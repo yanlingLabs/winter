@@ -244,6 +244,15 @@ const pre = preflight({
       const out = probe(`git status --porcelain`).stdout.trim();
       return out === "" ? null : `working tree not clean — commit or stash changes before releasing`;
     },
+    // `bun test` strips types and runs, so a type error ships unless something compiles it: 0.121.0
+    // and 0.122.0 went out with `winter mcp permissions` calling a name its branch never imported (a
+    // ReferenceError on every call) that `tsc -p packages/cli` reports. Every tsconfig, every release.
+    typecheck: () => {
+      const r = probe(`bun run typecheck`);
+      if (r.ok) return null;
+      const errors = r.stdout.split("\n").filter((l) => l.includes("error TS"));
+      return `TypeScript errors — run \`bun run typecheck\` and fix them before releasing:\n  ${errors.slice(0, 10).join("\n  ")}`;
+    },
     tag: () => {
       // Under --resume-publish an existing tag is the EXPECTED state, not a failure: the
       // publish tail tags+pushes BEFORE `gh release create` (the 0.2.002 fix), so every

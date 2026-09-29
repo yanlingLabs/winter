@@ -38,7 +38,7 @@ const ASSET_NAME = "IrohLib.xcframework.zip";
 function readIrohVersion(): string {
   const src = readFileSync(FETCH_SCRIPT, "utf8");
   const m = src.match(/^IROH_VERSION="([^"]+)"/m);
-  if (!m) throw new Error(`could not find IROH_VERSION in ${FETCH_SCRIPT}`);
+  if (!m?.[1]) throw new Error(`could not find IROH_VERSION in ${FETCH_SCRIPT}`);
   return m[1];
 }
 
@@ -46,7 +46,7 @@ function readIrohVersion(): string {
 function readCommittedChecksum(): string | null {
   const src = readFileSync(PACKAGE_SWIFT, "utf8");
   const m = src.match(/checksum:\s*"([0-9a-f]{64})"/);
-  return m ? m[1] : null;
+  return m?.[1] ?? null;
 }
 
 function ensureXcframework(): void {

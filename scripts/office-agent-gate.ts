@@ -655,8 +655,8 @@ function xlsxCell(file: string, sheetEntry: string, ref: string): string | null 
   const sheet = zipEntry(file, sheetEntry);
   const m = sheet.match(new RegExp(`<c r="${ref}"([^>]*)>([\\s\\S]*?)</c>`));
   if (!m) return null;
-  const attrs = m[1];
-  const inner = m[2];
+  const attrs = m[1] ?? "";
+  const inner = m[2] ?? "";
   const v = inner.match(/<v>([\s\S]*?)<\/v>/)?.[1];
   if (v === undefined) {
     // An inline-string cell keeps its text in <is><t>…</t></is> rather than <v>.
@@ -668,7 +668,7 @@ function xlsxCell(file: string, sheetEntry: string, ref: string): string | null 
   if (/\st="s"/.test(attrs)) {
     const shared = zipEntry(file, "xl/sharedStrings.xml");
     const items = [...shared.matchAll(/<si>([\s\S]*?)<\/si>/g)].map((si) =>
-      [...si[1].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map((t) => t[1]).join(""));
+      [...(si[1] ?? "").matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map((t) => t[1]).join(""));
     return items[Number(v)] ?? null;
   }
   return v;
@@ -689,7 +689,7 @@ function xlsxCellFont(file: string, sheetEntry: string, ref: string): { found: b
   const cell = sheet.match(new RegExp(`<c r="${ref}"([^>]*)>`));
   if (!cell) return miss;
   // A cell with no `s=` uses cellXf 0, exactly as the format does.
-  const xfIndex = Number(cell[1].match(/\ss="(\d+)"/)?.[1] ?? "0");
+  const xfIndex = Number((cell[1] ?? "").match(/\ss="(\d+)"/)?.[1] ?? "0");
   const styles = zipEntry(file, "xl/styles.xml");
   const cellXfs = styles.match(/<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/)?.[1] ?? "";
   const xf = [...cellXfs.matchAll(/<xf\b[^>]*>/g)].map((x) => x[0])[xfIndex];
@@ -706,7 +706,7 @@ function xlsxCellFont(file: string, sheetEntry: string, ref: string): { found: b
   const on = (tag: string) => {
     const m = font.match(new RegExp(`<${tag}\\b([^>]*)>`));
     if (!m) return false;
-    return !/val="false"/.test(m[1]);
+    return !/val="false"/.test(m[1] ?? "");
   };
   return { found: true, bold: on("b"), italic: on("i"), xml: font };
 }
@@ -1096,7 +1096,7 @@ function newestCodeSessionId(): string | undefined {
   if (!existsSync(dir)) return undefined;
   const files = spawnSync("ls", ["-t", dir], { encoding: "utf8" }).stdout.split("\n").filter((f) => f.endsWith(".jsonl"));
   for (const f of files) {
-    const first = readFileSync(join(dir, f), "utf8").split("\n")[0];
+    const first = readFileSync(join(dir, f), "utf8").split("\n")[0] ?? "";
     try {
       const ev = JSON.parse(first);
       // Header note 3: the app mints its own `mode: "chat"` session at launch and office tools are
