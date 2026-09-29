@@ -336,6 +336,9 @@ export function spawnAdoptChild(command: { file: string; args: string[] }, env: 
   let buf = "";
   let exited = false;
   const exit = new Promise<number | null>((resolve) => child.on("close", (code) => { exited = true; for (const w of waiting.splice(0)) w({ ok: false, reason: `the child exited (${code ?? "signal"})`, fatal: true }); resolve(code); }));
+  // A request written to a child that already exited raises EPIPE on stdin; "close" above answers every
+  // waiter fatally, so the stream error only needs a listener (uncaught, it would kill this process).
+  child.stdin!.on("error", () => { /* reported via "close" */ });
   child.stdout!.on("data", (d: Buffer) => {
     buf += d.toString("utf8");
     let i: number;

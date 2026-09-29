@@ -244,6 +244,13 @@ const pre = preflight({
       const out = probe(`git status --porcelain`).stdout.trim();
       return out === "" ? null : `working tree not clean — commit or stash changes before releasing`;
     },
+    // The shipped `winter-core` is compiled by THIS bun, and CI tests with `.bun-version` — they must be
+    // the same Bun, or CI proves a different binary (CI on "latest" went red on 1.4.2 while releases
+    // built with 1.3.14: bun:ffi's executable-memory need and a stdin EPIPE both differ between them).
+    bunVersion: () => {
+      const pinned = readFileSync(join(ROOT, ".bun-version"), "utf8").trim();
+      return Bun.version === pinned ? null : `this bun is ${Bun.version} but .bun-version pins ${pinned} — release with the pinned Bun (CI tests that one)`;
+    },
     // `bun test` strips types and runs, so a type error ships unless something compiles it: 0.121.0
     // and 0.122.0 went out with `winter mcp permissions` calling a name its branch never imported (a
     // ReferenceError on every call) that `tsc -p packages/cli` reports. Every tsconfig, every release.

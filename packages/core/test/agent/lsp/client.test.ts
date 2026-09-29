@@ -182,6 +182,24 @@ describe.if(isMac)("LspClient", () => {
     });
   });
 
+  // CI's killAllNow test failed intermittently on an uncaught EPIPE from `killNow()`'s stdin.end(): data
+  // still queued for a server that had already died, and no "error" listener on the stream. Forced
+  // here: the server is stopped (it reads nothing), its pipe is filled past the kernel buffer so the
+  // rest queues in the stream, then it is SIGKILLed and killNow() ends the stream onto a broken pipe.
+  test("ending stdin onto a dead server's broken pipe is not an uncaught error (EPIPE)", async () => {
+    const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
+    await c.start();
+    const child = (c as unknown as { child: import("node:child_process").ChildProcess }).child;
+    child.kill("SIGSTOP");
+    for (let i = 0; i < 8; i++) child.stdin!.write("x".repeat(256 * 1024));
+    const gone = new Promise((r) => child.once("exit", r));
+    child.kill("SIGKILL");
+    await gone;
+    c.killNow();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(c.alive).toBe(false);
+  });
+
   test("stop(): clean shutdown resolves and marks the client dead", async () => {
     const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
     await c.start();

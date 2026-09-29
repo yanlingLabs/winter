@@ -143,6 +143,9 @@ export class WorkflowRuntime {
     child.on("error", (err) => {
       if (this.live.has(runId)) this.teardown(runId, () => this.finish(runId, "failed", `workflow worker failed to spawn: ${(err as Error).message}`));
     });
+    // A reply written to a worker that already exited (a refusal at exit 77, a crash) raises EPIPE on
+    // stdin — an uncaught stream error in the daemon without this listener. "close" above fails the run.
+    child.stdin!.on("error", () => { /* reported via "close" */ });
 
     const summary = l.source.trim().split("\n")[0]?.slice(0, 120) ?? "";
     this.deps.onEvent(l.sessionId, { type: "started", runId, name: l.name, summary });
