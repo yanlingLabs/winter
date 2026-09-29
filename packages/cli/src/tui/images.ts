@@ -14,14 +14,12 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { IMAGE_INPUT_UNSUPPORTED_MESSAGE, STAGE_IMAGE_MAX_BYTES } from "@yanlinglabs/winter-protocol";
+import { IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, STAGE_IMAGE_MAX_BYTES } from "@yanlinglabs/winter-protocol";
 import { sniffImageMediaType } from "@yanlinglabs/winter-core";
 
-export { IMAGE_INPUT_UNSUPPORTED_MESSAGE };
-
-/** Shown when an image is over the daemon's cap (the runtime Read tool's own 5 MiB limit) — the
- *  daemon's `image_too_large` refusal says the same. */
-export const IMAGE_TOO_LARGE_MESSAGE = `The image is too large (the limit is ${STAGE_IMAGE_MAX_BYTES / (1024 * 1024)} MB)`;
+// Shown when an image is over the daemon's cap (the runtime Read tool's own 3.75 MiB limit) — the
+// daemon's `image_too_large` refusal says the same, word for word.
+export { IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE };
 
 export interface DraftImage {
   bytes: Uint8Array;

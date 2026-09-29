@@ -16,7 +16,7 @@ describe("TUI image placeholders", () => {
   test("the exact strings", () => {
     expect(imageToken(3)).toBe("[Image #3]");
     expect(IMAGE_INPUT_UNSUPPORTED_MESSAGE).toBe("The selected model doesn't support images");
-    expect(IMAGE_TOO_LARGE_MESSAGE).toBe("The image is too large (the limit is 5 MB)");
+    expect(IMAGE_TOO_LARGE_MESSAGE).toBe("Images must be 3.75 MB or smaller");
   });
 
   test("referenced numbers: first-appearance order, each once", () => {
@@ -61,7 +61,7 @@ describe("TUI image placeholders", () => {
   test("the magic bytes decide the media type; non-images and oversize images are named", () => {
     expect(draftImageFrom(JPEG)).toEqual({ bytes: JPEG, mediaType: "image/jpeg" });
     expect(draftImageFrom(new TextEncoder().encode("hello"))).toBe("not-image");
-    const big = new Uint8Array(5 * 1024 * 1024 + 1);
+    const big = new Uint8Array(3_932_160 + 1);
     big.set(PNG);
     expect(draftImageFrom(big)).toBe("too-large");
   });

@@ -1,6 +1,6 @@
 // Code-mode image input (2026-09-29): `session.stageImage` — a composer image staged into the
 // session's own temp directory (`sessionTmpDir(sessionId)/images/image_<k>.<ext>`). Local clients
-// only, code sessions only, image-capable models only, magic bytes decide the type, 5 MiB decoded,
+// only, code sessions only, image-capable models only, magic bytes decide the type, 3.75 MiB decoded,
 // daemon-picked names created atomically and never over anything — and the daemon never writes
 // through an agent-planted symlink (the session temp dir is a sandbox WRITABLE root).
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ConnWriter, ERR, IMAGE_DATA_INVALID, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE,
-  IMAGE_STAGE_FAILED, IMAGE_TOO_LARGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED, LineDecoder, METHODS, PROTOCOL_VERSION,
+  IMAGE_STAGE_FAILED, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED, LineDecoder, METHODS, PROTOCOL_VERSION,
   STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, encodeLine, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
@@ -171,28 +171,29 @@ describe("session.stageImage (code-mode image input)", () => {
     c.close();
   });
 
-  test("the cap: exactly 5 MiB stages over the REAL socket (it fits the 8 MiB line cap); one byte more refuses image_too_large", async () => {
+  test("the cap: exactly 3.75 MiB stages over the REAL socket (it fits the 8 MiB line cap); anything more refuses image_too_large", async () => {
     const { store, c } = await boot();
     const sid = store.createSession("global", { model: IMAGE_TAG });
+    expect(STAGE_IMAGE_MAX_BYTES).toBe(3_932_160); // the runtime Read tool's READ_IMAGE_MAX_BYTES
     const max = new Uint8Array(STAGE_IMAGE_MAX_BYTES);
     max.set(PNG);
     const maxB64 = b64(max);
-    expect(maxB64.length).toBeLessThanOrEqual(STAGE_IMAGE_B64_MAX_LENGTH);
+    expect(maxB64.length).toBe(STAGE_IMAGE_B64_MAX_LENGTH);
     const ok = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: maxB64 });
     expect(ok.error).toBeUndefined();
     expect(lstatSync(ok.result.path).size).toBe(STAGE_IMAGE_MAX_BYTES);
-    // One byte over still encodes within the schema's length bound (no padding), so the DECODED
-    // check is what refuses it — typed.
-    const over = new Uint8Array(STAGE_IMAGE_MAX_BYTES + 1);
-    over.set(PNG);
-    const overB64 = b64(over);
-    expect(overB64.length).toBe(STAGE_IMAGE_B64_MAX_LENGTH);
-    const tooBig = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: overB64 });
-    expect(tooBig.error.code).toBe(ERR.INVALID_PARAMS);
-    expect(tooBig.error.data).toEqual({ code: IMAGE_TOO_LARGE });
-    // Anything longer is refused at the params door, before any decode.
-    const farOver = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(new Uint8Array(STAGE_IMAGE_MAX_BYTES + 3)) });
-    expect(farOver.error.code).toBe(ERR.INVALID_PARAMS);
+    // One byte over, and far over: the same typed refusal and message, decided from the length.
+    for (const size of [STAGE_IMAGE_MAX_BYTES + 1, 5 * 1024 * 1024]) {
+      const over = new Uint8Array(size);
+      over.set(PNG);
+      const res = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(over) });
+      expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+      expect(res.error.data).toEqual({ code: IMAGE_TOO_LARGE });
+      expect(res.error.message).toBe(IMAGE_TOO_LARGE_MESSAGE);
+    }
+    expect(IMAGE_TOO_LARGE_MESSAGE).toBe("Images must be 3.75 MB or smaller");
+    // A base64 string just inside the length bound can still decode past the cap only by padding
+    // tricks, which strict decoding refuses; the decoded check stays as the belt.
     expect(readdirSync(imagesDirOf(sid))).toEqual(["image_1.png"]);
     c.close();
   });
