@@ -2245,6 +2245,30 @@ describe("App — code-mode image input", () => {
     expect(frame).toContain("see [Image #1]");
   });
 
+  test("an applied placeholder never replays when a pending card unmounts and remounts the composer", async () => {
+    const bridge = makeEventBridge();
+    const client = fakeClient({ request: syncConfig(true) });
+    const { stdin, lastFrame } = render(
+      <App client={client} bridge={bridge} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    expect(plain(lastFrame())).toContain("[Image #1]");
+    stdin.write("x");
+    await wait();
+    stdin.write("\r");
+    await wait(60);
+    expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "/tmp/winter-session-s1/images/image_1.pngx"]);
+    bridge.push(ev({ type: "approval_requested", callId: "c1", toolName: "bash", summary: "ls" }));
+    await wait();
+    expect(plain(lastFrame())).toContain("approve bash?");
+    bridge.push(ev({ type: "approval_resolved", callId: "c1", approved: true }));
+    await wait(60);
+    expect(plain(lastFrame())).toContain("❯");
+    expect(plain(lastFrame())).not.toContain("[Image #");
+  });
+
   test("a deleted placeholder is not staged; a pasted .png that is not an image types as text", async () => {
     const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
     const fake = join(dir, "not-really.png");

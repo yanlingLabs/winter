@@ -403,8 +403,9 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         adapter.pendingModel = .none
         adapter.pendingEffort = .none
         adapter.selectionProbation = nil
-        // Code-mode image input: a draft's images were attached for the session being left.
-        adapter.resetComposerImages()
+        // Code-mode image input: the draft TEXT carries across the switch, so its attachments do too;
+        // only a notice about the session being left goes (staging happens at submit, per session).
+        adapter.composerNotice = nil
         // working-directories T8: a refusal is about the session it was refused FOR — "that directory
         // is locked for this session" rendered over a different session's chip is a lie about a rule.
         adapter.dirsRefusal = nil

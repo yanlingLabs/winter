@@ -3099,8 +3099,10 @@ final class ShellSessionHost: ObservableObject {
         live.adapter.pendingEffort = .none
         live.adapter.selectionProbation = nil
         live.adapter.dirsRefusal = nil
-        // Code-mode image input: a draft's images were attached for the session being left.
-        live.adapter.resetComposerImages()
+        // Code-mode image input: the draft TEXT carries across a hop, so its attachments do too (they
+        // live exactly as long as the placeholders in it); only a notice about the session being left
+        // goes. Staging happens at submit, into whichever session is current then.
+        live.adapter.composerNotice = nil
         // A refusal is about the session it was refused FOR — "session is archived — resume it
         // first" rendered over a different session is a lie about a rule (the `dirsRefusal` lesson).
         live.adapter.activityRefusal = nil

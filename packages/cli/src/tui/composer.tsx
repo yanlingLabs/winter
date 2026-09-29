@@ -351,6 +351,9 @@ export interface ComposerProps {
   onPastedText?: (text: string) => boolean;
   /** See `ComposerInject`. */
   inject?: ComposerInject | null;
+  /** Called once an inject has been applied, so the App can drop it: the composer unmounts whenever a
+   *  pending card takes its slot, and a still-held inject would otherwise replay on the remount. */
+  onInjectApplied?: (id: number) => void;
 }
 
 export function Composer({
@@ -383,6 +386,7 @@ export function Composer({
   onPasteImage,
   onPastedText,
   inject,
+  onInjectApplied,
 }: ComposerProps) {
   // `policy` stays a prop (callers/tests still pass it; `<Footer>`, a sibling, is the one that
   // renders it) — this component no longer renders it directly, matching `task-list.tsx`'s
@@ -395,13 +399,16 @@ export function Composer({
     inputStateRef.current = next;
     setRenderedState(next);
   }, []);
-  // Code-mode image input: apply each distinct inject exactly once (see `ComposerInject`).
+  // Code-mode image input: apply each distinct inject exactly once (see `ComposerInject`), then hand
+  // it back (`onInjectApplied`) so a remount — this component unmounts under every pending card —
+  // never replays it. An inject that arrives while unmounted is applied on the next mount.
   const appliedInject = useRef<number | null>(null);
   useEffect(() => {
     if (!inject || appliedInject.current === inject.id) return;
     appliedInject.current = inject.id;
     setState(inject.mode === "insert" ? (s) => insert(s, inject.text) : { text: inject.text, cursor: inject.text.length });
-  }, [inject, setState]);
+    onInjectApplied?.(inject.id);
+  }, [inject, setState, onInjectApplied]);
   const mouseAnchor = useRef<number | null>(null);
   const preferredVerticalColumn = useRef<number | null>(null);
   const [review, setReview] = useState<{ text: string; cursor: number; columns: number; maxRows: number; start: number } | null>(null);

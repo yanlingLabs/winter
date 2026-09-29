@@ -92,6 +92,22 @@ final class ComposerImagesTests: XCTestCase {
         board.clearContents()
         board.setData(tinyTIFF(), forType: .tiff)
         XCTAssertEqual(composerImages(from: board)?.map(\.mediaType), ["image/png"])
+        XCTAssertTrue(composerPasteboardMayHaveImage(board))
+
+        // Copied cells / document text ride with an image rendering of themselves: that paste stays TEXT.
+        board.clearContents()
+        board.declareTypes([.string, .tiff], owner: nil)
+        board.setString("Q3\t1,200\nQ4\t1,450", forType: .string)
+        board.setData(tinyTIFF(), forType: .tiff)
+        XCTAssertNil(composerImages(from: board))
+        XCTAssertFalse(composerPasteboardMayHaveImage(board))
+
+        // A browser's "Copy Image" can carry the image's own URL as its string: that paste is the image.
+        board.clearContents()
+        board.declareTypes([.string, .tiff], owner: nil)
+        board.setString("https://example.com/cat.png", forType: .string)
+        board.setData(tinyTIFF(), forType: .tiff)
+        XCTAssertEqual(composerImages(from: board)?.map(\.mediaType), ["image/png"])
 
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("winter-composer-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

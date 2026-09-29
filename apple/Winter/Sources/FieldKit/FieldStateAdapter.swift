@@ -1010,7 +1010,8 @@ final class FieldStateAdapter: ObservableObject {
     // MARK: - Code-mode image input (`ComposerImages.swift`)
 
     /// The current draft's image attachments — beside `composerDraft`, for as long as the draft
-    /// lives. Dropped on a successful send and on a session switch (`resetComposerImages`).
+    /// lives (a session switch carries the draft, and so its attachments). Dropped on a successful
+    /// send (`resetComposerImages`).
     @Published var composerImages = ComposerImageDraft()
 
     /// The composer's one-line notice — why an image was not attached ("The selected model doesn't
@@ -1074,8 +1075,7 @@ final class FieldStateAdapter: ObservableObject {
         return nil
     }
 
-    /// A sent draft's attachments go with it (and so does any notice about it); on a session switch
-    /// the draft's images belong to the session they were attached for.
+    /// A sent draft's attachments go with it, and so does any notice about it.
     func resetComposerImages() {
         composerImages = ComposerImageDraft()
         composerNotice = nil

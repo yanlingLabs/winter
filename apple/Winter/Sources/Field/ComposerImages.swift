@@ -63,28 +63,57 @@ func composerURLIsImage(_ url: URL) -> Bool {
     return type.conforms(to: .image)
 }
 
-/// The images a pasteboard carries, or `nil` when it carries none — `nil` hands the paste/drop back to
-/// AppKit untouched.
-///
-/// File URLs come first and decide alone: a Finder copy puts the file's ICON on the pasteboard beside
-/// its URL, so reading image data there would attach an icon. When every URL is an image file, each
-/// is read (and converted if needed); when any is not, the whole paste is AppKit's (it inserts paths,
-/// exactly as before). With no file URLs, PNG data wins over TIFF.
-func composerImages(from pasteboard: NSPasteboard) -> [ComposerImage]? {
+/// Whether a pasteboard string is TEXT the user meant to paste — anything but a lone URL. Office and
+/// iWork apps put an image rendering of copied cells or text beside the text itself, and that paste
+/// must stay text; a browser's "Copy Image" can put the image's own URL beside its bytes, and that
+/// paste is the image.
+func composerStringIsPastedText(_ string: String) -> Bool {
+    let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return false }
+    if trimmed.contains(where: { $0.isWhitespace }) { return true }
+    guard let url = URL(string: trimmed), let scheme = url.scheme?.lowercased() else { return true }
+    return !["http", "https", "file"].contains(scheme)
+}
+
+/// Which image source a pasteboard offers, decided from its TYPES and file names only — never its
+/// bytes — so a drag's per-mouse-move check and ⌘V's menu validation stay cheap.
+private enum ComposerImageSource {
+    case files([URL])
+    case data(NSPasteboard.PasteboardType)
+}
+
+private func composerImageSource(on pasteboard: NSPasteboard) -> ComposerImageSource? {
     let urls = (pasteboard.readObjects(forClasses: [NSURL.self],
                                        options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
     if !urls.isEmpty {
-        guard urls.allSatisfy(composerURLIsImage) else { return nil }
-        return urls.compactMap { url in (try? Data(contentsOf: url)).flatMap(composerImage(fromImageData:)) }
+        // File URLs decide alone: a Finder copy puts the file's ICON beside its URL, and reading image
+        // data there would attach an icon. Any non-image file hands the whole paste back to AppKit
+        // (it inserts paths, exactly as before).
+        return urls.allSatisfy(composerURLIsImage) ? .files(urls) : nil
     }
-    if let png = pasteboard.data(forType: .png) { return composerImage(fromImageData: png).map { [$0] } ?? [] }
-    if let tiff = pasteboard.data(forType: .tiff) { return composerImage(fromImageData: tiff).map { [$0] } ?? [] }
+    if let text = pasteboard.string(forType: .string), composerStringIsPastedText(text) { return nil }
+    if let type = pasteboard.availableType(from: [.png, .tiff]) { return .data(type) }
     return nil
 }
 
-/// Whether a pasteboard carries an image the composer would take — Edit ▸ Paste's enablement.
-func composerPasteboardHasImage(_ pasteboard: NSPasteboard) -> Bool {
-    composerImages(from: pasteboard).map { !$0.isEmpty } ?? false
+/// Whether a pasteboard carries an image the composer would take — the cheap, types-only answer
+/// for Edit ▸ Paste's enablement and a drag's hover feedback.
+func composerPasteboardMayHaveImage(_ pasteboard: NSPasteboard) -> Bool {
+    composerImageSource(on: pasteboard) != nil
+}
+
+/// The images a pasteboard carries, or `nil` when it carries none — `nil` hands the paste/drop back to
+/// AppKit untouched. Image files are read (and converted if needed); with no file URLs, PNG data wins
+/// over TIFF; text beside the image (see `composerStringIsPastedText`) keeps the paste text.
+func composerImages(from pasteboard: NSPasteboard) -> [ComposerImage]? {
+    switch composerImageSource(on: pasteboard) {
+    case nil:
+        return nil
+    case .files(let urls):
+        return urls.compactMap { url in (try? Data(contentsOf: url)).flatMap(composerImage(fromImageData:)) }
+    case .data(let type):
+        return pasteboard.data(forType: type).flatMap(composerImage(fromImageData:)).map { [$0] } ?? []
+    }
 }
 
 /// One draft's attachments.
