@@ -1007,6 +1007,80 @@ final class FieldStateAdapter: ObservableObject {
         advisorModel = AppModel.readAdvisorModelFromSettings()
     }
 
+    // MARK: - Code-mode image input (`ComposerImages.swift`)
+
+    /// The current draft's image attachments — beside `composerDraft`, for as long as the draft
+    /// lives. Dropped on a successful send and on a session switch (`resetComposerImages`).
+    @Published var composerImages = ComposerImageDraft()
+
+    /// The composer's one-line notice — why an image was not attached ("The selected model doesn't
+    /// support images", too large) or why a submit's staging was refused (the daemon's own
+    /// sentence). Rendered by the surface in the composer cluster; `nil` shows nothing.
+    @Published var composerNotice: String?
+
+    /// The session ROW this adapter's composer is talking to, read FRESH at call time (the house
+    /// rule: a hop re-targets rather than acting on the session just left). Wired by each surface
+    /// that can host a code session (the shell, detached windows); the default `nil` keeps image
+    /// intake OFF — the orb's dispatch-only field never wires it.
+    var currentSessionRow: () -> SessionSummary? = { nil }
+
+    /// What the composer's text view is handed: live only for a code session (read at paste/drop
+    /// time, so a row that loads after attach turns it on, and a session switch turns it off).
+    var composerImageIntake: ComposerImageIntake {
+        ComposerImageIntake(
+            isEnabled: { [weak self] in composerImageInputEnabled(row: self?.currentSessionRow()) },
+            attach: { [weak self] image in self?.attachComposerImage(image) }
+        )
+    }
+
+    /// The model in force for the attach-time check: the row's own (with any optimistic pick
+    /// overlaid, exactly as the pickers compute it), else the daemon's live default.
+    var composerImageModel: String? {
+        effectiveSelection(row: currentSessionRow()?.model, optimistic: pendingModel)
+            ?? (modelCatalogue.defaultModel.isEmpty ? nil : modelCatalogue.defaultModel)
+    }
+
+    /// Attach one image to the draft and answer its placeholder, or refuse (`nil`) with the reason
+    /// on `composerNotice`: the selected model takes no image (the exact message), or it is over the
+    /// cap. An empty catalogue is refreshed so the NEXT attach can be checked; this one is let
+    /// through, and the daemon's `session.stageImage` refuses at submit if it must.
+    func attachComposerImage(_ image: ComposerImage) -> String? {
+        if modelCatalogue.models.isEmpty { onRefreshModelCatalogue() }
+        guard composerModelAcceptsImages(model: composerImageModel, catalogue: modelCatalogue) else {
+            composerNotice = composerImageUnsupportedMessage
+            return nil
+        }
+        guard image.data.count <= composerImageMaxBytes else {
+            composerNotice = composerImageTooLargeMessage
+            return nil
+        }
+        composerNotice = nil
+        return ComposerImageDraft.token(composerImages.add(image))
+    }
+
+    /// **Every code-mode submit site's one door** (`ShellSessionHost.submit`,
+    /// `DetachedWindowController.submit`): the text to actually send — each live `[Image #n]`
+    /// staged through `stage` (`session.stageImage` on that surface's own client and session) and
+    /// replaced by its path — or `nil` when staging was refused, with the daemon's own sentence on
+    /// `composerNotice`, and then NOTHING is sent. A draft with no live placeholder comes back as is.
+    func composerTextForSend(_ text: String, stage: (ComposerImage) async throws -> String) async -> String? {
+        do {
+            return try await resolveComposerImages(text, draft: composerImages, stage: stage)
+        } catch let error as RpcError {
+            composerNotice = error.message
+        } catch {
+            composerNotice = "couldn't reach the daemon — try again"
+        }
+        return nil
+    }
+
+    /// A sent draft's attachments go with it (and so does any notice about it); on a session switch
+    /// the draft's images belong to the session they were attached for.
+    func resetComposerImages() {
+        composerImages = ComposerImageDraft()
+        composerNotice = nil
+    }
+
     /// WS-20 (cross-lane fix): the advisor write now goes through the daemon's own
     /// `settings.setAdvisorModel` RPC (`AppModel.setAdvisorModel`), not a direct settings.json
     /// write — and this adapter, like every other RPC-backed control here, holds no

@@ -816,6 +816,24 @@ extension WinterClient {
         return url
     }
 
+    /// Code-mode image input (2026-09-29): `session.stageImage` — writes one composer image into the
+    /// session's own temp directory (daemon-named `image_<k>.<ext>`) and returns its absolute path,
+    /// which the composer substitutes for its `[Image #n]` placeholder before sending as usual.
+    /// `mediaType` must be what the bytes ARE (png/jpeg/gif/webp — the daemon sniffs and refuses a
+    /// mismatch). Throws `RpcError` with the daemon's message and `data.code` on a refusal —
+    /// `image_input_unsupported` carries exactly "The selected model doesn't support images". Local
+    /// clients only (never remote-allowlisted). The bytes are never logged.
+    public func stageImage(sessionId: String, mediaType: String, data: Data) async throws -> String {
+        let r = try await request("session.stageImage", params: obj([
+            "sessionId": .string(sessionId), "mediaType": .string(mediaType),
+            "dataBase64": .string(data.base64EncodedString()),
+        ]))
+        guard let path = r["path"]?.stringValue, !path.isEmpty else {
+            throw RpcError(code: -3, message: "invalid result from server for session.stageImage")
+        }
+        return path
+    }
+
     /// `notes` — CC AskUserQuestion parity, free-text notes keyed by question text like `answers`
     /// (`packages/protocol/src/methods.ts`'s `AskUserRespondParams.notes`). Optional/defaulted so
     /// existing no-notes call sites keep compiling unchanged; `obj(...)`'s `compactMapValues`
@@ -1509,13 +1527,21 @@ public struct SyncConfigModelInfo: Equatable, Sendable {
     /// per-family facing vocabulary (Terra/Luna/Sol/Astra, Fable/Opus/Sonnet/Haiku, …).
     public let facingName: String?
     public let efforts: [String]
+    /// Code-mode image input (2026-09-29): whether this row accepts an image — the catalog row's own
+    /// `inputModalities` containing `"image"`, decided daemon-side. A composer refuses an image at
+    /// ATTACH time on `false` (`composerImageUnsupportedMessage`). A daemon that predates the field
+    /// decodes as `true` — "not told" is not a claim the model is text-only, and the daemon's own
+    /// `session.stageImage` refuses at submit whenever it truly is.
+    public let supportsImages: Bool
 
-    public init(id: String, providerId: String, displayName: String, facingName: String?, efforts: [String]) {
+    public init(id: String, providerId: String, displayName: String, facingName: String?, efforts: [String],
+                supportsImages: Bool = true) {
         self.id = id
         self.providerId = providerId
         self.displayName = displayName
         self.facingName = facingName
         self.efforts = efforts
+        self.supportsImages = supportsImages
     }
 }
 
@@ -1622,7 +1648,9 @@ extension WinterClient {
             else { return nil }
             let facingName = m["facingName"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
             let efforts = (m["efforts"]?.arrayValue ?? []).compactMap { $0.stringValue }.filter { !$0.isEmpty }
-            return SyncConfigModelInfo(id: id, providerId: providerId, displayName: displayName, facingName: facingName, efforts: efforts)
+            return SyncConfigModelInfo(id: id, providerId: providerId, displayName: displayName, facingName: facingName, efforts: efforts,
+                                       // Absent → `true` (an older daemon): see the field's own doc.
+                                       supportsImages: m["supportsImages"]?.boolValue ?? true)
         }
         return SyncConfigSnapshot(
             // Absent → `""`: an older daemon, decoded as "nobody has said" rather than as a claim.
@@ -2401,11 +2429,15 @@ public struct CatalogModel: Equatable, Sendable {
     /// stated, not a measured denial. `nil` means an older daemon that predates this field — "not
     /// told", which every reader must treat as "no claim either way", never as `false`.
     public let sessionUsable: Bool?
+    /// Code-mode image input: whether the row accepts an image (`inputModalities` contains
+    /// `"image"`, daemon-derived). `nil` = an older daemon that predates the field — "not told".
+    public let supportsImages: Bool?
 
     public init(tag: String, canonicalModelId: String? = nil, providerId: String? = nil,
                 familyId: String? = nil, status: String? = nil,
                 pricing: CatalogPricing? = nil, costBasis: String = "unknown",
-                efforts: [String]? = nil, defaultEffort: String? = nil, sessionUsable: Bool? = nil) {
+                efforts: [String]? = nil, defaultEffort: String? = nil, sessionUsable: Bool? = nil,
+                supportsImages: Bool? = nil) {
         self.tag = tag
         self.canonicalModelId = canonicalModelId
         self.providerId = providerId
@@ -2416,6 +2448,7 @@ public struct CatalogModel: Equatable, Sendable {
         self.efforts = efforts
         self.defaultEffort = defaultEffort
         self.sessionUsable = sessionUsable
+        self.supportsImages = supportsImages
     }
 }
 
@@ -2509,7 +2542,8 @@ extension WinterClient {
                 costBasis: m["costBasis"]?.stringValue ?? "unknown",
                 efforts: effortVocabulary(m["efforts"]),
                 defaultEffort: m["defaultEffort"]?.stringValue,
-                sessionUsable: m["sessionUsable"]?.boolValue
+                sessionUsable: m["sessionUsable"]?.boolValue,
+                supportsImages: m["supportsImages"]?.boolValue
             )
         }
         return ModelsCatalog(schemaVersion: r["schemaVersion"]?.intValue,
