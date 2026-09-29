@@ -198,17 +198,27 @@ async function main(): Promise<void> {
       fail(`bun:ffi does not run on winter-core signed with ${WINTER_CORE_ENTITLEMENTS} (exit ${pos.status ?? pos.signal}): ${`${pos.stdout ?? ""}${pos.stderr ?? ""}`.trim().slice(0, 300)}`);
     }
     log(`--- Step 3c: signed copy runs bun:ffi: ${(pos.stdout ?? "").trim()} ---`);
+    // The kill is the hardened runtime's code-signing enforcement, which macOS relaxes with System
+    // Integrity Protection off — as on GitHub's macOS runners, where this leg exited 0 on the very Bun
+    // and macOS it is killed on locally. There it cannot see the crash, so it says so and stops; the
+    // positive leg above (what a release gates on) still ran. Everywhere SIP is on, it runs.
+    const sip = spawnSync("/usr/bin/csrutil", ["status"], { encoding: "utf8" });
+    const sipOff = /disabled/i.test(`${sip.stdout ?? ""}${sip.stderr ?? ""}`);
+    log(`(info) ${`${sip.stdout ?? ""}`.trim() || "csrutil status unavailable"}`);
     const negBinary = join(signedDir, "winter-core-jit-only");
     copyFileSync(DIST_BINARY, negBinary);
     chmodSync(negBinary, 0o755);
     const negSign = spawnSync("codesign", ["--force", "--sign", "-", "--options", "runtime", "--entitlements", BUN_JIT_ENTITLEMENTS, negBinary], { encoding: "utf8" });
     const neg = negSign.status === 0 ? spawnSync(negBinary, ["__keychain-ffi-probe"], { encoding: "utf8", env: ffiEnv, timeout: 30_000 }) : undefined;
-    if (neg === undefined || neg.status === 0) {
+    if (sipOff && neg !== undefined && neg.status === 0) {
+      log(`--- Step 3c: (skip) NEGATIVE leg: System Integrity Protection is off here, so the hardened runtime does not kill allow-jit alone; it runs where SIP is on ---`);
+    } else if (neg === undefined || neg.status === 0) {
       rmSync(tmpHome, { recursive: true, force: true });
       rmSync(signedDir, { recursive: true, force: true });
       fail(`NEGATIVE leg: winter-core signed with allow-jit alone was expected to be killed by bun:ffi and was not (${neg === undefined ? "codesign failed" : `exit ${neg.status}`}) — this check can no longer see the 0.120.0 crash`);
+    } else {
+      log(`--- Step 3c: allow-jit alone is killed as expected (${neg.signal ?? `exit ${neg.status}`}) ---`);
     }
-    log(`--- Step 3c: allow-jit alone is killed as expected (${neg.signal ?? `exit ${neg.status}`}) ---`);
   }
 
   try {
