@@ -1,6 +1,6 @@
 import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, SessionEvent,
-  SessionCreateResult, SessionAttachResult, SessionSendResult, SessionListResult,
+  SessionCreateResult, SessionAttachResult, SessionSendResult, SessionStageImageResult, SessionListResult,
   SessionAddDirResult, SessionSetCwdResult, TrustDirResult,
   BgListResult, BgPeekResult, BgKillResult, BgKillAllResult,
   SessionSteerResult, SessionInterruptResult, SessionCompactResult, SkillsListResult,
@@ -119,7 +119,11 @@ export class WinterClient {
         error() {}, // close() follows and rejects pending; stub silences Bun's default stderr print
       },
     });
-    client.writer = new ConnWriter(client.socket as unknown as WritableSocket);
+    // 16 MiB outbound: ConnWriter's default 4 MiB cap is the DAEMON's slow-consumer guard for its
+    // broadcasts. A client's own requests can legitimately reach the daemon's 8 MiB inbound line cap
+    // (a max-size `session.stageImage` is ~7 MB), and at 4 MiB the writer would end this socket on
+    // the request itself.
+    client.writer = new ConnWriter(client.socket as unknown as WritableSocket, 16 * 1024 * 1024);
     await client.request(METHODS.hello, {
       protocolVersion: PROTOCOL_VERSION,
       role: opts.role ?? "harness",
@@ -191,6 +195,12 @@ export class WinterClient {
   }
   async attach(sessionId: string, fromSeq = 0): Promise<number> {
     return this.validated(SessionAttachResult, await this.request(METHODS.sessionAttach, { sessionId, fromSeq }), METHODS.sessionAttach).lastSeq;
+  }
+  /** Code-mode image input: stage one composer image into the session's temp directory and get its
+   *  absolute path back (`session.stageImage`). A refusal rejects with the daemon's message and its
+   *  typed `data.code` (e.g. `image_input_unsupported`). */
+  async stageImage(sessionId: string, mediaType: string, dataBase64: string): Promise<string> {
+    return this.validated(SessionStageImageResult, await this.request(METHODS.sessionStageImage, { sessionId, mediaType, dataBase64 }), METHODS.sessionStageImage).path;
   }
   async send(sessionId: string, text: string): Promise<number> {
     return this.validated(SessionSendResult, await this.request(METHODS.sessionSend, { sessionId, text }), METHODS.sessionSend).seq;

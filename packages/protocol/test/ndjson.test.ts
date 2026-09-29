@@ -41,4 +41,26 @@ describe("NDJSON framing", () => {
     expect(() => d.push(new TextEncoder().encode("x".repeat(20)))).toThrow(/line too long/);
     expect(d.push(new TextEncoder().encode('{"ok":1}\n'))).toEqual(['{"ok":1}']);
   });
+
+  test("a long line in many small chunks decodes exactly, in linear time", () => {
+    const d = new LineDecoder();
+    const body = "A".repeat(7_000_000);
+    const bytes = new TextEncoder().encode(`${body}\n{"b":2}\n`);
+    const out: string[] = [];
+    const t = performance.now();
+    for (let i = 0; i < bytes.length; i += 8192) out.push(...d.push(bytes.subarray(i, i + 8192)));
+    expect(out.length).toBe(2);
+    expect(out[0]!.length).toBe(body.length);
+    expect(out[1]).toBe('{"b":2}');
+    // The quadratic re-merge/re-scan took well over a second here; linear is a few ms.
+    expect(performance.now() - t).toBeLessThan(500);
+  });
+
+  test("a held partial line is a copy — the caller may reuse its chunk buffer", () => {
+    const d = new LineDecoder();
+    const chunk = new TextEncoder().encode('{"a"');
+    expect(d.push(chunk)).toEqual([]);
+    chunk.fill(0x78);
+    expect(d.push(new TextEncoder().encode(":1}\n"))).toEqual(['{"a":1}']);
+  });
 });

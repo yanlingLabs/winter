@@ -310,6 +310,27 @@ describe("models.catalog", () => {
     c.close();
   });
 
+  // Code-mode image input (2026-09-29): `supportsImages` is the catalog row's own `inputModalities`
+  // containing "image", on EVERY row, both ways — the same rule `session.stageImage` refuses on.
+  test("supportsImages: the row's inputModalities, verbatim, on every row", async () => {
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.modelsCatalog, {});
+    const { loadCatalog } = await import("@yanlinglabs/winter-provider-catalog");
+    const rows = new Map(loadCatalog().models.map((m) => [m.key, m]));
+    let yes = 0, no = 0;
+    for (const m of result.result.models) {
+      const expected = rows.get(m.tag)!.inputModalities.value.includes("image");
+      expect(m.supportsImages).toBe(expected);
+      if (expected) yes++; else no++;
+    }
+    // Both answers occur in the real catalog, so neither branch is vacuous.
+    expect(yes).toBeGreaterThan(0);
+    expect(no).toBeGreaterThan(0);
+    c.close();
+  });
+
   // -----------------------------------------------------------------------------------------------
   // 2026-09-18, item 2: `credentialPresent` — readiness, answered daemon-side by the SAME rule
   // `pickerModels` filters `sync.config`'s model list on.
