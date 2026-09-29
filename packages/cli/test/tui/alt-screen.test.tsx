@@ -32,6 +32,6 @@ describe("mouse tracking escape sequences", () => {
     const sink: string[] = [];
     enableMouseTracking((s) => sink.push(s));
     disableMouseTracking((s) => sink.push(s));
-    expect(sink).toEqual(["\x1b[?1000h\x1b[?1006h", "\x1b[?1006l\x1b[?1000l"]);
+    expect(sink).toEqual(["\x1b[?1002h\x1b[?1006h", "\x1b[?1006l\x1b[?1002l"]);
   });
 });

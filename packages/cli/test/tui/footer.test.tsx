@@ -93,6 +93,12 @@ describe("Footer (e, f, g) — status-line wording survives the render", () => {
     expect(lastFrame() ?? "").toContain("? for shortcuts · shift+tab to cycle modes");
   });
 
+  test("the text below the composer uses white rather than a dim base", () => {
+    const frame = renderChrome().lastFrame() ?? "";
+    expect(frame).toContain("\x1b[38;2;255;255;255m");
+    expect(frame).not.toContain("\x1b[2m");
+  });
+
   test("no fallback once any keybinding-bearing segment renders", () => {
     const { lastFrame } = renderChrome({ running: true });
     expect(lastFrame() ?? "").not.toContain("shift+tab to cycle modes");

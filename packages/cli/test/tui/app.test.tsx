@@ -84,6 +84,92 @@ const WHEEL_UP = "\x1b[<64;10;5M";
 const count = (haystack: string, needle: string) => haystack.split(needle).length - 1;
 
 describe("App (fullscreen shell)", () => {
+  test("a file click opens the local target, while dragging across it only selects", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-file-click-"));
+    const path = join(dir, "Sushi_Story.pptx");
+    writeFileSync(path, "fixture");
+    try {
+      const bridge = makeEventBridge();
+      bridge.push(ev({ type: "assistant_message", threadId: "main", text: "Sushi_Story.pptx" }));
+      const opened: string[] = [];
+      const { stdin, lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} cwd={dir} openFile={(path) => opened.push(path)} />);
+      await wait();
+      const row = (lastFrame() ?? "").split("\n").findIndex((line) => line.includes("Sushi_Story")) + 1;
+      stdin.write(`\x1b[<0;5;${row}M\x1b[<0;5;${row}m`);
+      await wait();
+      expect(opened).toEqual([path]);
+      stdin.write(`\x1b[<0;5;${row}M\x1b[<32;9;${row}M\x1b[<0;9;${row}m`);
+      await wait();
+      expect(opened).toEqual([path]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("selecting within the first visible draft row does not scroll the composer", async () => {
+    const { stdin, lastFrame } = render(<App client={fakeClient()} bridge={makeEventBridge()} {...baseProps} />);
+    await wait();
+    stdin.write(Array.from({ length: 60 }, (_, i) => `draft-${i}`).join("\n"));
+    await wait(40);
+    const plain = () => (lastFrame() ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+    const top = plain().split("\n").findIndex((line) => line.includes("earlier draft")) + 2;
+    const hint = plain().split("\n")[top - 2];
+    stdin.write(`\x1b[<0;2;${top}M`);
+    await wait();
+    stdin.write(`\x1b[<32;6;${top}M`);
+    await wait(180);
+    expect(plain().split("\n")[top - 2]).toBe(hint);
+    stdin.write(`\x1b[<0;6;${top}m`);
+  });
+  test("wheel over composer reviews draft without moving transcript or edit cursor", async () => {
+    const client = fakeClient();
+    const { stdin, lastFrame } = render(<App client={client} bridge={makeEventBridge()} {...baseProps} />);
+    await wait();
+    const draft = Array.from({ length: 60 }, (_, i) => `draft-${i}`).join("\n");
+    stdin.write(draft);
+    await wait(40);
+    expect(lastFrame()).toContain("draft-59");
+    const before = (lastFrame() ?? "").split("\n").slice(0, 10);
+    stdin.write("\x1b[<64;10;18M");
+    await wait();
+    expect(lastFrame()).not.toContain("draft-59");
+    expect((lastFrame() ?? "").split("\n").slice(0, 10)).toEqual(before);
+    stdin.write("!");
+    stdin.write("\r");
+    await wait();
+    expect(client.calls.find((call) => call.method === "send")?.args[1]).toBe(draft + "!");
+  });
+
+  test("holding a transcript drag at the upper edge keeps scrolling until release", async () => {
+    const bridge = makeEventBridge();
+    for (let i = 0; i < 100; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `log-${i}` }));
+    const { stdin, lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
+    await wait();
+    stdin.write("\x1b[<0;8;8M");
+    stdin.write("\x1b[<32;8;1M");
+    await wait(80);
+    const first = lastFrame();
+    await wait(220);
+    expect(lastFrame()).not.toBe(first);
+    stdin.write("\x1b[<0;8;1m");
+    await wait();
+    const released = lastFrame();
+    await wait(120);
+    expect(lastFrame()).toBe(released);
+  });
+  test("a burst of large paste chunks remains editable and submits every byte in order", async () => {
+    const client = fakeClient();
+    const { stdin, lastFrame } = render(<App client={client} bridge={makeEventBridge()} {...baseProps} />);
+    await wait();
+    const chunk = "large pasted paragraph with spaces and punctuation.\r\n".repeat(200);
+    for (let i = 0; i < 100; i++) stdin.write(chunk);
+    await wait(80);
+    expect((lastFrame() ?? "").split("\n").length).toBe(23);
+    stdin.write("END");
+    // Editing/submit arriving before the paste timer must first flush queued input.
+    stdin.write("\x7f");
+    stdin.write("\r");
+    await wait();
+    expect(client.calls.find((call) => call.method === "send")?.args[1]).toBe(chunk.repeat(100) + "EN");
+  });
   test("(a) a full mini-turn (buffered before subscribe) commits the assistant text + returns to an idle composer", async () => {
     const bridge = makeEventBridge();
     // Push the whole turn BEFORE App renders/subscribes → exercises the bridge's pre-subscribe buffer.
@@ -102,7 +188,118 @@ describe("App (fullscreen shell)", () => {
     expect(frame).toContain("hi there friend"); // committed assistant block, windowed into view
     expect(frame).toContain("❯ hello"); // committed user block (⏺/❯ grammar)
     expect(frame).toContain(COMPOSER_CURSOR); // idle composer prompt present
+    const lines = frame.split("\n");
+    const summaryRow = lines.findIndex((line) => line.includes("tokens") && line.includes("for"));
+    expect(summaryRow).toBeGreaterThan(1);
+    expect(lines[summaryRow - 1]!.trim()).toBe(""); // transcript ↔ turn summary
+    expect(lines[summaryRow + 1]!.trim()).toBe(""); // turn summary ↔ composer
     expect(client.calls).toEqual([]); // App issued no RPCs on its own
+  });
+
+  test("a full transcript leaves exactly one empty row after the turn summary before the composer", async () => {
+    const bridge = makeEventBridge();
+    for (let i = 0; i < 30; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `older-${i}` }));
+    bridge.push(ev({ type: "turn_started", threadId: "main" }));
+    bridge.push(ev({ type: "assistant_message", threadId: "main", text: "The answer." }));
+    bridge.push(ev({ type: "turn_completed", threadId: "main", inputTokens: 10, outputTokens: 5 }));
+    const { lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
+    await wait();
+
+    const lines = (lastFrame() ?? "").split("\n");
+    const summaryRow = lines.findIndex((line) => line.includes("tokens") && line.includes("for"));
+    expect(summaryRow).toBeGreaterThan(1);
+    expect(lines[summaryRow - 2]).toContain("The answer.");
+    expect(lines[summaryRow - 1]!.trim()).toBe("");
+    expect(lines[summaryRow + 1]!.trim()).toBe("");
+    expect(lines[summaryRow + 2]).toContain("─");
+  });
+
+  test("a multiline sent message keeps full-width background through short and empty rows", async () => {
+    const bridge = makeEventBridge();
+    bridge.push(ev({ type: "user_message", threadId: "main", text: "one\n\ntwo" }));
+    const { lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
+    await wait();
+    const frame = lastFrame() ?? "";
+    const lines = frame.split("\n");
+    const first = lines.findIndex((line) => line.includes("❯ one"));
+    expect(first).toBeGreaterThanOrEqual(0);
+    const colored = lines.slice(first, first + 3).map((line) =>
+      /\x1b\[48;2;93;111;126m(.*?)\x1b\[49m/.exec(line)?.[1]);
+    expect(colored).toEqual(["❯ one".padEnd(80), " ".repeat(80), "two".padEnd(80)]);
+  });
+
+  test("the live composer has white rules and a white footer without a blue block", async () => {
+    const { stdin, lastFrame } = render(<App client={fakeClient()} bridge={makeEventBridge()} {...baseProps} />);
+    await wait();
+    stdin.write("hi\nthere");
+    await wait();
+    const lines = (lastFrame() ?? "").split("\n");
+    const first = lines.findIndex((line) => line.includes("❯ hi"));
+    expect(first).toBeGreaterThan(0);
+    expect(lines.slice(first, first + 2).map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd())).toEqual(["❯ hi", "there"]);
+    expect(lines[first - 1]).toContain("\x1b[38;2;255;255;255m");
+    expect(lines[first + 2]).toContain("\x1b[38;2;255;255;255m");
+    expect(lines.slice(first - 1, first + 3).every((line) => !line.includes("\x1b[48;2;93;111;126m"))).toBe(true);
+    expect(lines[first - 1]!.replace(/\x1b\[[0-9;]*m/g, "")).toBe("─".repeat(80));
+    expect(lines[first + 2]!.replace(/\x1b\[[0-9;]*m/g, "")).toBe("─".repeat(80));
+    expect(lines.at(-1)).toContain("\x1b[38;2;255;255;255m");
+  });
+
+  test("mouse drag selects transcript text and Ctrl-C copies it without submitting or arming exit", async () => {
+    const bridge = makeEventBridge();
+    bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: "select target" }));
+    const copied: string[] = [];
+    const client = fakeClient();
+    const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} copyText={(text) => copied.push(text)} />);
+    await wait();
+    const row = (lastFrame() ?? "").split("\n").findIndex((line) => line.includes("select target")) + 1;
+    expect(row).toBeGreaterThan(0);
+    stdin.write(`\x1b[<0;3;${row}M\x1b[<32;9;${row}M\x1b[<0;9;${row}m`);
+    await wait();
+    expect(lastFrame() ?? "").toContain("\x1b[48;2;255;255;255m");
+    expect(lastFrame() ?? "").toContain("selection · ctrl+c to copy");
+    expect(copied).toEqual([]); // selecting does not copy automatically
+    stdin.write("\x03"); // Ctrl-C copies only while a selection is active
+    await wait();
+    expect(copied).toEqual(["select"]);
+    expect(client.calls).toEqual([]);
+    expect(lastFrame() ?? "").not.toContain("Press Ctrl-C again to exit");
+  });
+
+  test("mouse drag selects composer text, Backspace removes it, and hint clicks jump to draft ends", async () => {
+    const client = fakeClient();
+    const copied: string[] = [];
+    const { stdin, lastFrame } = render(<App client={client} bridge={makeEventBridge()} {...baseProps} copyText={(text) => copied.push(text)} />);
+    await wait();
+    stdin.write("one two");
+    await wait();
+    const row = (lastFrame() ?? "").split("\n").findIndex((line) => line.includes("❯ one two")) + 1;
+    expect(row).toBeGreaterThan(0);
+    stdin.write(`\x1b[<0;3;${row}M\x1b[<32;6;${row}M\x1b[<0;6;${row}m`);
+    await wait();
+    stdin.write("\x03");
+    await wait();
+    expect(copied).toEqual(["one"]);
+    stdin.write("\x7f");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(client.calls).toContainEqual({ method: "send", args: ["s1", " two"] });
+
+    stdin.write(Array.from({ length: 30 }, (_, i) => `line-${i}`).join("\n"));
+    await wait();
+    let frame = lastFrame() ?? "";
+    let hintRow = frame.split("\n").findIndex((line) => line.includes("earlier draft lines")) + 1;
+    expect(hintRow).toBeGreaterThan(0);
+    stdin.write(`\x1b[<0;2;${hintRow}M\x1b[<0;2;${hintRow}m`);
+    await wait();
+    frame = lastFrame() ?? "";
+    expect(frame).toContain("\x1b[7ml\x1b[27mine-0");
+    hintRow = frame.split("\n").findIndex((line) => line.includes("later draft lines")) + 1;
+    expect(hintRow).toBeGreaterThan(0);
+    stdin.write(`\x1b[<0;2;${hintRow}M\x1b[<0;2;${hintRow}m`);
+    await wait();
+    expect(lastFrame() ?? "").toContain("line-29");
   });
 
   test("(b) parity bug e2e: a bg child's finish line keeps its real label/elapsed and the composer is never overwritten", async () => {
@@ -220,6 +417,53 @@ describe("App (fullscreen shell)", () => {
     expect(frame).toContain(COMPOSER_CURSOR); // bottom bar still pinned
   });
 
+  test("dragging a transcript selection against the top edge scrolls the window", async () => {
+    const bridge = makeEventBridge();
+    for (let i = 0; i < 60; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `edge-${i}` }));
+    const { stdin, lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
+    await wait();
+    const initial = lastFrame() ?? "";
+    const anchorRow = initial.split("\n").findIndex((line) => line.includes("edge-59")) + 1;
+    expect(anchorRow).toBeGreaterThan(0);
+    stdin.write(`\x1b[<0;2;${anchorRow}M`);
+    await wait();
+    for (let i = 0; i < 8; i++) {
+      stdin.write("\x1b[<32;2;1M");
+      await wait(20);
+    }
+    stdin.write("\x1b[<0;2;1m");
+    await wait();
+    expect(lastFrame() ?? "").toContain("edge-35");
+  });
+
+  test("a long sent user message marks earlier hidden lines and PageUp reveals its beginning", async () => {
+    const bridge = makeEventBridge();
+    bridge.push(ev({ type: "user_message", threadId: "main", text: `BEGIN ${"x".repeat(2500)} END` }));
+    const { stdin, lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
+    await wait();
+    expect(lastFrame() ?? "").toContain("END");
+    expect(lastFrame() ?? "").toContain("earlier lines (PgUp)");
+
+    for (let i = 0; i < 3; i++) { stdin.write("\x1b[5~"); await wait(); }
+    expect(lastFrame() ?? "").toContain("BEGIN");
+  });
+
+  test("PageUp reviews a long draft without scrolling the transcript behind it", async () => {
+    const bridge = makeEventBridge();
+    for (let i = 0; i < 30; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `LOG-${i}` }));
+    bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: "TAIL-MARKER" }));
+    const { stdin, lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
+    await wait();
+    stdin.write(`BEGIN ${"x".repeat(1200)} END`);
+    await wait();
+    expect(lastFrame() ?? "").toContain("TAIL-MARKER");
+    expect(lastFrame() ?? "").toContain("earlier draft lines");
+
+    for (let i = 0; i < 3; i++) { stdin.write("\x1b[5~"); await wait(); }
+    expect(lastFrame() ?? "").toContain("BEGIN");
+    expect(lastFrame() ?? "").toContain("TAIL-MARKER");
+  });
+
   test("(i) scroll keys: PgUp unsticks (a new block does NOT move the view); PgDn back to the end re-sticks (follows)", async () => {
     const bridge = makeEventBridge();
     for (let i = 0; i < 40; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `NOTE-${i}` }));
@@ -282,8 +526,8 @@ describe("App (fullscreen shell)", () => {
 
   // tui-mouse — rapid trackpad scroll batches many SGR reports into ONE `stdin.read()`/"input"
   // chunk. bottomBarRows(idle, no tasks/agents) = 4, so viewH = (24-1) - 4 = 19 at the 24-row
-  // fallback; 40 pushed lines -> max scrollTop 21, stuck at the bottom (scrollTop 21, lines
-  // W-21..W-39 visible) before any wheel input.
+  // fallback; 40 pushed lines + the terminal transcript spacer -> max scrollTop 26 (the welcome
+  // banner also takes 5 rows), stuck at the bottom before any wheel input.
   test("(k2) batched SGR reports: 3 concatenated wheel-up reports in ONE chunk scroll exactly 3 steps, nothing leaks to the composer", async () => {
     const bridge = makeEventBridge();
     for (let i = 0; i < 40; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `W-${i}` }));
@@ -296,9 +540,10 @@ describe("App (fullscreen shell)", () => {
     const frame = lastFrame() ?? "";
     expect(count(frame, "64;10;5")).toBe(0); // no raw mouse bytes anywhere (not the composer)
 
-    // Each of the 3 reports fired its own wheel step (-3 each = -9 total): scrollTop 21 -> 12, so
-    // the top visible line is W-12 and W-31 (visible only at a shallower scroll) is NOT.
-    expect(frame).toContain("W-12");
+    // Each of the 3 reports fired its own wheel step (-3 each = -9 total): scrollTop 26 -> 17.
+    // The new top disclosure replaces W-13 and counts it among the 17 earlier lines.
+    expect(frame).toContain("↑ 17 earlier lines (PgUp)");
+    expect(frame).toContain("W-14");
     expect(frame).not.toContain("W-31");
 
     // The composer buffer is empty (mouse was swallowed): Enter submits nothing.
@@ -316,13 +561,13 @@ describe("App (fullscreen shell)", () => {
 
     stdin.write("\x1b[<64;10;5"); // report split before the terminating 'M'
     await wait();
-    expect(lastFrame() ?? "").toContain("W-21"); // not yet scrolled — nothing fires on a partial report
+    expect(lastFrame() ?? "").toContain("↑ 26 earlier lines (PgUp)"); // not yet scrolled — nothing fires on a partial report
 
     stdin.write("M"); // completes the report
     await wait();
     const frame = lastFrame() ?? "";
     expect(count(frame, "64;10;5")).toBe(0); // no raw mouse bytes anywhere (not the composer)
-    expect(frame).toContain("W-18"); // scrolled exactly ONE step (21 -> 18), not zero and not double
+    expect(frame).toContain("↑ 23 earlier lines (PgUp)"); // scrolled exactly ONE step (26 -> 23), not zero and not double
 
     stdin.write("\r");
     await wait();
@@ -396,14 +641,16 @@ describe("App (fullscreen shell)", () => {
       stdin.write("\x1b[5~"); // PgUp -> offset 18, unfollowed
       await wait();
       const before = lastFrame() ?? "";
-      expect(before.split("\n")[0]).toContain("RW-3"); // window top — long note entirely above it
+      expect(before.split("\n")[0]).toContain("earlier lines (PgUp)");
+      expect(before.split("\n")[1]).toContain("RW-5"); // RW-4 is behind the disclosure row
       expect(before).toContain("↓ 19 newer lines");
 
       stdoutShape.columns = 40;
       process.stdout.emit("resize");
       await wait();
       const after = lastFrame() ?? "";
-      expect(after.split("\n")[0]).toContain("RW-3"); // same content on top — rewrap did not scroll the reader
+      expect(after.split("\n")[0]).toContain("earlier lines (PgUp)");
+      expect(after.split("\n")[1]).toContain("RW-5"); // same content under the disclosure after rewrap
       expect(after).toContain("↓ 19 newer lines"); // hidden-below count unchanged — offset was not "compensated"
     } finally {
       stdoutShape.columns = prevCols;
@@ -425,6 +672,7 @@ describe("App (fullscreen shell)", () => {
       (process.stdout as unknown as { rows?: number }).rows = prev;
     }
   });
+
 });
 
 describe("App — double ctrl+C/ctrl+D exit flow (Phase 3c Task 5)", () => {

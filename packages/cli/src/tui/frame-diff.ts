@@ -9,9 +9,10 @@
  *   - `diffFrames(prev, next)` — pure: per-row string equality (rows are OPAQUE strings, ANSI
  *     included — a styling-only change is a change), changed rows out as ops, vanished rows
  *     (shrink) as explicit clear ops. O(rows) compares, O(damage) ops.
- *   - `renderOps(ops, totalRows)` — pure serializer: for each op an absolute cursor position
+ *   - `renderOps(ops, totalRows, columns?)` — pure serializer: for each op an absolute cursor position
  *     (CSI row;1H, 1-based), the row text, and EL (CSI K, clear-to-EOL — erases any residue of a
- *     longer previous row); the whole batch wrapped in ONE BSU/ESU synchronized-update envelope
+ *     longer previous row) unless the row already fills the terminal width; the whole batch is
+ *     wrapped in ONE BSU/ESU synchronized-update envelope
  *     with the cursor parked on the frame's last row at the end (cursor discipline: Ink keeps the
  *     terminal cursor HIDDEN for the app's whole life — log-update's cliCursor.hide — and Winter's
  *     composer paints its own inverse-video cursor glyph, so the park is escape-hygiene for
@@ -39,6 +40,7 @@
  *  (today's `makeSyncStdout` write-through), the plan's renderer-vs-writer bisect hatch. */
 
 import { BSU, ESU } from "./alt-screen";
+import stringWidth from "string-width";
 
 export type RowOp = { row: number; text: string };
 
@@ -60,10 +62,14 @@ const ERASE_SCREEN = "\x1b[2J";
 const EL = "\x1b[K"; // erase to end of line — clears residue when the new row is shorter
 const posRow = (row0: number): string => `\x1b[${row0 + 1};1H`; // CSI params are 1-based
 
-/** One op = position + text + EL (concatenated, given order). */
-function opsBody(ops: RowOp[]): string {
+/** A full-width row has no trailing cells to clear. On Terminal.app, EL immediately after its
+ *  final glyph clears that glyph, leaving a visible one-cell gap at the right edge. */
+function opsBody(ops: RowOp[], columns?: number): string {
   let body = "";
-  for (const op of ops) body += posRow(op.row) + op.text + EL;
+  for (const op of ops) {
+    const fillsRow = typeof columns === "number" && columns > 0 && stringWidth(op.text) >= columns;
+    body += posRow(op.row) + op.text + (fillsRow ? "" : EL);
+  }
   return body;
 }
 
@@ -73,10 +79,10 @@ function park(totalRows: number): string {
 }
 
 /** Deterministic damage serialization: `""` for zero ops (nothing is written at all), else ONE
- *  BSU/ESU-wrapped string of per-op position+text+EL, cursor parked on the last frame row. */
-export function renderOps(ops: RowOp[], totalRows: number): string {
+ *  BSU/ESU-wrapped string of per-op position+text+optional-EL, cursor parked on the last row. */
+export function renderOps(ops: RowOp[], totalRows: number, columns?: number): string {
   if (ops.length === 0) return "";
-  return BSU + opsBody(ops) + park(totalRows) + ESU;
+  return BSU + opsBody(ops, columns) + park(totalRows) + ESU;
 }
 
 export type DiffingWriter = { write(frame: string): void; reset(): void };
@@ -99,9 +105,9 @@ export function makeDiffingWriter(out: NodeJS.WriteStream): DiffingWriter {
       if (rows.length > limit) rows = rows.slice(0, limit);
       if (prev === null) {
         const all = rows.map((text, row) => ({ row, text }));
-        out.write(BSU + ERASE_SCREEN + opsBody(all) + park(rows.length) + ESU);
+        out.write(BSU + ERASE_SCREEN + opsBody(all, out.columns) + park(rows.length) + ESU);
       } else {
-        const s = renderOps(diffFrames(prev, rows), rows.length);
+        const s = renderOps(diffFrames(prev, rows), rows.length, out.columns);
         if (s !== "") out.write(s); // zero damage ⇒ zero bytes
       }
       prev = rows;

@@ -2,25 +2,46 @@ import { describe, expect, test } from "bun:test";
 import {
   backspace,
   createMouseFilter,
+  cursorAtVisualPosition,
+  cursorTo,
   decodeMouse,
+  decodePointer,
   del,
+  deleteWordLeft,
+  deleteWordRight,
   end,
   home,
   insert,
   isMouseArtifact,
+  makePointerCoalescer,
   left,
+  renderDisplayWithCursor,
   renderWithCursor,
   right,
+  selectedText,
   WHEEL_SCROLL_LINES,
   wordLeft,
   wordRight,
   type InputState,
+  type PointerEvent,
   type WheelEvent,
 } from "../../src/tui/input-model";
 
 const s = (text: string, cursor: number): InputState => ({ text, cursor });
 
 describe("input-model", () => {
+  test("coalesces rapid drags and flushes the final drag before release", () => {
+    const seen: string[] = [];
+    const coalescer = makePointerCoalescer((event) => seen.push(`${event.kind}:${event.column}`), 10_000);
+    const drag = (column: number): PointerEvent => ({ kind: "drag", button: 0, column, row: 2, shift: false, alt: false, ctrl: false });
+    coalescer.push(drag(3));
+    coalescer.push(drag(8));
+    expect(seen).toEqual([]);
+    coalescer.push({ ...drag(9), kind: "release" });
+    expect(seen).toEqual(["drag:8", "release:9"]);
+    coalescer.dispose();
+  });
+
   describe("insert", () => {
     test("inserts at the cursor, moving it past the inserted text", () => {
       expect(insert(s("ac", 1), "b")).toEqual({ text: "abc", cursor: 2 });
@@ -89,6 +110,10 @@ describe("input-model", () => {
       const state = s("abc", 3);
       expect(right(state)).toBe(state);
     });
+    test("left and right cross a CRLF visual line break in one step", () => {
+      expect(left(s("ab\r\ncd", 4))).toEqual(s("ab\r\ncd", 2));
+      expect(right(s("ab\r\ncd", 2))).toEqual(s("ab\r\ncd", 4));
+    });
   });
 
   describe("home/end", () => {
@@ -140,6 +165,23 @@ describe("input-model", () => {
     });
   });
 
+  test("selection replaces and deletes exactly the selected draft span", () => {
+    const selected = cursorTo(s("one two three", 4), 7, true);
+    expect(selectedText(selected)).toBe("two");
+    expect(insert(selected, "TWO")).toEqual(s("one TWO three", 7));
+    expect(backspace(selected)).toEqual(s("one  three", 4));
+    expect(del(selected)).toEqual(s("one  three", 4));
+    expect(left(selected)).toEqual(s("one two three", 4));
+    expect(right(selected)).toEqual(s("one two three", 7));
+  });
+
+  test("word deletion and click positions respect words, prompt, and wrapped rows", () => {
+    expect(deleteWordLeft(s("one two three", 7))).toEqual(s("one  three", 4));
+    expect(deleteWordRight(s("one two three", 4))).toEqual(s("one  three", 4));
+    expect(cursorAtVisualPosition("abcdef", 5, 0, 3)).toBe(1); // 2-cell prompt
+    expect(cursorAtVisualPosition("abcdef", 5, 1, 1)).toBe(4); // wrapped continuation
+  });
+
   describe("non-ASCII basics (single-code-unit BMP chars — see input-model.ts's documented grapheme limitation)", () => {
     test("insert/backspace round-trip on accented text", () => {
       const typed = insert(s("", 0), "café");
@@ -158,7 +200,7 @@ describe("input-model", () => {
   });
 
   // ---- TUI renderer T1: mouse decoding at the input layer (plan Task 1; mechanism report Q3 +
-  // Q7 cure 3). mount.ts enables SGR mouse reporting (\x1b[?1000h\x1b[?1006h), so a wheel notch
+  // Q7 cure 3). mount.ts enables SGR mouse reporting (\x1b[?1002h\x1b[?1006h), so a wheel notch
   // makes the terminal write "\x1b[<64;COL;ROWM" (up) / "\x1b[<65;COL;ROWM" (down) to stdin; a
   // terminal that supports 1000 but NOT 1006 answers in the legacy X10 format instead: "\x1b[M"
   // plus three payload bytes (button+32, col+32, row+32). Wheel is decoded into a first-class
@@ -209,6 +251,13 @@ describe("input-model", () => {
       expect(decodeMouse("abc")).toBeNull();
       expect(decodeMouse("")).toBeNull();
     });
+  });
+
+  test("SGR press, drag, and release preserve coordinates and modifiers", () => {
+    expect(decodePointer("\x1b[<0;5;8M")).toMatchObject({ kind: "press", button: 0, column: 5, row: 8 });
+    expect(decodePointer("\x1b[<40;9;10M")).toMatchObject({ kind: "drag", button: 0, column: 9, row: 10, alt: true });
+    expect(decodePointer("\x1b[<0;9;10m")).toMatchObject({ kind: "release", button: 0, column: 9, row: 10 });
+    expect(decodePointer("\x1b[<64;9;10M")).toBeNull();
   });
 
   describe("isMouseArtifact (the composer's never-insert guard)", () => {
@@ -264,9 +313,9 @@ describe("input-model", () => {
       const f = createMouseFilter();
       expect(f("\x1b[<64;10;5M\x1b[<64;10;6M\x1b[<64;10;7M")).toEqual({ text: "", wheel: [up, up, up] });
     });
-    test("mixed batch: wheel-up, wheel-down, and a click — click swallowed, no text", () => {
+    test("mixed batch: wheel-up, wheel-down, and a click — events routed, no text", () => {
       const f = createMouseFilter();
-      expect(f("\x1b[<64;3;4M\x1b[<65;3;5M\x1b[<0;3;5M")).toEqual({ text: "", wheel: [up, down] });
+      expect(f("\x1b[<64;3;4M\x1b[<65;3;5M\x1b[<0;3;5M")).toEqual({ text: "", wheel: [up, down], pointer: [{ kind: "press", button: 0, column: 3, row: 5, shift: false, alt: false, ctrl: false }] });
     });
     test("a report split after the full prefix completes on the next chunk (old pin, kept)", () => {
       const f = createMouseFilter();
@@ -299,9 +348,9 @@ describe("input-model", () => {
       expect(f("\x1b[M\x61")).toEqual({ text: "", wheel: [] }); // partial: held
       expect(f("\x21\x21")).toEqual({ text: "", wheel: [down] });
     });
-    test("legacy X10 clicks are swallowed, not text", () => {
+    test("legacy X10 clicks are routed, not text", () => {
       const f = createMouseFilter();
-      expect(f("\x1b[M\x20\x21\x21")).toEqual({ text: "", wheel: [] });
+      expect(f("\x1b[M\x20\x21\x21")).toEqual({ text: "", wheel: [], pointer: [{ kind: "press", button: 0, column: 1, row: 1, shift: false, alt: false, ctrl: false }] });
     });
     test("non-mouse CSI (arrows etc.) passes through byte-identical — real keys keep working", () => {
       const f = createMouseFilter();
@@ -328,5 +377,9 @@ describe("input-model", () => {
     test("cursor at 0 on non-empty text", () => {
       expect(renderWithCursor(s("abc", 0))).toEqual({ before: "", at: "a", after: "bc" });
     });
+  });
+
+  test("display cursor keeps a pasted CRLF as one visible line break while moving through it", () => {
+    expect(renderDisplayWithCursor(s("a\r\nb", 2))).toEqual({ before: "a\n", at: "b", after: "" });
   });
 });

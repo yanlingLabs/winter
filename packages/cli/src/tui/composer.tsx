@@ -1,6 +1,7 @@
 /** `<Composer>` (Phase 3a Task 4; re-skinned Phase 3b Task 5; Phase 3c Task 3 — real cursor/editing
  *  model + disk-backed prompt history + double-esc clear). The interactive input line: cursor
- *  navigation and mid-text editing, ↑/↓ prompt-history recall, submit/steer, esc-interrupt (or
+ *  navigation and mid-text editing, ↑/↓ visual-row movement (history recall from an empty draft),
+ *  submit/steer, esc-interrupt (or
  *  double-esc-clear), shift+tab policy-cycle. Presentational only, per 3a's ambiguity resolution
  *  #4 — it renders the given `policy` and forwards key decisions via callbacks; the parent owns the
  *  actual policy value, the setPolicy RPC, and the one-RPC-at-a-time in-flight guard.
@@ -24,42 +25,51 @@
  *  read the exact same raw chunk Ink's own `useInput` consumes — via `useStdin().internal_eventEmitter`,
  *  the "input" event `useInput` itself subscribes to — purely to disambiguate these four keys by
  *  their literal byte sequence. Every other key (insert, arrows, enter, esc, ctrl+a/e, word-jumps,
- *  history ↑/↓) stays on the ordinary `useInput` path below; the two listeners never double-fire on
+ *  visual-row ↑/↓) stays on the ordinary `useInput` path below; the two listeners never double-fire on
  *  the same keystroke because Ink clears `input` and leaves every `key.*` flag unhelpful for these
  *  four cases anyway (nothing in the ordinary path reacts to them).
  *
- *  Phase 3b T5 render note (cc-ui-study-chrome.md §1) still holds: an "open" prompt (bare top+bottom
- *  rounded rules, no side walls), a `❯ ` prompt glyph dimmed while a turn runs (glyph ONLY — the
+ *  The composer has white rules above and below its content; a `❯ ` prompt glyph dims while a turn runs (glyph ONLY — the
  *  user's typed text never dims). T3 replaces the old trailing block-cursor glyph with a real
  *  cursor position: `❯ ` + `before` + inverse(`at` or a space) + `after`, per `renderWithCursor`
  *  (see `input-model.ts`) — all as ONE root `<Text>`, with the glyph's dim expressed as raw ANSI
  *  codes INSIDE the root string (see the render comment below for why an Ink layout bug forces
  *  that shape). */
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { join } from "node:path";
 import { Box, Text, useInput, useStdin } from "ink";
 import { Chalk } from "chalk";
-import wrapAnsi from "wrap-ansi";
 import { resolveWinterHome } from "@yanlinglabs/winter-core";
 import type { ApprovalPolicy } from "@yanlinglabs/winter-protocol";
 import { footerKeyAction } from "../keys";
 import type { FooterSelection } from "../task-block";
 import { theme } from "./theme";
+import { makeDraftWrapper } from "./draft-wrap";
 import {
   backspace,
+  cursorAtVisualPosition,
+  cursorTo,
   del,
+  deleteWordLeft,
+  deleteWordRight,
   end,
   home,
   insert,
   isMouseArtifact,
   left,
+  moveVerticalCursor,
   right,
-  renderWithCursor,
+  renderDisplayWithCursor,
+  selectedText,
+  selectionRange,
   wordLeft,
   wordRight,
   type InputState,
+  type PointerEvent,
 } from "./input-model";
+import { displayLineBreaks } from "./format";
+import { copyToClipboard } from "./clipboard";
 import { appendHistory, historyPathFor, loadHistory, makeHistoryNav } from "./history-store";
 import { COMMANDS, filterCommands, parseSlashInput } from "./commands";
 import { CompletionMenu, MAX_MENU_ROWS } from "./completion-menu";
@@ -83,7 +93,11 @@ const DOUBLE_ESC_WINDOW_MS = 800;
 // terminal variants (xterm/vt220/rxvt) for each logical key.
 const HOME_SEQS = new Set(["\x1b[H", "\x1bOH", "\x1b[1~", "\x1b[7~"]);
 const END_SEQS = new Set(["\x1b[F", "\x1bOF", "\x1b[4~", "\x1b[8~"]);
-const BACKSPACE_SEQS = new Set(["\x7f", "\b", "\x1b\x7f", "\x1b\b"]);
+const BACKSPACE_SEQS = new Set(["\x7f", "\b"]);
+const WORD_BACKSPACE_SEQS = new Set(["\x1b\x7f", "\x1b\b"]);
+const WORD_LEFT_SEQS = new Set(["\x1bb"]); // Terminal.app's Option-Left in meta mode
+const WORD_RIGHT_SEQS = new Set(["\x1bf"]); // CSI 1;3D/C variants go through useInput
+const WORD_DELETE_SEQS = new Set(["\x1b[3;3~"]);
 const DELETE_SEQS = new Set(["\x1b[3~", "\x1b[3^", "\x1b[3$"]);
 
 // Fixed-level truecolor Chalk instance — same convention (and reason) as flatten-blocks.ts /
@@ -145,19 +159,77 @@ export function computeFileQuery(state: InputState): string | null {
 
 /** TUI renderer T3 — the CAPPED composer's pure window: wraps the fully-styled content string
  *  (prompt glyph + before + baked-inverse cursor cell + after) at `columns` and, when the wrapped
- *  rows exceed `maxRows`, keeps the `maxRows`-tall window CONTAINING THE CURSOR (found by its
- *  unique `\x1b[7m` inverse marker — user text can never contain ESC, the input path refuses it),
- *  biased so the cursor sits at the window's bottom while typing past the cap (the terminal-input
- *  convention). `total` is the natural row count — the caller renders the window only when
- *  `total > maxRows`, so an uncapped composer's render path is byte-identical to before. Pure and
- *  exported for direct unit tests (the Ink harness can't reach wrap internals). */
-export function windowComposerContent(content: string, columns: number, maxRows: number): { rows: string[]; total: number } {
-  const rows = wrapAnsi(content, Math.max(1, columns), { hard: true, trim: false }).split("\n");
-  if (rows.length <= Math.max(1, maxRows)) return { rows, total: rows.length };
+ *  rows exceed `maxRows`, follows the cursor by default (found by its unique `\x1b[7m` inverse
+ *  marker — user text cannot contain ESC), or starts at `preferredStart` while paging through a
+ *  draft. `total` is the natural row count; hidden counts drive the rule disclosures. */
+export function windowComposerContent(content: string, columns: number, maxRows: number, preferredStart?: number, wrap = makeDraftWrapper()): { rows: string[]; total: number; start: number; hiddenAbove: number; hiddenBelow: number } {
+  const rows = wrap(content, columns);
+  if (rows.length <= Math.max(1, maxRows)) return { rows, total: rows.length, start: 0, hiddenAbove: 0, hiddenBelow: 0 };
   const cursorRow = Math.max(0, rows.findIndex((r: string) => r.includes("\x1b[7m")));
   const max = Math.max(1, maxRows);
-  const start = Math.min(Math.max(0, cursorRow - (max - 1)), rows.length - max);
-  return { rows: rows.slice(start, start + max), total: rows.length };
+  const autoStart = Math.min(Math.max(0, cursorRow - (max - 1)), rows.length - max);
+  const start = preferredStart === undefined ? autoStart : Math.min(Math.max(0, preferredStart), rows.length - max);
+  return { rows: rows.slice(start, start + max), total: rows.length, start, hiddenAbove: start, hiddenBelow: rows.length - start - max };
+}
+
+function draftRule(columns: number, hidden: number, direction: "earlier" | "later"): string {
+  const width = Math.max(1, columns);
+  if (hidden === 0 || width < 3) return ansi.hex(theme.promptBorder)("─".repeat(width));
+  const label = ` ${direction === "earlier" ? "↑" : "↓"} ${hidden} ${direction} draft line${hidden === 1 ? "" : "s"} (${direction === "earlier" ? "PgUp" : "PgDn"}) `
+    .slice(0, width - 2);
+  const left = ansi.hex(theme.promptBorder)("─".repeat(width - label.length - 2));
+  const badge = ansi.bgHex(theme.promptBorder)(ansi.hex(theme.userMessageBackground)(label));
+  const right = ansi.hex(theme.promptBorder)("──");
+  return left + badge + right;
+}
+
+/** Apply the draft-selection style in runs rather than wrapping every selected character in a
+ * separate Chalk call. Large pastes can contain tens of thousands of characters; keeping the
+ * ANSI work proportional to the number of selected/unselected runs makes dragging and typing
+ * remain responsive while preserving the exact display text and cursor cell. */
+function styleDraftRange(display: string, from: number, to: number, selectionStart: number, selectionEnd: number): string {
+  let result = "";
+  let position = Math.max(0, from);
+  const limit = Math.min(display.length, Math.max(position, to));
+  while (position < limit) {
+    const newline = display.indexOf("\n", position);
+    const lineEnd = newline === -1 ? limit : Math.min(newline, limit);
+    const selectedFrom = Math.min(lineEnd, Math.max(position, selectionStart));
+    const selectedTo = Math.max(selectedFrom, Math.min(lineEnd, selectionEnd));
+    if (selectedFrom > position) result += display.slice(position, selectedFrom);
+    if (selectedFrom < selectedTo) {
+      result += ansi.bgHex(theme.promptBorder)(ansi.hex(theme.userMessageBackground)(display.slice(selectedFrom, selectedTo)));
+    }
+    if (selectedTo < lineEnd) result += display.slice(selectedTo, lineEnd);
+    if (lineEnd < limit && display[lineEnd] === "\n") {
+      result += "\n";
+      position = lineEnd + 1;
+    } else {
+      position = lineEnd;
+    }
+  }
+  return result;
+}
+
+function renderSelectedDraft(state: InputState, running: boolean): string {
+  const range = selectionRange(state);
+  const prompt = running ? ansi.dim("❯ ") : "❯ ";
+  if (!range) {
+    const { before, at, after } = renderDisplayWithCursor(state);
+    return `${prompt}${before}${ansi.inverse(at || " ")}${after}`;
+  }
+  const display = displayLineBreaks(state.text);
+  const focus = displayLineBreaks(state.text.slice(0, state.cursor)).length;
+  const start = displayLineBreaks(state.text.slice(0, range[0])).length;
+  const finish = displayLineBreaks(state.text.slice(0, range[1])).length;
+  const cursor = Math.min(display.length, Math.max(0, focus));
+  const at = display[cursor] ?? "";
+  const beforeEnd = cursor;
+  const afterStart = at === "\n" ? cursor : Math.min(display.length, cursor + (at ? 1 : 0));
+  return prompt
+    + styleDraftRange(display, 0, beforeEnd, start, finish)
+    + ansi.inverse(at === "\n" ? "↵" : at || " ")
+    + styleDraftRange(display, afterStart, display.length, start, finish);
 }
 
 export interface ComposerProps {
@@ -225,11 +297,9 @@ export interface ComposerProps {
   columns?: number;
   /** TUI renderer T3 — the CAPPED composer: the maximum wrapped CONTENT rows this box may draw
    *  (App passes `bottomBarLayout(...).composerContentRows`, its share of the ≤50% chrome budget).
-   *  When the buffer's natural wrap fits, the render is byte-identical to before this prop existed
-   *  (the nested-inverse-cursor single-root-Text shape, Ink bug and all); past it, the content is
-   *  pre-wrapped and JS-windowed around the cursor (`windowComposerContent`) so a huge paste can
-   *  never grow the chrome slot past its cap. Optional: omitted (legacy call sites/tests) means
-   *  uncapped — today's behavior exactly. */
+   *  The content is pre-wrapped; when it exceeds this cap, `windowComposerContent` follows the
+   *  cursor while the two white rules stay fixed. Optional: omitted (legacy call sites/tests)
+   *  means the content is uncapped. */
   maxContentRows?: number;
   /** Phase 3d T3: the App-owned file index (see app.tsx's `fileIndexRef` doc) — `undefined` until
    *  the FIRST "@"-trigger's build resolves, a (possibly empty) array once it has. While
@@ -257,6 +327,12 @@ export interface ComposerProps {
    *  is byte-identical, provided or not (a menu can't even be open on an empty buffer — both
    *  predicates require text). Omitted → all Esc semantics exactly as before. */
   onEscEmpty?: () => void;
+  /** 1-based row of the composer's upper rule in the Terminal screen. */
+  screenTopRow?: number;
+  /** App's pre-Ink mouse router registers the current composer pointer handler here. */
+  registerPointerHandler?: (handler: ((event: PointerEvent) => void) | null) => void;
+  onCopy?: (text: string) => void;
+  registerWheelHandler?: (handler: ((delta: number) => void) | null) => void;
 }
 
 export function Composer({
@@ -282,14 +358,114 @@ export function Composer({
   fileIndex,
   onNeedFileIndex,
   onEscEmpty,
+  screenTopRow,
+  registerPointerHandler,
+  onCopy = copyToClipboard,
+  registerWheelHandler,
 }: ComposerProps) {
   // `policy` stays a prop (callers/tests still pass it; `<Footer>`, a sibling, is the one that
   // renders it) — this component no longer renders it directly, matching `task-list.tsx`'s
   // `void nowMs;` convention for an intentionally-unused-here prop.
   void policy;
-  const [state, setState] = useState<InputState>({ text: "", cursor: 0 });
+  const [state, setRenderedState] = useState<InputState>({ text: "", cursor: 0 });
+  const inputStateRef = useRef(state);
+  const setState = useCallback((update: React.SetStateAction<InputState>) => {
+    const next = typeof update === "function" ? update(inputStateRef.current) : update;
+    inputStateRef.current = next;
+    setRenderedState(next);
+  }, []);
+  const mouseAnchor = useRef<number | null>(null);
+  const preferredVerticalColumn = useRef<number | null>(null);
+  const [review, setReview] = useState<{ text: string; cursor: number; columns: number; maxRows: number; start: number } | null>(null);
   const [lastEscMs, setLastEscMs] = useState<number | null>(null);
   const effectiveHistoryPath = historyPath ?? defaultHistoryPath();
+  const [historyEntries] = useState(() => loadHistory(effectiveHistoryPath, sessionId));
+  const historyNav = useMemo(() => makeHistoryNav(historyEntries), [historyEntries]);
+  // The parent App ticks its activity chrome independently of the composer. Keep the expensive
+  // draft styling/wrapping memoized so those unrelated renders do not walk a 100k-character paste
+  // again; these values only need recomputing when the draft/layout inputs actually change.
+  const fullContent = useMemo(() => renderSelectedDraft(state, running), [state, running]);
+  const wrapDraft = useMemo(() => makeDraftWrapper(), []);
+  const maxRows = Math.max(1, maxContentRows ?? 1);
+  const reviewStart = review?.text === state.text && review.cursor === state.cursor && review.columns === columns && review.maxRows === maxRows
+    ? review.start : undefined;
+  const draftWindow = useMemo(
+    () => maxContentRows === undefined ? null : windowComposerContent(fullContent, columns, maxRows, reviewStart, wrapDraft),
+    [maxContentRows, fullContent, columns, maxRows, reviewStart],
+  );
+  const visibleDraftRows = useMemo(
+    () => draftWindow?.rows ?? wrapDraft(fullContent, columns),
+    [draftWindow, fullContent, columns],
+  );
+  const visibleDraft = useMemo(() => visibleDraftRows.join("\n"), [visibleDraftRows]);
+
+  useEffect(() => {
+    if (disabled || !registerWheelHandler) return;
+    registerWheelHandler((delta) => {
+      if (!draftWindow) return;
+      setReview((previous) => ({ text: state.text, cursor: state.cursor, columns, maxRows,
+        start: Math.max(0, Math.min(draftWindow.total - visibleDraftRows.length,
+          (previous?.text === state.text && previous.cursor === state.cursor ? previous.start : draftWindow.start) + delta)) }));
+    });
+    return () => registerWheelHandler(null);
+  }, [disabled, registerWheelHandler, draftWindow, state, columns, maxRows, visibleDraftRows.length]);
+
+  useEffect(() => {
+    if (!registerPointerHandler || screenTopRow === undefined || disabled) return;
+    const handle = (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      const bottomRuleRow = screenTopRow + 1 + visibleDraftRows.length;
+      if (event.kind === "press" && event.row === screenTopRow && (draftWindow?.hiddenAbove ?? 0) > 0) {
+        mouseAnchor.current = null;
+        setState(home);
+        return;
+      }
+      if (event.kind === "press" && event.row === bottomRuleRow && (draftWindow?.hiddenBelow ?? 0) > 0) {
+        mouseAnchor.current = null;
+        setState(end);
+        return;
+      }
+      let windowStart = draftWindow?.start ?? 0;
+      let rows = visibleDraftRows;
+      // Like transcript selection, a draft selection must keep moving when the pointer reaches
+      // the edge of a capped composer. Page the rendered window one row per drag frame and carry
+      // the review anchor forward with the new cursor, otherwise the next state update would make
+      // the cursor-following window snap back and the highlight would appear stuck.
+      if (event.kind === "drag" && mouseAnchor.current !== null && draftWindow) {
+        const atTop = event.row <= screenTopRow && draftWindow.hiddenAbove > 0;
+        const atBottom = event.row >= bottomRuleRow && draftWindow.hiddenBelow > 0;
+        if (atTop || atBottom) {
+          windowStart = Math.max(0, Math.min(draftWindow.total - maxRows, windowStart + (atTop ? -1 : 1)));
+          if (windowStart !== draftWindow.start) {
+            const nextWindow = windowComposerContent(fullContent, columns, maxRows, windowStart, wrapDraft);
+            rows = nextWindow.rows;
+            const row = atTop ? 0 : Math.max(0, rows.length - 1);
+            const cursor = cursorAtVisualPosition(state.text, columns, windowStart + row, event.column - 1);
+            const next = cursorTo({ text: state.text, cursor: mouseAnchor.current }, cursor, true);
+            setReview({ text: next.text, cursor: next.cursor, columns, maxRows, start: windowStart });
+            setState(next);
+            return;
+          }
+        }
+      }
+      const row = Math.max(0, Math.min(rows.length - 1, event.row - screenTopRow - 1));
+      const cursor = cursorAtVisualPosition(state.text, columns, windowStart + row, event.column - 1);
+      if (event.kind === "press") {
+        historyNav.reset();
+        mouseAnchor.current = event.shift ? state.anchor ?? state.cursor : cursor;
+        const next = cursorTo(state, cursor, event.shift);
+        setReview({ text: next.text, cursor: next.cursor, columns, maxRows, start: windowStart });
+        setState(next);
+      } else if (mouseAnchor.current !== null) {
+        const next = cursorTo({ text: state.text, cursor: mouseAnchor.current }, cursor, true);
+        setReview({ text: next.text, cursor: next.cursor, columns, maxRows, start: windowStart });
+        setState(next);
+        if (event.kind === "release") mouseAnchor.current = null;
+      }
+    };
+    registerPointerHandler(handle);
+    return () => registerPointerHandler(null);
+  }, [registerPointerHandler, screenTopRow, disabled, state, columns, draftWindow?.start, draftWindow?.hiddenAbove, draftWindow?.hiddenBelow, visibleDraftRows.length, historyNav]);
 
   // T5: mirror state up to the parent on mount + every edit (see the prop doc comment above).
   useEffect(() => { onStateChange?.(state); }, [state, onStateChange]);
@@ -297,8 +473,6 @@ export function Composer({
   // Load prompt history once per mount (the App never remounts a live composer, so "once" here
   // really does mean "for this composer's whole lifetime") — a lazy useState initializer, not an
   // effect, since there's no cleanup and no need to re-run on every render.
-  const [historyEntries] = useState(() => loadHistory(effectiveHistoryPath, sessionId));
-  const historyNav = useMemo(() => makeHistoryNav(historyEntries), [historyEntries]);
 
   // ---- Phase 3d T2/T3: completion menu state — slash-command menu (T2) AND "@"-file menu (T3),
   // sharing one selection/dismissal state machine. This is deliberate, not just economical: the two
@@ -439,24 +613,41 @@ export function Composer({
     const onRawInput = (chunk: Buffer | string) => {
       const seq = typeof chunk === "string" ? chunk : chunk.toString();
       if (HOME_SEQS.has(seq)) {
+        preferredVerticalColumn.current = null;
         if (textEmptyRef.current && onScrollTop) { onScrollTop(); return; }
         setState(home);
         return;
       }
       if (END_SEQS.has(seq)) {
+        preferredVerticalColumn.current = null;
         if (textEmptyRef.current && onScrollBottom) { onScrollBottom(); return; }
         setState(end);
         return;
       }
-      if (BACKSPACE_SEQS.has(seq)) { setState(backspace); return; }
-      if (DELETE_SEQS.has(seq)) { setState(del); return; }
+      if (BACKSPACE_SEQS.has(seq)) { preferredVerticalColumn.current = null; historyNav.reset(); setState(backspace); return; }
+      if (WORD_BACKSPACE_SEQS.has(seq)) { preferredVerticalColumn.current = null; historyNav.reset(); setState(deleteWordLeft); return; }
+      if (DELETE_SEQS.has(seq)) { preferredVerticalColumn.current = null; historyNav.reset(); setState(del); return; }
+      if (WORD_DELETE_SEQS.has(seq)) { preferredVerticalColumn.current = null; historyNav.reset(); setState(deleteWordRight); return; }
+      if (WORD_LEFT_SEQS.has(seq)) { preferredVerticalColumn.current = null; setState(wordLeft); return; }
+      if (WORD_RIGHT_SEQS.has(seq)) { preferredVerticalColumn.current = null; setState(wordRight); return; }
     };
     internal_eventEmitter.on("input", onRawInput);
     return () => { internal_eventEmitter.off("input", onRawInput); };
-  }, [disabled, internal_eventEmitter, onScrollTop, onScrollBottom]);
+  }, [disabled, historyNav, internal_eventEmitter, onScrollTop, onScrollBottom]);
 
   useInput(
     (input, key) => {
+      // Raw editing keys and Enter can arrive before React commits another frame.
+      const state = inputStateRef.current;
+      if (!key.upArrow && !key.downArrow) preferredVerticalColumn.current = null;
+      if (draftWindow && draftWindow.total > maxRows && (key.pageUp || key.pageDown)) {
+        const step = Math.max(1, maxRows - 1);
+        const start = key.pageUp
+          ? Math.max(0, draftWindow.start - step)
+          : Math.min(draftWindow.total - maxRows, draftWindow.start + step);
+        setReview({ text: state.text, cursor: state.cursor, columns, maxRows, start });
+        return;
+      }
       // Ink-key → decodeKey's enum adapter (ambiguity resolution #1).
       const k = key.escape
         ? "esc"
@@ -543,6 +734,7 @@ export function Composer({
         // (never Date.now here).
         if (lastEscMs !== null && nowMs - lastEscMs <= DOUBLE_ESC_WINDOW_MS) {
           appendHistory(effectiveHistoryPath, { display: state.text, pastedContents: {}, timestamp: nowMs, project, sessionId });
+          historyNav.reset();
           setState({ text: "", cursor: 0 });
           setLastEscMs(null);
         } else {
@@ -572,6 +764,7 @@ export function Composer({
           // "Unknown command" note — this composer only decides WHETHER to run vs. complete.
           onRunCommand?.(text);
           appendHistory(effectiveHistoryPath, { display: text, pastedContents: {}, timestamp: nowMs, project, sessionId });
+          historyNav.reset();
           setState({ text: "", cursor: 0 });
           setLastEscMs(null);
           return;
@@ -579,26 +772,53 @@ export function Composer({
         if (running) onSteer(text);
         else onSubmit(text);
         appendHistory(effectiveHistoryPath, { display: text, pastedContents: {}, timestamp: nowMs, project, sessionId });
+        historyNav.reset();
         setState({ text: "", cursor: 0 });
         setLastEscMs(null); // a fresh line resets the double-esc window
         return;
       }
 
       if (k === "up") {
-        const recalled = historyNav.up(state.text);
-        if (recalled !== null) setState({ text: recalled, cursor: recalled.length });
+        if (state.text.length === 0) {
+          const recalled = historyNav.up(state.text);
+          if (recalled !== null) setState({ text: recalled, cursor: recalled.length });
+        } else {
+          const moved = moveVerticalCursor(state, columns, -1, preferredVerticalColumn.current ?? undefined);
+          preferredVerticalColumn.current = moved.column;
+          setState(key.shift ? cursorTo(state, moved.state.cursor, true) : moved.state);
+        }
         return;
       }
       if (k === "down") {
-        const recalled = historyNav.down();
-        if (recalled !== null) setState({ text: recalled, cursor: recalled.length });
+        if (state.text.length === 0) {
+          const recalled = historyNav.down();
+          if (recalled !== null) setState({ text: recalled, cursor: recalled.length });
+        } else {
+          const moved = moveVerticalCursor(state, columns, 1, preferredVerticalColumn.current ?? undefined);
+          preferredVerticalColumn.current = moved.column;
+          setState(key.shift ? cursorTo(state, moved.state.cursor, true) : moved.state);
+        }
         return;
       }
 
-      if (key.ctrl && input === "a") { setState(home); return; }
-      if (key.ctrl && input === "e") { setState(end); return; }
-      if (key.leftArrow) { setState(key.ctrl || key.meta ? wordLeft : left); return; }
-      if (key.rightArrow) { setState(key.ctrl || key.meta ? wordRight : right); return; }
+      if (key.ctrl && ((key.shift && input.toLowerCase() === "c") || input === "y")) {
+        const text = selectedText(state);
+        if (text) onCopy(text);
+        return;
+      }
+      if (key.ctrl && input === "w") { historyNav.reset(); setState(deleteWordLeft); return; }
+      if (key.ctrl && input === "a") { setState((s) => cursorTo(s, 0, key.shift)); return; }
+      if (key.ctrl && input === "e") { setState((s) => cursorTo(s, s.text.length, key.shift)); return; }
+      if (key.leftArrow) {
+        const move = key.ctrl || key.meta ? wordLeft : left;
+        setState((s) => key.shift ? cursorTo(s, move({ text: s.text, cursor: s.cursor }).cursor, true) : move(s));
+        return;
+      }
+      if (key.rightArrow) {
+        const move = key.ctrl || key.meta ? wordRight : right;
+        setState((s) => key.shift ? cursorTo(s, move({ text: s.text, cursor: s.cursor }).cursor, true) : move(s));
+        return;
+      }
 
       // Phase 3d T4: "?" typed against an EMPTY buffer surfaces help instead of inserting — the
       // single actor for this keystroke, composer-internal and BEFORE the generic insert path
@@ -630,74 +850,23 @@ export function Composer({
       // keys) is refused on the same "unknown CSI never becomes text" rule.
       if (input && !key.ctrl && !key.meta) {
         if (isMouseArtifact(input) || input.includes("\x1b")) return;
+        historyNav.reset();
         setState((s) => insert(s, input));
       }
     },
     { isActive: !disabled },
   );
 
-  const { before, at, after } = renderWithCursor(state);
-
-  // TUI renderer T3 — the capped path: only when the buffer's natural wrap EXCEEDS the granted
-  // content rows does the render switch to the pre-wrapped, cursor-following window (one root
-  // <Text> of joined rows — codes baked, incl. the cursor's inverse, so the single-Text Ink-bug
-  // dodge below still holds). Within budget, the original JSX below renders byte-identical.
-  if (maxContentRows !== undefined) {
-    const full = `${running ? ansi.dim("❯ ") : "❯ "}${before}${ansi.inverse(at || " ")}${after}`;
-    const win = windowComposerContent(full, columns, maxContentRows);
-    if (win.total > Math.max(1, maxContentRows)) {
-      return (
-        <>
-          {menuVisible ? <CompletionMenu items={menuItems} selected={boundedSelected} columns={columns} /> : null}
-          <Box
-            borderStyle="round"
-            borderTop
-            borderBottom
-            borderLeft={false}
-            borderRight={false}
-            borderColor={theme.promptBorder}
-            width="100%"
-          >
-            <Text>{win.rows.join("\n")}</Text>
-          </Box>
-        </>
-      );
-    }
-  }
-
   return (
     <>
-      {/* Phase 3d T2/T3: the completion menu renders ABOVE the open-rule box, never inside it —
-       *  it's no part of the bordered composer's own single-root-Text layout (see the render note
-       *  below), just a sibling that appears/disappears above it. `menuVisible` (not `slashOpen`
-       *  alone) covers the T3 indexing placeholder, which renders with zero real matches. */}
+      {/* The completion menu is above the composer surface, not inside it. */}
       {menuVisible ? <CompletionMenu items={menuItems} selected={boundedSelected} columns={columns} /> : null}
-      <Box
-        borderStyle="round"
-        borderTop
-        borderBottom
-        borderLeft={false}
-        borderRight={false}
-        borderColor={theme.promptBorder}
-        width="100%"
-      >
-        {/* ONE root <Text> with exactly ONE nested <Text> (the inverse cursor) — not two sibling
-         *  Text nodes (the 3a/3b shape: a separate dimColor prompt Text next to a separate buffer
-         *  Text). Ink v5.2.1's Yoga-backed layout mismeasures a bordered, width:100% Box's row on
-         *  the FIRST render where MORE THAN ONE Text descendant has independent style/content
-         *  (reproduced in isolation: 2 sibling Texts, or 1 root + 2 nested children, both glitch —
-         *  garbled/truncated text, sometimes bleeding into the border row; 1 root + 1 nested child
-         *  never does). To keep the reference behavior — ONLY the "❯ " glyph dims while a turn runs,
-         *  never the user's typed text — the glyph's dim is baked into the root STRING as raw ANSI
-         *  codes (`ansi.dim`, the module-level Chalk instance) instead of a styled <Text> child that
-         *  would re-trigger the bug. Ink measures text width ANSI-aware (string-width), so the baked
-         *  codes don't skew layout; verified clean on the bug's trigger case (first content frame
-         *  after empty) in composer.test.tsx (n). */}
-        <Text>
-          {`${running ? ansi.dim("❯ ") : "❯ "}${before}`}
-          <Text inverse>{at || " "}</Text>
-          {after}
-        </Text>
+      <Box flexDirection="column" width="100%">
+        <Text wrap="truncate">{draftRule(columns, draftWindow?.hiddenAbove ?? 0, "earlier")}</Text>
+        {/* One Text per piece avoids Ink's first-render layout bug with nested styled descendants.
+         * Keep the input content separate from the rules so it stays uncolored. */}
+        <Text>{visibleDraft}</Text>
+        <Text wrap="truncate">{draftRule(columns, draftWindow?.hiddenBelow ?? 0, "later")}</Text>
       </Box>
     </>
   );

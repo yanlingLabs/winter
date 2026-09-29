@@ -10,8 +10,8 @@ export const theme = {
   error: "#FF6B80",
   warning: "#FFC107",
   permission: "#B1B9F9", // inline-code color
-  promptBorder: "#888888",
-  userMessageBackground: "#373737",
+  promptBorder: "#FFFFFF",
+  userMessageBackground: "#5D6F7E",
   planMode: "#48968C",
   autoAccept: "#AF87FF",
   dangerMode: "#FF5F5F", // SP-policies Task 13 — bypass mode's footer color (all actions auto-approved)

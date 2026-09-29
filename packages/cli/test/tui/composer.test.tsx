@@ -48,6 +48,173 @@ describe("Composer", () => {
     expect(stripAnsi(lastFrame() ?? "")).toContain("❯  "); // buffer cleared: prompt + inverse-space cursor
   });
 
+  test("a multiline paste with carriage returns displays separate lines without changing the submitted text", async () => {
+    const submitted: string[] = [];
+    const { stdin, lastFrame } = render(
+      <Composer
+        running={false}
+        policy="ask"
+        onSubmit={(text) => submitted.push(text)}
+        onSteer={() => {}}
+        onInterrupt={() => {}}
+        onCyclePolicy={() => {}}
+        nowMs={0}
+        historyPath={historyPath()}
+      />,
+    );
+    await wait();
+    stdin.write("first line\rsecond line\r\nthird line");
+    await wait();
+
+    const frame = stripAnsi(lastFrame() ?? "");
+    expect(frame).not.toContain("\r");
+    expect(frame.split("\n").slice(1, 4).map((line) => line.trimEnd())).toEqual([
+      "❯ first line",
+      "second line",
+      "third line",
+    ]);
+
+    stdin.write("\r");
+    await wait();
+    expect(submitted).toEqual(["first line\rsecond line\r\nthird line"]);
+  });
+
+  test("the composer shows short and empty draft rows without a colored block", async () => {
+    const { stdin, lastFrame } = render(
+      <Composer running={false} policy="ask" onSubmit={() => {}}
+        onSteer={() => {}} onInterrupt={() => {}} onCyclePolicy={() => {}}
+        nowMs={0} historyPath={historyPath()} columns={20} maxContentRows={4} />,
+    );
+    await wait();
+    stdin.write("hi\n\nthere");
+    await wait();
+    const lines = (lastFrame() ?? "").split("\n");
+    expect(lines.map(stripAnsi).slice(1, 4).map((line) => line.trimEnd())).toEqual(["❯ hi", "", "there"]);
+    expect(lines.every((line) => !line.includes("\x1b[48;2;93;111;126m"))).toBe(true);
+  });
+
+  test("the capped composer keeps right-aligned hidden-line badges on white rules", async () => {
+    const { stdin, lastFrame } = render(
+      <Composer running={false} policy="ask" onSubmit={() => {}}
+        onSteer={() => {}} onInterrupt={() => {}} onCyclePolicy={() => {}}
+        nowMs={0} historyPath={historyPath()} columns={40} maxContentRows={2} />,
+    );
+    await wait();
+    stdin.write("0\n1\n2\n3");
+    await wait();
+    const lines = (lastFrame() ?? "").split("\n");
+    expect(lines.slice(1, 3).map(stripAnsi).map((line) => line.trimEnd())).toEqual(["2", "3"]);
+    expect(stripAnsi(lines[0]!)).toContain("earlier draft");
+    expect(stripAnsi(lines[0]!).length).toBe(40);
+    expect(stripAnsi(lines[0]!).indexOf("↑")).toBeGreaterThan(1);
+    expect(stripAnsi(lines[0]!).endsWith("──")).toBe(true);
+    expect(stripAnsi(lines.at(-1)!)).toBe("─".repeat(40));
+    expect(lines[0]).toContain("\x1b[48;2;255;255;255m");
+    expect(lines[0]).toContain("\x1b[38;2;93;111;126m");
+    expect(lines.every((line) => !line.includes("\x1b[48;2;93;111;126m"))).toBe(true);
+  });
+
+  test("the composer has two white rules with no background fill", async () => {
+    const { lastFrame } = render(
+      <Composer running={false} policy="ask" onSubmit={() => {}}
+        onSteer={() => {}} onInterrupt={() => {}} onCyclePolicy={() => {}}
+        nowMs={0} historyPath={historyPath()} columns={20} maxContentRows={4} />,
+    );
+    await wait();
+    const lines = (lastFrame() ?? "").split("\n");
+    expect(lines[0]).toContain("\x1b[38;2;255;255;255m");
+    expect(lines.at(-1)).toContain("\x1b[38;2;255;255;255m");
+    expect(stripAnsi(lines[0]!)).toBe("─".repeat(20));
+    expect(stripAnsi(lines.at(-1)!)).toBe("─".repeat(20));
+    expect(lines.every((line) => !line.includes("\x1b[48;2;93;111;126m"))).toBe(true);
+  });
+
+  test("up and down navigate pasted lines without replacing the draft from history", async () => {
+    const path = historyPath();
+    appendHistory(path, { display: "history entry", pastedContents: {}, timestamp: 1, project: "", sessionId: "s1" });
+    const submitted: string[] = [];
+    const { stdin, lastFrame } = render(
+      <Composer running={false} policy="ask" onSubmit={(text) => submitted.push(text)}
+        onSteer={() => {}} onInterrupt={() => {}} onCyclePolicy={() => {}}
+        nowMs={0} historyPath={path} sessionId="s1" columns={40} maxContentRows={2} />,
+    );
+    await wait();
+    stdin.write("first\nsecond\nthird");
+    await wait();
+    stdin.write("\x1b[A");
+    await wait();
+    expect(stripAnsi(lastFrame() ?? "")).toContain("second");
+    expect(stripAnsi(lastFrame() ?? "")).not.toContain("history entry");
+    stdin.write("!");
+    await wait();
+    stdin.write("\x1b[B");
+    await wait();
+    stdin.write("?");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(submitted).toEqual(["first\nsecon!d\nthird?"]);
+  });
+
+  test("up and down keep the intended screen column across short lines", async () => {
+    const submitted: string[] = [];
+    const { stdin } = render(
+      <Composer running={false} policy="ask" onSubmit={(text) => submitted.push(text)}
+        onSteer={() => {}} onInterrupt={() => {}} onCyclePolicy={() => {}}
+        nowMs={0} historyPath={historyPath()} columns={12} maxContentRows={3} />,
+    );
+    await wait();
+    stdin.write("abcdefghij\nx\n0123456789");
+    await wait();
+    stdin.write("\x1b[A");
+    await wait();
+    stdin.write("\x1b[A");
+    await wait();
+    stdin.write("!");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(submitted).toEqual(["abcdefgh!ij\nx\n0123456789"]);
+  });
+
+  test("up moves the cursor through soft-wrapped rows of one long pasted line", async () => {
+    const submitted: string[] = [];
+    const { stdin } = render(
+      <Composer running={false} policy="ask" onSubmit={(text) => submitted.push(text)}
+        onSteer={() => {}} onInterrupt={() => {}} onCyclePolicy={() => {}}
+        nowMs={0} historyPath={historyPath()} columns={8} maxContentRows={2} />,
+    );
+    await wait();
+    stdin.write("1234567890");
+    await wait();
+    stdin.write("\x1b[A");
+    await wait();
+    stdin.write("!");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(submitted).toEqual(["12!34567890"]);
+  });
+
+  test("up reaches the content row when the trailing cursor occupies its own wrapped row", async () => {
+    const submitted: string[] = [];
+    const { stdin } = render(
+      <Composer running={false} policy="ask" onSubmit={(text) => submitted.push(text)}
+        onSteer={() => {}} onInterrupt={() => {}} onCyclePolicy={() => {}}
+        nowMs={0} historyPath={historyPath()} columns={8} maxContentRows={2} />,
+    );
+    await wait();
+    stdin.write("123456"); // prompt (2) + text (6) fills the first row; cursor wraps below
+    await wait();
+    stdin.write("\x1b[A");
+    await wait();
+    stdin.write("!");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(submitted).toEqual(["!123456"]);
+  });
+
   test("(b) type text + Enter while running calls onSteer, not onSubmit", async () => {
     const submitted: string[] = [];
     const steered: string[] = [];
@@ -331,6 +498,71 @@ describe("Composer", () => {
     expect(submitted).toEqual(["foo Xbar!"]);
   });
 
+  test("Option-Shift-Left selects a word, Ctrl-Y copies it, and Backspace removes only it", async () => {
+    const copied: string[] = [];
+    const submitted: string[] = [];
+    const { stdin } = render(
+      <Composer running={false} policy="ask" onSubmit={(text) => submitted.push(text)}
+        onSteer={() => {}} onInterrupt={() => {}} onCyclePolicy={() => {}}
+        onCopy={(text) => copied.push(text)} nowMs={0} historyPath={historyPath()} />,
+    );
+    await wait();
+    stdin.write("alpha beta");
+    await wait();
+    stdin.write("\x1b[1;4D"); // Option+Shift+Left
+    await wait();
+    stdin.write("\x19"); // Ctrl-Y, app-level copy
+    await wait();
+    stdin.write("\x7f");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(copied).toEqual(["beta"]);
+    expect(submitted).toEqual(["alpha "]);
+  });
+
+  test("Option-Left and Option-Delete move/delete by word", async () => {
+    const submitted: string[] = [];
+    const { stdin } = render(
+      <Composer running={false} policy="ask" onSubmit={(text) => submitted.push(text)}
+        onSteer={() => {}} onInterrupt={() => {}} onCyclePolicy={() => {}}
+        nowMs={0} historyPath={historyPath()} />,
+    );
+    await wait();
+    stdin.write("one two three");
+    await wait();
+    stdin.write("\x1b[1;3D"); // Option+Left -> start of three
+    await wait();
+    stdin.write("\x1b\x7f"); // Option+Delete -> removes two and its preceding space
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(submitted).toEqual(["one three"]);
+  });
+
+  test("Terminal meta-b/meta-f Option-Arrow variants move by word without typing b or f", async () => {
+    const submitted: string[] = [];
+    const { stdin } = render(
+      <Composer running={false} policy="ask" onSubmit={(text) => submitted.push(text)}
+        onSteer={() => {}} onInterrupt={() => {}} onCyclePolicy={() => {}}
+        nowMs={0} historyPath={historyPath()} />,
+    );
+    await wait();
+    stdin.write("one two");
+    await wait();
+    stdin.write("\x1bb");
+    await wait();
+    stdin.write("X");
+    await wait();
+    stdin.write("\x1bf");
+    await wait();
+    stdin.write("!");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(submitted).toEqual(["one Xtwo!"]);
+  });
+
   test("(i) Home/End/ctrl+a/ctrl+e move the cursor to the edges", async () => {
     const submitted: string[] = [];
     const { stdin } = render(
@@ -397,7 +629,7 @@ describe("Composer", () => {
     expect(submitted).toEqual(["abcd"]);
   });
 
-  test("(j) history: ↑ recalls the newest entry, ↓ restores the in-progress draft", async () => {
+  test("(j) ↑/↓ on a nonempty single-line draft leave it intact instead of recalling history", async () => {
     const path = historyPath();
     appendHistory(path, { display: "older prompt", pastedContents: {}, timestamp: 1, project: "", sessionId: "s1" });
     appendHistory(path, { display: "newest prompt", pastedContents: {}, timestamp: 2, project: "", sessionId: "s1" });
@@ -419,13 +651,13 @@ describe("Composer", () => {
     await wait();
     stdin.write("my draft");
     await wait();
-    stdin.write("\x1b[A"); // up — recalls "newest prompt", saving the draft
+    stdin.write("\x1b[A"); // already on first visual row — no history recall
     await wait();
-    stdin.write("\x1b[A"); // up again — walks to "older prompt"
+    stdin.write("\x1b[A");
     await wait();
-    stdin.write("\x1b[B"); // down — back to "newest prompt"
+    stdin.write("\x1b[B");
     await wait();
-    stdin.write("\x1b[B"); // down again — past the newest, restores the draft
+    stdin.write("\x1b[B");
     await wait();
     stdin.write("\r");
     await wait();
@@ -458,6 +690,28 @@ describe("Composer", () => {
     await wait();
 
     expect(submitted).toEqual(["recall me"]);
+  });
+
+  test("empty-composer history recall restarts at the newest entry after a submission", async () => {
+    const path = historyPath();
+    appendHistory(path, { display: "older", pastedContents: {}, timestamp: 1, project: "", sessionId: "s1" });
+    appendHistory(path, { display: "newer", pastedContents: {}, timestamp: 2, project: "", sessionId: "s1" });
+    const submitted: string[] = [];
+    const { stdin } = render(
+      <Composer running={false} policy="ask" onSubmit={(text) => submitted.push(text)}
+        onSteer={() => {}} onInterrupt={() => {}} onCyclePolicy={() => {}}
+        nowMs={0} historyPath={path} sessionId="s1" />,
+    );
+    await wait();
+    stdin.write("\x1b[A");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    stdin.write("\x1b[A");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(submitted).toEqual(["newer", "newer"]);
   });
 
   test("(l) double-esc clears the buffer within the window; a single esc only hints", async () => {
@@ -1096,7 +1350,7 @@ describe("Composer — slash-command completion menu (Phase 3d T2)", () => {
     expect(stripAnsi(lastFrame() ?? "")).toContain("/mo"); // not cleared
   });
 
-  test("(z) history ↑ is inert while the menu is open, and works again once it's closed", async () => {
+  test("(z) ↑ selects menu rows while open, then edits the draft after dismissal", async () => {
     const path = historyPath();
     appendHistory(path, { display: "recall me", pastedContents: {}, timestamp: 1, project: "", sessionId: "s1" });
 
@@ -1122,10 +1376,11 @@ describe("Composer — slash-command completion menu (Phase 3d T2)", () => {
 
     stdin.write("\x1b"); // close the menu
     await wait();
-    stdin.write("\x1b[A"); // up now that the menu is closed -> history recall works
+    stdin.write("\x1b[A"); // draft is nonempty: no history recall
     await wait();
 
-    expect(stripAnsi(lastFrame() ?? "")).toContain("recall me");
+    expect(stripAnsi(lastFrame() ?? "")).toContain("/mo");
+    expect(stripAnsi(lastFrame() ?? "")).not.toContain("recall me");
   });
 
   test("(aa) onMenuRowsChange mirrors the visible row count: 0 on mount, min(6,count) while open, 0 once closed", async () => {
@@ -1204,7 +1459,7 @@ describe("Composer — slash-command completion menu (Phase 3d T2)", () => {
     expect(interrupts).toBe(1);
   });
 
-  test("(ad) a zero-match query ('/zzz') never gates keys: ↑ recalls history as if no menu existed (T2 review item 2)", async () => {
+  test("(ad) a zero-match query ('/zzz') never gates keys: ↑ stays in the draft", async () => {
     const path = historyPath();
     appendHistory(path, { display: "recall me", pastedContents: {}, timestamp: 1, project: "", sessionId: "s1" });
 
@@ -1224,10 +1479,11 @@ describe("Composer — slash-command completion menu (Phase 3d T2)", () => {
     await wait();
     stdin.write("/zzz"); // zero matches — no menu rendered, and it must not swallow keys either
     await wait();
-    stdin.write("\x1b[A"); // up -> history recall, NOT an (invisible) selection move
+    stdin.write("\x1b[A"); // up edits the nonempty draft, NOT an invisible selection
     await wait();
 
-    expect(stripAnsi(lastFrame() ?? "")).toContain("recall me");
+    expect(stripAnsi(lastFrame() ?? "")).toContain("/zzz");
+    expect(stripAnsi(lastFrame() ?? "")).not.toContain("recall me");
   });
 });
 
@@ -1496,13 +1752,14 @@ describe("Composer — @-file mention menu (Phase 3d T3)", () => {
 
     expect(stripAnsi(lastFrame() ?? "")).toContain("indexing…");
 
-    stdin.write("\x1b[A"); // up while "indexing" -> history recall (zero-matches passthrough), NOT a selection move
+    stdin.write("\x1b[A"); // up while "indexing" -> cursor navigation, NOT a selection move
     await wait();
-    expect(stripAnsi(lastFrame() ?? "")).toContain("recall me");
+    expect(stripAnsi(lastFrame() ?? "")).toContain("@zzz");
+    expect(stripAnsi(lastFrame() ?? "")).not.toContain("recall me");
 
     stdin.write("\r"); // enter with no real match yet -> submits literally (passthrough)
     await wait();
-    expect(submitted).toEqual(["recall me"]);
+    expect(submitted).toEqual(["@zzz"]);
   });
 
   test("(i) onNeedFileIndex fires exactly ONCE per composer lifetime, on the first '@'-trigger", async () => {
@@ -1653,7 +1910,7 @@ describe("Composer — @-file mention menu (Phase 3d T3)", () => {
 });
 
 // TUI renderer T1 — the wheel-into-composer regression pin (plan Task 1; mechanism report Q3 +
-// Q7 cure 3). mount.ts enables SGR mouse reporting (\x1b[?1000h\x1b[?1006h — alt-screen.ts), so
+// Q7 cure 3). mount.ts enables SGR mouse reporting (\x1b[?1002h\x1b[?1006h — alt-screen.ts), so
 // ONE wheel-up notch makes the terminal write exactly "\x1b[<64;COL;ROWM" to stdin. Ink 5.2.1's
 // use-input strips a single leading ESC and hands the remnant to EVERY useInput consumer with
 // name:"", ctrl:false, meta:false (verified against its parse-keypress directly) — so the
@@ -1761,5 +2018,59 @@ describe("windowComposerContent (T3 — the capped composer)", () => {
     const content = `❯ ${"word ".repeat(50)}${INV(" ")}`;
     const { rows } = windowComposerContent(content, 12, 4);
     for (const r of rows) expect(strip(r).length).toBeLessThanOrEqual(12);
+  });
+});
+
+describe("Composer — long draft visibility", () => {
+  test("up arrows reveal earlier hidden draft rows while moving the cursor", async () => {
+    const submitted: string[] = [];
+    const { stdin, lastFrame } = render(
+      <Composer running={false} policy="ask" onSubmit={(text) => submitted.push(text)}
+        onSteer={() => {}} onInterrupt={() => {}} onCyclePolicy={() => {}}
+        nowMs={0} historyPath={historyPath()} columns={40} maxContentRows={3} />,
+    );
+    await wait();
+    stdin.write(Array.from({ length: 10 }, (_, i) => `line-${i}`).join("\n"));
+    await wait();
+    expect(stripAnsi(lastFrame() ?? "")).not.toContain("line-0");
+    for (let i = 0; i < 9; i++) { stdin.write("\x1b[A"); await wait(); }
+    expect(stripAnsi(lastFrame() ?? "")).toContain("line-0");
+    stdin.write("!");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(submitted).toEqual(["line!-0\n" + Array.from({ length: 9 }, (_, i) => `line-${i + 1}`).join("\n")]);
+  });
+
+  test("a long draft shows hidden-row guidance and PageUp reviews earlier text", async () => {
+    const { stdin, lastFrame } = render(
+      <Composer
+        running={false}
+        policy="ask"
+        onSubmit={() => {}}
+        onSteer={() => {}}
+        onInterrupt={() => {}}
+        onCyclePolicy={() => {}}
+        nowMs={0}
+        historyPath={historyPath()}
+        columns={100}
+        maxContentRows={4}
+      />,
+    );
+    await wait();
+    stdin.write(`BEGIN ${"x".repeat(850)} END`);
+    await wait();
+    expect(lastFrame() ?? "").toContain("END");
+    expect(lastFrame() ?? "").toContain("earlier draft lines");
+
+    for (let i = 0; i < 3; i++) { stdin.write("\x1b[5~"); await wait(); }
+    expect(stripAnsi(lastFrame() ?? "")).toContain("BEGIN");
+    expect(lastFrame() ?? "").toContain("later draft lines");
+    const bottomRule = (lastFrame() ?? "").split("\n").at(-1) ?? "";
+    expect(bottomRule).toContain("\x1b[48;2;255;255;255m");
+    expect(bottomRule).toContain("\x1b[38;2;93;111;126m");
+    expect(bottomRule).toContain("\x1b[38;2;255;255;255m");
+    expect(bottomRule).not.toContain("\x1b[48;2;93;111;126m");
+    expect(stripAnsi(bottomRule).endsWith("──")).toBe(true);
   });
 });

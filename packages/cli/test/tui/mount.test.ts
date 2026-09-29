@@ -16,8 +16,8 @@ import { makeEventBridge } from "../../src/tui/event-bridge";
 import { formatResumeHint } from "../../src/main";
 
 const ENTER = "\x1b[?1049h\x1b[2J\x1b[H";
-const MOUSE_ON = "\x1b[?1000h\x1b[?1006h";
-const MOUSE_OFF = "\x1b[?1006l\x1b[?1000l";
+const MOUSE_ON = "\x1b[?1002h\x1b[?1006h";
+const MOUSE_OFF = "\x1b[?1006l\x1b[?1002l";
 const LEAVE = "\x1b[?1049l";
 
 const wait = (ms = 10) => new Promise((r) => setTimeout(r, ms));

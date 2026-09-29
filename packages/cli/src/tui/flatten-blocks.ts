@@ -40,6 +40,7 @@
  *  (destructive) trimming. */
 
 import { Chalk } from "chalk";
+import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
 import type { Block } from "./state";
 import { theme } from "./theme";
@@ -47,7 +48,7 @@ import { createStreamingMarkdown, renderMarkdown, type Highlighter } from "./mar
 import { pickVerb, TURN_VERBS } from "./spinner-verbs";
 import { formatElapsed, formatTokens } from "../task-display";
 import { groupBlocks } from "./group-blocks";
-import { formatArgsHead, MAX_RESULT_LINES } from "./format";
+import { displayLineBreaks, formatArgsHead, MAX_RESULT_LINES } from "./format";
 
 const ansi = new Chalk({ level: 3 });
 
@@ -105,10 +106,12 @@ export function flattenBlock(block: Block, opts: FlattenOpts): string[] {
 
   switch (block.kind) {
     case "user": {
-      // transcript.tsx: `<Text backgroundColor={theme.userMessageBackground}>{"❯ "}{block.text}</Text>`
-      // — one Text node, background covers the whole (prefix+text) string; only line 0 gets "❯ ".
-      const logical = block.text.split("\n").map((line, i) => (i === 0 ? `❯ ${line}` : line));
-      return logical.flatMap((line) => wrapLine(ansi.bgHex(theme.userMessageBackground)(line), columns));
+      // Each physical row belongs to one full-width user-message surface. Padding must be inside
+      // the background style, including blank rows, or short pasted lines look like separate chips.
+      const logical = displayLineBreaks(block.text).split("\n").map((line, i) => (i === 0 ? `❯ ${line}` : line));
+      const width = Math.max(1, columns);
+      return logical.flatMap((line) => wrapLine(line, width).map((row) =>
+        ansi.bgHex(theme.userMessageBackground)(row + " ".repeat(Math.max(0, width - stringWidth(row))))));
     }
 
     case "assistant": {
@@ -171,16 +174,18 @@ function flattenCollapsedSummary(summary: string, columns: number): string[] {
  *  since "am I first in the log?" is positional, not content):
  *   - `user` and `assistant` — the conversation's beats. A blank line lands between a turn's end
  *     and the next prompt, and between a tool cluster and the assistant text that follows it.
+ *   - `turn-summary` gets one blank line above it, separating the assistant transcript from the
+ *     turn's elapsed/token footer.
  *   - Everything else stays TIGHT: tool cards/collapsed runs cluster under their assistant lead-in
  *     (deliberate house deviation from CC's per-tool-card margin — REQUIRED by the T3 no-glue pin:
  *     an in-flight tool head streams with no way to know the committed log precedes it, so a
  *     committed-side-only gap would make the turn-end swap non-byte-identical; tight on both sides
- *     keeps the swap exact), notes/skill lines are system meta, `turn-summary` is the turn's own
- *     footer, and `interrupted` is a ⎿ continuation of the turn it ends.
+ *     keeps the swap exact), notes/skill lines are system meta, and `interrupted` is a ⎿
+ *     continuation of the turn it ends.
  *  The streamed twin: `makeStreamRenderer` emits the SAME leading blank above its assistant rows
  *  when the caller says committed content precedes (`precededByContent`), so the swap parity the
  *  T3 pins enforce holds row-for-row with the spacer included. */
-const BEAT_KINDS: ReadonlySet<Block["kind"]> = new Set(["user", "assistant"]);
+const BEAT_KINDS: ReadonlySet<Block["kind"]> = new Set(["user", "assistant", "turn-summary"]);
 
 /** TUI renderer T3 — the in-flight turn rendered as TRANSCRIPT rows (the streaming block is the
  *  line log's last row-group now, not a pinned-bar slice — mechanism report Q2/Q7 cures 1-2).
@@ -278,6 +283,8 @@ export function makeFlattenCache(
 ): { lines(blocks: Block[], opts: FlattenOpts): string[] } {
   let lastColumns: number | undefined;
   let lastVerbose: boolean | undefined;
+  let lastBlocks: Block[] | undefined;
+  let lastLines: string[] | undefined;
   const blockCache = new Map<number, string[]>(); // verbose mode: block index -> lines
   const spanCache = new Map<string, string[]>(); // non-verbose mode: "b:i" | "c:start-end" -> lines
 
@@ -285,6 +292,8 @@ export function makeFlattenCache(
     if (opts.columns === lastColumns && opts.verbose === lastVerbose) return;
     blockCache.clear();
     spanCache.clear();
+    lastBlocks = undefined;
+    lastLines = undefined;
     lastColumns = opts.columns;
     lastVerbose = opts.verbose;
   }
@@ -292,6 +301,11 @@ export function makeFlattenCache(
   return {
     lines(blocks: Block[], opts: FlattenOpts): string[] {
       invalidateIfOptsChanged(opts);
+
+      // Composer edits and the clock tick re-render the parent App without changing the
+      // committed block array. Preserve the assembled line-log reference in that common case so
+      // the memoized transcript viewport can skip its visible-row map entirely.
+      if (blocks === lastBlocks && lastLines !== undefined) return lastLines;
 
       if (opts.verbose) {
         const out: string[] = [];
@@ -304,6 +318,8 @@ export function makeFlattenCache(
           if (out.length > 0 && BEAT_KINDS.has(blocks[i]!.kind)) out.push(""); // T6 spacing rhythm (assembly-time, never cached)
           out.push(...cached);
         }
+        lastBlocks = blocks;
+        lastLines = out;
         return out;
       }
 
@@ -345,6 +361,8 @@ export function makeFlattenCache(
           out.push(...cached);
         }
       }
+      lastBlocks = blocks;
+      lastLines = out;
       return out;
     },
   };

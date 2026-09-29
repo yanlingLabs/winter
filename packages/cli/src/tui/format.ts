@@ -20,6 +20,12 @@ const ARGS_HEAD_LINES = 2;
  *  (split on "\n"), not characters. */
 export const MAX_RESULT_LINES = 10;
 
+/** Terminal carriage returns repaint the current row. Treat pasted CR/CRLF as visual line breaks
+ * while keeping the stored and submitted text byte-for-byte unchanged. */
+export function displayLineBreaks(text: string): string {
+  return text.replace(/\r\n?/g, "\n");
+}
+
 export function formatArgsHead(argsJson: string): string {
   const lines = argsJson.split("\n");
   let head = lines.slice(0, ARGS_HEAD_LINES).join("\n");
