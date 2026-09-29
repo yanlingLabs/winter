@@ -188,7 +188,8 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // 0.0.32 → 0.0.33 (WS-27): keychain-store.ts diff EMPTY again; the mirror stands.
     // 0.0.33 → 0.0.34: keychain-store.ts gained only the test-only WINTER_TEST_KEYCHAIN in-memory backend;
     // parseStoredCredentialMaterial is untouched, so the mirror stands.
-    expect(pkg.version).toBe("0.0.34");
+    // 0.0.34 → 0.0.35 (Sonnet 5.5 catalog rows): keychain-store.ts diff EMPTY; the mirror stands.
+    expect(pkg.version).toBe("0.0.35");
   });
 
 

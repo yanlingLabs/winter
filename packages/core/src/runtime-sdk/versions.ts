@@ -3,8 +3,10 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.34";
-/** Bumped to 0.0.34 (2026-09-28): the catalog refresh (218 providers / 1293 models: fields filled from official
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.35";
+/** Bumped to 0.0.35 (2026-09-29): Claude Sonnet 5.5 in the catalog (anthropic, console, openrouter) with Opus 5.5's
+ *  per-message effort, mid-conversation system messages and cache-safe tool changes; `sonnet` now names it.
+ *  Earlier: bumped to 0.0.34 (2026-09-28): the catalog refresh (218 providers / 1293 models: fields filled from official
  *  sources, DeepInfra and ~210 missing models, OVHcloud/Crusoe/Tinfoil/Snowflake Cortex/Cloudflare Workers AI, dead
  *  providers blocked, retired rows deprecated) and the SDK's test Keychain isolation.
  *  Earlier: bumped to 0.0.33 (2026-09-27, WS-27): a turn waits, bounded and interruptible, for MCP servers mid-reconnect;
