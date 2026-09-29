@@ -2042,6 +2042,7 @@ if (import.meta.main) {
     // WS-26: `permissions` — the connector permissions (`mcp-cli.ts`'s section says how). Non-interactive,
     // through the daemon when it is live (never `connect()`'s auto-launch), else settings.json directly.
     if (sub === "permissions") {
+      const { cliCommandName } = await import("@yanlinglabs/winter-core");
       const door = await openCredentialDaemonDoor();
       const outcome = await runMcpPermissionsRoute(rest, { cwd: process.cwd(), winterHome: resolveWinterHome(), ...(door !== undefined ? { door } : {}) });
       if (outcome.ok) console.log(renderMcpPermissionsOutcome(outcome, cliCommandName()));
