@@ -243,6 +243,10 @@ export class LspClient {
     this.child = child;
     child.on("error", (e) => this.die(new LspServerExitedError(this.withStderr(`lsp server failed to start: ${e.message}`))));
     child.on("exit", (code, signal) => this.die(new LspServerExitedError(this.withStderr(`lsp server exited (code=${code} signal=${signal})`))));
+    // A write or end() to a server that already died raises EPIPE on stdin; without a listener that is
+    // an uncaught stream error (it failed CI's killAllNow test, and would take the daemon down). The
+    // death itself is reported by the "exit" handler above.
+    child.stdin!.on("error", () => { /* reported via "exit" */ });
     child.stdout!.on("data", (chunk: Buffer) => this.onData(chunk));
     child.stderr!.setEncoding("utf8");
     child.stderr!.on("data", (s: string) => {

@@ -19,7 +19,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
 
       # The script uses only Bun's built-ins: no dependency install.
       - name: Compare the live document with the committed one
