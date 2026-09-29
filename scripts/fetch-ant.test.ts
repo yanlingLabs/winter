@@ -38,7 +38,7 @@ afterEach(() => {
  *  the named entry either way). Returns the zip's bytes, the zip's own sha256, and the sha256 of
  *  the extracted content (a distinct digest — a zip and its decompressed contents never hash the
  *  same), i.e. a ready-to-use `AntPin`'s `{ sha256, binarySha256 }` pair. */
-function buildFixtureZip(antContent: string): { bytes: Uint8Array; sha256: string; binarySha256: string } {
+function buildFixtureZip(antContent: string): { bytes: Uint8Array<ArrayBuffer>; sha256: string; binarySha256: string } {
   const dir = mkdtempSync(join(tmpdir(), "fetch-ant-fixture-"));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, "ant"), antContent);

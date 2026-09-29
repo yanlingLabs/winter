@@ -155,9 +155,8 @@ jobs:
   # SCOPE, precisely (review F-3): `tsc -p packages/core` covers `packages/core/{src,test}` ONLY. Six
   # of the nine errors this batch fixed were there; the other three were in
   # `packages/protocol/test/events.test.ts`, which core's program never sees — hence the second job
-  # below. STILL UNCHECKED by any job: `packages/cli` and the repo-root `scripts/` (no tsconfig
-  # covers either), so a type error in the compiled-route CLI or in a build script surfaces only at
-  # runtime. Recorded as a carry, not fixed here.
+  # below. `packages/cli`, `packages/plugin-sdk` and the repo-root `scripts/` (its own tsconfig since
+  # 0.122.1) have the typecheck-rest job: an unchecked CLI shipped a ReferenceError in 0.121.0/0.122.0.
   typecheck-core:
     name: typecheck · core
     runs-on: macos-latest
@@ -191,6 +190,23 @@ jobs:
 
       - name: Typecheck
         run: bun run typecheck:protocol
+
+  # Everything else with a tsconfig: the CLI, the plugin SDK and the release/build scripts.
+  typecheck-rest:
+    name: typecheck · cli, plugin-sdk, scripts
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck:cli && bun run typecheck:plugin-sdk && bun run typecheck:scripts
 
   # The protocol package generates a JSON schema and the Swift round-trip fixtures. If a schema
   # change landed without re-running the generator, the tree is dirty here — which is exactly the
