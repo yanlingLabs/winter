@@ -232,6 +232,15 @@ function renderSelectedDraft(state: InputState, running: boolean): string {
     + styleDraftRange(display, afterStart, display.length, start, finish);
 }
 
+/** Code-mode image input: text the App writes INTO the composer from outside — an `[Image #n]`
+ *  placeholder once an async attach lands (`insert`, at the cursor), or a whole draft handed back
+ *  when a submit's image staging was refused (`replace`). Applied once per distinct `id`. */
+export interface ComposerInject {
+  id: number;
+  mode: "insert" | "replace";
+  text: string;
+}
+
 export interface ComposerProps {
   running: boolean;
   policy: ApprovalPolicy;
@@ -333,6 +342,15 @@ export interface ComposerProps {
   registerPointerHandler?: (handler: ((event: PointerEvent) => void) | null) => void;
   onCopy?: (text: string) => void;
   registerWheelHandler?: (handler: ((delta: number) => void) | null) => void;
+  /** Code-mode image input: ctrl+v. The App reads the clipboard's image (if any) and, on success,
+   *  inserts its placeholder through `inject`. Absent → ctrl+v stays what it was (nothing). */
+  onPasteImage?: () => void;
+  /** Code-mode image input: a multi-character input (a paste, or a file dragged in) is offered here
+   *  first; `true` means the App claimed it as an image path and will insert a placeholder (or hand
+   *  the text back) itself, so nothing is typed now. Single keystrokes never reach it. */
+  onPastedText?: (text: string) => boolean;
+  /** See `ComposerInject`. */
+  inject?: ComposerInject | null;
 }
 
 export function Composer({
@@ -362,6 +380,9 @@ export function Composer({
   registerPointerHandler,
   onCopy = copyToClipboard,
   registerWheelHandler,
+  onPasteImage,
+  onPastedText,
+  inject,
 }: ComposerProps) {
   // `policy` stays a prop (callers/tests still pass it; `<Footer>`, a sibling, is the one that
   // renders it) — this component no longer renders it directly, matching `task-list.tsx`'s
@@ -374,6 +395,13 @@ export function Composer({
     inputStateRef.current = next;
     setRenderedState(next);
   }, []);
+  // Code-mode image input: apply each distinct inject exactly once (see `ComposerInject`).
+  const appliedInject = useRef<number | null>(null);
+  useEffect(() => {
+    if (!inject || appliedInject.current === inject.id) return;
+    appliedInject.current = inject.id;
+    setState(inject.mode === "insert" ? (s) => insert(s, inject.text) : { text: inject.text, cursor: inject.text.length });
+  }, [inject, setState]);
   const mouseAnchor = useRef<number | null>(null);
   const preferredVerticalColumn = useRef<number | null>(null);
   const [review, setReview] = useState<{ text: string; cursor: number; columns: number; maxRows: number; start: number } | null>(null);
@@ -806,6 +834,7 @@ export function Composer({
         if (text) onCopy(text);
         return;
       }
+      if (key.ctrl && input === "v" && onPasteImage) { onPasteImage(); return; }
       if (key.ctrl && input === "w") { historyNav.reset(); setState(deleteWordLeft); return; }
       if (key.ctrl && input === "a") { setState((s) => cursorTo(s, 0, key.shift)); return; }
       if (key.ctrl && input === "e") { setState((s) => cursorTo(s, s.text.length, key.shift)); return; }
@@ -850,6 +879,7 @@ export function Composer({
       // keys) is refused on the same "unknown CSI never becomes text" rule.
       if (input && !key.ctrl && !key.meta) {
         if (isMouseArtifact(input) || input.includes("\x1b")) return;
+        if (input.length > 1 && onPastedText?.(input)) { historyNav.reset(); return; }
         historyNav.reset();
         setState((s) => insert(s, input));
       }
