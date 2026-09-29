@@ -156,6 +156,12 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
 
         window.delegate = self
         adapter.onSubmit = { [weak self] text in self?.submit(text) }
+        // Code-mode image input: this window's pinned session's row, read FRESH (`sessionId` flips on
+        // an in-place switch) — its mode gates the composer's image intake, its model the attach check.
+        adapter.currentSessionRow = { [weak self] in
+            guard let self else { return nil }
+            return self.directory.rows.first { $0.sessionId == self.sessionId }
+        }
         // FINAL-REVIEW FIX: [weak adapter] — the strong capture (GlassRootView's idiom) forms an
         // adapter→closure→adapter cycle. Harmless on the app-lifetime orb adapter, a REAL leak
         // here: detached windows create one adapter per window, and the cycle kept adapter +
@@ -397,6 +403,8 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         adapter.pendingModel = .none
         adapter.pendingEffort = .none
         adapter.selectionProbation = nil
+        // Code-mode image input: a draft's images were attached for the session being left.
+        adapter.resetComposerImages()
         // working-directories T8: a refusal is about the session it was refused FOR — "that directory
         // is locked for this session" rendered over a different session's chip is a lie about a rule.
         adapter.dirsRefusal = nil
@@ -577,21 +585,30 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// Mirrors `GlassRootView.submit`'s success-gated draft clear (GlassRootView.swift:~140–176):
     /// steer if this session's turn is already running, else send; the draft is cleared ONLY on
     /// success — a failed send/steer never loses the composed text.
+    ///
+    /// Code-mode image input: the draft's live `[Image #n]` placeholders are staged and replaced by
+    /// their paths first (`FieldStateAdapter.composerTextForSend`, shared with the shell's submit); a
+    /// staging refusal shows on the composer's notice line and sends nothing.
     private func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let wasRunning = session.state.turnRunning
         let sid = sessionId
         let client = feed.client
+        let adapter = self.adapter
         Task { @MainActor [weak self] in
+            guard let outgoing = await adapter.composerTextForSend(trimmed, stage: { image in
+                try await client.stageImage(sessionId: sid, mediaType: image.mediaType, data: image.data)
+            }) else { return }
             let ok: Bool
             if wasRunning {
-                ok = (try? await client.steer(sessionId: sid, text: trimmed)) != nil
+                ok = (try? await client.steer(sessionId: sid, text: outgoing)) != nil
             } else {
-                ok = (try? await client.send(sessionId: sid, text: trimmed)) != nil
+                ok = (try? await client.send(sessionId: sid, text: outgoing)) != nil
             }
             if ok {
                 self?.adapter.composerDraft = ""
+                self?.adapter.resetComposerImages()
             }
             // failure: text stays in the composer — the draft is never lost (spec §6 parity)
         }

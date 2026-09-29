@@ -264,6 +264,13 @@ struct WindowContentView<Accessory: View>: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
+                    // Code-mode image input: why an image was not attached, or why a submit's
+                    // staging was refused — the composer's own failure line, in place.
+                    if let notice = adapter.composerNotice {
+                        ComposerFailureLine(text: notice)
+                            .frame(maxWidth: .infinity)
+                    }
+
                     // While a question is waiting, the composer's SLOT is the question box — the
                     // composer does not appear below it, beside it, or greyed out; it becomes it
                     // (user call, 2026-08-12; iOS `CodeSessionView`'s SP-ask-morph). Answering
@@ -299,7 +306,10 @@ struct WindowContentView<Accessory: View>: View {
                         ComposerTextView(
                             text: adapter.draftBinding,
                             onSubmit: { adapter.onSubmit(adapter.composerDraft) },
-                            usesAdaptiveColors: true
+                            usesAdaptiveColors: true,
+                            // Code-mode image input — live only while the adapter's wired session
+                            // row is a code session (the detached window wires it; the orb does not).
+                            imageIntake: adapter.composerImageIntake
                         )
                         .frame(height: 88)
                         .transition(.blurReplace)
@@ -430,7 +440,8 @@ struct WindowContentView<Accessory: View>: View {
             workingDirectory: currentSidebarSessionSummary?.cwd,
             sendBlockedReason: adapter.composerDraft
                 .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil,
-            stop: composerStopControl
+            stop: composerStopControl,
+            imageIntake: adapter.composerImageIntake
         )
     }
 
