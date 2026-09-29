@@ -176,6 +176,7 @@ export { QuestionBroker, type AskOutcome } from "./agent/questions";
 export { PlanBroker, type PlanOutcome } from "./agent/plans";
 export { SessionDirectories } from "./agent/dirs";
 export { sessionTmpDir } from "./agent/session-tmp";
+export { sniffImageMediaType } from "./agent/stage-image";
 export { TrustStore } from "./agent/trust";
 export { ContextAssembler, BASE_PROMPT } from "./agent/context";
 export { SkillStore, type SkillMeta, type SkillResult } from "./agent/skills";

@@ -192,6 +192,9 @@ export interface ModelListingRow {
   displayName: string;
   facingName?: string;
   efforts: string[];
+  /** Code-mode image input: whether the row accepts an image (`SyncConfigModel.supportsImages`).
+   *  Not read by the listing; optional so a plain literal in a test need not state it. */
+  supportsImages?: boolean;
 }
 
 /** WS-20: `winter model` (show) / `/model` (headless fallback)'s catalogue listing — grouped by

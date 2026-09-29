@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
   HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
+  SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE,
   SessionHistoryParams,
   ApprovalListParams,
   SessionAddDirParams, SessionSetCwdParams, TrustDirParams,
@@ -84,7 +85,8 @@ import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
 import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
 import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
-import { rowForTag } from "../runtime-sdk/provider-selection";
+import { imagesAcceptedBy, rowForTag } from "../runtime-sdk/provider-selection";
+import { StageImageRefusal, stageSessionImage } from "../agent/stage-image";
 import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type ModelTag } from "../runtime-sdk/model-tag";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -3172,6 +3174,38 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const pending = opts.elicitations?.urlFor(p.sessionId, p.elicitationId);
         if (pending === undefined) throw new RpcFailure(ERR.NOT_FOUND, "this link request is no longer active", { code: ELICITATION_NOT_ACTIVE });
         return { url: pending.url };
+      }
+      case METHODS.sessionStageImage: {
+        // Code-mode image input (2026-09-29): stage a composer image into the session's temp
+        // directory and answer its path — the client substitutes that path for its `[Image #n]`
+        // placeholder and sends the text as usual. LOCAL clients only: already outside
+        // `REMOTE_ALLOWED_METHODS` and the plugin list, and the explicit check keeps it so if either
+        // list ever widens (`elicitation.url`'s precedent). The bytes are never logged — nothing in
+        // this arm, `parseParams` or `stageSessionImage` echoes a received value.
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "session.stageImage is available to local clients only");
+        const p = parseParams(SessionStageImageParams, params);
+        let meta: ReturnType<SessionStore["meta"]>;
+        try { meta = opts.store.meta(p.sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
+        // `mode ?? "code"` — an absent mode IS code, the store-wide convention.
+        if ((meta.mode ?? "code") !== "code") {
+          throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be added to code sessions", { code: IMAGE_SESSION_NOT_CODE });
+        }
+        // The session's CURRENT model, by the same precedence `assertEffortSelectable` resolves it
+        // (its own override, else the daemon's live default) — the backstop for a model switched
+        // after the client attached the image. No catalog row at all refuses too: there is no
+        // evidence the model reads an image.
+        const model = meta.model ?? opts.liveModel?.() ?? "";
+        if (!imagesAcceptedBy(rowForTag(model))) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_INPUT_UNSUPPORTED_MESSAGE, { code: IMAGE_INPUT_UNSUPPORTED });
+        }
+        try {
+          return { path: stageSessionImage({ sessionId: p.sessionId, mediaType: p.mediaType, dataBase64: p.dataBase64 }) };
+        } catch (err) {
+          if (err instanceof StageImageRefusal) {
+            throw new RpcFailure(err.internal ? ERR.INTERNAL : ERR.INVALID_PARAMS, err.message, { code: err.code });
+          }
+          throw new RpcFailure(ERR.INTERNAL, "could not stage the image", { code: "image_stage_failed" });
+        }
       }
       case METHODS.approvalList: {
         // SP3 T4b: queryable pending-approval state (remote-allowlisted so a phone can render live

@@ -406,6 +406,46 @@ export const ElicitationUrlParams = z.object({
 export const ElicitationUrlResult = z.object({ url: z.string().min(1) });
 export const ELICITATION_NOT_ACTIVE = "elicitation_not_active";
 
+/** Code-mode image input (2026-09-29): a composer image, STAGED into the session's own temp directory
+ *  (`sessionTmpDir(sessionId)/images/image_<k>.<ext>`, the daemon picks `k`, created atomically and
+ *  never over an existing file, mode 0600) so the client can replace its `[Image #n]` placeholder
+ *  with the returned absolute path before sending the text as usual — the model then reads it.
+ *
+ *  LOCAL role only (never remote-allowlisted; an explicit harness-role check like `elicitation.url`).
+ *  Every refusal is typed in `data.code`:
+ *    - `image_session_not_code` — the session is not a code session (`INVALID_PARAMS`);
+ *    - `image_input_unsupported` — the session's CURRENT model row does not accept images, with the
+ *      exact message `IMAGE_INPUT_UNSUPPORTED_MESSAGE` (`INVALID_PARAMS`);
+ *    - `image_data_invalid` — `dataBase64` is not strict base64, or decodes to nothing;
+ *    - `image_too_large` — more than `STAGE_IMAGE_MAX_BYTES` decoded (the runtime Read tool's own
+ *      image limit, so a staged file is always readable);
+ *    - `image_type_unsupported` — the bytes are not png/jpeg/gif/webp (the MAGIC BYTES decide,
+ *      never the declared type);
+ *    - `image_type_mismatch` — the bytes are an allowed type other than the declared `mediaType`;
+ *    - `image_stage_failed` — the file could not be created safely (`INTERNAL`).
+ *  An unknown session is `NOT_FOUND`. The bytes are never logged. */
+export const STAGE_IMAGE_MEDIA_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+/** The runtime Read tool's `IMAGE_MAX_BYTES` (5 MiB). A max-size request's base64 (6,990,508 chars)
+ *  plus its JSON-RPC envelope fits the daemon's 8 MiB inbound NDJSON line cap (`LineDecoder`). */
+export const STAGE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+/** `4 * ceil(STAGE_IMAGE_MAX_BYTES / 3)` — the longest base64 a max-size image encodes to. */
+export const STAGE_IMAGE_B64_MAX_LENGTH = 4 * Math.ceil(STAGE_IMAGE_MAX_BYTES / 3);
+export const IMAGE_INPUT_UNSUPPORTED = "image_input_unsupported";
+export const IMAGE_INPUT_UNSUPPORTED_MESSAGE = "The selected model doesn't support images";
+export const IMAGE_SESSION_NOT_CODE = "image_session_not_code";
+export const IMAGE_DATA_INVALID = "image_data_invalid";
+export const IMAGE_TOO_LARGE = "image_too_large";
+export const IMAGE_TYPE_UNSUPPORTED = "image_type_unsupported";
+export const IMAGE_TYPE_MISMATCH = "image_type_mismatch";
+export const IMAGE_STAGE_FAILED = "image_stage_failed";
+export const SessionStageImageParams = z.object({
+  sessionId: z.string().min(1),
+  mediaType: z.enum(STAGE_IMAGE_MEDIA_TYPES),
+  dataBase64: z.string().min(1).max(STAGE_IMAGE_B64_MAX_LENGTH),
+});
+export const SessionStageImageResult = z.object({ path: z.string().min(1) });
+export type SessionStageImageParams = z.infer<typeof SessionStageImageParams>;
+
 export const SessionAddDirParams = z.object({
   sessionId: z.string(),
   path: z.string().min(1),
@@ -2195,6 +2235,12 @@ export const ModelCatalogModelSchema = z.object({
    *  schema applies. The session-picker listing (`sync.config`'s `models`) is the one that excludes
    *  these rows outright. */
   sessionUsable: z.boolean(),
+  /** Code-mode image input (2026-09-29): whether this row ACCEPTS an image — the catalog row's own
+   *  `inputModalities` contains `"image"`, verbatim catalog evidence, never inferred from a family
+   *  or a name. A row the catalog does not know takes images (`winter-default`/`unknown` rows list
+   *  text only) reports `false`. The same rule `session.stageImage` refuses on
+   *  (`image_input_unsupported`), so a picker can never offer what the daemon then refuses. */
+  supportsImages: z.boolean(),
 });
 
 export const ModelsCatalogResult = z.object({
@@ -2566,6 +2612,11 @@ export const SyncConfigModel = z.object({
   // per-family facing vocabulary (Terra/Luna/Sol/Astra, Fable/Opus/Sonnet/Haiku, …).
   facingName: z.string().min(1).optional(),
   efforts: z.array(z.string().min(1)),
+  /** Code-mode image input (2026-09-29): whether this row accepts an image — the catalog row's
+   *  `inputModalities` contains `"image"` (`models.catalog`'s `supportsImages`, the same rule). A
+   *  client refuses an image at ATTACH time on `false`, with exactly
+   *  `IMAGE_INPUT_UNSUPPORTED_MESSAGE`; the daemon's `session.stageImage` is the backstop. */
+  supportsImages: z.boolean(),
 });
 export type SyncConfigModel = z.infer<typeof SyncConfigModel>;
 
@@ -2932,6 +2983,7 @@ export const METHODS = {
   approvalList: "approval.list",
   elicitationRespond: "elicitation.respond",
   elicitationUrl: "elicitation.url",
+  sessionStageImage: "session.stageImage",
   sessionAddDir: "session.addDir",
   sessionSetCwd: "session.setCwd",
   trustDir: "daemon.trustDir",
