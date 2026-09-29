@@ -363,7 +363,7 @@ final class CommandTextView: NSTextView {
     /// A plain-text view does not enable Paste for image-only pasteboard content (a screenshot), so
     /// ⌘V would never reach `paste(_:)` — enabled here exactly when the intake would take it.
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
-        if item.action == #selector(paste(_:)), liveImageIntake != nil, composerPasteboardHasImage(.general) {
+        if item.action == #selector(paste(_:)), liveImageIntake != nil, composerPasteboardMayHaveImage(.general) {
             return true
         }
         return super.validateUserInterfaceItem(item)
@@ -371,13 +371,13 @@ final class CommandTextView: NSTextView {
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         let op = super.draggingEntered(sender)
-        if op.isEmpty, liveImageIntake != nil, composerImages(from: sender.draggingPasteboard) != nil { return .copy }
+        if op.isEmpty, liveImageIntake != nil, composerPasteboardMayHaveImage(sender.draggingPasteboard) { return .copy }
         return op
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
         let op = super.draggingUpdated(sender)
-        if op.isEmpty, liveImageIntake != nil, composerImages(from: sender.draggingPasteboard) != nil { return .copy }
+        if op.isEmpty, liveImageIntake != nil, composerPasteboardMayHaveImage(sender.draggingPasteboard) { return .copy }
         return op
     }
 

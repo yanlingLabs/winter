@@ -512,6 +512,10 @@ export function App({
     injectSeqRef.current += 1;
     setComposerInject({ id: injectSeqRef.current, mode, text });
   }, []);
+  // The composer consumed it: drop it, so a remount (after a pending card) cannot replay it.
+  const onInjectApplied = useCallback((id: number) => {
+    setComposerInject((current) => (current?.id === id ? null : current));
+  }, []);
 
   // TUI renderer T5 — the status chrome's LIVE GLOBAL model/effort: seeded from the mount-time
   // settings read (props), flipped by `/model`'s post-write `onModelChanged` callback (commands.ts)
@@ -1335,6 +1339,7 @@ export function App({
             onPasteImage={onPasteImage}
             onPastedText={onPastedText}
             inject={composerInject}
+            onInjectApplied={onInjectApplied}
           />
         )}
         {agentsWindow.length > 0 ? <AgentList agents={agentsWindow} nowMs={nowMs} selectedIndex={agentSelInWindow} /> : null}
