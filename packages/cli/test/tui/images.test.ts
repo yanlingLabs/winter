@@ -66,6 +66,16 @@ describe("TUI image placeholders", () => {
     await expect(stageDraftImages("[Image #1]", d, () => Promise.reject(new Error("nope")))).rejects.toThrow("nope");
   });
 
+  test("more than 20 referenced images is refused before anything is staged", async () => {
+    const d = new DraftImages();
+    let text = "";
+    for (let i = 0; i < 21; i++) text += `[Image #${d.add({ bytes: PNG, mediaType: "image/png" })}] `;
+    let staged = 0;
+    await expect(stageDraftImages(text, d, async () => { staged++; return { path: "/t/x.png", imagesOnSend: true }; }))
+      .rejects.toThrow("A message can carry at most 20 images");
+    expect(staged).toBe(0);
+  });
+
   test("one stage answer without imagesOnSend (an older daemon) turns the whole draft to substitution", async () => {
     const d = new DraftImages();
     d.add({ bytes: PNG, mediaType: "image/png" });

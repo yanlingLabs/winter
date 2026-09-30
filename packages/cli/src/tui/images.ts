@@ -16,7 +16,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { IMAGE_ATTACH_MAX_LONG_EDGE, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, STAGE_IMAGE_MAX_BYTES } from "@yanlinglabs/winter-protocol";
+import { IMAGE_ATTACH_MAX_LONG_EDGE, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, STAGE_IMAGE_MAX_BYTES, USER_MESSAGE_IMAGES_MAX, USER_MESSAGE_IMAGES_MAX_MESSAGE } from "@yanlinglabs/winter-protocol";
 import { imageDimensions, imageTokenNumbers, sniffImageMediaType, substituteImageTokens } from "@yanlinglabs/winter-core";
 import type { UserMessageImageRef } from "@yanlinglabs/winter-protocol";
 
@@ -95,7 +95,9 @@ export interface StagedDraft {
 
 /**
  * Stage every attachment `text` still references (`stage` is `session.stageImage`), in order. The
- * first refusal rejects with the daemon's own error, and nothing is sent by the caller.
+ * first refusal rejects with the daemon's own error, and nothing is sent by the caller. A draft
+ * referencing more than `USER_MESSAGE_IMAGES_MAX` images is refused before anything is staged —
+ * the daemon would refuse the send anyway, after the files were written.
  */
 export async function stageDraftImages(
   text: string,
@@ -104,7 +106,9 @@ export async function stageDraftImages(
 ): Promise<StagedDraft> {
   const refs: UserMessageImageRef[] = [];
   let imagesOnSend = true;
-  for (const n of images.referencedIn(text)) {
+  const referenced = images.referencedIn(text);
+  if (referenced.length > USER_MESSAGE_IMAGES_MAX) throw new Error(USER_MESSAGE_IMAGES_MAX_MESSAGE);
+  for (const n of referenced) {
     const staged = await stage(images.get(n)!);
     refs.push({ n, path: staged.path });
     if (staged.imagesOnSend !== true) imagesOnSend = false;

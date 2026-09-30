@@ -1081,6 +1081,8 @@ final class FieldStateAdapter: ObservableObject {
             return try await resolveComposerImages(text, draft: composerImages, stage: stage)
         } catch let error as RpcError {
             composerNotice = error.message
+        } catch let refusal as ComposerImagesRefusal {
+            composerNotice = refusal.message
         } catch {
             composerNotice = "couldn't reach the daemon — try again"
         }

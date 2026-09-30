@@ -1,6 +1,7 @@
 // Code-mode image input (2026-09-29): `session.stageImage`'s file half. A composer image is written
-// into the session's own temp directory — `sessionTmpDir(sessionId)/images/image_<k>.<ext>` — so the
-// client can replace its `[Image #n]` placeholder with the absolute path and the model reads it.
+// into the session's own temp directory — `sessionTmpDir(sessionId)/images/image_<k>.<ext>`; the
+// client names that path beside its `[Image #n]` placeholder on send, and the model reads it.
+// `validateImageRefs` (bottom) is the send-side check that a named path is one staged here.
 //
 // That directory is HOSTILE. It is a sandbox writable root, so the session's agent can create
 // anything inside it (an `images` symlink pointing anywhere), and the sandboxed shell can also write
@@ -21,7 +22,7 @@
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import {
-  IMAGE_DATA_INVALID, IMAGE_REFERENCE_INVALID, IMAGE_STAGE_FAILED, USER_MESSAGE_IMAGES_MAX, type UserMessageImageRef, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
+  IMAGE_DATA_INVALID, IMAGE_REFERENCE_INVALID, IMAGE_STAGE_FAILED, USER_MESSAGE_IMAGES_MAX, USER_MESSAGE_IMAGES_MAX_MESSAGE, type UserMessageImageRef, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
   STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, STAGE_IMAGE_MAX_DIMENSION, type STAGE_IMAGE_MEDIA_TYPES,
 } from "@yanlinglabs/winter-protocol";
 import { imageTokenNumbers } from "../sessions/model-text";
@@ -243,7 +244,7 @@ export function stageSessionImage(
 export function validateImageRefs(sessionId: string, text: string, images: readonly UserMessageImageRef[] | undefined): UserMessageImageRef[] | undefined {
   if (images === undefined || images.length === 0) return undefined;
   const refuse = (why: string): never => { throw new StageImageRefusal(IMAGE_REFERENCE_INVALID, why); };
-  if (images.length > USER_MESSAGE_IMAGES_MAX) refuse(`a message can carry at most ${USER_MESSAGE_IMAGES_MAX} images`);
+  if (images.length > USER_MESSAGE_IMAGES_MAX) refuse(USER_MESSAGE_IMAGES_MAX_MESSAGE);
   const inText = new Set(imageTokenNumbers(text));
   const seen = new Set<number>();
   for (const ref of images) {
