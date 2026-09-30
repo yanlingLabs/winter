@@ -3,9 +3,11 @@
  *  An image enters the draft as the plain-text placeholder `[Image #n]` (n counts per draft from 1
  *  and never repeats within one), from ctrl+v with an image on the clipboard or from a pasted /
  *  dropped path to an image file. At submit, every placeholder still in the text is staged with
- *  `session.stageImage` (the daemon writes it into the session's temp directory) and replaced by the
- *  returned absolute path; the text then goes out exactly as before. A placeholder the user deleted
- *  is simply not staged.
+ *  `session.stageImage` (the daemon writes it into the session's temp directory). The text goes out
+ *  WITH its placeholders — the user's message shows `[Image #n]` — and `images` names each one's
+ *  staged path; the daemon gives the MODEL the text with the paths in place. A daemon that predates
+ *  that (its stage result has no `imagesOnSend`) is sent the paths substituted into the text, as
+ *  before. A placeholder the user deleted is simply not staged.
  *
  *  Pure helpers first; the clipboard reader (osascript) last, injectable so no test ever touches the
  *  user's real clipboard. */
@@ -15,7 +17,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { IMAGE_ATTACH_MAX_LONG_EDGE, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, STAGE_IMAGE_MAX_BYTES } from "@yanlinglabs/winter-protocol";
-import { imageDimensions, sniffImageMediaType } from "@yanlinglabs/winter-core";
+import { imageDimensions, imageTokenNumbers, sniffImageMediaType, substituteImageTokens } from "@yanlinglabs/winter-core";
+import type { UserMessageImageRef } from "@yanlinglabs/winter-protocol";
 
 // Shown when an image is over the daemon's cap (the runtime Read tool's own 3.75 MiB limit) — the
 // daemon's `image_too_large` refusal says the same, word for word.
@@ -28,19 +31,11 @@ export interface DraftImage {
 
 export const imageToken = (n: number): string => `[Image #${n}]`;
 
-const TOKEN_RE = /\[Image #(\d+)\]/g;
-
-/** The placeholder numbers `text` still contains, first-appearance order, each once. */
-export function referencedImageNumbers(text: string): number[] {
-  const seen = new Set<number>();
-  for (const m of text.matchAll(TOKEN_RE)) seen.add(Number(m[1]));
-  return [...seen];
-}
-
+/** The placeholder numbers `text` still contains, first-appearance order, each once — the daemon's
+ *  own token grammar (`imageTokenNumbers`, core), so the TUI and the daemon's check never disagree. */
+export const referencedImageNumbers = imageTokenNumbers;
 /** Every placeholder whose number `paths` knows is replaced by that path; any other is left as typed. */
-export function substituteImageTokens(text: string, paths: ReadonlyMap<number, string>): string {
-  return text.replace(TOKEN_RE, (whole, n: string) => paths.get(Number(n)) ?? whole);
-}
+export { substituteImageTokens };
 
 /** One draft's attachments. Numbers climb for the draft's whole life — a deleted placeholder's
  *  number is never reused, so an undo that brings it back still finds its image. */
@@ -80,19 +75,42 @@ export class DraftImages {
   }
 }
 
+/** `session.stageImage`'s answer: the staged path, and whether this daemon takes `images` on
+ *  `session.send`/`session.steer` (absent on a daemon that predates it). */
+export interface StagedImage {
+  path: string;
+  imagesOnSend?: boolean;
+}
+
+/** A draft after staging: `text` as written (placeholders kept), `images` naming each staged
+ *  placeholder's path, `modelText` with the paths substituted (what a daemon without
+ *  `imagesOnSend`, or a child agent's `thread.send`, is sent), and whether EVERY stage answered
+ *  `imagesOnSend`. */
+export interface StagedDraft {
+  text: string;
+  images: UserMessageImageRef[];
+  modelText: string;
+  imagesOnSend: boolean;
+}
+
 /**
- * Stage every attachment `text` still references (`stage` is `session.stageImage`), in order, and
- * answer the text with each placeholder replaced by its staged path. The first refusal rejects with
- * the daemon's own error, and nothing is sent by the caller.
+ * Stage every attachment `text` still references (`stage` is `session.stageImage`), in order. The
+ * first refusal rejects with the daemon's own error, and nothing is sent by the caller.
  */
 export async function stageDraftImages(
   text: string,
   images: DraftImages,
-  stage: (image: DraftImage) => Promise<string>,
-): Promise<string> {
-  const paths = new Map<number, string>();
-  for (const n of images.referencedIn(text)) paths.set(n, await stage(images.get(n)!));
-  return substituteImageTokens(text, paths);
+  stage: (image: DraftImage) => Promise<StagedImage>,
+): Promise<StagedDraft> {
+  const refs: UserMessageImageRef[] = [];
+  let imagesOnSend = true;
+  for (const n of images.referencedIn(text)) {
+    const staged = await stage(images.get(n)!);
+    refs.push({ n, path: staged.path });
+    if (staged.imagesOnSend !== true) imagesOnSend = false;
+  }
+  const modelText = substituteImageTokens(text, new Map(refs.map((r) => [r.n, r.path])));
+  return { text, images: refs, modelText, imagesOnSend };
 }
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;

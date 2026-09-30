@@ -3,6 +3,7 @@ import ImageIO
 import XCTest
 import WinterKit
 @testable import Winter
+import WinterProtocol
 
 /// Code-mode image input (2026-09-29): the composer's placeholder bookkeeping, the one submit-time
 /// substitution helper, the pasteboard reading, and the adapter's attach gate (code sessions only,
@@ -40,22 +41,39 @@ final class ComposerImagesTests: XCTestCase {
         XCTAssertEqual(out, "/t/winter-session-s/images/image_4.png vs [Image #2] vs /t/winter-session-s/images/image_4.png ✓")
     }
 
-    func testResolveStagesOnlyLivePlaceholdersInOrderThenSubstitutes() async throws {
+    func testResolveStagesOnlyLivePlaceholdersInOrderKeepingThemAndNamingThePaths() async throws {
         var draft = ComposerImageDraft()
         _ = draft.add(ComposerImage(data: png, mediaType: "image/png"))
         _ = draft.add(ComposerImage(data: jpeg, mediaType: "image/jpeg"))
         _ = draft.add(ComposerImage(data: png, mediaType: "image/png"))
         var staged: [String] = []
-        let text = try await resolveComposerImages("see [Image #3], then [Image #1] ([Image #9])", draft: draft) { image in
+        let out = try await resolveComposerImages("see [Image #3], then [Image #1] ([Image #9])", draft: draft) { image in
             staged.append(image.mediaType)
-            return "/t/image_\(staged.count).png"
+            return StagedImage(path: "/t/image_\(staged.count).png", imagesOnSend: true)
         }
         XCTAssertEqual(staged, ["image/png", "image/png"], "#2's placeholder was deleted — it is never staged")
-        XCTAssertEqual(text, "see /t/image_1.png, then /t/image_2.png ([Image #9])")
+        XCTAssertEqual(out, ComposerOutgoing(text: "see [Image #3], then [Image #1] ([Image #9])", images: [
+            SessionEvent.UserMessageImageRef(n: 3, path: "/t/image_1.png"),
+            SessionEvent.UserMessageImageRef(n: 1, path: "/t/image_2.png"),
+        ]), "the message keeps its placeholders; only the model is given the paths")
         let plain = try await resolveComposerImages("no images", draft: draft) { _ in
-            XCTFail("nothing to stage"); return ""
+            XCTFail("nothing to stage"); return StagedImage(path: "", imagesOnSend: true)
         }
-        XCTAssertEqual(plain, "no images")
+        XCTAssertEqual(plain, ComposerOutgoing(text: "no images", images: []))
+    }
+
+    /// A daemon that predates `imagesOnSend` would silently drop `images` — so any stage answer
+    /// without it sends the paths in the text, as before, with no images.
+    func testResolveSubstitutesForADaemonWithoutImagesOnSend() async throws {
+        var draft = ComposerImageDraft()
+        _ = draft.add(ComposerImage(data: png, mediaType: "image/png"))
+        _ = draft.add(ComposerImage(data: png, mediaType: "image/png"))
+        var k = 0
+        let out = try await resolveComposerImages("[Image #1] and [Image #2]", draft: draft) { _ in
+            k += 1
+            return StagedImage(path: "/t/image_\(k).png", imagesOnSend: k == 1)
+        }
+        XCTAssertEqual(out, ComposerOutgoing(text: "/t/image_1.png and /t/image_2.png", images: []))
     }
 
     // MARK: - Sniffing and the pasteboard
@@ -245,14 +263,14 @@ final class ComposerImagesTests: XCTestCase {
         XCTAssertEqual(a.composerNotice, composerImageTooLargeMessage)
     }
 
-    func testComposerTextForSendSubstitutesOrRefusesWithTheDaemonsSentence() async {
+    func testComposerTextForSendKeepsPlaceholdersOrRefusesWithTheDaemonsSentence() async {
         let a = adapter(mode: "code")
         _ = a.composerImageIntake.attach(ComposerImage(data: png, mediaType: "image/png"))
         let sent = await a.composerTextForSend("look [Image #1]") { image in
             XCTAssertEqual(image.mediaType, "image/png")
-            return "/t/image_1.png"
+            return StagedImage(path: "/t/image_1.png", imagesOnSend: true)
         }
-        XCTAssertEqual(sent, "look /t/image_1.png")
+        XCTAssertEqual(sent, ComposerOutgoing(text: "look [Image #1]", images: [SessionEvent.UserMessageImageRef(n: 1, path: "/t/image_1.png")]))
         let refused = await a.composerTextForSend("look [Image #1]") { _ in
             throw RpcError(code: -32602, message: "The selected model doesn't support images")
         }
@@ -370,8 +388,8 @@ final class ComposerImagesTests: XCTestCase {
     func testAttachmentsCarriedIntoANonCodeSessionAreDroppedSilently() async {
         let a = adapter(mode: "chat")
         a.composerImages = { var d = ComposerImageDraft(); _ = d.add(ComposerImage(data: png, mediaType: "image/png")); return d }()
-        let sent = await a.composerTextForSend("see [Image #1]") { _ in XCTFail("never staged"); return "" }
-        XCTAssertEqual(sent, "see [Image #1]")
+        let sent = await a.composerTextForSend("see [Image #1]") { _ in XCTFail("never staged"); return StagedImage(path: "", imagesOnSend: true) }
+        XCTAssertEqual(sent, ComposerOutgoing(text: "see [Image #1]", images: []))
         XCTAssertTrue(a.composerImages.isEmpty)
         XCTAssertNil(a.composerNotice)
     }

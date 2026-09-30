@@ -35,7 +35,7 @@ afterEach(cleanup);
 // behavior. Default (no override) is byte-identical to the old always-`{}` `rec("request")`.
 function fakeClient(opts: {
   request?: (method: string, params?: unknown) => unknown;
-  stageImage?: (sessionId: string, mediaType: string, dataBase64: string) => Promise<string>;
+  stageImage?: (sessionId: string, mediaType: string, dataBase64: string) => Promise<{ path: string; imagesOnSend?: boolean }>;
 } = {}) {
   const calls: { method: string; args: unknown[] }[] = [];
   const rec = (method: string) => (...args: unknown[]) => {
@@ -67,13 +67,13 @@ function fakeClient(opts: {
       calls.push({ method: "agentStop", args });
       return Promise.resolve({ status: "stopped" });
     },
-    // Code-mode image input: `session.stageImage` — records, then answers a path per call (or the
-    // test's own override, e.g. a refusal).
+    // Code-mode image input: `session.stageImage` — records, then answers a path per call from a
+    // daemon that takes `images` on send (or the test's own override, e.g. a refusal).
     stageImage: (sessionId: string, mediaType: string, dataBase64: string) => {
       calls.push({ method: "stageImage", args: [sessionId, mediaType, dataBase64] });
       if (opts.stageImage) return opts.stageImage(sessionId, mediaType, dataBase64);
       const n = calls.filter((c) => c.method === "stageImage").length;
-      return Promise.resolve(`/tmp/winter-session-${sessionId}/images/image_${n}.png`);
+      return Promise.resolve({ path: `/tmp/winter-session-${sessionId}/images/image_${n}.png`, imagesOnSend: true });
     },
   };
 }
@@ -2154,7 +2154,9 @@ describe("App — shift+tab policy switch reports a bypass crossing", () => {
 
 // Code-mode image input (2026-09-29): an image enters the draft as `[Image #n]` — from ctrl+v (the
 // clipboard reader is INJECTED, so no test reads the real clipboard) or a pasted image path — and at
-// submit each live placeholder is staged (`session.stageImage`) and replaced by the returned path.
+// submit each live placeholder is staged (`session.stageImage`); the text goes out WITH its placeholders
+// and `images` names each staged path (the daemon gives the model the paths) — or, to a daemon whose
+// stage result lacks `imagesOnSend`, with the paths substituted into the text as before.
 describe("App — code-mode image input", () => {
   const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
   const TAG = "codex-oauth/gpt-5.6-sol";
@@ -2164,7 +2166,7 @@ describe("App — code-mode image input", () => {
       : {};
   const plain = (frame: string | undefined) => (frame ?? "").replace(/\x1b\[[0-9;]*m/g, "");
 
-  test("a pasted image path becomes [Image #1]; Enter stages it and sends the path in its place", async () => {
+  test("a pasted image path becomes [Image #1]; Enter stages it and sends the placeholder plus its path in images", async () => {
     const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
     const path = join(dir, "My Shot.png");
     writeFileSync(path, PNG);
@@ -2182,7 +2184,7 @@ describe("App — code-mode image input", () => {
       await wait(60);
       const stage = client.calls.find((c) => c.method === "stageImage");
       expect(stage?.args).toEqual(["s1", "image/png", Buffer.from(PNG).toString("base64")]);
-      expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "look at /tmp/winter-session-s1/images/image_1.png"]);
+      expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "look at [Image #1]", [{ n: 1, path: "/tmp/winter-session-s1/images/image_1.png" }]]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -2249,7 +2251,7 @@ describe("App — code-mode image input", () => {
     let reject!: (e: Error) => void;
     const client = fakeClient({
       request: syncConfig(true),
-      stageImage: () => new Promise<string>((_, r) => { reject = r; }),
+      stageImage: () => new Promise<{ path: string }>((_, r) => { reject = r; }),
     });
     const { stdin, lastFrame } = render(
       <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
@@ -2272,10 +2274,10 @@ describe("App — code-mode image input", () => {
   });
 
   test("every submit goes out in order: a plain draft never overtakes an image draft still staging", async () => {
-    let resolve!: (path: string) => void;
+    let resolve!: (staged: { path: string; imagesOnSend?: boolean }) => void;
     const client = fakeClient({
       request: syncConfig(true),
-      stageImage: () => new Promise<string>((r) => { resolve = r; }),
+      stageImage: () => new Promise<{ path: string; imagesOnSend?: boolean }>((r) => { resolve = r; }),
     });
     const { stdin } = render(
       <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
@@ -2292,9 +2294,12 @@ describe("App — code-mode image input", () => {
     stdin.write("\r");
     await wait(40);
     expect(client.calls.filter((c) => c.method === "send")).toEqual([]); // "two" waits its turn
-    resolve("/t/image_1.png");
+    resolve({ path: "/t/image_1.png", imagesOnSend: true });
     await wait(60);
-    expect(client.calls.filter((c) => c.method === "send").map((c) => c.args[1])).toEqual(["one /t/image_1.png", "two"]);
+    expect(client.calls.filter((c) => c.method === "send").map((c) => c.args.slice(1))).toEqual([
+      ["one [Image #1]", [{ n: 1, path: "/t/image_1.png" }]],
+      ["two"],
+    ]);
   });
 
   test("a refused image PATH is still typed as text, beside the note", async () => {
@@ -2330,9 +2335,9 @@ describe("App — code-mode image input", () => {
     expect(plain(lastFrame())).toContain("old [Image #1] [Image #2]");
     stdin.write("\r");
     await wait(60);
-    // #1 was never attached in THIS draft, so it stays literal; only #2 is staged.
+    // #1 was never attached in THIS draft, so it stays literal and is not named; only #2 is staged.
     expect(client.calls.filter((c) => c.method === "stageImage").length).toBe(1);
-    expect(client.calls.find((c) => c.method === "send")?.args[1]).toBe("old [Image #1] /tmp/winter-session-s1/images/image_1.png");
+    expect(client.calls.find((c) => c.method === "send")?.args.slice(1)).toEqual(["old [Image #1] [Image #2]", [{ n: 2, path: "/tmp/winter-session-s1/images/image_1.png" }]]);
   });
 
   test("a daemon row that does not state supportsImages (an older daemon) lets the attach through", async () => {
@@ -2364,7 +2369,7 @@ describe("App — code-mode image input", () => {
     await wait();
     stdin.write("\r");
     await wait(60);
-    expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "/tmp/winter-session-s1/images/image_1.pngx"]);
+    expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "[Image #1]x", [{ n: 1, path: "/tmp/winter-session-s1/images/image_1.png" }]]);
     bridge.push(ev({ type: "approval_requested", callId: "c1", toolName: "bash", summary: "ls" }));
     await wait();
     expect(plain(lastFrame())).toContain("approve bash?");
@@ -2372,6 +2377,67 @@ describe("App — code-mode image input", () => {
     await wait(60);
     expect(plain(lastFrame())).toContain("❯");
     expect(plain(lastFrame())).not.toContain("[Image #");
+  });
+
+  test("a daemon whose stage result lacks imagesOnSend is sent the paths in the text (it would drop images)", async () => {
+    const client = fakeClient({
+      request: syncConfig(true),
+      stageImage: (sid) => Promise.resolve({ path: `/tmp/winter-session-${sid}/images/image_1.png` }),
+    });
+    const { stdin } = render(
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    stdin.write("see ");
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    stdin.write("\r");
+    await wait(60);
+    expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "see /tmp/winter-session-s1/images/image_1.png"]);
+  });
+
+  test("a steer into a running turn carries the placeholder and images too", async () => {
+    const bridge = makeEventBridge();
+    const client = fakeClient({ request: syncConfig(true) });
+    const { stdin } = render(
+      <App client={client} bridge={bridge} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    bridge.push(ev({ type: "turn_started", threadId: "main" }));
+    await wait();
+    stdin.write("also ");
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    stdin.write("\r");
+    await wait(60);
+    expect(client.calls.some((c) => c.method === "send")).toBe(false);
+    expect(client.calls.find((c) => c.method === "steer")?.args).toEqual(["s1", "also [Image #1]", [{ n: 1, path: "/tmp/winter-session-s1/images/image_1.png" }]]);
+  });
+
+  test("a child view's message (thread.send has no images door) is sent with the paths in the text", async () => {
+    const bridge = makeEventBridge();
+    const client = fakeClient({ request: syncConfig(true) });
+    const { stdin } = render(
+      <App client={client} bridge={bridge} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    bridge.push(ev({ type: "thread_started", threadId: "th_1", agentType: "general-purpose", description: "scout", ts: 500 }));
+    bridge.push(ev({ type: "turn_started", threadId: "th_1", ts: 1000 }));
+    await wait();
+    stdin.write("\x01");
+    await wait();
+    stdin.write("\r"); // open th_1's child view
+    await wait();
+    stdin.write("look ");
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    stdin.write("\r");
+    await wait(60);
+    expect(client.calls.find((c) => c.method === "sendToThread")?.args).toEqual(["s1", "th_1", "look /tmp/winter-session-s1/images/image_1.png"]);
+    expect(client.calls.some((c) => c.method === "send" || c.method === "steer")).toBe(false);
   });
 
   test("a deleted placeholder is not staged; a pasted .png that is not an image types as text", async () => {

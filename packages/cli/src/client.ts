@@ -18,7 +18,7 @@ import {
   RoutinesCreateResult, RoutinesListResult, RoutinesUpdateResult, RoutinesDeleteResult,
   MemoryListResult, MemoryReadResult, MemoryDeleteResult,
   WorkflowListResult, WorkflowRunResult, WorkflowStopResult, WorkflowGetResult,
-  ConnWriter, type WritableSocket,
+  ConnWriter, type WritableSocket, type UserMessageImageRef,
 } from "@yanlinglabs/winter-protocol";
 
 /** Mirrors `RoutineSchema` (protocol/src/methods.ts) / `Routine` (core/src/routines/store.ts)
@@ -197,13 +197,17 @@ export class WinterClient {
     return this.validated(SessionAttachResult, await this.request(METHODS.sessionAttach, { sessionId, fromSeq }), METHODS.sessionAttach).lastSeq;
   }
   /** Code-mode image input: stage one composer image into the session's temp directory and get its
-   *  absolute path back (`session.stageImage`). A refusal rejects with the daemon's message and its
-   *  typed `data.code` (e.g. `image_input_unsupported`). */
-  async stageImage(sessionId: string, mediaType: string, dataBase64: string): Promise<string> {
-    return this.validated(SessionStageImageResult, await this.request(METHODS.sessionStageImage, { sessionId, mediaType, dataBase64 }), METHODS.sessionStageImage).path;
+   *  absolute path back (`session.stageImage`), plus `imagesOnSend` when this daemon takes `images` on
+   *  `send`/`steer`. A refusal rejects with the daemon's message and its typed `data.code` (e.g.
+   *  `image_input_unsupported`). */
+  async stageImage(sessionId: string, mediaType: string, dataBase64: string): Promise<{ path: string; imagesOnSend?: boolean }> {
+    const r = this.validated(SessionStageImageResult, await this.request(METHODS.sessionStageImage, { sessionId, mediaType, dataBase64 }), METHODS.sessionStageImage);
+    return r.imagesOnSend === true ? { path: r.path, imagesOnSend: true } : { path: r.path };
   }
-  async send(sessionId: string, text: string): Promise<number> {
-    return this.validated(SessionSendResult, await this.request(METHODS.sessionSend, { sessionId, text }), METHODS.sessionSend).seq;
+  /** `images` (code-mode image input): each `[Image #n]` placeholder's staged path — `text` keeps the
+   *  placeholders; the daemon gives the model the paths. Omitted from the wire when empty. */
+  async send(sessionId: string, text: string, images?: readonly UserMessageImageRef[]): Promise<number> {
+    return this.validated(SessionSendResult, await this.request(METHODS.sessionSend, { sessionId, text, ...(images !== undefined && images.length > 0 ? { images } : {}) }), METHODS.sessionSend).seq;
   }
   async listSessions() {
     return this.validated(SessionListResult, await this.request(METHODS.sessionList), METHODS.sessionList);
@@ -234,8 +238,8 @@ export class WinterClient {
   async bgKillAll(sessionId: string): Promise<{ ok: true; killed: number }> {
     return this.validated(BgKillAllResult, await this.request(METHODS.bgKillAll, { sessionId }), METHODS.bgKillAll);
   }
-  async steer(sessionId: string, text: string): Promise<{ injected: boolean }> {
-    const r = this.validated(SessionSteerResult, await this.request(METHODS.sessionSteer, { sessionId, text }), METHODS.sessionSteer);
+  async steer(sessionId: string, text: string, images?: readonly UserMessageImageRef[]): Promise<{ injected: boolean }> {
+    const r = this.validated(SessionSteerResult, await this.request(METHODS.sessionSteer, { sessionId, text, ...(images !== undefined && images.length > 0 ? { images } : {}) }), METHODS.sessionSteer);
     return { injected: r.injected };
   }
   async interrupt(sessionId: string): Promise<{ wasRunning: boolean }> {

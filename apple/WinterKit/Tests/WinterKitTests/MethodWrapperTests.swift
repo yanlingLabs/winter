@@ -148,12 +148,13 @@ final class MethodWrapperTests: XCTestCase {
     }
 
     /// Code-mode image input: `session.stageImage`'s wire shape — the bytes travel as standard base64
-    /// under `dataBase64`, beside `sessionId` and `mediaType`, and the staged path comes back; a
-    /// refusal surfaces the daemon's own message and typed `data.code`.
+    /// under `dataBase64`, beside `sessionId` and `mediaType`, and the staged path comes back with the
+    /// daemon's `imagesOnSend` (false when an older daemon omits it); a refusal surfaces the daemon's
+    /// own message and typed `data.code`.
     func testStageImageEncodesBase64AndReturnsThePath() async throws {
         let (client, t) = try await connected()
         let png = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe])
-        let (req, path) = try await roundTrip(t, sentIndex: 1, result: #"{"path":"/tmp/winter-session-s_1/images/image_1.png"}"#) {
+        let (req, staged) = try await roundTrip(t, sentIndex: 1, result: #"{"path":"/tmp/winter-session-s_1/images/image_1.png","imagesOnSend":true}"#) {
             try await client.stageImage(sessionId: "s_1", mediaType: "image/png", data: png)
         }
         XCTAssertEqual(req["method"] as? String, "session.stageImage")
@@ -161,9 +162,9 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(params?["sessionId"] as? String, "s_1")
         XCTAssertEqual(params?["mediaType"] as? String, "image/png")
         XCTAssertEqual(params?["dataBase64"] as? String, png.base64EncodedString())
-        XCTAssertEqual(path, "/tmp/winter-session-s_1/images/image_1.png")
+        XCTAssertEqual(staged, StagedImage(path: "/tmp/winter-session-s_1/images/image_1.png", imagesOnSend: true))
 
-        async let refused: String = client.stageImage(sessionId: "s_1", mediaType: "image/png", data: png)
+        async let refused: StagedImage = client.stageImage(sessionId: "s_1", mediaType: "image/png", data: png)
         let sent = try await waitForSent(t, count: 3)
         let second = decodeLine(sent[2])
         t.feed(#"{"jsonrpc":"2.0","id":\#(second["id"] as! Int),"error":{"code":-32602,"message":"The selected model doesn't support images","data":{"code":"image_input_unsupported"}}}"#)
@@ -174,6 +175,39 @@ final class MethodWrapperTests: XCTestCase {
             XCTAssertEqual(error.message, "The selected model doesn't support images")
             XCTAssertEqual(error.data?["code"]?.stringValue, "image_input_unsupported")
         }
+    }
+
+    /// An older daemon's stage answer has no `imagesOnSend` — it reads as false.
+    func testStageImageFromAnOlderDaemonReadsImagesOnSendFalse() async throws {
+        let (client, t) = try await connected()
+        let (_, staged) = try await roundTrip(t, sentIndex: 1, result: #"{"path":"/t/image_1.png"}"#) {
+            try await client.stageImage(sessionId: "s_1", mediaType: "image/png", data: Data([0x89, 0x50]))
+        }
+        XCTAssertEqual(staged, StagedImage(path: "/t/image_1.png", imagesOnSend: false))
+    }
+
+    /// Code-mode image input: `send`/`steer` put `images` beside the placeholder text as `[{n, path}]`,
+    /// and omit the key entirely when there are none (an older daemon never sees it).
+    func testSendAndSteerCarryImagesOnlyWhenPresent() async throws {
+        let (client, t) = try await connected()
+        let refs = [SessionEvent.UserMessageImageRef(n: 2, path: "/t/image_1.png")]
+        let (sendReq, _) = try await roundTrip(t, sentIndex: 1, result: #"{"seq":4}"#) {
+            try await client.send(sessionId: "s_1", text: "see [Image #2]", images: refs)
+        }
+        let sendParams = sendReq["params"] as? [String: Any]
+        XCTAssertEqual(sendParams?["text"] as? String, "see [Image #2]")
+        let sent = sendParams?["images"] as? [[String: Any]]
+        XCTAssertEqual(sent?.count, 1)
+        XCTAssertEqual(sent?.first?["n"] as? Int, 2)
+        XCTAssertEqual(sent?.first?["path"] as? String, "/t/image_1.png")
+        let (steerReq, _) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"injected":true}"#) {
+            try await client.steer(sessionId: "s_1", text: "and [Image #2]", images: refs)
+        }
+        XCTAssertEqual(((steerReq["params"] as? [String: Any])?["images"] as? [[String: Any]])?.first?["n"] as? Int, 2)
+        let (plainReq, _) = try await roundTrip(t, sentIndex: 3, result: #"{"seq":5}"#) {
+            try await client.send(sessionId: "s_1", text: "plain")
+        }
+        XCTAssertNil((plainReq["params"] as? [String: Any])?["images"], "no images → no key")
     }
 
     /// Chat Slice D task 1: `session.setModel`'s wire shape — a set carries the string; a clear
