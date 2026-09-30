@@ -587,9 +587,10 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// steer if this session's turn is already running, else send; the draft is cleared ONLY on
     /// success — a failed send/steer never loses the composed text.
     ///
-    /// Code-mode image input: the draft's live `[Image #n]` placeholders are staged and replaced by
-    /// their paths first (`FieldStateAdapter.composerTextForSend`, shared with the shell's submit); a
-    /// staging refusal shows on the composer's notice line and sends nothing.
+    /// Code-mode image input: the draft's live `[Image #n]` placeholders are staged first
+    /// (`FieldStateAdapter.composerTextForSend`, shared with the shell's submit); the text keeps them
+    /// and `images` carries the staged paths (only the model sees them); a staging refusal shows on
+    /// the composer's notice line and sends nothing.
     private func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -607,9 +608,9 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
             }) else { return }
             let ok: Bool
             if wasRunning {
-                ok = (try? await client.steer(sessionId: sid, text: outgoing)) != nil
+                ok = (try? await client.steer(sessionId: sid, text: outgoing.text, images: outgoing.images)) != nil
             } else {
-                ok = (try? await client.send(sessionId: sid, text: outgoing)) != nil
+                ok = (try? await client.send(sessionId: sid, text: outgoing.text, images: outgoing.images)) != nil
             }
             // Clears only what was sent — edits made during the round trip stay.
             if ok { adapter.composerSendSucceeded(sentDraft: text) }

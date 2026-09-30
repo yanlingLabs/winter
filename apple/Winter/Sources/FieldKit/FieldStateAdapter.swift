@@ -1060,19 +1060,22 @@ final class FieldStateAdapter: ObservableObject {
     }
 
     /// **Every code-mode submit site's one door** (`ShellSessionHost.submit`,
-    /// `DetachedWindowController.submit`): the text to actually send — each live `[Image #n]`
-    /// staged through `stage` (`session.stageImage` on that surface's own client and session) and
-    /// replaced by its path — or `nil` when staging was refused, with the daemon's own sentence on
-    /// `composerNotice`, and then NOTHING is sent. A draft with no live placeholder comes back as is.
+    /// `DetachedWindowController.submit`): what to actually send — each live `[Image #n]` staged
+    /// through `stage` (`session.stageImage` on that surface's own client and session); the text keeps
+    /// its placeholders and `images` names the staged paths (the model sees the paths, the message
+    /// bubble the placeholders), or, from a daemon without `imagesOnSend`, the paths are substituted
+    /// into the text (`resolveComposerImages`) — or `nil` when staging was refused, with the daemon's
+    /// own sentence on `composerNotice`, and then NOTHING is sent. A draft with no live placeholder
+    /// comes back as is, with no images.
     ///
     /// A draft carried into a session that is NOT code (a hop or an in-place switch keeps the draft)
     /// sends its text literally and drops its attachments, silently — images are a code-session
     /// feature, and a refusal there would only block the message. A row not loaded yet is left to
     /// the daemon.
-    func composerTextForSend(_ text: String, stage: (ComposerImage) async throws -> String) async -> String? {
+    func composerTextForSend(_ text: String, stage: (ComposerImage) async throws -> StagedImage) async -> ComposerOutgoing? {
         if let row = currentSessionRow(), !composerImageInputEnabled(row: row) {
             composerImages = ComposerImageDraft()
-            return text
+            return ComposerOutgoing(text: text, images: [])
         }
         do {
             return try await resolveComposerImages(text, draft: composerImages, stage: stage)

@@ -88,7 +88,7 @@ import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } 
 import { Box, Text, useInput, useStdin } from "ink";
 import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
-import { METHODS, SyncConfigModel, type ApprovalPolicy, type SessionActivity, type SessionEvent } from "@yanlinglabs/winter-protocol";
+import { METHODS, SyncConfigModel, type ApprovalPolicy, type SessionActivity, type SessionEvent, type UserMessageImageRef } from "@yanlinglabs/winter-protocol";
 import { readFileSync } from "node:fs";
 import { POLICY_ORDER } from "./policy-order";
 import { policySwitchNotes } from "./policy-switch-notes";
@@ -107,7 +107,7 @@ import { Footer, type ExitKey } from "./footer";
 import { Composer, type ComposerInject } from "./composer";
 import {
   DraftImages, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, imagePathFromPaste, imageToken, isRegularFile,
-  isStageableImage, prepareDraftImage, readClipboardImage as readClipboardImageDefault, stageDraftImages,
+  isStageableImage, prepareDraftImage, readClipboardImage as readClipboardImageDefault, stageDraftImages, type StagedDraft, type StagedImage,
 } from "./images";
 import { makeDraftWrapper } from "./draft-wrap";
 import { makePasteBatch } from "./paste-batch";
@@ -127,8 +127,9 @@ import type { WinterClient } from "../client";
 /** The subset of `WinterClient` `<App>` actually calls — declared structurally so tests can pass a
  *  fake that only records these callbacks (the real `WinterClient` satisfies it field-for-field). */
 export interface AppClient {
-  send(sessionId: string, text: string): unknown;
-  steer(sessionId: string, text: string): unknown;
+  /** `images` (code-mode image input): each `[Image #n]`'s staged path; `text` keeps the placeholders. */
+  send(sessionId: string, text: string, images?: readonly UserMessageImageRef[]): unknown;
+  steer(sessionId: string, text: string, images?: readonly UserMessageImageRef[]): unknown;
   interrupt(sessionId: string): unknown;
   setPolicy(sessionId: string, policy: ApprovalPolicy): unknown;
   askUserRespond(params: { sessionId: string; callId: string; answers: Record<string, string>; notes?: Record<string, string> }): unknown;
@@ -140,9 +141,10 @@ export interface AppClient {
    *  results (which also carry `ok: true`) are assignable as-is. */
   sendToThread(sessionId: string, agent: string, text: string): Promise<{ delivered: "queued" | "resumed"; agentId: string }>;
   agentStop(sessionId: string, agent: string): Promise<{ status: string }>;
-  /** Code-mode image input: `session.stageImage` — resolves the staged file's absolute path, rejects
-   *  with the daemon's refusal (its message is what the note shows). */
-  stageImage(sessionId: string, mediaType: string, dataBase64: string): Promise<string>;
+  /** Code-mode image input: `session.stageImage` — resolves the staged file's absolute path (and
+   *  `imagesOnSend` when the daemon takes `images` on send/steer), rejects with the daemon's refusal
+   *  (its message is what the note shows). */
+  stageImage(sessionId: string, mediaType: string, dataBase64: string): Promise<StagedImage>;
 }
 
 /** Phase 3d T2 — everything the reducer's `dispatch` can be fed: every real wire `SessionEvent`
@@ -1095,17 +1097,25 @@ export function App({
   // commands still run in your main conversation").
   //
   // Code-mode image input: a draft's `[Image #n]` placeholders are staged (`session.stageImage`, into
-  // the MAIN session's temp directory — a child view's message carries the same paths, which any
-  // agent in the session can read) and replaced by their paths before the text goes anywhere. A
-  // draft with no live placeholder takes exactly the old synchronous path. A staging refusal shows
-  // the daemon's message as a note and hands the draft back to an empty composer — nothing is sent.
+  // the MAIN session's temp directory) before the text goes anywhere. The main session is sent the
+  // text WITH its placeholders plus `images` (the user's message shows `[Image #n]`; the daemon gives
+  // the model the paths). Two paths still get the paths substituted into the text itself: a daemon
+  // whose stage result lacks `imagesOnSend` (it would silently drop `images`), and a child view's
+  // `thread.send` — that message reaches the agent over messaging, with no `images` door, and any
+  // agent in the session can read the staged files. A draft with no live placeholder takes exactly
+  // the old synchronous path. A staging refusal shows the daemon's message as a note and hands the
+  // draft back to an empty composer — nothing is sent.
   //
   // ONE queue for every submit and steer (`submitQueueRef`): a draft with images goes out only after
   // its async staging, so without the queue a plain draft typed after it would overtake it. Each
   // entry runs after the one before it has been delivered (or refused).
-  const deliver = (text: string, steer: boolean) => {
-    if (childOpen) { sendToChild(childRow!.threadId, text); return; }
-    void (steer ? client.steer(sessionId, text) : client.send(sessionId, text));
+  const deliver = (staged: StagedDraft, steer: boolean) => {
+    if (childOpen) { sendToChild(childRow!.threadId, staged.modelText); return; }
+    if (staged.images.length > 0 && staged.imagesOnSend) {
+      void (steer ? client.steer(sessionId, staged.text, staged.images) : client.send(sessionId, staged.text, staged.images));
+      return;
+    }
+    void (steer ? client.steer(sessionId, staged.modelText) : client.send(sessionId, staged.modelText));
   };
   const submitQueueRef = useRef<Promise<void>>(Promise.resolve());
   const submitDraft = (text: string, steer: boolean) => {
@@ -1113,7 +1123,7 @@ export function App({
     const mark = images.mark();
     const hasImages = images.referencedIn(text).length > 0;
     submitQueueRef.current = submitQueueRef.current.then(async () => {
-      let outgoing = text;
+      let outgoing: StagedDraft = { text, images: [], modelText: text, imagesOnSend: true };
       if (hasImages) {
         try {
           outgoing = await stageDraftImages(text, images, (image) => client.stageImage(sessionId, image.mediaType, Buffer.from(image.bytes).toString("base64")));

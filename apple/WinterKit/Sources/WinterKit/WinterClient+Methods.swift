@@ -30,6 +30,14 @@ public enum PluginScope: String, Equatable, Sendable {
     case user, project, local
 }
 
+/// Code-mode image input: `session.stageImage`'s answer (`SessionStageImageResult`). `imagesOnSend` —
+/// this daemon takes `images` on `session.send`/`session.steer` (false from a daemon that predates it).
+public struct StagedImage: Equatable, Sendable {
+    public let path: String
+    public let imagesOnSend: Bool
+    public init(path: String, imagesOnSend: Bool) { self.path = path; self.imagesOnSend = imagesOnSend }
+}
+
 /// Contract B `InstalledPlugin` (methods.ts `InstalledPluginSchema`) — the result of
 /// `plugin.install`/`plugin.update`. `installPath` is absolute and stable; NOT a
 /// `<home>/plugins/<name>` convention (a plugin can install anywhere a directory marketplace names).
@@ -761,14 +769,24 @@ extension WinterClient {
         }
     }
 
-    public func send(sessionId: String, text: String) async throws -> Int {
-        let r = try await request("session.send", params: obj(["sessionId": .string(sessionId), "text": .string(text)]))
+    /// `images` (code-mode image input): each `[Image #n]` placeholder's staged path
+    /// (`stageImage`). `text` keeps the placeholders — the user's message shows them — and the daemon
+    /// gives the MODEL the paths. Only a daemon whose `stageImage` answered `imagesOnSend` takes
+    /// them; an empty list omits the key.
+    public func send(sessionId: String, text: String, images: [SessionEvent.UserMessageImageRef] = []) async throws -> Int {
+        let r = try await request("session.send", params: obj(["sessionId": .string(sessionId), "text": .string(text), "images": imagesParam(images)]))
         guard let seq = r["seq"]?.intValue else { throw RpcError(code: -3, message: "invalid result from server for session.send") }
         return seq
     }
 
-    public func steer(sessionId: String, text: String) async throws -> Bool {
-        try await request("session.steer", params: obj(["sessionId": .string(sessionId), "text": .string(text)]))["injected"]?.boolValue ?? false
+    /// `images`: as `send`'s.
+    public func steer(sessionId: String, text: String, images: [SessionEvent.UserMessageImageRef] = []) async throws -> Bool {
+        try await request("session.steer", params: obj(["sessionId": .string(sessionId), "text": .string(text), "images": imagesParam(images)]))["injected"]?.boolValue ?? false
+    }
+
+    /// `nil` (the key omitted) for no images — an older daemon never sees it.
+    private func imagesParam(_ images: [SessionEvent.UserMessageImageRef]) -> JSONValue? {
+        images.isEmpty ? nil : .array(images.map { .object(["n": .number(Double($0.n)), "path": .string($0.path)]) })
     }
 
     public func interrupt(sessionId: String) async throws -> Bool {
@@ -818,12 +836,14 @@ extension WinterClient {
 
     /// Code-mode image input (2026-09-29): `session.stageImage` — writes one composer image into the
     /// session's own temp directory (daemon-named `image_<k>.<ext>`) and returns its absolute path,
-    /// which the composer substitutes for its `[Image #n]` placeholder before sending as usual.
+    /// plus whether this daemon takes `images` on `send`/`steer` (`imagesOnSend`) — then the text
+    /// keeps its `[Image #n]` placeholder and names the path in `images`; otherwise (an older daemon,
+    /// whose send schema would silently drop `images`) the composer substitutes the path itself.
     /// `mediaType` must be what the bytes ARE (png/jpeg/gif/webp — the daemon sniffs and refuses a
     /// mismatch). Throws `RpcError` with the daemon's message and `data.code` on a refusal —
     /// `image_input_unsupported` carries exactly "The selected model doesn't support images". Local
     /// clients only (never remote-allowlisted). The bytes are never logged.
-    public func stageImage(sessionId: String, mediaType: String, data: Data) async throws -> String {
+    public func stageImage(sessionId: String, mediaType: String, data: Data) async throws -> StagedImage {
         let r = try await request("session.stageImage", params: obj([
             "sessionId": .string(sessionId), "mediaType": .string(mediaType),
             "dataBase64": .string(data.base64EncodedString()),
@@ -831,7 +851,7 @@ extension WinterClient {
         guard let path = r["path"]?.stringValue, !path.isEmpty else {
             throw RpcError(code: -3, message: "invalid result from server for session.stageImage")
         }
-        return path
+        return StagedImage(path: path, imagesOnSend: r["imagesOnSend"]?.boolValue == true)
     }
 
     /// `notes` — CC AskUserQuestion parity, free-text notes keyed by question text like `answers`
