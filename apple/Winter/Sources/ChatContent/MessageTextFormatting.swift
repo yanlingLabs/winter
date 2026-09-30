@@ -239,7 +239,8 @@ enum MessageTextFormatter {
         colorScheme: ColorScheme,
         baseFont: NSFont = Typography.sansNS(ofSize: transcriptProseMetrics(.sans).bodySize),
         codeFont: NSFont = Typography.monoNS(ofSize: transcriptProseMetrics(.sans).codeSize(for: transcriptProseMetrics(.sans).bodySize)),
-        lineSpacing: CGFloat = 0
+        lineSpacing: CGFloat = 0,
+        fileLink: ((String) -> URL?)? = nil
     ) -> AttributedString {
         // mac-chat-parity Task 8: the inline-code chip's fill is the brand's `ControlSurface` — its
         // token for small controls, which is what a code chip inside a run of prose is. It replaced a
@@ -255,7 +256,8 @@ enum MessageTextFormatter {
             foregroundColor: themeColor("TextPrimary", colorScheme: colorScheme),
             codeForegroundColor: themeColor("TextPrimary", colorScheme: colorScheme),
             codeBackgroundColor: codeBackground,
-            lineSpacing: lineSpacing
+            lineSpacing: lineSpacing,
+            fileLink: fileLink
         )
         return AttributedString(attributed)
     }
@@ -377,7 +379,8 @@ enum MessageTextFormatter {
         foregroundColor: NSColor,
         codeForegroundColor: NSColor,
         codeBackgroundColor: NSColor?,
-        lineSpacing: CGFloat = 0
+        lineSpacing: CGFloat = 0,
+        fileLink: ((String) -> URL?)? = nil
     ) -> NSAttributedString {
         let result = NSMutableAttributedString()
         let base = baseAttributes(
@@ -417,7 +420,8 @@ enum MessageTextFormatter {
         var plainStart = cursor
         while cursor < text.endIndex {
             if let token = inlineToken(in: text, at: cursor) {
-                result.append(NSAttributedString(string: String(text[plainStart..<cursor]), attributes: base))
+                appendLinkingPaths(String(text[plainStart..<cursor]), attributes: base,
+                                   fileLink: fileLink, to: result)
                 let attributes: [NSAttributedString.Key: Any]
                 switch token.kind {
                 case .code:
@@ -436,7 +440,31 @@ enum MessageTextFormatter {
                 let content = token.kind == .math
                     ? renderMathExpression(token.content)
                     : token.content
-                result.append(NSAttributedString(string: content, attributes: attributes))
+                switch token.kind {
+                case .math:
+                    result.append(NSAttributedString(string: content, attributes: attributes))
+                case .code:
+                    // A code span naming a file links WHOLE (spaces included — the user's own
+                    // checkout paths carry them); otherwise any path tokens inside it link alone.
+                    if let fileLink, let whole = transcriptCodeSpanPathCandidate(content),
+                       let url = fileLink(whole.path) {
+                        var linked = attributes
+                        linked[.link] = url
+                        result.append(NSAttributedString(string: content, attributes: linked))
+                    } else {
+                        appendLinkingPaths(content, attributes: attributes, fileLink: fileLink, to: result)
+                    }
+                case .link:
+                    var linked = attributes
+                    if let fileLink, let target = token.target,
+                       let candidate = transcriptLinkTargetPathCandidate(target),
+                       let url = fileLink(candidate.path) {
+                        linked[.link] = url
+                    }
+                    result.append(NSAttributedString(string: content, attributes: linked))
+                case .bold, .italic, .strike:
+                    appendLinkingPaths(content, attributes: attributes, fileLink: fileLink, to: result)
+                }
                 cursor = token.end
                 plainStart = cursor
             } else {
@@ -444,8 +472,72 @@ enum MessageTextFormatter {
             }
         }
 
-        result.append(NSAttributedString(string: String(text[plainStart...]), attributes: base))
+        appendLinkingPaths(String(text[plainStart...]), attributes: base, fileLink: fileLink, to: result)
         return result
+    }
+
+    /// Transcript file links (2026-09-30): append `run` in `attributes`, with every path the file
+    /// door answers a URL for carrying `.link` over exactly its own characters. `fileLink == nil`
+    /// (every caller but a linked assistant reply) appends the run untouched — byte-identical to
+    /// before, since the splitter is never even consulted.
+    private static func appendLinkingPaths(_ run: String,
+                                           attributes: [NSAttributedString.Key: Any],
+                                           fileLink: ((String) -> URL?)?,
+                                           to result: NSMutableAttributedString) {
+        guard let fileLink, !run.isEmpty else {
+            result.append(NSAttributedString(string: run, attributes: attributes))
+            return
+        }
+        var cursor = run.startIndex
+        for mention in transcriptPathMentions(inRun: run) {
+            guard let url = fileLink(mention.path) else { continue }
+            result.append(NSAttributedString(string: String(run[cursor..<mention.range.lowerBound]),
+                                             attributes: attributes))
+            var linked = attributes
+            linked[.link] = url
+            result.append(NSAttributedString(string: String(run[mention.range]), attributes: linked))
+            cursor = mention.range.upperBound
+        }
+        result.append(NSAttributedString(string: String(run[cursor...]), attributes: attributes))
+    }
+
+    /// Transcript file links: every path candidate `inlineAttributedString` would ask `fileLink`
+    /// about for this text, in order — the SAME token walk, so the set the view stats and the set
+    /// the renderer links cannot disagree. Math spans are skipped, as the renderer never links them.
+    static func inlineFileMentionQueries(_ text: String) -> [String] {
+        var queries: [String] = []
+        func collect(_ run: String) {
+            queries.append(contentsOf: transcriptPathMentions(inRun: run).map(\.path))
+        }
+        var cursor = text.startIndex
+        var plainStart = cursor
+        while cursor < text.endIndex {
+            if let token = inlineToken(in: text, at: cursor) {
+                collect(String(text[plainStart..<cursor]))
+                switch token.kind {
+                case .math:
+                    break
+                case .code:
+                    if let whole = transcriptCodeSpanPathCandidate(token.content) {
+                        queries.append(whole.path)
+                    }
+                    collect(token.content)
+                case .link:
+                    if let target = token.target,
+                       let candidate = transcriptLinkTargetPathCandidate(target) {
+                        queries.append(candidate.path)
+                    }
+                case .bold, .italic, .strike:
+                    collect(token.content)
+                }
+                cursor = token.end
+                plainStart = cursor
+            } else {
+                cursor = text.index(after: cursor)
+            }
+        }
+        collect(String(text[plainStart...]))
+        return queries
     }
 
     private enum InlineTokenKind {
@@ -461,6 +553,9 @@ enum MessageTextFormatter {
         let kind: InlineTokenKind
         let content: String
         let end: String.Index
+        /// A markdown link's `(target)` — `nil` for every other kind. Carried since transcript file
+        /// links (2026-09-30); before that the target was parsed past and dropped.
+        var target: String? = nil
     }
 
     private static func inlineToken(in text: String, at index: String.Index) -> InlineToken? {
@@ -494,7 +589,8 @@ enum MessageTextFormatter {
             }
             let labelStart = text.index(after: index)
             guard labelStart < labelEnd else { return nil }
-            return InlineToken(kind: .link, content: String(text[labelStart..<labelEnd]), end: text.index(after: parenEnd))
+            return InlineToken(kind: .link, content: String(text[labelStart..<labelEnd]), end: text.index(after: parenEnd),
+                               target: String(text[text.index(after: parenStart)..<parenEnd]))
         }
 
         if hasPrefix("**", in: text, at: index),
@@ -502,8 +598,9 @@ enum MessageTextFormatter {
             return token
         }
 
-        if hasPrefix("__", in: text, at: index),
-           let token = pairedToken(kind: .bold, marker: "__", in: text, at: index) {
+        if hasPrefix("__", in: text, at: index), underscoreEmphasisMayOpen(in: text, at: index),
+           let token = pairedToken(kind: .bold, marker: "__", in: text, at: index),
+           underscoreEmphasisMayClose(in: text, at: token.end) {
             return token
         }
 
@@ -528,11 +625,30 @@ enum MessageTextFormatter {
         }
 
         if text[index] == "_", !hasPrefix("__", in: text, at: index),
-           let token = pairedToken(kind: .italic, marker: "_", in: text, at: index) {
+           underscoreEmphasisMayOpen(in: text, at: index),
+           let token = pairedToken(kind: .italic, marker: "_", in: text, at: index),
+           underscoreEmphasisMayClose(in: text, at: token.end) {
             return token
         }
 
         return nil
+    }
+
+    /// CommonMark's intraword rule for `_`/`__` (transcript file links, 2026-09-30): an underscore
+    /// run flanked by a letter or digit on the outside never opens or closes emphasis. Before this,
+    /// `winter-session-s_1/images/image_1.png` in prose rendered as `…s` + italic `1/images/image` +
+    /// `1.png` — the underscores gone and the path unlinkable — and so did any `snake_case_name`.
+    /// `*` keeps its looser behaviour, as CommonMark's does.
+    private static func underscoreEmphasisMayOpen(in text: String, at index: String.Index) -> Bool {
+        guard index > text.startIndex else { return true }
+        let before = text[text.index(before: index)]
+        return !(before.isLetter || before.isNumber)
+    }
+
+    private static func underscoreEmphasisMayClose(in text: String, at end: String.Index) -> Bool {
+        guard end < text.endIndex else { return true }
+        let after = text[end]
+        return !(after.isLetter || after.isNumber)
     }
 
     private static func pairedToken(

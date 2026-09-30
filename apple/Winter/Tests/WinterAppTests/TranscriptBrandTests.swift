@@ -458,11 +458,13 @@ final class TranscriptBrandTests: XCTestCase {
             }
             scanned += 1
         }
-        // 11 since the header-only `WorkingDirsMenu.swift` was deleted (2026-09-17).
+        // 11 since the header-only `WorkingDirsMenu.swift` was deleted (2026-09-17); 12 with
+        // `ElicitationAnswer.swift` (WS-27 — this pin was not moved then and failed on main); 13 with
+        // `TranscriptFileMentions.swift` (transcript file links, 2026-09-30).
         // Exact, not a floor (fix round 1, review M3): `> 10` against 12 files quietly tolerated
         // deleting two of them, which would have made the ban pass by scanning less.
         XCTAssertEqual(scanned, try chatContentSources().count)
-        XCTAssertEqual(scanned, 11, "ChatContent's file count changed — confirm the new file is scanned")
+        XCTAssertEqual(scanned, 13, "ChatContent's file count changed — confirm the new file is scanned")
     }
 
     /// **The fence on IMPORTANT-1's fix itself.** The two pins above prove `HairlineElevated` is a
@@ -497,11 +499,12 @@ final class TranscriptBrandTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(elevatedSites, 8,
+        XCTAssertEqual(elevatedSites, 9,
                        "the question separator, the code-block rim, the latest pill, the "
                        + "interaction card's own rim, the pending box's option separators, its "
-                       + "header pills, the inline sidebars' divider and the floating cards' rim "
-                       + "— all eight, or this pin is passing because the rules stopped "
+                       + "header pills, the inline sidebars' divider, the floating cards' rim and "
+                       + "the reply's image-thumbnail rim (transcript file links, 2026-09-30) "
+                       + "— all nine, or this pin is passing because the rules stopped "
                        + "being drawn at all")
     }
 
