@@ -5748,6 +5748,35 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual((open["params"] as? [String: Any])?["kind"] as? String, "code")
     }
 
+    /// **Transcript file links (2026-09-30): the primary use case at the host.** A session with NO
+    /// working directory (the chat/no-folder case) opens an image from the session temp dir: the
+    /// router mints an ordinary `.code` tab at the absolute path (no new wire kind), the tab renders
+    /// the image viewer, and no editor runtime — no hidden Chromium — is ever stood up for it.
+    func testADirlessSessionOpensATempDirImageAsACodeTabWithNoEditorRuntime() async {
+        let rows = [codeRow("S1", dirs: [])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        let image = "/private/var/folders/xx/T/winter-session-S1/images/image_1.png"
+        host.openFileOrDocumentTab(image, sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("a dirless session must still open an image: \(mgmt.methods)")
+        }
+        let params = open["params"] as? [String: Any]
+        XCTAssertEqual(params?["kind"] as? String, "code", "an image rides the existing .code kind")
+        XCTAssertEqual(params?["url"] as? String, image)
+
+        let tab = PanelTab(tabId: "img", kind: .code, url: image, title: "image_1.png")
+        XCTAssertTrue(panelTabContent(for: tab, host: host, sessionId: "S1") is PanelImageTab)
+        XCTAssertTrue(host.editorRuntimes.isEmpty, "an image tab never mints an editor runtime")
+    }
+
     /// **Mint, unrecognized extension → `.code`.** The editor's own established fallback — a file
     /// this router does not specifically recognize as office still opens exactly as before.
     func testTheRouterMintsACodeTabForAnUnrecognizedExtension() async {
