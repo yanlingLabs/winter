@@ -11,11 +11,11 @@
  *  user's real clipboard. */
 
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, STAGE_IMAGE_MAX_BYTES } from "@yanlinglabs/winter-protocol";
-import { sniffImageMediaType } from "@yanlinglabs/winter-core";
+import { IMAGE_ATTACH_MAX_LONG_EDGE, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, STAGE_IMAGE_MAX_BYTES } from "@yanlinglabs/winter-protocol";
+import { imageDimensions, sniffImageMediaType } from "@yanlinglabs/winter-core";
 
 // Shown when an image is over the daemon's cap (the runtime Read tool's own 3.75 MiB limit) — the
 // daemon's `image_too_large` refusal says the same, word for word.
@@ -117,14 +117,54 @@ export function isRegularFile(path: string): boolean {
   try { return statSync(path).isFile(); } catch { return false; }
 }
 
-/** An image's bytes as a draft attachment: `"not-image"` when the magic bytes are none of the four
- *  the daemon takes, `"too-large"` past the cap. The media type is the SNIFFED one — a JPEG saved as
- *  `.png` would otherwise be refused by the daemon's type check at submit. */
-export function draftImageFrom(bytes: Uint8Array): DraftImage | "not-image" | "too-large" {
+/** Only the magic bytes: is this one of the four image types the daemon stages? */
+export function isStageableImage(bytes: Uint8Array): boolean {
+  return sniffImageMediaType(bytes) !== undefined;
+}
+
+const EXT_FOR: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
+const JPEG_QUALITIES = [85, 75, 65, 50];
+
+/**
+ * An image's bytes as a draft attachment, prepared ONCE, at attach time, so a submit never
+ * re-encodes. An image within `IMAGE_ATTACH_MAX_LONG_EDGE` (1568 px — Anthropic's documented size
+ * above which the service downscales anyway) and within the stage cap is attached untouched. Anything
+ * else is written to a PRIVATE temp copy (never the user's own file) and `sips -Z 1568`-ed there,
+ * keeping PNG as PNG and JPEG as JPEG (a GIF or WebP becomes a PNG of its first frame); if the result
+ * is still over 3.75 MB it is re-encoded as JPEG, quality stepping 85 → 50. Only when that still
+ * fails is it `"too-large"`. `"not-image"` when the magic bytes are none of the four the daemon takes.
+ */
+export async function prepareDraftImage(bytes: Uint8Array): Promise<DraftImage | "not-image" | "too-large"> {
   const mediaType = sniffImageMediaType(bytes);
   if (mediaType === undefined) return "not-image";
-  if (bytes.length > STAGE_IMAGE_MAX_BYTES) return "too-large";
-  return { bytes, mediaType };
+  const dims = imageDimensions(bytes);
+  const longEdge = dims === undefined ? undefined : Math.max(dims.width, dims.height);
+  const needsResize = longEdge === undefined || longEdge > IMAGE_ATTACH_MAX_LONG_EDGE;
+  if (!needsResize && bytes.length <= STAGE_IMAGE_MAX_BYTES) return { bytes, mediaType };
+  if (process.platform !== "darwin") return bytes.length <= STAGE_IMAGE_MAX_BYTES ? { bytes, mediaType } : "too-large";
+
+  const dir = mkdtempSync(join(tmpdir(), "winter-attach-"));
+  try {
+    const source = join(dir, `source.${EXT_FOR[mediaType]}`);
+    writeFileSync(source, bytes, { mode: 0o600 });
+    const asJpeg = mediaType === "image/jpeg";
+    const resized = join(dir, asJpeg ? "resized.jpg" : "resized.png");
+    const args = ["-s", "format", asJpeg ? "jpeg" : "png", ...(needsResize ? ["-Z", String(IMAGE_ATTACH_MAX_LONG_EDGE)] : []), source, "--out", resized];
+    if (!(await run("/usr/bin/sips", args)).ok || !existsSync(resized)) {
+      return bytes.length <= STAGE_IMAGE_MAX_BYTES ? { bytes, mediaType } : "too-large";
+    }
+    const out = new Uint8Array(readFileSync(resized));
+    if (out.length <= STAGE_IMAGE_MAX_BYTES) return { bytes: out, mediaType: asJpeg ? "image/jpeg" : "image/png" };
+    for (const quality of JPEG_QUALITIES) {
+      const jpeg = join(dir, `q${quality}.jpg`);
+      if (!(await run("/usr/bin/sips", ["-s", "format", "jpeg", "-s", "formatOptions", String(quality), resized, "--out", jpeg])).ok) continue;
+      const encoded = new Uint8Array(readFileSync(jpeg));
+      if (encoded.length <= STAGE_IMAGE_MAX_BYTES) return { bytes: encoded, mediaType: "image/jpeg" };
+    }
+    return "too-large";
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function run(file: string, args: string[]): Promise<{ ok: boolean; stdout: string }> {
