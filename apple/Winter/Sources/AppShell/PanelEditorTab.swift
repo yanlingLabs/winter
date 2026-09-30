@@ -236,6 +236,35 @@ func panelTabKind(forFilePath path: String) -> PanelTabKind {
     officeFileExtensions.contains((path as NSString).pathExtension.lowercased()) ? .document : .code
 }
 
+/// **Transcript file links (2026-09-30): the raster formats a `.code` tab shows as a PICTURE
+/// rather than handing to the editor.** ImageIO decodes every one of them natively, and none is
+/// text — Monaco would render the bytes as mojibake. SVG is deliberately absent: it IS text, the
+/// editor opens it usefully, and an agent that writes one wants to read its source.
+///
+/// One set, read by the three places that must agree on "is this an image": the tab factory
+/// (`panelTabContent(for:)`'s `.code` arm), ⌘S (`editorSaveMenuTarget`) and the transcript's
+/// thumbnail gate (`transcriptFileMentionIsImage`, `ChatContent/TranscriptFileMentions.swift`).
+let panelImageFileExtensions: Set<String> = [
+    "png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "tif", "tiff", "bmp",
+]
+
+/// PURE: does a `.code` tab pointed at `path` render the native image viewer (`PanelImageTab`)
+/// instead of the editor viewport?
+///
+/// **Why an image is still a `.code` tab on the wire, not a new `PanelTabKind`.** `PanelTabKind` is
+/// a CLOSED enum on both sides of the wire — the phone's pinned `WinterProtocol` and any older app
+/// fail the whole-event decode of a `panel_tab_opened` whose `kind` they have never seen, and the
+/// session log replays byte-verbatim to them (`panelFilesDoorShown`'s own doc tells the same story
+/// for `"files"`). A `.code` tab already means "a file, by absolute path, in `url`"; the decision to
+/// draw that file as a picture is made HERE, at the rendering boundary, from the path alone — so no
+/// event, fold or peer learns anything new, and an old app shows the same tab as a code tab.
+///
+/// Case-insensitive off `NSString.pathExtension`, like `panelTabKind(forFilePath:)` beside it.
+func panelCodeTabShowsImage(path: String?) -> Bool {
+    guard let path, !path.isEmpty else { return false }
+    return panelImageFileExtensions.contains((path as NSString).pathExtension.lowercased())
+}
+
 /// What a code tab draws when it is NOT drawing the editor. Every case is a calm, centred sentence
 /// (or a spinner); none of them is an error the user can act on by pressing something, which is why
 /// there is no retry anywhere here — the doors that retry are the file tree and the transcript, and
@@ -399,6 +428,9 @@ func editorTabDisplayPath(path: String?, fallbackTitle: String) -> String {
 func editorSaveMenuTarget(tabs: [PanelTab], activeTabId: String?) -> PanelTab? {
     guard let tab = panelShownTab(tabs: tabs, activeTabId: activeTabId) else { return nil }
     guard tab.kind == .code, let url = tab.url, !url.isEmpty else { return nil }
+    // An image tab is a viewer, not a buffer (`panelCodeTabShowsImage`): there is nothing to save,
+    // and a ⌘S reaching the runtime would file a save outcome for a path it never opened.
+    guard !panelCodeTabShowsImage(path: url) else { return nil }
     return tab
 }
 
