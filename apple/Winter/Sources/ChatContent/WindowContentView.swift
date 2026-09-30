@@ -85,6 +85,12 @@ struct WindowContentView<Accessory: View>: View {
     /// `directory.rows`, the same "read fresh from the directory" convention `composerCardMode`
     /// itself already follows.
     var sessionHasWorkingDirectory: Bool = false
+    /// Transcript file links (2026-09-30): the session's PRIMARY working directory
+    /// (`dirs.first.path`), which a relative path an assistant reply names resolves against before it
+    /// is stat-ed and handed to `onOpenFile` as an absolute path. `nil` — every home but the shell, and
+    /// any session without one — leaves relative mentions as text. A plain value, like
+    /// `sessionHasWorkingDirectory` above and for the same display-time reason.
+    var fileMentionBaseDirectory: String? = nil
     /// How far this view runs UP under a titlebar band it has been laid out beneath (2026-09-19,
     /// the shell only; zero everywhere else). The transcript then scrolls up under the band and
     /// fades out there instead of being cut at a hard line — the empty strip at the top of the page
@@ -232,6 +238,7 @@ struct WindowContentView<Accessory: View>: View {
                 inactiveElicitations: adapter.inactiveElicitations
             ), onOpenDiff: onOpenDiff, onOpenFile: onOpenFile,
             sessionHasWorkingDirectory: sessionHasWorkingDirectory,
+            fileMentionBaseDirectory: fileMentionBaseDirectory,
             bottomOverlayInset: topBleed > 0 ? composerClusterHeight : 0)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .modifier(TranscriptTopBleed(bleed: topBleed, inset: topInset,

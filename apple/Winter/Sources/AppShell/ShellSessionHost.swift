@@ -4021,6 +4021,10 @@ struct ShellSessionView: View {
                         sessionHasWorkingDirectory: editorTabSessionRoots(
                             sessionId: host.attachedSessionId, rows: directory.rows
                         ) == .present,
+                        // Transcript file links: where a reply's relative paths resolve — the SAME
+                        // field `resolvedFilePath` joins against (`dirs.first.path`, never `cwd`).
+                        fileMentionBaseDirectory: directory.rows
+                            .first { $0.sessionId == host.attachedSessionId }?.dirs?.first?.path,
                         topBleed: topBleed
                     ) {
                         // The header row is gone from the shell (2026-09-17, ChatGPT has none);

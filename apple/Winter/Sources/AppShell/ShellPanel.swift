@@ -705,7 +705,7 @@ private struct PanelTabPill: View {
                             .clipShape(RoundedRectangle(cornerRadius: panelTabFaviconRadius,
                                                         style: .continuous))
                     } else {
-                        Image(systemName: panelTabFaviconSystemImage(tab.kind))
+                        Image(systemName: panelTabPillSystemImage(tab))
                             .font(Typography.caption())
                             .foregroundStyle(Theme.textMuted)
                     }
@@ -820,6 +820,14 @@ func panelTabFaviconSystemImage(_ kind: PanelTabKind) -> String {
     // the placeholder pill already reads as "files" rather than a generic blank one.
     case .files: return "folder"
     }
+}
+
+/// The glyph a pill with no page icon shows: the kind's own (`panelTabFaviconSystemImage`), except a
+/// `.code` tab pointed at a picture (`panelCodeTabShowsImage`), which renders the image viewer and
+/// says so — a code glyph on a photo tab would describe a surface the tab never draws.
+func panelTabPillSystemImage(_ tab: PanelTab) -> String {
+    if tab.kind == .code, panelCodeTabShowsImage(path: tab.url) { return "photo" }
+    return panelTabFaviconSystemImage(tab.kind)
 }
 
 /// A tab's display title before the daemon has reported one (`panel_tab_navigated` hasn't landed
