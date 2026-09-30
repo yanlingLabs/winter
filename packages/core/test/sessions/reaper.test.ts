@@ -745,6 +745,39 @@ describe("wired: session.create's mint-time sweep (session-activity-hygiene T6)"
     c.close();
   });
 
+  // "Cannot use a closed database" (follow_up.md, fixed 2026-09-30): a create answered just before
+  // shutdown left its sweep queued, and the owner's `server.stop(); store.close()` ran first, so the
+  // sweep queried a closed store. `stop()` now cancels a queued sweep. The 0 ms sweep is stretched to
+  // 50 ms here (only for this test) so "queued but not yet run" is a window the test can stop inside.
+  test("stop() cancels a queued mint-time sweep — it never runs against the store closed after it", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-reaper-stop-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    let sweepRan = false;
+    const server = startIpcServer({
+      socketPath, serverVersion: "test", tokens: authority, store, winterHome: home,
+      reapEmptySessions: () => { sweepRan = true; store.emptySessionIds(() => 0, Date.now()); return []; },
+    });
+    const realSetTimeout = globalThis.setTimeout;
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "harness");
+    globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) =>
+      realSetTimeout(fn, ms === 0 ? 50 : ms, ...rest)) as typeof setTimeout;
+    try {
+      const res = await c.request(METHODS.sessionCreate, { scope: "global" });
+      expect(res.result.sessionId).toBeTruthy();
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+    c.close();
+    server.stop();
+    store.close();
+    await new Promise((r) => realSetTimeout(r, 120));
+    expect(sweepRan).toBe(false);
+  });
+
   test("with no winterHome wired, session.create still works and never throws over the sweep", async () => {
     const { socketPath, harnessToken } = await boot(false);
     const c = await TestClient.connect(socketPath);
