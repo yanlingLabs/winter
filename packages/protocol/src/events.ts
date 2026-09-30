@@ -57,11 +57,34 @@ export const HarnessDetachedEvent = Base.extend({
   clientName: z.string().min(1),
 });
 
+/** Code-mode image input: at most this many images ride one `user_message` (and one
+ *  `session.send`/`session.steer` — the daemon refuses more, typed `image_reference_invalid`). */
+export const USER_MESSAGE_IMAGES_MAX = 20;
+/** The refusal past `USER_MESSAGE_IMAGES_MAX` — the daemon's `image_reference_invalid` message, and
+ *  what a client shows when it refuses the same draft before staging anything. */
+export const USER_MESSAGE_IMAGES_MAX_MESSAGE = `A message can carry at most ${USER_MESSAGE_IMAGES_MAX} images`;
+/** A staged image's absolute path is at most this many characters (a `sessionTmpDir` path is ~100). */
+export const USER_MESSAGE_IMAGE_PATH_MAX = 4096;
+/** One `[Image #n]` placeholder's staged file: `n` is the number in the message text's token, `path`
+ *  the absolute path `session.stageImage` answered. */
+export const UserMessageImageRef = z.object({
+  n: z.number().int().positive(),
+  path: z.string().min(1).max(USER_MESSAGE_IMAGE_PATH_MAX),
+});
+export type UserMessageImageRef = z.infer<typeof UserMessageImageRef>;
+
 export const UserMessageEvent = Base.extend({
   type: z.literal("user_message"),
   threadId: z.string().min(1),
+  /** What the USER wrote — `[Image #n]` placeholders stay as typed (the bubble shows them). */
   text: z.string().min(1),
   clientName: z.string().min(1),
+  /** Code-mode image input: the staged file behind each `[Image #n]` in `text`. Only the MODEL sees
+   *  the paths — the daemon substitutes them (`modelTextOf`, core) wherever it feeds this message to
+   *  the runtime child. Absent on every message without images (never an empty array). Bounded
+   *  (≤ `USER_MESSAGE_IMAGES_MAX` entries, each path ≤ `USER_MESSAGE_IMAGE_PATH_MAX` chars), so it
+   *  stays inside `session.history`/the remote stream's per-event caps. */
+  images: z.array(UserMessageImageRef).min(1).max(USER_MESSAGE_IMAGES_MAX).optional(),
 });
 
 const ThreadBase = Base.extend({ threadId: z.string().min(1) });

@@ -983,3 +983,99 @@ describe("startWinterSession — resume", () => {
     expect(h.session.pendingSends).toEqual(["two"]);
   });
 });
+
+// Code-mode image input: the log keeps what the user wrote (`[Image #n]` + `images`); the CHILD is
+// pushed the text with each placeholder replaced by its path — live, held, steered, handed off and
+// replayed on resume alike — and the projector's echo window matches the pushed text, so no
+// pass-through `user_message` ever doubles the bubble.
+describe("startWinterSession — code-mode image placeholders (only the model sees the paths)", () => {
+  const IMG = [{ n: 1, path: "/tmp/winter-session-s_x/images/image_1.png" }];
+  const IMG2 = [{ n: 1, path: "/tmp/winter-session-s_x/images/image_2.png" }];
+  const userMessages = (h: Harness) => h.events.filter((e) => e.type === "user_message") as Array<Extract<SessionEvent, { type: "user_message" }>>;
+
+  test("a live send: the log keeps the placeholder and images, the child gets the path, an echo of it is dropped", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    await h.session.send("look at [Image #1] please", "cli", IMG);
+    await h.settled();
+    expect(h.q().pushed).toEqual(["look at /tmp/winter-session-s_x/images/image_1.png please"]);
+    expect(userMessages(h)).toMatchObject([{ text: "look at [Image #1] please", clientName: "cli", images: IMG }]);
+    // A child that echoes its input back is recognised by the pushed (path) text — no second bubble.
+    h.q().emit({ type: "user", message: { role: "user", content: [{ type: "text", text: "look at /tmp/winter-session-s_x/images/image_1.png please" }] } });
+    h.q().emit(result());
+    await h.settled();
+    expect(userMessages(h)).toHaveLength(1);
+  });
+
+  test("a send without images stores no images key (never an empty array)", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    await h.session.send("plain", "cli", []);
+    expect("images" in userMessages(h)[0]!).toBe(false);
+    expect(h.q().pushed).toEqual(["plain"]);
+  });
+
+  test("a send held behind a running turn is pushed with its path at the turn's result", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    await h.session.send("first", "cli");
+    await expect(h.session.send("then [Image #1]", "cli", IMG)).resolves.toMatchObject({ queued: true });
+    expect(h.session.pendingSends).toEqual(["then /tmp/winter-session-s_x/images/image_1.png"]);
+    h.q().emit(result());
+    await h.settled();
+    expect(h.q().pushed).toEqual(["first", "then /tmp/winter-session-s_x/images/image_1.png"]);
+    expect(userMessages(h).map((m) => m.text)).toEqual(["first", "then [Image #1]"]);
+  });
+
+  test("a steer carries the placeholder in the log and the path to the child", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    await h.session.send("running", "cli");
+    await expect(h.session.steer("also [Image #1]", "orb", IMG)).resolves.toMatchObject({ injected: true });
+    await h.settled();
+    expect(h.q().pushed).toEqual(["running", "also /tmp/winter-session-s_x/images/image_1.png"]);
+    expect(userMessages(h)[1]).toMatchObject({ text: "also [Image #1]", clientName: "orb", images: IMG });
+  });
+
+  test("resume: the log's unconsumed messages are re-pushed with their paths (and a handoff's held ones)", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    let finish: (() => void) | undefined;
+    const held = h.session.beginHandoff(() => new Promise<void>((resolve) => { finish = resolve; }));
+    await h.session.send("see [Image #1]", "cli", IMG);
+    await h.session.steer("and [Image #1] too", "cli", IMG2);
+    await h.settled();
+    expect(h.q().pushed).toEqual([]);
+    expect(userMessages(h).map((m) => m.text)).toEqual(["see [Image #1]", "and [Image #1] too"]);
+    expect(unconsumedUserMessages(h.events)).toEqual([
+      "see /tmp/winter-session-s_x/images/image_1.png",
+      "and /tmp/winter-session-s_x/images/image_2.png too",
+    ]);
+    await h.session.end();
+    finish!();
+    await expect(held).resolves.toEqual({ heldTurns: 2 });
+    h.transcriptExists = true;
+    await h.session.open();
+    await h.settled();
+    expect(h.q().pushed).toEqual(["see /tmp/winter-session-s_x/images/image_1.png"]);
+    expect(h.session.pendingSends).toEqual(["and /tmp/winter-session-s_x/images/image_2.png too"]);
+  });
+
+  test("unconsumedUserMessages substitutes only the placeholders `images` names", () => {
+    const ev = (extra: Record<string, unknown>): SessionEvent => ({ type: "user_message", sessionId: "s", threadId: "main", seq: 0, ts: 0, clientName: "cli", ...extra } as unknown as SessionEvent);
+    expect(unconsumedUserMessages([
+      ev({ text: "[Image #1] vs [Image #2] vs [Image #01]", images: [{ n: 1, path: "/a.png" }] }),
+      ev({ text: "[Image #1] literal" }),
+    ])).toEqual(["/a.png vs [Image #2] vs /a.png", "[Image #1] literal"]);
+  });
+});

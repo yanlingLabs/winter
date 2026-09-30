@@ -3574,8 +3574,9 @@ final class ShellSessionHost: ObservableObject {
     /// cleared ONLY on success, so a failed send never loses the composed text (spec §6 parity).
     ///
     /// Code-mode image input: every `[Image #n]` still in the draft is staged first
-    /// (`FieldStateAdapter.composerTextForSend` — the one door both code-mode submit sites share) and
-    /// replaced by its path; a staging refusal shows on the composer's notice line and sends nothing.
+    /// (`FieldStateAdapter.composerTextForSend` — the one door both code-mode submit sites share); the
+    /// text keeps its placeholders and `images` carries the staged paths (only the model sees them); a
+    /// staging refusal shows on the composer's notice line and sends nothing.
     private func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let live = attachment, let sid = attachedSessionId else { return }
@@ -3592,9 +3593,9 @@ final class ShellSessionHost: ObservableObject {
             }) else { return }
             let ok: Bool
             if wasRunning {
-                ok = (try? await client.steer(sessionId: sid, text: outgoing)) != nil
+                ok = (try? await client.steer(sessionId: sid, text: outgoing.text, images: outgoing.images)) != nil
             } else {
-                ok = (try? await client.send(sessionId: sid, text: outgoing)) != nil
+                ok = (try? await client.send(sessionId: sid, text: outgoing.text, images: outgoing.images)) != nil
             }
             // Clears only what was sent — edits made during the round trip stay.
             if ok { adapter.composerSendSucceeded(sentDraft: text) }

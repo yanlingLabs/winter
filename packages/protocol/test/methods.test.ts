@@ -150,7 +150,10 @@ import {
   ProviderStatusResult,
   VersionsGetResult,
   SettingsSetSkillDeniedParams,
+  SessionSendParams,
+  SessionStageImageResult,
 } from "../src/methods";
+import { USER_MESSAGE_IMAGE_PATH_MAX } from "../src/events";
 
 describe("SessionAttachParams", () => {
   test("fromSeq defaults to 0 when omitted", () => {
@@ -1553,5 +1556,27 @@ describe("WS-21 method schemas", () => {
     expect(() => m.MarketplaceInfoSchema.parse({ ...market, kind: "npm" })).toThrow();
     expect(m.PluginSetEnabledResult.parse({ ok: true, spec: "fmt@local", scope: "user", enabled: false }).enabled).toBe(false);
     expect(m.PluginUninstallResult.parse({ ok: true, spec: "fmt@local", scope: "user" }).scope).toBe("user");
+  });
+});
+
+// Code-mode image input: `session.send`/`session.steer` carry `images` beside a text that keeps its
+// `[Image #n]` placeholders; `session.stageImage` says whether the daemon takes them.
+describe("session.send / session.steer images, session.stageImage imagesOnSend", () => {
+  test("images is optional on both; each entry is a positive n and a bounded, non-empty path", () => {
+    const base = { sessionId: "s_1", text: "see [Image #1]" };
+    for (const schema of [SessionSendParams, SessionSteerParams]) {
+      expect(schema.parse(base)).toEqual(base);
+      expect(schema.parse({ ...base, images: [{ n: 1, path: "/t/images/image_1.png" }] }).images).toEqual([{ n: 1, path: "/t/images/image_1.png" }]);
+      expect(() => schema.parse({ ...base, images: [{ n: 0, path: "/p" }] })).toThrow();
+      expect(() => schema.parse({ ...base, images: [{ n: 1.5, path: "/p" }] })).toThrow();
+      expect(() => schema.parse({ ...base, images: [{ n: 1, path: "" }] })).toThrow();
+      expect(() => schema.parse({ ...base, images: [{ n: 1, path: "/" + "a".repeat(USER_MESSAGE_IMAGE_PATH_MAX) }] })).toThrow();
+    }
+  });
+
+  test("stageImage's imagesOnSend is optional (an older daemon omits it) and only ever true", () => {
+    expect(SessionStageImageResult.parse({ path: "/p" })).toEqual({ path: "/p" });
+    expect(SessionStageImageResult.parse({ path: "/p", imagesOnSend: true })).toEqual({ path: "/p", imagesOnSend: true });
+    expect(() => SessionStageImageResult.parse({ path: "/p", imagesOnSend: false })).toThrow();
   });
 });
