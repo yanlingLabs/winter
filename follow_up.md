@@ -33,5 +33,4 @@ The canonical list of known, deliberately parked work. Nothing here blocks a rel
 - [ ] Retire the router: fold run homes and messaging into the SDK.
 
 ## Tests and infrastructure
-- [ ] WinterKit's `FakePhoneConformanceTests.testStreamingDeltasReachThePhone…` fails on `main` (timing-sensitive, real-daemon).
 - [ ] The core suite prints "Cannot use a closed database" lines from teardown ordering (no test fails).

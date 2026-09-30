@@ -274,17 +274,12 @@ jobs:
       # npm platform package). Lane J (2026-09) fixed 4 of the remaining 5 by having the affected
       # tests settle a credential-less Winter-leg turn's real `turn_started`/`agent_error`/
       # `turn_completed` tail before asserting exact frame counts, instead of racing it (see those
-      # tests' own doc comments and `RealDaemon.waitForFirstLine`'s). `FakePhoneConformanceTests`'
-      # streaming test stays skipped: its `agentProvider` injection seam only feeds the daemon's
-      # OWN internal jobs now (titler/reviewer/dreamer/cleaner), never a real session turn, so its
-      # controlled-chunks/reasoning_item/oversized-chunk scenario cannot be exercised without a new
-      # `winter-test/*` double in the separate `winter-agent-sdk` repo (not checked out here) —
-      # genuine product/test-infra gap, not a stale assertion; do not remove this skip without that.
+      # tests' own doc comments and `RealDaemon.waitForFirstLine`'s). The last one,
+      # `FakePhoneConformanceTests`' streaming test, was rebuilt (2026-09-30) around a fake OpenAI
+      # Responses endpoint the daemon's real `openai` adapter streams from, so nothing is skipped.
       - name: WinterKit — swift test (retry once — known socket-test flake class)
         working-directory: apple/WinterKit
-        env:
-          WINTERKIT_SKIP: 'FakePhoneConformanceTests/(testStreamingDeltasReachThePhone_OpaqueStateDoesNot_AndAnOversizedEventDoesNotKillTheLink)$'
-        run: swift test --skip "$WINTERKIT_SKIP" || (echo "::warning::WinterKit swift test failed once — retrying (known socket-test flake class)"; swift test --skip "$WINTERKIT_SKIP")
+        run: swift test || (echo "::warning::WinterKit swift test failed once — retrying (known socket-test flake class)"; swift test)
 
       # WS-19 Lane I: the THIRD kit the phone links (WinterProtocol + WinterSessionKit +
       # WinterChatKit are the root umbrella's products) had no CI step at all — its ~338 tests ran
