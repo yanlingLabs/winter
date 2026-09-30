@@ -33,6 +33,7 @@
 // dependency of the wrapper — falling back to the single hop only for a DIRECT install (e.g. a dev
 // `bun add <tarball> --optional` in `packages/core` itself, which is top-level-resolvable).
 import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { bundleRuntimePath } from "./bundle-layout";
@@ -147,4 +148,30 @@ export function resolveWinterExecutable(input: {
   }
   if (packagePath !== undefined) return { ok: true, path: packagePath, source: "platform-package" };
   return { ok: false, error: new WinterExecutableUnavailable(tried, { triedPlatformPackage: true }) };
+}
+
+/** An explicitly configured runtime (`runtimes.winterExecutable` / `$WINTER_RUNTIME_EXECUTABLE`) is used as
+ *  it is — that is how a local SDK build gets tested — so nothing refuses a version that differs from the
+ *  pin. But a stale one silently runs yesterday's runtime (2026-09-30: a dev home's `dist/winter` stayed on
+ *  0.0.35 after the pin moved to 0.0.36, and code sessions got the old Read). This names the mismatch:
+ *  `undefined` when the binary reports the pinned version (or cannot be asked), else one line for the log.
+ *  The answer is cached per path + size + mtime, so a session start costs one `--version` per rebuild. */
+const explicitVersionCache = new Map<string, string | undefined>();
+export function explicitRuntimeVersionNote(
+  path: string,
+  deps: { runVersion?: (path: string) => string | undefined; statKey?: (path: string) => string | undefined } = {},
+): string | undefined {
+  const statKey = deps.statKey ?? ((p: string) => { try { const s = statSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return undefined; } });
+  const key = `${path}\0${statKey(path) ?? ""}`;
+  if (explicitVersionCache.has(key)) return explicitVersionCache.get(key);
+  const runVersion = deps.runVersion ?? ((p: string) => {
+    const r = spawnSync(p, ["--version"], { encoding: "utf8", timeout: 5000 });
+    return r.status === 0 ? r.stdout.trim().split("\n").pop()?.trim() : undefined;
+  });
+  const reported = runVersion(path);
+  const note = reported === undefined || reported === REQUIRED_WINTER_AGENT_SDK
+    ? undefined
+    : `code sessions run ${path}, which reports winter ${reported}, but this daemon is pinned to ${REQUIRED_WINTER_AGENT_SDK} — rebuild it (bun run build:winter) or unset runtimes.winterExecutable / $WINTER_RUNTIME_EXECUTABLE`;
+  explicitVersionCache.set(key, note);
+  return note;
 }

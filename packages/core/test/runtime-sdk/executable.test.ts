@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { resolvePlatformPackageWinter, resolveWinterExecutable, WinterExecutableUnavailable } from "../../src/runtime-sdk/executable";
+import { explicitRuntimeVersionNote, resolvePlatformPackageWinter, resolveWinterExecutable, WinterExecutableUnavailable } from "../../src/runtime-sdk/executable";
 import { bundleRuntimePath } from "../../src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../../src/runtime-sdk/versions";
 
@@ -231,5 +231,32 @@ describe("resolvePlatformPackageWinter (P9a-9, fix wave C1/M2)", () => {
     // as a function signature (fromUrl defaults to import.meta.url) without asserting what it
     // finds — this worktree's ambient node_modules may or may not carry m1's staged residue.
     expect(() => resolvePlatformPackageWinter()).not.toThrow();
+  });
+});
+
+describe("explicitRuntimeVersionNote", () => {
+  test("a configured runtime reporting the pinned version says nothing", () => {
+    expect(explicitRuntimeVersionNote("/x/winter-a", { runVersion: () => REQUIRED_WINTER_AGENT_SDK, statKey: () => "1:1" })).toBeUndefined();
+  });
+  test("a stale configured runtime is named, with both versions and the fix", () => {
+    const note = explicitRuntimeVersionNote("/x/winter-b", { runVersion: () => "0.0.1", statKey: () => "1:1" });
+    expect(note).toContain("/x/winter-b");
+    expect(note).toContain("winter 0.0.1");
+    expect(note).toContain(`pinned to ${REQUIRED_WINTER_AGENT_SDK}`);
+    expect(note).toContain("bun run build:winter");
+  });
+  test("a binary that can't be asked says nothing (the spawn itself reports a broken binary)", () => {
+    expect(explicitRuntimeVersionNote("/x/winter-c", { runVersion: () => undefined, statKey: () => "1:1" })).toBeUndefined();
+  });
+  test("asked once per path + size + mtime: a rebuild is asked again", () => {
+    let calls = 0;
+    let stat = "1:1";
+    const deps = { runVersion: () => { calls++; return "0.0.1"; }, statKey: () => stat };
+    explicitRuntimeVersionNote("/x/winter-d", deps);
+    explicitRuntimeVersionNote("/x/winter-d", deps);
+    expect(calls).toBe(1);
+    stat = "2:2";
+    expect(explicitRuntimeVersionNote("/x/winter-d", { ...deps, runVersion: () => { calls++; return REQUIRED_WINTER_AGENT_SDK; } })).toBeUndefined();
+    expect(calls).toBe(2);
   });
 });
