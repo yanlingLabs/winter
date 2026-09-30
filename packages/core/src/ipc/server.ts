@@ -914,6 +914,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     throw new Error("startIpcServer: an engine requires a shared hub (engine and server must broadcast through the same SessionHub)");
   }
   const hub = opts.hub ?? new SessionHub(opts.store);
+  /** Mint-time reaper sweeps queued by `session.create` and not yet run — cancelled by `stop()`. */
+  const pendingReaps = new Set<ReturnType<typeof setTimeout>>();
 
   /**
    * WS-19 (whole-branch review MAJOR 1): after a credential is added, replaced or removed, every
@@ -1950,13 +1952,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // all), reaping with no audit trail at all is not a degraded mode this feature should ever
         // run in — see reaper.ts's own doc comment on the delete-then-audit order. Every real
         // caller (daemon.ts) always wires `winterHome`.
+        //
+        // The timer is TRACKED (`pendingReaps`) and cancelled by `stop()`: a create answered just
+        // before shutdown used to leave its sweep queued behind the reply, and the caller's
+        // `stop()` → `store.close()` ran first, so the sweep queried a closed database ("Cannot use
+        // a closed database" from `emptySessionIds`). A server that has stopped reaps nothing.
         if (opts.winterHome) {
           const home = opts.winterHome;
           const reap = opts.reapEmptySessions ?? reapEmptySessions;
-          setTimeout(() => {
+          const timer = setTimeout(() => {
+            pendingReaps.delete(timer);
             try { reap({ store: opts.store, attachedCount: (id) => hub.attachedCount(id), home, onDelete: opts.onSessionDeleted }); }
             catch (err) { console.error("[reaper] mint-time sweep failed:", err); }
           }, 0);
+          pendingReaps.add(timer);
         }
         return { sessionId, trusted };
       }
@@ -4774,5 +4783,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // T5: the enforcement owns real timers (the demotion sweep interval, plus any pending post-turn
   // grace) — a server torn down without stopping them leaves callbacks that fire against a dead
   // store, which in a test run is a cross-test leak rather than a crash (they're unref'd).
-  return { stop() { enforcement.stop(); mcpOAuthDoors?.dispose(); server.stop(true); } };
+  return {
+    stop() {
+      // Before anything else: a queued mint-time reaper sweep must never outlive the server (it
+      // would run against a store its owner closes right after this returns — see `pendingReaps`).
+      for (const timer of pendingReaps) clearTimeout(timer);
+      pendingReaps.clear();
+      enforcement.stop(); mcpOAuthDoors?.dispose(); server.stop(true);
+    },
+  };
 }

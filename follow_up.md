@@ -31,6 +31,3 @@ The canonical list of known, deliberately parked work. Nothing here blocks a rel
 - [ ] The local settings tier is read before the "shipped by the repository" check (a local-process race only).
 - [ ] The daemon's `gitRootFor` could tell "not a git repository" apart from "git failed" and pass it to the router, retiring the router's `.git`-walk heuristic.
 - [ ] Retire the router: fold run homes and messaging into the SDK.
-
-## Tests and infrastructure
-- [ ] The core suite prints "Cannot use a closed database" lines from teardown ordering (no test fails).
