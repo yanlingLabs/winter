@@ -166,17 +166,21 @@ func composerPasteboardMayHaveImage(_ pasteboard: NSPasteboard) -> Bool {
     composerImageSource(on: pasteboard) != nil
 }
 
-/// The images a pasteboard carries, or `nil` when it carries none — `nil` hands the paste/drop back to
-/// AppKit untouched. Image files are read (and converted if needed); with no file URLs, PNG data wins
+/// The images a pasteboard carries, or `nil` when it carries none (or any of them fails to decode) —
+/// `nil` hands the paste/drop back to AppKit untouched. Image files are read (and converted if needed); with no file URLs, PNG data wins
 /// over TIFF; text beside the image (see `composerStringIsPastedText`) keeps the paste text.
 func composerImages(from pasteboard: NSPasteboard) -> [ComposerImage]? {
     switch composerImageSource(on: pasteboard) {
     case nil:
         return nil
     case .files(let urls):
-        return urls.compactMap { url in (try? Data(contentsOf: url)).flatMap(composerImage(fromImageData:)) }
+        // Every file must DECODE, not merely be typed as an image: an SVG conforms to `.image` but
+        // ImageIO reads no frame from it, and a corrupt file reads nothing. Any such file hands the
+        // whole paste back to AppKit (which inserts the paths) rather than silently doing nothing.
+        let images = urls.compactMap { url in (try? Data(contentsOf: url)).flatMap(composerImage(fromImageData:)) }
+        return images.count == urls.count ? images : nil
     case .data(let type):
-        return pasteboard.data(forType: type).flatMap(composerImage(fromImageData:)).map { [$0] } ?? []
+        return pasteboard.data(forType: type).flatMap(composerImage(fromImageData:)).map { [$0] }
     }
 }
 
@@ -190,12 +194,20 @@ struct ComposerImageDraft: Equatable {
     var isEmpty: Bool { images.isEmpty }
 
     /// Adds an image and answers its number. Numbers climb for the draft's whole life: a deleted
-    /// placeholder's number is never reused, so ⌘Z bringing it back still finds its image.
-    mutating func add(_ image: ComposerImage) -> Int {
-        let n = nextNumber
-        nextNumber += 1
+    /// placeholder's number is never reused, so ⌘Z bringing it back still finds its image. `draftText`
+    /// is the draft as it stands: the number also lands past every `[Image #n]` already WRITTEN in it,
+    /// so a placeholder that came back after the attachments were reset (⌘Z past a send, a pasted old
+    /// message) never binds to a different, newly attached image — it stays literal text.
+    mutating func add(_ image: ComposerImage, draftText: String = "") -> Int {
+        let n = max(nextNumber, (composerImageTokenNumbers(in: draftText).max() ?? 0) + 1)
+        nextNumber = n + 1
         images[n] = image
         return n
+    }
+
+    /// Drops these attachments (a sent message's), keeping every other one and the counter.
+    mutating func remove(_ numbers: [Int]) {
+        for n in numbers { images[n] = nil }
     }
 
     /// The attachments `text` still references, first-appearance order, each once.

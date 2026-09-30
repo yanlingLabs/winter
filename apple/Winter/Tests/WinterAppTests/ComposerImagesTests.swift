@@ -262,4 +262,117 @@ final class ComposerImagesTests: XCTestCase {
         XCTAssertTrue(a.composerImages.isEmpty)
         XCTAssertNil(a.composerNotice)
     }
+
+    // MARK: - Review fixes
+
+    private func privateBoard() -> NSPasteboard {
+        NSPasteboard(name: NSPasteboard.Name("winter.test.\(UUID().uuidString)"))
+    }
+
+    private func tempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("winter-composer-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// An SVG conforms to `.image` but ImageIO reads no frame from it (nor from a corrupt file): the
+    /// paste must fall through to AppKit (the path is typed), never silently do nothing.
+    func testUndecodableImageFilesFallThroughToAppKit() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let svg = dir.appendingPathComponent("logo.svg")
+        try Data(#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>"#.utf8).write(to: svg)
+        let corrupt = dir.appendingPathComponent("broken.png")
+        try Data("not really a png".utf8).write(to: corrupt)
+        let good = dir.appendingPathComponent("good.png")
+        try generatedPNG(width: 8, height: 8, noise: false).write(to: good)
+        let board = privateBoard()
+        defer { board.releaseGlobally() }
+        for urls in [[svg], [corrupt], [good, svg]] {
+            board.clearContents()
+            board.writeObjects(urls.map { $0 as NSURL })
+            XCTAssertNil(composerImages(from: board), "\(urls.map(\.lastPathComponent)) must go to AppKit")
+        }
+        board.clearContents()
+        board.setData(Data("garbage".utf8), forType: .png)
+        XCTAssertNil(composerImages(from: board), "undecodable image DATA is AppKit's too, not a silent no-op")
+    }
+
+    private func textView(intake: ComposerImageIntake) -> CommandTextView {
+        let view = CommandTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
+        view.imageIntake = intake
+        return view
+    }
+
+    /// A refused image FILE (a text-only model) still types its path — AppKit's paste runs beside the
+    /// notice; an accepted one inserts its placeholder; refused image DATA is handled (nothing to type).
+    func testRefusedImageFilesFallBackToAppKitsPaste() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let shot = dir.appendingPathComponent("shot.png")
+        try generatedPNG(width: 8, height: 8, noise: false).write(to: shot)
+        let board = privateBoard()
+        defer { board.releaseGlobally() }
+        board.clearContents()
+        board.writeObjects([shot as NSURL])
+
+        var refusals = 0
+        let refusing = textView(intake: ComposerImageIntake(isEnabled: { true }, attach: { _ in refusals += 1; return nil }))
+        XCTAssertFalse(refusing.takeComposerImages(from: board), "refused files → AppKit types the path")
+        XCTAssertEqual(refusals, 1)
+        XCTAssertEqual(refusing.string, "")
+
+        let accepting = textView(intake: ComposerImageIntake(isEnabled: { true }, attach: { _ in "[Image #1]" }))
+        XCTAssertTrue(accepting.takeComposerImages(from: board))
+        XCTAssertEqual(accepting.string, "[Image #1]")
+
+        board.clearContents()
+        board.setData(generatedPNG(width: 8, height: 8, noise: false), forType: .png)
+        XCTAssertTrue(refusing.takeComposerImages(from: board), "refused image data has no text to fall back to")
+
+        let off = textView(intake: ComposerImageIntake(isEnabled: { false }, attach: { _ in XCTFail("never asked"); return nil }))
+        XCTAssertFalse(off.takeComposerImages(from: board), "not a code session → AppKit's paste, untouched")
+    }
+
+    func testANewAttachmentNeverTakesANumberAlreadyWrittenInTheDraft() {
+        var draft = ComposerImageDraft()
+        XCTAssertEqual(draft.add(ComposerImage(data: png, mediaType: "image/png"), draftText: "old [Image #1] and [Image #3]"), 4)
+        XCTAssertEqual(draft.add(ComposerImage(data: png, mediaType: "image/png")), 5)
+        let a = adapter(mode: "code")
+        a.composerDraft = "recalled [Image #1] "
+        XCTAssertEqual(a.composerImageIntake.attach(ComposerImage(data: png, mediaType: "image/png")), "[Image #2]")
+    }
+
+    /// A double Enter during staging stages and sends once; edits made meanwhile are not wiped.
+    func testOneSubmitAtATimeAndOnlyWhatWasSentIsCleared() {
+        let a = adapter(mode: "code")
+        XCTAssertTrue(a.beginComposerSubmit())
+        XCTAssertFalse(a.beginComposerSubmit(), "a second Enter while the first is in flight is refused")
+        a.endComposerSubmit()
+        XCTAssertTrue(a.beginComposerSubmit())
+        a.endComposerSubmit()
+
+        _ = a.composerImageIntake.attach(ComposerImage(data: png, mediaType: "image/png"))
+        a.composerDraft = "look [Image #1]"
+        let sent = a.composerDraft
+        a.composerDraft = sent + "\nand then [Image #1] again" // typed during the round trip
+        a.composerSendSucceeded(sentDraft: sent)
+        XCTAssertEqual(a.composerDraft, "and then [Image #1] again")
+        XCTAssertFalse(a.composerImages.isEmpty, "#1 is still referenced by what remains")
+
+        a.composerDraft = "plain"
+        a.composerSendSucceeded(sentDraft: "plain")
+        XCTAssertEqual(a.composerDraft, "")
+    }
+
+    /// Attachments carried into a chat session (the draft follows a switch) are dropped and the text
+    /// goes literally — no staging, no error.
+    func testAttachmentsCarriedIntoANonCodeSessionAreDroppedSilently() async {
+        let a = adapter(mode: "chat")
+        a.composerImages = { var d = ComposerImageDraft(); _ = d.add(ComposerImage(data: png, mediaType: "image/png")); return d }()
+        let sent = await a.composerTextForSend("see [Image #1]") { _ in XCTFail("never staged"); return "" }
+        XCTAssertEqual(sent, "see [Image #1]")
+        XCTAssertTrue(a.composerImages.isEmpty)
+        XCTAssertNil(a.composerNotice)
+    }
 }

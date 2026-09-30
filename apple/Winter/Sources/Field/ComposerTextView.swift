@@ -353,11 +353,22 @@ final class CommandTextView: NSTextView {
     }
 
     override func paste(_ sender: Any?) {
-        if let intake = liveImageIntake, let images = composerImages(from: .general) {
-            insertComposerImages(images, intake: intake)
-            return
-        }
+        if takeComposerImages(from: .general) { return }
         super.paste(sender)
+    }
+
+    /// The paste/drop decision, on a pasteboard handed in (so a test never touches the user's general
+    /// pasteboard). `true` = handled here: placeholders were inserted, or image DATA was refused (its
+    /// reason is on the surface's notice line; there is no text to fall back to). `false` = AppKit's
+    /// own paste/drop runs — no live intake, no image on the pasteboard, or image FILES whose every
+    /// attach was refused (a text-only model, too large): their paths are typed as before, beside the
+    /// notice, instead of the paste silently doing nothing.
+    func takeComposerImages(from pasteboard: NSPasteboard) -> Bool {
+        guard let intake = liveImageIntake, let images = composerImages(from: pasteboard) else { return false }
+        if insertComposerImages(images, intake: intake) { return true }
+        let hasFiles = !((pasteboard.readObjects(forClasses: [NSURL.self],
+                                                 options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []).isEmpty
+        return !hasFiles
     }
 
     /// A plain-text view does not enable Paste for image-only pasteboard content (a screenshot), so
@@ -382,25 +393,27 @@ final class CommandTextView: NSTextView {
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        if let intake = liveImageIntake, let images = composerImages(from: sender.draggingPasteboard) {
+        if liveImageIntake != nil, composerImages(from: sender.draggingPasteboard) != nil {
             let point = convert(sender.draggingLocation, from: nil)
             setSelectedRange(NSRange(location: characterIndexForInsertion(at: point), length: 0))
             window?.makeFirstResponder(self)
-            insertComposerImages(images, intake: intake)
-            return true
+            if takeComposerImages(from: sender.draggingPasteboard) { return true }
         }
         return super.performDragOperation(sender)
     }
 
     /// Attach each image in order and insert the placeholders at the caret, space-separated. The first
-    /// refusal stops the rest — its reason is already on the surface's notice line.
-    private func insertComposerImages(_ images: [ComposerImage], intake: ComposerImageIntake) {
+    /// refusal stops the rest — its reason is already on the surface's notice line. Answers whether
+    /// anything was inserted.
+    @discardableResult
+    private func insertComposerImages(_ images: [ComposerImage], intake: ComposerImageIntake) -> Bool {
         var tokens: [String] = []
         for image in images {
             guard let token = intake.attach(image) else { break }
             tokens.append(token)
         }
-        guard !tokens.isEmpty else { return }
+        guard !tokens.isEmpty else { return false }
         insertText(tokens.joined(separator: " "), replacementRange: selectedRange())
+        return true
     }
 }
