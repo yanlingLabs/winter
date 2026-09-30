@@ -417,7 +417,8 @@ export const ELICITATION_NOT_ACTIVE = "elicitation_not_active";
  *    - `image_input_unsupported` — the session's CURRENT model row does not accept images, with the
  *      exact message `IMAGE_INPUT_UNSUPPORTED_MESSAGE` (`INVALID_PARAMS`);
  *    - `image_data_invalid` — `dataBase64` is not strict base64, or decodes to nothing;
- *    - `image_too_large` — more than `STAGE_IMAGE_MAX_BYTES` (3.75 MiB) decoded, message
+ *    - `image_too_large` — more than `STAGE_IMAGE_MAX_BYTES` (3.75 MiB) decoded, or wider/taller than
+ *      `STAGE_IMAGE_MAX_DIMENSION` px (read from the header bytes), message
  *      `IMAGE_TOO_LARGE_MESSAGE` (the runtime Read tool's own image limit, so a staged file is always
  *      readable);
  *    - `image_type_unsupported` — the bytes are not png/jpeg/gif/webp (the MAGIC BYTES decide,
@@ -435,6 +436,12 @@ export const STAGE_IMAGE_MAX_BYTES = 3_932_160;
 /** `4 * ceil(STAGE_IMAGE_MAX_BYTES / 3)` — the longest base64 a max-size image encodes to. Longer
  *  data is refused `image_too_large` before it is decoded. */
 export const STAGE_IMAGE_B64_MAX_LENGTH = 4 * Math.ceil(STAGE_IMAGE_MAX_BYTES / 3);
+/** The runtime Read tool refuses an image wider or taller than this many pixels; `session.stageImage`
+ *  refuses it too (`image_too_large`), reading the dimensions from the header bytes, never decoding. */
+export const STAGE_IMAGE_MAX_DIMENSION = 8000;
+/** The long edge clients downscale an attached image to before staging — Anthropic's documented size
+ *  above which the service downscales anyway, so nothing the model could see is lost. */
+export const IMAGE_ATTACH_MAX_LONG_EDGE = 1568;
 /** The `image_too_large` refusal's wording, shared by every client's attach-time check. */
 export const IMAGE_TOO_LARGE_MESSAGE = "Images must be 3.75 MB or smaller";
 export const IMAGE_INPUT_UNSUPPORTED = "image_input_unsupported";
