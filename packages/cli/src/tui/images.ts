@@ -48,8 +48,14 @@ export class DraftImages {
   private images = new Map<number, DraftImage>();
   private next = 1;
 
-  add(image: DraftImage): number {
-    const n = this.next++;
+  /** Adds an image and answers its number. `draftText` is the draft as it stands: the number always
+   *  lands past every `[Image #n]` already written in it — a placeholder recalled from history (↑)
+   *  after the counter restarted must never bind to a DIFFERENT, newly attached image. */
+  add(image: DraftImage, draftText = ""): number {
+    const present = referencedImageNumbers(draftText);
+    const floor = present.length === 0 ? 0 : Math.max(...present);
+    const n = Math.max(this.next, floor + 1);
+    this.next = n + 1;
     this.images.set(n, image);
     return n;
   }
