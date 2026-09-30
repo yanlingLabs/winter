@@ -208,6 +208,10 @@ final class TranscriptFileMentionTests: XCTestCase {
         XCTAssertEqual(linked.map(\.0), ["/tmp/out.png"])
         XCTAssertEqual(linked.first?.1, url)
         XCTAssertEqual(String(attributed.characters), "Saved it to /tmp/out.png.", "no character changes")
+        for run in attributed.runs where run.link != nil {
+            XCTAssertEqual(run.appKit.underlineStyle, .single,
+                           "a linked path is underlined in the string itself, whatever Text does")
+        }
     }
 
     func testACodeSpanAndAMarkdownLinkLabelCarryTheLink() {

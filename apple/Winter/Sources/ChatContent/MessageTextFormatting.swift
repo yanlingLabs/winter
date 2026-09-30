@@ -257,7 +257,10 @@ enum MessageTextFormatter {
             codeForegroundColor: themeColor("TextPrimary", colorScheme: colorScheme),
             codeBackgroundColor: codeBackground,
             lineSpacing: lineSpacing,
-            fileLink: fileLink
+            fileLink: fileLink,
+            // A linked path wears Winter's accent and an underline in the string itself, so it reads
+            // as a link whatever SwiftUI's `Text` does with the `.link` run's own colour.
+            fileLinkColor: fileLink == nil ? nil : themeColor("AccentColor", colorScheme: colorScheme)
         )
         return AttributedString(attributed)
     }
@@ -380,7 +383,8 @@ enum MessageTextFormatter {
         codeForegroundColor: NSColor,
         codeBackgroundColor: NSColor?,
         lineSpacing: CGFloat = 0,
-        fileLink: ((String) -> URL?)? = nil
+        fileLink: ((String) -> URL?)? = nil,
+        fileLinkColor: NSColor? = nil
     ) -> NSAttributedString {
         let result = NSMutableAttributedString()
         let base = baseAttributes(
@@ -421,7 +425,7 @@ enum MessageTextFormatter {
         while cursor < text.endIndex {
             if let token = inlineToken(in: text, at: cursor) {
                 appendLinkingPaths(String(text[plainStart..<cursor]), attributes: base,
-                                   fileLink: fileLink, to: result)
+                                   fileLink: fileLink, color: fileLinkColor, to: result)
                 let attributes: [NSAttributedString.Key: Any]
                 switch token.kind {
                 case .code:
@@ -448,22 +452,23 @@ enum MessageTextFormatter {
                     // checkout paths carry them); otherwise any path tokens inside it link alone.
                     if let fileLink, let whole = transcriptCodeSpanPathCandidate(content),
                        let url = fileLink(whole.path) {
-                        var linked = attributes
-                        linked[.link] = url
-                        result.append(NSAttributedString(string: content, attributes: linked))
+                        result.append(NSAttributedString(
+                            string: content, attributes: fileLinked(attributes, url: url, color: fileLinkColor)))
                     } else {
-                        appendLinkingPaths(content, attributes: attributes, fileLink: fileLink, to: result)
+                        appendLinkingPaths(content, attributes: attributes, fileLink: fileLink,
+                                           color: fileLinkColor, to: result)
                     }
                 case .link:
                     var linked = attributes
                     if let fileLink, let target = token.target,
                        let candidate = transcriptLinkTargetPathCandidate(target),
                        let url = fileLink(candidate.path) {
-                        linked[.link] = url
+                        linked = fileLinked(attributes, url: url, color: fileLinkColor)
                     }
                     result.append(NSAttributedString(string: content, attributes: linked))
                 case .bold, .italic, .strike:
-                    appendLinkingPaths(content, attributes: attributes, fileLink: fileLink, to: result)
+                    appendLinkingPaths(content, attributes: attributes, fileLink: fileLink,
+                                       color: fileLinkColor, to: result)
                 }
                 cursor = token.end
                 plainStart = cursor
@@ -472,7 +477,8 @@ enum MessageTextFormatter {
             }
         }
 
-        appendLinkingPaths(String(text[plainStart...]), attributes: base, fileLink: fileLink, to: result)
+        appendLinkingPaths(String(text[plainStart...]), attributes: base, fileLink: fileLink,
+                           color: fileLinkColor, to: result)
         return result
     }
 
@@ -483,6 +489,7 @@ enum MessageTextFormatter {
     private static func appendLinkingPaths(_ run: String,
                                            attributes: [NSAttributedString.Key: Any],
                                            fileLink: ((String) -> URL?)?,
+                                           color: NSColor?,
                                            to result: NSMutableAttributedString) {
         guard let fileLink, !run.isEmpty else {
             result.append(NSAttributedString(string: run, attributes: attributes))
@@ -493,12 +500,22 @@ enum MessageTextFormatter {
             guard let url = fileLink(mention.path) else { continue }
             result.append(NSAttributedString(string: String(run[cursor..<mention.range.lowerBound]),
                                              attributes: attributes))
-            var linked = attributes
-            linked[.link] = url
-            result.append(NSAttributedString(string: String(run[mention.range]), attributes: linked))
+            result.append(NSAttributedString(string: String(run[mention.range]),
+                                             attributes: fileLinked(attributes, url: url, color: color)))
             cursor = mention.range.upperBound
         }
         result.append(NSAttributedString(string: String(run[cursor...]), attributes: attributes))
+    }
+
+    /// A run's attributes, made a file link: the `.link` a click resolves, an underline, and — when
+    /// given — the link colour (a code chip keeps its own fill behind it).
+    private static func fileLinked(_ attributes: [NSAttributedString.Key: Any], url: URL,
+                                   color: NSColor?) -> [NSAttributedString.Key: Any] {
+        var linked = attributes
+        linked[.link] = url
+        linked[.underlineStyle] = NSUnderlineStyle.single.rawValue
+        if let color { linked[.foregroundColor] = color }
+        return linked
     }
 
     /// Transcript file links: every path candidate `inlineAttributedString` would ask `fileLink`
