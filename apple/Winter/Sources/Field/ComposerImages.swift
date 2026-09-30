@@ -14,8 +14,9 @@ import WinterProtocol
 // directory. The text is sent WITH its placeholders (the user's message shows `[Image #n]`) and
 // `images` names each one's staged path; the daemon gives the MODEL the text with the paths in place.
 // A daemon whose stage answer lacks `imagesOnSend` (it would silently drop `images`) is sent the
-// paths substituted into the text instead, as before. A placeholder the user deleted is never staged. Every other mode keeps today's behaviour: the
-// intake answers "not handled" and AppKit's own paste/drop runs.
+// paths substituted into the text instead, as before. A placeholder the user deleted is never staged.
+// Every other mode keeps today's behaviour: the intake answers "not handled" and AppKit's own
+// paste/drop runs.
 //
 // Everything here is pure (or reads only a pasteboard handed to it), so the rules are unit-tested
 // without a view (`ComposerImagesTests`).
@@ -246,6 +247,17 @@ func substituteComposerImageTokens(_ text: String, paths: [Int: String]) -> Stri
     return out
 }
 
+/// At most this many images ride one message (`USER_MESSAGE_IMAGES_MAX`); a draft referencing more
+/// is refused before anything is staged — the daemon would refuse the send after the files were written.
+let composerImagesPerMessageMax = 20
+/// The daemon's own sentence for that refusal (`USER_MESSAGE_IMAGES_MAX_MESSAGE`).
+let composerImagesPerMessageMaxMessage = "A message can carry at most 20 images"
+
+/// `resolveComposerImages`' own refusal (the per-message cap), shown on the composer's notice line.
+struct ComposerImagesRefusal: Error, Equatable {
+    let message: String
+}
+
 /// What a code-mode submit sends: `session.send`/`session.steer`'s `text` and `images`.
 struct ComposerOutgoing: Equatable {
     let text: String
@@ -262,7 +274,11 @@ func resolveComposerImages(_ text: String, draft: ComposerImageDraft,
                            stage: (ComposerImage) async throws -> StagedImage) async throws -> ComposerOutgoing {
     var refs: [SessionEvent.UserMessageImageRef] = []
     var imagesOnSend = true
-    for n in draft.referencedNumbers(in: text) {
+    let referenced = draft.referencedNumbers(in: text)
+    if referenced.count > composerImagesPerMessageMax {
+        throw ComposerImagesRefusal(message: composerImagesPerMessageMaxMessage)
+    }
+    for n in referenced {
         guard let image = draft.images[n] else { continue }
         let staged = try await stage(image)
         refs.append(SessionEvent.UserMessageImageRef(n: n, path: staged.path))

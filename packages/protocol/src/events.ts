@@ -60,6 +60,9 @@ export const HarnessDetachedEvent = Base.extend({
 /** Code-mode image input: at most this many images ride one `user_message` (and one
  *  `session.send`/`session.steer` — the daemon refuses more, typed `image_reference_invalid`). */
 export const USER_MESSAGE_IMAGES_MAX = 20;
+/** The refusal past `USER_MESSAGE_IMAGES_MAX` — the daemon's `image_reference_invalid` message, and
+ *  what a client shows when it refuses the same draft before staging anything. */
+export const USER_MESSAGE_IMAGES_MAX_MESSAGE = `A message can carry at most ${USER_MESSAGE_IMAGES_MAX} images`;
 /** A staged image's absolute path is at most this many characters (a `sessionTmpDir` path is ~100). */
 export const USER_MESSAGE_IMAGE_PATH_MAX = 4096;
 /** One `[Image #n]` placeholder's staged file: `n` is the number in the message text's token, `path`

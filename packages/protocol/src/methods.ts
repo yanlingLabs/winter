@@ -418,8 +418,9 @@ export const ELICITATION_NOT_ACTIVE = "elicitation_not_active";
 
 /** Code-mode image input (2026-09-29): a composer image, STAGED into the session's own temp directory
  *  (`sessionTmpDir(sessionId)/images/image_<k>.<ext>`, the daemon picks `k`, created atomically and
- *  never over an existing file, mode 0600) so the client can replace its `[Image #n]` placeholder
- *  with the returned absolute path before sending the text as usual — the model then reads it.
+ *  never over an existing file, mode 0600); the client names the returned absolute path beside its
+ *  `[Image #n]` placeholder in `session.send`/`session.steer`'s `images`, and the daemon gives the
+ *  model the text with the path in place — the model then reads it.
  *
  *  LOCAL role only (never remote-allowlisted; an explicit harness-role check like `elicitation.url`).
  *  Every refusal is typed in `data.code`:

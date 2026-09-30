@@ -62,6 +62,18 @@ final class ComposerImagesTests: XCTestCase {
         XCTAssertEqual(plain, ComposerOutgoing(text: "no images", images: []))
     }
 
+    /// More than 20 referenced images is refused before anything is staged, with the daemon's sentence.
+    func testMoreThanTwentyImagesIsRefusedBeforeStaging() async {
+        let a = adapter(mode: "code")
+        var text = ""
+        for _ in 0..<21 { text += (a.composerImageIntake.attach(ComposerImage(data: png, mediaType: "image/png")) ?? "") + " " }
+        var staged = 0
+        let sent = await a.composerTextForSend(text) { _ in staged += 1; return StagedImage(path: "/t/x.png", imagesOnSend: true) }
+        XCTAssertNil(sent, "nothing is sent")
+        XCTAssertEqual(staged, 0, "nothing is staged")
+        XCTAssertEqual(a.composerNotice, "A message can carry at most 20 images")
+    }
+
     /// A daemon that predates `imagesOnSend` would silently drop `images` — so any stage answer
     /// without it sends the paths in the text, as before, with no images.
     func testResolveSubstitutesForADaemonWithoutImagesOnSend() async throws {
