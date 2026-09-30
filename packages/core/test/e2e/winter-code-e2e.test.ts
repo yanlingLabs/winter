@@ -107,8 +107,12 @@ const homeSignature = (dir: string): string => walkHome(dir, (rel, st) => (st.is
 const projectsSignature = (home: string): string => walkHome(join(home, "projects"), (rel, st) => `${rel} ${st.size} ${st.mtimeMs}`);
 const winterSurvivors = (bin: string): string[] =>
   Bun.spawnSync(["ps", "-axo", "pid=,command="]).stdout.toString().split("\n").map((l) => l.trim()).filter((l) => l.replace(/^\d+\s+/, "").startsWith(bin));
+/** `pgrep -f` takes a REGEX. The npm platform binary's path carries `+` and `.`
+ *  (`…/@yanlinglabs+winter-agent-sdk-darwin-arm64@0.0.35/…`), so an unescaped path matched nothing and
+ *  every child scan came back empty whenever `$WINTER_RUNTIME_EXECUTABLE` was unset. */
+const pgrepLiteral = (path: string): string => path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const winterChildren = (bin: string): string[] =>
-  Bun.spawnSync(["pgrep", "-P", String(process.pid), "-f", bin]).stdout.toString().trim().split("\n").filter(Boolean);
+  Bun.spawnSync(["pgrep", "-P", String(process.pid), "-f", pgrepLiteral(bin)]).stdout.toString().trim().split("\n").filter(Boolean);
 const types = (events: SessionEvent[]): string[] => events.map((e) => e.type);
 
 describeWithWinterBinary("code on the Winter leg — the built binary through a real daemon", (bin) => {

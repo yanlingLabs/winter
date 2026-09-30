@@ -39,15 +39,29 @@ import {
  *
  * The router does not expose its descriptor record, so the last observable step is read through the
  * guard that IS keyed by it: a query whose own `mcpServers` collides with a capability name is
- * refused, naming that capability. That probe runs before the leg is picked and before anything is
- * spawned, so no child process is created anywhere in this file.
+ * refused, naming that capability, before the leg is picked and before anything is spawned. A probe
+ * the guard does NOT refuse is a real query and does spawn a child — `queries` ends every one.
  */
 
 let home: string;
 let handles: WinterRuntimeSdk[];
+/** A probe the guard does NOT refuse (a bare key, which is not a capability's name) is a real query:
+ *  the router picks a leg and spawns a `winter` child for it. Each one is ended here — left alone,
+ *  those children outlived the file and were counted as survivors by the e2e home-isolation checks
+ *  that run later in the same `bun test` process. */
+let queries: AsyncGenerator<unknown>[];
+/** Ends a probe query AND its child. The child is spawned at `query()` even with a pre-aborted
+ *  controller, and it is killed only once the generator is first pulled (`next()` then rejects
+ *  "query aborted: runtime process killed") — a bare `return()` on a never-started generator runs
+ *  no cleanup at all, and the child lives until this whole `bun test` process exits. */
+const endQuery = async (q: AsyncGenerator<unknown>): Promise<void> => {
+  await q.next().catch(() => undefined);
+  await q.return(undefined).catch(() => undefined);
+};
 
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), "p8b-wire-names-")); handles = []; });
+beforeEach(() => { home = mkdtempSync(join(tmpdir(), "p8b-wire-names-")); handles = []; queries = []; });
 afterEach(async () => {
+  for (const q of queries) await endQuery(q);
   for (const h of handles) await h.dispose();
   rmSync(home, { recursive: true, force: true });
 });
@@ -215,7 +229,8 @@ describe("P8b-35: the REAL router accepts these servers and keys them by their o
     const abortController = new AbortController();
     abortController.abort();
     try {
-      h.sdk.query({ prompt: "unreachable", options: { abortController, mcpServers: { [name]: { type: "sdk", name, instance: {} } } } });
+      const q = h.sdk.query({ prompt: "unreachable", options: { abortController, mcpServers: { [name]: { type: "sdk", name, instance: {} } } } });
+      queries.push(q);
       return false;
     } catch (err) {
       return (err as Error).message.includes("is the name of a capability server this handle forwards");
@@ -240,5 +255,15 @@ describe("P8b-35: the REAL router accepts these servers and keys them by their o
       // The bare key is NOT what the router holds — which is exactly why it must not be the name.
       expect(routerHolds(h, key)).toBe(false);
     }
+  });
+
+  test("the unrefused probes leave no winter child behind", async () => {
+    const h = await handle(Object.values(serversFor("code")));
+    for (const key of CAPABILITY_SERVER_KEYS) expect(routerHolds(h, key)).toBe(false);
+    for (const q of queries.splice(0)) await endQuery(q);
+    const children = () => Bun.spawnSync(["pgrep", "-P", String(process.pid), "-f", "/bin/winter"]).stdout.toString().trim();
+    const t0 = Date.now();
+    while (children() !== "" && Date.now() - t0 < 5000) await Bun.sleep(50);
+    expect(children()).toBe("");
   });
 });
