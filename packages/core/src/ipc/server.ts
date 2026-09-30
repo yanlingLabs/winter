@@ -6,6 +6,7 @@ import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
   HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
   SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE,
+  IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
   SessionHistoryParams,
   ApprovalListParams,
   SessionAddDirParams, SessionSetCwdParams, TrustDirParams,
@@ -3204,6 +3205,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // after the client attached the image. No catalog row at all refuses too: there is no
         // evidence the model reads an image.
         const model = meta.model ?? opts.liveModel?.() ?? "";
+        // No model at all (the `unstated/unstated` sentinel, or none and no live default) is its own
+        // answer — "this model doesn't support images" would name a model that does not exist.
+        if (model === "" || model === UNSTATED_TAG) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_SESSION_NO_MODEL_MESSAGE, { code: IMAGE_SESSION_NO_MODEL });
+        }
         if (!imagesAcceptedBy(rowForTag(model))) {
           throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_INPUT_UNSUPPORTED_MESSAGE, { code: IMAGE_INPUT_UNSUPPORTED });
         }

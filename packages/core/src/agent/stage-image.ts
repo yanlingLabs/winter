@@ -2,18 +2,24 @@
 // into the session's own temp directory — `sessionTmpDir(sessionId)/images/image_<k>.<ext>` — so the
 // client can replace its `[Image #n]` placeholder with the absolute path and the model reads it.
 //
-// That directory is a sandbox WRITABLE root: the session's agent can create anything inside it,
-// including an `images` symlink pointing anywhere. The daemon is unsandboxed, so every step below
-// assumes the directory is hostile:
+// That directory is HOSTILE. It is a sandbox writable root, so the session's agent can create
+// anything inside it (an `images` symlink pointing anywhere), and the sandboxed shell can also write
+// direct children of the per-user temp dir — so it can REPLACE `winter-session-<sid>` itself with a
+// symlink, at any moment. The daemon is unsandboxed, so:
+//   - the session directory's own name is NEVER resolved: the root is `realpath(<its parent>)` joined
+//     with its basename, and every later step goes through that name, so a swap of the directory
+//     at any point is caught by the final check rather than silently followed;
 //   - the session directory and `images/` must be REAL directories (`lstat`, never followed);
 //   - the file is created with O_CREAT|O_EXCL|O_NOFOLLOW (never over, or through, anything that
-//     exists) and mode 0600;
+//     exists as the final component) and mode 0600;
 //   - the bytes are written only AFTER the created file is proved to be the one at
-//     `<realpath(session dir)>/images/<name>` (same inode as the descriptor), so a directory swapped
-//     between the checks and the open costs at most one EMPTY new file elsewhere, which is unlinked.
+//     `<root>/images/<name>` — its realpath is exactly that path and it has the descriptor's inode.
+// So a directory swapped between the checks and the open costs at most one EMPTY new file (and, if
+// the swap landed before the `images/` mkdir, one empty `images` directory) inside a directory the
+// agent could already write, and the file is unlinked; nothing is ever WRITTEN there.
 // The bytes are never logged, and no refusal message carries any of them.
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
-import { join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import {
   IMAGE_DATA_INVALID, IMAGE_STAGE_FAILED, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
   STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, STAGE_IMAGE_MAX_DIMENSION, type STAGE_IMAGE_MEDIA_TYPES,
@@ -142,7 +148,10 @@ function requireRealDirectory(path: string): void {
   }
 }
 
-const NAME_RE = /^image_(\d+)\.[a-z]+$/;
+// At most 9 digits: a planted `image_9007199254740991.png` (or any index past what `k + 1` can still
+// represent exactly) would otherwise pin `k` at a value that never increments, and every later
+// stage would retry the same taken name until it gave up.
+const NAME_RE = /^image_(\d{1,9})\.[a-z]+$/;
 
 /** The next `k` after every `image_<k>.*` already in the folder — the O_EXCL open below is what
  *  actually guarantees "never overwrite"; this only keeps the numbers climbing. */
@@ -160,12 +169,23 @@ function nextIndex(dir: string): number {
  * (`validateStagedImage`); then the file is created safely (see the module header). The folder is
  * `sessionTmpDirPath(sessionId)` — `$WINTER_TMPDIR` or the OS temp dir, exactly `sessionTmpDir`'s.
  */
-export function stageSessionImage(input: { sessionId: string; mediaType: StageImageMediaType; dataBase64: string }): string {
+export function stageSessionImage(
+  input: { sessionId: string; mediaType: StageImageMediaType; dataBase64: string },
+  /** TEST-ONLY: runs right after the session directory's own check — the window a swap of that
+   *  directory for a symlink would use. */
+  hooks: { afterSessionDirCheck?: () => void } = {},
+): string {
   const { bytes, ext } = validateStagedImage(input.mediaType, input.dataBase64);
   const sessionDir = sessionTmpDirPath(input.sessionId);
   try { mkdirSync(sessionDir, { recursive: true, mode: 0o700 }); } catch { /* lstat below reports it */ }
-  requireRealDirectory(sessionDir);
-  const root = realpathSync(sessionDir);
+  // The parent (the OS or `$WINTER_TMPDIR` temp dir) is resolved; the session directory's own name
+  // never is — see the module header.
+  let root: string;
+  try { root = join(realpathSync(dirname(sessionDir)), basename(sessionDir)); } catch {
+    throw new StageImageRefusal(IMAGE_STAGE_FAILED, "the session's temp directory is unavailable", true);
+  }
+  requireRealDirectory(root);
+  hooks.afterSessionDirCheck?.();
   const imagesDir = join(root, "images");
   try { mkdirSync(imagesDir, { mode: 0o700 }); } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw new StageImageRefusal(IMAGE_STAGE_FAILED, "could not create the session's image folder", true);
