@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 import UniformTypeIdentifiers
 import WinterKit
 
@@ -46,14 +47,77 @@ func composerImageMediaType(of data: Data) -> String? {
     return nil
 }
 
-/// Bytes as an attachment: kept as-is when they are one of the four stageable types, otherwise
-/// decoded as any image AppKit reads (TIFF — what a screenshot or `NSImage` copy puts on the
-/// pasteboard — HEIC, BMP, …) and re-encoded as PNG. `nil` when they are not an image at all.
+/// The long edge an attached image is downscaled to — Anthropic's documented size above which the
+/// service downscales anyway, so nothing the model could see is lost (`IMAGE_ATTACH_MAX_LONG_EDGE`).
+let composerImageMaxLongEdge = 1568
+
+/// JPEG qualities tried, in order, when an image is still over the cap after the downscale.
+private let composerJPEGQualities: [Double] = [0.85, 0.75, 0.65, 0.5]
+
+/// Bytes as an attachment, prepared ONCE, when attached — a submit never re-encodes.
+///
+/// One of the four stageable types that is already within `composerImageMaxLongEdge`, within the cap
+/// and upright is kept byte for byte. Anything else (a Retina screenshot, TIFF/HEIC/BMP from the
+/// pasteboard, a rotated JPEG) is rendered through ImageIO — `CGImageSourceCreateThumbnailAtIndex`,
+/// long edge at most 1568, orientation applied — and encoded as PNG (a JPEG stays JPEG; a GIF becomes
+/// a PNG of its first frame). If that is still over the cap it is re-encoded as JPEG, quality stepping
+/// 0.85 → 0.5 (transparency flattened onto white). What comes back may still exceed the cap only when
+/// nothing fits; the attach gate then refuses it with `composerImageTooLargeMessage`. `nil` when the
+/// bytes are not an image at all.
 func composerImage(fromImageData data: Data) -> ComposerImage? {
-    if let type = composerImageMediaType(of: data) { return ComposerImage(data: data, mediaType: type) }
-    guard let rep = NSBitmapImageRep(data: data),
-          let png = rep.representation(using: .png, properties: [:]) else { return nil }
-    return ComposerImage(data: png, mediaType: "image/png")
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0 else { return nil }
+    let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+    let width = (props?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+    let height = (props?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+    let orientation = (props?[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+    let longEdge = max(width, height)
+    let sniffed = composerImageMediaType(of: data)
+    if let sniffed, longEdge > 0, longEdge <= composerImageMaxLongEdge, orientation == 1, data.count <= composerImageMaxBytes {
+        return ComposerImage(data: data, mediaType: sniffed)
+    }
+    let options: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: longEdge > 0 ? min(longEdge, composerImageMaxLongEdge) : composerImageMaxLongEdge,
+    ]
+    guard let rendered = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+    let keepsJPEG = sniffed == "image/jpeg"
+    var last: ComposerImage?
+    if !keepsJPEG, let png = composerEncode(rendered, as: .png, quality: nil) {
+        last = ComposerImage(data: png, mediaType: "image/png")
+        if png.count <= composerImageMaxBytes { return last }
+    }
+    let opaque = composerFlattenedOnWhite(rendered) ?? rendered
+    for quality in composerJPEGQualities {
+        guard let jpeg = composerEncode(opaque, as: .jpeg, quality: quality) else { continue }
+        last = ComposerImage(data: jpeg, mediaType: "image/jpeg")
+        if jpeg.count <= composerImageMaxBytes { return last }
+    }
+    return last
+}
+
+/// One CGImage encoded as `type` through ImageIO.
+func composerEncode(_ image: CGImage, as type: UTType, quality: Double?) -> Data? {
+    let out = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(out, type.identifier as CFString, 1, nil) else { return nil }
+    var properties: [CFString: Any] = [:]
+    if let quality { properties[kCGImageDestinationLossyCompressionQuality] = quality }
+    CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+    guard CGImageDestinationFinalize(destination) else { return nil }
+    return out as Data
+}
+
+/// JPEG has no alpha: composite onto white first, so transparent areas do not turn black.
+private func composerFlattenedOnWhite(_ image: CGImage) -> CGImage? {
+    guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+          let context = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+    else { return nil }
+    let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(rect)
+    context.draw(image, in: rect)
+    return context.makeImage()
 }
 
 /// Whether a file URL names an image by its type — the gate for treating a pasted/dropped file as an

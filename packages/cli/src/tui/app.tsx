@@ -106,8 +106,8 @@ import { AgentList, FINISH_LABEL } from "./agent-list";
 import { Footer, type ExitKey } from "./footer";
 import { Composer, type ComposerInject } from "./composer";
 import {
-  DraftImages, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, draftImageFrom, imagePathFromPaste, imageToken,
-  isRegularFile, readClipboardImage as readClipboardImageDefault, stageDraftImages,
+  DraftImages, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, imagePathFromPaste, imageToken, isRegularFile,
+  isStageableImage, prepareDraftImage, readClipboardImage as readClipboardImageDefault, stageDraftImages,
 } from "./images";
 import { makeDraftWrapper } from "./draft-wrap";
 import { makePasteBatch } from "./paste-batch";
@@ -540,11 +540,14 @@ export function App({
     }
   };
   /** Attach one image's bytes to the draft: not an image → `fallbackText` (the pasted text) is typed
-   *  instead; the model refuses images → the exact message as a note; over the cap → a note. */
+   *  instead; the model refuses images → the exact message as a note; otherwise it is prepared ONCE
+   *  here (downscaled to 1568 px, re-encoded only if it must be — `prepareDraftImage`), and only an
+   *  image that cannot be brought under the cap is refused, with a note. */
   const attachImageBytes = async (bytes: Uint8Array, fallbackText?: string): Promise<void> => {
-    const image = draftImageFrom(bytes);
-    if (image === "not-image") { if (fallbackText !== undefined) injectIntoComposer("insert", fallbackText); return; }
+    if (!isStageableImage(bytes)) { if (fallbackText !== undefined) injectIntoComposer("insert", fallbackText); return; }
     if (!(await modelAcceptsImages())) { appendNote(IMAGE_INPUT_UNSUPPORTED_MESSAGE); return; }
+    const image = await prepareDraftImage(bytes);
+    if (image === "not-image") { if (fallbackText !== undefined) injectIntoComposer("insert", fallbackText); return; }
     if (image === "too-large") { appendNote(IMAGE_TOO_LARGE_MESSAGE); return; }
     injectIntoComposer("insert", imageToken(draftImagesRef.current.add(image)));
   };

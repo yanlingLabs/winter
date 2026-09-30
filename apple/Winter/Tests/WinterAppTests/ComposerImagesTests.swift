@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import XCTest
 import WinterKit
 @testable import Winter
@@ -81,6 +82,56 @@ final class ComposerImagesTests: XCTestCase {
         XCTAssertNil(composerImage(fromImageData: Data("not an image".utf8)))
     }
 
+    /// A `width`×`height` sRGB image, encoded as PNG — a gradient (compresses well) or noise (barely).
+    private func generatedPNG(width: Int, height: Int, noise: Bool) -> Data {
+        let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        let pixels = ctx.data!.bindMemory(to: UInt8.self, capacity: ctx.bytesPerRow * height)
+        var seed: UInt32 = 0x2545F491
+        for y in 0..<height {
+            for x in 0..<width {
+                let i = y * ctx.bytesPerRow + x * 4
+                if noise {
+                    seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5
+                    pixels[i] = UInt8(seed & 0xFF); pixels[i + 1] = UInt8((seed >> 8) & 0xFF); pixels[i + 2] = UInt8((seed >> 16) & 0xFF)
+                } else {
+                    pixels[i] = UInt8(x * 255 / width); pixels[i + 1] = UInt8(y * 255 / height); pixels[i + 2] = 128
+                }
+            }
+        }
+        return composerEncode(ctx.makeImage()!, as: .png, quality: nil)!
+    }
+
+    private func pixelSize(_ data: Data) -> (Int, Int) {
+        let props = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithData(data as CFData, nil)!, 0, nil) as! [CFString: Any]
+        return ((props[kCGImagePropertyPixelWidth] as! NSNumber).intValue, (props[kCGImagePropertyPixelHeight] as! NSNumber).intValue)
+    }
+
+    func testA4000By3000ImageIsDownscaledTo1568AndStaysPNG() {
+        let big = generatedPNG(width: 4000, height: 3000, noise: false)
+        let image = composerImage(fromImageData: big)
+        XCTAssertEqual(image?.mediaType, "image/png")
+        let size = image.map { pixelSize($0.data) }
+        XCTAssertEqual(size?.0, 1568)
+        XCTAssertEqual(size?.1, 1176)
+        XCTAssertLessThanOrEqual(image?.data.count ?? .max, composerImageMaxBytes)
+    }
+
+    func testAnImageStillOverTheCapAfterTheDownscaleBecomesJPEG() {
+        // Noise barely compresses: 1568×1176 of it is ~5.5 MB as PNG, so only a JPEG fits.
+        let noisy = generatedPNG(width: 2400, height: 1800, noise: true)
+        let image = composerImage(fromImageData: noisy)
+        XCTAssertEqual(image?.mediaType, "image/jpeg")
+        XCTAssertEqual(image.map { pixelSize($0.data).0 }, 1568)
+        XCTAssertLessThanOrEqual(image?.data.count ?? .max, composerImageMaxBytes)
+        XCTAssertEqual(image.flatMap { composerImageMediaType(of: $0.data) }, "image/jpeg")
+    }
+
+    func testASmallImageIsKeptByteForByte() {
+        let small = generatedPNG(width: 800, height: 600, noise: false)
+        XCTAssertEqual(composerImage(fromImageData: small), ComposerImage(data: small, mediaType: "image/png"))
+    }
+
     func testPasteboardImageDataAndFiles() throws {
         let board = NSPasteboard(name: NSPasteboard.Name("winter.test.\(UUID().uuidString)"))
         defer { board.releaseGlobally() }
@@ -114,12 +165,13 @@ final class ComposerImagesTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
         let shot = dir.appendingPathComponent("shot.png")
         let notes = dir.appendingPathComponent("notes.txt")
-        try png.write(to: shot)
+        let realPNG = generatedPNG(width: 40, height: 30, noise: false)
+        try realPNG.write(to: shot)
         try Data("notes".utf8).write(to: notes)
 
         board.clearContents()
         board.writeObjects([shot as NSURL])
-        XCTAssertEqual(composerImages(from: board), [ComposerImage(data: png, mediaType: "image/png")])
+        XCTAssertEqual(composerImages(from: board), [ComposerImage(data: realPNG, mediaType: "image/png")])
 
         board.clearContents()
         board.writeObjects([shot as NSURL, notes as NSURL])

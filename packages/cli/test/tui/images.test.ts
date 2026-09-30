@@ -4,10 +4,12 @@
 import { describe, expect, test } from "bun:test";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { imageDimensions } from "@yanlinglabs/winter-core";
 import {
-  DraftImages, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, draftImageFrom, imagePathFromPaste, imageToken,
-  referencedImageNumbers, stageDraftImages, substituteImageTokens,
+  DraftImages, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, imagePathFromPaste, imageToken,
+  prepareDraftImage, referencedImageNumbers, stageDraftImages, substituteImageTokens,
 } from "../../src/tui/images";
+import { makePng } from "../../../core/test/helpers/png-fixture";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]);
 const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0]);
@@ -58,13 +60,32 @@ describe("TUI image placeholders", () => {
     await expect(stageDraftImages("[Image #1]", d, () => Promise.reject(new Error("nope")))).rejects.toThrow("nope");
   });
 
-  test("the magic bytes decide the media type; non-images and oversize images are named", () => {
-    expect(draftImageFrom(JPEG)).toEqual({ bytes: JPEG, mediaType: "image/jpeg" });
-    expect(draftImageFrom(new TextEncoder().encode("hello"))).toBe("not-image");
-    const big = new Uint8Array(3_932_160 + 1);
-    big.set(PNG);
-    expect(draftImageFrom(big)).toBe("too-large");
+  test("small images attach untouched; non-images are named", async () => {
+    expect(await prepareDraftImage(JPEG)).toEqual({ bytes: JPEG, mediaType: "image/jpeg" });
+    const small = makePng(800, 600);
+    expect(await prepareDraftImage(small)).toEqual({ bytes: small, mediaType: "image/png" });
+    expect(await prepareDraftImage(new TextEncoder().encode("hello"))).toBe("not-image");
   });
+
+  // Real `sips` on a real, generated PNG — the attach-time downscale a Retina screenshot takes.
+  test("a 4000×3000 PNG is downscaled to a 1568 px long edge and stays PNG", async () => {
+    const big = makePng(4000, 3000);
+    const out = await prepareDraftImage(big);
+    if (typeof out === "string") throw new Error(`expected an image, got ${out}`);
+    expect(out.mediaType).toBe("image/png");
+    expect(imageDimensions(out.bytes)).toEqual({ width: 1568, height: 1176 });
+    expect(out.bytes.length).toBeLessThanOrEqual(3_932_160);
+  }, 30_000);
+
+  test("a PNG still over 3.75 MB after the downscale is re-encoded as JPEG", async () => {
+    // Noise barely compresses: 1568×1176 RGB noise is ~5.5 MB as PNG, so only a JPEG fits.
+    const noisy = makePng(2400, 1800, { noise: true });
+    const out = await prepareDraftImage(noisy);
+    if (typeof out === "string") throw new Error(`expected an image, got ${out}`);
+    expect(out.mediaType).toBe("image/jpeg");
+    expect(imageDimensions(out.bytes)).toEqual({ width: 1568, height: 1176 });
+    expect(out.bytes.length).toBeLessThanOrEqual(3_932_160);
+  }, 60_000);
 
   test("pasted paths: shell-escaped, quoted, file:// and ~/ forms; anything else is not a path", () => {
     expect(imagePathFromPaste("/Users/me/My\\ Shot.png")).toBe("/Users/me/My Shot.png");
