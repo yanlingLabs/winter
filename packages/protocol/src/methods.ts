@@ -414,6 +414,8 @@ export const ELICITATION_NOT_ACTIVE = "elicitation_not_active";
  *  LOCAL role only (never remote-allowlisted; an explicit harness-role check like `elicitation.url`).
  *  Every refusal is typed in `data.code`:
  *    - `image_session_not_code` — the session is not a code session (`INVALID_PARAMS`);
+ *    - `image_session_no_model` — the session has no model at all (`unstated/unstated`, or none and
+ *      no live default), message `IMAGE_SESSION_NO_MODEL_MESSAGE` (`INVALID_PARAMS`);
  *    - `image_input_unsupported` — the session's CURRENT model row does not accept images, with the
  *      exact message `IMAGE_INPUT_UNSUPPORTED_MESSAGE` (`INVALID_PARAMS`);
  *    - `image_data_invalid` — `dataBase64` is not strict base64, or decodes to nothing;
@@ -447,6 +449,10 @@ export const IMAGE_TOO_LARGE_MESSAGE = "Images must be 3.75 MB or smaller";
 export const IMAGE_INPUT_UNSUPPORTED = "image_input_unsupported";
 export const IMAGE_INPUT_UNSUPPORTED_MESSAGE = "The selected model doesn't support images";
 export const IMAGE_SESSION_NOT_CODE = "image_session_not_code";
+/** The session has no model to check an image against — its tag is the `unstated/unstated` sentinel,
+ *  or it names none and the daemon has no live default. */
+export const IMAGE_SESSION_NO_MODEL = "image_session_no_model";
+export const IMAGE_SESSION_NO_MODEL_MESSAGE = "This session has no model yet — choose a model before adding images";
 export const IMAGE_DATA_INVALID = "image_data_invalid";
 export const IMAGE_TOO_LARGE = "image_too_large";
 export const IMAGE_TYPE_UNSUPPORTED = "image_type_unsupported";
@@ -2631,8 +2637,13 @@ export const SyncConfigModel = z.object({
   /** Code-mode image input (2026-09-29): whether this row accepts an image — the catalog row's
    *  `inputModalities` contains `"image"` (`models.catalog`'s `supportsImages`, the same rule). A
    *  client refuses an image at ATTACH time on `false`, with exactly
-   *  `IMAGE_INPUT_UNSUPPORTED_MESSAGE`; the daemon's `session.stageImage` is the backstop. */
-  supportsImages: z.boolean(),
+   *  `IMAGE_INPUT_UNSUPPORTED_MESSAGE`; the daemon's `session.stageImage` is the backstop.
+   *
+   *  OPTIONAL on the wire (this daemon always states it): a daemon built before the field must not
+   *  make a newer client's whole model list fail to parse. Every reader treats ABSENT the same way —
+   *  "not told" → allow the attach and let `session.stageImage` decide — the TUI (`?? true`) and
+   *  WinterKit's `SyncConfigModelInfo` (absent → `true`) alike. */
+  supportsImages: z.boolean().optional(),
 });
 export type SyncConfigModel = z.infer<typeof SyncConfigModel>;
 

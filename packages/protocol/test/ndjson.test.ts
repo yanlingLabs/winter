@@ -63,4 +63,23 @@ describe("NDJSON framing", () => {
     chunk.fill(0x78);
     expect(d.push(new TextEncoder().encode(":1}\n"))).toEqual(['{"a":1}']);
   });
+
+  test("a held partial line survives the caller REUSING a Node Buffer (Buffer#slice is a view)", () => {
+    const d = new LineDecoder();
+    const chunk = Buffer.from('{"a"');
+    expect(d.push(chunk)).toEqual([]);
+    chunk.fill(0x78);
+    expect(d.push(Buffer.from(":1}\n"))).toEqual(['{"a":1}']);
+  });
+
+  test("a long line fed one byte at a time decodes exactly, in linear time", () => {
+    const d = new LineDecoder();
+    const body = "B".repeat(300_000);
+    const bytes = new TextEncoder().encode(`${body}\n`);
+    const out: string[] = [];
+    const t = performance.now();
+    for (let i = 0; i < bytes.length; i++) out.push(...d.push(bytes.subarray(i, i + 1)));
+    expect(out).toEqual([body]);
+    expect(performance.now() - t).toBeLessThan(1500);
+  });
 });

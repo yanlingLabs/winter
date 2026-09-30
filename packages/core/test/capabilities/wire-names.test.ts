@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
+import { resolvePlatformPackageWinter } from "../../src/runtime-sdk/executable";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import { createWinterRuntimeSdk, type WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import {
@@ -258,11 +259,23 @@ describe("P8b-35: the REAL router accepts these servers and keys them by their o
   });
 
   test("the unrefused probes leave no winter child behind", async () => {
+    // Matched on the executable this handle ACTUALLY spawns. It is built with no executable option,
+    // so the SDK runs its own platform-package binary whatever `$WINTER_RUNTIME_EXECUTABLE` says —
+    // measured: under a `dist/winter` build the children are still the package's `bin/winter`. The
+    // non-vacuity check below is what keeps this honest if that ever changes. `pgrep -f` takes a
+    // regex (the package path carries `+` and `.`), so the path is escaped.
+    const bin = resolvePlatformPackageWinter();
+    if (bin === undefined) throw new Error("the pinned platform package is not installed — this check needs it");
+    const pattern = bin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const children = () => Bun.spawnSync(["pgrep", "-P", String(process.pid), "-f", pattern]).stdout.toString().trim();
     const h = await handle(Object.values(serversFor("code")));
     for (const key of CAPABILITY_SERVER_KEYS) expect(routerHolds(h, key)).toBe(false);
+    // Not vacuous: the matcher SEES the probes' children before they are ended.
+    let t0 = Date.now();
+    while (children() === "" && Date.now() - t0 < 3000) await Bun.sleep(25);
+    expect(children()).not.toBe("");
     for (const q of queries.splice(0)) await endQuery(q);
-    const children = () => Bun.spawnSync(["pgrep", "-P", String(process.pid), "-f", "/bin/winter"]).stdout.toString().trim();
-    const t0 = Date.now();
+    t0 = Date.now();
     while (children() !== "" && Date.now() - t0 < 5000) await Bun.sleep(50);
     expect(children()).toBe("");
   });

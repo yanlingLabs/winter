@@ -1206,7 +1206,7 @@ describe("sync.config schema (provider-correctness T3)", () => {
     });
   });
 
-  test("a catalogue row needs a tag-shaped id, a providerId, a displayName, an efforts array AND supportsImages — no half rows", () => {
+  test("a catalogue row needs a tag-shaped id, a providerId, a displayName AND an efforts array — no half rows", () => {
     const row = { id: "codex-oauth/m", providerId: "codex-oauth", displayName: "M", efforts: ["low"], supportsImages: false };
     expect(SyncConfigModel.parse(row)).toEqual(row);
     expect(SyncConfigModel.parse({ ...row, efforts: [] })).toEqual({ ...row, efforts: [] });
@@ -1217,10 +1217,11 @@ describe("sync.config schema (provider-correctness T3)", () => {
     expect(() => SyncConfigModel.parse({ providerId: "codex-oauth", displayName: "M", efforts: ["low"] })).toThrow();
     // An empty-string effort would reach a request body verbatim and 400 the turn.
     expect(() => SyncConfigModel.parse({ ...row, efforts: [""] })).toThrow();
-    // Code-mode image input: stated on every row, never inferred by a client from absence.
+    // Code-mode image input: OPTIONAL — an older daemon's rows (no field) still parse, so a newer
+    // client's model list never breaks on them; a present value must be a boolean.
     const { supportsImages, ...noImages } = row;
     void supportsImages;
-    expect(() => SyncConfigModel.parse(noImages)).toThrow();
+    expect(SyncConfigModel.parse(noImages)).toEqual(noImages);
     expect(() => SyncConfigModel.parse({ ...row, supportsImages: "yes" })).toThrow();
     // One bad row poisons the whole result rather than being silently dropped.
     expect(() => SyncConfigResult.parse({ ...full, models: [{ ...row, id: "" }] })).toThrow();

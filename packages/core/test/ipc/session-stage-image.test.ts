@@ -4,12 +4,12 @@
 // daemon-picked names created atomically and never over anything — and the daemon never writes
 // through an agent-planted symlink (the session temp dir is a sandbox WRITABLE root).
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ConnWriter, ERR, IMAGE_DATA_INVALID, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE,
-  IMAGE_STAGE_FAILED, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED, LineDecoder, METHODS, PROTOCOL_VERSION,
+  IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE, IMAGE_STAGE_FAILED, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED, LineDecoder, METHODS, PROTOCOL_VERSION,
   STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, encodeLine, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
@@ -17,7 +17,7 @@ import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
-import { decodeStrictBase64, imageDimensions, sniffImageMediaType } from "../../src/agent/stage-image";
+import { StageImageRefusal, decodeStrictBase64, imageDimensions, sniffImageMediaType, stageSessionImage } from "../../src/agent/stage-image";
 import { makePng } from "../helpers/png-fixture";
 import { execFileSync } from "node:child_process";
 
@@ -290,7 +290,7 @@ describe("session.stageImage (code-mode image input)", () => {
     c.close();
   });
 
-  test("local clients only: the remote role is refused, and the method is never remote-allowed", async () => {
+  test("local clients only: the remote, admin and plugin roles are refused, and the method is never remote-allowed", async () => {
     const { store, socketPath, tokens, c } = await boot();
     const sid = store.createSession("global", { model: IMAGE_TAG });
     const phone = await TestClient.connect(socketPath);
@@ -300,6 +300,12 @@ describe("session.stageImage (code-mode image input)", () => {
     const admin = await TestClient.connect(socketPath);
     await admin.hello(tokens.admin, "cli-admin", "admin");
     expect((await admin.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(PNG) })).error.code).toBe(ERR.UNAUTHORIZED);
+    const plugin = await TestClient.connect(socketPath);
+    const pluginToken = store.mintPluginToken("p-stage");
+    const helloed = await plugin.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "plugin", token: pluginToken, clientName: "p", pluginId: "p-stage" });
+    expect(helloed.error).toBeUndefined();
+    expect((await plugin.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(PNG) })).error.code).toBe(ERR.UNAUTHORIZED);
+    plugin.close();
     expect(existsSync(join(tmpBase, `winter-session-${sid}`, "images"))).toBe(false);
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.sessionStageImage)).toBe(false);
     phone.close(); admin.close(); c.close();
@@ -329,6 +335,55 @@ describe("session.stageImage (code-mode image input)", () => {
     expect(res.error.data).toEqual({ code: IMAGE_STAGE_FAILED });
     expect(readdirSync(target)).toEqual([]);
     rmSync(target, { recursive: true, force: true });
+    c.close();
+  });
+
+  test("the session directory swapped for a symlink right after its check: nothing is written through it", () => {
+    const sid = "s_swap";
+    const sessionDir = join(tmpBase, `winter-session-${sid}`);
+    const elsewhere = mkdtempSync(join(tmpdir(), "winter-stage-elsewhere-"));
+    mkdirSync(join(elsewhere, "images"));
+    let caught: unknown;
+    try {
+      stageSessionImage({ sessionId: sid, mediaType: "image/png", dataBase64: b64(PNG) }, {
+        // The sandboxed shell can replace a direct child of the temp dir at any moment: here, right
+        // after the daemon has checked it (where the old `realpathSync(sessionDir)` then followed it).
+        afterSessionDirCheck: () => {
+          renameSync(sessionDir, `${sessionDir}-moved`);
+          symlinkSync(elsewhere, sessionDir);
+        },
+      });
+    } catch (err) { caught = err; }
+    expect(caught).toBeInstanceOf(StageImageRefusal);
+    expect((caught as StageImageRefusal).code).toBe(IMAGE_STAGE_FAILED);
+    expect(readdirSync(join(elsewhere, "images"))).toEqual([]);
+    rmSync(elsewhere, { recursive: true, force: true });
+  });
+
+  test("a planted image_9007199254740991.png (or any index past 9 digits) does not stop staging", async () => {
+    const { store, c } = await boot();
+    const sid = store.createSession("global", { model: IMAGE_TAG });
+    const images = join(tmpBase, `winter-session-${sid}`, "images");
+    mkdirSync(images, { recursive: true });
+    writeFileSync(join(images, "image_9007199254740991.png"), "planted");
+    writeFileSync(join(images, "image_10000000000.png"), "planted");
+    for (const n of [1, 2]) {
+      const res = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(PNG) });
+      expect(res.result.path.endsWith(`/image_${n}.png`)).toBe(true);
+    }
+    c.close();
+  });
+
+  test("a session with no model at all gets its own refusal, not the images one", async () => {
+    const { store, c } = await boot();
+    const unstated = store.createSession("global", { model: "unstated/unstated" });
+    const none = store.createSession("global", {}); // no override and no live default
+    for (const sid of [unstated, none]) {
+      const res = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(PNG) });
+      expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+      expect(res.error.data).toEqual({ code: IMAGE_SESSION_NO_MODEL });
+      expect(res.error.message).toBe(IMAGE_SESSION_NO_MODEL_MESSAGE);
+    }
     c.close();
   });
 
