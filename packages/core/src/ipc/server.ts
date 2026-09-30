@@ -206,12 +206,18 @@ export interface IpcServerOptions {
   store: SessionStore;
   hub?: SessionHub;          // shared with the agent engine when the daemon wires one up
   // session-activity-hygiene T6 (review fix round 1): the empty-session reaper invocation the
-  // `session.create` mint-time sweep calls — injectable ONLY so a test can observe/intercept
-  // exactly when the sweep runs relative to the create reply (a slow synchronous stub makes the
-  // property measurable: reaper.test.ts's "never delays the reply" case) without reaching into a
-  // private closure. Every real caller gets the true `reapEmptySessions` (sessions/reaper.ts) by
+  // `session.create` mint-time sweep calls — injectable ONLY so a test can observe exactly when the
+  // sweep runs relative to the create reply (with `scheduleMintSweep` below: reaper.test.ts's "never
+  // delays the create reply" case, proven by order, not by timing) without reaching into a private
+  // closure. Every real caller gets the true `reapEmptySessions` (sessions/reaper.ts) by
   // leaving this unset.
   reapEmptySessions?: typeof reapEmptySessions;
+  // TEST-ONLY seam, beside `reapEmptySessions`: how `session.create` defers its mint-time sweep.
+  // Returns a canceller (what `stop()` calls). Production leaves it unset and gets
+  // `deferMintSweep` — a MACROTASK, so the sweep runs only after the create reply is written.
+  // reaper.test.ts injects a capturing scheduler to prove, without any wall-clock bound, that the
+  // reply is written while the sweep is still merely scheduled.
+  scheduleMintSweep?: (run: () => void) => () => void;
   // P8a Task 12 (WS-16 §16): the runtime-state deletion hook, threaded into the mint-time sweep so
   // THAT reap removes a session's runtime rows exactly like the boot sweep in daemon.ts does — the
   // two are the same function and must not disagree about the reach of a delete. Undefined on a
@@ -550,6 +556,15 @@ export interface IpcServer { stop(): void }
  *  structurally; `sync.push`'s DIVERGED uses the same slot). P8b Task 16: the Winter leg's typed
  *  refusals travel as `data: { code }` — the numeric `code` stays a JSON-RPC class, the string
  *  names the refusal, and a client can branch on it without string-matching a message. */
+/** `session.create`'s default mint-sweep scheduler: a MACROTASK (`setTimeout(0)`), which the event loop
+ *  runs only after draining every microtask — including the continuation that writes the create
+ *  reply. (A microtask here would run the sweep BEFORE the reply is enqueued; reaper.test.ts pins
+ *  both halves.) Returns a canceller for `stop()`. */
+export function deferMintSweep(run: () => void): () => void {
+  const timer = setTimeout(run, 0);
+  return () => clearTimeout(timer);
+}
+
 class RpcFailure extends Error { constructor(public code: number, message: string, public data?: unknown) { super(message); } }
 
 /** P8b Task 16: a `WinterLegRefusal` (or the driver's own typed errors) as the RPC error a client
@@ -916,7 +931,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   }
   const hub = opts.hub ?? new SessionHub(opts.store);
   /** Mint-time reaper sweeps queued by `session.create` and not yet run — cancelled by `stop()`. */
-  const pendingReaps = new Set<ReturnType<typeof setTimeout>>();
+  const pendingReaps = new Set<() => void>(); // cancellers
+  const scheduleMintSweep = opts.scheduleMintSweep ?? deferMintSweep;
 
   /**
    * WS-19 (whole-branch review MAJOR 1): after a credential is added, replaced or removed, every
@@ -1961,12 +1977,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (opts.winterHome) {
           const home = opts.winterHome;
           const reap = opts.reapEmptySessions ?? reapEmptySessions;
-          const timer = setTimeout(() => {
-            pendingReaps.delete(timer);
+          const cancel = scheduleMintSweep(() => {
+            pendingReaps.delete(cancel);
             try { reap({ store: opts.store, attachedCount: (id) => hub.attachedCount(id), home, onDelete: opts.onSessionDeleted }); }
             catch (err) { console.error("[reaper] mint-time sweep failed:", err); }
-          }, 0);
-          pendingReaps.add(timer);
+          });
+          pendingReaps.add(cancel);
         }
         return { sessionId, trusted };
       }
@@ -4793,7 +4809,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     stop() {
       // Before anything else: a queued mint-time reaper sweep must never outlive the server (it
       // would run against a store its owner closes right after this returns — see `pendingReaps`).
-      for (const timer of pendingReaps) clearTimeout(timer);
+      for (const cancel of pendingReaps) cancel();
       pendingReaps.clear();
       enforcement.stop(); mcpOAuthDoors?.dispose(); server.stop(true);
     },
