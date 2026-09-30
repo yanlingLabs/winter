@@ -453,5 +453,34 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.122.1/Winter-0.122.1.zip" sparkle:edSignature="hVmqgLLqGXwXEVJlpo+atdm/Y67R6xI/1j3vnVTPgL1Qfh5vVoWLD1BkL2sQVHM5uCUujAzUBOGdJk0oHlFcAA==" length="426757305" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.123.0</title>
+      <description><![CDATA[<p>Winter agent SDK 0.0.36</p>
+<h2>Images in code sessions</h2>
+<ul>
+  <li>Paste or drag an image into a code session's message box, or press ctrl+v in the terminal app, and it appears as <code>[Image #1]</code>. Pasting an image file's path works too.</li>
+  <li>Large images, such as Retina screenshots, are shrunk when you attach them, so they always fit.</li>
+  <li>Your message shows <code>[Image #n]</code>. The model receives the saved image and looks at it.</li>
+  <li>If the selected model can't read images, Winter says so as soon as you attach one: "The selected model doesn't support images".</li>
+  <li>Chat and dispatch sessions are unchanged for now.</li>
+</ul>
+<h2>Files in replies open in the side panel</h2>
+<ul>
+  <li>When the model names a file in its reply, the path is a link. Click it and the file opens in the right-hand panel.</li>
+  <li>An image path also shows a small preview. Click it to see the full image in the panel, fitted to size; double-click for actual size.</li>
+</ul>
+<h2>Models see images from tools</h2>
+<ul>
+  <li>When a model reads an image file, it now sees the picture itself on every provider. Before, it got the image's raw data as text.</li>
+  <li>Images returned by MCP tools and notebook plots reach the model as images too.</li>
+  <li>Long sessions with many screenshots stay within each provider's image limits instead of failing.</li>
+  <li>A model that can't read images gets a short note instead of unreadable data.</li>
+</ul>
+<p>This release runs on Winter agent SDK 0.0.36 and runtime SDK 0.0.15.</p>]]></description>
+      <sparkle:version>0.123.0</sparkle:version>
+      <sparkle:shortVersionString>0.123.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.123.0/Winter-0.123.0.zip" sparkle:edSignature="Wg7ijaJqJze86kAL57CESJv0p+YFRl3IJBO7/7ho9EiFmtCIJQEOfigXKi0b5sVqcV3eP0U8pVfvR87ESIEgAA==" length="426866447" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
