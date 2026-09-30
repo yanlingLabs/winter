@@ -509,6 +509,11 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
     if (event.sessionId !== p.sessionId) {
       throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} carries sessionId ${event.sessionId}, not ${p.sessionId} — nothing was appended`);
     }
+    // Code-mode image input: `user_message.images` names files a CODE session staged on this Mac;
+    // sync.push replicates CHAT sessions only, which never carry them.
+    if (event.type === "user_message" && event.images !== undefined) {
+      throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a user_message with images — chat sessions carry none; nothing was appended`);
+    }
     if (i > 0 && event.seq !== entries[i - 1]!.event.seq + 1) {
       throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push seqs must be contiguous: event ${i + 1} has seq ${event.seq}, expected ${entries[i - 1]!.event.seq + 1} — nothing was appended`);
     }

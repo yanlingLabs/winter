@@ -2,6 +2,7 @@ import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { Provider, TurnInputItem } from "../providers/types";
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
+import { modelTextOf } from "../sessions/model-text";
 
 /** Task 17: moved here from the retired engine (its context-overflow trigger fraction) — the codex
  *  model-drift test pins the catalogue against it. */
@@ -151,7 +152,8 @@ export class Compactor {
     const input: TurnInputItem[] = olderClamped.map((m) => ({
       type: "message",
       role: m.type === "user_message" ? "user" : "assistant",
-      content: m.text,
+      // A model reads this: image placeholders become their staged paths (`modelTextOf`).
+      content: m.type === "user_message" ? modelTextOf(m) : m.text,
     }));
 
     let newPartial = "";

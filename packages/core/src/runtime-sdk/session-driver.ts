@@ -96,6 +96,7 @@ import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import type { SkillStore } from "../agent/skills";
 import { startWinterSession, unconsumedUserMessages, withRunHome, withSessionMcpServers, type CompactOptions, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
+import type { UserMessageImageRef } from "@yanlinglabs/winter-protocol";
 import { RunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, type RunHomeInput } from "@yanlinglabs/winter-runtime-sdk";
 import { projectScopeTrusted, type RunHomeSessionFacts } from "./run-home-input";
 import { readWinterTasks } from "./tasks-reader";
@@ -177,8 +178,9 @@ export interface LegSession {
   readonly done: Promise<void>;
   readonly pendingSends: readonly string[];
   readonly heldDeliveries: readonly string[];
-  send(text: string, clientName?: string): Promise<{ seq: number; queued: boolean }>;
-  steer(text: string, clientName?: string): Promise<{ seq: number; injected: boolean }>;
+  /** `images`: see `WinterSession.send` — appended with `text` as written, the child given the paths. */
+  send(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; queued: boolean }>;
+  steer(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; injected: boolean }>;
   interrupt(): Promise<{ wasRunning: boolean }>;
   /** WS-23 (reasoning-state): compact the live child now, on its own model -- see `WinterSession.compact`. */
   compact(opts?: CompactOptions): Promise<{ retainedCount: number }>;

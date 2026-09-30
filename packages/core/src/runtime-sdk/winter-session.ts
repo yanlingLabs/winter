@@ -83,7 +83,8 @@
 // spawns (finding 3), and no push can reach the closed queue in between.
 import type { AgentInfo, McpServerConfig, Options, Query } from "@yanlinglabs/winter-agent-sdk";
 import { canonicalMcpServerUrl } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
-import type { NewSessionEvent, SessionEvent } from "@yanlinglabs/winter-protocol";
+import type { NewSessionEvent, SessionEvent, UserMessageImageRef } from "@yanlinglabs/winter-protocol";
+import { modelTextOf } from "../sessions/model-text";
 import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, type ProjectedBatch, type Projector, type ProtocolSdkMessage } from "../projector";
 import { PROJECTOR_PASSTHROUGH_CLIENT } from "../projector/index";
 import { asInitFrame, asResultFrame } from "../projector/conversation";
@@ -314,7 +315,9 @@ export function unconsumedUserMessages(events: readonly SessionEvent[]): string[
     if ((e as { threadId?: string }).threadId !== undefined && (e as { threadId?: string }).threadId !== MAIN_THREAD) continue;
     if (e.type === "user_message") {
       if ((e as { clientName?: string }).clientName === PROJECTOR_PASSTHROUGH_CLIENT) continue;
-      owed.push((e as { text: string }).text);
+      // Code-mode image input: what is OWED is the text the model is given — each `[Image #n]`
+      // replaced by its staged path (`modelTextOf`); the log keeps the placeholders.
+      owed.push(modelTextOf(e));
     } else if (e.type === "turn_started") {
       owed.pop();   // the nearest preceding unpaired message is this turn's
     }
@@ -343,12 +346,15 @@ export interface WinterSession {
    *  Already resolved while `resumable`/`ended`. */
   readonly done: Promise<void>;
   /** Texts held while a turn ran (P8b-5) — a cache of the log's unconsumed `user_message`s
-   *  (P8b-39), pushed one per `result`, or on the next `send`/`steer` after an interrupt. */
+   *  (P8b-39), pushed one per `result`, or on the next `send`/`steer` after an interrupt. Each is
+   *  the MODEL's text (`modelTextOf`: image placeholders replaced by their paths). */
   readonly pendingSends: readonly string[];
   /** Deliveries that reached the push sink while `resumable` (P8b-24), pushed first on resume. */
   readonly heldDeliveries: readonly string[];
-  send(text: string, clientName?: string): Promise<{ seq: number; queued: boolean }>;
-  steer(text: string, clientName?: string): Promise<{ seq: number; injected: boolean }>;
+  /** `images` (code-mode image input, already validated by the caller): the `user_message` is
+   *  appended with `text` as written and `images`; the child is pushed `modelTextOf` of the two. */
+  send(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; queued: boolean }>;
+  steer(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; injected: boolean }>;
   interrupt(): Promise<{ wasRunning: boolean }>;
   /**
    * WS-23 (reasoning-state, decision 5): compacts the LIVE child's conversation NOW, on the model it runs
@@ -518,12 +524,12 @@ class WinterSessionImpl implements WinterSession {
 
   // ── the doors ──────────────────────────────────────────────────────────────────────────────
 
-  async send(text: string, clientName = "session"): Promise<{ seq: number; queued: boolean }> {
+  async send(text: string, clientName = "session", images?: readonly UserMessageImageRef[]): Promise<{ seq: number; queued: boolean }> {
     this.assertNotEnded();
     // WS-19 (W19-7): the pre-turn gate, BEFORE the open and before the append — a refusal here
     // leaves the session exactly as it was, with no child and no orphan `user_message`.
     await this.deps.beforeTurn?.();
-    if (this.handoff !== undefined) return { seq: this.holdForHandoff(text, clientName), queued: true };
+    if (this.handoff !== undefined) return { seq: this.holdForHandoff(text, clientName, images), queued: true };
     // Open FIRST: a refused open (the binary is gone) then leaves no orphan `user_message`, and a
     // delivery held while resumable is appended by `open()` BEFORE this text — chronological.
     await this.open();
@@ -534,28 +540,31 @@ class WinterSessionImpl implements WinterSession {
       // of the log pairs them the way they ran) and this one waits its turn.
       this.beginAndPush(this.pending.shift()!, this.inc!);
     }
-    const seq = this.appendUser(text, clientName);
+    const seq = this.appendUser(text, clientName, images);
+    // What the child is given (and what the projector's echo window must match): the placeholders
+    // replaced by their paths. The log keeps `text` as written.
+    const modelText = modelTextOf({ text, images });
     if (this.inFlight > 0) {
       // P8b-5/39: held until the running turn's `result` arrives. Its `user_message` is in the log;
       // its turn is begun when it is pushed, not now.
-      this.pending.push(text);
+      this.pending.push(modelText);
       return { seq, queued: true };
     }
-    this.beginAndPush(text, this.inc!);
+    this.beginAndPush(modelText, this.inc!);
     return { seq, queued: false };
   }
 
-  async steer(text: string, clientName = "steer"): Promise<{ seq: number; injected: boolean }> {
+  async steer(text: string, clientName = "steer", images?: readonly UserMessageImageRef[]): Promise<{ seq: number; injected: boolean }> {
     this.assertNotEnded();
     await this.deps.beforeTurn?.();
     // I-5: a steer during a pending handoff is not injected into the SOURCE's turn: it is the target's.
-    if (this.handoff !== undefined) return { seq: this.holdForHandoff(text, clientName), injected: false };
+    if (this.handoff !== undefined) return { seq: this.holdForHandoff(text, clientName, images), injected: false };
     await this.open();
-    const seq = this.appendUser(text, clientName);
+    const seq = this.appendUser(text, clientName, images);
     const wasRunning = this.inFlight > 0;
     this.drainPaused = false;
     // P8b-38: a steered-in message yields its OWN result on this wire, so it is a begun turn too.
-    this.beginAndPush(text, this.inc!);
+    this.beginAndPush(modelTextOf({ text, images }), this.inc!);
     return { seq, injected: wasRunning };
   }
 
@@ -666,9 +675,9 @@ class WinterSessionImpl implements WinterSession {
 
   /** I-5: the text is in the log (unconsumed: no `turn_started` pairs it), so the next incarnation --
    *  on the target -- pushes it (`deps.unconsumed`). Nothing reaches the source child. */
-  private holdForHandoff(text: string, clientName: string): number {
+  private holdForHandoff(text: string, clientName: string, images?: readonly UserMessageImageRef[]): number {
     this.heldForHandoff++;
-    return this.appendUser(text, clientName);
+    return this.appendUser(text, clientName, images);
   }
 
   idle(): Promise<void> {
@@ -947,13 +956,16 @@ class WinterSessionImpl implements WinterSession {
     inc.attachment?.refresh();
   }
 
-  private appendUser(text: string, clientName: string): number {
+  private appendUser(text: string, clientName: string, images?: readonly UserMessageImageRef[]): number {
     // C2 (lane C, 2026-09-22): a turn pushed while another ran has its `turn_started` held by the
     // projector until that turn ends (turn boundaries in order). Any still held is announced HERE,
     // before this message lands, so a `turn_started` is never separated from its own message by a
     // younger one — the adjacency pairing `unconsumedUserMessages` rests on.
     if (this.inc !== undefined) this.emit(this.inc.projector.announceQueuedTurns());
-    return this.deps.append({ type: "user_message", sessionId: this.sessionId, threadId: MAIN_THREAD, text, clientName }).seq;
+    return this.deps.append({
+      type: "user_message", sessionId: this.sessionId, threadId: MAIN_THREAD, text, clientName,
+      ...(images !== undefined && images.length > 0 ? { images: images.map((i) => ({ n: i.n, path: i.path })) } : {}),
+    }).seq;
   }
 
   private emit(batch: ProjectedBatch): void {

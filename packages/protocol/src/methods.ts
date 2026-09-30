@@ -4,7 +4,7 @@ import { z } from "zod";
 // from this file — methods.ts already imports from events.ts, so the reverse edge would be a module
 // cycle whose `z.enum(...)` const would be in the TDZ at events.ts's evaluation. Re-exported by the
 // package index either way, so `@yanlinglabs/winter-protocol` consumers see no difference.
-import { SessionEvent, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
+import { SessionEvent, UserMessageImageRef, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
 
 export const PROTOCOL_VERSION = 0;
 
@@ -339,9 +339,19 @@ export const SessionHistoryResult = z.object({
   oldestSeq: z.number().int().nullable(), // seq of events[0]; null iff events is empty
 });
 
+/** Code-mode image input: `text` keeps its `[Image #n]` placeholders (what the user's bubble shows)
+ *  and `images` names each one's staged file — the daemon hands the MODEL the text with every
+ *  placeholder replaced by its path, and stores the `user_message` with the placeholders and
+ *  `images`. Every entry is checked before anything is appended (typed `image_reference_invalid`):
+ *  the path is a regular file `session.stageImage` could have written — directly inside THIS
+ *  session's temp `images/` folder, no symlink — `n` is unique, and `[Image #n]` appears in `text`;
+ *  a non-code session refuses `image_session_not_code`, a non-local caller `image_reference_invalid`.
+ *  Omitted (or empty) = no images. The array length is checked by the handler (typed), not here. */
+export const SessionSendImagesParam = z.array(UserMessageImageRef).optional();
 export const SessionSendParams = z.object({
   sessionId: z.string(),
   text: z.string().min(1),
+  images: SessionSendImagesParam,
 });
 export const SessionSendResult = z.object({ seq: z.number().int() });
 
@@ -458,6 +468,10 @@ export const IMAGE_TOO_LARGE = "image_too_large";
 export const IMAGE_TYPE_UNSUPPORTED = "image_type_unsupported";
 export const IMAGE_TYPE_MISMATCH = "image_type_mismatch";
 export const IMAGE_STAGE_FAILED = "image_stage_failed";
+/** `session.send`/`session.steer`'s `images` refusal: an entry whose file is not one this session
+ *  staged, a repeated `n`, an `n` with no `[Image #n]` in the text, too many entries, or a caller
+ *  other than a local client. Nothing is appended. */
+export const IMAGE_REFERENCE_INVALID = "image_reference_invalid";
 export const SessionStageImageParams = z.object({
   sessionId: z.string().min(1),
   mediaType: z.enum(STAGE_IMAGE_MEDIA_TYPES),
@@ -465,7 +479,11 @@ export const SessionStageImageParams = z.object({
   // handler gives from the length alone, before decoding. The 8 MiB line cap bounds the string.
   dataBase64: z.string().min(1),
 });
-export const SessionStageImageResult = z.object({ path: z.string().min(1) });
+/** `imagesOnSend: true` — this daemon takes `images` on `session.send`/`session.steer` (the model
+ *  sees the paths, the bubble keeps `[Image #n]`). Absent from a daemon that predates it, whose
+ *  send schema would silently STRIP `images`: a client then substitutes the paths into the text
+ *  itself, as before. */
+export const SessionStageImageResult = z.object({ path: z.string().min(1), imagesOnSend: z.literal(true).optional() });
 export type SessionStageImageParams = z.infer<typeof SessionStageImageParams>;
 
 export const SessionAddDirParams = z.object({
@@ -493,7 +511,7 @@ export const BgKillResult = z.object({ ok: z.literal(true) });
 export const BgKillAllParams = z.object({ sessionId: z.string() });
 export const BgKillAllResult = z.object({ ok: z.literal(true), killed: z.number().int().nonnegative() });
 
-export const SessionSteerParams = z.object({ sessionId: z.string(), text: z.string().min(1) });
+export const SessionSteerParams = z.object({ sessionId: z.string(), text: z.string().min(1), images: SessionSendImagesParam });
 export const SessionSteerResult = z.object({ ok: z.literal(true), injected: z.boolean() });
 export const SessionInterruptParams = z.object({ sessionId: z.string() });
 export const SessionInterruptResult = z.object({ ok: z.literal(true), wasRunning: z.boolean() });

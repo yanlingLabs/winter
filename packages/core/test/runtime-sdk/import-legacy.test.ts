@@ -56,6 +56,14 @@ describe("convertEngineEraLog", () => {
     expect(JSON.stringify(entries)).not.toContain("secret");
   });
 
+  test("a user_message's image placeholders reach the imported transcript as their paths (a model reads it)", () => {
+    const events: SessionEvent[] = [
+      { type: "user_message", sessionId: "s1", seq: 1, ts: 1, threadId: "main", text: "see [Image #1]", clientName: "cli", images: [{ n: 1, path: "/tmp/i/images/image_1.png" }] },
+    ];
+    const entries = convertEngineEraLog(events, { sessionId: "s1", backendSessionId: "be-1", cwd: "/tmp/x", version: "unknown" });
+    expect((entries[0]!.message as { content: string }).content).toBe("see /tmp/i/images/image_1.png");
+  });
+
   test("a subagent's own thread (threadId !== main) is skipped", () => {
     const events: SessionEvent[] = [
       { type: "user_message", sessionId: "s1", seq: 1, ts: 1, threadId: "main", text: "hi", clientName: "cli" },

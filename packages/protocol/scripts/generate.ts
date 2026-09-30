@@ -29,6 +29,11 @@ const fixtures: Record<string, unknown> = {
   "harness_attached": { ...base, type: "harness_attached", clientName: "orb" },
   "harness_detached": { ...base, type: "harness_detached", clientName: "orb" },
   "user_message": { ...base, type: "user_message", threadId: "main", text: "héllo \"world\" — done ✓", clientName: "cli-1" },
+  // Code-mode image input: `images` is additive/optional on the EXISTING user_message shape — a
+  // dedicated fixture (user_message.json above predates it, absent) so Swift round-trips one carrying
+  // it. Two entries, out of order and with distinct n, so a Swift decode that drops or reorders
+  // them fails this fixture's content check.
+  "user_message_with_images": { ...base, type: "user_message", threadId: "main", text: "compare [Image #2] with [Image #1]", clientName: "orb", images: [{ n: 2, path: "/tmp/winter-session-s_1/images/image_2.png" }, { n: 1, path: "/tmp/winter-session-s_1/images/image_1.jpg" }] },
   "turn_started": { ...base, threadId: "main", type: "turn_started" },
   "assistant_message": { ...base, threadId: "main", type: "assistant_message", text: "done ✓" },
   "assistant_delta": { ...base, threadId: "main", type: "assistant_delta", delta: "wor" },
