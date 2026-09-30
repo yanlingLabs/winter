@@ -71,7 +71,7 @@ struct TranscriptUserBubble: View {
 /// (`PendingCards.swift`) compose it to render a plan's markdown. A hardcoded serif here would put
 /// every plan card into Winter's speaking voice, which `docs/brand.md` § 4 does not allowlist — so
 /// the transcript's two call sites pass `.assistant` and the two card bodies pass `.sans`.
-struct TranscriptAssistantMessage: View {
+struct TranscriptAssistantMessage: View, Equatable {
     let text: String
     let isStreaming: Bool
     let role: TranscriptProseRole
@@ -184,6 +184,19 @@ struct TranscriptAssistantMessage: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(displayText, forType: .string)
         showMessageCopiedFeedback()
+    }
+
+    /// Transcript file links: what makes this reply's body skippable. Before `fileDoor` every input
+    /// was a value, so SwiftUI could skip every FINISHED reply while the last one streamed; a closure
+    /// can never compare equal, so without this every visible reply would re-extract, re-parse and
+    /// re-render on every streaming delta. The closure itself is left out on purpose — the window
+    /// layer's reads the attached session at click time, so an older copy of it opens the same thing.
+    /// Used through `.equatable()` at the transcript's replies loop.
+    static func == (lhs: TranscriptAssistantMessage, rhs: TranscriptAssistantMessage) -> Bool {
+        lhs.text == rhs.text && lhs.isStreaming == rhs.isStreaming && lhs.role == rhs.role
+            && (lhs.fileDoor == nil) == (rhs.fileDoor == nil)
+            && lhs.fileDoor?.baseDirectory == rhs.fileDoor?.baseDirectory
+            && lhs.fileDoor?.sessionHasWorkingDirectory == rhs.fileDoor?.sessionHasWorkingDirectory
     }
 
     private func showMessageCopiedFeedback() {

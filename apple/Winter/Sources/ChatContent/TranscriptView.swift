@@ -260,6 +260,7 @@ private struct TranscriptExchangeRow: View {
             ForEach(Array(exchange.replies.enumerated()), id: \.offset) { _, reply in
                 TranscriptAssistantMessage(text: reply, isStreaming: false, role: .assistant,
                                            fileDoor: fileDoor)
+                    .equatable()
             }
             if let streamingText {
                 TranscriptAssistantMessage(text: streamingText, isStreaming: true, role: .assistant)
