@@ -447,8 +447,12 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(settingsLibraryDoors.map(\.tab), [.plugins, .skills, .hooks, .mcp, .agents])
         XCTAssertEqual(Set(settingsLibraryDoors.map(\.tab)), Set(LibraryTab.allCases),
                        "every library tab has exactly one door")
-        XCTAssertTrue(settingsHooksSwitchNote.contains("plugin hooks"),
-                      "hooks.enabled gates the plugin hook registry, not the daemon's own hooks")
+        // WS-21 rewrote the note: plugin hooks now run from each plugin's own hooks/hooks.json and
+        // `hooks.enabled` gates nothing (the old "gates the plugin hook registry" claim is gone).
+        XCTAssertTrue(settingsHooksSwitchNote.contains("Plugin hooks"),
+                      "the note is about PLUGIN hooks, not the daemon's own")
+        XCTAssertTrue(settingsHooksSwitchNote.contains("no longer gates anything"),
+                      "hooks.enabled is inert since WS-21, and the note says so")
         XCTAssertTrue(settingsHooksSwitchNote.contains("hooks.enabled"),
                       "the global hooks switch moved here from the old Hooks section")
         XCTAssertFalse(settingsHooksSwitchNote.contains("`"))
