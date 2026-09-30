@@ -597,7 +597,11 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         let sid = sessionId
         let client = feed.client
         let adapter = self.adapter
-        Task { @MainActor [weak self] in
+        // One submit at a time per surface: a second Enter while images stage would stage and send
+        // the same draft again.
+        guard adapter.beginComposerSubmit() else { return }
+        Task { @MainActor in
+            defer { adapter.endComposerSubmit() }
             guard let outgoing = await adapter.composerTextForSend(trimmed, stage: { image in
                 try await client.stageImage(sessionId: sid, mediaType: image.mediaType, data: image.data)
             }) else { return }
@@ -607,10 +611,8 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
             } else {
                 ok = (try? await client.send(sessionId: sid, text: outgoing)) != nil
             }
-            if ok {
-                self?.adapter.composerDraft = ""
-                self?.adapter.resetComposerImages()
-            }
+            // Clears only what was sent — edits made during the round trip stay.
+            if ok { adapter.composerSendSucceeded(sentDraft: text) }
             // failure: text stays in the composer — the draft is never lost (spec §6 parity)
         }
     }

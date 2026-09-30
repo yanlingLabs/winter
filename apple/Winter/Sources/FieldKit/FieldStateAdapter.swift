@@ -1056,7 +1056,7 @@ final class FieldStateAdapter: ObservableObject {
             return nil
         }
         composerNotice = nil
-        return ComposerImageDraft.token(composerImages.add(image))
+        return ComposerImageDraft.token(composerImages.add(image, draftText: composerDraft))
     }
 
     /// **Every code-mode submit site's one door** (`ShellSessionHost.submit`,
@@ -1064,7 +1064,16 @@ final class FieldStateAdapter: ObservableObject {
     /// staged through `stage` (`session.stageImage` on that surface's own client and session) and
     /// replaced by its path — or `nil` when staging was refused, with the daemon's own sentence on
     /// `composerNotice`, and then NOTHING is sent. A draft with no live placeholder comes back as is.
+    ///
+    /// A draft carried into a session that is NOT code (a hop or an in-place switch keeps the draft)
+    /// sends its text literally and drops its attachments, silently — images are a code-session
+    /// feature, and a refusal there would only block the message. A row not loaded yet is left to
+    /// the daemon.
     func composerTextForSend(_ text: String, stage: (ComposerImage) async throws -> String) async -> String? {
+        if let row = currentSessionRow(), !composerImageInputEnabled(row: row) {
+            composerImages = ComposerImageDraft()
+            return text
+        }
         do {
             return try await resolveComposerImages(text, draft: composerImages, stage: stage)
         } catch let error as RpcError {
@@ -1078,6 +1087,39 @@ final class FieldStateAdapter: ObservableObject {
     /// A sent draft's attachments go with it, and so does any notice about it.
     func resetComposerImages() {
         composerImages = ComposerImageDraft()
+        composerNotice = nil
+    }
+
+    /// Whether a code-mode submit is between its Enter and its reply — `beginComposerSubmit` refuses
+    /// a second one meanwhile, so a double Enter during image staging stages and sends once.
+    private(set) var composerSubmitInFlight = false
+
+    /// Claims the surface's one submit slot; `false` while another submit is still in flight.
+    func beginComposerSubmit() -> Bool {
+        guard !composerSubmitInFlight else { return false }
+        composerSubmitInFlight = true
+        return true
+    }
+
+    func endComposerSubmit() { composerSubmitInFlight = false }
+
+    /// After a successful send, clear ONLY what was sent. `sentDraft` is the draft as it was at Enter:
+    /// if the user kept typing during the staging round trip, the text they added after it stays in
+    /// the composer (an untouched draft clears as before), and only the attachments the sent text
+    /// referenced — and nothing still referenced by what remains — are dropped.
+    func composerSendSucceeded(sentDraft: String) {
+        let remaining: String
+        if composerDraft == sentDraft {
+            remaining = ""
+        } else if composerDraft.hasPrefix(sentDraft) {
+            remaining = String(composerDraft.dropFirst(sentDraft.count)).trimmingCharacters(in: .newlines)
+        } else {
+            remaining = composerDraft
+        }
+        composerDraft = remaining
+        let stillUsed = Set(composerImageTokenNumbers(in: remaining))
+        composerImages.remove(composerImageTokenNumbers(in: sentDraft).filter { !stillUsed.contains($0) })
+        if remaining.isEmpty && composerImages.isEmpty { composerImages = ComposerImageDraft() }
         composerNotice = nil
     }
 
