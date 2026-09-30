@@ -34,7 +34,7 @@ import type { SecretStore } from "../auth/secret-store";
 import { retentionFromSettings } from "../runtime-state/retention";
 import { winterOptionsFromSettings, type Settings } from "../settings";
 import { buildCoreBrand } from "./brand";
-import { resolveWinterExecutable, type WinterExecutableUnavailable } from "./executable";
+import { explicitRuntimeVersionNote, resolveWinterExecutable, type WinterExecutableUnavailable } from "./executable";
 import { EmbeddedRuntimeUnavailable, embeddedVersionCheck, runsEmbedded, type EmbeddedSessionHost } from "./embedded";
 import { credentialPresenceFrom } from "./keychain";
 import { familyListingFromCatalog } from "./provider-selection";
@@ -370,6 +370,8 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
   // underneath a child that is still appending into both. That is precisely the ordering G-14
   // exists to guarantee, so the second caller awaits the first instead.
   let disposing: Promise<void> | undefined;
+  // One log line per distinct stale-runtime note (explicitRuntimeVersionNote), never one per session.
+  const loggedRuntimeVersionNotes = new Set<string>();
 
   return {
     sdk,
@@ -398,7 +400,15 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
         home: deps.home,
         exists: (p) => existsSync(p),
       });
-      return resolution.ok ? { pathToClaudeCodeExecutable: resolution.path } : resolution.error;
+      if (!resolution.ok) return resolution.error;
+      if (resolution.source === "setting" || resolution.source === "env") {
+        const note = explicitRuntimeVersionNote(resolution.path);
+        if (note !== undefined && !loggedRuntimeVersionNotes.has(note)) {
+          loggedRuntimeVersionNotes.add(note);
+          deps.log?.(note);
+        }
+      }
+      return { pathToClaudeCodeExecutable: resolution.path };
     },
     async selectRuntimeFor(input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<RuntimeSelection | SelectionRefusal> {
       try {
