@@ -17,7 +17,9 @@ import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
-import { decodeStrictBase64, sniffImageMediaType } from "../../src/agent/stage-image";
+import { decodeStrictBase64, imageDimensions, sniffImageMediaType } from "../../src/agent/stage-image";
+import { makePng } from "../helpers/png-fixture";
+import { execFileSync } from "node:child_process";
 
 /** Minimal raw NDJSON JSON-RPC client — the same per-file copy every test in test/ipc carries. */
 class TestClient {
@@ -196,6 +198,51 @@ describe("session.stageImage (code-mode image input)", () => {
     // tricks, which strict decoding refuses; the decoded check stays as the belt.
     expect(readdirSync(imagesDirOf(sid))).toEqual(["image_1.png"]);
     c.close();
+  });
+
+  test("more than 8000 px on either edge refuses image_too_large, read from the header alone", async () => {
+    const { store, c } = await boot();
+    const sid = store.createSession("global", { model: IMAGE_TAG });
+    // A header claiming 8001×10 — tiny on the wire, so only the dimension check can refuse it.
+    const header = (w: number, h: number) => {
+      const png = makePng(4, 4);
+      const view = new DataView(png.buffer, png.byteOffset);
+      view.setUint32(16, w); view.setUint32(20, h);
+      return png;
+    };
+    for (const [w, h] of [[8001, 10], [10, 8001]] as const) {
+      const res = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(header(w, h)) });
+      expect(res.error.data).toEqual({ code: IMAGE_TOO_LARGE });
+      expect(res.error.message).toBe(IMAGE_TOO_LARGE_MESSAGE);
+    }
+    const edge = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(header(8000, 8000)) });
+    expect(edge.error).toBeUndefined();
+    c.close();
+  });
+
+  test("imageDimensions reads PNG, JPEG, GIF and WebP headers without decoding", () => {
+    expect(imageDimensions(makePng(640, 480))).toEqual({ width: 640, height: 480 });
+    const dir = mkdtempSync(join(tmpdir(), "winter-dims-"));
+    try {
+      const src = join(dir, "a.png");
+      writeFileSync(src, makePng(321, 123));
+      for (const [format, ext] of [["jpeg", "jpg"], ["gif", "gif"]] as const) {
+        const out = join(dir, `a.${ext}`);
+        execFileSync("/usr/bin/sips", ["-s", "format", format, src, "--out", out], { stdio: "ignore" });
+        expect(imageDimensions(new Uint8Array(readFileSync(out)))).toEqual({ width: 321, height: 123 });
+      }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+    // WebP's three header kinds, hand-built (sips cannot write WebP).
+    const riff = (fourcc: string, body: number[]) => new Uint8Array([...Buffer.from("RIFF"), 0, 0, 0, 0, ...Buffer.from("WEBP"), ...Buffer.from(fourcc), 0, 0, 0, 0, ...body]);
+    // VP8X: 24-bit (w-1), (h-1) at 24..29.
+    expect(imageDimensions(riff("VP8X", [0, 0, 0, 0, 0x3f, 0x01, 0, 0x1f, 0x03, 0]))).toEqual({ width: 320, height: 800 });
+    // VP8 (lossy): frame tag + start code, then 14-bit w/h at 26..29.
+    expect(imageDimensions(riff("VP8 ", [0, 0, 0, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0x20, 0x03]))).toEqual({ width: 320, height: 800 });
+    // VP8L (lossless): signature 0x2f, then 14-bit (w-1), (h-1) packed from byte 21.
+    const w = 320 - 1, h = 800 - 1;
+    const bits = w | (h << 14);
+    expect(imageDimensions(riff("VP8L", [0x2f, bits & 0xff, (bits >> 8) & 0xff, (bits >> 16) & 0xff, (bits >> 24) & 0xff, 0, 0, 0, 0, 0]))).toEqual({ width: 320, height: 800 });
+    expect(imageDimensions(new Uint8Array([0xff, 0xd8, 0xff]))).toBeUndefined();
   });
 
   test("code sessions only: a chat or dispatch session refuses image_session_not_code; an absent mode is code", async () => {

@@ -16,7 +16,7 @@ import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdi
 import { join, sep } from "node:path";
 import {
   IMAGE_DATA_INVALID, IMAGE_STAGE_FAILED, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
-  STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, type STAGE_IMAGE_MEDIA_TYPES,
+  STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, STAGE_IMAGE_MAX_DIMENSION, type STAGE_IMAGE_MEDIA_TYPES,
 } from "@yanlinglabs/winter-protocol";
 import { sessionTmpDirPath } from "./session-tmp";
 
@@ -55,6 +55,48 @@ export function sniffImageMediaType(bytes: Uint8Array): StageImageMediaType | un
   return undefined;
 }
 
+/**
+ * An image's pixel dimensions, read from its HEADER bytes only (nothing is decoded): PNG's IHDR,
+ * GIF's logical screen, WebP's VP8/VP8L/VP8X header, JPEG's first SOF marker. `undefined` when the
+ * header cannot be read — the caller then has no dimension to refuse on.
+ */
+export function imageDimensions(bytes: Uint8Array): { width: number; height: number } | undefined {
+  const b = bytes;
+  const u16be = (i: number) => (b[i]! << 8) | b[i + 1]!;
+  const u16le = (i: number) => b[i]! | (b[i + 1]! << 8);
+  const u24le = (i: number) => b[i]! | (b[i + 1]! << 8) | (b[i + 2]! << 16);
+  const type = sniffImageMediaType(b);
+  if (type === "image/png") {
+    if (b.length < 24 || !startsWith(b, ascii("IHDR"), 12)) return undefined;
+    const u32 = (i: number) => ((b[i]! << 24) >>> 0) + (b[i + 1]! << 16) + (b[i + 2]! << 8) + b[i + 3]!;
+    return { width: u32(16), height: u32(20) };
+  }
+  if (type === "image/gif") return b.length < 10 ? undefined : { width: u16le(6), height: u16le(8) };
+  if (type === "image/webp") {
+    if (b.length < 30) return undefined;
+    if (startsWith(b, ascii("VP8X"), 12)) return { width: 1 + u24le(24), height: 1 + u24le(27) };
+    if (startsWith(b, ascii("VP8L"), 12)) {
+      return { width: 1 + (((b[22]! & 0x3f) << 8) | b[21]!), height: 1 + (((b[24]! & 0x0f) << 10) | (b[23]! << 2) | ((b[22]! & 0xc0) >> 6)) };
+    }
+    if (startsWith(b, ascii("VP8 "), 12)) return { width: u16le(26) & 0x3fff, height: u16le(28) & 0x3fff };
+    return undefined;
+  }
+  if (type === "image/jpeg") {
+    let i = 2;
+    while (i + 3 < b.length) {
+      if (b[i] !== 0xff) return undefined;
+      const marker = b[i + 1]!;
+      if (marker === 0xff) { i += 1; continue; } // fill byte
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) { i += 2; continue; } // no length
+      const sof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+      if (sof) return i + 8 < b.length ? { width: u16be(i + 7), height: u16be(i + 5) } : undefined;
+      i += 2 + u16be(i + 2);
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
 const STRICT_BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 
 /** Strict standard base64 — `Buffer.from(s, "base64")` silently SKIPS characters it does not know,
@@ -82,6 +124,12 @@ export function validateStagedImage(mediaType: StageImageMediaType, dataBase64: 
   }
   if (sniffed !== mediaType) {
     throw new StageImageRefusal(IMAGE_TYPE_MISMATCH, `the image data is ${sniffed}, not the declared ${mediaType}`);
+  }
+  // The runtime Read tool refuses an image past 8000 px on either edge; so does staging, from the
+  // header alone. (Clients downscale to 1568 px before they get here — this is the backstop.)
+  const dims = imageDimensions(bytes);
+  if (dims !== undefined && (dims.width > STAGE_IMAGE_MAX_DIMENSION || dims.height > STAGE_IMAGE_MAX_DIMENSION)) {
+    throw new StageImageRefusal(IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE);
   }
   return { bytes, ext: EXTENSION[sniffed] };
 }
