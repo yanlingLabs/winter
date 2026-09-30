@@ -24,7 +24,7 @@
     },
     "packages/cli": {
       "name": "@yanlinglabs/winter-cli",
-      "version": "0.122.0",
+      "version": "0.122.1",
       "bin": {
         "winter": "./src/main.ts",
       },
@@ -47,31 +47,31 @@
     },
     "packages/core": {
       "name": "@yanlinglabs/winter-core",
-      "version": "0.122.0",
+      "version": "0.122.1",
       "dependencies": {
-        "@yanlinglabs/winter-agent-runtime": "0.0.35",
-        "@yanlinglabs/winter-agent-sdk": "0.0.35",
+        "@yanlinglabs/winter-agent-runtime": "0.0.36",
+        "@yanlinglabs/winter-agent-sdk": "0.0.36",
         "@yanlinglabs/winter-protocol": "workspace:*",
-        "@yanlinglabs/winter-provider-catalog": "0.0.35",
-        "@yanlinglabs/winter-provider-runtime": "0.0.35",
+        "@yanlinglabs/winter-provider-catalog": "0.0.36",
+        "@yanlinglabs/winter-provider-runtime": "0.0.36",
         "@yanlinglabs/winter-runtime-sdk": "^0.0.15",
         "unpdf": "^1.6.2",
         "zod": "^4.0.0",
       },
       "devDependencies": {
-        "@yanlinglabs/winter-provider-conformance": "0.0.35",
+        "@yanlinglabs/winter-provider-conformance": "0.0.36",
       },
     },
     "packages/plugin-sdk": {
       "name": "@yanlinglabs/winter-plugin-sdk",
-      "version": "0.122.0",
+      "version": "0.122.1",
       "dependencies": {
         "@yanlinglabs/winter-protocol": "workspace:*",
       },
     },
     "packages/protocol": {
       "name": "@yanlinglabs/winter-protocol",
-      "version": "0.122.0",
+      "version": "0.122.1",
       "dependencies": {
         "zod": "^4.0.0",
       },
@@ -130,11 +130,11 @@
 
     "@winter-spike/bun-compile": ["@winter-spike/bun-compile@workspace:spikes/bun-compile"],
 
-    "@yanlinglabs/winter-agent-runtime": ["@yanlinglabs/winter-agent-runtime@0.0.35", "", { "dependencies": { "@modelcontextprotocol/client": "^2.1.0", "@yanlinglabs/winter-agent-sdk": "0.0.35", "@yanlinglabs/winter-provider-catalog": "0.0.35", "@yanlinglabs/winter-provider-runtime": "0.0.35", "ajv": "^8.20.0", "ignore": "7.0.5" } }, "sha512-mDwy4TWjjPk9vhvicEqPHYY4NeLze9XCawNt3ARkXoYfNR8zLTYsFK4qc9BjdR9ZObdpwEWMnd8ENPiatqAdAg=="],
+    "@yanlinglabs/winter-agent-runtime": ["@yanlinglabs/winter-agent-runtime@0.0.36", "", { "dependencies": { "@modelcontextprotocol/client": "^2.1.0", "@yanlinglabs/winter-agent-sdk": "0.0.36", "@yanlinglabs/winter-provider-catalog": "0.0.36", "@yanlinglabs/winter-provider-runtime": "0.0.36", "ajv": "^8.20.0", "ignore": "7.0.5" } }, "sha512-obr1So31h0hInBjTvECKfoNNH297UwBHduwwfXaHEdtxvP1P8I5OrZWmPYNcjU/XnczB2s729JbHNfo3NlKPWQ=="],
 
-    "@yanlinglabs/winter-agent-sdk": ["@yanlinglabs/winter-agent-sdk@0.0.35", "", { "dependencies": { "@yanlinglabs/winter-provider-catalog": "0.0.35" }, "optionalDependencies": { "@yanlinglabs/winter-agent-sdk-darwin-arm64": "0.0.35" } }, "sha512-IpnqkyWnnX5iseOCuwQOEsVcHHW84amdOZlRwCAisgIoislXNS+ixcnHOsd8SLc1Y3OrUv4dggduF3VneYnyuA=="],
+    "@yanlinglabs/winter-agent-sdk": ["@yanlinglabs/winter-agent-sdk@0.0.36", "", { "dependencies": { "@yanlinglabs/winter-provider-catalog": "0.0.36" }, "optionalDependencies": { "@yanlinglabs/winter-agent-sdk-darwin-arm64": "0.0.36" } }, "sha512-VttyI0AjX+AG6f2UUupQids63iaFfazRiVyX07rlCQ9i95GmEBdSLUKgT6nrXD9T2ZY75kZR/iR+bnZa8vFxAw=="],
 
-    "@yanlinglabs/winter-agent-sdk-darwin-arm64": ["@yanlinglabs/winter-agent-sdk-darwin-arm64@0.0.35", "", { "os": "darwin", "cpu": "arm64", "bin": { "winter": "bin/winter" } }, "sha512-0xVm3zEP1nDSzK48Qnm266AqvF+Ov+zdVmWF9TA2kCIcTiqGBJakAexaPBjSovczWlSjEludhdLrr9jQv2b88g=="],
+    "@yanlinglabs/winter-agent-sdk-darwin-arm64": ["@yanlinglabs/winter-agent-sdk-darwin-arm64@0.0.36", "", { "os": "darwin", "cpu": "arm64", "bin": { "winter": "bin/winter" } }, "sha512-0xWUKA+F/KMS/D2J9HCnFo/L+B5Ps6Oc0O/bZW6qqlUmHqb3jHrQaTwSFrFB1n+2VsaMCoJDyIRnZGnAqeEn+A=="],
 
     "@yanlinglabs/winter-cli": ["@yanlinglabs/winter-cli@workspace:packages/cli"],
 
@@ -144,11 +144,11 @@
 
     "@yanlinglabs/winter-protocol": ["@yanlinglabs/winter-protocol@workspace:packages/protocol"],
 
-    "@yanlinglabs/winter-provider-catalog": ["@yanlinglabs/winter-provider-catalog@0.0.35", "", {}, "sha512-LS1xT+MYvX+vCYJeK2q9JHDdicC0GnwralMwQbmjATAa22MwVO6L68r4oPcyaIc1S+iklLmsdvcrvXZ4n8OyPA=="],
+    "@yanlinglabs/winter-provider-catalog": ["@yanlinglabs/winter-provider-catalog@0.0.36", "", {}, "sha512-sIaYg3xajVQOiiSldN0u6USW+ePQaNgxLxpyq4NKXzPpqceO6rzTqmSPOSw47BBzzLhTX//5Di2/GoqFqrEbmA=="],
 
-    "@yanlinglabs/winter-provider-conformance": ["@yanlinglabs/winter-provider-conformance@0.0.35", "", { "dependencies": { "@yanlinglabs/winter-provider-catalog": "0.0.35", "@yanlinglabs/winter-provider-runtime": "0.0.35" } }, "sha512-20B/7DtYvKszkPefEHdXwFu4SCC4pjsffvgB/RdZ4Q9wJYR+xiRk6j1nNwqctOjRBPl3m32PSs+scAR0jDz+5g=="],
+    "@yanlinglabs/winter-provider-conformance": ["@yanlinglabs/winter-provider-conformance@0.0.36", "", { "dependencies": { "@yanlinglabs/winter-provider-catalog": "0.0.36", "@yanlinglabs/winter-provider-runtime": "0.0.36" } }, "sha512-JzW59oMLl3ESjI9+szGKHIpbVJgfrxBgzARNU+o+vq+cIsaYp2keW9SiBgSyi767pXfaBZWycscKYPIFSWdKaQ=="],
 
-    "@yanlinglabs/winter-provider-runtime": ["@yanlinglabs/winter-provider-runtime@0.0.35", "", { "dependencies": { "@yanlinglabs/winter-agent-sdk": "0.0.35", "@yanlinglabs/winter-provider-catalog": "0.0.35" } }, "sha512-IFbs6DotEssaRhBUg13OXVpDf6i5FWoRUZqZQnmJiTsGCe5oXH3cQBn1VDVKhISlUWSkRoVS3h7CLW6XQ9vXXA=="],
+    "@yanlinglabs/winter-provider-runtime": ["@yanlinglabs/winter-provider-runtime@0.0.36", "", { "dependencies": { "@yanlinglabs/winter-agent-sdk": "0.0.36", "@yanlinglabs/winter-provider-catalog": "0.0.36" } }, "sha512-VyLS8FObdiw7cLNKsS17mCg52gN0vbHLd+eIN+0h+MI8jxWci8IBBt/tsYAniBQ/RFci2ZOPt7D1IXlEJFUteg=="],
 
     "@yanlinglabs/winter-runtime-sdk": ["@yanlinglabs/winter-runtime-sdk@0.0.15", "", { "peerDependencies": { "@yanlinglabs/winter-agent-sdk": ">=0.0.21 <0.1.0", "@yanlinglabs/winter-conformance": ">=0.0.3 <0.1.0", "@yanlinglabs/winter-provider-catalog": ">=0.0.21 <0.1.0", "@yanlinglabs/winter-provider-conformance": ">=0.0.21 <0.1.0", "@yanlinglabs/winter-provider-runtime": ">=0.0.21 <0.1.0" }, "optionalPeers": ["@yanlinglabs/winter-conformance", "@yanlinglabs/winter-provider-conformance"] }, "sha512-p6E7pvE0UXi8r7op0l+aQbpCAN/pkimfphdvQh4eWRI+1yC/7G429K49wFmVZpUYWeoUdV799gFrZ4CjMXXgnQ=="],
 
