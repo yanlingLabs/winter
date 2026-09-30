@@ -2,7 +2,7 @@ import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import type { SyncConfigModel } from "@yanlinglabs/winter-protocol";
 import { facingNameOf, type ModelTag } from "../runtime-sdk/model-tag";
-import { effortVocabularyFor, toolsRefusedFor } from "../runtime-sdk/provider-selection";
+import { effortVocabularyFor, imagesAcceptedBy, toolsRefusedFor } from "../runtime-sdk/provider-selection";
 import { credentialPresentProbe } from "../runtime-sdk/keychain";
 
 // Mirrors `ipc/sync.ts`'s own `effortsForModel` EXACTLY (never imported from there — `sync.ts`
@@ -64,6 +64,7 @@ export function pickerModels(deps: { credentials: CredentialPresence; home: stri
         displayName: row.displayName,
         ...(facingNameOf(tag) === undefined ? {} : { facingName: facingNameOf(tag)! }),
         efforts: effortsForModel(tag),
+        supportsImages: imagesAcceptedBy(row),
       });
     }
   }

@@ -9,7 +9,7 @@ import { appendCleanerLog } from "../../src/sessions/cleaner-log";
 import { reapEmptySessions, type ReaperStore } from "../../src/sessions/reaper";
 import { ensureOutdir, outdirPath } from "../../src/sessions/outdir";
 import { writeDiff, mintDiffId, diffDirPath } from "../../src/diffs/store";
-import { startIpcServer } from "../../src/ipc/server";
+import { deferMintSweep, startIpcServer } from "../../src/ipc/server";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
@@ -704,45 +704,89 @@ describe("wired: session.create's mint-time sweep (session-activity-hygiene T6)"
   });
 
   // Review fix round 1, Finding 1 (Important): the mint-time sweep must not merely fail to THROW
-  // into the reply — it must not DELAY it either. `opts.reapEmptySessions` (server.ts) exists ONLY
-  // so this test can intercept exactly when the sweep runs, via a deliberately slow but PURELY
-  // SYNCHRONOUS stub (a busy-wait, not a real sleep — this measures actual event-loop blocking, not
-  // wall-clock scheduling noise). If the sweep is scheduled such that it still runs BEFORE the reply
-  // is enqueued (the bug: `Promise.resolve().then(fn)` on an already-fulfilled promise queues `fn` as
-  // a microtask strictly ahead of the `await handle(...)` continuation that writes the reply), the
-  // whole single-threaded event loop is blocked for the stub's artificial delay and the round trip
-  // below is provably at least that slow. If the sweep is genuinely deferred past the reply (a
-  // macrotask via `setTimeout`, which only runs once the microtask queue — including the reply write
-  // — has fully drained), the round trip is unaffected by the stub's delay at all.
-  test("the mint-time sweep never delays the create reply, even when the sweep itself is slow", async () => {
+  // into the reply — it must not DELAY it either. Proven by ORDER, never by a wall-clock bound (the
+  // old version timed the round trip against a 100 ms bound and flaked under full-suite load):
+  //   1. with a CAPTURING scheduler injected (`scheduleMintSweep`), the create reply arrives while
+  //      the sweep is still only scheduled — it has not run, so the reply cannot have waited on it;
+  //   2. the production scheduler (`deferMintSweep`) is a MACROTASK: it has not run after any number
+  //      of microtask turns (where the reply write happens) and runs once a macrotask turn passes.
+  // Either half fails on the bug shapes: a create that runs or awaits the sweep before replying
+  // never replies while the sweep is held (1), and a microtask scheduler runs inside (2)'s drain.
+  test("the mint-time sweep never delays the create reply: the reply is written while the sweep is only scheduled", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-reaper-wire-"));
     const store = new SessionStore(home);
     const hub = new SessionHub(store);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
-    const ARTIFICIAL_SWEEP_DELAY_MS = 200; // generous margin over a normal <10ms round trip
     let sweepRan = false;
+    const held: Array<() => void> = [];
     const server = startIpcServer({
       socketPath, serverVersion: "test", tokens: authority, store, hub, winterHome: home,
-      reapEmptySessions: () => {
-        const until = Date.now() + ARTIFICIAL_SWEEP_DELAY_MS;
-        while (Date.now() < until) { /* deliberate synchronous busy-wait — blocks the event loop */ }
-        sweepRan = true;
-        return [];
-      },
+      reapEmptySessions: () => { sweepRan = true; return []; },
+      scheduleMintSweep: (run) => { held.push(run); return () => {}; },
     });
     stop = () => { server.stop(); store.close(); };
 
     const c = await TestClient.connect(socketPath);
     await c.hello(tokens.harness, "harness");
-    const startedAt = Date.now();
-    await c.request(METHODS.sessionCreate, { scope: "global" });
-    const roundTripMs = Date.now() - startedAt;
-
-    expect(roundTripMs).toBeLessThan(ARTIFICIAL_SWEEP_DELAY_MS / 2);
-    await waitFor(() => sweepRan, "the deferred sweep to actually run");
+    const reply = await Promise.race([
+      c.request(METHODS.sessionCreate, { scope: "global" }),
+      new Promise<"no-reply">((r) => setTimeout(() => r("no-reply"), 5_000)),
+    ]);
+    expect(reply).not.toBe("no-reply");
+    expect((reply as { result: { sessionId: string } }).result.sessionId).toBeTruthy();
+    expect(held.length).toBe(1);     // the sweep WAS scheduled…
+    expect(sweepRan).toBe(false);    // …and had not run when the reply arrived
+    held[0]!();
+    expect(sweepRan).toBe(true);
     c.close();
+  });
+
+  test("deferMintSweep is a macrotask: never inside a microtask drain, always after one macrotask turn", async () => {
+    let ran = false;
+    deferMintSweep(() => { ran = true; });
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    expect(ran).toBe(false);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ran).toBe(true);
+    let cancelledRan = false;
+    const cancel = deferMintSweep(() => { cancelledRan = true; });
+    cancel();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(cancelledRan).toBe(false);
+  });
+
+  // "Cannot use a closed database" (follow_up.md, fixed 2026-09-30): a create answered just before
+  // shutdown left its sweep queued, and the owner's `server.stop(); store.close()` ran first, so the
+  // sweep queried a closed store. `stop()` now cancels a queued sweep. The injected scheduler holds
+  // the sweep for 50 ms, so "queued but not yet run" is a window the test can stop inside.
+  test("stop() cancels a queued mint-time sweep — it never runs against the store closed after it", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-reaper-stop-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    let sweepRan = false;
+    let cancelled = false;
+    const server = startIpcServer({
+      socketPath, serverVersion: "test", tokens: authority, store, winterHome: home,
+      reapEmptySessions: () => { sweepRan = true; store.emptySessionIds(() => 0, Date.now()); return []; },
+      scheduleMintSweep: (run) => {
+        const t = setTimeout(run, 50);
+        return () => { cancelled = true; clearTimeout(t); };
+      },
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "harness");
+    const res = await c.request(METHODS.sessionCreate, { scope: "global" });
+    expect(res.result.sessionId).toBeTruthy();
+    c.close();
+    server.stop();
+    store.close();
+    expect(cancelled).toBe(true);
+    await new Promise((r) => setTimeout(r, 120));
+    expect(sweepRan).toBe(false);
   });
 
   test("with no winterHome wired, session.create still works and never throws over the sweep", async () => {

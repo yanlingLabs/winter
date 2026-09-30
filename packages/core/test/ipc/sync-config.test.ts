@@ -515,7 +515,7 @@ describe("sync.config model catalogue (provider-correctness T3, WS-20)", () => {
     expect(clientEfforts()).toEqual([...CLIENT_EFFORTS]);
   });
 
-  test("pickerModels() projects a catalog row to {id, providerId, displayName, efforts[, facingName]} — never the whole row", async () => {
+  test("pickerModels() projects a catalog row to {id, providerId, displayName, efforts, supportsImages[, facingName]} — never the whole row", async () => {
     // `sync.config`'s `models` field is exactly `pickerModels()`'s own shape — pinned directly here
     // (replacing the pre-WS-20 `syncConfig({knownModels: ...})` projection test, whose `ModelInfo`
     // source no longer exists) so a field added to the catalog row does not leak onto the wire
@@ -528,9 +528,12 @@ describe("sync.config model catalogue (provider-correctness T3, WS-20)", () => {
     expect(models.length).toBeGreaterThan(0);
     for (const m of models) {
       expect(Object.keys(m).sort()).toEqual(
-        m.facingName === undefined ? ["displayName", "efforts", "id", "providerId"] : ["displayName", "efforts", "facingName", "id", "providerId"],
+        m.facingName === undefined ? ["displayName", "efforts", "id", "providerId", "supportsImages"] : ["displayName", "efforts", "facingName", "id", "providerId", "supportsImages"],
       );
       expect(m.id.startsWith(`${m.providerId}/`)).toBe(true);
+      // Code-mode image input: the catalog row's own `inputModalities`, verbatim — never a guess.
+      const row = loadCatalog().models.find((r) => r.key === m.id)!;
+      expect(m.supportsImages).toBe(row.inputModalities.value.includes("image"));
     }
   });
 

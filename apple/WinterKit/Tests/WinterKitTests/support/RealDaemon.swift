@@ -79,39 +79,54 @@ struct RealDaemon {
     process.on("SIGTERM", async () => { await d.stop(); process.exit(0); });
     """
 
-    /// iOS remote-path T2: the same daemon, booted with an INJECTED streaming `Provider` instead of
-    /// `agentProvider: null`, so a `session.send` runs a REAL turn through the REAL `AgentEngine`
-    /// and produces the events the phone path actually depends on — `assistant_delta` transients via
-    /// `hub.broadcastTransient` (borrowed seq and all), a persisted `reasoning_item` carrying opaque
-    /// provider state, and an oversized final message. Nothing here is faked below the provider
-    /// boundary: the engine, the hub, the store, the IPC server and the gateway are all production
-    /// code. (`agentProvider: {provider, model}` is the same injection seam packages/core's own
-    /// tests use — daemon.ts's `startDaemon` option, "object: use this provider directly".)
+    /// iOS remote-path T2, rebuilt for today's runtime (2026-09-30): the same daemon, with its
+    /// `openai` provider pointed (`settings.providers.openai.baseUrl`, the one per-provider override
+    /// the daemon honours, declared local for a loopback address) at a fake OpenAI **Responses**
+    /// endpoint served from this same `bun -e` process, and a fake key in the temp secret store. A
+    /// `session.send` then runs a REAL Winter-leg turn — the embedded runtime, the real `openai`
+    /// Responses adapter parsing a real SSE stream, the projector, the hub, the IPC server, the
+    /// gateway — and only the HTTP endpoint is fake. (The previous fixture injected `agentProvider`,
+    /// which feeds only the daemon's own internal jobs now and never a session turn, so none of its
+    /// chunks ever reached the wire.)
     ///
-    /// The stream is: six small text chunks (six `assistant_delta`s at ONE borrowed seq), one opaque
-    /// `reasoning_item`, then a >1 MiB chunk. That last chunk is deliberate — uncapped it produces
-    /// both an `assistant_delta` and a final `assistant_message` past the phone transport's hard
-    /// 1 MiB de-framing limit, whose overflow silently ends the phone's inbound stream.
+    /// The session turn (the only request that carries tools) streams six small text chunks (six
+    /// `assistant_delta` transients at ONE borrowed seq), a reasoning item whose `encrypted_content`
+    /// is `streamedReasoningSecret` (opaque provider state that must never reach a phone), then a
+    /// >1 MiB chunk — uncapped, that delta and the final `assistant_message` would pass the phone
+    /// transport's hard 1 MiB de-framing limit, whose overflow silently ends the phone's stream. Any
+    /// other request (the daemon's own titler) gets a short reply.
     static let streamingProviderFixture = """
-    import { startDaemon, FileSecretStore } from "@yanlinglabs/winter-core";
+    import { startDaemon, FileSecretStore, writeOpenAiApiKey } from "@yanlinglabs/winter-core";
+    import { mkdirSync, writeFileSync } from "node:fs";
     const home = process.env.WINTER_HOME;
     const CHUNKS = \(streamedChunksJSLiteral);
-    const provider = {
-      id: "conformance-fake",
-      models: () => [{ id: "conformance-model", family: "conformance", contextWindow: 128000, supportsVision: false }],
-      async *streamTurn() {
-        for (const c of CHUNKS) yield { type: "text_delta", delta: c };
-        yield { type: "reasoning_item", itemJson: "\(streamedReasoningSecret)" };
-        yield { type: "text_delta", delta: "Z".repeat(\(oversizedChunkBytes)) };
-        yield { type: "done", stopReason: "end_turn" };
-      },
-    };
-    const d = await startDaemon({
-      home, secrets: new FileSecretStore(home + "/secrets"),
-      agentProvider: { provider, model: "conformance-model" },
-    });
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+      const body = JSON.parse((await req.text()) || "{}");
+      const isSessionTurn = Array.isArray(body.tools) && body.tools.length > 0;
+      const events = [{ type: "response.created", response: { id: "resp_conformance", model: body.model } }];
+      if (isSessionTurn) {
+        for (const c of CHUNKS) events.push({ type: "response.output_text.delta", delta: c });
+        events.push({ type: "response.output_item.done", output_index: 0,
+          item: { type: "reasoning", id: "rs_conformance", summary: [], encrypted_content: "\(streamedReasoningSecret)" } });
+        events.push({ type: "response.output_text.delta", delta: "Z".repeat(\(oversizedChunkBytes)) });
+      } else {
+        events.push({ type: "response.output_text.delta", delta: "Conformance" });
+      }
+      events.push({ type: "response.completed", response: { id: "resp_conformance", usage: { input_tokens: 1, output_tokens: 1 } } });
+      const sse = events.map((e) => "event: " + e.type + "\\ndata: " + JSON.stringify(e) + "\\n\\n").join("");
+      return new Response(sse, { headers: { "content-type": "text/event-stream" } });
+    } });
+    mkdirSync(home, { recursive: true });
+    writeFileSync(home + "/settings.json", JSON.stringify({
+      schemaVersion: 3,
+      provider: { model: "openai/gpt-5.4-mini" },
+      providers: { openai: { baseUrl: "http://127.0.0.1:" + server.port + "/v1" } },
+    }));
+    const secrets = new FileSecretStore(home + "/secrets");
+    await writeOpenAiApiKey(secrets, "sk-conformance-fake-key");
+    const d = await startDaemon({ home, secrets, agentProvider: null });
     process.stdout.write(JSON.stringify({ socketPath: d.socketPath, harness: d.tokens.harness, remote: d.tokens.remote }) + "\\n");
-    process.on("SIGTERM", async () => { await d.stop(); process.exit(0); });
+    process.on("SIGTERM", async () => { await d.stop(); server.stop(true); process.exit(0); });
     """
 
     /// The six small chunks `streamingProviderFixture` streams, in order — and the expected
@@ -307,13 +322,12 @@ struct RealDaemon {
     /// (seed helpers now wait for a turn to settle before the next step, and assert exact equality
     /// against the daemon's real, settled content instead of a hardcoded frame count; see each
     /// test's own doc comment and `GatewayGateTests.collectUntilTurnsSettle`/`crossesRemoteGate`).
-    /// `FakePhoneConformanceTests`'s streaming test is the one still WAIVED: `agentProvider`
-    /// injection now feeds only the daemon's own internal jobs (titler/reviewer/dreamer/cleaner —
-    /// `daemon.ts`'s `if (agentProvider)` gate), never a real session turn, so its controlled
-    /// 6-chunk/reasoning_item/oversized-chunk scenario cannot be reproduced short of a new
-    /// `winter-test/*` double (`testProviderNameFor`, `packages/core/src/runtime-sdk/
-    /// session-driver.ts`) added in the separate `winter-agent-sdk` repo — out of this repo's edit
-    /// scope entirely, not just this lane's.
+    /// `FakePhoneConformanceTests`'s streaming test was the one left: `agentProvider` injection feeds
+    /// only the daemon's own internal jobs (titler/reviewer/dreamer/cleaner — `daemon.ts`'s
+    /// `if (agentProvider)` gate), never a real session turn, and no `winter-test/*` double streams.
+    /// **Fixed 2026-09-30** without either: `streamingProviderFixture` now serves a fake OpenAI
+    /// Responses endpoint from its own `bun -e` process and points the daemon's `openai` provider at
+    /// it, so the real adapter streams the scenario through a real Winter-leg turn.
     private static func waitForFirstLine(
         process: Process, stdoutPath: String, stderrPath: String, timeoutSeconds: Double = 20
     ) async throws -> String {

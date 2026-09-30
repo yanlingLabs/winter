@@ -58,7 +58,7 @@ describe("model-tag-parity: every RPC schema with a model field refuses a bare i
   });
 
   test("SyncConfigModel.id (a served picker row, not a param — same schema, same rule)", () => {
-    const rowFor = (id: string) => ({ id, providerId: "codex-oauth", displayName: "GPT-5.6 Sol", efforts: [] });
+    const rowFor = (id: string) => ({ id, providerId: "codex-oauth", displayName: "GPT-5.6 Sol", efforts: [], supportsImages: true });
     expect(SyncConfigModel.safeParse(rowFor(BARE)).success).toBe(false);
     expect(SyncConfigModel.safeParse(rowFor(TAG)).success).toBe(true);
   });

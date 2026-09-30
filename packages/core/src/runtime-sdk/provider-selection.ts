@@ -92,6 +92,17 @@ export function toolsRefusedFor(row: WinterModelDescriptor): boolean {
 }
 
 /**
+ * Code-mode image input (2026-09-29): whether this catalog row ACCEPTS an image — its own
+ * `inputModalities` evidence contains `"image"`, verbatim. The ONE rule behind `models.catalog`'s and
+ * `sync.config`'s `supportsImages` and `session.stageImage`'s `image_input_unsupported` refusal, so a
+ * picker can never offer what the daemon then refuses. A `winter-default`/`unknown` row lists text
+ * only and so refuses images — deliberately: the catalog has no evidence the model reads them.
+ */
+export function imagesAcceptedBy(row: WinterModelDescriptor | undefined): boolean {
+  return row?.inputModalities.value.includes("image") === true;
+}
+
+/**
  * WS-20: **a tag names exactly its provider and that provider's credential ref.** No selection, no
  * inventory-order tie-break, no bare-id ambiguity — the old bare-id selector this function replaces
  * is gone entirely, because there is nothing left to decide: `splitTag(tag).providerId` IS the

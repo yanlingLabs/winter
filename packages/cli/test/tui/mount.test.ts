@@ -30,6 +30,7 @@ function fakeClient() {
     // child-transcript-view T3 (AppClient's two typed members):
     sendToThread: () => Promise.resolve({ delivered: "queued" as const, agentId: "x" }),
     agentStop: () => Promise.resolve({ status: "stopped" }),
+    stageImage: () => Promise.resolve("/tmp/image_1.png"),
   };
 }
 
