@@ -2245,6 +2245,111 @@ describe("App — code-mode image input", () => {
     expect(frame).toContain("see [Image #1]");
   });
 
+  test("a refusal that lands after the user typed something new keeps BOTH drafts", async () => {
+    let reject!: (e: Error) => void;
+    const client = fakeClient({
+      request: syncConfig(true),
+      stageImage: () => new Promise<string>((_, r) => { reject = r; }),
+    });
+    const { stdin, lastFrame } = render(
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    stdin.write("first ");
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    stdin.write("\r");
+    await wait(40);
+    stdin.write("second");
+    await wait(40);
+    reject(new Error("The selected model doesn't support images"));
+    await wait(80);
+    const frame = plain(lastFrame());
+    expect(frame).toContain("first [Image #1]");
+    expect(frame).toContain("second");
+    expect(client.calls.some((c) => c.method === "send")).toBe(false);
+  });
+
+  test("every submit goes out in order: a plain draft never overtakes an image draft still staging", async () => {
+    let resolve!: (path: string) => void;
+    const client = fakeClient({
+      request: syncConfig(true),
+      stageImage: () => new Promise<string>((r) => { resolve = r; }),
+    });
+    const { stdin } = render(
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    stdin.write("one ");
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    stdin.write("\r");
+    await wait(40);
+    stdin.write("two");
+    await wait();
+    stdin.write("\r");
+    await wait(40);
+    expect(client.calls.filter((c) => c.method === "send")).toEqual([]); // "two" waits its turn
+    resolve("/t/image_1.png");
+    await wait(60);
+    expect(client.calls.filter((c) => c.method === "send").map((c) => c.args[1])).toEqual(["one /t/image_1.png", "two"]);
+  });
+
+  test("a refused image PATH is still typed as text, beside the note", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
+    const path = join(dir, "shot.png");
+    writeFileSync(path, PNG);
+    try {
+      const client = fakeClient({ request: syncConfig(false) });
+      const { stdin, lastFrame } = render(<App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} />);
+      await wait();
+      stdin.write("see ");
+      await wait();
+      stdin.write(path);
+      await wait(80);
+      expect(plain(lastFrame())).toContain("The selected model doesn't support images");
+      expect(plain(lastFrame())).not.toContain("[Image #");
+      stdin.write("\r");
+      await wait(60);
+      expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", `see ${path}`]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("a new attachment's number lands past any [Image #n] already in the draft (a recalled message)", async () => {
+    const client = fakeClient({ request: syncConfig(true) });
+    const { stdin, lastFrame } = render(
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    stdin.write("old [Image #1] ");
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    expect(plain(lastFrame())).toContain("old [Image #1] [Image #2]");
+    stdin.write("\r");
+    await wait(60);
+    // #1 was never attached in THIS draft, so it stays literal; only #2 is staged.
+    expect(client.calls.filter((c) => c.method === "stageImage").length).toBe(1);
+    expect(client.calls.find((c) => c.method === "send")?.args[1]).toBe("old [Image #1] /tmp/winter-session-s1/images/image_1.png");
+  });
+
+  test("a daemon row that does not state supportsImages (an older daemon) lets the attach through", async () => {
+    const client = fakeClient({
+      request: (method) => method === METHODS.syncConfig
+        ? { models: [{ id: TAG, providerId: "codex-oauth", displayName: "GPT-5.6 Sol", efforts: [] }] }
+        : {},
+    });
+    const { stdin, lastFrame } = render(
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    expect(plain(lastFrame())).toContain("[Image #1]");
+  });
+
   test("an applied placeholder never replays when a pending card unmounts and remounts the composer", async () => {
     const bridge = makeEventBridge();
     const client = fakeClient({ request: syncConfig(true) });

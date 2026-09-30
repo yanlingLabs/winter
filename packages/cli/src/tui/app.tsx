@@ -527,8 +527,9 @@ export function App({
 
   // Code-mode image input — ATTACH time. The model in force (the session override, else the live
   // global — the chrome's own resolution) is looked up in `sync.config`'s rows; `supportsImages:
-  // false` refuses with the exact message and attaches nothing. A tag the listing does not carry, or
-  // a failed read, attaches: the daemon's `session.stageImage` is the authority and refuses at submit.
+  // false` refuses with the exact message and attaches nothing. A tag the listing does not carry, a
+  // row that does not state the field (an older daemon — `supportsImages` is optional on the wire),
+  // or a failed read, attaches: the daemon's `session.stageImage` is the authority at submit.
   const modelAcceptsImages = async (): Promise<boolean> => {
     const tag = sessionModelOverride ?? liveGlobal.model;
     try {
@@ -544,12 +545,15 @@ export function App({
    *  here (downscaled to 1568 px, re-encoded only if it must be — `prepareDraftImage`), and only an
    *  image that cannot be brought under the cap is refused, with a note. */
   const attachImageBytes = async (bytes: Uint8Array, fallbackText?: string): Promise<void> => {
-    if (!isStageableImage(bytes)) { if (fallbackText !== undefined) injectIntoComposer("insert", fallbackText); return; }
-    if (!(await modelAcceptsImages())) { appendNote(IMAGE_INPUT_UNSUPPORTED_MESSAGE); return; }
+    // A refused PATH paste still types the path (as it did before images existed); the note says why
+    // it was not attached. A clipboard image has no text to fall back to.
+    const typeInstead = () => { if (fallbackText !== undefined) injectIntoComposer("insert", fallbackText); };
+    if (!isStageableImage(bytes)) { typeInstead(); return; }
+    if (!(await modelAcceptsImages())) { appendNote(IMAGE_INPUT_UNSUPPORTED_MESSAGE); typeInstead(); return; }
     const image = await prepareDraftImage(bytes);
-    if (image === "not-image") { if (fallbackText !== undefined) injectIntoComposer("insert", fallbackText); return; }
-    if (image === "too-large") { appendNote(IMAGE_TOO_LARGE_MESSAGE); return; }
-    injectIntoComposer("insert", imageToken(draftImagesRef.current.add(image)));
+    if (image === "not-image") { typeInstead(); return; }
+    if (image === "too-large") { appendNote(IMAGE_TOO_LARGE_MESSAGE); typeInstead(); return; }
+    injectIntoComposer("insert", imageToken(draftImagesRef.current.add(image, composerStateRef.current.text)));
   };
   // ctrl+v: the clipboard's image, if it holds one; otherwise nothing happens (what ctrl+v did before).
   const onPasteImage = () => {
@@ -1095,20 +1099,36 @@ export function App({
   // agent in the session can read) and replaced by their paths before the text goes anywhere. A
   // draft with no live placeholder takes exactly the old synchronous path. A staging refusal shows
   // the daemon's message as a note and hands the draft back to an empty composer — nothing is sent.
+  //
+  // ONE queue for every submit and steer (`submitQueueRef`): a draft with images goes out only after
+  // its async staging, so without the queue a plain draft typed after it would overtake it. Each
+  // entry runs after the one before it has been delivered (or refused).
   const deliver = (text: string, steer: boolean) => {
     if (childOpen) { sendToChild(childRow!.threadId, text); return; }
     void (steer ? client.steer(sessionId, text) : client.send(sessionId, text));
   };
+  const submitQueueRef = useRef<Promise<void>>(Promise.resolve());
   const submitDraft = (text: string, steer: boolean) => {
     const images = draftImagesRef.current;
     const mark = images.mark();
-    if (images.referencedIn(text).length === 0) { images.clearBefore(mark); deliver(text, steer); return; }
-    void stageDraftImages(text, images, (image) => client.stageImage(sessionId, image.mediaType, Buffer.from(image.bytes).toString("base64")))
-      .then((resolved) => { images.clearBefore(mark); deliver(resolved, steer); })
-      .catch((err: unknown) => {
-        appendNote(err instanceof Error ? err.message : String(err));
-        if (composerStateRef.current.text.length === 0) injectIntoComposer("replace", text);
-      });
+    const hasImages = images.referencedIn(text).length > 0;
+    submitQueueRef.current = submitQueueRef.current.then(async () => {
+      let outgoing = text;
+      if (hasImages) {
+        try {
+          outgoing = await stageDraftImages(text, images, (image) => client.stageImage(sessionId, image.mediaType, Buffer.from(image.bytes).toString("base64")));
+        } catch (err: unknown) {
+          appendNote(err instanceof Error ? err.message : String(err));
+          // Hand the refused draft back WITHOUT losing whatever was typed since: it goes first,
+          // the newer text after it, on its own line.
+          const current = composerStateRef.current.text;
+          injectIntoComposer("replace", current.length === 0 ? text : `${text}\n${current}`);
+          return;
+        }
+      }
+      images.clearBefore(mark);
+      deliver(outgoing, steer);
+    });
   };
   const onSubmit = (text: string) => submitDraft(text, false);
   const onSteer = (text: string) => submitDraft(text, true);

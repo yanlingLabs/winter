@@ -43,6 +43,9 @@ describe("TUI image placeholders", () => {
     expect(d.get(3)?.mediaType).toBe("image/jpeg");
     d.clearBefore(d.mark());
     expect(d.add({ bytes: PNG, mediaType: "image/png" })).toBe(1);
+    // …but never onto a number the draft text already shows (a message recalled from history).
+    d.clearBefore(d.mark());
+    expect(d.add({ bytes: PNG, mediaType: "image/png" }, "recalled [Image #1] and [Image #4]")).toBe(5);
   });
 
   test("staging stages only the placeholders still in the text, in order, then substitutes", async () => {
