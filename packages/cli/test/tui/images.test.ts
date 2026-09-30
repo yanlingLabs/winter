@@ -48,19 +48,42 @@ describe("TUI image placeholders", () => {
     expect(d.add({ bytes: PNG, mediaType: "image/png" }, "recalled [Image #1] and [Image #4]")).toBe(5);
   });
 
-  test("staging stages only the placeholders still in the text, in order, then substitutes", async () => {
+  test("staging stages only the placeholders still in the text, in order; the text keeps them, images names the paths", async () => {
     const d = new DraftImages();
     d.add({ bytes: PNG, mediaType: "image/png" });
     d.add({ bytes: JPEG, mediaType: "image/jpeg" });
     d.add({ bytes: PNG, mediaType: "image/png" });
     const staged: string[] = [];
-    const text = await stageDraftImages("see [Image #3] then [Image #1] ([Image #9])", d, async (img) => {
+    const out = await stageDraftImages("see [Image #3] then [Image #1] ([Image #9])", d, async (img) => {
       staged.push(img.mediaType);
-      return `/t/image_${staged.length}.${img.mediaType === "image/png" ? "png" : "jpg"}`;
+      return { path: `/t/image_${staged.length}.${img.mediaType === "image/png" ? "png" : "jpg"}`, imagesOnSend: true };
     });
     expect(staged).toEqual(["image/png", "image/png"]); // #2 was deleted from the text: never staged
-    expect(text).toBe("see /t/image_1.png then /t/image_2.png ([Image #9])");
+    expect(out.text).toBe("see [Image #3] then [Image #1] ([Image #9])");
+    expect(out.images).toEqual([{ n: 3, path: "/t/image_1.png" }, { n: 1, path: "/t/image_2.png" }]);
+    expect(out.modelText).toBe("see /t/image_1.png then /t/image_2.png ([Image #9])");
+    expect(out.imagesOnSend).toBe(true);
     await expect(stageDraftImages("[Image #1]", d, () => Promise.reject(new Error("nope")))).rejects.toThrow("nope");
+  });
+
+  test("more than 20 referenced images is refused before anything is staged", async () => {
+    const d = new DraftImages();
+    let text = "";
+    for (let i = 0; i < 21; i++) text += `[Image #${d.add({ bytes: PNG, mediaType: "image/png" })}] `;
+    let staged = 0;
+    await expect(stageDraftImages(text, d, async () => { staged++; return { path: "/t/x.png", imagesOnSend: true }; }))
+      .rejects.toThrow("A message can carry at most 20 images");
+    expect(staged).toBe(0);
+  });
+
+  test("one stage answer without imagesOnSend (an older daemon) turns the whole draft to substitution", async () => {
+    const d = new DraftImages();
+    d.add({ bytes: PNG, mediaType: "image/png" });
+    d.add({ bytes: PNG, mediaType: "image/png" });
+    let k = 0;
+    const out = await stageDraftImages("[Image #1] [Image #2]", d, async () => (++k === 1 ? { path: "/t/a.png", imagesOnSend: true } : { path: "/t/b.png" }));
+    expect(out.imagesOnSend).toBe(false);
+    expect(out.modelText).toBe("/t/a.png /t/b.png");
   });
 
   test("small images attach untouched; non-images are named", async () => {

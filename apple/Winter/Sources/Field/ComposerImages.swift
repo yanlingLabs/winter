@@ -3,6 +3,7 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 import WinterKit
+import WinterProtocol
 
 // MARK: - Code-mode image input (2026-09-29)
 //
@@ -10,9 +11,12 @@ import WinterKit
 // adds an attachment to the draft and inserts the plain-text placeholder `[Image #n]` (n counts per
 // draft from 1 and is never reused within it). At submit every placeholder still in the text is
 // staged with `session.stageImage` — the daemon writes the image into the session's own temp
-// directory — and replaced by the returned absolute path; the text is then sent exactly as before.
-// A placeholder the user deleted is never staged. Every other mode keeps today's behaviour: the
-// intake answers "not handled" and AppKit's own paste/drop runs.
+// directory. The text is sent WITH its placeholders (the user's message shows `[Image #n]`) and
+// `images` names each one's staged path; the daemon gives the MODEL the text with the paths in place.
+// A daemon whose stage answer lacks `imagesOnSend` (it would silently drop `images`) is sent the
+// paths substituted into the text instead, as before. A placeholder the user deleted is never staged.
+// Every other mode keeps today's behaviour: the intake answers "not handled" and AppKit's own
+// paste/drop runs.
 //
 // Everything here is pure (or reads only a pasteboard handed to it), so the rules are unit-tested
 // without a view (`ComposerImagesTests`).
@@ -243,18 +247,46 @@ func substituteComposerImageTokens(_ text: String, paths: [Int: String]) -> Stri
     return out
 }
 
+/// At most this many images ride one message (`USER_MESSAGE_IMAGES_MAX`); a draft referencing more
+/// is refused before anything is staged — the daemon would refuse the send after the files were written.
+let composerImagesPerMessageMax = 20
+/// The daemon's own sentence for that refusal (`USER_MESSAGE_IMAGES_MAX_MESSAGE`).
+let composerImagesPerMessageMaxMessage = "A message can carry at most 20 images"
+
+/// `resolveComposerImages`' own refusal (the per-message cap), shown on the composer's notice line.
+struct ComposerImagesRefusal: Error, Equatable {
+    let message: String
+}
+
+/// What a code-mode submit sends: `session.send`/`session.steer`'s `text` and `images`.
+struct ComposerOutgoing: Equatable {
+    let text: String
+    let images: [SessionEvent.UserMessageImageRef]
+}
+
 /// **The one submit-time helper** every code-mode submit site goes through: stage each attachment the
-/// text still references (`stage` is `session.stageImage` for that session), in order, and answer the
-/// text with every placeholder replaced by its staged path. The first refusal throws — the caller
-/// sends nothing. A text with no live placeholder comes back unchanged and stages nothing.
+/// text still references (`stage` is `session.stageImage` for that session), in order. When every
+/// stage answered `imagesOnSend`, the text goes as written (placeholders kept) with `images` naming
+/// each staged path; otherwise (an older daemon) each placeholder is replaced by its path in the text
+/// and `images` is empty. The first refusal throws — the caller sends nothing. A text with no live
+/// placeholder comes back unchanged, with no images, and stages nothing.
 func resolveComposerImages(_ text: String, draft: ComposerImageDraft,
-                           stage: (ComposerImage) async throws -> String) async throws -> String {
-    var paths: [Int: String] = [:]
-    for n in draft.referencedNumbers(in: text) {
-        guard let image = draft.images[n] else { continue }
-        paths[n] = try await stage(image)
+                           stage: (ComposerImage) async throws -> StagedImage) async throws -> ComposerOutgoing {
+    var refs: [SessionEvent.UserMessageImageRef] = []
+    var imagesOnSend = true
+    let referenced = draft.referencedNumbers(in: text)
+    if referenced.count > composerImagesPerMessageMax {
+        throw ComposerImagesRefusal(message: composerImagesPerMessageMaxMessage)
     }
-    return paths.isEmpty ? text : substituteComposerImageTokens(text, paths: paths)
+    for n in referenced {
+        guard let image = draft.images[n] else { continue }
+        let staged = try await stage(image)
+        refs.append(SessionEvent.UserMessageImageRef(n: n, path: staged.path))
+        if !staged.imagesOnSend { imagesOnSend = false }
+    }
+    if refs.isEmpty || imagesOnSend { return ComposerOutgoing(text: text, images: refs) }
+    let paths = Dictionary(uniqueKeysWithValues: refs.map { ($0.n, $0.path) })
+    return ComposerOutgoing(text: substituteComposerImageTokens(text, paths: paths), images: [])
 }
 
 /// Whether a session takes composer images at all: a CODE session only (an absent mode is code), and

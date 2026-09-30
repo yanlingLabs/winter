@@ -92,18 +92,31 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let clientName: String
     }
 
+    /// Code-mode image input: one `[Image #n]` placeholder's staged file (`UserMessageImageRef`,
+    /// `packages/protocol/src/events.ts`).
+    public struct UserMessageImageRef: Codable, Equatable, Sendable {
+        public let n: Int
+        public let path: String
+        public init(n: Int, path: String) { self.n = n; self.path = path }
+    }
+
     public struct UserMessage: Codable, Equatable, Sendable {
         public let seq: Int
         public let sessionId: String
         public let ts: Int
         public let threadId: String
+        /// What the user wrote — `[Image #n]` placeholders stay as typed; render it as is.
         public let text: String
         public let clientName: String
+        /// Code-mode image input: the staged file behind each `[Image #n]` in `text` (only the model
+        /// sees the paths). Absent on every message without images, and stays absent on re-encode.
+        public let images: [UserMessageImageRef]?
         // Public init so a Swift PRODUCER (WinterChatKit's phone ChatEngine) can construct this event
         // — the synthesized memberwise init is `internal`. Additive; no wire/shape change.
-        public init(seq: Int, sessionId: String, ts: Int, threadId: String, text: String, clientName: String) {
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, text: String, clientName: String,
+                    images: [UserMessageImageRef]? = nil) {
             self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
-            self.text = text; self.clientName = clientName
+            self.text = text; self.clientName = clientName; self.images = images
         }
     }
 

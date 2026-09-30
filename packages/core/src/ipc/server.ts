@@ -5,7 +5,7 @@ import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
   HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
-  SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE,
+  SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
   SessionHistoryParams,
   ApprovalListParams,
@@ -87,7 +87,7 @@ import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
 import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
 import { imagesAcceptedBy, rowForTag } from "../runtime-sdk/provider-selection";
-import { StageImageRefusal, stageSessionImage } from "../agent/stage-image";
+import { StageImageRefusal, stageSessionImage, validateImageRefs } from "../agent/stage-image";
 import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type ModelTag } from "../runtime-sdk/model-tag";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -1128,6 +1128,30 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   async function afterConsoleCredentialChange(): Promise<void> {
     await evictSessionsForCredentialChange("console");
     await refreshInternalProvidersAfterCredentialChange();
+  }
+
+  /**
+   * Code-mode image input: `session.send`/`session.steer`'s `images`, checked BEFORE anything is
+   * resumed or appended — every refusal leaves the log as it was. Answers the refs to store
+   * (`undefined` = no images; an empty array is none). A caller other than a local client refuses:
+   * only a local client can stage (`session.stageImage` is harness-only), so a remote `images` is
+   * never one it staged. A non-code session refuses `image_session_not_code`; every entry is then
+   * held to `validateImageRefs` (the file is one this session staged, `n` unique and in `text`).
+   */
+  function checkedImageRefs(sessionId: string, text: string, images: readonly UserMessageImageRef[] | undefined, role: string | undefined): UserMessageImageRef[] | undefined {
+    if (images === undefined || images.length === 0) return undefined;
+    if (role !== "harness") throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be sent by a local client", { code: IMAGE_REFERENCE_INVALID });
+    let meta: ReturnType<SessionStore["meta"]>;
+    try { meta = opts.store.meta(sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
+    if ((meta.mode ?? "code") !== "code") {
+      throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be added to code sessions", { code: IMAGE_SESSION_NOT_CODE });
+    }
+    try {
+      return validateImageRefs(sessionId, text, images);
+    } catch (err) {
+      if (err instanceof StageImageRefusal) throw new RpcFailure(err.internal ? ERR.INTERNAL : ERR.INVALID_PARAMS, err.message, { code: err.code });
+      throw new RpcFailure(ERR.INTERNAL, "could not check the message's images", { code: IMAGE_REFERENCE_INVALID });
+    }
   }
 
   async function ensureWinterSession(sessionId: string): Promise<LegSession | undefined> {
@@ -2177,6 +2201,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(SessionSendParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
         if (!socket.data.hubClient) throw new RpcFailure(ERR.NOT_FOUND, "attach to the session first");
+        // Code-mode image input: `text` is stored as written (`[Image #n]` placeholders); only the
+        // model is given the paths. Checked before any resume, import or append.
+        const images = checkedImageRefs(p.sessionId, p.text, p.images, socket.data.authedRole);
         // P8b Task 16: a session on the Winter leg — a live driver, or a record that says "winter"
         // and is resumed here — takes its own path. The attachment check mirrors `hub.send`'s own
         // (same message, same plain Error → INTERNAL), and the driver appends the `user_message`
@@ -2190,7 +2217,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const winterSession = await ensureWinterSession(p.sessionId);
           if (winterSession !== undefined) {
             try {
-              const sent = await winterSession.send(p.text, socket.data.clientName);
+              const sent = await winterSession.send(p.text, socket.data.clientName, images);
               return { seq: sent.seq };
             } catch (err) { rpcFromWinterRefusal(err); }
           }
@@ -2221,7 +2248,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const imported = await ensureWinterSession(p.sessionId);
           if (imported !== undefined) {
             try {
-              const sent = await imported.send(p.text, socket.data.clientName);
+              const sent = await imported.send(p.text, socket.data.clientName, images);
               return { seq: sent.seq };
             } catch (err) { rpcFromWinterRefusal(err); }
           }
@@ -2230,16 +2257,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // No driver table at all (a bare test server): the message lands in the log, exactly as it
         // always has on a no-engine daemon. With a table present every path above either ran the
         // turn or refused typed — this line is never a production no-op (fix wave F2).
-        const seq = hub.send(socket.data.hubClient, p.sessionId, p.text);
+        const seq = hub.send(socket.data.hubClient, p.sessionId, p.text, images);
         return { seq };
       }
       case METHODS.sessionSteer: {
         const p = parseParams(SessionSteerParams, params);
+        const images = checkedImageRefs(p.sessionId, p.text, p.images, socket.data.authedRole);
         {
           const winterSession = await ensureWinterSession(p.sessionId);
           if (winterSession !== undefined) {
             try {
-              const steered = await winterSession.steer(p.text);
+              const steered = await winterSession.steer(p.text, undefined, images);
               return { ok: true, injected: steered.injected };
             } catch (err) { rpcFromWinterRefusal(err); }
           }
@@ -3203,8 +3231,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionStageImage: {
         // Code-mode image input (2026-09-29): stage a composer image into the session's temp
-        // directory and answer its path — the client substitutes that path for its `[Image #n]`
-        // placeholder and sends the text as usual. LOCAL clients only: already outside
+        // directory and answer its path — the client names it beside its `[Image #n]` placeholder
+        // in `session.send`/`session.steer`'s `images` (the model is given the path; the stored
+        // message keeps the placeholder). LOCAL clients only: already outside
         // `REMOTE_ALLOWED_METHODS` and the plugin list, and the explicit check keeps it so if either
         // list ever widens (`elicitation.url`'s precedent). The bytes are never logged — nothing in
         // this arm, `parseParams` or `stageSessionImage` echoes a received value.
@@ -3230,7 +3259,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_INPUT_UNSUPPORTED_MESSAGE, { code: IMAGE_INPUT_UNSUPPORTED });
         }
         try {
-          return { path: stageSessionImage({ sessionId: p.sessionId, mediaType: p.mediaType, dataBase64: p.dataBase64 }) };
+          // `imagesOnSend`: this daemon takes `images` on `session.send`/`session.steer`, so the
+          // client keeps `[Image #n]` in the text and names the paths beside it.
+          return { path: stageSessionImage({ sessionId: p.sessionId, mediaType: p.mediaType, dataBase64: p.dataBase64 }), imagesOnSend: true as const };
         } catch (err) {
           if (err instanceof StageImageRefusal) {
             throw new RpcFailure(err.internal ? ERR.INTERNAL : ERR.INVALID_PARAMS, err.message, { code: err.code });

@@ -1,0 +1,19 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "type": "user_message",
+  "threadId": "main",
+  "text": "compare [Image #2] with [Image #1]",
+  "clientName": "orb",
+  "images": [
+    {
+      "n": 2,
+      "path": "/tmp/winter-session-s_1/images/image_2.png"
+    },
+    {
+      "n": 1,
+      "path": "/tmp/winter-session-s_1/images/image_1.jpg"
+    }
+  ]
+}
