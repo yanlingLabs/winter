@@ -101,7 +101,16 @@ func panelTabContent(for tab: PanelTab, host: ShellSessionHost? = nil,
     // code tab that would mean re-reading the file from disk on every visit. Nothing on this line
     // touches CEF: `bind` records the host/session and hops off the current pass, and even the
     // runtime it eventually resolves is only a browser once something opens a file in it.
+    //
+    // Transcript file links (2026-09-30): an IMAGE path branches off BEFORE the editor registry is
+    // consulted (`panelCodeTabShowsImage`), so an image tab never has a `PanelEditorTabModel` — the
+    // editor runtime is never asked to read the bytes as text, and the dirless gate
+    // (`editorRuntimeForCodeTab`) never applies: a picture needs no working directory, which is what
+    // lets a session-temp-dir image open in a chat or no-folder session.
     case .code:
+        if panelCodeTabShowsImage(path: tab.url) {
+            return PanelImageTab(tab: tab)
+        }
         return PanelEditorTab(tab: tab,
                               model: PanelEditorTabModels.model(for: tab, host: host,
                                                                 sessionId: sessionId))

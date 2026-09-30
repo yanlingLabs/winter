@@ -71,19 +71,59 @@ struct TranscriptUserBubble: View {
 /// (`PendingCards.swift`) compose it to render a plan's markdown. A hardcoded serif here would put
 /// every plan card into Winter's speaking voice, which `docs/brand.md` § 4 does not allowlist — so
 /// the transcript's two call sites pass `.assistant` and the two card bodies pass `.sans`.
-struct TranscriptAssistantMessage: View {
+struct TranscriptAssistantMessage: View, Equatable {
     let text: String
     let isStreaming: Bool
     let role: TranscriptProseRole
+    /// Transcript file links (2026-09-30, `TranscriptFileMentions.swift`): the file door, handed down
+    /// from the window layer. `nil` — the default, and what the orb's morph window, every detached
+    /// window and both plan-card bodies pass — renders this reply exactly as before: no links, no
+    /// thumbnails, no stat. A STREAMING reply ignores it too; it links once its round has finished.
+    var fileDoor: TranscriptFileDoor? = nil
 
     @State private var isMessageCopyHovering = false
     @State private var didCopyMessage = false
+    /// The last resolution this row finished, with the inputs it answered for. Read only while those
+    /// inputs are still current (`fileLinks`), so a reused row never shows another reply's links.
+    @State private var resolvedFiles: (key: TranscriptFileMentionKey, files: Set<String>)?
 
     private var displayText: String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// What a resolution answers for: the text, where its relative paths resolve, and whether
+    /// non-image files may open. A change to any of them re-resolves.
+    private var mentionKey: TranscriptFileMentionKey? {
+        guard let fileDoor, !isStreaming else { return nil }
+        return TranscriptFileMentionKey(text: displayText, baseDirectory: fileDoor.baseDirectory,
+                                        sessionHasWorkingDirectory: fileDoor.sessionHasWorkingDirectory)
+    }
+
+    /// Everything this reply links, or `nil` when it links nothing. Falls back to the existence
+    /// cache's synchronous answer until this row's own resolution lands, so a recycled row draws its
+    /// links and thumbnails on its first frame.
+    private func fileLinks(for key: TranscriptFileMentionKey,
+                           candidates: [String]) -> TranscriptFileLinks {
+        let home = NSHomeDirectory()
+        let files: Set<String>
+        if let resolvedFiles, resolvedFiles.key == key {
+            files = resolvedFiles.files
+        } else {
+            files = TranscriptFileExistenceCache.shared.knownFiles(
+                among: candidates.compactMap {
+                    transcriptResolvedMentionPath($0, baseDirectory: key.baseDirectory, homeDirectory: home)
+                })
+        }
+        return TranscriptFileLinks(baseDirectory: key.baseDirectory, homeDirectory: home,
+                                   sessionHasWorkingDirectory: key.sessionHasWorkingDirectory,
+                                   existingFiles: files)
+    }
+
     var body: some View {
+        let key = mentionKey
+        let candidates = key.map { transcriptFileMentionCandidates(in: $0.text) } ?? []
+        let links = key.map { fileLinks(for: $0, candidates: candidates) }
+        let images = links?.images(among: candidates) ?? []
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 6) {
                 // `Theme.accent` rather than `.accentColor`: SwiftUI's `.accentColor` resolves to
@@ -92,8 +132,18 @@ struct TranscriptAssistantMessage: View {
                 // and quote rule in the transcript was drawing in whatever colour the Mac's owner
                 // had picked in General, not in Winter's teal.
                 TranscriptFormattedMessageText(text: displayText, tint: Theme.accent,
-                                               role: role, fillsAvailableWidth: true)
+                                               role: role, fillsAvailableWidth: true,
+                                               fileLink: links.map { resolved -> (String) -> URL? in
+                                                   { resolved.url(forCandidate: $0) }
+                                               })
                     .foregroundStyle(.primary)
+                    // A linked path draws in Winter's own accent, not the system's (see above).
+                    .tint(Theme.accent)
+
+                if let fileDoor, !images.isEmpty {
+                    TranscriptImageThumbnailStrip(paths: images, onOpen: fileDoor.open)
+                        .padding(.top, 2)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -112,12 +162,41 @@ struct TranscriptAssistantMessage: View {
         }
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // A linked path's click: this reply's own scheme goes to the file door, with the absolute
+        // path the link carries; any other URL keeps the system's behaviour.
+        .environment(\.openURL, OpenURLAction { url in
+            guard let fileDoor, let path = transcriptFileLinkPath(from: url) else { return .systemAction }
+            fileDoor.open(path)
+            return .handled
+        })
+        .task(id: key) {
+            guard let key else { return }
+            let home = NSHomeDirectory()
+            let paths = candidates.compactMap {
+                transcriptResolvedMentionPath($0, baseDirectory: key.baseDirectory, homeDirectory: home)
+            }
+            let files = paths.isEmpty ? [] : await TranscriptFileExistenceCache.shared.files(among: paths)
+            resolvedFiles = (key, files)
+        }
     }
 
     private func copyMessageToPasteboard() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(displayText, forType: .string)
         showMessageCopiedFeedback()
+    }
+
+    /// Transcript file links: what makes this reply's body skippable. Before `fileDoor` every input
+    /// was a value, so SwiftUI could skip every FINISHED reply while the last one streamed; a closure
+    /// can never compare equal, so without this every visible reply would re-extract, re-parse and
+    /// re-render on every streaming delta. The closure itself is left out on purpose — the window
+    /// layer's reads the attached session at click time, so an older copy of it opens the same thing.
+    /// Used through `.equatable()` at the transcript's replies loop.
+    static func == (lhs: TranscriptAssistantMessage, rhs: TranscriptAssistantMessage) -> Bool {
+        lhs.text == rhs.text && lhs.isStreaming == rhs.isStreaming && lhs.role == rhs.role
+            && (lhs.fileDoor == nil) == (rhs.fileDoor == nil)
+            && lhs.fileDoor?.baseDirectory == rhs.fileDoor?.baseDirectory
+            && lhs.fileDoor?.sessionHasWorkingDirectory == rhs.fileDoor?.sessionHasWorkingDirectory
     }
 
     private func showMessageCopiedFeedback() {
@@ -137,6 +216,9 @@ private struct TranscriptFormattedMessageText: View {
     /// both roles, which is the whole point of a code block.
     let role: TranscriptProseRole
     let fillsAvailableWidth: Bool
+    /// Transcript file links: asked for each path candidate in the prose; a URL links it. `nil` —
+    /// every caller but a linked assistant reply — renders exactly as before.
+    var fileLink: ((String) -> URL?)? = nil
 
     private var blocks: [FormattedMessageBlock] {
         FormattedMessageBlock.parse(text)
@@ -153,7 +235,8 @@ private struct TranscriptFormattedMessageText: View {
                 switch block.kind {
                 case .text(let content):
                     ForEach(MessageTextFormatter.chatMarkdownBlocks(content)) { markdownBlock in
-                        TranscriptMarkdownBlockView(block: markdownBlock, tint: tint, role: role)
+                        TranscriptMarkdownBlockView(block: markdownBlock, tint: tint, role: role,
+                                                    fileLink: fileLink)
                     }
                 case .code(let language, let code):
                     TranscriptCodeBlock(
@@ -180,6 +263,8 @@ private struct TranscriptMarkdownBlockView: View {
     let block: FormattedMarkdownBlock
     let tint: Color
     let role: TranscriptProseRole
+    /// Transcript file links — see `TranscriptFormattedMessageText.fileLink`.
+    var fileLink: ((String) -> URL?)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -240,7 +325,8 @@ private struct TranscriptMarkdownBlockView: View {
             colorScheme: colorScheme,
             baseFont: transcriptProseFont(role, size: size, weight: weight),
             codeFont: Typography.monoNS(ofSize: metrics.codeSize(for: size)),
-            lineSpacing: metrics.lineSpacing
+            lineSpacing: metrics.lineSpacing,
+            fileLink: fileLink
         ))
     }
 

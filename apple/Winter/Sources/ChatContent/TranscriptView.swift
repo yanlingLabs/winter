@@ -27,6 +27,8 @@ struct TranscriptView: View {
     var onOpenFile: ((String) -> Void)? = nil
     /// editor-product Task 6 — see `WindowContentView.sessionHasWorkingDirectory`'s own doc.
     var sessionHasWorkingDirectory: Bool = false
+    /// Transcript file links — see `WindowContentView.fileMentionBaseDirectory`'s own doc.
+    var fileMentionBaseDirectory: String? = nil
     /// How far the floating composer covers the transcript's bottom (the shell, where the
     /// transcript runs beneath it) — the "latest" pill sits above it. Zero elsewhere.
     var bottomOverlayInset: CGFloat = 0
@@ -45,6 +47,7 @@ struct TranscriptView: View {
                             onOpenDiff: onOpenDiff,
                             onOpenFile: onOpenFile,
                             sessionHasWorkingDirectory: sessionHasWorkingDirectory,
+                            fileMentionBaseDirectory: fileMentionBaseDirectory,
                             streamingText: isLast ? adapter.liveStreamingText : nil,
                             // Live only for the newest exchange (mac-chat-parity Task 2). That is
                             // not quite the same as "every in-flight call lives here": a main-thread
@@ -173,6 +176,8 @@ private struct TranscriptExchangeRow: View {
     var onOpenFile: ((String) -> Void)? = nil
     /// editor-product Task 6 — see `WindowContentView.sessionHasWorkingDirectory`'s own doc.
     var sessionHasWorkingDirectory: Bool = false
+    /// Transcript file links — see `WindowContentView.fileMentionBaseDirectory`'s own doc.
+    var fileMentionBaseDirectory: String? = nil
     /// Non-nil only for the LAST exchange while a reply is actively streaming (v1's synthetic
     /// trailing-stream mechanism) — `TranscriptView.body` computes this per-index so this view
     /// stays a pure function of its own inputs.
@@ -184,6 +189,16 @@ private struct TranscriptExchangeRow: View {
     let tint: Color
 
     @State private var expandedRuns: Set<String> = []
+
+    /// The replies' file door — only where the window layer wired `onOpenFile`, so the orb's morph
+    /// window and detached windows keep plain replies.
+    private var fileDoor: TranscriptFileDoor? {
+        onOpenFile.map { open in
+            TranscriptFileDoor(baseDirectory: fileMentionBaseDirectory,
+                               sessionHasWorkingDirectory: sessionHasWorkingDirectory,
+                               open: open)
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -238,8 +253,14 @@ private struct TranscriptExchangeRow: View {
             // mac-chat-parity Task 8: `.assistant` — the transcript reply IS `docs/brand.md` § 4's
             // serif allowlist binding #4, and these two are the only call sites that pass it. Both
             // plan-card bodies compose this same view with `.sans`.
+            //
+            // Transcript file links (2026-09-30): a FINISHED reply gets the file door — paths it
+            // names link, images it names draw a thumbnail. The streaming row below never does
+            // (`TranscriptAssistantMessage.fileDoor`'s own doc).
             ForEach(Array(exchange.replies.enumerated()), id: \.offset) { _, reply in
-                TranscriptAssistantMessage(text: reply, isStreaming: false, role: .assistant)
+                TranscriptAssistantMessage(text: reply, isStreaming: false, role: .assistant,
+                                           fileDoor: fileDoor)
+                    .equatable()
             }
             if let streamingText {
                 TranscriptAssistantMessage(text: streamingText, isStreaming: true, role: .assistant)
