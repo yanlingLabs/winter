@@ -1176,7 +1176,7 @@ describe("sync.config schema (provider-correctness T3)", () => {
     exaKey: null,
     dangerousDomains: [],
     defaultModel: "codex-oauth/gpt-5.6-sol",
-    models: [{ id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"] }],
+    models: [{ id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"], supportsImages: true }],
     defaultEffort: "high",
     clientEfforts: ["ultra"],
   };
@@ -1207,7 +1207,7 @@ describe("sync.config schema (provider-correctness T3)", () => {
   });
 
   test("a catalogue row needs a tag-shaped id, a providerId, a displayName AND an efforts array — no half rows", () => {
-    const row = { id: "codex-oauth/m", providerId: "codex-oauth", displayName: "M", efforts: ["low"] };
+    const row = { id: "codex-oauth/m", providerId: "codex-oauth", displayName: "M", efforts: ["low"], supportsImages: false };
     expect(SyncConfigModel.parse(row)).toEqual(row);
     expect(SyncConfigModel.parse({ ...row, efforts: [] })).toEqual({ ...row, efforts: [] });
     expect(() => SyncConfigModel.parse({ ...row, id: "" })).toThrow();
@@ -1217,6 +1217,12 @@ describe("sync.config schema (provider-correctness T3)", () => {
     expect(() => SyncConfigModel.parse({ providerId: "codex-oauth", displayName: "M", efforts: ["low"] })).toThrow();
     // An empty-string effort would reach a request body verbatim and 400 the turn.
     expect(() => SyncConfigModel.parse({ ...row, efforts: [""] })).toThrow();
+    // Code-mode image input: OPTIONAL — an older daemon's rows (no field) still parse, so a newer
+    // client's model list never breaks on them; a present value must be a boolean.
+    const { supportsImages, ...noImages } = row;
+    void supportsImages;
+    expect(SyncConfigModel.parse(noImages)).toEqual(noImages);
+    expect(() => SyncConfigModel.parse({ ...row, supportsImages: "yes" })).toThrow();
     // One bad row poisons the whole result rather than being silently dropped.
     expect(() => SyncConfigResult.parse({ ...full, models: [{ ...row, id: "" }] })).toThrow();
   });
@@ -1280,8 +1286,8 @@ describe("sync.config schema (provider-correctness T3)", () => {
     const divergent = {
       ...full,
       models: [
-        { id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"] },
-        { id: "codex-oauth/gpt-5.7-nano", providerId: "codex-oauth", displayName: "GPT-5.7 Nano", efforts: ["low", "medium"] },
+        { id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"], supportsImages: true },
+        { id: "codex-oauth/gpt-5.7-nano", providerId: "codex-oauth", displayName: "GPT-5.7 Nano", efforts: ["low", "medium"], supportsImages: false },
       ],
     };
     expect(SyncConfigResult.parse(divergent)).toEqual(divergent);

@@ -147,6 +147,35 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(url, "https://linear.app/oauth?code=1")
     }
 
+    /// Code-mode image input: `session.stageImage`'s wire shape — the bytes travel as standard base64
+    /// under `dataBase64`, beside `sessionId` and `mediaType`, and the staged path comes back; a
+    /// refusal surfaces the daemon's own message and typed `data.code`.
+    func testStageImageEncodesBase64AndReturnsThePath() async throws {
+        let (client, t) = try await connected()
+        let png = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe])
+        let (req, path) = try await roundTrip(t, sentIndex: 1, result: #"{"path":"/tmp/winter-session-s_1/images/image_1.png"}"#) {
+            try await client.stageImage(sessionId: "s_1", mediaType: "image/png", data: png)
+        }
+        XCTAssertEqual(req["method"] as? String, "session.stageImage")
+        let params = req["params"] as? [String: Any]
+        XCTAssertEqual(params?["sessionId"] as? String, "s_1")
+        XCTAssertEqual(params?["mediaType"] as? String, "image/png")
+        XCTAssertEqual(params?["dataBase64"] as? String, png.base64EncodedString())
+        XCTAssertEqual(path, "/tmp/winter-session-s_1/images/image_1.png")
+
+        async let refused: String = client.stageImage(sessionId: "s_1", mediaType: "image/png", data: png)
+        let sent = try await waitForSent(t, count: 3)
+        let second = decodeLine(sent[2])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(second["id"] as! Int),"error":{"code":-32602,"message":"The selected model doesn't support images","data":{"code":"image_input_unsupported"}}}"#)
+        do {
+            _ = try await refused
+            XCTFail("a refusal must throw")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.message, "The selected model doesn't support images")
+            XCTAssertEqual(error.data?["code"]?.stringValue, "image_input_unsupported")
+        }
+    }
+
     /// Chat Slice D task 1: `session.setModel`'s wire shape — a set carries the string; a clear
     /// carries a LITERAL JSON `null` for `"model"`, never an omitted key (the wire param is
     /// required-but-nullable, `SessionSetModelParams.model: z.string().min(1).nullable()` — NOT
@@ -1235,7 +1264,7 @@ extension MethodWrapperTests {
         // WS-20: `id` is now a provider-qualified tag, and each row also carries `providerId`
         // (pre-split, for grouping) + `displayName` + an optional `facingName` (present only when
         // the row fills a family slot — "sol" does, "luna" here does not, to prove `nil` decodes).
-        let catalogueBody = #"{"provider":"codex-oauth","exaKey":"exa_secret","dangerousDomains":["evil.test"],"defaultModel":"codex-oauth/gpt-5.6-sol","models":[{"id":"codex-oauth/gpt-5.6-sol","providerId":"codex-oauth","displayName":"GPT-5.6 Sol","facingName":"sol","efforts":["none","low","medium","high","xhigh","max"]},{"id":"codex-oauth/gpt-5.6-luna","providerId":"codex-oauth","displayName":"GPT-5.6 Luna","efforts":["low","high"]}],"defaultEffort":"medium","clientEfforts":["ultra"]}"#
+        let catalogueBody = #"{"provider":"codex-oauth","exaKey":"exa_secret","dangerousDomains":["evil.test"],"defaultModel":"codex-oauth/gpt-5.6-sol","models":[{"id":"codex-oauth/gpt-5.6-sol","providerId":"codex-oauth","displayName":"GPT-5.6 Sol","facingName":"sol","efforts":["none","low","medium","high","xhigh","max"],"supportsImages":false},{"id":"codex-oauth/gpt-5.6-luna","providerId":"codex-oauth","displayName":"GPT-5.6 Luna","efforts":["low","high"]}],"defaultEffort":"medium","clientEfforts":["ultra"]}"#
         let (req, snapshot) = try await roundTrip(t, sentIndex: 1, result: catalogueBody) {
             try await client.syncConfig()
         }
@@ -1247,9 +1276,12 @@ extension MethodWrapperTests {
         XCTAssertEqual(snapshot.defaultModel, "codex-oauth/gpt-5.6-sol")
         XCTAssertEqual(snapshot.defaultEffort, "medium")
         XCTAssertEqual(snapshot.models, [
-            SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", facingName: "sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"]),
+            SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", facingName: "sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"], supportsImages: false),
             SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-luna", providerId: "codex-oauth", displayName: "GPT-5.6 Luna", facingName: nil, efforts: ["low", "high"]),
         ], "per-model efforts survive verbatim — the whole point of the field")
+        XCTAssertFalse(snapshot.models[0].supportsImages, "a stated false is carried")
+        XCTAssertTrue(snapshot.models[1].supportsImages,
+                      "an absent supportsImages (an older daemon) is not a claim the model is text-only")
         XCTAssertEqual(snapshot.clientEfforts, ["ultra"],
                        "tiers arrive on their OWN list, never merged into models[].efforts")
     }
@@ -1842,7 +1874,7 @@ extension MethodWrapperTests {
     /// lets the app branch on the door rather than on a hardcoded provider id.
     func testModelsCatalogDecodesFamiliesProvidersModelsAndTheThreeCredentialDoors() async throws {
         let (client, t) = try await connected()
-        let payload = #"{"ok":true,"schemaVersion":2,"catalogVersion":"v3.8.50+winter.1", "families":[{"id":"gpt","displayName":"GPT","vendor":"openai","status":"stable"}, {"id":"other","displayName":"Other models","vendor":"various","status":"stable"}, {"displayName":"nameless"}], "providers":[{"id":"openai","displayName":"OpenAI","pricingBasis":"token","authKinds":["api-key"], "credentialSlotId":"openai:default","credentialDoor":"keychain"}, {"id":"console","displayName":"Anthropic Console","pricingBasis":"token","authKinds":["oauth"], "credentialSlotId":null,"credentialDoor":"console-profile"}, {"id":"ollama-local","displayName":"Ollama","pricingBasis":"free","authKinds":[], "credentialSlotId":null,"credentialDoor":"none"}, {"id":"futurehost","displayName":"Future","credentialDoor":"smartcard"}], "models":[{"tag":"openai/gpt-5.6-terra","canonicalModelId":"gpt-5.6-terra","providerId":"openai", "familyId":"gpt","status":"stable","costBasis":"list", "pricing":{"inputPerMTokUsd":1.25,"outputPerMTokUsd":10,"cacheReadPerMTokUsd":0.125, "source":"vendor-pricing-page","confidence":"high","observedAt":"2026-09-01T00:00:00Z", "sourceRef":"Published list prices. Cache WRITE rates are under-reported; batch and geographic modifiers are not folded in."}}, {"tag":"console/claude-opus-5","canonicalModelId":"claude-opus-5","providerId":"console", "familyId":"other","status":"stable","pricing":null,"costBasis":"unknown"}, {"tag":"openai/gpt-nameless","providerId":"openai", "pricing":{"inputPerMTokUsd":3,"outputPerMTokUsd":15,"source":"guess"}}, {"canonicalModelId":"no-tag-at-all","providerId":"openai"}]}"#
+        let payload = #"{"ok":true,"schemaVersion":2,"catalogVersion":"v3.8.50+winter.1", "families":[{"id":"gpt","displayName":"GPT","vendor":"openai","status":"stable"}, {"id":"other","displayName":"Other models","vendor":"various","status":"stable"}, {"displayName":"nameless"}], "providers":[{"id":"openai","displayName":"OpenAI","pricingBasis":"token","authKinds":["api-key"], "credentialSlotId":"openai:default","credentialDoor":"keychain"}, {"id":"console","displayName":"Anthropic Console","pricingBasis":"token","authKinds":["oauth"], "credentialSlotId":null,"credentialDoor":"console-profile"}, {"id":"ollama-local","displayName":"Ollama","pricingBasis":"free","authKinds":[], "credentialSlotId":null,"credentialDoor":"none"}, {"id":"futurehost","displayName":"Future","credentialDoor":"smartcard"}], "models":[{"tag":"openai/gpt-5.6-terra","canonicalModelId":"gpt-5.6-terra","providerId":"openai", "familyId":"gpt","status":"stable","costBasis":"list", "pricing":{"inputPerMTokUsd":1.25,"outputPerMTokUsd":10,"cacheReadPerMTokUsd":0.125, "source":"vendor-pricing-page","confidence":"high","observedAt":"2026-09-01T00:00:00Z", "sourceRef":"Published list prices. Cache WRITE rates are under-reported; batch and geographic modifiers are not folded in."},"supportsImages":true}, {"tag":"console/claude-opus-5","canonicalModelId":"claude-opus-5","providerId":"console", "familyId":"other","status":"stable","pricing":null,"costBasis":"unknown"}, {"tag":"openai/gpt-nameless","providerId":"openai", "pricing":{"inputPerMTokUsd":3,"outputPerMTokUsd":15,"source":"guess"}}, {"canonicalModelId":"no-tag-at-all","providerId":"openai"}]}"#
 
         let (req, c) = try await roundTrip(t, sentIndex: 1, result: payload) {
             try await client.modelsCatalog()
@@ -1867,6 +1899,8 @@ extension MethodWrapperTests {
         XCTAssertEqual(c.providers[3].displayName, "Future")
         XCTAssertNil(c.providers[3].pricingBasis, "not told ⇒ nil, never a guessed basis")
 
+        XCTAssertEqual(c.models.first?.supportsImages, true, "code-mode image input: the daemon's own answer, carried")
+        XCTAssertNil(c.models.dropFirst().first?.supportsImages, "absent ⇒ nil — not told, never a guessed false")
         XCTAssertEqual(c.models.map(\.tag),
                        ["openai/gpt-5.6-terra", "console/claude-opus-5", "openai/gpt-nameless"],
                        "a row with no tag is dropped: there is no string it could ever commit")

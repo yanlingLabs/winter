@@ -5,6 +5,8 @@ import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
   HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
+  SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE,
+  IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
   SessionHistoryParams,
   ApprovalListParams,
   SessionAddDirParams, SessionSetCwdParams, TrustDirParams,
@@ -84,7 +86,8 @@ import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
 import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
 import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
-import { rowForTag } from "../runtime-sdk/provider-selection";
+import { imagesAcceptedBy, rowForTag } from "../runtime-sdk/provider-selection";
+import { StageImageRefusal, stageSessionImage } from "../agent/stage-image";
 import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type ModelTag } from "../runtime-sdk/model-tag";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -203,12 +206,18 @@ export interface IpcServerOptions {
   store: SessionStore;
   hub?: SessionHub;          // shared with the agent engine when the daemon wires one up
   // session-activity-hygiene T6 (review fix round 1): the empty-session reaper invocation the
-  // `session.create` mint-time sweep calls — injectable ONLY so a test can observe/intercept
-  // exactly when the sweep runs relative to the create reply (a slow synchronous stub makes the
-  // property measurable: reaper.test.ts's "never delays the reply" case) without reaching into a
-  // private closure. Every real caller gets the true `reapEmptySessions` (sessions/reaper.ts) by
+  // `session.create` mint-time sweep calls — injectable ONLY so a test can observe exactly when the
+  // sweep runs relative to the create reply (with `scheduleMintSweep` below: reaper.test.ts's "never
+  // delays the create reply" case, proven by order, not by timing) without reaching into a private
+  // closure. Every real caller gets the true `reapEmptySessions` (sessions/reaper.ts) by
   // leaving this unset.
   reapEmptySessions?: typeof reapEmptySessions;
+  // TEST-ONLY seam, beside `reapEmptySessions`: how `session.create` defers its mint-time sweep.
+  // Returns a canceller (what `stop()` calls). Production leaves it unset and gets
+  // `deferMintSweep` — a MACROTASK, so the sweep runs only after the create reply is written.
+  // reaper.test.ts injects a capturing scheduler to prove, without any wall-clock bound, that the
+  // reply is written while the sweep is still merely scheduled.
+  scheduleMintSweep?: (run: () => void) => () => void;
   // P8a Task 12 (WS-16 §16): the runtime-state deletion hook, threaded into the mint-time sweep so
   // THAT reap removes a session's runtime rows exactly like the boot sweep in daemon.ts does — the
   // two are the same function and must not disagree about the reach of a delete. Undefined on a
@@ -547,6 +556,15 @@ export interface IpcServer { stop(): void }
  *  structurally; `sync.push`'s DIVERGED uses the same slot). P8b Task 16: the Winter leg's typed
  *  refusals travel as `data: { code }` — the numeric `code` stays a JSON-RPC class, the string
  *  names the refusal, and a client can branch on it without string-matching a message. */
+/** `session.create`'s default mint-sweep scheduler: a MACROTASK (`setTimeout(0)`), which the event loop
+ *  runs only after draining every microtask — including the continuation that writes the create
+ *  reply. (A microtask here would run the sweep BEFORE the reply is enqueued; reaper.test.ts pins
+ *  both halves.) Returns a canceller for `stop()`. */
+export function deferMintSweep(run: () => void): () => void {
+  const timer = setTimeout(run, 0);
+  return () => clearTimeout(timer);
+}
+
 class RpcFailure extends Error { constructor(public code: number, message: string, public data?: unknown) { super(message); } }
 
 /** P8b Task 16: a `WinterLegRefusal` (or the driver's own typed errors) as the RPC error a client
@@ -912,6 +930,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     throw new Error("startIpcServer: an engine requires a shared hub (engine and server must broadcast through the same SessionHub)");
   }
   const hub = opts.hub ?? new SessionHub(opts.store);
+  /** Mint-time reaper sweeps queued by `session.create` and not yet run — cancelled by `stop()`. */
+  const pendingReaps = new Set<() => void>(); // cancellers
+  const scheduleMintSweep = opts.scheduleMintSweep ?? deferMintSweep;
 
   /**
    * WS-19 (whole-branch review MAJOR 1): after a credential is added, replaced or removed, every
@@ -1948,13 +1969,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // all), reaping with no audit trail at all is not a degraded mode this feature should ever
         // run in — see reaper.ts's own doc comment on the delete-then-audit order. Every real
         // caller (daemon.ts) always wires `winterHome`.
+        //
+        // The timer is TRACKED (`pendingReaps`) and cancelled by `stop()`: a create answered just
+        // before shutdown used to leave its sweep queued behind the reply, and the caller's
+        // `stop()` → `store.close()` ran first, so the sweep queried a closed database ("Cannot use
+        // a closed database" from `emptySessionIds`). A server that has stopped reaps nothing.
         if (opts.winterHome) {
           const home = opts.winterHome;
           const reap = opts.reapEmptySessions ?? reapEmptySessions;
-          setTimeout(() => {
+          const cancel = scheduleMintSweep(() => {
+            pendingReaps.delete(cancel);
             try { reap({ store: opts.store, attachedCount: (id) => hub.attachedCount(id), home, onDelete: opts.onSessionDeleted }); }
             catch (err) { console.error("[reaper] mint-time sweep failed:", err); }
-          }, 0);
+          });
+          pendingReaps.add(cancel);
         }
         return { sessionId, trusted };
       }
@@ -3172,6 +3200,43 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const pending = opts.elicitations?.urlFor(p.sessionId, p.elicitationId);
         if (pending === undefined) throw new RpcFailure(ERR.NOT_FOUND, "this link request is no longer active", { code: ELICITATION_NOT_ACTIVE });
         return { url: pending.url };
+      }
+      case METHODS.sessionStageImage: {
+        // Code-mode image input (2026-09-29): stage a composer image into the session's temp
+        // directory and answer its path — the client substitutes that path for its `[Image #n]`
+        // placeholder and sends the text as usual. LOCAL clients only: already outside
+        // `REMOTE_ALLOWED_METHODS` and the plugin list, and the explicit check keeps it so if either
+        // list ever widens (`elicitation.url`'s precedent). The bytes are never logged — nothing in
+        // this arm, `parseParams` or `stageSessionImage` echoes a received value.
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "session.stageImage is available to local clients only");
+        const p = parseParams(SessionStageImageParams, params);
+        let meta: ReturnType<SessionStore["meta"]>;
+        try { meta = opts.store.meta(p.sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
+        // `mode ?? "code"` — an absent mode IS code, the store-wide convention.
+        if ((meta.mode ?? "code") !== "code") {
+          throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be added to code sessions", { code: IMAGE_SESSION_NOT_CODE });
+        }
+        // The session's CURRENT model, by the same precedence `assertEffortSelectable` resolves it
+        // (its own override, else the daemon's live default) — the backstop for a model switched
+        // after the client attached the image. No catalog row at all refuses too: there is no
+        // evidence the model reads an image.
+        const model = meta.model ?? opts.liveModel?.() ?? "";
+        // No model at all (the `unstated/unstated` sentinel, or none and no live default) is its own
+        // answer — "this model doesn't support images" would name a model that does not exist.
+        if (model === "" || model === UNSTATED_TAG) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_SESSION_NO_MODEL_MESSAGE, { code: IMAGE_SESSION_NO_MODEL });
+        }
+        if (!imagesAcceptedBy(rowForTag(model))) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_INPUT_UNSUPPORTED_MESSAGE, { code: IMAGE_INPUT_UNSUPPORTED });
+        }
+        try {
+          return { path: stageSessionImage({ sessionId: p.sessionId, mediaType: p.mediaType, dataBase64: p.dataBase64 }) };
+        } catch (err) {
+          if (err instanceof StageImageRefusal) {
+            throw new RpcFailure(err.internal ? ERR.INTERNAL : ERR.INVALID_PARAMS, err.message, { code: err.code });
+          }
+          throw new RpcFailure(ERR.INTERNAL, "could not stage the image", { code: "image_stage_failed" });
+        }
       }
       case METHODS.approvalList: {
         // SP3 T4b: queryable pending-approval state (remote-allowlisted so a phone can render live
@@ -4740,5 +4805,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // T5: the enforcement owns real timers (the demotion sweep interval, plus any pending post-turn
   // grace) — a server torn down without stopping them leaves callbacks that fire against a dead
   // store, which in a test run is a cross-test leak rather than a crash (they're unref'd).
-  return { stop() { enforcement.stop(); mcpOAuthDoors?.dispose(); server.stop(true); } };
+  return {
+    stop() {
+      // Before anything else: a queued mint-time reaper sweep must never outlive the server (it
+      // would run against a store its owner closes right after this returns — see `pendingReaps`).
+      for (const cancel of pendingReaps) cancel();
+      pendingReaps.clear();
+      enforcement.stop(); mcpOAuthDoors?.dispose(); server.stop(true);
+    },
+  };
 }

@@ -3099,6 +3099,10 @@ final class ShellSessionHost: ObservableObject {
         live.adapter.pendingEffort = .none
         live.adapter.selectionProbation = nil
         live.adapter.dirsRefusal = nil
+        // Code-mode image input: the draft TEXT carries across a hop, so its attachments do too (they
+        // live exactly as long as the placeholders in it); only a notice about the session being left
+        // goes. Staging happens at submit, into whichever session is current then.
+        live.adapter.composerNotice = nil
         // A refusal is about the session it was refused FOR — "session is archived — resume it
         // first" rendered over a different session is a lie about a rule (the `dirsRefusal` lesson).
         live.adapter.activityRefusal = nil
@@ -3376,6 +3380,12 @@ final class ShellSessionHost: ObservableObject {
         adapter.onSubmit = { [weak self] text in self?.submit(text) }
         adapter.onClearMessage = { [weak adapter] in adapter?.composerDraft = "" }
         adapter.boundSessionId = { [weak self] in self?.attachedSessionId }
+        // Code-mode image input: the attached session's row, read FRESH — its mode gates the
+        // composer's image intake and its model is what the attach-time check asks the catalogue.
+        adapter.currentSessionRow = { [weak self] in
+            guard let self, let sid = self.attachedSessionId else { return nil }
+            return self.directory.rows.first { $0.sessionId == sid }
+        }
 
         adapter.onApprovalRespond = { [weak self, weak adapter] callId, approved, optionId, childSessionId in
             guard let adapter else { return }
@@ -3562,19 +3572,32 @@ final class ShellSessionHost: ObservableObject {
 
     /// Mirrors `DetachedWindowController.submit` — steer a running turn, else send; the draft is
     /// cleared ONLY on success, so a failed send never loses the composed text (spec §6 parity).
+    ///
+    /// Code-mode image input: every `[Image #n]` still in the draft is staged first
+    /// (`FieldStateAdapter.composerTextForSend` — the one door both code-mode submit sites share) and
+    /// replaced by its path; a staging refusal shows on the composer's notice line and sends nothing.
     private func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let live = attachment, let sid = attachedSessionId else { return }
         let wasRunning = live.session.state.turnRunning
         let client = live.feed.client
-        Task { @MainActor [weak self] in
+        let adapter = live.adapter
+        // One submit at a time per surface: a second Enter while images stage would stage and send
+        // the same draft again.
+        guard adapter.beginComposerSubmit() else { return }
+        Task { @MainActor in
+            defer { adapter.endComposerSubmit() }
+            guard let outgoing = await adapter.composerTextForSend(trimmed, stage: { image in
+                try await client.stageImage(sessionId: sid, mediaType: image.mediaType, data: image.data)
+            }) else { return }
             let ok: Bool
             if wasRunning {
-                ok = (try? await client.steer(sessionId: sid, text: trimmed)) != nil
+                ok = (try? await client.steer(sessionId: sid, text: outgoing)) != nil
             } else {
-                ok = (try? await client.send(sessionId: sid, text: trimmed)) != nil
+                ok = (try? await client.send(sessionId: sid, text: outgoing)) != nil
             }
-            if ok { self?.attachment?.adapter.composerDraft = "" }
+            // Clears only what was sent — edits made during the round trip stay.
+            if ok { adapter.composerSendSucceeded(sentDraft: text) }
         }
     }
 

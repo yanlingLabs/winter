@@ -119,13 +119,20 @@ public struct SyncConfigModel: Codable, Equatable, Sendable {
     public let providerId: String?
     public let displayName: String?
     public let facingName: String?
+    /// Code-mode image input (2026-09-29): whether the Mac's catalog says this row accepts an image.
+    /// Optional-tolerant for the same reason as the three fields above (an older Mac never sends it);
+    /// `nil` is "not told". Carried so this mirror does not silently drop a wire field — the phone's
+    /// own chat takes no images today.
+    public let supportsImages: Bool?
 
-    public init(id: String, efforts: [String], providerId: String? = nil, displayName: String? = nil, facingName: String? = nil) {
+    public init(id: String, efforts: [String], providerId: String? = nil, displayName: String? = nil, facingName: String? = nil,
+                supportsImages: Bool? = nil) {
         self.id = id
         self.efforts = efforts
         self.providerId = providerId
         self.displayName = displayName
         self.facingName = facingName
+        self.supportsImages = supportsImages
     }
 
     public init(from decoder: Decoder) throws {
@@ -150,6 +157,7 @@ public struct SyncConfigModel: Codable, Equatable, Sendable {
         self.providerId = try c.decodeIfPresent(String.self, forKey: .providerId).flatMap { $0.isEmpty ? nil : $0 }
         self.displayName = try c.decodeIfPresent(String.self, forKey: .displayName).flatMap { $0.isEmpty ? nil : $0 }
         self.facingName = try c.decodeIfPresent(String.self, forKey: .facingName).flatMap { $0.isEmpty ? nil : $0 }
+        self.supportsImages = try c.decodeIfPresent(Bool.self, forKey: .supportsImages)
     }
 }
 

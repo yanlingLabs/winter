@@ -88,7 +88,8 @@ import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } 
 import { Box, Text, useInput, useStdin } from "ink";
 import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
-import { METHODS, type ApprovalPolicy, type SessionActivity, type SessionEvent } from "@yanlinglabs/winter-protocol";
+import { METHODS, SyncConfigModel, type ApprovalPolicy, type SessionActivity, type SessionEvent } from "@yanlinglabs/winter-protocol";
+import { readFileSync } from "node:fs";
 import { POLICY_ORDER } from "./policy-order";
 import { policySwitchNotes } from "./policy-switch-notes";
 import { modelIdPortion } from "../model-cli";
@@ -103,7 +104,11 @@ import { Spinner } from "./spinner";
 import { TaskList } from "./task-list";
 import { AgentList, FINISH_LABEL } from "./agent-list";
 import { Footer, type ExitKey } from "./footer";
-import { Composer } from "./composer";
+import { Composer, type ComposerInject } from "./composer";
+import {
+  DraftImages, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, imagePathFromPaste, imageToken, isRegularFile,
+  isStageableImage, prepareDraftImage, readClipboardImage as readClipboardImageDefault, stageDraftImages,
+} from "./images";
 import { makeDraftWrapper } from "./draft-wrap";
 import { makePasteBatch } from "./paste-batch";
 import { transcriptFileAtCell, openLocalFile } from "./file-links";
@@ -135,6 +140,9 @@ export interface AppClient {
    *  results (which also carry `ok: true`) are assignable as-is. */
   sendToThread(sessionId: string, agent: string, text: string): Promise<{ delivered: "queued" | "resumed"; agentId: string }>;
   agentStop(sessionId: string, agent: string): Promise<{ status: string }>;
+  /** Code-mode image input: `session.stageImage` — resolves the staged file's absolute path, rejects
+   *  with the daemon's refusal (its message is what the note shows). */
+  stageImage(sessionId: string, mediaType: string, dataBase64: string): Promise<string>;
 }
 
 /** Phase 3d T2 — everything the reducer's `dispatch` can be fed: every real wire `SessionEvent`
@@ -189,6 +197,9 @@ export interface AppProps {
   /** Injectable clipboard writer for UI tests; production uses the macOS pasteboard. */
   copyText?: (text: string) => void;
   openFile?: (path: string) => void;
+  /** Code-mode image input: the clipboard's image bytes, or `null` when it holds none. Injectable so
+   *  tests never read the real clipboard; production runs `osascript` (`images.ts`). */
+  readClipboardImage?: () => Promise<Uint8Array | null>;
 }
 
 // Re-exported from the zero-dep `./policy-order` module (SP-policies): main.ts's cycler imports the
@@ -431,6 +442,7 @@ export function App({
   client, bridge, sessionId, cwd, initialPolicy, version, model,
   effort, sessionModelOverride, sessionEffortOverride, initialActivity,
   now = Date.now, onExitRequest, resumeTargetSeq, copyText = copyToClipboard, openFile = openLocalFile,
+  readClipboardImage = readClipboardImageDefault,
 }: AppProps) {
   const [state, dispatch] = useReducer(
     (s: TuiState, e: AppEvent) => reduce(s, e, now()),
@@ -490,6 +502,21 @@ export function App({
   const appendNote = useCallback((text: string) => dispatch({ type: "local_note", text }), []);
   const cwdRef = useRef(cwd);
 
+  // Code-mode image input (`images.ts`): the current draft's attachments, and the one door the App
+  // writes into the composer through (`ComposerInject`) — a placeholder once an async attach lands,
+  // or a refused draft handed back.
+  const draftImagesRef = useRef(new DraftImages());
+  const [composerInject, setComposerInject] = useState<ComposerInject | null>(null);
+  const injectSeqRef = useRef(0);
+  const injectIntoComposer = useCallback((mode: ComposerInject["mode"], text: string) => {
+    injectSeqRef.current += 1;
+    setComposerInject({ id: injectSeqRef.current, mode, text });
+  }, []);
+  // The composer consumed it: drop it, so a remount (after a pending card) cannot replay it.
+  const onInjectApplied = useCallback((id: number) => {
+    setComposerInject((current) => (current?.id === id ? null : current));
+  }, []);
+
   // TUI renderer T5 — the status chrome's LIVE GLOBAL model/effort: seeded from the mount-time
   // settings read (props), flipped by `/model`'s post-write `onModelChanged` callback (commands.ts)
   // — the truthful live source, since /model is the only in-TUI writer and no wire event announces
@@ -497,6 +524,52 @@ export function App({
   // below, per axis, mirroring the daemon's own `meta.model || global` resolution.
   const [liveGlobal, setLiveGlobal] = useState<{ model: string; effort?: string }>({ model, effort });
   const onModelChanged = useCallback((m: string, e?: string) => setLiveGlobal({ model: m, effort: e }), []);
+
+  // Code-mode image input — ATTACH time. The model in force (the session override, else the live
+  // global — the chrome's own resolution) is looked up in `sync.config`'s rows; `supportsImages:
+  // false` refuses with the exact message and attaches nothing. A tag the listing does not carry, a
+  // row that does not state the field (an older daemon — `supportsImages` is optional on the wire),
+  // or a failed read, attaches: the daemon's `session.stageImage` is the authority at submit.
+  const modelAcceptsImages = async (): Promise<boolean> => {
+    const tag = sessionModelOverride ?? liveGlobal.model;
+    try {
+      const raw = await client.request(METHODS.syncConfig, {});
+      const parsed = SyncConfigModel.array().safeParse((raw as { models?: unknown } | undefined)?.models);
+      return (parsed.success ? parsed.data.find((m) => m.id === tag)?.supportsImages : undefined) ?? true;
+    } catch {
+      return true;
+    }
+  };
+  /** Attach one image's bytes to the draft: not an image → `fallbackText` (the pasted text) is typed
+   *  instead; the model refuses images → the exact message as a note; otherwise it is prepared ONCE
+   *  here (downscaled to 1568 px, re-encoded only if it must be — `prepareDraftImage`), and only an
+   *  image that cannot be brought under the cap is refused, with a note. */
+  const attachImageBytes = async (bytes: Uint8Array, fallbackText?: string): Promise<void> => {
+    // A refused PATH paste still types the path (as it did before images existed); the note says why
+    // it was not attached. A clipboard image has no text to fall back to.
+    const typeInstead = () => { if (fallbackText !== undefined) injectIntoComposer("insert", fallbackText); };
+    if (!isStageableImage(bytes)) { typeInstead(); return; }
+    if (!(await modelAcceptsImages())) { appendNote(IMAGE_INPUT_UNSUPPORTED_MESSAGE); typeInstead(); return; }
+    const image = await prepareDraftImage(bytes);
+    if (image === "not-image") { typeInstead(); return; }
+    if (image === "too-large") { appendNote(IMAGE_TOO_LARGE_MESSAGE); typeInstead(); return; }
+    injectIntoComposer("insert", imageToken(draftImagesRef.current.add(image, composerStateRef.current.text)));
+  };
+  // ctrl+v: the clipboard's image, if it holds one; otherwise nothing happens (what ctrl+v did before).
+  const onPasteImage = () => {
+    void readClipboardImage()
+      .then((bytes) => (bytes === null ? undefined : attachImageBytes(bytes)))
+      .catch(() => { /* an unreadable clipboard is the same as an empty one */ });
+  };
+  // A pasted or dragged-in path to an existing image file becomes an attachment; anything else types.
+  const onPastedText = (text: string): boolean => {
+    const path = imagePathFromPaste(text);
+    if (path === undefined || !isRegularFile(path)) return false;
+    let bytes: Uint8Array;
+    try { bytes = new Uint8Array(readFileSync(path)); } catch { return false; }
+    void attachImageBytes(bytes, text);
+    return true;
+  };
 
   // Bugfix-pass B2 — the bottom picker (choice-menu.tsx): a command whose no-arg reply is a list
   // the user picks from (`/model`, `/output-style`) opens it via `CommandCtx.openChoice` instead of
@@ -1020,14 +1093,45 @@ export function App({
   // MAIN turn changes nothing about where the text goes. Slash input never reaches either path
   // (composer's parseSlashInput branch → onRunCommand → the MAIN session, unchanged — "built-in
   // commands still run in your main conversation").
-  const onSubmit = (text: string) => {
+  //
+  // Code-mode image input: a draft's `[Image #n]` placeholders are staged (`session.stageImage`, into
+  // the MAIN session's temp directory — a child view's message carries the same paths, which any
+  // agent in the session can read) and replaced by their paths before the text goes anywhere. A
+  // draft with no live placeholder takes exactly the old synchronous path. A staging refusal shows
+  // the daemon's message as a note and hands the draft back to an empty composer — nothing is sent.
+  //
+  // ONE queue for every submit and steer (`submitQueueRef`): a draft with images goes out only after
+  // its async staging, so without the queue a plain draft typed after it would overtake it. Each
+  // entry runs after the one before it has been delivered (or refused).
+  const deliver = (text: string, steer: boolean) => {
     if (childOpen) { sendToChild(childRow!.threadId, text); return; }
-    void client.send(sessionId, text);
+    void (steer ? client.steer(sessionId, text) : client.send(sessionId, text));
   };
-  const onSteer = (text: string) => {
-    if (childOpen) { sendToChild(childRow!.threadId, text); return; }
-    void client.steer(sessionId, text);
+  const submitQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const submitDraft = (text: string, steer: boolean) => {
+    const images = draftImagesRef.current;
+    const mark = images.mark();
+    const hasImages = images.referencedIn(text).length > 0;
+    submitQueueRef.current = submitQueueRef.current.then(async () => {
+      let outgoing = text;
+      if (hasImages) {
+        try {
+          outgoing = await stageDraftImages(text, images, (image) => client.stageImage(sessionId, image.mediaType, Buffer.from(image.bytes).toString("base64")));
+        } catch (err: unknown) {
+          appendNote(err instanceof Error ? err.message : String(err));
+          // Hand the refused draft back WITHOUT losing whatever was typed since: it goes first,
+          // the newer text after it, on its own line.
+          const current = composerStateRef.current.text;
+          injectIntoComposer("replace", current.length === 0 ? text : `${text}\n${current}`);
+          return;
+        }
+      }
+      images.clearBefore(mark);
+      deliver(outgoing, steer);
+    });
   };
+  const onSubmit = (text: string) => submitDraft(text, false);
+  const onSteer = (text: string) => submitDraft(text, true);
   // idle-Esc parity: no-op while nothing is running (legacy's idle readLine swallowed Esc).
   const onInterrupt = () => { if (state.turnRunning) void client.interrupt(sessionId); };
   const onCyclePolicy = () => {
@@ -1255,6 +1359,10 @@ export function App({
             // Passed ONLY while a child view is open: an empty-buffer Esc then closes the view
             // (back to main) instead of any other Esc semantics — see composer.tsx's prop doc.
             onEscEmpty={childOpen ? onCloseChildView : undefined}
+            onPasteImage={onPasteImage}
+            onPastedText={onPastedText}
+            inject={composerInject}
+            onInjectApplied={onInjectApplied}
           />
         )}
         {agentsWindow.length > 0 ? <AgentList agents={agentsWindow} nowMs={nowMs} selectedIndex={agentSelInWindow} /> : null}

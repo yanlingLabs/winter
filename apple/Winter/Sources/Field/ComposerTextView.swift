@@ -92,6 +92,12 @@ struct ComposerTextView: NSViewRepresentable {
     /// site — the orb field, the detached window, the new-chat page — is byte-identical.
     var onEscape: (() -> Bool)?
 
+    /// Code-mode image input (`ComposerImages.swift`): paste of image data / image files and drops of
+    /// image files become `[Image #n]` attachments while `isEnabled()` answers true. `nil` (the
+    /// default) — or `isEnabled() == false` — leaves paste and drop exactly as AppKit does them, so
+    /// every surface that does not opt in (the orb's field) is byte-identical.
+    var imageIntake: ComposerImageIntake? = nil
+
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
@@ -143,6 +149,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onFocusKey = onFocusKey
         textView.onTypingRefocus = onTypingRefocus
         textView.onEscape = onEscape
+        textView.imageIntake = imageIntake
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = false
@@ -177,6 +184,7 @@ struct ComposerTextView: NSViewRepresentable {
         // not hold a Bool), but the closure OBJECT still has to be refreshed here or a card rebuilt
         // against a new attachment would keep interrupting the previous session.
         textView.onEscape = onEscape
+        textView.imageIntake = imageIntake
         // Keep the live view in step if the size changes across an update — otherwise the font
         // would be whatever `makeNSView` happened to set the first time this view was built.
         if textView.font?.pointSize != fontSize {
@@ -275,8 +283,10 @@ func composerShouldClaimFirstResponder(current: NSResponder?, composer: NSView) 
 }
 
 /// v1 port of `CommandTextView` (TextField/ComposerTextView.swift:333-437), stripped to just
-/// the Enter/Shift+Enter `doCommand(by:)` override — the paste-image interception and
-/// selection-change reporting are gone with the image/caret-navigation surface above.
+/// the Enter/Shift+Enter `doCommand(by:)` override — v1's paste-image interception and
+/// selection-change reporting went with the image/caret-navigation surface above. Code-mode image
+/// input (2026-09-29) brings back a paste/drop hook of its own, gated on `imageIntake` (see the MARK
+/// at the bottom): with no live intake every paste and drop is AppKit's, unchanged.
 ///
 /// Task 6 (FieldFocus) adds the virtual-focus keyboard chain on top: `onFocusKey` gets first
 /// look at ↑/↓/Enter (see `FieldFocus.swift`'s header for why this is virtual, never a real
@@ -329,5 +339,81 @@ final class CommandTextView: NSTextView {
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         onTypingRefocus?()
         super.insertText(insertString, replacementRange: replacementRange)
+    }
+
+    // MARK: Code-mode image input
+
+    /// See `ComposerTextView.imageIntake`.
+    var imageIntake: ComposerImageIntake?
+
+    /// The intake, only while it is live — every override below falls through to AppKit otherwise.
+    private var liveImageIntake: ComposerImageIntake? {
+        guard let imageIntake, imageIntake.isEnabled() else { return nil }
+        return imageIntake
+    }
+
+    override func paste(_ sender: Any?) {
+        if takeComposerImages(from: .general) { return }
+        super.paste(sender)
+    }
+
+    /// The paste/drop decision, on a pasteboard handed in (so a test never touches the user's general
+    /// pasteboard). `true` = handled here: placeholders were inserted, or image DATA was refused (its
+    /// reason is on the surface's notice line; there is no text to fall back to). `false` = AppKit's
+    /// own paste/drop runs — no live intake, no image on the pasteboard, or image FILES whose every
+    /// attach was refused (a text-only model, too large): their paths are typed as before, beside the
+    /// notice, instead of the paste silently doing nothing.
+    func takeComposerImages(from pasteboard: NSPasteboard) -> Bool {
+        guard let intake = liveImageIntake, let images = composerImages(from: pasteboard) else { return false }
+        if insertComposerImages(images, intake: intake) { return true }
+        let hasFiles = !((pasteboard.readObjects(forClasses: [NSURL.self],
+                                                 options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []).isEmpty
+        return !hasFiles
+    }
+
+    /// A plain-text view does not enable Paste for image-only pasteboard content (a screenshot), so
+    /// ⌘V would never reach `paste(_:)` — enabled here exactly when the intake would take it.
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)), liveImageIntake != nil, composerPasteboardMayHaveImage(.general) {
+            return true
+        }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let op = super.draggingEntered(sender)
+        if op.isEmpty, liveImageIntake != nil, composerPasteboardMayHaveImage(sender.draggingPasteboard) { return .copy }
+        return op
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let op = super.draggingUpdated(sender)
+        if op.isEmpty, liveImageIntake != nil, composerPasteboardMayHaveImage(sender.draggingPasteboard) { return .copy }
+        return op
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if liveImageIntake != nil, composerImages(from: sender.draggingPasteboard) != nil {
+            let point = convert(sender.draggingLocation, from: nil)
+            setSelectedRange(NSRange(location: characterIndexForInsertion(at: point), length: 0))
+            window?.makeFirstResponder(self)
+            if takeComposerImages(from: sender.draggingPasteboard) { return true }
+        }
+        return super.performDragOperation(sender)
+    }
+
+    /// Attach each image in order and insert the placeholders at the caret, space-separated. The first
+    /// refusal stops the rest — its reason is already on the surface's notice line. Answers whether
+    /// anything was inserted.
+    @discardableResult
+    private func insertComposerImages(_ images: [ComposerImage], intake: ComposerImageIntake) -> Bool {
+        var tokens: [String] = []
+        for image in images {
+            guard let token = intake.attach(image) else { break }
+            tokens.append(token)
+        }
+        guard !tokens.isEmpty else { return false }
+        insertText(tokens.joined(separator: " "), replacementRange: selectedRange())
+        return true
     }
 }

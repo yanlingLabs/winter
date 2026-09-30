@@ -30,7 +30,7 @@ import type { CapabilityEvidence, ModelPricing } from "@yanlinglabs/winter-provi
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { permittedProviders } from "../settings";
 import { credentialInventory, credentialPresentProbe } from "../runtime-sdk/keychain";
-import { effortVocabularyOf, toolsRefusedFor } from "../runtime-sdk/provider-selection";
+import { effortVocabularyOf, imagesAcceptedBy, toolsRefusedFor } from "../runtime-sdk/provider-selection";
 
 export interface ModelCatalogWirePricing {
   inputPerMTokUsd: number;
@@ -69,6 +69,9 @@ export interface ModelCatalogWireModel {
    *  titles, the dreamer, the cleaner AND the bash reviewer's classifier all call their provider with
    *  `tools: []` — none of them need this field to be anything but informational. */
   sessionUsable: boolean;
+  /** Code-mode image input: the row's `inputModalities` contains `"image"` (`imagesAcceptedBy`,
+   *  runtime-sdk/provider-selection.ts) — the same rule `session.stageImage` refuses on. */
+  supportsImages: boolean;
 }
 
 export interface ModelCatalogWireProvider {
@@ -221,6 +224,7 @@ export function modelCatalogWire(deps: { credentials: CredentialPresence; home: 
       // the vocabulary rather than being left for a consumer to guess.
       defaultEffort: m.reasoning?.defaultEffort ?? null,
       sessionUsable: !toolsRefusedFor(m),
+      supportsImages: imagesAcceptedBy(m),
     }));
 
   // Families with at least one offerable model, in the catalog's own id order — an empty family

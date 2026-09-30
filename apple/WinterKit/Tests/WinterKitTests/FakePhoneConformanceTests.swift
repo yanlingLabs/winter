@@ -41,11 +41,10 @@ import IrohLib
 /// `WINTERKIT_SKIP` names by exact test — bisected to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
 /// (`session.dispatch`'s default mode now requires a resolvable `winter` executable this suite
 /// never provisions). Three of the four pass outright once a real `winter` binary is available
-/// (`WINTER_RUNTIME_EXECUTABLE`); `testStreamingDeltasReachThePhone_...` does not, for a second,
-/// independent cause — its `streamingProviderFixture`'s injected `agentProvider` (this file's own
-/// synthetic-event seam, built for the retired engine) is never consulted by the Winter leg, so
-/// none of its chunks reach the wire. See `RealDaemon.waitForFirstLine`'s own doc comment for the
-/// full classification.
+/// (`WINTER_RUNTIME_EXECUTABLE`). `testStreamingDeltasReachThePhone_...` had a second cause — its
+/// fixture injected an `agentProvider`, which the Winter leg never consults for a session turn — and
+/// was rebuilt (2026-09-30) around a fake OpenAI Responses endpoint the daemon's real `openai`
+/// adapter streams from (`RealDaemon.streamingProviderFixture`); it runs in CI again.
 final class FakePhoneConformanceTests: XCTestCase {
 
     // MARK: - Host + ceremony setup (mirrors PairingE2ETests' own pattern)
@@ -375,10 +374,11 @@ final class FakePhoneConformanceTests: XCTestCase {
     // MARK: - iOS remote-path T1+T2: streaming, opaque state, and the frame cliff — on the wire
 
     /// **The end-to-end proof for the whole iOS remote path, and the tripwire for both of its
-    /// tasks.** Everything below runs through production code: a REAL daemon with a REAL
-    /// `AgentEngine` (only the `Provider` is injected — `RealDaemon.streamingProviderFixture`), a
-    /// REAL pairing ceremony, the REAL `Gateway` over a REAL iroh QUIC link, into the shipped
-    /// `WinterSessionClient`. Nothing between the provider and the phone is faked.
+    /// tasks.** Everything below runs through production code: a REAL daemon running a REAL
+    /// Winter-leg turn (the embedded runtime and the real `openai` Responses adapter — only the HTTP
+    /// endpoint is fake, `RealDaemon.streamingProviderFixture`), a REAL pairing ceremony, the REAL
+    /// `Gateway` over a REAL iroh QUIC link, into the shipped `WinterSessionClient`. Nothing between
+    /// the provider's bytes and the phone is faked.
     ///
     /// It exists because NOTHING in either suite covered a transient event traversing the gateway,
     /// and that hole hid two bugs at once:
@@ -463,12 +463,12 @@ final class FakePhoneConformanceTests: XCTestCase {
         // delta's seq is BORROWED from the store's head, never its own, so a run of deltas repeats
         // one seq. Whatever the first of them does to a client's cursor, every one after it arrives
         // at `seq == cursor` — the case a naive `seq <= cursor` dedupe drops 100% of the time.
-        // (The 7th delta's seq differs from the first six precisely because the `reasoning_item`
-        // the engine persisted between them moved the store's head — a borrowed seq tracks the LOG,
-        // not the stream.)
+        // (A borrowed seq tracks the LOG, not the stream: nothing is persisted between these
+        // chunks — the Winter leg never writes the provider's reasoning item as a session event — so
+        // they all ride the same head seq.)
         let smallDeltaSeqs = Set(deltas.prefix(RealDaemon.streamedChunks.count).compactMap { $0.seq })
         XCTAssertEqual(smallDeltaSeqs.count, 1,
-                       "the six chunks streamed before the mid-turn reasoning_item all share the store's head seq — that is what makes `seq == cursor` the norm, not an edge case")
+                       "the six small chunks all share the store's head seq — that is what makes `seq == cursor` the norm, not an edge case")
         XCTAssertGreaterThanOrEqual(deltas.count - Set(deltas.compactMap { $0.seq }).count, 5,
                                     "at least five deltas repeated a seq an earlier delta already delivered — i.e. arrived at `seq == cursor`")
 

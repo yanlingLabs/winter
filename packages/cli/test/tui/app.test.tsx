@@ -33,7 +33,10 @@ afterEach(cleanup);
 // `/model`'s show form now reads over `ctx.client.request` — see commands.test.ts's fake client,
 // which follows the same shape) while every other method keeps the generic "record + return {}"
 // behavior. Default (no override) is byte-identical to the old always-`{}` `rec("request")`.
-function fakeClient(opts: { request?: (method: string, params?: unknown) => unknown } = {}) {
+function fakeClient(opts: {
+  request?: (method: string, params?: unknown) => unknown;
+  stageImage?: (sessionId: string, mediaType: string, dataBase64: string) => Promise<string>;
+} = {}) {
   const calls: { method: string; args: unknown[] }[] = [];
   const rec = (method: string) => (...args: unknown[]) => {
     calls.push({ method, args });
@@ -63,6 +66,14 @@ function fakeClient(opts: { request?: (method: string, params?: unknown) => unkn
     agentStop: (...args: unknown[]) => {
       calls.push({ method: "agentStop", args });
       return Promise.resolve({ status: "stopped" });
+    },
+    // Code-mode image input: `session.stageImage` — records, then answers a path per call (or the
+    // test's own override, e.g. a refusal).
+    stageImage: (sessionId: string, mediaType: string, dataBase64: string) => {
+      calls.push({ method: "stageImage", args: [sessionId, mediaType, dataBase64] });
+      if (opts.stageImage) return opts.stageImage(sessionId, mediaType, dataBase64);
+      const n = calls.filter((c) => c.method === "stageImage").length;
+      return Promise.resolve(`/tmp/winter-session-${sessionId}/images/image_${n}.png`);
     },
   };
 }
@@ -1907,9 +1918,9 @@ describe("bottomBarLayout — B2: pickerRows are counted (essential, like chrome
 // the retired static CODEX_MODELS enumeration — `fakeClient({ request: … })` answers it.
 const codexOauthCatalogue = () => ({
   models: [
-    { id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", facingName: "sol", efforts: ["low"] },
-    { id: "codex-oauth/gpt-5.6-terra", providerId: "codex-oauth", displayName: "GPT-5.6 Terra", facingName: "terra", efforts: ["low"] },
-    { id: "codex-oauth/gpt-5.6-luna", providerId: "codex-oauth", displayName: "GPT-5.6 Luna", facingName: "luna", efforts: ["low"] },
+    { id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", facingName: "sol", efforts: ["low"], supportsImages: true },
+    { id: "codex-oauth/gpt-5.6-terra", providerId: "codex-oauth", displayName: "GPT-5.6 Terra", facingName: "terra", efforts: ["low"], supportsImages: true },
+    { id: "codex-oauth/gpt-5.6-luna", providerId: "codex-oauth", displayName: "GPT-5.6 Luna", facingName: "luna", efforts: ["low"], supportsImages: true },
   ],
 });
 const catalogueClient = () => fakeClient({ request: (method) => (method === METHODS.syncConfig ? codexOauthCatalogue() : {}) });
@@ -2138,5 +2149,257 @@ describe("App — shift+tab policy switch reports a bypass crossing", () => {
     expect(base.calls.map((c) => c.args[1])).toEqual(["bypass", "plan"]);
     expect(count(frame, "mode is in force")).toBe(1);
     expect(frame).not.toContain("plan mode applies");
+  });
+});
+
+// Code-mode image input (2026-09-29): an image enters the draft as `[Image #n]` — from ctrl+v (the
+// clipboard reader is INJECTED, so no test reads the real clipboard) or a pasted image path — and at
+// submit each live placeholder is staged (`session.stageImage`) and replaced by the returned path.
+describe("App — code-mode image input", () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  const TAG = "codex-oauth/gpt-5.6-sol";
+  const syncConfig = (supportsImages: boolean) => (method: string) =>
+    method === METHODS.syncConfig
+      ? { models: [{ id: TAG, providerId: "codex-oauth", displayName: "GPT-5.6 Sol", efforts: [], supportsImages }] }
+      : {};
+  const plain = (frame: string | undefined) => (frame ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+
+  test("a pasted image path becomes [Image #1]; Enter stages it and sends the path in its place", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
+    const path = join(dir, "My Shot.png");
+    writeFileSync(path, PNG);
+    try {
+      const client = fakeClient({ request: syncConfig(true) });
+      const { stdin, lastFrame } = render(<App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} />);
+      await wait();
+      stdin.write("look at ");
+      await wait();
+      // Terminal.app drags a file in as its shell-escaped path.
+      stdin.write(path.replace(/ /g, "\\ "));
+      await wait(60);
+      expect(plain(lastFrame())).toContain("look at [Image #1]");
+      stdin.write("\r");
+      await wait(60);
+      const stage = client.calls.find((c) => c.method === "stageImage");
+      expect(stage?.args).toEqual(["s1", "image/png", Buffer.from(PNG).toString("base64")]);
+      expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "look at /tmp/winter-session-s1/images/image_1.png"]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("ctrl+v attaches the clipboard's image; an empty clipboard inserts nothing", async () => {
+    let clip: Uint8Array | null = PNG;
+    const client = fakeClient({ request: syncConfig(true) });
+    const { stdin, lastFrame } = render(
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(clip)} />,
+    );
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    expect(plain(lastFrame())).toContain("[Image #1]");
+    clip = null;
+    stdin.write("\x16");
+    await wait(60);
+    expect(plain(lastFrame())).not.toContain("[Image #2]");
+    clip = PNG;
+    stdin.write("\x16");
+    await wait(60);
+    expect(plain(lastFrame())).toContain("[Image #1][Image #2]");
+  });
+
+  test("a model without image input refuses at attach time with the exact message, and attaches nothing", async () => {
+    const client = fakeClient({ request: syncConfig(false) });
+    const { stdin, lastFrame } = render(
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    expect(plain(lastFrame())).toContain("The selected model doesn't support images");
+    expect(plain(lastFrame())).not.toContain("[Image #1]");
+    stdin.write("hi");
+    await wait();
+    stdin.write("\r");
+    await wait(60);
+    expect(client.calls.some((c) => c.method === "stageImage")).toBe(false);
+    expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "hi"]);
+  });
+
+  test("a staging refusal shows the daemon's message, sends nothing, and hands the draft back", async () => {
+    const client = fakeClient({
+      request: syncConfig(true),
+      stageImage: () => Promise.reject(new Error("The selected model doesn't support images")),
+    });
+    const { stdin, lastFrame } = render(
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    stdin.write("see ");
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    stdin.write("\r");
+    await wait(80);
+    expect(client.calls.some((c) => c.method === "send")).toBe(false);
+    const frame = plain(lastFrame());
+    expect(frame).toContain("The selected model doesn't support images");
+    expect(frame).toContain("see [Image #1]");
+  });
+
+  test("a refusal that lands after the user typed something new keeps BOTH drafts", async () => {
+    let reject!: (e: Error) => void;
+    const client = fakeClient({
+      request: syncConfig(true),
+      stageImage: () => new Promise<string>((_, r) => { reject = r; }),
+    });
+    const { stdin, lastFrame } = render(
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    stdin.write("first ");
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    stdin.write("\r");
+    await wait(40);
+    stdin.write("second");
+    await wait(40);
+    reject(new Error("The selected model doesn't support images"));
+    await wait(80);
+    const frame = plain(lastFrame());
+    expect(frame).toContain("first [Image #1]");
+    expect(frame).toContain("second");
+    expect(client.calls.some((c) => c.method === "send")).toBe(false);
+  });
+
+  test("every submit goes out in order: a plain draft never overtakes an image draft still staging", async () => {
+    let resolve!: (path: string) => void;
+    const client = fakeClient({
+      request: syncConfig(true),
+      stageImage: () => new Promise<string>((r) => { resolve = r; }),
+    });
+    const { stdin } = render(
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    stdin.write("one ");
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    stdin.write("\r");
+    await wait(40);
+    stdin.write("two");
+    await wait();
+    stdin.write("\r");
+    await wait(40);
+    expect(client.calls.filter((c) => c.method === "send")).toEqual([]); // "two" waits its turn
+    resolve("/t/image_1.png");
+    await wait(60);
+    expect(client.calls.filter((c) => c.method === "send").map((c) => c.args[1])).toEqual(["one /t/image_1.png", "two"]);
+  });
+
+  test("a refused image PATH is still typed as text, beside the note", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
+    const path = join(dir, "shot.png");
+    writeFileSync(path, PNG);
+    try {
+      const client = fakeClient({ request: syncConfig(false) });
+      const { stdin, lastFrame } = render(<App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} />);
+      await wait();
+      stdin.write("see ");
+      await wait();
+      stdin.write(path);
+      await wait(80);
+      expect(plain(lastFrame())).toContain("The selected model doesn't support images");
+      expect(plain(lastFrame())).not.toContain("[Image #");
+      stdin.write("\r");
+      await wait(60);
+      expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", `see ${path}`]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("a new attachment's number lands past any [Image #n] already in the draft (a recalled message)", async () => {
+    const client = fakeClient({ request: syncConfig(true) });
+    const { stdin, lastFrame } = render(
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    stdin.write("old [Image #1] ");
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    expect(plain(lastFrame())).toContain("old [Image #1] [Image #2]");
+    stdin.write("\r");
+    await wait(60);
+    // #1 was never attached in THIS draft, so it stays literal; only #2 is staged.
+    expect(client.calls.filter((c) => c.method === "stageImage").length).toBe(1);
+    expect(client.calls.find((c) => c.method === "send")?.args[1]).toBe("old [Image #1] /tmp/winter-session-s1/images/image_1.png");
+  });
+
+  test("a daemon row that does not state supportsImages (an older daemon) lets the attach through", async () => {
+    const client = fakeClient({
+      request: (method) => method === METHODS.syncConfig
+        ? { models: [{ id: TAG, providerId: "codex-oauth", displayName: "GPT-5.6 Sol", efforts: [] }] }
+        : {},
+    });
+    const { stdin, lastFrame } = render(
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    expect(plain(lastFrame())).toContain("[Image #1]");
+  });
+
+  test("an applied placeholder never replays when a pending card unmounts and remounts the composer", async () => {
+    const bridge = makeEventBridge();
+    const client = fakeClient({ request: syncConfig(true) });
+    const { stdin, lastFrame } = render(
+      <App client={client} bridge={bridge} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+    );
+    await wait();
+    stdin.write("\x16");
+    await wait(60);
+    expect(plain(lastFrame())).toContain("[Image #1]");
+    stdin.write("x");
+    await wait();
+    stdin.write("\r");
+    await wait(60);
+    expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "/tmp/winter-session-s1/images/image_1.pngx"]);
+    bridge.push(ev({ type: "approval_requested", callId: "c1", toolName: "bash", summary: "ls" }));
+    await wait();
+    expect(plain(lastFrame())).toContain("approve bash?");
+    bridge.push(ev({ type: "approval_resolved", callId: "c1", approved: true }));
+    await wait(60);
+    expect(plain(lastFrame())).toContain("❯");
+    expect(plain(lastFrame())).not.toContain("[Image #");
+  });
+
+  test("a deleted placeholder is not staged; a pasted .png that is not an image types as text", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
+    const fake = join(dir, "not-really.png");
+    writeFileSync(fake, "plain text, not an image");
+    try {
+      const client = fakeClient({ request: syncConfig(true) });
+      const { stdin, lastFrame } = render(
+        <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+      );
+      await wait();
+      stdin.write("\x16");
+      await wait(60);
+      expect(plain(lastFrame())).toContain("[Image #1]");
+      // ctrl+w deletes the placeholder word-by-word; clear it outright with backspaces instead.
+      for (let i = 0; i < "[Image #1]".length; i++) stdin.write("\x7f");
+      await wait(40);
+      // (A draft STARTING with "/" is a slash command, so the path follows a word.)
+      stdin.write("see ");
+      await wait();
+      stdin.write(fake);
+      await wait(60);
+      expect(plain(lastFrame())).not.toContain("[Image #");
+      stdin.write("\r");
+      await wait(60);
+      expect(client.calls.some((c) => c.method === "stageImage")).toBe(false);
+      expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", `see ${fake}`]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

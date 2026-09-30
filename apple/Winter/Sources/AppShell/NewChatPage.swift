@@ -381,6 +381,21 @@ struct NewChatControlChip: View {
 /// no longer applies verbatim (there IS a second store now, `host` itself), but "the page is one
 /// keystroke away from anywhere" still holds, and drop-on-navigate-away is unchanged behavior,
 /// not a new one.
+/// The composer's in-place failure line — red, centred, the empty-state subtitle face. Extracted from
+/// this page's create-failure banner (its first user) so the live session composer's notice
+/// (`FieldStateAdapter.composerNotice`, code-mode image input) is the same line rather than a second
+/// style of error.
+struct ComposerFailureLine: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(Typography.emptyStateSubtitle)
+            .foregroundStyle(.red)
+            .multilineTextAlignment(.center)
+    }
+}
+
 struct NewChatPage: View {
     @ObservedObject var nav: ShellNavigationModel
     @ObservedObject var host: ShellSessionHost
@@ -428,19 +443,13 @@ struct NewChatPage: View {
             // Visible failure (spec's honesty rule): a create that failed says so, in place —
             // the page never navigates on failure (`sendFirstChatMessage`'s own contract).
             if case .failed(let message) = host.newChatCreate {
-                Text(message)
-                    .font(Typography.emptyStateSubtitle)
-                    .foregroundStyle(.red)
-                    .multilineTextAlignment(.center)
+                ComposerFailureLine(text: message)
             } else if let advisorError = host.newChatAdvisorError {
                 // Whole-branch review Major 2: the advisor picker's OWN failure banner — a
                 // SEPARATE property from `newChatCreate` above (see that property's own doc), so
                 // this never shows at the same time as a create failure (the `else` here is just
                 // "don't stack two banners", not a shared state machine).
-                Text(advisorError)
-                    .font(Typography.emptyStateSubtitle)
-                    .foregroundStyle(.red)
-                    .multilineTextAlignment(.center)
+                ComposerFailureLine(text: advisorError)
             }
             Spacer(minLength: 0)
             Spacer(minLength: 0) // greeting+composer sit slightly above center, the reference's own balance
