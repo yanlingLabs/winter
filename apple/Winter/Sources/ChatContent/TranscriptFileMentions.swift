@@ -201,8 +201,10 @@ func transcriptFileMentionCandidates(in text: String) -> [String] {
 
 /// PURE: a candidate as an absolute, dot-free path — absolute as-is, `~/` against `homeDirectory`,
 /// anything else against the session's primary working directory (`baseDirectory`; `nil` when the
-/// session has none, and then a relative candidate resolves to nothing). `/private/var` and `/var`
-/// are left as written: only `.`/`..` segments are collapsed, never a symlink resolved.
+/// session has none, and then a relative candidate resolves to nothing). Only `.`/`..` segments are
+/// collapsed and no symlink is resolved, with one fixed exception: macOS's own `/var`, `/tmp` and
+/// `/etc` links are spelled `/private/…`, the form a staged image's path takes (the daemon hands out
+/// real paths), so a reply naming `/var/folders/…/image_1.png` lands on the same one panel tab.
 func transcriptResolvedMentionPath(_ candidate: String, baseDirectory: String?,
                                    homeDirectory: String) -> String? {
     let raw: String
@@ -216,7 +218,11 @@ func transcriptResolvedMentionPath(_ candidate: String, baseDirectory: String?,
         raw = (baseDirectory as NSString).appendingPathComponent(candidate)
     }
     let standardized = URL(fileURLWithPath: raw).standardized.path
-    return standardized.isEmpty ? nil : standardized
+    if standardized.isEmpty { return nil }
+    for link in ["/var", "/tmp", "/etc"] where standardized == link || standardized.hasPrefix(link + "/") {
+        return "/private" + standardized
+    }
+    return standardized
 }
 
 /// PURE: whether the panel shows this path as a picture — the panel's own set
