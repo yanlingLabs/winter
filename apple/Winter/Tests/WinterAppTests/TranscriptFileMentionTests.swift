@@ -132,6 +132,12 @@ final class TranscriptFileMentionTests: XCTestCase {
         XCTAssertEqual(transcriptResolvedMentionPath("/private/var/folders/x/a.png", baseDirectory: nil,
                                                      homeDirectory: home),
                        "/private/var/folders/x/a.png", "/private is never stripped")
+        XCTAssertEqual(transcriptResolvedMentionPath("/var/folders/x/a.png", baseDirectory: nil, homeDirectory: home),
+                       "/private/var/folders/x/a.png", "/var lands on the staged image's own /private spelling")
+        XCTAssertEqual(transcriptResolvedMentionPath("/tmp/a.png", baseDirectory: nil, homeDirectory: home),
+                       "/private/tmp/a.png")
+        XCTAssertEqual(transcriptResolvedMentionPath("/variable/a.png", baseDirectory: nil, homeDirectory: home),
+                       "/variable/a.png", "only the whole /var component is folded")
         XCTAssertEqual(transcriptResolvedMentionPath("~/Desktop/a.png", baseDirectory: nil, homeDirectory: home),
                        "/Users/me/Desktop/a.png")
         XCTAssertEqual(transcriptResolvedMentionPath("src/a.ts", baseDirectory: "/repo", homeDirectory: home),
@@ -160,13 +166,13 @@ final class TranscriptFileMentionTests: XCTestCase {
     func testFileLinksAnswerOnlyForExistingClickableFilesAndDeduplicateImages() {
         let links = TranscriptFileLinks(baseDirectory: "/repo", homeDirectory: "/Users/me",
                                         sessionHasWorkingDirectory: false,
-                                        existingFiles: ["/repo/shot.png", "/repo/a.ts", "/tmp/b.jpg"])
+                                        existingFiles: ["/repo/shot.png", "/repo/a.ts", "/private/tmp/b.jpg"])
         XCTAssertEqual(links.url(forCandidate: "shot.png").flatMap(transcriptFileLinkPath(from:)),
                        "/repo/shot.png")
         XCTAssertNil(links.url(forCandidate: "a.ts"), "code without a working directory stays text")
         XCTAssertNil(links.url(forCandidate: "/tmp/missing.png"), "a file that does not exist stays text")
         XCTAssertEqual(links.images(among: ["shot.png", "/repo/shot.png", "a.ts", "/tmp/b.jpg", "/x.png"]),
-                       ["/repo/shot.png", "/tmp/b.jpg"])
+                       ["/repo/shot.png", "/private/tmp/b.jpg"], "/tmp resolves to its /private spelling")
         let many = TranscriptFileLinks(baseDirectory: nil, homeDirectory: "/h", sessionHasWorkingDirectory: true,
                                        existingFiles: Set((0..<10).map { "/i/\($0).png" }))
         XCTAssertEqual(many.images(among: (0..<10).map { "/i/\($0).png" }).count,
