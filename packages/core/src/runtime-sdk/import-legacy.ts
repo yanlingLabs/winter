@@ -63,6 +63,7 @@ import { join } from "node:path";
 import { WinterCompatibilitySessionStore, transcriptProjectKey, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { MAIN_THREAD } from "../projector";
+import { modelTextOf } from "../sessions/model-text";
 import { RuntimeSessionRecords, type RuntimeSessionState } from "../runtime-state/records";
 import { sessionLegOf } from "./leg";
 import { canonicalCwd, storeHomeFor, storeProjectsDir } from "../agent/paths";
@@ -152,7 +153,7 @@ export function convertEngineEraLog(events: readonly SessionEvent[], opts: Conve
     switch (event.type) {
       case "user_message": {
         flush();
-        const entry: SessionStoreEntry = { type: "user", ...baseFields(opts, { parentUuid }), message: { role: "user", content: event.text } };
+        const entry: SessionStoreEntry = { type: "user", ...baseFields(opts, { parentUuid }), message: { role: "user", content: modelTextOf(event) } };
         entries.push(entry);
         parentUuid = entry.uuid as string;
         break;

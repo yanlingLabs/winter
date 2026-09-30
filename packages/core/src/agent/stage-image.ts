@@ -21,9 +21,10 @@
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import {
-  IMAGE_DATA_INVALID, IMAGE_STAGE_FAILED, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
+  IMAGE_DATA_INVALID, IMAGE_REFERENCE_INVALID, IMAGE_STAGE_FAILED, USER_MESSAGE_IMAGES_MAX, type UserMessageImageRef, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
   STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, STAGE_IMAGE_MAX_DIMENSION, type STAGE_IMAGE_MEDIA_TYPES,
 } from "@yanlinglabs/winter-protocol";
+import { imageTokenNumbers } from "../sessions/model-text";
 import { sessionTmpDirPath } from "./session-tmp";
 
 export type StageImageMediaType = (typeof STAGE_IMAGE_MEDIA_TYPES)[number];
@@ -140,6 +141,14 @@ export function validateStagedImage(mediaType: StageImageMediaType, dataBase64: 
   return { bytes, ext: EXTENSION[sniffed] };
 }
 
+/** The session directory as the daemon names it: the parent (the OS or `$WINTER_TMPDIR` temp dir) is
+ *  resolved; the session directory's own name never is — see the module header. */
+function sessionRootOf(sessionDir: string): string {
+  try { return join(realpathSync(dirname(sessionDir)), basename(sessionDir)); } catch {
+    throw new StageImageRefusal(IMAGE_STAGE_FAILED, "the session's temp directory is unavailable", true);
+  }
+}
+
 function requireRealDirectory(path: string): void {
   let st;
   try { st = lstatSync(path); } catch { throw new StageImageRefusal(IMAGE_STAGE_FAILED, "the session's temp directory is unavailable", true); }
@@ -178,12 +187,7 @@ export function stageSessionImage(
   const { bytes, ext } = validateStagedImage(input.mediaType, input.dataBase64);
   const sessionDir = sessionTmpDirPath(input.sessionId);
   try { mkdirSync(sessionDir, { recursive: true, mode: 0o700 }); } catch { /* lstat below reports it */ }
-  // The parent (the OS or `$WINTER_TMPDIR` temp dir) is resolved; the session directory's own name
-  // never is — see the module header.
-  let root: string;
-  try { root = join(realpathSync(dirname(sessionDir)), basename(sessionDir)); } catch {
-    throw new StageImageRefusal(IMAGE_STAGE_FAILED, "the session's temp directory is unavailable", true);
-  }
+  const root = sessionRootOf(sessionDir);
   requireRealDirectory(root);
   hooks.afterSessionDirCheck?.();
   const imagesDir = join(root, "images");
@@ -225,4 +229,46 @@ export function stageSessionImage(
     }
   }
   throw new StageImageRefusal(IMAGE_STAGE_FAILED, "could not pick a free image file name", true);
+}
+
+/**
+ * `session.send`/`session.steer`'s `images` check — every entry, before anything is appended. Each
+ * `path` must be a file `stageSessionImage` could have written for THIS session: a regular file (never
+ * a symlink, `lstat`) named `image_<k>.<ext>`, directly inside `<root>/images/` (the root derived
+ * exactly as staging derives it, and both directories real), spelled as its own realpath. Each `n` is
+ * unique and its `[Image #n]` appears in `text`; at most `USER_MESSAGE_IMAGES_MAX` entries. Answers
+ * the refs to store (`undefined` for none — an empty array is "no images"), or throws a
+ * `StageImageRefusal` (`image_reference_invalid`) whose message never echoes a path.
+ */
+export function validateImageRefs(sessionId: string, text: string, images: readonly UserMessageImageRef[] | undefined): UserMessageImageRef[] | undefined {
+  if (images === undefined || images.length === 0) return undefined;
+  const refuse = (why: string): never => { throw new StageImageRefusal(IMAGE_REFERENCE_INVALID, why); };
+  if (images.length > USER_MESSAGE_IMAGES_MAX) refuse(`a message can carry at most ${USER_MESSAGE_IMAGES_MAX} images`);
+  const inText = new Set(imageTokenNumbers(text));
+  const seen = new Set<number>();
+  for (const ref of images) {
+    if (seen.has(ref.n)) refuse(`[Image #${ref.n}] is named more than once`);
+    seen.add(ref.n);
+    if (!inText.has(ref.n)) refuse(`[Image #${ref.n}] does not appear in the message`);
+  }
+  let imagesDir: string;
+  try {
+    const root = sessionRootOf(sessionTmpDirPath(sessionId));
+    requireRealDirectory(root);
+    imagesDir = join(root, "images");
+    requireRealDirectory(imagesDir);
+  } catch {
+    return refuse("this session has no staged images");
+  }
+  for (const ref of images) {
+    const notStaged = `[Image #${ref.n}] is not an image staged for this session`;
+    if (dirname(ref.path) !== imagesDir || !NAME_RE.test(basename(ref.path))) refuse(notStaged);
+    let st;
+    try { st = lstatSync(ref.path); } catch { return refuse(notStaged); }
+    if (st.isSymbolicLink() || !st.isFile()) refuse(notStaged);
+    let real: string;
+    try { real = realpathSync(ref.path); } catch { return refuse(notStaged); }
+    if (real !== ref.path) refuse(notStaged);
+  }
+  return images.map((i) => ({ n: i.n, path: i.path }));
 }

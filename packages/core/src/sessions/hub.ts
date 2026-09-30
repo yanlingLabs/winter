@@ -1,4 +1,4 @@
-import { SessionEvent, type SessionActivity } from "@yanlinglabs/winter-protocol";
+import { SessionEvent, type SessionActivity, type UserMessageImageRef } from "@yanlinglabs/winter-protocol";
 import type { SessionStore, EventInput } from "./store";
 
 /** Default bound on `SessionHub`'s last-emitted-activity memo (see `emitActivity`). Sessions are
@@ -127,12 +127,13 @@ export class SessionHub {
     catch (err) { console.error(`[hub] detach hook failed for ${sessionId}:`, err); }
   }
 
-  send(client: HubClient, sessionId: string, text: string): number {
+  send(client: HubClient, sessionId: string, text: string, images?: readonly UserMessageImageRef[]): number {
     if (this.byClient.get(client) !== sessionId) {
       throw new Error(`client ${client.clientName} not attached to ${sessionId}`);
     }
     return this.appendAndBroadcast(sessionId, {
       type: "user_message", sessionId, threadId: "main", text, clientName: client.clientName,
+      ...(images !== undefined && images.length > 0 ? { images: images.map((i) => ({ n: i.n, path: i.path })) } : {}),
     }).seq;
   }
 

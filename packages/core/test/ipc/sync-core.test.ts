@@ -442,6 +442,22 @@ describe("sync.heads / sync.pull / sync.push (Chat Slice D task 2)", () => {
     c.close();
   });
 
+  // Code-mode image input: `user_message.images` names files a CODE session staged on this Mac. A
+  // chat log carries none, so a pushed one is refused whole — it could otherwise put paths in front
+  // of the daemon's chat model on a resume.
+  test("a user_message carrying images rejects the whole batch", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "sync-client");
+    const id = uuid();
+    await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true });
+    const withImages = { ...userMsg(id, 2, "see [Image #1]"), images: [{ n: 1, path: "/tmp/winter-session-x/images/image_1.png" }] };
+    const bad = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([withImages])), complete: true });
+    expect(bad.error?.code).toBe(ERR.INVALID_PARAMS);
+    expect(store.lastSeq(id)).toBe(1);
+    c.close();
+  });
+
   test("a schema-invalid event (unknown type) rejects the whole batch", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
