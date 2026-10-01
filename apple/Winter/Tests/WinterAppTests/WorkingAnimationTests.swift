@@ -313,6 +313,14 @@ final class WorkingAnimationTests: XCTestCase {
         ], "every named source in order, each from its reported icon; then a reported site the text did not name")
     }
 
+    func testTwoIconsForOneHostAreFiledApart() {
+        let a = plumeFaviconKey(host: "a.example.com", iconURL: "https://a.example.com/one.png")
+        let b = plumeFaviconKey(host: "a.example.com", iconURL: "https://cdn.example.net/two.png")
+        XCTAssertNotEqual(a, b)
+        XCTAssertEqual(a, "https://a.example.com/one.png")
+        XCTAssertEqual(plumeFaviconKey(host: "a.example.com", iconURL: nil), "https://a.example.com/favicon.ico")
+    }
+
     func testReportedSitesAreOnePerPublicHost() {
         let sites = plumeSites([
             SiteIconRef(url: "https://a.example.com/1", iconUrl: "https://a.example.com/i.png"),
@@ -342,7 +350,11 @@ final class WorkingAnimationTests: XCTestCase {
     func testOnlyPublicNamesAreAskedForAFavicon() {
         XCTAssertTrue(plumeFaviconHostAllowed("github.com"))
         XCTAssertTrue(plumeFaviconHostAllowed("docs.swift.org"))
-        for host in ["localhost", "printer.local", "db.internal", "10.0.0.1", "192.168.1.1", "intranet", "a..b", "-x.com"] {
+        for host in ["lan.example.com", "myhome.com", "corp.example.org", "private.example.net"] {
+            XCTAssertTrue(plumeFaviconHostAllowed(host), "only the suffix counts: \(host)")
+        }
+        for host in ["localhost", "printer.local", "db.internal", "nas.lan", "router.home", "box.home.arpa", "wiki.corp",
+                     "hr.intranet", "x.private", "a.localhost", "10.0.0.1", "192.168.1.1", "intranet", "a..b", "-x.com"] {
             XCTAssertFalse(plumeFaviconHostAllowed(host), host)
         }
     }

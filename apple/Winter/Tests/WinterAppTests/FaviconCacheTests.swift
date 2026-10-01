@@ -88,10 +88,62 @@ final class FaviconCacheTests: XCTestCase {
         let cache = FaviconCache(fetch: net.fetch)
         let icon = "https://a.example.com/missing.png"
         XCTAssertNil(cache.image(host: "a.example.com", iconURL: icon))
+        // The first fetch has FINISHED and FAILED before the second ask — so what follows is the
+        // failure memory at work, not the in-flight dedupe.
         waitUntilSettled(cache)
+        XCTAssertEqual(cache.pendingCountForTesting, 0)
+        XCTAssertEqual(cache.failedCountForTesting, 1)
+        XCTAssertEqual(net.asked.count, 1)
         XCTAssertNil(cache.image(host: "a.example.com", iconURL: icon))
+        XCTAssertEqual(cache.pendingCountForTesting, 0, "nothing new started")
         waitUntilSettled(cache)
         XCTAssertEqual(net.asked.count, 1)
+    }
+
+    // MARK: - The real request path (a stub URLProtocol, never the network)
+
+    /// Answers by url: a 302 to `redirects[url]`, else a 200 with `bodies[url]`, else a 404. Records
+    /// every url it is asked for — a redirect the guard refused is never asked for at all.
+    final class StubProtocol: URLProtocol {
+        nonisolated(unsafe) static var redirects: [String: String] = [:]
+        nonisolated(unsafe) static var bodies: [String: Data] = [:]
+        nonisolated(unsafe) static var asked: [String] = []
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {
+            let url = request.url!
+            Self.asked.append(url.absoluteString)
+            if let target = Self.redirects[url.absoluteString], let next = URL(string: target) {
+                let response = HTTPURLResponse(url: url, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: ["Location": target])!
+                client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: next), redirectResponse: response)
+                // What a real server's refused redirect leaves the task with: the 302 itself, and its
+                // (here empty) body. Ignored by the loader when the redirect is followed instead.
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data())
+                client?.urlProtocolDidFinishLoading(self)
+                return
+            }
+            let body = Self.bodies[url.absoluteString]
+            let response = HTTPURLResponse(url: url, statusCode: body == nil ? 404 : 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if let body { client?.urlProtocol(self, didLoad: body) }
+            client?.urlProtocolDidFinishLoading(self)
+        }
+        override func stopLoading() {}
+    }
+
+    func testTheRealRequestPathRefusesARedirectToAPrivateHost() async {
+        StubProtocol.asked = []
+        StubProtocol.redirects = ["https://cdn.example.com/i.png": "https://192.168.1.1/i.png",
+                                  "https://cdn.example.com/moved.png": "https://img.example.net/moved.png"]
+        StubProtocol.bodies = ["https://192.168.1.1/i.png": png(side: 16), "https://img.example.net/moved.png": png(side: 16)]
+        let session = FaviconCache.makeSession(protocolClasses: [StubProtocol.self])
+        let refused = await FaviconCache.download(URL(string: "https://cdn.example.com/i.png")!, maxBytes: FaviconCache.maxIconBytes, session: session)
+        XCTAssertNil(refused, "a hop to a private address is not followed")
+        XCTAssertFalse(StubProtocol.asked.contains("https://192.168.1.1/i.png"), "…and never even requested")
+        let followed = await FaviconCache.download(URL(string: "https://cdn.example.com/moved.png")!, maxBytes: FaviconCache.maxIconBytes, session: session)
+        XCTAssertNotNil(followed, "a hop to a public https name is followed")
+        XCTAssertTrue(StubProtocol.asked.contains("https://img.example.net/moved.png"))
     }
 
     func testAFailureIsRetriedOnlyAfterTheRetryWindow() {
