@@ -3,8 +3,10 @@ import SwiftUI
 // MARK: - Width splitting (pure — `ChildSessionPillsTests`)
 
 /// How the child row divides its width. One child takes the main pill's whole width, two split it
-/// in half, three in thirds, four in quarters; past four, the first three keep their thirds-minus-
-/// a-circle and the rest collapse into one "+n" circle at the trailing end.
+/// in half, three in thirds, and so on — for as long as every pill stays at least `minPillWidth`
+/// wide. Past that, as many pills as fit beside a "+n" circle keep an even share, and the rest
+/// collapse into the circle at the trailing end. So the wider typing pill holds more children
+/// than the compact one.
 struct ChildPillLayout: Equatable {
     /// How many children get a pill of their own.
     let visibleCount: Int
@@ -19,14 +21,17 @@ func childPillLayout(
     rowWidth: CGFloat,
     gap: CGFloat = DispatchPillMetrics.childPillGap,
     overflowDiameter: CGFloat = DispatchPillMetrics.childRowHeight,
-    maxPills: Int = DispatchPillMetrics.maxChildPills
+    minPillWidth: CGFloat = DispatchPillMetrics.minChildPillWidth
 ) -> ChildPillLayout {
-    guard count > 0, maxPills > 1 else { return ChildPillLayout(visibleCount: 0, pillWidth: 0, overflowCount: 0) }
-    if count <= maxPills {
+    guard count > 0 else { return ChildPillLayout(visibleCount: 0, pillWidth: 0, overflowCount: 0) }
+    // How many pills fit side by side at the minimum width (n pills need n·min + (n-1)·gap).
+    let fitting = max(1, Int(((rowWidth + gap) / (minPillWidth + gap)).rounded(.down)))
+    if count <= fitting {
         let width = (rowWidth - gap * CGFloat(count - 1)) / CGFloat(count)
         return ChildPillLayout(visibleCount: count, pillWidth: max(0, width), overflowCount: 0)
     }
-    let visible = maxPills - 1
+    // Beside the circle: n pills need n·min + n·gap + the circle.
+    let visible = max(1, Int(((rowWidth - overflowDiameter) / (minPillWidth + gap)).rounded(.down)))
     let width = (rowWidth - overflowDiameter - gap * CGFloat(visible)) / CGFloat(visible)
     return ChildPillLayout(visibleCount: visible, pillWidth: max(0, width), overflowCount: count - visible)
 }
@@ -79,12 +84,12 @@ struct ChildSessionPillsView: View {
             if layout.overflowCount > 0 {
                 Button(action: onOpenOverflow) {
                     Text("+\(layout.overflowCount)")
-                        .font(Typography.caption(.semibold))
-                        .foregroundStyle(Theme.textPrimary)
+                        .font(Typography.label(.semibold))
+                        .foregroundStyle(Color.white)
                         .frame(width: DispatchPillMetrics.childRowHeight,
                                height: DispatchPillMetrics.childRowHeight)
-                        .background(Circle().fill(Theme.cardSurface))
-                        .overlay(Circle().strokeBorder(Theme.hairlineElevated, lineWidth: 1))
+                        .background(Circle().fill(Color.black))
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 .help("\(layout.overflowCount) more — open Dispatch")
@@ -108,7 +113,7 @@ private struct ChildSessionPill: View {
         HStack(spacing: 6) {
             statusGlyph
             Text(child.title.isEmpty ? "Session" : child.title)
-                .font(Typography.caption(.medium))
+                .font(Typography.label(.medium))
                 .foregroundStyle(Theme.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -117,24 +122,26 @@ private struct ChildSessionPill: View {
             if status.isStoppable {
                 Button(action: onStop) {
                     Image(systemName: "stop.fill")
-                        .font(Typography.micro(.bold))
+                        .font(Typography.label(.bold))
                         .foregroundStyle(.white)
-                        .frame(width: 20, height: 20)
+                        .frame(width: DispatchPillMetrics.sendCircleSize, height: DispatchPillMetrics.sendCircleSize)
                         .background(Circle().fill(palette.bodyColor))
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .help("Stop this session")
             }
         }
-        .padding(.leading, status == .working ? 12 : 6)
-        .padding(.trailing, 6)
+        .padding(.leading, 12)
+        .padding(.trailing, DispatchPillMetrics.trailingPadding)
         .background {
             ZStack {
                 Capsule().fill(Color.black)
                 if status == .working {
                     // The main pill's plume in this child's own colours, its nozzle on this pill's
                     // stop button — a little dimmed, so the title over it stays readable.
-                    WorkingAnimationView(emitterInset: 6 + 10, palette: palette)
+                    WorkingAnimationView(emitterInset: DispatchPillMetrics.trailingPadding + DispatchPillMetrics.sendCircleSize / 2,
+                                         palette: palette)
                         .opacity(0.8)
                         .clipShape(Capsule())
                         .transition(.opacity.animation(.easeOut(duration: 0.25)))

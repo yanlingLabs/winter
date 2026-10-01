@@ -64,9 +64,12 @@ enum DispatchPillMetrics {
     static let shadowPad: CGFloat = 24
     /// Gap between the stacked layers: cards → child pills → main pill.
     static let stackGap: CGFloat = 8
-    static let childRowHeight: CGFloat = 32
+    /// A child pill is the main pill's own height (the user's call: same height, same shape).
+    static var childRowHeight: CGFloat { pillHeight }
     static let childPillGap: CGFloat = 6
-    static let maxChildPills = 4
+    /// The narrowest a child pill gets before the row stops splitting and shows "+n" instead —
+    /// its stop circle plus room for a few letters of its title.
+    static let minChildPillWidth: CGFloat = 72
     /// The approval cards' width — wider than the compact pill, because a card has a summary and two
     /// buttons to fit.
     static let cardWidth: CGFloat = 440
