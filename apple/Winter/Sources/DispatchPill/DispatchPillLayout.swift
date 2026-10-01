@@ -52,7 +52,7 @@ enum DispatchPillMetrics {
     /// The swiped-to-turn preview's band above the composer (prompt line + reply line).
     static let previewHeight: CGFloat = 58
     /// How far above the Dock (the visible frame's bottom edge) the pill's bottom sits.
-    static let dockGap: CGFloat = 12
+    static let dockGap: CGFloat = 28
     /// Transparent margin around everything, for the shadow. The mouse gate passes clicks there
     /// through to whatever is underneath.
     static let shadowPad: CGFloat = 24
@@ -68,6 +68,10 @@ enum DispatchPillMetrics {
     static let maxFloatingCards = 2
     /// Inset of the full-screen surface from the visible frame's sides and top.
     static let fullScreenInset: CGFloat = 28
+    /// The most the content blurs mid-change of shape (`dispatchPillMorphBlur`).
+    static let maxMorphBlur: CGFloat = 8
+    /// Points of remaining spring travel per point of blur.
+    static let morphBlurFalloff: CGFloat = 12
     /// The rounded-rect radius a tall pill settles on — a capsule's radius at `pillHeight`.
     static let maxCornerRadius: CGFloat = 22
 
@@ -112,6 +116,16 @@ func dispatchPillMainSize(
         return CGSize(width: max(DispatchPillMetrics.expandedWidth, width.rounded(.down)),
                       height: max(DispatchPillMetrics.maxExpandedHeight, height.rounded(.down)))
     }
+}
+
+/// PURE: how much the pill's content (text, icons, the plume) blurs while its shape is changing —
+/// by how far the spring still has to go, so a change of shape softens everything inside and it
+/// sharpens back as the shape settles. Nothing at rest: within `morphBlurFalloff` of the target the
+/// radius is under a point and falls to zero.
+func dispatchPillMorphBlur(size: CGSize, target: CGSize) -> CGFloat {
+    let remaining = max(abs(target.width - size.width), abs(target.height - size.height))
+    let radius = min(DispatchPillMetrics.maxMorphBlur, remaining / DispatchPillMetrics.morphBlurFalloff)
+    return radius < 0.25 ? 0 : radius
 }
 
 /// PURE: pill ↔ rounded rect. At the resting height the radius is half the height (a capsule);

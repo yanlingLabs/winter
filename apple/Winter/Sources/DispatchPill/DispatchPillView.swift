@@ -71,6 +71,10 @@ struct DispatchPillView: View {
 /// text view inside has a fixed width (`composerFieldWidth`), so this re-layout never re-wraps it.
 /// Full screen keeps the target width: re-wrapping a whole transcript 60 times a second is not free,
 /// and revealing it reads fine.
+///
+/// While the shape changes, everything inside is blurred by how far the spring still has to travel
+/// (`dispatchPillMorphBlur`), sharpening as it settles — so content never reads as snapping into
+/// place ahead of, or behind, the shape around it.
 struct DispatchPillShell<Content: View>: View {
     @ObservedObject var morph: DispatchPillMorphModel
     var tracksAnimatedWidth = true
@@ -83,6 +87,7 @@ struct DispatchPillShell<Content: View>: View {
             .frame(width: tracksAnimatedWidth ? morph.size.width : morph.target.width,
                    height: morph.target.height)
             .frame(width: morph.size.width, height: morph.size.height, alignment: .bottom)
+            .blur(radius: dispatchPillMorphBlur(size: morph.size, target: morph.target))
             .clipShape(shape)
             .background(shape.fill(Color.black))
             .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
@@ -183,7 +188,7 @@ struct DispatchPillComposerBar: View {
                     if draft.isEmpty {
                         Text(running ? adapter.verbText : "Type here")
                             .font(Typography.composerField())
-                            .foregroundStyle(expanded ? Color.blue.opacity(0.6) : Theme.textPlaceholder)
+                            .foregroundStyle(expanded ? Color.white.opacity(0.5) : Theme.textPlaceholder)
                             .lineLimit(1)
                             .padding(.leading, ComposerTextView.textContainerInset.width)
                             .padding(.top, ComposerTextView.textContainerInset.height)
@@ -194,7 +199,8 @@ struct DispatchPillComposerBar: View {
                         onSubmit: { controller.submit(adapter.composerDraft) },
                         onContentHeightChange: { controller.composerContentHeightChanged($0) },
                         usesAdaptiveColors: true,
-                        tintOverride: .systemBlue
+                        tintOverride: .white,
+                        onViewCreated: { controller.registerComposerView($0) }
                     )
                 }
                 .frame(width: controller.composerFieldWidth, height: controller.composerFieldHeight)

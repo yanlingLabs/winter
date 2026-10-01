@@ -652,6 +652,24 @@ final class DispatchPillControllerTests: XCTestCase {
                        "the full typing width from the first keystroke — the text never re-wraps mid-spring")
     }
 
+    // MARK: - Blur while the shape changes
+
+    func testTheAppKitComposerBlursWithTheShapeAndSharpensAtRest() {
+        let pill = makePill()
+        pill.show()
+        let composer = NSScrollView()
+        pill.registerComposerView(composer)
+        XCTAssertTrue(composer.layerUsesCoreImageFilters)
+        XCTAssertTrue(composer.contentFilters.isEmpty, "sharp at rest")
+        pill.adapter.composerDraft = "h" // compact → expanded: the spring starts
+        pill.setAnimatedSizeForTesting(CGSize(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight))
+        XCTAssertEqual(composer.contentFilters.count, 1, "mid-change: blurred")
+        XCTAssertEqual(pill.composerBlurRadiusForTesting,
+                       dispatchPillMorphBlur(size: pill.morph.size, target: pill.morph.target))
+        waitUntil { pill.isSpringIdleForTesting }
+        XCTAssertTrue(composer.contentFilters.isEmpty, "settled: sharp again")
+    }
+
     // MARK: - The mouse gate
 
     func testTheMouseGateTakesClicksOnThePillAndPassesTheMarginThrough() {

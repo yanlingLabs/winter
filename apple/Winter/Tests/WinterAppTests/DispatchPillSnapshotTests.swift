@@ -137,6 +137,27 @@ final class DispatchPillSnapshotTests: XCTestCase {
         try render(p, "6-approval-card")
     }
 
+    func test8MidMorphBlurs() throws {
+        let p = pill()
+        p.adapter.composerDraft = "Summarise what changed in the release branch"
+        p.setPresentationForTesting(.expanded)
+        p.setAnimatedSizeForTesting(CGSize(width: DispatchPillMetrics.compactWidth + 60,
+                                           height: DispatchPillMetrics.pillHeight))
+        try render(p, "8-mid-morph")
+    }
+
+    func test9WorkingChildren() throws {
+        let p = pill { s in
+            s.turnRunning = true
+            s.status = .thinking
+            s.children = [ChildItem(sessionId: "c0", title: "fix auth", status: "running"),
+                          ChildItem(sessionId: "c1", title: "docs pass", status: "running"),
+                          ChildItem(sessionId: "c2", title: "bump sdk", status: "running")]
+        }
+        p.setPresentationForTesting(.compact)
+        try render(p, "9-working-children")
+    }
+
     func test7ChildPills() throws {
         let titles = ["fix auth", "docs pass", "bump sdk", "flaky test", "perf trace", "triage"]
         let statuses = ["running", "awaiting_approval", "completed", "running", "error", "running"]
