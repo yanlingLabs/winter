@@ -469,6 +469,28 @@ describe("which turns are followed, the bounded roster, shutdown and restart", (
     expect(t.childUpdates().at(-1)).toMatchObject({ childSessionId: child, status: "completed", resultSummary: "X done" });
   });
 
+  test("a follow-up the coordinator delivers to a FORGOTTEN child is picked back up from its stored link, reported, and wakes it", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    t.finish(child, { text: "first" });
+    await t.drain();
+    t.finish(t.dispatchId, { text: "reported it" });   // the wake turn ends → forgotten
+    expect(t.dc.roster()).toEqual([]);
+    const wakesBefore = t.driverFor(t.dispatchId).sends.length;
+    await t.driverFor(child).send("one more thing", "messaging");
+    expect(t.dc.roster().map((r) => ({ id: r.sessionId, status: r.status, title: r.title }))).toEqual([{ id: child, status: "running", title: "Kid" }]);
+    t.finish(child, { text: "follow-up done" });
+    await t.drain();
+    expect(t.childUpdates().at(-1)).toMatchObject({ childSessionId: child, status: "completed", title: "Kid", resultSummary: "follow-up done" });
+    expect(t.driverFor(t.dispatchId).sends.length).toBe(wakesBefore + 1);
+    expect(t.driverFor(t.dispatchId).sends.at(-1)!.text).toContain("follow-up done");
+    // The same message from a non-dispatch-child session is never picked up.
+    const plain = t.store.createSession("global", { mode: "code", cwd: t.workDir });
+    t.hub.append(plain, { type: "user_message", sessionId: plain, threadId: "main", text: "hi", clientName: "messaging" });
+    t.hub.append(plain, { type: "turn_started", sessionId: plain, threadId: "main" });
+    expect(t.dc.roster().some((r) => r.sessionId === plain)).toBe(false);
+  });
+
   test("shutdown: no report and no wake while the children drain — but a withdrawn card still closes on the coordinator's log", async () => {
     const t = setup();
     const child = await t.spawnOne();
