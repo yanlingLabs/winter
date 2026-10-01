@@ -183,13 +183,44 @@ struct PlumeCircle: Equatable {
     let spark: Bool
 }
 
-/// PURE: the plume's colour for a heat — three stops, deep vivid blue at the tail, the system's
-/// bright blue through the body, a near-white blue at the nozzle.
-func plumeColorComponents(heat: Double) -> (red: Double, green: Double, blue: Double) {
+/// A plume's three colour stops: deep at the tail, vivid through the body, near-white at the nozzle.
+/// Dispatch's own plume is `.blue`; each child session's pill gets one of `childPalettes`, so the
+/// row above the pill reads as separate engines at a glance.
+struct PlumePalette: Equatable {
+    typealias RGB = (red: Double, green: Double, blue: Double)
+    let tail: RGB
+    let body: RGB
+    let hot: RGB
+
+    static func == (a: PlumePalette, b: PlumePalette) -> Bool {
+        a.tail == b.tail && a.body == b.body && a.hot == b.hot
+    }
+
+    static let blue = PlumePalette(tail: (0.05, 0.33, 1.0), body: (0.16, 0.55, 1.0), hot: (0.80, 0.93, 1.0))
+    static let violet = PlumePalette(tail: (0.36, 0.12, 0.92), body: (0.64, 0.40, 1.0), hot: (0.93, 0.87, 1.0))
+    static let mint = PlumePalette(tail: (0.0, 0.50, 0.46), body: (0.15, 0.84, 0.70), hot: (0.82, 1.0, 0.94))
+    static let rose = PlumePalette(tail: (0.82, 0.08, 0.40), body: (1.0, 0.36, 0.60), hot: (1.0, 0.87, 0.92))
+    static let ember = PlumePalette(tail: (0.88, 0.30, 0.0), body: (1.0, 0.60, 0.12), hot: (1.0, 0.94, 0.72))
+
+    /// The children's palettes, in the order the row hands them out — none of them Dispatch's blue.
+    static let childPalettes: [PlumePalette] = [.violet, .mint, .rose, .ember]
+
+    /// The palette for the child at `index` in the dispatch session's roster (spawn order): the row's
+    /// visible pills never share a colour.
+    static func child(at index: Int) -> PlumePalette {
+        childPalettes[((index % childPalettes.count) + childPalettes.count) % childPalettes.count]
+    }
+
+    var bodyColor: Color { Color(red: body.red, green: body.green, blue: body.blue) }
+}
+
+/// PURE: the plume's colour for a heat — the palette's tail at 0, its body through the middle, its
+/// near-white hot stop at the nozzle.
+func plumeColorComponents(heat: Double, palette: PlumePalette = .blue) -> (red: Double, green: Double, blue: Double) {
     let stops: [(Double, (Double, Double, Double))] = [
-        (0.0, (0.05, 0.33, 1.0)),
-        (0.55, (0.16, 0.55, 1.0)),
-        (1.0, (0.80, 0.93, 1.0)),
+        (0.0, palette.tail),
+        (0.55, palette.body),
+        (1.0, palette.hot),
     ]
     let h = min(max(heat, 0), 1)
     for (a, b) in zip(stops, stops.dropFirst()) where h <= b.0 {
@@ -277,6 +308,7 @@ struct WorkingAnimationView: View {
     let toolName: String?
     var showsIcon = true
     var emitterInset: CGFloat?
+    var palette: PlumePalette = .blue
     var iconFont: Font = Typography.label(.semibold)
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -306,6 +338,7 @@ struct WorkingAnimationView: View {
         let model = self.model
         let showsIcon = self.showsIcon
         let emitterInset = self.emitterInset
+        let palette = self.palette
         return Canvas { context, size in
             let rect = CGRect(origin: .zero, size: size)
             let emitterX = size.width - (emitterInset ?? size.height / 2)
@@ -319,15 +352,15 @@ struct WorkingAnimationView: View {
                 glow.blendMode = .plusLighter
                 glow.opacity = 0.55
                 for circle in circles where !circle.spark {
-                    glow.fill(Self.disc(circle, scale: 1.15), with: .color(Self.color(heat: circle.heat)))
+                    glow.fill(Self.disc(circle, scale: 1.15), with: .color(Self.color(heat: circle.heat, palette)))
                 }
             }
             // The puffs themselves — flat colour, no outline.
             for circle in circles where !circle.spark {
-                context.fill(Self.disc(circle), with: .color(Self.color(heat: circle.heat)))
+                context.fill(Self.disc(circle), with: .color(Self.color(heat: circle.heat, palette)))
             }
             for circle in circles where circle.spark {
-                context.fill(Self.disc(circle), with: .color(Self.color(heat: 1).opacity(0.95)))
+                context.fill(Self.disc(circle), with: .color(Self.color(heat: 1, palette).opacity(0.95)))
             }
         }
     }
@@ -350,8 +383,8 @@ struct WorkingAnimationView: View {
         return Path(ellipseIn: CGRect(x: circle.center.x - d / 2, y: circle.center.y - d / 2, width: d, height: d))
     }
 
-    private static func color(heat: Double) -> Color {
-        let c = plumeColorComponents(heat: heat)
+    private static func color(heat: Double, _ palette: PlumePalette) -> Color {
+        let c = plumeColorComponents(heat: heat, palette: palette)
         return Color(red: c.red, green: c.green, blue: c.blue)
     }
 

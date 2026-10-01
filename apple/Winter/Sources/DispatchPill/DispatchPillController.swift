@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreImage
 import SwiftUI
 import WinterKit
 
@@ -673,6 +674,7 @@ final class DispatchPillController: ObservableObject {
         morph.target = target
         morph.size = target
         pendingShrink = false
+        applyComposerBlur()
         setCanvas(canvasTarget())
     }
 
@@ -731,6 +733,38 @@ final class DispatchPillController: ObservableObject {
         panel.setFrame(frame, display: false)
     }
 
+    // MARK: - Blur while the shape changes (the AppKit composer's half)
+
+    /// The pill's `ComposerTextView`. SwiftUI's `.blur` on the shell blurs everything SwiftUI draws
+    /// (`DispatchPillShell`); this NSView is AppKit's, so its blur is set here, as a Core Image
+    /// content filter, on every spring tick — the same radius (`dispatchPillMorphBlur`), so text and
+    /// icons soften and sharpen together.
+    private weak var composerView: NSScrollView?
+    private var appliedComposerBlur: CGFloat = 0
+
+    func registerComposerView(_ view: NSScrollView) {
+        composerView = view
+        view.wantsLayer = true
+        view.layerUsesCoreImageFilters = true
+        appliedComposerBlur = -1
+        applyComposerBlur()
+    }
+
+    private func applyComposerBlur() {
+        guard let composerView else { return }
+        let radius = dispatchPillMorphBlur(size: morph.size, target: morph.target)
+        guard radius != appliedComposerBlur else { return }
+        appliedComposerBlur = radius
+        if radius > 0, let blur = CIFilter(name: "CIGaussianBlur") {
+            blur.setValue(radius, forKey: kCIInputRadiusKey)
+            composerView.contentFilters = [blur]
+        } else {
+            composerView.contentFilters = []
+        }
+    }
+
+    var composerBlurRadiusForTesting: CGFloat { max(0, appliedComposerBlur) }
+
     // MARK: - Spring (the orb's `morphStep`, on width and height)
 
     private func startSpring() {
@@ -773,6 +807,7 @@ final class DispatchPillController: ObservableObject {
         } else {
             morph.size = CGSize(width: max(1, w.progress), height: max(1, h.progress))
         }
+        applyComposerBlur()
         updateMouseGate()
     }
 
@@ -986,6 +1021,12 @@ final class DispatchPillController: ObservableObject {
     }
 
     func setVisibleForTesting(_ visible: Bool) { isVisible = visible }
+
+    /// Hold the spring mid-flight at `size` (offscreen renders of a change of shape).
+    func setAnimatedSizeForTesting(_ size: CGSize) {
+        morph.size = size
+        applyComposerBlur()
+    }
 }
 
 /// PURE: does a canvas-local point (y-down) land on something the pill draws?

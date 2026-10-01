@@ -70,8 +70,9 @@ struct ChildSessionPillsView: View {
 
     var body: some View {
         HStack(spacing: DispatchPillMetrics.childPillGap) {
-            ForEach(Array(children.prefix(layout.visibleCount))) { child in
-                ChildSessionPill(child: child, onOpen: { onOpen(child.sessionId) },
+            ForEach(Array(children.prefix(layout.visibleCount).enumerated()), id: \.element.id) { index, child in
+                ChildSessionPill(child: child, palette: .child(at: index),
+                                 onOpen: { onOpen(child.sessionId) },
                                  onStop: { onStop(child.sessionId) })
                     .frame(width: layout.pillWidth, height: DispatchPillMetrics.childRowHeight)
             }
@@ -93,9 +94,11 @@ struct ChildSessionPillsView: View {
     }
 }
 
-/// One child: status (working animation, or a glyph), its title, and — while it runs — a stop button.
+/// One child: its own coloured plume while it works (or a status glyph), its title, and — while it
+/// runs — a stop button in its plume's colour, sitting on the nozzle.
 private struct ChildSessionPill: View {
     let child: ChildItem
+    let palette: PlumePalette
     let onOpen: () -> Void
     let onStop: () -> Void
 
@@ -109,6 +112,7 @@ private struct ChildSessionPill: View {
                 .foregroundStyle(Theme.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+                .shadow(color: .black.opacity(status == .working ? 0.8 : 0), radius: 2)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if status.isStoppable {
                 Button(action: onStop) {
@@ -116,7 +120,7 @@ private struct ChildSessionPill: View {
                         .font(Typography.micro(.bold))
                         .foregroundStyle(.white)
                         .frame(width: 20, height: 20)
-                        .background(Circle().fill(Color.blue))
+                        .background(Circle().fill(palette.bodyColor))
                 }
                 .buttonStyle(.plain)
                 .help("Stop this session")
@@ -128,10 +132,10 @@ private struct ChildSessionPill: View {
             ZStack {
                 Capsule().fill(Color.black)
                 if status == .working {
-                    // The main pill's plume, its nozzle on this pill's stop button — dimmed, so the
-                    // title over it stays readable.
-                    WorkingAnimationView(toolName: nil, showsIcon: false, emitterInset: 6 + 10)
-                        .opacity(0.6)
+                    // The main pill's plume in this child's own colours, its nozzle on this pill's
+                    // stop button — a little dimmed, so the title over it stays readable.
+                    WorkingAnimationView(toolName: nil, showsIcon: false, emitterInset: 6 + 10, palette: palette)
+                        .opacity(0.8)
                         .clipShape(Capsule())
                         .transition(.opacity.animation(.easeOut(duration: 0.25)))
                 }

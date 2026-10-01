@@ -57,9 +57,9 @@ struct ExpandedPillAccessoryButtons: View {
     private func accessoryGlyph(_ symbol: String) -> some View {
         Image(systemName: symbol)
             .font(Typography.label(.semibold))
-            .foregroundStyle(Color.blue)
+            .foregroundStyle(Color.white)
             .frame(width: DispatchPillMetrics.accessoryButtonSize, height: DispatchPillMetrics.accessoryButtonSize)
-            .background(Circle().fill(Color.blue.opacity(0.16)))
+            .background(Circle().fill(Color.white.opacity(0.12)))
             .contentShape(Circle())
     }
 

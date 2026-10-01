@@ -142,6 +142,26 @@ final class WorkingAnimationTests: XCTestCase {
         XCTAssertEqual(plumeColorComponents(heat: 5).red, hot.red, "clamped")
     }
 
+    func testEveryChildGetsItsOwnColourAndNoneIsDispatchsBlue() {
+        let visible = (0..<DispatchPillMetrics.maxChildPills).map(PlumePalette.child(at:))
+        for (i, a) in visible.enumerated() {
+            XCTAssertNotEqual(a, .blue, "a child never wears Dispatch's own colour")
+            for b in visible[(i + 1)...] { XCTAssertNotEqual(a, b, "the row's pills never share a colour") }
+        }
+        XCTAssertEqual(PlumePalette.child(at: PlumePalette.childPalettes.count), PlumePalette.child(at: 0), "wraps")
+        XCTAssertEqual(PlumePalette.child(at: -1), PlumePalette.childPalettes.last, "never traps on a bad index")
+    }
+
+    func testEveryPaletteRunsDeepToWhiteHot() {
+        for palette in [PlumePalette.blue] + PlumePalette.childPalettes {
+            let hot = plumeColorComponents(heat: 1, palette: palette)
+            let cool = plumeColorComponents(heat: 0, palette: palette)
+            XCTAssertGreaterThan(hot.red + hot.green + hot.blue, cool.red + cool.green + cool.blue + 0.9,
+                                 "the nozzle is far brighter than the tail")
+            XCTAssertGreaterThan(min(hot.red, hot.green, hot.blue), 0.7, "near-white at the nozzle")
+        }
+    }
+
     // MARK: - The icon
 
     func testANewToolCrossFadesItsIconIn() {

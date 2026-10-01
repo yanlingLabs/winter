@@ -66,10 +66,10 @@ final class DispatchPillViewTests: XCTestCase {
                        CGSize(width: 360 + 48, height: 44 + 48), "a zero-width report is no accessory")
     }
 
-    func testThePanelFrameIsCentredAndItsPillSitsTwelvePointsAboveTheDock() {
+    func testThePanelFrameIsCentredAndItsPillSits28PointsAboveTheDock() {
         let frame = dispatchPillPanelFrame(canvasSize: CGSize(width: 408, height: 92), visibleFrame: visible)
         XCTAssertEqual(frame.midX, visible.midX)
-        XCTAssertEqual(frame.minY, visible.minY + 12 - DispatchPillMetrics.shadowPad)
+        XCTAssertEqual(frame.minY, visible.minY + 28 - DispatchPillMetrics.shadowPad)
         XCTAssertEqual(frame.size, CGSize(width: 408, height: 92))
     }
 
@@ -149,6 +149,32 @@ final class DispatchPillViewTests: XCTestCase {
                            - DispatchPillMetrics.trailingPadding - DispatchPillMetrics.sendCircleSize
                            - DispatchPillMetrics.rowSpacing,
                        "everything left of the send circle — no room set aside for ↗ and ⋯")
+    }
+
+    // MARK: - Blur while the shape changes
+
+    func testTheContentBlursByHowFarTheShapeStillHasToGo() {
+        let compact = CGSize(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight)
+        let expanded = CGSize(width: DispatchPillMetrics.expandedWidth, height: DispatchPillMetrics.pillHeight)
+        XCTAssertEqual(dispatchPillMorphBlur(size: compact, target: compact), 0, "sharp at rest")
+        XCTAssertEqual(dispatchPillMorphBlur(size: compact, target: expanded), DispatchPillMetrics.maxMorphBlur,
+                       "the full blur at the start of a big change, capped")
+        let halfway = CGSize(width: compact.width + 150, height: compact.height)
+        let late = CGSize(width: expanded.width - 30, height: compact.height)
+        XCTAssertLessThan(dispatchPillMorphBlur(size: late, target: expanded),
+                          dispatchPillMorphBlur(size: halfway, target: expanded), "sharpens as it settles")
+        XCTAssertEqual(dispatchPillMorphBlur(size: CGSize(width: expanded.width - 2, height: expanded.height),
+                                             target: expanded), 0, "no lingering haze in the last points")
+        XCTAssertGreaterThan(dispatchPillMorphBlur(size: compact,
+                                                   target: CGSize(width: compact.width, height: compact.height + 40)), 0,
+                             "growing taller blurs too")
+    }
+
+    func testThePillSitsClearOfTheDock() {
+        let frame = dispatchPillPanelFrame(canvasSize: CGSize(width: 408, height: 92), visibleFrame: visible)
+        XCTAssertEqual(frame.minY + DispatchPillMetrics.shadowPad, visible.minY + DispatchPillMetrics.dockGap,
+                       "the pill's own bottom edge, above the shadow margin")
+        XCTAssertGreaterThanOrEqual(DispatchPillMetrics.dockGap, 24)
     }
 
     // MARK: - A reply opens the pill

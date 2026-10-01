@@ -50,8 +50,12 @@ struct ComposerTextView: NSViewRepresentable {
     /// byte-identical / zero behavior change; only the window opts in.
     var usesAdaptiveColors: Bool = false
     /// One colour for the typed text AND the caret, over whatever `usesAdaptiveColors` picks — the
-    /// dispatch pill types in its own blue. `nil` (the default) leaves every other surface as it was.
+    /// dispatch pill types in plain white, caret included, over its black. `nil` (the default) leaves every other surface as it was.
     var tintOverride: NSColor? = nil
+    /// Handed the composer's scroll view once, when it is built — for a host that drives an effect
+    /// on the AppKit view itself, which a SwiftUI modifier does not reach (the dispatch pill blurs
+    /// it while its shape changes). `nil` (the default) everywhere else.
+    var onViewCreated: ((NSScrollView) -> Void)? = nil
     /// The typed text's point size. The default is BOUND to the user-message size (ruling
     /// 2026-08-13: the composer types at the size the sent bubble renders, derived from the
     /// same live metrics, so the two can never diverge). NO home overrides it any more: the
@@ -166,6 +170,7 @@ struct ComposerTextView: NSViewRepresentable {
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
         scrollView.documentView = textView
+        onViewCreated?(scrollView)
 
         DispatchQueue.main.async { [weak textView] in
             guard let textView else { return }
