@@ -472,6 +472,12 @@ describe("state.ts — user messages", () => {
     s = reduce(s, { type: "user_message", threadId: "main", text: "hi there", clientName: "cli-chat" }, T0);
     expect(s.committed).toEqual([{ kind: "user", text: "hi there" }]);
   });
+
+  test("Dispatch's own wake (clientName dispatch-wake) is a note, never a user block", () => {
+    let s = initialState();
+    s = reduce(s, { type: "user_message", threadId: "main", text: "<child_update>\nsession: s_1\n</child_update>", clientName: "dispatch-wake" }, T0);
+    expect(s.committed).toEqual([{ kind: "note", text: "↻ child session update" }]);
+  });
 });
 
 describe("state.ts — note one-liners match main.ts's wording (bg-task/worktree/directory/agent_error)", () => {

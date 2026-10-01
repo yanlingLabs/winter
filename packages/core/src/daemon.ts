@@ -20,7 +20,8 @@ import { reapEmptySessions } from "./sessions/reaper";
 import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
-import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
+import { startIpcServer, type InternalSessionCreator, type IpcServer, type IpcServerOptions } from "./ipc/server";
+import { DispatchChildren } from "./agent/dispatch-children";
 import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, retiredRuntimeSettingKeys, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, liveSettingsView, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor } from "./agent/memory-dir";
@@ -208,6 +209,9 @@ export interface RunningDaemon {
    * child) off this rather than off a mirror it built itself.
    */
   winter: WinterSessionDrivers;
+  /** Dispatch's children tracker (`agent/dispatch-children.ts`) — the SAME instance the `sessions`
+   *  capability server's `session_spawn` and every driver's turn-settled hook reach. */
+  dispatchChildren: DispatchChildren | undefined;
   /**
    * P8b Task 15: THE LIVE settings holder — the same binding the settings-watcher swaps, not a boot
    * snapshot. Reading it twice around a `settings.json` write is how a test proves a key is hot
@@ -620,6 +624,12 @@ export async function startDaemon(opts: {
   // — see `IpcServerOptions.onActivityDeriver`. `startIpcServer` is called unconditionally further
   // down (before any turn can run), so the tool never actually observes the unset holder.
   let activityDeriver: ActivityDeriver | undefined;
+  // Dispatch's `session_spawn` (`agent/dispatch-children.ts`): the creation transaction is published
+  // by `startIpcServer` (`onSessionCreator`, the `activityDeriver` precedent just above) and the
+  // children tracker is built once the driver table exists; the `sessions` capability server reads
+  // both live, at call time.
+  let sessionCreator: InternalSessionCreator | undefined;
+  let dispatchChildren: DispatchChildren | undefined;
 
   const winterHome = dirs.home;
 
@@ -1288,6 +1298,10 @@ export async function startDaemon(opts: {
   const capabilityDeps: CapabilityDeps = {
     sessions: {
       models: spawnModelIds,
+      spawn: async (args, ctx) => {
+        if (dispatchChildren === undefined) throw new Error("session_spawn is not ready yet — the daemon is still starting; try again in a moment.");
+        return await dispatchChildren.spawn(ctx.sessionId, args);
+      },
       // THE SAME instances the registry door gets (`registerListSessionsTools` below): a
       // management surface with its own hub/store would read every attached session as idle.
       sessions: {
@@ -1933,7 +1947,7 @@ export async function startDaemon(opts: {
     }),
     // Task 17 (P8b-15): Winter children land in the persisted roster (absent when the spine is offline).
     ...(bgAgents === undefined ? {} : { children: bgAgents }),
-    onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); },
+    onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); dispatchChildren?.onTurnSettled(sid); },
     onSupportedAgents: (sid, agents) => supportedAgentsCache.observe(sid, agents),
     ...(titler === undefined ? {} : { titler }),
     // Fix wave (review row 7): the user's servers and a TRUSTED project's MCP file (WS-21: its
@@ -1993,6 +2007,27 @@ export async function startDaemon(opts: {
   // Wiring 1: fills the forward reference `planBridge`'s `setPolicy` closes over (declared above,
   // before `winterDrivers` existed) — see that block's own comment for why the cycle is broken here.
   winterDriversForPlanBridge = winterDrivers;
+  // Dispatch's children (`agent/dispatch-children.ts`): `session_spawn` mints them through the IPC
+  // server's creation transaction, sends each its prompt through its own driver, mirrors their
+  // approvals/questions and status onto the coordinator's log, and wakes the coordinator with a
+  // `<child_update>` when one finishes. Started here, before any turn can run.
+  dispatchChildren = new DispatchChildren({
+    store, hub,
+    createSession: () => sessionCreator,
+    // A spawn whose first message could not be delivered is rolled back like a refused creation:
+    // the row and the runtime rows (and any driver) go, the same two steps `session.create` takes.
+    deleteSession: (sid) => {
+      try { store.deleteSession(sid); } catch { /* already gone */ }
+      onSessionDeleted(sid);
+    },
+    sessions: { get: (sid) => winterDrivers.get(sid), ensure: (sid) => winterDrivers.ensure(sid) },
+    // LIVE, per call — the schema's enum is a boot snapshot (`spawnModelIds` above).
+    models: async () => pickerModels({ credentials: await credentialPresenceFrom(secrets), home: winterHome }).map((m) => m.id),
+    announceActivity: (sid) => { try { hub.emitActivity(sid, activityDeriver?.(store.meta(sid), sid, Date.now())); } catch { /* best effort */ } },
+    notifyFallback: (title, message) => notifyHeadless(title, message),
+    log: (line) => console.error(`dispatch-children: ${line}`),
+  });
+  dispatchChildren.start();
   /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime
    *  rows with it — the reaper's 600 s grace is shorter than the 900 s idle timer, so without the
    *  first half a live child would outlive its session. The boot sweep above ran before any driver
@@ -2744,6 +2779,8 @@ export async function startDaemon(opts: {
     // this daemon serves everywhere else — including the two signals (post-turn grace, >24h
     // demotion) that exist only inside the server's own enforcement scope.
     onActivityDeriver: (derive) => { activityDeriver = derive; },
+    // Dispatch's `session_spawn` mints its children through `session.create`'s own transaction.
+    onSessionCreator: (create) => { sessionCreator = create; },
     broker: approvalBroker,
     elicitations: elicitationBroker,
     // SP-approvals Task 5: the SAME PermissionRules instance the engine's ask-policy rule-consult
@@ -2918,6 +2955,7 @@ export async function startDaemon(opts: {
     sessions: store,
     buildSessionCapabilities,
     winter: winterDrivers,
+    dispatchChildren,
     // The HOLDER, read through a closure — never `settings` captured by value, which would freeze
     // this at boot and make every hot-reload assertion above it a lie.
     settings: () => settings,
@@ -2927,6 +2965,10 @@ export async function startDaemon(opts: {
       // the `void stopAll()` graceful path below is async and process.exit(0) (direct-run path) drops
       // its shutdown-request/.then + SIGKILL-timer before they can fire. stopAll still runs to drain
       // any in-flight spawn on the in-process (awaited) path.
+      // First: a draining child's last settle must not report a "finished" turn or wake Dispatch — but
+      // the cards its aborted turn withdraws still close on Dispatch's log (stopped fully below,
+      // after the children drained and before the store closes).
+      dispatchChildren?.beginShutdown();
       server.stop(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
       for (const w of sdkWatchers) w.stop();
@@ -2971,6 +3013,7 @@ export async function startDaemon(opts: {
           // One macrotask for the iterations whose stdout just ended to run their `finally` blocks.
           .then(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
       const closeRest = (): void | Promise<void> => {
+        dispatchChildren?.stop();
         store.close();
         if (!runtime) { lock.release(); return; }
         return runtime.close().then(() => lock.release(), () => lock.release());

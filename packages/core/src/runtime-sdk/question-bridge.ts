@@ -45,6 +45,10 @@ export interface AskUserQuestionDeps {
   emit: (event: NewSessionEvent) => void;
   log?: BridgeLogger;
   now?: () => number;
+  /** How long a question waits for its answer before it resolves unanswered (`by: "timeout"`, a
+   *  typed deny). Absent: it waits for its human (P8b-19). A dispatch child's questions, relayed to
+   *  its coordinator, are bounded (`approval-bridge.ts`'s `DISPATCH_CHILD_APPROVAL_TIMEOUT_MS`). */
+  timeoutMs?: number;
 }
 
 /**
@@ -154,7 +158,7 @@ export function askUserQuestionBridge(deps: AskUserQuestionDeps): AskUserQuestio
 
     // Wait-before-emit, for the same reason the engine and `buildLeasePolicy` do it: the broadcast
     // is synchronous, so a watcher that answers on sight would race an unregistered wait.
-    const waiting = deps.questions.wait(sessionId, callId, NO_PARK_TIMEOUT_MS);
+    const waiting = deps.questions.wait(sessionId, callId, deps.timeoutMs ?? NO_PARK_TIMEOUT_MS);
     try {
       deps.emit({ type: "question_asked", sessionId, threadId, callId, questions });
     } catch (err) {

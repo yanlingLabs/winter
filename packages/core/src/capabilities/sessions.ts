@@ -11,28 +11,26 @@
 // id. Delegating its scoping to a STRING list was the arrangement C1 showed can be silently wrong:
 // a `disallowedTools` entry that does not match the name the child registered denies nothing.
 //
-// ⚠️ `session_spawn` IS A PLACEHOLDER ON BOTH DOORS, and that is the honest port rather than an
-// oversight. On the engine the real work is a BRIDGE: `engine.ts`'s per-round loop intercepts
-// `session_spawn` calls in a dispatch session's main thread BEFORE registry execution, does its own
-// pre-flight rejections and calls `DispatchChildren.spawnChild`, so the registered tool's `run()`
-// has always been the fallback that fires when the bridge is not active ("session_spawn is only
-// available in the dispatch session."). That bridge is entangled in the engine's `spawnOutcomes`
-// map and its call-order consumption — it is not a function this file could call — and P8b-15
-// replaces the whole mechanism with `PersistedWinterChild` in Task 13. So: one implementation, two
-// doors is satisfied (both doors run the SAME def), and the consequence is recorded — a Winter-leg
-// dispatch session cannot delegate until Task 13 rebuilds the bridge on the SDK's child messaging.
+// `session_spawn` runs through `deps.spawn` — the daemon's `DispatchChildren.spawn`
+// (`agent/dispatch-children.ts`), which mints the child through `session.create`'s own creation
+// transaction, sends it the prompt, returns at once, and then follows the child: its `child_update`s
+// and relayed approval/question cards land on the dispatch session's log, and its result wakes the
+// coordinator with a `<child_update>`. On the engine this was a BRIDGE in `engine.ts` that ran before
+// the registry; the capability server's `callTool` is the door on the Winter leg. A server built
+// without `spawn` (a test) answers the def's fixed "only available in the dispatch session" line.
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { listSessionsToolDefs, type ListSessionsDeps, type ManageSessionDeps } from "../agent/tools/list-sessions";
-import { sessionSpawnToolDefs } from "../agent/tools/session-spawn";
+import { sessionSpawnToolDefs, type SessionSpawner } from "../agent/tools/session-spawn";
 import { capabilityServer, type CapabilitySession } from "./server";
 
 export interface SessionsCapabilityDeps {
   /** The `session_spawn` schema's `model` enum — WS-20: every credentialed provider's own tag
-   *  (`pickerModels()`, ipc/picker-models.ts — the SAME list `daemon.ts` builds for
-   *  `registerSessionSpawnTool`), catalog order. Steering only, exactly as it is on the registry
-   *  door: the bridge's own `models()` check is the authoritative gate. A daemon with no
-   *  credentials at all has no model list, and the field falls back to a free string. */
+   *  (`pickerModels()`, ipc/picker-models.ts), catalog order, snapshotted at boot. Steering only:
+   *  the spawner's own LIVE picker check is the authoritative gate. A daemon with no credentials at
+   *  all has no model list, and the field falls back to a free string. */
   models?: string[];
+  /** `session_spawn`'s implementation (`DispatchChildren.spawn`, bound to the calling session). */
+  spawn?: SessionSpawner;
   /** `list_sessions`/`manage_session`'s deps — the SAME `store`/`derive`/`interrupt`/`emit`
    *  closures `daemon.ts` hands `registerListSessionsTools`. Handing this server its own store or
    *  hub would make it disagree with the session list about what is running (the T7 finding). */
@@ -44,7 +42,7 @@ export function sessionsCapability(session: CapabilitySession, deps: SessionsCap
     {
       key: "sessions",
       defs: [
-        ...sessionSpawnToolDefs({ models: deps.models }),
+        ...sessionSpawnToolDefs({ models: deps.models, ...(deps.spawn === undefined ? {} : { spawn: deps.spawn }) }),
         ...listSessionsToolDefs(deps.sessions),
       ],
     },
