@@ -15,7 +15,7 @@
 //     old `mcp__winter__sessions__list_sessions` is not a tool the model is offered);
 //   * the Exa key swaps `Search` for `WebSearch` in chat and dispatch.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
@@ -102,6 +102,25 @@ async function surfaceOf(d: { daemon: RunningDaemon; client: TestClient }, sid: 
   return { eager: [...(d.daemon.winter.get(sid)?.init?.tools ?? [])].sort(), results: JSON.parse(answer?.text ?? "[]") as Reported };
 }
 
+/** The deferred names the runtime announced to the model, read from the child's own transcript (its
+ *  persisted `deferred_tools_delta` attachments, folded: added minus removed). */
+function announcedDeferred(daemon: RunningDaemon, sid: string): string[] {
+  const rt = daemon.runtimeState as { records?: { get(id: string): { backendRoot?: string } | undefined } };
+  const root = rt.records?.get(sid)?.backendRoot;
+  if (root === undefined || !existsSync(root)) return [];
+  const announced = new Set<string>();
+  for (const file of readdirSync(root).filter((f) => f.endsWith(".jsonl"))) {
+    for (const line of readFileSync(join(root, file), "utf8").split("\n")) {
+      if (!line.includes("deferred_tools_delta")) continue;
+      const attachment = (JSON.parse(line) as { attachment?: { type?: string; addedNames?: string[]; removedNames?: string[] } }).attachment;
+      if (attachment?.type !== "deferred_tools_delta") continue;
+      for (const n of attachment.addedNames ?? []) announced.add(n);
+      for (const n of attachment.removedNames ?? []) announced.delete(n);
+    }
+  }
+  return [...announced].sort();
+}
+
 const toolSearchResult = (s: Surface, i = 0): { matches: string[]; total_deferred_tools: number } => {
   const searches = s.results.filter((r) => r.name === "ToolSearch");
   return JSON.parse(searches[i]!.content) as { matches: string[]; total_deferred_tools: number };
@@ -144,17 +163,21 @@ describe("the tool surface (Exa key stored)", () => {
     expect([...search.matches].sort()).toEqual(["Browser", "Computer", "CronList", "ListSessions", "ManageSession", "SpawnSession"]);
     // The deferred pool: the three the ruling names, plus SendMessage's standing twin (see above).
     expect(search.total_deferred_tools).toBe(4);
-    // `ListSessions` runs (a real listing); the OLD spelling is not a tool this model was offered; and a
-    // built-in outside the allowed list is refused as no such tool.
+    // `ListSessions` runs (a real listing); the OLD spelling — what a resumed coordinator's history may
+    // teach the model — still runs as the same tool; and a built-in outside the allowed list is refused
+    // as no such tool.
     const [, listed, oldSpelling, edit] = s.results;
     expect(listed).toMatchObject({ name: "ListSessions", isError: false });
-    expect(oldSpelling!.isError).toBe(true);
-    expect(oldSpelling!.content).toContain("No such tool available");
+    expect(oldSpelling).toMatchObject({ name: "mcp__winter__sessions__list_sessions", isError: false });
+    expect(oldSpelling!.content).toBe(listed!.content);
     expect(edit!.isError).toBe(true);
     expect(edit!.content).toContain("No such tool available: Edit");
     // The projector records the call under the HOST name the renderers and the gate key on.
     const calls = d.daemon.sessions.read(sessionId).filter((e) => e.type === "tool_call") as Array<{ name: string }>;
     expect(calls.map((c) => c.name)).toContain("list_sessions");
+    // The MODEL is told which tools are deferred: the runtime's persisted `deferred_tools_delta` names
+    // exactly the three the ruling defers (never the standing server's twin of SendMessage).
+    expect(announcedDeferred(d.daemon, sessionId)).toEqual(["Browser", "Computer", "CronList"]);
     void SEND_MESSAGE_TWIN;
   }, 60_000);
 

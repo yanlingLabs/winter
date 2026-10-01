@@ -165,7 +165,12 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     expect(res.content[0]!.text).toContain("at your current approval policy (auto");
     const done = await until(() => h.updates().find((u) => u.childSessionId === child && u.status === "completed"), 30_000, "the child's completed update");
     expect(done.title).toBe("Echo kid");
-    expect(done.resultSummary ?? "").toContain("hello from the coordinator");
+    // The echo double echoes the child's whole first user message — the runtime's own system-reminder
+    // attachments (agent listing, the deferred-tools announcement since 2026-10-01) included — so the
+    // CAPPED summary is the echo's head; the child's own reply carries the prompt in full.
+    expect(done.resultSummary ?? "").toStartWith("echo:");
+    const childReply = h.log(child!).find((e) => e.type === "assistant_message") as { text?: string } | undefined;
+    expect(childReply?.text ?? "").toContain("hello from the coordinator");
     expect(h.updates().filter((u) => u.childSessionId === child).map((u) => u.status)).toEqual(["running", "completed"]);
     // The coordinator is woken with ONE message carrying the update, and runs a turn for it.
     const wake = await until(() => h.log(h.dispatchId).find((e) => e.type === "user_message" && (e as { clientName?: string }).clientName === "dispatch-wake") as { text: string; seq: number } | undefined, 30_000, "the wake message");
