@@ -11,7 +11,7 @@ import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
 import { classifyPermissionMode } from "@yanlinglabs/winter-agent-sdk/messaging";
-import { canUseToolFor, neverPromptsMessage, type BridgeLogger } from "../../src/runtime-sdk/approval-bridge";
+import { DISPATCH_CHILD_APPROVAL_TIMEOUT_MS, canUseToolFor, neverPromptsMessage, type BridgeLogger } from "../../src/runtime-sdk/approval-bridge";
 import { REVIEWER_ESCALATION_REASON, noteReviewerCleared, takeReviewerCleared } from "../../src/runtime-sdk/bridge-common";
 import {
   buildWinterOptions, permissionModeFor, disallowedToolsFor,
@@ -879,24 +879,68 @@ for (const mode of MODES) {
   }
 }
 
-test("P8b-26: a CODE-mode dispatch child never prompts — the cards the ruling was written about", async () => {
-  // A dispatch session's own turns are `mode: "dispatch"`, but the work is done by CHILDREN, which
-  // `agent/dispatch-children.ts` spawns as ordinary CODE sessions distinguished only by
-  // `meta.origin === "dispatch-child"`. Keying only on `mode` would have left exactly these cards
-  // prompting, in a code-mode session nobody is watching.
+test("a CODE-mode dispatch child's card is RAISED (relayed to its coordinator) and auto-denies after 10 minutes", async () => {
+  // P8b-26 used to turn these into the never-prompt deny ("dispatch children prompt nobody"). The
+  // `session_spawn` rebuild restored the engine-era relay instead: the child raises its card on its own
+  // log and `agent/dispatch-children.ts` mirrors it onto the coordinator's, where the user answers it.
+  // Bounded, because Dispatch's prompt promises an auto-deny.
   for (const policy of ["ask", "accept-edits", "auto"] as SessionApprovalPolicy[]) {
     const h = harness({ mode: "code", policy, origin: "dispatch-child" });
-    const res = (await h.canUse("Workflow", { script: "x" }, ctx()))!;
-    expect(res.behavior).toBe("deny");
-    // …and it names itself a DISPATCH session, because "this code session never prompts" would be
-    // simply false about a dispatch child.
-    expect((res as { message: string }).message).toBe(neverPromptsMessage("Workflow", "dispatch", policy));
-    expect(h.events).toEqual([]);
+    void h.canUse("Workflow", { script: "x" }, ctx());
+    expect(h.events).toHaveLength(1);
+    const card = h.events[0] as { type: string; issuedAt: number; expiresAt: number };
+    expect(card.type).toBe("approval_requested");
+    expect(card.expiresAt - card.issuedAt).toBe(DISPATCH_CHILD_APPROVAL_TIMEOUT_MS);
+    expect(DISPATCH_CHILD_APPROVAL_TIMEOUT_MS).toBe(10 * 60_000);
   }
-  // The same session with no origin DOES prompt.
+  // An ordinary code session's card waits for its human (P8b-19: no park timeout).
   const plain = harness({ mode: "code", policy: "auto" });
   void plain.canUse("Workflow", { script: "x" }, ctx());
   expect(plain.events).toHaveLength(1);
+  const card = plain.events[0] as { issuedAt: number; expiresAt: number };
+  expect(card.expiresAt - card.issuedAt).toBeGreaterThan(DISPATCH_CHILD_APPROVAL_TIMEOUT_MS);
+  // …and the dispatch session's OWN card is still the never-prompt deny (P8b-7).
+  const coordinator = harness({ mode: "dispatch", policy: "auto" });
+  const res = (await coordinator.canUse("Workflow", { script: "x" }, ctx()))!;
+  expect(res.behavior).toBe("deny");
+  expect((res as { message: string }).message).toBe(neverPromptsMessage("Workflow", "dispatch", "auto"));
+  expect(coordinator.events).toEqual([]);
+});
+
+test("a relayed dispatch child's card that nobody answers is denied as a timeout and resolved on the log", async () => {
+  const events: NewSessionEvent[] = [];
+  const approvals = new ApprovalBroker();
+  const original = approvals.wait.bind(approvals);
+  // The broker's own timer, shortened: the bridge must hand it the dispatch-child bound.
+  const seen: number[] = [];
+  approvals.wait = (sid, cid, ms, meta) => { seen.push(ms); return original(sid, cid, 5, meta); };
+  const canUse = canUseToolFor({
+    sessionId: "s1", mode: "code", policy: "auto", origin: "dispatch-child",
+    approvals, questions: new QuestionBroker(), gate: new PermissionGate(),
+    emit: (e) => { events.push(e); }, log: silent, now: () => 1_700_000_000_000,
+  });
+  const res = (await canUse("Workflow", { script: "x" }, ctx()))!;
+  expect(seen).toEqual([DISPATCH_CHILD_APPROVAL_TIMEOUT_MS]);
+  expect(res.behavior).toBe("deny");
+  expect((res as { message: string }).message).toContain("nobody answered");
+  expect(events.map((e) => e.type)).toEqual(["approval_requested", "approval_resolved"]);
+  expect((events[1] as { by: string; approved: boolean })).toMatchObject({ by: "timeout", approved: false });
+});
+
+test("dispatch's own session_spawn is allowed under every policy a dispatch session can hold (the old bridge ran before the gate)", async () => {
+  for (const policy of ["dont-ask", "ask", "accept-edits", "auto", "bypass"] as SessionApprovalPolicy[]) {
+    const h = harness({ mode: "dispatch", policy });
+    const res = (await h.canUse("mcp__winter__sessions__session_spawn", { dir: "/tmp", prompt: "p" }, ctx()))!;
+    expect({ policy, behavior: res.behavior }).toEqual({ policy, behavior: "allow" });
+    expect(h.events).toEqual([]);
+  }
+  // plan keeps the gate's "nothing mutates while planning" (dispatch cannot be set to plan anyway).
+  const planned = harness({ mode: "dispatch", policy: "plan" });
+  expect((await planned.canUse("mcp__winter__sessions__session_spawn", { dir: "/tmp", prompt: "p" }, ctx()))!.behavior).toBe("deny");
+  // The carve-out is dispatch's alone: the same name in a code session is the gate's MUTATING answer.
+  const code = harness({ mode: "code", policy: "ask" });
+  void code.canUse("mcp__winter__sessions__session_spawn", { dir: "/tmp", prompt: "p" }, ctx());
+  expect(code.events).toHaveLength(1);
 });
 
 test("P8b-28: Winter's own four are allowed silently in every mode × policy, even plan and chat", async () => {
@@ -1013,12 +1057,16 @@ test("C3 round 3: a clearance is bound to the command the reviewer judged — a 
   expect(takeReviewerCleared("s1", c.toolUseID, "gh repo view x")).toBe(false);
 });
 
-test("C3-1: where nobody can answer a card (dispatch, a dispatch child) an uncleared escape is the typed never-prompts deny; a cleared one runs", async () => {
+test("C3-1: where nobody can answer a card (dispatch) an uncleared escape is the typed never-prompts deny; a dispatch child's is relayed; a cleared one runs", async () => {
+  const dispatch = harness({ mode: "dispatch", policy: "auto" });
+  const res = (await dispatch.canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, escapeCtx()))!;
+  expect(res.behavior).toBe("deny");
+  expect(dispatch.events).toEqual([]);
+  // A dispatch child's uncleared escape is a CARD — relayed to its coordinator — never a silent run.
+  const child = harness({ mode: "code", policy: "auto", origin: "dispatch-child" });
+  void child.canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, escapeCtx());
+  expect(child.events.map((e) => e.type)).toEqual(["approval_requested"]);
   for (const make of [() => harness({ mode: "dispatch", policy: "auto" }), () => harness({ mode: "code", policy: "auto", origin: "dispatch-child" })]) {
-    const h = make();
-    const res = (await h.canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, escapeCtx()))!;
-    expect(res.behavior).toBe("deny");
-    expect(h.events).toEqual([]);
     const c = escapeCtx();
     noteReviewerCleared("s1", c.toolUseID, "x");
     const ok = (await make().canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, c))!;

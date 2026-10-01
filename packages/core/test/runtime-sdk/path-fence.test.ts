@@ -113,11 +113,15 @@ describe("the bridge never auto-allows a protected write (spec §7.2, layer 3)",
     });
   }
 
-  test("dont-ask declines it; a dispatch child gets the never-prompt deny", async () => {
+  test("dont-ask declines it; a dispatch child's is a card (relayed to its coordinator), never an allow", async () => {
     expect((await bridge("dont-ask").canUse("Write", protectedInput, ctx()))?.behavior).toBe("deny");
     const child = bridge("bypass", { origin: "dispatch-child" });
-    expect((await child.canUse("Write", protectedInput, ctx()))?.behavior).toBe("deny");
-    expect(child.approvals.list("s_1")).toHaveLength(0);
+    const pending = child.canUse("Write", protectedInput, ctx());
+    await new Promise((r) => setTimeout(r, 10));
+    const listed = child.approvals.list("s_1");
+    expect(listed).toHaveLength(1);
+    child.approvals.resolve("s_1", listed[0]!.callId, false, "test");
+    expect((await pending)?.behavior).toBe("deny");
   });
 
   test("review C1: at the repo root under bypass, a nested project dir's skill is a card, trusted or not", async () => {

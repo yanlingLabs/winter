@@ -62,7 +62,8 @@ export interface CanUseToolDeps {
   mode: SessionMode;
   /** `SessionMeta.origin` (`sessions/store.ts:70`, a bare `string`). `"dispatch-child"` is the one
    *  value this bridge reads: a dispatch child is an ordinary CODE session whose cards are mirrored
-   *  into the dispatch stream, so P8b-26's never-prompt rule must catch it too. */
+   *  into the dispatch stream (`cardsRelayedToDispatch`) and auto-denied after 10 minutes; its
+   *  private-address escalation alone keeps the never-prompt refusal (`neverPromptsAs`). */
   origin?: string;
   /** WINTER_HOME. Used ONLY to recognise this session's own `$OUTDIR` as a blessed write target
    *  (see `isBlessedOutputPath`); absent means every Winter escalation is escalated, the
@@ -146,9 +147,10 @@ function deniedByPolicyMessage(policy: SessionApprovalPolicy): string {
  * **The one deliberate divergence from today (P8b-7).** A case that would draw a card in a DISPATCH
  * or CHAT session becomes a typed deny with no event at all.
  *
- * Today a dispatch child's card is mirrored into the dispatch stream and a human can answer it;
- * the user's standing rule is that chat and dispatch never ask, so under the Winter leg the card is
- * not raised in the first place. Chat reaches this only from a stale row (a chat session created
+ * The user's standing rule is that chat and dispatch never ask, so under the Winter leg a dispatch
+ * session's OWN card is not raised in the first place. (A dispatch CHILD — a code session the
+ * coordinator spawned — is different: its card IS raised, on its own log, and relayed onto the
+ * coordinator's log for the user to answer; see `cardsRelayedToDispatch`.) Chat reaches this only from a stale row (a chat session created
  * before the create-time coercion, whose stored policy is still `auto` — the same case
  * `buildLeasePolicy` guards on `meta.mode === "chat"`); a chat session with its coerced `"chat"`
  * policy resolves to `"ask"` for nothing but a connector action (below).
@@ -156,9 +158,8 @@ function deniedByPolicyMessage(policy: SessionApprovalPolicy): string {
  * **WS-26 (USER RULING 2026-09-27) — the one exception: CONNECTOR actions** (`isConnectorToolName`, a
  * tool of a user-configured MCP server). A chat or dispatch session CARDS one — the same
  * `approval_requested` event and `approval.respond` RPC code uses, rendered in the chat and dispatch
- * windows and on the phone — and waits for the human. A dispatch CHILD does not: it is a code session
- * nobody is watching, so its connector "ask" stays this typed deny. Nothing else in chat or dispatch
- * ever cards.
+ * windows and on the phone — and waits for the human. (A dispatch CHILD's connector "ask" is relayed
+ * like any other card it raises.) Nothing else in chat or dispatch ever cards.
  *
  * CODE mode is untouched and prompts exactly as it does today.
  */
@@ -339,8 +340,9 @@ export function approvalOptionsFromSuggestions(suggestions: readonly PermissionU
  *  4c. a CONNECTOR action's connector-permission deny refuses and its ask cards (WS-26); its allow is the
  *      PreToolUse floor's to give, never this bridge's.
  *  5. `"deny"` → a typed deny with today's mode-aware text; `"allow"` → allow, silently, no event;
- *     `"ask"` → a card in CODE mode, a typed deny in DISPATCH/CHAT (P8b-7) — except a connector action,
- *     which cards in chat and dispatch too (never in a dispatch child).
+ *     `"ask"` → a card in CODE mode (a dispatch child's relayed to its coordinator, auto-denied after
+ *     10 minutes), a typed deny in DISPATCH/CHAT (P8b-7) — except a connector action, which cards in
+ *     chat and dispatch too.
  *
  * **Fail-closed everywhere** (SDK surface map §5.1: a `canUseTool` that throws is turned into a
  * typed deny by the runtime anyway — this bridge never relies on that, it returns the deny itself).
@@ -531,6 +533,18 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     const classificationName = gateClassFor(toolName);
     let decision = deps.gate.evaluate(classificationName, policy);
 
+    // (4b') DISPATCH'S OWN DELEGATION VERB. `session_spawn` is the coordinator's job, not a side effect
+    // to gate: the gate classifies it MUTATING (a child starts unattended work at `auto`), which allows
+    // it under dispatch's default `auto` but would turn it into the never-prompt deny under any other
+    // dispatch policy (`session.setPolicy` lets a dispatch session hold ask/accept-edits/dont-ask/
+    // bypass, never plan) — and the engine-era bridge ran before the gate entirely, so delegation
+    // never depended on the policy. Allowed in a dispatch session under every policy but `plan`
+    // (unreachable for dispatch, kept as the gate's own "nothing mutates while planning"). The child
+    // it creates is gated on its own, at its own `auto` policy, with its cards relayed back here.
+    if (deps.mode === "dispatch" && classificationName === "session_spawn" && policy !== "plan") {
+      return { behavior: "allow", updatedInput: input };
+    }
+
     // (4c) WS-26 — A CONNECTOR ACTION'S DENY AND ASK VERDICTS. The user's stored allow/ask/deny and the
     // server's read-only mark (`agent/mcp/connector-permissions.ts`, read live) are applied here ONLY in the
     // narrowing direction: a `deny` refuses, an `ask` cards (it also turns a `bypass`/`auto` gate allow into
@@ -571,8 +585,8 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // safety reviewer's CLEARANCE for this very call: a `safe` verdict under the unsandboxed
     // instruction, recorded by the PreToolUse hook (`bridge-common.ts`'s `noteReviewerCleared`). No
     // clearance — no reviewer wired, the reviewer disabled, no runnable model, a transient failure, a
-    // missing call id, an evicted note — is a card in code and a typed deny wherever nobody can answer
-    // one (dispatch, a dispatch child, a stale chat row). Chat never runs an escape at all. The sandbox
+    // missing call id, an evicted note — is a card in code (a dispatch child's relayed to Dispatch) and a
+    // typed deny wherever nobody can answer one (dispatch, a stale chat row). Chat never runs an escape at all. The sandbox
     // WAS the bash floor for the control-plane files and `<home>/runtimes` (the fence at (2) covers the
     // write-class tools only), which is why nothing weaker than a positive verdict may stand in for it.
     //
@@ -719,11 +733,14 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
       return { behavior: "allow", updatedInput: input };
     }
 
-    // (6) "ask" — and a session that never prompts denies instead (P8b-7 / P8b-26) — except a CONNECTOR
-    // action in a chat or dispatch session, which cards (WS-26; see `neverPromptsMessage`'s doc). A
-    // dispatch child keeps the deny.
-    const connectorCards = isConnectorToolName(toolName) && deps.origin !== "dispatch-child";
-    const never = connectorCards ? undefined : neverPromptsAs(deps);
+    // (6) "ask" — and a session that never prompts denies instead (P8b-7) — except a CONNECTOR action in
+    // a chat or dispatch session, which cards (WS-26; see `neverPromptsMessage`'s doc), and anything a
+    // DISPATCH CHILD asks: its card is raised on its own log and RELAYED onto the coordinator's
+    // (`agent/dispatch-children.ts`), where the user answers it, and it auto-denies after
+    // `DISPATCH_CHILD_APPROVAL_TIMEOUT_MS` (see `cardsRelayedToDispatch`).
+    const relayed = cardsRelayedToDispatch(deps);
+    const connectorCards = isConnectorToolName(toolName);
+    const never = connectorCards || relayed ? undefined : neverPromptsAs(deps);
     if (never) {
       log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${policy} reason=never-prompts mode=${deps.mode} origin=${deps.origin ?? "none"}`);
       // Named as the MODEL called it: this message is a tool result the model reads, and naming a
@@ -766,11 +783,32 @@ interface BridgeState {
  * The returned word is what `<mode>` reads as in the message. A dispatch child is `mode: "code"`,
  * so naming it "this code session never prompts" would be simply false — it is a dispatch child,
  * and the message says so.
+ *
+ * **What still reads it for a dispatch child** (2026-10-01, the `session_spawn` rebuild): only the
+ * private-address floor (5d), which keeps refusing a local `WebFetch` target outright. An ordinary
+ * "ask" from a dispatch child is now RELAYED instead (`cardsRelayedToDispatch`, step (6)): P8b-26's
+ * failure mode was "dispatch children prompt nobody", and with the relay restored the card reaches
+ * the user through the coordinator — bounded by `DISPATCH_CHILD_APPROVAL_TIMEOUT_MS`.
  */
 export function neverPromptsAs(deps: { mode: SessionMode; origin?: string }): string | undefined {
   if (deps.origin === "dispatch-child") return "dispatch";
   if (deps.mode !== "code") return deps.mode;
   return undefined;
+}
+
+/** How long a relayed dispatch child's card waits before it is auto-denied (`by: "timeout"`) — the
+ *  10 minutes Dispatch's own prompt tells the model (`agent/dispatch-prompt.ts`). */
+export const DISPATCH_CHILD_APPROVAL_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * **Is this session's card RELAYED to a dispatch coordinator?** A dispatch child (a CODE session
+ * `session_spawn` created, `origin: "dispatch-child"`) raises its card on its own log, and
+ * `agent/dispatch-children.ts` mirrors it onto the coordinator's log with `childSessionId` — the Mac's
+ * dispatch pill renders it and answers `approval.respond` at the child's id. Dispatch's OWN calls
+ * never take this path (it is `mode: "dispatch"`, not a child): it stays the never-prompt mode.
+ */
+export function cardsRelayedToDispatch(deps: { mode: SessionMode; origin?: string }): boolean {
+  return deps.origin === "dispatch-child" && deps.mode === "code";
 }
 
 async function raiseCard(
@@ -853,7 +891,10 @@ async function raiseCard(
     : offered.filter((o) => o.rule === undefined || (o.scope ?? "project") !== "project");
 
   const issuedAt = env.now();
-  const expiresAt = issuedAt + NO_PARK_TIMEOUT_MS;
+  // A relayed dispatch child's card is bounded (the coordinator's prompt promises the user an
+  // auto-deny); every other card waits for its human (P8b-19).
+  const parkMs = cardsRelayedToDispatch(deps) ? DISPATCH_CHILD_APPROVAL_TIMEOUT_MS : NO_PARK_TIMEOUT_MS;
+  const expiresAt = issuedAt + parkMs;
   const record: BridgedApprovalRequest = {
     sessionId, callId, toolName, gateToolName,
     requestId: ctx.requestId,
@@ -867,7 +908,7 @@ async function raiseCard(
   // Register the wait BEFORE emitting: the append/broadcast is synchronous, so a watcher that
   // answers the instant it sees the event would otherwise race an unregistered wait into a lost
   // response (engine.ts's and buildLeasePolicy's identical wait-before-emit comments).
-  const waiting = deps.approvals.wait(sessionId, callId, NO_PARK_TIMEOUT_MS, {
+  const waiting = deps.approvals.wait(sessionId, callId, parkMs, {
     toolName: record.gateToolName, summary, issuedAt, expiresAt, options,
   });
 
