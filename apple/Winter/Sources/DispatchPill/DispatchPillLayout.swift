@@ -351,6 +351,9 @@ func dispatchPillPreviewHeight(replyWidth: CGFloat, lineHeight: CGFloat) -> CGFl
     return ceil(max(DispatchPillMetrics.pillHeight, height))
 }
 
+/// The prompt line of a turn the user did not start — Dispatch reporting on its child sessions.
+let dispatchPillSessionUpdateLabel = "Update from your sessions"
+
 /// The longest a preview line gets before it is cut with "…".
 let dispatchPillPreviewPromptLimit = 90
 let dispatchPillPreviewReplyLimit = 140
@@ -367,7 +370,9 @@ func dispatchPillTurnPreview(exchanges: [Exchange], index: Int) -> DispatchPillT
     let reply = dispatchPillShortened(dispatchPillStrippingMarkdownLead(firstLine),
                                       limit: dispatchPillPreviewReplyLimit)
     return DispatchPillTurnPreview(
-        prompt: prompt.isEmpty ? "(no prompt)" : prompt,
+        // A turn with no prompt is Dispatch's own: the daemon woke it to report on the sessions it
+        // spawned (`dispatch-wake`, which `SessionReducer` opens as a promptless exchange).
+        prompt: prompt.isEmpty ? dispatchPillSessionUpdateLabel : prompt,
         reply: reply.isEmpty ? (exchange.aborted ? "stopped" : "no reply yet") : reply,
         position: "\(index + 1)/\(exchanges.count)"
     )

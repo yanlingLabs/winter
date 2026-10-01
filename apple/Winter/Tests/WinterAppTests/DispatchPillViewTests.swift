@@ -154,6 +154,13 @@ final class DispatchPillViewTests: XCTestCase {
 
     // MARK: - A pinned turn
 
+    func testAWakeTurnIsLabelledAsAnUpdateFromTheSessions() {
+        // `dispatch-wake` opens a promptless exchange; its reply is Dispatch's report on the children.
+        let preview = dispatchPillTurnPreview(exchanges: [Exchange(prompt: "", reply: "fix-auth finished: all green")], index: 0)
+        XCTAssertEqual(preview?.prompt, dispatchPillSessionUpdateLabel)
+        XCTAssertEqual(preview?.reply, "fix-auth finished: all green")
+    }
+
     func testAPinnedTurnIsSizedToItsReplysLines() {
         let line: CGFloat = 20
         let one = dispatchPillPreviewHeight(replyWidth: 120, lineHeight: line)
