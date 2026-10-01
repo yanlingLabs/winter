@@ -167,6 +167,22 @@ describe("capabilities.list", () => {
     c.close();
   });
 
+  test("`deferred` is the EFFECTIVE state: a mode whose default model cannot tool-search (tool calling not native) defers nothing", async () => {
+    // `agentrouter/gpt-5.6-sol` is a catalog row whose tool calling is not native, so the agent SDK injects every
+    // tool up front for it; dispatch keeps its own pin, which can search.
+    const { socketPath, harnessToken } = await boot({ provider: { model: "agentrouter/gpt-5.6-sol" }, pins: { dispatch: "codex-oauth/gpt-5.6-sol" } });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.capabilitiesList, {});
+    expect(result.error).toBeUndefined();
+    const browser = result.result.capabilities.find((x: any) => x.key === "browser").tools[0];
+    expect(browser.deferred).toEqual(["dispatch"]);
+    // Office is code-only, so on this default nothing defers it at all — the field is absent.
+    const docs = result.result.capabilities.find((x: any) => x.key === "office").tools.find((t: any) => t.name === "mcp__winter__office__docs");
+    expect(docs.deferred).toBeUndefined();
+    c.close();
+  });
+
   test("not remote-allowed — local role only", () => {
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.capabilitiesList)).toBe(false);
   });

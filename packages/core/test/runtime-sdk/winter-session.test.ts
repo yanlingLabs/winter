@@ -192,6 +192,57 @@ const seen = (h: Harness, type: string): SessionEvent[] => h.events.filter((e) =
 
 // ── tests ────────────────────────────────────────────────────────────────────────────────────────
 
+describe("FAIL CLOSED (2026-10-01 review): a child that offers a built-in its `Options.tools` left out is refused", () => {
+  const ALLOWED = ["AskUserQuestion", "SendMessage", "ToolSearch", "WebFetch"];
+  const withTools = () => harness({
+    options: (inc) => ({ abortController: inc.abort, cwd: "/repo", model: "winter-test/echo", tools: [...ALLOWED], ...(inc.resume ? { resume: "be-x" } : { sessionId: "be-x" }) }),
+  });
+
+  test("an init inside the allowed list (plus capability plain names and MCP tools) runs as ever", async () => {
+    const h = withTools();
+    await h.session.open();
+    h.q().emit(init(h.q().options, [...ALLOWED, "Browser", "mcp__winter__send_message"]));
+    await h.settled();
+    expect(seen(h, "agent_error")).toEqual([]);
+    expect(h.session.state).toBe("live");
+  });
+
+  test("idle: an init offering `Bash`/`Edit` (a runtime that ignored `tools`) appends a typed agent_error and ends the incarnation", async () => {
+    const h = withTools();
+    await h.session.open();
+    h.q().emit(init(h.q().options, [...ALLOWED, "Bash", "Edit"]));
+    await h.settled();
+    const errors = seen(h, "agent_error") as Array<{ code?: string; message: string }>;
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.code).toBe("tool_surface_unenforced");
+    expect(errors[0]!.message).toContain("Bash, Edit");
+    await h.session.end();
+    expect(h.session.state).not.toBe("live");
+    expect(h.tracked[0]!.abort.signal.aborted || h.q().promptClosed).toBe(true);
+  });
+
+  test("mid-turn: the open turn is closed with the same typed error, and nothing the child says afterwards is projected", async () => {
+    const h = withTools();
+    await h.session.open();
+    await h.session.send("hello", "cli");
+    h.q().emit(init(h.q().options, [...ALLOWED, "Write"]));
+    h.q().emit(assistant("I wrote a file"));
+    await h.settled();
+    const errors = seen(h, "agent_error") as Array<{ code?: string }>;
+    expect(errors.map((e) => e.code)).toEqual(["tool_surface_unenforced"]);
+    expect(seen(h, "assistant_message")).toEqual([]);
+    expect(h.session.turnRunning).toBe(false);
+  });
+
+  test("code (no `tools` stated) is never checked", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options, ["Bash", "Edit", "Agent"]));
+    await h.settled();
+    expect(seen(h, "agent_error")).toEqual([]);
+  });
+});
+
 describe("startWinterSession — one incarnation", () => {
   test("open() spawns through runtime.sdk.query with the host queue as the prompt, a FRESH sessionId, and is tracked", async () => {
     const h = harness();

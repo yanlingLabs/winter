@@ -25,10 +25,63 @@ describe("the connector predicate", () => {
     expect(parseConnectorToolName("mcp__cf__workers_list")).toEqual({ server: "cf", tool: "workers_list" });
     expect(parseConnectorToolName("mcp__gh__create__issue")).toEqual({ server: "gh", tool: "create__issue" });
     expect(connectorCandidates("mcp__cf__prod__delete_worker")).toEqual([{ server: "cf", tool: "prod__delete_worker" }, { server: "cf__prod", tool: "delete_worker" }]);
-    expect(connectorCandidates("mcp__winter__x__y")).toEqual([]);
-    for (const name of ["mcp__winter__research__Search", "mcp__winter__external__battery", "mcp__winter__x", "plugin__battery__status", "Bash", "WebFetch", "mcp__", "mcp__cf", "mcp__cf__", "mcp____x"]) {
+    // A `winter__x` server is NOT one of the daemon's capability servers (no such key): its tools are a
+    // user connector's (2026-10-01 review — the exemption is keyed on the KEY, never the bare prefix).
+    expect(connectorCandidates("mcp__winter__x__y")).toEqual([{ server: "winter__x", tool: "y" }]);
+    for (const name of ["mcp__winter__research__Search", "mcp__winter__external__battery", "mcp__winter__browser__browser", "mcp__winter__x", "mcp__winter__send_message", "plugin__battery__status", "Bash", "WebFetch", "Browser", "mcp__", "mcp__cf", "mcp__cf__", "mcp____x"]) {
       expect(isConnectorToolName(name)).toBe(false);
     }
+  });
+
+  test("on a LIVE call only the keys the incarnation built are Winter's: a retired or unbuilt key's spelling is a connector action", () => {
+    const live = new Set(["sessions", "browser", "external"]);
+    expect(isConnectorToolName("mcp__winter__browser__browser", live)).toBe(false);
+    expect(isConnectorToolName("mcp__winter__external__battery", live)).toBe(false);
+    // `research` is retired; `computer` was not built (computer use off).
+    expect(connectorCandidates("mcp__winter__research__Search", live)).toEqual([{ server: "winter__research", tool: "Search" }]);
+    expect(connectorCandidates("mcp__winter__computer__computer", live)).toEqual([{ server: "winter__computer", tool: "computer" }]);
+    // The standing `winter` server is never split off as a connector.
+    expect(isConnectorToolName("mcp__winter__send_message", live)).toBe(false);
+  });
+});
+
+describe("a server wearing a retired or unbuilt capability name gets no Winter exemption on a live call (2026-10-01 review)", () => {
+  const live = new Set(["sessions", "browser"]);
+  test("the hook and the bridge apply the user's connector setting to it, and the gate never sees a host name", async () => {
+    for (const name of ["mcp__winter__research__Search", "mcp__winter__computer__computer"]) {
+      const server = name.split("__").slice(1, 3).join("__");
+      const session: Session = { label: "bypass", mode: "code", policy: "bypass" };
+      const source = liveSource({ [server]: { "*": "deny" } });
+      const built = sessionHooksFor({ sessionId: "s_1", roots: ["/tmp"], mode: "code", cwd: "/tmp", policy: () => "bypass", connectors: source, capabilityKeys: () => live });
+      const hook = (built.winter?.PreToolUse ?? []).filter((g: HookCallbackMatcher) => g.matcher === undefined)[1]!.hooks[0]!;
+      expect((await hookDecision(hook, name)).decision).toBe("deny");
+      const bridge = canUseToolFor({
+        sessionId: "s_1", mode: "code", cwd: "/tmp", policy: () => session.policy, approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(),
+        emit: () => {}, log: silent, now: () => 1_700_000_000_000, connectors: source, capabilityKeys: () => live,
+      });
+      expect(((await bridge(name, {}, ctx())) as PermissionResult).behavior).toBe("deny");
+    }
+  });
+
+  test("in chat the spelling is no longer NETWORK-class `Search` (allowed silently): unset, it cards like any connector action", async () => {
+    const source = liveSource({});
+    const events: NewSessionEvent[] = [];
+    const approvals = new ApprovalBroker();
+    const bridge = canUseToolFor({
+      sessionId: "s_1", mode: "chat", cwd: "/tmp", policy: () => "chat", approvals, questions: new QuestionBroker(), gate: new PermissionGate(),
+      emit: (e) => { events.push(e); }, log: silent, now: () => 1_700_000_000_000, connectors: source, capabilityKeys: () => live,
+    });
+    const pending = bridge("mcp__winter__research__Search", {}, ctx());
+    const card = events.find((e) => e.type === "approval_requested") as { callId: string } | undefined;
+    expect(card).toBeDefined();
+    approvals.resolve("s_1", card!.callId, false, "test");
+    expect(((await pending) as PermissionResult).behavior).toBe("deny");
+    // …while a capability the incarnation DID build keeps its exemption and its host class.
+    const browser = canUseToolFor({
+      sessionId: "s_1", mode: "chat", cwd: "/tmp", policy: () => "chat", approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(),
+      emit: () => {}, log: silent, now: () => 1_700_000_000_000, connectors: source, capabilityKeys: () => live,
+    });
+    expect(((await browser("mcp__winter__browser__browser", {}, ctx("tu2"))) as PermissionResult).behavior).toBe("allow");
   });
 });
 
