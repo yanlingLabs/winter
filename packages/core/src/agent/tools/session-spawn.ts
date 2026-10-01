@@ -1,29 +1,35 @@
 import { z } from "zod";
-import type { ToolDefinition, ToolRegistry } from "./registry";
+import type { ToolContext, ToolDefinition, ToolRegistry } from "./registry";
 
-/** Dispatch (Phase 7) Task 4: session_spawn — the coordinator's delegation tool. Registered with a
- *  placeholder run(): the engine BRIDGE intercepts session_spawn calls in a dispatch session's
- *  main thread BEFORE registry execution (spawn_agent precedent, engine.ts's dispatch loop) — this
- *  placeholder only fires when the bridge isn't active for the call (a code session, where
- *  session_spawn is also excluded from the tool list entirely — turn()'s isDispatch ternary — or a
- *  dispatch session with cfg.dispatch unwired), mirroring spawn.ts's own placeholder-vs-bridge
- *  split and its plain-string return (registry.ts's execute() wraps a returned string as
- *  {output, isError:false} — same shape spawn_agent's own placeholder uses).
+/** What a `session_spawn` call is handed: the parsed arguments and the caller's context
+ *  (`ctx.sessionId` is the dispatch session that called it). Resolves to the result text; a throw is
+ *  the tool's error result (the registry turns it into `isError`). */
+export type SessionSpawner = (
+  args: { dir: string; prompt: string; model?: string; type?: "code" | "cowork"; title?: string },
+  ctx: ToolContext,
+) => Promise<string>;
+
+/** Dispatch (Phase 7) Task 4: session_spawn — the coordinator's delegation tool.
  *
- *  The schema enum on `model` is steering only (defense-in-depth, same two-layer shape as
- *  spawn.ts's own `model` field, see its doc comment) — the bridge's own models() check is the
- *  authoritative runtime gate. WS-20: the enum is now the picker's own tag list
- *  (`pickerModels()`, ipc/picker-models.ts) — a provider-qualified tag like
+ *  `run()` calls the daemon's spawner (`agent/dispatch-children.ts`'s `DispatchChildren.spawn`,
+ *  wired through the `sessions` capability server, `capabilities/sessions.ts`) when one is given.
+ *  The engine-era bridge that intercepted the call before the registry ran went with the engine; on
+ *  the Winter leg the capability server's `callTool` IS the door. Without a spawner (a door nobody
+ *  wired, a test) the call answers the fixed "only available in the dispatch session" line — a
+ *  plain-string return, which `registry.ts`'s `execute()` wraps as `{output, isError:false}`.
+ *
+ *  The schema enum on `model` is steering only (defense-in-depth): it is a boot snapshot of the
+ *  picker list, and the spawner's own LIVE picker check is the authoritative gate. WS-20: the enum is
+ *  the picker's own tag list (`pickerModels()`, ipc/picker-models.ts) — a provider-qualified tag like
  *  `codex-oauth/gpt-5.6-terra`, never a bare id or a short alias. */
-export function registerSessionSpawnTool(r: ToolRegistry, opts: { models?: string[] } = {}): void {
+export function registerSessionSpawnTool(r: ToolRegistry, opts: { models?: string[]; spawn?: SessionSpawner } = {}): void {
   for (const def of sessionSpawnToolDefs(opts)) r.register(def);
 }
 
 /** P8b Task 6 — THE definitions, extracted verbatim from `registerSessionSpawnTool`'s body so the
  *  daemon's shared `ToolRegistry` and the `sessions` capability server (`capabilities/sessions.ts`)
- *  drive the SAME `ToolDefinition` object rather than two copies of one. Nothing about the
- *  registration changed; the `register*` wrapper above is the only caller that existed before. */
-export function sessionSpawnToolDefs(opts: { models?: string[] } = {}): ToolDefinition[] {
+ *  drive the SAME `ToolDefinition` object rather than two copies of one. */
+export function sessionSpawnToolDefs(opts: { models?: string[]; spawn?: SessionSpawner } = {}): ToolDefinition[] {
   const hasModels = !!opts.models && opts.models.length > 0;
   const modelField = hasModels ? z.enum(opts.models as [string, ...string[]]).optional() : z.string().optional();
   const modelClause = hasModels
@@ -31,22 +37,14 @@ export function sessionSpawnToolDefs(opts: { models?: string[] } = {}): ToolDefi
     : "model: optional override, a provider-qualified model tag, e.g. codex-oauth/gpt-5.6-terra";
   return [{
     name: "session_spawn",
-    // R-T2: dispatch's own orchestration verb — was DISPATCH_ALLOW_TOOLS's literal membership,
-    // now the single declaration site.
-    // R-T3 review finding 1: this used to read `["code", "dispatch"]` — "code eligibility is
-    // vestigial (SESSION_SPAWN_TOOL is ALWAYS added to code's excludeTools unconditionally in
-    // engine.ts, independent of this field) but kept for consistency" — which was exactly the
-    // class of drift this whole slice exists to remove: eligibility stated in two places that
-    // could disagree. Declared truthfully as dispatch-only now. engine.ts's hardcoded
-    // SESSION_SPAWN_TOOL exclusion for code stays as belt-and-braces: if a later task ever moves
-    // code from exclude-shaped toolAccess to an allow-shaped `namesForMode("code")` (chat and
-    // dispatch already are), this field alone would no longer keep session_spawn off code's
-    // toolset — the hardcoded exclusion is what still would.
+    // R-T2: dispatch's own orchestration verb — the single declaration site of its eligibility.
+    // Dispatch-only: `capabilityServer` filters the defs by the session's mode (P8b-37), so a code or
+    // chat session's `sessions` server never advertises or serves it.
     modes: ["dispatch"],
     description: [
       "Spawn a full, first-class work session in a directory. The child is an ordinary code session:",
-      "own transcript, visible in the session list, full tools. It runs asynchronously — you get a",
-      "child_update when it finishes. Write the prompt self-contained: the child cannot see this conversation.",
+      "own transcript, visible in the session list, full tools. It runs asynchronously — this returns at once,",
+      "and you are woken with a <child_update> when it finishes. Write the prompt self-contained: the child cannot see this conversation.",
       `dir: absolute directory the session works in. ${modelClause}.`,
       "type: 'code' (default). 'cowork' is not yet available. title: short roster label.",
     ].join(" "),
@@ -57,8 +55,10 @@ export function sessionSpawnToolDefs(opts: { models?: string[] } = {}): ToolDefi
       type: z.enum(["code", "cowork"]).optional(),
       title: z.string().optional(),
     }),
-    run() {
-      return "session_spawn is only available in the dispatch session.";
+    async run(args, ctx) {
+      if (opts.spawn === undefined) return "session_spawn is only available in the dispatch session.";
+      // The schema above has validated `args` (its `model` field's type depends on the enum).
+      return await opts.spawn(args as Parameters<SessionSpawner>[0], ctx);
     },
   }];
 }

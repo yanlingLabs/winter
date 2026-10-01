@@ -298,8 +298,8 @@ export const PROJECTED_EVENT_COVERAGE = {
   // `runtime-sdk/sinks.ts`'s `push_notification` sink, observing the projected `tool_call` for
   // Winter's `PushNotification` (never a projector branch of its own, same reasoning as the
   // approval/question/plan bridges above: this is a SINK, not the projector). The
-  // `dispatch-children.ts:260` half (a background dispatch child's own completion notice) is
-  // unrelated and still survives untouched.
+  // `agent/dispatch-children.ts` half (`notifyUnattended`: a dispatch child needs input or finished
+  // while nobody is attached to the coordinator) is unrelated — a daemon producer, not the projector.
   notification_requested: false,
   task_notification: false,
 } satisfies Record<SessionEvent["type"], boolean>;
