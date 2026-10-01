@@ -40,8 +40,9 @@ struct FullScreenPillView: View {
                 .font(Typography.control(.semibold))
                 .foregroundStyle(Theme.textPrimary)
             if adapter.turnRunning {
-                WorkingAnimationView(toolName: controller.runningToolName, iconFont: Typography.caption(.semibold))
-                    .frame(width: 96, height: 22)
+                WorkingAnimationView(thrown: controller.plumeThrows)
+                    .frame(width: 110, height: 22)
+                    .clipShape(Capsule())
                 Text(adapter.verbText)
                     .font(Typography.caption())
                     .foregroundStyle(Theme.textSecondary)

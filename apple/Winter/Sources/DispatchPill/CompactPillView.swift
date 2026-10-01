@@ -6,20 +6,20 @@ import SwiftUI
 // drawn here:
 //
 //   idle:     [ Type here …………………………………… (🎙) ]   — the blue circle, the voice glyph until there is text
-//   working:  [ ✺  ·  ∘ ○ ◯ ⬤⬤(■) ]             — the plume streaming out from behind stop
+//   working:  [ ·  ∘ ○ ▣ ◯ ⬤ ▣ ⬤⬤(■) ]            — the plume, end to end, tool tiles riding it
 
-/// The working state's whole body: the plume, its nozzle behind the stop button. No composer —
-/// the text view stays mounted underneath, invisible, so a keystroke still lands in it and the
-/// first one opens the typing pill (`dispatchPillPresentationAfterDraftChange`).
+/// The working state's whole body: the plume, end to end, its nozzle behind the stop button, with
+/// each tool Dispatch uses thrown out of it as a tile (`plumeThrows`). No composer — the text view
+/// stays mounted underneath, invisible, so a keystroke still lands in it and the first one opens the
+/// typing pill (`dispatchPillPresentationAfterDraftChange`).
 struct CompactPillWorking: View {
-    let toolName: String?
+    let thrown: [PlumeThrow]
 
     var body: some View {
         WorkingAnimationView(
-            toolName: toolName,
+            thrown: thrown,
             emitterInset: DispatchPillMetrics.trailingPadding + DispatchPillMetrics.sendCircleSize / 2
         )
-        .padding(.leading, DispatchPillMetrics.leadingPadding - 8)
     }
 }
 

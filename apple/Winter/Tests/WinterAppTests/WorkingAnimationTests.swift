@@ -5,16 +5,6 @@ import AppKit
 /// The working animation's model: the plume's flow, the icon cross-fade, the idle symbol rotation,
 /// and the tool→symbol map.
 final class WorkingAnimationTests: XCTestCase {
-    /// Advance in frame-sized steps — a single tick is clamped to `maxStep`.
-    private func advance(_ model: inout WorkingAnimationModel, by seconds: Double, toolSymbol: String?) {
-        var left = seconds
-        while left > 1e-12 {
-            let step = min(left, 1.0 / 60.0)
-            model.tick(dt: step, toolSymbol: toolSymbol)
-            left -= step
-        }
-    }
-
     // MARK: - The plume
 
     private let rect = CGRect(x: 0, y: 0, width: 300, height: 44)
@@ -90,7 +80,7 @@ final class WorkingAnimationTests: XCTestCase {
         let cap = Int(PropulsionPlume.puffsPerSecond * PropulsionPlume.puffLifetime.upperBound
                       + PropulsionPlume.sparksPerSecond * PropulsionPlume.sparkLifetime.upperBound) + 2
         for _ in 0..<600 {
-            model.tick(dt: 1.0 / 60.0, toolSymbol: nil)
+            model.tick(dt: 1.0 / 60.0)
             XCTAssertLessThanOrEqual(model.plume.puffs.count, cap)
             XCTAssertGreaterThan(model.plume.puffs.count, 15)
         }
@@ -99,7 +89,7 @@ final class WorkingAnimationTests: XCTestCase {
     func testThePlumeFlows() {
         var model = WorkingAnimationModel()
         let before = model.plume.puffs
-        model.tick(dt: 1.0 / 60.0, toolSymbol: nil)
+        model.tick(dt: 1.0 / 60.0)
         let survivors = model.plume.puffs.prefix { p in before.contains { $0.lifetime == p.lifetime && $0.lane == p.lane } }
         XCTAssertFalse(survivors.isEmpty)
         for p in survivors {
@@ -111,20 +101,20 @@ final class WorkingAnimationTests: XCTestCase {
     func testAStallIsClampedAndReduceMotionHoldsThePlume() {
         var model = WorkingAnimationModel()
         let before = model.plume
-        model.tick(dt: 30, toolSymbol: nil) // the app was suspended
+        model.tick(dt: 30) // the app was suspended
         XCTAssertFalse(model.plume.puffs.isEmpty, "a long gap never empties the plume")
         var still = WorkingAnimationModel()
-        still.tick(dt: 1.0 / 60.0, toolSymbol: nil, animatesPlume: false)
+        still.tick(dt: 1.0 / 60.0, animatesPlume: false)
         XCTAssertEqual(still.plume, before, "Reduce Motion: the plume holds")
         var frozen = WorkingAnimationModel()
-        frozen.tick(dt: -1, toolSymbol: nil)
+        frozen.tick(dt: -1)
         XCTAssertEqual(frozen.plume, before, "a negative dt is no time at all")
     }
 
     func testThePlumeIsReproducibleFromItsSeed() {
         var a = WorkingAnimationModel(seed: 42)
         var b = WorkingAnimationModel(seed: 42)
-        for _ in 0..<90 { a.tick(dt: 1.0 / 60.0, toolSymbol: nil); b.tick(dt: 1.0 / 60.0, toolSymbol: nil) }
+        for _ in 0..<90 { a.tick(dt: 1.0 / 60.0); b.tick(dt: 1.0 / 60.0) }
         XCTAssertEqual(a.plume, b.plume)
         XCTAssertNotEqual(WorkingAnimationModel(seed: 1).plume, WorkingAnimationModel(seed: 2).plume)
     }
@@ -164,54 +154,138 @@ final class WorkingAnimationTests: XCTestCase {
 
     // MARK: - The icon
 
-    func testANewToolCrossFadesItsIconIn() {
-        var model = WorkingAnimationModel()
-        let thinking = model.symbol
-        model.tick(dt: 1.0 / 60.0, toolSymbol: "terminal")
-        XCTAssertEqual(model.symbol, "terminal")
-        XCTAssertEqual(model.previousSymbol, thinking)
-        XCTAssertEqual(model.symbolOpacity, 0, "the change itself starts the fade at zero")
-        XCTAssertEqual(model.previousSymbolOpacity, 1)
-        advance(&model, by: WorkingAnimationModel.crossfadeSeconds / 2, toolSymbol: "terminal")
-        XCTAssertEqual(model.symbolOpacity, 0.5, accuracy: 1e-9)
-        XCTAssertEqual(model.previousSymbolOpacity, 0.5, accuracy: 1e-9)
-        advance(&model, by: WorkingAnimationModel.crossfadeSeconds, toolSymbol: "terminal")
-        XCTAssertEqual(model.symbolOpacity, 1)
-        XCTAssertNil(model.previousSymbol, "the old icon is gone once the fade completes")
-        XCTAssertEqual(model.previousSymbolOpacity, 0)
+    // MARK: - Throwing tool tiles
+
+    private func toolThrow(_ id: String, _ symbol: String = "terminal") -> PlumeThrow {
+        PlumeThrow(id: id, kind: .tool(symbol: symbol))
     }
 
-    func testAChangeMidFadeRestartsFromTheArrivingIcon() {
+    func testWhatWasAlreadyDoneWhenThePlumeAppearedIsNotThrown() {
         var model = WorkingAnimationModel()
-        model.tick(dt: 0.01, toolSymbol: "terminal")
-        model.tick(dt: 0.05, toolSymbol: "terminal")
-        model.tick(dt: 0.01, toolSymbol: "pencil")
-        XCTAssertEqual(model.previousSymbol, "terminal")
-        XCTAssertEqual(model.symbol, "pencil")
-        XCTAssertEqual(model.crossfade, 0)
+        model.tick(dt: 1.0 / 60.0, thrown: [toolThrow("a"), toolThrow("b")])
+        for _ in 0..<30 { model.tick(dt: 1.0 / 60.0, thrown: [toolThrow("a"), toolThrow("b")]) }
+        XCTAssertTrue(model.plume.tokens.isEmpty, "no burst of stale tiles when summoned mid-turn")
     }
 
-    func testWhileThinkingTheIdleSymbolsRotate() {
+    func testEachNewToolUseIsThrownOnceFromTheNozzle() {
         var model = WorkingAnimationModel()
-        XCTAssertEqual(model.symbol, WorkingAnimationModel.idleSymbols[0])
-        let hold = WorkingAnimationModel.idleSymbolHoldSeconds
+        model.tick(dt: 1.0 / 60.0, thrown: [])
+        model.tick(dt: 1.0 / 60.0, thrown: [toolThrow("a")])
+        XCTAssertEqual(model.plume.tokens.map(\.item.id), ["a"])
+        XCTAssertEqual(model.plume.tokens.first?.age ?? -1, 0, accuracy: 1e-9, "leaves the nozzle now")
+        for _ in 0..<20 { model.tick(dt: 1.0 / 60.0, thrown: [toolThrow("a")]) }
+        XCTAssertEqual(model.plume.tokens.count, 1, "the same call is never thrown twice")
+    }
+
+    func testABurstOfToolUsesLeavesOneByOne() {
+        var model = WorkingAnimationModel()
+        model.tick(dt: 1.0 / 60.0, thrown: [])
+        let burst = (0..<3).map { toolThrow("t\($0)") }
+        model.tick(dt: 1.0 / 60.0, thrown: burst)
+        XCTAssertEqual(model.plume.tokens.count, 1)
+        XCTAssertEqual(model.queued.count, 2)
         var t = 0.0
-        while t < hold - 0.05 { model.tick(dt: 0.05, toolSymbol: nil); t += 0.05 }
-        XCTAssertEqual(model.symbol, WorkingAnimationModel.idleSymbols[0], "held for the hold time")
-        model.tick(dt: 0.06, toolSymbol: nil)
-        XCTAssertEqual(model.symbol, WorkingAnimationModel.idleSymbols[1])
-        XCTAssertEqual(model.previousSymbol, WorkingAnimationModel.idleSymbols[0], "and cross-fades")
-        for _ in 0..<WorkingAnimationModel.idleSymbols.count {
-            for _ in 0..<Int((hold / 0.05).rounded(.up)) { model.tick(dt: 0.05, toolSymbol: nil) }
-        }
-        XCTAssertTrue(WorkingAnimationModel.idleSymbols.contains(model.symbol), "the rotation wraps")
+        while t < WorkingAnimationModel.throwSpacing * 2.5 { model.tick(dt: 1.0 / 60.0, thrown: burst); t += 1.0 / 60.0 }
+        XCTAssertEqual(model.plume.tokens.map(\.item.id), ["t0", "t1", "t2"], "in order, spaced out")
+        XCTAssertTrue(model.queued.isEmpty)
     }
 
-    func testARunningToolHoldsItsIconAndResetsTheIdleClock() {
+    func testTheQueueIsBounded() {
         var model = WorkingAnimationModel()
-        for _ in 0..<100 { model.tick(dt: 0.05, toolSymbol: "terminal") }
-        XCTAssertEqual(model.symbol, "terminal")
-        XCTAssertEqual(model.idleElapsed, 0)
+        model.tick(dt: 1.0 / 60.0, thrown: [])
+        let flood = (0..<30).map { toolThrow("f\($0)") }
+        model.tick(dt: 1.0 / 60.0, thrown: flood)
+        XCTAssertLessThanOrEqual(model.queued.count, WorkingAnimationModel.maxQueuedThrows)
+        XCTAssertEqual(model.queued.last?.id, "f29", "the newest are kept")
+    }
+
+    func testReduceMotionThrowsNothing() {
+        var model = WorkingAnimationModel()
+        model.tick(dt: 1.0 / 60.0, thrown: [], animatesPlume: false)
+        model.tick(dt: 1.0 / 60.0, thrown: [toolThrow("a")], animatesPlume: false)
+        XCTAssertTrue(model.plume.tokens.isEmpty)
+    }
+
+    func testATileGrowsOutOfTheNozzleRidesTheFlowAndShrinksAway() {
+        let token = { (age: Double) in PropulsionPlume.Token(age: age, lifetime: 1, lane: 0.6, spin: 1, item: self.toolThrow("a")) }
+        let tile = { (age: Double) in PropulsionPlume.tile(for: token(age), in: self.rect, emitterX: self.emitterX, tailX: self.tailX) }
+        let born = tile(0), out = tile(PropulsionPlume.tokenEmergeShare), mid = tile(0.5), end = tile(1)
+        XCTAssertEqual(born.center.x, emitterX, accuracy: 1e-9)
+        XCTAssertLessThan(born.side, out.side, "grows out of the nozzle")
+        XCTAssertEqual(out.side, rect.height * PropulsionPlume.tokenSideShare * (1 - PropulsionPlume.tokenShrinkAlongPlume * PropulsionPlume.tokenEmergeShare), accuracy: 1e-6)
+        XCTAssertLessThan(mid.center.x, out.center.x, "rides toward the tail")
+        XCTAssertLessThan(mid.side, out.side, "shrinks")
+        XCTAssertGreaterThan(mid.rotation, 0, "tumbles its own way")
+        XCTAssertEqual(end.side, 0, accuracy: 1e-9, "gone at the tail, never a pop")
+        for age in stride(from: 0.0, through: 1.0, by: 0.05) {
+            let t = tile(age)
+            XCTAssertGreaterThanOrEqual(t.center.y - t.side / 2, rect.minY - 1e-9)
+            XCTAssertLessThanOrEqual(t.center.y + t.side / 2, rect.maxY + 1e-9)
+        }
+    }
+
+    func testATileOutlivesNoPuffAndIsDroppedAtTheTail() {
+        var plume = PropulsionPlume(seed: 7)
+        plume.launch(toolThrow("a"))
+        for _ in 0..<Int(PropulsionPlume.tokenLifetime.upperBound * 60) + 2 { plume.advance(dt: 1.0 / 60.0) }
+        XCTAssertTrue(plume.tokens.isEmpty)
+    }
+
+    // MARK: - What a turn throws
+
+    private func tool(_ name: String, detail: String? = nil, callId: String, output: String? = nil) -> ActivityItem {
+        ActivityItem(kind: .tool(name: name, detail: detail, callId: callId, output: output))
+    }
+
+    func testEveryToolCallThrowsItsTile() {
+        let exchange = Exchange(prompt: "p", reply: "", activity: [
+            tool("bash", detail: "ls", callId: "c1"),
+            ActivityItem(kind: .task(subject: "x", status: "done")),
+            tool("edit", detail: "a.swift", callId: "c2"),
+        ])
+        XCTAssertEqual(plumeThrows(for: exchange), [
+            PlumeThrow(id: "c1", kind: .tool(symbol: "terminal")),
+            PlumeThrow(id: "c2", kind: .tool(symbol: "pencil")),
+        ])
+        XCTAssertEqual(plumeThrows(for: nil), [])
+    }
+
+    func testAFetchThrowsItsSitesFavicon() {
+        let exchange = Exchange(prompt: "p", reply: "", activity: [
+            tool("WebFetch", detail: "https://www.apple.com/newsroom/", callId: "f1"),
+        ])
+        XCTAssertEqual(plumeThrows(for: exchange), [PlumeThrow(id: "f1#www.apple.com", kind: .site(host: "www.apple.com"))])
+    }
+
+    func testASearchThrowsItsTileThenTheSitesItFound() {
+        let pending = Exchange(prompt: "p", reply: "", activity: [tool("WebSearch", detail: "swift", callId: "s1")])
+        XCTAssertEqual(plumeThrows(for: pending), [PlumeThrow(id: "s1", kind: .tool(symbol: "globe"))])
+        let output = """
+        1. https://swift.org/blog — Swift
+        2. https://developer.apple.com/swift/ and again https://swift.org/docs
+        3. http://localhost:8080/x (never) 4. https://10.0.0.2/a (never)
+        5. https://a.com 6. https://b.com 7. https://c.com
+        """
+        let done = Exchange(prompt: "p", reply: "", activity: [tool("WebSearch", detail: "swift", callId: "s1", output: output)])
+        XCTAssertEqual(plumeThrows(for: done).map(\.id),
+                       ["s1", "s1#swift.org", "s1#developer.apple.com", "s1#a.com", "s1#b.com"],
+                       "distinct public hosts, in order, capped")
+    }
+
+    func testOnlyPublicNamesAreAskedForAFavicon() {
+        XCTAssertTrue(plumeFaviconHostAllowed("github.com"))
+        XCTAssertTrue(plumeFaviconHostAllowed("docs.swift.org"))
+        for host in ["localhost", "printer.local", "db.internal", "10.0.0.1", "192.168.1.1", "intranet", "a..b", "-x.com"] {
+            XCTAssertFalse(plumeFaviconHostAllowed(host), host)
+        }
+    }
+
+    func testEachToolKeepsItsOwnTileColour() {
+        XCTAssertTrue(plumeToolTileColor(symbol: "terminal") == plumeToolTileColor(symbol: "terminal"), "stable")
+        let colours = ["terminal", "pencil", "doc.text", "globe", "checklist", "person.2.fill", "bolt.fill", "safari"]
+            .map { plumeToolTileColor(symbol: $0) }
+        let distinct = Set(colours.map { "\($0.red),\($0.green),\($0.blue)" })
+        XCTAssertGreaterThan(distinct.count, 3, "the tools are not all one colour")
     }
 
     // MARK: - Tool → symbol
@@ -237,7 +311,7 @@ final class WorkingAnimationTests: XCTestCase {
                      "spawn_agent", "session_spawn", "Workflow", "ask_user", "Skill", "mcp__winter__office__x",
                      "mcp__winter__sessions__x", "mcp__winter__research__x", "mcp__winter__lsp__x",
                      "mcp__winter__other__x", "mcp__x__y", "unknown"]
-        for symbol in names.map(workingToolSymbol(for:)) + WorkingAnimationModel.idleSymbols {
+        for symbol in names.map(workingToolSymbol(for:)) {
             XCTAssertNotNil(NSImage(systemSymbolName: symbol, accessibilityDescription: nil), symbol)
         }
     }

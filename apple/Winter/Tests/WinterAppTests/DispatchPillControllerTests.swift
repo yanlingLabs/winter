@@ -130,6 +130,7 @@ final class DispatchPillControllerTests: XCTestCase {
         let pill = makePill()
         pill.show()
         pill.adapter.composerDraft = "half a thought"
+        waitUntil { pill.presentation == .expanded }
         XCTAssertEqual(pill.presentation, .expanded)
         pill.hide()
         XCTAssertEqual(pill.adapter.composerDraft, "", "hidden, the draft lives in the DraftCache")
@@ -160,6 +161,7 @@ final class DispatchPillControllerTests: XCTestCase {
         let pill = makePill()
         pill.show()
         pill.adapter.composerDraft = "h"
+        waitUntil { pill.presentation == .expanded }
         XCTAssertEqual(pill.presentation, .expanded)
         // GROW-FIRST: the frame is already the expanded canvas…
         XCTAssertEqual(pill.panelFrameForTesting.width, pill.canvas.size.width)
@@ -177,6 +179,7 @@ final class DispatchPillControllerTests: XCTestCase {
         let pill = makePill()
         pill.show()
         pill.adapter.composerDraft = "draft"
+        waitUntil { pill.presentation == .expanded }
         waitForSpring(pill)
         let expandedCanvas = pill.canvas.size
         XCTAssertTrue(pill.handleEscape(), "Esc in the typing pill compresses it")
@@ -561,6 +564,7 @@ final class DispatchPillControllerTests: XCTestCase {
         pill.handleSwipe(.right)
         XCTAssertEqual(pill.historyIndex, 0)
         pill.adapter.composerDraft = "n"
+        waitUntil { pill.historyIndex == nil }
         XCTAssertNil(pill.historyIndex)
     }
 
@@ -654,8 +658,29 @@ final class DispatchPillControllerTests: XCTestCase {
         pill.show()
         XCTAssertEqual(pill.composerFieldWidth, DispatchPillMetrics.fieldWidth(pillWidth: DispatchPillMetrics.compactWidth))
         pill.adapter.composerDraft = "h"
+        waitUntil { pill.presentation == .expanded }
         XCTAssertEqual(pill.composerFieldWidth, DispatchPillMetrics.expandedFieldWidth,
                        "the full typing width from the first keystroke — the text never re-wraps mid-spring")
+    }
+
+    // MARK: - Typing into the compact pill
+
+    /// The user's report: typing into the compact pill lost the first key. Types into the REAL text
+    /// view, the way AppKit does, and lets the expansion it triggers run.
+    func testTheFirstKeyTypedIntoTheCompactPillIsKept() {
+        let pill = makePill()
+        pill.show()
+        waitUntil { pill.composerTextViewForTesting != nil }
+        guard let textView = pill.composerTextViewForTesting else { return XCTFail("no composer mounted") }
+        textView.window?.makeFirstResponder(textView)
+        textView.insertText("h", replacementRange: textView.selectedRange())
+        textView.insertText("i", replacementRange: textView.selectedRange())
+        let settled = expectation(description: "layout settles")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { settled.fulfill() }
+        wait(for: [settled], timeout: 2)
+        XCTAssertEqual(pill.presentation, .expanded)
+        XCTAssertEqual(pill.adapter.composerDraft, "hi")
+        XCTAssertEqual(textView.string, "hi", "the first key survives the pill growing")
     }
 
     // MARK: - Blur while the shape changes
@@ -668,6 +693,7 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertTrue(composer.layerUsesCoreImageFilters)
         XCTAssertTrue(composer.contentFilters.isEmpty, "sharp at rest")
         pill.adapter.composerDraft = "h" // compact → expanded: the spring starts
+        waitUntil { pill.presentation == .expanded }
         pill.setAnimatedSizeForTesting(CGSize(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight))
         XCTAssertEqual(composer.contentFilters.count, 1, "mid-change: blurred")
         XCTAssertEqual(pill.composerBlurRadiusForTesting,
@@ -725,6 +751,7 @@ final class DispatchPillControllerTests: XCTestCase {
         let pill = makePill()
         pill.show()
         pill.adapter.composerDraft = "line"
+        waitUntil { pill.presentation == .expanded }
         pill.composerContentHeightChanged(80)
         XCTAssertEqual(pill.morph.target.height, 80 + DispatchPillMetrics.composerVerticalPadding)
         XCTAssertEqual(pill.composerFieldHeight, 80)

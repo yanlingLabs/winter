@@ -2,81 +2,157 @@ import SwiftUI
 
 // MARK: - The working animation's model (pure, ticked — `WorkingAnimationTests`)
 
-/// What the pill shows while Dispatch works: a sideways rocket plume. Flat blue puffs leave a nozzle
-/// at the trailing end (behind the stop button) big, bunched and white-hot, and stream toward the
-/// leading end, cooling to deep blue, spreading out and shrinking away; a few small sparks shoot
-/// through faster. At the leading end, the running tool's icon cross-fades as the work changes, and
-/// a slow rotation of "thinking" symbols shows between tools.
+/// What the pill shows while Dispatch works: a sideways rocket plume filling the pill. Flat puffs
+/// leave a nozzle at the trailing end (behind the stop button) big, bunched and white-hot, and
+/// stream toward the leading end, cooling, spreading out and shrinking away; a few small sparks
+/// shoot through faster. Every tool Dispatch uses is THROWN out of the nozzle as a small rounded
+/// tile — its symbol on its own colour, or, for the web, each site's favicon on white — and rides the
+/// plume down, tumbling and shrinking away like the rest of the exhaust.
 ///
-/// A value type advanced by `tick(dt:toolSymbol:)` rather than SwiftUI implicit animation, so its
-/// whole behaviour (the plume's flow, the cross-fade timing, the idle rotation) is unit-testable
-/// without a render loop. The view holds one in `@State` and ticks it off a `TimelineView` — the same
-/// local-animation-state convention `DispatchParticleField` and `WinterFieldView`'s spinner follow.
+/// A value type advanced by `tick(dt:thrown:)` rather than SwiftUI implicit animation, so its whole
+/// behaviour (the plume's flow, which throws leave and when) is unit-testable without a render loop.
+/// The view holds one in `@State` and ticks it off a `TimelineView` — the same local-animation-state
+/// convention `DispatchParticleField` and `WinterFieldView`'s spinner follow.
 struct WorkingAnimationModel: Equatable {
-    /// How long one icon takes to cross-fade into the next.
-    static let crossfadeSeconds: Double = 0.35
-    /// How long each "thinking" symbol holds before the next one fades in (no tool running).
-    static let idleSymbolHoldSeconds: Double = 1.4
-    /// The symbols the leading icon rotates through while the agent is thinking rather than running
-    /// a tool.
-    static let idleSymbols = ["sparkles", "paperplane.fill", "wand.and.stars"]
     /// A frame gap longer than this (the app was suspended, the timeline paused) is treated as this —
     /// the plume never empties or bursts on resume.
     static let maxStep: Double = 0.1
+    /// The least time between two throws, so a burst of tool calls leaves the nozzle one by one.
+    static let throwSpacing: Double = 0.22
+    /// The most throws waiting their turn at the nozzle; past it the oldest waiting are dropped.
+    static let maxQueuedThrows = 6
 
     private(set) var plume: PropulsionPlume
-    /// The symbol fading IN (fully shown once `crossfade` reaches 1).
-    private(set) var symbol: String
-    /// The symbol fading OUT, or nil once the last cross-fade finished.
-    private(set) var previousSymbol: String?
-    /// 0 → 1 across a cross-fade; 1 when settled.
-    private(set) var crossfade: Double = 1
-    private(set) var idleIndex = 0
-    private(set) var idleElapsed: Double = 0
+    /// Throws seen but not yet launched, oldest first.
+    private(set) var queued: [PlumeThrow] = []
+    /// Every throw id this plume has seen — launched, queued, or (on the first tick) already done
+    /// before the plume appeared.
+    private var seen: Set<String> = []
+    private var primed = false
+    private var sinceLastThrow: Double = .infinity
 
     /// The plume starts already full (pre-warmed), so it never visibly "fills up" when the working
     /// pill appears.
-    init(toolSymbol: String? = nil, seed: UInt64 = PropulsionPlume.defaultSeed) {
-        symbol = toolSymbol ?? Self.idleSymbols[0]
+    init(seed: UInt64 = PropulsionPlume.defaultSeed) {
         plume = PropulsionPlume(seed: seed, prewarmed: true)
     }
 
-    /// Advance by `dt` seconds. `toolSymbol` is the running tool's symbol (`workingToolSymbol(for:)`),
-    /// or nil while the agent is thinking between tools. `animatesPlume` false (Reduce Motion) holds
-    /// the plume still and keeps only the icon's cross-fade.
-    mutating func tick(dt rawDt: Double, toolSymbol: String?, animatesPlume: Bool = true) {
+    /// Advance by `dt` seconds. `thrown` is the turn's tool uses so far (`plumeThrows(for:)`); any
+    /// not seen before is queued and leaves the nozzle at the next free slot. What was already in the
+    /// list on the FIRST tick happened before this plume appeared (the pill was summoned mid-turn),
+    /// and is not thrown — no burst of stale tiles. `animatesPlume` false (Reduce Motion) holds the
+    /// plume still and throws nothing.
+    mutating func tick(dt rawDt: Double, thrown incoming: [PlumeThrow] = [], animatesPlume: Bool = true) {
         let dt = max(0, min(rawDt, Self.maxStep))
-        if animatesPlume { plume.advance(dt: dt) }
-
-        let target: String
-        if let toolSymbol {
-            target = toolSymbol
-            idleElapsed = 0
+        if !primed {
+            primed = true
+            seen = Set(incoming.map(\.id))
         } else {
-            idleElapsed += dt
-            if idleElapsed >= Self.idleSymbolHoldSeconds {
-                idleElapsed -= Self.idleSymbolHoldSeconds
-                idleIndex = (idleIndex + 1) % Self.idleSymbols.count
-            }
-            target = Self.idleSymbols[idleIndex]
+            for item in incoming where seen.insert(item.id).inserted { queued.append(item) }
+            if queued.count > Self.maxQueuedThrows { queued.removeFirst(queued.count - Self.maxQueuedThrows) }
         }
-
-        if target != symbol {
-            // A change mid-fade restarts the fade from the symbol that was arriving: the one leaving
-            // is whatever was most visible, never a symbol that had already gone.
-            previousSymbol = symbol
-            symbol = target
-            crossfade = 0
-        } else if crossfade < 1 {
-            crossfade = min(1, crossfade + dt / Self.crossfadeSeconds)
-            if crossfade >= 1 { previousSymbol = nil }
+        guard animatesPlume else { return }
+        plume.advance(dt: dt)
+        sinceLastThrow += dt
+        if !queued.isEmpty, sinceLastThrow >= Self.throwSpacing {
+            plume.launch(queued.removeFirst())
+            sinceLastThrow = 0
         }
     }
+}
 
-    /// The arriving symbol's opacity.
-    var symbolOpacity: Double { crossfade }
-    /// The leaving symbol's opacity (0 once it has gone).
-    var previousSymbolOpacity: Double { previousSymbol == nil ? 0 : 1 - crossfade }
+/// One thing thrown out of the plume: a tool's tile, or a site's favicon. `id` is stable across
+/// renders (the tool call's id, plus the host for a site), so each is thrown exactly once.
+struct PlumeThrow: Equatable, Hashable {
+    enum Kind: Equatable, Hashable {
+        /// A tool: its SF Symbol (`workingToolSymbol(for:)`) on its own colour (`plumeToolTileColor`).
+        case tool(symbol: String)
+        /// A website the agent read or found: its favicon on white.
+        case site(host: String)
+    }
+    let id: String
+    let kind: Kind
+}
+
+/// PURE: what an exchange's tool uses throw, in order. Each tool call throws its tile when it is
+/// made. The web throws favicons instead: a fetch throws its page's site at once, and a search throws
+/// its tile at once and then the sites in its RESULTS (up to `plumeSitesPerSearch`) when they arrive.
+/// The last `plumeThrowWindow` only — older ones were thrown long ago.
+func plumeThrows(for exchange: Exchange?) -> [PlumeThrow] {
+    guard let exchange else { return [] }
+    var out: [PlumeThrow] = []
+    for (index, item) in exchange.activity.enumerated() {
+        guard case let .tool(name, detail, callId, output, _, _) = item.kind else { continue }
+        let base = callId ?? "activity-\(index)"
+        let lowered = name.lowercased()
+        if plumeFetchToolNames.contains(lowered), let host = detail.flatMap(plumeHosts(in:)).flatMap(\.first) {
+            out.append(PlumeThrow(id: base + "#" + host, kind: .site(host: host)))
+            continue
+        }
+        out.append(PlumeThrow(id: base, kind: .tool(symbol: workingToolSymbol(for: name))))
+        if plumeIsSearchTool(lowered), let output {
+            for host in plumeHosts(in: output).prefix(plumeSitesPerSearch) {
+                out.append(PlumeThrow(id: base + "#" + host, kind: .site(host: host)))
+            }
+        }
+    }
+    return Array(out.suffix(plumeThrowWindow))
+}
+
+let plumeSitesPerSearch = 4
+let plumeThrowWindow = 40
+let plumeFetchToolNames: Set<String> = ["webfetch", "web_fetch", "readpage"]
+
+func plumeIsSearchTool(_ lowered: String) -> Bool {
+    ["websearch", "web_search", "search"].contains(lowered) || lowered.hasPrefix("mcp__winter__research__")
+}
+
+/// PURE: the distinct hosts of the http(s) urls in `text`, in order of first appearance — only
+/// public-looking names (`plumeFaviconHostAllowed`), since each one is asked for its favicon.
+func plumeHosts(in text: String) -> [String] {
+    guard let regex = try? NSRegularExpression(pattern: #"https?://([A-Za-z0-9.-]+)"#) else { return [] }
+    var seen: Set<String> = []
+    var hosts: [String] = []
+    let range = NSRange(text.startIndex..., in: text)
+    for match in regex.matches(in: text, range: range) {
+        guard let r = Range(match.range(at: 1), in: text) else { continue }
+        let host = text[r].lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        guard plumeFaviconHostAllowed(host), seen.insert(host).inserted else { continue }
+        hosts.append(host)
+    }
+    return hosts
+}
+
+/// PURE: a host whose favicon the pill may fetch — a dotted DNS name, never an IP literal, never
+/// `localhost` or a `.local`/`.internal` name: the pill must not go poking the user's own network
+/// because a url appeared in a tool's output.
+func plumeFaviconHostAllowed(_ host: String) -> Bool {
+    guard host.contains("."), host.count <= 253, !host.hasPrefix("-") else { return false }
+    if host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".local") || host.hasSuffix(".internal") {
+        return false
+    }
+    let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+    guard let tld = labels.last, tld.contains(where: \.isLetter) else { return false } // 10.0.0.1 and friends
+    return labels.allSatisfy { !$0.isEmpty && $0.count <= 63 }
+}
+
+/// PURE: a tool tile's colour — one per symbol, stable across launches (FNV-1a over its name, never
+/// `hashValue`, which Swift seeds per process), from a set of bright colours that read under a white
+/// glyph and stand apart from the plume's own blue.
+func plumeToolTileColor(symbol: String) -> PlumePalette.RGB {
+    let colours: [PlumePalette.RGB] = [
+        (1.0, 0.55, 0.10),  // orange
+        (1.0, 0.30, 0.52),  // pink
+        (0.62, 0.40, 1.0),  // purple
+        (0.08, 0.76, 0.68), // teal
+        (0.96, 0.74, 0.08), // gold
+        (0.28, 0.78, 0.34), // green
+        (1.0, 0.34, 0.30),  // red
+        (0.40, 0.44, 1.0),  // indigo
+    ]
+    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+    for byte in symbol.utf8 { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
+    return colours[Int(hash % UInt64(colours.count))]
 }
 
 /// The plume itself: puffs (and sparks) born at the nozzle, aging until they reach the tail. Kept in
@@ -112,7 +188,30 @@ struct PropulsionPlume: Equatable {
     /// fast at the tail (where they thin out) — what reads as thrust.
     static let travelExponent: Double = 1.7
 
+    /// A thrown tile riding the plume (`launch(_:)`).
+    struct Token: Equatable {
+        var age: Double
+        let lifetime: Double
+        let lane: Double
+        /// Which way, and how hard, it tumbles: -1 … 1.
+        let spin: Double
+        let item: PlumeThrow
+    }
+
+    static let tokenLifetime: ClosedRange<Double> = 1.5...1.85
+    /// A tile's side at the nozzle, as a share of the plume's height.
+    static let tokenSideShare: Double = 0.56
+    /// How much of its size a tile has lost by the tail.
+    static let tokenShrinkAlongPlume: Double = 0.5
+    /// The first share of its life over which a tile grows out of the nozzle.
+    static let tokenEmergeShare: Double = 0.08
+    /// The most a tile turns over its whole ride, radians.
+    static let tokenMaxTurn: Double = 0.9
+    /// Tiles slow at the nozzle like the puffs, but less — they are flung, not blown.
+    static let tokenTravelExponent: Double = 1.35
+
     private(set) var puffs: [Puff] = []
+    private(set) var tokens: [Token] = []
     private var puffDebt: Double = 0
     private var sparkDebt: Double = 0
     private var rng: SplitMix64
@@ -128,6 +227,8 @@ struct PropulsionPlume: Equatable {
         guard dt > 0 else { return }
         for i in puffs.indices { puffs[i].age += dt }
         puffs.removeAll { $0.age >= $0.lifetime }
+        for i in tokens.indices { tokens[i].age += dt }
+        tokens.removeAll { $0.age >= $0.lifetime }
         puffDebt += dt * Self.puffsPerSecond
         while puffDebt >= 1 {
             puffDebt -= 1
@@ -139,6 +240,34 @@ struct PropulsionPlume: Equatable {
             sparkDebt -= 1
             spawn(age: sparkDebt / Self.sparksPerSecond, spark: true)
         }
+    }
+
+    /// Throw `item` out of the nozzle now.
+    mutating func launch(_ item: PlumeThrow) {
+        tokens.append(Token(age: 0, lifetime: rng.next(in: Self.tokenLifetime), lane: rng.next(in: -0.85...0.85),
+                            spin: rng.next(in: -1...1), item: item))
+    }
+
+    /// Every riding tile laid out in `rect`, oldest first (the newest, nearest the nozzle, on top).
+    func tiles(in rect: CGRect, emitterX: CGFloat, tailX: CGFloat) -> [PlumeTile] {
+        tokens.map { Self.tile(for: $0, in: rect, emitterX: emitterX, tailX: tailX) }.filter { $0.side > 0.5 }
+    }
+
+    /// PURE: one tile's square. It grows out of the nozzle over `tokenEmergeShare` of its life, rides
+    /// down the plume drifting to its lane and tumbling, shrinks as it goes, and vanishes to nothing
+    /// at the tail like a puff.
+    static func tile(for token: Token, in rect: CGRect, emitterX: CGFloat, tailX: CGFloat) -> PlumeTile {
+        let p = min(max(token.age / token.lifetime, 0), 1)
+        let travel = pow(p, tokenTravelExponent)
+        let x = Double(emitterX) - travel * Double(emitterX - tailX)
+        let height = Double(rect.height)
+        var side = height * tokenSideShare * (1 - tokenShrinkAlongPlume * p)
+        side *= min(1, 0.35 + 0.65 * p / tokenEmergeShare)
+        side *= min(1, (1 - p) / vanishShare)
+        let slack = max(0, (height - side) / 2)
+        let y = Double(rect.midY) + token.lane * slack * min(1, p * 2.5)
+        return PlumeTile(center: CGPoint(x: x, y: y), side: CGFloat(max(0, side)),
+                         rotation: token.spin * tokenMaxTurn * p, item: token.item)
     }
 
     private mutating func spawn(age: Double, spark: Bool) {
@@ -173,6 +302,14 @@ struct PropulsionPlume: Equatable {
         return PlumeCircle(center: CGPoint(x: x, y: y), diameter: CGFloat(max(0, diameter)),
                            heat: puff.spark ? 1 : 1 - p, spark: puff.spark)
     }
+}
+
+/// A thrown tile's square, laid out: centre, side, and how far it has turned (radians).
+struct PlumeTile: Equatable {
+    let center: CGPoint
+    let side: CGFloat
+    let rotation: Double
+    let item: PlumeThrow
 }
 
 struct PlumeCircle: Equatable {
@@ -302,33 +439,31 @@ func workingToolName(_ status: OrbStatus) -> String? {
 
 /// The working animation, filling whatever frame it is given: the plume streams from a nozzle
 /// `emitterInset` in from the trailing edge (by default half the height — the centre of a round
-/// trailing button the height of the frame, which is where the pill's stop button sits) toward the
-/// leading end, where the tool icon cross-fades (`showsIcon`). `toolName` nil means "thinking".
+/// trailing button the height of the frame, which is where the pill's stop button sits) all the way
+/// to the leading end, and `thrown` items leave the nozzle as tiles riding it.
 struct WorkingAnimationView: View {
-    let toolName: String?
-    var showsIcon = true
+    var thrown: [PlumeThrow] = []
     var emitterInset: CGFloat?
     var palette: PlumePalette = .blue
-    var iconFont: Font = Typography.label(.semibold)
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var model = WorkingAnimationModel()
+    @State private var model: WorkingAnimationModel
     @State private var lastTick: Date?
 
-    private var toolSymbol: String? { toolName.map(workingToolSymbol(for:)) }
+    /// `initialModel` starts the plume from a model already run forward (offscreen renders); the app
+    /// never passes one.
+    init(thrown: [PlumeThrow] = [], emitterInset: CGFloat? = nil, palette: PlumePalette = .blue,
+         initialModel: WorkingAnimationModel? = nil) {
+        self.thrown = thrown
+        self.emitterInset = emitterInset
+        self.palette = palette
+        _model = State(initialValue: initialModel ?? WorkingAnimationModel())
+    }
 
     var body: some View {
         TimelineView(.animation) { timeline in
-            GeometryReader { proxy in
-                let height = proxy.size.height
-                ZStack(alignment: .leading) {
-                    plume
-                    if showsIcon {
-                        icon.frame(width: height, height: height)
-                    }
-                }
-            }
-            .onChange(of: timeline.date) { _, now in step(now) }
+            plume
+                .onChange(of: timeline.date) { _, now in step(now) }
         }
         .accessibilityElement()
         .accessibilityLabel("Working")
@@ -336,13 +471,20 @@ struct WorkingAnimationView: View {
 
     private var plume: some View {
         let model = self.model
-        let showsIcon = self.showsIcon
         let emitterInset = self.emitterInset
         let palette = self.palette
+        // Favicons are looked up HERE, on the main actor, for the tiles riding right now; the
+        // Canvas below only draws what it is handed.
+        var favicons: [String: NSImage] = [:]
+        for token in model.plume.tokens {
+            if case .site(let host) = token.item.kind, let image = FaviconCache.shared.image(for: host) {
+                favicons[host] = image
+            }
+        }
         return Canvas { context, size in
             let rect = CGRect(origin: .zero, size: size)
             let emitterX = size.width - (emitterInset ?? size.height / 2)
-            let tailX = showsIcon ? size.height * 1.15 : size.height * 0.3
+            let tailX = size.height * 0.3
             let circles = model.plume.circles(in: rect, emitterX: emitterX, tailX: tailX)
 
             // A soft glow under everything, added rather than painted, so the bunched nozzle
@@ -362,20 +504,48 @@ struct WorkingAnimationView: View {
             for circle in circles where circle.spark {
                 context.fill(Self.disc(circle), with: .color(Self.color(heat: 1, palette).opacity(0.95)))
             }
+            // The thrown tiles ride on top of the exhaust.
+            for tile in model.plume.tiles(in: rect, emitterX: emitterX, tailX: tailX) {
+                Self.draw(tile, favicons: favicons, in: &context)
+            }
         }
     }
 
-    private var icon: some View {
-        ZStack {
-            if let previous = model.previousSymbol {
-                Image(systemName: previous)
-                    .opacity(model.previousSymbolOpacity)
+    /// One tile: a rounded square, turned by its tumble — a tool's white symbol on its own colour, or
+    /// a site's favicon on white (a globe until the favicon has loaded, or if it never does).
+    private static func draw(_ tile: PlumeTile, favicons: [String: NSImage], in context: inout GraphicsContext) {
+        var ctx = context
+        ctx.translateBy(x: tile.center.x, y: tile.center.y)
+        ctx.rotate(by: .radians(tile.rotation))
+        let side = tile.side
+        let square = CGRect(x: -side / 2, y: -side / 2, width: side, height: side)
+        let shape = Path(roundedRect: square, cornerRadius: side * 0.26, style: .continuous)
+        switch tile.item.kind {
+        case .tool(let symbol):
+            let c = plumeToolTileColor(symbol: symbol)
+            ctx.fill(shape, with: .color(Color(red: c.red, green: c.green, blue: c.blue)))
+            drawSymbol(symbol, color: .white, in: square.insetBy(dx: side * 0.22, dy: side * 0.22), context: &ctx)
+        case .site(let host):
+            ctx.fill(shape, with: .color(.white))
+            let inner = square.insetBy(dx: side * 0.17, dy: side * 0.17)
+            if let image = favicons[host] {
+                ctx.clip(to: Path(roundedRect: inner, cornerRadius: side * 0.1))
+                ctx.draw(Image(nsImage: image).resizable(), in: inner)
+            } else {
+                drawSymbol("globe", color: Color(white: 0.45), in: inner.insetBy(dx: side * 0.04, dy: side * 0.04), context: &ctx)
             }
-            Image(systemName: model.symbol)
-                .opacity(model.symbolOpacity)
         }
-        .font(iconFont)
-        .foregroundStyle(Color.white.opacity(0.92))
+    }
+
+    private static func drawSymbol(_ symbol: String, color: Color, in box: CGRect, context: inout GraphicsContext) {
+        var image = context.resolve(Image(systemName: symbol))
+        image.shading = .color(color)
+        let natural = image.size
+        guard natural.width > 0, natural.height > 0 else { return }
+        let scale = min(box.width / natural.width, box.height / natural.height)
+        let size = CGSize(width: natural.width * scale, height: natural.height * scale)
+        context.draw(image, in: CGRect(x: box.midX - size.width / 2, y: box.midY - size.height / 2,
+                                       width: size.width, height: size.height))
     }
 
     private static func disc(_ circle: PlumeCircle, scale: CGFloat = 1) -> Path {
@@ -391,6 +561,48 @@ struct WorkingAnimationView: View {
     private func step(_ now: Date) {
         let dt = lastTick.map { now.timeIntervalSince($0) } ?? (1.0 / 60.0)
         lastTick = now
-        model.tick(dt: dt, toolSymbol: toolSymbol, animatesPlume: !reduceMotion)
+        model.tick(dt: dt, thrown: thrown, animatesPlume: !reduceMotion)
+    }
+}
+
+/// The favicons the plume throws, fetched straight from each site (`https://<host>/favicon.ico`) —
+/// never through a third-party favicon service, which would tell it every site Dispatch reads — and
+/// kept in memory for the app's lifetime. A host that fails (no favicon, not an image, too big, a
+/// timeout) is not asked again; its tiles show a globe. Bounded: past `capacity` hosts nothing new
+/// is fetched.
+@MainActor
+final class FaviconCache {
+    static let shared = FaviconCache()
+    static let capacity = 256
+    static let maxBytes = 256 * 1024
+
+    private var images: [String: NSImage] = [:]
+    private var pending: Set<String> = []
+    private var failed: Set<String> = []
+
+    /// The host's favicon if it has loaded; otherwise nil, starting the fetch the first time asked.
+    func image(for host: String) -> NSImage? {
+        if let image = images[host] { return image }
+        guard plumeFaviconHostAllowed(host), !pending.contains(host), !failed.contains(host),
+              images.count + pending.count < Self.capacity,
+              let url = URL(string: "https://\(host)/favicon.ico") else { return nil }
+        pending.insert(host)
+        Task { [weak self] in
+            let image = await Self.fetch(url)
+            guard let self else { return }
+            self.pending.remove(host)
+            if let image { self.images[host] = image } else { self.failed.insert(host) }
+        }
+        return nil
+    }
+
+    private nonisolated static func fetch(_ url: URL) async -> NSImage? {
+        var request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 6)
+        request.setValue("image/*", forHTTPHeaderField: "Accept")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              !data.isEmpty, data.count <= maxBytes,
+              let image = NSImage(data: data), image.isValid else { return nil }
+        return image
     }
 }
