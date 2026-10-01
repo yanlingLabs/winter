@@ -212,10 +212,25 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         /// produce it. Optional/additive — decode only, absent on older-shaped payloads and on
         /// results from tools that don't touch a file.
         public let fileDiff: FileDiffSummary?
-        public init(seq: Int, sessionId: String, ts: Int, threadId: String, callId: String, output: String, isError: Bool, fileDiff: FileDiffSummary? = nil) {
+        /// The icon each web tool KNEW for the sites its result names (Exa's `favicon` for the
+        /// daemon's `Search`; the page's own declared icon for the runtime's `WebFetch`), in result
+        /// order — mirrors TS `ToolResultEvent.siteIcons`. Optional/additive, never model-visible;
+        /// absent on every older event and every other tool. The daemon bounds it (≤ 10 entries,
+        /// https urls ≤ 2048 chars); a client still checks each url before fetching anything.
+        public let siteIcons: [SiteIcon]?
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, callId: String, output: String, isError: Bool, fileDiff: FileDiffSummary? = nil, siteIcons: [SiteIcon]? = nil) {
             self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
             self.callId = callId; self.output = output; self.isError = isError; self.fileDiff = fileDiff
+            self.siteIcons = siteIcons
         }
+    }
+
+    /// One `ToolResult.siteIcons` entry — mirrors TS `SiteIcon` (`packages/protocol/src/events.ts`):
+    /// the page `url` the tool read or cited, and the `iconUrl` the tool knows for it.
+    public struct SiteIcon: Codable, Equatable, Sendable {
+        public let url: String
+        public let iconUrl: String
+        public init(url: String, iconUrl: String) { self.url = url; self.iconUrl = iconUrl }
     }
 
     /// SP-approvals T4: a caller-facing "grant a rule" choice offered alongside plain approve/

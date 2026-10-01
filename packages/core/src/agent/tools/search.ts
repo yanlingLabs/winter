@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { ToolDefinition, ToolRegistry } from "./registry";
 import { checkDangerousDomain } from "./page-core";
+import { noteKnownSiteIcons } from "../../runtime-sdk/site-icons";
 
 /** `/answer` SYNTHESIZES — it runs a search and then writes a grounded answer over the results, so
  *  it is materially slower than the old `/search` round trip (which only returned rows). 15 s was
@@ -40,10 +41,16 @@ export interface SearchToolDeps {
  *  `answer` is the synthesized text — a string unless the request asked for structured output,
  *  which this tool never does — and `citations` are the pages it was grounded in, each carrying at
  *  least `title` and `url`. `requestId`/`costDollars` also ride along and are deliberately ignored:
- *  neither is anything the model should be shown, and `costDollars` is not this tool's ledger. */
+ *  neither is anything the model should be shown, and `costDollars` is not this tool's ledger.
+ *
+ *  `favicon` (2026-10-01, Exa's reference for `/answer`: "The URL of the favicon for the search
+ *  result's domain" — optional, and no request field gates it, so the request body is unchanged) is
+ *  read but NEVER rendered into the output: it reaches clients only, through
+ *  `runtime-sdk/site-icons.ts` (`tool_result.siteIcons`). */
+type ExaCitation = { title?: string; url?: string; favicon?: unknown };
 interface ExaAnswerResponse {
   answer?: unknown;
-  citations?: Array<{ title?: string; url?: string }>;
+  citations?: ExaCitation[];
 }
 
 /** Shape-checks a parsed `/answer` body just enough to safely index into it — NOT full schema
@@ -54,7 +61,7 @@ interface ExaAnswerResponse {
  *  Carried over verbatim in spirit from the `/search` era's `isValidExaResults` (branch review
  *  FIX 5), which existed for exactly these three cases: `citations:"str"`, `citations:{}`,
  *  `citations:[null]` — all three are `parse_error`, the outcome that already exists for them. */
-function isValidExaCitations(value: unknown): value is Array<{ title?: string; url?: string }> | undefined {
+function isValidExaCitations(value: unknown): value is ExaCitation[] | undefined {
   if (value === undefined) return true;
   if (!Array.isArray(value)) return false;
   return value.every((item) => item !== null && typeof item === "object");
@@ -209,6 +216,12 @@ export function searchToolDefs(deps: SearchToolDeps = {}): ToolDefinition[] {
           : "";
 
         outcome = "ok";
+        // The cited pages' icons, for the clients and never the model: only citations that survived
+        // the floor, and only sendable https urls (`site-icons.ts` checks both). The Search PostToolUse
+        // hook (`hooks.ts`) pairs them with this call's id through the urls the output below names.
+        if (ctx.sessionId) {
+          noteKnownSiteIcons(ctx.sessionId, citations.flatMap((c) => (typeof c.url === "string" && typeof c.favicon === "string" ? [{ url: c.url, iconUrl: c.favicon }] : [])));
+        }
         if (answer === "") return `no answer for ${query}${withheldNote}`;
         // An answer with NOTHING left to attribute is still the answer — the user asked a question
         // and a refusal here would be a worse outcome than an honest label. It is MARKED, because an

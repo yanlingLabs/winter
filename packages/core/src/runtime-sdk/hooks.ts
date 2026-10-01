@@ -64,6 +64,8 @@ import { computeLineDiff } from "../diffs/myers";
 import { DIFF_PATCH_MAX_BYTES, mintDiffId, writeDiff } from "../diffs/store";
 import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
+import { attachSiteIcons, siteIconsInText } from "./site-icons";
+import { capabilityToolName } from "../capabilities/names";
 import { REVIEWER_ESCALATION_REASON, noteReviewerCleared } from "./bridge-common";
 import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFenceFor, homeFencedDirs, homeFencedFiles, isHomeWriteOnly } from "./home-fence";
 import { controlPlaneDenialMessage, controlPlaneTargetForCall } from "./control-plane";
@@ -1522,6 +1524,30 @@ function fileDiffPostToolUseHook(deps: SessionHooksDeps, pending: Map<string, Pe
   };
 }
 
+/** The daemon's own `Search`, as the child names it (`capabilities/research.ts`). */
+export const SEARCH_CAPABILITY_TOOL = capabilityToolName("research", "Search");
+
+/** `PostToolUse`, matched on the daemon's `Search` — pairs the page icons Search's `run` recorded for
+ *  this session (Exa's citation `favicon`s, `site-icons.ts`) with THIS call's id, from the urls the
+ *  result text names, and hands them to the projector (`attachSiteIcons` → `takeSiteIcons`, the
+ *  `fileDiff` hand-off's shape). An observer: it never denies, never changes the output, and a
+ *  failure here can only cost the pill an icon. */
+function searchSiteIconsPostToolUseHook(deps: SessionHooksDeps): HookCallback {
+  return async (input) => {
+    try {
+      const post = input as PostToolUseHookInput;
+      const text = typeof post.tool_response === "string" ? post.tool_response : "";
+      const icons = siteIconsInText(deps.sessionId, text);
+      if (icons !== undefined && typeof post.tool_use_id === "string" && post.tool_use_id.length > 0) {
+        attachSiteIcons(deps.sessionId, post.tool_use_id, icons);
+      }
+    } catch (err) {
+      console.error(`hooks: failed to attach Search's site icons: ${err instanceof Error ? err.name : "unknown error"}`);
+    }
+    return allow();
+  };
+}
+
 /** `PostToolUse`, matched per file-mutating tool — the SAME diagnostics-after-edit CC parity the
  *  retired engine ran (ported to Winter's own tool names/shapes in `auto-diagnostics.ts`). Skipped
  *  entirely (no LSP round trip at all) when `deps.lsp` was never wired, or when
@@ -1838,6 +1864,9 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
     if (deps.lsp) hooks.push(diagnosticsPostToolUseHook(deps));
     if (hooks.length > 0) postToolUse.push({ matcher: tool, hooks });
   }
+  // `tool_result.siteIcons` for the daemon's own Search (`searchSiteIconsPostToolUseHook`). Every
+  // mode: the tool exists only in chat and dispatch, and the hook is inert for any other result.
+  postToolUse.push({ matcher: SEARCH_CAPABILITY_TOOL, hooks: [searchSiteIconsPostToolUseHook(deps)] });
 
   // Review r1 MAJOR 2: the failure twin of the unmatched PostToolUse plugin-observation group —
   // see `pluginPostToolUseFailureHook`'s own doc comment for why this is a SEPARATE SDK event
