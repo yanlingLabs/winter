@@ -49,10 +49,18 @@ async function runSearch(citations: unknown[], sessionId = SID): Promise<string>
   return res.content.map((c) => c.text).join("\n");
 }
 
+/** What the runtime does for a PostToolUse on the Search tool: run every UNMATCHED group's callbacks
+ *  (the Search icon hook lives in one and filters on `tool_name` itself). */
 function searchPostHook(sessionId = SID): HookCallbackMatcher {
-  const group = sessionHooksFor({ sessionId, roots: ["/tmp"] }).winter?.PostToolUse?.find((g) => g.matcher === SEARCH_CAPABILITY_TOOL);
-  if (!group) throw new Error("no Search PostToolUse group");
-  return group;
+  const groups = (sessionHooksFor({ sessionId, roots: ["/tmp"] }).winter?.PostToolUse ?? []).filter((g) => g.matcher === undefined);
+  if (groups.length === 0) throw new Error("no unmatched PostToolUse group");
+  return {
+    hooks: [async (input, id, opts) => {
+      let last: unknown = {};
+      for (const g of groups) for (const h of g.hooks) last = await h(input, id, opts);
+      return last as never;
+    }],
+  };
 }
 
 function postInput(toolUseId: string, response: unknown): PostToolUseHookInput {
@@ -71,7 +79,7 @@ describe("Search → hook → projector", () => {
     expect(output).not.toContain("evil.example");
 
     const hook = searchPostHook();
-    expect(hook.matcher).toBe("mcp__winter__research__Search");
+    expect(SEARCH_CAPABILITY_TOOL).toBe("mcp__winter__research__Search");
     await hook.hooks[0]!(postInput("toolu_s1", output), "toolu_s1", { signal: abortSignal() });
 
     const { projector } = makeProjector({ sessionId: SID, mode: "dispatch" });
@@ -109,6 +117,12 @@ describe("Search → hook → projector", () => {
     const output = await runSearch(CITATIONS, "s_other");
     await searchPostHook().hooks[0]!(postInput("toolu_s3", output), "toolu_s3", { signal: abortSignal() });
     expect(takeSiteIcons(SID, "toolu_s3")).toBeUndefined();
+  });
+
+  test("another tool's result naming the same urls attaches nothing (the unmatched hook filters on tool_name)", async () => {
+    const output = await runSearch(CITATIONS);
+    await searchPostHook().hooks[0]!({ ...postInput("toolu_x", output), tool_name: "WebFetch" }, "toolu_x", { signal: abortSignal() });
+    expect(takeSiteIcons(SID, "toolu_x")).toBeUndefined();
   });
 
   test("a non-string tool_response is ignored, never thrown on", async () => {

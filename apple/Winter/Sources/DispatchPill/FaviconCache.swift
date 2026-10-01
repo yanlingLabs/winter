@@ -10,8 +10,9 @@ import UniformTypeIdentifiers
 /// **This is not a persistent cache.** Nothing is written to disk and nothing outlives the app's run:
 /// the icon url arrives fresh with every result, so a stored copy could only ever be staler than what
 /// the tool just said. What is kept is a small in-memory DEDUPE, keyed by the icon url, so a tile
-/// redrawn every frame (and the same site met again this run) does not refetch — the decoded image,
-/// the urls still in flight, and the ones that failed (which stay a globe rather than retrying).
+/// redrawn every frame (and the same site met again this run) does not refetch — the decoded images
+/// (at most `memoryCapacity`, least recently drawn dropped first), the urls still in flight, and the
+/// ones that failed (a globe, not retried for `failureRetryAfter`).
 ///
 /// With no icon url known (an older daemon or runtime, a source Exa had no favicon for) the site gets
 /// ONE attempt at `https://<host>/favicon.ico`, deduped the same way, then a globe.
@@ -23,8 +24,12 @@ import UniformTypeIdentifiers
 final class FaviconCache {
     static let shared = FaviconCache()
 
-    /// The most icon urls one run holds in any state; past it nothing new is fetched (a globe).
+    /// The most decoded icons one run holds; past it the least recently drawn is dropped (and simply
+    /// fetched again if its site comes back). Failures and in-flight fetches are capped the same.
     static let memoryCapacity = 256
+    /// A failed icon url stays a globe this long, then may be tried again (an offline moment must not
+    /// grey a site out for the rest of a long-running menu-bar app's life).
+    static let failureRetryAfter: TimeInterval = 5 * 60
     static let maxIconBytes = 256 * 1024
     static let iconPixelSize = 64
 
@@ -33,27 +38,38 @@ final class FaviconCache {
     typealias Fetch = @Sendable (_ url: URL, _ maxBytes: Int) async -> Data?
 
     private let fetch: Fetch
+    private let now: () -> Date
     private var images: [URL: NSImage] = [:]
+    /// `images`' keys, least recently drawn first.
+    private var recency: [URL] = []
     private var pending: Set<URL> = []
-    private var failed: Set<URL> = []
+    private var failed: [URL: Date] = [:]
 
-    init(fetch: @escaping Fetch = FaviconCache.networkFetch) {
+    init(fetch: @escaping Fetch = FaviconCache.networkFetch, now: @escaping () -> Date = { Date() }) {
         self.fetch = fetch
+        self.now = now
     }
 
     /// The site's icon if it is in memory; otherwise nil, starting the one fetch of it the first time
     /// asked. Called every frame by the plume, so it must stay cheap: it never blocks.
     func image(host: String, iconURL: String?) -> NSImage? {
         guard let url = faviconRequestURL(host: host, iconURL: iconURL) else { return nil }
-        if let image = images[url] { return image }
-        guard !pending.contains(url), !failed.contains(url),
-              images.count + pending.count + failed.count < Self.memoryCapacity else { return nil }
+        if let image = images[url] {
+            if recency.last != url, let i = recency.firstIndex(of: url) { recency.append(recency.remove(at: i)) }
+            return image
+        }
+        if let failedAt = failed[url] {
+            guard now().timeIntervalSince(failedAt) >= Self.failureRetryAfter else { return nil }
+            failed[url] = nil
+        }
+        guard !pending.contains(url), pending.count < Self.memoryCapacity else { return nil }
         pending.insert(url)
         Task { await self.load(url) }
         return nil
     }
 
     var pendingCountForTesting: Int { pending.count }
+    var imageCountForTesting: Int { images.count }
 
     private func load(_ url: URL) async {
         defer { pending.remove(url) }
@@ -64,8 +80,13 @@ final class FaviconCache {
         }.value
         if let png, let image = NSImage(data: png) {
             images[url] = image
+            recency.append(url)
+            while recency.count > Self.memoryCapacity { images[recency.removeFirst()] = nil }
         } else {
-            failed.insert(url)
+            if failed.count >= Self.memoryCapacity, let oldest = failed.min(by: { $0.value < $1.value })?.key {
+                failed[oldest] = nil
+            }
+            failed[url] = now()
         }
     }
 
