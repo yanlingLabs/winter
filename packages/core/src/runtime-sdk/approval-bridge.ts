@@ -436,6 +436,8 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     emit: deps.emit,
     log,
     now,
+    // A dispatch child's question is relayed to its coordinator and bounded like its approvals.
+    ...(cardsRelayedToDispatch(deps) ? { timeoutMs: DISPATCH_CHILD_APPROVAL_TIMEOUT_MS } : {}),
   });
 
   const withdrawPending = (callId: string): boolean => {

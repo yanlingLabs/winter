@@ -167,7 +167,8 @@ export interface ConnectorVerdictInput {
   readOnly: boolean;
   policy: SessionApprovalPolicy;
   mode: SessionMode;
-  /** `SessionMeta.origin`; `"dispatch-child"` keeps the never-prompt rule. */
+  /** `SessionMeta.origin`. A `"dispatch-child"` is a code session, so it takes the code row; its
+   *  "ask" is a card relayed to its coordinator (`approval-bridge.ts`'s `cardsRelayedToDispatch`). */
   origin?: string;
 }
 
