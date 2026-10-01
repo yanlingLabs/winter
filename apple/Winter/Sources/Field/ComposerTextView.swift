@@ -49,6 +49,9 @@ struct ComposerTextView: NSViewRepresentable {
     /// requires. Defaults `false` so the field's own call-site (`WinterFieldView.swift`) is
     /// byte-identical / zero behavior change; only the window opts in.
     var usesAdaptiveColors: Bool = false
+    /// One colour for the typed text AND the caret, over whatever `usesAdaptiveColors` picks — the
+    /// dispatch pill types in its own blue. `nil` (the default) leaves every other surface as it was.
+    var tintOverride: NSColor? = nil
     /// The typed text's point size. The default is BOUND to the user-message size (ruling
     /// 2026-08-13: the composer types at the size the sent bubble renders, derived from the
     /// same live metrics, so the two can never diverge). NO home overrides it any more: the
@@ -144,6 +147,11 @@ struct ComposerTextView: NSViewRepresentable {
         textView.insertionPointColor = usesAdaptiveColors
             ? (NSColor(named: "AccentColor") ?? .labelColor)
             : .white
+        if let tintOverride {
+            textView.textColor = tintOverride
+            textView.typingAttributes[.foregroundColor] = tintOverride
+            textView.insertionPointColor = tintOverride
+        }
         textView.string = text
         textView.onSubmit = onSubmit
         textView.onFocusKey = onFocusKey

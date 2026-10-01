@@ -2,11 +2,9 @@ import XCTest
 import AppKit
 @testable import Winter
 
-/// The working animation's model: the particle ring's rotation, the icon cross-fade, the idle
-/// symbol rotation, and the tool→symbol map.
+/// The working animation's model: the plume's flow, the icon cross-fade, the idle symbol rotation,
+/// and the tool→symbol map.
 final class WorkingAnimationTests: XCTestCase {
-    private let period = WorkingAnimationModel.revolutionSeconds
-
     /// Advance in frame-sized steps — a single tick is clamped to `maxStep`.
     private func advance(_ model: inout WorkingAnimationModel, by seconds: Double, toolSymbol: String?) {
         var left = seconds
@@ -17,54 +15,134 @@ final class WorkingAnimationTests: XCTestCase {
         }
     }
 
-    func testTheRingTurnsAtItsRevolutionRate() {
-        var model = WorkingAnimationModel()
-        advance(&model, by: period / 4, toolSymbol: nil)
-        XCTAssertEqual(model.angle, .pi / 2, accuracy: 1e-9)
-        advance(&model, by: period / 4, toolSymbol: nil)
-        XCTAssertEqual(model.angle, .pi, accuracy: 1e-9)
+    // MARK: - The plume
+
+    private let rect = CGRect(x: 0, y: 0, width: 300, height: 44)
+    private let emitterX: CGFloat = 278
+    private let tailX: CGFloat = 50
+
+    private func puff(_ progress: Double, lane: Double = 0, size: Double = 1, spark: Bool = false) -> PropulsionPlume.Puff {
+        PropulsionPlume.Puff(age: progress, lifetime: 1, lane: lane, size: size, spark: spark)
     }
 
-    func testTheAngleWrapsAndNeverJumpsOnAStall() {
+    func testAPuffIsBornAtTheNozzleBigHotAndOnTheMidLine() {
+        let c = PropulsionPlume.circle(for: puff(0, lane: 1), in: rect, emitterX: emitterX, tailX: tailX)
+        XCTAssertEqual(c.center.x, emitterX, accuracy: 1e-9)
+        XCTAssertEqual(c.center.y, rect.midY, accuracy: 1e-9, "no spread yet at the nozzle")
+        XCTAssertEqual(c.diameter, rect.height * PropulsionPlume.nozzleDiameterShare, accuracy: 1e-9)
+        XCTAssertEqual(c.heat, 1)
+    }
+
+    func testDownThePlumeAPuffTravelsLeftShrinksSpreadsAndCools() {
+        var last = PropulsionPlume.circle(for: puff(0, lane: 1), in: rect, emitterX: emitterX, tailX: tailX)
+        for p in stride(from: 0.1, through: 0.8, by: 0.1) {
+            let c = PropulsionPlume.circle(for: puff(p, lane: 1), in: rect, emitterX: emitterX, tailX: tailX)
+            XCTAssertLessThan(c.center.x, last.center.x, "streams toward the leading end")
+            XCTAssertLessThan(c.diameter, last.diameter, "shrinks")
+            XCTAssertLessThan(c.heat, last.heat, "cools")
+            XCTAssertGreaterThanOrEqual(c.center.y, last.center.y, "drifts out to its lane")
+            last = c
+        }
+    }
+
+    func testPuffsBunchAtTheNozzleAndThinOutDownstream() {
+        // Equal slices of life cover less ground near the nozzle than near the tail — the clumping
+        // that reads as thrust.
+        let x = { (p: Double) in PropulsionPlume.circle(for: self.puff(p), in: self.rect,
+                                                        emitterX: self.emitterX, tailX: self.tailX).center.x }
+        XCTAssertLessThan(x(0) - x(0.2), x(0.6) - x(0.8))
+    }
+
+    func testAPuffShrinksAwayToNothingAtTheTailNeverPops() {
+        let end = PropulsionPlume.circle(for: puff(1), in: rect, emitterX: emitterX, tailX: tailX)
+        XCTAssertEqual(end.diameter, 0, accuracy: 1e-9)
+        XCTAssertEqual(end.center.x, tailX, accuracy: 1e-9)
+        let nearly = PropulsionPlume.circle(for: puff(0.97), in: rect, emitterX: emitterX, tailX: tailX)
+        XCTAssertLessThan(nearly.diameter, 4)
+    }
+
+    func testEveryCircleStaysInsideThePlumesHeight() {
+        for p in stride(from: 0.0, through: 1.0, by: 0.05) {
+            for lane in [-1.0, -0.4, 0, 0.7, 1] {
+                for spark in [false, true] {
+                    let c = PropulsionPlume.circle(for: puff(p, lane: lane, spark: spark), in: rect,
+                                                   emitterX: emitterX, tailX: tailX)
+                    XCTAssertGreaterThanOrEqual(c.center.y - c.diameter / 2, rect.minY - 1e-9)
+                    XCTAssertLessThanOrEqual(c.center.y + c.diameter / 2, rect.maxY + 1e-9)
+                }
+            }
+        }
+    }
+
+    func testSparksAreSmallHotAndQuickerThanPuffs() {
+        let spark = PropulsionPlume.circle(for: puff(0.5, spark: true), in: rect, emitterX: emitterX, tailX: tailX)
+        let puffCircle = PropulsionPlume.circle(for: puff(0.5), in: rect, emitterX: emitterX, tailX: tailX)
+        XCTAssertLessThan(spark.diameter, puffCircle.diameter / 2)
+        XCTAssertEqual(spark.heat, 1)
+        XCTAssertLessThan(spark.center.x, puffCircle.center.x, "further down the plume at the same progress")
+    }
+
+    func testTheWorkingPlumeStartsFullAndStaysFull() {
         var model = WorkingAnimationModel()
-        for _ in 0..<200 { model.tick(dt: 1.0 / 60.0, toolSymbol: nil) }
-        XCTAssertGreaterThanOrEqual(model.angle, 0)
-        XCTAssertLessThan(model.angle, 2 * .pi)
-        let before = model.angle
+        let initial = model.plume.circles(in: rect, emitterX: emitterX, tailX: tailX)
+        XCTAssertGreaterThan(initial.count, 15, "pre-warmed: never visibly fills up")
+        XCTAssertTrue(initial.contains { $0.center.x < (emitterX + tailX) / 2 }, "already reaching the tail")
+        let cap = Int(PropulsionPlume.puffsPerSecond * PropulsionPlume.puffLifetime.upperBound
+                      + PropulsionPlume.sparksPerSecond * PropulsionPlume.sparkLifetime.upperBound) + 2
+        for _ in 0..<600 {
+            model.tick(dt: 1.0 / 60.0, toolSymbol: nil)
+            XCTAssertLessThanOrEqual(model.plume.puffs.count, cap)
+            XCTAssertGreaterThan(model.plume.puffs.count, 15)
+        }
+    }
+
+    func testThePlumeFlows() {
+        var model = WorkingAnimationModel()
+        let before = model.plume.puffs
+        model.tick(dt: 1.0 / 60.0, toolSymbol: nil)
+        let survivors = model.plume.puffs.prefix { p in before.contains { $0.lifetime == p.lifetime && $0.lane == p.lane } }
+        XCTAssertFalse(survivors.isEmpty)
+        for p in survivors {
+            let old = before.first { $0.lifetime == p.lifetime && $0.lane == p.lane }!
+            XCTAssertEqual(p.age, old.age + 1.0 / 60.0, accuracy: 1e-9, "every puff ages with the clock")
+        }
+    }
+
+    func testAStallIsClampedAndReduceMotionHoldsThePlume() {
+        var model = WorkingAnimationModel()
+        let before = model.plume
         model.tick(dt: 30, toolSymbol: nil) // the app was suspended
-        let advanced = (model.angle - before + 2 * .pi).truncatingRemainder(dividingBy: 2 * .pi)
-        XCTAssertEqual(advanced, WorkingAnimationModel.maxStep * 2 * .pi / period, accuracy: 1e-9,
-                       "a long gap is clamped to one max step")
+        XCTAssertFalse(model.plume.puffs.isEmpty, "a long gap never empties the plume")
+        var still = WorkingAnimationModel()
+        still.tick(dt: 1.0 / 60.0, toolSymbol: nil, animatesPlume: false)
+        XCTAssertEqual(still.plume, before, "Reduce Motion: the plume holds")
         var frozen = WorkingAnimationModel()
         frozen.tick(dt: -1, toolSymbol: nil)
-        XCTAssertEqual(frozen.angle, 0, "a negative dt is no time at all")
+        XCTAssertEqual(frozen.plume, before, "a negative dt is no time at all")
     }
 
-    func testEightParticlesHeadBrightestAndLargestTrailingDimmer() {
-        let model = WorkingAnimationModel()
-        let particles = model.particles(center: CGPoint(x: 10, y: 10), radius: 8, headDiameter: 4)
-        XCTAssertEqual(particles.count, 8)
-        for p in particles {
-            XCTAssertEqual(hypot(p.position.x - 10, p.position.y - 10), 8, accuracy: 1e-9, "all on the ring")
-        }
-        for (a, b) in zip(particles, particles.dropFirst()) {
-            XCTAssertGreaterThan(a.opacity, b.opacity)
-            XCTAssertGreaterThan(a.diameter, b.diameter)
-        }
-        XCTAssertEqual(particles[0].opacity, 1, accuracy: 1e-9)
-        XCTAssertEqual(particles[0].diameter, 4)
-        XCTAssertEqual(particles[0].position.x, 18, accuracy: 1e-9, "head at angle 0")
+    func testThePlumeIsReproducibleFromItsSeed() {
+        var a = WorkingAnimationModel(seed: 42)
+        var b = WorkingAnimationModel(seed: 42)
+        for _ in 0..<90 { a.tick(dt: 1.0 / 60.0, toolSymbol: nil); b.tick(dt: 1.0 / 60.0, toolSymbol: nil) }
+        XCTAssertEqual(a.plume, b.plume)
+        XCTAssertNotEqual(WorkingAnimationModel(seed: 1).plume, WorkingAnimationModel(seed: 2).plume)
     }
 
-    func testTheParticlesRotateWithTheTicks() {
-        var model = WorkingAnimationModel()
-        let before = model.particles(center: .zero, radius: 10, headDiameter: 2)[0].position
-        advance(&model, by: period / 4, toolSymbol: nil)
-        let after = model.particles(center: .zero, radius: 10, headDiameter: 2)[0].position
-        XCTAssertEqual(before.x, 10, accuracy: 1e-9)
-        XCTAssertEqual(after.x, 0, accuracy: 1e-9)
-        XCTAssertEqual(after.y, 10, accuracy: 1e-9)
+    func testThePlumeIsWhiteHotAtTheNozzleAndDeepBlueAtTheTail() {
+        let hot = plumeColorComponents(heat: 1)
+        let cool = plumeColorComponents(heat: 0)
+        XCTAssertGreaterThan(hot.red, 0.7)
+        XCTAssertGreaterThan(hot.green, 0.85)
+        XCTAssertLessThan(cool.red, 0.15)
+        XCTAssertEqual(cool.blue, 1)
+        let mid = plumeColorComponents(heat: 0.3)
+        XCTAssertGreaterThan(mid.green, cool.green)
+        XCTAssertLessThan(mid.green, hot.green)
+        XCTAssertEqual(plumeColorComponents(heat: 5).red, hot.red, "clamped")
     }
+
+    // MARK: - The icon
 
     func testANewToolCrossFadesItsIconIn() {
         var model = WorkingAnimationModel()

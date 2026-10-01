@@ -6,9 +6,10 @@ import SwiftUI
 //
 //   [ text being typed ………………………… (⋯) (↗) (●) ]
 //
-// ↗ and ⋯ step aside the moment the text reaches them (`dispatchPillAccessoryButtonsVisible`), and
-// the field takes their room; past a line, the pill grows taller into a rounded rect. A 2-finger
-// swipe pins a past turn, shown in a band above the composer (`ExpandedPillTurnPreview`).
+// ↗ and ⋯ float over the field's trailing end and blur out as the text comes up to them
+// (`dispatchPillAccessoryButtonsVisible`); the text runs on underneath, and the field never changes
+// width for them. Past a line, the pill grows taller into a rounded rect. A 2-finger swipe — or a
+// reply arriving — pins a turn, shown in a band above the composer (`ExpandedPillTurnPreview`).
 
 /// ⋯ and ↗. ⋯ is a popover rather than a `Menu`: an `NSMenu` opens at the pop-up-menu window level,
 /// BELOW this `.screenSaver`-level panel, so its items would draw underneath the pill; a popover is a
@@ -56,9 +57,9 @@ struct ExpandedPillAccessoryButtons: View {
     private func accessoryGlyph(_ symbol: String) -> some View {
         Image(systemName: symbol)
             .font(Typography.label(.semibold))
-            .foregroundStyle(Theme.textSecondary)
+            .foregroundStyle(Color.blue)
             .frame(width: DispatchPillMetrics.accessoryButtonSize, height: DispatchPillMetrics.accessoryButtonSize)
-            .background(Circle().fill(Theme.controlSurface))
+            .background(Circle().fill(Color.blue.opacity(0.16)))
             .contentShape(Circle())
     }
 

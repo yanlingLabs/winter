@@ -5,24 +5,33 @@ import SwiftUI
 // the text field survives the first keystroke (see that type's doc). What is compact-specific is
 // drawn here:
 //
-//   idle:     [ Type here …………………………………… (●) ]   — the blue send circle
-//   working:  [ (✺) Reticulating… ………………… (■) ]   — the rocket ring, the working verb, stop
+//   idle:     [ Type here …………………………………… (🎙) ]   — the blue circle, the voice glyph until there is text
+//   working:  [ ✺  ·  ∘ ○ ◯ ⬤⬤(■) ]             — the plume streaming out from behind stop
 
-/// The working state's leading mark: the particle ring with the running tool's icon at its centre.
-struct CompactPillLeading: View {
+/// The working state's whole body: the plume, its nozzle behind the stop button. No composer —
+/// the text view stays mounted underneath, invisible, so a keystroke still lands in it and the
+/// first one opens the typing pill (`dispatchPillPresentationAfterDraftChange`).
+struct CompactPillWorking: View {
     let toolName: String?
 
     var body: some View {
-        WorkingAnimationView(toolName: toolName, diameter: 26)
-            .transition(.opacity.combined(with: .scale(scale: 0.6)))
+        WorkingAnimationView(
+            toolName: toolName,
+            emitterInset: DispatchPillMetrics.trailingPadding + DispatchPillMetrics.sendCircleSize / 2
+        )
+        .padding(.leading, DispatchPillMetrics.leadingPadding - 8)
     }
 }
 
-/// The pill's trailing circle: the blue SEND circle, or STOP while a turn runs. The role is
-/// `composerSendButtonRole` — the composer card's own rule, "running beats blocked" — so the pill
-/// and the app's composer agree on what that button is at every instant. While a turn runs, Enter
-/// still sends (a steer); the circle trades its send for the stop the user needs. When blocked,
-/// shows a voice/mic icon overlay instead of a disabled state.
+/// The pill's trailing circle — always the same bright system blue, never greyed. Its role is
+/// `composerSendButtonRole` (the composer card's own rule, "running beats blocked"), so the pill and
+/// the app's composer agree on what that button is at every instant:
+///
+/// - running → STOP (Enter still sends a steer; the circle trades its send for the stop the user
+///   needs);
+/// - text to send → SEND;
+/// - nothing to send → the VOICE glyph. Voice input is not built yet, so the circle does nothing in
+///   that state — it is a placeholder for it, never a disabled send.
 struct PillSendStopButton: View {
     let isRunning: Bool
     let canSend: Bool
@@ -41,21 +50,33 @@ struct PillSendStopButton: View {
             ZStack {
                 Circle()
                     .fill(Color.blue)
-                if case .blocked = role {
-                    Image(systemName: "mic.fill")
-                        .font(Typography.label(.bold))
-                        .foregroundStyle(.white)
-                } else {
-                    Image(systemName: role == .stop ? "stop.fill" : "arrow.up")
-                        .font(Typography.label(.bold))
-                        .foregroundStyle(.white)
-                }
+                Image(systemName: pillSendButtonSymbol(role))
+                    .font(Typography.label(.bold))
+                    .foregroundStyle(.white)
+                    .contentTransition(.symbolEffect(.replace))
             }
             .frame(width: DispatchPillMetrics.sendCircleSize, height: DispatchPillMetrics.sendCircleSize)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .help(role == .stop ? "Stop" : "Send")
-        .accessibilityLabel(role == .stop ? "Stop" : "Send")
+        .help(pillSendButtonLabel(role))
+        .accessibilityLabel(pillSendButtonLabel(role))
+    }
+}
+
+/// PURE: the trailing circle's glyph for its role.
+func pillSendButtonSymbol(_ role: ComposerSendButtonRole) -> String {
+    switch role {
+    case .stop: return "stop.fill"
+    case .send: return "arrow.up"
+    case .blocked: return "mic.fill"
+    }
+}
+
+func pillSendButtonLabel(_ role: ComposerSendButtonRole) -> String {
+    switch role {
+    case .stop: return "Stop"
+    case .send: return "Send"
+    case .blocked: return "Voice"
     }
 }

@@ -3,14 +3,13 @@ import SwiftUI
 /// ↗ — the pill grown to the screen: a header (working status, the child sessions, a small close
 /// button), the dispatch session's transcript (`TranscriptView`, the same one the app's windows
 /// draw — pending asks render there inline as live cards, which is why the floating overlay hides
-/// here), and a composer. The 4-finger tap or Esc collapses it back to the pill; so does the close
-/// button.
+/// here) — and NO composer: full screen is for reading. A draft typed before ↗ waits in the adapter
+/// and is back in the typing pill when this closes. The 4-finger tap or Esc collapses it back to the
+/// pill; so does the close button.
 struct FullScreenPillView: View {
     @ObservedObject var controller: DispatchPillController
     @ObservedObject var adapter: FieldStateAdapter
 
-    /// The full-screen composer's tallest, before it scrolls internally.
-    static let maxComposerHeight: CGFloat = 160
     static let headerHeight: CGFloat = 48
     /// One child pill's share of the header row.
     static let headerChildPillWidth: CGFloat = 150
@@ -27,9 +26,10 @@ struct FullScreenPillView: View {
                     .foregroundStyle(Theme.textMuted)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                TranscriptView(adapter: adapter, tint: Theme.accent,
+                TranscriptView(adapter: adapter, tint: .blue,
                                cardWiring: dispatchPillCardWiring(adapter: adapter, records: records))
                     .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
             }
         }
     }
@@ -40,8 +40,8 @@ struct FullScreenPillView: View {
                 .font(Typography.control(.semibold))
                 .foregroundStyle(Theme.textPrimary)
             if adapter.turnRunning {
-                WorkingAnimationView(toolName: controller.runningToolName, diameter: 20,
-                                     iconFont: Typography.micro(.semibold))
+                WorkingAnimationView(toolName: controller.runningToolName, iconFont: Typography.caption(.semibold))
+                    .frame(width: 96, height: 22)
                 Text(adapter.verbText)
                     .font(Typography.caption())
                     .foregroundStyle(Theme.textSecondary)
@@ -75,5 +75,4 @@ struct FullScreenPillView: View {
         .padding(.horizontal, 16)
         .frame(height: Self.headerHeight)
     }
-
 }

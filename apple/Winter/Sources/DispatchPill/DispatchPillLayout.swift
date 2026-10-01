@@ -13,11 +13,13 @@ import Foundation
 /// (the stop button and the working animation are drawn off `FieldStateAdapter.turnRunning`), so a
 /// turn starting or ending never moves the panel by itself.
 enum DispatchPillPresentation: Equatable {
-    /// Idle: the blue send circle and a "Type here" field. Also the working state.
+    /// Idle: the blue circle and a "Type here" field. Also the working state, which swaps the
+    /// field for the plume (`CompactPillWorking`).
     case compact
-    /// Typing: wider, with ↗ (full screen) and ⋯ beside the send circle; grows with the text.
+    /// Typing: wider, with ↗ (full screen) and ⋯ floating over the field's end; grows with the
+    /// text. Also where a pinned turn (a swipe, or a reply that just arrived) shows.
     case expanded
-    /// The transcript and a composer, filling the screen's visible frame.
+    /// The transcript alone, filling the screen's visible frame — no composer.
     case fullScreen
 }
 
@@ -39,6 +41,13 @@ enum DispatchPillMetrics {
     static let trailingPadding: CGFloat = 6
     static let sendCircleSize: CGFloat = 32
     static let accessoryButtonSize: CGFloat = 28
+    /// How close the typed text gets to ↗ and ⋯ before they blur out of its way.
+    static let accessoryApproachMargin: CGFloat = 14
+    /// The text view's bottom inset inside the pill: centres one line in the resting capsule.
+    static var fieldBottomInset: CGFloat { composerVerticalPadding / 2 }
+    /// The send circle's bottom inset: centres it in the resting capsule, and keeps it on the
+    /// bottom line as the pill grows taller.
+    static var sendBottomInset: CGFloat { (pillHeight - sendCircleSize) / 2 }
     static let rowSpacing: CGFloat = 6
     /// The swiped-to-turn preview's band above the composer (prompt line + reply line).
     static let previewHeight: CGFloat = 58
@@ -62,14 +71,17 @@ enum DispatchPillMetrics {
     /// The rounded-rect radius a tall pill settles on — a capsule's radius at `pillHeight`.
     static let maxCornerRadius: CGFloat = 22
 
-    /// The text field's width while ↗ and ⋯ are showing — the line the typed text "reaches".
+    /// Where ⋯'s leading edge sits in the typing pill's field — the line the typed text "reaches".
     static var fieldWidthBesideAccessories: CGFloat {
         expandedFieldWidth - 2 * accessoryButtonSize - 2 * rowSpacing
     }
 
-    /// The text field's width once ↗ and ⋯ have gone.
-    static var expandedFieldWidth: CGFloat {
-        expandedWidth - leadingPadding - trailingPadding - sendCircleSize - rowSpacing
+    /// The typing pill's text field width. Constant: ↗ and ⋯ float over it rather than beside it.
+    static var expandedFieldWidth: CGFloat { fieldWidth(pillWidth: expandedWidth) }
+
+    /// The text field's width in a pill this wide — everything left of the send circle.
+    static func fieldWidth(pillWidth: CGFloat) -> CGFloat {
+        max(1, pillWidth - leadingPadding - trailingPadding - sendCircleSize - rowSpacing)
     }
 }
 
@@ -202,15 +214,13 @@ func dispatchPillPresentationLeavingFullScreen(draft: String) -> DispatchPillPre
 
 /// Typing auto-expands: a draft that CHANGED to something non-empty while compact moves the pill to
 /// `.expanded`. Keyed on a change (not on the draft merely being non-empty) so a restored draft or a
-/// click-outside compress never bounces the pill straight back open. When a turn is running (working
-/// state), the pill stays compact to avoid distracting animation.
+/// click-outside compress never bounces the pill straight back open.
 func dispatchPillPresentationAfterDraftChange(
     _ presentation: DispatchPillPresentation,
     old: String,
-    new: String,
-    turnRunning: Bool
+    new: String
 ) -> DispatchPillPresentation {
-    guard presentation == .compact, old != new, !new.isEmpty, !turnRunning else { return presentation }
+    guard presentation == .compact, old != new, !new.isEmpty else { return presentation }
     return .expanded
 }
 
@@ -269,12 +279,33 @@ func dispatchPillDraftExpiryDeadline(closedAt: Date, interval: TimeInterval?) ->
 
 // MARK: - ↗ and ⋯ give way to the text
 
-/// PURE: whether ↗ and ⋯ show beside the send circle. They vanish the moment the typed text reaches
-/// them — a line wider than the field beside them, or a second line — and the field takes their
-/// room. They come back when the text shrinks below that line again.
+/// PURE: whether ↗ and ⋯ show. They FLOAT over the trailing end of the text field — they take no
+/// room of their own, so the field's width (and therefore its wrapping and its height) never
+/// changes when they come or go. They blur out as the typed text comes within
+/// `accessoryApproachMargin` of them, or on a second line, and the text runs on underneath where
+/// they were; they blur back when the text shrinks below that line again.
 func dispatchPillAccessoryButtonsVisible(draft: String, textWidth: CGFloat) -> Bool {
     guard !draft.contains("\n") else { return false }
-    return textWidth <= DispatchPillMetrics.fieldWidthBesideAccessories
+    return textWidth + DispatchPillMetrics.accessoryApproachMargin <= DispatchPillMetrics.fieldWidthBesideAccessories
+}
+
+// MARK: - A reply opens the pill
+
+/// PURE: whether a turn that just ended pins its reply (`historyIndex` → the newest turn) and opens
+/// the pill to show it. Only on a pill that is on screen, not full screen (the transcript is already
+/// there), not already showing a swiped-to turn, and not holding a draft — a reply never pushes
+/// aside what the user is typing. A stopped turn, or one with no reply text, opens nothing.
+func dispatchPillRevealsReply(
+    isVisible: Bool,
+    presentation: DispatchPillPresentation,
+    previewing: Bool,
+    draft: String,
+    latest: Exchange?
+) -> Bool {
+    guard isVisible, presentation != .fullScreen, !previewing,
+          draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          let latest, !latest.aborted else { return false }
+    return !latest.reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 }
 
 // MARK: - Swiping through turns

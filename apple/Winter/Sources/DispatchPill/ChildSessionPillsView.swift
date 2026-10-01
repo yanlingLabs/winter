@@ -114,18 +114,30 @@ private struct ChildSessionPill: View {
                 Button(action: onStop) {
                     Image(systemName: "stop.fill")
                         .font(Typography.micro(.bold))
-                        .foregroundStyle(Theme.textPrimary)
+                        .foregroundStyle(.white)
                         .frame(width: 20, height: 20)
-                        .background(Circle().fill(Theme.controlSurface))
+                        .background(Circle().fill(Color.blue))
                 }
                 .buttonStyle(.plain)
                 .help("Stop this session")
             }
         }
-        .padding(.leading, 6)
+        .padding(.leading, status == .working ? 12 : 6)
         .padding(.trailing, 6)
-        .background(Capsule().fill(Theme.cardSurface))
-        .overlay(Capsule().strokeBorder(status == .needsYou ? Color.orange : Theme.hairlineElevated,
+        .background {
+            ZStack {
+                Capsule().fill(Color.black)
+                if status == .working {
+                    // The main pill's plume, its nozzle on this pill's stop button — dimmed, so the
+                    // title over it stays readable.
+                    WorkingAnimationView(toolName: nil, showsIcon: false, emitterInset: 6 + 10)
+                        .opacity(0.6)
+                        .clipShape(Capsule())
+                        .transition(.opacity.animation(.easeOut(duration: 0.25)))
+                }
+            }
+        }
+        .overlay(Capsule().strokeBorder(status == .needsYou ? Color.orange : Color.white.opacity(0.09),
                                         lineWidth: 1))
         .contentShape(Capsule())
         .onTapGesture(perform: onOpen)
@@ -136,7 +148,8 @@ private struct ChildSessionPill: View {
     private var statusGlyph: some View {
         switch status {
         case .working:
-            WorkingAnimationView(toolName: nil, diameter: 20, iconFont: Typography.micro(.semibold))
+            // The plume behind the whole pill is this state's mark (`body`); no glyph of its own.
+            EmptyView()
         case .needsYou:
             Image(systemName: "hand.raised.fill")
                 .font(Typography.caption())
