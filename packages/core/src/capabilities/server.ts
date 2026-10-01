@@ -105,6 +105,10 @@ export interface CapabilitySession {
   /** A per-session override of the daemon's `ComputerUseService`. Normally unset — the `computer`
    *  capability reads the daemon's single holder instead. */
   computerUse?: ComputerUseService;
+  /** The capability server KEYS this incarnation built — set by the session driver AFTER the build, for
+   *  the session's hooks (`hooks.ts`'s `capabilityKeys`): only these keys' `mcp__winter__<key>__*` names
+   *  are the daemon's own on a live call. Absent before the build. */
+  capabilityKeys?: ReadonlySet<string>;
   // `exaKeyPresent` lived here until 2026-10-01, for the `research` server's `Search`. `Search` is the
   // agent SDK's built-in now, and its key gate is one input to ONE door: `runtime-sdk/mode-options.ts`'s
   // `toolsFor` (which of `Search`/`WebSearch` the session's `Options.tools` names).

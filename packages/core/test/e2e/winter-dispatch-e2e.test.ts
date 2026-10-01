@@ -257,7 +257,9 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
     expect(daemon!.winter.get(sid)!.init?.tools).not.toContain("Agent");
     const refused = [...log].reverse().find((e) => e.type === "tool_result") as { output: string; isError: boolean } | undefined;
     expect(refused).toMatchObject({ isError: true });
-    expect(refused!.output).toContain("No such tool available: Agent");
+    // Refused twice over: `Agent` is outside `Options.tools`, and (the fail-closed review fix) dispatch's
+    // `disallowedTools` names every known built-in its allowed list leaves out — the deny rule answers first.
+    expect(refused!.output).toContain("Denied by permission rule: Agent");
     // The projector derives `thread_started` from the spawning `tool_use` block itself (children.ts), so the
     // ATTEMPT is still named on the log; what matters is that no child ever ran on that thread.
     const attempted = log.filter((e) => e.type === "thread_started") as Array<{ threadId: string }>;

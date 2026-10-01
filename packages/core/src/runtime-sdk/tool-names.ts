@@ -249,8 +249,8 @@ export const WINTER_TOOL_GATE_CLASS: ReadonlyMap<string, string> = new Map([
  * chat/dispatch/plan) and no Winter tool is named that — but every other lookup in this module is a
  * `Map`/`Set`, and this one has no business being the exception.
  */
-export function gateClassFor(winterToolName: string): string {
-  return WINTER_TOOL_GATE_CLASS.get(winterToolName) ?? gateToolNameFor(winterToolName);
+export function gateClassFor(winterToolName: string, liveKeys?: ReadonlySet<string>): string {
+  return WINTER_TOOL_GATE_CLASS.get(winterToolName) ?? gateToolNameFor(winterToolName, liveKeys);
 }
 
 /** `mcp__winter__` — the prefix every daemon-owned capability tool carries under R-1 / P8b-12
@@ -287,12 +287,33 @@ export const WINTER_CAPABILITY_SERVER_KEYS: ReadonlySet<string> = new Set([
   // MISSING; removing it now would recreate it for every past session.
   // `research` IS RETAINED ON PURPOSE TOO (2026-10-01), for the same reason: its server is gone (`Search`
   // is the agent SDK's built-in) but old JSONLs replay `mcp__winter__research__Search`. Both retired
-  // keys stay RESERVED server names (`capabilities/names.ts`'s `RETIRED_CAPABILITY_SERVER_KEYS`), so no
-  // configured server can mint a name that strips through them.
+  // keys stay RESERVED server names (`capabilities/names.ts`'s `RETIRED_CAPABILITY_SERVER_KEYS`, refused by
+  // the write door and, for every origin, by the agent SDK's `reservedMcpServerNames`), and a LIVE caller
+  // strips only the keys its incarnation built (`hostToolNameFor`'s `liveKeys`) — so these two strip on
+  // REPLAY only.
   "sessions", "computer", "browser", "office", "research", "web",
   // The SEVENTH key, `lsp` (fix wave, review F7): `mcp__winter__lsp__lsp` strips to `lsp`, which
   // `gate.ts` classifies READ_ONLY — the class the registry-door tool always had.
   "lsp",
+]);
+
+/**
+ * **The tools each capability server key has EVER served** — the only `<tool>` an `mcp__winter__<key>__<tool>`
+ * name strips to (2026-10-01 review). A bare key match was not enough: the projector's tool name feeds LIVE
+ * side effects (`sinks.ts` creates a routine for `schedule`, notifies for `push_notification`), so a server
+ * that somehow wore a retired or unbuilt capability name (`winter__web`, `winter__computer` with computer use
+ * off) and served a tool called `schedule` would have stripped onto the host's own scheduling verb. Exact names
+ * close that: the retired ones (`research`'s `Search`/`ReadPage`, `web`'s pair) keep stripping for old
+ * transcripts, and nothing else does. `mode-matrix.test.ts` pins this against `WINTER_CAPABILITY_TOOLS`.
+ */
+export const CAPABILITY_TOOLS_BY_KEY: ReadonlyMap<string, ReadonlySet<string>> = new Map<string, ReadonlySet<string>>([
+  ["sessions", new Set(["session_spawn", "list_sessions", "manage_session"])],
+  ["computer", new Set(["computer"])],
+  ["browser", new Set(["browser"])],
+  ["office", new Set(["docs", "sheets", "slides"])],
+  ["lsp", new Set(["lsp"])],
+  ["research", new Set(["Search", "ReadPage"])],
+  ["web", new Set(["web_fetch", "web_search"])],
 ]);
 
 const RUNTIME_TO_HOST = new Map<string, string>(RUNTIME_HOST_TOOL_PAIRS.map(([w, n]) => [w, n]));
@@ -318,9 +339,17 @@ const HOST_TO_RUNTIME = ((): ReadonlyMap<string, string> => {
  *     keep its prefix, so `isExternalToolName` still classifies it as external; every other unknown
  *     name stays unknown and fails closed.
  *
+ * **`liveKeys` — the LIVE paths' narrowing (2026-10-01 review).** A LIVE call (the approval bridge, the
+ * hooks) passes the capability server keys THIS incarnation actually built: an `mcp__winter__<key>__…`
+ * name is the daemon's own only when its `<key>` server exists in the session right now. A retired key
+ * (`research`, `web`) or one not built this time (`computer` with computer use off) then strips to
+ * nothing and stays an ordinary MCP name — so a server that somehow took such a name (the agent SDK's
+ * `reservedMcpServerNames` refuses every origin, and this is the second fence) can never mint a host
+ * name. Only REPLAY (the projector rendering a stored transcript) omits it and strips every key.
+ *
  * Pure; no I/O; safe to call on every permission request.
  */
-export function hostToolNameFor(winterToolName: string): string | undefined {
+export function hostToolNameFor(winterToolName: string, liveKeys?: ReadonlySet<string>): string | undefined {
   if (winterToolName.startsWith(WINTER_CAPABILITY_TOOL_PREFIX)) {
     const rest = winterToolName.slice(WINTER_CAPABILITY_TOOL_PREFIX.length);
     // `<serverKey>__<tool>` — split at the FIRST `__`, so a tool name that itself contains `__`
@@ -329,8 +358,11 @@ export function hostToolNameFor(winterToolName: string): string | undefined {
     // is therefore still classified as an external MCP tool, never silently widened.
     const sep = rest.indexOf("__");
     if (sep <= 0 || sep + 2 >= rest.length) return undefined;
-    if (!WINTER_CAPABILITY_SERVER_KEYS.has(rest.slice(0, sep))) return undefined;
-    return rest.slice(sep + 2);
+    const key = rest.slice(0, sep);
+    if (!WINTER_CAPABILITY_SERVER_KEYS.has(key)) return undefined;
+    if (liveKeys !== undefined && !liveKeys.has(key)) return undefined;
+    const tool = rest.slice(sep + 2);
+    return CAPABILITY_TOOLS_BY_KEY.get(key)?.has(tool) === true ? tool : undefined;
   }
   return RUNTIME_TO_HOST.get(winterToolName);
 }
@@ -347,6 +379,6 @@ export function winterToolNameFor(hostToolName: string): string | undefined {
 /** The name to hand `PermissionGate.evaluate` — the host name when one exists, otherwise the
  *  runtime name unchanged, which fails closed. The bridge's one-liner, kept here so the projector
  *  lane and the bridge cannot disagree about the fallback. */
-export function gateToolNameFor(winterToolName: string): string {
-  return hostToolNameFor(winterToolName) ?? winterToolName;
+export function gateToolNameFor(winterToolName: string, liveKeys?: ReadonlySet<string>): string {
+  return hostToolNameFor(winterToolName, liveKeys) ?? winterToolName;
 }

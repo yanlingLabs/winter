@@ -92,6 +92,19 @@ export function toolsRefusedFor(row: WinterModelDescriptor): boolean {
 }
 
 /**
+ * Whether a session on this tag gets a DEFERRED tool surface: the agent SDK defers (and offers
+ * `ToolSearch`) only for a model whose tool calling is `"native"` (`provider/selection.ts`'s
+ * `supportsToolSearch`), and injects every tool up front otherwise. A tag with no catalog row — and a
+ * `winter-test/*` double — reads as supported, as the SDK reads a descriptor it does not have.
+ * `capabilities.list` reports the EFFECTIVE `deferred` modes through it.
+ */
+export function toolSearchSupportedBy(tag: string | undefined): boolean {
+  if (tag === undefined || tag.startsWith(WINTER_TEST_MODEL_PREFIX)) return true;
+  const row = rowForTag(tag);
+  return row === undefined || row.toolCalling.value === "native";
+}
+
+/**
  * Code-mode image input (2026-09-29): whether this catalog row ACCEPTS an image — its own
  * `inputModalities` evidence contains `"image"`, verbatim. The ONE rule behind `models.catalog`'s and
  * `sync.config`'s `supportsImages` and `session.stageImage`'s `image_input_unsupported` refusal, so a

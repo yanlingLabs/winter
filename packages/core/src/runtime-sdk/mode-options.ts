@@ -21,7 +21,7 @@ import type { Mode as SessionMode } from "../agent/tools/registry";
 import { CONTROL_PLANE_FILENAMES } from "./control-plane";
 import { providerFor, testProviderNameFor } from "./provider-selection";
 import { splitTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
-import { WINTER_OWN_TOOL_NAMES } from "./tool-names";
+import { WINTER_ADVERTISED_TOOLS_0_0_4, WINTER_OWN_TOOL_NAMES } from "./tool-names";
 
 /**
  * **The six Winter policies → Winter's `PermissionMode`** (P8b-7, AMENDED by the whole-branch
@@ -157,6 +157,10 @@ export function toolsFor(mode: SessionMode, exposure: ToolExposure): string[] | 
  *  names it carries it. */
 export const SEARCH_BUILTIN = "Search";
 
+/** `Options.legacyToolNames`: the daemon's own tools that became runtime built-ins, old name → new. Until
+ *  2026-10-01 `Search` was the `research` capability server's `mcp__winter__research__Search`. */
+export const LEGACY_TOOL_NAMES: Readonly<Record<string, string>> = { mcp__winter__research__Search: SEARCH_BUILTIN };
+
 /**
  * **The built-ins that start DEFERRED** (`Options.deferTools`; the 2026-10-01 ruling): `CronList`, in
  * every mode that has it. Every MCP tool already starts deferred by itself (the capability tools the
@@ -279,6 +283,13 @@ export interface WinterOptionsInput {
   abort: AbortController;
   /** Task 7's `WINTER_CAPABILITY_TOOLS`, or `CAPABILITY_TOOL_MODES` until it lands. */
   capabilityTools?: Readonly<Record<string, { modes: readonly SessionMode[] }>>;
+  /**
+   * Every server name the daemon's capability servers own or have owned (`capabilities/names.ts`'s
+   * `reservedMcpServerNames()`, `computer` included when computer use is off, the retired `research`/`web`
+   * too) — `Options.reservedMcpServerNames`: the runtime refuses any other server under one of them, from
+   * every origin (a settings scope, a plugin's `.mcp.json`, an agent definition's inline server).
+   */
+  reservedMcpServerNames?: readonly string[];
   /**
    * P8b-36 (Task 16): THIS session's daemon-owned capability servers, already keyed by server name
    * (`buildSessionCapabilities(session)` — `capabilities/index.ts`'s `CapabilityServerRecord`).
@@ -1080,20 +1091,46 @@ const ANY_DEPTH_PROJECT_KINDS: readonly string[] = [...PROTECTED_ITEM_DIRS, "age
  * structural filter cannot miss. The literal is pinned by the matrix test; the parity tripwire diffs
  * `CAPABILITY_TOOL_MODES` against Task 7's `WINTER_CAPABILITY_TOOLS`.
  *
- * The BUILT-IN half of each mode's surface is no longer a deny list (the 2026-10-01 ruling: allowed lists
- * replace restricted lists) — it is `toolsFor`, claude's own `tools` option, which also decides the
- * `Search`/`WebSearch` complement. `exposure` is kept for that reason and for callers that pass it; this
- * function no longer reads it.
+ * The BUILT-IN half of each mode's surface is an ALLOWED list (the 2026-10-01 ruling) — `toolsFor`,
+ * claude's own `tools` option, which also decides the `Search`/`WebSearch` complement. For chat and
+ * dispatch this list ALSO names every KNOWN built-in that allowed list leaves out (`KNOWN_RUNTIME_BUILTINS`
+ * minus `toolsFor`) — belt and braces, so a runtime that ignored `tools` would still deny them (the review's
+ * fail-closed rule; `toolSurfaceViolations` is the other half, for a built-in nobody knew about yet).
  */
 export function disallowedToolsFor(
   mode: SessionMode,
-  _exposure: ToolExposure = {},
+  exposure: ToolExposure = {},
   capabilityTools: Readonly<Record<string, { modes: readonly SessionMode[]; plainName?: string }>> = CAPABILITY_TOOL_MODES,
 ): string[] {
   const out = Object.entries(capabilityTools)
     .filter(([, v]) => !v.modes.includes(mode))
     .map(([name, v]) => v.plainName ?? name);
+  const allowed = toolsFor(mode, exposure);
+  if (allowed !== undefined) out.push(...KNOWN_RUNTIME_BUILTINS.filter((name) => !allowed.includes(name)));
   return [...new Set(out)].sort();
+}
+
+/**
+ * **Every built-in the Winter runtime is known to offer** — the measured `init.tools` set
+ * (`WINTER_ADVERTISED_TOOLS_0_0_4`, the MCP family included) plus the ones that arrived later: the web pair
+ * and `Search`, `LSP`, and Winter's own `advisor`. Only the deny-list half of the fail-closed rule reads
+ * it; a built-in missing here is still caught at init (`toolSurfaceViolations`).
+ */
+export const KNOWN_RUNTIME_BUILTINS: readonly string[] = [...new Set([...WINTER_ADVERTISED_TOOLS_0_0_4, "WebFetch", "WebSearch", SEARCH_BUILTIN, "LSP", ...WINTER_OWN_TOOL_NAMES])].sort();
+
+/**
+ * **The fail-closed check on what a chat/dispatch child actually offers** (2026-10-01 review). `init.tools`
+ * must be inside the incarnation's own allowed list (`Options.tools`), the daemon's plain-named capability
+ * tools (`plainNames`), or an MCP tool (`mcp__…`). Anything else — a built-in the runtime offered although
+ * `tools` left it out, i.e. a runtime that ignores the option — is returned, and the session refuses the
+ * incarnation typed (`winter-session.ts`, `tool_surface_unenforced`). `[]` when `tools` is absent (code).
+ */
+export const CAPABILITY_PLAIN_NAMES: ReadonlySet<string> = new Set(Object.values(CAPABILITY_TOOL_MODES).flatMap((v) => (v.plainName === undefined ? [] : [v.plainName])));
+
+export function toolSurfaceViolations(initTools: readonly string[], allowed: readonly string[] | undefined, plainNames: ReadonlySet<string>): string[] {
+  if (allowed === undefined) return [];
+  const ok = new Set(allowed);
+  return initTools.filter((name) => !ok.has(name) && !plainNames.has(name) && !name.startsWith("mcp__"));
 }
 
 /**
@@ -1153,6 +1190,11 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     })(),
     toolSearchEnabled: true,
     ...(deferToolsFor(input.mode).length > 0 ? { deferTools: deferToolsFor(input.mode) } : {}),
+    // The daemon's own tools that became the runtime's: a resumed history's call, a saved rule or a hook
+    // matcher under the old name keeps meaning the tool (`LEGACY_TOOL_NAMES`).
+    legacyToolNames: { ...LEGACY_TOOL_NAMES },
+    // No server but the daemon's own in-process ones may take a capability server's name — whatever its origin.
+    ...(input.reservedMcpServerNames === undefined ? {} : { reservedMcpServerNames: [...input.reservedMcpServerNames].sort() }),
     // Batch 3 (item 2): the fixed control-plane fence PLUS `settings.permissions.deny` (today just
     // `Skill(<name>)` toggles) — see `permissionDenyRulesFor`'s own doc for why this reads
     // `input.settings` rather than the vestigial "no longer consumed" note this field used to carry.

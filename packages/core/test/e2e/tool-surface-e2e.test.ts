@@ -170,14 +170,17 @@ describe("the tool surface (Exa key stored)", () => {
     expect(listed).toMatchObject({ name: "ListSessions", isError: false });
     expect(oldSpelling).toMatchObject({ name: "mcp__winter__sessions__list_sessions", isError: false });
     expect(oldSpelling!.content).toBe(listed!.content);
-    expect(edit!.isError).toBe(true);
-    expect(edit!.content).toContain("No such tool available: Edit");
+    // Refused by the fail-closed deny list first (every known built-in dispatch's allowed list leaves out),
+    // ahead of the runtime's own "No such tool" for a built-in outside `Options.tools`.
+    expect(edit!.content).toBe("Denied by permission rule: Edit");
     // The projector records the call under the HOST name the renderers and the gate key on.
     const calls = d.daemon.sessions.read(sessionId).filter((e) => e.type === "tool_call") as Array<{ name: string }>;
     expect(calls.map((c) => c.name)).toContain("list_sessions");
     // The MODEL is told which tools are deferred: the runtime's persisted `deferred_tools_delta` names
     // exactly the three the ruling defers (never the standing server's twin of SendMessage).
     expect(announcedDeferred(d.daemon, sessionId)).toEqual(["Browser", "Computer", "CronList"]);
+    // The incarnation passed the fail-closed init check (nothing outside its allowed list was offered).
+    expect(d.daemon.sessions.read(sessionId).filter((e) => e.type === "agent_error")).toEqual([]);
     void SEND_MESSAGE_TWIN;
   }, 60_000);
 
@@ -202,6 +205,7 @@ describe("the tool surface (Exa key stored)", () => {
     expect(d.daemon.sessions.read(sessionId).filter((e) => e.type === "approval_requested")).toEqual([]);
     const calls = d.daemon.sessions.read(sessionId).filter((e) => e.type === "tool_call") as Array<{ name: string }>;
     expect(calls.map((c) => c.name)).toEqual(["ToolSearch", "browser"]);
+    expect(d.daemon.sessions.read(sessionId).filter((e) => e.type === "agent_error")).toEqual([]);
     void LIST_AGENTS_TWIN;
   }, 60_000);
 });

@@ -1829,6 +1829,10 @@ export async function startDaemon(opts: {
       trustedProjectRoot: () => (projectScopeTrusted(session.cwd, trustStore) ? projectScopeRootFor(session.cwd) : null),
       // WS-26: the connector-permission floor (every mode; `hooks.ts`'s `connectorPermissionHook`).
       connectors: connectorPermissions,
+      // Only the capability servers THIS incarnation built are the daemon's own (an empty set reads as none).
+      capabilityKeys: () => session.capabilityKeys ?? new Set<string>(),
+      // `Search`'s audit line (`hooks.ts`'s `searchAuditHook`) — the one the daemon's own `Search` wrote.
+      audit: (line) => audit.append(line),
     });
   // ── P8c integration Wiring 2: the notification/schedule sinks (lane 2's `sinks.ts`, P8c-11) ────
   // `hub.addObserver` (Dispatch/Phase 7's existing fan-out of every appended event of EVERY

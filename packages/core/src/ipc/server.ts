@@ -86,7 +86,7 @@ import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
 import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
 import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
-import { imagesAcceptedBy, rowForTag } from "../runtime-sdk/provider-selection";
+import { imagesAcceptedBy, rowForTag, toolSearchSupportedBy } from "../runtime-sdk/provider-selection";
 import { StageImageRefusal, stageSessionImage, validateImageRefs } from "../agent/stage-image";
 import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type ModelTag } from "../runtime-sdk/model-tag";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
@@ -122,7 +122,7 @@ import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
-import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
+import { DEFAULT_PROVIDER, pinsFor, addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
 import { addMcpServerInScope, mcpServerInScope, McpRenameRefusal, removeMcpServerForgettingPermissions, renameMcpServerCarryingSettings, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../runtime-sdk/run-home-input";
@@ -2838,6 +2838,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           dispatch: new Set(disallowedToolsFor("dispatch", exposure, WINTER_CAPABILITY_TOOLS)),
           chat: new Set(disallowedToolsFor("chat", exposure, WINTER_CAPABILITY_TOOLS)),
         };
+        // `deferred` is the EFFECTIVE state: a mode whose default model cannot tool-search (its tool calling
+        // is not native — `toolSearchSupportedBy`) gets every tool injected up front, so nothing defers there.
+        // The default model is the one a new session of that mode runs on (dispatch its pin, the rest
+        // `settings.provider.model`); a session on another model may differ.
+        const modeDefaultTag = (mode: "code" | "dispatch" | "chat"): string | undefined =>
+          mode === "dispatch" ? pinsFor(settings).dispatch : settings?.provider?.model ?? DEFAULT_PROVIDER.model;
+        const searchable = new Set((["code", "dispatch", "chat"] as const).filter((mode) => toolSearchSupportedBy(modeDefaultTag(mode))));
         const capabilities = CAPABILITY_SERVER_KEYS.map((key) => {
           // `capabilityToolName(key, "")` mints the exact `mcp__winter__<key>__` prefix every one
           // of this key's tool names carries (capabilities/names.ts's own wire-name doc) — so a
@@ -2855,9 +2862,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
                 ...(facts.plainName === undefined ? {} : { plainName: facts.plainName }),
                 modes: [...facts.modes],
                 // Since the 2026-10-01 ruling every capability tool but the `eager` ones starts
-                // deferred, in every mode it is exposed to — sent as that mode list (the form every
-                // client reads).
-                ...(facts.eager === true ? {} : { deferred: [...facts.modes] }),
+                // deferred, in every mode it is exposed to whose default model can tool-search — sent as
+                // that mode list (the form every client reads), and absent when no mode defers it.
+                ...((): { deferred?: Array<"code" | "dispatch" | "chat"> } => {
+                  const modes = facts.eager === true ? [] : facts.modes.filter((mode) => searchable.has(mode));
+                  return modes.length === 0 ? {} : { deferred: [...modes] };
+                })(),
                 exposure: {
                   code: !disallowedByMode.code.has(childName),
                   dispatch: !disallowedByMode.dispatch.has(childName),
