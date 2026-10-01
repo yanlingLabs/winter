@@ -199,6 +199,23 @@ export interface EngineSignals {
   onTurnSettled?: (sessionId: string) => void;
 }
 
+/** `createSessionInternal`'s input — `session.create`'s params after the RPC-only checks (remote
+ *  role, the dispatch-mode refusal, the chat policy coercion, the canonical cwd), plus the parent
+ *  link only the daemon's own doors set. */
+export interface InternalSessionCreateInput {
+  scope: string;
+  /** Already canonical (`canonicalSessionCwd`). */
+  cwd?: string;
+  approvalPolicy: SessionApprovalPolicy;
+  origin?: string;
+  mode?: "code" | "chat";
+  /** A provider-qualified tag as the caller gave it — resolved here by `resolveModelSelection`. */
+  model?: string;
+  effort?: string;
+  parentSessionId?: string;
+}
+export type InternalSessionCreator = (input: InternalSessionCreateInput) => Promise<{ sessionId: string; trusted: boolean }>;
+
 export interface IpcServerOptions {
   socketPath: string;
   serverVersion: string;
@@ -316,6 +333,10 @@ export interface IpcServerOptions {
   // of a third hand-assembled copy that would quietly disagree in exactly those two windows.
   // Optional: every server built without it (all existing tests) is byte-identical.
   onActivityDeriver?: (derive: ActivityDeriver) => void;
+  /** The session-creation transaction (`createSessionInternal`), published for the daemon's own
+   *  doors on the same terms as `onActivityDeriver`: dispatch's `session_spawn` mints its child
+   *  sessions through THIS, never a second copy of `session.create`'s steps. Optional. */
+  onSessionCreator?: (create: InternalSessionCreator) => void;
   /** P8b Task 17: the engine is gone; what remains is the ACTIVITY the handlers read (turn running,
    *  background work, the model catalogue) — served by the daemon over the Winter driver table and
    *  the persisted child roster. */
@@ -1159,6 +1180,137 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     try { return await opts.winter.ensure(sessionId); } catch (err) { rpcFromWinterRefusal(err); }
   }
 
+  /**
+   * THE session-creation transaction — `session.create`'s body, extracted so the daemon's own
+   * doors create sessions through exactly the same steps a client's `session.create` takes (the
+   * dispatch coordinator's `session_spawn`, `agent/dispatch-children.ts`): the model resolved and
+   * the effort checked, the Winter-leg availability check BEFORE the row exists, the row, the
+   * creation transaction (the record and the child) with the row rolled back on a refusal, the
+   * `session_created` broadcast to every harness (so a child appears in every open session list
+   * live) and the mint-time reaper sweep. Throws the typed `WinterLegRefusal` (the RPC wrapper maps
+   * it with `rpcFromWinterRefusal`) or the `RpcFailure` of a bad model/effort. Published to the
+   * daemon through `opts.onSessionCreator`.
+   */
+  async function createSessionInternal(input: InternalSessionCreateInput): Promise<{ sessionId: string; trusted: boolean }> {
+    // followups batch T2: `model` itself, resolved+validated by the SAME `resolveModelSelection`
+    // helper `session.setModel` applies (extracted above, beside `assertEffortSelectable`) — an
+    // alias like "sol" is stamped as its canonical id ("gpt-5.6-sol") rather than stored
+    // verbatim, and an unresolvable slug is refused OUTRIGHT when the catalogue can enumerate,
+    // exactly like `session.setModel` (a BYO endpoint that can't enumerate is never bricked).
+    // MUST run BEFORE the effort check just below: effort validates against the model THIS CALL
+    // is about to stamp, and that model is the RESOLVED id, never whatever the caller typed —
+    // a create that validated effort against an unresolved alias would name the wrong model in
+    // its own refusal message, and (once `effortsForModel` ever diverges per model) could
+    // validate against the wrong list entirely.
+    let model = input.model;
+    if (model !== undefined) {
+      model = resolveModelSelection(model, liveSettingsFor(opts));
+    }
+    // provider-correctness T6: the effort half of `model`, validated by the SAME rule
+    // `session.setEffort` applies (`assertEffortSelectable`) so a create can never accept what a
+    // set would refuse. Both inputs are the ones THIS CALL is about to stamp — `model` (the
+    // RESOLVED id from just above; before the daemon's live default: checking against a model
+    // this session will not use would validate the wrong thing) and `p.mode` (absent = code,
+    // which `clientEffortEligible` reads as tier-eligible). Refused OUTRIGHT rather than dropped,
+    // unlike `sync.push`'s ingress: there is no irreplaceable log riding along here, so the
+    // caller can simply be told.
+    if (input.effort !== undefined) assertEffortSelectable(input.effort, model ?? opts.liveModel?.() ?? "", input.mode);
+    // P8b-2 / Task 17: the availability check runs BEFORE the product row is minted, so a
+    // Winter-leg refusal (no `winter` binary resolves; the router handle or the runtime spine
+    // did not construct) costs nothing but this reply — and NEVER falls back to anything.
+    // `winter` is undefined only on a bare test server, where the row is minted and no child
+    // exists (fix wave F9 retired the engine-leg branch that used to sit here).
+    if (opts.winter !== undefined) {
+      opts.winter.assertAvailable(input.mode ?? "code");
+    }
+    // Winter Phase 8c (P8c-5), AMENDED Phase 8d (P8d-7, M7) and WS-23: `runtimeKind` is stamped
+    // HERE and only here — the 8a runtime record `winter.create()` mints just below does not exist
+    // yet, so this is the ONE call site that can honestly stamp the seq-1 event. P8d-7 omitted it
+    // for a Claude-family model while an official peer could still have claimed that session; with
+    // the official leg retired, every session a driver table creates runs on the Winter leg.
+    // `modelRef` rides the ALREADY-RESOLVED `model` local (set above, before the effort check) —
+    // never the caller's raw, possibly-aliased `p.model`. `providerId` has no producer on THIS event
+    // (P8d-7: `session.list` is the truthful source, from the record) and is deliberately omitted,
+    // not set to a guess.
+    const knowsWinterLeg = opts.winter !== undefined;
+    const { cwd } = input;
+    const sessionId = opts.store.createSession(input.scope, {
+      cwd, approvalPolicy: input.approvalPolicy, origin: input.origin, mode: input.mode, model, effort: input.effort,
+      ...(input.parentSessionId === undefined ? {} : { parentSessionId: input.parentSessionId }),
+      ...(knowsWinterLeg ? { runtimeKind: "winter-agent" as const } : {}),
+      ...(model !== undefined ? { modelRef: model } : {}),
+    });
+    // THE CREATION TRANSACTION (WS-16 §6, P8b-14): the record allocates the backend uuid and
+    // the child is started; a failure there ROLLS THE ROW BACK (it was never announced to any
+    // client — the `session_created` broadcast is below) and the typed refusal is the reply.
+    if (opts.winter !== undefined) {
+      try {
+        await opts.winter!.create(sessionId);
+      } catch (err) {
+        // The row AND its runtime rows: `create` may have persisted the record (with its backend
+        // uuid) before the child refused to start, and a record for a session that no longer
+        // exists is parked by every later recovery and counted by `winter doctor` forever —
+        // retention never removes it, only a session deletion does. Same hook the reaper fires.
+        try { opts.store.deleteSession(sessionId); } catch { /* the row is gone or undeletable; the refusal still stands */ }
+        try { opts.onSessionDeleted?.(sessionId); } catch { /* best effort; the refusal still stands */ }
+        throw err;
+      }
+    }
+    // R.3 re-review B-2: the project-scope trust rule (`projectScopeTrusted`), as the card and the save use.
+    const trusted = cwd && opts.trust ? projectScopeTrusted(cwd, opts.trust) : false;
+    // Broadcast the session_created event to every authed harness (not just attachments —
+    // a brand-new session has none) so other harnesses can offer to follow (spec §4.4).
+    const created = opts.store.read(sessionId, 0)[0];
+    if (created) {
+      for (const conn of harnessConns) {
+        try { conn.writer.enqueue(encodeLine({ jsonrpc: "2.0", method: METHODS.event, params: created })); }
+        catch { /* dead socket — its close() handler will evict it from harnessConns */ }
+      }
+    }
+    // session-activity-hygiene T6 (spec §2): the empty-session reaper's mint-time sweep — fires
+    // on every `session.create`, but must never delay or fail THIS reply over hygiene against
+    // unrelated sessions (the just-minted one above is always safe: `emptySessionIds`'s own
+    // 10-minute grace excludes anything this young regardless of timing).
+    //
+    // Review fix round 1 (Finding 1, Important): a MICROTASK deferral here (`Promise.resolve()
+    // .then(fn)`) is NOT non-blocking — `reapEmptySessions` is entirely synchronous, and on an
+    // already-fulfilled promise `.then(fn)` queues `fn` as a microtask strictly AHEAD of this
+    // `async` handler's own resolution (whose continuation — `await handle(...)` back in the
+    // caller — is what writes this reply). The queue is FIFO, so the sweep would run to
+    // completion (sqlite query, per-candidate readFileSync, unlinkSync, appendFileSync) BEFORE
+    // the reply is even enqueued — the event loop is single-threaded, so every connection on
+    // this daemon sits blocked for however long that takes. `setTimeout(fn, 0)` is a MACROTASK:
+    // the event loop always fully drains the microtask queue (which includes the reply write)
+    // before running any macrotask, so this genuinely runs AFTER the reply is on its way out —
+    // proven by reaper.test.ts's "never delays the create reply" case (a slow synchronous stub,
+    // injected via `opts.reapEmptySessions` below, measurably delayed the round trip under the
+    // old microtask version and does not under this one). A synchronous throw from `reap` still
+    // can't reach this handler either way (it runs on a later turn, not inline) — the try/catch
+    // is the error sink for that turn.
+    //
+    // Skipped outright with no `opts.winterHome` wired (most existing tests): unlike the
+    // destructive half (`store.emptySessionIds`/`deleteSession`, which need no winterHome at
+    // all), reaping with no audit trail at all is not a degraded mode this feature should ever
+    // run in — see reaper.ts's own doc comment on the delete-then-audit order. Every real
+    // caller (daemon.ts) always wires `winterHome`.
+    //
+    // The timer is TRACKED (`pendingReaps`) and cancelled by `stop()`: a create answered just
+    // before shutdown used to leave its sweep queued behind the reply, and the caller's
+    // `stop()` → `store.close()` ran first, so the sweep queried a closed database ("Cannot use
+    // a closed database" from `emptySessionIds`). A server that has stopped reaps nothing.
+    if (opts.winterHome) {
+      const home = opts.winterHome;
+      const reap = opts.reapEmptySessions ?? reapEmptySessions;
+      const cancel = scheduleMintSweep(() => {
+        pendingReaps.delete(cancel);
+        try { reap({ store: opts.store, attachedCount: (id) => hub.attachedCount(id), home, onDelete: opts.onSessionDeleted }); }
+        catch (err) { console.error("[reaper] mint-time sweep failed:", err); }
+      });
+      pendingReaps.add(cancel);
+    }
+    return { sessionId, trusted };
+  }
+
   /** P8c-14: `session.send`/`session.interrupt`/`session.compact` gate on this BEFORE resuming —
    *  a leg the driver table can actually run a turn on, never `"engine"` (P8b-22's own refusal)
    *  and never `undefined` (no record at all). Widened from a bare `=== "winter"` string check the
@@ -1329,6 +1481,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // lazily, but handing a consumer a function it could legally call before that binding initialized
   // would be a TDZ throw waiting for a race nobody would reproduce.
   opts.onActivityDeriver?.(deriveActivity);
+  opts.onSessionCreator?.(createSessionInternal);
 
   const helloTimeoutMs = opts.helloTimeoutMs ?? 5000;
   const maxConnections = opts.maxConnections ?? 64;
@@ -1894,121 +2047,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // SessionApprovalPolicy doc comment), so this coercion is the ONLY way a session's stored
         // policy ever becomes "chat".
         const approvalPolicy = p.mode === "chat" ? "chat" : p.approvalPolicy;
-        // followups batch T2: `model` itself, resolved+validated by the SAME `resolveModelSelection`
-        // helper `session.setModel` applies (extracted above, beside `assertEffortSelectable`) — an
-        // alias like "sol" is stamped as its canonical id ("gpt-5.6-sol") rather than stored
-        // verbatim, and an unresolvable slug is refused OUTRIGHT when the catalogue can enumerate,
-        // exactly like `session.setModel` (a BYO endpoint that can't enumerate is never bricked).
-        // MUST run BEFORE the effort check just below: effort validates against the model THIS CALL
-        // is about to stamp, and that model is the RESOLVED id, never whatever the caller typed —
-        // a create that validated effort against an unresolved alias would name the wrong model in
-        // its own refusal message, and (once `effortsForModel` ever diverges per model) could
-        // validate against the wrong list entirely.
-        let model = p.model;
-        if (model !== undefined) {
-          model = resolveModelSelection(model, liveSettingsFor(opts));
-        }
-        // provider-correctness T6: the effort half of `model`, validated by the SAME rule
-        // `session.setEffort` applies (`assertEffortSelectable`) so a create can never accept what a
-        // set would refuse. Both inputs are the ones THIS CALL is about to stamp — `model` (the
-        // RESOLVED id from just above; before the daemon's live default: checking against a model
-        // this session will not use would validate the wrong thing) and `p.mode` (absent = code,
-        // which `clientEffortEligible` reads as tier-eligible). Refused OUTRIGHT rather than dropped,
-        // unlike `sync.push`'s ingress: there is no irreplaceable log riding along here, so the
-        // caller can simply be told.
-        if (p.effort !== undefined) assertEffortSelectable(p.effort, model ?? opts.liveModel?.() ?? "", p.mode);
-        // P8b-2 / Task 17: the availability check runs BEFORE the product row is minted, so a
-        // Winter-leg refusal (no `winter` binary resolves; the router handle or the runtime spine
-        // did not construct) costs nothing but this reply — and NEVER falls back to anything.
-        // `winter` is undefined only on a bare test server, where the row is minted and no child
-        // exists (fix wave F9 retired the engine-leg branch that used to sit here).
-        if (opts.winter !== undefined) {
-          try { opts.winter.assertAvailable(p.mode ?? "code"); } catch (err) { rpcFromWinterRefusal(err); }
-        }
-        // Winter Phase 8c (P8c-5), AMENDED Phase 8d (P8d-7, M7) and WS-23: `runtimeKind` is stamped
-        // HERE and only here — the 8a runtime record `winter.create()` mints just below does not exist
-        // yet, so this is the ONE call site that can honestly stamp the seq-1 event. P8d-7 omitted it
-        // for a Claude-family model while an official peer could still have claimed that session; with
-        // the official leg retired, every session a driver table creates runs on the Winter leg.
-        // `modelRef` rides the ALREADY-RESOLVED `model` local (set above, before the effort check) —
-        // never the caller's raw, possibly-aliased `p.model`. `providerId` has no producer on THIS event
-        // (P8d-7: `session.list` is the truthful source, from the record) and is deliberately omitted,
-        // not set to a guess.
-        const knowsWinterLeg = opts.winter !== undefined;
-        const sessionId = opts.store.createSession(p.scope, {
-          cwd, approvalPolicy, origin: p.origin, mode: p.mode, model, effort: p.effort,
-          ...(knowsWinterLeg ? { runtimeKind: "winter-agent" as const } : {}),
-          ...(model !== undefined ? { modelRef: model } : {}),
-        });
-        // THE CREATION TRANSACTION (WS-16 §6, P8b-14): the record allocates the backend uuid and
-        // the child is started; a failure there ROLLS THE ROW BACK (it was never announced to any
-        // client — the `session_created` broadcast is below) and the typed refusal is the reply.
-        if (opts.winter !== undefined) {
-          try {
-            await opts.winter!.create(sessionId);
-          } catch (err) {
-            // The row AND its runtime rows: `create` may have persisted the record (with its backend
-            // uuid) before the child refused to start, and a record for a session that no longer
-            // exists is parked by every later recovery and counted by `winter doctor` forever —
-            // retention never removes it, only a session deletion does. Same hook the reaper fires.
-            try { opts.store.deleteSession(sessionId); } catch { /* the row is gone or undeletable; the refusal still stands */ }
-            try { opts.onSessionDeleted?.(sessionId); } catch { /* best effort; the refusal still stands */ }
-            rpcFromWinterRefusal(err);
-          }
-        }
-        // R.3 re-review B-2: the project-scope trust rule (`projectScopeTrusted`), as the card and the save use.
-        const trusted = cwd && opts.trust ? projectScopeTrusted(cwd, opts.trust) : false;
-        // Broadcast the session_created event to every authed harness (not just attachments —
-        // a brand-new session has none) so other harnesses can offer to follow (spec §4.4).
-        const created = opts.store.read(sessionId, 0)[0];
-        if (created) {
-          for (const conn of harnessConns) {
-            try { conn.writer.enqueue(encodeLine({ jsonrpc: "2.0", method: METHODS.event, params: created })); }
-            catch { /* dead socket — its close() handler will evict it from harnessConns */ }
-          }
-        }
-        // session-activity-hygiene T6 (spec §2): the empty-session reaper's mint-time sweep — fires
-        // on every `session.create`, but must never delay or fail THIS reply over hygiene against
-        // unrelated sessions (the just-minted one above is always safe: `emptySessionIds`'s own
-        // 10-minute grace excludes anything this young regardless of timing).
-        //
-        // Review fix round 1 (Finding 1, Important): a MICROTASK deferral here (`Promise.resolve()
-        // .then(fn)`) is NOT non-blocking — `reapEmptySessions` is entirely synchronous, and on an
-        // already-fulfilled promise `.then(fn)` queues `fn` as a microtask strictly AHEAD of this
-        // `async` handler's own resolution (whose continuation — `await handle(...)` back in the
-        // caller — is what writes this reply). The queue is FIFO, so the sweep would run to
-        // completion (sqlite query, per-candidate readFileSync, unlinkSync, appendFileSync) BEFORE
-        // the reply is even enqueued — the event loop is single-threaded, so every connection on
-        // this daemon sits blocked for however long that takes. `setTimeout(fn, 0)` is a MACROTASK:
-        // the event loop always fully drains the microtask queue (which includes the reply write)
-        // before running any macrotask, so this genuinely runs AFTER the reply is on its way out —
-        // proven by reaper.test.ts's "never delays the create reply" case (a slow synchronous stub,
-        // injected via `opts.reapEmptySessions` below, measurably delayed the round trip under the
-        // old microtask version and does not under this one). A synchronous throw from `reap` still
-        // can't reach this handler either way (it runs on a later turn, not inline) — the try/catch
-        // is the error sink for that turn.
-        //
-        // Skipped outright with no `opts.winterHome` wired (most existing tests): unlike the
-        // destructive half (`store.emptySessionIds`/`deleteSession`, which need no winterHome at
-        // all), reaping with no audit trail at all is not a degraded mode this feature should ever
-        // run in — see reaper.ts's own doc comment on the delete-then-audit order. Every real
-        // caller (daemon.ts) always wires `winterHome`.
-        //
-        // The timer is TRACKED (`pendingReaps`) and cancelled by `stop()`: a create answered just
-        // before shutdown used to leave its sweep queued behind the reply, and the caller's
-        // `stop()` → `store.close()` ran first, so the sweep queried a closed database ("Cannot use
-        // a closed database" from `emptySessionIds`). A server that has stopped reaps nothing.
-        if (opts.winterHome) {
-          const home = opts.winterHome;
-          const reap = opts.reapEmptySessions ?? reapEmptySessions;
-          const cancel = scheduleMintSweep(() => {
-            pendingReaps.delete(cancel);
-            try { reap({ store: opts.store, attachedCount: (id) => hub.attachedCount(id), home, onDelete: opts.onSessionDeleted }); }
-            catch (err) { console.error("[reaper] mint-time sweep failed:", err); }
+        try {
+          return await createSessionInternal({
+            scope: p.scope, approvalPolicy,
+            ...(p.mode === undefined ? {} : { mode: p.mode }),
+            ...(cwd === undefined ? {} : { cwd }),
+            ...(p.origin === undefined ? {} : { origin: p.origin }),
+            ...(p.model === undefined ? {} : { model: p.model }),
+            ...(p.effort === undefined ? {} : { effort: p.effort }),
           });
-          pendingReaps.add(cancel);
-        }
-        return { sessionId, trusted };
+        } catch (err) { rpcFromWinterRefusal(err); }
       }
       case METHODS.sessionList: {
         // session-activity-hygiene T2 (spec §1): stamp each row's derived lifecycle state. ONE
