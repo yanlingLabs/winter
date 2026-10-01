@@ -9,17 +9,51 @@ import AppKit
 final class DispatchPillControllerTests: XCTestCase {
     private let visible = CGRect(x: 100, y: 80, width: 1440, height: 820)
     private var controllers: [DispatchPillController] = []
+    /// Every pill gets its OWN `UserDefaults` suite: the test host is the app, so `.standard` is
+    /// the dev app's real preferences — a dev app left on "Clear draft on close" would otherwise
+    /// break every draft round trip here, and a test's write would leak into the app.
+    private var defaultsSuites: [String] = []
 
     override func tearDown() async throws {
         controllers.forEach { $0.hide() }
         controllers.removeAll()
+        defaultsSuites.forEach { UserDefaults().removePersistentDomain(forName: $0) }
+        defaultsSuites.removeAll()
         try await super.tearDown()
     }
 
-    private func makePill(_ session: SessionModel? = nil) -> DispatchPillController {
-        let pill = DispatchPillController(session: session ?? SessionModel())
+    private func makeSettings(_ expiry: DispatchPillDraftExpiry? = nil) -> DispatchPillSettings {
+        let suite = "WinterTests.DispatchPill.\(UUID().uuidString)"
+        defaultsSuites.append(suite)
+        let settings = DispatchPillSettings(defaults: UserDefaults(suiteName: suite)!)
+        if let expiry { settings.setDraftExpiry(expiry) }
+        return settings
+    }
+
+    private func makePill(_ session: SessionModel? = nil,
+                          settings: DispatchPillSettings? = nil) -> DispatchPillController {
+        let pill = DispatchPillController(session: session ?? SessionModel(), settings: settings ?? makeSettings())
         pill.visibleFrameOverrideForTesting = visible
         controllers.append(pill)
+        return pill
+    }
+
+    /// A clock a test moves by hand.
+    private final class Clock {
+        var now: Date
+        init(_ now: Date) { self.now = now }
+        func advance(_ seconds: TimeInterval) { now = now.addingTimeInterval(seconds) }
+    }
+
+    private let t0 = Date(timeIntervalSinceReferenceDate: 800_000_000)
+
+    /// A pill on `expiry`, reading `clock`, shown with `draft` typed into it.
+    private func pillWithDraft(_ draft: String, expiry: DispatchPillDraftExpiry,
+                               clock: Clock? = nil) -> DispatchPillController {
+        let pill = makePill(settings: makeSettings(expiry))
+        if let clock { pill.nowOverrideForTesting = { clock.now } }
+        pill.show()
+        pill.adapter.composerDraft = draft
         return pill
     }
 
@@ -168,6 +202,8 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertEqual(pill.presentation, .compact)
         XCTAssertEqual(pill.adapter.composerDraft, "", "the compact pill shows its placeholder…")
         XCTAssertFalse(pill.panelAcceptsKeyForTesting, "…and stops taking the keyboard")
+        XCTAssertNil(pill.draftExpiryDeadlineForTesting, "a click outside never starts the draft countdown")
+        XCTAssertFalse(pill.draftExpiryTimerArmedForTesting)
         pill.hide()
         pill.show()
         XCTAssertEqual(pill.adapter.composerDraft, "keep me", "…and the draft survived in the DraftCache")
@@ -197,6 +233,208 @@ final class DispatchPillControllerTests: XCTestCase {
         pill.handleClickOutside()
         XCTAssertEqual(pill.presentation, .compact)
         XCTAssertTrue(pill.isVisible)
+    }
+
+    /// A click-outside stash, with the pill still on screen, never ages out: the pill's cache has no
+    /// expiry of its own, and the countdown only runs while the pill is put away.
+    func testAClickOutsideStashSurvivesAnyTimeOnScreen() {
+        let clock = Clock(t0)
+        let pill = pillWithDraft("still here", expiry: .fiveMinutes, clock: clock)
+        pill.handleClickOutside()
+        clock.advance(86_400)
+        XCTAssertEqual(pill.stashedDraftForTesting, "still here")
+        XCTAssertFalse(pill.draftExpiryTimerArmedForTesting)
+    }
+
+    // MARK: - Draft expiry (the put-away pill's countdown)
+
+    /// The 4-finger tap puts the pill away and starts the countdown; reopening before it runs out
+    /// cancels it and keeps the draft; the next close starts a FRESH, full countdown.
+    func testTheTapStartsTheCountdownAReopenCancelsItAndTheNextCloseStartsAfresh() {
+        let clock = Clock(t0)
+        let pill = pillWithDraft("half a thought", expiry: .tenMinutes, clock: clock)
+        XCTAssertNil(pill.draftExpiryDeadlineForTesting, "no countdown while the pill is on screen")
+
+        pill.handleTrigger()
+        XCTAssertFalse(pill.isVisible)
+        XCTAssertEqual(pill.draftExpiryDeadlineForTesting, t0.addingTimeInterval(600))
+        XCTAssertTrue(pill.draftExpiryTimerArmedForTesting)
+        XCTAssertEqual(pill.stashedDraftForTesting, "half a thought")
+
+        clock.advance(300)
+        pill.handleTrigger()
+        XCTAssertTrue(pill.isVisible)
+        XCTAssertEqual(pill.adapter.composerDraft, "half a thought", "reopened in time: the draft is back")
+        XCTAssertNil(pill.draftExpiryDeadlineForTesting, "…and the countdown is cancelled")
+        XCTAssertFalse(pill.draftExpiryTimerArmedForTesting)
+
+        clock.advance(100)
+        pill.handleTrigger()
+        XCTAssertEqual(pill.draftExpiryDeadlineForTesting, t0.addingTimeInterval(400 + 600),
+                       "the next close starts a full countdown from ITS moment, not the first close's")
+    }
+
+    /// A real timer, on the real run loop: it fires while the pill is away and the draft is gone.
+    func testTheCountdownRunningOutClearsThePutAwayDraft() {
+        let pill = pillWithDraft("gone soon", expiry: .fiveMinutes)
+        pill.draftExpiryIntervalOverrideForTesting = 0.05
+        pill.handleTrigger()
+        XCTAssertEqual(pill.stashedDraftForTesting, "gone soon")
+        waitUntil { pill.stashedDraftForTesting == nil }
+        XCTAssertNil(pill.stashedDraftForTesting, "the countdown ran out: the draft is cleared")
+        XCTAssertFalse(pill.draftExpiryTimerArmedForTesting)
+        pill.handleTrigger()
+        XCTAssertEqual(pill.adapter.composerDraft, "")
+        XCTAssertEqual(pill.presentation, .compact)
+    }
+
+    /// A timer set by an earlier close must not fire into a later one: reopen and close again
+    /// inside the first countdown, wait past where it would have run out, and the draft is still
+    /// there — then the SECOND countdown clears it.
+    func testACancelledCountdownNeverFiresIntoTheNextClose() {
+        // Wide margins, so a loaded run loop cannot make the test fail for the wrong reason: the
+        // first countdown would end at ~1.0 s, the second at ~1.4 s, and the check lands at ~1.2 s.
+        let pill = pillWithDraft("second chance", expiry: .fiveMinutes)
+        pill.draftExpiryIntervalOverrideForTesting = 1.0
+        pill.handleTrigger()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        pill.handleTrigger()
+        XCTAssertEqual(pill.adapter.composerDraft, "second chance")
+        pill.handleTrigger()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        XCTAssertEqual(pill.stashedDraftForTesting, "second chance",
+                       "past the FIRST countdown's end, the draft is still kept")
+        waitUntil(timeout: 3) { pill.stashedDraftForTesting == nil }
+        XCTAssertNil(pill.stashedDraftForTesting, "the second countdown clears it")
+    }
+
+    func testClearDraftOnCloseClearsItTheMomentThePillIsPutAway() {
+        let pill = pillWithDraft("not kept", expiry: .onClose)
+        pill.handleTrigger()
+        XCTAssertNil(pill.stashedDraftForTesting)
+        XCTAssertFalse(pill.draftExpiryTimerArmedForTesting, "nothing left to count down")
+        pill.handleTrigger()
+        XCTAssertEqual(pill.adapter.composerDraft, "")
+        XCTAssertEqual(pill.presentation, .compact)
+    }
+
+    func testNeverKeepsThePutAwayDraftWithNoCountdown() {
+        let clock = Clock(t0)
+        let pill = pillWithDraft("forever", expiry: .never, clock: clock)
+        pill.handleTrigger()
+        XCTAssertNil(pill.draftExpiryDeadlineForTesting)
+        XCTAssertFalse(pill.draftExpiryTimerArmedForTesting)
+        clock.advance(86_400 * 7)
+        pill.handleTrigger()
+        XCTAssertEqual(pill.adapter.composerDraft, "forever")
+        XCTAssertEqual(pill.presentation, .expanded)
+    }
+
+    /// A `Timer` is not promised to fire on time across a sleep: a deadline that passed while the
+    /// timer was held back still clears the draft on the reopen, before it could be restored.
+    func testADeadlinePassedWhileAwayClearsTheDraftOnTheReopen() {
+        let clock = Clock(t0)
+        let pill = pillWithDraft("slept through", expiry: .fiveMinutes, clock: clock)
+        pill.handleTrigger()
+        clock.advance(301)
+        XCTAssertTrue(pill.draftExpiryTimerArmedForTesting, "the real timer has not run")
+        pill.handleTrigger()
+        XCTAssertEqual(pill.adapter.composerDraft, "")
+        XCTAssertEqual(pill.presentation, .compact)
+        XCTAssertNil(pill.stashedDraftForTesting)
+    }
+
+    /// A setting changed while the pill is away applies to the countdown already running,
+    /// measured from the close: shorter-than-elapsed clears now, longer re-arms, `never` stops it.
+    func testASettingChangedWhileThePillIsAwayAppliesToTheRunningCountdown() {
+        let clock = Clock(t0)
+        let pill = pillWithDraft("moving target", expiry: .fifteenMinutes, clock: clock)
+        pill.handleTrigger()
+        XCTAssertEqual(pill.draftExpiryDeadlineForTesting, t0.addingTimeInterval(900))
+
+        clock.advance(6 * 60)
+        pill.settings.setDraftExpiry(.tenMinutes)
+        XCTAssertEqual(pill.draftExpiryDeadlineForTesting, t0.addingTimeInterval(600),
+                       "measured from the close, not from the change")
+        XCTAssertTrue(pill.draftExpiryTimerArmedForTesting)
+
+        pill.settings.setDraftExpiry(.never)
+        XCTAssertNil(pill.draftExpiryDeadlineForTesting)
+        XCTAssertFalse(pill.draftExpiryTimerArmedForTesting)
+        XCTAssertEqual(pill.stashedDraftForTesting, "moving target")
+
+        pill.settings.setDraftExpiry(.fifteenMinutes)
+        XCTAssertEqual(pill.draftExpiryDeadlineForTesting, t0.addingTimeInterval(900),
+                       "back from never: still measured from the original close")
+
+        pill.settings.setDraftExpiry(.fiveMinutes)
+        XCTAssertNil(pill.stashedDraftForTesting, "six minutes away already: five minutes has run out")
+        XCTAssertFalse(pill.draftExpiryTimerArmedForTesting)
+    }
+
+    func testChangingToClearOnCloseWhileAwayClearsAtOnce() {
+        let pill = pillWithDraft("now", expiry: .never)
+        pill.handleTrigger()
+        pill.settings.setDraftExpiry(.onClose)
+        XCTAssertNil(pill.stashedDraftForTesting)
+    }
+
+    /// While the pill is on screen a setting change starts nothing; the next close uses it.
+    func testASettingChangedWhileVisibleTakesEffectAtTheNextClose() {
+        let pill = pillWithDraft("typed", expiry: .fifteenMinutes)
+        pill.settings.setDraftExpiry(.onClose)
+        XCTAssertEqual(pill.adapter.composerDraft, "typed", "nothing happens to a draft on screen")
+        XCTAssertFalse(pill.draftExpiryTimerArmedForTesting)
+        pill.handleTrigger()
+        XCTAssertNil(pill.stashedDraftForTesting)
+    }
+
+    /// A sent draft leaves nothing to expire: the countdown after a send has nothing to clear and
+    /// never resurrects anything.
+    func testAfterASendTheCloseHasNoDraftToKeep() async {
+        let pill = pillWithDraft("sent", expiry: .never)
+        pill.onSubmit = { _ in true }
+        pill.submit("sent")
+        for _ in 0..<50 where !pill.adapter.composerDraft.isEmpty {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        pill.handleTrigger()
+        XCTAssertNil(pill.stashedDraftForTesting)
+        pill.handleTrigger()
+        XCTAssertEqual(pill.adapter.composerDraft, "")
+    }
+
+    // MARK: - The draft-expiry setting
+
+    func testTheDraftExpiryOptionsAreStoredUnderTheirFixedSpellings() {
+        XCTAssertEqual(DispatchPillDraftExpiry.allCases.map(\.rawValue),
+                       ["onClose", "5min", "10min", "15min", "never"])
+        XCTAssertEqual(DispatchPillDraftExpiry.allCases.map(\.label),
+                       ["Clear draft on close", "5 min", "10 min", "15 min", "Never"])
+        XCTAssertEqual(DispatchPillDraftExpiry.allCases.map(\.interval), [0, 300, 600, 900, nil])
+        XCTAssertEqual(DispatchPillDraftExpiry.default, .fifteenMinutes)
+        XCTAssertEqual(DispatchPillDraftExpiry(storedValue: nil), .fifteenMinutes)
+        XCTAssertEqual(DispatchPillDraftExpiry(storedValue: "1h"), .fifteenMinutes, "unrecognised → default")
+        XCTAssertEqual(DispatchPillDraftExpiry(storedValue: "never"), .never)
+        XCTAssertEqual(dispatchPillDraftExpiryDeadline(closedAt: t0, interval: 300), t0.addingTimeInterval(300))
+        XCTAssertEqual(dispatchPillDraftExpiryDeadline(closedAt: t0, interval: 0), t0)
+        XCTAssertNil(dispatchPillDraftExpiryDeadline(closedAt: t0, interval: nil))
+    }
+
+    func testTheSettingsStoreReadsWithoutWritingAndPersistsAChange() {
+        let suite = "WinterTests.DispatchPill.\(UUID().uuidString)"
+        defaultsSuites.append(suite)
+        let defaults = UserDefaults(suiteName: suite)!
+        let store = DispatchPillSettings(defaults: defaults)
+        XCTAssertEqual(store.draftExpiry, .fifteenMinutes)
+        XCTAssertNil(defaults.object(forKey: DispatchPillSettings.draftExpiryKey),
+                     "constructing the store writes nothing")
+        store.setDraftExpiry(.tenMinutes)
+        XCTAssertEqual(defaults.string(forKey: "dispatchPillDraftExpiry"), "10min")
+        XCTAssertEqual(DispatchPillSettings(defaults: defaults).draftExpiry, .tenMinutes,
+                       "a later launch reads it back")
+        defaults.set("garbage", forKey: DispatchPillSettings.draftExpiryKey)
+        XCTAssertEqual(DispatchPillSettings(defaults: defaults).draftExpiry, .fifteenMinutes)
     }
 
     // MARK: - Esc
@@ -455,5 +693,7 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertNotNil(pill.onStopChild)
         XCTAssertNotNil(pill.onOpenInApp)
         XCTAssertEqual(pill.onEsc?(), false, "no turn running in the degraded test boot: Esc is not an interrupt")
+        XCTAssertTrue(pill.settings === delegate.dispatchPillSettings,
+                      "the pill reads the ONE store the settings page writes")
     }
 }

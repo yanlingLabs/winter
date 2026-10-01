@@ -241,7 +241,10 @@ final class DispatchPillViewTests: XCTestCase {
             s.exchanges = [Exchange(prompt: "hello", reply: "hi there")]
             s.children = [ChildItem(sessionId: "c1", title: "fix auth", status: "running")]
         }
-        let pill = DispatchPillController(session: session)
+        // A throwaway suite, never written (nothing here shows or hides the pill): the test host is
+        // the app, and `.standard` is the dev app's real preferences.
+        let settings = DispatchPillSettings(defaults: UserDefaults(suiteName: "WinterTests.DispatchPill.views")!)
+        let pill = DispatchPillController(session: session, settings: settings)
         pill.visibleFrameOverrideForTesting = CGRect(x: 0, y: 0, width: 1200, height: 800)
         let childRow = DispatchPillMetrics.childRowHeight + DispatchPillMetrics.stackGap
         for presentation in [DispatchPillPresentation.compact, .expanded, .fullScreen] {

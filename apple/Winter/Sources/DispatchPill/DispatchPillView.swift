@@ -151,7 +151,6 @@ struct DispatchPillComposerBar: View {
                         onFullScreen: { controller.requestFullScreen() },
                         onOpenInApp: { controller.onOpenInApp?() },
                         onClearDraft: { controller.clearDraft() },
-                        onHide: { controller.hide() },
                         onPopoverChange: { controller.auxiliaryPopoverOpen = $0 }
                     )
                     .transition(.opacity)

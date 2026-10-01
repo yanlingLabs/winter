@@ -242,6 +242,12 @@ struct DashboardWiring {
     /// panel degrade honestly instead of looking empty.
     var updates: UpdatePresenter? = nil
 
+    /// Settings → Dispatch: the dispatch pill's own preferences — the SAME instance the pill reads
+    /// (`AppDelegate.dispatchPillSettings`), so the page's writes reach it at once. App-local
+    /// (`UserDefaults`), no daemon call. `var` with a `nil` default for the same reason `mcpList`
+    /// is one; `nil` renders the page's control inert.
+    var dispatchPillSettings: DispatchPillSettings? = nil
+
     /// 2026-09-18 — the three SDK versions (Winter agent SDK, Winter runtime SDK, Claude agent SDK).
     ///
     /// `nil` TODAY, deliberately: the daemon RPC that answers this is being built by another
