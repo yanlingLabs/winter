@@ -18,6 +18,9 @@ struct ExpandedPillAccessoryButtons: View {
     let onOpenInApp: () -> Void
     let onClearDraft: () -> Void
     let onHide: () -> Void
+    /// Whether the ⋯ popover is open — the controller's click-outside monitor must not treat a click
+    /// inside the popover as a click away from the pill.
+    var onPopoverChange: (Bool) -> Void = { _ in }
 
     @State private var showsMore = false
 
@@ -37,6 +40,9 @@ struct ExpandedPillAccessoryButtons: View {
                 .padding(6)
                 .environment(\.colorScheme, .dark)
             }
+
+            .onChange(of: showsMore) { _, open in onPopoverChange(open) }
+            .onDisappear { if showsMore { onPopoverChange(false) } }
 
             Button(action: onFullScreen) {
                 accessoryGlyph("arrow.up.left.and.arrow.down.right")
