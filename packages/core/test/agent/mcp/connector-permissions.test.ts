@@ -102,9 +102,10 @@ const MATRIX: Array<[Session, Cell]> = [
     { deny: "deny", allow_ro: "allow", allow_rw: "allow", ask_ro: "card", ask_rw: "card", unset_ro: "allow", unset_rw: "card" }],
   [{ label: "dispatch", mode: "dispatch", policy: "auto" },
     { deny: "deny", allow_ro: "allow", allow_rw: "allow", ask_ro: "card", ask_rw: "card", unset_ro: "allow", unset_rw: "card" }],
-  // A dispatch child keeps today's never-prompt rule: "ask" is a typed deny; unset follows its `auto` gate.
+  // A dispatch child's "ask" is a card RELAYED to its coordinator (the `session_spawn` rebuild); unset
+  // follows its `auto` gate.
   [{ label: "dispatch child", mode: "code", policy: "auto", origin: "dispatch-child" },
-    { deny: "deny", allow_ro: "allow", allow_rw: "allow", ask_ro: "deny", ask_rw: "deny", unset_ro: "allow", unset_rw: "allow" }],
+    { deny: "deny", allow_ro: "allow", allow_rw: "allow", ask_ro: "card", ask_rw: "card", unset_ro: "allow", unset_rw: "allow" }],
 ];
 
 const TOOL = "mcp__cf__workers_list";
