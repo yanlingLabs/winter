@@ -23,8 +23,8 @@
 //     COORDINATOR's log as a `child_update` (what the Mac builds its child pills from), and a finished
 //     turn — reported when the child's driver settles (`onTurnSettled`) — carries the result summary.
 //     Only turns the coordinator started are followed: the spawn's own, and a follow-up it delivered
-//     (`send_message` → `clientName: "messaging"`). A user working in a finished child directly wakes
-//     nobody.
+//     (`send_message` → `clientName: "messaging"`) — even to a child already forgotten, which its
+//     stored parent link picks back up. A user working in a finished child directly wakes nobody.
 //   - **Relay** — a followed turn's `approval_requested`/`question_asked` are MIRRORED onto the
 //     coordinator's log with `childSessionId` (always on its main thread, whatever thread raised it
 //     inside the child) and their resolutions after them, so a client watching only Dispatch sees the
@@ -116,6 +116,7 @@ export interface DispatchChildrenDeps {
   store: {
     meta(sessionId: string): { mode?: string; origin?: string; parentSessionId?: string; approvalPolicy?: string };
     setBackgrounded(sessionId: string, on: boolean): void;
+    getTitle?(sessionId: string): string | null;
     dispatchSessionId(): string | undefined;
     read(sessionId: string, fromSeq?: number): SessionEvent[];
   };
@@ -335,9 +336,12 @@ export class DispatchChildren {
     const main = (e as { threadId?: string }).threadId === "main";
     let c = this.children.get(e.sessionId);
     if (c === undefined) {
-      // Only a child a restart interrupted is picked back up — at its next turn.
-      if (this.draining || e.type !== "turn_started" || !main) return;
-      c = this.retrack(e.sessionId);
+      // Picked back up: a child a restart interrupted, at its next turn; a forgotten child the
+      // COORDINATOR messages again (its follow-up's `user_message` — `messaging`/`dispatch` — lands
+      // before the turn it starts). A user typing in a forgotten child directly is never picked up.
+      if (this.draining || !main) return;
+      if (e.type === "turn_started") c = this.retrack(e.sessionId);
+      else if (e.type === "user_message" && (e.clientName === MESSAGING_CLIENT_NAME || e.clientName === DISPATCH_CLIENT_NAME)) c = this.retrackFromLink(e.sessionId);
       if (c === undefined) return;
     }
     if (this.draining) {
@@ -399,6 +403,21 @@ export class DispatchChildren {
     const state = newChild(interrupted.dispatchId, interrupted.title, "", this.now());
     state.status = "error";
     state.lastUserClient = DISPATCH_CLIENT_NAME;   // the turn resumes the coordinator's own work
+    this.children.set(sessionId, state);
+    return state;
+  }
+
+  /** A forgotten child, from its stored link: a `dispatch-child` whose parent is a dispatch session. */
+  private retrackFromLink(sessionId: string): ChildState | undefined {
+    let meta: { origin?: string; parentSessionId?: string };
+    try { meta = this.deps.store.meta(sessionId); } catch { return undefined; }
+    if (meta.origin !== "dispatch-child" || meta.parentSessionId === undefined) return undefined;
+    try { if (this.deps.store.meta(meta.parentSessionId).mode !== "dispatch") return undefined; } catch { return undefined; }
+    let title = "child session";
+    try { title = this.deps.store.getTitle?.(sessionId) ?? title; } catch { /* keep the fallback */ }
+    const state = newChild(meta.parentSessionId, title, "", this.now());
+    state.status = "completed";   // its last reported turn ended; this follow-up starts the next
+    state.reported = true;
     this.children.set(sessionId, state);
     return state;
   }
