@@ -285,6 +285,15 @@ struct FileDiffRef: Equatable {
     let diffId: String
 }
 
+/// One site a web tool's result names, with the icon the TOOL knows for it — the wire's
+/// `tool_result.siteIcons` entry (Exa's `favicon` for the daemon's `Search`; the page's own declared
+/// icon for the runtime's `WebFetch`). What the dispatch pill draws a site tile from
+/// (`plumeThrows(for:)`), instead of guessing `https://<host>/favicon.ico`.
+struct SiteIconRef: Equatable, Hashable {
+    let url: String
+    let iconUrl: String
+}
+
 /// One line of "what happened during this exchange" — tools run, task transitions, subagents
 /// spawned/finished, worktree enters/exits, and interaction points (approvals/questions/plans).
 /// Captured per-exchange by `SessionReducer.reduce` (2d-ii-a task 1) so the transcript can show
@@ -326,10 +335,13 @@ struct ActivityItem: Equatable {
         /// renders from. Absent everywhere else, forever: every pre-feature session replays with it
         /// `nil` and must render byte-identically to before.
         ///
-        /// All four are defaulted so every `.tool(name:detail:)` construction site written before
-        /// they existed compiles and means the same thing; pattern matches must bind all six.
+        /// `siteIcons` is the result's `tool_result.siteIcons` (empty when the event carried none —
+        /// every older event, every non-web tool), folded by the same join as `output`.
+        ///
+        /// All five are defaulted so every `.tool(name:detail:)` construction site written before
+        /// they existed compiles and means the same thing; pattern matches must bind all seven.
         case tool(name: String, detail: String?, callId: String? = nil, output: String? = nil,
-                  isError: Bool = false, fileDiff: FileDiffRef? = nil)
+                  isError: Bool = false, fileDiff: FileDiffRef? = nil, siteIcons: [SiteIconRef] = [])
         case task(subject: String, status: String)
         case subagent(agentType: String)
         case subagentDone
@@ -356,7 +368,7 @@ extension ActivityItem {
     /// accessor rather than a stored field on `ActivityItem`, so that tool-only data stays on the
     /// tool case where a `.task`/`.worktree` item can't carry a meaningless one.
     var toolCallId: String? {
-        if case .tool(_, _, let callId, _, _, _) = kind { return callId }
+        if case .tool(_, _, let callId, _, _, _, _) = kind { return callId }
         return nil
     }
 
@@ -692,7 +704,8 @@ enum SessionReducer {
                            fileDiff: v.fileDiff.map {
                                FileDiffRef(path: $0.path, added: $0.added, removed: $0.removed,
                                            diffId: $0.diffId)
-                           })
+                           },
+                           siteIcons: (v.siteIcons ?? []).map { SiteIconRef(url: $0.url, iconUrl: $0.iconUrl) })
         case .approvalRequested(let v) where v.threadId == mainThread:
             appendPending(.approval(callId: v.callId, toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, childSessionId: v.childSessionId, options: v.options), to: &s)
             appendInteraction(InteractionRecord(
@@ -1009,10 +1022,11 @@ enum SessionReducer {
     /// every no-op edit, and every event from before the field existed) writes `nil`, which is what
     /// the item already held.
     private static func foldToolResult(_ state: inout OrbSessionState, callId: String, output: String,
-                                       isError: Bool, fileDiff: FileDiffRef? = nil) {
+                                       isError: Bool, fileDiff: FileDiffRef? = nil,
+                                       siteIcons: [SiteIconRef] = []) {
         for e in state.exchanges.indices.reversed().prefix(toolResultFoldSearchDepth) {
             guard let i = state.exchanges[e].activity.lastIndex(where: { $0.toolCallId == callId }),
-                  case .tool(let name, let detail, let itemCallId, _, _, _) = state.exchanges[e].activity[i].kind else {
+                  case .tool(let name, let detail, let itemCallId, _, _, _, _) = state.exchanges[e].activity[i].kind else {
                 continue
             }
             state.exchanges[e].activity[i].kind = .tool(
@@ -1021,7 +1035,8 @@ enum SessionReducer {
                 callId: itemCallId,
                 output: capToolOutput(output),
                 isError: isError,
-                fileDiff: fileDiff
+                fileDiff: fileDiff,
+                siteIcons: siteIcons
             )
             return
         }

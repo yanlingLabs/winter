@@ -201,7 +201,7 @@ final class ActivityCaptureTests: XCTestCase {
         // Fail loudly rather than returning nil if no `.tool` item was captured at all — otherwise
         // a reducer that stopped appending would make every `XCTAssertNil` below pass for the
         // wrong reason.
-        guard let kind = lastActivity(s).first?.kind, case .tool(_, let d, _, _, _, _) = kind else {
+        guard let kind = lastActivity(s).first?.kind, case .tool(_, let d, _, _, _, _, _) = kind else {
             XCTFail("no .tool activity captured for \(tool)", file: file, line: line)
             return nil
         }
@@ -762,7 +762,7 @@ final class ActivityCaptureTests: XCTestCase {
     }
 
     private func resultFields(_ item: ActivityItem?) -> (output: String?, isError: Bool)? {
-        guard let kind = item?.kind, case .tool(_, _, _, let output, let isError, _) = kind else { return nil }
+        guard let kind = item?.kind, case .tool(_, _, _, let output, let isError, _, _) = kind else { return nil }
         return (output, isError)
     }
 
@@ -770,7 +770,7 @@ final class ActivityCaptureTests: XCTestCase {
     /// deliberately keeps its pre-task shape so every assertion written against it still means
     /// exactly what it meant.
     private func foldedFileDiff(_ item: ActivityItem?) -> FileDiffRef? {
-        guard let kind = item?.kind, case .tool(_, _, _, _, _, let fileDiff) = kind else { return nil }
+        guard let kind = item?.kind, case .tool(_, _, _, _, _, let fileDiff, _) = kind else { return nil }
         return fileDiff
     }
 
@@ -814,6 +814,32 @@ final class ActivityCaptureTests: XCTestCase {
         XCTAssertEqual(resultFields(lastActivity(s).first)?.output,
                        "edited packages/core/src/agent/engine.ts (-33 +198)")
         XCTAssertEqual(resultFields(lastActivity(s).first)?.isError, false)
+    }
+
+    // MARK: - tool_result.siteIcons on the same fold
+
+    private func foldedSiteIcons(_ item: ActivityItem?) -> [SiteIconRef]? {
+        guard let kind = item?.kind, case .tool(_, _, _, _, _, _, let siteIcons) = kind else { return nil }
+        return siteIcons
+    }
+
+    /// The wire's `siteIcons` decodes (through the real `SessionEvent` decoder) onto the folded
+    /// `.tool` item, in order, beside output/isError; a result without the key folds to `[]`.
+    func testToolResultCarriesSiteIconsOntoTheFoldedItem() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, toolCall("mcp__winter__research__Search", seq: 3, argsJson: #"{"query":"q"}"#))
+        XCTAssertEqual(foldedSiteIcons(lastActivity(s).first), [], "no result yet — no icons yet")
+        s = SessionReducer.reduce(s, ev(#"{"type":"tool_result","seq":4,"sessionId":"s","ts":0,"threadId":"main","callId":"c3","output":"answer","isError":false,"siteIcons":[{"url":"https://a.example.com/x","iconUrl":"https://a.example.com/favicon.ico"},{"url":"https://b.example.org/y","iconUrl":"https://cdn.example.net/b.png"}]}"#))
+        XCTAssertEqual(foldedSiteIcons(lastActivity(s).first), [
+            SiteIconRef(url: "https://a.example.com/x", iconUrl: "https://a.example.com/favicon.ico"),
+            SiteIconRef(url: "https://b.example.org/y", iconUrl: "https://cdn.example.net/b.png"),
+        ])
+        XCTAssertEqual(resultFields(lastActivity(s).first)?.output, "answer")
+
+        var t = openTurnState()
+        t = SessionReducer.reduce(t, toolCall("WebFetch", seq: 3, argsJson: #"{"url":"https://a.example.com/"}"#))
+        t = SessionReducer.reduce(t, toolResult(callId: "c3", output: "page", seq: 4))
+        XCTAssertEqual(foldedSiteIcons(lastActivity(t).first), [])
     }
 
     /// **The protect-every-existing-session pin.** A `tool_result` with NO `fileDiff` key — which is

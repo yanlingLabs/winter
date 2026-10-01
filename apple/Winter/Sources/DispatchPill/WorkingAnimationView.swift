@@ -67,36 +67,73 @@ struct PlumeThrow: Equatable, Hashable {
     enum Kind: Equatable, Hashable {
         /// A tool: its SF Symbol (`workingToolSymbol(for:)`) on its own colour (`plumeToolTileColor`).
         case tool(symbol: String)
-        /// A website the agent read or found: its favicon on white.
-        case site(host: String)
+        /// A website the agent read or found: its favicon on white. `iconURL` is the icon the TOOL
+        /// reported for it (`tool_result.siteIcons` — Exa's `favicon`, or the fetched page's own
+        /// declared icon); nil when none was reported, and `FaviconCache` then tries the host's
+        /// `/favicon.ico` once.
+        case site(host: String, iconURL: String? = nil)
     }
     let id: String
     let kind: Kind
 }
 
 /// PURE: what an exchange's tool uses throw, in order. Each tool call throws its tile when it is
-/// made. The web throws favicons instead: a fetch throws its page's site at once, and a search throws
-/// its tile at once and then the sites in its RESULTS (up to `plumeSitesPerSearch`) when they arrive.
-/// The last `plumeThrowWindow` only — older ones were thrown long ago.
+/// made; a web tool then throws the sites in its RESULT when the result arrives — a search up to
+/// `plumeSitesPerSearch` of them, a fetch its one page (a failed fetch, none). A site is drawn from
+/// the icon the result's `siteIcons` names for it; a result without them (an older daemon or
+/// runtime, a source Exa had no favicon for) falls back to the hosts in the output (a search) or the
+/// fetched url (a fetch), with no icon url. A fetch's site waits for its result because that is when
+/// the page — and the icon it declares — arrives; thrown at the call, its tile would be gone long
+/// before. The last `plumeThrowWindow` only — older ones were thrown long ago.
 func plumeThrows(for exchange: Exchange?) -> [PlumeThrow] {
     guard let exchange else { return [] }
     var out: [PlumeThrow] = []
     for (index, item) in exchange.activity.enumerated() {
-        guard case let .tool(name, detail, callId, output, _, _) = item.kind else { continue }
+        guard case let .tool(name, detail, callId, output, isError, _, siteIcons) = item.kind else { continue }
         let base = callId ?? "activity-\(index)"
         let lowered = name.lowercased()
-        if plumeFetchToolNames.contains(lowered), let host = detail.flatMap(plumeHosts(in:)).flatMap(\.first) {
-            out.append(PlumeThrow(id: base + "#" + host, kind: .site(host: host)))
+        out.append(PlumeThrow(id: base, kind: .tool(symbol: workingToolSymbol(for: name))))
+        guard let output else { continue }
+        var sites = plumeSites(siteIcons)
+        if plumeFetchToolNames.contains(lowered) {
+            guard !isError else { continue }
+            if sites.isEmpty, let host = detail.flatMap(plumeHosts(in:))?.first { sites = [(host, nil)] }
+            sites = Array(sites.prefix(1))
+        } else if plumeIsSearchTool(lowered) {
+            // Every source the output names, in order, each with its reported icon when there is
+            // one (Exa omits `favicon` for some); then any reported site the text did not name.
+            let reported = sites
+            let named = plumeHosts(in: output)
+            sites = named.map { host in (host, reported.first { $0.host == host }?.iconURL) }
+                + reported.filter { site in !named.contains(site.host) }
+        } else {
             continue
         }
-        out.append(PlumeThrow(id: base, kind: .tool(symbol: workingToolSymbol(for: name))))
-        if plumeIsSearchTool(lowered), let output {
-            for host in plumeHosts(in: output).prefix(plumeSitesPerSearch) {
-                out.append(PlumeThrow(id: base + "#" + host, kind: .site(host: host)))
-            }
+        for site in sites.prefix(plumeSitesPerSearch) {
+            out.append(PlumeThrow(id: base + "#" + site.host, kind: .site(host: site.host, iconURL: site.iconURL)))
         }
     }
     return Array(out.suffix(plumeThrowWindow))
+}
+
+/// PURE: a result's `siteIcons` as plume sites — one per public page host, in order. An icon url
+/// that is not https to a public host is dropped (the site then falls back to `/favicon.ico`).
+func plumeSites(_ icons: [SiteIconRef]) -> [(host: String, iconURL: String?)] {
+    var seen: Set<String> = []
+    var out: [(host: String, iconURL: String?)] = []
+    for icon in icons {
+        guard let host = URL(string: icon.url)?.host?.lowercased(), plumeFaviconHostAllowed(host),
+              seen.insert(host).inserted else { continue }
+        out.append((host, plumeIconURLAllowed(icon.iconUrl) ? icon.iconUrl : nil))
+    }
+    return out
+}
+
+/// PURE: an icon url the pill may fetch — https, to a public name (`plumeFaviconHostAllowed`).
+func plumeIconURLAllowed(_ string: String) -> Bool {
+    guard let url = URL(string: string), url.scheme?.lowercased() == "https",
+          let host = url.host?.lowercased() else { return false }
+    return plumeFaviconHostAllowed(host)
 }
 
 let plumeSitesPerSearch = 4
@@ -481,7 +518,8 @@ struct WorkingAnimationView: View {
         // Canvas below only draws what it is handed.
         var favicons: [String: NSImage] = [:]
         for token in model.plume.tokens {
-            if case .site(let host) = token.item.kind, let image = FaviconCache.shared.image(for: host) {
+            if case .site(let host, let iconURL) = token.item.kind,
+               let image = FaviconCache.shared.image(host: host, iconURL: iconURL) {
                 favicons[host] = image
             }
         }
@@ -529,7 +567,7 @@ struct WorkingAnimationView: View {
             let c = plumeToolTileColor(symbol: symbol)
             ctx.fill(shape, with: .color(Color(red: c.red, green: c.green, blue: c.blue)))
             drawSymbol(symbol, color: .white, in: square.insetBy(dx: side * 0.22, dy: side * 0.22), context: &ctx)
-        case .site(let host):
+        case .site(let host, _):
             ctx.fill(shape, with: .color(.white))
             let inner = square.insetBy(dx: side * 0.17, dy: side * 0.17)
             if let image = favicons[host] {
