@@ -164,7 +164,9 @@ func dispatchPillCanvasStep(current: CGSize, target: CGSize) -> DispatchPillCanv
 
 /// What the 4-finger tap (and the hotkey, and the menu's summon item — all of `TriggerHub`) does to
 /// the pill. Hidden → show it. Full screen → collapse it back to the pill (spec: "4-finger tap
-/// collapses"). Otherwise → hide it, keeping the draft.
+/// collapses"). Otherwise → hide it, keeping the draft (for as long as `DispatchPillDraftExpiry`
+/// says). This is the ONLY way the pill is ever hidden: a click outside compresses it, and the ⋯
+/// popover has no Hide row.
 enum DispatchPillTriggerAction: Equatable { case show, hide, collapseFullScreen }
 
 func dispatchPillTriggerAction(isVisible: Bool, presentation: DispatchPillPresentation) -> DispatchPillTriggerAction {
@@ -208,6 +210,59 @@ func dispatchPillPresentationAfterDraftChange(
 ) -> DispatchPillPresentation {
     guard presentation == .compact, old != new, !new.isEmpty else { return presentation }
     return .expanded
+}
+
+// MARK: - How long a put-away pill keeps its draft (Settings → Dispatch)
+
+/// The `dispatchPillDraftExpiry` setting. The countdown starts only when the 4-finger tap puts the
+/// pill away (`DispatchPillController.hide()`), and a reopen cancels it, so the next close starts
+/// it afresh. A click outside never starts it: the pill stays on screen, compact, holding its draft.
+///
+/// Raw values are the stored spelling (`UserDefaults`, `DispatchPillSettings`) — never rename one.
+enum DispatchPillDraftExpiry: String, CaseIterable, Sendable {
+    /// Cleared the moment the pill is put away.
+    case onClose
+    case fiveMinutes = "5min"
+    case tenMinutes = "10min"
+    case fifteenMinutes = "15min"
+    /// Kept until it is sent or cleared by hand.
+    case never
+
+    static let `default`: DispatchPillDraftExpiry = .fifteenMinutes
+
+    /// How long after the close the draft is cleared: `0` = at the close itself, `nil` = never.
+    var interval: TimeInterval? {
+        switch self {
+        case .onClose: return 0
+        case .fiveMinutes: return 5 * 60
+        case .tenMinutes: return 10 * 60
+        case .fifteenMinutes: return 15 * 60
+        case .never: return nil
+        }
+    }
+
+    /// The settings menu's wording for the option.
+    var label: String {
+        switch self {
+        case .onClose: return "Clear draft on close"
+        case .fiveMinutes: return "5 min"
+        case .tenMinutes: return "10 min"
+        case .fifteenMinutes: return "15 min"
+        case .never: return "Never"
+        }
+    }
+
+    /// The stored value read back: an absent or unrecognised one is the default.
+    init(storedValue: String?) {
+        self = storedValue.flatMap(DispatchPillDraftExpiry.init(rawValue:)) ?? .default
+    }
+}
+
+/// PURE: when a put-away pill's draft is cleared — the close plus the option's interval, or `nil`
+/// for never. A deadline at or before "now" means clear at once (`onClose`, or a setting changed
+/// to something shorter than the time already spent closed).
+func dispatchPillDraftExpiryDeadline(closedAt: Date, interval: TimeInterval?) -> Date? {
+    interval.map { closedAt.addingTimeInterval(max(0, $0)) }
 }
 
 // MARK: - ↗ and ⋯ give way to the text

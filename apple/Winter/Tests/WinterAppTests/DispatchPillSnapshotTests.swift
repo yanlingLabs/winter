@@ -30,7 +30,10 @@ final class DispatchPillSnapshotTests: XCTestCase {
             s.status = .idle
             seed(&s)
         }
-        let pill = DispatchPillController(session: session)
+        // A throwaway suite, never written (no render shows or hides the pill): the test host is
+        // the app, and `.standard` is the dev app's real preferences.
+        let settings = DispatchPillSettings(defaults: UserDefaults(suiteName: "WinterTests.DispatchPill.snapshots")!)
+        let pill = DispatchPillController(session: session, settings: settings)
         pill.visibleFrameOverrideForTesting = screen
         return pill
     }

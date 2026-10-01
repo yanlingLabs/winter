@@ -311,8 +311,8 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(sections["personal"], [.profile, .personalization, .notifications, .voice,
                                               .appearance, .shortcuts, .importChats, .archivedChats])
         XCTAssertEqual(sections["models"], [.roles, .providers, .runtimes, .quota])
-        XCTAssertEqual(sections["assistant"], [.memory, .workflows, .sessions, .permissions],
-                       "Hooks moved onto the Plugins page; Approvals is Permissions")
+        XCTAssertEqual(sections["assistant"], [.memory, .workflows, .sessions, .permissions, .dispatch],
+                       "Hooks moved onto the Plugins page; Approvals is Permissions; Dispatch is the pill's page")
         XCTAssertEqual(sections["integrations"], [.plugins, .computerUse, .browser, .appshots],
                        "MCP servers live under Plugins now — no standalone section")
         XCTAssertEqual(sections["mac"], [.trust, .peripheral, .commandLine, .launchAtLogin, .daemonStatus])
@@ -342,6 +342,7 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(settingsSectionsMatching("archived", in: all), [.archivedChats])
         XCTAssertEqual(settingsSectionsMatching("discord", in: all), [.discord])
         XCTAssertEqual(settingsSectionsMatching("permiss", in: all), [.permissions])
+        XCTAssertEqual(settingsSectionsMatching("dispatch", in: all), [.dispatch])
         XCTAssertTrue(settingsSectionsMatching("approvals", in: all).isEmpty, "renamed, not duplicated")
         XCTAssertTrue(settingsSectionsMatching("mcp", in: all).isEmpty, "MCP servers is a row on Plugins")
         XCTAssertTrue(settingsSectionsMatching("hooks", in: all).isEmpty, "Hooks is a row on Plugins")
@@ -435,6 +436,22 @@ final class AppShellTests: XCTestCase {
             XCTAssertLessThanOrEqual(copy.count, 100, "\(section) stays short")
             XCTAssertFalse(copy.contains("settings.json"), "\(section) claims nothing is configured today")
         }
+    }
+
+    // MARK: - Settings → Dispatch (2026-10-01)
+
+    /// A built page, not a placeholder: it has no coming copy, and needs the wiring (which carries
+    /// the one store the pill reads). Its sentence names what the setting does and reaches `Text`
+    /// as a variable, so it carries no backticks.
+    func testDispatchPageIsBuiltAndItsCopySaysWhatTheSettingDoes() {
+        XCTAssertNil(settingsSectionComingCopy(.dispatch))
+        XCTAssertFalse(settingsSectionRendersWithoutWiring(.dispatch))
+        XCTAssertEqual(settingsSectionTitle(.dispatch), "Dispatch")
+        XCTAssertEqual(settingsSectionSystemImage(.dispatch), SessionMode.dispatch.systemImage)
+        let copy = settingsDispatchDraftExpiryDescription
+        XCTAssertFalse(copy.contains("`"))
+        XCTAssertTrue(copy.contains("four-finger tap"), "the countdown starts at the tap's close")
+        XCTAssertTrue(copy.contains("Clicking outside"), "and a click outside never starts it")
     }
 
     // MARK: - Settings → Plugins: doors into the library (2026-09-18)

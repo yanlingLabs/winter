@@ -13,11 +13,13 @@ import SwiftUI
 /// ⋯ and ↗. ⋯ is a popover rather than a `Menu`: an `NSMenu` opens at the pop-up-menu window level,
 /// BELOW this `.screenSaver`-level panel, so its items would draw underneath the pill; a popover is a
 /// child window of the panel and orders above it.
+///
+/// There is no Hide row: only the 4-finger tap (the trigger) puts the pill away, and putting it away
+/// is what starts the draft countdown (`DispatchPillDraftExpiry`).
 struct ExpandedPillAccessoryButtons: View {
     let onFullScreen: () -> Void
     let onOpenInApp: () -> Void
     let onClearDraft: () -> Void
-    let onHide: () -> Void
     /// Whether the ⋯ popover is open — the controller's click-outside monitor must not treat a click
     /// inside the popover as a click away from the pill.
     var onPopoverChange: (Bool) -> Void = { _ in }
@@ -35,7 +37,6 @@ struct ExpandedPillAccessoryButtons: View {
                 VStack(alignment: .leading, spacing: 2) {
                     moreRow("Open Dispatch in Winter", symbol: "macwindow") { onOpenInApp() }
                     moreRow("Clear Draft", symbol: "xmark.circle") { onClearDraft() }
-                    moreRow("Hide", symbol: "eye.slash") { onHide() }
                 }
                 .padding(6)
                 .environment(\.colorScheme, .dark)

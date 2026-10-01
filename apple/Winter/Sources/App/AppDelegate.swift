@@ -13,6 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// now, replacing the orb's quick-dispatch field. Bound to the same dispatch session the orb
     /// follows (`AppModel.session`), through its own adapter.
     private(set) var pillController: DispatchPillController?
+    /// The pill's own preferences (Settings → Dispatch: how long a put-away pill keeps its draft).
+    /// ONE instance, handed to both the pill and the settings page (`DashboardWiring`), so a change
+    /// on the page reaches the pill at once. Constructing it only READS `UserDefaults`.
+    private(set) var dispatchPillSettings = DispatchPillSettings()
     /// Task 4 (2f): owns the peripheral capability provider, constructed against `appModel.client`
     /// — the app's MAIN feed client/socket (the daemon rule: THE provider = the most-recent-
     /// advertiser CONNECTION, so this must never be a second/detached-window client).
@@ -840,6 +844,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Debug (where it will report `.unavailable`) so the panel never has a nil case to
             // invent copy for.
             updates: updatePresenter,
+            // Settings → Dispatch: the SAME store the pill reads (`boot()`), so the page's writes
+            // reach a put-away pill's running countdown at once.
+            dispatchPillSettings: dispatchPillSettings,
             // 2026-09-18 — the four settings-surface reads. EVERY ONE OF THEM IS NEWER THAN THE
             // DAEMON MOST USERS ARE RUNNING: the methods exist in this app before they exist in
             // the `winter-core` on disk, so each call can come back `-32601`. That is wired as an
@@ -1312,7 +1319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The dispatch pill: the 4-finger tap / hotkey / menu summon's surface (the `TriggerHub`
         // sink below). Construction has no side effects — no ordering, no monitors — so every
         // `boot()` under test builds one harmlessly.
-        let pill = DispatchPillController(session: model.session)
+        let pill = DispatchPillController(session: model.session, settings: dispatchPillSettings)
         pillController = pill
         wireDispatchPill(pill, model: model)
 

@@ -48,6 +48,37 @@ final class DispatchPillMorphModel: ObservableObject {
     @Published var target: CGSize = .zero
 }
 
+/// The pill's own preferences (Settings → Dispatch). App-local, not the daemon's `settings.json`:
+/// the pill is a Mac surface and nothing the daemon does depends on it — the same `UserDefaults`
+/// posture, with the same injectable `defaults`, as `LoginItemController`/`ShortcutSettingsStore`.
+///
+/// ONE instance (`AppDelegate.dispatchPillSettings`) is handed to both the pill and the settings
+/// page, so a change made on the page reaches the pill at once — including a pill that is put away
+/// with a countdown already running (`DispatchPillController`'s `draftExpiry` sink). Read live,
+/// never snapshotted: there is no restart to pick a change up.
+@MainActor
+final class DispatchPillSettings: ObservableObject {
+    static let draftExpiryKey = "dispatchPillDraftExpiry"
+
+    @Published private(set) var draftExpiry: DispatchPillDraftExpiry
+
+    private let defaults: UserDefaults
+
+    /// Reads only — constructing the store never writes a default into `defaults`.
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        draftExpiry = DispatchPillDraftExpiry(storedValue: defaults.string(forKey: Self.draftExpiryKey))
+    }
+
+    func setDraftExpiry(_ value: DispatchPillDraftExpiry) {
+        guard value != draftExpiry else { return }
+        let old = draftExpiry
+        defaults.set(value.rawValue, forKey: Self.draftExpiryKey)
+        draftExpiry = value
+        NSLog("[DispatchPill] draft expiry setting: \(old.rawValue) → \(value.rawValue)")
+    }
+}
+
 /// Owns the dispatch pill: a bottom-anchored, screen-centred panel that replaces the orb as the
 /// 4-finger tap's surface. Four looks — compact (idle), expanded (typing), full screen (transcript
 /// and composer), and working (compact while a turn runs) — over the ONE dispatch session the orb
@@ -66,6 +97,11 @@ final class DispatchPillMorphModel: ObservableObject {
 /// anchors every resize keeps (`dispatchPillPanelFrame`). The shape itself — pill ↔ rounded rect,
 /// small ↔ large — is driven by `morphStep` (the orb's morph integrator) on a 60Hz `Timer`, never by
 /// `NSAnimationContext`/`.animator()` on the frame (a recorded SIGBUS class in this codebase).
+///
+/// VISIBILITY. Only the trigger (`handleTrigger`, i.e. `TriggerHub`: the 4-finger tap, the hotkey,
+/// the menu's summon item) hides or shows the pill. A click outside compresses it to the compact
+/// pill and leaves it on screen. Putting it away starts the draft countdown
+/// (`DispatchPillDraftExpiry`); bringing it back cancels it.
 @MainActor
 final class DispatchPillController: ObservableObject {
     @Published private(set) var presentation: DispatchPillPresentation = .compact
@@ -125,12 +161,35 @@ final class DispatchPillController: ObservableObject {
     var visibleFrameOverrideForTesting: CGRect?
     /// Overrides `NSEvent.mouseLocation` for the mouse gate.
     var mouseLocationOverrideForTesting: CGPoint?
+    /// Overrides the clock the draft countdown reads (the close time, the deadline check on show).
+    var nowOverrideForTesting: (() -> Date)?
+    /// Replaces the TIMED options' interval (5/10/15 min) so a test can watch a real timer fire.
+    /// `onClose` and `never` keep their meaning.
+    var draftExpiryIntervalOverrideForTesting: TimeInterval?
+    /// When the put-away pill's draft will be cleared; nil when no countdown is running.
+    var draftExpiryDeadlineForTesting: Date? { draftExpiryDeadline }
+    var draftExpiryTimerArmedForTesting: Bool { draftExpiryTimer != nil }
+    /// What the cache holds right now, without consuming it (a restore would).
+    var stashedDraftForTesting: String? { draftCache.restore() }
 
     // MARK: Internals
 
     private let session: SessionModel
     private let panel: DispatchPillPanel
-    private let draftCache = DraftCache()
+    /// The pill's preferences — the instance the settings page writes (`AppDelegate`).
+    let settings: DispatchPillSettings
+    /// No age limit of its own: the draft countdown below owns expiry, and it runs only while the
+    /// pill is put away — a stash made by a click outside, with the pill still on screen, must keep.
+    private let draftCache = DraftCache(expiry: nil)
+    /// The countdown to clearing a put-away pill's draft. Started by `hide()`, cancelled by `show()`.
+    private var draftExpiryTimer: Timer?
+    /// When the pill was put away — the countdown's origin, kept so a setting changed while the
+    /// pill is away is measured from the real close, not from the change. nil while visible.
+    private var closedAt: Date?
+    private var draftExpiryDeadline: Date?
+    /// Bumped whenever the countdown is re-armed or cancelled, so a timer callback that was
+    /// already queued when that happened does nothing.
+    private var draftExpiryGeneration = 0
     private let swipeRecognizer = TrackpadHorizontalSwipeRecognizer()
     private var monitors: [Any] = []
     private var externalFocus: ExternalFocusSnapshot?
@@ -154,8 +213,12 @@ final class DispatchPillController: ObservableObject {
     static let settleDistance: Double = 0.5
     static let settleSpeed: Double = 4
 
-    init(session: SessionModel) {
+    /// `settings` is required, never defaulted: the app hands in its ONE store
+    /// (`AppDelegate.dispatchPillSettings`) and a test its own throwaway suite, so no construction
+    /// can quietly read a different store than the settings page writes.
+    init(session: SessionModel, settings: DispatchPillSettings) {
         self.session = session
+        self.settings = settings
         self.adapter = FieldStateAdapter(session: session)
         let initialMain = CGSize(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight)
         let initialCanvas = dispatchPillCanvasSize(mainSize: initialMain, accessorySize: .zero)
@@ -192,6 +255,7 @@ final class DispatchPillController: ObservableObject {
 
         wireAdapter()
         observeSession()
+        observeSettings()
     }
 
     // MARK: - Visibility
@@ -208,9 +272,12 @@ final class DispatchPillController: ObservableObject {
     func toggle() { isVisible ? hide() : show() }
 
     /// Bring the pill up at the bottom of the screen the cursor is on, restore any stashed draft, and
-    /// take the keyboard — a summon is for typing.
+    /// take the keyboard — a summon is for typing. Cancels the draft countdown first, so the next
+    /// close starts a fresh one; a draft whose deadline has already passed is cleared before the
+    /// restore could bring it back.
     func show() {
         guard !isVisible else { return }
+        settleDraftExpiryOnShow()
         lockedVisibleFrame = currentVisibleFrame()
         restoreDraftIfEmpty()
         historyIndex = nil
@@ -223,7 +290,9 @@ final class DispatchPillController: ObservableObject {
         updateMouseGate()
     }
 
-    /// Put the pill away. The draft is stashed (`DraftCache`) and comes back on the next summon.
+    /// Put the pill away — the trigger's `.hide`, and nothing else calls it in the app. The draft is
+    /// stashed (`DraftCache`) and comes back on the next summon unless the draft countdown
+    /// (`DispatchPillDraftExpiry`), which starts here, clears it first.
     func hide() {
         guard isVisible else { return }
         stashDraft()
@@ -235,6 +304,88 @@ final class DispatchPillController: ObservableObject {
         snapToTarget()
         panel.orderOut(nil)
         rest(restoreFocus: true)
+        startDraftExpiry()
+    }
+
+    // MARK: - Draft expiry (the put-away pill's countdown)
+
+    private var now: Date { nowOverrideForTesting?() ?? Date() }
+
+    /// The interval the countdown uses for `expiry` (the timed options can be shortened by a test).
+    private func draftExpiryInterval(_ expiry: DispatchPillDraftExpiry) -> TimeInterval? {
+        guard let interval = expiry.interval else { return nil }
+        guard interval > 0, let override = draftExpiryIntervalOverrideForTesting else { return interval }
+        return override
+    }
+
+    /// The close: start the countdown under the setting as it is NOW (read live, never a snapshot).
+    private func startDraftExpiry() {
+        closedAt = now
+        armDraftExpiry(settings.draftExpiry)
+    }
+
+    /// (Re)arm the countdown from the recorded close. Used at the close and again when the setting
+    /// changes while the pill is away, so the new value is measured from the close, not the change:
+    /// a deadline already behind us clears now, `never` stops the countdown (the close stays
+    /// recorded, so changing back re-arms it from the original close).
+    private func armDraftExpiry(_ expiry: DispatchPillDraftExpiry) {
+        cancelDraftExpiryTimer()
+        guard let closedAt else { return }
+        guard let deadline = dispatchPillDraftExpiryDeadline(closedAt: closedAt,
+                                                            interval: draftExpiryInterval(expiry)) else {
+            return
+        }
+        let remaining = deadline.timeIntervalSince(now)
+        guard remaining > 0 else {
+            expireDraft(under: expiry)
+            return
+        }
+        draftExpiryDeadline = deadline
+        let generation = draftExpiryGeneration
+        // `.common` modes, so an open menu or a drag elsewhere in the app cannot hold it back.
+        let timer = Timer(timeInterval: remaining, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.draftExpiryTimerFired(generation: generation, expiry: expiry) }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        draftExpiryTimer = timer
+    }
+
+    private func draftExpiryTimerFired(generation: Int, expiry: DispatchPillDraftExpiry) {
+        // A reopen or a re-arm since this timer was set makes it stale; and a visible pill's draft
+        // is never cleared by the countdown, whatever got queued.
+        guard generation == draftExpiryGeneration, !isVisible, closedAt != nil else { return }
+        expireDraft(under: expiry)
+    }
+
+    /// Stop the timer and forget the deadline. The recorded close is the caller's to keep or drop.
+    private func cancelDraftExpiryTimer() {
+        draftExpiryGeneration += 1
+        draftExpiryTimer?.invalidate()
+        draftExpiryTimer = nil
+        draftExpiryDeadline = nil
+    }
+
+    /// The countdown ran out (or `onClose`): the put-away draft is gone. The draft lives only in
+    /// the cache while the pill is away (`hide()` stashed it and emptied the composer).
+    private func expireDraft(under expiry: DispatchPillDraftExpiry) {
+        cancelDraftExpiryTimer()
+        closedAt = nil
+        let hadDraft = draftCache.restore() != nil
+        draftCache.clear()
+        // The option only — never the text.
+        if hadDraft { NSLog("[DispatchPill] put-away draft cleared (draft expiry: \(expiry.rawValue))") }
+    }
+
+    /// The reopen. A `Timer` is not promised to fire on time across a sleep, so the wall clock is
+    /// checked here too: a deadline that passed while the timer was held back still clears the
+    /// draft, before the restore could bring it back. Then the countdown is cancelled — the next
+    /// close starts a fresh, full one.
+    private func settleDraftExpiryOnShow() {
+        if let deadline = draftExpiryDeadline, now >= deadline {
+            expireDraft(under: settings.draftExpiry)
+        }
+        cancelDraftExpiryTimer()
+        closedAt = nil
     }
 
     // MARK: - Presentation
@@ -759,6 +910,20 @@ final class DispatchPillController: ObservableObject {
                 guard let self, let index = self.historyIndex, index >= count else { return }
                 self.historyIndex = nil
                 self.retargetMain()
+            }
+            .store(in: &cancellables)
+    }
+
+    /// A draft-expiry change made while the pill is put away applies to the countdown already
+    /// running, measured from the close (`armDraftExpiry`). `$draftExpiry` publishes on willSet, so
+    /// the NEW value is the sink's argument — never re-read the property here.
+    private func observeSettings() {
+        settings.$draftExpiry
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] expiry in
+                guard let self, !self.isVisible, self.closedAt != nil else { return }
+                self.armDraftExpiry(expiry)
             }
             .store(in: &cancellables)
     }

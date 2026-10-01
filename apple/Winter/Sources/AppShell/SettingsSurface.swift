@@ -50,6 +50,7 @@ enum SettingsSection: String, Hashable, CaseIterable, Sendable {
     case workflows
     case sessions
     case permissions
+    case dispatch
     // Integrations
     case plugins
     case computerUse
@@ -90,7 +91,7 @@ let settingsSectionGroups: [SettingsSectionGroup] = [
     SettingsSectionGroup(id: "models", title: "Models",
                          sections: [.roles, .providers, .runtimes, .quota]),
     SettingsSectionGroup(id: "assistant", title: "Assistant",
-                         sections: [.memory, .workflows, .sessions, .permissions]),
+                         sections: [.memory, .workflows, .sessions, .permissions, .dispatch]),
     SettingsSectionGroup(id: "integrations", title: "Integrations",
                          sections: [.plugins, .computerUse, .browser, .appshots]),
     SettingsSectionGroup(id: "mac", title: "This Mac",
@@ -123,6 +124,7 @@ func settingsSectionTitle(_ section: SettingsSection) -> String {
     case .workflows: return "Workflows"
     case .sessions: return "Sessions"
     case .permissions: return "Permissions"
+    case .dispatch: return SessionMode.dispatch.title
     case .plugins: return "Plugins"
     case .computerUse: return "Computer Use"
     case .browser: return "Browser"
@@ -159,6 +161,8 @@ func settingsSectionSystemImage(_ section: SettingsSection) -> String {
     case .workflows: return "flowchart"
     case .sessions: return "bubble.left.and.bubble.right"
     case .permissions: return "hand.raised"
+    // The Dispatch mode's own glyph: this page is about that mode's summon surface, the pill.
+    case .dispatch: return SessionMode.dispatch.systemImage
     // The library panel's own glyph for plugins: this page is a door into that panel, so the row
     // and the tab it opens are recognisably the same subject.
     case .plugins: return libraryTabSystemImage(.plugins)
@@ -197,6 +201,7 @@ func settingsSectionSubtitle(_ section: SettingsSection) -> String {
     case .workflows: return "Saved orchestrations, and the ones running now."
     case .sessions: return "Chat titles, and the purge that retires stale chats."
     case .permissions: return "What Winter may do without asking."
+    case .dispatch: return "The pill a four-finger tap summons, and how long it keeps a draft."
     case .plugins: return "Plugins, skills, hooks, MCP servers and agents."
     case .computerUse: return "Letting Winter use the screen, keyboard and pointer."
     case .browser: return "The browser Winter works in."
@@ -292,7 +297,7 @@ func settingsSectionComingCopy(_ section: SettingsSection) -> String? {
             + "Hyper-Space (⌃⌥⌘Space), is fixed today with no control to change it; plugin "
             + "shortcuts are bound in the library panel's Plugins tab, which is the wrong home "
             + "for them."
-    case .roles, .providers, .quota, .memory, .workflows, .plugins, .trust, .peripheral,
+    case .roles, .providers, .quota, .memory, .workflows, .dispatch, .plugins, .trust, .peripheral,
          .commandLine, .launchAtLogin, .daemonStatus, .support, .feedback, .discord, .donate:
         return nil
     }
@@ -430,7 +435,7 @@ func settingsSectionRendersWithoutWiring(_ section: SettingsSection) -> Bool {
 /// Three kinds of arm after the 2026-09-18 restyle, and the difference is the whole design:
 ///
 /// - **Settings-native** (`.roles`, `.quota`, `.trust`, `.peripheral`, `.commandLine`,
-///   `.launchAtLogin`, `.daemonStatus`) — written for THIS surface in the card/row vocabulary
+///   `.launchAtLogin`, `.daemonStatus`, `.dispatch`) — written for THIS surface in the card/row vocabulary
 ///   (`Sources/Settings/SettingsChrome.swift`), each drawing its own `SettingsPage` title, subtitle,
 ///   scroll and margins. The seven that were pane moves kept every closure, every pure formatter
 ///   and every failure string from the pane they replaced; only the presentation changed, and the
@@ -546,6 +551,10 @@ struct SettingsSectionView: View {
         case .launchAtLogin:
             SettingsLaunchAtLoginSection(isEnabled: wiring.loginItemEnabled,
                                          setEnabled: wiring.setLoginItemEnabled)
+        case .dispatch:
+            // App-local (`UserDefaults`), no daemon call — but the store rides the wiring so the
+            // page writes to the SAME instance the pill reads.
+            SettingsDispatchSection(settings: wiring.dispatchPillSettings)
         case .daemonStatus:
             SettingsDaemonStatusSection(fetch: wiring.daemonStatus)
         case .profile, .personalization, .notifications, .voice, .appearance, .shortcuts,
