@@ -587,7 +587,7 @@ export function sheetsToolDefs(deps: SheetsToolDeps): ToolDefinition[] {
       + "re-sending the exact same format call after a timeout is safe — it converges to the same "
       + "result, never doubles anything — but re-reading first is still the honest way to confirm "
       + "what actually happened before deciding to resend.",
-    modes: ["code", "dispatch"],
+    modes: ["code"], // 2026-10-01 tool-surface ruling: office is code-only (dispatch names no office tool)
     args: SheetsArgs,
     async run(a: SheetsArgs, ctx) {
       const sessionId = ctx.sessionId;

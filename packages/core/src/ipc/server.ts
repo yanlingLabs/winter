@@ -2830,16 +2830,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // through (`capabilityTools: WINTER_CAPABILITY_TOOLS`) — computed once per mode, not
         // per tool, since `disallowedToolsFor` itself is a pure O(table size) scan.
         //
-        // 0.0.17: the answer depends on whether an Exa key is stored, so that is supplied rather than
-        // defaulted. The key presence is probed LIVE here, per call,
-        // for the same reason `credential.list` re-probes: a client that adds a key and re-reads must
-        // see the new answer with no restart. It decides one row in THIS listing:
-        // `mcp__winter__research__Search` reports `exposure: false` for chat and dispatch when no key is
-        // stored, which is what a real session of that mode would get (`capabilities/research.ts` does
-        // not advertise the tool either) — so this surface answers the "why can't chat search?" question
-        // without a second, drifting explanation of the rule.
-        const exaPresent = await exaKeyPresent(opts.secrets);
-        const exposure = { exaKeyPresent: exaPresent };
+        // (The Exa key no longer decides any row here: the `research` server and its `Search` left on
+        // 2026-10-01 — `Search` is the agent SDK's built-in, named in chat's/dispatch's `Options.tools`.)
+        const exposure = {};
         const disallowedByMode: Record<"code" | "dispatch" | "chat", Set<string>> = {
           code: new Set(disallowedToolsFor("code", exposure, WINTER_CAPABILITY_TOOLS)),
           dispatch: new Set(disallowedToolsFor("dispatch", exposure, WINTER_CAPABILITY_TOOLS)),
@@ -2854,14 +2847,21 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             .filter(([name]) => name.startsWith(prefix))
             .map(([name, factsRaw]) => {
               const facts: CapabilityToolFacts = factsRaw;
+              // `disallowedToolsFor` names a tool by the name the CHILD knows it under (its plain name
+              // when it has one), so exposure is looked up under that name.
+              const childName = facts.plainName ?? name;
               return {
                 name,
+                ...(facts.plainName === undefined ? {} : { plainName: facts.plainName }),
                 modes: [...facts.modes],
-                ...(facts.deferred === undefined ? {} : { deferred: facts.deferred === true ? true : [...facts.deferred] }),
+                // Since the 2026-10-01 ruling every capability tool but the `eager` ones starts
+                // deferred, in every mode it is exposed to — sent as that mode list (the form every
+                // client reads).
+                ...(facts.eager === true ? {} : { deferred: [...facts.modes] }),
                 exposure: {
-                  code: !disallowedByMode.code.has(name),
-                  dispatch: !disallowedByMode.dispatch.has(name),
-                  chat: !disallowedByMode.chat.has(name),
+                  code: !disallowedByMode.code.has(childName),
+                  dispatch: !disallowedByMode.dispatch.has(childName),
+                  chat: !disallowedByMode.chat.has(childName),
                 },
               };
             });

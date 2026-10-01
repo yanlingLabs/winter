@@ -233,7 +233,7 @@ describe("session_spawn: the spawn", () => {
     expect(bad.content[0]!.text).toContain("absolute directory path");
     const unwired = sessionsCapability({ sessionId: t.dispatchId, mode: "dispatch", cwd: t.home, roots: [t.home] }, { sessions: {} as never });
     const plain = await (unwired.instance as WinterMcpServerInstance).callTool("session_spawn", { dir: t.workDir, prompt: "go" }) as { content: Array<{ text: string }> };
-    expect(plain.content[0]!.text).toBe("session_spawn is only available in the dispatch session.");
+    expect(plain.content[0]!.text).toBe("SpawnSession is only available in the dispatch session.");
   });
 });
 

@@ -145,15 +145,25 @@ describe("capabilities.list", () => {
     };
     for (const group of result.result.capabilities) {
       for (const tool of group.tools) {
-        expect(tool.exposure.code).toBe(!disallowed.code.has(tool.name));
-        expect(tool.exposure.dispatch).toBe(!disallowed.dispatch.has(tool.name));
-        expect(tool.exposure.chat).toBe(!disallowed.chat.has(tool.name));
+        // `disallowedToolsFor` names a tool by the name the CHILD knows it under (2026-10-01): its plain name.
+        const childName = tool.plainName ?? tool.name;
+        expect(tool.exposure.code).toBe(!disallowed.code.has(childName));
+        expect(tool.exposure.dispatch).toBe(!disallowed.dispatch.has(childName));
+        expect(tool.exposure.chat).toBe(!disallowed.chat.has(childName));
       }
     }
-    // Spot-check one concretely: the sessions trio is dispatch-only.
+    // Spot-check one concretely: the sessions trio is dispatch-only, shown as `SpawnSession`, loaded up front.
     const sessionsGroup = result.result.capabilities.find((x: any) => x.key === "sessions");
     const spawn = sessionsGroup.tools.find((t: any) => t.name === "mcp__winter__sessions__session_spawn");
     expect(spawn.exposure).toEqual({ code: false, dispatch: true, chat: false });
+    expect(spawn.plainName).toBe("SpawnSession");
+    expect(spawn.deferred).toBeUndefined();
+    // …and `Browser` starts deferred in every mode it is offered; office is code-only.
+    const browser = result.result.capabilities.find((x: any) => x.key === "browser").tools[0];
+    expect(browser).toMatchObject({ name: "mcp__winter__browser__browser", plainName: "Browser", deferred: ["code", "dispatch", "chat"] });
+    const docs = result.result.capabilities.find((x: any) => x.key === "office").tools.find((t: any) => t.name === "mcp__winter__office__docs");
+    expect(docs.exposure).toEqual({ code: true, dispatch: false, chat: false });
+    expect(result.result.capabilities.some((x: any) => x.key === "research")).toBe(false);
     c.close();
   });
 

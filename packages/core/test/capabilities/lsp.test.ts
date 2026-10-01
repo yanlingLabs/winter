@@ -68,8 +68,8 @@ describe("lspCapability: the server shape", () => {
     } finally { h.cleanup(); }
   });
 
-  test("the tables agree: code-only, deferred on the registry door, classified READ_ONLY under the bare name `lsp`", () => {
-    expect(WINTER_CAPABILITY_TOOLS["mcp__winter__lsp__lsp"]).toEqual({ modes: ["code"], deferred: true });
+  test("the tables agree: code-only, deferred (no `eager`), classified READ_ONLY under the bare name `lsp`", () => {
+    expect(WINTER_CAPABILITY_TOOLS["mcp__winter__lsp__lsp"]).toEqual({ modes: ["code"] });
     expect(CAPABILITY_TOOL_MODES["mcp__winter__lsp__lsp"]).toEqual({ modes: ["code"] });
     expect(disallowedToolsFor("chat", {})).toContain("mcp__winter__lsp__lsp");
     expect(disallowedToolsFor("dispatch", {})).toContain("mcp__winter__lsp__lsp");
@@ -89,7 +89,6 @@ describe("lspCapability: the server shape", () => {
       computer: { computerUse: () => undefined }, computerUseEnabled: () => false,
       browser: { browser: { tabs: () => ({ tabs: [], activeTabId: undefined }) as never, openTab: () => "t", ...panel } },
       office: { office: { ...panel, dirsOf: () => [] as never } },
-      research: { search: {} },
       lsp: { lsp: () => undefined },
     };
     const base: CapabilitySession = { sessionId: "s", mode: "code", cwd: "/tmp", roots: ["/tmp"] };

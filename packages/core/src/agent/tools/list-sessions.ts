@@ -198,7 +198,7 @@ export function listSessionsToolDefs(deps: ListSessionsDeps & ManageSessionDeps)
       `The keyword scan is BOUNDED: at most ${Math.round(KEYWORD_SCAN_BYTES_PER_SESSION / 1024)}KB per session (its first and last halves) and`,
       `${Math.round(KEYWORD_SCAN_BYTES_TOTAL / 1024 / 1024)}MB per call, newest sessions first — the answer says how many sessions went unscanned if that budget runs out.`,
       `At most ${LIST_SESSIONS_MAX_ROWS} rows are shown; the count of further matches is always reported.`,
-      "Manage what you find with manage_session; message one with send_message.",
+      "Manage what you find with ManageSession; message one with SendMessage.",
     ].join(" "),
     args: ListSessionsArgs,
     run(args: z.infer<typeof ListSessionsArgs>) {
@@ -283,7 +283,7 @@ export function listSessionsToolDefs(deps: ListSessionsDeps & ManageSessionDeps)
       const footer = unscanned > 0
         ? `\n${unscanned} sessions were not scanned for keywords (budget spent) — narrow with cwd or type to reach them.`
         : "";
-      return `${header}\n${lines.join("\n")}${footer}\nManage one with manage_session (stop/background/unbackground/archive/resume); message one with send_message.`;
+      return `${header}\n${lines.join("\n")}${footer}\nManage one with ManageSession (stop/background/unbackground/archive/resume); message one with SendMessage.`;
     },
   }, {
     name: MANAGE_SESSION_TOOL,
@@ -292,7 +292,7 @@ export function listSessionsToolDefs(deps: ListSessionsDeps & ManageSessionDeps)
     // unconditional `true` (dispatch-only tool, so `true` and `["dispatch"]` coincide).
     deferred: true,
     description: [
-      "Change a code or cowork session's lifecycle state, or stop the turn it is running. Find sessions with list_sessions.",
+      "Change a code or cowork session's lifecycle state, or stop the turn it is running. Find sessions with ListSessions.",
       "action: stop — take it off duty: abort the running turn (the same abort the user's ESC performs; the session stays resumable) AND clear its background flag, even when no turn is running.",
       "background — keep it running unattended.",
       "unbackground — clear the keep-running-unattended flag without stopping anything; refused on archived sessions.",

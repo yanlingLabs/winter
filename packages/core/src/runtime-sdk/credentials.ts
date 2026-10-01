@@ -20,7 +20,7 @@ import type { z } from "zod";
 import type { SecretStore } from "../auth/secret-store";
 import type { Settings } from "../settings";
 import { CODEX_SECRET_NAMES, readCredentialMaterial, writeCredentialMaterial } from "../auth/credential-material";
-import { EXA_API_KEY_SECRET } from "../agent/tools/search";
+import { EXA_API_KEY_SECRET } from "../agent/exa-key";
 import { WEB_SEARCH_API_KEY_SECRET } from "../agent/tools/web";
 import {
   ANTHROPIC_ACCOUNT_REQUIRED_KIND,

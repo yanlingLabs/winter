@@ -43,7 +43,7 @@ import type { SecretStore } from "../auth/secret-store";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
 import type { QuestionBroker } from "../agent/questions";
-import { WINTER_CAPABILITY_TOOLS, assertNoCapabilityCollision, type CapabilityServerRecord, type CapabilitySession } from "../capabilities";
+import { RETIRED_CAPABILITY_SERVER_KEYS, WINTER_CAPABILITY_TOOLS, assertNoCapabilityCollision, capabilityServerName, type CapabilityServerRecord, type CapabilitySession } from "../capabilities";
 import { createProjector, type Projector } from "../projector";
 import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-state/records";
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
@@ -57,7 +57,6 @@ import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import { elicitationHandlerFor, elicitationTurnTracker, type ElicitationBroker } from "./url-elicitation";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import { clearSession as clearDiffSession } from "./diff-attach";
-import { clearSiteIcons } from "./site-icons";
 import { credentialPresenceFrom, credentialRefFor, refMaterialPresent } from "./keychain";
 import { SHIPPED_DANGEROUS_DOMAINS } from "../agent/dangerous-domains";
 import { apiKeyProviderIsUnauthenticated, exaKeyPresent, missingCredentialDetail } from "./credentials";
@@ -77,8 +76,8 @@ import { winterSystemPromptFor } from "./system-prompt";
 import { dispatchEffortFor } from "../agent/dispatch-config";
 import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers, type LoadedAgentDefinitions } from "../agent/agent-definitions";
 
-/** Both per-session, in-memory tool_result side channels: `fileDiff` and `siteIcons`. */
-function clearSession(sessionId: string): void { clearDiffSession(sessionId); clearSiteIcons(sessionId); }
+/** The per-session, in-memory tool_result side channel: `fileDiff` (`siteIcons` now ride the runtime's own block, statelessly). */
+function clearSession(sessionId: string): void { clearDiffSession(sessionId); }
 
 /**
  * Daemon settings surface batch 3: the ONE merge the incarnation builder calls — `<home>/agents/*.md`
@@ -969,11 +968,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         tmpDir: deps.tmpDirOf(sessionId),
         outDir: deps.outDirOf(sessionId),
         signal: inc.abort.signal,
-        // The SAME probe `buildWinterOptions` gets below (one read, one incarnation): it decides
-        // whether this session's `research` server advertises `Search` at all, and `disallowedTools`
-        // decides the complementary `WebSearch`/`Search` withholding from the identical value. Two
-        // doors, one answer — see `capabilities/research.ts` for what disagreement would cost.
-        exaKeyPresent: exaPresent,
+        // (`exaKeyPresent` is no longer a capability input: `Search` is the agent SDK's built-in, so
+        // the key decides one door only — which of `Search`/`WebSearch` `Options.tools` names, in
+        // `buildWinterOptions` below — and the prompt that names it.)
       };
       const capabilities = deps.buildSessionCapabilities(capSession);
       // Winter's own voice (Step 0(a)): the engine's `primaryDir`/`cwd`/`additionalWorkDirs` inputs,
@@ -991,9 +988,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const systemPrompt = deps.assembler === undefined ? undefined : winterSystemPromptFor(deps.assembler, {
         mode, origin: live.origin, primary, cwd: primary ?? deps.tmpDirOf(sessionId),
         outDir: deps.outDirOf(sessionId), extraDirs, effort: live.effort,
-        // THE THIRD READER of this one probe, and the reason it is threaded rather than re-derived:
+        // THE SECOND READER of this one probe, and the reason it is threaded rather than re-derived:
         // chat's and dispatch's base prompts NAME their search tool, and the prompt must name the one
-        // `disallowedTools` and the capability server actually gave this incarnation.
+        // `Options.tools` actually gave this incarnation (`Search` with a key, `WebSearch` without).
         exaKeyPresent: exaPresent,
         // WS-21 (L3.4): the run folder carries the instructions, the output style and the code memory.
         ...(runHomeApplied ? { runHomeApplied: true } : {}),
@@ -1006,7 +1003,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // WS-21 (L3.4): on a run-home incarnation the configured servers (user, local, trusted project) are
       // the run folder's `.winter.json`; only the daemon's capability servers ride `Options.mcpServers`.
       const extra = runHomeApplied ? {} : (deps.extraMcpServers?.(capSession) ?? {});
-      try { assertNoCapabilityCollision(extra, capabilities); } catch (err) {
+      // The RETIRED server names too (`winter__research`, `winter__web`): their old tool spellings still
+      // strip to the host's own NETWORK-class names (`tool-names.ts`), so a configured server must not
+      // take one.
+      try { assertNoCapabilityCollision(extra, [...Object.keys(capabilities), ...RETIRED_CAPABILITY_SERVER_KEYS.map((k) => capabilityServerName(k))]); } catch (err) {
         throw new WinterLegRefusal("winter_leg_unavailable", err instanceof Error ? err.message : String(err));
       }
       // WS-25/27: the fold this incarnation's child will have — on a run-home incarnation the configured servers

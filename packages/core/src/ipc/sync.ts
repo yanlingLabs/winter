@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { ERR, SessionEvent, SESSION_TITLE_MAX_CHARS, type SyncConfigResult, type SyncHeadsResult, type SyncMemoryResult, type SyncPullParams, type SyncPullResult, type SyncPushParams, type SyncPushResult } from "@yanlinglabs/winter-protocol";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { assistantMemoryDirFor } from "../agent/memory-dir";
-import { EXA_API_KEY_SECRET } from "../agent/tools/search";
+import { EXA_API_KEY_SECRET } from "../agent/exa-key";
 import { CLIENT_EFFORTS, isClientEffort } from "../settings";
 import { effortVocabularyFor } from "../runtime-sdk/provider-selection";
 import { canonicalizeModelTag, UNSTATED_TAG } from "../runtime-sdk/model-tag";

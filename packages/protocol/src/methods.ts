@@ -1017,14 +1017,17 @@ export const SessionModeSchema = z.enum(["code", "dispatch", "chat"]);
  *  re-implemented here), the same table `session-driver.ts` passes every real session's
  *  `Options.disallowedTools`. */
 export const CapabilityToolInfoSchema = z.object({
-  /** The full wire name a child sees: `mcp__winter__<key>__<tool>` (`capabilityToolName`). */
+  /** The tool's MCP identity: `mcp__winter__<key>__<tool>` (`capabilityToolName`) — what a saved rule or
+   *  an old transcript names. The name the model SEES is `plainName` when there is one. */
   name: z.string(),
+  /** The ordinary name the child advertises the tool under (`SpawnSession`, `Computer`, `Browser`, … —
+   *  the 2026-10-01 tool-surface ruling). Absent: the model sees `name`. */
+  plainName: z.string().optional(),
   /** Today's registration (`CapabilityToolFacts.modes`) — NOT a wish list; see that type's own doc. */
   modes: z.array(SessionModeSchema),
-  /** Mirrors `CapabilityToolFacts.deferred` — `true` (deferred in every mode it's exposed to) or
-   *  the subset of `modes` it's deferred in. Absent means never deferred (immediate everywhere it's
-   *  exposed). Carries no meaning for the Winter leg's `Options` itself — recorded only so the UI
-   *  can reproduce today's exposure faithfully. */
+  /** The modes the tool starts DEFERRED in — loaded through ToolSearch on first use (since the
+   *  2026-10-01 ruling: every capability tool but the eager `sessions` trio, in every mode it is exposed
+   *  to). `true` is the older "every mode" spelling, still valid. Absent means loaded up front. */
   deferred: z.union([z.literal(true), z.array(SessionModeSchema)]).optional(),
   /** Per-mode: whether the child is actually handed this tool today (`!disallowedToolsFor(mode).includes(name)`). */
   exposure: z.object({ code: z.boolean(), dispatch: z.boolean(), chat: z.boolean() }),

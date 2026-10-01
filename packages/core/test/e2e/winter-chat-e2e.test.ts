@@ -50,7 +50,7 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import type { RuntimeStateWiring } from "../../src/runtime-state";
 import { sessionLegOf } from "../../src/runtime-sdk/leg";
-import { CHAT_ALLOWED_WINTER_TOOLS, buildWinterOptions, disallowedToolsFor } from "../../src/runtime-sdk/mode-options";
+import { buildWinterOptions, toolsFor } from "../../src/runtime-sdk/mode-options";
 import type { ModelTag } from "../../src/runtime-sdk/model-tag";
 import { WINTER_ADVERTISED_MCP_TOOLS_0_0_4, WINTER_ADVERTISED_TOOLS_0_0_4_BASE } from "../../src/runtime-sdk/tool-names";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";
@@ -276,26 +276,16 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     const driver = daemon!.winter.get(sid)!;
     const t0 = Date.now();
     while (driver.init === undefined && Date.now() - t0 < 10_000) await Bun.sleep(20);
+    // The 2026-10-01 tool-surface ruling: chat's built-ins are an ALLOWED list (`Options.tools`,
+    // `toolsFor`) — with no Exa key stored (this daemon's throwaway Keychain service holds none) its
+    // search tool is `WebSearch` — and every MCP tool starts DEFERRED, so chat's one capability tool,
+    // `Browser`, is NOT in `init.tools` (it loads through `ToolSearch`; `tool-surface-e2e.test.ts`
+    // proves the deferred half). `advisor` is allowed but advertised only when a reviewer resolves.
     const chatCaps = Object.entries(WINTER_CAPABILITY_TOOLS).filter(([, f]) => (f.modes as readonly string[]).includes("chat")).map(([n]) => n);
-    // Agent SDK 0.0.17 adds `WebFetch`/`WebSearch` to EVERY default `init.tools` (the 0.0.3
-    // measurement `WINTER_ADVERTISED_TOOLS_0_0_4_BASE` records predates them), and the 2026-09-18
-    // ruling gives chat `WebFetch` plus — only with no Exa key stored — `WebSearch`. This daemon's
-    // throwaway Keychain service holds no Exa key, so both are expected here.
-    const disallowed = new Set(disallowedToolsFor("chat", { exaKeyPresent: false }));
-    const expected = [...new Set([
-      ...WINTER_ADVERTISED_TOOLS_0_0_4_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_4, "WebFetch", "WebSearch", ...chatCaps,
-    ])].filter((t) => !disallowed.has(t)).sort();
+    expect(chatCaps).toEqual(["mcp__winter__browser__browser"]);
+    const expected = toolsFor("chat", { exaKeyPresent: false })!.filter((t) => t !== "advisor");
     expect([...driver.init!.tools].sort()).toEqual(expected);
-    // and, stated plainly: the four Winter defaults the child advertises (`advisor` is not
-    // advertised at 0.0.4), AskUserQuestion, and chat's capability tools THAT THIS SESSION GETS.
-    // `chatCaps` is the mode-level registration and must be filtered by the same `disallowed` set as
-    // above (2026-09-18): with no Exa key stored `Search` is withheld — that is the whole point of the
-    // gate — so the plainly-stated side has to withhold it too or the two sides describe different
-    // sessions. The remaining chat capability tool is `browser`; `ReadPage` retired with the ruling.
-    expect(expected).toEqual([
-      ...CHAT_ALLOWED_WINTER_TOOLS.filter((t) => t !== "advisor"), "WebSearch",
-      ...chatCaps.filter((t) => !disallowed.has(t)),
-    ].sort());
+    expect(expected).toEqual(["AskUserQuestion", "ListAgents", "ReadNotifications", "SendMessage", "ToolSearch", "WebFetch", "WebSearch"]);
   }, 30_000);
 
   test("(b) tooluse → tool_call + tool_result + terminal, WINTER-shaped, and the child's fallback text on the unregistered tool", async () => {
@@ -593,17 +583,16 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     } finally { queue.close(); abort.abort(); }
     await Bun.sleep(50);
     await runHome.dispose();
-    const codeCaps = Object.entries(caps).flatMap(([server, cfg]) =>
-      (cfg as { instance: { listTools(): Array<{ name: string }> } }).instance.listTools().map((t) => `mcp__${server}__${t.name}`));
     // Agent SDK 0.0.17 advertises `WebFetch`/`WebSearch` in EVERY session (the 0.0.3 measurement the
     // BASE constant records predates them), and code mode withholds neither — the 2026-09-18 ruling
-    // gives a Winter code session both.
-    const union = new Set([...WINTER_ADVERTISED_TOOLS_0_0_4_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_4, "WebFetch", "WebSearch", ...codeCaps]);
-    const pair = ["ToolSearch", "WaitForMcpServers"];
-    const advertisedPair = pair.filter((p) => tools.includes(p));
-    expect(advertisedPair).toHaveLength(1);
-    const expected = [...union].filter((t) => !pair.includes(t) || advertisedPair.includes(t)).sort();
+    // gives a Winter code session both. The 2026-10-01 ruling turns Tool Search ON: so `ToolSearch` is
+    // advertised (never `WaitForMcpServers`), every capability tool (an MCP tool) starts DEFERRED and is
+    // NOT in `init.tools`, and `CronList` is deferred too (`deferTools`).
+    expect(Object.keys(caps).length).toBeGreaterThan(0);
+    const expected = [...new Set([...WINTER_ADVERTISED_TOOLS_0_0_4_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_4, "WebFetch", "WebSearch"])]
+      .filter((t) => t !== "WaitForMcpServers" && t !== "CronList").sort();
     expect([...tools].sort()).toEqual(expected);
+    expect(tools.some((t) => t.startsWith("mcp__winter__"))).toBe(false);
     rmSync(cwd, { recursive: true, force: true });
   }, 40_000);
 

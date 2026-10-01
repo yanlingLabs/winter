@@ -6,12 +6,18 @@
  *
  * A function, not a constant, for the same reason chat's is (`chat-prompt.ts`): its ROUTING DOCTRINE
  * names the search tool by name, and which search tool a dispatch session actually has depends on
- * whether an Exa key is stored — the daemon's `Search` (Exa ANSWER mode) with one, the runtime's own
- * `WebSearch` without (the 2026-09-18 ruling; `/answer` cannot be called anonymously). Naming the one
- * the session was not given is how a model ends up reporting a tool as broken when it was never there.
+ * whether an Exa key is stored — the agent SDK's `Search` built-in (Exa ANSWER mode) with one, the
+ * runtime's own `WebSearch` without (`/answer` cannot be called anonymously; `mode-options.ts`'s
+ * `toolsFor` makes the same choice for `Options.tools`). Naming the one the session was not given is how
+ * a model ends up reporting a tool as broken when it was never there.
  *
- * `exaKeyPresent` ABSENT reads as PRESENT — the convention `ToolExposure`, `CapabilitySession` and
- * `disallowedToolsFor` all keep, so every door agrees by default rather than by coincidence.
+ * Every tool it names is one dispatch's ALLOWED set carries (the 2026-10-01 tool-surface ruling,
+ * `DISPATCH_BUILTIN_TOOLS` plus the daemon's `SpawnSession`/`ListSessions`/`ManageSession`/`Computer`/
+ * `Browser`), under the plain name the model sees. `Computer`, `Browser` and `CronList` start deferred:
+ * the model loads them through `ToolSearch` on first use, which the prompt says once.
+ *
+ * `exaKeyPresent` ABSENT reads as PRESENT — the convention `ToolExposure` and `toolsFor` keep, so every
+ * door agrees by default rather than by coincidence.
  */
 export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean } = {}): string {
   const search = opts.exaKeyPresent !== false ? "Search" : "WebSearch";
@@ -19,20 +25,21 @@ export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean } = {}): st
     "You are Winter in Dispatch mode: the user's ambient coordinator on this Mac. You plan, delegate, monitor, and report — you are NOT a coding session.",
     "",
     "# Routing doctrine",
-    `Always use the narrowest capable tool, in this order: answer directly < ${search} < read/glob/grep/ls < bash < computer < session_spawn.`,
+    `Always use the narrowest capable tool, in this order: answer directly < ${search} < Read < Bash < Computer < SpawnSession.`,
     opts.exaKeyPresent !== false
       ? "Search takes a real question and comes back with a written answer and its sources; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up."
-      : "WebSearch finds pages; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up. (Winter's own Search tool — one call, a written answer with sources — needs an Exa key: `winter login --exa-key`.)",
-    "Anything that CHANGES FILES routes to session_spawn — no exceptions. You have no write or edit tools; do not try to write files via bash either.",
-    "bash is for inspection and glue: git status, running a script or build the user asked about — never file mutation.",
+      : "WebSearch finds pages; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up. (Winter's Search tool — one call, a written answer with sources — needs an Exa key: `winter login --exa-key`.)",
+    "Anything that CHANGES FILES routes to SpawnSession — no exceptions. You have no write or edit tools; do not try to write files via Bash either.",
+    "Bash is for inspection and glue: git status, listing or searching files, running a script or build the user asked about — never file mutation.",
+    "Some tools are loaded on demand: Computer, Browser and CronList (and any MCP server's tools) are not in your tool list until you load them with ToolSearch — `select:Computer` loads Computer by name.",
     "",
     "# Spawning work",
     "One session per coherent task. Pick the right dir. A child runs at your own approval policy as it is when you spawn it (it keeps that policy if yours changes later). The child knows NOTHING of this conversation — write it a complete, self-contained prompt with all context it needs.",
-    "Children run asynchronously: session_spawn returns at once, and you are woken with a <child_update> when one finishes (several finishing together arrive in one message). Report outcomes in your own words, with file paths the user can open.",
-    "Each <child_update> message also lists your children still at work. To stop a child, use manage_session with action stop and its session id.",
+    "Children run asynchronously: SpawnSession returns at once, and you are woken with a <child_update> when one finishes (several finishing together arrive in one message). Report outcomes in your own words, with file paths the user can open.",
+    "Each <child_update> message also lists your children still at work. To stop a child, use ManageSession with action stop and its session id.",
     "",
     "# The whole fleet, not just your children",
-    "list_sessions shows every code and cowork session on this Mac — what state each is in, where it works, and how long a running turn has been going. You may manage any of them, not only the ones you spawned: manage_session stops / backgrounds / unbackgrounds / archives / resumes one, and send_message speaks to one.",
+    "ListSessions shows every code and cowork session on this Mac — what state each is in, where it works, and how long a running turn has been going. You may manage any of them, not only the ones you spawned: ManageSession stops / backgrounds / unbackgrounds / archives / resumes one, and SendMessage speaks to one.",
     "Stopping takes a session off duty: it aborts any running turn AND clears its background flag, so a worker you stop is no longer a background session even if it was already idle. To clear that flag WITHOUT interrupting the work, use unbackground.",
     "Archived means the user hid it, and it stays exactly as they left it until someone resumes it: messaging it is refused, and so is backgrounding it. Resume is the only door — take it deliberately, and only when the user's intent is clear. A session that was backgrounded before it was archived comes back backgrounded.",
     "",
@@ -41,34 +48,8 @@ export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean } = {}): st
   ].join("\n");
 }
 
-// R-T2 (per-mode tool registry, Task 2 — "the flip"): DISPATCH_ALLOW_TOOLS used to live here as
-// the hand-maintained source of truth for dispatch's toolset (spec §7's 11 tools; `web` registers
-// as two). It's gone — engine.ts's toolAccess for dispatch is now
-// `registry.namesForMode("dispatch", { builtinDeferral })` (registry.ts), derived live from each
-// tool def's own `modes` field (session-spawn.ts, task-stop.ts, computer.ts, fs-read.ts, bash.ts,
-// push-notification.ts all carry `modes: ["code", "dispatch"]`; search.ts carries `modes: ["chat",
-// "dispatch"]`). The live toolset also now includes "ToolSearch" whenever ToolSearch deferral is
-// active (bug #7's fix — a mode with any eligible deferred tool always gets ToolSearch alongside
-// it, registry.ts's `namesForMode`), which this constant never tracked. The tests that used to
-// import this constant for static sanity checks were rewritten to call
-// `registry.namesForMode(...)` directly against their own harness's registry instead (see
-// task-2-report.md, "Fix round 1").
-//
-// R-T3 (Task 3): the derivation above is what EXPOSED bug #7's other half — dispatch's toolset
-// historically had no ToolSearch entry point of its own, so its two `deferred: true` web tools
-// (web_fetch/web_search, web.ts) were advertised but permanently uncallable; a reviewer reproduced
-// the catch-22 end to end (ToolSearch itself refused as unavailable, then push_notification
-// refused as "deferred — load its schema via ToolSearch first"). push_notification staying
-// dispatch-eligible+deferred is what makes ToolSearch appear for dispatch at all (it is loadable
-// now); web_fetch/web_search left dispatch's `modes` in R-T3 and RETIRED ALTOGETHER on 2026-09-18 —
-// dispatch's web surface is `Search` (search.ts, `modes: ["chat","dispatch"]`, never deferred, so it
-// needs no ToolSearch round-trip) plus the runtime child's own `WebFetch`/`WebSearch`.
-//
-// D1-T2 (per-mode `deferred`): dispatch's simplified question tool is now `AskQuestion`
-// (ask-question.ts, `modes: ["chat", "dispatch"]`), not `ask_user` — `ask-user.ts` dropped
-// "dispatch" from its own `modes` in the same change, so dispatch no longer sees it at all (there
-// is no literal "ask_user" text anywhere in DISPATCH_SYSTEM_PROMPT above to fix — this comment
-// block was the only place still naming the file). `bash`/`task_stop`/`computer`/`AskQuestion`/
-// `send_message` are all now `deferred: ["dispatch"]` too — immediate in code (or, for AskQuestion,
-// immediate in chat), loadable via ToolSearch for dispatch specifically. `push_notification` is
-// UNCHANGED (`deferred: true` — every mode, deliberately untouched).
+// HISTORY (kept short; the long R-T2/R-T3/D1-T2 notes that lived here described the retired engine's
+// per-mode registry and its `namesForMode` derivation). Dispatch's surface is now the child's
+// `Options.tools` allowed list (`runtime-sdk/mode-options.ts`'s `DISPATCH_BUILTIN_TOOLS`/`toolsFor`)
+// plus the daemon's capability servers, with Tool Search on (`toolSearchEnabled`) so the deferred ones
+// load through `ToolSearch` — the 2026-10-01 tool-surface ruling.

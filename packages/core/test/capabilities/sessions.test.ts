@@ -144,7 +144,7 @@ describe("sessionsCapability: callTool", () => {
     const h = harness();
     const res = await h.instance.callTool("session_spawn", { dir: "/tmp", prompt: "do a thing" });
     expect(res.isError).toBe(false);
-    expect(res.content).toEqual([{ type: "text", text: "session_spawn is only available in the dispatch session." }]);
+    expect(res.content).toEqual([{ type: "text", text: "SpawnSession is only available in the dispatch session." }]);
   });
 
   test("an unknown tool is an isError result, never a throw", async () => {

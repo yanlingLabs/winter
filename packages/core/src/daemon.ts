@@ -1299,7 +1299,7 @@ export async function startDaemon(opts: {
     sessions: {
       models: spawnModelIds,
       spawn: async (args, ctx) => {
-        if (dispatchChildren === undefined) throw new Error("session_spawn is not ready yet — the daemon is still starting; try again in a moment.");
+        if (dispatchChildren === undefined) throw new Error("SpawnSession is not ready yet — the daemon is still starting; try again in a moment.");
         return await dispatchChildren.spawn(ctx.sessionId, args);
       },
       // THE SAME instances the registry door gets (`registerListSessionsTools` below): a
@@ -1349,16 +1349,11 @@ export async function startDaemon(opts: {
         dirsOf: (sid) => store.dirs(sid),
       },
     },
-    // Winter's OWN search tool for chat/dispatch (Exa answer mode). `secret` is a CLOSURE — the Exa
-    // key is read inside `run`, never here and never into `listTools()`. `dangerousDomainsAdded` is
-    // the same shared getter every other consumer takes, so the floor is one list.
-    //
-    // `readPage` and the whole `web` server (`web_fetch`/`web_search`) left with the 2026-09-18 ruling:
-    // the child's own `WebFetch`/`WebSearch` are the web surface on both legs now, carrying this same
-    // floor and this same key through `Options.web` (`runtime-sdk/mode-options.ts`'s `webOptionsFor`).
-    research: {
-      search: { audit: (line: Record<string, unknown>) => audit.append(line), secret: (name: string) => secrets.get(name), dangerousDomainsAdded },
-    },
+    // The `research` server (Winter's own Exa-answer `Search` for chat/dispatch) is GONE (2026-10-01
+    // ruling): `Search` is the agent SDK's built-in now, reading the same key through
+    // `Options.web.search.authRef` (resolved over `credential_resolve`) and the same floor through
+    // `Options.web.blockedDomains` (`runtime-sdk/mode-options.ts`'s `webOptionsFor`). `readPage` and
+    // the `web` server left earlier, with the 2026-09-18 ruling.
     // Fix wave (review F7): the `lsp` tool over the SAME `let lspManager` holder the registry
     // door and `settings-apply.ts`'s hot `lsp.enabled` flip reassign — read per call.
     lsp: { lsp: () => lspManager ?? undefined },
