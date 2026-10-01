@@ -49,8 +49,14 @@ enum DispatchPillMetrics {
     /// bottom line as the pill grows taller.
     static var sendBottomInset: CGFloat { (pillHeight - sendCircleSize) / 2 }
     static let rowSpacing: CGFloat = 6
-    /// The swiped-to-turn preview's band above the composer (prompt line + reply line).
-    static let previewHeight: CGFloat = 58
+    /// A pinned turn's padding above its prompt line and below its reply.
+    static let previewVerticalInset: CGFloat = 12
+    /// Between the prompt line and the reply.
+    static let previewLineGap: CGFloat = 4
+    /// How many lines of the reply a pinned turn shows.
+    static let previewReplyLines = 2
+    /// The text width inside a pinned turn.
+    static var previewTextWidth: CGFloat { expandedWidth - 2 * leadingPadding }
     /// How far above the Dock (the visible frame's bottom edge) the pill's bottom sits.
     static let dockGap: CGFloat = 28
     /// Transparent margin around everything, for the shadow. The mouse gate passes clicks there
@@ -94,22 +100,23 @@ enum DispatchPillMetrics {
 /// only once it has settled).
 ///
 /// `composerContentHeight` is `ComposerTextView`'s own measured content height (0 until it has
-/// reported). `showsPreview` adds the swiped-to-turn band above the composer.
+/// reported). `previewHeight` is set while a turn is pinned (a swipe, or a reply that just
+/// arrived): the pill then shows that turn ALONE, no composer, at the turn's own height
+/// (`dispatchPillPreviewHeight`).
 func dispatchPillMainSize(
     presentation: DispatchPillPresentation,
     composerContentHeight: CGFloat,
-    showsPreview: Bool,
+    previewHeight: CGFloat? = nil,
     visibleFrame: CGRect
 ) -> CGSize {
     switch presentation {
     case .compact:
         return CGSize(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight)
     case .expanded:
-        let composer = max(DispatchPillMetrics.pillHeight,
-                           composerContentHeight + DispatchPillMetrics.composerVerticalPadding)
-        let total = composer + (showsPreview ? DispatchPillMetrics.previewHeight : 0)
+        let total = previewHeight ?? max(DispatchPillMetrics.pillHeight,
+                                         composerContentHeight + DispatchPillMetrics.composerVerticalPadding)
         return CGSize(width: DispatchPillMetrics.expandedWidth,
-                      height: min(total, DispatchPillMetrics.maxExpandedHeight))
+                      height: min(max(total, DispatchPillMetrics.pillHeight), DispatchPillMetrics.maxExpandedHeight))
     case .fullScreen:
         let width = visibleFrame.width - 2 * DispatchPillMetrics.fullScreenInset
         let height = visibleFrame.height - DispatchPillMetrics.fullScreenInset - DispatchPillMetrics.dockGap
@@ -331,6 +338,17 @@ struct DispatchPillTurnPreview: Equatable {
     let reply: String
     /// "3/7" — which turn, of how many.
     let position: String
+}
+
+/// PURE: a pinned turn's height — the prompt line and as many reply lines as the reply needs (up to
+/// `previewReplyLines`), all at the composer's own text size, plus the insets. `lineHeight` and
+/// `replyWidth` are measured by the caller (`dispatchPillPreviewHeight(reply:)`).
+func dispatchPillPreviewHeight(replyWidth: CGFloat, lineHeight: CGFloat) -> CGFloat {
+    let lines = min(DispatchPillMetrics.previewReplyLines,
+                    max(1, Int((replyWidth / DispatchPillMetrics.previewTextWidth).rounded(.up))))
+    let height = 2 * DispatchPillMetrics.previewVerticalInset + lineHeight
+        + DispatchPillMetrics.previewLineGap + CGFloat(lines) * lineHeight
+    return ceil(max(DispatchPillMetrics.pillHeight, height))
 }
 
 /// The longest a preview line gets before it is cut with "…".

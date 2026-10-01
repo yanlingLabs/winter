@@ -15,32 +15,33 @@ final class DispatchPillViewTests: XCTestCase {
 
     func testCompactIsTheFixedCapsule() {
         let size = dispatchPillMainSize(presentation: .compact, composerContentHeight: 200,
-                                        showsPreview: true, visibleFrame: visible)
+                                        previewHeight: 90, visibleFrame: visible)
         XCTAssertEqual(size, CGSize(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight),
                        "the compact pill ignores the composer's height and any preview")
     }
 
     func testExpandedHeightFollowsTheMeasuredComposer() {
-        func height(_ content: CGFloat, preview: Bool = false) -> CGFloat {
+        func height(_ content: CGFloat, preview: CGFloat? = nil) -> CGFloat {
             dispatchPillMainSize(presentation: .expanded, composerContentHeight: content,
-                                 showsPreview: preview, visibleFrame: visible).height
+                                 previewHeight: preview, visibleFrame: visible).height
         }
         XCTAssertEqual(height(0), DispatchPillMetrics.pillHeight, "unmeasured: the resting capsule")
         XCTAssertEqual(height(26), DispatchPillMetrics.pillHeight, "one line: still the capsule")
         XCTAssertEqual(height(60), 60 + DispatchPillMetrics.composerVerticalPadding)
         XCTAssertEqual(height(2_000), DispatchPillMetrics.maxExpandedHeight, "capped; the text scrolls inside")
-        XCTAssertEqual(height(26, preview: true), DispatchPillMetrics.pillHeight + DispatchPillMetrics.previewHeight)
+        XCTAssertEqual(height(120, preview: 80), 80, "a pinned turn shows alone: its height, not the composer's")
+        XCTAssertEqual(height(0, preview: 900), DispatchPillMetrics.maxExpandedHeight)
         XCTAssertEqual(dispatchPillMainSize(presentation: .expanded, composerContentHeight: 0,
-                                            showsPreview: false, visibleFrame: visible).width,
+                                            visibleFrame: visible).width,
                        DispatchPillMetrics.expandedWidth)
     }
 
     func testFullScreenFillsTheVisibleFrameLessItsInsets() {
         let size = dispatchPillMainSize(presentation: .fullScreen, composerContentHeight: 0,
-                                        showsPreview: false, visibleFrame: visible)
+                                        visibleFrame: visible)
         XCTAssertEqual(size.width, visible.width - 2 * DispatchPillMetrics.fullScreenInset)
         XCTAssertEqual(size.height, visible.height - DispatchPillMetrics.fullScreenInset - DispatchPillMetrics.dockGap)
-        let tiny = dispatchPillMainSize(presentation: .fullScreen, composerContentHeight: 0, showsPreview: false,
+        let tiny = dispatchPillMainSize(presentation: .fullScreen, composerContentHeight: 0,
                                         visibleFrame: CGRect(x: 0, y: 0, width: 300, height: 200))
         XCTAssertGreaterThanOrEqual(tiny.width, DispatchPillMetrics.expandedWidth, "never smaller than the typing pill")
     }
@@ -149,6 +150,29 @@ final class DispatchPillViewTests: XCTestCase {
                            - DispatchPillMetrics.trailingPadding - DispatchPillMetrics.sendCircleSize
                            - DispatchPillMetrics.rowSpacing,
                        "everything left of the send circle — no room set aside for ↗ and ⋯")
+    }
+
+    // MARK: - A pinned turn
+
+    func testAPinnedTurnIsSizedToItsReplysLines() {
+        let line: CGFloat = 20
+        let one = dispatchPillPreviewHeight(replyWidth: 120, lineHeight: line)
+        let two = dispatchPillPreviewHeight(replyWidth: DispatchPillMetrics.previewTextWidth + 1, lineHeight: line)
+        let long = dispatchPillPreviewHeight(replyWidth: DispatchPillMetrics.previewTextWidth * 5, lineHeight: line)
+        XCTAssertEqual(one, 2 * DispatchPillMetrics.previewVerticalInset + line + DispatchPillMetrics.previewLineGap + line,
+                       "the prompt line and one reply line")
+        XCTAssertEqual(two - one, line, "a second reply line")
+        XCTAssertEqual(long, two, "capped at two reply lines")
+        XCTAssertEqual(dispatchPillPreviewHeight(replyWidth: 0, lineHeight: 1), DispatchPillMetrics.pillHeight,
+                       "never smaller than the capsule")
+    }
+
+    func testAPinnedTurnsTextIsTheComposersSize() {
+        let font = Typography.sansNS(ofSize: Typography.composerFieldSize)
+        let lineHeight = ceil(NSLayoutManager().defaultLineHeight(for: font))
+        XCTAssertEqual(dispatchPillPreviewHeight(reply: "ok"),
+                       dispatchPillPreviewHeight(replyWidth: 10, lineHeight: lineHeight),
+                       "measured at the composer's own face")
     }
 
     // MARK: - Blur while the shape changes

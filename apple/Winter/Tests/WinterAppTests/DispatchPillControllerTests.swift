@@ -479,7 +479,7 @@ final class DispatchPillControllerTests: XCTestCase {
         pill.show()
         pill.requestFullScreen()
         let main = dispatchPillMainSize(presentation: .fullScreen, composerContentHeight: 0,
-                                        showsPreview: false, visibleFrame: visible)
+                                        visibleFrame: visible)
         XCTAssertEqual(pill.panelFrameForTesting.size, canvas(for: main))
         XCTAssertEqual(pill.morph.target, main)
         XCTAssertEqual(pill.panelFrameForTesting.midX, visible.midX, accuracy: 0.5)
@@ -542,13 +542,8 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertEqual(pill.historyIndex, 2)
         XCTAssertEqual(pill.presentation, .expanded)
         XCTAssertEqual(pill.turnPreview?.prompt, "three")
-        XCTAssertEqual(pill.morph.target.height,
-                       dispatchPillMainSize(presentation: .expanded,
-                                            composerContentHeight: pill.composerContentHeight,
-                                            showsPreview: true, visibleFrame: visible).height,
-                       "the preview band rides above the composer")
-        XCTAssertGreaterThanOrEqual(pill.morph.target.height,
-                                    DispatchPillMetrics.pillHeight + DispatchPillMetrics.previewHeight)
+        XCTAssertEqual(pill.morph.target.height, dispatchPillPreviewHeight(reply: "c"),
+                       "the pinned turn shows alone, at its own height")
         pill.handleSwipe(.right)
         XCTAssertEqual(pill.historyIndex, 1)
         pill.handleSwipe(.left)
@@ -609,9 +604,7 @@ final class DispatchPillControllerTests: XCTestCase {
         waitUntil { pill.presentation == .expanded }
         XCTAssertEqual(pill.historyIndex, 1, "the newest turn is pinned")
         XCTAssertEqual(pill.turnPreview?.reply, "All green.")
-        XCTAssertEqual(pill.morph.target.height,
-                       dispatchPillMainSize(presentation: .expanded, composerContentHeight: pill.composerContentHeight,
-                                            showsPreview: true, visibleFrame: visible).height)
+        XCTAssertEqual(pill.morph.target.height, dispatchPillPreviewHeight(reply: "All green."))
     }
 
     func testAReplyLeavesADraftAlone() {
@@ -632,6 +625,19 @@ final class DispatchPillControllerTests: XCTestCase {
         wait(for: [drained], timeout: 1)
         XCTAssertNil(pill.historyIndex)
         XCTAssertEqual(pill.adapter.composerDraft, "next thing")
+    }
+
+    func testClickingAPinnedTurnReturnsToTheComposer() {
+        let session = SessionModel()
+        session.applyForTesting { s in s.exchanges = [Exchange(prompt: "one", reply: "a")] }
+        let pill = makePill(session)
+        pill.show()
+        pill.handleSwipe(.right)
+        XCTAssertNotNil(pill.historyIndex)
+        pill.exitPreview()
+        XCTAssertNil(pill.historyIndex)
+        XCTAssertEqual(pill.presentation, .expanded)
+        XCTAssertEqual(pill.morph.target.height, DispatchPillMetrics.pillHeight, "back to the composer's own height")
     }
 
     func testClickingTheWorkingPlumeOpensTheComposer() {
