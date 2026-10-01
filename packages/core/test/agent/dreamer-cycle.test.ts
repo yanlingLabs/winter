@@ -55,6 +55,8 @@ describe("Dreamer.tick", () => {
       type: "child_update", sessionId: dispatchId, threadId: "main", childSessionId: "s_child",
       status: "completed", title: "build the site", resultSummary: "built the site",
     });
+    // Dispatch's own wake is not the user's words — never a `[user]` line.
+    store.append(dispatchId, { type: "user_message", sessionId: dispatchId, threadId: "main", text: "WAKE_TEXT <child_update>", clientName: "dispatch-wake" });
     // Noise: none of this may leak into the window text.
     store.append(dispatchId, { type: "tool_call", sessionId: dispatchId, threadId: "main", callId: "c1", name: "bash", argsJson: "{}" });
     store.append(dispatchId, { type: "tool_result", sessionId: dispatchId, threadId: "main", callId: "c1", output: "SECRET_TOOL_OUTPUT", isError: false });
@@ -77,6 +79,7 @@ describe("Dreamer.tick", () => {
     expect(content).not.toContain("SECRET_TOOL_OUTPUT");
     expect(content).not.toContain("reasoning");
     expect(content).not.toContain("harness_attached");
+    expect(content).not.toContain("WAKE_TEXT");
   });
 
   test("2) request shape: hardcoded model/effort, no tools, exact instruction text", async () => {

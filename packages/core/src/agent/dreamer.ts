@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DISPATCH_WAKE_CLIENT_NAME } from "@yanlinglabs/winter-protocol";
 import type { Provider, TurnInputItem } from "../providers/types";
 import type { SessionStore } from "../sessions/store";
 import type { Settings } from "../settings";
@@ -193,7 +194,9 @@ export class Dreamer {
     const events = this.deps.store.read(dispatchId, state.watermarkSeq);
     const lines: string[] = [];
     for (const e of events) {
-      if (e.type === "user_message") lines.push(`[user] ${e.text}`);
+      // Dispatch's own wake (`agent/dispatch-children.ts`) is the daemon talking, not the user — the
+      // `child_update` it carries is already a line of its own below.
+      if (e.type === "user_message") { if (e.clientName !== DISPATCH_WAKE_CLIENT_NAME) lines.push(`[user] ${e.text}`); }
       else if (e.type === "assistant_message") lines.push(`[winter] ${e.text}`);
       else if (e.type === "child_update") lines.push(`[delegated work "${e.title}" → ${e.status}]${e.resultSummary ? ` ${e.resultSummary}` : ""}`);
     }

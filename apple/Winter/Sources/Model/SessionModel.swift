@@ -632,6 +632,15 @@ enum SessionReducer {
             if let i = s.attachedClients.firstIndex(of: v.clientName) {
                 s.attachedClients.remove(at: i) // remove-first-match, see `attachedClients`'s doc
             }
+        case .userMessage(let v) where v.threadId == mainThread && v.clientName == dispatchWakeClientName:
+            // Dispatch's children (`packages/core/src/agent/dispatch-children.ts`): the daemon WAKES the
+            // dispatch session with a `<child_update>` message the user never typed. It opens its own
+            // exchange (the reply is Dispatch's report on the finished children) with NO prompt, so no
+            // user bubble is drawn (`TranscriptView` skips an empty prompt), and it never folds into a
+            // running turn as a steer. Its origin is stamped like any non-orb sender's, so the report
+            // finishes quietly (`lastTurnWasOrbInitiated` is false) — the unread indicator is the signal.
+            s.exchanges.append(Exchange(prompt: "", reply: ""))
+            s.lastTurnOriginClientName = v.clientName
         case .userMessage(let v) where v.threadId == mainThread:
             if s.turnRunning, let last = s.exchanges.indices.last, s.exchanges[last].reply.isEmpty {
                 // Mid-turn steer: same turn, same exchange — the prompt grows (one turn = one exchange).
@@ -1406,6 +1415,11 @@ enum SessionReducer {
     /// `"iphone-gateway"` (the phone's Mac-side gateway harness), `"routine"` (a scheduled routine),
     /// any `"cli-*"` (the CLI's own `connect(name:)` identities), and `"orb"` itself — each of these
     /// is a real new turn origin, not the engine talking to itself.
+    /// Mirrors core's `DISPATCH_WAKE_CLIENT_NAME` (`packages/protocol/src/events.ts`): the
+    /// `clientName` of the daemon's own dispatch wake message — rendered as no user bubble (see the
+    /// reducer's first `.userMessage` case).
+    static let dispatchWakeClientName = "dispatch-wake"
+
     private static func isEngineSentinelClientName(_ clientName: String) -> Bool {
         ["steer", "send_message", "resume"].contains(clientName)
     }
