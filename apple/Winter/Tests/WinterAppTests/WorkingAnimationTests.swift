@@ -235,8 +235,10 @@ final class WorkingAnimationTests: XCTestCase {
 
     // MARK: - What a turn throws
 
-    private func tool(_ name: String, detail: String? = nil, callId: String, output: String? = nil) -> ActivityItem {
-        ActivityItem(kind: .tool(name: name, detail: detail, callId: callId, output: output))
+    private func tool(_ name: String, detail: String? = nil, callId: String, output: String? = nil,
+                      isError: Bool = false, siteIcons: [SiteIconRef] = []) -> ActivityItem {
+        ActivityItem(kind: .tool(name: name, detail: detail, callId: callId, output: output, isError: isError,
+                                 siteIcons: siteIcons))
     }
 
     func testEveryToolCallThrowsItsTile() {
@@ -252,11 +254,82 @@ final class WorkingAnimationTests: XCTestCase {
         XCTAssertEqual(plumeThrows(for: nil), [])
     }
 
-    func testAFetchThrowsItsSitesFavicon() {
-        let exchange = Exchange(prompt: "p", reply: "", activity: [
+    func testAFetchThrowsItsTileThenItsSiteWhenThePageArrives() {
+        let running = Exchange(prompt: "p", reply: "", activity: [
             tool("WebFetch", detail: "https://www.apple.com/newsroom/", callId: "f1"),
         ])
-        XCTAssertEqual(plumeThrows(for: exchange), [PlumeThrow(id: "f1#www.apple.com", kind: .site(host: "www.apple.com"))])
+        XCTAssertEqual(plumeThrows(for: running), [PlumeThrow(id: "f1", kind: .tool(symbol: "safari"))],
+                       "the site waits for the page — that is when its icon arrives")
+        // An older runtime reports no icon: the fetched url's host, with no icon url (favicon.ico).
+        let done = Exchange(prompt: "p", reply: "", activity: [
+            tool("WebFetch", detail: "https://www.apple.com/newsroom/", callId: "f1", output: "digest"),
+        ])
+        XCTAssertEqual(plumeThrows(for: done), [
+            PlumeThrow(id: "f1", kind: .tool(symbol: "safari")),
+            PlumeThrow(id: "f1#www.apple.com", kind: .site(host: "www.apple.com", iconURL: nil)),
+        ])
+        let failed = Exchange(prompt: "p", reply: "", activity: [
+            tool("WebFetch", detail: "https://www.apple.com/newsroom/", callId: "f1", output: "403", isError: true),
+        ])
+        XCTAssertEqual(plumeThrows(for: failed).map(\.id), ["f1"], "no page came, no site")
+    }
+
+    func testAFetchDrawsThePagesOwnReportedIcon() {
+        let done = Exchange(prompt: "p", reply: "", activity: [
+            tool("WebFetch", detail: "https://www.apple.com/newsroom/", callId: "f1", output: "digest",
+                 siteIcons: [SiteIconRef(url: "https://www.apple.com/newsroom/", iconUrl: "https://www.apple.com/favicon-32.png")]),
+        ])
+        XCTAssertEqual(plumeThrows(for: done).last,
+                       PlumeThrow(id: "f1#www.apple.com", kind: .site(host: "www.apple.com", iconURL: "https://www.apple.com/favicon-32.png")))
+    }
+
+    func testASearchDrawsEachSourceFromItsReportedIcon() {
+        let output = """
+        The answer.
+
+        Sources:
+        1. A
+           https://alpha.example.com/a
+        2. G
+           https://gamma.example.com/g
+        3. B
+           https://beta.example.org/b
+        """
+        let icons = [
+            SiteIconRef(url: "https://alpha.example.com/a", iconUrl: "https://alpha.example.com/favicon.ico"),
+            SiteIconRef(url: "https://beta.example.org/b", iconUrl: "https://cdn.example.net/beta.png"),
+            // A private icon is never drawn from; the source falls back to its own favicon.ico.
+            SiteIconRef(url: "https://delta.example.com/d", iconUrl: "https://10.0.0.1/i.png"),
+        ]
+        let done = Exchange(prompt: "p", reply: "", activity: [
+            tool("mcp__winter__research__Search", detail: "q", callId: "s1", output: output, siteIcons: icons),
+        ])
+        XCTAssertEqual(plumeThrows(for: done), [
+            PlumeThrow(id: "s1", kind: .tool(symbol: workingToolSymbol(for: "mcp__winter__research__Search"))),
+            PlumeThrow(id: "s1#alpha.example.com", kind: .site(host: "alpha.example.com", iconURL: "https://alpha.example.com/favicon.ico")),
+            PlumeThrow(id: "s1#gamma.example.com", kind: .site(host: "gamma.example.com", iconURL: nil)),
+            PlumeThrow(id: "s1#beta.example.org", kind: .site(host: "beta.example.org", iconURL: "https://cdn.example.net/beta.png")),
+            PlumeThrow(id: "s1#delta.example.com", kind: .site(host: "delta.example.com", iconURL: nil)),
+        ], "every named source in order, each from its reported icon; then a reported site the text did not name")
+    }
+
+    func testTwoIconsForOneHostAreFiledApart() {
+        let a = plumeFaviconKey(host: "a.example.com", iconURL: "https://a.example.com/one.png")
+        let b = plumeFaviconKey(host: "a.example.com", iconURL: "https://cdn.example.net/two.png")
+        XCTAssertNotEqual(a, b)
+        XCTAssertEqual(a, "https://a.example.com/one.png")
+        XCTAssertEqual(plumeFaviconKey(host: "a.example.com", iconURL: nil), "https://a.example.com/favicon.ico")
+    }
+
+    func testReportedSitesAreOnePerPublicHost() {
+        let sites = plumeSites([
+            SiteIconRef(url: "https://a.example.com/1", iconUrl: "https://a.example.com/i.png"),
+            SiteIconRef(url: "https://A.example.com/2", iconUrl: "https://a.example.com/j.png"),
+            SiteIconRef(url: "https://localhost/x", iconUrl: "https://a.example.com/i.png"),
+            SiteIconRef(url: "not a url", iconUrl: "https://a.example.com/i.png"),
+        ])
+        XCTAssertEqual(sites.map(\.host), ["a.example.com"])
+        XCTAssertEqual(sites.first?.iconURL, "https://a.example.com/i.png")
     }
 
     func testASearchThrowsItsTileThenTheSitesItFound() {
@@ -277,7 +350,11 @@ final class WorkingAnimationTests: XCTestCase {
     func testOnlyPublicNamesAreAskedForAFavicon() {
         XCTAssertTrue(plumeFaviconHostAllowed("github.com"))
         XCTAssertTrue(plumeFaviconHostAllowed("docs.swift.org"))
-        for host in ["localhost", "printer.local", "db.internal", "10.0.0.1", "192.168.1.1", "intranet", "a..b", "-x.com"] {
+        for host in ["lan.example.com", "myhome.com", "corp.example.org", "private.example.net"] {
+            XCTAssertTrue(plumeFaviconHostAllowed(host), "only the suffix counts: \(host)")
+        }
+        for host in ["localhost", "printer.local", "db.internal", "nas.lan", "router.home", "box.home.arpa", "wiki.corp",
+                     "hr.intranet", "x.private", "a.localhost", "10.0.0.1", "192.168.1.1", "intranet", "a..b", "-x.com"] {
             XCTAssertFalse(plumeFaviconHostAllowed(host), host)
         }
     }

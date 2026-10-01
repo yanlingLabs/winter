@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 77, "expected 77 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 78, "expected 78 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -344,6 +344,31 @@ final class RoundTripTests: XCTestCase {
         let withoutReencoded = try JSONEncoder().encode(SessionEvent.toolResult(without))
         let withoutObj = try JSONSerialization.jsonObject(with: withoutReencoded) as? [String: Any]
         XCTAssertNil(withoutObj?["fileDiff"], "an absent fileDiff must stay absent on re-encode")
+    }
+
+    /// `tool_result.siteIcons` is additive/optional — with (the TS-generated
+    /// `tool_result_with_site_icons.json`, two entries, the second's icon on another host) vs. the
+    /// older `tool_result.json` (absent), checking CONTENT and order, and absent-stays-absent.
+    func testToolResultSiteIconsOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "tool_result_with_site_icons", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing tool_result_with_site_icons.json fixture")
+        }
+        guard case .toolResult(let with) = try JSONDecoder().decode(SessionEvent.self, from: Data(contentsOf: withURL)) else { return XCTFail() }
+        XCTAssertEqual(with.siteIcons, [
+            SessionEvent.SiteIcon(url: "https://a.example.com/x", iconUrl: "https://a.example.com/favicon.ico"),
+            SessionEvent.SiteIcon(url: "https://b.example.org/y", iconUrl: "https://cdn.example.net/b/icon-32.png"),
+        ])
+        let reencoded = try JSONEncoder().encode(SessionEvent.toolResult(with))
+        guard case .toolResult(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+
+        guard let withoutURL = Bundle.module.url(forResource: "tool_result", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing tool_result.json fixture")
+        }
+        guard case .toolResult(let without) = try JSONDecoder().decode(SessionEvent.self, from: Data(contentsOf: withoutURL)) else { return XCTFail() }
+        XCTAssertNil(without.siteIcons)
+        let withoutObj = try JSONSerialization.jsonObject(with: JSONEncoder().encode(SessionEvent.toolResult(without))) as? [String: Any]
+        XCTAssertNil(withoutObj?["siteIcons"], "an absent siteIcons must stay absent on re-encode")
     }
 
     /// Code-mode image input: `user_message.images` is additive/optional — with/without via the

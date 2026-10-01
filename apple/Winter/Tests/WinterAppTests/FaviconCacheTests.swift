@@ -2,21 +2,11 @@ import XCTest
 import AppKit
 @testable import Winter
 
-/// The plume's favicon cache: memory → disk → network, the miss marker, the stale refresh, the home
-/// page's declared icon, and the pure parsing/normalising helpers. The network is a stub throughout.
+/// The plume's favicons: the EXACT icon url a web tool reported is what is fetched; with none, one
+/// `/favicon.ico` attempt; an in-memory dedupe (never disk) so a tile drawn every frame never
+/// refetches and a failure stays a globe; public https hosts only. The network is a stub throughout.
 @MainActor
 final class FaviconCacheTests: XCTestCase {
-    private var directory: URL!
-
-    override func setUpWithError() throws {
-        directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("WinterFaviconTests-\(UUID().uuidString)", isDirectory: true)
-    }
-
-    override func tearDownWithError() throws {
-        try? FileManager.default.removeItem(at: directory)
-    }
-
     /// Every URL the stub was asked for, and what it answers.
     private final class StubNetwork: @unchecked Sendable {
         private let lock = NSLock()
@@ -32,6 +22,8 @@ final class FaviconCacheTests: XCTestCase {
         }
     }
 
+    private final class Clock: @unchecked Sendable { var now = Date(timeIntervalSince1970: 1_800_000_000) }
+
     private func png(side: Int, color: NSColor = .systemOrange) -> Data {
         let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8,
                                    samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
@@ -44,13 +36,13 @@ final class FaviconCacheTests: XCTestCase {
         return rep.representation(using: .png, properties: [:])!
     }
 
-    private func waitForImage(_ cache: FaviconCache, _ host: String, timeout: TimeInterval = 3) -> NSImage? {
+    private func waitForImage(_ cache: FaviconCache, host: String, iconURL: String?, timeout: TimeInterval = 3) -> NSImage? {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if let image = cache.image(for: host) { return image }
+            if let image = cache.image(host: host, iconURL: iconURL) { return image }
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))
         }
-        return cache.image(for: host)
+        return cache.image(host: host, iconURL: iconURL)
     }
 
     private func waitUntilSettled(_ cache: FaviconCache, timeout: TimeInterval = 3) {
@@ -60,136 +52,180 @@ final class FaviconCacheTests: XCTestCase {
         }
     }
 
-    // MARK: - Memory → disk → network
+    // MARK: - What is fetched
 
-    func testASiteMetOnceIsDrawnFromDiskOnEveryLaterLaunch() {
+    func testTheToolsIconURLIsFetchedExactlyAndOnlyOnce() {
         let net = StubNetwork()
-        net.answers["https://example.com/favicon.ico"] = png(side: 32)
-        let first = FaviconCache(directory: directory, fetch: net.fetch)
-        XCTAssertNil(first.image(for: "example.com"), "never blocks: nil while it looks")
-        XCTAssertNotNil(waitForImage(first, "example.com"))
-        XCTAssertEqual(net.asked.count, 1)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("example.com.png").path))
-
-        let offline = StubNetwork()
-        let relaunched = FaviconCache(directory: directory, fetch: offline.fetch)
-        XCTAssertNotNil(waitForImage(relaunched, "example.com"), "a later launch reads it from disk")
-        XCTAssertTrue(offline.asked.isEmpty, "…without asking the site again")
+        let icon = "https://cdn.example.net/beta/icon-32.png"
+        net.answers[icon] = png(side: 32)
+        let cache = FaviconCache(fetch: net.fetch)
+        XCTAssertNil(cache.image(host: "beta.example.org", iconURL: icon), "never blocks: nil while it loads")
+        XCTAssertNotNil(waitForImage(cache, host: "beta.example.org", iconURL: icon))
+        for _ in 0..<50 { XCTAssertNotNil(cache.image(host: "beta.example.org", iconURL: icon)) } // every frame
+        XCTAssertEqual(net.asked.map(\.absoluteString), [icon], "the exact url, once — no favicon.ico, no home page")
     }
 
-    func testTheIconIsKeptSmallOnDisk() throws {
-        let net = StubNetwork()
-        net.answers["https://big.example/favicon.ico"] = png(side: 256)
-        let cache = FaviconCache(directory: directory, fetch: net.fetch)
-        _ = waitForImage(cache, "big.example")
-        waitUntilSettled(cache)
-        let stored = try Data(contentsOf: directory.appendingPathComponent("big.example.png"))
-        let rep = try XCTUnwrap(NSBitmapImageRep(data: stored))
-        XCTAssertEqual(rep.pixelsWide, FaviconCache.iconPixelSize)
-    }
-
-    func testASiteWithNoIconIsNotAskedAgainForAWhile() {
+    func testWithNoIconURLTheHostsFaviconIcoIsTriedOnceThenAGlobe() {
         let net = StubNetwork() // answers nothing
-        var clock = Date() // the markers carry real modification times
-        let cache = FaviconCache(directory: directory, fetch: net.fetch, now: { [clock] in clock })
-        XCTAssertNil(cache.image(for: "nothing.example"))
+        let cache = FaviconCache(fetch: net.fetch)
+        XCTAssertNil(cache.image(host: "nothing.example", iconURL: nil))
         waitUntilSettled(cache)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("nothing.example.miss").path))
-        let askedOnce = net.asked.count
-        XCTAssertEqual(askedOnce, 2, "favicon.ico, then the home page")
-        XCTAssertNil(cache.image(for: "nothing.example"))
+        for _ in 0..<20 { XCTAssertNil(cache.image(host: "nothing.example", iconURL: nil)) }
         waitUntilSettled(cache)
-        XCTAssertEqual(net.asked.count, askedOnce, "this run remembers the miss")
-
-        let soon = FaviconCache(directory: directory, fetch: net.fetch, now: { [clock] in clock })
-        XCTAssertNil(soon.image(for: "nothing.example"))
-        waitUntilSettled(soon)
-        XCTAssertEqual(net.asked.count, askedOnce, "a relaunch inside the retry window does not ask")
-
-        clock = clock.addingTimeInterval(FaviconCache.missRetryAfter + 3600)
-        let later = FaviconCache(directory: directory, fetch: net.fetch, now: { [clock] in clock })
-        XCTAssertNil(later.image(for: "nothing.example"))
-        waitUntilSettled(later)
-        XCTAssertGreaterThan(net.asked.count, askedOnce, "past the retry window it is tried again")
+        XCTAssertEqual(net.asked.map(\.absoluteString), ["https://nothing.example/favicon.ico"],
+                       "one attempt, then the failure is remembered for the run — never the home page")
     }
 
-    func testAStaleIconIsDrawnAtOnceAndRefreshedBehindIt() throws {
-        let old = png(side: 32, color: .systemRed)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = directory.appendingPathComponent("stale.example.png")
-        try faviconNormalizedPNG(old)!.write(to: file)
-        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-FaviconCache.freshFor - 3600)],
-                                              ofItemAtPath: file.path)
+    func testTheFallbackLoadsWhenTheSiteHasAFaviconIco() {
         let net = StubNetwork()
-        net.answers["https://stale.example/favicon.ico"] = png(side: 48, color: .systemGreen)
-        let cache = FaviconCache(directory: directory, fetch: net.fetch)
-        XCTAssertNotNil(waitForImage(cache, "stale.example"))
-        waitUntilSettled(cache)
-        XCTAssertEqual(net.asked.map(\.absoluteString), ["https://stale.example/favicon.ico"], "refreshed once")
-        let modified = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date)
-        XCTAssertLessThan(Date().timeIntervalSince(modified), 60, "the fresh copy replaced the stale one")
+        net.answers["https://www.apple.com/favicon.ico"] = png(side: 16)
+        let cache = FaviconCache(fetch: net.fetch)
+        XCTAssertNotNil(waitForImage(cache, host: "www.apple.com", iconURL: nil))
     }
 
-    func testTheHomePagesDeclaredIconIsUsedWhenThereIsNoFaviconIco() {
+    func testAFailedIconURLStaysAGlobeAndIsNotRetried() {
         let net = StubNetwork()
-        net.answers["https://news.example/"] = Data(#"""
-        <html><head>
-        <link rel="mask-icon" href="/mask.svg" color="#000">
-        <link rel="icon" type="image/png" href="/static/icon-32.png">
-        </head></html>
-        """#.utf8)
-        net.answers["https://news.example/static/icon-32.png"] = png(side: 32)
-        let cache = FaviconCache(directory: directory, fetch: net.fetch)
-        XCTAssertNotNil(waitForImage(cache, "news.example"))
-        XCTAssertEqual(net.asked.map(\.absoluteString), [
-            "https://news.example/favicon.ico", "https://news.example/", "https://news.example/static/icon-32.png",
-        ])
-    }
-
-    func testAPrivateHostIsNeverFetched() {
-        let net = StubNetwork()
-        let cache = FaviconCache(directory: directory, fetch: net.fetch)
-        for host in ["localhost", "192.168.1.10", "printer.local"] { XCTAssertNil(cache.image(for: host)) }
+        let cache = FaviconCache(fetch: net.fetch)
+        let icon = "https://a.example.com/missing.png"
+        XCTAssertNil(cache.image(host: "a.example.com", iconURL: icon))
+        // The first fetch has FINISHED and FAILED before the second ask — so what follows is the
+        // failure memory at work, not the in-flight dedupe.
         waitUntilSettled(cache)
-        XCTAssertTrue(net.asked.isEmpty)
+        XCTAssertEqual(cache.pendingCountForTesting, 0)
+        XCTAssertEqual(cache.failedCountForTesting, 1)
+        XCTAssertEqual(net.asked.count, 1)
+        XCTAssertNil(cache.image(host: "a.example.com", iconURL: icon))
+        XCTAssertEqual(cache.pendingCountForTesting, 0, "nothing new started")
+        waitUntilSettled(cache)
+        XCTAssertEqual(net.asked.count, 1)
     }
 
-    func testPruningKeepsTheNewestEntries() throws {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let now = Date()
-        for i in 0..<5 {
-            let url = directory.appendingPathComponent("s\(i).example.png")
-            try Data([1]).write(to: url)
-            try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(Double(-i) * 60)], ofItemAtPath: url.path)
+    // MARK: - The real request path (a stub URLProtocol, never the network)
+
+    /// Answers by url: a 302 to `redirects[url]`, else a 200 with `bodies[url]`, else a 404. Records
+    /// every url it is asked for — a redirect the guard refused is never asked for at all.
+    final class StubProtocol: URLProtocol {
+        nonisolated(unsafe) static var redirects: [String: String] = [:]
+        nonisolated(unsafe) static var bodies: [String: Data] = [:]
+        nonisolated(unsafe) static var asked: [String] = []
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {
+            let url = request.url!
+            Self.asked.append(url.absoluteString)
+            if let target = Self.redirects[url.absoluteString], let next = URL(string: target) {
+                let response = HTTPURLResponse(url: url, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: ["Location": target])!
+                client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: next), redirectResponse: response)
+                // What a real server's refused redirect leaves the task with: the 302 itself, and its
+                // (here empty) body. Ignored by the loader when the redirect is followed instead.
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data())
+                client?.urlProtocolDidFinishLoading(self)
+                return
+            }
+            let body = Self.bodies[url.absoluteString]
+            let response = HTTPURLResponse(url: url, statusCode: body == nil ? 404 : 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if let body { client?.urlProtocol(self, didLoad: body) }
+            client?.urlProtocolDidFinishLoading(self)
         }
-        let ancient = directory.appendingPathComponent("old.example.png")
-        try Data([1]).write(to: ancient)
-        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-FaviconCache.pruneOlderThan - 60)],
-                                              ofItemAtPath: ancient.path)
-        FaviconCache.prune(directory, now: now, keep: 3, olderThan: FaviconCache.pruneOlderThan)
-        let left = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
-        XCTAssertEqual(left, ["s0.example.png", "s1.example.png", "s2.example.png"])
+        override func stopLoading() {}
+    }
+
+    func testTheRealRequestPathRefusesARedirectToAPrivateHost() async {
+        StubProtocol.asked = []
+        StubProtocol.redirects = ["https://cdn.example.com/i.png": "https://192.168.1.1/i.png",
+                                  "https://cdn.example.com/moved.png": "https://img.example.net/moved.png"]
+        StubProtocol.bodies = ["https://192.168.1.1/i.png": png(side: 16), "https://img.example.net/moved.png": png(side: 16)]
+        let session = FaviconCache.makeSession(protocolClasses: [StubProtocol.self])
+        let refused = await FaviconCache.download(URL(string: "https://cdn.example.com/i.png")!, maxBytes: FaviconCache.maxIconBytes, session: session)
+        XCTAssertNil(refused, "a hop to a private address is not followed")
+        XCTAssertFalse(StubProtocol.asked.contains("https://192.168.1.1/i.png"), "…and never even requested")
+        let followed = await FaviconCache.download(URL(string: "https://cdn.example.com/moved.png")!, maxBytes: FaviconCache.maxIconBytes, session: session)
+        XCTAssertNotNil(followed, "a hop to a public https name is followed")
+        XCTAssertTrue(StubProtocol.asked.contains("https://img.example.net/moved.png"))
+    }
+
+    func testAFailureIsRetriedOnlyAfterTheRetryWindow() {
+        let net = StubNetwork()
+        let icon = "https://flaky.example.com/i.png"
+        let clock = Clock()
+        let cache = FaviconCache(fetch: net.fetch, now: { clock.now })
+        XCTAssertNil(cache.image(host: "flaky.example.com", iconURL: icon))
+        waitUntilSettled(cache)
+        clock.now += FaviconCache.failureRetryAfter - 1
+        XCTAssertNil(cache.image(host: "flaky.example.com", iconURL: icon))
+        waitUntilSettled(cache)
+        XCTAssertEqual(net.asked.count, 1, "inside the window: still a globe, not asked again")
+        net.answers[icon] = png(side: 16) // back online
+        clock.now += 2
+        XCTAssertNotNil(waitForImage(cache, host: "flaky.example.com", iconURL: icon))
+        XCTAssertEqual(net.asked.count, 2)
+    }
+
+    func testDecodedIconsAreCappedLeastRecentlyDrawnFirst() {
+        let net = StubNetwork()
+        let icon = png(side: 8)
+        let total = FaviconCache.memoryCapacity + 3
+        for i in 0..<total { net.answers["https://s\(i).example.com/favicon.ico"] = icon }
+        let cache = FaviconCache(fetch: net.fetch)
+        XCTAssertNotNil(waitForImage(cache, host: "s0.example.com", iconURL: nil))
+        for i in 1..<total {
+            XCTAssertNotNil(waitForImage(cache, host: "s\(i).example.com", iconURL: nil))
+            _ = cache.image(host: "s0.example.com", iconURL: nil) // s0 keeps being drawn
+        }
+        XCTAssertEqual(cache.imageCountForTesting, FaviconCache.memoryCapacity)
+        XCTAssertNotNil(cache.image(host: "s0.example.com", iconURL: nil), "the one still being drawn is kept")
+        XCTAssertNil(cache.image(host: "s1.example.com", iconURL: nil), "the least recently drawn went first")
+    }
+
+    func testTwoCachesShareNothing_NothingIsPersisted() {
+        let net = StubNetwork()
+        let icon = "https://a.example.com/i.png"
+        net.answers[icon] = png(side: 32)
+        XCTAssertNotNil(waitForImage(FaviconCache(fetch: net.fetch), host: "a.example.com", iconURL: icon))
+        let relaunched = FaviconCache(fetch: net.fetch)
+        XCTAssertNotNil(waitForImage(relaunched, host: "a.example.com", iconURL: icon))
+        XCTAssertEqual(net.asked.count, 2, "a new run asks again: no disk cache to go stale")
+    }
+
+    func testAPrivateHostOrIconIsNeverFetched() {
+        let net = StubNetwork()
+        let cache = FaviconCache(fetch: net.fetch)
+        for host in ["localhost", "192.168.1.10", "printer.local"] { XCTAssertNil(cache.image(host: host, iconURL: nil)) }
+        // A private or plain-http ICON on a public page falls back to the page's own favicon.ico.
+        XCTAssertNil(cache.image(host: "a.example.com", iconURL: "https://10.0.0.5/i.png"))
+        XCTAssertNil(cache.image(host: "b.example.com", iconURL: "http://b.example.com/i.png"))
+        waitUntilSettled(cache)
+        XCTAssertEqual(Set(net.asked.map(\.absoluteString)), ["https://a.example.com/favicon.ico", "https://b.example.com/favicon.ico"])
+    }
+
+    func testTheIconIsKeptSmall() throws {
+        let net = StubNetwork()
+        let icon = "https://big.example/apple-touch-icon.png"
+        net.answers[icon] = png(side: 256)
+        let cache = FaviconCache(fetch: net.fetch)
+        let image = try XCTUnwrap(waitForImage(cache, host: "big.example", iconURL: icon))
+        let rep = try XCTUnwrap(image.representations.first as? NSBitmapImageRep)
+        XCTAssertEqual(rep.pixelsWide, FaviconCache.iconPixelSize)
     }
 
     // MARK: - Pure helpers
 
-    func testThePagesBestIconIsChosen() {
-        XCTAssertEqual(faviconLinkHref(inHTML: #"<link rel="icon" href="/a.png"><link rel="apple-touch-icon" href="/touch.png">"#),
-                       "/touch.png", "the large touch icon wins")
-        XCTAssertEqual(faviconLinkHref(inHTML: #"<LINK REL='shortcut icon' HREF='/f.ico'>"#), "/f.ico")
-        XCTAssertEqual(faviconLinkHref(inHTML: "<link rel=icon href=/bare.png>"), "/bare.png", "unquoted attributes")
-        XCTAssertNil(faviconLinkHref(inHTML: #"<link rel="icon" href="/logo.svg"><link rel="mask-icon" href="/m.png">"#),
-                     "never an SVG or a mask")
-        XCTAssertNil(faviconLinkHref(inHTML: #"<link rel="stylesheet" href="/s.css">"#))
-        XCTAssertNil(faviconLinkHref(inHTML: #"<link rel="icon" href="data:image/png;base64,AAAA">"#))
+    func testTheRequestURLIsTheToolsIconElseTheHostsFaviconIco() {
+        XCTAssertEqual(faviconRequestURL(host: "a.com", iconURL: "https://cdn.a.com/i.png")?.absoluteString, "https://cdn.a.com/i.png")
+        XCTAssertEqual(faviconRequestURL(host: "a.com", iconURL: nil)?.absoluteString, "https://a.com/favicon.ico")
+        XCTAssertEqual(faviconRequestURL(host: "a.com", iconURL: "http://a.com/i.png")?.absoluteString, "https://a.com/favicon.ico", "https only")
+        XCTAssertEqual(faviconRequestURL(host: "a.com", iconURL: "https://127.0.0.1/i.png")?.absoluteString, "https://a.com/favicon.ico")
+        XCTAssertNil(faviconRequestURL(host: "intranet", iconURL: "https://cdn.a.com/i.png"), "a private page host fetches nothing")
     }
 
-    func testAnIconHrefResolvesOnlyToAPublicHttpsURL() {
-        XCTAssertEqual(faviconResolvedURL("/i.png", host: "a.com")?.absoluteString, "https://a.com/i.png")
-        XCTAssertEqual(faviconResolvedURL("//cdn.a.com/i.png", host: "a.com")?.absoluteString, "https://cdn.a.com/i.png")
-        XCTAssertEqual(faviconResolvedURL("img/i.png", host: "a.com")?.absoluteString, "https://a.com/img/i.png")
-        XCTAssertNil(faviconResolvedURL("http://a.com/i.png", host: "a.com"), "https only")
-        XCTAssertNil(faviconResolvedURL("https://10.0.0.5/i.png", host: "a.com"), "never a private address")
+    func testARedirectIsFollowedOnlyToAPublicHttpsName() {
+        XCTAssertTrue(faviconRedirectAllowed(URL(string: "https://cdn.example.com/i.png")))
+        XCTAssertFalse(faviconRedirectAllowed(URL(string: "http://cdn.example.com/i.png")))
+        XCTAssertFalse(faviconRedirectAllowed(URL(string: "https://192.168.0.1/i.png")))
+        XCTAssertFalse(faviconRedirectAllowed(URL(string: "https://router.local/i.png")))
+        XCTAssertFalse(faviconRedirectAllowed(nil))
     }
 
     func testAnyImageIsNormalisedToASmallPNGAndJunkIsRefused() throws {

@@ -2,247 +2,156 @@ import AppKit
 import ImageIO
 import UniformTypeIdentifiers
 
-/// The favicons the plume throws (`PlumeThrow.Kind.site`), fetched straight from each site — never
-/// through a third-party favicon service, which would be told every site Dispatch reads — and kept
-/// ON DISK, so a site met once is drawn instantly on every later turn and every later launch.
+/// The favicons the plume throws (`PlumeThrow.Kind.site`), fetched from the EXACT icon url the web
+/// tool reported for the site (`tool_result.siteIcons`: Exa's `favicon` for a search source, the
+/// fetched page's own declared icon for a fetch) — never guessed from a home page, and never through
+/// a third-party favicon service of Winter's choosing.
 ///
-/// Lookup order for a host: memory → disk → network. On disk an icon is a small normalised PNG
-/// (`<host>.png`, `iconPixelSize` square); one older than `freshFor` is still drawn at once and
-/// refreshed quietly behind it. A site with no usable icon leaves a `<host>.miss` marker, and is not
-/// asked again for `missRetryAfter` — its tiles show a globe meanwhile.
+/// **This is not a persistent cache.** Nothing is written to disk and nothing outlives the app's run:
+/// the icon url arrives fresh with every result, so a stored copy could only ever be staler than what
+/// the tool just said. What is kept is a small in-memory DEDUPE, keyed by the icon url, so a tile
+/// redrawn every frame (and the same site met again this run) does not refetch — the decoded images
+/// (at most `memoryCapacity`, least recently drawn dropped first), the urls still in flight, and the
+/// ones that failed (a globe, not retried for `failureRetryAfter`).
 ///
-/// From the network: `https://<host>/favicon.ico` first; failing that, the site's home page is read
-/// (capped) for its `<link rel="icon">` / `apple-touch-icon` (`faviconLinkHref`), and that is
-/// fetched. Requests go out on an EPHEMERAL session — no cookies, nothing of the user's sent along —
-/// and only to public names (`plumeFaviconHostAllowed`), never an IP literal or a local name.
+/// With no icon url known (an older daemon or runtime, a source Exa had no favicon for) the site gets
+/// ONE attempt at `https://<host>/favicon.ico`, deduped the same way, then a globe.
+///
+/// Requests go out on an EPHEMERAL session — no cookies, nothing of the user's sent along — only over
+/// https, and only to public names (`plumeFaviconHostAllowed`) for the page AND the icon, re-checked
+/// on every redirect hop (`faviconRedirectAllowed`): never an IP literal or a local name.
 @MainActor
 final class FaviconCache {
-    static let shared = FaviconCache(directory: FaviconCache.defaultDirectory())
+    static let shared = FaviconCache()
 
+    /// The most decoded icons one run holds; past it the least recently drawn is dropped (and simply
+    /// fetched again if its site comes back). Failures and in-flight fetches are capped the same.
     static let memoryCapacity = 256
+    /// A failed icon url stays a globe this long, then may be tried again (an offline moment must not
+    /// grey a site out for the rest of a long-running menu-bar app's life).
+    static let failureRetryAfter: TimeInterval = 5 * 60
     static let maxIconBytes = 256 * 1024
-    static let maxPageBytes = 512 * 1024
     static let iconPixelSize = 64
-    static let freshFor: TimeInterval = 30 * 24 * 3600
-    static let missRetryAfter: TimeInterval = 3 * 24 * 3600
-    /// The disk folder is pruned (oldest first) back to this many entries, once per launch.
-    static let maxDiskEntries = 3000
-    static let pruneOlderThan: TimeInterval = 120 * 24 * 3600
 
     /// Fetches `url`, returning its body only for a 200 no larger than `maxBytes`. Injectable so the
     /// tests never touch the network.
     typealias Fetch = @Sendable (_ url: URL, _ maxBytes: Int) async -> Data?
 
-    private let directory: URL?
     private let fetch: Fetch
-    private let now: @Sendable () -> Date
-    private var images: [String: NSImage] = [:]
-    private var pending: Set<String> = []
-    private var missedThisRun: Set<String> = []
-    private var pruned = false
+    private let now: () -> Date
+    private var images: [URL: NSImage] = [:]
+    /// `images`' keys, least recently drawn first.
+    private var recency: [URL] = []
+    private var pending: Set<URL> = []
+    private var failed: [URL: Date] = [:]
 
-    /// `directory` nil keeps everything in memory only.
-    init(directory: URL?, fetch: @escaping Fetch = FaviconCache.networkFetch,
-         now: @escaping @Sendable () -> Date = { Date() }) {
-        self.directory = directory
+    init(fetch: @escaping Fetch = FaviconCache.networkFetch, now: @escaping () -> Date = { Date() }) {
         self.fetch = fetch
         self.now = now
     }
 
-    /// `~/Library/Caches/<bundle id>/Favicons` — the dev and dist apps each keep their own.
-    nonisolated static func defaultDirectory() -> URL? {
-        guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
-        return caches.appendingPathComponent(Bundle.main.bundleIdentifier ?? "com.winter.app", isDirectory: true)
-            .appendingPathComponent("Favicons", isDirectory: true)
-    }
-
-    /// The host's favicon if it is in memory; otherwise nil, starting the disk-then-network lookup
-    /// the first time asked. Called every frame by the plume, so it must stay cheap: it never blocks.
-    func image(for host: String) -> NSImage? {
-        if let image = images[host] { return image }
-        guard plumeFaviconHostAllowed(host), !pending.contains(host), !missedThisRun.contains(host),
-              images.count + pending.count < Self.memoryCapacity else { return nil }
-        pending.insert(host)
-        Task { await self.resolve(host) }
+    /// The site's icon if it is in memory; otherwise nil, starting the one fetch of it the first time
+    /// asked. Called every frame by the plume, so it must stay cheap: it never blocks.
+    func image(host: String, iconURL: String?) -> NSImage? {
+        guard let url = faviconRequestURL(host: host, iconURL: iconURL) else { return nil }
+        if let image = images[url] {
+            if recency.last != url, let i = recency.firstIndex(of: url) { recency.append(recency.remove(at: i)) }
+            return image
+        }
+        if let failedAt = failed[url] {
+            guard now().timeIntervalSince(failedAt) >= Self.failureRetryAfter else { return nil }
+            failed[url] = nil
+        }
+        guard !pending.contains(url), pending.count < Self.memoryCapacity else { return nil }
+        pending.insert(url)
+        Task { await self.load(url) }
         return nil
     }
 
     var pendingCountForTesting: Int { pending.count }
+    var imageCountForTesting: Int { images.count }
+    var failedCountForTesting: Int { failed.count }
 
-    private func resolve(_ host: String) async {
-        defer { pending.remove(host) }
-        pruneOnce()
-        let directory = self.directory
-        let now = self.now()
-        let stored = await Task.detached { FaviconCache.readDisk(host: host, in: directory, now: now) }.value
-        switch stored {
-        case .icon(let data, let age):
-            if let image = NSImage(data: data) {
-                images[host] = image
-                if age > Self.freshFor { await refresh(host) }
-                return
-            }
-        case .miss(let age) where age < Self.missRetryAfter:
-            missedThisRun.insert(host)
-            return
-        case .miss, .nothing:
-            break
-        }
-        await refresh(host)
-    }
-
-    /// Fetch afresh and keep the result (an icon, or a miss marker). A failed REFRESH of an icon
-    /// already held keeps the old one.
-    private func refresh(_ host: String) async {
+    private func load(_ url: URL) async {
+        defer { pending.remove(url) }
         let fetch = self.fetch
-        let png = await Task.detached { await FaviconCache.download(host: host, fetch: fetch) }.value
-        let directory = self.directory
+        let png = await Task.detached { () -> Data? in
+            let data = await fetch(url, FaviconCache.maxIconBytes)
+            return data.flatMap { faviconNormalizedPNG($0) }
+        }.value
         if let png, let image = NSImage(data: png) {
-            images[host] = image
-            await Task.detached { FaviconCache.writeDisk(host: host, png: png, in: directory) }.value
-        } else if images[host] == nil {
-            missedThisRun.insert(host)
-            await Task.detached { FaviconCache.writeDisk(host: host, png: nil, in: directory) }.value
-        }
-    }
-
-    private func pruneOnce() {
-        guard !pruned, let directory else { return }
-        pruned = true
-        let now = self.now()
-        Task.detached(priority: .utility) {
-            FaviconCache.prune(directory, now: now, keep: FaviconCache.maxDiskEntries,
-                               olderThan: FaviconCache.pruneOlderThan)
-        }
-    }
-
-    // MARK: - Disk (nonisolated — run off the main actor)
-
-    enum Stored: Equatable {
-        case icon(Data, age: TimeInterval)
-        case miss(age: TimeInterval)
-        case nothing
-    }
-
-    nonisolated static func readDisk(host: String, in directory: URL?, now: Date) -> Stored {
-        guard let directory else { return .nothing }
-        let fm = FileManager.default
-        let icon = directory.appendingPathComponent(host + ".png")
-        if let data = try? Data(contentsOf: icon), !data.isEmpty {
-            return .icon(data, age: age(of: icon, now: now))
-        }
-        let miss = directory.appendingPathComponent(host + ".miss")
-        if fm.fileExists(atPath: miss.path) { return .miss(age: age(of: miss, now: now)) }
-        return .nothing
-    }
-
-    /// An icon (`png`) or, for nil, a miss marker. Writing one removes the other.
-    nonisolated static func writeDisk(host: String, png: Data?, in directory: URL?) {
-        guard let directory else { return }
-        let fm = FileManager.default
-        try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
-        let icon = directory.appendingPathComponent(host + ".png")
-        let miss = directory.appendingPathComponent(host + ".miss")
-        if let png {
-            try? png.write(to: icon, options: .atomic)
-            try? fm.removeItem(at: miss)
+            images[url] = image
+            recency.append(url)
+            while recency.count > Self.memoryCapacity { images[recency.removeFirst()] = nil }
         } else {
-            try? Data().write(to: miss, options: .atomic)
+            if failed.count >= Self.memoryCapacity, let oldest = failed.min(by: { $0.value < $1.value })?.key {
+                failed[oldest] = nil
+            }
+            failed[url] = now()
         }
-    }
-
-    nonisolated static func prune(_ directory: URL, now: Date, keep: Int, olderThan: TimeInterval) {
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
-        var dated = files.map { ($0, (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) }
-        for (url, date) in dated where now.timeIntervalSince(date) > olderThan { try? fm.removeItem(at: url) }
-        dated.removeAll { now.timeIntervalSince($0.1) > olderThan }
-        guard dated.count > keep else { return }
-        for (url, _) in dated.sorted(by: { $0.1 < $1.1 }).prefix(dated.count - keep) { try? fm.removeItem(at: url) }
-    }
-
-    private nonisolated static func age(of url: URL, now: Date) -> TimeInterval {
-        let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-        return now.timeIntervalSince(date)
     }
 
     // MARK: - Network
 
-    private nonisolated static let session: URLSession = {
+    /// The ephemeral, cookie-less session every icon request uses. `protocolClasses` is the tests' seam
+    /// (a stub `URLProtocol`), so the real request path — redirect guard included — runs without a network.
+    nonisolated static func makeSession(protocolClasses: [AnyClass]? = nil) -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.httpCookieAcceptPolicy = .never
         config.httpShouldSetCookies = false
+        config.urlCache = nil
         config.timeoutIntervalForRequest = 6
         config.timeoutIntervalForResource = 10
+        if let protocolClasses { config.protocolClasses = protocolClasses }
         return URLSession(configuration: config)
-    }()
+    }
 
-    nonisolated static let networkFetch: Fetch = { url, maxBytes in
+    private nonisolated static let session = makeSession()
+
+    /// Re-checks every redirect hop: an icon url on a public host must not be bounced to a private one.
+    private final class RedirectGuard: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest) async -> URLRequest? {
+            faviconRedirectAllowed(request.url) ? request : nil
+        }
+    }
+
+    /// The one request path: `url` on `session`, every redirect hop through `RedirectGuard`; the body
+    /// only for a final 200 no larger than `maxBytes`.
+    nonisolated static func download(_ url: URL, maxBytes: Int, session: URLSession) async -> Data? {
         var request = URLRequest(url: url)
         request.setValue("Winter", forHTTPHeaderField: "User-Agent")
-        guard let (data, response) = try? await session.data(for: request),
+        guard let (data, response) = try? await session.data(for: request, delegate: RedirectGuard()),
               (response as? HTTPURLResponse)?.statusCode == 200,
               !data.isEmpty, data.count <= maxBytes else { return nil }
         return data
     }
 
-    /// `/favicon.ico`, else the home page's declared icon — normalised to a small PNG, or nil.
-    nonisolated static func download(host: String, fetch: Fetch) async -> Data? {
-        if let root = URL(string: "https://\(host)/favicon.ico"),
-           let data = await fetch(root, maxIconBytes), let png = faviconNormalizedPNG(data) {
-            return png
-        }
-        guard let home = URL(string: "https://\(host)/"),
-              let page = await fetch(home, maxPageBytes),
-              let html = String(data: page, encoding: .utf8) ?? String(data: page, encoding: .isoLatin1),
-              let href = faviconLinkHref(inHTML: html),
-              let icon = faviconResolvedURL(href, host: host),
-              let data = await fetch(icon, maxIconBytes) else { return nil }
-        return faviconNormalizedPNG(data)
+    nonisolated static let networkFetch: Fetch = { url, maxBytes in
+        await download(url, maxBytes: maxBytes, session: session)
     }
 }
 
 // MARK: - Pure helpers (`FaviconCacheTests`)
 
-/// PURE: the best icon a page declares — `apple-touch-icon` (large, opaque PNG) over `icon` /
-/// `shortcut icon`; never a `mask-icon` (a monochrome stencil) or an SVG (ImageIO cannot draw one).
-func faviconLinkHref(inHTML html: String) -> String? {
-    guard let tagRegex = try? NSRegularExpression(pattern: #"<link\b[^>]*>"#, options: [.caseInsensitive]),
-          let attrRegex = try? NSRegularExpression(
-              pattern: #"([A-Za-z][\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))"#) else { return nil }
-    var best: (rank: Int, href: String)?
-    let whole = NSRange(html.startIndex..., in: html)
-    for tag in tagRegex.matches(in: html, range: whole) {
-        guard let tagRange = Range(tag.range, in: html) else { continue }
-        let text = String(html[tagRange])
-        var attrs: [String: String] = [:]
-        for m in attrRegex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-            guard let k = Range(m.range(at: 1), in: text) else { continue }
-            let value = (2...4).lazy.compactMap { Range(m.range(at: $0), in: text) }.first.map { String(text[$0]) } ?? ""
-            attrs[text[k].lowercased()] = value
-        }
-        let rel = (attrs["rel"] ?? "").lowercased()
-        guard let href = attrs["href"]?.trimmingCharacters(in: .whitespaces), !href.isEmpty,
-              !rel.contains("mask"), !href.lowercased().hasSuffix(".svg"), !href.lowercased().hasPrefix("data:") else { continue }
-        let rank: Int
-        if rel.contains("apple-touch-icon") { rank = 3 } else if rel.split(separator: " ").contains("icon") { rank = 2 } else { continue }
-        if best == nil || rank > best!.rank { best = (rank, href) }
-    }
-    return best?.href
+/// PURE: what the pill fetches for a site — the tool's icon url when it is https to a public name
+/// (`plumeIconURLAllowed`), else the page host's own `https://<host>/favicon.ico`; nil when the page
+/// host itself is not a public name (nothing is fetched for it at all).
+func faviconRequestURL(host: String, iconURL: String?) -> URL? {
+    guard plumeFaviconHostAllowed(host) else { return nil }
+    if let iconURL, plumeIconURLAllowed(iconURL), let url = URL(string: iconURL) { return url }
+    return URL(string: "https://\(host)/favicon.ico")
 }
 
-/// PURE: an icon href resolved against the site's home page — https only (a protocol-relative `//`
-/// href is taken as https), and only to a public name; a plain-http or private icon is not fetched.
-func faviconResolvedURL(_ href: String, host: String) -> URL? {
-    guard let base = URL(string: "https://\(host)/"),
-          let url = URL(string: href, relativeTo: base)?.absoluteURL,
-          url.scheme?.lowercased() == "https",
-          let iconHost = url.host?.lowercased(), plumeFaviconHostAllowed(iconHost) else { return nil }
-    return url
+/// PURE: a redirect the icon fetch may follow — https, to a public name only.
+func faviconRedirectAllowed(_ url: URL?) -> Bool {
+    guard let url else { return false }
+    return plumeIconURLAllowed(url.absoluteString)
 }
 
 /// PURE: any image ImageIO reads (ICO, PNG, JPEG, GIF, …) as a square PNG of at most `pixelSize` —
-/// an ICO's largest frame, scaled down. Nil for anything that is not an image.
+/// an ICO's largest frame, scaled down. Nil for anything that is not an image (an SVG included:
+/// ImageIO cannot draw one, and the tile shows a globe).
 func faviconNormalizedPNG(_ data: Data, pixelSize: Int = FaviconCache.iconPixelSize) -> Data? {
     guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
     let count = CGImageSourceGetCount(source)
