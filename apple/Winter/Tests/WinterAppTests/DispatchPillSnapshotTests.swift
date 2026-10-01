@@ -203,6 +203,14 @@ final class DispatchPillSnapshotTests: XCTestCase {
             .write(to: outputDirectory.appendingPathComponent("11-tool-tiles.png"))
     }
 
+    func test12ErroredChildrenAreFullHeight() throws {
+        let p = pill { s in
+            s.children = (0..<3).map { ChildItem(sessionId: "e\($0)", title: "Search + 2 reads", status: $0 == 1 ? "completed" : "error") }
+        }
+        p.setPresentationForTesting(.compact)
+        try render(p, "12-errored-children")
+    }
+
     func test7ChildPills() throws {
         let titles = ["fix auth", "docs pass", "bump sdk", "flaky test", "perf trace", "triage"]
         let statuses = ["running", "awaiting_approval", "completed", "running", "error", "running"]
