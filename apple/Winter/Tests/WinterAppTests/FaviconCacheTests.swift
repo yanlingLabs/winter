@@ -22,6 +22,8 @@ final class FaviconCacheTests: XCTestCase {
         }
     }
 
+    private final class Clock: @unchecked Sendable { var now = Date(timeIntervalSince1970: 1_800_000_000) }
+
     private func png(side: Int, color: NSColor = .systemOrange) -> Data {
         let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8,
                                    samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
@@ -90,6 +92,39 @@ final class FaviconCacheTests: XCTestCase {
         XCTAssertNil(cache.image(host: "a.example.com", iconURL: icon))
         waitUntilSettled(cache)
         XCTAssertEqual(net.asked.count, 1)
+    }
+
+    func testAFailureIsRetriedOnlyAfterTheRetryWindow() {
+        let net = StubNetwork()
+        let icon = "https://flaky.example.com/i.png"
+        let clock = Clock()
+        let cache = FaviconCache(fetch: net.fetch, now: { clock.now })
+        XCTAssertNil(cache.image(host: "flaky.example.com", iconURL: icon))
+        waitUntilSettled(cache)
+        clock.now += FaviconCache.failureRetryAfter - 1
+        XCTAssertNil(cache.image(host: "flaky.example.com", iconURL: icon))
+        waitUntilSettled(cache)
+        XCTAssertEqual(net.asked.count, 1, "inside the window: still a globe, not asked again")
+        net.answers[icon] = png(side: 16) // back online
+        clock.now += 2
+        XCTAssertNotNil(waitForImage(cache, host: "flaky.example.com", iconURL: icon))
+        XCTAssertEqual(net.asked.count, 2)
+    }
+
+    func testDecodedIconsAreCappedLeastRecentlyDrawnFirst() {
+        let net = StubNetwork()
+        let icon = png(side: 8)
+        let total = FaviconCache.memoryCapacity + 3
+        for i in 0..<total { net.answers["https://s\(i).example.com/favicon.ico"] = icon }
+        let cache = FaviconCache(fetch: net.fetch)
+        XCTAssertNotNil(waitForImage(cache, host: "s0.example.com", iconURL: nil))
+        for i in 1..<total {
+            XCTAssertNotNil(waitForImage(cache, host: "s\(i).example.com", iconURL: nil))
+            _ = cache.image(host: "s0.example.com", iconURL: nil) // s0 keeps being drawn
+        }
+        XCTAssertEqual(cache.imageCountForTesting, FaviconCache.memoryCapacity)
+        XCTAssertNotNil(cache.image(host: "s0.example.com", iconURL: nil), "the one still being drawn is kept")
+        XCTAssertNil(cache.image(host: "s1.example.com", iconURL: nil), "the least recently drawn went first")
     }
 
     func testTwoCachesShareNothing_NothingIsPersisted() {

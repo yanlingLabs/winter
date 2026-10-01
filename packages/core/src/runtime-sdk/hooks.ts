@@ -1527,7 +1527,7 @@ function fileDiffPostToolUseHook(deps: SessionHooksDeps, pending: Map<string, Pe
 /** The daemon's own `Search`, as the child names it (`capabilities/research.ts`). */
 export const SEARCH_CAPABILITY_TOOL = capabilityToolName("research", "Search");
 
-/** `PostToolUse`, matched on the daemon's `Search` — pairs the page icons Search's `run` recorded for
+/** `PostToolUse` (unmatched; acts only on the daemon's `Search`) — pairs the page icons Search's `run` recorded for
  *  this session (Exa's citation `favicon`s, `site-icons.ts`) with THIS call's id, from the urls the
  *  result text names, and hands them to the projector (`attachSiteIcons` → `takeSiteIcons`, the
  *  `fileDiff` hand-off's shape). An observer: it never denies, never changes the output, and a
@@ -1536,6 +1536,7 @@ function searchSiteIconsPostToolUseHook(deps: SessionHooksDeps): HookCallback {
   return async (input) => {
     try {
       const post = input as PostToolUseHookInput;
+      if (post.tool_name !== SEARCH_CAPABILITY_TOOL) return allow();
       const text = typeof post.tool_response === "string" ? post.tool_response : "";
       const icons = siteIconsInText(deps.sessionId, text);
       if (icons !== undefined && typeof post.tool_use_id === "string" && post.tool_use_id.length > 0) {
@@ -1864,9 +1865,10 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
     if (deps.lsp) hooks.push(diagnosticsPostToolUseHook(deps));
     if (hooks.length > 0) postToolUse.push({ matcher: tool, hooks });
   }
-  // `tool_result.siteIcons` for the daemon's own Search (`searchSiteIconsPostToolUseHook`). Every
-  // mode: the tool exists only in chat and dispatch, and the hook is inert for any other result.
-  postToolUse.push({ matcher: SEARCH_CAPABILITY_TOOL, hooks: [searchSiteIconsPostToolUseHook(deps)] });
+  // `tool_result.siteIcons` for the daemon's own Search (`searchSiteIconsPostToolUseHook`). UNMATCHED, and
+  // the hook filters on `tool_name` itself: it is the daemon's only hook on an MCP tool name, and an
+  // unmatched group fires for every call whatever matcher semantics the runtime applies to `mcp__` names.
+  postToolUse.push({ hooks: [searchSiteIconsPostToolUseHook(deps)] });
 
   // Review r1 MAJOR 2: the failure twin of the unmatched PostToolUse plugin-observation group —
   // see `pluginPostToolUseFailureHook`'s own doc comment for why this is a SEPARATE SDK event
