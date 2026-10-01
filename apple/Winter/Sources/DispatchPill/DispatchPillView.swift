@@ -42,7 +42,7 @@ struct DispatchPillView: View {
                         controller.accessoryLayoutChanged(frame: frame)
                     }
             }
-            DispatchPillShell(morph: morph) {
+            DispatchPillShell(morph: morph, tracksAnimatedWidth: controller.presentation != .fullScreen) {
                 if controller.presentation == .fullScreen {
                     FullScreenPillView(controller: controller, adapter: adapter)
                 } else {
@@ -60,24 +60,34 @@ struct DispatchPillView: View {
     }
 }
 
-/// The main pill's shape: content laid out at the TARGET size, revealed by a shape at the spring's
-/// CURRENT size (bottom-anchored), whose corner radius follows its height — a capsule at rest, a
-/// rounded rect once it grows taller. The only view that observes the 60Hz morph.
+/// The main pill's shape: a black capsule at rest, a black rounded rect once it grows taller (the
+/// corner radius follows the spring's CURRENT height). The only view that observes the 60Hz morph.
+///
+/// Content is laid out at the TARGET height, bottom-anchored, so a pill growing taller reveals its
+/// upper lines as the shape rises and a shrinking one never squeezes its rows. Its WIDTH follows the
+/// spring's current width when `tracksAnimatedWidth`: the send circle and ↗/⋯ then ride the shape's
+/// edge as it widens or narrows, instead of jumping to where the edge will be once the spring
+/// settles (laid out at the target width, they appeared — or vanished — ahead of the shape). The
+/// text view inside has a fixed width (`composerFieldWidth`), so this re-layout never re-wraps it.
+/// Full screen keeps the target width: re-wrapping a whole transcript 60 times a second is not free,
+/// and revealing it reads fine.
 struct DispatchPillShell<Content: View>: View {
     @ObservedObject var morph: DispatchPillMorphModel
+    var tracksAnimatedWidth = true
     @ViewBuilder let content: Content
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: dispatchPillCornerRadius(height: morph.size.height),
                                      style: .continuous)
         content
-            .frame(width: morph.target.width, height: morph.target.height)
+            .frame(width: tracksAnimatedWidth ? morph.size.width : morph.target.width,
+                   height: morph.target.height)
             .frame(width: morph.size.width, height: morph.size.height, alignment: .bottom)
             .clipShape(shape)
-            .background(shape.fill(Color(red: 0.08, green: 0.08, blue: 0.08)))
-            .overlay(shape.strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+            .background(shape.fill(Color.black))
+            .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
             .compositingGroup()
-            .shadow(color: .black.opacity(0.4), radius: 14, y: 4)
+            .shadow(color: .black.opacity(0.45), radius: 14, y: 4)
     }
 }
 
@@ -107,9 +117,14 @@ private struct DispatchPillAccessories: View {
 /// The compact AND expanded pill — ONE view, so the `ComposerTextView` inside keeps its identity
 /// (its `NSTextView`, its caret, its first-responder status) when the first keystroke grows the pill.
 /// Swapping a `CompactPillView` for an `ExpandedPillView` here would rebuild the text view mid-word.
-/// The state-specific pieces live in those files: `CompactPillLeading` and `PillSendStopButton`
+/// The state-specific pieces live in those files: `CompactPillWorking` and `PillSendStopButton`
 /// (`CompactPillView.swift`), `ExpandedPillAccessoryButtons` and `ExpandedPillTurnPreview`
 /// (`ExpandedPillView.swift`).
+///
+/// WORKING (compact while a turn runs) shows no composer: the plume fills the pill, streaming out
+/// from behind the stop button. The text view stays mounted underneath, invisible and untouchable,
+/// so a keystroke still lands in it — the first one opens the typing pill — and a click on the plume
+/// opens it too (`openComposer`), for a steer.
 struct DispatchPillComposerBar: View {
     @ObservedObject var controller: DispatchPillController
     @ObservedObject var adapter: FieldStateAdapter
@@ -118,48 +133,75 @@ struct DispatchPillComposerBar: View {
         let expanded = controller.presentation == .expanded
         let running = adapter.turnRunning
         let draft = adapter.composerDraft
-        let textWidth = dispatchPillDraftTextWidth(draft)
-        let shouldShowAccessories = expanded && dispatchPillAccessoryButtonsVisible(draft: draft, textWidth: textWidth)
-        let accessoriesOpacity = shouldShowAccessories ? 1.0 : 0.0
-
+        let working = !expanded && running
+        let showsAccessories = expanded
+            && dispatchPillAccessoryButtonsVisible(draft: draft, textWidth: dispatchPillDraftTextWidth(draft))
         VStack(spacing: 0) {
             if expanded, let preview = controller.turnPreview {
                 ExpandedPillTurnPreview(preview: preview)
+                    .transition(.opacity.animation(.easeOut(duration: 0.2)))
             }
-            ZStack(alignment: .bottom) {
-                HStack(alignment: .center, spacing: DispatchPillMetrics.rowSpacing) {
-                    if !expanded, running {
-                        CompactPillLeading(toolName: controller.runningToolName)
+            HStack(alignment: .bottom, spacing: DispatchPillMetrics.rowSpacing) {
+                // Animations here are SCOPED (the body form, transitions carrying their own), never
+                // `.animation(_:value:)` on a container: that would also ease the container's layout,
+                // which the spring already drives frame by frame — the two would fight.
+                field(draft: draft, expanded: expanded, running: running, showsAccessories: showsAccessories)
+                    .animation(.easeOut(duration: 0.25)) { $0.opacity(working ? 0 : 1) }
+                    .allowsHitTesting(!working)
+                PillSendStopButton(
+                    isRunning: running,
+                    canSend: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    onSend: { controller.submit(adapter.composerDraft) },
+                    onStop: { controller.interrupt() }
+                )
+                .padding(.bottom, DispatchPillMetrics.sendBottomInset)
+            }
+            .padding(.leading, DispatchPillMetrics.leadingPadding)
+            .padding(.trailing, DispatchPillMetrics.trailingPadding)
+            .frame(maxHeight: .infinity)
+            // Under the row, so the stop button sits on the plume's nozzle.
+            .background(alignment: .bottom) {
+                if working {
+                    CompactPillWorking(toolName: controller.runningToolName)
+                        .frame(height: DispatchPillMetrics.pillHeight)
+                        .contentShape(Rectangle())
+                        .onTapGesture { controller.openComposer() }
+                        .transition(.opacity.animation(.easeOut(duration: 0.25)))
+                }
+            }
+        }
+    }
+
+    /// The text field, at a FIXED width (`composerFieldWidth`) in a flexible, clipped slot — the slot
+    /// follows the animated shape, the text inside never re-wraps mid-animation. ↗ and ⋯ float over
+    /// its trailing end, outside the clip so their blur is not cut off.
+    private func field(draft: String, expanded: Bool, running: Bool, showsAccessories: Bool) -> some View {
+        Color.clear
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .bottomLeading) {
+                ZStack(alignment: .topLeading) {
+                    if draft.isEmpty {
+                        Text(running ? adapter.verbText : "Type here")
+                            .font(Typography.composerField())
+                            .foregroundStyle(expanded ? Color.blue.opacity(0.6) : Theme.textPlaceholder)
+                            .lineLimit(1)
+                            .padding(.leading, ComposerTextView.textContainerInset.width)
+                            .padding(.top, ComposerTextView.textContainerInset.height)
+                            .allowsHitTesting(false)
                     }
-                    ZStack(alignment: .topLeading) {
-                        if draft.isEmpty {
-                            Text(running ? adapter.verbText : "Type here")
-                                .font(Typography.composerField())
-                                .foregroundStyle(Theme.textPlaceholder)
-                                .lineLimit(1)
-                                .padding(.leading, ComposerTextView.textContainerInset.width)
-                                .padding(.top, ComposerTextView.textContainerInset.height)
-                                .allowsHitTesting(false)
-                        }
-                        ComposerTextView(
-                            text: adapter.draftBinding,
-                            onSubmit: { controller.submit(adapter.composerDraft) },
-                            onContentHeightChange: { controller.composerContentHeightChanged($0) },
-                            usesAdaptiveColors: true
-                        )
-                    }
-                    .frame(height: controller.composerFieldHeight)
-                    PillSendStopButton(
-                        isRunning: running,
-                        canSend: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                        onSend: { controller.submit(adapter.composerDraft) },
-                        onStop: { controller.interrupt() }
+                    ComposerTextView(
+                        text: adapter.draftBinding,
+                        onSubmit: { controller.submit(adapter.composerDraft) },
+                        onContentHeightChange: { controller.composerContentHeightChanged($0) },
+                        usesAdaptiveColors: true,
+                        tintOverride: .systemBlue
                     )
                 }
-                .padding(.leading, DispatchPillMetrics.leadingPadding)
-                .padding(.trailing, DispatchPillMetrics.trailingPadding)
-                .frame(maxHeight: .infinity)
-
+                .frame(width: controller.composerFieldWidth, height: controller.composerFieldHeight)
+                .padding(.bottom, DispatchPillMetrics.fieldBottomInset)
+            }
+            .clipped()
+            .overlay(alignment: .bottomTrailing) {
                 if expanded {
                     ExpandedPillAccessoryButtons(
                         onFullScreen: { controller.requestFullScreen() },
@@ -167,13 +209,17 @@ struct DispatchPillComposerBar: View {
                         onClearDraft: { controller.clearDraft() },
                         onPopoverChange: { controller.auxiliaryPopoverOpen = $0 }
                     )
-                    .opacity(accessoriesOpacity)
-                    .blur(radius: shouldShowAccessories ? 0 : 2)
-                    .padding(.trailing, DispatchPillMetrics.trailingPadding - 44)
-                    .padding(.bottom, 8)
+                    .animation(.easeOut(duration: 0.22)) { view in
+                        view.opacity(showsAccessories ? 1 : 0)
+                            .blur(radius: showsAccessories ? 0 : 6)
+                            .scaleEffect(showsAccessories ? 1 : 0.9)
+                    }
+                    .allowsHitTesting(showsAccessories)
+                    .padding(.bottom, DispatchPillMetrics.sendBottomInset
+                        + (DispatchPillMetrics.sendCircleSize - DispatchPillMetrics.accessoryButtonSize) / 2)
+                    .transition(.opacity.animation(.easeOut(duration: 0.2)))
                 }
             }
-        }
     }
 }
 

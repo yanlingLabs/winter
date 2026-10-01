@@ -126,14 +126,69 @@ final class DispatchPillViewTests: XCTestCase {
 
     // MARK: - ↗ and ⋯ give way to the text
 
-    func testTheAccessoryButtonsVanishWhenTheTextReachesThem() {
+    func testTheAccessoryButtonsBlurOutAsTheTextComesUpToThem() {
         let line = DispatchPillMetrics.fieldWidthBesideAccessories
+        let margin = DispatchPillMetrics.accessoryApproachMargin
         XCTAssertTrue(dispatchPillAccessoryButtonsVisible(draft: "short", textWidth: 40))
-        XCTAssertTrue(dispatchPillAccessoryButtonsVisible(draft: "x", textWidth: line))
-        XCTAssertFalse(dispatchPillAccessoryButtonsVisible(draft: "x", textWidth: line + 1))
+        XCTAssertTrue(dispatchPillAccessoryButtonsVisible(draft: "x", textWidth: line - margin))
+        XCTAssertFalse(dispatchPillAccessoryButtonsVisible(draft: "x", textWidth: line - margin + 1),
+                       "gone BEFORE the text touches them")
         XCTAssertFalse(dispatchPillAccessoryButtonsVisible(draft: "two\nlines", textWidth: 10),
                        "a second line has passed them by definition")
         XCTAssertLessThan(line, DispatchPillMetrics.expandedFieldWidth)
+    }
+
+    /// The regression the user hit: ↗ and ⋯ used to sit BESIDE the field, so hiding them widened it,
+    /// the text re-wrapped onto one line, the pill shrank, they came back, and round again. They
+    /// float over it now — the field's width is the same whether they show or not.
+    func testTheFieldWidthDoesNotDependOnTheAccessories() {
+        XCTAssertEqual(DispatchPillMetrics.expandedFieldWidth,
+                       DispatchPillMetrics.fieldWidth(pillWidth: DispatchPillMetrics.expandedWidth))
+        XCTAssertEqual(DispatchPillMetrics.expandedFieldWidth,
+                       DispatchPillMetrics.expandedWidth - DispatchPillMetrics.leadingPadding
+                           - DispatchPillMetrics.trailingPadding - DispatchPillMetrics.sendCircleSize
+                           - DispatchPillMetrics.rowSpacing,
+                       "everything left of the send circle — no room set aside for ↗ and ⋯")
+    }
+
+    // MARK: - A reply opens the pill
+
+    func testAFinishedReplyOpensAnIdleVisiblePill() {
+        let reply = Exchange(prompt: "check the build", reply: "All green.")
+        XCTAssertTrue(dispatchPillRevealsReply(isVisible: true, presentation: .compact, previewing: false,
+                                               draft: "", latest: reply))
+        XCTAssertTrue(dispatchPillRevealsReply(isVisible: true, presentation: .expanded, previewing: false,
+                                               draft: "  ", latest: reply), "an empty typing pill pins it too")
+    }
+
+    func testAReplyNeverPushesAsideWhatTheUserIsDoing() {
+        let reply = Exchange(prompt: "p", reply: "done")
+        XCTAssertFalse(dispatchPillRevealsReply(isVisible: false, presentation: .compact, previewing: false,
+                                                draft: "", latest: reply), "a put-away pill stays away")
+        XCTAssertFalse(dispatchPillRevealsReply(isVisible: true, presentation: .expanded, previewing: false,
+                                                draft: "half a thought", latest: reply), "never over a draft")
+        XCTAssertFalse(dispatchPillRevealsReply(isVisible: true, presentation: .expanded, previewing: true,
+                                                draft: "", latest: reply), "never over a swiped-to turn")
+        XCTAssertFalse(dispatchPillRevealsReply(isVisible: true, presentation: .fullScreen, previewing: false,
+                                                draft: "", latest: reply), "full screen already shows it")
+    }
+
+    func testAStoppedOrEmptyTurnOpensNothing() {
+        XCTAssertFalse(dispatchPillRevealsReply(isVisible: true, presentation: .compact, previewing: false,
+                                                draft: "", latest: Exchange(prompt: "p", reply: "partial", aborted: true)))
+        XCTAssertFalse(dispatchPillRevealsReply(isVisible: true, presentation: .compact, previewing: false,
+                                                draft: "", latest: Exchange(prompt: "p", reply: " \n")))
+        XCTAssertFalse(dispatchPillRevealsReply(isVisible: true, presentation: .compact, previewing: false,
+                                                draft: "", latest: nil))
+    }
+
+    // MARK: - The trailing circle
+
+    func testTheTrailingCircleShowsVoiceInsteadOfAGreyedSend() {
+        XCTAssertEqual(pillSendButtonSymbol(composerSendButtonRole(isRunning: false, sendBlockedReason: "")), "mic.fill")
+        XCTAssertEqual(pillSendButtonSymbol(composerSendButtonRole(isRunning: false, sendBlockedReason: nil)), "arrow.up")
+        XCTAssertEqual(pillSendButtonSymbol(composerSendButtonRole(isRunning: true, sendBlockedReason: "")), "stop.fill",
+                       "running beats blocked")
     }
 
     func testTheMeasuredTextWidthGrowsWithTheDraft() {

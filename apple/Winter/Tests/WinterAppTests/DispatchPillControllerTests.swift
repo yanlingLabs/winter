@@ -590,6 +590,68 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertNil(pill.historyIndex)
     }
 
+    // MARK: - A reply opens the pill
+
+    func testAReplyArrivingOpensTheCompactPillOnIt() {
+        let session = SessionModel()
+        session.applyForTesting { s in s.exchanges = [Exchange(prompt: "old", reply: "old reply")] }
+        let pill = makePill(session)
+        pill.show()
+        session.applyForTesting { s in
+            s.turnRunning = true
+            s.exchanges.append(Exchange(prompt: "check the build", reply: ""))
+        }
+        XCTAssertEqual(pill.presentation, .compact, "working: the plume, not the typing pill")
+        session.applyForTesting { s in
+            s.exchanges[1] = Exchange(prompt: "check the build", reply: "All green.")
+            s.turnRunning = false
+        }
+        waitUntil { pill.presentation == .expanded }
+        XCTAssertEqual(pill.historyIndex, 1, "the newest turn is pinned")
+        XCTAssertEqual(pill.turnPreview?.reply, "All green.")
+        XCTAssertEqual(pill.morph.target.height,
+                       dispatchPillMainSize(presentation: .expanded, composerContentHeight: pill.composerContentHeight,
+                                            showsPreview: true, visibleFrame: visible).height)
+    }
+
+    func testAReplyLeavesADraftAlone() {
+        let session = SessionModel()
+        let pill = makePill(session)
+        pill.show()
+        session.applyForTesting { s in
+            s.turnRunning = true
+            s.exchanges = [Exchange(prompt: "p", reply: "")]
+        }
+        pill.adapter.composerDraft = "next thing"
+        session.applyForTesting { s in
+            s.exchanges[0] = Exchange(prompt: "p", reply: "done")
+            s.turnRunning = false
+        }
+        let drained = expectation(description: "the deferred reveal ran")
+        DispatchQueue.main.async { DispatchQueue.main.async { drained.fulfill() } }
+        wait(for: [drained], timeout: 1)
+        XCTAssertNil(pill.historyIndex)
+        XCTAssertEqual(pill.adapter.composerDraft, "next thing")
+    }
+
+    func testClickingTheWorkingPlumeOpensTheComposer() {
+        let pill = makePill()
+        pill.show()
+        XCTAssertEqual(pill.presentation, .compact)
+        pill.openComposer()
+        XCTAssertEqual(pill.presentation, .expanded)
+        XCTAssertTrue(pill.panelAcceptsKeyForTesting)
+    }
+
+    func testTheFieldWidthFollowsTheTargetNotTheSpring() {
+        let pill = makePill()
+        pill.show()
+        XCTAssertEqual(pill.composerFieldWidth, DispatchPillMetrics.fieldWidth(pillWidth: DispatchPillMetrics.compactWidth))
+        pill.adapter.composerDraft = "h"
+        XCTAssertEqual(pill.composerFieldWidth, DispatchPillMetrics.expandedFieldWidth,
+                       "the full typing width from the first keystroke — the text never re-wraps mid-spring")
+    }
+
     // MARK: - The mouse gate
 
     func testTheMouseGateTakesClicksOnThePillAndPassesTheMarginThrough() {

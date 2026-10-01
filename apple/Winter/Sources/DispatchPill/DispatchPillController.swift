@@ -479,6 +479,35 @@ final class DispatchPillController: ObservableObject {
         return max(1, morph.target.height - preview - DispatchPillMetrics.composerVerticalPadding)
     }
 
+    /// The text field's width for the current TARGET — fixed while the spring runs, so the text
+    /// never re-wraps (and so never re-measures its height) mid-animation.
+    var composerFieldWidth: CGFloat { DispatchPillMetrics.fieldWidth(pillWidth: morph.target.width) }
+
+    /// A click on the working pill's plume: open the typing pill (stop stays on the circle, Enter
+    /// steers) and take the keyboard.
+    func openComposer() {
+        guard isVisible, presentation == .compact else { return }
+        restoreDraftIfEmpty()
+        historyIndex = nil
+        setPresentation(.expanded)
+        engage()
+    }
+
+    /// A turn just ended: pin its reply and open the pill to show it, when `dispatchPillRevealsReply`
+    /// says so. Leaving it is the ordinary way out of a pinned turn — type, swipe, Esc, click away.
+    private func revealReplyIfDue() {
+        let exchanges = session.state.exchanges
+        guard dispatchPillRevealsReply(isVisible: isVisible, presentation: presentation,
+                                       previewing: historyIndex != nil, draft: adapter.composerDraft,
+                                       latest: exchanges.last) else { return }
+        historyIndex = exchanges.count - 1
+        if presentation == .compact {
+            setPresentation(.expanded)
+        } else {
+            retargetMain()
+        }
+    }
+
     // MARK: - Swipe (2-finger) through turns
 
     /// One accepted 2-finger swipe. Right = older, left = newer (the field's page-flip convention,
@@ -897,31 +926,32 @@ final class DispatchPillController: ObservableObject {
                     self.historyIndex = nil
                     self.retargetMain()
                 }
-                let next = dispatchPillPresentationAfterDraftChange(self.presentation, old: old, new: new,
-                                                                    turnRunning: self.adapter.turnRunning)
+                let next = dispatchPillPresentationAfterDraftChange(self.presentation, old: old, new: new)
                 if next != self.presentation { self.setPresentation(next) }
             }
             .store(in: &cancellables)
 
         // A refocus/reset shrinks the transcript under a pinned turn — never point past its end.
-        // Also auto-expand when a new turn arrives while in compact state (a reply came in).
-        var lastExchangeCount = 0
         session.$state
             .map(\.exchanges.count)
             .removeDuplicates()
             .sink { [weak self] count in
-                guard let self else { return }
-                defer { lastExchangeCount = count }
-                let hadTurns = lastExchangeCount > 0
-                let newTurnArrived = count > lastExchangeCount
-                // Auto-expand when a reply arrives while in compact state
-                if newTurnArrived, hadTurns, self.presentation == .compact, self.isVisible {
-                    self.setPresentation(.expanded)
-                }
-                // Shrink if a turn was pinned but is now gone
-                guard let index = self.historyIndex, index >= count else { return }
+                guard let self, let index = self.historyIndex, index >= count else { return }
                 self.historyIndex = nil
                 self.retargetMain()
+            }
+            .store(in: &cancellables)
+
+        // A reply opens the pill: on the turn's END (running → not), when the reply is complete.
+        // `$state` publishes on willSet, so the sink reads the new value off its argument — and
+        // defers the reveal one hop, so `session.state` (which the reveal reads) is the new one too.
+        session.$state
+            .map(\.turnRunning)
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] running in
+                guard !running else { return }
+                DispatchQueue.main.async { self?.revealReplyIfDue() }
             }
             .store(in: &cancellables)
     }
