@@ -74,8 +74,8 @@ struct DispatchPillShell<Content: View>: View {
             .frame(width: morph.target.width, height: morph.target.height)
             .frame(width: morph.size.width, height: morph.size.height, alignment: .bottom)
             .clipShape(shape)
-            .background(shape.fill(Theme.cardSurface))
-            .overlay(shape.strokeBorder(Theme.hairlineElevated, lineWidth: 1))
+            .background(shape.fill(Color(red: 0.08, green: 0.08, blue: 0.08)))
+            .overlay(shape.strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
             .compositingGroup()
             .shadow(color: .black.opacity(0.4), radius: 14, y: 4)
     }
@@ -118,54 +118,61 @@ struct DispatchPillComposerBar: View {
         let expanded = controller.presentation == .expanded
         let running = adapter.turnRunning
         let draft = adapter.composerDraft
-        let showsAccessories = expanded
-            && dispatchPillAccessoryButtonsVisible(draft: draft, textWidth: dispatchPillDraftTextWidth(draft))
+        let textWidth = dispatchPillDraftTextWidth(draft)
+        let shouldShowAccessories = expanded && dispatchPillAccessoryButtonsVisible(draft: draft, textWidth: textWidth)
+        let accessoriesOpacity = shouldShowAccessories ? 1.0 : 0.0
+
         VStack(spacing: 0) {
             if expanded, let preview = controller.turnPreview {
                 ExpandedPillTurnPreview(preview: preview)
             }
-            HStack(alignment: .center, spacing: DispatchPillMetrics.rowSpacing) {
-                if !expanded, running {
-                    CompactPillLeading(toolName: controller.runningToolName)
-                }
-                ZStack(alignment: .topLeading) {
-                    if draft.isEmpty {
-                        Text(running ? adapter.verbText : "Type here")
-                            .font(Typography.composerField())
-                            .foregroundStyle(Theme.textPlaceholder)
-                            .lineLimit(1)
-                            .padding(.leading, ComposerTextView.textContainerInset.width)
-                            .padding(.top, ComposerTextView.textContainerInset.height)
-                            .allowsHitTesting(false)
+            ZStack(alignment: .bottom) {
+                HStack(alignment: .center, spacing: DispatchPillMetrics.rowSpacing) {
+                    if !expanded, running {
+                        CompactPillLeading(toolName: controller.runningToolName)
                     }
-                    ComposerTextView(
-                        text: adapter.draftBinding,
-                        onSubmit: { controller.submit(adapter.composerDraft) },
-                        onContentHeightChange: { controller.composerContentHeightChanged($0) },
-                        usesAdaptiveColors: true
+                    ZStack(alignment: .topLeading) {
+                        if draft.isEmpty {
+                            Text(running ? adapter.verbText : "Type here")
+                                .font(Typography.composerField())
+                                .foregroundStyle(Theme.textPlaceholder)
+                                .lineLimit(1)
+                                .padding(.leading, ComposerTextView.textContainerInset.width)
+                                .padding(.top, ComposerTextView.textContainerInset.height)
+                                .allowsHitTesting(false)
+                        }
+                        ComposerTextView(
+                            text: adapter.draftBinding,
+                            onSubmit: { controller.submit(adapter.composerDraft) },
+                            onContentHeightChange: { controller.composerContentHeightChanged($0) },
+                            usesAdaptiveColors: true
+                        )
+                    }
+                    .frame(height: controller.composerFieldHeight)
+                    PillSendStopButton(
+                        isRunning: running,
+                        canSend: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                        onSend: { controller.submit(adapter.composerDraft) },
+                        onStop: { controller.interrupt() }
                     )
                 }
-                .frame(height: controller.composerFieldHeight)
-                if showsAccessories {
+                .padding(.leading, DispatchPillMetrics.leadingPadding)
+                .padding(.trailing, DispatchPillMetrics.trailingPadding)
+                .frame(maxHeight: .infinity)
+
+                if expanded {
                     ExpandedPillAccessoryButtons(
                         onFullScreen: { controller.requestFullScreen() },
                         onOpenInApp: { controller.onOpenInApp?() },
                         onClearDraft: { controller.clearDraft() },
                         onPopoverChange: { controller.auxiliaryPopoverOpen = $0 }
                     )
-                    .transition(.opacity)
+                    .opacity(accessoriesOpacity)
+                    .blur(radius: shouldShowAccessories ? 0 : 2)
+                    .padding(.trailing, DispatchPillMetrics.trailingPadding - 44)
+                    .padding(.bottom, 8)
                 }
-                PillSendStopButton(
-                    isRunning: running,
-                    canSend: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                    onSend: { controller.submit(adapter.composerDraft) },
-                    onStop: { controller.interrupt() }
-                )
             }
-            .padding(.leading, DispatchPillMetrics.leadingPadding)
-            .padding(.trailing, DispatchPillMetrics.trailingPadding)
-            .frame(maxHeight: .infinity)
-            .animation(.easeOut(duration: 0.15), value: showsAccessories)
         }
     }
 }

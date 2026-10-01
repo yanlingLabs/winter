@@ -202,13 +202,15 @@ func dispatchPillPresentationLeavingFullScreen(draft: String) -> DispatchPillPre
 
 /// Typing auto-expands: a draft that CHANGED to something non-empty while compact moves the pill to
 /// `.expanded`. Keyed on a change (not on the draft merely being non-empty) so a restored draft or a
-/// click-outside compress never bounces the pill straight back open.
+/// click-outside compress never bounces the pill straight back open. When a turn is running (working
+/// state), the pill stays compact to avoid distracting animation.
 func dispatchPillPresentationAfterDraftChange(
     _ presentation: DispatchPillPresentation,
     old: String,
-    new: String
+    new: String,
+    turnRunning: Bool
 ) -> DispatchPillPresentation {
-    guard presentation == .compact, old != new, !new.isEmpty else { return presentation }
+    guard presentation == .compact, old != new, !new.isEmpty, !turnRunning else { return presentation }
     return .expanded
 }
 

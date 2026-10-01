@@ -2,31 +2,24 @@ import SwiftUI
 
 // MARK: - The working animation's model (pure, ticked — `WorkingAnimationTests`)
 
-/// The "rocket" the pill shows while Dispatch works: a ring of eight particles chasing each other
-/// round a circle like exhaust, with an icon at the centre that cross-fades as the work changes —
-/// the running tool's symbol while a tool runs, and a slow rotation of "thinking" symbols between
-/// tools.
-///
-/// A value type advanced by `tick(dt:toolSymbol:)` rather than SwiftUI implicit animation, so its
-/// whole behaviour (rotation rate, cross-fade timing, the idle rotation) is unit-testable without a
-/// render loop. The view holds one in `@State` and ticks it off a `TimelineView` — the same local-
-/// animation-state convention `DispatchParticleField` and `WinterFieldView`'s spinner follow.
+/// The "rocket" the pill shows while Dispatch works: horizontal particles streaming left-to-right
+/// like engine exhaust, with an icon at the centre that cross-fades as the work changes — the
+/// running tool's symbol while a tool runs, and a slow rotation of "thinking" symbols between tools.
 struct WorkingAnimationModel: Equatable {
     static let particleCount = 8
-    /// Seconds per full revolution of the particle ring.
-    static let revolutionSeconds: Double = 1.6
+    /// Seconds for particles to stream left-to-right once.
+    static let streamSeconds: Double = 1.2
     /// How long one icon takes to cross-fade into the next.
     static let crossfadeSeconds: Double = 0.35
     /// How long each "thinking" symbol holds before the next one fades in (no tool running).
     static let idleSymbolHoldSeconds: Double = 1.4
     /// The symbols the centre rotates through while the agent is thinking rather than running a tool.
     static let idleSymbols = ["sparkles", "paperplane.fill", "wand.and.stars"]
-    /// A frame gap longer than this (the app was suspended, the timeline paused) is treated as this —
-    /// the ring never jumps half a revolution on resume.
+    /// A frame gap longer than this (the app was suspended, the timeline paused) is treated as this.
     static let maxStep: Double = 0.1
 
-    /// The ring's rotation, radians, in [0, 2π).
-    private(set) var angle: Double = 0
+    /// Horizontal position of the particle stream, 0 (right) → 1 (left).
+    private(set) var streamPhase: Double = 0
     /// The symbol fading IN (fully shown once `crossfade` reaches 1).
     private(set) var symbol: String
     /// The symbol fading OUT, or nil once the last cross-fade finished.
@@ -40,11 +33,10 @@ struct WorkingAnimationModel: Equatable {
         symbol = toolSymbol ?? Self.idleSymbols[0]
     }
 
-    /// Advance by `dt` seconds. `toolSymbol` is the running tool's symbol (`workingToolSymbol(for:)`),
-    /// or nil while the agent is thinking between tools.
+    /// Advance by `dt` seconds. `toolSymbol` is the running tool's symbol, or nil while thinking.
     mutating func tick(dt rawDt: Double, toolSymbol: String?) {
         let dt = max(0, min(rawDt, Self.maxStep))
-        angle = (angle + dt * 2 * .pi / Self.revolutionSeconds).truncatingRemainder(dividingBy: 2 * .pi)
+        streamPhase = (streamPhase + dt / Self.streamSeconds).truncatingRemainder(dividingBy: 1)
 
         let target: String
         if let toolSymbol {
@@ -60,8 +52,6 @@ struct WorkingAnimationModel: Equatable {
         }
 
         if target != symbol {
-            // A change mid-fade restarts the fade from the symbol that was arriving: the one leaving
-            // is whatever was most visible, never a symbol that had already gone.
             previousSymbol = symbol
             symbol = target
             crossfade = 0
@@ -76,17 +66,16 @@ struct WorkingAnimationModel: Equatable {
     /// The leaving symbol's opacity (0 once it has gone).
     var previousSymbolOpacity: Double { previousSymbol == nil ? 0 : 1 - crossfade }
 
-    /// The ring's particles for the current angle — index 0 is the head, brightest and largest; each
-    /// one after trails a step behind it, dimmer and smaller, which is what reads as exhaust.
-    func particles(center: CGPoint, radius: CGFloat, headDiameter: CGFloat) -> [WorkingParticle] {
+    /// Particles streaming horizontally left-to-right (propulsion effect).
+    func particles(center: CGPoint, width: CGFloat, headDiameter: CGFloat) -> [WorkingParticle] {
         (0..<Self.particleCount).map { i in
-            let theta = angle - Double(i) * (2 * .pi / Double(Self.particleCount))
             let fade = 1 - Double(i) / Double(Self.particleCount)
+            let x = center.x + (streamPhase - Double(i) / Double(Self.particleCount)) * width
+            let clampedX = x.truncatingRemainder(dividingBy: width * 2)
             return WorkingParticle(
-                position: CGPoint(x: center.x + radius * CGFloat(cos(theta)),
-                                  y: center.y + radius * CGFloat(sin(theta))),
-                opacity: 0.12 + 0.88 * fade,
-                diameter: headDiameter * CGFloat(0.5 + 0.5 * fade)
+                position: CGPoint(x: center.x - width / 2 + clampedX, y: center.y),
+                opacity: 0.15 + 0.85 * fade,
+                diameter: headDiameter * CGFloat(0.6 + 0.4 * fade)
             )
         }
     }
@@ -146,12 +135,11 @@ func workingToolName(_ status: OrbStatus) -> String? {
 
 // MARK: - The view
 
-/// The working animation: the particle ring, and the centre icon cross-fading. `toolName` nil means
-/// "thinking" (the idle symbols rotate). `diameter` is the whole thing's box.
+/// The working animation: horizontal particles streaming like rocket exhaust, centre icon cross-fading.
 struct WorkingAnimationView: View {
     let toolName: String?
     var diameter: CGFloat = 26
-    var tint: Color = Theme.accent
+    var tint: Color = .blue
     var iconFont: Font = Typography.caption(.semibold)
 
     @State private var model = WorkingAnimationModel()
@@ -164,9 +152,8 @@ struct WorkingAnimationView: View {
             ZStack {
                 Canvas { context, size in
                     let center = CGPoint(x: size.width / 2, y: size.height / 2)
-                    let head = max(2, size.width * 0.13)
-                    let radius = size.width / 2 - head / 2
-                    for particle in model.particles(center: center, radius: radius, headDiameter: head) {
+                    let head = max(2, size.width * 0.15)
+                    for particle in model.particles(center: center, width: size.width * 1.2, headDiameter: head) {
                         let r = particle.diameter / 2
                         let rect = CGRect(x: particle.position.x - r, y: particle.position.y - r,
                                           width: particle.diameter, height: particle.diameter)
@@ -181,7 +168,7 @@ struct WorkingAnimationView: View {
                     .opacity(model.symbolOpacity)
             }
             .font(iconFont)
-            .foregroundStyle(Theme.textPrimary)
+            .foregroundStyle(Color.blue)
             .onChange(of: timeline.date) { _, now in step(now) }
         }
         .frame(width: diameter, height: diameter)
