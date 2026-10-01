@@ -4,20 +4,22 @@
 // table as recording fakes that behave like the real ones (a `send` appends the `user_message` and,
 // when idle, begins the turn with `turn_started`; a settle is the driver's `onTurnSettled`).
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
+import type { WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
-import { DispatchChildren, DISPATCH_CLIENT_NAME, type DispatchChildrenDeps } from "../../src/agent/dispatch-children";
+import {
+  DispatchChildren, DISPATCH_CLIENT_NAME, DISPATCH_WAKE_CLIENT_NAME, RESTART_RESOLUTION_BY, childPolicyFor, type DispatchChildrenDeps,
+} from "../../src/agent/dispatch-children";
 import { WinterLegRefusal } from "../../src/runtime-sdk/session-driver";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
-import { PermissionGate } from "../../src/agent/gate";
-import { canUseToolFor } from "../../src/runtime-sdk/approval-bridge";
+import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
+import { DISPATCH_CHILD_APPROVAL_TIMEOUT_MS, canUseToolFor } from "../../src/runtime-sdk/approval-bridge";
 import { sessionsCapability } from "../../src/capabilities/sessions";
-import type { WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 
 class FakeDriver {
   turnRunning = false;
@@ -35,17 +37,22 @@ class FakeDriver {
   }
 }
 
-function setup(opts: { models?: string[]; attached?: boolean } = {}) {
-  const home = mkdtempSync(join(tmpdir(), "winter-dispatch-children-"));
+type ChildUpdate = Extract<SessionEvent, { type: "child_update" }>;
+
+function setup(opts: { models?: string[]; attached?: boolean; policy?: SessionApprovalPolicy } = {}) {
+  // Canonical (macOS's tmpdir is a symlink): the spawn stores the canonical dir.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-dispatch-children-")));
   const store = new SessionStore(home);
   const hub = new SessionHub(store);
   const drivers = new Map<string, FakeDriver>();
   const driverFor = (id: string) => { let d = drivers.get(id); if (!d) { d = new FakeDriver(hub, id); drivers.set(id, d); } return d; };
   const created: Array<Record<string, unknown>> = [];
+  const deleted: string[] = [];
   let refuseNext: Error | undefined;
   const deferred: Array<() => void> = [];
+  const scheduled: Array<{ fn: () => void; ms: number }> = [];
   const notifications: Array<{ title: string; message: string }> = [];
-  const dispatchId = store.createSession("global", { cwd: home, approvalPolicy: "auto", origin: "dispatch", mode: "dispatch" });
+  const dispatchId = store.createSession("global", { cwd: home, approvalPolicy: opts.policy ?? "auto", origin: "dispatch", mode: "dispatch" });
   driverFor(dispatchId);
   const workDir = join(home, "work");
   mkdirSync(workDir);
@@ -58,11 +65,14 @@ function setup(opts: { models?: string[]; attached?: boolean } = {}) {
       driverFor(sessionId);
       return { sessionId };
     },
+    deleteSession: (sid) => { deleted.push(sid); store.deleteSession(sid); drivers.delete(sid); },
     sessions: { get: (id) => drivers.get(id), ensure: async (id) => driverFor(id) },
     ...(opts.models === undefined ? {} : { models: () => opts.models! }),
     notifyFallback: (title, message) => { notifications.push({ title, message }); },
     log: () => {},
     defer: (fn) => { deferred.push(fn); },
+    schedule: (fn, ms) => { scheduled.push({ fn, ms }); },
+    retryDelaysMs: [5, 10],
   };
   if (opts.attached) hub.attach({ clientName: "mac", deliver: () => true }, dispatchId, 0);
   const dc = new DispatchChildren(deps);
@@ -83,31 +93,74 @@ function setup(opts: { models?: string[]; attached?: boolean } = {}) {
     dc.onTurnSettled(id);
   };
   const dispatchLog = () => store.read(dispatchId);
-  const childUpdates = () => dispatchLog().filter((e): e is Extract<SessionEvent, { type: "child_update" }> => e.type === "child_update");
+  const childUpdates = () => dispatchLog().filter((e): e is ChildUpdate => e.type === "child_update");
+  const spawnOne = async (args: Partial<Parameters<DispatchChildren["spawn"]>[1]> = {}) => {
+    await dc.spawn(dispatchId, { dir: workDir, prompt: "p", ...args });
+    return store.childrenOf(dispatchId).at(-1)!.sessionId;
+  };
   return {
-    home, store, hub, drivers, driverFor, created, dispatchId, workDir, dc, deps, drain, finish, dispatchLog, childUpdates, notifications,
+    home, store, hub, drivers, driverFor, created, deleted, dispatchId, workDir, dc, deps, drain, finish, dispatchLog, childUpdates, notifications, scheduled, spawnOne,
     refuse: (e: Error) => { refuseNext = e; },
   };
 }
 
+const approval = (sid: string, callId: string, threadId = "main") =>
+  ({ type: "approval_requested" as const, sessionId: sid, threadId, callId, toolName: "bash", summary: "rm x", issuedAt: 1, expiresAt: 2 });
+
 describe("session_spawn: the spawn", () => {
-  test("creates a first-class CODE child linked to its coordinator, sends the prompt, and returns at once", async () => {
+  test("creates a first-class CODE child linked to its coordinator, titled, sends the prompt, and returns at once", async () => {
     const t = setup();
     const out = await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "  fix the build  ", title: "Build fix" });
     expect(t.created).toHaveLength(1);
     expect(t.created[0]).toMatchObject({ scope: "global", cwd: t.workDir, approvalPolicy: "auto", origin: "dispatch-child", mode: "code", parentSessionId: t.dispatchId });
     const childId = t.store.childrenOf(t.dispatchId)[0]!.sessionId;
     expect(out).toContain(`spawned session ${childId} ("Build fix") in ${t.workDir}`);
+    expect(out).toContain("at your current approval policy (auto");
     expect(out).toContain("<child_update>");
-    const meta = t.store.meta(childId);
-    expect(meta).toMatchObject({ mode: "code", origin: "dispatch-child", parentSessionId: t.dispatchId, approvalPolicy: "auto", backgrounded: true });
+    expect(t.store.meta(childId)).toMatchObject({ mode: "code", origin: "dispatch-child", parentSessionId: t.dispatchId, approvalPolicy: "auto", backgrounded: true });
+    // The spawn's title is the session's own (the auto-titler skips a titled session).
+    expect(t.store.getTitle(childId)).toBe("Build fix");
     // The prompt went in through the child's own driver, under the dispatch client name — and the
     // spawn did not wait for the child's turn (it is still running).
     expect(t.driverFor(childId).sends).toEqual([{ text: "fix the build", clientName: DISPATCH_CLIENT_NAME }]);
     expect(t.driverFor(childId).turnRunning).toBe(true);
     expect(t.childUpdates().map((e) => ({ child: e.childSessionId, status: e.status, title: e.title }))).toEqual([{ child: childId, status: "running", title: "Build fix" }]);
-    // The coordinator was NOT woken by the spawn itself.
     expect(t.driverFor(t.dispatchId).sends).toEqual([]);
+  });
+
+  test("the child takes the coordinator's CURRENT policy, fixed at spawn", async () => {
+    for (const policy of ["auto", "ask", "accept-edits", "dont-ask", "bypass"] as SessionApprovalPolicy[]) {
+      const t = setup({ policy });
+      const out = await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p" });
+      const childId = t.store.childrenOf(t.dispatchId)[0]!.sessionId;
+      expect({ policy, child: t.store.meta(childId).approvalPolicy }).toEqual({ policy, child: policy });
+      expect(t.created[0]!.approvalPolicy).toBe(policy);
+      expect(out).toContain(`(${policy}; it keeps it even if yours changes later)`);
+      // A later change of the coordinator's policy does not reach the running child.
+      t.store.setApprovalPolicy(t.dispatchId, "ask");
+      expect(t.store.meta(childId).approvalPolicy).toBe(policy);
+    }
+    // The map: every policy a dispatch session can hold is a code policy (identity); anything else is auto.
+    expect(childPolicyFor("plan")).toBe("plan");
+    expect(childPolicyFor("chat")).toBe("auto");
+    expect(childPolicyFor(undefined)).toBe("auto");
+  });
+
+  test("the dir is canonicalised FIRST: a symlinked spelling lands on the real directory, and `/x/..` is `/`", async () => {
+    const t = setup();
+    const link = join(t.home, "link-to-work");
+    symlinkSync(t.workDir, link);
+    await t.dc.spawn(t.dispatchId, { dir: link, prompt: "p" });
+    expect(t.created[0]!.cwd).toBe(t.workDir);
+    // The OS tmp dir itself is a symlinked spelling on macOS (/var → /private/var).
+    const viaTmp = mkdtempSync(join(tmpdir(), "winter-dc-tmp-"));
+    await t.dc.spawn(t.dispatchId, { dir: viaTmp, prompt: "p" });
+    expect(t.created[1]!.cwd).toBe(realpathSync(viaTmp));
+    for (const dir of ["/nonexistent-x/..", "/tmp/..", "/"]) {
+      const err = await t.dc.spawn(t.dispatchId, { dir, prompt: "p" }).then(() => undefined, (e: Error) => e);
+      expect({ dir, message: err?.message }).toEqual({ dir, message: "dir must be an absolute directory path (not '/')." });
+    }
+    expect(t.created).toHaveLength(2);
   });
 
   test("a model is stamped at creation (no prompt trailer) and the title defaults to the prompt's head", async () => {
@@ -154,15 +207,16 @@ describe("session_spawn: the spawn", () => {
     expect(t.childUpdates()).toEqual([]);
   });
 
-  test("a first message that cannot be delivered is an error update and a tool error naming the child", async () => {
+  test("a first message that cannot be delivered rolls the child back: no row, no child_update, a plain tool error", async () => {
     const t = setup();
     const orig = t.deps.createSession()!;
     t.deps.createSession = () => async (input) => { const r = await orig(input); t.driverFor(r.sessionId).failNext = new Error("no credential"); return r; };
     const err = await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p", title: "T" }).then(() => undefined, (e: Error) => e);
-    const childId = t.store.childrenOf(t.dispatchId)[0]!.sessionId;
-    expect(err?.message).toContain(`spawned session ${childId} ("T")`);
-    expect(err?.message).toContain("no credential");
-    expect(t.childUpdates().map((e) => e.status)).toEqual(["running", "error"]);
+    expect(err?.message).toBe("could not start the child session: its first message could not be delivered: no credential");
+    expect(t.deleted).toHaveLength(1);
+    expect(t.store.childrenOf(t.dispatchId)).toEqual([]);
+    expect(t.childUpdates()).toEqual([]);
+    expect(t.dc.roster()).toEqual([]);
   });
 
   test("the sessions capability server runs the spawner for the calling dispatch session", async () => {
@@ -177,7 +231,6 @@ describe("session_spawn: the spawn", () => {
     const bad = await (server.instance as WinterMcpServerInstance).callTool("session_spawn", { dir: "rel", prompt: "go" }) as { content: Array<{ text: string }>; isError: boolean };
     expect(bad.isError).toBe(true);
     expect(bad.content[0]!.text).toContain("absolute directory path");
-    // Without a spawner the def keeps its fixed line (a door nobody wired).
     const unwired = sessionsCapability({ sessionId: t.dispatchId, mode: "dispatch", cwd: t.home, roots: [t.home] }, { sessions: {} as never });
     const plain = await (unwired.instance as WinterMcpServerInstance).callTool("session_spawn", { dir: t.workDir, prompt: "go" }) as { content: Array<{ text: string }> };
     expect(plain.content[0]!.text).toBe("session_spawn is only available in the dispatch session.");
@@ -187,14 +240,12 @@ describe("session_spawn: the spawn", () => {
 describe("child_update progression and the relay", () => {
   test("approval and question events are mirrored onto the coordinator with childSessionId, and the status follows", async () => {
     const t = setup();
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p", title: "Kid" });
-    const child = t.store.childrenOf(t.dispatchId)[0]!.sessionId;
-    t.hub.append(child, { type: "approval_requested", sessionId: child, threadId: "main", callId: "c1", toolName: "bash", summary: "rm x", issuedAt: 1, expiresAt: 2 });
+    const child = await t.spawnOne({ title: "Kid" });
+    t.hub.append(child, approval(child, "c1"));
     t.hub.append(child, { type: "approval_resolved", sessionId: child, threadId: "main", callId: "c1", approved: true, by: "mac" });
     t.hub.append(child, { type: "question_asked", sessionId: child, threadId: "main", callId: "q1", questions: [{ question: "Which?", header: "Pick", options: [{ label: "a", description: "" }, { label: "b", description: "" }], multiSelect: false }] });
     t.hub.append(child, { type: "question_resolved", sessionId: child, threadId: "main", callId: "q1", answers: { "Which?": "a" }, by: "mac" });
-    const log = t.dispatchLog();
-    const mirrored = log.filter((e) => ["approval_requested", "approval_resolved", "question_asked", "question_resolved"].includes(e.type));
+    const mirrored = t.dispatchLog().filter((e) => ["approval_requested", "approval_resolved", "question_asked", "question_resolved"].includes(e.type));
     expect(mirrored.map((e) => [e.type, e.sessionId, (e as { childSessionId?: string }).childSessionId, (e as { callId: string }).callId])).toEqual([
       ["approval_requested", t.dispatchId, child, "c1"],
       ["approval_resolved", t.dispatchId, child, "c1"],
@@ -202,14 +253,20 @@ describe("child_update progression and the relay", () => {
       ["question_resolved", t.dispatchId, child, "q1"],
     ]);
     expect(t.childUpdates().map((e) => e.status)).toEqual(["running", "awaiting_approval", "running", "awaiting_input", "running"]);
-    // The coordinator's own events are never re-mirrored (loop safety): exactly four copies.
-    expect(mirrored).toHaveLength(4);
+  });
+
+  test("a card raised on a SUBAGENT thread inside the child is mirrored on the coordinator's MAIN thread (the Mac shows only main-thread cards)", async () => {
+    const t = setup();
+    const child = await t.spawnOne();
+    t.hub.append(child, approval(child, "c-sub", "agent-7"));
+    t.hub.append(child, { type: "approval_resolved", sessionId: child, threadId: "agent-7", callId: "c-sub", approved: false, by: "mac" });
+    const copies = t.dispatchLog().filter((e) => e.type === "approval_requested" || e.type === "approval_resolved");
+    expect(copies.map((e) => [(e as { threadId: string }).threadId, (e as { childSessionId?: string }).childSessionId])).toEqual([["main", child], ["main", child]]);
   });
 
   test("a REAL bridge card from a dispatch child reaches the coordinator, and answering at the child's id resolves it", async () => {
     const t = setup();
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p" });
-    const child = t.store.childrenOf(t.dispatchId)[0]!.sessionId;
+    const child = await t.spawnOne();
     const approvals = new ApprovalBroker();
     const canUse = canUseToolFor({
       sessionId: child, mode: "code", policy: "auto", origin: "dispatch-child",
@@ -220,43 +277,65 @@ describe("child_update progression and the relay", () => {
     await new Promise((r) => setTimeout(r, 5));
     const card = t.dispatchLog().find((e) => e.type === "approval_requested") as { childSessionId?: string; callId: string; toolName: string } | undefined;
     expect(card).toMatchObject({ childSessionId: child, callId: "tu-1", toolName: "Workflow" });
-    // What `approval.respond {sessionId: childSessionId, callId}` does.
-    approvals.resolve(child, "tu-1", true, "mac");
+    approvals.resolve(child, "tu-1", true, "mac");   // what `approval.respond {sessionId: child, callId}` does
     expect((await pending)?.behavior).toBe("allow");
-    const resolved = t.dispatchLog().find((e) => e.type === "approval_resolved") as { childSessionId?: string; approved: boolean } | undefined;
-    expect(resolved).toMatchObject({ childSessionId: child, approved: true });
+    expect(t.dispatchLog().find((e) => e.type === "approval_resolved")).toMatchObject({ childSessionId: child, approved: true });
     expect(t.childUpdates().map((e) => e.status)).toEqual(["running", "awaiting_approval", "running"]);
+  });
+
+  test("a dispatch child's QUESTION is bounded like its approvals: it resolves unanswered after 10 minutes", async () => {
+    const questions = new QuestionBroker();
+    const seen: number[] = [];
+    const original = questions.wait.bind(questions);
+    questions.wait = (sid, cid, ms) => { seen.push(ms); return original(sid, cid, 5); };
+    const events: SessionEvent[] = [];
+    const canUse = canUseToolFor({
+      sessionId: "s_child", mode: "code", policy: "auto", origin: "dispatch-child",
+      approvals: new ApprovalBroker(), questions, gate: new PermissionGate(),
+      emit: (e) => { events.push(e as SessionEvent); }, log: { info: () => {}, error: () => {} },
+    });
+    const input = { questions: [{ question: "Which?", header: "Pick", options: [{ label: "a", description: "" }, { label: "b", description: "" }], multiSelect: false }] };
+    const res = await canUse("AskUserQuestion", input, { signal: new AbortController().signal, toolUseID: "q-1", requestId: "r" } as never);
+    expect(seen).toEqual([DISPATCH_CHILD_APPROVAL_TIMEOUT_MS]);
+    expect(res?.behavior).toBe("deny");
+    expect(events.map((e) => e.type)).toEqual(["question_asked", "question_resolved"]);
+    expect(events[1]).toMatchObject({ by: "timeout", answers: {} });
+    // An ordinary code session's question still waits for its human.
+    const plainSeen: number[] = [];
+    const q2 = new QuestionBroker();
+    q2.wait = (_sid, _cid, ms) => { plainSeen.push(ms); return new Promise(() => {}); };
+    const plain = canUseToolFor({ sessionId: "s2", mode: "code", policy: "auto", approvals: new ApprovalBroker(), questions: q2, gate: new PermissionGate(), emit: () => {}, log: { info: () => {}, error: () => {} } });
+    void plain("AskUserQuestion", input, { signal: new AbortController().signal, toolUseID: "q-2", requestId: "r" } as never);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(plainSeen[0]).toBeGreaterThan(DISPATCH_CHILD_APPROVAL_TIMEOUT_MS);
   });
 
   test("an unattended coordinator gets a notification when a child needs input or finishes", async () => {
     const t = setup();
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p", title: "Kid" });
-    const child = t.store.childrenOf(t.dispatchId)[0]!.sessionId;
-    t.hub.append(child, { type: "approval_requested", sessionId: child, threadId: "main", callId: "c1", toolName: "bash", summary: "s", issuedAt: 1, expiresAt: 2 });
+    const child = await t.spawnOne({ title: "Kid" });
+    t.hub.append(child, approval(child, "c1"));
     t.finish(child, { text: "done" });
     expect(t.notifications).toEqual([{ title: "Kid", message: "needs your approval" }, { title: "Kid", message: "finished" }]);
     expect(t.dispatchLog().filter((e) => e.type === "notification_requested")).toHaveLength(2);
-    // Attached: no notification.
     const a = setup({ attached: true });
-    await a.dc.spawn(a.dispatchId, { dir: a.workDir, prompt: "p" });
-    a.finish(a.store.childrenOf(a.dispatchId)[0]!.sessionId, { text: "done" });
+    a.finish(await a.spawnOne(), { text: "done" });
     expect(a.notifications).toEqual([]);
   });
 });
 
 describe("the completion wake", () => {
-  test("a finished child posts its result and wakes an idle coordinator with a <child_update>", async () => {
+  test("a finished child posts its result and wakes an idle coordinator with a <child_update> (a dispatch-wake message)", async () => {
     const t = setup();
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p", title: "Kid" });
-    const child = t.store.childrenOf(t.dispatchId)[0]!.sessionId;
+    const child = await t.spawnOne({ title: "Kid" });
     t.finish(child, { text: "All green. See /tmp/report.md" });
-    const done = t.childUpdates().at(-1)!;
-    expect(done).toMatchObject({ childSessionId: child, status: "completed", title: "Kid", resultSummary: "All green. See /tmp/report.md" });
+    expect(t.childUpdates().at(-1)!).toMatchObject({ childSessionId: child, status: "completed", title: "Kid", resultSummary: "All green. See /tmp/report.md" });
     expect(t.driverFor(t.dispatchId).sends).toEqual([]); // deferred to a macrotask
     await t.drain();
     const wake = t.driverFor(t.dispatchId).sends;
     expect(wake).toHaveLength(1);
-    expect(wake[0]!.clientName).toBe(DISPATCH_CLIENT_NAME);
+    // Not the user's words: clients render this clientName as a notice, never a user bubble.
+    expect(wake[0]!.clientName).toBe(DISPATCH_WAKE_CLIENT_NAME);
+    expect(DISPATCH_WAKE_CLIENT_NAME).toBe("dispatch-wake");
     expect(wake[0]!.text).toContain("<child_update>");
     expect(wake[0]!.text).toContain(`session: ${child}`);
     expect(wake[0]!.text).toContain("status: completed");
@@ -266,11 +345,10 @@ describe("the completion wake", () => {
 
   test("an error turn is reported as error; a stopped turn as completed, saying it was stopped", async () => {
     const t = setup();
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p1", title: "A" });
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p2", title: "B" });
-    const [a, b] = t.store.childrenOf(t.dispatchId).map((r) => r.sessionId);
-    t.finish(a!, { error: "provider 500" });
-    t.finish(b!, { text: "halfway", aborted: true });
+    const a = await t.spawnOne({ title: "A" });
+    const b = await t.spawnOne({ title: "B" });
+    t.finish(a, { error: "provider 500" });
+    t.finish(b, { text: "halfway", aborted: true });
     const ups = t.childUpdates();
     expect(ups.find((e) => e.childSessionId === a && e.status !== "running")).toMatchObject({ status: "error" });
     expect(ups.find((e) => e.childSessionId === b && e.status !== "running")).toMatchObject({ status: "completed", resultSummary: "Stopped before it finished. Its last message: halfway" });
@@ -278,13 +356,12 @@ describe("the completion wake", () => {
 
   test("COALESCING: children finishing while the coordinator works wake it ONCE, at its turn's end", async () => {
     const t = setup();
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p1", title: "A" });
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p2", title: "B" });
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p3", title: "C" });
-    const [a, b, c] = t.store.childrenOf(t.dispatchId).map((r) => r.sessionId);
+    const a = await t.spawnOne({ title: "A" });
+    const b = await t.spawnOne({ title: "B" });
+    const c = await t.spawnOne({ title: "C" });
     t.driverFor(t.dispatchId).turnRunning = true; // the coordinator is mid-turn
-    t.finish(a!, { text: "A done" });
-    t.finish(b!, { text: "B done" });
+    t.finish(a, { text: "A done" });
+    t.finish(b, { text: "B done" });
     await t.drain();
     expect(t.driverFor(t.dispatchId).sends).toEqual([]);
     t.finish(t.dispatchId, { text: "coordinator turn ends" });
@@ -294,26 +371,47 @@ describe("the completion wake", () => {
     expect(sends[0]!.text).toContain(`session: ${a}`);
     expect(sends[0]!.text).toContain(`session: ${b}`);
     expect(sends[0]!.text.match(/<child_update>/g)).toHaveLength(2);
-    // The child still at work is listed as the roster.
     expect(sends[0]!.text).toContain(`Still working:\n- ${c} "C"`);
   });
 
   test("COALESCING: children finishing in the same tick while the coordinator is idle wake it once", async () => {
     const t = setup();
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p1" });
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p2" });
-    const [a, b] = t.store.childrenOf(t.dispatchId).map((r) => r.sessionId);
-    t.finish(a!, { text: "one" });
-    t.finish(b!, { text: "two" });
+    const a = await t.spawnOne();
+    const b = await t.spawnOne();
+    t.finish(a, { text: "one" });
+    t.finish(b, { text: "two" });
     await t.drain();
     expect(t.driverFor(t.dispatchId).sends).toHaveLength(1);
     expect(t.driverFor(t.dispatchId).sends[0]!.text.match(/<child_update>/g)).toHaveLength(2);
   });
 
+  test("a failed wake is retried (bounded), then waits for the coordinator's next settle", async () => {
+    const t = setup();
+    const child = await t.spawnOne();
+    const coordinator = t.driverFor(t.dispatchId);
+    coordinator.failNext = new Error("transient");
+    t.finish(child, { text: "done" });
+    await t.drain();
+    expect(coordinator.sends).toEqual([]);
+    expect(t.scheduled.map((s) => s.ms)).toEqual([5]);
+    t.scheduled.shift()!.fn();
+    await t.drain();
+    expect(coordinator.sends).toHaveLength(1);
+    expect(coordinator.sends[0]!.text).toContain("done");
+    // Exhausted retries: no unbounded timer chain.
+    const u = setup();
+    const kid = await u.spawnOne();
+    const dead = { turnRunning: false, send: async () => { throw new Error("down"); } };
+    u.deps.sessions.get = (id) => (id === u.dispatchId ? dead : u.drivers.get(id));
+    u.finish(kid, { text: "x" });
+    for (let i = 0; i < 4; i++) { await u.drain(); u.scheduled.splice(0).forEach((s) => s.fn()); }
+    await u.drain();
+    expect(u.scheduled).toEqual([]);
+  });
+
   test("a resumable coordinator is resumed for the wake (ensure), like any inbound message", async () => {
     const t = setup();
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p" });
-    const child = t.store.childrenOf(t.dispatchId)[0]!.sessionId;
+    const child = await t.spawnOne();
     const coordinator = t.drivers.get(t.dispatchId)!;
     t.drivers.delete(t.dispatchId); // no live driver: it idled out
     let ensured = 0;
@@ -326,81 +424,118 @@ describe("the completion wake", () => {
 
   test("a settle with no turn (an idle child ended) reports nothing", async () => {
     const t = setup();
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p" });
-    const child = t.store.childrenOf(t.dispatchId)[0]!.sessionId;
+    const child = await t.spawnOne();
     t.finish(child, { text: "ok" });
     const before = t.childUpdates().length;
-    t.dc.onTurnSettled(child); // the idle timer ended its child
+    t.dc.onTurnSettled(child);
     expect(t.childUpdates().length).toBe(before);
-  });
-
-  test("stop(): a draining child's last settle reports nothing and wakes nobody", async () => {
-    const t = setup();
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p" });
-    const child = t.store.childrenOf(t.dispatchId)[0]!.sessionId;
-    t.dc.stop();
-    t.finish(child, { aborted: true });
-    await t.drain();
-    expect(t.childUpdates().map((e) => e.status)).toEqual(["running"]);
-    expect(t.driverFor(t.dispatchId).sends).toEqual([]);
   });
 });
 
-describe("the bounded roster and restart recovery", () => {
-  test("a reported child is forgotten when the coordinator's wake turn ends — and tracked again when it runs again", async () => {
+describe("which turns are followed, the bounded roster, shutdown and restart", () => {
+  test("a user working in a finished child directly wakes nobody — tracked or forgotten", async () => {
     const t = setup();
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p", title: "Kid" });
-    const child = t.store.childrenOf(t.dispatchId)[0]!.sessionId;
+    const child = await t.spawnOne({ title: "Kid" });
     t.finish(child, { text: "first" });
+    // Still tracked (Dispatch has not been told yet): the user's own turn in it is not followed.
+    await t.driverFor(child).send("let me tweak this myself", "mac");
+    t.hub.append(child, approval(child, "c-user"));
+    t.finish(child, { text: "user turn result" });
     await t.drain();
-    expect(t.dc.roster().map((r) => r.sessionId)).toEqual([child]);
-    t.finish(t.dispatchId, { text: "reported it" }); // the wake turn ends
+    const wakes = t.driverFor(t.dispatchId).sends;
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]!.text).toContain("first");
+    expect(wakes[0]!.text).not.toContain("user turn result");
+    expect(t.dispatchLog().some((e) => e.type === "approval_requested")).toBe(false);
+    // The wake turn ends → the child is forgotten; a later direct turn is not picked back up.
+    t.finish(t.dispatchId, { text: "reported" });
     expect(t.dc.roster()).toEqual([]);
-    // The user sends the child another message; its next result still reaches Dispatch.
-    await t.driverFor(child).send("more please", "mac");
-    expect(t.dc.roster().map((r) => ({ id: r.sessionId, status: r.status }))).toEqual([{ id: child, status: "running" }]);
-    t.finish(child, { text: "second" });
+    await t.driverFor(child).send("more", "mac");
+    t.finish(child, { text: "later" });
     await t.drain();
-    expect(t.childUpdates().at(-1)).toMatchObject({ childSessionId: child, status: "completed", resultSummary: "second" });
-    expect(t.driverFor(t.dispatchId).sends.at(-1)!.text).toContain("second");
+    expect(t.dc.roster()).toEqual([]);
+    expect(t.driverFor(t.dispatchId).sends).toHaveLength(1);
   });
 
-  test("restart: an in-flight child is closed on the coordinator's log; the session stays; its next run is reported", async () => {
+  test("a follow-up the COORDINATOR delivers (send_message → messaging) is followed and reported", async () => {
     const t = setup();
-    await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p", title: "Long job" });
-    const child = t.store.childrenOf(t.dispatchId)[0]!.sessionId;
-    t.hub.append(child, { type: "approval_requested", sessionId: child, threadId: "main", callId: "c1", toolName: "bash", summary: "s", issuedAt: 1, expiresAt: 2 });
-    // The daemon stops mid-turn.
+    const child = await t.spawnOne();
+    t.finish(child, { text: "first" });
+    await t.drain();
+    await t.driverFor(child).send("now also do X", "messaging");
+    expect(t.dc.roster()[0]!.status).toBe("running");
+    t.finish(child, { text: "X done" });
+    await t.drain();
+    expect(t.childUpdates().at(-1)).toMatchObject({ childSessionId: child, status: "completed", resultSummary: "X done" });
+  });
+
+  test("shutdown: no report and no wake while the children drain — but a withdrawn card still closes on the coordinator's log", async () => {
+    const t = setup();
+    const child = await t.spawnOne();
+    t.hub.append(child, approval(child, "c1"));
+    t.dc.beginShutdown();
+    // The child's turn is aborted by the drain: the bridge withdraws the card, then the turn settles.
+    t.hub.append(child, { type: "approval_resolved", sessionId: child, threadId: "main", callId: "c1", approved: false, by: "aborted" });
+    t.finish(child, { aborted: true });
+    await t.drain();
+    expect(t.dispatchLog().filter((e) => e.type === "approval_resolved")).toHaveLength(1);
+    expect(t.childUpdates().map((e) => e.status)).toEqual(["running", "awaiting_approval"]);
+    expect(t.driverFor(t.dispatchId).sends).toEqual([]);
+    await expect(t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "p" })).rejects.toThrow("shutting down");
     t.dc.stop();
-    // A new process over the same store.
+    t.hub.append(child, { type: "approval_resolved", sessionId: child, threadId: "main", callId: "c2", approved: false, by: "aborted" });
+    expect(t.dispatchLog().filter((e) => e.type === "approval_resolved")).toHaveLength(1);
+  });
+
+  test("restart: open mirrored cards are CLOSED, an in-flight child gets a closing update, and only it is re-tracked", async () => {
+    const t = setup();
+    const busy = await t.spawnOne({ title: "Long job" });
+    const done = await t.spawnOne({ title: "Done job" });
+    t.finish(done, { text: "finished before the restart" });
+    t.hub.append(busy, approval(busy, "c1"));
+    t.hub.append(busy, { type: "question_asked", sessionId: busy, threadId: "main", callId: "q1", questions: [{ question: "Which?", header: "Pick", options: [{ label: "a", description: "" }, { label: "b", description: "" }], multiSelect: false }] });
+    // A crash: nothing resolves the cards, nothing reports the turn.
+    t.dc.stop();
     const store2 = new SessionStore(t.home);
     const hub2 = new SessionHub(store2);
     const sends: string[] = [];
     const deferred: Array<() => void> = [];
     const fake = { turnRunning: false, send: async (text: string) => { sends.push(text); return { seq: 0, queued: false }; } };
-    const dc2 = new DispatchChildren({
+    const mk = () => new DispatchChildren({
       store: store2, hub: hub2, createSession: () => undefined,
       sessions: { get: () => fake, ensure: async () => fake },
       log: () => {}, defer: (fn) => { deferred.push(fn); },
     });
+    const dc2 = mk();
     dc2.start();
-    const ups = store2.read(t.dispatchId).filter((e) => e.type === "child_update") as Array<Extract<SessionEvent, { type: "child_update" }>>;
-    expect(ups.at(-1)).toMatchObject({ childSessionId: child, status: "error", title: "Long job" });
+    const log = store2.read(t.dispatchId);
+    const resolutions = log.filter((e) => e.type === "approval_resolved" || e.type === "question_resolved");
+    expect(resolutions.map((e) => [e.type, (e as { callId: string }).callId, (e as { by: string }).by, (e as { childSessionId?: string }).childSessionId])).toEqual([
+      ["approval_resolved", "c1", RESTART_RESOLUTION_BY, busy],
+      ["question_resolved", "q1", RESTART_RESOLUTION_BY, busy],
+    ]);
+    expect(resolutions[0]).toMatchObject({ approved: false });
+    expect(resolutions[1]).toMatchObject({ answers: {} });
+    const ups = log.filter((e): e is ChildUpdate => e.type === "child_update");
+    expect(ups.at(-1)).toMatchObject({ childSessionId: busy, status: "error", title: "Long job" });
     expect(ups.at(-1)!.resultSummary).toContain("Winter restarted while this session was working");
-    // The child is still a first-class session of the coordinator.
-    expect(store2.childrenOf(t.dispatchId).map((r) => r.sessionId)).toEqual([child]);
-    // A second boot does not close it again.
-    const again = new DispatchChildren({ store: store2, hub: hub2, createSession: () => undefined, sessions: { get: () => fake, ensure: async () => fake }, log: () => {} });
-    again.start(); again.stop();
-    expect((store2.read(t.dispatchId).filter((e) => e.type === "child_update")).length).toBe(ups.length);
-    // The user resumes the child: it is picked up from its stored link and reported.
-    hub2.append(child, { type: "turn_started", sessionId: child, threadId: "main" });
-    hub2.append(child, { type: "assistant_message", sessionId: child, threadId: "main", text: "resumed and done" });
-    dc2.onTurnSettled(child);
+    expect(ups.filter((u) => u.childSessionId === done).map((u) => u.status)).toEqual(["running", "completed"]);
+    expect(store2.childrenOf(t.dispatchId).map((r) => r.sessionId).sort()).toEqual([busy, done].sort());
+    // A second boot closes nothing again.
+    const again = mk(); again.start(); again.stop();
+    expect(store2.read(t.dispatchId).length).toBe(log.length);
+    // The child that was finished before the restart, resumed by the user, is NOT picked up…
+    hub2.append(done, { type: "turn_started", sessionId: done, threadId: "main" });
+    dc2.onTurnSettled(done);
+    // …the interrupted one IS: its next turn is reported.
+    hub2.append(busy, { type: "turn_started", sessionId: busy, threadId: "main" });
+    hub2.append(busy, { type: "assistant_message", sessionId: busy, threadId: "main", text: "resumed and done" });
+    dc2.onTurnSettled(busy);
     for (const fn of deferred.splice(0)) fn();
     await new Promise((r) => setTimeout(r, 0));
     expect(sends).toHaveLength(1);
     expect(sends[0]).toContain("resumed and done");
+    expect(sends[0]).not.toContain(done);
     dc2.stop();
   });
 

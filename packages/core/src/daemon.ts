@@ -2014,6 +2014,12 @@ export async function startDaemon(opts: {
   dispatchChildren = new DispatchChildren({
     store, hub,
     createSession: () => sessionCreator,
+    // A spawn whose first message could not be delivered is rolled back like a refused creation:
+    // the row and the runtime rows (and any driver) go, the same two steps `session.create` takes.
+    deleteSession: (sid) => {
+      try { store.deleteSession(sid); } catch { /* already gone */ }
+      onSessionDeleted(sid);
+    },
     sessions: { get: (sid) => winterDrivers.get(sid), ensure: (sid) => winterDrivers.ensure(sid) },
     // LIVE, per call — the schema's enum is a boot snapshot (`spawnModelIds` above).
     models: async () => pickerModels({ credentials: await credentialPresenceFrom(secrets), home: winterHome }).map((m) => m.id),
@@ -2959,8 +2965,10 @@ export async function startDaemon(opts: {
       // the `void stopAll()` graceful path below is async and process.exit(0) (direct-run path) drops
       // its shutdown-request/.then + SIGKILL-timer before they can fire. stopAll still runs to drain
       // any in-flight spawn on the in-process (awaited) path.
-      // First: a draining child's last settle must not report a "finished" turn or wake Dispatch.
-      dispatchChildren?.stop();
+      // First: a draining child's last settle must not report a "finished" turn or wake Dispatch — but
+      // the cards its aborted turn withdraws still close on Dispatch's log (stopped fully below,
+      // after the children drained and before the store closes).
+      dispatchChildren?.beginShutdown();
       server.stop(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
       for (const w of sdkWatchers) w.stop();
@@ -3005,6 +3013,7 @@ export async function startDaemon(opts: {
           // One macrotask for the iterations whose stdout just ended to run their `finally` blocks.
           .then(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
       const closeRest = (): void | Promise<void> => {
+        dispatchChildren?.stop();
         store.close();
         if (!runtime) { lock.release(); return; }
         return runtime.close().then(() => lock.release(), () => lock.release());

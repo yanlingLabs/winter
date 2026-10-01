@@ -160,12 +160,15 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     // The child's own transcript: the prompt under the dispatch client name, then its turn.
     const first = h.log(child!).find((e) => e.type === "user_message") as { text: string; clientName: string };
     expect(first).toMatchObject({ text: "hello from the coordinator", clientName: "dispatch" });
+    // Titled with the spawn's title (the pill's label stays put), at the coordinator's policy.
+    expect(h.daemon!.sessions.getTitle(child!)).toBe("Echo kid");
+    expect(res.content[0]!.text).toContain("at your current approval policy (auto");
     const done = await until(() => h.updates().find((u) => u.childSessionId === child && u.status === "completed"), 30_000, "the child's completed update");
     expect(done.title).toBe("Echo kid");
     expect(done.resultSummary ?? "").toContain("hello from the coordinator");
     expect(h.updates().filter((u) => u.childSessionId === child).map((u) => u.status)).toEqual(["running", "completed"]);
     // The coordinator is woken with ONE message carrying the update, and runs a turn for it.
-    const wake = await until(() => h.log(h.dispatchId).find((e) => e.type === "user_message" && (e as { clientName?: string }).clientName === "dispatch") as { text: string; seq: number } | undefined, 30_000, "the wake message");
+    const wake = await until(() => h.log(h.dispatchId).find((e) => e.type === "user_message" && (e as { clientName?: string }).clientName === "dispatch-wake") as { text: string; seq: number } | undefined, 30_000, "the wake message");
     expect(wake.text).toContain("<child_update>");
     expect(wake.text).toContain(`session: ${child}`);
     expect(wake.text).toContain("status: completed");
@@ -187,6 +190,19 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     await until(() => h.updates().find((u) => u.childSessionId === child && (u.status === "completed" || u.status === "error")), 30_000, "the child's end");
     const toolResult = h.log(child).find((e) => e.type === "tool_result") as { isError: boolean } | undefined;
     expect(toolResult).toBeDefined();
+  }, 90_000);
+
+  test("(4) a child takes Dispatch's policy as it is at spawn, through session.create's own door", async () => {
+    await h.client.call(METHODS.sessionSetPolicy, { sessionId: h.dispatchId, policy: "accept-edits" });
+    try {
+      const res = await h.spawn({ dir: h.work, prompt: "policy probe", model: "winter-test/echo" });
+      expect(res.isError).toBe(false);
+      const child = /spawned session (s_[0-9a-f]+)/.exec(res.content[0]!.text)![1]!;
+      expect(h.daemon!.sessions.meta(child).approvalPolicy).toBe("accept-edits");
+      await until(() => h.updates().find((u) => u.childSessionId === child && u.status !== "running"), 30_000, "the child's end");
+    } finally {
+      await h.client.call(METHODS.sessionSetPolicy, { sessionId: h.dispatchId, policy: "auto" });
+    }
   }, 90_000);
 
   test("(3) stopping a child interrupts its turn, and the stop is reported", async () => {

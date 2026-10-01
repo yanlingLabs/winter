@@ -147,9 +147,10 @@ const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill",
 // own header invites ("the spawn_agent precedent"): spawn_agent's entry above earns its READ_ONLY on
 // one specific clause — "the child inherits the parent's approval policy (engine.ts's bridge passes
 // the SAME `meta` object down), so the child's own mutating tool calls still get gated by that
-// policy". That clause is FALSE here. A session_spawn child is a full first-class session created at
-// a FIXED `approvalPolicy: "auto"` (agent/dispatch-children.ts's `spawn`), whatever the caller's own policy
-// is — so it is not merely delegating within a policy, it is starting unattended work at one. That is
+// policy". That clause does not hold here either: a session_spawn child is a full first-class session,
+// created at the coordinator's policy AS IT IS AT SPAWN and fixed for the child's life
+// (agent/dispatch-children.ts's `childPolicyFor`) — so it is not merely delegating within a live
+// policy, it is starting separate, unattended work at one. That is
 // the same shape `schedule` and `Workflow` are already MUTATING for ("stands up an unattended,
 // headless-firing routine"; "starts a background run of up to 1000 agents"), and the same reason
 // `plan` must keep denying it: a planning session must not be able to start a mutating session any
