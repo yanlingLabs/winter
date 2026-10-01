@@ -23,6 +23,8 @@ import { SITE_ICONS_MAX, SITE_ICON_URL_MAX_LENGTH, type SiteIcon } from "@yanlin
 
 /** How many page → icon pairs one session remembers (oldest first out). */
 const KNOWN_PER_SESSION = 200;
+/** How many not-yet-projected per-call attachments one session holds (oldest first out). */
+export const ATTACHED_PER_SESSION = 50;
 
 const known = new Map<string, Map<string, string>>();
 const attached = new Map<string, Map<string, SiteIcon[]>>();
@@ -98,7 +100,11 @@ function urlIndexIn(text: string, url: string): number {
 export function attachSiteIcons(sessionId: string, toolUseId: string, icons: SiteIcon[]): void {
   let bySession = attached.get(sessionId);
   if (bySession === undefined) { bySession = new Map(); attached.set(sessionId, bySession); }
+  bySession.delete(toolUseId);
   bySession.set(toolUseId, icons);
+  // An attachment whose result is never projected (an interrupted turn) would otherwise linger until
+  // the session ends: the oldest goes first past the cap.
+  while (bySession.size > ATTACHED_PER_SESSION) bySession.delete(bySession.keys().next().value as string);
 }
 
 export function takeSiteIcons(sessionId: string, toolUseId: string): SiteIcon[] | undefined {

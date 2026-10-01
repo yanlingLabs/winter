@@ -129,6 +129,12 @@ func plumeSites(_ icons: [SiteIconRef]) -> [(host: String, iconURL: String?)] {
     return out
 }
 
+/// PURE: the key a site tile's favicon is filed under for one frame — the url actually fetched for it
+/// (`faviconRequestURL`), so two tiles for one host with different reported icons never swap.
+func plumeFaviconKey(host: String, iconURL: String?) -> String {
+    faviconRequestURL(host: host, iconURL: iconURL)?.absoluteString ?? host
+}
+
 /// PURE: an icon url the pill may fetch — https, to a public name (`plumeFaviconHostAllowed`).
 func plumeIconURLAllowed(_ string: String) -> Bool {
     guard let url = URL(string: string), url.scheme?.lowercased() == "https",
@@ -160,14 +166,17 @@ func plumeHosts(in text: String) -> [String] {
     return hosts
 }
 
+/// Name suffixes that conventionally stay on the user's own network (mDNS, home routers, corporate
+/// split-horizon DNS). Matched by name only — the pill resolves nothing itself. Kept in step with the
+/// agent SDK's `isPublicName` (`tools/impl/_site-icons.ts`).
+let plumePrivateNameSuffixes = [".localhost", ".local", ".internal", ".lan", ".home", ".home.arpa", ".corp", ".intranet", ".private"]
+
 /// PURE: a host whose favicon the pill may fetch — a dotted DNS name, never an IP literal, never
-/// `localhost` or a `.local`/`.internal` name: the pill must not go poking the user's own network
-/// because a url appeared in a tool's output.
+/// `localhost` or a name under `plumePrivateNameSuffixes`: the pill must not go poking the user's own
+/// network because a url appeared in a tool's output.
 func plumeFaviconHostAllowed(_ host: String) -> Bool {
     guard host.contains("."), host.count <= 253, !host.hasPrefix("-") else { return false }
-    if host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".local") || host.hasSuffix(".internal") {
-        return false
-    }
+    if host == "localhost" || plumePrivateNameSuffixes.contains(where: { host.hasSuffix($0) }) { return false }
     let labels = host.split(separator: ".", omittingEmptySubsequences: false)
     guard let tld = labels.last, tld.contains(where: \.isLetter) else { return false } // 10.0.0.1 and friends
     return labels.allSatisfy { !$0.isEmpty && $0.count <= 63 }
@@ -520,7 +529,7 @@ struct WorkingAnimationView: View {
         for token in model.plume.tokens {
             if case .site(let host, let iconURL) = token.item.kind,
                let image = FaviconCache.shared.image(host: host, iconURL: iconURL) {
-                favicons[host] = image
+                favicons[plumeFaviconKey(host: host, iconURL: iconURL)] = image
             }
         }
         return Canvas { context, size in
@@ -567,10 +576,10 @@ struct WorkingAnimationView: View {
             let c = plumeToolTileColor(symbol: symbol)
             ctx.fill(shape, with: .color(Color(red: c.red, green: c.green, blue: c.blue)))
             drawSymbol(symbol, color: .white, in: square.insetBy(dx: side * 0.22, dy: side * 0.22), context: &ctx)
-        case .site(let host, _):
+        case .site(let host, let iconURL):
             ctx.fill(shape, with: .color(.white))
             let inner = square.insetBy(dx: side * 0.17, dy: side * 0.17)
-            if let image = favicons[host] {
+            if let image = favicons[plumeFaviconKey(host: host, iconURL: iconURL)] {
                 ctx.clip(to: Path(roundedRect: inner, cornerRadius: side * 0.1))
                 ctx.draw(Image(nsImage: image).resizable(), in: inner)
             } else {

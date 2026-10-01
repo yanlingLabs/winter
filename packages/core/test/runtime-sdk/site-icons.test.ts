@@ -9,9 +9,10 @@ import type { WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import { SITE_ICONS_MAX, SessionEvent, ToolResultEvent } from "@yanlinglabs/winter-protocol";
 import { researchCapability } from "../../src/capabilities/research";
 import type { CapabilitySession } from "../../src/capabilities/server";
+import type { SessionMode } from "../../src/runtime-sdk/create";
 import { SEARCH_CAPABILITY_TOOL, sessionHooksFor } from "../../src/runtime-sdk/hooks";
 import {
-  attachSiteIcons, cleanSiteIcons, clearSiteIcons, noteKnownSiteIcons, siteIconSessions, siteIconUrl,
+  ATTACHED_PER_SESSION, attachSiteIcons, cleanSiteIcons, clearSiteIcons, noteKnownSiteIcons, siteIconSessions, siteIconUrl,
   siteIconsFromRuntimeBlock, siteIconsInText, takeSiteIcons,
 } from "../../src/runtime-sdk/site-icons";
 import { capEvent } from "../../src/sessions/history";
@@ -50,9 +51,9 @@ async function runSearch(citations: unknown[], sessionId = SID): Promise<string>
 }
 
 /** What the runtime does for a PostToolUse on the Search tool: run every UNMATCHED group's callbacks
- *  (the Search icon hook lives in one and filters on `tool_name` itself). */
-function searchPostHook(sessionId = SID): HookCallbackMatcher {
-  const groups = (sessionHooksFor({ sessionId, roots: ["/tmp"] }).winter?.PostToolUse ?? []).filter((g) => g.matcher === undefined);
+ *  (the Search icon step is folded into the unmatched plugin callback and filters on `tool_name`). */
+function searchPostHook(sessionId = SID, mode: SessionMode = "dispatch"): HookCallbackMatcher {
+  const groups = unmatchedPostGroups(sessionId, mode);
   if (groups.length === 0) throw new Error("no unmatched PostToolUse group");
   return {
     hooks: [async (input, id, opts) => {
@@ -61,6 +62,10 @@ function searchPostHook(sessionId = SID): HookCallbackMatcher {
       return last as never;
     }],
   };
+}
+
+function unmatchedPostGroups(sessionId: string, mode: SessionMode): HookCallbackMatcher[] {
+  return (sessionHooksFor({ sessionId, roots: ["/tmp"], mode }).winter?.PostToolUse ?? []).filter((g) => g.matcher === undefined);
 }
 
 function postInput(toolUseId: string, response: unknown): PostToolUseHookInput {
@@ -123,6 +128,19 @@ describe("Search → hook → projector", () => {
     const output = await runSearch(CITATIONS);
     await searchPostHook().hooks[0]!({ ...postInput("toolu_x", output), tool_name: "WebFetch" }, "toolu_x", { signal: abortSignal() });
     expect(takeSiteIcons(SID, "toolu_x")).toBeUndefined();
+  });
+
+  test("a code session's hook set gains no callback, and its unmatched callback attaches nothing", async () => {
+    const callbacks = (mode: SessionMode) => (sessionHooksFor({ sessionId: SID, roots: ["/tmp"], mode }).winter?.PostToolUse ?? []).reduce((n, g) => n + g.hooks.length, 0);
+    // The step is FOLDED into the existing unmatched plugin callback: one callback in every mode.
+    for (const mode of ["code", "chat", "dispatch"] as const) expect(unmatchedPostGroups(SID, mode).flatMap((g) => g.hooks)).toHaveLength(1);
+    expect(callbacks("code")).toBe(callbacks("dispatch"));
+    expect(callbacks("chat")).toBe(callbacks("dispatch"));
+    const output = await runSearch(CITATIONS);
+    await searchPostHook(SID, "code").hooks[0]!(postInput("toolu_code", output), "toolu_code", { signal: abortSignal() });
+    expect(takeSiteIcons(SID, "toolu_code")).toBeUndefined();
+    await searchPostHook(SID, "chat").hooks[0]!(postInput("toolu_chat", output), "toolu_chat", { signal: abortSignal() });
+    expect(takeSiteIcons(SID, "toolu_chat")).toHaveLength(2);
   });
 
   test("a non-string tool_response is ignored, never thrown on", async () => {
@@ -197,6 +215,14 @@ describe("url checks and bounds", () => {
     noteKnownSiteIcons(SID, [{ url: "https://a.example.com/x", iconUrl: "https://a.example.com/i.png" }]);
     expect(siteIconsInText(SID, "see https://a.example.com/xy")).toBeUndefined();
     expect(siteIconsInText(SID, "see https://a.example.com/x\n")).toEqual([{ url: "https://a.example.com/x", iconUrl: "https://a.example.com/i.png" }]);
+  });
+
+  test("unprojected per-call attachments are capped per session, oldest first out", () => {
+    const icons = [{ url: "https://a.example.com/x", iconUrl: "https://a.example.com/i.png" }];
+    for (let i = 0; i < ATTACHED_PER_SESSION + 5; i++) attachSiteIcons(SID, `t${i}`, icons);
+    for (let i = 0; i < 5; i++) expect(takeSiteIcons(SID, `t${i}`)).toBeUndefined();
+    expect(takeSiteIcons(SID, "t5")).toEqual(icons);
+    expect(takeSiteIcons(SID, `t${ATTACHED_PER_SESSION + 4}`)).toEqual(icons);
   });
 
   test("clearSiteIcons drops both the known pairs and any pending attachment", () => {

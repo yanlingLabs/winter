@@ -70,6 +70,7 @@ final class FaviconCache {
 
     var pendingCountForTesting: Int { pending.count }
     var imageCountForTesting: Int { images.count }
+    var failedCountForTesting: Int { failed.count }
 
     private func load(_ url: URL) async {
         defer { pending.remove(url) }
@@ -92,15 +93,20 @@ final class FaviconCache {
 
     // MARK: - Network
 
-    private nonisolated static let session: URLSession = {
+    /// The ephemeral, cookie-less session every icon request uses. `protocolClasses` is the tests' seam
+    /// (a stub `URLProtocol`), so the real request path — redirect guard included — runs without a network.
+    nonisolated static func makeSession(protocolClasses: [AnyClass]? = nil) -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.httpCookieAcceptPolicy = .never
         config.httpShouldSetCookies = false
         config.urlCache = nil
         config.timeoutIntervalForRequest = 6
         config.timeoutIntervalForResource = 10
+        if let protocolClasses { config.protocolClasses = protocolClasses }
         return URLSession(configuration: config)
-    }()
+    }
+
+    private nonisolated static let session = makeSession()
 
     /// Re-checks every redirect hop: an icon url on a public host must not be bounced to a private one.
     private final class RedirectGuard: NSObject, URLSessionTaskDelegate {
@@ -110,13 +116,19 @@ final class FaviconCache {
         }
     }
 
-    nonisolated static let networkFetch: Fetch = { url, maxBytes in
+    /// The one request path: `url` on `session`, every redirect hop through `RedirectGuard`; the body
+    /// only for a final 200 no larger than `maxBytes`.
+    nonisolated static func download(_ url: URL, maxBytes: Int, session: URLSession) async -> Data? {
         var request = URLRequest(url: url)
         request.setValue("Winter", forHTTPHeaderField: "User-Agent")
         guard let (data, response) = try? await session.data(for: request, delegate: RedirectGuard()),
               (response as? HTTPURLResponse)?.statusCode == 200,
               !data.isEmpty, data.count <= maxBytes else { return nil }
         return data
+    }
+
+    nonisolated static let networkFetch: Fetch = { url, maxBytes in
+        await download(url, maxBytes: maxBytes, session: session)
     }
 }
 
