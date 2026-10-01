@@ -86,6 +86,21 @@ export const RUNTIME_HOST_TOOL_PAIRS: ReadonlyArray<readonly [runtime: string, h
   // and a future caller that DOES gate it lands on `ask_user`'s READ_ONLY classification — the
   // human IS the approval, so a gate card on top would double-ask (gate.ts's own reasoning).
   ["AskUserQuestion", "ask_user"],
+  // class (d) — THE DAEMON'S OWN CAPABILITY TOOLS UNDER THEIR PLAIN NAMES (the 2026-10-01 tool-surface
+  // ruling). The model, the transcript, hook inputs and `canUseTool` all carry these now (the agent SDK's
+  // `toolNames`), so each maps onto the SAME host name its `mcp__winter__<key>__<tool>` spelling strips to
+  // — the gate's class, the card text and the Mac/phone rows are unchanged. ⚠️ LOAD-BEARING like the web
+  // pair above: without a row, chat's `Browser` would fall to the unclassified fail-closed branch and be
+  // a typed deny. The old spellings keep stripping below (`WINTER_CAPABILITY_SERVER_KEYS`) for old
+  // transcripts and for a call the runtime reports under the old spelling (a rule or matcher named it).
+  ["SpawnSession", "session_spawn"],
+  ["ListSessions", "list_sessions"],
+  ["ManageSession", "manage_session"],
+  ["Computer", "computer"],
+  ["Browser", "browser"],
+  // `Search` — Exa answer mode, the agent SDK's built-in since 2026-10-01 (it was the daemon's
+  // `mcp__winter__research__Search`, which strips to the same host name): `gate.ts`'s NETWORK class.
+  ["Search", "Search"],
 ];
 
 /**
@@ -270,6 +285,10 @@ export const WINTER_CAPABILITY_SERVER_KEYS: ReadonlySet<string> = new Set([
   // branch — a CARD under `ask`/`accept-edits`, a DENY under `plan`/`dont-ask`, where the web class is
   // `NETWORK` and allowed under every policy. That was the original review-NEW-1 bug when the key was
   // MISSING; removing it now would recreate it for every past session.
+  // `research` IS RETAINED ON PURPOSE TOO (2026-10-01), for the same reason: its server is gone (`Search`
+  // is the agent SDK's built-in) but old JSONLs replay `mcp__winter__research__Search`. Both retired
+  // keys stay RESERVED server names (`capabilities/names.ts`'s `RETIRED_CAPABILITY_SERVER_KEYS`), so no
+  // configured server can mint a name that strips through them.
   "sessions", "computer", "browser", "office", "research", "web",
   // The SEVENTH key, `lsp` (fix wave, review F7): `mcp__winter__lsp__lsp` strips to `lsp`, which
   // `gate.ts` classifies READ_ONLY — the class the registry-door tool always had.

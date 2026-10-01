@@ -139,6 +139,14 @@ final class ActivityGroupingTests: XCTestCase {
 
     // MARK: toolGroupFragment (lowercase, sentence-building unit)
 
+    /// The plain names the model calls the daemon's tools by (2026-10-01) read like their host names.
+    func testPlainToolNamesReadLikeTheirHostNames() {
+        XCTAssertEqual(toolGroupFragment(name: "SpawnSession", count: 1), toolGroupFragment(name: "session_spawn", count: 1))
+        XCTAssertEqual(toolGroupFragment(name: "Browser", count: 2), toolGroupFragment(name: "browser", count: 2))
+        XCTAssertEqual(toolGroupFragment(name: "Computer", count: 1), toolGroupFragment(name: "computer", count: 1))
+        XCTAssertEqual(toolGroupFragment(name: "Search", count: 1), "searched the web")
+    }
+
     func testToolGroupFragmentSingularPlural() {
         XCTAssertEqual(toolGroupFragment(name: "bash", count: 1), "ran a shell command")
         XCTAssertEqual(toolGroupFragment(name: "bash", count: 3), "ran 3 shell commands")

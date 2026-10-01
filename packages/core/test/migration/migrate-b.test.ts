@@ -24,7 +24,7 @@ import { CREDENTIAL_MATERIAL_NAMES } from "../../src/auth/credential-material";
 import { ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import { TOKEN_NAMES } from "../../src/auth/tokens";
 import { WEB_SEARCH_API_KEY_SECRET } from "../../src/agent/tools/web";
-import { EXA_API_KEY_SECRET } from "../../src/agent/tools/search";
+import { EXA_API_KEY_SECRET } from "../../src/agent/exa-key";
 import { LEGACY_DEV_HOME_DIR, LEGACY_HOME_DIR, LEGACY_HOME_ENV, LEGACY_WINTER_EXECUTABLE_ENV } from "../../src/legacy-names";
 
 const dirs: string[] = [];

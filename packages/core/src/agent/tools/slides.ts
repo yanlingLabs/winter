@@ -451,7 +451,7 @@ export function slidesToolDefs(deps: SlidesToolDeps): ToolDefinition[] {
       + "exception worth naming: title/body each set an ABSOLUTE state, so re-sending the exact same "
       + "set_text call after a timeout converges rather than doubles — but re-reading first is "
       + "still the honest way to confirm what actually happened before deciding to resend.",
-    modes: ["code", "dispatch"],
+    modes: ["code"], // 2026-10-01 tool-surface ruling: office is code-only (dispatch names no office tool)
     args: SlidesArgs,
     async run(a: SlidesArgs, ctx) {
       const sessionId = ctx.sessionId;

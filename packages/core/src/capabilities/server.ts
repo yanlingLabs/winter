@@ -48,7 +48,7 @@
 import type { McpSdkServerConfigWithInstance, WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import type { ComputerUseService } from "../agent/computer-use";
 import { ToolRegistry, type ToolContext, type ToolDefinition } from "../agent/tools/registry";
-import { WINTER_CAPABILITY_TOOLS, capabilityServerName, capabilityToolName, type SessionMode } from "./names";
+import { WINTER_CAPABILITY_TOOLS, capabilityServerName, capabilityToolName, type CapabilityToolFacts, type SessionMode } from "./names";
 
 /**
  * Everything a capability call needs to know about WHO is calling. Fixed for the life of the
@@ -105,20 +105,9 @@ export interface CapabilitySession {
   /** A per-session override of the daemon's `ComputerUseService`. Normally unset — the `computer`
    *  capability reads the daemon's single holder instead. */
   computerUse?: ComputerUseService;
-  /**
-   * Is an Exa API key stored for this incarnation? (2026-09-18, the web-tools ruling.)
-   *
-   * `research.ts` reads it to decide whether this session's server advertises `Search` at all: Exa's
-   * `/answer` endpoint requires a key, so without one the tool cannot work and the runtime's own
-   * `WebSearch` takes its place instead (`runtime-sdk/mode-options.ts`'s `disallowedToolsFor`, which
-   * names `Search` in `disallowedTools` in exactly the same case).
-   *
-   * **ABSENT READS AS `true`** — the same convention `ToolExposure.exaKeyPresent` keeps, and for the
-   * same reason: the two answers must never disagree, because a `disallowedTools` string that names a
-   * tool the server never advertised denies nothing, silently, and a server that advertises a tool
-   * `disallowedTools` withheld offers nothing, also silently. One value, one meaning, both doors.
-   */
-  exaKeyPresent?: boolean;
+  // `exaKeyPresent` lived here until 2026-10-01, for the `research` server's `Search`. `Search` is the
+  // agent SDK's built-in now, and its key gate is one input to ONE door: `runtime-sdk/mode-options.ts`'s
+  // `toolsFor` (which of `Search`/`WebSearch` the session's `Options.tools` names).
 }
 
 export interface CapabilityServerSpec {
@@ -159,11 +148,12 @@ export interface CapabilityServerSpec {
  * A tool absent from the table falls back to the registry's own documented default (`["code"]`),
  * which is the restrictive answer; `wire-names.test.ts` proves the absent case is unreachable.
  */
+function factsFor(serverKey: string, def: ToolDefinition): CapabilityToolFacts | undefined {
+  return (WINTER_CAPABILITY_TOOLS as Readonly<Record<string, CapabilityToolFacts>>)[capabilityToolName(serverKey, def.name)];
+}
+
 function modesFor(serverKey: string, def: ToolDefinition): readonly SessionMode[] {
-  const facts = (WINTER_CAPABILITY_TOOLS as Readonly<Record<string, { modes: readonly SessionMode[] }>>)[
-    capabilityToolName(serverKey, def.name)
-  ];
-  return facts?.modes ?? (def.modes as readonly SessionMode[] | undefined) ?? ["code"];
+  return factsFor(serverKey, def)?.modes ?? (def.modes as readonly SessionMode[] | undefined) ?? ["code"];
 }
 
 /** `{ content: [{ type: "text", text }], isError }` — the registry's `ToolOutcome` → MCP mapping,
@@ -191,6 +181,14 @@ export function capabilityServer(
   const registry = new ToolRegistry();
   for (const def of defs) registry.register(def);
   const names = new Set(defs.map((d) => d.name));
+  // 2026-10-01 tool-surface ruling: the model sees some capability tools under ORDINARY names
+  // (`SpawnSession`, `Computer`, `Browser`, …) — the agent SDK's `toolNames` — and the ones the ruling
+  // keeps up front carry `_meta["anthropic/alwaysLoad"]`; every other one starts deferred.
+  const toolNames: Record<string, string> = {};
+  for (const def of defs) {
+    const plain = factsFor(spec.key, def)?.plainName;
+    if (plain !== undefined) toolNames[def.name] = plain;
+  }
 
   const instance: WinterMcpServerInstance = {
     listTools() {
@@ -210,6 +208,9 @@ export function capabilityServer(
           // (`capabilityInputSchema`), at CONSTRUCTION — so a def whose schema is not an object
           // shape would take down `createRuntimeSdk`, not just this tool.
           inputSchema: rendered.parameters as Record<string, unknown>,
+          // MCP's own per-tool "load me up front" knob, which the agent SDK honours over its
+          // deferred-by-default for MCP tools (claude's `_meta['anthropic/alwaysLoad']`).
+          ...(factsFor(spec.key, def)?.eager === true ? { _meta: { "anthropic/alwaysLoad": true } } : {}),
         };
       });
     },
@@ -256,5 +257,5 @@ export function capabilityServer(
     },
   };
 
-  return { type: "sdk", name: capabilityServerName(spec.key), instance };
+  return { type: "sdk", name: capabilityServerName(spec.key), instance, ...(Object.keys(toolNames).length > 0 ? { toolNames } : {}) };
 }

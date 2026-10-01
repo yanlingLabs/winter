@@ -1,153 +1,52 @@
-// `tool_result.siteIcons` end to end: Exa's citation `favicon` → the daemon's own `Search` (the
-// REAL definition, through the REAL capability server door) → the REAL Search PostToolUse hook
-// from `sessionHooksFor` → the REAL projector's `tool_result`. Plus the runtime's own report
-// (`winter_site_icons` on a host-facing tool_result block — the Winter agent SDK's WebFetch/
-// WebSearch, fixture-shaped), the url checks, and the caps on history / the remote stream.
-import { afterEach, describe, expect, test } from "bun:test";
-import type { HookCallbackMatcher, PostToolUseHookInput } from "@yanlinglabs/winter-agent-sdk";
-import type { WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
+// `tool_result.siteIcons` end to end: the runtime's own report (`winter_site_icons` on a host-facing
+// tool_result block — the Winter agent SDK's WebFetch/WebSearch/Search, fixture-shaped) → the REAL
+// projector's `tool_result`; the url checks; and the caps on history / the remote stream.
+//
+// (Until 2026-10-01 the daemon's own `Search` was a second producer, through a PostToolUse hook. `Search`
+// is the agent SDK's built-in now and reports its citations' icons on its own block like the other two,
+// so that path and its tests are gone; one test below pins that no hook step survived.)
+import { describe, expect, test } from "bun:test";
 import { SITE_ICONS_MAX, SessionEvent, ToolResultEvent } from "@yanlinglabs/winter-protocol";
-import { researchCapability } from "../../src/capabilities/research";
-import type { CapabilitySession } from "../../src/capabilities/server";
-import type { SessionMode } from "../../src/runtime-sdk/create";
-import { SEARCH_CAPABILITY_TOOL, sessionHooksFor } from "../../src/runtime-sdk/hooks";
-import {
-  ATTACHED_PER_SESSION, attachSiteIcons, cleanSiteIcons, clearSiteIcons, noteKnownSiteIcons, siteIconSessions, siteIconUrl,
-  siteIconsFromRuntimeBlock, siteIconsInText, takeSiteIcons,
-} from "../../src/runtime-sdk/site-icons";
+import { sessionHooksFor } from "../../src/runtime-sdk/hooks";
+import { cleanSiteIcons, siteIconUrl, siteIconsFromRuntimeBlock } from "../../src/runtime-sdk/site-icons";
 import { capEvent } from "../../src/sessions/history";
 import { filterRemoteStreamEvent } from "../../src/sessions/remote-stream";
 import { accept, makeProjector } from "../projector/harness";
 
 const SID = "s_site_icons";
-afterEach(() => { clearSiteIcons(SID); clearSiteIcons("s_other"); });
 
-const CITATIONS = [
-  { title: "Alpha", url: "https://alpha.example.com/a", favicon: "https://alpha.example.com/favicon.ico" },
-  // A different host for the icon than the page — the url the TOOL names is drawn, never guessed.
-  { title: "Beta", url: "https://beta.example.org/b?x=1", favicon: "https://cdn.example.net/beta/icon-32.png" },
-  // No favicon from Exa: nothing for this page (the client falls back to /favicon.ico itself).
-  { title: "Gamma", url: "https://gamma.example.com/g" },
-  // A plain-http favicon is never sent.
-  { title: "Delta", url: "https://delta.example.com/d", favicon: "http://delta.example.com/favicon.ico" },
-  // Withheld by the dangerous-domain floor: neither shown to the model nor iconed.
-  { title: "Bad", url: "https://evil.example/x", favicon: "https://evil.example/favicon.ico" },
-];
+describe("the SDK's Search reports its citations' icons on its own block", () => {
+  // Fixture: what the agent SDK's `Search` (Exa answer mode) puts on its host-facing frame.
+  const output = "The answer.\n\nSources:\n1. Alpha\n   https://alpha.example.com/a\n2. Beta\n   https://beta.example.org/b?x=1";
+  const icons = [
+    { url: "https://alpha.example.com/a", icon_url: "https://alpha.example.com/favicon.ico" },
+    // A different host for the icon than the page — the url the TOOL names is drawn, never guessed.
+    { url: "https://beta.example.org/b?x=1", icon_url: "https://cdn.example.net/beta/icon-32.png" },
+  ];
 
-function exaFetch(citations: unknown[]): typeof fetch {
-  return (async () => new Response(JSON.stringify({ answer: "The answer.", citations }), { status: 200 })) as unknown as typeof fetch;
-}
-
-function searchServer(citations: unknown[], sessionId = SID): WinterMcpServerInstance {
-  const session: CapabilitySession = { sessionId, mode: "dispatch", cwd: "/tmp", roots: ["/tmp"] };
-  const search = { secret: async () => "k", fetchFn: exaFetch(citations), dangerousDomainsAdded: () => ["evil.example"] };
-  return researchCapability(session, { search }).instance as WinterMcpServerInstance;
-}
-
-async function runSearch(citations: unknown[], sessionId = SID): Promise<string> {
-  const res = await searchServer(citations, sessionId).callTool("Search", { query: "what?" }) as { content: Array<{ text: string }>; isError: boolean };
-  expect(res.isError).toBe(false);
-  return res.content.map((c) => c.text).join("\n");
-}
-
-/** What the runtime does for a PostToolUse on the Search tool: run every UNMATCHED group's callbacks
- *  (the Search icon step is folded into the unmatched plugin callback and filters on `tool_name`). */
-function searchPostHook(sessionId = SID, mode: SessionMode = "dispatch"): HookCallbackMatcher {
-  const groups = unmatchedPostGroups(sessionId, mode);
-  if (groups.length === 0) throw new Error("no unmatched PostToolUse group");
-  return {
-    hooks: [async (input, id, opts) => {
-      let last: unknown = {};
-      for (const g of groups) for (const h of g.hooks) last = await h(input, id, opts);
-      return last as never;
-    }],
-  };
-}
-
-function unmatchedPostGroups(sessionId: string, mode: SessionMode): HookCallbackMatcher[] {
-  return (sessionHooksFor({ sessionId, roots: ["/tmp"], mode }).winter?.PostToolUse ?? []).filter((g) => g.matcher === undefined);
-}
-
-function postInput(toolUseId: string, response: unknown): PostToolUseHookInput {
-  return { session_id: SID, transcript_path: "", cwd: "/tmp", hook_event_name: "PostToolUse", tool_name: SEARCH_CAPABILITY_TOOL, tool_input: { query: "what?" }, tool_use_id: toolUseId, tool_response: response };
-}
-
-const abortSignal = () => new AbortController().signal;
-
-describe("Search → hook → projector", () => {
-  test("Exa's favicons ride the projected tool_result, in source order, and never the model's text", async () => {
-    const output = await runSearch(CITATIONS);
-    // The model-visible text names the sources but carries no icon url at all.
-    expect(output).toContain("https://alpha.example.com/a");
-    expect(output).not.toContain("favicon");
-    expect(output).not.toContain("cdn.example.net");
-    expect(output).not.toContain("evil.example");
-
-    const hook = searchPostHook();
-    expect(SEARCH_CAPABILITY_TOOL).toBe("mcp__winter__research__Search");
-    await hook.hooks[0]!(postInput("toolu_s1", output), "toolu_s1", { signal: abortSignal() });
-
+  test("they ride the projected tool_result, in source order, and never the model's text", () => {
     const { projector } = makeProjector({ sessionId: SID, mode: "dispatch" });
-    accept(projector, { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_s1", name: SEARCH_CAPABILITY_TOOL, input: { query: "what?" } }] } } as never);
-    const events = accept(projector, { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_s1", content: output }] } } as never);
+    accept(projector, { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_s1", name: "Search", input: { query: "what?" } }] } } as never);
+    const events = accept(projector, { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_s1", content: output, winter_site_icons: icons }] } } as never);
+    const call = events.find((e) => e.type === "tool_call") as Record<string, unknown> | undefined;
     const result = events.find((e) => e.type === "tool_result") as Record<string, unknown>;
     expect(result.output).toBe(output);
     expect(result.siteIcons).toEqual([
       { url: "https://alpha.example.com/a", iconUrl: "https://alpha.example.com/favicon.ico" },
       { url: "https://beta.example.org/b?x=1", iconUrl: "https://cdn.example.net/beta/icon-32.png" },
     ]);
+    expect(String(result.output)).not.toContain("favicon");
     expect(ToolResultEvent.safeParse(result).success).toBe(true);
     expect(SessionEvent.safeParse(result).success).toBe(true);
-
-    // The take is destructive: a replayed result of the same call carries nothing.
-    expect(takeSiteIcons(SID, "toolu_s1")).toBeUndefined();
+    // The renderers see the host name the pair table gives it — the one the daemon's own Search had.
+    if (call !== undefined) expect(call.name).toBe("Search");
   });
 
-  test("the model-visible output is byte-identical with and without Exa favicons", async () => {
-    const withIcons = await runSearch(CITATIONS);
-    clearSiteIcons(SID);
-    const without = await runSearch(CITATIONS.map(({ favicon: _f, ...rest }) => rest));
-    expect(withIcons).toBe(without);
-  });
-
-  test("no favicons from Exa → no siteIcons field at all", async () => {
-    const output = await runSearch(CITATIONS.map(({ favicon: _f, ...rest }) => rest));
-    await searchPostHook().hooks[0]!(postInput("toolu_s2", output), "toolu_s2", { signal: abortSignal() });
-    const { projector } = makeProjector({ sessionId: SID });
-    const events = accept(projector, { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_s2", content: output }] } } as never);
-    expect(Object.keys(events[0]!)).not.toContain("siteIcons");
-  });
-
-  test("another session's Search never lends this one its icons", async () => {
-    const output = await runSearch(CITATIONS, "s_other");
-    await searchPostHook().hooks[0]!(postInput("toolu_s3", output), "toolu_s3", { signal: abortSignal() });
-    expect(takeSiteIcons(SID, "toolu_s3")).toBeUndefined();
-  });
-
-  test("another tool's result naming the same urls attaches nothing (the unmatched hook filters on tool_name)", async () => {
-    const output = await runSearch(CITATIONS);
-    await searchPostHook().hooks[0]!({ ...postInput("toolu_x", output), tool_name: "WebFetch" }, "toolu_x", { signal: abortSignal() });
-    expect(takeSiteIcons(SID, "toolu_x")).toBeUndefined();
-  });
-
-  test("a code session's hook set gains no callback, and its unmatched callback attaches nothing", async () => {
-    const callbacks = (mode: SessionMode) => (sessionHooksFor({ sessionId: SID, roots: ["/tmp"], mode }).winter?.PostToolUse ?? []).reduce((n, g) => n + g.hooks.length, 0);
-    // The step is FOLDED into the existing unmatched plugin callback: one callback in every mode.
-    for (const mode of ["code", "chat", "dispatch"] as const) expect(unmatchedPostGroups(SID, mode).flatMap((g) => g.hooks)).toHaveLength(1);
-    expect(callbacks("code")).toBe(callbacks("dispatch"));
-    expect(callbacks("chat")).toBe(callbacks("dispatch"));
-    const output = await runSearch(CITATIONS);
-    await searchPostHook(SID, "code").hooks[0]!(postInput("toolu_code", output), "toolu_code", { signal: abortSignal() });
-    expect(takeSiteIcons(SID, "toolu_code")).toBeUndefined();
-    await searchPostHook(SID, "chat").hooks[0]!(postInput("toolu_chat", output), "toolu_chat", { signal: abortSignal() });
-    expect(takeSiteIcons(SID, "toolu_chat")).toHaveLength(2);
-  });
-
-  test("a non-string tool_response is ignored, never thrown on", async () => {
-    await runSearch(CITATIONS);
-    const out = await searchPostHook().hooks[0]!(postInput("toolu_s4", { not: "text" }), "toolu_s4", { signal: abortSignal() });
-    expect(out).toEqual({});
-    expect(takeSiteIcons(SID, "toolu_s4")).toBeUndefined();
+  test("no daemon-side hook step is left: the unmatched PostToolUse group is the plugin callback alone, in every mode", () => {
+    for (const mode of ["code", "chat", "dispatch"] as const) {
+      const unmatched = (sessionHooksFor({ sessionId: SID, roots: ["/tmp"], mode }).winter?.PostToolUse ?? []).filter((g) => g.matcher === undefined);
+      expect(unmatched.flatMap((g) => g.hooks)).toHaveLength(1);
+    }
   });
 });
 
@@ -171,20 +70,18 @@ describe("the runtime's own report (winter_site_icons on the block)", () => {
     expect(siteIconsFromRuntimeBlock({ winter_site_icons: [{ url: "https://a.example.com/", icon_url: "https://a.example.com/i.png" }] })).toEqual([{ url: "https://a.example.com/", iconUrl: "https://a.example.com/i.png" }]);
   });
 
-  test("merged with an attached list, deduplicated by page url (the attached one first)", () => {
-    attachSiteIcons(SID, "toolu_m", [{ url: "https://docs.example.com/page", iconUrl: "https://docs.example.com/a.ico" }]);
+  test("duplicates by page url are dropped (the first wins)", () => {
     const { projector } = makeProjector({ sessionId: SID });
     const frame = structuredClone(fetchFrame);
-    frame.message.content[0]!.tool_use_id = "toolu_m";
-    frame.message.content[0]!.winter_site_icons.push({ url: "https://other.example.com/", icon_url: "https://other.example.com/o.png" });
+    frame.message.content[0]!.winter_site_icons.push({ url: "https://docs.example.com/page", icon_url: "https://docs.example.com/second.png" }, { url: "https://other.example.com/", icon_url: "https://other.example.com/o.png" });
     const events = accept(projector, frame as never);
     expect((events[0] as { siteIcons?: unknown }).siteIcons).toEqual([
-      { url: "https://docs.example.com/page", iconUrl: "https://docs.example.com/a.ico" },
+      { url: "https://docs.example.com/page", iconUrl: "https://docs.example.com/static/icon.png" },
       { url: "https://other.example.com/", iconUrl: "https://other.example.com/o.png" },
     ]);
   });
 
-  test("a block without the field (today's pinned runtime) projects exactly as before", () => {
+  test("a block without the field projects exactly as before", () => {
     const { projector } = makeProjector({ sessionId: SID });
     const events = accept(projector, { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "x" }] } } as never);
     expect(events[0]).toEqual({ type: "tool_result", sessionId: SID, threadId: "main", callId: "t1", output: "x", isError: false, seq: (events[0] as { seq: number }).seq, ts: (events[0] as { ts: number }).ts } as never);
@@ -209,29 +106,6 @@ describe("url checks and bounds", () => {
     const clean = cleanSiteIcons(many)!;
     expect(clean).toHaveLength(SITE_ICONS_MAX);
     expect(new Set(clean.map((c) => c.url)).size).toBe(SITE_ICONS_MAX);
-  });
-
-  test("a url found only as the head of a longer one does not match", () => {
-    noteKnownSiteIcons(SID, [{ url: "https://a.example.com/x", iconUrl: "https://a.example.com/i.png" }]);
-    expect(siteIconsInText(SID, "see https://a.example.com/xy")).toBeUndefined();
-    expect(siteIconsInText(SID, "see https://a.example.com/x\n")).toEqual([{ url: "https://a.example.com/x", iconUrl: "https://a.example.com/i.png" }]);
-  });
-
-  test("unprojected per-call attachments are capped per session, oldest first out", () => {
-    const icons = [{ url: "https://a.example.com/x", iconUrl: "https://a.example.com/i.png" }];
-    for (let i = 0; i < ATTACHED_PER_SESSION + 5; i++) attachSiteIcons(SID, `t${i}`, icons);
-    for (let i = 0; i < 5; i++) expect(takeSiteIcons(SID, `t${i}`)).toBeUndefined();
-    expect(takeSiteIcons(SID, "t5")).toEqual(icons);
-    expect(takeSiteIcons(SID, `t${ATTACHED_PER_SESSION + 4}`)).toEqual(icons);
-  });
-
-  test("clearSiteIcons drops both the known pairs and any pending attachment", () => {
-    noteKnownSiteIcons(SID, [{ url: "https://a.example.com/x", iconUrl: "https://a.example.com/i.png" }]);
-    attachSiteIcons(SID, "t9", [{ url: "https://a.example.com/x", iconUrl: "https://a.example.com/i.png" }]);
-    clearSiteIcons(SID);
-    expect(siteIconsInText(SID, "https://a.example.com/x")).toBeUndefined();
-    expect(takeSiteIcons(SID, "t9")).toBeUndefined();
-    expect(siteIconSessions()).toBe(0);
   });
 
   test("history and the remote stream keep a maximal siteIcons intact beside a capped output", () => {

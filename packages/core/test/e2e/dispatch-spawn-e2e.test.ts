@@ -175,6 +175,32 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     await until(() => h.log(h.dispatchId).some((e) => e.type === "turn_completed" && e.seq > wake.seq) || undefined, 30_000, "the coordinator's wake turn");
   }, 90_000);
 
+  test("(1b) the MODEL spawns by the plain name it is shown — `SpawnSession`, through the runtime, not the server door", async () => {
+    // The 2026-10-01 tool-surface ruling: the coordinator's model sees `SpawnSession`, never
+    // `mcp__winter__sessions__session_spawn`. `winter-test/calls` makes the call exactly as a model
+    // would, by that name; the runtime forwards it to the daemon's `sessions` server as `session_spawn`.
+    await h.daemon!.winter.get(h.dispatchId)?.end();
+    h.daemon!.sessions.setModel(h.dispatchId, "winter-test/calls");
+    try {
+      const before = h.client.events.length;
+      const args = { dir: h.work, prompt: "hello from the model", model: "winter-test/echo", title: "Model kid" };
+      await h.client.call(METHODS.sessionSend, { sessionId: h.dispatchId, text: `CALL SpawnSession ${JSON.stringify(args)}` });
+      await until(() => h.client.events.some((e) => h.client.events.indexOf(e) >= before && e.type === "turn_completed" && e.sessionId === h.dispatchId) || undefined, 30_000, "the coordinator's spawning turn");
+      const result = [...h.log(h.dispatchId)].reverse().find((e) => e.type === "tool_result") as { output: string; isError: boolean };
+      expect(result.isError).toBe(false);
+      const child = /spawned session (s_[0-9a-f]+)/.exec(result.output)?.[1];
+      expect(child).toBeDefined();
+      expect(h.daemon!.sessions.meta(child!)).toMatchObject({ mode: "code", origin: "dispatch-child", parentSessionId: h.dispatchId });
+      // The projected call carries the HOST name the gate, the cards and the renderers key on.
+      const call = [...h.log(h.dispatchId)].reverse().find((e) => e.type === "tool_call") as { name: string };
+      expect(call.name).toBe("session_spawn");
+      await until(() => h.updates().find((u) => u.childSessionId === child && u.status === "completed"), 30_000, "the model-spawned child's completed update");
+    } finally {
+      await h.daemon!.winter.get(h.dispatchId)?.end();
+      h.daemon!.sessions.setModel(h.dispatchId, "winter-test/echo");
+    }
+  }, 90_000);
+
   test("(2) a child's approval card is relayed onto the coordinator's log and answered at the child's id", async () => {
     const res = await h.spawn({ dir: h.work, prompt: "use the tool", model: "winter-test/tooluse", title: "Tool kid" });
     expect(res.isError).toBe(false);
