@@ -234,6 +234,27 @@ describe("FAIL CLOSED (2026-10-01 review): a child that offers a built-in its `O
     expect(h.session.turnRunning).toBe(false);
   });
 
+  test("an init that states NO tool list is a violation when the incarnation has an allowed list", async () => {
+    const h = withTools();
+    await h.session.open();
+    const frame = init(h.q().options);
+    delete frame["tools"];
+    h.q().emit(frame);
+    await h.settled();
+    const errors = seen(h, "agent_error") as Array<{ code?: string; message: string }>;
+    expect(errors.map((e) => e.code)).toEqual(["tool_surface_unenforced"]);
+    expect(errors[0]!.message).toContain("init.tools missing");
+  });
+
+  test("the refused child is ABORTED at once — no end-of-input grace for a child that ignores its closed input", async () => {
+    const h = withTools();
+    await h.session.open();
+    h.q().ignoreClose = true;
+    h.q().emit(init(h.q().options, [...ALLOWED, "Bash"]));
+    await h.settled();   // 5 ms — inside the harness's 25 ms end grace
+    expect(h.tracked[0]!.abort.signal.aborted).toBe(true);
+  });
+
   test("code (no `tools` stated) is never checked", async () => {
     const h = harness();
     await h.session.open();
