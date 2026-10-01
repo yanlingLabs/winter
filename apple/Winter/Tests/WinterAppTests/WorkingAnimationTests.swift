@@ -133,7 +133,9 @@ final class WorkingAnimationTests: XCTestCase {
     }
 
     func testEveryChildGetsItsOwnColourAndNoneIsDispatchsBlue() {
-        let visible = (0..<DispatchPillMetrics.maxChildPills).map(PlumePalette.child(at:))
+        let widest = childPillLayout(count: 50, rowWidth: DispatchPillMetrics.expandedWidth).visibleCount
+        XCTAssertLessThanOrEqual(widest, PlumePalette.childPalettes.count, "a full wide row never repeats a colour")
+        let visible = (0..<widest).map(PlumePalette.child(at:))
         for (i, a) in visible.enumerated() {
             XCTAssertNotEqual(a, .blue, "a child never wears Dispatch's own colour")
             for b in visible[(i + 1)...] { XCTAssertNotEqual(a, b, "the row's pills never share a colour") }

@@ -55,7 +55,7 @@ struct FullScreenPillView: View {
                 ChildSessionPillsView(
                     children: adapter.dispatchChildren,
                     rowWidth: min(DispatchPillMetrics.expandedWidth,
-                                  CGFloat(min(adapter.dispatchChildren.count, DispatchPillMetrics.maxChildPills))
+                                  CGFloat(min(adapter.dispatchChildren.count, 4))
                                       * Self.headerChildPillWidth),
                     onOpen: { controller.onOpenChild?($0) },
                     onStop: { controller.onStopChild?($0) },

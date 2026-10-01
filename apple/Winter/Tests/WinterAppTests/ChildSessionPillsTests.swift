@@ -1,8 +1,9 @@
 import XCTest
 @testable import Winter
 
-/// The child row's width split — 1 child = the main pill's width, 2 = halves, 3 = thirds,
-/// 4 = quarters, more than 4 = the first 3 plus a "+n" circle — and the status mapping.
+/// The child row's width split — 1 child = the main pill's width, then halves, thirds, … for as long
+/// as every pill keeps `minChildPillWidth`, then as many as fit plus a "+n" circle — and the status
+/// mapping.
 final class ChildSessionPillsTests: XCTestCase {
     private let row: CGFloat = 360
     private let gap = DispatchPillMetrics.childPillGap
@@ -18,26 +19,40 @@ final class ChildSessionPillsTests: XCTestCase {
                        ChildPillLayout(visibleCount: 1, pillWidth: row, overflowCount: 0))
     }
 
-    func testTwoThreeAndFourSplitTheRowEvenly() {
-        for count in 2...4 {
+    func testTheRowKeepsSplittingWhileEveryPillStaysWideEnough() {
+        let fitting = Int(((row + gap) / (DispatchPillMetrics.minChildPillWidth + gap)).rounded(.down))
+        XCTAssertGreaterThanOrEqual(fitting, 4, "the compact pill's row holds at least four")
+        for count in 2...fitting {
             let layout = childPillLayout(count: count, rowWidth: row)
             XCTAssertEqual(layout.visibleCount, count)
             XCTAssertEqual(layout.overflowCount, 0)
             XCTAssertEqual(layout.pillWidth * CGFloat(count) + gap * CGFloat(count - 1), row, accuracy: 0.001,
                            "\(count) pills and their gaps fill the row exactly")
+            XCTAssertGreaterThanOrEqual(layout.pillWidth, DispatchPillMetrics.minChildPillWidth)
         }
         XCTAssertEqual(childPillLayout(count: 2, rowWidth: row).pillWidth, (row - gap) / 2)
-        XCTAssertEqual(childPillLayout(count: 4, rowWidth: row).pillWidth, (row - 3 * gap) / 4)
     }
 
-    func testMoreThanFourShowsThreeAndAPlusNCircle() {
-        for count in [5, 6, 12] {
+    func testOnceThePillsNoLongerFitTheRestBecomeAPlusNCircle() {
+        let fitting = Int(((row + gap) / (DispatchPillMetrics.minChildPillWidth + gap)).rounded(.down))
+        for count in [fitting + 1, fitting + 3, 30] {
             let layout = childPillLayout(count: count, rowWidth: row)
-            XCTAssertEqual(layout.visibleCount, 3)
-            XCTAssertEqual(layout.overflowCount, count - 3)
-            XCTAssertEqual(layout.pillWidth * 3 + gap * 3 + circle, row, accuracy: 0.001,
-                           "three pills, the circle, and their gaps fill the row exactly")
+            XCTAssertGreaterThan(layout.overflowCount, 0)
+            XCTAssertEqual(layout.visibleCount + layout.overflowCount, count, "every child is counted")
+            XCTAssertGreaterThanOrEqual(layout.pillWidth, DispatchPillMetrics.minChildPillWidth)
+            XCTAssertEqual(layout.pillWidth * CGFloat(layout.visibleCount) + gap * CGFloat(layout.visibleCount) + circle,
+                           row, accuracy: 0.001, "the pills, the circle, and their gaps fill the row exactly")
         }
+    }
+
+    func testTheWiderTypingPillHoldsMoreChildren() {
+        let compact = childPillLayout(count: 30, rowWidth: DispatchPillMetrics.compactWidth).visibleCount
+        let expanded = childPillLayout(count: 30, rowWidth: DispatchPillMetrics.expandedWidth).visibleCount
+        XCTAssertGreaterThan(expanded, compact)
+    }
+
+    func testAChildPillIsTheMainPillsHeight() {
+        XCTAssertEqual(DispatchPillMetrics.childRowHeight, DispatchPillMetrics.pillHeight)
     }
 
     func testTheRowFollowsTheMainPillsWidth() {
@@ -48,6 +63,7 @@ final class ChildSessionPillsTests: XCTestCase {
 
     func testAWidthTooSmallNeverGoesNegative() {
         XCTAssertEqual(childPillLayout(count: 9, rowWidth: 10).pillWidth, 0)
+        XCTAssertEqual(childPillLayout(count: 1, rowWidth: 10).visibleCount, 1, "one child always shows")
     }
 
     func testStatusMapping() {

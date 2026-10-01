@@ -338,9 +338,13 @@ struct PlumePalette: Equatable {
     static let mint = PlumePalette(tail: (0.0, 0.50, 0.46), body: (0.15, 0.84, 0.70), hot: (0.82, 1.0, 0.94))
     static let rose = PlumePalette(tail: (0.82, 0.08, 0.40), body: (1.0, 0.36, 0.60), hot: (1.0, 0.87, 0.92))
     static let ember = PlumePalette(tail: (0.88, 0.30, 0.0), body: (1.0, 0.60, 0.12), hot: (1.0, 0.94, 0.72))
+    static let lime = PlumePalette(tail: (0.28, 0.58, 0.0), body: (0.58, 0.88, 0.18), hot: (0.92, 1.0, 0.78))
+    static let gold = PlumePalette(tail: (0.72, 0.50, 0.0), body: (1.0, 0.82, 0.16), hot: (1.0, 0.97, 0.80))
+    static let orchid = PlumePalette(tail: (0.62, 0.0, 0.66), body: (0.90, 0.30, 0.92), hot: (1.0, 0.86, 1.0))
 
-    /// The children's palettes, in the order the row hands them out — none of them Dispatch's blue.
-    static let childPalettes: [PlumePalette] = [.violet, .mint, .rose, .ember]
+    /// The children's palettes, in the order the row hands them out — none of them Dispatch's blue,
+    /// enough that a wide row (`childPillLayout` at the typing pill's width) never repeats one.
+    static let childPalettes: [PlumePalette] = [.violet, .mint, .rose, .ember, .lime, .gold, .orchid]
 
     /// The palette for the child at `index` in the dispatch session's roster (spawn order): the row's
     /// visible pills never share a colour.
@@ -562,47 +566,5 @@ struct WorkingAnimationView: View {
         let dt = lastTick.map { now.timeIntervalSince($0) } ?? (1.0 / 60.0)
         lastTick = now
         model.tick(dt: dt, thrown: thrown, animatesPlume: !reduceMotion)
-    }
-}
-
-/// The favicons the plume throws, fetched straight from each site (`https://<host>/favicon.ico`) —
-/// never through a third-party favicon service, which would tell it every site Dispatch reads — and
-/// kept in memory for the app's lifetime. A host that fails (no favicon, not an image, too big, a
-/// timeout) is not asked again; its tiles show a globe. Bounded: past `capacity` hosts nothing new
-/// is fetched.
-@MainActor
-final class FaviconCache {
-    static let shared = FaviconCache()
-    static let capacity = 256
-    static let maxBytes = 256 * 1024
-
-    private var images: [String: NSImage] = [:]
-    private var pending: Set<String> = []
-    private var failed: Set<String> = []
-
-    /// The host's favicon if it has loaded; otherwise nil, starting the fetch the first time asked.
-    func image(for host: String) -> NSImage? {
-        if let image = images[host] { return image }
-        guard plumeFaviconHostAllowed(host), !pending.contains(host), !failed.contains(host),
-              images.count + pending.count < Self.capacity,
-              let url = URL(string: "https://\(host)/favicon.ico") else { return nil }
-        pending.insert(host)
-        Task { [weak self] in
-            let image = await Self.fetch(url)
-            guard let self else { return }
-            self.pending.remove(host)
-            if let image { self.images[host] = image } else { self.failed.insert(host) }
-        }
-        return nil
-    }
-
-    private nonisolated static func fetch(_ url: URL) async -> NSImage? {
-        var request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 6)
-        request.setValue("image/*", forHTTPHeaderField: "Accept")
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200,
-              !data.isEmpty, data.count <= maxBytes,
-              let image = NSImage(data: data), image.isValid else { return nil }
-        return image
     }
 }
