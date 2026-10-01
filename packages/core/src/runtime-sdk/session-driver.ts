@@ -56,7 +56,8 @@ import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import { elicitationHandlerFor, elicitationTurnTracker, type ElicitationBroker } from "./url-elicitation";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
-import { clearSession } from "./diff-attach";
+import { clearSession as clearDiffSession } from "./diff-attach";
+import { clearSiteIcons } from "./site-icons";
 import { credentialPresenceFrom, credentialRefFor, refMaterialPresent } from "./keychain";
 import { SHIPPED_DANGEROUS_DOMAINS } from "../agent/dangerous-domains";
 import { apiKeyProviderIsUnauthenticated, exaKeyPresent, missingCredentialDetail } from "./credentials";
@@ -75,6 +76,9 @@ import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
 import { dispatchEffortFor } from "../agent/dispatch-config";
 import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers, type LoadedAgentDefinitions } from "../agent/agent-definitions";
+
+/** Both per-session, in-memory tool_result side channels: `fileDiff` and `siteIcons`. */
+function clearSession(sessionId: string): void { clearDiffSession(sessionId); clearSiteIcons(sessionId); }
 
 /**
  * Daemon settings surface batch 3: the ONE merge the incarnation builder calls — `<home>/agents/*.md`

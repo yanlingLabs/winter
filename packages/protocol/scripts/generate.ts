@@ -46,6 +46,10 @@ const fixtures: Record<string, unknown> = {
   // unequal (198 vs 33) so a swapped-argument Swift decode fails this fixture's content check, not
   // just its optionality.
   "tool_result_with_file_diff": { ...base, threadId: "main", type: "tool_result", callId: "call_60", output: "edited /tmp/fixture.swift (-33 +198)", isError: false, fileDiff: { path: "/tmp/fixture.swift", added: 198, removed: 33, diffId: "d1f2e3" } },
+  // siteIcons is additive/optional on the EXISTING tool_result shape — a dedicated fixture so Swift
+  // round-trips one carrying it. Two entries, the icon of the second on a different host than its
+  // page, so a Swift decode that drops, reorders or swaps url/iconUrl fails the content check.
+  "tool_result_with_site_icons": { ...base, threadId: "main", type: "tool_result", callId: "call_61", output: "answer\n\nSources:\n1. A\n   https://a.example.com/x\n2. B\n   https://b.example.org/y", isError: false, siteIcons: [{ url: "https://a.example.com/x", iconUrl: "https://a.example.com/favicon.ico" }, { url: "https://b.example.org/y", iconUrl: "https://cdn.example.net/b/icon-32.png" }] },
   // SP3 T4b review fix (Phase-A CRITICAL): this BASE fixture deliberately carries NO issuedAt/
   // expiresAt — it is the pre-T4b persisted shape, and Swift round-tripping it proves an OLD
   // session-JSONL approval_requested still decodes with the fields ABSENT (they are optional).

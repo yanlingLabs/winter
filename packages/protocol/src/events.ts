@@ -137,10 +137,31 @@ export const FileDiffSummary = z.object({
 });
 export type FileDiffSummary = z.infer<typeof FileDiffSummary>;
 
+/** `ToolResultEvent.siteIcons` bounds. Load-bearing for the same reason as `FileDiffSummary`'s: the
+ *  field rides a PERSISTED, remote-streamed event. At the maximum (10 entries × 2 urls × 2048) the
+ *  field is ~41 KiB, so with `tool_result.output` at `capEvent`'s 64 KiB per-string cap the event
+ *  stays far under its 160 KiB whole-event ceiling — the tighter second pass, which would cut these
+ *  urls into garbage, can never fire because of them. */
+export const SITE_ICONS_MAX = 10;
+export const SITE_ICON_URL_MAX_LENGTH = 2048;
+/** An https url of printable ASCII only (what `new URL(...).href` produces) — never another scheme,
+ *  never whitespace or a control character. */
+export const SiteIconUrl = z.string().max(SITE_ICON_URL_MAX_LENGTH).regex(/^https:\/\/[!-~]+$/);
+/** One site a web tool's result names, and the icon the TOOL knows for it: Exa's citation/result
+ *  `favicon`, or the icon a fetched page declares. Never model-visible — a client (the Mac's dispatch
+ *  pill) draws the site from `iconUrl` instead of guessing `/favicon.ico`. */
+export const SiteIcon = z.object({ url: SiteIconUrl, iconUrl: SiteIconUrl });
+export type SiteIcon = z.infer<typeof SiteIcon>;
+
 export const ToolResultEvent = ThreadBase.extend({
   type: z.literal("tool_result"), callId: z.string().min(1), output: z.string(), isError: z.boolean(),
   /** Set only by the daemon engine for edit/write/notebook_edit; chat-mode engines never produce it. */
   fileDiff: FileDiffSummary.optional(),
+  /** Set only by the daemon for a web tool (its own `Search`; the runtime's `WebFetch`/`WebSearch`
+   *  when the runtime reports icons), in result order, one per page url. Absent when no icon is
+   *  known — every older event, every other tool. The phone's chat engine never produces it, and
+   *  `sync.push` refuses it. */
+  siteIcons: z.array(SiteIcon).min(1).max(SITE_ICONS_MAX).optional(),
 });
 /** Opaque provider reasoning item (Responses API), captured at output_item.done and replayed
  *  verbatim into later requests (CC/Codex parity — see the history-parity spec). itemJson is

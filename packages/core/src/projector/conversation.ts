@@ -1,4 +1,5 @@
 import { takeFileDiff } from "../runtime-sdk/diff-attach";
+import { siteIconsForResult } from "../runtime-sdk/site-icons";
 import type { ProjectedEvent, ProtocolSdkMessage } from "./types";
 
 /**
@@ -191,7 +192,7 @@ export function isErrorResult(block: ContentBlock): boolean {
  * call, so it is also the one place the hooks lane's PostToolUse-produced diff summary (attached
  * under the SAME sessionId/toolUseId) can be handed to the persisted event. A take is destructive
  * (`diff-attach.ts`'s own doc), so a replayed `tool_result` never re-attaches a diff — the summary
- * rides the event exactly once, the same turn it was produced on.
+ * rides the event exactly once, the same turn it was produced on. `siteIcons` follows the same rule.
  */
 export function toolResults(frame: UserFrame, sessionId: string, threadId: string): ProjectedEvent[] {
   const out: ProjectedEvent[] = [];
@@ -201,7 +202,15 @@ export function toolResults(frame: UserFrame, sessionId: string, threadId: strin
     if (callId === undefined || callId.length === 0) continue;
     const isError = isErrorResult(b);
     const fileDiff = takeFileDiff(sessionId, callId);
-    out.push({ type: "tool_result", sessionId, threadId, callId, output: toolResultOutput(b), isError, ...(fileDiff === undefined ? {} : { fileDiff }) });
+    // `siteIcons` (`runtime-sdk/site-icons.ts`): the icons the web tool itself knew — attached by the
+    // Search hook under this id, and/or reported on the block by the runtime. Taken here for the same
+    // reason `fileDiff` is: this is the one emission site, and the take is destructive.
+    const siteIcons = siteIconsForResult(sessionId, callId, b);
+    out.push({
+      type: "tool_result", sessionId, threadId, callId, output: toolResultOutput(b), isError,
+      ...(fileDiff === undefined ? {} : { fileDiff }),
+      ...(siteIcons === undefined ? {} : { siteIcons }),
+    });
   }
   return out;
 }
