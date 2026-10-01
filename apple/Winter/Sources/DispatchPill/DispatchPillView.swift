@@ -139,18 +139,34 @@ struct DispatchPillComposerBar: View {
         let running = adapter.turnRunning
         let draft = adapter.composerDraft
         let working = !expanded && running
-        let showsAccessories = expanded
+        let preview = expanded ? controller.turnPreview : nil
+        let showsAccessories = expanded && preview == nil
             && dispatchPillAccessoryButtonsVisible(draft: draft, textWidth: dispatchPillDraftTextWidth(draft))
-        VStack(spacing: 0) {
-            if expanded, let preview = controller.turnPreview {
+        ZStack(alignment: .top) {
+            composerRow(draft: draft, expanded: expanded, running: running, working: working,
+                        hidesComposer: working || preview != nil, showsAccessories: showsAccessories)
+                .animation(.easeOut(duration: 0.2)) { $0.opacity(preview == nil ? 1 : 0) }
+                .allowsHitTesting(preview == nil)
+            // A pinned turn shows ALONE — no composer. The composer stays mounted underneath,
+            // invisible, so typing still lands in it (and the first keystroke leaves the turn).
+            if let preview {
                 ExpandedPillTurnPreview(preview: preview)
+                    .contentShape(Rectangle())
+                    .onTapGesture { controller.exitPreview() }
                     .transition(.opacity.animation(.easeOut(duration: 0.2)))
             }
+        }
+    }
+
+    private func composerRow(draft: String, expanded: Bool, running: Bool, working: Bool,
+                             hidesComposer: Bool, showsAccessories: Bool) -> some View {
+        VStack(spacing: 0) {
             HStack(alignment: .bottom, spacing: DispatchPillMetrics.rowSpacing) {
                 // Animations here are SCOPED (the body form, transitions carrying their own), never
                 // `.animation(_:value:)` on a container: that would also ease the container's layout,
                 // which the spring already drives frame by frame — the two would fight.
-                field(draft: draft, expanded: expanded, running: running, showsAccessories: showsAccessories)
+                field(draft: draft, expanded: expanded, running: running, hidden: hidesComposer,
+                      showsAccessories: showsAccessories)
                     .animation(.easeOut(duration: 0.25)) { $0.opacity(working ? 0 : 1) }
                     .allowsHitTesting(!working)
                 PillSendStopButton(
@@ -180,7 +196,8 @@ struct DispatchPillComposerBar: View {
     /// The text field, at a FIXED width (`composerFieldWidth`) in a flexible, clipped slot — the slot
     /// follows the animated shape, the text inside never re-wraps mid-animation. ↗ and ⋯ float over
     /// its trailing end, outside the clip so their blur is not cut off.
-    private func field(draft: String, expanded: Bool, running: Bool, showsAccessories: Bool) -> some View {
+    private func field(draft: String, expanded: Bool, running: Bool, hidden: Bool,
+                       showsAccessories: Bool) -> some View {
         Color.clear
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .bottomLeading) {
@@ -200,7 +217,8 @@ struct DispatchPillComposerBar: View {
                         onContentHeightChange: { controller.composerContentHeightChanged($0) },
                         usesAdaptiveColors: true,
                         tintOverride: .white,
-                        onViewCreated: { controller.registerComposerView($0) }
+                        onViewCreated: { controller.registerComposerView($0) },
+                        viewAlpha: hidden ? 0 : 1
                     )
                 }
                 .frame(width: controller.composerFieldWidth, height: controller.composerFieldHeight)
@@ -227,6 +245,15 @@ struct DispatchPillComposerBar: View {
                 }
             }
     }
+}
+
+/// A pinned turn's height for `reply`, measured at the composer's own face (the size every line of
+/// the turn is drawn at).
+func dispatchPillPreviewHeight(reply: String) -> CGFloat {
+    let font = Typography.sansNS(ofSize: Typography.composerFieldSize)
+    let width = ceil((reply as NSString).size(withAttributes: [.font: font]).width)
+    return dispatchPillPreviewHeight(replyWidth: width,
+                                     lineHeight: ceil(NSLayoutManager().defaultLineHeight(for: font)))
 }
 
 /// The draft's single-line width at the composer's own face — what `dispatchPillAccessoryButtonsVisible`

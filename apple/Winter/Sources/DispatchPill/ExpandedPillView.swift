@@ -80,39 +80,36 @@ struct ExpandedPillAccessoryButtons: View {
     }
 }
 
-/// A swiped-to past turn: its prompt shortened to one line, the first line of its reply, and where it
-/// sits in the conversation ("3/7"). Swiping on past the newest turn returns to the composer.
+/// A pinned turn — swiped to, or a reply that just arrived — shown ALONE in the pill (no composer):
+/// its prompt shortened to one line, the start of its reply, and where it sits in the conversation
+/// ("3/7"). Every line is at the composer's own text size; the prompt is told apart by colour, not
+/// size. The pill is sized to the reply's lines (`dispatchPillPreviewHeight`). Typing, a click on
+/// it, Esc, or swiping on past the newest turn returns to the composer.
 struct ExpandedPillTurnPreview: View {
     let preview: DispatchPillTurnPreview
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: DispatchPillMetrics.previewLineGap) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(preview.prompt)
-                    .font(Typography.caption(.semibold))
-                    .foregroundStyle(Theme.textSecondary)
+                    .font(Typography.composerField(.medium))
+                    .foregroundStyle(Color.white.opacity(0.5))
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 0)
                 Text(preview.position)
                     .font(Typography.caption())
-                    .foregroundStyle(Theme.textMuted)
+                    .foregroundStyle(Color.white.opacity(0.35))
             }
             Text(preview.reply)
-                .font(Typography.label())
-                .foregroundStyle(Theme.textPrimary)
-                .lineLimit(2)
+                .font(Typography.composerField())
+                .foregroundStyle(Color.white)
+                .lineLimit(DispatchPillMetrics.previewReplyLines)
                 .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, DispatchPillMetrics.leadingPadding)
-        .padding(.top, 10)
-        .frame(height: DispatchPillMetrics.previewHeight, alignment: .top)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Theme.hairlineElevated)
-                .frame(height: 1)
-                .padding(.horizontal, DispatchPillMetrics.leadingPadding)
-        }
+        .padding(.vertical, DispatchPillMetrics.previewVerticalInset)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }

@@ -476,8 +476,25 @@ final class DispatchPillController: ObservableObject {
 
     /// The text field's height inside the bar for the current target.
     var composerFieldHeight: CGFloat {
-        let preview = (presentation == .expanded && historyIndex != nil) ? DispatchPillMetrics.previewHeight : 0
-        return max(1, morph.target.height - preview - DispatchPillMetrics.composerVerticalPadding)
+        // While a turn is pinned the composer is hidden under it, at the height it would have.
+        let composer = previewHeight == nil ? morph.target.height
+            : dispatchPillMainSize(presentation: .expanded, composerContentHeight: composerContentHeight,
+                                   visibleFrame: lockedVisibleFrame).height
+        return max(1, composer - DispatchPillMetrics.composerVerticalPadding)
+    }
+
+    /// The pinned turn's height, or nil when no turn is pinned (the composer shows).
+    private var previewHeight: CGFloat? {
+        guard presentation == .expanded, let preview = turnPreview else { return nil }
+        return dispatchPillPreviewHeight(reply: preview.reply)
+    }
+
+    /// A click on a pinned turn (and Esc there): back to the composer, keyboard included.
+    func exitPreview() {
+        guard historyIndex != nil else { return }
+        historyIndex = nil
+        retargetMain()
+        engage()
     }
 
     /// The text field's width for the current TARGET — fixed while the spring runs, so the text
@@ -644,7 +661,7 @@ final class DispatchPillController: ObservableObject {
     private func mainTarget() -> CGSize {
         dispatchPillMainSize(presentation: presentation,
                              composerContentHeight: composerContentHeight,
-                             showsPreview: presentation == .expanded && historyIndex != nil,
+                             previewHeight: previewHeight,
                              visibleFrame: lockedVisibleFrame)
     }
 

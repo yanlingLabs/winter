@@ -158,6 +158,19 @@ final class DispatchPillSnapshotTests: XCTestCase {
         try render(p, "9-working-children")
     }
 
+    func test10PinnedTurnShowsAlone() throws {
+        let p = pill { s in
+            s.exchanges = [Exchange(prompt: "can you spawn a session in code and tell it to set a sleep 30 in foreground",
+                                    reply: "Noted — that one didn't decode into a task. What do you want me to do?"),
+                           Exchange(prompt: "summarise the release branch",
+                                    reply: "Fourteen commits since Monday: the dispatch pill, the plume, child colours, and the session_spawn rebuild, which is still in review before it merges.")]
+        }
+        p.setPresentationForTesting(.expanded, historyIndex: 0)
+        try render(p, "10-pinned-turn-short")
+        p.setPresentationForTesting(.expanded, historyIndex: 1)
+        try render(p, "10-pinned-turn-long")
+    }
+
     func test7ChildPills() throws {
         let titles = ["fix auth", "docs pass", "bump sdk", "flaky test", "perf trace", "triage"]
         let statuses = ["running", "awaiting_approval", "completed", "running", "error", "running"]

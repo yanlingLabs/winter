@@ -56,6 +56,10 @@ struct ComposerTextView: NSViewRepresentable {
     /// on the AppKit view itself, which a SwiftUI modifier does not reach (the dispatch pill blurs
     /// it while its shape changes). `nil` (the default) everywhere else.
     var onViewCreated: ((NSScrollView) -> Void)? = nil
+    /// The AppKit view's own alpha, eased over 0.2 s on a change. For a host that hides the
+    /// composer while keeping it mounted (and first responder): SwiftUI's `.opacity` is not promised
+    /// to reach an `NSViewRepresentable`'s view. `1` (the default) leaves every other surface alone.
+    var viewAlpha: CGFloat = 1
     /// The typed text's point size. The default is BOUND to the user-message size (ruling
     /// 2026-08-13: the composer types at the size the sent bubble renders, derived from the
     /// same live metrics, so the two can never diverge). NO home overrides it any more: the
@@ -211,6 +215,12 @@ struct ComposerTextView: NSViewRepresentable {
             height: .greatestFiniteMagnitude
         )
         context.coordinator.reportHeight(textView)
+        if nsView.alphaValue != viewAlpha {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.2
+                nsView.animator().alphaValue = viewAlpha
+            }
+        }
 
         // **The re-claim, and live-gate fix D's main site.**
         //
