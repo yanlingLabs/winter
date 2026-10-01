@@ -498,6 +498,31 @@
             "diffId"
           ],
           "additionalProperties": false
+        },
+        "siteIcons": {
+          "minItems": 1,
+          "maxItems": 10,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "maxLength": 2048,
+                "pattern": "^https:\\/\\/[!-~]+$"
+              },
+              "iconUrl": {
+                "type": "string",
+                "maxLength": 2048,
+                "pattern": "^https:\\/\\/[!-~]+$"
+              }
+            },
+            "required": [
+              "url",
+              "iconUrl"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [

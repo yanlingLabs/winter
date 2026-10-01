@@ -64,6 +64,8 @@ import { computeLineDiff } from "../diffs/myers";
 import { DIFF_PATCH_MAX_BYTES, mintDiffId, writeDiff } from "../diffs/store";
 import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
+import { attachSiteIcons, siteIconsInText } from "./site-icons";
+import { capabilityToolName } from "../capabilities/names";
 import { REVIEWER_ESCALATION_REASON, noteReviewerCleared } from "./bridge-common";
 import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFenceFor, homeFencedDirs, homeFencedFiles, isHomeWriteOnly } from "./home-fence";
 import { controlPlaneDenialMessage, controlPlaneTargetForCall } from "./control-plane";
@@ -1522,6 +1524,38 @@ function fileDiffPostToolUseHook(deps: SessionHooksDeps, pending: Map<string, Pe
   };
 }
 
+/** The daemon's own `Search`, as the child names it (`capabilities/research.ts`). */
+export const SEARCH_CAPABILITY_TOOL = capabilityToolName("research", "Search");
+
+/** For the daemon's `Search` only: pairs the page icons Search's `run` recorded for this session
+ *  (Exa's citation `favicon`s, `site-icons.ts`) with THIS call's id, from the urls the result text
+ *  names, and hands them to the projector (`attachSiteIcons` → `takeSiteIcons`, the `fileDiff`
+ *  hand-off's shape). Synchronous and side-effect-only: it never denies, never changes the output, and
+ *  a failure here can only cost the pill an icon. */
+function noteSearchSiteIcons(deps: SessionHooksDeps, input: unknown): void {
+  try {
+    const post = input as PostToolUseHookInput;
+    if (post.tool_name !== SEARCH_CAPABILITY_TOOL) return;
+    const text = typeof post.tool_response === "string" ? post.tool_response : "";
+    const icons = siteIconsInText(deps.sessionId, text);
+    if (icons !== undefined && typeof post.tool_use_id === "string" && post.tool_use_id.length > 0) {
+      attachSiteIcons(deps.sessionId, post.tool_use_id, icons);
+    }
+  } catch (err) {
+    console.error(`hooks: failed to attach Search's site icons: ${err instanceof Error ? err.name : "unknown error"}`);
+  }
+}
+
+/** The unmatched plugin PostToolUse callback with the Search icon step folded in FIRST — one callback,
+ *  so chat and dispatch pay no extra host round trip per call. Registered only in those two modes,
+ *  where `Search` exists (`sessionHooksFor`). The plugin callback's own answer is returned untouched. */
+function withSearchSiteIcons(deps: SessionHooksDeps, inner: HookCallback): HookCallback {
+  return async (input, toolUseID, opts) => {
+    noteSearchSiteIcons(deps, input);
+    return inner(input, toolUseID, opts);
+  };
+}
+
 /** `PostToolUse`, matched per file-mutating tool — the SAME diagnostics-after-edit CC parity the
  *  retired engine ran (ported to Winter's own tool names/shapes in `auto-diagnostics.ts`). Skipped
  *  entirely (no LSP round trip at all) when `deps.lsp` was never wired, or when
@@ -1831,7 +1865,11 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
     });
   }
 
-  const postToolUse: HookCallbackMatcher[] = [{ hooks: [pluginPostToolUseHook(deps)] }];
+  // `tool_result.siteIcons` for the daemon's own Search rides INSIDE this existing unmatched callback, and
+  // only in the modes Search exists in (chat, dispatch): no extra callback, no extra host round trip per
+  // call, and code sessions are byte-identical to before (`withSearchSiteIcons`).
+  const pluginPost = pluginPostToolUseHook(deps);
+  const postToolUse: HookCallbackMatcher[] = [{ hooks: [deps.mode === "chat" || deps.mode === "dispatch" ? withSearchSiteIcons(deps, pluginPost) : pluginPost] }];
   for (const tool of Object.keys(DIFF_TOOL_FILE_PATH_ARG)) {
     const hooks: HookCallback[] = [];
     if (deps.home) hooks.push(fileDiffPostToolUseHook(deps, pending));

@@ -458,6 +458,26 @@ describe("sync.heads / sync.pull / sync.push (Chat Slice D task 2)", () => {
     c.close();
   });
 
+  // `tool_result.siteIcons` is the daemon's own stamp — urls the Mac fetches. The phone's chat engine
+  // never writes it, so a pushed one is refused whole (and the same result without it is accepted).
+  test("a tool_result carrying siteIcons rejects the whole batch", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "sync-client");
+    const id = uuid();
+    await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true });
+    const result = { type: "tool_result", threadId: "main", callId: "call_1", output: "ok", isError: false };
+    const withIcons = ev(id, 2, { ...result, siteIcons: [{ url: "https://a.example.com/x", iconUrl: "https://a.example.com/favicon.ico" }] });
+    const bad = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([withIcons])), complete: true });
+    expect(bad.error?.code).toBe(ERR.INVALID_PARAMS);
+    expect(bad.error?.message).toContain("siteIcons");
+    expect(store.lastSeq(id)).toBe(1);
+    const good = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([ev(id, 2, result)])), complete: true });
+    expect(good.error).toBeUndefined();
+    expect(store.lastSeq(id)).toBe(2);
+    c.close();
+  });
+
   test("a schema-invalid event (unknown type) rejects the whole batch", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);

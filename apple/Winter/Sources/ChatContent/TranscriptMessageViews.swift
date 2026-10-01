@@ -480,7 +480,7 @@ private func transcriptCopyForeground(isHovering: Bool, didCopy: Bool) -> Color 
 ///     `ActivityRowTests`) rather than deleted.
 func activityGlyphAndLabel(_ item: ActivityItem) -> (glyph: String, label: String) {
     switch item.kind {
-    case .tool(let name, let detail, _, _, _, _):
+    case .tool(let name, let detail, _, _, _, _, _):
         return ("⚙", detail.map { "\(name): \($0)" } ?? name)
     case .task(let subject, let status):
         return (taskGlyph(for: status), subject)
@@ -664,7 +664,7 @@ func groupActivity(_ items: [ActivityItem]) -> [ActivityGroup] {
         switch item.kind {
         case .task:
             continue // deliberate — see doc comment above
-        case .tool(let name, let detail, let callId, let output, let isError, let fileDiff):
+        case .tool(let name, let detail, let callId, let output, let isError, let fileDiff, _):
             let record = ToolCallRecord(callId: callId, detail: detail, output: output,
                                         isError: isError, fileDiff: fileDiff)
             if case .toolRun(var entries) = groups.last {
