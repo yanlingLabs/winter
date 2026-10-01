@@ -21,7 +21,8 @@ struct CompactPillLeading: View {
 /// The pill's trailing circle: the blue SEND circle, or STOP while a turn runs. The role is
 /// `composerSendButtonRole` — the composer card's own rule, "running beats blocked" — so the pill
 /// and the app's composer agree on what that button is at every instant. While a turn runs, Enter
-/// still sends (a steer); the circle trades its send for the stop the user needs.
+/// still sends (a steer); the circle trades its send for the stop the user needs. When blocked,
+/// shows a voice/mic icon overlay instead of a disabled state.
 struct PillSendStopButton: View {
     let isRunning: Bool
     let canSend: Bool
@@ -39,13 +40,18 @@ struct PillSendStopButton: View {
         } label: {
             ZStack {
                 Circle()
-                    .fill(role == .stop ? Theme.textPrimary : Theme.accent)
-                Image(systemName: role == .stop ? "stop.fill" : "arrow.up")
-                    .font(Typography.label(.bold))
-                    .foregroundStyle(Theme.cardSurface)
+                    .fill(Color.blue)
+                if case .blocked = role {
+                    Image(systemName: "mic.fill")
+                        .font(Typography.label(.bold))
+                        .foregroundStyle(.white)
+                } else {
+                    Image(systemName: role == .stop ? "stop.fill" : "arrow.up")
+                        .font(Typography.label(.bold))
+                        .foregroundStyle(.white)
+                }
             }
             .frame(width: DispatchPillMetrics.sendCircleSize, height: DispatchPillMetrics.sendCircleSize)
-            .opacity(role == .blocked("") ? 0.55 : 1)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)

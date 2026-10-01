@@ -31,7 +31,6 @@ struct FullScreenPillView: View {
                                cardWiring: dispatchPillCardWiring(adapter: adapter, records: records))
                     .padding(.horizontal, 16)
             }
-            composer
         }
     }
 
@@ -77,46 +76,4 @@ struct FullScreenPillView: View {
         .frame(height: Self.headerHeight)
     }
 
-    private var composer: some View {
-        let draft = adapter.composerDraft
-        let fieldHeight = min(max(controller.composerContentHeight, 26), Self.maxComposerHeight)
-        return HStack(alignment: .bottom, spacing: DispatchPillMetrics.rowSpacing) {
-            ZStack(alignment: .topLeading) {
-                if draft.isEmpty {
-                    Text(adapter.turnRunning ? adapter.verbText : "Type here")
-                        .font(Typography.composerField())
-                        .foregroundStyle(Theme.textPlaceholder)
-                        .lineLimit(1)
-                        .padding(.leading, ComposerTextView.textContainerInset.width)
-                        .padding(.top, ComposerTextView.textContainerInset.height)
-                        .allowsHitTesting(false)
-                }
-                ComposerTextView(
-                    text: adapter.draftBinding,
-                    onSubmit: { controller.submit(adapter.composerDraft) },
-                    onContentHeightChange: { controller.composerContentHeightChanged($0) },
-                    usesAdaptiveColors: true
-                )
-            }
-            .frame(height: fieldHeight)
-            .padding(.vertical, 9)
-            PillSendStopButton(
-                isRunning: adapter.turnRunning,
-                canSend: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                onSend: { controller.submit(adapter.composerDraft) },
-                onStop: { controller.interrupt() }
-            )
-            .padding(.bottom, 6)
-        }
-        .padding(.leading, DispatchPillMetrics.leadingPadding)
-        .padding(.trailing, DispatchPillMetrics.trailingPadding)
-        .background(
-            RoundedRectangle(cornerRadius: DispatchPillMetrics.maxCornerRadius, style: .continuous)
-                .fill(Theme.controlSurface)
-        )
-        .frame(maxWidth: newChatCardWidth)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 14)
-        .padding(.top, 8)
-    }
 }

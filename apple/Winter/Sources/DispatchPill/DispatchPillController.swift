@@ -897,17 +897,29 @@ final class DispatchPillController: ObservableObject {
                     self.historyIndex = nil
                     self.retargetMain()
                 }
-                let next = dispatchPillPresentationAfterDraftChange(self.presentation, old: old, new: new)
+                let next = dispatchPillPresentationAfterDraftChange(self.presentation, old: old, new: new,
+                                                                    turnRunning: self.adapter.turnRunning)
                 if next != self.presentation { self.setPresentation(next) }
             }
             .store(in: &cancellables)
 
         // A refocus/reset shrinks the transcript under a pinned turn — never point past its end.
+        // Also auto-expand when a new turn arrives while in compact state (a reply came in).
+        var lastExchangeCount = 0
         session.$state
             .map(\.exchanges.count)
             .removeDuplicates()
             .sink { [weak self] count in
-                guard let self, let index = self.historyIndex, index >= count else { return }
+                guard let self else { return }
+                defer { lastExchangeCount = count }
+                let hadTurns = lastExchangeCount > 0
+                let newTurnArrived = count > lastExchangeCount
+                // Auto-expand when a reply arrives while in compact state
+                if newTurnArrived, hadTurns, self.presentation == .compact, self.isVisible {
+                    self.setPresentation(.expanded)
+                }
+                // Shrink if a turn was pinned but is now gone
+                guard let index = self.historyIndex, index >= count else { return }
                 self.historyIndex = nil
                 self.retargetMain()
             }
