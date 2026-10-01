@@ -404,6 +404,13 @@ export const ChildUpdateEvent = ThreadBase.extend({
   resultSummary: z.string().optional(),
 });
 
+/** Dispatch: the `clientName` of the `user_message` that WAKES a dispatch session when its children
+ *  finish (core's `agent/dispatch-children.ts`). The daemon wrote it, not the user: clients render it
+ *  as a system notice, never as a user bubble (Swift mirror: `SessionModel`'s
+ *  `dispatchWakeClientName`). Not a variant — a `user_message` is still what the runtime child is
+ *  given, so the durable send queue keeps its pairing. */
+export const DISPATCH_WAKE_CLIENT_NAME = "dispatch-wake";
+
 /** CC-parity phase 3 (Workflows, Track D Task D1): the wire counterpart of WorkflowRuntime's
  *  internal `WorkflowRuntimeEvent` (core's `workflows/runtime.ts`) — the daemon's `onEvent` bridge
  *  (daemon.ts) maps its `started`/`progress`/`completed`/`failed` variants onto these 4 events so

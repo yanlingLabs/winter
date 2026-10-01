@@ -43,6 +43,7 @@
  *  `Date.now()`. ZERO Ink/React import — unit-testable in isolation (state.test.ts). */
 
 import type { ApprovalOption, ApprovalPolicy, SessionActivity, Task } from "@yanlinglabs/winter-protocol";
+import { DISPATCH_WAKE_CLIENT_NAME } from "@yanlinglabs/winter-protocol";
 import { updateSubagents, type CliSubagent } from "../subagent-state";
 import { subagentTokens } from "../subagent-display";
 import { upsertTask } from "../task-block";
@@ -276,7 +277,11 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       // Same Block shape for both destinations (child-transcript-view T2: a steer-drain/thread.send
       // echo lands here with a non-MAIN threadId — previously silently committed to the MAIN
       // transcript regardless of thread; now routed to that child's own block list instead).
-      const block: Block = { kind: "user", text: str(e.text) };
+      // Dispatch's own wake (core's `agent/dispatch-children.ts`): the daemon wrote it, not the user —
+      // a one-line note, never a user block.
+      const block: Block = e.clientName === DISPATCH_WAKE_CLIENT_NAME
+        ? { kind: "note", text: "↻ child session update" }
+        : { kind: "user", text: str(e.text) };
       if (e.threadId !== MAIN) return { ...s, childBlocks: withChildBlock(s.childBlocks, str(e.threadId), block) };
       return { ...s, committed: [...s.committed, block] };
     }
