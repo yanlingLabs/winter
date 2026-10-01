@@ -9,6 +9,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var menuBar: MenuBarController?
     private(set) var appModel: AppModel?
     private(set) var orbController: OrbWindowController?
+    /// The dispatch pill (`DispatchPill/DispatchPillController.swift`) — the 4-finger tap's surface
+    /// now, replacing the orb's quick-dispatch field. Bound to the same dispatch session the orb
+    /// follows (`AppModel.session`), through its own adapter.
+    private(set) var pillController: DispatchPillController?
     /// Task 4 (2f): owns the peripheral capability provider, constructed against `appModel.client`
     /// — the app's MAIN feed client/socket (the daemon rule: THE provider = the most-recent-
     /// advertiser CONNECTION, so this must never be a second/detached-window client).
@@ -392,6 +396,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         spawnDetachedWindow(feed: feed, session: session, frame: frame, title: title, isChat: isChat)
         Task { await model.startFreshSessionAfterDetach() } // orb's next summon = clean slate
         return true
+    }
+
+    /// The dispatch pill's callbacks — the orb's own seams (`orb.onSubmit`/`onEsc`/the respond
+    /// closures in `boot()`), mirrored onto the pill, plus the pill's child row and ⋯ actions.
+    ///
+    /// One deliberate difference from the orb's respond wiring: an answer for a mirrored CHILD
+    /// session's ask (`childSessionId != nil`) goes straight to that child on `model.client`, instead
+    /// of through `AppModel.respondApproval`/`respondQuestion`. Those gate on the DISPATCH session's
+    /// `pendingInteractions` (`pendingCallIdIsCurrent`), which its own turn end empties — while the
+    /// child is still blocked on the ask. The gate exists for the focus race of a callId bound to a
+    /// session that has since been refocused away from; a child answer names its target explicitly
+    /// (the {childSessionId, callId} pair comes off one card), so it has no such race. Without this,
+    /// a child approval floating above the pill after Dispatch's turn ended could never be answered.
+    private func wireDispatchPill(_ pill: DispatchPillController, model: AppModel) {
+        pill.currentSessionId = { [weak model] in model?.focusedSessionId }
+        pill.onSubmit = { [weak self] text in
+            guard let model = self?.appModel else { return false }
+            let ok = await model.sendOrSteer(text)
+            if ok { Haptics.messageSent() }
+            return ok
+        }
+        pill.onEsc = { [weak self] in
+            guard let self, self.appModel?.session.state.turnRunning == true else { return false }
+            Task { await self.appModel?.interruptTurn() }
+            return true
+        }
+        pill.onInterrupt = { [weak self] in
+            Task { await self?.appModel?.interruptTurn() }
+        }
+        pill.onApprovalRespond = { [weak self] callId, approved, optionId, childSessionId in
+            guard let model = self?.appModel else { return false }
+            if let childSessionId {
+                return (try? await model.client.approvalRespond(sessionId: childSessionId, callId: callId,
+                                                                approved: approved, optionId: optionId)) != nil
+            }
+            return await model.respondApproval(callId: callId, approved: approved, optionId: optionId)
+        }
+        pill.onQuestionRespond = { [weak self] callId, answers, notes, childSessionId in
+            guard let model = self?.appModel else { return false }
+            if let childSessionId {
+                return (try? await model.client.askUserRespond(sessionId: childSessionId, callId: callId,
+                                                               answers: answers,
+                                                               notes: notes.isEmpty ? nil : notes)) != nil
+            }
+            return await model.respondQuestion(callId: callId, answers: answers, notes: notes)
+        }
+        pill.onPlanRespond = { [weak self] callId, approved, autoAccept, feedback in
+            await self?.appModel?.respondPlan(callId: callId, approved: approved, autoAccept: autoAccept, feedback: feedback) ?? false
+        }
+        pill.onElicitationRespond = { [weak self] elicitationId, accept in
+            await self?.appModel?.respondElicitation(elicitationId: elicitationId, accept: accept) ?? .failed
+        }
+        pill.onElicitationURL = { [weak self] elicitationId in
+            await self?.appModel?.elicitationURL(elicitationId: elicitationId)
+        }
+        pill.onOpenChild = { [weak self] sessionId in
+            self?.openSessionInNewDetachedWindow(sessionId)
+        }
+        pill.onStopChild = { [weak self] sessionId in
+            guard let client = self?.appModel?.client else { return }
+            Task { _ = try? await client.interrupt(sessionId: sessionId) }
+        }
+        pill.onOpenInApp = { [weak self] in
+            self?.summonAppWindow(navigatingTo: .mode(.dispatch))
+        }
     }
 
     /// Plan-immunity Task 2 (mode×surface matrix): the orb's OWN sidebar row filter
@@ -1240,6 +1309,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `AppDelegate.boot()`'s AppModel can never be scripted in a test).
         orb.onWindowDetach = { [weak self] frame in self?.handleWindowDetach(frame: frame) ?? false }
 
+        // The dispatch pill: the 4-finger tap / hotkey / menu summon's surface (the `TriggerHub`
+        // sink below). Construction has no side effects — no ordering, no monitors — so every
+        // `boot()` under test builds one harmlessly.
+        let pill = DispatchPillController(session: model.session)
+        pillController = pill
+        wireDispatchPill(pill, model: model)
+
         // Task 6 (2e-iii): the morph window's width-responsive sidebars. `onSelect` refocuses the
         // orb's own follow-focus feed in place (`focusSession`); `onNewSession` creates+focuses a
         // fresh session (the same create+focus primitive the detach path reuses); `onOpenDetached`
@@ -1377,17 +1453,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 firstRun.show()
             }
 
+            // The dispatch pill replaced the orb's field as the summon surface: the 4-finger tap, the
+            // hotkey and the menu's summon item all toggle the pill now (`dispatchPillTriggerAction`
+            // — show, hide, or collapse full screen). The orb itself is untouched and still reachable
+            // through the menu's Show Orb item; it is simply no longer what a summon opens.
             TriggerHub.shared.didTrigger
-                .sink { [weak orb] in
+                .sink { [weak pill] in
                     Haptics.gestureRecognized()
-                    guard let orb else { return }
-                    // Gate r7: the window surface is the SAME panel now, so window-open == orb visible
-                    // with `surface == .window`. A 4-finger tap while the window is open collapses it
-                    // back to the orb (the SAME 140/22 spring the morph uses); otherwise toggle field.
-                    switch summonToggleAction(surface: orb.surface, windowVisible: orb.isVisible) {
-                    case .closeWindow: orb.collapseWindowToOrb()
-                    case .toggleField: orb.toggleField()
-                    }
+                    pill?.handleTrigger()
                 }
                 .store(in: &cancellables)
 
@@ -1550,8 +1623,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
-        orb.show()
-        mb.setOrbVisible(true)
+        // The orb is no longer shown at launch — the dispatch pill is the summon surface now. Left
+        // visible, the orb would pop its own field open over every answer the PILL asked for:
+        // `GlassRootView.handleTurnCompleted` auto-expands on an orb-initiated turn, and the pill's
+        // sends share the orb's client name (`AppModel.ownClientName`), so they read as the orb's —
+        // and `expandToField()` then takes the keyboard from the pill. Show Orb (menu) still works.
+        mb.setOrbVisible(false)
 
         if !tokenMissing {
             startTask = Task { [weak model, weak mb] in
