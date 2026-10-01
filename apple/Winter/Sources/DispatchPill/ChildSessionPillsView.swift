@@ -134,6 +134,9 @@ private struct ChildSessionPill: View {
         }
         .padding(.leading, 12)
         .padding(.trailing, DispatchPillMetrics.trailingPadding)
+        // Fill the row's full height whatever the status: a finished or failed child has no stop
+        // circle, and without this its capsule shrank to its glyph and title (the user's report).
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background {
             ZStack {
                 Capsule().fill(Color.black)
