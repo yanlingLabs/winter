@@ -27,7 +27,7 @@ enum DispatchPillPresentation: Equatable {
 /// (brand.md § 4.5: panel geometry is independent of text size); the composer's MEASURED height is
 /// an input to `dispatchPillMainSize`, never a constant.
 enum DispatchPillMetrics {
-    static let compactWidth: CGFloat = 360
+    static let compactWidth: CGFloat = 316
     static let expandedWidth: CGFloat = 560
     /// The capsule's resting height — one line of text plus the send circle's margin.
     static let pillHeight: CGFloat = 44

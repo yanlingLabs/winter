@@ -134,7 +134,7 @@ private struct ChildSessionPill: View {
                 if status == .working {
                     // The main pill's plume in this child's own colours, its nozzle on this pill's
                     // stop button — a little dimmed, so the title over it stays readable.
-                    WorkingAnimationView(toolName: nil, showsIcon: false, emitterInset: 6 + 10, palette: palette)
+                    WorkingAnimationView(emitterInset: 6 + 10, palette: palette)
                         .opacity(0.8)
                         .clipShape(Capsule())
                         .transition(.opacity.animation(.easeOut(duration: 0.25)))

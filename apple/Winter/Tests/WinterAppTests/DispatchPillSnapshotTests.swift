@@ -171,6 +171,38 @@ final class DispatchPillSnapshotTests: XCTestCase {
         try render(p, "10-pinned-turn-long")
     }
 
+    func test11ToolTilesRideThePlume() throws {
+        var model = WorkingAnimationModel(seed: 11)
+        model.tick(dt: 1.0 / 60.0)
+        let thrown = [PlumeThrow(id: "1", kind: .tool(symbol: "terminal")),
+                      PlumeThrow(id: "2", kind: .tool(symbol: "pencil")),
+                      PlumeThrow(id: "3", kind: .site(host: "example.invalid")),
+                      PlumeThrow(id: "4", kind: .tool(symbol: "doc.text")),
+                      PlumeThrow(id: "5", kind: .tool(symbol: "checklist"))]
+        for i in 0..<70 { model.tick(dt: 1.0 / 60.0, thrown: Array(thrown.prefix(1 + i / 12))) }
+        let size = CGSize(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight)
+        let view = ZStack(alignment: .trailing) {
+            Color.black
+            WorkingAnimationView(thrown: thrown,
+                                 emitterInset: DispatchPillMetrics.trailingPadding + DispatchPillMetrics.sendCircleSize / 2,
+                                 initialModel: model)
+            PillSendStopButton(isRunning: true, canSend: false, onSend: {}, onStop: {})
+                .padding(.trailing, DispatchPillMetrics.trailingPadding)
+        }
+        .frame(width: size.width, height: size.height)
+        .clipShape(Capsule())
+        let host = NSHostingView(rootView: view)
+        host.frame = CGRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: rep)
+        try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+            .write(to: outputDirectory.appendingPathComponent("11-tool-tiles.png"))
+    }
+
     func test7ChildPills() throws {
         let titles = ["fix auth", "docs pass", "bump sdk", "flaky test", "perf trace", "triage"]
         let statuses = ["running", "awaiting_approval", "completed", "running", "error", "running"]

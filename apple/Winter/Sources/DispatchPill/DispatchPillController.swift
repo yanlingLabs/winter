@@ -469,6 +469,9 @@ final class DispatchPillController: ObservableObject {
     /// The running tool's name, nil while thinking.
     var runningToolName: String? { workingToolName(session.state.status) }
 
+    /// What the working plume throws: the running turn's tool uses so far (`plumeThrows(for:)`).
+    var plumeThrows: [PlumeThrow] { Winter.plumeThrows(for: session.state.exchanges.last) }
+
     /// The swiped-to turn's preview, or nil at the composer.
     var turnPreview: DispatchPillTurnPreview? {
         historyIndex.flatMap { dispatchPillTurnPreview(exchanges: session.state.exchanges, index: $0) }
@@ -781,6 +784,7 @@ final class DispatchPillController: ObservableObject {
     }
 
     var composerBlurRadiusForTesting: CGFloat { max(0, appliedComposerBlur) }
+    var composerTextViewForTesting: NSTextView? { composerView?.documentView as? NSTextView }
 
     // MARK: - Spring (the orb's `morphStep`, on width and height)
 
@@ -974,12 +978,21 @@ final class DispatchPillController: ObservableObject {
                 let old = self.lastDraft
                 self.lastDraft = new
                 guard old != new else { return }
-                if self.historyIndex != nil, !new.isEmpty {
-                    self.historyIndex = nil
-                    self.retargetMain()
+                // ONE HOP LATER, never here: this sink runs in the draft's willSet, and growing the
+                // pill resizes the panel, whose hosting view lays out SYNCHRONOUSLY — handing the
+                // composer the draft as it was BEFORE this keystroke. `ComposerTextView` then
+                // "corrects" the text view back to it, and the first key typed into the compact pill
+                // was lost (the user's report; `testTheFirstKeyTypedIntoTheCompactPillIsKept`).
+                // By the hop the new draft is stored, so the same layout agrees with the text view.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.adapter.composerDraft == new else { return }
+                    if self.historyIndex != nil, !new.isEmpty {
+                        self.historyIndex = nil
+                        self.retargetMain()
+                    }
+                    let next = dispatchPillPresentationAfterDraftChange(self.presentation, old: old, new: new)
+                    if next != self.presentation { self.setPresentation(next) }
                 }
-                let next = dispatchPillPresentationAfterDraftChange(self.presentation, old: old, new: new)
-                if next != self.presentation { self.setPresentation(next) }
             }
             .store(in: &cancellables)
 
