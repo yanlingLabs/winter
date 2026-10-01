@@ -858,7 +858,11 @@ class WinterSessionImpl implements WinterSession {
           // FAIL CLOSED (2026-10-01 review): a chat/dispatch child whose runtime ignored `Options.tools`
           // would offer built-ins the ruling withholds. The deny list names the known ones; this catches the
           // rest. The incarnation is refused typed and ended before anything else of it is projected.
-          const violations = toolSurfaceViolations(this.initFacts.tools, inc.allowedTools, CAPABILITY_PLAIN_NAMES);
+          // An init that states NO tool list cannot be checked, and a session with an allowed list does not
+          // run on a runtime it cannot check: that is a violation too, never an empty (passing) list.
+          const violations = inc.allowedTools !== undefined && !Array.isArray(init.tools)
+            ? ["(init.tools missing)"]
+            : toolSurfaceViolations(this.initFacts.tools, inc.allowedTools, CAPABILITY_PLAIN_NAMES);
           if (violations.length > 0) {
             const message = `this session's runtime offered tools its allowed list leaves out (${violations.slice(0, 8).join(", ")}${violations.length > 8 ? ", …" : ""}), so it does not enforce Winter's tool surface — refused`;
             this.log(`the winter child for ${this.sessionId}: ${message}`);
@@ -870,6 +874,8 @@ class WinterSessionImpl implements WinterSession {
             } else {
               this.safeAppend({ type: "agent_error", sessionId: this.sessionId, threadId: MAIN_THREAD, message, code: "tool_surface_unenforced" });
             }
+            // ABORT AT ONCE — no end-of-input grace: this child is not one to let finish what it started.
+            try { inc.abort.abort(); } catch { /* already aborted */ }
             void this.end();
             break;
           }
