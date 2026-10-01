@@ -100,6 +100,10 @@ final class DispatchPillController: ObservableObject {
     var onStopChild: ((String) -> Void)?
     /// "Open Dispatch in Winter" (the ⋯ popover, and the child row's "+n").
     var onOpenInApp: (() -> Void)?
+    /// True while the ⋯ popover is open (`ExpandedPillAccessoryButtons` reports it): a click inside
+    /// the popover's own window is not a click outside the pill.
+    var auxiliaryPopoverOpen = false
+
     /// The session this pill is bound to, read fresh (card drafts are keyed by it).
     var currentSessionId: (() -> String?)? {
         didSet { adapter.boundSessionId = { [weak self] in self?.currentSessionId?() } }
@@ -224,6 +228,7 @@ final class DispatchPillController: ObservableObject {
         guard isVisible else { return }
         stashDraft()
         historyIndex = nil
+        auxiliaryPopoverOpen = false
         presentation = .compact
         removeMonitors()
         isVisible = false
@@ -641,8 +646,13 @@ final class DispatchPillController: ObservableObject {
                                                     handler: { [weak self] event in
             guard let self, self.isVisible else { return event }
             if let window = event.window, window !== self.panel {
-                // A menu or popover's own window is part of the pill's interaction, not "outside".
-                if window.parent === self.panel || String(describing: type(of: window)).contains("Menu") {
+                // The ⋯ popover's (or a menu's) own window is part of the pill's interaction, not
+                // "outside": compressing on its mouse-down would remove the very button whose
+                // action fires on mouse-up. Judged three ways, since AppKit does not promise the
+                // popover's window is parented to the panel.
+                if self.auxiliaryPopoverOpen || window.parent === self.panel
+                    || (self.panel.childWindows ?? []).contains(where: { $0 === window })
+                    || String(describing: type(of: window)).contains("Menu") {
                     return event
                 }
                 self.handleClickOutside()
