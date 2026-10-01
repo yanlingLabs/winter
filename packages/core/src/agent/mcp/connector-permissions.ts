@@ -56,9 +56,10 @@
 //                   otherwise → a card in chat and dispatch, and in code exactly today's per-policy
 //                   answer (`gate.ts`: plan deny, dont-ask deny, ask/accept-edits card, auto and bypass
 //                   allow) — the verdict is `"gate"`, meaning "the gate decides, as before".
-//   dispatch child  (a CODE session with `origin: "dispatch-child"`) keeps today's never-prompt rule:
-//                   allow and deny apply as above, an "ask" is the bridge's typed never-prompts deny,
-//                   and unset follows today's gate (its `auto` policy allows).
+//   dispatch child  (a CODE session with `origin: "dispatch-child"`): allow and deny apply as above,
+//                   an "ask" is a card RELAYED to its dispatch coordinator (the bridge's
+//                   `cardsRelayedToDispatch`; auto-denied after 10 minutes), and unset follows the
+//                   code gate (its `auto` policy allows).
 //
 // READ-ONLY comes from the daemon's own probe (`McpManager`'s per-server `tools/list`): an action is
 // read-only only when the server's `annotations.readOnlyHint === true` in the last listing that named it.
@@ -166,7 +167,8 @@ export interface ConnectorVerdictInput {
   readOnly: boolean;
   policy: SessionApprovalPolicy;
   mode: SessionMode;
-  /** `SessionMeta.origin`; `"dispatch-child"` keeps the never-prompt rule. */
+  /** `SessionMeta.origin`. A `"dispatch-child"` is a code session, so it takes the code row; its
+   *  "ask" is a card relayed to its coordinator (`approval-bridge.ts`'s `cardsRelayedToDispatch`). */
   origin?: string;
 }
 

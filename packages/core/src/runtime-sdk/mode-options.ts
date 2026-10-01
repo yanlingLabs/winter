@@ -248,7 +248,8 @@ export interface WinterOptionsInput {
   mode: SessionMode;
   /** Seven-valued in practice — chat sessions persist the internal `"chat"` policy. */
   policy: SessionApprovalPolicy;
-  /** `SessionMeta.origin`; `"dispatch-child"` makes a code-mode child never-prompt (P8b-26). */
+  /** `SessionMeta.origin`; `"dispatch-child"` keeps a code-mode child's private-address `WebFetch` at
+   *  `"deny"` (P8b-26) — its approval cards are relayed to its coordinator, but this one stays refused. */
   origin?: string;
   /** The pre-allocated BACKEND uuid from 8a's creation transaction (surface map §6.1) — not
    *  Winter's own `s_<hex>` session id. */
@@ -1344,8 +1345,8 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
  *    they are the backend's own economics, not a Winter policy.)
  *  - `fetch.digestModel` / `fetch.authRef` — `pins.research` (see `WinterOptionsInput.digestModel`).
  *  - `fetch.privateAddressPolicy` — `"ask"` in CODE, `"deny"` in chat and dispatch, and `"deny"` for
- *    a dispatch CHILD (P8b-26: a code-mode child spawned by dispatch can never answer a card, so an
- *    `ask` there is a hang or a fail-closed refusal with a card nobody sees). `WebFetch` is the only
+ *    a dispatch CHILD (P8b-26; kept when the `session_spawn` rebuild began relaying a child's other cards to
+ *    its coordinator: a local-network reach from unattended delegated work stays refused, not relayed). `WebFetch` is the only
  *    door a Winter child has to a local service — its Bash sandbox has no network at all — so silent
  *    reach would ADD power claude's own design does not grant.
  *

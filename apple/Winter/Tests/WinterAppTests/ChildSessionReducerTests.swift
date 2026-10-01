@@ -70,4 +70,43 @@ final class ChildSessionReducerTests: XCTestCase {
         ])
         XCTAssertEqual(s.children.map(\.sessionId), ["c1"])
     }
+
+    // MARK: - Dispatch's own wake (`clientName: "dispatch-wake"`, core's `agent/dispatch-children.ts`)
+
+    private func userMessage(_ text: String, clientName: String, seq: Int) -> String {
+        #"{"type":"user_message","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"main","text":"\#(text)","clientName":"\#(clientName)"}"#
+    }
+    private func assistantMessage(_ text: String, seq: Int) -> String {
+        #"{"type":"assistant_message","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"main","text":"\#(text)"}"#
+    }
+
+    /// The daemon's wake is not something the user typed: it opens its own exchange with NO prompt
+    /// (no user bubble — `TranscriptView` skips an empty prompt), and Dispatch's report is its reply.
+    func testDispatchWakeOpensAPromptlessExchange() {
+        let s = reduce(OrbSessionState(), [
+            userMessage("check the repo", clientName: "orb", seq: 1),
+            turnStarted(seq: 2),
+            assistantMessage("spawned a child", seq: 3),
+            #"{"type":"turn_completed","seq":4,"sessionId":"s","ts":0,"threadId":"main","stopReason":"end_turn","inputTokens":0,"outputTokens":0}"#,
+            userMessage("<child_update> session: c1 </child_update>", clientName: "dispatch-wake", seq: 5),
+            turnStarted(seq: 6),
+            assistantMessage("the child finished: all green", seq: 7),
+        ])
+        XCTAssertEqual(s.exchanges.map(\.prompt), ["check the repo", ""])
+        XCTAssertEqual(s.exchanges.last?.replies, ["the child finished: all green"])
+        XCTAssertFalse(s.exchanges.contains { $0.prompt.contains("child_update") }, "the wake text never becomes a prompt")
+        // A turn the user did not start here finishes quietly (no orb auto-reveal).
+        XCTAssertFalse(s.lastTurnWasOrbInitiated)
+    }
+
+    /// A wake that lands while the Mac still believes a turn runs never folds into it as a steer.
+    func testDispatchWakeNeverFoldsIntoARunningTurnAsASteer() {
+        let s = reduce(OrbSessionState(), [
+            userMessage("go", clientName: "orb", seq: 1),
+            turnStarted(seq: 2),
+            userMessage("<child_update/>", clientName: "dispatch-wake", seq: 3),
+        ])
+        XCTAssertEqual(s.exchanges.map(\.prompt), ["go", ""])
+        XCTAssertTrue(s.queuedSteers.isEmpty)
+    }
 }

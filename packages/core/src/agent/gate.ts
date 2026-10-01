@@ -147,22 +147,21 @@ const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill",
 // own header invites ("the spawn_agent precedent"): spawn_agent's entry above earns its READ_ONLY on
 // one specific clause — "the child inherits the parent's approval policy (engine.ts's bridge passes
 // the SAME `meta` object down), so the child's own mutating tool calls still get gated by that
-// policy". That clause is FALSE here. A session_spawn child is a full first-class session created at
-// a FIXED `approvalPolicy: "auto"` (agent/dispatch-children.ts:72), whatever the caller's own policy
-// is — so it is not merely delegating within a policy, it is starting unattended work at one. That is
+// policy". That clause does not hold here either: a session_spawn child is a full first-class session,
+// created at the coordinator's policy AS IT IS AT SPAWN and fixed for the child's life
+// (agent/dispatch-children.ts's `childPolicyFor`) — so it is not merely delegating within a live
+// policy, it is starting separate, unattended work at one. That is
 // the same shape `schedule` and `Workflow` are already MUTATING for ("stands up an unattended,
 // headless-firing routine"; "starts a background run of up to 1000 agents"), and the same reason
 // `plan` must keep denying it: a planning session must not be able to start a mutating session any
 // more than it can mutate now.
 //
-// **The reach, honestly.** This omission is LATENT rather than live, unlike `browser`'s. In a real
-// dispatch session the engine's session_spawn BRIDGE populates `spawnOutcomes` and the per-call loop
-// consumes it at engine.ts's `preOutcome` branch, which sits BEFORE `gate.evaluate` — so the call
-// never reaches this file at all. It becomes live exactly when that bridge is inactive: a daemon with
-// `cfg.dispatch` unwired (engine.ts names that case), where the call falls through to the per-call
-// loop and, unclassified, drew an approval card under `auto` — dispatch's own default — in a session
-// with no human to answer it. Classified, only ONE cell moves: `auto` (ask → allow). plan stays deny,
-// bypass stays allow, ask/accept-edits/dont-ask stay ask.
+// **The reach, on the Winter leg.** This verdict is what a NON-dispatch caller would get (none can:
+// the `sessions` capability server serves the tool to dispatch only). A dispatch session's own call
+// never takes the per-policy answer below: `runtime-sdk/approval-bridge.ts`'s step (4b') allows
+// dispatch's `session_spawn` under every policy but plan, as the engine-era bridge (which ran before
+// this gate) always did — otherwise a dispatch session switched to ask/accept-edits/dont-ask would
+// turn its own delegation into the never-prompt deny.
 // office-agent-tools T4: `sheets` moves HERE from READ_ONLY (see that set's own comment for the
 // read-half reasoning it still carries). Task 3 shipped `sheets` with only `info`/`read`; this task
 // adds real write verbs (`set`, `insert_rows`, `insert_cols`, `delete_rows`, `delete_cols`,
