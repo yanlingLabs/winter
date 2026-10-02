@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -517,7 +517,14 @@ export class SessionStore {
 
   // ── the edited-files index (ListSessions' `query`) ─────────────────────────────────────────────
 
-  private recordEditedFile(sessionId: string, path: string, ts: number): void {
+  private recordEditedFile(sessionId: string, rawPath: string, ts: number): void {
+    // `fileDiff.path` is the path the tool was CALLED with (`hooks.ts`' producer) — absolute for the edit
+    // tools in practice; a relative one is resolved against the session's cwd so a path query can find it.
+    let path = rawPath;
+    if (!isAbsolute(rawPath)) {
+      const row = this.db.query("SELECT cwd FROM sessions WHERE session_id = ?").get(sessionId) as { cwd: string | null } | null;
+      if (row?.cwd) path = join(row.cwd, rawPath);
+    }
     this.db.run(
       "INSERT INTO session_files (session_id, path, last_ts) VALUES (?, ?, ?) ON CONFLICT(session_id, path) DO UPDATE SET last_ts = MAX(last_ts, excluded.last_ts)",
       [sessionId, path, ts],

@@ -40,7 +40,8 @@
 //     human; it can answer with SendMessage to the sender's id. Not followed. (The Mac renders the wrapper
 //     as "From session …", never raw.)
 //
-// ONE DELIVERY PER MESSAGE ID. A request is deduped on (caller, runtime message id, target, text) for a
+// ONE DELIVERY PER MESSAGE ID. A request is deduped on (caller, its runtime incarnation, runtime message
+// id, target, text) for a
 // while (`DELIVERY_DEDUPE_TTL_MS`): a re-sent request gets the first one's answer (in flight or settled),
 // never a second delivery. A cancelled sender (the handler's `signal`) and a daemon that began shutting
 // down are checked again right before anything is resumed or sent.
@@ -139,10 +140,15 @@ export class SessionMessaging {
     this.draining = true;
   }
 
-  /** `Options.hostMessaging` for the session `callerSessionId`. */
-  handlerFor(callerSessionId: string): HostMessagingHandler {
+  /**
+   * `Options.hostMessaging` for the session `callerSessionId`. `incarnation` names the runtime child the
+   * handler serves: its message ids (`msg-1`, `msg-2`, …) restart in every new process or Worker, so the
+   * delivery dedupe is keyed on it too — a restarted coordinator's `msg-1` is a NEW message, never the
+   * previous incarnation's.
+   */
+  handlerFor(callerSessionId: string, incarnation = ""): HostMessagingHandler {
     return {
-      send: (request, opts) => this.send(callerSessionId, request, opts?.signal),
+      send: (request, opts) => this.send(callerSessionId, request, opts?.signal, incarnation),
       list: async () => this.list(callerSessionId),
       stop: (request) => this.stop(callerSessionId, request),
     };
@@ -162,8 +168,8 @@ export class SessionMessaging {
   }
 
   /** One SendMessage the caller's runtime could not resolve in-process. Never throws. */
-  send(callerSessionId: string, request: HostMessageSendRequest, signal?: AbortSignal): Promise<SendAnswer> {
-    const key = [callerSessionId, request.messageId, request.to.trim(), createHash("sha256").update(request.message).digest("hex")].join("\u0000");
+  send(callerSessionId: string, request: HostMessageSendRequest, signal?: AbortSignal, incarnation = ""): Promise<SendAnswer> {
+    const key = [callerSessionId, incarnation, request.messageId, request.to.trim(), createHash("sha256").update(request.message).digest("hex")].join("\u0000");
     const at = this.now();
     for (const [k, v] of this.deliveries) {
       if (at - v.at <= DELIVERY_DEDUPE_TTL_MS && this.deliveries.size <= DELIVERY_DEDUPE_MAX) break;

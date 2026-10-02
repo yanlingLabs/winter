@@ -1314,6 +1314,7 @@ export async function startDaemon(opts: {
         store,
         derive: (row, sessionId, nowMs) => activityDeriver?.(row, sessionId, nowMs),
         turnStartedAt: (sid) => winterDrivers.get(sid)?.turnStartedAt,
+        working: (sid) => signalsDeriver?.(sid).working ?? (winterDrivers.get(sid)?.turnRunning ?? false),
       },
     },
     computer: {
