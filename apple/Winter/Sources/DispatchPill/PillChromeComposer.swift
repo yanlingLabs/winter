@@ -15,6 +15,8 @@ struct PillChromeComposer: View {
     @Environment(\.pillChromePalette) private var palette
 
     static let maxFieldHeight: CGFloat = 160
+    /// The gap between the floating composer and the window's bottom edge, which it keeps black.
+    static let bottomSkirt: CGFloat = 16
     /// The pill's width in a wide window — the typing pill's own, a little wider for a window.
     static let maxWidth: CGFloat = 640
 
@@ -76,6 +78,15 @@ struct PillChromeComposer: View {
             }
         }
         .shadow(color: .black.opacity(0.6), radius: 14, y: 4)
+        // Below the floating composer the transcript would show through the gap to the window's
+        // edge (a rule under a message read as a rim) — that strip is the window's black, edge to
+        // edge, behind the composer's lower half.
+        .background(alignment: .bottom) {
+            Color.black
+                .frame(width: 4000, height: Self.bottomSkirt + DispatchPillMetrics.pillHeight / 2)
+                .offset(y: Self.bottomSkirt)
+                .allowsHitTesting(false)
+        }
         .frame(maxWidth: Self.maxWidth)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: fieldHeight)
     }
