@@ -786,7 +786,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       // times out server-side and the engine proceeds with its "best judgment" fallback.
       if (process.stdin.isTTY) {
         // Its prompts and read loop start only when the card before it is done (never two stdin readers).
-        cards.raiseInteractive(e.callId, async () => {
+        cards.raiseInteractive(e.callId, async (resolvedElsewhere) => {
           const answers: Record<string, string> = {};
           const notes: Record<string, string> = {}; // Task 3 (CC parity): optional per-question free-text note
           for (const q of e.questions) {
@@ -806,12 +806,14 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
             const promptText = q.multiSelect ? "choose (comma-separated numbers or text): " : "choose (number or text): ";
             emit(promptText);
             const input = (await readLine("")) ?? ""; // readLine now returns null on EOF; "" here (empty answer)
+            if (resolvedElsewhere.aborted) return; // answered in another window meanwhile: stop asking, send nothing
             if (isOtherChoice(input, q.options.length)) {
               // M1: choosing "Other" BY ITS MENU NUMBER isn't itself an answer — that digit is a
               // selection, not free text. Re-prompt for the real answer so the model never sees
               // the literal number as if the user had typed it as their response.
               emit("your answer: ");
               answers[q.question] = ((await readLine("")) ?? "").trim();
+              if (resolvedElsewhere.aborted) return;
             } else {
               answers[q.question] = parseQuestionAnswer(input, q.options.map((o: { label: string }) => o.label), q.multiSelect);
             }
@@ -821,6 +823,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
             // payload as before this feature (notes omitted below, not sent as `{}`).
             emit("note (enter to skip): ");
             const note = ((await readLine("")) ?? "").trim();
+            if (resolvedElsewhere.aborted) return;
             if (note !== "") notes[q.question] = note;
           }
           await c.askUserRespond({
@@ -833,11 +836,12 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       // No TTY → skip rendering entirely (do NOT block reading stdin); the server-side timeout
       // resolves the plan and the engine proceeds, same guard as question_asked above.
       if (process.stdin.isTTY) {
-        cards.raiseInteractive(e.callId, async () => {
+        cards.raiseInteractive(e.callId, async (resolvedElsewhere) => {
           emit(`\n${AQUA}Plan${RESET}\n${e.plan}\n\n`);
           emit(`  1) approve — I'll approve each edit\n  2) approve + auto-accept edits\n  3) reject (type: 3 <reason>)\n`);
           emit("choose (number or text): ");
           const input = (await readLine("")) ?? "";
+          if (resolvedElsewhere.aborted) return; // answered in another window meanwhile
           const r = parsePlanResponse(input);
           await c.planRespond({ sessionId, callId: e.callId, ...r });
         });

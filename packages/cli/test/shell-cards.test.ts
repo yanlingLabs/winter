@@ -67,6 +67,29 @@ describe("ShellCardQueue", () => {
     expect(ran).toEqual(["q1 start", "q1 end", "q2 start"]);
   });
 
+  test("a question on screen answered elsewhere gives way at the next line, sends nothing, and the next card appears", async () => {
+    const h = harness();
+    let lineArrives!: () => void;
+    let answered = false;
+    // The question's loop: waits for a line, then (as main.ts's loops do) stops if it was resolved elsewhere.
+    h.cards.raiseInteractive("q1", async (resolvedElsewhere) => {
+      await new Promise<void>((r) => (lineArrives = r));
+      if (resolvedElsewhere.aborted) return;
+      answered = true;
+    });
+    h.cards.raiseApproval("a", "A? ");
+    await Promise.resolve();
+    expect(h.out).toEqual([]);
+    h.cards.resolved("q1"); // the Mac answered it
+    expect(h.out.some((t) => t.includes("press Enter to continue"))).toBe(true);
+    lineArrives(); // the user presses Enter
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(answered).toBe(false); // nothing was sent for the stale question
+    expect(h.out.at(-1)).toBe("A? "); // and the waiting approval is on screen
+    await h.cards.answerApproval("y");
+    expect(h.answers).toEqual([{ callId: "a", approved: true }]);
+  });
+
   test("a card raised twice is held once; a failed answer is reported and the queue moves on", async () => {
     const errors: unknown[] = [];
     const out: string[] = [];
