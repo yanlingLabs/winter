@@ -278,6 +278,12 @@ enum Typography {
 ///
 /// `TranscriptUserBubble` is the one view that DECLARES its role rather than taking one: it renders
 /// exactly one thing — the user's own words — so there is nothing for a caller to decide.
+extension View {
+    /// The ruled user message's weight (the session window, 2026-10-02): the user's own words as
+    /// full-width prose set a step heavier than the reply, so the turn reads as theirs without a bubble.
+    func transcriptRuledUserMessageWeight() -> some View { fontWeight(.medium) }
+}
+
 enum TranscriptProseRole: Equatable {
     /// Serif allowlist binding #4 — what Winter *says*, in the transcript, in its own voice.
     case assistant

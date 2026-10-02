@@ -90,7 +90,7 @@ struct TranscriptUserBubble: View {
                 TranscriptFormattedMessageText(text: displayText, tint: tint, role: proseRole,
                                                fillsAvailableWidth: true)
                     .foregroundStyle(.primary)
-                    .fontWeight(.medium)
+                    .transcriptRuledUserMessageWeight()
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Rectangle()
                     .fill(Theme.textPrimary.opacity(0.85)) // white: the window is dark-only
