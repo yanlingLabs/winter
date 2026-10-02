@@ -7,6 +7,7 @@ import type { SessionApprovalPolicy } from "../agent/gate";
 import { hasOpenPanelTabs } from "../panel/store";
 import type { SessionDirs } from "./dirs";
 import { outdirPath } from "./outdir";
+import { BashEditPairer, bashCommandOf } from "./bash-edits";
 import { removeSessionDiffs } from "../diffs/store";
 import { canonicalModelTag, isModelTag, UNSTATED_TAG } from "../runtime-sdk/model-tag";
 import { migrateBareModelId } from "../settings";
@@ -208,6 +209,10 @@ export class SessionStore {
    *  store instance's lifetime — see `dirs()`'s doc comment for why this is what makes "log once"
    *  true without a second `dirs`-column write path. */
   private readonly warnedMalformedDirs = new Set<string>();
+  /** The edited-files index's LIVE Bash pairing (`bash-edits.ts`): a Bash call's write targets wait here,
+   *  keyed by session and call id, until its result says it ran. Best-effort and bounded — a restart drops
+   *  what is in flight, and the next open's `recoverAll` pass re-pairs the whole log anyway. */
+  private readonly bashEdits = new BashEditPairer();
 
   /** WS-20 (review round 2, M5): `presentProviders` (`credentialPresenceFrom(secrets)`'s keys) is
    *  threaded into `migrateBareModelColumnToTags`'s own rule-5 tie-break — only the daemon boot
@@ -304,7 +309,8 @@ export class SessionStore {
     )`);
     // ListSessions' `query` (2026-10-02): the files each session EDITED, as a durable per-session index —
     // recorded live from every `tool_result.fileDiff` the daemon appends (edit/write/notebook edits) and
-    // backfilled once from the logs that predate it (`backfillEditedFiles`, marked in `index_markers`).
+    // from every successful Bash call whose command writes a file (`bash-edits.ts`), and backfilled once
+    // from the logs that predate it (`backfillEditedFiles`, marked in `index_markers`).
     this.db.run(`CREATE TABLE IF NOT EXISTS session_files (
       session_id TEXT NOT NULL,
       path TEXT NOT NULL,
@@ -435,16 +441,23 @@ export class SessionStore {
     }
   }
 
-  /** Index every `tool_result.fileDiff` in these events, in ONE transaction; with `mark`, record that the
-   *  edited-files index has seen every log (the one-time backfill is then done). Never throws: the index
-   *  is a search aid, and a failure here must not fail a boot or a sync — it is logged, and the next boot's
-   *  pass catches up. */
+  /** Index every `tool_result.fileDiff` in these events, and every file a successful Bash call wrote
+   *  (`bash-edits.ts`, each batch paired from its own `tool_call`s in log order), in ONE transaction; with
+   *  `mark`, record that the edited-files index has seen every log (the one-time backfill is then done).
+   *  Never throws: the index is a search aid, and a failure here must not fail a boot or a sync — it is
+   *  logged, and the next boot's pass catches up. */
   private indexEditedFilesFrom(batches: ReadonlyArray<{ sessionId: string; events: readonly SessionEvent[] }>, mark: boolean): number {
     let seen = 0;
     try {
       this.db.transaction(() => {
         for (const { sessionId, events } of batches) {
+          const bash = new BashEditPairer(Number.MAX_SAFE_INTEGER);
+          let cwd: string | undefined | null = null;   // looked up once, at the batch's first Bash call
           for (const e of events) {
+            if (e.type === "tool_call" || e.type === "tool_result") {
+              if (e.type === "tool_call" && cwd === null && bashCommandOf(e) !== undefined) cwd = this.sessionCwd(sessionId);
+              for (const path of bash.observe(e.callId, e, cwd ?? undefined)) { this.recordEditedFile(sessionId, path, e.ts); seen++; }
+            }
             if (e.type !== "tool_result" || e.fileDiff === undefined) continue;
             this.recordEditedFile(sessionId, e.fileDiff.path, e.ts);
             seen++;
@@ -552,10 +565,23 @@ export class SessionStore {
       try { this.recordEditedFile(sessionId, event.fileDiff.path, event.ts); }
       catch (err) { console.error(`[store] could not index an edited file for ${sessionId} (${err instanceof Error ? err.name : "error"}) — the next boot catches up`); }
     }
+    if (event.type === "tool_call" || event.type === "tool_result") {
+      try {
+        // The cwd query runs only for a Bash call (every other tool_call passes through untouched).
+        const cwd = event.type === "tool_call" && bashCommandOf(event) !== undefined ? this.sessionCwd(sessionId) : undefined;
+        for (const path of this.bashEdits.observe(`${sessionId}\0${event.callId}`, event, cwd)) this.recordEditedFile(sessionId, path, event.ts);
+      } catch (err) { console.error(`[store] could not index a Bash edit for ${sessionId} (${err instanceof Error ? err.name : "error"}) — the next boot catches up`); }
+    }
     return event;
   }
 
   // ── the edited-files index (ListSessions' `query`) ─────────────────────────────────────────────
+
+  /** The session's stored cwd (what a relative edited path, and a Bash command, resolve against). */
+  private sessionCwd(sessionId: string): string | undefined {
+    const row = this.db.query("SELECT cwd FROM sessions WHERE session_id = ?").get(sessionId) as { cwd: string | null } | null;
+    return row?.cwd ?? undefined;
+  }
 
   private recordEditedFile(sessionId: string, rawPath: string, ts: number): void {
     // `fileDiff.path` is the path the tool was CALLED with (`hooks.ts`' producer) — absolute for the edit
@@ -590,7 +616,8 @@ export class SessionStore {
   /**
    * The ONE-TIME backfill of the edited-files index from every session log that predates it. Idempotent
    * (an upsert keeping the newest timestamp), so a crash mid-way just runs again; the marker is written
-   * only after every log was read. Cheap per line: only lines that mention `"fileDiff"` are parsed.
+   * only after every log was read. Cheap per line: only lines that mention `"fileDiff"`, a Bash `tool_call`,
+   * or the `tool_result` of one of those calls are parsed.
    * Returns how many (session, file) rows it saw; 0 and no work once marked.
    */
   backfillEditedFiles(): number {
@@ -602,9 +629,18 @@ export class SessionStore {
       let text: string;
       try { text = readFileSync(path, "utf8"); } catch { continue; }
       const events: SessionEvent[] = [];
+      const bashCalls = new Set<string>();
       for (const line of text.split("\n")) {
-        if (!line.includes('"fileDiff"')) continue;   // cheap: only edit results are parsed
-        try { events.push(SessionEvent.parse(JSON.parse(line))); } catch { /* a bad line indexes nothing */ }
+        // Cheap: only edit results, Bash calls and those calls' results are parsed.
+        const bashCall = line.includes('"type":"tool_call"') && (line.includes('"name":"bash"') || line.includes('"name":"Bash"'));
+        const bashResult = !bashCall && bashCalls.size > 0 && line.includes('"type":"tool_result"')
+          && bashCalls.has(/"callId":"((?:[^"\\]|\\.)*)"/.exec(line)?.[1] ?? "");
+        if (!bashCall && !bashResult && !line.includes('"fileDiff"')) continue;
+        try {
+          const e = SessionEvent.parse(JSON.parse(line));
+          if (e.type === "tool_call" && bashCall) bashCalls.add(e.callId);
+          events.push(e);
+        } catch { /* a bad line indexes nothing */ }
       }
       if (events.length > 0) batches.push({ sessionId: sid, events });
     }

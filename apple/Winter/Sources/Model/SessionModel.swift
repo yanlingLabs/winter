@@ -708,7 +708,8 @@ enum SessionReducer {
         case .userMessage(let v) where v.threadId == mainThread:
             // Another session's message (`SendMessage`, core's host messaging): the wrapper is parsed
             // ONCE here so no view shows raw XML. Anything that is not exactly the wrapper stays text.
-            let envelope = v.clientName == messagingClientName ? AgentMessageEnvelope.parse(v.text) : nil
+            // The reader is the shared kit's (`WinterSessionKit.AgentMessageEnvelope`) — the phone uses it too.
+            let envelope = AgentMessageEnvelope.forUserMessage(text: v.text, clientName: v.clientName)
             if s.turnRunning, let last = s.exchanges.indices.last, s.exchanges[last].reply.isEmpty {
                 // Mid-turn steer: same turn, same exchange — the prompt grows (one turn = one exchange).
                 // A steer from another session folds in as a readable line carrying its sender.
@@ -1508,9 +1509,9 @@ enum SessionReducer {
     /// `clientName` of the daemon's own dispatch wake message — rendered as no user bubble (see the
     /// reducer's first `.userMessage` case).
     static let dispatchWakeClientName = "dispatch-wake"
-    /// A message another Winter session sent in (`AgentMessageEnvelope`); Dispatch's messages to its
-    /// own child carry plain text under the same name and fall through the parser untouched.
-    static let messagingClientName = "messaging"
+    // A message another Winter session sent in carries `AgentMessageEnvelope.messagingClientName`
+    // (the shared kit's); Dispatch's messages to its own child carry plain text under the same name and
+    // fall through the parser untouched.
 
     private static func isEngineSentinelClientName(_ clientName: String) -> Bool {
         ["steer", "send_message", "resume"].contains(clientName)
