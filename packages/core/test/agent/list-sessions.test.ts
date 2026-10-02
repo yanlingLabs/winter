@@ -207,6 +207,45 @@ describe("list_sessions: query", () => {
     expect(reopened.editedFiles(old)).toEqual([]);
   });
 
+  test("a file a Bash call WROTE is indexed live — against the session's cwd and the command's own cd — and found by query", async () => {
+    const h = harness();
+    const id = h.session({ cwd: "/work/repo", title: "Shell edits" });
+    const bash = (callId: string, command: string, isError = false) => {
+      h.store.append(id, { type: "tool_call", sessionId: id, threadId: "main", callId, name: "bash", argsJson: JSON.stringify({ command }) });
+      h.store.append(id, { type: "tool_result", sessionId: id, threadId: "main", callId, output: "[exit 1]", isError });
+    };
+    bash("b1", "cd packages/core && sed -i '' 's/a/b/' src/Thing.ts");
+    bash("b2", "git commit -am 'touch nothing'");          // no write target
+    bash("b3", "echo x > denied.txt", true);               // an error result (a denial) never ran
+    bash("b4", "rm -f old/legacy.ts");                       // a deletion counts
+    expect(h.store.editedFiles(id).sort()).toEqual(["/work/repo/old/legacy.ts", "/work/repo/packages/core/src/Thing.ts"]);
+    const res = await h.call({ query: "Thing.ts" });
+    expect(rowsOf(res.output)[0]).toStartWith(id);
+    expect(rowsOf(res.output)[0]).toContain("matched: edited /work/repo/packages/core/src/Thing.ts");
+  });
+
+  test("Bash writes are re-indexed from the LOGS when the store opens, and by the one-time backfill", () => {
+    const h = harness();
+    const id = h.session({ cwd: "/work/repo" });
+    const base = h.store.lastSeq(id);
+    const lines = [
+      { type: "tool_call", sessionId: id, threadId: "main", callId: "x1", name: "bash", argsJson: JSON.stringify({ command: "touch notes/a.md" }), seq: base + 1, ts: at(2026, 9, 1) },
+      { type: "tool_result", sessionId: id, threadId: "main", callId: "x1", output: "", isError: false, seq: base + 2, ts: at(2026, 9, 1) },
+      { type: "tool_call", sessionId: id, threadId: "main", callId: "x2", name: "Bash", argsJson: JSON.stringify({ command: "touch notes/b.md" }), seq: base + 3, ts: at(2026, 9, 1) },
+      { type: "tool_result", sessionId: id, threadId: "main", callId: "x2", output: "denied", isError: true, seq: base + 4, ts: at(2026, 9, 1) },
+    ];
+    appendFileSync(h.store.transcriptPath(id), lines.map((l) => JSON.stringify(l) + "\n").join(""));
+    expect(h.store.editedFiles(id)).toEqual([]);
+    const reopened = new SessionStore(h.home);
+    expect(reopened.editedFiles(id)).toEqual(["/work/repo/notes/a.md"]);
+    // The one-time backfill's cheap line filter admits Bash calls and their results too.
+    (reopened as unknown as { db: { run(sql: string): void } }).db.run("DELETE FROM session_files");
+    (reopened as unknown as { db: { run(sql: string): void } }).db.run("DELETE FROM index_markers");
+    expect(reopened.editedFilesBackfilled()).toBe(false);
+    expect(reopened.backfillEditedFiles()).toBe(1);
+    expect(reopened.editedFiles(id)).toEqual(["/work/repo/notes/a.md"]);
+  });
+
   test("a phone sync push (appendSynced) is indexed too", () => {
     const h = harness();
     const id = h.session();

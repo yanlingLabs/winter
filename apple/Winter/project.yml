@@ -63,6 +63,11 @@ targets:
       - path: Assets.xcassets
     dependencies:
       - package: WinterKit
+      # 2026-10-02: `AgentMessageEnvelope` (another session's message) lives in the shared kit so the
+      # phone reads it with the same parser — the app imports `WinterSessionKit` for it directly rather
+      # than relying on the module being visible through WinterKit.
+      - package: WinterKit
+        product: WinterSessionKit
       - package: WinterProtocol
       - package: Sparkle
       - target: WinterHelper

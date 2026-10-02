@@ -17,6 +17,7 @@ import { outdirPath } from "../sessions/outdir";
 import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge";
 import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, REVIEWER_ESCALATION_REASON, takeReviewerCleared, type BridgeLogger } from "./bridge-common";
 import type { BridgedPlanRequest } from "./plan-bridge";
+import { isHumanTurnOrigin } from "../sessions/turn-origins";
 import { connectorDenialMessage, connectorFactsFor, connectorVerdict, isConnectorToolName, statedServerFromCanUseTool, type ConnectorPermissionSource } from "../agent/mcp/connector-permissions";
 
 export { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
@@ -62,9 +63,14 @@ export interface CanUseToolDeps {
   mode: SessionMode;
   /** `SessionMeta.origin` (`sessions/store.ts:70`, a bare `string`). `"dispatch-child"` is the one
    *  value this bridge reads: a dispatch child is an ordinary CODE session whose cards are mirrored
-   *  into the dispatch stream (`cardsRelayedToDispatch`) and auto-denied after 10 minutes; its
-   *  private-address escalation alone keeps the never-prompt refusal (`neverPromptsAs`). */
+   *  into the dispatch stream (`cardsRelayedToDispatch`) and auto-denied after 10 minutes — unless the
+   *  USER started the turn (`turnOrigin`, `dispatchChildCardTimeoutMs`); its private-address escalation
+   *  alone keeps the never-prompt refusal (`neverPromptsAs`). */
   origin?: string;
+  /** Who started the session's RUNNING turn — the `clientName` of the message it answers
+   *  (`sessions/turn-origins.ts`'s `runningTurnOrigin` over the log), `undefined` when none is known.
+   *  Read per card, and only for a dispatch child (`dispatchChildCardTimeoutMs`). */
+  turnOrigin?: () => string | undefined;
   /** WINTER_HOME. Used ONLY to recognise this session's own `$OUTDIR` as a blessed write target
    *  (see `isBlessedOutputPath`); absent means every Winter escalation is escalated, the
    *  conservative answer. */
@@ -444,8 +450,9 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     emit: deps.emit,
     log,
     now,
-    // A dispatch child's question is relayed to its coordinator and bounded like its approvals.
-    ...(cardsRelayedToDispatch(deps) ? { timeoutMs: DISPATCH_CHILD_APPROVAL_TIMEOUT_MS } : {}),
+    // A dispatch child's question is relayed to its coordinator and bounded like its approvals — decided
+    // per question, since a turn the USER started in the child waits for its human (2026-10-02).
+    ...(cardsRelayedToDispatch(deps) ? { timeoutMs: () => dispatchChildCardTimeoutMs(deps) } : {}),
   });
 
   const withdrawPending = (callId: string): boolean => {
@@ -808,8 +815,27 @@ export function neverPromptsAs(deps: { mode: SessionMode; origin?: string }): st
 }
 
 /** How long a relayed dispatch child's card waits before it is auto-denied (`by: "timeout"`) — the
- *  10 minutes Dispatch's own prompt tells the model (`agent/dispatch-prompt.ts`). */
+ *  10 minutes Dispatch's own prompt tells the model (`agent/dispatch-prompt.ts`). Only for a turn the
+ *  daemon started on someone else's behalf (Dispatch's spawn prompt or follow-up, a peer's message):
+ *  a card from a turn the USER typed into the child waits for its human like any session's
+ *  (`dispatchChildCardTimeoutMs`, user ruling 2026-10-02). */
 export const DISPATCH_CHILD_APPROVAL_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * **How long THIS card of a dispatch child may wait** — `DISPATCH_CHILD_APPROVAL_TIMEOUT_MS`, or
+ * `undefined` (no bound: the ordinary park) when the card is not relayed at all or the running turn is a
+ * HUMAN's (user ruling 2026-10-02): the user typed into the child's own window, so its card shows there at
+ * once and behaves like any session's — while still relayed to Dispatch (`agent/dispatch-children.ts`
+ * mirrors every turn's cards), where answering either one resolves both (one broker entry, keyed by the
+ * child's id). Human means a known origin outside `AUTOMATED_TURN_ORIGINS`; an UNKNOWN origin (no paired
+ * message — a runtime-internal wake — or a log that cannot be read) stays bounded, today's behaviour.
+ */
+export function dispatchChildCardTimeoutMs(deps: { mode: SessionMode; origin?: string; turnOrigin?: () => string | undefined }): number | undefined {
+  if (!cardsRelayedToDispatch(deps)) return undefined;
+  let origin: string | undefined;
+  try { origin = deps.turnOrigin?.(); } catch { origin = undefined; }
+  return isHumanTurnOrigin(origin) ? undefined : DISPATCH_CHILD_APPROVAL_TIMEOUT_MS;
+}
 
 /**
  * **Is this session's card RELAYED to a dispatch coordinator?** A dispatch child (a CODE session
@@ -903,8 +929,9 @@ async function raiseCard(
 
   const issuedAt = env.now();
   // A relayed dispatch child's card is bounded (the coordinator's prompt promises the user an
-  // auto-deny); every other card waits for its human (P8b-19).
-  const parkMs = cardsRelayedToDispatch(deps) ? DISPATCH_CHILD_APPROVAL_TIMEOUT_MS : NO_PARK_TIMEOUT_MS;
+  // auto-deny) — unless the user started the turn in the child; every other card waits for its human
+  // (P8b-19).
+  const parkMs = dispatchChildCardTimeoutMs(deps) ?? NO_PARK_TIMEOUT_MS;
   const expiresAt = issuedAt + parkMs;
   const record: BridgedApprovalRequest = {
     sessionId, callId, toolName, gateToolName,

@@ -63,3 +63,10 @@ export function runningTurnOrigin(events: readonly SessionEvent[]): string | und
  *  attached to watch (`activity-enforcement.ts`): another session's SendMessage, Dispatch's spawn
  *  prompt and its own wake. */
 export const AUTOMATED_TURN_ORIGINS: ReadonlySet<string> = new Set(["messaging", "dispatch", "dispatch-wake"]);
+
+/** Was a turn of this origin started by a HUMAN — a known client's message (the Mac, the TUI, the phone, a
+ *  client that named itself nothing, `"session"`) rather than one of `AUTOMATED_TURN_ORIGINS`? An unknown
+ *  origin (`undefined`: no paired message) is NOT human. */
+export function isHumanTurnOrigin(origin: string | undefined): boolean {
+  return origin !== undefined && origin !== PROJECTOR_PASSTHROUGH_CLIENT && !AUTOMATED_TURN_ORIGINS.has(origin);
+}
