@@ -214,6 +214,8 @@ private struct TranscriptExchangeRow: View {
                 switch entry {
                 case .group(let index, let group):
                     activityGroupRow(group, index: index)
+                case .pillRow(let items):
+                    pillRow(items)
                 case .reply(let index):
                     // One row per assistant message (mac-chat-parity Task 1) — the engine emits one
                     // per ROUND. `.assistant`: the transcript reply IS `docs/brand.md` § 4's serif
@@ -237,32 +239,79 @@ private struct TranscriptExchangeRow: View {
     private enum TimelineEntry {
         case group(index: Int, ActivityGroup)
         case reply(Int)
+        /// Consecutive tools' pills, side by side (pill-themed window only).
+        case pillRow([PillRowItem])
+    }
+
+    private struct PillRowItem {
+        let index: Int
+        let entry: ToolRunEntry
     }
 
     private var timeline: [TimelineEntry] {
         var entries: [TimelineEntry] = []
         var groupIndex = 0
+        var row: [PillRowItem] = []
+        func closeRow() {
+            if !row.isEmpty { entries.append(.pillRow(row)); row = [] }
+        }
         for segment in exchangeTimeline(exchange) {
             switch segment {
             case .activity(let items):
                 for group in groupActivity(items) {
-                    // The pill-themed window gives each tool its own pill (user, 2026-10-02): a run
-                    // that searched and then ran commands is two pills, each with its own words.
-                    if toolRowStyle == .pill, case .toolRun(let runs) = group, runs.count > 1 {
+                    // The pill-themed window gives each tool its own pill and lays consecutive ones
+                    // side by side (user, 2026-10-02): a stretch that searched, read pages and ran
+                    // commands is one row of three pills, each with its own words.
+                    if toolRowStyle == .pill, case .toolRun(let runs) = group {
                         for run in runs {
-                            entries.append(.group(index: groupIndex, .toolRun([run])))
+                            row.append(PillRowItem(index: groupIndex, entry: run))
                             groupIndex += 1
                         }
                     } else {
+                        closeRow()
                         entries.append(.group(index: groupIndex, group))
                         groupIndex += 1
                     }
                 }
             case .reply(let index):
+                closeRow()
                 entries.append(.reply(index))
             }
         }
+        closeRow()
         return entries
+    }
+
+    /// A row of tool pills, then — beneath it — each pill's body that has something to show: an
+    /// opened pill's calls, a failure line, its diff chips.
+    @ViewBuilder
+    private func pillRow(_ items: [PillRowItem]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            PillFlowLayout(spacing: 8, lineSpacing: 8) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    let key = toolRunExpansionKey([item.entry], fallbackIndex: item.index)
+                    PillToolRunHeader(entries: [item.entry], turnIsLive: turnIsLive,
+                                      isExpanded: expandedRuns.contains(key), toggle: { toggle(key) })
+                }
+            }
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                let key = toolRunExpansionKey([item.entry], fallbackIndex: item.index)
+                let expanded = expandedRuns.contains(key)
+                if expanded || toolRunFailureSummary([item.entry]) != nil
+                    || !toolRunCollapsedDiffChips([item.entry]).chips.isEmpty {
+                    TranscriptToolGroupRow(
+                        entries: [item.entry],
+                        turnIsLive: turnIsLive,
+                        isExpanded: expanded,
+                        toggle: { toggle(key) },
+                        onOpenDiff: onOpenDiff,
+                        onOpenFile: onOpenFile,
+                        sessionHasWorkingDirectory: sessionHasWorkingDirectory,
+                        showsHeader: false
+                    )
+                }
+            }
+        }
     }
 
     @ViewBuilder

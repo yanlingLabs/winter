@@ -235,8 +235,7 @@ struct PillToolRunHeader: View {
         let discs = toolRunDiscs(entries)
         let running = status == .running
         let failed = status == .failed && !running
-        HStack(spacing: 0) {
-            Button(action: toggle) {
+        Button(action: toggle) {
                 TimelineView(.periodic(from: .now, by: Self.rotationPeriod)) { timeline in
                     let tick = Int(timeline.date.timeIntervalSinceReferenceDate / Self.rotationPeriod)
                     HStack(spacing: 10) {
@@ -267,10 +266,9 @@ struct PillToolRunHeader: View {
                 .clipShape(Capsule())
                 .contentShape(Capsule())
                 .animation(.easeInOut(duration: 0.3), value: status)
-            }
-            .buttonStyle(.plain)
-            Spacer(minLength: 0)
         }
+        .buttonStyle(.plain)
+        .fixedSize()
         .task(id: discs) { await waitForFavicons(discs) }
     }
 
@@ -461,6 +459,55 @@ struct PillToolRunCard: ViewModifier {
                 .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white.opacity(0.04)))
         } else {
             content
+        }
+    }
+}
+
+/// Tool pills side by side (user, 2026-10-02: "the pills should be in front of each other"): left to
+/// right in their arrival order, wrapping onto the next line when the column runs out of width.
+struct PillFlowLayout: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 8
+
+    private func rows(_ sizes: [CGSize], width: CGFloat) -> [[Int]] {
+        var rows: [[Int]] = [[]]
+        var x: CGFloat = 0
+        for (i, size) in sizes.enumerated() {
+            if !rows[rows.count - 1].isEmpty, x + spacing + size.width > width {
+                rows.append([])
+                x = 0
+            }
+            x += (rows[rows.count - 1].isEmpty ? 0 : spacing) + size.width
+            rows[rows.count - 1].append(i)
+        }
+        return rows
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let width = proposal.width ?? .infinity
+        var height: CGFloat = 0
+        var widest: CGFloat = 0
+        for row in rows(sizes, width: width) where !row.isEmpty {
+            let rowWidth = row.map { sizes[$0].width }.reduce(0, +) + spacing * CGFloat(row.count - 1)
+            widest = max(widest, rowWidth)
+            height += (height == 0 ? 0 : lineSpacing) + (row.map { sizes[$0].height }.max() ?? 0)
+        }
+        return CGSize(width: proposal.width ?? widest, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        var y = bounds.minY
+        for row in rows(sizes, width: bounds.width) where !row.isEmpty {
+            var x = bounds.minX
+            let rowHeight = row.map { sizes[$0].height }.max() ?? 0
+            for i in row {
+                subviews[i].place(at: CGPoint(x: x, y: y + (rowHeight - sizes[i].height) / 2),
+                                  proposal: ProposedViewSize(sizes[i]))
+                x += sizes[i].width + spacing
+            }
+            y += rowHeight + lineSpacing
         }
     }
 }
