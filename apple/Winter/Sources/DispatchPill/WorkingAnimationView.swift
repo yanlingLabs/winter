@@ -19,8 +19,11 @@ struct WorkingAnimationModel: Equatable {
     static let maxStep: Double = 0.1
     /// The least time between two throws, so a burst of tool calls leaves the nozzle one by one.
     static let throwSpacing: Double = 0.22
-    /// The most throws waiting their turn at the nozzle; past it the oldest waiting are dropped.
-    static let maxQueuedThrows = 6
+    /// The most throws waiting their turn at the nozzle; past it the oldest waiting are dropped (a
+    /// round that is still running repeats its throws anyway, so nothing it found is lost for long).
+    static let maxQueuedThrows = 24
+    /// While a tool round runs and nothing new is waiting, its throws leave again, one every this.
+    static let repeatSpacing: Double = 0.4
 
     private(set) var plume: PropulsionPlume
     /// Throws seen but not yet launched, oldest first.
@@ -30,6 +33,7 @@ struct WorkingAnimationModel: Equatable {
     private var seen: Set<String> = []
     private var primed = false
     private var sinceLastThrow: Double = .infinity
+    private var repeatCursor = 0
 
     /// The plume starts already full (pre-warmed), so it never visibly "fills up" when the working
     /// pill appears.
@@ -40,9 +44,12 @@ struct WorkingAnimationModel: Equatable {
     /// Advance by `dt` seconds. `thrown` is the turn's tool uses so far (`plumeThrows(for:)`); any
     /// not seen before is queued and leaves the nozzle at the next free slot. What was already in the
     /// list on the FIRST tick happened before this plume appeared (the pill was summoned mid-turn),
-    /// and is not thrown — no burst of stale tiles. `animatesPlume` false (Reduce Motion) holds the
-    /// plume still and throws nothing.
-    mutating func tick(dt rawDt: Double, thrown incoming: [PlumeThrow] = [], animatesPlume: Bool = true) {
+    /// and is not thrown — no burst of stale tiles. `repeating` is the CURRENT tool round's throws
+    /// (`plumeRepeatingThrows(for:)`): while it is non-empty and nothing new waits, they leave again in
+    /// turn, so a running round keeps streaming its tools and sites until it ends. `animatesPlume`
+    /// false (Reduce Motion) holds the plume still and throws nothing.
+    mutating func tick(dt rawDt: Double, thrown incoming: [PlumeThrow] = [], repeating: [PlumeThrow] = [],
+                       animatesPlume: Bool = true) {
         let dt = max(0, min(rawDt, Self.maxStep))
         if !primed {
             primed = true
@@ -54,9 +61,16 @@ struct WorkingAnimationModel: Equatable {
         guard animatesPlume else { return }
         plume.advance(dt: dt)
         sinceLastThrow += dt
-        if !queued.isEmpty, sinceLastThrow >= Self.throwSpacing {
+        if !queued.isEmpty {
+            guard sinceLastThrow >= Self.throwSpacing else { return }
             plume.launch(queued.removeFirst())
             sinceLastThrow = 0
+        } else if !repeating.isEmpty, sinceLastThrow >= Self.repeatSpacing {
+            plume.launch(repeating[repeatCursor % repeating.count])
+            repeatCursor = (repeatCursor + 1) % repeating.count
+            sinceLastThrow = 0
+        } else if repeating.isEmpty {
+            repeatCursor = 0
         }
     }
 }
@@ -87,8 +101,25 @@ struct PlumeThrow: Equatable, Hashable {
 /// before. The last `plumeThrowWindow` only — older ones were thrown long ago.
 func plumeThrows(for exchange: Exchange?) -> [PlumeThrow] {
     guard let exchange else { return [] }
+    return Array(plumeThrows(in: exchange.activity, from: 0).suffix(plumeThrowWindow))
+}
+
+/// PURE: the CURRENT tool round's throws — every tool call from the earliest one still running to
+/// the end of the exchange, with whatever its finished calls found — or nothing once every call has
+/// returned. A round of twenty searches therefore keeps streaming its sites for as long as any of
+/// them is still out, and stops when the round is over.
+func plumeRepeatingThrows(for exchange: Exchange?) -> [PlumeThrow] {
+    guard let exchange,
+          let start = exchange.activity.firstIndex(where: {
+              if case let .tool(_, _, _, output, _, _, _) = $0.kind { return output == nil }
+              return false
+          }) else { return [] }
+    return Array(plumeThrows(in: exchange.activity, from: start).suffix(plumeThrowWindow))
+}
+
+private func plumeThrows(in activity: [ActivityItem], from start: Int) -> [PlumeThrow] {
     var out: [PlumeThrow] = []
-    for (index, item) in exchange.activity.enumerated() {
+    for (index, item) in activity.enumerated() where index >= start {
         guard case let .tool(name, detail, callId, output, isError, _, siteIcons) = item.kind else { continue }
         let base = callId ?? "activity-\(index)"
         let lowered = name.lowercased()
@@ -113,7 +144,7 @@ func plumeThrows(for exchange: Exchange?) -> [PlumeThrow] {
             out.append(PlumeThrow(id: base + "#" + site.host, kind: .site(host: site.host, iconURL: site.iconURL)))
         }
     }
-    return Array(out.suffix(plumeThrowWindow))
+    return out
 }
 
 /// PURE: a result's `siteIcons` as plume sites — one per public page host, in order. An icon url
@@ -142,8 +173,10 @@ func plumeIconURLAllowed(_ string: String) -> Bool {
     return plumeFaviconHostAllowed(host)
 }
 
-let plumeSitesPerSearch = 4
-let plumeThrowWindow = 40
+/// Every source a search names is thrown — the cap only bounds a pathological result (`siteIcons`
+/// itself is capped at 10; a `Search` cites up to 20).
+let plumeSitesPerSearch = 20
+let plumeThrowWindow = 200
 let plumeFetchToolNames: Set<String> = ["webfetch", "web_fetch", "readpage"]
 
 func plumeIsSearchTool(_ lowered: String) -> Bool {
@@ -182,25 +215,6 @@ func plumeFaviconHostAllowed(_ host: String) -> Bool {
     return labels.allSatisfy { !$0.isEmpty && $0.count <= 63 }
 }
 
-/// PURE: a tool tile's colour — one per symbol, stable across launches (FNV-1a over its name, never
-/// `hashValue`, which Swift seeds per process), from a set of bright colours that read under a white
-/// glyph and stand apart from the plume's own blue.
-func plumeToolTileColor(symbol: String) -> PlumePalette.RGB {
-    let colours: [PlumePalette.RGB] = [
-        (1.0, 0.55, 0.10),  // orange
-        (1.0, 0.30, 0.52),  // pink
-        (0.62, 0.40, 1.0),  // purple
-        (0.08, 0.76, 0.68), // teal
-        (0.96, 0.74, 0.08), // gold
-        (0.28, 0.78, 0.34), // green
-        (1.0, 0.34, 0.30),  // red
-        (0.40, 0.44, 1.0),  // indigo
-    ]
-    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-    for byte in symbol.utf8 { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
-    return colours[Int(hash % UInt64(colours.count))]
-}
-
 /// The plume itself: puffs (and sparks) born at the nozzle, aging until they reach the tail. Kept in
 /// normalised terms — age, a vertical lane, a size factor — and laid out into a rect only when drawn
 /// (`circles(in:emitterX:tailX:)`), so the same plume draws at any size: the pill, the full-screen
@@ -227,33 +241,29 @@ struct PropulsionPlume: Equatable {
     static let nozzleDiameterShare: Double = 0.9
     static let sparkDiameterShare: Double = 0.14
     /// How much of its size a puff has lost by the time it reaches the tail.
-    static let shrinkAlongPlume: Double = 0.62
+    static let shrinkAlongPlume: Double = 0.5
     /// The last share of a puff's life over which it shrinks away to nothing (never a pop).
-    static let vanishShare: Double = 0.16
+    static let vanishShare: Double = 0.1
     /// How sharply a puff speeds up down the plume: >1 is slow at the nozzle (where they bunch) and
     /// fast at the tail (where they thin out) — what reads as thrust.
     static let travelExponent: Double = 1.7
 
-    /// A thrown tile riding the plume (`launch(_:)`).
+    /// A thrown item riding the plume (`launch(_:)`).
     struct Token: Equatable {
         var age: Double
         let lifetime: Double
         let lane: Double
-        /// Which way, and how hard, it tumbles: -1 … 1.
-        let spin: Double
         let item: PlumeThrow
     }
 
-    static let tokenLifetime: ClosedRange<Double> = 1.5...1.85
-    /// A tile's side at the nozzle, as a share of the plume's height.
+    static let tokenLifetime: ClosedRange<Double> = 1.6...1.9
+    /// A thrown item's diameter at the nozzle, as a share of the plume's height.
     static let tokenSideShare: Double = 0.56
-    /// How much of its size a tile has lost by the tail.
+    /// How much of its size a TOOL puff has lost by the tail (a site keeps its size the whole way).
     static let tokenShrinkAlongPlume: Double = 0.5
-    /// The first share of its life over which a tile grows out of the nozzle.
+    /// The first share of its life over which an item grows out of the nozzle.
     static let tokenEmergeShare: Double = 0.08
-    /// The most a tile turns over its whole ride, radians.
-    static let tokenMaxTurn: Double = 0.9
-    /// Tiles slow at the nozzle like the puffs, but less — they are flung, not blown.
+    /// Thrown items slow at the nozzle like the puffs, but less — they are flung, not blown.
     static let tokenTravelExponent: Double = 1.35
 
     private(set) var puffs: [Puff] = []
@@ -291,7 +301,7 @@ struct PropulsionPlume: Equatable {
     /// Throw `item` out of the nozzle now.
     mutating func launch(_ item: PlumeThrow) {
         tokens.append(Token(age: 0, lifetime: rng.next(in: Self.tokenLifetime), lane: rng.next(in: -0.85...0.85),
-                            spin: rng.next(in: -1...1), item: item))
+                            item: item))
     }
 
     /// Every riding tile laid out in `rect`, oldest first (the newest, nearest the nozzle, on top).
@@ -299,21 +309,22 @@ struct PropulsionPlume: Equatable {
         tokens.map { Self.tile(for: $0, in: rect, emitterX: emitterX, tailX: tailX) }.filter { $0.side > 0.5 }
     }
 
-    /// PURE: one tile's square. It grows out of the nozzle over `tokenEmergeShare` of its life, rides
-    /// down the plume drifting to its lane and tumbling, shrinks as it goes, and vanishes to nothing
-    /// at the tail like a puff.
+    /// PURE: one thrown item's disc. Both kinds grow out of the nozzle over `tokenEmergeShare` of their
+    /// life and drift to their lane. A TOOL is a puff of the plume itself — it shrinks, cools and
+    /// vanishes at the tail like the rest of the exhaust. A SITE keeps its size the whole way and rides
+    /// out past the tail (`tailX` lies beyond the pill's leading edge, which clips it).
     static func tile(for token: Token, in rect: CGRect, emitterX: CGFloat, tailX: CGFloat) -> PlumeTile {
         let p = min(max(token.age / token.lifetime, 0), 1)
         let travel = pow(p, tokenTravelExponent)
         let x = Double(emitterX) - travel * Double(emitterX - tailX)
         let height = Double(rect.height)
-        var side = height * tokenSideShare * (1 - tokenShrinkAlongPlume * p)
-        side *= min(1, 0.35 + 0.65 * p / tokenEmergeShare)
-        side *= min(1, (1 - p) / vanishShare)
+        var side = height * tokenSideShare * min(1, 0.35 + 0.65 * p / tokenEmergeShare)
+        if case .tool = token.item.kind {
+            side *= (1 - tokenShrinkAlongPlume * p) * min(1, (1 - p) / vanishShare)
+        }
         let slack = max(0, (height - side) / 2)
         let y = Double(rect.midY) + token.lane * slack * min(1, p * 2.5)
-        return PlumeTile(center: CGPoint(x: x, y: y), side: CGFloat(max(0, side)),
-                         rotation: token.spin * tokenMaxTurn * p, item: token.item)
+        return PlumeTile(center: CGPoint(x: x, y: y), side: CGFloat(max(0, side)), heat: 1 - p, item: token.item)
     }
 
     private mutating func spawn(age: Double, spark: Bool) {
@@ -350,11 +361,12 @@ struct PropulsionPlume: Equatable {
     }
 }
 
-/// A thrown tile's square, laid out: centre, side, and how far it has turned (radians).
+/// A thrown item's disc, laid out: centre, diameter (`side`), and how hot it still is (1 at the
+/// nozzle, 0 at the tail) — a tool puff cools like the exhaust around it.
 struct PlumeTile: Equatable {
     let center: CGPoint
     let side: CGFloat
-    let rotation: Double
+    let heat: Double
     let item: PlumeThrow
 }
 
@@ -493,6 +505,8 @@ func workingToolName(_ status: OrbStatus) -> String? {
 /// to the leading end, and `thrown` items leave the nozzle as tiles riding it.
 struct WorkingAnimationView: View {
     var thrown: [PlumeThrow] = []
+    /// The current tool round's throws (`plumeRepeatingThrows`), streamed again while it runs.
+    var repeating: [PlumeThrow] = []
     var emitterInset: CGFloat?
     var palette: PlumePalette = .blue
 
@@ -502,9 +516,10 @@ struct WorkingAnimationView: View {
 
     /// `initialModel` starts the plume from a model already run forward (offscreen renders); the app
     /// never passes one.
-    init(thrown: [PlumeThrow] = [], emitterInset: CGFloat? = nil, palette: PlumePalette = .blue,
-         initialModel: WorkingAnimationModel? = nil) {
+    init(thrown: [PlumeThrow] = [], repeating: [PlumeThrow] = [], emitterInset: CGFloat? = nil,
+         palette: PlumePalette = .blue, initialModel: WorkingAnimationModel? = nil) {
         self.thrown = thrown
+        self.repeating = repeating
         self.emitterInset = emitterInset
         self.palette = palette
         _model = State(initialValue: initialModel ?? WorkingAnimationModel())
@@ -535,7 +550,9 @@ struct WorkingAnimationView: View {
         return Canvas { context, size in
             let rect = CGRect(origin: .zero, size: size)
             let emitterX = size.width - (emitterInset ?? size.height / 2)
-            let tailX = size.height * 0.3
+            // Past the pill's leading edge: the exhaust runs the whole length and out (the pill's shape
+            // clips it), never stopping short.
+            let tailX = -size.height * 0.2
             let circles = model.plume.circles(in: rect, emitterX: emitterX, tailX: tailX)
 
             // A soft glow under everything, added rather than painted, so the bunched nozzle
@@ -557,33 +574,34 @@ struct WorkingAnimationView: View {
             }
             // The thrown tiles ride on top of the exhaust.
             for tile in model.plume.tiles(in: rect, emitterX: emitterX, tailX: tailX) {
-                Self.draw(tile, favicons: favicons, in: &context)
+                Self.draw(tile, palette: palette, favicons: favicons, in: &context)
             }
         }
     }
 
     /// One tile: a rounded square, turned by its tumble — a tool's white symbol on its own colour, or
     /// a site's favicon on white (a globe until the favicon has loaded, or if it never does).
-    private static func draw(_ tile: PlumeTile, favicons: [String: NSImage], in context: inout GraphicsContext) {
-        var ctx = context
-        ctx.translateBy(x: tile.center.x, y: tile.center.y)
-        ctx.rotate(by: .radians(tile.rotation))
+    /// One thrown item, a disc like everything else in the plume: a TOOL is a puff in the plume's own
+    /// colours (cooling as it goes) carrying its white symbol; a SITE is a white disc holding its
+    /// favicon (a globe until the favicon has loaded, or if it never does).
+    private static func draw(_ tile: PlumeTile, palette: PlumePalette, favicons: [String: NSImage],
+                             in context: inout GraphicsContext) {
         let side = tile.side
-        let square = CGRect(x: -side / 2, y: -side / 2, width: side, height: side)
-        let shape = Path(roundedRect: square, cornerRadius: side * 0.26, style: .continuous)
+        let disc = CGRect(x: tile.center.x - side / 2, y: tile.center.y - side / 2, width: side, height: side)
+        let shape = Path(ellipseIn: disc)
         switch tile.item.kind {
         case .tool(let symbol):
-            let c = plumeToolTileColor(symbol: symbol)
-            ctx.fill(shape, with: .color(Color(red: c.red, green: c.green, blue: c.blue)))
-            drawSymbol(symbol, color: .white, in: square.insetBy(dx: side * 0.22, dy: side * 0.22), context: &ctx)
+            context.fill(shape, with: .color(color(heat: 0.35 + 0.65 * tile.heat, palette)))
+            drawSymbol(symbol, color: .white, in: disc.insetBy(dx: side * 0.25, dy: side * 0.25), context: &context)
         case .site(let host, let iconURL):
-            ctx.fill(shape, with: .color(.white))
-            let inner = square.insetBy(dx: side * 0.17, dy: side * 0.17)
+            context.fill(shape, with: .color(.white))
+            let inner = disc.insetBy(dx: side * 0.18, dy: side * 0.18)
             if let image = favicons[plumeFaviconKey(host: host, iconURL: iconURL)] {
-                ctx.clip(to: Path(roundedRect: inner, cornerRadius: side * 0.1))
-                ctx.draw(Image(nsImage: image).resizable(), in: inner)
+                var clipped = context
+                clipped.clip(to: Path(ellipseIn: inner.insetBy(dx: -side * 0.04, dy: -side * 0.04)))
+                clipped.draw(Image(nsImage: image).resizable(), in: inner)
             } else {
-                drawSymbol("globe", color: Color(white: 0.45), in: inner.insetBy(dx: side * 0.04, dy: side * 0.04), context: &ctx)
+                drawSymbol("globe", color: Color(white: 0.45), in: inner.insetBy(dx: side * 0.03, dy: side * 0.03), context: &context)
             }
         }
     }
@@ -612,6 +630,6 @@ struct WorkingAnimationView: View {
     private func step(_ now: Date) {
         let dt = lastTick.map { now.timeIntervalSince($0) } ?? (1.0 / 60.0)
         lastTick = now
-        model.tick(dt: dt, thrown: thrown, animatesPlume: !reduceMotion)
+        model.tick(dt: dt, thrown: thrown, repeating: repeating, animatesPlume: !reduceMotion)
     }
 }

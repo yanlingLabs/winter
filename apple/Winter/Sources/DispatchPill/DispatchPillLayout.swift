@@ -13,7 +13,7 @@ import Foundation
 /// (the stop button and the working animation are drawn off `FieldStateAdapter.turnRunning`), so a
 /// turn starting or ending never moves the panel by itself.
 enum DispatchPillPresentation: Equatable {
-    /// Idle: the blue circle and a "Type here" field. Also the working state, which swaps the
+    /// Idle: the white circle and a "Type here" field. Also the working state, which swaps the
     /// field for the plume (`CompactPillWorking`).
     case compact
     /// Typing: wider, with ↗ (full screen) and ⋯ floating over the field's end; grows with the

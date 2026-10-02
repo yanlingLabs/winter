@@ -183,7 +183,7 @@ struct DispatchPillComposerBar: View {
             // Under the row, so the stop button sits on the plume's nozzle.
             .background(alignment: .bottom) {
                 if working {
-                    CompactPillWorking(thrown: controller.plumeThrows)
+                    CompactPillWorking(thrown: controller.plumeThrows, repeating: controller.plumeRepeatingThrows)
                         .frame(height: DispatchPillMetrics.pillHeight)
                         .contentShape(Rectangle())
                         .onTapGesture { controller.openComposer() }
