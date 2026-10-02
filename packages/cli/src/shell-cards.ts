@@ -5,7 +5,9 @@
 // approval's `[y/N]` prompt is printed only when that approval is the one being answered, and a question's
 // or plan's read loop starts only when the card before it is done -- never two stdin readers at once, and a
 // typed answer always goes to the card whose prompt is on screen. A card resolved elsewhere (another
-// window, a broker timeout) leaves the queue; if it was the one on screen, the next card takes its place.
+// window, a broker timeout) leaves the queue; if it was the one on screen, the next card takes its place --
+// an approval at once; a question or plan once its pending line is read (its `run` is handed a signal that
+// aborts, and stops asking and answering), with a note telling the user to press Enter.
 //
 // Pure of process state: `main.ts` hands it the writer, the RPC and the raw key listener's suspend/resume.
 
@@ -25,7 +27,7 @@ export interface ShellCardDeps {
 
 type Card =
   | { kind: "approval"; callId: string; prompt: string }
-  | { kind: "interactive"; callId: string; run: () => Promise<void> };
+  | { kind: "interactive"; callId: string; run: (signal: AbortSignal) => Promise<void>; abort: AbortController };
 
 export class ShellCardQueue {
   private readonly waiting: Card[] = [];
@@ -42,10 +44,12 @@ export class ShellCardQueue {
     this.pump();
   }
 
-  /** A question or plan card: `run` (its own prompts and read loop) starts when it reaches the front. */
-  raiseInteractive(callId: string, run: () => Promise<void>): void {
+  /** A question or plan card: `run` (its own prompts and read loop) starts when it reaches the front. Its
+   *  signal aborts when the card is resolved elsewhere while on screen: `run` must check it after each line it
+   *  reads, stop asking, and send no answer. */
+  raiseInteractive(callId: string, run: (signal: AbortSignal) => Promise<void>): void {
     if (this.holds(callId)) return;
-    this.waiting.push({ kind: "interactive", callId, run });
+    this.waiting.push({ kind: "interactive", callId, run, abort: new AbortController() });
     this.pump();
   }
 
@@ -57,10 +61,17 @@ export class ShellCardQueue {
       return;
     }
     const active = this.active;
-    // An interactive card's own read loop ends when its prompts are answered; only an approval gives way here.
-    if (active?.kind === "approval" && active.callId === callId && !this.answering) {
+    if (active === undefined || active.callId !== callId) return;
+    if (active.kind === "approval" && !this.answering) {
       this.deps.emit(`\n${this.dimmed("(answered elsewhere)")}\n`);
       this.finish(active);
+      return;
+    }
+    // A question or plan on screen: its read loop is waiting for a line. It stops at that line (the signal)
+    // and the next card takes its place -- the user is told to press Enter.
+    if (active.kind === "interactive" && !active.abort.signal.aborted) {
+      active.abort.abort();
+      this.deps.emit(`\n${this.dimmed("(answered elsewhere — press Enter to continue)")}\n`);
     }
   }
 
@@ -104,7 +115,7 @@ export class ShellCardQueue {
       this.deps.emit(next.prompt);
       return;
     }
-    void next.run().catch((err: unknown) => this.deps.onError?.(err)).finally(() => this.finish(next));
+    void next.run(next.abort.signal).catch((err: unknown) => this.deps.onError?.(err)).finally(() => this.finish(next));
   }
 
   private finish(card: Card): void {
