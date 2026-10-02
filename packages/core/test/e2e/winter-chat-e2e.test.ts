@@ -285,7 +285,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     expect(chatCaps).toEqual(["mcp__winter__browser__browser"]);
     const expected = toolsFor("chat", { exaKeyPresent: false })!.filter((t) => t !== "advisor");
     expect([...driver.init!.tools].sort()).toEqual(expected);
-    expect(expected).toEqual(["AskUserQuestion", "ListAgents", "ReadNotifications", "SendMessage", "ToolSearch", "WebFetch", "WebSearch"]);
+    expect(expected).toEqual(["AskUserQuestion", "ToolSearch", "WebFetch", "WebSearch"]);
   }, 30_000);
 
   test("(b) tooluse → tool_call + tool_result + terminal, WINTER-shaped, and the child's fallback text on the unregistered tool", async () => {

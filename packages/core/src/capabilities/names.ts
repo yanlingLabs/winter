@@ -160,11 +160,10 @@ export interface CapabilityToolFacts {
  * `test/capabilities/names.test.ts`; that test is what keeps the two spellings from drifting.
  */
 export const WINTER_CAPABILITY_TOOLS = {
-  // `sessions` — dispatch's orchestration + fleet-management surface (`modes: ["dispatch"]` on all
-  // three defs). EAGER: the ruling lists them as ordinary dispatch tools, not as deferred ones.
+  // `sessions` — dispatch's orchestration surface (`modes: ["dispatch"]` on both defs). EAGER: the ruling
+  // lists them as ordinary dispatch tools. `manage_session` (ManageSession) was removed 2026-10-02.
   "mcp__winter__sessions__session_spawn": { modes: ["dispatch"], plainName: "SpawnSession", eager: true },
   "mcp__winter__sessions__list_sessions": { modes: ["dispatch"], plainName: "ListSessions", eager: true },
-  "mcp__winter__sessions__manage_session": { modes: ["dispatch"], plainName: "ManageSession", eager: true },
   // `computer` — `modes: ["code","dispatch"]`, deferred in both. Its PRESENCE additionally follows the
   // LIVE `settings.computerUse.enabled`, read when the session's servers are built (`index.ts`).
   "mcp__winter__computer__computer": { modes: ["code", "dispatch"], plainName: "Computer" },

@@ -156,6 +156,12 @@ struct WindowContentView<Accessory: View>: View {
                 pageColumns
             }
         }
+        // A message from another session names its sender by title where the sidebar's list has it
+        // (read at render time, never observed — the id is the fallback, so a stale list only costs
+        // a title appearing a render late).
+        .environment(\.transcriptSessionTitle, sidebars.map { wiring in
+            { id in wiring.directory.rows.first { $0.sessionId == id }?.title }
+        })
         // Winter Phase 8d (Task 4.2, WS-13 §8.2); Winter Phase 10b (D1-4, W18-23): the lossy-switch
         // confirm dialog — ONE modifier on this shared view covers all three of
         // `WindowContentView`'s homes (the shell's live chat page, a detached window, the orb's

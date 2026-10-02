@@ -60,7 +60,7 @@ describe("P8b-37: what each server ADVERTISES follows the session's mode", () =>
     expect(toolsOf(serversFor("chat"), "sessions")).toEqual([]);
     expect(toolsOf(serversFor("code"), "sessions")).toEqual([]);
     // Dispatch is the mode that actually owns the fleet surface.
-    expect(toolsOf(serversFor("dispatch"), "sessions")).toEqual(["list_sessions", "manage_session", "session_spawn"]);
+    expect(toolsOf(serversFor("dispatch"), "sessions")).toEqual(["list_sessions", "session_spawn"]);
   });
 
   test("the `research` and `web` servers are retired: no such key, in any mode", () => {

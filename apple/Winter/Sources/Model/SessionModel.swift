@@ -390,6 +390,11 @@ extension ActivityItem {
 /// event log.
 struct Exchange: Equatable {
     var prompt: String
+    /// Set when this exchange was opened by ANOTHER session's message (`clientName: "messaging"`,
+    /// text parsed once by `AgentMessageEnvelope.parse`): `prompt` then holds the message's body, and
+    /// the user bubble wears the sender's header (and the summary, when it carried one) instead of
+    /// showing the wrapper's XML. `nil` for everything a person typed.
+    var promptEnvelope: AgentMessageEnvelope? = nil
     /// EVERY `assistant_message` this exchange's turn emitted, in arrival order (mac-chat-parity
     /// Task 1). The engine emits one PER ROUND, whenever the round produced text
     /// (`if (textBuf.length > 0)`, `packages/core/src/agent/engine.ts`) — this was a single
@@ -442,7 +447,7 @@ struct Exchange: Equatable {
     /// derived from the same events and changes only when they do, so it never decides whether two
     /// exchanges differ (an `Exchange(prompt:reply:activity:)` a test builds has no arrival order).
     static func == (a: Exchange, b: Exchange) -> Bool {
-        a.prompt == b.prompt && a.replies == b.replies && a.activity == b.activity && a.aborted == b.aborted
+        a.prompt == b.prompt && a.promptEnvelope == b.promptEnvelope && a.replies == b.replies && a.activity == b.activity && a.aborted == b.aborted
     }
 
     /// The LAST assistant message of this exchange, or `""` when none has arrived yet. This is
@@ -697,14 +702,21 @@ enum SessionReducer {
             s.exchanges.append(Exchange(prompt: "", reply: ""))
             s.lastTurnOriginClientName = v.clientName
         case .userMessage(let v) where v.threadId == mainThread:
+            // Another session's message (`SendMessage`, core's host messaging): the wrapper is parsed
+            // ONCE here so no view shows raw XML. Anything that is not exactly the wrapper stays text.
+            let envelope = v.clientName == messagingClientName ? AgentMessageEnvelope.parse(v.text) : nil
             if s.turnRunning, let last = s.exchanges.indices.last, s.exchanges[last].reply.isEmpty {
                 // Mid-turn steer: same turn, same exchange — the prompt grows (one turn = one exchange).
-                s.exchanges[last].prompt += "\n↳ \(v.text)"
+                // A steer from another session folds in as a readable line carrying its sender.
+                let steer = envelope.map { "[\($0.senderLabel())] \($0.body)" } ?? v.text
+                s.exchanges[last].prompt += "\n↳ \(steer)"
                 // Wave-5 gate item 2: surface the queued message separately from the fold above
                 // so the UI can show it as visibly "queued" rather than silently absorbed.
-                s.queuedSteers.append(v.text)
+                s.queuedSteers.append(steer)
             } else {
-                s.exchanges.append(Exchange(prompt: v.text, reply: ""))
+                var opened = Exchange(prompt: envelope?.body ?? v.text, reply: "")
+                opened.promptEnvelope = envelope
+                s.exchanges.append(opened)
                 // orb-scope Part 2 / Important-2 fix: a NEW exchange is exactly a new-turn start —
                 // stamp who initiated it, UNLESS `clientName` is one of the engine's OWN bookkeeping
                 // sentinels (never a real originating surface/client) — see
@@ -1477,6 +1489,9 @@ enum SessionReducer {
     /// `clientName` of the daemon's own dispatch wake message — rendered as no user bubble (see the
     /// reducer's first `.userMessage` case).
     static let dispatchWakeClientName = "dispatch-wake"
+    /// A message another Winter session sent in (`AgentMessageEnvelope`); Dispatch's messages to its
+    /// own child carry plain text under the same name and fall through the parser untouched.
+    static let messagingClientName = "messaging"
 
     private static func isEngineSentinelClientName(_ clientName: String) -> Bool {
         ["steer", "send_message", "resume"].contains(clientName)

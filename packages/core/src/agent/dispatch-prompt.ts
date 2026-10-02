@@ -12,8 +12,9 @@
  * a model ends up reporting a tool as broken when it was never there.
  *
  * Every tool it names is one dispatch's ALLOWED set carries (the 2026-10-01 tool-surface ruling,
- * `DISPATCH_BUILTIN_TOOLS` plus the daemon's `SpawnSession`/`ListSessions`/`ManageSession`/`Computer`/
- * `Browser`), under the plain name the model sees. `Computer`, `Browser` and `CronList` start deferred:
+ * `DISPATCH_BUILTIN_TOOLS` plus the daemon's `SpawnSession`/`ListSessions`/`Computer`/`Browser`), under the
+ * plain name the model sees. ManageSession was removed 2026-10-02 (user ruling): SendMessage messages or
+ * resumes a session, TaskStop stops its running turn. `Computer`, `Browser` and `CronList` start deferred:
  * the model loads them through `ToolSearch` on first use, which the prompt says once.
  *
  * `exaKeyPresent` ABSENT reads as PRESENT — the convention `ToolExposure` and `toolsFor` keep, so every
@@ -36,13 +37,13 @@ export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean } = {}): st
     "# Spawning work",
     "One session per coherent task. Pick the right dir. A child runs at your own approval policy as it is when you spawn it (it keeps that policy if yours changes later). The child knows NOTHING of this conversation — write it a complete, self-contained prompt with all context it needs.",
     "Children run asynchronously: SpawnSession returns at once, and you are woken with a <child_update> when one finishes (several finishing together arrive in one message). Report outcomes in your own words, with file paths the user can open.",
-    "Each <child_update> message also lists your children still at work. To stop a child, use ManageSession with action stop and its session id.",
-    "To follow up a child — to correct it, answer it, or give it its next step — SendMessage it with its session id (`s_…`) as `to`, instead of spawning a new session. This works whether it is still running (your message runs right after its current turn) or finished (it is resumed for your message), and you are woken with a <child_update> when that turn finishes. SendMessage is the only way to message a session; ManageSession never does.",
+    "Each <child_update> message also lists your children still at work. To stop a child's running turn, use TaskStop with its session id (`s_…`) as task_id — it stays resumable.",
+    "To follow up a child — to correct it, answer it, or give it its next step — SendMessage it with its session id (`s_…`) as `to`, instead of spawning a new session. This works whether it is still running (your message runs right after its current turn) or finished (it is resumed for your message), and you are woken with a <child_update> when that turn finishes. SendMessage is the only way to message or resume a session.",
     "",
     "# The whole fleet, not just your children",
-    "ListSessions shows every code and cowork session on this Mac — what state each is in, where it works, and how long a running turn has been going. You may manage any of them, not only the ones you spawned: ManageSession stops / backgrounds / unbackgrounds / archives / resumes one, and SendMessage (to: its `s_…` id) speaks to one — an idle or finished one is resumed for your message. A session you did not spawn is not followed: you are not woken when it finishes, so check on it with ListSessions.",
-    "Stopping takes a session off duty: it aborts any running turn AND clears its background flag, so a worker you stop is no longer a background session even if it was already idle. To clear that flag WITHOUT interrupting the work, use unbackground.",
-    "Archived means the user hid it, and it stays exactly as they left it until someone resumes it: messaging it is refused, and so is backgrounding it. Resume is the only door — take it deliberately, and only when the user's intent is clear. A session that was backgrounded before it was archived comes back backgrounded.",
+    "ListSessions shows what is going on: every active and background code/Cowork session on this Mac, plus the sessions you spawned (the newest finished ones as completed). To find any other session — an idle or archived one, one from yesterday, the one that edited a given file — call ListSessions with a `query` describing it.",
+    "You may message (SendMessage) or stop (TaskStop) any code or Cowork session, not only the ones you spawned. A session you did not spawn is not followed: you are not woken when it finishes, so check on it with ListSessions. Chat sessions and the dispatch session cannot be messaged or stopped.",
+    "An archived session is one the user hid: messaging it is refused. Only the user brings it back.",
     "",
     "# Relayed prompts",
     "When a child needs a permission or has a question, the card appears HERE in this conversation — the user answers it here; never re-ask on the child's behalf. Unanswered permission requests and questions expire after 10 minutes (denied / left unanswered) and the child continues without them.",

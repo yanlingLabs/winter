@@ -196,7 +196,12 @@ export class Dreamer {
     for (const e of events) {
       // Dispatch's own wake (`agent/dispatch-children.ts`) is the daemon talking, not the user — the
       // `child_update` it carries is already a line of its own below.
-      if (e.type === "user_message") { if (e.clientName !== DISPATCH_WAKE_CLIENT_NAME) lines.push(`[user] ${e.text}`); }
+      // A `messaging` turn is ANOTHER SESSION's SendMessage (`agent/session-messaging.ts`), never the user:
+      // labelled as such, so a peer's words are never learned as the user's preferences.
+      if (e.type === "user_message") {
+        if (e.clientName === DISPATCH_WAKE_CLIENT_NAME) continue;
+        lines.push(e.clientName === "messaging" ? `[message from another session — not the user] ${e.text}` : `[user] ${e.text}`);
+      }
       else if (e.type === "assistant_message") lines.push(`[winter] ${e.text}`);
       else if (e.type === "child_update") lines.push(`[delegated work "${e.title}" → ${e.status}]${e.resultSummary ? ` ${e.resultSummary}` : ""}`);
     }

@@ -1,594 +1,253 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ToolRegistry } from "../../src/agent/tools/registry";
 import {
   registerListSessionsTools,
   LIST_SESSIONS_MAX_ROWS,
+  LIST_SESSIONS_QUERY_MAX_ROWS,
+  LIST_SESSIONS_RECENT_COMPLETED_CHILDREN,
   LIST_SESSIONS_TOOL,
-  MANAGE_SESSION_TOOL,
-  STOP_MODE_REFUSAL,
+  type ListSessionsStore,
 } from "../../src/agent/tools/list-sessions";
 import { makeActivityDeriver } from "../../src/sessions/activity";
-import { ACTIVITY_MODE_REFUSAL, ARCHIVED_IMMUTABLE_REFUSAL } from "../../src/sessions/set-activity";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type SessionActivity, type WritableSocket } from "@yanlinglabs/winter-protocol";
-import { startDaemon, type RunningDaemon } from "../../src/daemon";
-import { FileSecretStore } from "../../src/auth/secret-store";
-import { FakeProvider } from "../../src/agent/fake-provider";
 import { SessionStore } from "../../src/sessions/store";
+import { parseSessionQuery, rankSessions, type QueryableSession } from "../../src/sessions/session-query";
 
-// session-activity-hygiene T8: dispatch's management surface — `list_sessions` (the read) and
-// `manage_session` (the write). Driven through the REAL ToolRegistry (`execute`, the same door the
-// engine calls) against a REAL SessionStore in a temp WINTER_HOME, with the SAME
-// `makeActivityDeriver` production binds — no hand-rolled state machine anywhere in this file, so a
-// derivation change shows up here as a behaviour change rather than being mirrored twice.
+// Dispatch's `list_sessions`, rebuilt (user ruling 2026-10-02): the default listing (active + background +
+// the newest completed spawned sessions) and the free-form `query` across every session, with the
+// edited-files index. Driven through the REAL ToolRegistry against a REAL SessionStore in a temp home,
+// with the SAME `makeActivityDeriver` production binds; only the clock and the per-session last-event
+// times are injected, so ordering and dates are deterministic.
 
-const NOW = 1_770_000_000_000;
-
-interface Harness {
-  registry: ToolRegistry;
-  store: SessionStore;
-  home: string;
-  attached: Set<string>;
-  running: Map<string, number>;
-  bgWork: Set<string>;
-  emitted: Array<{ sessionId: string; activity: SessionActivity | undefined }>;
-  interrupted: string[];
-  now: number;
-  call(name: string, args: unknown): Promise<{ output: string; isError: boolean }>;
-}
+/** A fixed local-time "now": Friday 2026-10-02 15:00. */
+const NOW = new Date(2026, 9, 2, 15, 0, 0).getTime();
+const at = (y: number, m: number, d: number, h = 12): number => new Date(y, m - 1, d, h).getTime();
 
 const homes: string[] = [];
+afterEach(() => { for (const dir of homes.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
-function harness(opts: { scanBytesPerSession?: number; scanBytesTotal?: number } = {}): Harness {
+function harness() {
   const home = mkdtempSync(join(tmpdir(), "winter-list-sessions-"));
   homes.push(home);
   const store = new SessionStore(home);
   const registry = new ToolRegistry();
-  const h: Harness = {
-    registry, store, home,
-    attached: new Set(),
-    running: new Map(),
-    bgWork: new Set(),
-    emitted: [],
-    interrupted: [],
-    now: NOW,
-    call: (name, args) =>
-      registry.execute(name, args, { cwd: home, roots: [home], sessionId: "s_dispatch", mode: "dispatch" }),
+  const attached = new Set<string>();
+  const running = new Map<string, number>();
+  const lastTs = new Map<string, number>();
+  const view: ListSessionsStore = {
+    list: () => store.list(),
+    lastEventTs: (id) => lastTs.get(id) ?? store.lastEventTs(id),
+    transcriptPath: (id) => store.transcriptPath(id),
+    editedFiles: (id) => store.editedFiles(id),
+    firstMessage: (id) => store.firstMessage(id),
+    editedFilesBackfilled: () => store.editedFilesBackfilled(),
+    backfillEditedFiles: () => store.backfillEditedFiles(),
   };
   const derive = makeActivityDeriver({
-    attachedCount: (id) => (h.attached.has(id) ? 1 : 0),
-    turnRunning: (id) => h.running.has(id),
-    bgWork: (id) => h.bgWork.has(id),
-    lastEventTs: (id) => store.lastEventTs(id),
+    attachedCount: (id) => (attached.has(id) ? 1 : 0),
+    turnRunning: (id) => running.has(id),
+    bgWork: () => false,
+    lastEventTs: (id) => view.lastEventTs(id),
   });
-  registerListSessionsTools(registry, {
-    store,
-    derive,
-    turnStartedAt: (id) => h.running.get(id),
-    now: () => h.now,
-    isRunning: (id) => h.running.has(id),
-    interrupt: (id) => { h.interrupted.push(id); },
-    emit: (sessionId, activity) => { h.emitted.push({ sessionId, activity }); },
-    scanBytesPerSession: opts.scanBytesPerSession,
-    scanBytesTotal: opts.scanBytesTotal,
-  });
-  return h;
+  registerListSessionsTools(registry, { store: view, derive, turnStartedAt: (id) => running.get(id), now: () => NOW });
+  const call = (args: unknown) => registry.execute(LIST_SESSIONS_TOOL, args, { cwd: home, roots: [home], sessionId: "s_dispatch", mode: "dispatch" });
+  /** A code session, optionally titled, with a first message, created/last-active at given times. */
+  const session = (o: { title?: string; first?: string; cwd?: string; origin?: string; parent?: string; last?: number; mode?: "code" | "chat" | "dispatch" } = {}) => {
+    const id = store.createSession("global", { cwd: o.cwd ?? home, mode: o.mode ?? "code", ...(o.origin ? { origin: o.origin } : {}), ...(o.parent ? { parentSessionId: o.parent } : {}) });
+    if (o.title) store.append(id, { type: "session_titled", sessionId: id, threadId: "main", title: o.title });
+    if (o.first) store.append(id, { type: "user_message", sessionId: id, threadId: "main", text: o.first, clientName: "mac" });
+    if (o.last !== undefined) lastTs.set(id, o.last);
+    return id;
+  };
+  const edit = (id: string, path: string) =>
+    store.append(id, { type: "tool_result", sessionId: id, threadId: "main", callId: `c-${Math.random()}`, output: "ok", isError: false, fileDiff: { path, added: 1, removed: 0, diffId: "d1" } });
+  return { home, store, attached, running, lastTs, call, session, edit };
 }
 
-afterEach(() => {
-  for (const dir of homes.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+const rowsOf = (out: string) => out.split("\n").filter((l) => l.startsWith("s_"));
 
-/** A directory that actually exists — `canonDir` realpaths what it can, and on macOS /var is a
- *  symlink to /private/var, so a fixture cwd must be compared through the same resolution. */
-function realDir(label: string): string {
-  return mkdtempSync(join(tmpdir(), `winter-ls-${label}-`));
-}
-
-describe("list_sessions (T8): what it shows", () => {
-  test("chat and dispatch sessions NEVER appear — cowork and code only", async () => {
+describe("list_sessions: the default listing", () => {
+  test("shows active and background sessions and recent spawned ones — never chat, dispatch, idle or archived", async () => {
     const h = harness();
-    const code = h.store.createSession("global", { cwd: realDir("code"), mode: "code" });
-    const legacy = h.store.createSession("global", { cwd: realDir("legacy") }); // no mode = code
-    const chat = h.store.createSession("global", { cwd: realDir("chat"), mode: "chat" });
-    const dispatch = h.store.createSession("global", { cwd: realDir("disp"), mode: "dispatch" });
-
-    const res = await h.call(LIST_SESSIONS_TOOL, {});
-    expect(res.isError).toBe(false);
-    expect(res.output).toContain(code);
-    expect(res.output).toContain(legacy);
-    expect(res.output).not.toContain(chat);
-    expect(res.output).not.toContain(dispatch);
-  });
-
-  test("a row carries id, state, mode, cwd, title and the transcript file", async () => {
-    const h = harness();
-    const cwd = realDir("row");
-    const id = h.store.createSession("global", { cwd, mode: "code" });
-    h.store.append(id, { type: "session_titled", sessionId: id, threadId: "main", title: "Fix the reaper" });
-
-    const res = await h.call(LIST_SESSIONS_TOOL, {});
-    expect(res.output).toContain(id);
-    expect(res.output).toContain("idle");
-    expect(res.output).toContain("code");
-    expect(res.output).toContain(cwd);
-    expect(res.output).toContain('"Fix the reaper"');
-    expect(res.output).toContain(h.store.transcriptPath(id));
-  });
-
-  test("the STATE column appears only for type 'all' — a filtered listing does not repeat the state it was asked for", async () => {
-    const h = harness();
-    const id = h.store.createSession("global", { cwd: realDir("state"), mode: "code" });
-    h.store.setBackgrounded(id, true);
-
-    const all = await h.call(LIST_SESSIONS_TOOL, { type: "all" });
-    expect(all.output).toContain(`${id} | background | code`);
-
-    const filtered = await h.call(LIST_SESSIONS_TOOL, { type: "background" });
-    expect(filtered.output).toContain(`${id} | code`);
-    expect(filtered.output).not.toContain("| background |");
-  });
-
-  test("type filters by the DERIVED state, not by the stored flags", async () => {
-    const h = harness();
-    const idle = h.store.createSession("global", { cwd: realDir("idle"), mode: "code" });
-    const active = h.store.createSession("global", { cwd: realDir("active"), mode: "code" });
-    const bg = h.store.createSession("global", { cwd: realDir("bg"), mode: "code" });
-    const archived = h.store.createSession("global", { cwd: realDir("arch"), mode: "code" });
+    const active = h.session({ title: "Attached" });
     h.attached.add(active);
-    // No stored flag at all: a turn running with nothing attached IS background (the invisible
-    // runner this whole lifecycle exists to surface).
-    h.running.set(bg, NOW - 42_000);
+    const bg = h.session({ title: "Running unattended" });
+    h.running.set(bg, NOW - 125_000);
+    const flagged = h.session({ title: "Flagged" });
+    h.store.setBackgrounded(flagged, true);
+    const idle = h.session({ title: "Idle one" });
+    const archived = h.session({ title: "Archived one" });
     h.store.setArchived(archived, true);
+    const chat = h.session({ mode: "chat" });
+    h.attached.add(chat);
+    const dispatch = h.session({ mode: "dispatch" });
 
-    for (const [type, want, notWant] of [
-      ["idle", idle, active],
-      ["active", active, idle],
-      ["background", bg, idle],
-      ["archived", archived, idle],
-    ] as const) {
-      const res = await h.call(LIST_SESSIONS_TOOL, { type });
-      expect(res.output).toContain(want);
-      expect(res.output).not.toContain(notWant);
-    }
+    const res = await h.call({});
+    expect(res.isError).toBe(false);
+    const rows = rowsOf(res.output);
+    expect(rows.find((l) => l.startsWith(active))).toContain(`${active} | active | code`);
+    expect(rows.find((l) => l.startsWith(bg))).toContain("| background | code | running 125s |");
+    expect(rows.find((l) => l.startsWith(flagged))).toContain("| background |");
+    for (const hidden of [idle, archived, chat, dispatch]) expect(res.output).not.toContain(hidden);
+    expect(res.output).toContain("2 other sessions (idle, archived) not listed — find one with query.");
+    expect(res.output).toContain(h.store.transcriptPath(active));
+    expect(res.output).toContain('"Attached"');
   });
 
-  test("a running turn shows its duration; an idle session shows none", async () => {
+  test(`inactive Dispatch-spawned sessions show as completed — the newest ${LIST_SESSIONS_RECENT_COMPLETED_CHILDREN} only`, async () => {
     const h = harness();
-    const runner = h.store.createSession("global", { cwd: realDir("dur"), mode: "code" });
-    const quiet = h.store.createSession("global", { cwd: realDir("quiet"), mode: "code" });
-    h.running.set(runner, NOW - 125_000);
-
-    const res = await h.call(LIST_SESSIONS_TOOL, {});
-    const runnerLine = res.output.split("\n").find((l) => l.startsWith(runner))!;
-    const quietLine = res.output.split("\n").find((l) => l.startsWith(quiet))!;
-    expect(runnerLine).toContain("running 125s");
-    expect(quietLine).not.toContain("running");
+    const dispatch = h.session({ mode: "dispatch" });
+    const kids = [1, 2, 3, 4, 5, 6].map((n) => h.session({ origin: "dispatch-child", parent: dispatch, title: `Kid ${n}`, last: at(2026, 10, n) }));
+    const res = await h.call({});
+    const rows = rowsOf(res.output);
+    expect(rows.map((l) => l.split(" | ")[0])).toEqual([kids[5], kids[4], kids[3], kids[2]]);
+    for (const l of rows) expect(l).toContain("| completed | code |");
+    expect(res.output).toContain("older completed children");
+    // A spawned session that is running shows by its live label, whatever its age.
+    h.running.set(kids[0]!, NOW - 1000);
+    expect(rowsOf((await h.call({})).output).some((l) => l.startsWith(`${kids[0]} | background`))).toBe(true);
   });
 
-  test("rows are capped at 50 with an EXPLICIT count of the rest — never a silent truncation", async () => {
+  test(`the listing is capped at ${LIST_SESSIONS_MAX_ROWS} with an explicit count — never a silent truncation`, async () => {
     const h = harness();
-    const cwd = realDir("many");
-    for (let i = 0; i < LIST_SESSIONS_MAX_ROWS + 7; i++) h.store.createSession("global", { cwd, mode: "code" });
-
-    const res = await h.call(LIST_SESSIONS_TOOL, {});
-    const rowLines = res.output.split("\n").filter((l) => l.startsWith("s_"));
-    expect(rowLines.length).toBe(LIST_SESSIONS_MAX_ROWS);
-    expect(res.output).toContain("7 more matched");
+    for (let i = 0; i < LIST_SESSIONS_MAX_ROWS + 7; i++) h.store.setBackgrounded(h.session(), true);
+    const res = await h.call({});
+    expect(rowsOf(res.output).length).toBe(LIST_SESSIONS_MAX_ROWS);
+    expect(res.output).toContain("(7 more active/background — narrow with query)");
   });
 
-  test("nothing matched says so", async () => {
+  test("nothing going on says so, and still counts what is hidden", async () => {
     const h = harness();
-    h.store.createSession("global", { cwd: realDir("none"), mode: "code" });
-    const res = await h.call(LIST_SESSIONS_TOOL, { type: "archived" });
-    expect(res.output).toBe("no sessions matched");
+    h.session();
+    const res = await h.call({});
+    expect(res.output).toStartWith("no active, background or recently completed spawned sessions\n1 other session (idle, archived) not listed");
   });
 });
 
-describe("list_sessions (T8): cwd matching", () => {
-  test("matches sessions AT the directory and UNDER it, and normalizes trailing slashes", async () => {
+describe("list_sessions: query", () => {
+  test("finds the session that EDITED a file — by full path, ~ path, trailing path or file name — across idle and archived sessions", async () => {
     const h = harness();
-    const base = realDir("base");
-    const child = join(base, "pkg", "core");
-    mkdirSync(child, { recursive: true });
-    const outside = realDir("outside");
-    const atBase = h.store.createSession("global", { cwd: base, mode: "code" });
-    const underBase = h.store.createSession("global", { cwd: child, mode: "code" });
-    const elsewhere = h.store.createSession("global", { cwd: outside, mode: "code" });
-
-    for (const probe of [base, `${base}/`, `${base}/pkg/..`]) {
-      const res = await h.call(LIST_SESSIONS_TOOL, { cwd: probe });
-      expect(res.output).toContain(atBase);
-      expect(res.output).toContain(underBase);
-      expect(res.output).not.toContain(elsewhere);
+    const editor = h.session({ title: "Tidy configs" });
+    h.edit(editor, "/Users/someone/projects/winter/config.toml");
+    h.store.setArchived(editor, true);
+    const other = h.session({ title: "Something else" });
+    h.edit(other, "/Users/someone/projects/other/config.yaml");
+    for (const q of [
+      "the session that edited /Users/someone/projects/winter/config.toml",
+      "winter/config.toml",
+      "config.toml",
+    ]) {
+      const res = await h.call({ query: q });
+      const rows = rowsOf(res.output);
+      expect(rows[0]).toStartWith(`${editor} | archived`);
+      expect(rows[0]).toContain("matched: edited /Users/someone/projects/winter/config.toml");
+      expect(res.output).not.toContain(other);
     }
   });
 
-  test("maxDepth bounds how far BELOW the directory a session may sit (default is deep, 0 means exactly here)", async () => {
+  test("words rank title over first message; an unmatched query says so", async () => {
     const h = harness();
-    const base = realDir("depth");
-    const oneDown = join(base, "a");
-    const threeDown = join(base, "a", "b", "c");
-    mkdirSync(threeDown, { recursive: true });
-    const atBase = h.store.createSession("global", { cwd: base, mode: "code" });
-    const one = h.store.createSession("global", { cwd: oneDown, mode: "code" });
-    const three = h.store.createSession("global", { cwd: threeDown, mode: "code" });
-
-    const deep = await h.call(LIST_SESSIONS_TOOL, { cwd: base });
-    expect(deep.output).toContain(three);
-
-    const shallow = await h.call(LIST_SESSIONS_TOOL, { cwd: base, maxDepth: 1 });
-    expect(shallow.output).toContain(atBase);
-    expect(shallow.output).toContain(one);
-    expect(shallow.output).not.toContain(three);
-
-    const exact = await h.call(LIST_SESSIONS_TOOL, { cwd: base, maxDepth: 0 });
-    expect(exact.output).toContain(atBase);
-    expect(exact.output).not.toContain(one);
+    const byTitle = h.session({ title: "Fix login bug", last: at(2026, 9, 20) });
+    const byFirst = h.session({ title: "Form work", first: "please look at the login form", last: at(2026, 9, 21) });
+    h.session({ title: "Refactor reaper" });
+    const res = await h.call({ query: "login" });
+    expect(rowsOf(res.output).map((l) => l.split(" | ")[0])).toEqual([byTitle, byFirst]);
+    expect(rowsOf(res.output)[0]).toContain("matched: title: login");
+    expect(rowsOf(res.output)[1]).toContain("matched: first message: login");
+    expect((await h.call({ query: "zebra quokka" })).output).toStartWith('no sessions matched "zebra quokka"');
   });
 
-  test("`~` is expanded, so a home-relative probe finds a home-relative session", async () => {
+  test(`returns at most ${LIST_SESSIONS_QUERY_MAX_ROWS} matches, best first, and counts the rest`, async () => {
     const h = harness();
-    const inHome = h.store.createSession("global", { cwd: process.env.HOME!, mode: "code" });
-    const res = await h.call(LIST_SESSIONS_TOOL, { cwd: "~" });
-    expect(res.output).toContain(inHome);
+    for (let i = 0; i < LIST_SESSIONS_QUERY_MAX_ROWS + 3; i++) h.session({ title: `build fix ${i}` });
+    const res = await h.call({ query: "build" });
+    expect(rowsOf(res.output).length).toBe(LIST_SESSIONS_QUERY_MAX_ROWS);
+    expect(res.output).toContain("(3 more matched — refine the query to reach them)");
+  });
+
+  test("the edited-files index is BACKFILLED once from logs written before it existed", async () => {
+    const h = harness();
+    const old = h.session({ title: "Legacy" });
+    // Write an edit straight into the log, bypassing `append` (as a pre-index daemon left it), and drop the index rows.
+    const ev = { type: "tool_result", sessionId: old, threadId: "main", callId: "x", output: "ok", isError: false, seq: 99, ts: at(2026, 9, 1), fileDiff: { path: "/srv/app/main.ts", added: 2, removed: 1, diffId: "d2" } };
+    appendFileSync(h.store.transcriptPath(old), JSON.stringify(ev) + "\n");
+    expect(h.store.editedFiles(old)).toEqual([]);
+    expect(h.store.editedFilesBackfilled()).toBe(false);
+    const res = await h.call({ query: "app/main.ts" });
+    expect(rowsOf(res.output)[0]).toStartWith(old);
+    expect(h.store.editedFiles(old)).toEqual(["/srv/app/main.ts"]);
+    expect(h.store.editedFilesBackfilled()).toBe(true);
+    expect(h.store.backfillEditedFiles()).toBe(0); // marked: never again
+    // Live edits are indexed as they are appended.
+    h.edit(old, "/srv/app/util.ts");
+    expect(h.store.editedFiles(old)).toContain("/srv/app/util.ts");
+    // A deleted session takes its index rows with it.
+    h.store.deleteSession(old);
+    expect(h.store.editedFiles(old)).toEqual([]);
   });
 });
 
-describe("list_sessions (T8): the BOUNDED keyword scan", () => {
-  const say = (store: SessionStore, id: string, text: string) =>
-    store.append(id, { type: "user_message", sessionId: id, threadId: "main", text, clientName: "t" });
+describe("session-query: the interpreter (pure, deterministic)", () => {
+  const s = (id: string, o: Partial<QueryableSession>): QueryableSession => ({ sessionId: id, createdAt: o.createdAt ?? at(2026, 9, 1), lastEventTs: o.lastEventTs ?? at(2026, 9, 1), editedFiles: o.editedFiles ?? [], ...o });
 
-  test("matches ALL whitespace-separated terms, case-insensitively", async () => {
-    const h = harness();
-    const hit = h.store.createSession("global", { cwd: realDir("hit"), mode: "code" });
-    const partial = h.store.createSession("global", { cwd: realDir("partial"), mode: "code" });
-    const miss = h.store.createSession("global", { cwd: realDir("miss"), mode: "code" });
-    say(h.store, hit, "the Reaper deletes empty SESSIONS");
-    say(h.store, partial, "the reaper is asleep");
-    say(h.store, miss, "nothing to see");
-
-    const res = await h.call(LIST_SESSIONS_TOOL, { keywords: "REAPER sessions" });
-    expect(res.output).toContain(hit);
-    expect(res.output).not.toContain(partial);
-    expect(res.output).not.toContain(miss);
+  test("relative dates resolve against now, in local time", () => {
+    const labels = (q: string) => parseSessionQuery(q, NOW).ranges.map((r) => [r.label, new Date(r.from).toDateString(), new Date(r.to).toDateString()]);
+    expect(labels("yesterday")).toEqual([["yesterday", "Thu Oct 01 2026", "Fri Oct 02 2026"]]);
+    expect(labels("today")).toEqual([["today", "Fri Oct 02 2026", "Sat Oct 03 2026"]]);
+    expect(labels("last week")).toEqual([["last week", "Mon Sep 21 2026", "Mon Sep 28 2026"]]);
+    expect(labels("this week")).toEqual([["this week", "Mon Sep 28 2026", "Mon Oct 05 2026"]]);
+    expect(labels("monday")).toEqual([["monday", "Mon Sep 28 2026", "Tue Sep 29 2026"]]);
+    expect(labels("on friday")).toEqual([["friday", "Fri Oct 02 2026", "Sat Oct 03 2026"]]);
+    expect(labels("3 days ago")).toEqual([["3 days ago", "Tue Sep 29 2026", "Wed Sep 30 2026"]]);
+    expect(labels("in september")).toEqual([["september", "Tue Sep 01 2026", "Thu Oct 01 2026"]]);
+    expect(labels("2026-09-15")).toEqual([["2026-09-15", "Tue Sep 15 2026", "Wed Sep 16 2026"]]);
+    expect(labels("last month")).toEqual([["last month", "Tue Sep 01 2026", "Thu Oct 01 2026"]]);
   });
 
-  test("the per-session budget is real: head and tail are scanned, the middle of a long transcript is not", async () => {
-    // 1000 bytes per session, so 500 of head and 500 of tail of a ~4.5KB transcript.
-    const h = harness({ scanBytesPerSession: 1000 });
-    const id = h.store.createSession("global", { cwd: realDir("bounded"), mode: "code" });
-    say(h.store, id, "OPENINGWORD");
-    say(h.store, id, "x".repeat(2000) + "BURIEDWORD" + "y".repeat(2000));
-    say(h.store, id, "CLOSINGWORD");
-
-    expect((await h.call(LIST_SESSIONS_TOOL, { keywords: "OPENINGWORD" })).output).toContain(id);
-    expect((await h.call(LIST_SESSIONS_TOOL, { keywords: "CLOSINGWORD" })).output).toContain(id);
-    // Honest bound, not a silent one — the tool description states the cap.
-    expect((await h.call(LIST_SESSIONS_TOOL, { keywords: "BURIEDWORD" })).output).toBe("no sessions matched");
+  test("paths, words and filler are told apart", () => {
+    const p = parseSessionQuery("the session that edited ~/projects/winter/config.toml about the reaper yesterday", NOW);
+    expect(p.paths).toEqual([`${require("node:os").homedir()}/projects/winter/config.toml`]);
+    expect(p.words).toEqual(["reaper"]);
+    expect(p.ranges.map((r) => r.label)).toEqual(["yesterday"]);
   });
 
-  test("when the TOTAL budget runs out mid-list, the remainder is reported as unscanned — never a silent clean non-match", async () => {
-    // Four ~1KB transcripts against a 2KB total budget: granting the newest session its full
-    // per-session cap exhausts the budget, so every remaining session's GRANTED budget falls below
-    // the cap. Pre-fix, that residual (however small — down to the degenerate 0/1-byte case where
-    // `sampleTranscript`'s head/tail halves floor to nothing) was still handed to a real scan and
-    // came back a "clean" non-match; fixed, a below-cap grant is counted as unscanned outright.
-    const h = harness({ scanBytesPerSession: 2000, scanBytesTotal: 2000 });
-    const cwd = realDir("budget");
-    const ids: string[] = [];
-    for (let i = 0; i < 4; i++) {
-      const id = h.store.createSession("global", { cwd, mode: "code" });
-      say(h.store, id, "FINDME " + "z".repeat(1000));
-      ids.push(id);
-      Bun.sleepSync(12); // distinct mtimes: the scan order (newest first) is what the budget follows
-    }
+  test("a date query keeps only sessions whose span overlaps it; ranking is stable", () => {
+    const sessions = [
+      s("s_a", { title: "reaper", createdAt: at(2026, 9, 30), lastEventTs: at(2026, 10, 1, 9) }),
+      s("s_b", { title: "reaper", createdAt: at(2026, 9, 20), lastEventTs: at(2026, 9, 22) }),
+      s("s_c", { title: "other", createdAt: at(2026, 10, 1, 8), lastEventTs: at(2026, 10, 1, 20) }),
+    ];
+    expect(rankSessions(sessions, parseSessionQuery("yesterday", NOW)).map((r) => r.session.sessionId)).toEqual(["s_c", "s_a"]);
+    const both = rankSessions(sessions, parseSessionQuery("reaper yesterday", NOW));
+    expect(both.map((r) => [r.session.sessionId, r.why])).toEqual([
+      ["s_a", ["active yesterday", "title: reaper"]],
+      ["s_c", ["active yesterday"]],
+      ["s_b", ["title: reaper"]],
+    ]);
+  });
 
-    const res = await h.call(LIST_SESSIONS_TOOL, { keywords: "FINDME" });
-    expect(res.output).toMatch(/3 sessions were not scanned for keywords \(budget spent\)/);
-    // Newest-first: only the ONE session granted the full per-session budget was actually scanned.
-    expect(res.output).toContain("1 session\n");
-    expect(res.output).toContain(ids[3]!);
-    // The other three are absent because they went UNSCANNED, not because "FINDME" failed to
-    // match — every transcript here contains it, so a pre-fix run reported these as non-matches.
-    expect(res.output).not.toContain(ids[2]!);
-    expect(res.output).not.toContain(ids[1]!);
-    expect(res.output).not.toContain(ids[0]!);
+  test("an exact edited path outranks a basename match and a cwd match", () => {
+    const sessions = [
+      s("s_base", { editedFiles: ["/elsewhere/config.toml"] }),
+      s("s_exact", { editedFiles: ["/p/winter/config.toml"] }),
+      s("s_cwd", { cwd: "/p/winter" }),
+    ];
+    // The file sits inside s_cwd's directory, so it is a (weaker) match too.
+    expect(rankSessions(sessions, parseSessionQuery("/p/winter/config.toml", NOW)).map((r) => r.session.sessionId)).toEqual(["s_exact", "s_cwd"]);
+    expect(rankSessions(sessions, parseSessionQuery("config.toml", NOW)).map((r) => r.session.sessionId).sort()).toEqual(["s_base", "s_exact"]);
+    expect(rankSessions(sessions, parseSessionQuery("/p/winter", NOW)).map((r) => r.session.sessionId)).toEqual(["s_cwd"]);
   });
 });
 
-describe("manage_session (T8): the write half, with session.setActivity's own semantics", () => {
-  test("background / archive / resume drive the stored flags and ANNOUNCE the derived state", async () => {
-    const h = harness();
-    const id = h.store.createSession("global", { cwd: realDir("manage"), mode: "code" });
-
-    const bg = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "background" });
-    expect(bg.isError).toBe(false);
-    expect(bg.output).toBe(`session '${id}' is now background`);
-    expect(h.store.meta(id).backgrounded).toBe(true);
-    expect(h.emitted.at(-1)).toEqual({ sessionId: id, activity: "background" });
-
-    const arch = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "archive" });
-    expect(arch.output).toBe(`session '${id}' is now archived`);
-    expect(h.store.meta(id).archived).toBe(true);
-    // Independent columns: archiving leaves the background flag alone.
-    expect(h.store.meta(id).backgrounded).toBe(true);
-    expect(h.emitted.at(-1)).toEqual({ sessionId: id, activity: "archived" });
-
-    // activity-verb-semantics ruling 2: resume clears the ARCHIVE flag only, so this session comes
-    // back as what it was before it was hidden — a background worker.
-    const resumed = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "resume" });
-    expect(resumed.output).toBe(`session '${id}' is now background`);
-    expect(h.store.meta(id).archived).toBeUndefined();
-    expect(h.store.meta(id).backgrounded).toBe(true);
-    expect(h.emitted.at(-1)).toEqual({ sessionId: id, activity: "background" });
+describe("the per-mode registry", () => {
+  test("list_sessions is dispatch-only; manage_session no longer exists", () => {
+    const registry = new ToolRegistry();
+    registerListSessionsTools(registry, { store: { list: () => [], lastEventTs: () => 0, transcriptPath: () => "", editedFiles: () => [], firstMessage: () => undefined }, derive: () => undefined, turnStartedAt: () => undefined });
+    expect(registry.namesForMode("dispatch").has(LIST_SESSIONS_TOOL)).toBe(true);
+    expect(registry.namesForMode("code").has(LIST_SESSIONS_TOOL)).toBe(false);
+    expect(registry.namesForMode("chat").has(LIST_SESSIONS_TOOL)).toBe(false);
+    expect(registry.namesForMode("dispatch").has("manage_session")).toBe(false);
   });
-
-  // activity-verb-semantics ruling 1, at dispatch's door. The T3-era pin here asserted the exact
-  // opposite (background un-archives, "the target names a STATE, not a flag") — it is flipped, not
-  // deleted, because the coordinator is precisely the caller that must not be able to un-hide a
-  // session the user hid without saying the word "resume".
-  test("background on an ARCHIVED session is REFUSED and names resume — nothing is written", async () => {
-    const h = harness();
-    const id = h.store.createSession("global", { cwd: realDir("unarchive"), mode: "code" });
-    h.store.setArchived(id, true);
-
-    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "background" });
-    expect(res.isError).toBe(true);
-    expect(res.output).toBe(ARCHIVED_IMMUTABLE_REFUSAL);
-    expect(h.store.meta(id).archived).toBe(true);
-    expect(h.store.meta(id).backgrounded).toBeUndefined();
-    expect(h.emitted).toHaveLength(0);
-  });
-
-  // activity-verb-semantics amendment: the coordinator gets `unbackground` too. Without it,
-  // dispatch's ONLY way to clear the flag was `stop` — which aborts a running turn — so the TUI
-  // could take a worker off background duty without disturbing its work and the coordinator could
-  // not. That contradicts the standing ruling that dispatch manages the whole fleet with the same
-  // verbs. Nothing here is hand-rolled: the action maps onto the shared state machine, so the
-  // archived refusal, the idempotence, the emission and the derived answer all arrive with it.
-  test("unbackground clears the flag WITHOUT stopping anything, and answers the derived state", async () => {
-    const h = harness();
-    const id = h.store.createSession("global", { cwd: realDir("unbg"), mode: "code" });
-    h.store.setBackgrounded(id, true);
-    h.running.set(id, NOW - 5_000);
-
-    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "unbackground" });
-    expect(res.isError).toBe(false);
-    // Still "background": the turn is running with nothing attached, so the derivation says so
-    // regardless of the flag — which is exactly the point. The verb moved the FLAG and left the
-    // WORK alone; `stop` is the verb that touches the turn.
-    expect(res.output).toBe(`session '${id}' is now background`);
-    expect(h.store.meta(id).backgrounded).toBeUndefined();
-    expect(h.interrupted).toHaveLength(0);
-  });
-
-  test("unbackground on an idle flagged worker takes it off duty and reads back idle", async () => {
-    const h = harness();
-    const id = h.store.createSession("global", { cwd: realDir("unbg-idle"), mode: "code" });
-    h.store.setBackgrounded(id, true);
-
-    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "unbackground" });
-    expect(res.output).toBe(`session '${id}' is now idle`);
-    expect(h.store.meta(id).backgrounded).toBeUndefined();
-    expect(h.emitted.at(-1)).toEqual({ sessionId: id, activity: "idle" });
-  });
-
-  // Ruling 1 through THIS door, not merely through the RPC: the tool and the RPC are two doors onto
-  // one state machine, and this is the pin that says so for the new verb.
-  test("unbackground on an ARCHIVED session is REFUSED here too — nothing is written", async () => {
-    const h = harness();
-    const id = h.store.createSession("global", { cwd: realDir("unbg-arch"), mode: "code" });
-    h.store.setBackgrounded(id, true);
-    h.store.setArchived(id, true);
-
-    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "unbackground" });
-    expect(res.isError).toBe(true);
-    expect(res.output).toBe(ARCHIVED_IMMUTABLE_REFUSAL);
-    expect(h.store.meta(id).backgrounded).toBe(true);
-    expect(h.store.meta(id).archived).toBe(true);
-    expect(h.emitted).toHaveLength(0);
-  });
-
-  test("archive on an ALREADY-ARCHIVED session is an idempotent success", async () => {
-    const h = harness();
-    const id = h.store.createSession("global", { cwd: realDir("rearchive"), mode: "code" });
-    h.store.setArchived(id, true);
-
-    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "archive" });
-    expect(res.isError).toBe(false);
-    expect(res.output).toBe(`session '${id}' is now archived`);
-    expect(h.store.meta(id).archived).toBe(true);
-  });
-
-  test("archiving a RUNNING session is refused with the same two ways out the RPC names", async () => {
-    const h = harness();
-    const id = h.store.createSession("global", { cwd: realDir("running"), mode: "code" });
-    h.running.set(id, NOW - 1000);
-
-    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "archive" });
-    expect(res.isError).toBe(true);
-    expect(res.output).toBe("stop or background it first");
-    expect(h.store.meta(id).archived).toBeUndefined();
-    expect(h.emitted).toHaveLength(0);
-    // Backgrounding a running session is the whole point of that flag — never refused.
-    const bg = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "background" });
-    expect(bg.isError).toBe(false);
-  });
-
-  test("chat and dispatch targets are refused for EVERY action — including the coordinator's own session", async () => {
-    const h = harness();
-    const chat = h.store.createSession("global", { cwd: realDir("chat2"), mode: "chat" });
-    const dispatch = h.store.createSession("global", { cwd: realDir("disp2"), mode: "dispatch" });
-    h.running.set(dispatch, NOW - 10_000);
-
-    for (const target of [chat, dispatch]) {
-      for (const action of ["stop", "background", "unbackground", "archive", "resume"] as const) {
-        const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: target, action });
-        expect(res.isError).toBe(true);
-        // `stop` sets no activity state, so it answers with its own honest refusal — every other
-        // verb shares the one "activity states apply to..." sentence.
-        expect(res.output).toBe(action === "stop" ? STOP_MODE_REFUSAL : ACTIVITY_MODE_REFUSAL);
-      }
-    }
-    expect(h.interrupted).toHaveLength(0);
-    expect(h.emitted).toHaveLength(0);
-  });
-
-  test("an unknown session is UNKNOWN, never a state refusal", async () => {
-    const h = harness();
-    for (const action of ["stop", "background", "unbackground", "archive", "resume"] as const) {
-      const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: "s_nope", action });
-      expect(res.isError).toBe(true);
-      expect(res.output).toMatch(/unknown session/);
-    }
-  });
-
-  // ------------------------------------------------------------------------------------------
-  // activity-verb-semantics ruling 4a: A FLEET STOP DECOMMISSIONS. `stop` no longer only aborts a
-  // turn — it also takes the session OFF background duty, because that is what a coordinator means
-  // by stopping one of its workers. Interactive interrupt (ESC / `session.interrupt`) is
-  // deliberately NOT changed: pausing a session you are sitting in front of is not decommissioning
-  // it. The flag write goes through `setSessionActivity` rather than `store.setBackgrounded`, so
-  // there stays exactly ONE writer and the change reaches open windows on the same emission path
-  // every other lifecycle move uses.
-  // ------------------------------------------------------------------------------------------
-  test("stop on a RUNNING background worker aborts the turn AND clears the background flag, announcing the result", async () => {
-    const h = harness();
-    const id = h.store.createSession("global", { cwd: realDir("stop-run"), mode: "code" });
-    h.store.setBackgrounded(id, true);
-    h.running.set(id, NOW - 5_000);
-
-    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "stop" });
-    expect(res.isError).toBe(false);
-    expect(res.output).toMatch(/stopped the running turn/);
-    expect(h.interrupted).toEqual([id]);
-    expect(h.store.meta(id).backgrounded).toBeUndefined();
-    // The derived state is still "background" — the turn is running until the abort lands, and a
-    // running session with nothing attached derives background regardless of the flag. The point of
-    // the assertion is that the change WAS announced, through the state-setters' own path.
-    expect(h.emitted.at(-1)).toEqual({ sessionId: id, activity: "background" });
-  });
-
-  test("stop on an IDLE-but-FLAGGED worker clears the flag and SAYS SO — no turn is not nothing to do", async () => {
-    const h = harness();
-    const id = h.store.createSession("global", { cwd: realDir("stop-idle"), mode: "code" });
-    h.store.setBackgrounded(id, true);
-
-    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "stop" });
-    expect(res.isError).toBe(false);
-    expect(res.output).toMatch(/no turn was running/);
-    expect(res.output).toMatch(/background flag/);
-    expect(h.interrupted).toHaveLength(0);
-    expect(h.store.meta(id).backgrounded).toBeUndefined();
-    expect(h.emitted.at(-1)).toEqual({ sessionId: id, activity: "idle" });
-  });
-
-  test("stop on an UNFLAGGED idle session is the plain nothing-to-stop notice", async () => {
-    const h = harness();
-    const id = h.store.createSession("global", { cwd: realDir("stop-quiet"), mode: "code" });
-
-    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "stop" });
-    expect(res.isError).toBe(false);
-    expect(res.output).toMatch(/no turn running/);
-    expect(res.output).not.toMatch(/background flag/);
-    expect(h.interrupted).toHaveLength(0);
-  });
-
-  // Ruling 1 binds `stop` too: an archived session's flags are not the coordinator's to move. Since
-  // archived ∧ running is unreachable (the archive door refuses a running turn), this is simply
-  // "don't clear flags on an archived session, and say something honest".
-  test("stop on an ARCHIVED session mutates NOTHING and says why", async () => {
-    const h = harness();
-    const id = h.store.createSession("global", { cwd: realDir("stop-arch"), mode: "code" });
-    h.store.setBackgrounded(id, true);
-    h.store.setArchived(id, true);
-
-    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "stop" });
-    expect(res.isError).toBe(false);
-    expect(res.output).toMatch(/archived/);
-    expect(h.interrupted).toHaveLength(0);
-    expect(h.store.meta(id).backgrounded).toBe(true);
-    expect(h.store.meta(id).archived).toBe(true);
-    expect(h.emitted).toHaveLength(0);
-  });
-});
-
-describe("the per-mode registry (T8)", () => {
-  test("both tools are dispatch-only — declared, not inherited", async () => {
-    const h = harness();
-    for (const name of [LIST_SESSIONS_TOOL, MANAGE_SESSION_TOOL]) {
-      expect(h.registry.namesForMode("dispatch").has(name)).toBe(true);
-      expect(h.registry.namesForMode("code").has(name)).toBe(false);
-      expect(h.registry.namesForMode("chat").has(name)).toBe(false);
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------------------------
-// The WIRING pin. Everything above drives the tools with injected deps — which proves the logic
-// and nothing about whether daemon.ts hooked them to the daemon's real store/hub/engine. The T7
-// review recorded the exact failure that costs: a consumer handed a DIFFERENT hub instance reads
-// `attachedCount` as 0 forever and calls every attached session idle, silently, for good. So this
-// boots the REAL daemon (temp WINTER_HOME + injected FakeProvider, the mode-toolset-census.test.ts
-// precedent), attaches a REAL harness over the REAL socket, and asks the REAL registry's tool.
-// ---------------------------------------------------------------------------------------------
-describe("list_sessions (T8): wired to the real daemon", () => {
-  let daemon: RunningDaemon | undefined;
-  let daemonHome: string | undefined;
-
-  // AWAITED (P8b Task 5): `stop()`'s tail now closes the SessionStore too — it sits behind the
-  // Winter handle's dispose — so dropping the promise would rm the home out from under an open
-  // sqlite handle.
-  afterEach(async () => {
-    await daemon?.stop();
-    daemon = undefined;
-    if (daemonHome) rmSync(daemonHome, { recursive: true, force: true });
-    daemonHome = undefined;
-  });
-
-  /** Minimal raw NDJSON client — each daemon-IPC test file in this repo carries its own copy (see
-   *  mode-toolset-census.test.ts / settings-hot-e2e.test.ts for the convention). */
-  class TestClient {
-    private decoder = new LineDecoder();
-    private nextId = 1;
-    private pending = new Map<number, (msg: any) => void>();
-    private socket!: Awaited<ReturnType<typeof Bun.connect>>;
-    private writer!: ConnWriter;
-    readonly notifications: any[] = [];
-
-    static async connect(socketPath: string): Promise<TestClient> {
-      const c = new TestClient();
-      c.socket = await Bun.connect({
-        unix: socketPath,
-        socket: {
-          data(_s, chunk) {
-            for (const line of c.decoder.push(chunk)) {
-              const msg = JSON.parse(line);
-              if (msg.id !== undefined && c.pending.has(msg.id)) {
-                c.pending.get(msg.id)!(msg);
-                c.pending.delete(msg.id);
-              } else if (msg.method) {
-                c.notifications.push(msg);
-              }
-            }
-          },
-          drain(_s) { c.writer.onDrain(); },
-        },
-      });
-      c.writer = new ConnWriter(c.socket as unknown as WritableSocket);
-      return c;
-    }
-
-    request(method: string, params?: unknown): Promise<any> {
-      const id = this.nextId++;
-      this.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, method, params }));
-      return new Promise((resolve) => this.pending.set(id, resolve));
-    }
-
-    close(): void { this.socket.end(); }
-  }
-
 });

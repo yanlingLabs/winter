@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
 import { makeActivityDeriver, makeSessionSignalsDeriver } from "../../src/sessions/activity";
-import { CHAT_SENDER_REFUSAL, SessionMessaging, sessionIdFromAddress, type MessagingDriverHandle } from "../../src/agent/session-messaging";
+import { CHAT_SENDER_REFUSAL, TARGET_MODE_REFUSAL, LIST_AGENTS_SESSION_MAX, SessionMessaging, sessionIdFromAddress, type MessagingDriverHandle } from "../../src/agent/session-messaging";
 import { DispatchChildren } from "../../src/agent/dispatch-children";
 
 class FakeDriver implements MessagingDriverHandle {
@@ -17,7 +17,14 @@ class FakeDriver implements MessagingDriverHandle {
   state: "live" | "resumable" | "ended" = "live";
   readonly sends: Array<{ text: string; clientName?: string }> = [];
   failNext?: Error;
+  interrupts = 0;
   constructor(private readonly hub: SessionHub, readonly sessionId: string) {}
+  async interrupt(): Promise<{ wasRunning: boolean }> {
+    this.interrupts++;
+    const wasRunning = this.turnRunning;
+    this.turnRunning = false;
+    return { wasRunning };
+  }
   async send(text: string, clientName?: string): Promise<{ seq: number; queued: boolean }> {
     if (this.failNext) { const e = this.failNext; this.failNext = undefined; throw e; }
     this.sends.push({ text, ...(clientName === undefined ? {} : { clientName }) });
@@ -37,6 +44,7 @@ function setup() {
   const ensured: string[] = [];
   let ensureFails: Error | undefined;
   let ensureNone = false;
+  let ensureGate: Promise<void> | undefined;
   const driverFor = (id: string) => { let d = drivers.get(id); if (!d) { d = new FakeDriver(hub, id); drivers.set(id, d); } return d; };
   const attached = new Set<string>();
   // THE derivation `session.list` and ListSessions use, over fake live sources.
@@ -63,6 +71,7 @@ function setup() {
       get: (id) => drivers.get(id),
       ensure: async (id) => {
         ensured.push(id);
+        if (ensureGate) await ensureGate;
         if (ensureFails) throw ensureFails;
         return ensureNone ? undefined : driverFor(id);
       },
@@ -76,12 +85,15 @@ function setup() {
     return sid;
   };
   let n = 0;
-  const send = (from: string, to: string, message = "hello", extra: { notifyWhenIdle?: boolean; summary?: string } = {}) =>
-    messaging.send(from, { to, message, messageId: `msg-${++n}`, ...extra });
+  const send = (from: string, to: string, message = "hello", extra: { notifyWhenIdle?: boolean; summary?: string; messageId?: string; signal?: AbortSignal } = {}) => {
+    const { signal, messageId, ...rest } = extra;
+    return messaging.send(from, { to, message, messageId: messageId ?? `msg-${++n}`, ...rest }, signal);
+  };
   return {
     home, store, hub, drivers, driverFor, ensured, attached, messaging, code, send, dc,
     failEnsure: (e: Error) => { ensureFails = e; },
     noDriver: () => { ensureNone = true; },
+    holdEnsure: () => { let release!: () => void; ensureGate = new Promise((r) => (release = r)); return release; },
   };
 }
 
@@ -139,18 +151,21 @@ describe("SendMessage to a session", () => {
     expect((await t.send(from, to)).status).toBe("resumed_and_delivered");
   });
 
-  test("refusals: self, archived, unknown, a non-id `to`, an empty message, a chat sender — nothing delivered or resumed", async () => {
+  test("refusals: self, archived, unknown, a non-id `to`, an empty message, a chat or dispatch TARGET, a chat sender — nothing delivered or resumed", async () => {
     const t = setup();
     const from = t.code();
     const archived = t.code();
     t.store.setArchived(archived, true);
     const chat = t.store.createSession("global", { mode: "chat" });
-    expect(await t.send(from, from)).toMatchObject({ status: "refused", reason: "cannot SendMessage to your own session" });
+    const dispatch = t.store.createSession("global", { mode: "dispatch", origin: "dispatch" });
+    expect(await t.send(from, chat)).toMatchObject({ status: "refused", reason: TARGET_MODE_REFUSAL });
+    expect(await t.send(from, dispatch)).toMatchObject({ status: "refused", reason: TARGET_MODE_REFUSAL });
+    expect(await t.send(from, from)).toMatchObject({ status: "refused", reason: "cannot target your own session" });
     expect((await t.send(from, archived)).status).toBe("refused");
     expect((await t.send(from, archived)).reason).toContain("archived");
     expect(await t.send(from, "s_doesnotexist")).toMatchObject({ status: "not_found", reason: "no Winter session 's_doesnotexist'" });
     expect((await t.send(from, "the build session")).status).toBe("not_found");
-    expect((await t.send(from, t.code(), "   ")).status).toBe("refused");
+    expect(await t.send(from, t.code(), "   ")).toMatchObject({ status: "refused", reason: "the message is empty — write the session what you want it to do" });
     expect(await t.send(chat, from)).toMatchObject({ status: "refused", reason: CHAT_SENDER_REFUSAL });
     expect(t.ensured).toEqual([]);
     for (const d of t.drivers.values()) expect(d.sends).toEqual([]);
@@ -168,14 +183,13 @@ describe("SendMessage to a session", () => {
     expect(answer.reason).toContain("session_cwd_unavailable");
   });
 
-  test("a code session may message a dispatch session and a chat session (attributed)", async () => {
+  test("a Cowork session is a valid target (the mode with a lifecycle that ships next)", async () => {
     const t = setup();
-    const from = t.code();
-    const dispatch = t.store.createSession("global", { mode: "dispatch", origin: "dispatch" });
-    const chat = t.store.createSession("global", { mode: "chat" });
-    expect((await t.send(from, dispatch)).status).toBe("resumed_and_delivered");
-    expect((await t.send(from, chat)).status).toBe("resumed_and_delivered");
-    expect(t.driverFor(dispatch).sends[0]!.text).toStartWith("<agent-message");
+    const cowork = t.store.createSession("global", { mode: "code", cwd: t.home });
+    // The store's own column stops at code/dispatch/chat today; the rule is `participatesInActivity`, which names cowork.
+    const { participatesInActivity } = await import("../../src/sessions/activity");
+    expect(participatesInActivity("cowork")).toBe(true);
+    expect((await t.send(t.code(), cowork)).status).toBe("resumed_and_delivered");
   });
 
   test("notify_when_idle is answered as a separate refused fact beside a delivered message", async () => {
@@ -185,14 +199,61 @@ describe("SendMessage to a session", () => {
     expect(answer.notify?.refused).toBeDefined();
   });
 
-  test("a coordinator's message to its own child that cannot be delivered undoes the background flag it set", async () => {
+  test("a coordinator's message to its own child never sets the background flag (user ruling 2026-10-02), delivered or not", async () => {
     const t = setup();
     const dispatch = t.store.createSession("global", { mode: "dispatch", origin: "dispatch" });
     const child = t.store.createSession("global", { mode: "code", origin: "dispatch-child", parentSessionId: dispatch, cwd: t.home });
     t.driverFor(child).failNext = new Error("queue closed");
-    const answer = await t.send(dispatch, child);
-    expect(answer).toMatchObject({ status: "unavailable" });
+    expect(await t.send(dispatch, child)).toMatchObject({ status: "unavailable" });
+    expect(await t.send(dispatch, child, "again")).toMatchObject({ status: "delivered" });
     expect(t.store.meta(child).backgrounded).not.toBe(true);
+  });
+
+  test("ONE delivery per message id: a re-sent request gets the first answer, in flight or settled", async () => {
+    const t = setup();
+    const from = t.code();
+    const to = t.code();
+    const release = t.holdEnsure();
+    const first = t.send(from, to, "do it", { messageId: "msg-7" });
+    const again = t.send(from, to, "do it", { messageId: "msg-7" });
+    release();
+    expect(await again).toEqual(await first);
+    expect(t.driverFor(to).sends).toHaveLength(1);
+    expect(await t.send(from, to, "do it", { messageId: "msg-7" })).toEqual(await first);
+    expect(t.driverFor(to).sends).toHaveLength(1);
+    // A different id (a new tool call) or different text is a new message.
+    await t.send(from, to, "do it", { messageId: "msg-8" });
+    await t.send(from, to, "do something else", { messageId: "msg-7" });
+    expect(t.driverFor(to).sends).toHaveLength(3);
+  });
+
+  test("a cancelled sender delivers nothing — before the resume, or while the target was coming up", async () => {
+    const t = setup();
+    const from = t.code();
+    const to = t.code();
+    const early = new AbortController();
+    early.abort();
+    expect(await t.send(from, to, "x", { signal: early.signal })).toMatchObject({ status: "unavailable", retryable: true });
+    expect(t.ensured).toEqual([]);
+    const late = new AbortController();
+    const release = t.holdEnsure();
+    const pending = t.send(from, to, "y", { signal: late.signal });
+    late.abort();
+    release();
+    expect(await pending).toMatchObject({ status: "unavailable", retryable: true, reason: "the sender was interrupted; nothing was delivered" });
+    expect(t.driverFor(to).sends).toEqual([]);
+  });
+
+  test("a send already past the shutdown check delivers nothing once shutdown begins while the target comes up", async () => {
+    const t = setup();
+    const from = t.code();
+    const to = t.code();
+    const release = t.holdEnsure();
+    const pending = t.send(from, to);
+    t.messaging.beginShutdown();
+    release();
+    expect(await pending).toMatchObject({ status: "unavailable", retryable: true });
+    expect(t.driverFor(to).sends).toEqual([]);
   });
 
   test("after shutdown begins, nothing is delivered", async () => {
@@ -221,7 +282,7 @@ describe("ListAgents' session rows", () => {
     const dispatch = t.store.createSession("global", { mode: "dispatch", origin: "dispatch" });
     t.attached.add(dispatch);
     const rows = t.messaging.list(caller).sessions;
-    // `flagged` is backgrounded but doing nothing (every finished dispatch child looks like this): not listed.
+    // `flagged` is backgrounded but doing nothing: not listed (`working || active`).
     expect(rows.map((r) => r.address).sort()).toEqual([`session:${attachedOne}`, `session:${working}`].sort());
     expect(rows.some((r) => r.address === `session:${flagged}`)).toBe(false);
     // The same flagged session IS listed while it works.
@@ -231,11 +292,40 @@ describe("ListAgents' session rows", () => {
     expect(rows.find((r) => r.address === `session:${attachedOne}`)).toMatchObject({ name: "Attached one", status: "idle" });
   });
 
+  test(`a cap of ${LIST_AGENTS_SESSION_MAX} is reported as omitted, never applied silently`, () => {
+    const t = setup();
+    const caller = t.code();
+    for (let i = 0; i < LIST_AGENTS_SESSION_MAX + 4; i++) t.attached.add(t.code());
+    const answer = t.messaging.list(caller);
+    expect(answer.sessions).toHaveLength(LIST_AGENTS_SESSION_MAX);
+    expect(answer.omitted).toBe(4);
+  });
+
   test("a chat caller lists no sessions", () => {
     const t = setup();
     const busy = t.code();
     t.attached.add(busy);
     const chat = t.store.createSession("global", { mode: "chat" });
     expect(t.messaging.list(chat)).toEqual({ sessions: [] });
+  });
+});
+
+describe("TaskStop on a session (host_session_stop)", () => {
+  test("interrupts a running code session; an idle one is not_running; chat/dispatch targets refused; unknown not_found; self refused", async () => {
+    const t = setup();
+    const from = t.code();
+    const busy = t.code();
+    t.driverFor(busy).turnRunning = true;
+    expect(await t.messaging.stop(from, { id: busy })).toEqual({ status: "stopped" });
+    expect(t.driverFor(busy).interrupts).toBe(1);
+    expect(await t.messaging.stop(from, { id: `session:${busy}` })).toEqual({ status: "not_running" });
+    expect(await t.messaging.stop(from, { id: t.code() })).toEqual({ status: "not_running" });
+    const chat = t.store.createSession("global", { mode: "chat" });
+    const dispatch = t.store.createSession("global", { mode: "dispatch", origin: "dispatch" });
+    expect(await t.messaging.stop(from, { id: chat })).toEqual({ status: "refused", reason: TARGET_MODE_REFUSAL });
+    expect(await t.messaging.stop(from, { id: dispatch })).toEqual({ status: "refused", reason: TARGET_MODE_REFUSAL });
+    expect((await t.messaging.stop(from, { id: "s_nope" })).status).toBe("not_found");
+    expect((await t.messaging.stop(from, { id: from })).status).toBe("refused");
+    expect(t.ensured).toEqual([]); // stopping never resumes anything
   });
 });

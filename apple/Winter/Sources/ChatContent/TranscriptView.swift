@@ -203,8 +203,8 @@ private struct TranscriptExchangeRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if !exchange.prompt.isEmpty {
-                TranscriptUserBubble(text: exchange.prompt, tint: tint)
+            if !exchange.prompt.isEmpty || exchange.promptEnvelope != nil {
+                TranscriptUserBubble(text: exchange.prompt, tint: tint, envelope: exchange.promptEnvelope)
             }
             // Tools, cards and replies in the order they happened (`exchangeTimeline`, user
             // 2026-10-02): each reply after exactly the activity that preceded it, so a "search,

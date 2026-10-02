@@ -159,7 +159,8 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     const child = /spawned session (s_[0-9a-f]+)/.exec(res.content[0]!.text)?.[1];
     expect(child).toBeDefined();
     expect(Date.now() - t0).toBeLessThan(20_000);
-    expect(h.daemon!.sessions.meta(child!)).toMatchObject({ mode: "code", origin: "dispatch-child", parentSessionId: h.dispatchId, approvalPolicy: "auto", model: "winter-test/echo", backgrounded: true });
+    expect(h.daemon!.sessions.meta(child!)).toMatchObject({ mode: "code", origin: "dispatch-child", parentSessionId: h.dispatchId, approvalPolicy: "auto", model: "winter-test/echo" });
+    expect(h.daemon!.sessions.meta(child!).backgrounded).not.toBe(true); // user ruling 2026-10-02
     // Announced to every harness, like any session.create.
     await until(() => h.client.events.some((e) => e.type === "session_created" && e.sessionId === child) || undefined, 10_000, "the session_created broadcast");
     // The child's own transcript: the prompt under the dispatch client name, then its turn.
@@ -285,7 +286,7 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
   }, 150_000);
 
   test("(6) a CODE session (the spawned winter binary) lists an active session in ListAgents and messages a finished one by its session: address", async () => {
-    // A finished session to message, and an ACTIVE one (a backgrounded, running child) to be listed.
+    // A finished session to message, and a RUNNING one (a child mid-turn, nobody attached) to be listed.
     const idle = await h.spawn({ dir: h.work, prompt: "be done", model: "winter-test/echo", title: "Done kid" });
     const idleId = /spawned session (s_[0-9a-f]+)/.exec(idle.content[0]!.text)![1]!;
     await until(() => h.updates().find((u) => u.childSessionId === idleId && u.status === "completed"), 30_000, "the finished session");
@@ -316,6 +317,43 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     } finally {
       await h.client.call(METHODS.sessionInterrupt, { sessionId: busyId });
     }
+  }, 180_000);
+
+  test("(7) TaskStop stops a SESSION by its s_ id — from Dispatch (embedded) and from a code session (spawned binary)", async () => {
+    // Dispatch (the embedded topology) stops its own running child: reported "Stopped before it finished".
+    const res = await h.spawn({ dir: h.work, prompt: "spin", model: "winter-test/hang", title: "Spinner" });
+    const child = /spawned session (s_[0-9a-f]+)/.exec(res.content[0]!.text)![1]!;
+    await until(() => h.daemon!.winter.get(child)?.turnRunning || undefined, 30_000, "the child's turn");
+    await h.daemon!.winter.get(h.dispatchId)?.end();
+    h.daemon!.sessions.setModel(h.dispatchId, "winter-test/calls");
+    await h.client.call(METHODS.sessionAttach, { sessionId: h.dispatchId, fromSeq: 0 }); // (6) moved the client away
+    try {
+      const before = h.log(h.dispatchId).length;
+      await h.client.call(METHODS.sessionSend, { sessionId: h.dispatchId, text: `CALL TaskStop ${JSON.stringify({ task_id: child })}` });
+      const result = await until(() => h.log(h.dispatchId).slice(before).find((e) => e.type === "tool_result") as { output: string; isError: boolean } | undefined, 60_000, "TaskStop's result");
+      expect({ isError: result.isError, output: result.output }).toMatchObject({ isError: false });
+      expect(JSON.parse(result.output)).toMatchObject({ task_id: child, task_type: "session" });
+      const end = await until(() => h.updates().find((u) => u.childSessionId === child && u.status !== "running"), 30_000, "the stopped child's update");
+      expect(end.status).toBe("completed");
+      expect(end.resultSummary ?? "").toContain("Stopped before it finished");
+    } finally {
+      await h.daemon!.winter.get(h.dispatchId)?.end();
+      h.daemon!.sessions.setModel(h.dispatchId, "winter-test/echo");
+    }
+    // A code session (the spawned `winter` binary) stops another code session; the dispatch session is refused.
+    const busy = await h.spawn({ dir: h.work, prompt: "spin too", model: "winter-test/hang", title: "Spinner 2" });
+    const busyId = /spawned session (s_[0-9a-f]+)/.exec(busy.content[0]!.text)![1]!;
+    await until(() => h.daemon!.winter.get(busyId)?.turnRunning || undefined, 30_000, "the second child's turn");
+    const code = (await h.client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "global", cwd: h.work, approvalPolicy: "auto", model: "winter-test/calls" })).sessionId;
+    await h.client.call(METHODS.sessionAttach, { sessionId: code, fromSeq: 0 });
+    await h.client.call(METHODS.sessionSend, { sessionId: code, text: [`CALL TaskStop ${JSON.stringify({ task_id: busyId })}`, `CALL TaskStop ${JSON.stringify({ task_id: h.dispatchId })}`].join("\n") });
+    await until(() => h.log(code).some((e) => e.type === "turn_completed") || undefined, 90_000, "the code session's turn");
+    const [stopped, refused] = h.log(code).filter((e) => e.type === "tool_result") as Array<{ output: string; isError: boolean }>;
+    expect(stopped!.isError).toBe(false);
+    expect(stopped!.output).toContain("stopped session");
+    await until(() => h.daemon!.winter.get(busyId)?.turnRunning === false || undefined, 30_000, "the second child's stop");
+    expect(refused!.isError).toBe(true);
+    expect(refused!.output).toContain("only code and Cowork sessions");
   }, 180_000);
 
   test("(3) stopping a child interrupts its turn, and the stop is reported", async () => {
