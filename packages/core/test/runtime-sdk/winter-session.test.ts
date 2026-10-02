@@ -192,6 +192,36 @@ const seen = (h: Harness, type: string): SessionEvent[] => h.events.filter((e) =
 
 // ── tests ────────────────────────────────────────────────────────────────────────────────────────
 
+describe("shutdown never leaves a child: an end mid-open, and a spawn refused while the daemon stops", () => {
+  test("end() while the incarnation is still OPENING waits for the open and ends the child it spawned", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const h = harness({
+      options: async (inc) => {
+        await gate; // the open is parked here, before any spawn
+        return { abortController: inc.abort, cwd: "/repo", model: "winter-test/echo", sessionId: "be-x" };
+      },
+    });
+    const opening = h.session.open();
+    await Bun.sleep(1);
+    expect(h.queries).toHaveLength(0);
+    const ending = h.session.end(); // lands mid-open: before 0.0.40 this returned at once and ended nothing
+    release();
+    await opening;
+    await ending;
+    expect(h.queries).toHaveLength(1);
+    expect(h.q().promptClosed).toBe(true); // the child it spawned was ended
+    expect(h.session.state).not.toBe("live");
+  });
+
+  test("a spawn refusal (the driver table's beginShutdown) refuses the open BEFORE any child spawns", async () => {
+    const h = harness({ spawnRefusal: () => Object.assign(new Error("Winter is shutting down"), { code: "daemon_shutting_down" }) });
+    await expect(h.session.open()).rejects.toThrow("shutting down");
+    expect(h.queries).toHaveLength(0);
+    expect(h.tracked).toHaveLength(0);
+  });
+});
+
 describe("FAIL CLOSED (2026-10-01 review): a child that offers a built-in its `Options.tools` left out is refused", () => {
   const ALLOWED = ["AskUserQuestion", "SendMessage", "ToolSearch", "WebFetch"];
   const withTools = () => harness({

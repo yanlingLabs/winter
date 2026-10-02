@@ -223,6 +223,9 @@ export interface WinterSessionDeps {
    * no live child is HELD, not pushed), so it can never be what spawns one.
    */
   beforeTurn?: () => Promise<void>;
+  /** Checked by `open()` just before it spawns the runtime child: an error here refuses the open and spawns
+   *  nothing (the driver table's `beginShutdown` — no child is started into a daemon that is stopping). */
+  spawnRefusal?: () => Error | undefined;
   /** A projector for ONE incarnation, built on ITS generation. */
   projector: (incarnation: WinterIncarnation) => Projector;
   /** A fresh queue per incarnation (a closed queue cannot be reused). */
@@ -705,7 +708,13 @@ class WinterSessionImpl implements WinterSession {
   end(): Promise<void> {
     if (this.endingPromise !== undefined) return this.endingPromise;
     const inc = this.inc;
-    if (this.stateValue !== "live" || inc === undefined) return this.done;
+    if (this.stateValue !== "live" || inc === undefined) {
+      // An incarnation still OPENING has no child to end yet -- but it may spawn one in a moment. Wait for
+      // the open to settle and end whatever it produced, so an end that lands mid-open never leaves a child.
+      const opening = this.opening;
+      if (opening !== undefined) return opening.then(() => this.end(), () => undefined);
+      return this.done;
+    }
     this.ending = true;
     this.clearIdleTimer();
     const grace = this.deps.endGraceMs ?? WINTER_SESSION_END_GRACE_MS;
@@ -779,6 +788,10 @@ class WinterSessionImpl implements WinterSession {
       let projector: Projector;
       let query: Query;
       try {
+        // The daemon may have begun stopping while this open awaited its options: refuse BEFORE the spawn,
+        // so no runtime child is started into a daemon that is going away (`beginShutdown`).
+        const refusal = this.deps.spawnRefusal?.();
+        if (refusal !== undefined) throw refusal;
         generation = this.deps.records?.bumpGeneration(this.sessionId, { runtimeKind: "winter-agent", backendSessionId: this.backendSessionId }).generation ?? this.gen + 1;
         shape = { generation, resume, abort };
         queue = (this.deps.queue ?? createHostPromptQueue)();
