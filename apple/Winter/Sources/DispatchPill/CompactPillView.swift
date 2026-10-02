@@ -5,25 +5,28 @@ import SwiftUI
 // the text field survives the first keystroke (see that type's doc). What is compact-specific is
 // drawn here:
 //
-//   idle:     [ Type here …………………………………… (🎙) ]   — the blue circle, the voice glyph until there is text
+//   idle:     [ Type here …………………………………… (🎙) ]   — the white circle, the voice glyph until there is text
 //   working:  [ ·  ∘ ○ ▣ ◯ ⬤ ▣ ⬤⬤(■) ]            — the plume, end to end, tool tiles riding it
 
 /// The working state's whole body: the plume, end to end, its nozzle behind the stop button, with
-/// each tool Dispatch uses thrown out of it as a tile (`plumeThrows`). No composer — the text view
+/// each tool Dispatch uses thrown out of it as a puff, and each site it reads as its favicon
+/// (`plumeThrows`) — the current round's again and again while it runs. No composer — the text view
 /// stays mounted underneath, invisible, so a keystroke still lands in it and the first one opens the
 /// typing pill (`dispatchPillPresentationAfterDraftChange`).
 struct CompactPillWorking: View {
     let thrown: [PlumeThrow]
+    var repeating: [PlumeThrow] = []
 
     var body: some View {
         WorkingAnimationView(
             thrown: thrown,
+            repeating: repeating,
             emitterInset: DispatchPillMetrics.trailingPadding + DispatchPillMetrics.sendCircleSize / 2
         )
     }
 }
 
-/// The pill's trailing circle — always the same bright system blue, never greyed. Its role is
+/// The pill's trailing circle — always white with a black glyph, never greyed. Its role is
 /// `composerSendButtonRole` (the composer card's own rule, "running beats blocked"), so the pill and
 /// the app's composer agree on what that button is at every instant:
 ///
@@ -49,10 +52,10 @@ struct PillSendStopButton: View {
         } label: {
             ZStack {
                 Circle()
-                    .fill(Color.blue)
+                    .fill(Color.white)
                 Image(systemName: pillSendButtonSymbol(role))
                     .font(Typography.label(.bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.black)
                     .contentTransition(.symbolEffect(.replace))
             }
             .frame(width: DispatchPillMetrics.sendCircleSize, height: DispatchPillMetrics.sendCircleSize)

@@ -2,7 +2,7 @@ import XCTest
 import AppKit
 @testable import Winter
 
-/// The working animation's model: the plume's flow, the icon cross-fade, the idle symbol rotation,
+/// The working animation's model: the plume's flow, what it throws and when it repeats,
 /// and the tool→symbol map.
 final class WorkingAnimationTests: XCTestCase {
     // MARK: - The plume
@@ -47,7 +47,7 @@ final class WorkingAnimationTests: XCTestCase {
         let end = PropulsionPlume.circle(for: puff(1), in: rect, emitterX: emitterX, tailX: tailX)
         XCTAssertEqual(end.diameter, 0, accuracy: 1e-9)
         XCTAssertEqual(end.center.x, tailX, accuracy: 1e-9)
-        let nearly = PropulsionPlume.circle(for: puff(0.97), in: rect, emitterX: emitterX, tailX: tailX)
+        let nearly = PropulsionPlume.circle(for: puff(0.99), in: rect, emitterX: emitterX, tailX: tailX)
         XCTAssertLessThan(nearly.diameter, 4)
     }
 
@@ -208,22 +208,40 @@ final class WorkingAnimationTests: XCTestCase {
         XCTAssertTrue(model.plume.tokens.isEmpty)
     }
 
-    func testATileGrowsOutOfTheNozzleRidesTheFlowAndShrinksAway() {
-        let token = { (age: Double) in PropulsionPlume.Token(age: age, lifetime: 1, lane: 0.6, spin: 1, item: self.toolThrow("a")) }
-        let tile = { (age: Double) in PropulsionPlume.tile(for: token(age), in: self.rect, emitterX: self.emitterX, tailX: self.tailX) }
+    private func token(_ age: Double, _ item: PlumeThrow) -> PropulsionPlume.Token {
+        PropulsionPlume.Token(age: age, lifetime: 1, lane: 0.6, item: item)
+    }
+
+    func testAToolIsAPuffThatGrowsOutRidesTheFlowAndShrinksAway() {
+        let tile = { (age: Double) in
+            PropulsionPlume.tile(for: self.token(age, self.toolThrow("a")), in: self.rect, emitterX: self.emitterX, tailX: self.tailX)
+        }
         let born = tile(0), out = tile(PropulsionPlume.tokenEmergeShare), mid = tile(0.5), end = tile(1)
         XCTAssertEqual(born.center.x, emitterX, accuracy: 1e-9)
         XCTAssertLessThan(born.side, out.side, "grows out of the nozzle")
         XCTAssertEqual(out.side, rect.height * PropulsionPlume.tokenSideShare * (1 - PropulsionPlume.tokenShrinkAlongPlume * PropulsionPlume.tokenEmergeShare), accuracy: 1e-6)
         XCTAssertLessThan(mid.center.x, out.center.x, "rides toward the tail")
-        XCTAssertLessThan(mid.side, out.side, "shrinks")
-        XCTAssertGreaterThan(mid.rotation, 0, "tumbles its own way")
+        XCTAssertLessThan(mid.side, out.side, "shrinks like the exhaust")
+        XCTAssertLessThan(mid.heat, out.heat, "and cools")
         XCTAssertEqual(end.side, 0, accuracy: 1e-9, "gone at the tail, never a pop")
         for age in stride(from: 0.0, through: 1.0, by: 0.05) {
             let t = tile(age)
             XCTAssertGreaterThanOrEqual(t.center.y - t.side / 2, rect.minY - 1e-9)
             XCTAssertLessThanOrEqual(t.center.y + t.side / 2, rect.maxY + 1e-9)
         }
+    }
+
+    func testASiteKeepsItsSizeAllTheWayAndRidesOutPastTheTail() {
+        let site = PlumeThrow(id: "s#a.com", kind: .site(host: "a.com", iconURL: nil))
+        let tile = { (age: Double) in
+            PropulsionPlume.tile(for: self.token(age, site), in: self.rect, emitterX: self.emitterX, tailX: self.tailX)
+        }
+        let full = rect.height * PropulsionPlume.tokenSideShare
+        XCTAssertLessThan(tile(0).side, full, "grows out of the nozzle")
+        for age in stride(from: PropulsionPlume.tokenEmergeShare, through: 1.0, by: 0.1) {
+            XCTAssertEqual(tile(age).side, full, accuracy: 1e-6, "one size the whole way (age \(age))")
+        }
+        XCTAssertEqual(tile(1).center.x, tailX, accuracy: 1e-9, "all the way to the tail")
     }
 
     func testATileOutlivesNoPuffAndIsDroppedAtTheTail() {
@@ -343,8 +361,8 @@ final class WorkingAnimationTests: XCTestCase {
         """
         let done = Exchange(prompt: "p", reply: "", activity: [tool("WebSearch", detail: "swift", callId: "s1", output: output)])
         XCTAssertEqual(plumeThrows(for: done).map(\.id),
-                       ["s1", "s1#swift.org", "s1#developer.apple.com", "s1#a.com", "s1#b.com"],
-                       "distinct public hosts, in order, capped")
+                       ["s1", "s1#swift.org", "s1#developer.apple.com", "s1#a.com", "s1#b.com", "s1#c.com"],
+                       "every distinct public host, in order")
     }
 
     func testOnlyPublicNamesAreAskedForAFavicon() {
@@ -359,12 +377,46 @@ final class WorkingAnimationTests: XCTestCase {
         }
     }
 
-    func testEachToolKeepsItsOwnTileColour() {
-        XCTAssertTrue(plumeToolTileColor(symbol: "terminal") == plumeToolTileColor(symbol: "terminal"), "stable")
-        let colours = ["terminal", "pencil", "doc.text", "globe", "checklist", "person.2.fill", "bolt.fill", "safari"]
-            .map { plumeToolTileColor(symbol: $0) }
-        let distinct = Set(colours.map { "\($0.red),\($0.green),\($0.blue)" })
-        XCTAssertGreaterThan(distinct.count, 3, "the tools are not all one colour")
+    // MARK: - A running round repeats
+
+    func testOnlyARoundStillRunningRepeatsAndItCoversFromItsEarliestRunningCall() {
+        let earlier = tool("bash", detail: "ls", callId: "b0", output: "ok")
+        let doneSearch = tool("WebSearch", detail: "q", callId: "s1", output: "1. https://a.com 2. https://b.com")
+        let running = tool("WebSearch", detail: "q2", callId: "s2")
+        let finishedAfter = tool("read", detail: "f", callId: "r1", output: "x")
+        XCTAssertEqual(plumeRepeatingThrows(for: Exchange(prompt: "p", reply: "", activity: [earlier, doneSearch])), [],
+                       "every call has returned: nothing repeats")
+        let round = plumeRepeatingThrows(for: Exchange(prompt: "p", reply: "", activity: [earlier, running, finishedAfter]))
+        XCTAssertEqual(round.map(\.id), ["s2", "r1"], "from the earliest call still out, to the end")
+        let withSites = plumeRepeatingThrows(for: Exchange(prompt: "p", reply: "", activity: [running, doneSearch]))
+        XCTAssertEqual(withSites.map(\.id), ["s2", "s1", "s1#a.com", "s1#b.com"], "a finished search's sites keep streaming while its round runs")
+        XCTAssertEqual(plumeRepeatingThrows(for: nil), [])
+    }
+
+    func testARunningRoundStreamsAgainOnceNothingNewWaits() {
+        var model = WorkingAnimationModel()
+        let round = [toolThrow("a"), toolThrow("b")]
+        model.tick(dt: 1.0 / 60.0, thrown: round, repeating: round) // primed: what was already there is not new
+        var t = 0.0
+        while t < WorkingAnimationModel.repeatSpacing * 3.5 { model.tick(dt: 1.0 / 60.0, thrown: round, repeating: round); t += 1.0 / 60.0 }
+        let launched = model.plume.tokens.map(\.item.id)
+        XCTAssertGreaterThanOrEqual(launched.count, 4, "the round keeps leaving the nozzle")
+        XCTAssertEqual(Array(launched.prefix(4)), ["a", "b", "a", "b"], "in turn")
+        var ended = model
+        let before = ended.plume.tokens.count
+        for _ in 0..<Int(WorkingAnimationModel.repeatSpacing * 60) + 5 { ended.tick(dt: 1.0 / 60.0, thrown: round, repeating: []) }
+        XCTAssertLessThanOrEqual(ended.plume.tokens.count, before, "once the round is over nothing new is thrown")
+    }
+
+    func testNewThrowsGoBeforeTheRepeats() {
+        var model = WorkingAnimationModel()
+        model.tick(dt: 1.0 / 60.0)
+        let round = [toolThrow("old")]
+        model.tick(dt: 1.0 / 60.0, thrown: [toolThrow("new1"), toolThrow("new2")], repeating: round)
+        for _ in 0..<Int(WorkingAnimationModel.throwSpacing * 60 * 2) + 3 {
+            model.tick(dt: 1.0 / 60.0, thrown: [toolThrow("new1"), toolThrow("new2")], repeating: round)
+        }
+        XCTAssertEqual(Array(model.plume.tokens.map(\.item.id).prefix(2)), ["new1", "new2"])
     }
 
     // MARK: - Tool → symbol

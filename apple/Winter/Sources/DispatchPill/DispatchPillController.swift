@@ -472,6 +472,10 @@ final class DispatchPillController: ObservableObject {
     /// What the working plume throws: the running turn's tool uses so far (`plumeThrows(for:)`).
     var plumeThrows: [PlumeThrow] { Winter.plumeThrows(for: session.state.exchanges.last) }
 
+    /// The current tool round's throws, which the plume streams again while the round runs
+    /// (`plumeRepeatingThrows(for:)`).
+    var plumeRepeatingThrows: [PlumeThrow] { Winter.plumeRepeatingThrows(for: session.state.exchanges.last) }
+
     /// The swiped-to turn's preview, or nil at the composer.
     var turnPreview: DispatchPillTurnPreview? {
         historyIndex.flatMap { dispatchPillTurnPreview(exchanges: session.state.exchanges, index: $0) }
