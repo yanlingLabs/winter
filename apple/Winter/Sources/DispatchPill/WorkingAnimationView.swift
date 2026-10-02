@@ -242,10 +242,17 @@ struct PropulsionPlume: Equatable {
     /// The nozzle's puff diameter, as a share of the plume's height.
     static let nozzleDiameterShare: Double = 0.9
     static let sparkDiameterShare: Double = 0.14
-    /// How much of its size a puff has lost by the time it reaches the tail.
+    /// How much of its size a puff has lost by the time it reaches the tail. The shrink is by
+    /// DISTANCE travelled, so it is the same rate the whole way down the pill (shrinking by age, plus a
+    /// last-moment vanish, made puffs collapse in the final stretch, where they move fastest).
     static let shrinkAlongPlume: Double = 0.5
-    /// The last share of a puff's life over which it shrinks away to nothing (never a pop).
-    static let vanishShare: Double = 0.1
+    /// How far past the plume's leading edge its tail lies, as a share of its height — far enough that
+    /// every puff and thrown item has wholly left the pill before it is dropped, so nothing ever pops
+    /// out of sight in view.
+    static let tailOvershootShare: Double = 0.32
+
+    /// The tail for a plume this high whose leading edge is at x = 0.
+    static func tailX(height: CGFloat) -> CGFloat { -height * CGFloat(tailOvershootShare) }
     /// How sharply a puff speeds up down the plume: >1 is slow at the nozzle (where they bunch) and
     /// fast at the tail (where they thin out) — what reads as thrust.
     static let travelExponent: Double = 1.7
@@ -312,9 +319,9 @@ struct PropulsionPlume: Equatable {
     }
 
     /// PURE: one thrown item's disc. Both kinds grow out of the nozzle over `tokenEmergeShare` of their
-    /// life and drift to their lane. A TOOL is a puff of the plume itself — it shrinks, cools and
-    /// vanishes at the tail like the rest of the exhaust. A SITE keeps its size the whole way and rides
-    /// out past the tail (`tailX` lies beyond the pill's leading edge, which clips it).
+    /// life and drift to their lane. A TOOL is a puff of the plume itself — it shrinks (by distance,
+    /// like the exhaust) and cools. A SITE keeps its size the whole way. Both ride out past the pill's
+    /// leading edge (`tailX`), which clips them, before they are dropped.
     static func tile(for token: Token, in rect: CGRect, emitterX: CGFloat, tailX: CGFloat) -> PlumeTile {
         let p = min(max(token.age / token.lifetime, 0), 1)
         let travel = pow(p, tokenTravelExponent)
@@ -322,7 +329,7 @@ struct PropulsionPlume: Equatable {
         let height = Double(rect.height)
         var side = height * tokenSideShare * min(1, 0.35 + 0.65 * p / tokenEmergeShare)
         if case .tool = token.item.kind {
-            side *= (1 - tokenShrinkAlongPlume * p) * min(1, (1 - p) / vanishShare)
+            side *= 1 - tokenShrinkAlongPlume * travel
         }
         let slack = max(0, (height - side) / 2)
         let y = Double(rect.midY) + token.lane * slack * min(1, p * 2.5)
@@ -351,10 +358,9 @@ struct PropulsionPlume: Equatable {
         let travel = puff.spark ? p : pow(p, travelExponent)
         let x = Double(emitterX) - travel * Double(emitterX - tailX)
         let height = Double(rect.height)
-        var diameter = puff.spark
-            ? height * sparkDiameterShare * (1 - 0.5 * p)
-            : height * nozzleDiameterShare * puff.size * (1 - shrinkAlongPlume * p)
-        diameter *= min(1, (1 - p) / vanishShare)
+        let diameter = puff.spark
+            ? height * sparkDiameterShare * (1 - 0.5 * travel)
+            : height * nozzleDiameterShare * puff.size * (1 - shrinkAlongPlume * travel)
         // Free room either side of the mid line, used more the further the puff has travelled.
         let slack = max(0, (height - diameter) / 2)
         let y = Double(rect.midY) + puff.lane * slack * min(1, p * 3)
@@ -557,7 +563,7 @@ struct WorkingAnimationView: View {
             let emitterX = size.width - (emitterInset ?? size.height / 2)
             // Past the pill's leading edge: the exhaust runs the whole length and out (the pill's shape
             // clips it), never stopping short.
-            let tailX = -size.height * 0.2
+            let tailX = PropulsionPlume.tailX(height: size.height)
             let circles = model.plume.circles(in: rect, emitterX: emitterX, tailX: tailX)
 
             // A soft glow under everything, added rather than painted, so the bunched nozzle
