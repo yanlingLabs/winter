@@ -12,7 +12,7 @@ import AppKit
 /// - resizing is `PillWindowResizeHandles`, laid over the content (AppKit's own edge tracking is a
 ///   feature of the system frame);
 /// - moving is the SwiftUI root's drag band along the top.
-final class PillChromeWindow: NSWindow {
+final class PillChromeWindow: NSPanel {
     /// The rounded shape's radius — the dispatch pill's own (`DispatchPillMetrics.maxCornerRadius`).
     static let cornerRadius: CGFloat = DispatchPillMetrics.maxCornerRadius
 
@@ -20,19 +20,40 @@ final class PillChromeWindow: NSWindow {
     private var unzoomedFrame: NSRect?
 
     init(contentRect: NSRect) {
-        super.init(contentRect: contentRect, styleMask: [.borderless, .resizable, .closable, .miniaturizable],
+        // A PANEL, non-activating — the dispatch pill's own kind. Measured 2026-10-02 with the user's
+        // Terminal full screen: macOS lets another app's ordinary WINDOW onto a full-screen app's Space
+        // once at most (the second session window went to the regular desktop, invisible), and
+        // activating Winter to show one jumped the user to a desktop with Winter's windows. A
+        // non-activating auxiliary panel is what full-screen Spaces admit, as many as are opened, and it
+        // takes the keyboard without activating Winter — no jump.
+        super.init(contentRect: contentRect,
+                   styleMask: [.borderless, .resizable, .closable, .miniaturizable, .nonactivatingPanel],
                    backing: .buffered, defer: false)
+        isFloatingPanel = false          // an ordinary window's level, not always-on-top
+        hidesOnDeactivate = false        // a panel's default would hide it whenever Winter is inactive
+        becomesKeyOnlyIfNeeded = false   // a click anywhere in it takes the keyboard
         isOpaque = false
         backgroundColor = .clear
-        // Open where the user IS. Opened from the dispatch pill (which floats on every Space), a second
-        // session window landed on another Space — open, key, and invisible (measured 2026-10-02:
-        // `isOnActiveSpace == false` right after `show()`); the user saw "only one window opens".
-        // `.fullScreenAuxiliary` lets it come up over a full-screen app's Space too, like the pill.
+        // Opens on the Space the user is on — a full-screen app's included — and stays there.
         collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         // No system shadow: on a dark window the window server's shadow carries its own thin light
         // edge — the rim the user saw even with no stroke drawn (2026-10-02). The black shape stands
         // on its own, like the dispatch pill does.
         hasShadow = false
+    }
+
+    /// Cmd-W / Cmd-M straight to the window: a non-activating panel's keys do not reach the app's
+    /// menu while Winter is not the active app.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags == .command, let key = event.charactersIgnoringModifiers?.lowercased() {
+            switch key {
+            case "w": performClose(nil); return true
+            case "m": performMiniaturize(nil); return true
+            default: break
+            }
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     override var canBecomeKey: Bool { true }

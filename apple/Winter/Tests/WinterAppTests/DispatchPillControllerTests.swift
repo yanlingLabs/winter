@@ -797,6 +797,17 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertFalse(pill.gateTimerActiveForTesting, "no clock while the pill is away")
     }
 
+    /// The user's report: with a session window holding the keyboard, the first click on a child pill
+    /// only made the (non-key) pill panel key and the tap was lost — a second click was needed. The
+    /// pill's content acts on the first click.
+    func testThePillActsOnTheFirstClickEvenWhenNotKey() {
+        let pill = makePill()
+        pill.show()
+        let content = pill.panelContentViewForTesting
+        XCTAssertNotNil(content)
+        XCTAssertTrue(content?.acceptsFirstMouse(for: nil) ?? false)
+    }
+
     func testHitTestCountsTheFloatingLayers() {
         let canvasSize = CGSize(width: 500, height: 300)
         let accessory = CGRect(x: 30, y: 24, width: 440, height: 120)

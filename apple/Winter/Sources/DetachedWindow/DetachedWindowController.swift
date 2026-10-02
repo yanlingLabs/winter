@@ -335,7 +335,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
             onOpenDetached: { [weak self] sid in self?.onOpenSessionDetached?(sid) },
             onNewSession: { [weak self] in self?.newSession() }
         )
-        let hosting = NSHostingView(rootView: DetachedWindowRootView(
+        let hosting = FirstClickHostingView(rootView: DetachedWindowRootView(
             adapter: adapter, sidebars: sidebars, palette: palette,
             onClose: { [weak window] in window?.performClose(nil) },
             onMinimize: { [weak window] in window?.performMiniaturize(nil) },
@@ -370,15 +370,16 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// An already-open window, brought forward and given the keyboard (a child pill clicked again).
     func bringToFront() {
         if window.isMiniaturized { window.deminiaturize(nil) }
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        window.makeKey()
     }
 
     func show() {
-        // Winter forward first: a window opened from the dispatch pill (a non-activating panel) would
-        // otherwise come up behind whatever app the user is in — open, but invisible.
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
+        // A non-activating panel (`PillChromeWindow`): ordered in front of whatever app the user is in
+        // and given the keyboard WITHOUT activating Winter — activating it jumped the user to a desktop
+        // holding Winter's windows.
+        window.orderFrontRegardless()
+        window.makeKey()
         feedTask = Task { await feed.start() }
         installEscMonitor()
     }
