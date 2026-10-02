@@ -758,9 +758,11 @@ enum SessionReducer {
                 s.exchanges[e].activity[i].writtenLines = lines
             }
         case .toolResult(let v) where v.threadId == mainThread:
-            // The status flip is deliberately UNCONDITIONAL and comes first: it is the behaviour
-            // this case has always had, and it must not become contingent on whether the fold
-            // below finds an item to land on.
+            // The status flip must not be contingent on whether the fold below finds an item to
+            // land on — but since 2026-10-02 the runtime runs read-only calls CONCURRENTLY and
+            // reports each as it finishes, so a result no longer means the round is over: the status
+            // stays on a tool while any call of the turn is still out (`outstandingToolName`), and
+            // reads "thinking" only once none is.
             if s.pendingInteractions.isEmpty { s.status = .thinking }
             // diff-tabs Task 9: the wire's `FileDiffSummary` becomes the app's `FileDiffRef` HERE —
             // the one translation point, `nil` in ⇒ `nil` out, so a session whose events predate the
@@ -771,6 +773,9 @@ enum SessionReducer {
                                            diffId: $0.diffId)
                            },
                            siteIcons: (v.siteIcons ?? []).map { SiteIconRef(url: $0.url, iconUrl: $0.iconUrl) })
+            if s.pendingInteractions.isEmpty, let running = outstandingToolName(s) {
+                s.status = .toolRunning(name: running)
+            }
         case .approvalRequested(let v) where v.threadId == mainThread:
             appendPending(.approval(callId: v.callId, toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, childSessionId: v.childSessionId, options: v.options), to: &s)
             appendInteraction(InteractionRecord(
@@ -1351,6 +1356,19 @@ enum SessionReducer {
     /// checked first for the fs tools as a deliberate belt — it is CC's name for that argument, so a
     /// model trained on that shape does sometimes emit it, and such a call still emits its
     /// `tool_call` (and therefore its row) before failing the daemon's zod parse.
+    /// The name of a tool call of the running turn that has no result yet (the newest one), or nil
+    /// when every call has come back — concurrent calls report one by one.
+    static func outstandingToolName(_ state: OrbSessionState) -> String? {
+        guard state.turnRunning, let exchange = state.exchanges.last else { return nil }
+        for item in exchange.activity.reversed() {
+            if case .tool(let name, _, let callId, let output, let isError, _, _) = item.kind,
+               callId != nil, output == nil, !isError {
+                return name
+            }
+        }
+        return nil
+    }
+
     /// How many lines a `write` call's `content` holds (a trailing newline does not start another).
     static func writtenLineCount(argsJson: String) -> Int? {
         guard let data = argsJson.data(using: .utf8),

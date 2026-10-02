@@ -43,6 +43,8 @@ final class MenuBarActivityTests: XCTestCase {
         XCTAssertEqual(MenuBarActivity.next(after: .thinking, event: toolCall()), .working)
         // tool_result alone does NOT idle — the turn continues (model may keep thinking)
         XCTAssertEqual(MenuBarActivity.next(after: .working, event: toolResult()), .thinking)
+        // Concurrent read-only calls report one by one: while another is still out, keep working.
+        XCTAssertEqual(MenuBarActivity.next(after: .working, event: toolResult(), toolsOutstanding: true), .working)
         // turn_completed ⇒ idle from anywhere
         XCTAssertEqual(MenuBarActivity.next(after: .working, event: turnCompleted()), .idle)
         XCTAssertEqual(MenuBarActivity.next(after: .thinking, event: turnCompleted()), .idle)

@@ -76,4 +76,14 @@ final class ExchangeTimelineTests: XCTestCase {
         reduced.appendReply("x")
         XCTAssertEqual(built, reduced)
     }
+
+    func testStatusStaysOnAToolWhileAConcurrentCallIsStillOut() {
+        var s = OrbSessionState()
+        for e in [user(1), started(2), tool("web_search", 3), tool("web_search", 4), result(3, 5)] {
+            s = SessionReducer.reduce(s, e)
+        }
+        XCTAssertEqual(s.status, .toolRunning(name: "web_search"), "one search came back, the other is still out")
+        s = SessionReducer.reduce(s, result(4, 6))
+        XCTAssertEqual(s.status, .thinking)
+    }
 }

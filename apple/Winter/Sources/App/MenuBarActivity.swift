@@ -26,14 +26,16 @@ import WinterProtocol
 enum MenuBarActivity: Equatable {
     case idle, thinking, working
 
-    static func next(after current: MenuBarActivity, event: SessionEvent) -> MenuBarActivity {
+    /// `toolsOutstanding`: a call of the running turn still has no result — concurrent read-only
+    /// calls report one by one (2026-10-02), so one call's result no longer ends the working state.
+    static func next(after current: MenuBarActivity, event: SessionEvent, toolsOutstanding: Bool = false) -> MenuBarActivity {
         switch event {
         case .assistantDelta:
             return .thinking
         case .toolCall:
             return .working
         case .toolResult:
-            return .thinking
+            return toolsOutstanding ? .working : .thinking
         case .turnCompleted, .agentError:
             return .idle
         default:
