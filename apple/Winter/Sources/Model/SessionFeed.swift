@@ -146,6 +146,7 @@ final class SessionFeed {
     func repin(to sessionId: String) async {
         guard case .pinned = mode else { return }
         mode = .pinned(sessionId: sessionId)
+        pendingChunks.removeAll() // the old session's — never folded into the new one
         session.reset()
         // Same two lines, and for the same reason — see `start()`'s pinned branch.
         let ceilingSeq = try? await client.attach(sessionId: sessionId, fromSeq: 0)
@@ -157,13 +158,48 @@ final class SessionFeed {
         switch ev {
         case .session(let e):
             if case .pinned(let sessionId) = mode, e.sessionId == sessionId {
-                session.apply(e)
+                if case .assistantDelta = e {
+                    pendingChunks.append(e)
+                    scheduleChunkFlush()
+                } else {
+                    flushChunks()
+                    session.apply(e)
+                }
             }
             // followFocus always supplies onEvent (returns true above) — no fallback needed here.
         case .connection(let s):
+            flushChunks()
             session.apply(connection: s)
         case .unknown:
             break // newer daemon event — nothing to render for it
         }
+    }
+
+    // MARK: - Streamed chunks, a frame at a time
+
+    /// How long streamed chunks wait to be folded together — one display frame.
+    static let chunkFlushInterval: TimeInterval = 1.0 / 60.0
+    private var pendingChunks: [SessionEvent] = []
+    private var chunkFlushScheduled = false
+
+    /// Streamed text is folded into the session at most once a frame, never once per chunk (user,
+    /// 2026-10-02): every fold re-renders whatever shows the session, and a model sends a chunk every
+    /// few milliseconds — a session window re-rendering per chunk fell further and further behind
+    /// the stream (the dispatch pill showed a child done while its window was still writing). Any
+    /// other event folds the waiting chunks first, so the session sees every event in order.
+    private func scheduleChunkFlush() {
+        guard !chunkFlushScheduled else { return }
+        chunkFlushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.chunkFlushInterval) { [weak self] in
+            MainActor.assumeIsolated { self?.flushChunks() }
+        }
+    }
+
+    private func flushChunks() {
+        chunkFlushScheduled = false
+        guard !pendingChunks.isEmpty else { return }
+        let chunks = pendingChunks
+        pendingChunks.removeAll(keepingCapacity: true)
+        session.apply(contentsOf: chunks)
     }
 }

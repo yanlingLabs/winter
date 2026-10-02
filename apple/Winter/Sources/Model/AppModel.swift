@@ -375,6 +375,27 @@ final class AppModel: ObservableObject {
         try? await client.engineActivity()
     }
 
+    /// Streamed chunks folded once a frame, never once each — `SessionFeed.flushChunks`'s rule and
+    /// reason (the surfaces showing this session re-render on every fold).
+    private var pendingChunks: [SessionEvent] = []
+    private var chunkFlushScheduled = false
+
+    private func scheduleChunkFlush() {
+        guard !chunkFlushScheduled else { return }
+        chunkFlushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + SessionFeed.chunkFlushInterval) { [weak self] in
+            MainActor.assumeIsolated { self?.flushChunks() }
+        }
+    }
+
+    private func flushChunks() {
+        chunkFlushScheduled = false
+        guard !pendingChunks.isEmpty else { return }
+        let chunks = pendingChunks
+        pendingChunks.removeAll(keepingCapacity: true)
+        session.apply(contentsOf: chunks)
+    }
+
     private func handle(_ ev: WinterEvent) async {
         switch ev {
         case .session(let e):
@@ -394,8 +415,15 @@ final class AppModel: ObservableObject {
                 }
             }
             guard e.sessionId == focusedSessionId else { return }
-            session.apply(e)
+            if case .assistantDelta = e {
+                pendingChunks.append(e)
+                scheduleChunkFlush()
+            } else {
+                flushChunks()
+                session.apply(e)
+            }
         case .connection(let s):
+            flushChunks()
             session.apply(connection: s)
             connectionSummary = summaryLine()
             // FINAL-REVIEW FIX (M1): `.connection(.connected)` arriving through the event pump is
@@ -483,6 +511,7 @@ final class AppModel: ObservableObject {
             OrbDebug.log("refocus: refusing non-dispatch session \(sessionId.prefix(10)) (mode: \(row.mode ?? "code"))")
             return
         }
+        pendingChunks.removeAll() // the old session's — never folded into the next one
         session.reset()
         focusedSessionId = sessionId
         // Full replay from 0 rebuilds tasks/pending state through the reducer.
@@ -503,7 +532,8 @@ final class AppModel: ObservableObject {
             if let sessions = try? await client.listSessions(),
                let newest = sessions.filter({ $0.mode == "dispatch" }).max(by: { $0.createdAt < $1.createdAt }),
                newest.sessionId != sessionId {
-                session.reset()
+                pendingChunks.removeAll() // the old session's — never folded into the next one
+        session.reset()
                 focusedSessionId = newest.sessionId
                 if (try? await client.attach(sessionId: newest.sessionId, fromSeq: 0)) == nil {
                     focusedSessionId = await client.attachedSession // reconcile again on double failure
