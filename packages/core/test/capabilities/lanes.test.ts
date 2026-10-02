@@ -37,6 +37,29 @@ describe("capability concurrency lanes", () => {
     expect(browserCapability(session(), { browser: browserDeps() }).toolLanes).toEqual({ browser: "browser" });
   });
 
+  test("the runtime's cancel (the call's own signal) stops a running Browser and Computer call promptly", async () => {
+    // Browser: the panel never settles the command; only the cancel can end the call.
+    const deps: BrowserToolDeps = { ...browserDeps(), dispatch: () => ({ commandId: "pcmd_2", settled: new Promise<PanelCommandOutcome>(() => {}) }) };
+    const browser = browserCapability(session(), { browser: deps }).instance as WinterMcpServerInstance;
+    const browserCancel = new AbortController();
+    const browserCall = browser.callTool("browser", { verb: "click", tabId: "t1", selector: "#go" }, { signal: browserCancel.signal });
+    await Bun.sleep(5);
+    browserCancel.abort();
+    const browserResult = await Promise.race([browserCall, Bun.sleep(2_000).then(() => "still running" as const)]);
+    expect(browserResult).not.toBe("still running");
+
+    // Computer: a 5 s `wait` ends on the cancel instead of running its full time.
+    const computer = computerCapability(session({ computerUse: {} as ComputerUseService }), { computerUse: () => undefined }).instance as WinterMcpServerInstance;
+    const computerCancel = new AbortController();
+    const started = performance.now();
+    const computerCall = computer.callTool("computer", { action: "wait", seconds: 5 }, { signal: computerCancel.signal });
+    await Bun.sleep(5);
+    computerCancel.abort();
+    const computerResult = await computerCall;
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(JSON.stringify(computerResult.content)).toContain("interrupted");
+  });
+
   test("the daemon runs a Computer call and a Browser call at the same time", async () => {
     let release!: () => void;
     const held = new Promise<void>((r) => (release = r));
