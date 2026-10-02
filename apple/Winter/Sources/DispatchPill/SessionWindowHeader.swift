@@ -1,9 +1,8 @@
 import SwiftUI
 
-/// The pill-themed session window's header: the session's own CHILD PILL, docked at the top of its
-/// window — the same black capsule the user clicked in the dispatch pill's row, in the same plume
-/// colours. While the session works, its plume streams behind the title, throwing the tools and sites
-/// the turn uses, with its stop circle on the nozzle; at rest it is a quiet capsule with the title.
+/// The pill-themed session window's header: a quiet capsule on the traffic lights' row with the
+/// session's title and a dot in its plume colour. The plume itself — and the stop — live in the
+/// composer (`PillChromeComposer`), the way they do in the dispatch pill.
 struct SessionWindowHeader: View {
     @ObservedObject var adapter: FieldStateAdapter
     @ObservedObject var directory: SessionDirectory
@@ -22,54 +21,24 @@ struct SessionWindowHeader: View {
     }
 
     var body: some View {
-        let running = adapter.turnRunning
         HStack(spacing: 8) {
-            if !running {
-                Circle()
-                    .fill(palette.bodyColor)
-                    .frame(width: 7, height: 7)
-                    .transition(.opacity)
-            }
+            Circle()
+                .fill(palette.bodyColor)
+                .frame(width: 7, height: 7)
+                .opacity(adapter.turnRunning ? 1 : 0.6)
             Text(title)
                 .font(Typography.label(.semibold))
                 .foregroundStyle(Color.white)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .shadow(color: .black.opacity(running ? 0.8 : 0), radius: 2)
-                .frame(maxWidth: .infinity, alignment: running ? .leading : .center)
-            if running {
-                Button { adapter.onInterrupt?() } label: {
-                    Image(systemName: "stop.fill")
-                        .font(Typography.caption(.bold))
-                        .foregroundStyle(.white)
-                        .frame(width: Self.height - 12, height: Self.height - 12)
-                        .background(Circle().fill(palette.bodyColor))
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .help("Stop this session")
-                .transition(.opacity.combined(with: .scale(scale: 0.6)))
-            }
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 6)
-        .frame(width: Self.width, height: Self.height)
-        .background {
-            ZStack {
-                Capsule().fill(pillChromeSurface)
-                if running {
-                    let thrown = plumeThrows(for: adapter.transcript.last)
-                    WorkingAnimationView(thrown: thrown, repeating: thrown, emitterInset: 6 + (Self.height - 12) / 2,
-                                         palette: palette)
-                        .opacity(0.85)
-                        .clipShape(Capsule())
-                        .transition(.opacity)
-                }
-            }
-        }
+        .padding(.horizontal, 16)
+        .frame(height: Self.height)
+        .frame(maxWidth: Self.width)
+        .background(Capsule().fill(pillChromeSurface))
         .shadow(color: .black.opacity(0.6), radius: 12, y: 3)
-        .animation(.easeInOut(duration: 0.3), value: running)
-        .accessibilityElement(children: .contain)
+        .animation(.easeInOut(duration: 0.3), value: adapter.turnRunning)
+        .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
     }
 }

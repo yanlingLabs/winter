@@ -648,11 +648,11 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
 
 /// The detached session window, in the dispatch pill's family (user, 2026-10-02: "restyle the
 /// entire window from scratch to fully match the pill"): a black slab, dark whatever the system says;
-/// the session's own child pill docked at the top (`SessionWindowHeader`), its plume running in the
-/// session's colours while it works; a centred reading column that scrolls up under the header and
-/// fades there; the user's words in capsules tinted in that same plume colour; and the pill itself
-/// floating at the bottom as the composer (`PillChromeComposer`). No session-switcher sidebar — the
-/// window is one session's.
+/// a quiet title capsule on the traffic lights' row (`SessionWindowHeader`); a centred reading column
+/// that scrolls up under it and fades there, the user's words as plain full-width text ruled off from
+/// the agent's turn (`TranscriptUserMessageStyle.ruled`); and the pill itself floating at the bottom
+/// as the composer (`PillChromeComposer`), its plume streaming in the session's colours while it
+/// works. No session-switcher sidebar — the window is one session's.
 ///
 /// The column is the shared `WindowContentView` (cards, question box, tasks, image intake, model
 /// dialogs all come with it) — laid out with a top BLEED the height of the header band, which is
@@ -688,7 +688,8 @@ struct DetachedWindowRootView: View {
             }
             .frame(maxWidth: Self.columnWidth)
             .frame(maxWidth: .infinity)
-            .environment(\.transcriptUserBubbleFill, palette.bodyColor.opacity(0.3))
+            .environment(\.transcriptUserMessageStyle, .ruled)
+            .environment(\.pillChromePalette, palette)
 
             SessionWindowHeader(adapter: adapter, directory: directory, sessionId: sessionId,
                                 fallbackTitle: fallbackTitle, palette: palette)
