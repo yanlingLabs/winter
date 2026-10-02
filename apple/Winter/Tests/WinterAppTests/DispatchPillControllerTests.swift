@@ -777,6 +777,26 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertTrue(pill.panelIgnoresMouseEventsForTesting, "over the shadow margin: clicks pass through")
     }
 
+    /// The user's report: with a detached session window under the pill, no mouse-moved event ever
+    /// reached the gate (a local monitor only sees moves a window of ours asked for), so the gate
+    /// stayed shut and a click on a child pill fell through — only one window could ever be opened.
+    /// The gate now also re-checks on a clock while the pill is up.
+    func testTheMouseGateReopensWithNoMouseMovedEventAtAll() {
+        let pill = makePill()
+        pill.show()
+        XCTAssertTrue(pill.gateTimerActiveForTesting)
+        let frame = pill.panelFrameForTesting
+        pill.mouseLocationOverrideForTesting = CGPoint(x: frame.minX + 4, y: frame.minY + 4)
+        pill.updateMouseGate()
+        XCTAssertTrue(pill.panelIgnoresMouseEventsForTesting, "over the margin: clicks pass through")
+        // The pointer moves onto the pill — and nothing tells the controller.
+        pill.mouseLocationOverrideForTesting = CGPoint(x: frame.midX, y: frame.minY + DispatchPillMetrics.shadowPad + 20)
+        waitUntil { !pill.panelIgnoresMouseEventsForTesting }
+        XCTAssertFalse(pill.panelIgnoresMouseEventsForTesting, "the clock reopened the gate")
+        pill.hide()
+        XCTAssertFalse(pill.gateTimerActiveForTesting, "no clock while the pill is away")
+    }
+
     func testHitTestCountsTheFloatingLayers() {
         let canvasSize = CGSize(width: 500, height: 300)
         let accessory = CGRect(x: 30, y: 24, width: 440, height: 120)
