@@ -734,6 +734,7 @@ struct DetachedWindowRootView: View {
             .frame(maxWidth: Self.columnWidth)
             .frame(maxWidth: .infinity)
             .environment(\.transcriptUserMessageStyle, .ruled)
+            .environment(\.transcriptToolRowStyle, .pill)
             .environment(\.transcriptMarkerTint, .white)
             .environment(\.pillChromePalette, palette)
 
