@@ -409,6 +409,13 @@ export interface WinterLegDeps {
    *  `onElicitation` is set, and the SDK declines every elicitation deterministically. */
   elicitations?: ElicitationBroker;
   /**
+   * SendMessage between Winter sessions (agent SDK 0.0.39's `Options.hostMessaging`): the daemon's
+   * `SessionMessaging` (`agent/session-messaging.ts`), read LIVE at every call so a handler built before
+   * the daemon finished wiring still answers once it has. Absent (or not yet built): the handler
+   * answers a retryable `unavailable` and ListAgents lists no sessions.
+   */
+  sessionMessaging?: () => { handlerFor(callerSessionId: string): NonNullable<Options["hostMessaging"]> } | undefined;
+  /**
    * P8c-14 (integration round 2): lane 3's `sessionHooksFor(...)` module — this file never imports
    * it, only threads its result through: `.winter` goes into every incarnation's
    * `buildWinterOptions({..., hooks})` call (TYPED as `Options["hooks"]`, the exact type
@@ -1215,6 +1222,11 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // WS-27: URL-mode elicitation. Form mode (and anything else that is not URL mode) is declined
       // deterministically inside the handler, as is every request in a dispatch child.
       if (onElicitation !== undefined) options.onElicitation = onElicitation;
+      // SendMessage/ListAgents reach the daemon's other sessions (agent SDK 0.0.39): whatever the child
+      // cannot resolve in-process (its own subagents) is asked of THIS process, which knows the caller by
+      // this closure — the request never names a sender. Every mode: the reach rules (chat reaches no
+      // session) live in `SessionMessaging`.
+      if (deps.sessionMessaging !== undefined) options.hostMessaging = hostMessagingFor(sessionId, deps.sessionMessaging);
       // WS-25: the same fold, kept with the incarnation (a symbol key — never on the wire), so a sign-in
       // door can ask a live session which of its servers sit at a URL (`WinterSession.mcpServerNamesFor`).
       withSessionMcpServers(options, configuredMcp);
@@ -1632,6 +1644,21 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     list: () => [...drivers.values()],
     async endAll() {
       await Promise.all([...drivers.entries()].map(([sessionId, s]) => s.end().catch(() => {}).finally(() => clearSession(sessionId))));
+    },
+  };
+}
+
+/** `Options.hostMessaging` for one session over a LIVE (late-bound) `SessionMessaging`. */
+function hostMessagingFor(sessionId: string, messaging: NonNullable<WinterLegDeps["sessionMessaging"]>): NonNullable<Options["hostMessaging"]> {
+  return {
+    send: async (request, opts) => {
+      const live = messaging();
+      if (live === undefined) return { status: "unavailable", reason: "Winter is still starting; try again in a moment", retryable: true };
+      return live.handlerFor(sessionId).send(request, opts);
+    },
+    list: async (request, opts) => {
+      const live = messaging();
+      return live === undefined ? { sessions: [] } : live.handlerFor(sessionId).list(request, opts);
     },
   };
 }

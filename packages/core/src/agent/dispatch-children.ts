@@ -23,8 +23,10 @@
 //     COORDINATOR's log as a `child_update` (what the Mac builds its child pills from), and a finished
 //     turn — reported when the child's driver settles (`onTurnSettled`) — carries the result summary.
 //     Only turns the coordinator started are followed: the spawn's own, and a follow-up it delivered
-//     (`send_message` → `clientName: "messaging"`) — even to a child already forgotten, which its
-//     stored parent link picks back up. A user working in a finished child directly wakes nobody.
+//     with `SendMessage` (`agent/session-messaging.ts` → `expectFollowUp`, then the child's own driver
+//     `send` under `clientName: "messaging"`) — even to a child already forgotten, which its stored
+//     parent link picks back up. A `messaging` turn that the coordinator did NOT send (another session's
+//     SendMessage to its child) is not followed, and neither is a user working in a finished child.
 //   - **Relay** — a followed turn's `approval_requested`/`question_asked` are MIRRORED onto the
 //     coordinator's log with `childSessionId` (always on its main thread, whatever thread raised it
 //     inside the child) and their resolutions after them, so a client watching only Dispatch sees the
@@ -63,8 +65,10 @@ import { canonicalSessionCwd } from "../sessions/dirs";
 export { DISPATCH_WAKE_CLIENT_NAME };
 /** The `clientName` of the child's first prompt (visible in the child's own transcript as its task). */
 export const DISPATCH_CLIENT_NAME = "dispatch";
-/** The `clientName` a coordinator's `send_message` delivery lands under in the child (`WinterSession.deliver`). */
+/** The `clientName` a SendMessage delivery lands under in the target (`agent/session-messaging.ts`). */
 const MESSAGING_CLIENT_NAME = "messaging";
+/** What `lastUserClient` records for a `messaging` turn the coordinator did not send: never followed. */
+const PEER_MESSAGE_MARK = "messaging-peer";
 /** The status vocabulary of `child_update` (`packages/protocol/src/events.ts`). */
 export type ChildStatus = "running" | "awaiting_approval" | "awaiting_input" | "completed" | "error";
 /** A result summary (on `child_update` and in the wake) is the child's last main-thread message, cut. */
@@ -114,7 +118,7 @@ export interface DispatchDriverHandle {
 
 export interface DispatchChildrenDeps {
   store: {
-    meta(sessionId: string): { mode?: string; origin?: string; parentSessionId?: string; approvalPolicy?: string };
+    meta(sessionId: string): { mode?: string; origin?: string; parentSessionId?: string; approvalPolicy?: string; backgrounded?: boolean };
     setBackgrounded(sessionId: string, on: boolean): void;
     getTitle?(sessionId: string): string | null;
     dispatchSessionId(): string | undefined;
@@ -203,6 +207,9 @@ export class DispatchChildren {
   /** Children the boot sweep closed (in flight across a restart): the only untracked children that
    *  are picked back up when they run again. */
   private readonly interruptedByRestart = new Map<string, { dispatchId: string; title: string }>();
+  /** Child → coordinator: a SendMessage follow-up the coordinator is delivering right now
+   *  (`expectFollowUp`), consumed by the child's next `messaging` `user_message`. */
+  private readonly expectedFollowUps = new Map<string, string>();
   private off?: () => void;
   /** `beginShutdown()`: only resolutions are mirrored now. */
   private draining = false;
@@ -311,7 +318,31 @@ export class DispatchChildren {
     }
     this.update(childId, "running");
     const modelNote = model === undefined ? "" : ` on ${model}`;
-    return `spawned session ${childId} ("${title}") in ${dir}${modelNote}, at your current approval policy (${policy}; it keeps it even if yours changes later) — it is working in the background; you'll be woken with a <child_update> when it finishes.`;
+    return `spawned session ${childId} ("${title}") in ${dir}${modelNote}, at your current approval policy (${policy}; it keeps it even if yours changes later) — it is working in the background; you'll be woken with a <child_update> when it finishes. To tell it more later — even after it has finished — SendMessage it with to: "${childId}".`;
+  }
+
+  /**
+   * SendMessage from the coordinator `coordinatorId` to its OWN child `childId`
+   * (`agent/session-messaging.ts`), called just before the message goes in through the child's driver.
+   * The child's next `messaging` `user_message` is then the coordinator's follow-up: its turn is
+   * followed (`child_update` running → completed, the wake) — a forgotten child is picked back up from
+   * its stored link — and the child is put back on background duty first, as the spawn does (a harness
+   * that attaches to watch and detaches again must not abort the delegated turn). Returns the undo for a
+   * message that could not be delivered.
+   */
+  expectFollowUp(childId: string, coordinatorId: string): () => void {
+    this.expectedFollowUps.set(childId, coordinatorId);
+    let backgrounded = true;
+    try { backgrounded = this.deps.store.meta(childId).backgrounded === true; } catch { /* unknown: leave its flags alone */ }
+    if (!backgrounded) this.setBackgrounded(childId, true);
+    return () => {
+      if (this.expectedFollowUps.get(childId) === coordinatorId) this.expectedFollowUps.delete(childId);
+      if (!backgrounded) this.setBackgrounded(childId, false);
+    };
+  }
+
+  private setBackgrounded(sessionId: string, on: boolean): void {
+    try { this.deps.store.setBackgrounded(sessionId, on); this.deps.announceActivity?.(sessionId); } catch { /* best effort, as at spawn */ }
   }
 
   /** Every session's driver calls this when its turn queue goes idle (or its child ends). */
@@ -341,7 +372,8 @@ export class DispatchChildren {
       // before the turn it starts). A user typing in a forgotten child directly is never picked up.
       if (this.draining || !main) return;
       if (e.type === "turn_started") c = this.retrack(e.sessionId);
-      else if (e.type === "user_message" && (e.clientName === MESSAGING_CLIENT_NAME || e.clientName === DISPATCH_CLIENT_NAME)) c = this.retrackFromLink(e.sessionId);
+      else if (e.type === "user_message" && e.clientName === DISPATCH_CLIENT_NAME) c = this.retrackFromLink(e.sessionId);
+      else if (e.type === "user_message" && e.clientName === MESSAGING_CLIENT_NAME && this.expectedFollowUps.has(e.sessionId)) c = this.retrackFromLink(e.sessionId);
       if (c === undefined) return;
     }
     if (this.draining) {
@@ -351,7 +383,16 @@ export class DispatchChildren {
     }
     switch (e.type) {
       case "user_message":
-        if (main) c.lastUserClient = e.clientName;
+        if (!main) return;
+        // A `messaging` turn is the coordinator's follow-up only when it said so (`expectFollowUp`);
+        // another session's SendMessage to this child is recorded as a peer message and not followed.
+        if (e.clientName === MESSAGING_CLIENT_NAME) {
+          const expected = this.expectedFollowUps.get(e.sessionId);
+          if (expected === c.dispatchId) this.expectedFollowUps.delete(e.sessionId);
+          c.lastUserClient = expected === c.dispatchId ? MESSAGING_CLIENT_NAME : PEER_MESSAGE_MARK;
+          return;
+        }
+        c.lastUserClient = e.clientName;
         return;
       case "turn_started": {
         if (!main) return;

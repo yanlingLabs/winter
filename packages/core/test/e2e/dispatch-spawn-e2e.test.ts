@@ -14,6 +14,11 @@
 //       (2) a child's approval card is relayed onto the coordinator's log and answered at the child's id
 //       (3) stopping a child (`session.interrupt` on it — the Mac's stop button) ends its turn and is
 //           reported
+//       (5) the coordinator's MODEL follows up a FINISHED child with `SendMessage {to: <its s_ id>}`
+//           (agent SDK 0.0.39 `Options.hostMessaging`, answered by `agent/session-messaging.ts`): the
+//           child is resumed through its driver, reports running → completed, and wakes the coordinator
+//       (6) a CODE session (the spawned `winter` binary — the other topology) lists an active session in
+//           ListAgents and messages a finished session by its `session:` address
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -235,6 +240,83 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
       await h.client.call(METHODS.sessionSetPolicy, { sessionId: h.dispatchId, policy: "auto" });
     }
   }, 90_000);
+
+  test("(5) the model follows up a FINISHED child with SendMessage by its s_ id: resumed, reported running → completed, and the coordinator is woken", async () => {
+    const res = await h.spawn({ dir: h.work, prompt: "first task", model: "winter-test/echo", title: "Follow-up kid" });
+    expect(res.isError).toBe(false);
+    const child = /spawned session (s_[0-9a-f]+)/.exec(res.content[0]!.text)![1]!;
+    expect(res.content[0]!.text).toContain(`SendMessage it with to: "${child}"`);
+    await until(() => h.updates().find((u) => u.childSessionId === child && u.status === "completed"), 30_000, "the first turn's completed update");
+    const firstWake = await until(() => h.log(h.dispatchId).find((e) => e.type === "user_message" && (e as { clientName?: string }).clientName === "dispatch-wake" && (e as { text: string }).text.includes(child)) as { seq: number } | undefined, 30_000, "the first wake");
+    await until(() => h.log(h.dispatchId).some((e) => e.type === "turn_completed" && e.seq > firstWake.seq) || undefined, 30_000, "the first wake turn");
+    // FINISHED: its child process is gone, so the message must resume it (never the router's cold resume).
+    const generation = h.daemon!.winter.get(child)?.generation ?? 0;
+    await h.daemon!.winter.get(child)?.end();
+    await h.daemon!.winter.get(h.dispatchId)?.end();
+    h.daemon!.sessions.setModel(h.dispatchId, "winter-test/calls");
+    try {
+      const before = h.log(h.dispatchId).length;
+      const call = { to: child, message: "second task: say more", summary: "second task" };
+      await h.client.call(METHODS.sessionSend, { sessionId: h.dispatchId, text: `CALL SendMessage ${JSON.stringify(call)}` });
+      const result = await until(() => h.log(h.dispatchId).slice(before).find((e) => e.type === "tool_result") as { output: string; isError: boolean } | undefined, 60_000, "SendMessage's result");
+      expect(result.isError).toBe(false);
+      const outcome = JSON.parse(result.output) as { status: string; note?: string };
+      expect(outcome.status).toBe("resumed_and_delivered");
+      expect(outcome.note).toContain("<child_update>");
+      // The child got it as its next turn — plain text (Dispatch is its delegate-user), clientName messaging.
+      const msg = await until(() => h.log(child).find((e) => e.type === "user_message" && (e as { clientName?: string }).clientName === "messaging") as { text: string } | undefined, 30_000, "the follow-up in the child's log");
+      expect(msg.text).toBe("second task: say more");
+      expect((h.daemon!.winter.get(child)?.generation ?? 0)).toBeGreaterThan(generation);
+      // Followed: running → completed for the follow-up turn, then the coordinator is woken for it.
+      const statuses = await until(() => {
+        const s = h.updates().filter((u) => u.childSessionId === child).map((u) => u.status);
+        return s.length >= 4 ? s : undefined;
+      }, 60_000, "the follow-up's child_updates");
+      expect(statuses).toEqual(["running", "completed", "running", "completed"]);
+      const done = h.updates().filter((u) => u.childSessionId === child).at(-1)!;
+      expect(done.resultSummary ?? "").toContain("second task: say more");
+      const wake = await until(() => h.log(h.dispatchId).slice(before).find((e) => e.type === "user_message" && (e as { clientName?: string }).clientName === "dispatch-wake") as { text: string } | undefined, 60_000, "the follow-up wake");
+      expect(wake.text).toContain(`session: ${child}`);
+      expect(wake.text).toContain("status: completed");
+    } finally {
+      await h.daemon!.winter.get(h.dispatchId)?.end();
+      h.daemon!.sessions.setModel(h.dispatchId, "winter-test/echo");
+    }
+  }, 150_000);
+
+  test("(6) a CODE session (the spawned winter binary) lists an active session in ListAgents and messages a finished one by its session: address", async () => {
+    // A finished session to message, and an ACTIVE one (a backgrounded, running child) to be listed.
+    const idle = await h.spawn({ dir: h.work, prompt: "be done", model: "winter-test/echo", title: "Done kid" });
+    const idleId = /spawned session (s_[0-9a-f]+)/.exec(idle.content[0]!.text)![1]!;
+    await until(() => h.updates().find((u) => u.childSessionId === idleId && u.status === "completed"), 30_000, "the finished session");
+    await h.daemon!.winter.get(idleId)?.end();
+    const busy = await h.spawn({ dir: h.work, prompt: "keep going", model: "winter-test/hang", title: "Busy kid" });
+    const busyId = /spawned session (s_[0-9a-f]+)/.exec(busy.content[0]!.text)![1]!;
+    await until(() => h.daemon!.winter.get(busyId)?.turnRunning || undefined, 30_000, "the busy child's turn");
+    try {
+      const code = (await h.client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "global", cwd: h.work, approvalPolicy: "auto", model: "winter-test/calls" })).sessionId;
+      await h.client.call(METHODS.sessionAttach, { sessionId: code, fromSeq: 0 });
+      const script = ["CALL ListAgents {}", `CALL SendMessage ${JSON.stringify({ to: `session:${idleId}`, message: "a peer asks", summary: "peer" })}`].join("\n");
+      await h.client.call(METHODS.sessionSend, { sessionId: code, text: script });
+      await until(() => h.log(code).some((e) => e.type === "turn_completed") || undefined, 90_000, "the code session's turn");
+      const results = h.log(code).filter((e) => e.type === "tool_result") as Array<{ output: string; isError: boolean }>;
+      expect(results).toHaveLength(2);
+      const listing = (JSON.parse(results[0]!.output) as { listing: string }).listing;
+      expect(listing).toContain(`Busy kid (session:${busyId}) [session/winter-agent] status=running mode=code`);
+      expect(listing).not.toContain(idleId);            // finished: not active, so not listed
+      expect(listing).not.toContain(code);               // never itself
+      expect(results[1]!.isError).toBe(false);
+      expect(JSON.parse(results[1]!.output)).toMatchObject({ status: "resumed_and_delivered" });
+      const received = await until(() => h.log(idleId).find((e) => e.type === "user_message" && (e as { clientName?: string }).clientName === "messaging") as { text: string } | undefined, 30_000, "the peer's message");
+      expect(received.text).toStartWith(`<agent-message from="session:${code}"`);
+      expect(received.text).toContain("a peer asks");
+      // Not Dispatch's follow-up: the finished child's peer turn is not reported to the coordinator.
+      await until(() => h.daemon!.winter.get(idleId)?.turnRunning === false || undefined, 30_000, "the peer turn's end");
+      expect(h.updates().filter((u) => u.childSessionId === idleId).map((u) => u.status)).toEqual(["running", "completed"]);
+    } finally {
+      await h.client.call(METHODS.sessionInterrupt, { sessionId: busyId });
+    }
+  }, 180_000);
 
   test("(3) stopping a child interrupts its turn, and the stop is reported", async () => {
     const res = await h.spawn({ dir: h.work, prompt: "wait forever", model: "winter-test/hang", title: "Slow kid" });

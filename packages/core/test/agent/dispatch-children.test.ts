@@ -20,6 +20,7 @@ import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
 import { DISPATCH_CHILD_APPROVAL_TIMEOUT_MS, canUseToolFor } from "../../src/runtime-sdk/approval-bridge";
 import { sessionsCapability } from "../../src/capabilities/sessions";
+import { SessionMessaging } from "../../src/agent/session-messaging";
 
 class FakeDriver {
   turnRunning = false;
@@ -77,6 +78,15 @@ function setup(opts: { models?: string[]; attached?: boolean; policy?: SessionAp
   if (opts.attached) hub.attach({ clientName: "mac", deliver: () => true }, dispatchId, 0);
   const dc = new DispatchChildren(deps);
   dc.start();
+  // THE door a coordinator's follow-up comes through: SendMessage → the daemon's `SessionMessaging`.
+  const messaging = new SessionMessaging({
+    store, derive: () => undefined, working: () => false,
+    sessions: { get: (id) => drivers.get(id), ensure: async (id) => driverFor(id) },
+    followUp: () => dc, log: () => {},
+  });
+  let msgCounter = 0;
+  const sendMessage = (from: string, to: string, message: string) =>
+    messaging.send(from, { to, message, messageId: `msg-${++msgCounter}` });
   /** Run every deferred flush, then let their async sends land. */
   const drain = async () => {
     for (let i = 0; i < 5; i++) {
@@ -99,7 +109,7 @@ function setup(opts: { models?: string[]; attached?: boolean; policy?: SessionAp
     return store.childrenOf(dispatchId).at(-1)!.sessionId;
   };
   return {
-    home, store, hub, drivers, driverFor, created, deleted, dispatchId, workDir, dc, deps, drain, finish, dispatchLog, childUpdates, notifications, scheduled, spawnOne,
+    home, store, hub, drivers, driverFor, created, deleted, dispatchId, workDir, dc, deps, drain, finish, dispatchLog, childUpdates, notifications, scheduled, spawnOne, sendMessage,
     refuse: (e: Error) => { refuseNext = e; },
   };
 }
@@ -457,12 +467,16 @@ describe("which turns are followed, the bounded roster, shutdown and restart", (
     expect(t.driverFor(t.dispatchId).sends).toHaveLength(1);
   });
 
-  test("a follow-up the COORDINATOR delivers (send_message → messaging) is followed and reported", async () => {
+  test("a follow-up the COORDINATOR delivers (SendMessage → messaging) is followed and reported", async () => {
     const t = setup();
     const child = await t.spawnOne();
     t.finish(child, { text: "first" });
     await t.drain();
-    await t.driverFor(child).send("now also do X", "messaging");
+    const answer = await t.sendMessage(t.dispatchId, child, "now also do X");
+    expect(answer).toMatchObject({ status: "delivered" });
+    expect(answer.note).toContain("<child_update>");
+    // Dispatch is the child's delegate-user: its follow-up goes in as plain text, like the spawn's prompt.
+    expect(t.driverFor(child).sends.at(-1)).toEqual({ text: "now also do X", clientName: "messaging" });
     expect(t.dc.roster()[0]!.status).toBe("running");
     t.finish(child, { text: "X done" });
     await t.drain();
@@ -477,7 +491,12 @@ describe("which turns are followed, the bounded roster, shutdown and restart", (
     t.finish(t.dispatchId, { text: "reported it" });   // the wake turn ends → forgotten
     expect(t.dc.roster()).toEqual([]);
     const wakesBefore = t.driverFor(t.dispatchId).sends.length;
-    await t.driverFor(child).send("one more thing", "messaging");
+    // Finished and not live: resumed for the message (`ensure`), never cold-resumed by the router.
+    t.drivers.delete(child);
+    t.store.setBackgrounded(child, false);
+    expect(await t.sendMessage(t.dispatchId, `session:${child}`, "one more thing")).toMatchObject({ status: "resumed_and_delivered" });
+    // Back on background duty before the message went in, as at spawn.
+    expect(t.store.meta(child).backgrounded).toBe(true);
     expect(t.dc.roster().map((r) => ({ id: r.sessionId, status: r.status, title: r.title }))).toEqual([{ id: child, status: "running", title: "Kid" }]);
     t.finish(child, { text: "follow-up done" });
     await t.drain();
@@ -489,6 +508,28 @@ describe("which turns are followed, the bounded roster, shutdown and restart", (
     t.hub.append(plain, { type: "user_message", sessionId: plain, threadId: "main", text: "hi", clientName: "messaging" });
     t.hub.append(plain, { type: "turn_started", sessionId: plain, threadId: "main" });
     expect(t.dc.roster().some((r) => r.sessionId === plain)).toBe(false);
+  });
+
+  test("ANOTHER session's SendMessage to a dispatch child is delivered (attributed) but never followed — forgotten or tracked", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    t.finish(child, { text: "first" });
+    await t.drain();
+    const peer = t.store.createSession("global", { mode: "code", cwd: t.workDir });
+    // Still tracked (the coordinator has not ended the wake turn yet): a peer's message is not Dispatch's work.
+    const tracked = await t.sendMessage(peer, child, "peer says hi");
+    expect(tracked.status).toBe("delivered");
+    expect(tracked.note).toContain("not one of your children");
+    expect(t.driverFor(child).sends.at(-1)!.text).toStartWith(`<agent-message from="session:${peer}"`);
+    const updatesBefore = t.childUpdates().length;
+    t.finish(child, { text: "answered the peer" });
+    await t.drain();
+    expect(t.childUpdates().length).toBe(updatesBefore);
+    // Forgotten: a peer's message does not pick it back up either.
+    t.finish(t.dispatchId, { text: "reported it" });
+    expect(t.dc.roster()).toEqual([]);
+    await t.sendMessage(peer, child, "again");
+    expect(t.dc.roster()).toEqual([]);
   });
 
   test("shutdown: no report and no wake while the children drain — but a withdrawn card still closes on the coordinator's log", async () => {
