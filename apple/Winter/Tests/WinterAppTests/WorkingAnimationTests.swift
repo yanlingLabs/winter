@@ -43,12 +43,32 @@ final class WorkingAnimationTests: XCTestCase {
         XCTAssertLessThan(x(0) - x(0.2), x(0.6) - x(0.8))
     }
 
-    func testAPuffShrinksAwayToNothingAtTheTailNeverPops() {
-        let end = PropulsionPlume.circle(for: puff(1), in: rect, emitterX: emitterX, tailX: tailX)
-        XCTAssertEqual(end.diameter, 0, accuracy: 1e-9)
-        XCTAssertEqual(end.center.x, tailX, accuracy: 1e-9)
-        let nearly = PropulsionPlume.circle(for: puff(0.99), in: rect, emitterX: emitterX, tailX: tailX)
-        XCTAssertLessThan(nearly.diameter, 4)
+    /// The pill's own tail (`PropulsionPlume.tailX`), its leading edge at x = 0.
+    private var realTail: CGFloat { PropulsionPlume.tailX(height: rect.height) }
+
+    func testAPuffHasWhollyLeftThePillBeforeItIsDropped() {
+        for size in [PropulsionPlume.puffSize.lowerBound, PropulsionPlume.puffSize.upperBound] {
+            for spark in [false, true] {
+                let end = PropulsionPlume.circle(for: puff(1, size: size, spark: spark), in: rect,
+                                                 emitterX: emitterX, tailX: realTail)
+                XCTAssertGreaterThan(end.diameter, 0, "it never shrinks to nothing in view")
+                XCTAssertLessThanOrEqual(end.center.x + end.diameter / 2, 0, "out past the leading edge — no pop")
+            }
+        }
+    }
+
+    /// The user's report: puffs collapsed in the last centimetre. The shrink is by DISTANCE now, so
+    /// every stretch of the pill takes the same bite out of a puff.
+    func testAPuffShrinksAtOneRateAlongThePill() {
+        let samples = stride(from: 0.0, through: 1.0, by: 0.05).map {
+            PropulsionPlume.circle(for: puff($0), in: rect, emitterX: emitterX, tailX: realTail)
+        }
+        let rates = zip(samples, samples.dropFirst()).compactMap { a, b -> Double? in
+            let dx = Double(a.center.x - b.center.x)
+            return dx > 1e-6 ? Double(a.diameter - b.diameter) / dx : nil
+        }
+        XCTAssertFalse(rates.isEmpty)
+        for rate in rates { XCTAssertEqual(rate, rates[0], accuracy: 1e-6, "the same shrink per point travelled") }
     }
 
     func testEveryCircleStaysInsideThePlumesHeight() {
@@ -219,11 +239,16 @@ final class WorkingAnimationTests: XCTestCase {
         let born = tile(0), out = tile(PropulsionPlume.tokenEmergeShare), mid = tile(0.5), end = tile(1)
         XCTAssertEqual(born.center.x, emitterX, accuracy: 1e-9)
         XCTAssertLessThan(born.side, out.side, "grows out of the nozzle")
-        XCTAssertEqual(out.side, rect.height * PropulsionPlume.tokenSideShare * (1 - PropulsionPlume.tokenShrinkAlongPlume * PropulsionPlume.tokenEmergeShare), accuracy: 1e-6)
+        XCTAssertEqual(out.side, rect.height * PropulsionPlume.tokenSideShare
+                       * (1 - PropulsionPlume.tokenShrinkAlongPlume
+                          * pow(PropulsionPlume.tokenEmergeShare, PropulsionPlume.tokenTravelExponent)),
+                       accuracy: 1e-6, "shrinks by distance travelled, like the exhaust")
         XCTAssertLessThan(mid.center.x, out.center.x, "rides toward the tail")
         XCTAssertLessThan(mid.side, out.side, "shrinks like the exhaust")
         XCTAssertLessThan(mid.heat, out.heat, "and cools")
-        XCTAssertEqual(end.side, 0, accuracy: 1e-9, "gone at the tail, never a pop")
+        let leaving = PropulsionPlume.tile(for: token(1, toolThrow("a")), in: rect, emitterX: emitterX, tailX: realTail)
+        XCTAssertLessThanOrEqual(leaving.center.x + leaving.side / 2, 0, "out past the leading edge before it is dropped")
+        XCTAssertGreaterThan(end.side, 0, "never shrinks to nothing in view")
         for age in stride(from: 0.0, through: 1.0, by: 0.05) {
             let t = tile(age)
             XCTAssertGreaterThanOrEqual(t.center.y - t.side / 2, rect.minY - 1e-9)
@@ -242,6 +267,8 @@ final class WorkingAnimationTests: XCTestCase {
             XCTAssertEqual(tile(age).side, full, accuracy: 1e-6, "one size the whole way (age \(age))")
         }
         XCTAssertEqual(tile(1).center.x, tailX, accuracy: 1e-9, "all the way to the tail")
+        let leaving = PropulsionPlume.tile(for: token(1, site), in: rect, emitterX: emitterX, tailX: realTail)
+        XCTAssertLessThanOrEqual(leaving.center.x + leaving.side / 2, 0, "wholly out of the pill before it is dropped")
     }
 
     func testATileOutlivesNoPuffAndIsDroppedAtTheTail() {
