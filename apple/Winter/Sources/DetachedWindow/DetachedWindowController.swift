@@ -354,8 +354,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
             onNewSession: { [weak self] in self?.newSession() }
         )
         window.contentView = NSHostingView(rootView: DetachedWindowRootView(
-            adapter: adapter, sidebars: sidebars, directory: directory,
-            sessionId: { [weak self] in self?.sessionId ?? "" }, fallbackTitle: title, palette: palette))
+            adapter: adapter, sidebars: sidebars, palette: palette))
         window.setFrame(frame, display: true)
     }
 
@@ -648,8 +647,8 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
 
 /// The detached session window, in the dispatch pill's family (user, 2026-10-02: "restyle the
 /// entire window from scratch to fully match the pill"): a black slab, dark whatever the system says;
-/// a quiet title capsule on the traffic lights' row (`SessionWindowHeader`); a centred reading column
-/// that scrolls up under it and fades there, the user's words as plain full-width text ruled off from
+/// nothing on the traffic lights' row but the lights (the title capsule went, 2026-10-02); a centred
+/// reading column that scrolls up under that band and fades there, list markers in white, the user's words as plain full-width text ruled off from
 /// the agent's turn (`TranscriptUserMessageStyle.ruled`); and the pill itself floating at the bottom
 /// as the composer (`PillChromeComposer`), its plume streaming in the session's colours while it
 /// works. No session-switcher sidebar — the window is one session's.
@@ -664,12 +663,9 @@ struct DetachedWindowRootView: View {
     /// Not shown in the pill-themed window (one session, no switcher); kept so the controller's
     /// in-place switch plumbing is unchanged.
     let sidebars: SidebarWiring
-    let directory: SessionDirectory
-    let sessionId: () -> String
-    let fallbackTitle: String
     var palette: PlumePalette = .blue
 
-    /// The header band: the traffic lights' row, with the docked pill centred on it.
+    /// The band the traffic lights sit in, which the transcript scrolls up under.
     static let headerBand: CGFloat = 54
     /// The reading column's widest.
     static let columnWidth: CGFloat = 760
@@ -678,7 +674,9 @@ struct DetachedWindowRootView: View {
         ZStack(alignment: .top) {
             WindowContentView(
                 adapter: adapter,
-                tint: palette.bodyColor,
+                // White, not the session's colour: list markers, numbers and the quote rule read
+                // this tint, and the user asked for them white (2026-10-02).
+                tint: .white,
                 topInset: 8,
                 sidebars: nil,
                 topBleed: Self.headerBand,
@@ -689,12 +687,9 @@ struct DetachedWindowRootView: View {
             .frame(maxWidth: Self.columnWidth)
             .frame(maxWidth: .infinity)
             .environment(\.transcriptUserMessageStyle, .ruled)
+            .environment(\.transcriptMarkerTint, .white)
             .environment(\.pillChromePalette, palette)
 
-            SessionWindowHeader(adapter: adapter, directory: directory, sessionId: sessionId,
-                                fallbackTitle: fallbackTitle, palette: palette)
-                .padding(.top, (Self.headerBand - SessionWindowHeader.height) / 2)
-                .padding(.horizontal, 90) // clear of the traffic lights on a narrow window
         }
         .background(Color.black)
         .environment(\.colorScheme, .dark)
