@@ -156,11 +156,12 @@ describe("the tool surface (Exa key stored)", () => {
       `CALL Edit {"file_path":"/tmp/x","old_string":"a","new_string":"b"}`,
     ].join("\n"));
     expect(s.eager).toEqual([
-      "AskUserQuestion", "Bash", "CronCreate", "CronDelete", "ListSessions", "ManageSession", "PushNotification", "Read",
+      "AskUserQuestion", "Bash", "CronCreate", "CronDelete", "ListSessions", "PushNotification", "Read",
       "ScheduleWakeup", "Search", "SendMessage", "SpawnSession", "TaskStop", "ToolSearch", "WebFetch",
     ]);
     const search = toolSearchResult(s);
-    expect([...search.matches].sort()).toEqual(["Browser", "Computer", "CronList", "ListSessions", "ManageSession", "SpawnSession"]);
+    // ManageSession is gone from Dispatch (user ruling 2026-10-02): not offered, not loadable.
+    expect([...search.matches].sort()).toEqual(["Browser", "Computer", "CronList", "ListSessions", "SpawnSession"]);
     // The deferred pool: the three the ruling names, plus SendMessage's standing twin (see above).
     expect(search.total_deferred_tools).toBe(4);
     // `ListSessions` runs (a real listing); the OLD spelling — what a resumed coordinator's history may
@@ -184,7 +185,7 @@ describe("the tool surface (Exa key stored)", () => {
     void SEND_MESSAGE_TWIN;
   }, 60_000);
 
-  test("CHAT: its set unchanged apart from ToolSearch (Browser deferred), Search not WebSearch", async () => {
+  test("CHAT: no messaging trio (SendMessage/ListAgents/ReadNotifications removed 2026-10-02), Browser deferred, Search not WebSearch", async () => {
     const { sessionId } = await d.client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "chat", model: "winter-test/calls" });
     const s = await surfaceOf(d, sessionId, [
       `CALL ToolSearch {"query":"select:${PROBE}"}`,
@@ -193,11 +194,11 @@ describe("the tool surface (Exa key stored)", () => {
       `CALL Browser {"verb":"tabs"}`,
     ].join("\n"));
     // `advisor` is chat-allowed but advertised only when a reviewer resolves (none for a test double).
-    expect(s.eager).toEqual(["AskUserQuestion", "ListAgents", "ReadNotifications", "Search", "SendMessage", "ToolSearch", "WebFetch"]);
+    expect(s.eager).toEqual(["AskUserQuestion", "Search", "ToolSearch", "WebFetch"]);
     const search = toolSearchResult(s);
-    expect([...search.matches].sort()).toEqual(["Browser", "ListAgents"]);
-    // Browser, plus the two standing twins of chat's SendMessage/ListAgents.
-    expect(search.total_deferred_tools).toBe(3);
+    expect([...search.matches].sort()).toEqual(["Browser"]);
+    // Browser alone: the standing twins of SendMessage/ListAgents go with their natives.
+    expect(search.total_deferred_tools).toBe(1);
     const browsed = s.results[1]!;
     expect(browsed.name).toBe("Browser");
     expect(browsed.content).not.toContain("No such tool");

@@ -1314,9 +1314,6 @@ export async function startDaemon(opts: {
         store,
         derive: (row, sessionId, nowMs) => activityDeriver?.(row, sessionId, nowMs),
         turnStartedAt: (sid) => winterDrivers.get(sid)?.turnStartedAt,
-        isRunning: (sid) => winterDrivers.get(sid)?.turnRunning ?? false,
-        interrupt: (sid) => { void winterDrivers.get(sid)?.interrupt(); },
-        emit: (sid, activity) => { hub.emitActivity(sid, activity); },
       },
     },
     computer: {
@@ -2035,6 +2032,15 @@ export async function startDaemon(opts: {
     log: (line) => console.error(`dispatch-children: ${line}`),
   });
   dispatchChildren.start();
+  // ListSessions' `query` reads the per-session edited-files index; a home that predates it is backfilled
+  // ONCE from its logs, off the boot path (a query that arrives first runs the same idempotent backfill).
+  if (!store.editedFilesBackfilled()) {
+    const backfill = setTimeout(() => {
+      try { const rows = store.backfillEditedFiles(); console.error(`sessions: edited-files index backfilled (${rows} edit record(s))`); }
+      catch (err) { console.error(`sessions: edited-files backfill failed (${err instanceof Error ? err.name : "error"}) — the next ListSessions query retries`); }
+    }, 0);
+    (backfill as { unref?: () => void }).unref?.();
+  }
   // SendMessage between sessions: resolve an `s_…` id, resume a finished session through its own driver,
   // deliver under `clientName: "messaging"`; a coordinator's message to its own child is followed by
   // `dispatchChildren` (child_update + wake). ListAgents lists the ACTIVE sessions by the SAME derivation
@@ -2236,7 +2242,7 @@ export async function startDaemon(opts: {
     // aliases) so the bridge's alias resolution (engine.ts) always accepts whatever this tool's own
     // schema enum advertised.
     // session-activity-hygiene T8: dispatch's MANAGEMENT surface over the session lifecycle —
-    // `list_sessions` (read) and `manage_session` (stop/background/archive/resume). Both declare
+    // `list_sessions` (read; `manage_session` was removed from Dispatch 2026-10-02). It declares
     // `modes: ["dispatch"]` in their own file (the per-mode registry's single declaration site), so
     // registering them on the shared registry here cannot make them code-visible.
     //

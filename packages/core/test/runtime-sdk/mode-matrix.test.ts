@@ -562,12 +562,12 @@ test("the per-mode capability exposure table is pinned (the 2026-10-01 tool-surf
   // Plain names for the renamed tools; office and LSP are code-only; the `research` server is gone.
   // (The built-in half of chat's and dispatch's list is the fail-closed test below.)
   const capabilityHalf = (mode: (typeof MODES)[number]): string[] => disallowedToolsFor(mode, WINTER_LEG_WITH_EXA).filter((name) => !KNOWN_RUNTIME_BUILTINS.includes(name));
-  expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).toEqual(["ListSessions", "ManageSession", "SpawnSession"]);
+  expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).toEqual(["ListSessions", "SpawnSession"]);
   expect(capabilityHalf("dispatch")).toEqual([
     "mcp__winter__lsp__lsp", "mcp__winter__office__docs", "mcp__winter__office__sheets", "mcp__winter__office__slides",
   ]);
   expect(capabilityHalf("chat")).toEqual([
-    "Computer", "ListSessions", "ManageSession", "SpawnSession",
+    "Computer", "ListSessions", "SpawnSession",
     "mcp__winter__lsp__lsp", "mcp__winter__office__docs", "mcp__winter__office__sheets", "mcp__winter__office__slides",
   ]);
   // Code keeps every built-in, so the key never moves its list.
@@ -602,13 +602,13 @@ test("FAIL CLOSED (review): chat's and dispatch's deny list also names every KNO
 
 test("FAIL CLOSED (review): `toolSurfaceViolations` names a built-in the child offered outside its allowed list; capability plain names and MCP tools are fine", () => {
   const allowed = toolsFor("dispatch", WINTER_LEG_WITH_EXA)!;
-  const honest = [...allowed.filter((n) => n !== "CronList"), "SpawnSession", "ListSessions", "ManageSession", "mcp__winter__send_message", "mcp__github__search"];
+  const honest = [...allowed.filter((n) => n !== "CronList"), "SpawnSession", "ListSessions", "mcp__winter__send_message", "mcp__github__search"];
   expect(toolSurfaceViolations(honest, allowed, CAPABILITY_PLAIN_NAMES)).toEqual([]);
   // A runtime that ignored `tools` offers its whole set:
   expect(toolSurfaceViolations([...honest, "Edit", "Agent", "SomeFutureBuiltin"], allowed, CAPABILITY_PLAIN_NAMES)).toEqual(["Edit", "Agent", "SomeFutureBuiltin"]);
   // Code states no allowed list: nothing to check.
   expect(toolSurfaceViolations(["Edit", "Agent"], undefined, CAPABILITY_PLAIN_NAMES)).toEqual([]);
-  expect([...CAPABILITY_PLAIN_NAMES].sort()).toEqual(["Browser", "Computer", "ListSessions", "ManageSession", "SpawnSession"]);
+  expect([...CAPABILITY_PLAIN_NAMES].sort()).toEqual(["Browser", "Computer", "ListSessions", "SpawnSession"]);
 });
 
 test("`Options.legacyToolNames` carries the daemon's retired Search under its old name in every mode", () => {
@@ -618,8 +618,9 @@ test("`Options.legacyToolNames` carries the daemon's retired Search under its ol
 test("ALLOWED lists replace restricted lists: chat's and dispatch's `tools` are pinned; code keeps every built-in", () => {
   expect(toolsFor("code", WINTER_LEG_WITH_EXA)).toBeUndefined();
   expect(toolsFor("code", WINTER_LEG_NO_EXA)).toBeUndefined();
-  // Chat: unchanged by the ruling apart from ToolSearch (Browser is an MCP tool and starts deferred).
-  expect(toolsFor("chat", WINTER_LEG_WITH_EXA)).toEqual(["AskUserQuestion", "ListAgents", "ReadNotifications", "Search", "SendMessage", "ToolSearch", "WebFetch", "advisor"]);
+  // Chat: no messaging trio (user ruling 2026-10-02 — SendMessage, ListAgents, ReadNotifications removed).
+  expect(toolsFor("chat", WINTER_LEG_WITH_EXA)).toEqual(["AskUserQuestion", "Search", "ToolSearch", "WebFetch", "advisor"]);
+  for (const gone of ["SendMessage", "ListAgents", "ReadNotifications"]) expect(disallowedToolsFor("chat", WINTER_LEG_WITH_EXA)).toContain(gone);
   // Dispatch: EXACTLY the ruling's list (+ ToolSearch so the deferred tools load). No Agent/Edit/Glob/…,
   // and of Winter's own four only SendMessage.
   expect(toolsFor("dispatch", WINTER_LEG_WITH_EXA)).toEqual([

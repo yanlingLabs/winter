@@ -1,43 +1,52 @@
-// SendMessage between Winter sessions: the daemon's half of the agent SDK's `Options.hostMessaging`.
+// SendMessage / TaskStop between Winter sessions: the daemon's half of the agent SDK's `Options.hostMessaging`.
 //
 // WHY THIS EXISTS. A session's `SendMessage` runs inside its own runtime child (a `winter` process for a
-// code session, a Worker for chat and dispatch), and that child can resolve only what it holds: its own
-// subagents and itself. Every other Winter session lives in another child, so before agent SDK 0.0.39 a
-// message to one answered `not_found … is currently reachable` (dev, 2026-10-02: Dispatch could not
-// follow up a single child). Since 0.0.39 the runtime asks its HOST for anything it cannot resolve
-// in-process (`host_message_send`) and for the rows ListAgents adds (`host_message_list`). This file
-// answers both, one handler per session, built in `session-driver.ts`'s `optionsFor` beside
-// `onCredentialResolve`. The caller is the session whose handler fired — never a field of the request.
+// code session, a Worker for dispatch), and that child can resolve only what it holds: its own subagents
+// and itself. Every other Winter session lives in another child, so before agent SDK 0.0.39 a message to
+// one answered `not_found … is currently reachable` (dev, 2026-10-02: Dispatch could not follow up a single
+// child). Since 0.0.39 the runtime asks its HOST for anything it cannot resolve in-process
+// (`host_message_send`), for the rows ListAgents adds (`host_message_list`), and — for a `TaskStop` whose
+// id names no task of its own — to stop a session (`host_session_stop`). This file answers all three, one
+// handler per session, built in `session-driver.ts`'s `optionsFor` beside `onCredentialResolve`. The
+// caller is the session whose handler fired — never a field of the request.
 //
-// USER RULINGS (2026-10-02). SendMessage is the ONE tool that sends a message to a session and resumes
-// it (ManageSession never does). It can reach anyone: its own subagents (in-process, never here) and any
-// recorded session, finished ones included — a session id from ListSessions must work even though
-// ListAgents would not list it. ListAgents lists the subagents plus the peer sessions that are RUNNING
-// right now, by the daemon's OWN two definitions in `sessions/activity.ts` (no third notion of "active"):
-// a session whose lifecycle label (`activityFor`, what `session.list` and ListSessions show) is `active`
-// (a harness has it open), or `background` AND `working` (`makeSessionSignalsDeriver`'s `working`: a turn
-// or background work in flight). Never idle, archived, or a background-flagged session doing nothing —
-// every dispatch child carries that flag from birth, finished or not.
+// USER RULINGS (2026-10-02), binding:
+//   - SendMessage is the ONE tool that messages a session and resumes it; ManageSession is gone from
+//     Dispatch. TaskStop stops a session's running turn (by `s_…` id) the way it stops a subagent.
+//   - TARGETS are code and Cowork sessions only (`participatesInActivity` — the modes with a lifecycle,
+//     which already names `cowork`). Chat and dispatch sessions are refused, typed.
+//   - SENDERS are whoever has the tool. Chat does not (its allowed list dropped SendMessage, ListAgents and
+//     ReadNotifications), and a chat caller is refused here too, defensively.
+//   - A message runs at the TARGET's own approval policy, with no card for the message itself — a session
+//     at `ask` can drive one at `bypass`. That escalation is the user's DELIBERATE decision (it was the
+//     reviewer's HIGH finding #1), not an oversight.
+//   - Approvals: a top-level code session messaging another forwards NOTHING — each shows its own cards in
+//     its own window. Only Dispatch-spawned sessions forward cards through Dispatch, whoever messaged them
+//     (`DispatchChildren`'s relay).
+//   - ListAgents lists the subagents plus the peers RUNNING now: `working` (a turn or background work —
+//     `makeSessionSignalsDeriver`) OR the `session.list` label `active` (a harness has it open), among
+//     valid targets only. Never padded with idle ones (ListSessions finds those), and a cap is reported as
+//     a count, never silently applied.
 //
-// WHAT A MESSAGE IS. The text goes in through the target's own driver (`send`, `clientName:
-// "messaging"`), exactly as the user's `session.send` would: a live session reads it now or right after
-// the turn it is running (`queued`), a finished resumable one is RESUMED for it through its driver
-// (`ensure` — never the router's cold resume). It runs at the TARGET's own approval policy; nothing about
-// the sender's policy travels with it. Two renderings:
+// WHAT A MESSAGE IS. The text goes in through the target's own driver (`send`, `clientName: "messaging"`),
+// exactly as the user's `session.send` would: a live session reads it now or right after the turn it is
+// running (`queued`), a finished resumable one is RESUMED for it through its driver (`ensure` — never the
+// router's cold resume). Two renderings:
 //   - Dispatch to its OWN child: the plain text, like the spawn's first prompt — Dispatch is the child's
-//     delegate-user — and the child's turn is FOLLOWED (`DispatchChildren.expectFollowUp`: child_update
-//     running → completed and the coordinator's wake), with the child put back on background duty first.
+//     delegate-user — and the child's turn is FOLLOWED (`DispatchChildren.expectFollowUp`, keyed on the
+//     coordinator and the exact text: child_update running → completed and the coordinator's wake).
 //   - Everyone else: an ATTRIBUTED turn (`<agent-message from="session:<sender>" …>`, the same frame the
-//     runtime renders for an in-process peer), so the receiving model never mistakes another agent for
-//     its human; it can answer with SendMessage to the sender's id. Not followed.
+//     runtime renders for an in-process peer), so the receiving model never mistakes another agent for its
+//     human; it can answer with SendMessage to the sender's id. Not followed. (The Mac renders the wrapper
+//     as "From session …", never raw.)
 //
-// WHO MAY MESSAGE WHOM. Any code/cowork/dispatch session may message any other session that is not
-// archived (the user hid it; resume it first) and not itself. CHAT may message no other session
-// (decided conservatively: a chat session has no files, no shell and never asks for approval, and
-// letting it drive a code session at that session's policy would hand chat exactly those tools by proxy);
-// its ListAgents lists no sessions either.
+// ONE DELIVERY PER MESSAGE ID. A request is deduped on (caller, runtime message id, target, text) for a
+// while (`DELIVERY_DEDUPE_TTL_MS`): a re-sent request gets the first one's answer (in flight or settled),
+// never a second delivery. A cancelled sender (the handler's `signal`) and a daemon that began shutting
+// down are checked again right before anything is resumed or sent.
+import { createHash } from "node:crypto";
 import { buildSessionAddress, type GlobalAgentMessage } from "@yanlinglabs/winter-agent-sdk/messaging";
-import type { HostMessageListAnswer, HostMessageSendAnswer, HostMessageSendRequest, HostMessagingHandler, HostReachableSession } from "@yanlinglabs/winter-agent-sdk";
+import type { HostMessageListAnswer, HostMessageSendAnswer, HostMessageSendRequest, HostMessagingHandler, HostReachableSession, HostSessionStopAnswer, HostSessionStopRequest } from "@yanlinglabs/winter-agent-sdk";
 import type { Activity } from "../sessions/activity";
 import { participatesInActivity } from "../sessions/activity";
 import type { SessionRow } from "../sessions/store";
@@ -47,11 +56,17 @@ import { renderAttributedTurn } from "../runtime-sdk/messaging";
 export const MESSAGING_CLIENT_NAME = "messaging";
 /** A session id as the daemon mints it. */
 const SESSION_ID = /^s_[0-9a-z]+$/i;
-/** ListAgents shows at most this many sessions (the SDK caps a host listing at 200; this is the daemon's own, smaller bound). */
+/** ListAgents shows at most this many sessions; the rest is reported as `omitted`. */
 export const LIST_AGENTS_SESSION_MAX = 50;
+/** How long a delivery's answer is remembered against its (caller, message id, target, text). */
+export const DELIVERY_DEDUPE_TTL_MS = 10 * 60_000;
+/** How many delivery answers are remembered at most (oldest dropped first). */
+export const DELIVERY_DEDUPE_MAX = 500;
 
-/** The refusal a chat session gets (its reach is none, see the header). */
-export const CHAT_SENDER_REFUSAL = "a chat session cannot message other Winter sessions";
+/** The refusal a chat session gets (it has no SendMessage; defensive). */
+export const CHAT_SENDER_REFUSAL = "a chat session cannot message or stop other Winter sessions";
+/** The refusal for a chat or dispatch TARGET (user ruling: only code and Cowork sessions). */
+export const TARGET_MODE_REFUSAL = "only code and Cowork sessions can be messaged or stopped — not chat sessions or the dispatch session";
 
 /** The slice of a session's live driver this file uses (`LegSession`). */
 export interface MessagingDriverHandle {
@@ -59,6 +74,8 @@ export interface MessagingDriverHandle {
   /** `live` (a child is running), `resumable`, `ended` — absent on a test double, read as live. */
   readonly state?: "live" | "resumable" | "ended";
   send(text: string, clientName?: string): Promise<{ seq: number; queued: boolean }>;
+  /** The session's own interrupt (`session.interrupt`, the Mac's stop button). Optional on a test double. */
+  interrupt?(): Promise<{ wasRunning: boolean }>;
 }
 
 export interface SessionMessagingDeps {
@@ -79,7 +96,7 @@ export interface SessionMessagingDeps {
   };
   /** Dispatch's follow-up hook (`DispatchChildren.expectFollowUp`): called before a coordinator's message
    *  to its OWN child; returns the undo for a send that fails. Absent until the daemon built it. */
-  followUp?: () => { expectFollowUp(childId: string, coordinatorId: string): () => void } | undefined;
+  followUp?: () => { expectFollowUp(childId: string, coordinatorId: string, text: string): () => void } | undefined;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -103,10 +120,14 @@ export function sessionIdFromAddress(to: string): string | undefined {
   return SESSION_ID.test(id) ? id : undefined;
 }
 
+type Meta = ReturnType<SessionMessagingDeps["store"]["meta"]>;
+
 export class SessionMessaging {
   private readonly now: () => number;
   private readonly log: (line: string) => void;
   private draining = false;
+  /** (caller, message id, target, text digest) → the delivery's answer, in flight or settled. */
+  private readonly deliveries = new Map<string, { at: number; answer: Promise<SendAnswer> }>();
 
   constructor(private readonly deps: SessionMessagingDeps) {
     this.now = deps.now ?? (() => Date.now());
@@ -121,31 +142,58 @@ export class SessionMessaging {
   /** `Options.hostMessaging` for the session `callerSessionId`. */
   handlerFor(callerSessionId: string): HostMessagingHandler {
     return {
-      send: (request) => this.send(callerSessionId, request),
+      send: (request, opts) => this.send(callerSessionId, request, opts?.signal),
       list: async () => this.list(callerSessionId),
+      stop: (request) => this.stop(callerSessionId, request),
     };
   }
 
+  /** The target checks every door shares: a session id, known, not the caller, code/Cowork. */
+  private resolveTarget(callerSessionId: string, to: string): { id: string; meta: Meta } | { answer: { status: "refused" | "not_found"; reason: string } } {
+    const id = sessionIdFromAddress(to);
+    if (id === undefined) {
+      return { answer: { status: "not_found", reason: `no agent or session named "${to}" is reachable — address a Winter session by its id (s_…), from SpawnSession, ListSessions or ListAgents` } };
+    }
+    if (id === callerSessionId) return { answer: { status: "refused", reason: "cannot target your own session" } };
+    let meta: Meta;
+    try { meta = this.deps.store.meta(id); } catch { return { answer: { status: "not_found", reason: `no Winter session '${id}'` } }; }
+    if (!participatesInActivity(meta.mode)) return { answer: { status: "refused", reason: TARGET_MODE_REFUSAL } };
+    return { id, meta };
+  }
+
   /** One SendMessage the caller's runtime could not resolve in-process. Never throws. */
-  async send(callerSessionId: string, request: HostMessageSendRequest): Promise<SendAnswer> {
-    if (this.draining) return { status: "unavailable", reason: "Winter is shutting down; nothing was delivered", retryable: true };
-    let caller: ReturnType<SessionMessagingDeps["store"]["meta"]>;
+  send(callerSessionId: string, request: HostMessageSendRequest, signal?: AbortSignal): Promise<SendAnswer> {
+    const key = [callerSessionId, request.messageId, request.to.trim(), createHash("sha256").update(request.message).digest("hex")].join("\u0000");
+    const at = this.now();
+    for (const [k, v] of this.deliveries) {
+      if (at - v.at <= DELIVERY_DEDUPE_TTL_MS && this.deliveries.size <= DELIVERY_DEDUPE_MAX) break;
+      this.deliveries.delete(k);
+    }
+    const prior = this.deliveries.get(key);
+    if (prior !== undefined && at - prior.at <= DELIVERY_DEDUPE_TTL_MS) return prior.answer;
+    const answer = this.deliver(callerSessionId, request, signal);
+    this.deliveries.set(key, { at, answer });
+    // A delivery that never left the daemon (refused before anything ran, or cancelled) may be tried again.
+    void answer.then((a) => { if (a.status === "unavailable" && a.retryable === true) this.deliveries.delete(key); });
+    return answer;
+  }
+
+  private async deliver(callerSessionId: string, request: HostMessageSendRequest, signal: AbortSignal | undefined): Promise<SendAnswer> {
+    const notDelivered = (why: string): SendAnswer => ({ status: "unavailable", reason: `${why}; nothing was delivered`, retryable: true });
+    // A function, not a narrowed field: the signal can abort during the awaits below.
+    const cancelled = (): boolean => signal?.aborted === true;
+    if (this.draining) return notDelivered("Winter is shutting down");
+    let caller: Meta;
     try { caller = this.deps.store.meta(callerSessionId); } catch { return refused("the sending session is not known to Winter"); }
     if (caller.mode === "chat") return refused(CHAT_SENDER_REFUSAL);
 
-    const targetId = sessionIdFromAddress(request.to);
-    if (targetId === undefined) {
-      return { status: "not_found", reason: `no agent or session named "${request.to}" is reachable — address a Winter session by its id (s_…), from SpawnSession, ListSessions or ListAgents` };
-    }
-    if (targetId === callerSessionId) return refused("cannot SendMessage to your own session");
-    let target: ReturnType<SessionMessagingDeps["store"]["meta"]>;
-    try { target = this.deps.store.meta(targetId); } catch { return { status: "not_found", reason: `no Winter session '${targetId}'` }; }
+    const resolved = this.resolveTarget(callerSessionId, request.to);
+    if ("answer" in resolved) return resolved.answer;
+    const { id: targetId, meta: target } = resolved;
     if (target.archived === true) {
-      return refused(`session '${targetId}' is archived — the user hid it, and a message never brings it back; it has to be resumed (un-archived) first, and only if the user wants it back`);
+      return refused(`session '${targetId}' is archived — the user hid it, and a message never brings it back; only the user can restore it`);
     }
-    if (request.message.trim() === "") {
-      return refused("notify_when_idle on its own is not supported for Winter sessions — send a message");
-    }
+    if (request.message.trim() === "") return refused("the message is empty — write the session what you want it to do");
 
     // Dispatch following up its OWN child: plain text (the child's delegate-user), followed and woken.
     const ownChild = caller.mode === "dispatch" && target.origin === "dispatch-child" && target.parentSessionId === callerSessionId;
@@ -164,6 +212,7 @@ export class SessionMessaging {
       senderPermissionClass: senderClassOf(caller.approvalPolicy),
     }, { winterSessionId: targetId });
 
+    if (cancelled()) return notDelivered("the sender was interrupted");
     let driver: MessagingDriverHandle | undefined;
     let resumed = false;
     try {
@@ -176,8 +225,12 @@ export class SessionMessaging {
     if (driver === undefined) {
       return { status: "unavailable", reason: `session '${targetId}' has no runtime to resume, so it cannot be messaged`, retryable: false };
     }
+    // Re-checked AFTER the (possibly long) resume: nothing goes in once the sender was cancelled or the
+    // daemon began stopping while the target came up.
+    if (this.draining) return notDelivered("Winter began shutting down");
+    if (cancelled()) return notDelivered("the sender was interrupted");
 
-    const undoFollowUp = ownChild ? this.deps.followUp?.()?.expectFollowUp(targetId, callerSessionId) : undefined;
+    const undoFollowUp = ownChild ? this.deps.followUp?.()?.expectFollowUp(targetId, callerSessionId, text) : undefined;
     let sent: { queued: boolean };
     try {
       sent = await driver.send(text, MESSAGING_CLIENT_NAME);
@@ -202,20 +255,39 @@ export class SessionMessaging {
     };
   }
 
-  /** ListAgents' session rows for `callerSessionId`: the RUNNING peers (active, or background and working — see the header), never itself. */
+  /** `TaskStop` on a session id: interrupt its running turn (the Mac's stop button). Never throws. */
+  async stop(callerSessionId: string, request: HostSessionStopRequest): Promise<HostSessionStopAnswer> {
+    let caller: Meta;
+    try { caller = this.deps.store.meta(callerSessionId); } catch { return { status: "refused", reason: "the calling session is not known to Winter" }; }
+    if (caller.mode === "chat") return { status: "refused", reason: CHAT_SENDER_REFUSAL };
+    const resolved = this.resolveTarget(callerSessionId, request.id);
+    if ("answer" in resolved) {
+      return resolved.answer.status === "not_found" ? { status: "not_found", reason: resolved.answer.reason } : { status: "refused", reason: resolved.answer.reason };
+    }
+    const driver = this.deps.sessions.get(resolved.id);
+    if (driver === undefined || !driver.turnRunning || driver.interrupt === undefined) return { status: "not_running" };
+    try {
+      const { wasRunning } = await driver.interrupt();
+      return wasRunning ? { status: "stopped" } : { status: "not_running" };
+    } catch (err) {
+      return { status: "unavailable", reason: `could not stop session '${resolved.id}': ${refusalText(err)}` };
+    }
+  }
+
+  /** ListAgents' session rows for `callerSessionId`: the RUNNING code/Cowork peers (see the header), never itself. */
   list(callerSessionId: string): HostMessageListAnswer {
     let caller: { mode?: string };
     try { caller = this.deps.store.meta(callerSessionId); } catch { return { sessions: [] }; }
     if (caller.mode === "chat") return { sessions: [] };
     const at = this.now();
-    const rows: Array<{ row: SessionRow; activity: Activity }> = [];
+    const rows: SessionRow[] = [];
     for (const row of this.deps.store.list()) {
-      if (row.sessionId === callerSessionId || !participatesInActivity(row.mode)) continue;
+      if (row.sessionId === callerSessionId || !participatesInActivity(row.mode) || row.archived === true) continue;
       let activity: Activity | undefined;
       try { activity = this.deps.derive(row, row.sessionId, at); } catch { continue; }
-      if (activity === "active" || (activity === "background" && this.deps.working(row.sessionId))) rows.push({ row, activity });
+      if (this.deps.working(row.sessionId) || activity === "active") rows.push(row);
     }
-    const sessions: HostReachableSession[] = rows.slice(0, LIST_AGENTS_SESSION_MAX).map(({ row }) => {
+    const sessions: HostReachableSession[] = rows.slice(0, LIST_AGENTS_SESSION_MAX).map((row) => {
       const title = row.title?.replace(/\s+/g, " ").trim();
       return {
         address: `session:${row.sessionId}`,
@@ -225,7 +297,8 @@ export class SessionMessaging {
         ...(row.cwd ? { cwd: row.cwd } : {}),
       };
     });
-    return { sessions };
+    const omitted = rows.length - sessions.length;
+    return { sessions, ...(omitted > 0 ? { omitted } : {}) };
   }
 
   private titleOf(sessionId: string): string | undefined {

@@ -88,11 +88,10 @@ export function permissionModeFor(policy: SessionApprovalPolicy): PermissionMode
  *
  *  `Browser` is the only all-three entry (chat's read-only restriction is enforced INSIDE the
  *  capability, not by hiding the tool); `Computer` is code+dispatch; office and LSP are code-only; the
- *  `sessions` trio is dispatch-only. */
+ *  `sessions` pair is dispatch-only (ManageSession was removed 2026-10-02). */
 export const CAPABILITY_TOOL_MODES: Readonly<Record<string, { modes: readonly SessionMode[]; plainName?: string }>> = {
   "mcp__winter__sessions__session_spawn": { modes: ["dispatch"], plainName: "SpawnSession" },
   "mcp__winter__sessions__list_sessions": { modes: ["dispatch"], plainName: "ListSessions" },
-  "mcp__winter__sessions__manage_session": { modes: ["dispatch"], plainName: "ManageSession" },
   "mcp__winter__computer__computer": { modes: ["code", "dispatch"], plainName: "Computer" },
   "mcp__winter__browser__browser": { modes: ["code", "dispatch", "chat"], plainName: "Browser" },
   "mcp__winter__office__docs": { modes: ["code"] },
@@ -112,20 +111,24 @@ export const CAPABILITY_TOOL_MODES: Readonly<Record<string, { modes: readonly Se
  * `Options.tools`, less its search tool, which `toolsFor` adds by whether an Exa key is stored.
  *
  * Chat is "conversation-with-a-memory": no filesystem, no shell, no repo (the shipped Chat Slice A
- * design). Its set is UNCHANGED by the ruling apart from `ToolSearch`, which deferral needs now that
- * `Browser` (an MCP tool) starts deferred: `AskUserQuestion`, `WebFetch` (the only way chat reads a page —
- * the SDK's own, with the daemon's domain floor and a `privateAddressPolicy` of `deny`), and Winter's own
- * four default tools (P8b-28, allowed silently in every mode). `Browser` is not a built-in and is not
- * named here: MCP tools are never filtered by `tools`, and the `browser` capability server is the one
- * that decides chat gets it.
+ * design): `AskUserQuestion`, `WebFetch` (the only way chat reads a page — the SDK's own, with the
+ * daemon's domain floor and a `privateAddressPolicy` of `deny`), `ToolSearch` (deferral needs it now that
+ * `Browser`, an MCP tool, starts deferred) and `advisor`. **NOT the messaging trio** — `SendMessage`,
+ * `ListAgents`, `ReadNotifications` (user ruling 2026-10-02: whoever has SendMessage can message and resume
+ * sessions, and chat must not have it). Being outside this list they land in chat's fail-closed
+ * `disallowedTools` too (`KNOWN_RUNTIME_BUILTINS`), and the standing server's alias twins with them.
+ * `Browser` is not a built-in and is not named here: MCP tools are never filtered by `tools`, and the
+ * `browser` capability server is the one that decides chat gets it.
  */
-export const CHAT_BUILTIN_TOOLS: readonly string[] = [...new Set(["AskUserQuestion", "WebFetch", "ToolSearch", ...WINTER_OWN_TOOL_NAMES])].sort();
+export const CHAT_BUILTIN_TOOLS: readonly string[] = ["AskUserQuestion", "ToolSearch", "WebFetch", "advisor"];
 
 /**
  * **DISPATCH's allowed built-ins** — EXACTLY the ruling's list (2026-10-01), less its search tool, which
  * `toolsFor` adds: `Bash`, `Read`, `WebFetch`, `SendMessage`, `TaskStop`, the three cron tools,
  * `AskUserQuestion`, `PushNotification`, `ScheduleWakeup`, plus `ToolSearch` so the deferred tools load.
- * `SpawnSession`/`ListSessions`/`ManageSession`/`Computer`/`Browser` are the daemon's capability tools
+ * (`TaskStop` also stops a code/Cowork SESSION by its `s_…` id since agent SDK 0.0.39 — `host_session_stop`.)
+ * `SpawnSession`/`ListSessions`/`Computer`/`Browser` are the daemon's capability tools (ManageSession was
+ * removed from dispatch 2026-10-02)
  * (MCP, never filtered by `tools`); a user/plugin MCP server's tools arrive the same way, deferred.
  *
  * Deliberately NOT here, because the ruling's list is exact: `Agent`, `Edit`/`Write`/`Glob`/`Grep`, the

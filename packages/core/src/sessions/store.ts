@@ -302,6 +302,16 @@ export class SessionStore {
       token_hash TEXT NOT NULL,
       minted_at INTEGER NOT NULL
     )`);
+    // ListSessions' `query` (2026-10-02): the files each session EDITED, as a durable per-session index —
+    // recorded live from every `tool_result.fileDiff` the daemon appends (edit/write/notebook edits) and
+    // backfilled once from the logs that predate it (`backfillEditedFiles`, marked in `index_markers`).
+    this.db.run(`CREATE TABLE IF NOT EXISTS session_files (
+      session_id TEXT NOT NULL,
+      path TEXT NOT NULL,
+      last_ts INTEGER NOT NULL,
+      PRIMARY KEY (session_id, path)
+    )`);
+    this.db.run(`CREATE TABLE IF NOT EXISTS index_markers (name TEXT PRIMARY KEY, value TEXT NOT NULL)`);
     this.migrateBareModelColumnToTags();
     this.recoverAll();
   }
@@ -501,7 +511,60 @@ export class SessionStore {
         [event.text, sessionId],
       );
     }
+    if (event.type === "tool_result" && event.fileDiff !== undefined) this.recordEditedFile(sessionId, event.fileDiff.path, event.ts);
     return event;
+  }
+
+  // ── the edited-files index (ListSessions' `query`) ─────────────────────────────────────────────
+
+  private recordEditedFile(sessionId: string, path: string, ts: number): void {
+    this.db.run(
+      "INSERT INTO session_files (session_id, path, last_ts) VALUES (?, ?, ?) ON CONFLICT(session_id, path) DO UPDATE SET last_ts = MAX(last_ts, excluded.last_ts)",
+      [sessionId, path, ts],
+    );
+  }
+
+  /** The files `sessionId` edited (a `fileDiff` on one of its tool results), most recent first. */
+  editedFiles(sessionId: string): string[] {
+    return (this.db.query("SELECT path FROM session_files WHERE session_id = ? ORDER BY last_ts DESC, path").all(sessionId) as { path: string }[]).map((r) => r.path);
+  }
+
+  /** `sessionId`'s first main-thread user message as indexed (the title's fallback source), or undefined. */
+  firstMessage(sessionId: string): string | undefined {
+    const row = this.db.query("SELECT first_message FROM sessions WHERE session_id = ?").get(sessionId) as { first_message: string | null } | null;
+    return row?.first_message ?? undefined;
+  }
+
+  /** True once the one-time edited-files backfill has run on this home. */
+  editedFilesBackfilled(): boolean {
+    return this.db.query("SELECT value FROM index_markers WHERE name = 'edited_files_backfill'").get() !== null;
+  }
+
+  /**
+   * The ONE-TIME backfill of the edited-files index from every session log that predates it. Idempotent
+   * (an upsert keeping the newest timestamp), so a crash mid-way just runs again; the marker is written
+   * only after every log was read. Cheap per line: only lines that mention `"fileDiff"` are parsed.
+   * Returns how many (session, file) rows it saw; 0 and no work once marked.
+   */
+  backfillEditedFiles(): number {
+    if (this.editedFilesBackfilled()) return 0;
+    let seen = 0;
+    const rows = this.db.query("SELECT session_id, scope FROM sessions").all() as { session_id: string; scope: string }[];
+    for (const { session_id: sid, scope } of rows) {
+      const path = this.logPath(scope, sid);
+      let text: string;
+      try { text = readFileSync(path, "utf8"); } catch { continue; }
+      for (const line of text.split("\n")) {
+        if (!line.includes('"fileDiff"')) continue;
+        let event: { type?: unknown; ts?: unknown; fileDiff?: { path?: unknown } };
+        try { event = JSON.parse(line); } catch { continue; }
+        if (event.type !== "tool_result" || typeof event.fileDiff?.path !== "string") continue;
+        this.recordEditedFile(sid, event.fileDiff.path, typeof event.ts === "number" ? event.ts : 0);
+        seen++;
+      }
+    }
+    this.db.run("INSERT OR REPLACE INTO index_markers (name, value) VALUES ('edited_files_backfill', ?)", [String(Date.now())]);
+    return seen;
   }
 
   /** Current last persisted seq for the session (used to stamp transient broadcast-only events). */
@@ -955,6 +1018,7 @@ export class SessionStore {
     const path = this.logPath(row.scope, sessionId);
     if (existsSync(path)) unlinkSync(path);
     this.db.run("DELETE FROM sessions WHERE session_id = ?", [sessionId]);
+    this.db.run("DELETE FROM session_files WHERE session_id = ?", [sessionId]);
     try {
       rmSync(outdirPath(this.homeDir, sessionId), { recursive: true, force: true });
     } catch (err) {

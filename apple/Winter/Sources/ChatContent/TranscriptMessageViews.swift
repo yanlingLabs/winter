@@ -41,6 +41,13 @@ private struct TranscriptUserMessageStyleKey: EnvironmentKey {
     static let defaultValue: TranscriptUserMessageStyle = .bubble
 }
 
+/// A session id's title, where the surface has the session list at hand (the shell's sidebar
+/// directory) — what a message from another session's header names it by. `nil` (the default, and
+/// every surface without a list) shows the id.
+private struct TranscriptSessionTitleKey: EnvironmentKey {
+    static let defaultValue: ((String) -> String?)? = nil
+}
+
 /// A surface's own colour for the agent's list markers, numbers and quote rule — the
 /// dispatch-pill-themed session window draws them white. `nil` (every other home) keeps
 /// `Theme.accent`.
@@ -74,12 +81,40 @@ extension EnvironmentValues {
         get { self[TranscriptUserMessageStyleKey.self] }
         set { self[TranscriptUserMessageStyleKey.self] = newValue }
     }
+
+    var transcriptSessionTitle: ((String) -> String?)? {
+        get { self[TranscriptSessionTitleKey.self] }
+        set { self[TranscriptSessionTitleKey.self] = newValue }
+    }
 }
 
 struct TranscriptUserBubble: View {
     let text: String
     let tint: Color
+    /// Set when `text` is the body of ANOTHER session's message (`Exchange.promptEnvelope`): a small
+    /// "From session …" header (and the summary, subtly) rides above the body.
+    var envelope: AgentMessageEnvelope? = nil
     @Environment(\.transcriptUserMessageStyle) private var style
+    @Environment(\.transcriptSessionTitle) private var sessionTitle
+
+    /// The sender header line and the optional summary — nil without an envelope.
+    var senderHeader: String? { envelope?.senderLabel(titleFor: sessionTitle) }
+
+    @ViewBuilder
+    private var senderBlock: some View {
+        if let envelope {
+            VStack(alignment: .leading, spacing: 2) {
+                Label(envelope.senderLabel(titleFor: sessionTitle), systemImage: "arrow.turn.down.left")
+                    .font(Typography.caption(.medium))
+                    .foregroundStyle(Theme.textMuted)
+                if let summary = envelope.summary {
+                    Text(summary)
+                        .font(Typography.caption())
+                        .foregroundStyle(Theme.textMuted)
+                }
+            }
+        }
+    }
 
     /// **A wiring pin, not coverage** (same species as `ModelPickerTests.swift:767`): hoisted so
     /// "the user's own words are NOT set in Winter's voice" is assertable without rendering. The
@@ -103,11 +138,14 @@ struct TranscriptUserBubble: View {
             .frame(maxWidth: .infinity, alignment: .trailing)
         case .ruled:
             VStack(alignment: .leading, spacing: 22) {
-                TranscriptFormattedMessageText(text: displayText, tint: tint, role: proseRole,
-                                               fillsAvailableWidth: true)
+                senderBlock
+                if !displayText.isEmpty {
+                    TranscriptFormattedMessageText(text: displayText, tint: tint, role: proseRole,
+                                                   fillsAvailableWidth: true)
                     .foregroundStyle(.primary)
                     .transcriptRuledUserMessageWeight()
                     .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 Rectangle()
                     .fill(Theme.textPrimary.opacity(0.85)) // white: the window is dark-only
                     .frame(height: 1)
@@ -120,9 +158,12 @@ struct TranscriptUserBubble: View {
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 6) {
-            TranscriptFormattedMessageText(text: displayText, tint: tint, role: proseRole,
-                                           fillsAvailableWidth: false)
-                .foregroundStyle(.primary)
+            senderBlock
+            if !displayText.isEmpty {
+                TranscriptFormattedMessageText(text: displayText, tint: tint, role: proseRole,
+                                               fillsAvailableWidth: false)
+                    .foregroundStyle(.primary)
+            }
         }
         .padding(14)
         .background(Theme.bubbleUser, in: RoundedRectangle(cornerRadius: 18, style: .continuous))

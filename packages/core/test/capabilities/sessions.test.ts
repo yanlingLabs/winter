@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isWinterMcpServerInstance, type WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import { ToolRegistry } from "../../src/agent/tools/registry";
-import { registerListSessionsTools, LIST_SESSIONS_TOOL, MANAGE_SESSION_TOOL } from "../../src/agent/tools/list-sessions";
+import { registerListSessionsTools, LIST_SESSIONS_TOOL } from "../../src/agent/tools/list-sessions";
 import { registerSessionSpawnTool } from "../../src/agent/tools/session-spawn";
 import { makeActivityDeriver } from "../../src/sessions/activity";
 import { SessionStore } from "../../src/sessions/store";
@@ -32,8 +32,6 @@ interface Harness {
   instance: WinterMcpServerInstance;
   session: CapabilitySession;
   deps: { models: string[]; sessions: never };
-  interrupted: string[];
-  emitted: Array<{ sessionId: string; activity: unknown }>;
 }
 
 function harness(): Harness {
@@ -43,8 +41,6 @@ function harness(): Harness {
   const registry = new ToolRegistry();
   const h = {
     home, store, registry,
-    interrupted: [] as string[],
-    emitted: [] as Array<{ sessionId: string; activity: unknown }>,
   } as Harness;
   h.session = {
     sessionId: "s_dispatch", mode: "dispatch", cwd: home, roots: [home],
@@ -60,9 +56,6 @@ function harness(): Harness {
     derive,
     turnStartedAt: () => undefined,
     now: () => NOW,
-    isRunning: () => false,
-    interrupt: (id: string) => { h.interrupted.push(id); },
-    emit: (sessionId: string, activity: unknown) => { h.emitted.push({ sessionId, activity }); },
   };
   // Door 1 — the daemon's shared registry, wired exactly as `daemon.ts` wires it.
   registerSessionSpawnTool(registry, { models: MODELS });
@@ -79,7 +72,7 @@ describe("sessionsCapability: the server shape", () => {
     const h = harness();
     const server = sessionsCapability(h.session, {
       models: MODELS,
-      sessions: { store: h.store, derive: () => undefined, turnStartedAt: () => undefined, isRunning: () => false, interrupt: () => {}, emit: () => {} } as never,
+      sessions: { store: h.store, derive: () => undefined, turnStartedAt: () => undefined } as never,
     });
     expect(server.type).toBe("sdk");
     // P8b-35: the BRAND rides the server name, so the router's `mcp__<server>__<tool>` comes out as
@@ -90,10 +83,10 @@ describe("sessionsCapability: the server shape", () => {
     expect(isWinterMcpServerInstance(server.instance)).toBe(true);
   });
 
-  test("listTools names the three tools", () => {
+  test("listTools names the two tools — manage_session was removed (user ruling 2026-10-02)", () => {
     const h = harness();
     expect(h.instance.listTools().map((t) => t.name).sort())
-      .toEqual(["list_sessions", "manage_session", "session_spawn"]);
+      .toEqual(["list_sessions", "session_spawn"]);
   });
 
   test("every advertised inputSchema is a JSON-Schema object (the router's construction gate)", () => {
@@ -119,6 +112,9 @@ describe("sessionsCapability: callTool", () => {
     const h = harness();
     const one = h.store.createSession("global", { cwd: h.home, mode: "code" });
     const two = h.store.createSession("global", { cwd: h.home, mode: "code" });
+    // The default listing shows what is going on — background sessions are.
+    h.store.setBackgrounded(one, true);
+    h.store.setBackgrounded(two, true);
 
     const viaRegistry = await h.registry.execute(LIST_SESSIONS_TOOL, {}, {
       cwd: h.home, roots: [h.home], sessionId: "s_dispatch", mode: "dispatch",
@@ -130,14 +126,6 @@ describe("sessionsCapability: callTool", () => {
     expect(viaCapability.content).toEqual([{ type: "text", text: viaRegistry.output }]);
     expect(viaRegistry.output).toContain(one);
     expect(viaRegistry.output).toContain(two);
-  });
-
-  test("manage_session drives the SAME interrupt/emit closures the registry door drives", async () => {
-    const h = harness();
-    const one = h.store.createSession("global", { cwd: h.home, mode: "code" });
-    const res = await h.instance.callTool(MANAGE_SESSION_TOOL, { sessionId: one, action: "background" });
-    expect(res.isError).toBe(false);
-    expect(h.emitted.map((e) => e.sessionId)).toEqual([one]);
   });
 
   test("session_spawn answers with its placeholder — the engine bridge is Task 13's", async () => {
@@ -156,35 +144,23 @@ describe("sessionsCapability: callTool", () => {
 
   test("invalid arguments are an isError result with the registry's own wording", async () => {
     const h = harness();
-    const viaRegistry = await h.registry.execute(MANAGE_SESSION_TOOL, { sessionId: "s_x" }, {
+    const viaRegistry = await h.registry.execute(LIST_SESSIONS_TOOL, { query: 42 }, {
       cwd: h.home, roots: [h.home], sessionId: "s_dispatch", mode: "dispatch",
     });
-    const viaCapability = await h.instance.callTool(MANAGE_SESSION_TOOL, { sessionId: "s_x" });
+    const viaCapability = await h.instance.callTool(LIST_SESSIONS_TOOL, { query: 42 });
     expect(viaRegistry.isError).toBe(true);
     expect(viaCapability.isError).toBe(true);
     expect(viaCapability.content).toEqual([{ type: "text", text: viaRegistry.output }]);
   });
 
-  test("manage_session acts on the session its ARGUMENT names, never on the caller's own", async () => {
-    // Named for what it actually proves (N4). The `sessions` tools take no `ToolContext` at all —
-    // `run(args)` — so the server's baked session is deliberately NOT an input here: a coordinator
-    // manages OTHER sessions, and it must not be able to act on itself by omission. The baked
-    // identity is proved where it is observable (computer.test.ts asserts `ctx.sessionId` reaching
-    // the service; office/browser assert it on the dispatched command).
-    const h = harness();
-    const target = h.store.createSession("global", { cwd: h.home, mode: "code" });
-    await h.instance.callTool(MANAGE_SESSION_TOOL, { sessionId: target, action: "background" });
-    expect(h.emitted.map((e) => e.sessionId)).toEqual([target]);
-    // The server's own session — the dispatch coordinator — was never touched.
-    expect(h.session.sessionId).toBe("s_dispatch");
-    expect(h.emitted.some((e) => e.sessionId === "s_dispatch")).toBe(false);
-  });
-
   test("a tool that throws is an isError result (the registry's throw→isError conversion)", async () => {
     const h = harness();
-    // No such session in the store → `store.meta` throws inside the tool.
-    const res = await h.instance.callTool(MANAGE_SESSION_TOOL, { sessionId: "s_missing", action: "stop" });
+    // A store that cannot be read → the tool throws inside; the server answers an error result.
+    const broken = sessionsCapability(h.session, { models: MODELS, sessions: { store: { list: () => { throw new Error("index unreadable"); } }, derive: () => undefined, turnStartedAt: () => undefined } as never });
+    const res = await (broken.instance as WinterMcpServerInstance).callTool(LIST_SESSIONS_TOOL, {});
     expect(res.isError).toBe(true);
     expect(res.content.length).toBe(1);
+    // And the retired tool is simply unknown.
+    expect((await h.instance.callTool("manage_session", { sessionId: "s_x", action: "stop" })).content).toEqual([{ type: "text", text: "unknown tool: manage_session" }]);
   });
 });

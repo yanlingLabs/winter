@@ -409,7 +409,7 @@ export interface WinterLegDeps {
    *  `onElicitation` is set, and the SDK declines every elicitation deterministically. */
   elicitations?: ElicitationBroker;
   /**
-   * SendMessage between Winter sessions (agent SDK 0.0.39's `Options.hostMessaging`): the daemon's
+   * SendMessage / ListAgents / TaskStop between Winter sessions (agent SDK 0.0.39's `Options.hostMessaging`): the daemon's
    * `SessionMessaging` (`agent/session-messaging.ts`), read LIVE at every call so a handler built before
    * the daemon finished wiring still answers once it has. Absent (or not yet built): the handler
    * answers a retryable `unavailable` and ListAgents lists no sessions.
@@ -1659,6 +1659,12 @@ function hostMessagingFor(sessionId: string, messaging: NonNullable<WinterLegDep
     list: async (request, opts) => {
       const live = messaging();
       return live === undefined ? { sessions: [] } : live.handlerFor(sessionId).list(request, opts);
+    },
+    // TaskStop on a session id (`host_session_stop`).
+    stop: async (request, opts) => {
+      const handler = messaging()?.handlerFor(sessionId);
+      if (handler?.stop === undefined) return { status: "unavailable", reason: "Winter is still starting; try again in a moment" };
+      return handler.stop(request, opts);
     },
   };
 }

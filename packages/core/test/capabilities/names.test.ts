@@ -38,7 +38,6 @@ const CANONICAL_NAMES = [
   // WS-06 §5 `mcp__winter__sessions` → R-1 re-brands the namespace, C-6 splits the three verbs out.
   "mcp__winter__sessions__session_spawn",
   "mcp__winter__sessions__list_sessions",
-  "mcp__winter__sessions__manage_session",
   // WS-06 §5 `mcp__winter__computer`.
   "mcp__winter__computer__computer",
   // WS-06 §5 `mcp__winter__browser`.
@@ -147,7 +146,8 @@ describe("WINTER_CAPABILITY_TOOLS", () => {
     const t = WINTER_CAPABILITY_TOOLS as Readonly<Record<string, CapabilityToolFacts>>;
     expect(t["mcp__winter__sessions__session_spawn"]).toEqual({ modes: ["dispatch"], plainName: "SpawnSession", eager: true });
     expect(t["mcp__winter__sessions__list_sessions"]).toEqual({ modes: ["dispatch"], plainName: "ListSessions", eager: true });
-    expect(t["mcp__winter__sessions__manage_session"]).toEqual({ modes: ["dispatch"], plainName: "ManageSession", eager: true });
+    // ManageSession was removed from Dispatch (user ruling 2026-10-02).
+    expect(t["mcp__winter__sessions__manage_session"]).toBeUndefined();
     expect(t["mcp__winter__computer__computer"]).toEqual({ modes: ["code", "dispatch"], plainName: "Computer" });
     expect(t["mcp__winter__browser__browser"]).toEqual({ modes: ["code", "dispatch", "chat"], plainName: "Browser" });
     for (const tool of ["docs", "sheets", "slides"]) {

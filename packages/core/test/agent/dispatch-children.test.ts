@@ -127,7 +127,9 @@ describe("session_spawn: the spawn", () => {
     expect(out).toContain(`spawned session ${childId} ("Build fix") in ${t.workDir}`);
     expect(out).toContain("at your current approval policy (auto");
     expect(out).toContain("<child_update>");
-    expect(t.store.meta(childId)).toMatchObject({ mode: "code", origin: "dispatch-child", parentSessionId: t.dispatchId, approvalPolicy: "auto", backgrounded: true });
+    expect(t.store.meta(childId)).toMatchObject({ mode: "code", origin: "dispatch-child", parentSessionId: t.dispatchId, approvalPolicy: "auto" });
+    // NOT backgrounded (user ruling 2026-10-02).
+    expect(t.store.meta(childId).backgrounded).not.toBe(true);
     // The spawn's title is the session's own (the auto-titler skips a titled session).
     expect(t.store.getTitle(childId)).toBe("Build fix");
     // The prompt went in through the child's own driver, under the dispatch client name — and the
@@ -456,8 +458,13 @@ describe("which turns are followed, the bounded roster, shutdown and restart", (
     expect(wakes).toHaveLength(1);
     expect(wakes[0]!.text).toContain("first");
     expect(wakes[0]!.text).not.toContain("user turn result");
-    expect(t.dispatchLog().some((e) => e.type === "approval_requested")).toBe(false);
-    // The wake turn ends → the child is forgotten; a later direct turn is not picked back up.
+    // Its CARD is still relayed to Dispatch (ruling 4: a Dispatch-spawned session's cards always go there),
+    // but the unfollowed turn moves no status.
+    expect(t.dispatchLog().some((e) => e.type === "approval_requested" && (e as { childSessionId?: string }).childSessionId === child)).toBe(true);
+    expect(t.childUpdates().filter((u) => u.childSessionId === child).map((u) => u.status)).toEqual(["running", "completed"]);
+    // Its resolution is relayed too; with nothing open, the wake turn's end forgets the child.
+    t.hub.append(child, { type: "approval_resolved", sessionId: child, threadId: "main", callId: "c-user", approved: true, by: "mac" });
+    expect(t.dispatchLog().some((e) => e.type === "approval_resolved" && (e as { childSessionId?: string }).childSessionId === child)).toBe(true);
     t.finish(t.dispatchId, { text: "reported" });
     expect(t.dc.roster()).toEqual([]);
     await t.driverFor(child).send("more", "mac");
@@ -493,10 +500,8 @@ describe("which turns are followed, the bounded roster, shutdown and restart", (
     const wakesBefore = t.driverFor(t.dispatchId).sends.length;
     // Finished and not live: resumed for the message (`ensure`), never cold-resumed by the router.
     t.drivers.delete(child);
-    t.store.setBackgrounded(child, false);
     expect(await t.sendMessage(t.dispatchId, `session:${child}`, "one more thing")).toMatchObject({ status: "resumed_and_delivered" });
-    // Back on background duty before the message went in, as at spawn.
-    expect(t.store.meta(child).backgrounded).toBe(true);
+    expect(t.store.meta(child).backgrounded).not.toBe(true);
     expect(t.dc.roster().map((r) => ({ id: r.sessionId, status: r.status, title: r.title }))).toEqual([{ id: child, status: "running", title: "Kid" }]);
     t.finish(child, { text: "follow-up done" });
     await t.drain();
@@ -530,6 +535,60 @@ describe("which turns are followed, the bounded roster, shutdown and restart", (
     expect(t.dc.roster()).toEqual([]);
     await t.sendMessage(peer, child, "again");
     expect(t.dc.roster()).toEqual([]);
+  });
+
+  test("APPROVAL FORWARDING (ruling 4): a peer's message to a FORGOTTEN dispatch child still relays its cards to Dispatch — no status, no wake", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    t.finish(child, { text: "first" });
+    await t.drain();
+    t.finish(t.dispatchId, { text: "reported" });
+    expect(t.dc.roster()).toEqual([]);
+    const peer = t.store.createSession("global", { mode: "code", cwd: t.workDir });
+    const wakesBefore = t.driverFor(t.dispatchId).sends.length;
+    const updatesBefore = t.childUpdates().length;
+    expect((await t.sendMessage(peer, child, "peer asks for something risky")).status).toBe("delivered");
+    t.hub.append(child, approval(child, "c-peer"));
+    const mirrored = t.dispatchLog().find((e) => e.type === "approval_requested" && (e as { callId?: string }).callId === "c-peer") as { childSessionId?: string; threadId: string } | undefined;
+    expect(mirrored).toMatchObject({ childSessionId: child, threadId: "main" });
+    t.hub.append(child, { type: "approval_resolved", sessionId: child, threadId: "main", callId: "c-peer", approved: false, by: "mac" });
+    expect(t.dispatchLog().some((e) => e.type === "approval_resolved" && (e as { callId?: string }).callId === "c-peer")).toBe(true);
+    t.finish(child, { text: "did the peer's thing" });
+    await t.drain();
+    expect(t.childUpdates().length).toBe(updatesBefore);
+    expect(t.driverFor(t.dispatchId).sends.length).toBe(wakesBefore);
+    expect(t.dc.roster()).toEqual([]); // the relay-only entry left with its last card
+  });
+
+  test("APPROVAL FORWARDING (ruling 4): a top-level code session's cards are never forwarded anywhere", async () => {
+    const t = setup();
+    const a = t.store.createSession("global", { mode: "code", cwd: t.workDir });
+    const b = t.store.createSession("global", { mode: "code", cwd: t.workDir });
+    expect((await t.sendMessage(a, b, "do it")).status).toBe("resumed_and_delivered");
+    t.hub.append(b, approval(b, "c-b"));
+    expect(t.dispatchLog().some((e) => e.type === "approval_requested")).toBe(false);
+    expect(t.store.read(a).some((e) => e.type === "approval_requested")).toBe(false);
+    expect(t.dc.roster()).toEqual([]);
+  });
+
+  test("the follow-up expectation is keyed on the coordinator's exact text: a peer's message queued first is not mistaken for it", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    t.finish(child, { text: "first" });
+    await t.drain();
+    t.finish(t.dispatchId, { text: "reported" });
+    const peer = t.store.createSession("global", { mode: "code", cwd: t.workDir });
+    // Set the coordinator's expectation, then let the PEER's message land first.
+    const undo = t.dc.expectFollowUp(child, t.dispatchId, "coordinator's next step");
+    await t.driverFor(child).send("<agent-message from=\"session:x\">peer</agent-message>", "messaging");
+    expect(t.dc.roster()).toEqual([]); // not picked up by the peer's message
+    t.finish(child, { text: "peer turn" });
+    await t.driverFor(child).send("coordinator's next step", "messaging");
+    expect(t.dc.roster().map((r) => r.status)).toEqual(["running"]);
+    t.finish(child, { text: "followed turn" });
+    await t.drain();
+    expect(t.childUpdates().at(-1)).toMatchObject({ childSessionId: child, status: "completed", resultSummary: "followed turn" });
+    undo(); // consumed already: a no-op
   });
 
   test("shutdown: no report and no wake while the children drain — but a withdrawn card still closes on the coordinator's log", async () => {

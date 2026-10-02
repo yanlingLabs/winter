@@ -27,7 +27,9 @@ const PAIRS: ReadonlyArray<readonly [plain: string, old: string]> = [
 describe("plain names ↔ old spellings", () => {
   test("every plain name in the capability table is one of the pairs", () => {
     const plain = Object.values(WINTER_CAPABILITY_TOOLS as Readonly<Record<string, CapabilityToolFacts>>).flatMap((f) => (f.plainName === undefined ? [] : [f.plainName]));
-    expect(plain.sort()).toEqual(PAIRS.map(([p]) => p).filter((p) => p !== "Search").sort());
+    // `Search` became a runtime built-in; `ManageSession` was removed from Dispatch (2026-10-02) — both
+    // keep their pair so an old transcript's call still maps.
+    expect(plain.sort()).toEqual(PAIRS.map(([p]) => p).filter((p) => p !== "Search" && p !== "ManageSession").sort());
   });
 
   test("map onto the SAME host name — so the renderers, the cards and the gate see one tool", () => {

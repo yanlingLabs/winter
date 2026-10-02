@@ -49,6 +49,13 @@ export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits"
 // consulted, so this classification only backstops a stray depth>0 call (send_message is excluded
 // from child tool sets, so this can only fire if a provider ignores that) — allow it to return the
 // bridge/placeholder path cleanly rather than hang on an approval prompt.
+// USER DECISION 2026-10-02 (recorded here, not an oversight): since agent SDK 0.0.39 `SendMessage` also
+// reaches OTHER top-level code/Cowork sessions (`agent/session-messaging.ts`), resuming a finished one, and
+// `TaskStop` stops another session's turn. Both stay allowed without a card: the message then runs at the
+// TARGET's own approval policy, so a session at `ask` can drive one at `bypass`. The reviewer flagged that
+// policy escalation (HIGH #1); the user accepted it deliberately. Each session shows its own cards in its own
+// window (nothing forwards between top-level code sessions); only Dispatch-spawned sessions relay their
+// cards through Dispatch.
 // task_stop is read-only too (4h-ii-c Task 2): orchestration like spawn_agent/send_message — it
 // only aborts Winter's OWN child work (a bg agent's AbortController, or a bg bash task it started)
 // and never touches anything external on its own; CC's TaskStop prompts no approval either.
@@ -83,6 +90,8 @@ export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits"
 // something, which defeats the point (CC's own PushNotification prompts no approval either). Must
 // stay allowed under `plan` too — flagging a decision/finish is exactly the kind of thing a
 // planning session should still be able to do.
+// (`manage_session` was REMOVED from Dispatch 2026-10-02; its entry stays only so an old transcript's call
+// still classifies the same on replay.)
 // list_sessions/manage_session are read-only too (dispatch-tool-deferral gate-classification
 // follow-up): list_sessions only ever reads SessionStore/registry state and bounded transcript
 // bytes, same class as task_get/agent_list. manage_session's targets are Winter's OWN session

@@ -12,8 +12,9 @@
 //     in `session.list`, `session_created` broadcast to every harness, linked to its coordinator by
 //     `parentSessionId` + `origin: "dispatch-child"`, at the coordinator's CURRENT approval policy
 //     (`childPolicyFor`; fixed for the child's life), titled with the spawn's title (so the auto-titler leaves it alone and the pill keeps its
-//     label), backgrounded at birth (nobody has a harness on it, so a later attach-then-detach must
-//     not be able to kill its turn). The prompt is its first message through the session's own
+//     label). NOT backgrounded (user ruling 2026-10-02 — until then every child was flagged background
+//     at birth and on each follow-up, which made every finished child look busy to ListSessions and
+//     ListAgents). The prompt is its first message through the session's own
 //     driver (`send`), and the tool returns as soon as the message is in — it never waits for the
 //     child's turn. A `model` is stamped AT CREATION. A first message that cannot be delivered rolls
 //     the child back like a refused creation does: nothing is left behind.
@@ -26,8 +27,13 @@
 //     with `SendMessage` (`agent/session-messaging.ts` → `expectFollowUp`, then the child's own driver
 //     `send` under `clientName: "messaging"`) — even to a child already forgotten, which its stored
 //     parent link picks back up. A `messaging` turn that the coordinator did NOT send (another session's
-//     SendMessage to its child) is not followed, and neither is a user working in a finished child.
-//   - **Relay** — a followed turn's `approval_requested`/`question_asked` are MIRRORED onto the
+//     SendMessage to its child) is not followed, and neither is a user working in a finished child —
+//     but their cards are still RELAYED (below).
+//   - **Relay** — a dispatch child's `approval_requested`/`question_asked` are MIRRORED onto the
+//     coordinator's log WHOEVER started the turn (user ruling 2026-10-02: only Dispatch-spawned sessions
+//     forward their cards, and they always do — the bridge already parks every dispatch-child card for
+//     10 minutes as a relayed one, `cardsRelayedToDispatch`); an unfollowed turn's cards ride a
+//     relay-only entry that reports no status and wakes no one. A followed turn's cards are the same:
 //     coordinator's log with `childSessionId` (always on its main thread, whatever thread raised it
 //     inside the child) and their resolutions after them, so a client watching only Dispatch sees the
 //     card and answers it at the CHILD's id (`approval.respond`/`ask_user.respond` — the brokers are
@@ -182,6 +188,8 @@ interface ChildState {
   reported: boolean;
   /** Call ids whose card was mirrored and has not been resolved on the coordinator's log yet. */
   openAsks: Set<string>;
+  /** Tracked only to relay an unfollowed turn's cards (ruling 4): reports no status and wakes no one. */
+  relayOnly?: boolean;
 }
 
 /** One queued wake entry. */
@@ -209,7 +217,7 @@ export class DispatchChildren {
   private readonly interruptedByRestart = new Map<string, { dispatchId: string; title: string }>();
   /** Child → coordinator: a SendMessage follow-up the coordinator is delivering right now
    *  (`expectFollowUp`), consumed by the child's next `messaging` `user_message`. */
-  private readonly expectedFollowUps = new Map<string, string>();
+  private readonly expectedFollowUps = new Map<string, Array<{ coordinatorId: string; text: string }>>();
   private off?: () => void;
   /** `beginShutdown()`: only resolutions are mirrored now. */
   private draining = false;
@@ -299,9 +307,6 @@ export class DispatchChildren {
     // The spawn's title is the session's own title: the pill and the session list agree, and the
     // auto-titler (which skips a titled session) does not rename it under the user.
     this.safeAppend(childId, { type: "session_titled", sessionId: childId, threadId: "main", title });
-    // Unattended by construction: the flag is what keeps a harness that later attaches to inspect it
-    // from killing its turn by detaching again (the last-detach abort skips a backgrounded session).
-    try { this.deps.store.setBackgrounded(childId, true); this.deps.announceActivity?.(childId); } catch { /* the row is new; best effort */ }
     // Tracked BEFORE the send, so its `turn_started` and every later event find it; announced on the
     // coordinator's log only once the prompt is in.
     this.children.set(childId, newChild(callerSessionId, title, dir, this.now()));
@@ -318,31 +323,35 @@ export class DispatchChildren {
     }
     this.update(childId, "running");
     const modelNote = model === undefined ? "" : ` on ${model}`;
-    return `spawned session ${childId} ("${title}") in ${dir}${modelNote}, at your current approval policy (${policy}; it keeps it even if yours changes later) — it is working in the background; you'll be woken with a <child_update> when it finishes. To tell it more later — even after it has finished — SendMessage it with to: "${childId}".`;
+    return `spawned session ${childId} ("${title}") in ${dir}${modelNote}, at your current approval policy (${policy}; it keeps it even if yours changes later) — it is working on it now; you'll be woken with a <child_update> when it finishes. To tell it more later — even after it has finished — SendMessage it with to: "${childId}".`;
   }
 
   /**
-   * SendMessage from the coordinator `coordinatorId` to its OWN child `childId`
-   * (`agent/session-messaging.ts`), called just before the message goes in through the child's driver.
-   * The child's next `messaging` `user_message` is then the coordinator's follow-up: its turn is
-   * followed (`child_update` running → completed, the wake) — a forgotten child is picked back up from
-   * its stored link — and the child is put back on background duty first, as the spawn does (a harness
-   * that attaches to watch and detaches again must not abort the delegated turn). Returns the undo for a
-   * message that could not be delivered.
+   * SendMessage from the coordinator `coordinatorId` to its OWN child `childId` (`agent/session-messaging.ts`),
+   * called just before `text` goes in through the child's driver. The child's `messaging` `user_message`
+   * carrying exactly that text (own-child messages are sent verbatim) is the coordinator's follow-up: its
+   * turn is followed (`child_update` running → completed, the wake) — a forgotten child is picked back up
+   * from its stored link. Keyed on (coordinator, text), so a peer's message queued ahead of it is never
+   * mistaken for it. Returns the undo for a message that could not be delivered. The child's background
+   * flag is left alone (user ruling 2026-10-02).
    */
-  expectFollowUp(childId: string, coordinatorId: string): () => void {
-    this.expectedFollowUps.set(childId, coordinatorId);
-    let backgrounded = true;
-    try { backgrounded = this.deps.store.meta(childId).backgrounded === true; } catch { /* unknown: leave its flags alone */ }
-    if (!backgrounded) this.setBackgrounded(childId, true);
-    return () => {
-      if (this.expectedFollowUps.get(childId) === coordinatorId) this.expectedFollowUps.delete(childId);
-      if (!backgrounded) this.setBackgrounded(childId, false);
-    };
+  expectFollowUp(childId: string, coordinatorId: string, text: string): () => void {
+    const entry = { coordinatorId, text };
+    const list = this.expectedFollowUps.get(childId) ?? [];
+    list.push(entry);
+    this.expectedFollowUps.set(childId, list);
+    return () => { this.consumeFollowUp(childId, (x) => x === entry); };
   }
 
-  private setBackgrounded(sessionId: string, on: boolean): void {
-    try { this.deps.store.setBackgrounded(sessionId, on); this.deps.announceActivity?.(sessionId); } catch { /* best effort, as at spawn */ }
+  /** Remove (and report) the first expectation on `childId` that `match` accepts. */
+  private consumeFollowUp(childId: string, match: (x: { coordinatorId: string; text: string }) => boolean): { coordinatorId: string; text: string } | undefined {
+    const list = this.expectedFollowUps.get(childId);
+    if (list === undefined) return undefined;
+    const at = list.findIndex(match);
+    if (at < 0) return undefined;
+    const [hit] = list.splice(at, 1);
+    if (list.length === 0) this.expectedFollowUps.delete(childId);
+    return hit;
   }
 
   /** Every session's driver calls this when its turn queue goes idle (or its child ends). */
@@ -370,10 +379,14 @@ export class DispatchChildren {
       // Picked back up: a child a restart interrupted, at its next turn; a forgotten child the
       // COORDINATOR messages again (its follow-up's `user_message` — `messaging`/`dispatch` — lands
       // before the turn it starts). A user typing in a forgotten child directly is never picked up.
-      if (this.draining || !main) return;
-      if (e.type === "turn_started") c = this.retrack(e.sessionId);
+      if (this.draining) return;
+      // A card from a dispatch child's turn nobody follows (a peer's message, the user typing in it): relayed
+      // all the same, on a relay-only entry (any thread — a subagent's card too).
+      if (e.type === "approval_requested" || e.type === "question_asked") c = this.relayOnlyFromLink(e.sessionId);
+      else if (!main) return;
+      else if (e.type === "turn_started") c = this.retrack(e.sessionId);
       else if (e.type === "user_message" && e.clientName === DISPATCH_CLIENT_NAME) c = this.retrackFromLink(e.sessionId);
-      else if (e.type === "user_message" && e.clientName === MESSAGING_CLIENT_NAME && this.expectedFollowUps.has(e.sessionId)) c = this.retrackFromLink(e.sessionId);
+      else if (e.type === "user_message" && e.clientName === MESSAGING_CLIENT_NAME && (this.expectedFollowUps.get(e.sessionId) ?? []).some((x) => x.text === e.text)) c = this.retrackFromLink(e.sessionId);
       if (c === undefined) return;
     }
     if (this.draining) {
@@ -387,9 +400,9 @@ export class DispatchChildren {
         // A `messaging` turn is the coordinator's follow-up only when it said so (`expectFollowUp`);
         // another session's SendMessage to this child is recorded as a peer message and not followed.
         if (e.clientName === MESSAGING_CLIENT_NAME) {
-          const expected = this.expectedFollowUps.get(e.sessionId);
-          if (expected === c.dispatchId) this.expectedFollowUps.delete(e.sessionId);
-          c.lastUserClient = expected === c.dispatchId ? MESSAGING_CLIENT_NAME : PEER_MESSAGE_MARK;
+          const dispatchId = c.dispatchId;
+          const hit = this.consumeFollowUp(e.sessionId, (x) => x.coordinatorId === dispatchId && x.text === e.text);
+          c.lastUserClient = hit !== undefined ? MESSAGING_CLIENT_NAME : PEER_MESSAGE_MARK;
           return;
         }
         c.lastUserClient = e.clientName;
@@ -400,6 +413,7 @@ export class DispatchChildren {
         // child directly is not Dispatch's to report.
         const followed = !TERMINAL.has(c.status) || c.lastUserClient === DISPATCH_CLIENT_NAME || c.lastUserClient === MESSAGING_CLIENT_NAME;
         if (!followed) return;
+        c.relayOnly = false;
         c.turnOpen = true;
         c.lastAssistant = undefined; c.sawError = false; c.aborted = false;
         if (c.status !== "running") { c.status = "running"; c.reported = false; this.update(e.sessionId, "running"); }
@@ -416,21 +430,22 @@ export class DispatchChildren {
         if (main && c.turnOpen && e.stopReason === "error") c.sawError = true;
         return;
       case "approval_requested":
-        if (!c.turnOpen) return;
+        // Relayed whoever started the turn (ruling 4); only a followed turn's status moves.
         this.mirrorAsk(c, e);
-        this.setStatus(e.sessionId, c, "awaiting_approval");
+        if (c.turnOpen) this.setStatus(e.sessionId, c, "awaiting_approval");
         this.notifyUnattended(c, "needs your approval");
         return;
       case "question_asked":
-        if (!c.turnOpen) return;
         this.mirrorAsk(c, e);
-        this.setStatus(e.sessionId, c, "awaiting_input");
+        if (c.turnOpen) this.setStatus(e.sessionId, c, "awaiting_input");
         this.notifyUnattended(c, "has a question for you");
         return;
       case "approval_resolved":
       case "question_resolved":
         if (!this.mirrorResolution(c, e)) return;
-        if ((c.status === "awaiting_approval" || c.status === "awaiting_input") && c.openAsks.size === 0) this.setStatus(e.sessionId, c, "running");
+        if (c.turnOpen && (c.status === "awaiting_approval" || c.status === "awaiting_input") && c.openAsks.size === 0) this.setStatus(e.sessionId, c, "running");
+        // A relay-only entry exists for its cards alone: gone once they are all resolved.
+        if (c.relayOnly && c.openAsks.size === 0) this.children.delete(e.sessionId);
         return;
       default:
         return;
@@ -445,6 +460,13 @@ export class DispatchChildren {
     state.status = "error";
     state.lastUserClient = DISPATCH_CLIENT_NAME;   // the turn resumes the coordinator's own work
     this.children.set(sessionId, state);
+    return state;
+  }
+
+  /** A relay-only entry for a dispatch child nobody is following (its cards still go to Dispatch). */
+  private relayOnlyFromLink(sessionId: string): ChildState | undefined {
+    const state = this.retrackFromLink(sessionId);
+    if (state !== undefined) state.relayOnly = true;
     return state;
   }
 

@@ -95,7 +95,7 @@ export const RUNTIME_HOST_TOOL_PAIRS: ReadonlyArray<readonly [runtime: string, h
   // transcripts and for a call the runtime reports under the old spelling (a rule or matcher named it).
   ["SpawnSession", "session_spawn"],
   ["ListSessions", "list_sessions"],
-  ["ManageSession", "manage_session"],
+  ["ManageSession", "manage_session"], // retired from Dispatch 2026-10-02; kept so an old transcript's calls still map
   ["Computer", "computer"],
   ["Browser", "browser"],
   // `Search` — Exa answer mode, the agent SDK's built-in since 2026-10-01 (it was the daemon's
@@ -109,7 +109,10 @@ export const RUNTIME_HOST_TOOL_PAIRS: ReadonlyArray<readonly [runtime: string, h
  * names). **Derived from the SDK at module load, never hand-copied** — the four literals are pinned
  * by a test instead, so the SDK adding a fifth widens this set automatically and the test says so.
  *
- * P8b-28: these four are allowed SILENTLY in every mode. Two of them (`SendMessage`, `ListAgents`)
+ * P8b-28: these four are allowed SILENTLY in every mode that has them (chat no longer has SendMessage,
+ * ListAgents or ReadNotifications — user ruling 2026-10-02). Since agent SDK 0.0.39 a silent SendMessage can
+ * resume and drive ANOTHER code/Cowork session at that session's own policy — a deliberate user decision
+ * (the reviewer's HIGH #1 policy-escalation finding, accepted), see `agent/gate.ts`. Two of them (`SendMessage`, `ListAgents`)
  * also have host names in the pair table above, and both of those land in `gate.ts`'s `READ_ONLY`
  * — so the gate would allow them anyway. `ReadNotifications` and `advisor` have NO host
  * counterpart at all (there is no tool to map them to, and inventing one would be a lie), so
