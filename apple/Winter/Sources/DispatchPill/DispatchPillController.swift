@@ -873,9 +873,23 @@ final class DispatchPillController: ObservableObject {
 
     // MARK: - Event monitors (installed while visible, removed on hide)
 
+    /// Re-runs the mouse gate on a clock while the pill is up. The move monitors below cannot be the
+    /// only input: a LOCAL monitor sees `mouseMoved` only for a window of ours that asked for it, so
+    /// with one of Winter's own windows (a detached session window) under the pill no move ever
+    /// arrived, the gate stayed shut, and a click on a child pill fell through to the window beneath —
+    /// the user's "it only lets me open one window". 30Hz is plenty for a pointer and costs a rect test.
+    private var gateTimer: Timer?
+    static let gateTickInterval: TimeInterval = 1.0 / 30.0
+    var gateTimerActiveForTesting: Bool { gateTimer != nil }
+
     private func installMonitors() {
         guard monitors.isEmpty else { return }
         swipeRecognizer.reset()
+        let timer = Timer(timeInterval: Self.gateTickInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.updateMouseGate() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        gateTimer = timer
 
         // Esc. A LOCAL monitor sees only this app's events; it acts only on keys bound for this panel.
         if let m = NSEvent.addLocalMonitorForEvents(matching: [.keyDown], handler: { [weak self] event in
@@ -941,6 +955,8 @@ final class DispatchPillController: ObservableObject {
     private func removeMonitors() {
         monitors.forEach(NSEvent.removeMonitor)
         monitors.removeAll()
+        gateTimer?.invalidate()
+        gateTimer = nil
     }
 
     // MARK: - Adapter wiring (once — this adapter is the pill's alone)

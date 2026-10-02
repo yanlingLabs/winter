@@ -375,6 +375,9 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     }
 
     func show() {
+        // Winter forward first: a window opened from the dispatch pill (a non-activating panel) would
+        // otherwise come up behind whatever app the user is in — open, but invisible.
+        NSApp.activate()
         window.makeKeyAndOrderFront(nil)
         feedTask = Task { await feed.start() }
         installEscMonitor()
