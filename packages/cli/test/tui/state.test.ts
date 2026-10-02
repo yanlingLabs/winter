@@ -424,6 +424,29 @@ describe("state.ts — pending cards (f)", () => {
     expect(s.committed).toContainEqual({ kind: "note", text: "approved bash" });
   });
 
+  test("several open cards (concurrent subagents, two lanes): a second card queues behind the first; each resolution drops exactly its own", () => {
+    let s = initialState();
+    s = reduce(s, { type: "approval_requested", threadId: "main", callId: "a", toolName: "Computer", summary: "click" }, T0);
+    s = reduce(s, { type: "approval_requested", threadId: "agent-2", callId: "b", toolName: "Bash", summary: "make" }, T0 + 1);
+    s = reduce(s, { type: "question_asked", threadId: "agent-3", callId: "q", questions: [] }, T0 + 2);
+    expect(s.pending).toMatchObject({ kind: "approval", callId: "a" }); // the first stays on screen
+    expect(s.queuedCards?.map((c) => (c.kind === "elicitation" ? c.elicitationId : c.callId))).toEqual(["b", "q"]);
+    // b resolved elsewhere (another window) while a is on screen: b leaves the queue, a stays.
+    s = reduce(s, { type: "approval_resolved", threadId: "agent-2", callId: "b", approved: true, by: "user" }, T0 + 3);
+    expect(s.pending).toMatchObject({ callId: "a" });
+    expect(s.committed).toContainEqual({ kind: "note", text: "approved Bash" });
+    expect(s.queuedCards?.map((c) => (c.kind === "elicitation" ? c.elicitationId : c.callId))).toEqual(["q"]);
+    // A resolution naming no card this view holds changes nothing.
+    s = reduce(s, { type: "approval_resolved", threadId: "main", callId: "zzz", approved: false, by: "user" }, T0 + 4);
+    expect(s.pending).toMatchObject({ callId: "a" });
+    // a answered: the queued question takes the screen; then it too resolves.
+    s = reduce(s, { type: "approval_resolved", threadId: "main", callId: "a", approved: true, by: "user" }, T0 + 5);
+    expect(s.pending).toMatchObject({ kind: "question", callId: "q" });
+    expect(s.queuedCards).toEqual([]);
+    s = reduce(s, { type: "question_resolved", threadId: "agent-3", callId: "q", answers: {}, by: "user" }, T0 + 6);
+    expect(s.pending).toBeNull();
+  });
+
   test("approval_requested threads options through when the wire event carries them (SP-approvals T7)", () => {
     let s = initialState();
     const options = [
