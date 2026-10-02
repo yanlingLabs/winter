@@ -188,10 +188,14 @@ type WireEvent = { type: string; threadId?: string; [k: string]: unknown };
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
 
 /** A card's identity: its call id, or an elicitation's own id. */
-const cardKey = (c: PendingCard): string => (c.kind === "elicitation" ? `elicitation:${c.elicitationId}` : `call:${c.callId}`);
+export const cardKey = (c: PendingCard): string => (c.kind === "elicitation" ? `elicitation:${c.elicitationId}` : `call:${c.callId}`);
 
-/** Show `card`, or queue it behind the card already on screen. */
+/** Show `card`, or queue it behind the card already on screen. A card already held (the same key raised
+ *  again -- a replay, a second attach) replaces its own copy in place, never a duplicate. */
 function raiseCard(s: TuiState, card: PendingCard): Pick<TuiState, "pending" | "queuedCards"> {
+  const key = cardKey(card);
+  if (s.pending !== null && cardKey(s.pending) === key) return { pending: card, ...(s.queuedCards !== undefined ? { queuedCards: s.queuedCards } : {}) };
+  if ((s.queuedCards ?? []).some((c) => cardKey(c) === key)) return { pending: s.pending, queuedCards: s.queuedCards!.map((c) => (cardKey(c) === key ? card : c)) };
   if (s.pending === null) return { pending: card, ...(s.queuedCards !== undefined ? { queuedCards: s.queuedCards } : {}) };
   return { pending: s.pending, queuedCards: [...(s.queuedCards ?? []), card] };
 }

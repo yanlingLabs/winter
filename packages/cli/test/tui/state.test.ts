@@ -447,6 +447,19 @@ describe("state.ts — pending cards (f)", () => {
     expect(s.pending).toBeNull();
   });
 
+  test("a card raised again (a replay, a second attach) replaces its own copy — never a duplicate", () => {
+    let s = initialState();
+    s = reduce(s, { type: "approval_requested", threadId: "main", callId: "a", toolName: "Computer", summary: "click" }, T0);
+    s = reduce(s, { type: "approval_requested", threadId: "main", callId: "b", toolName: "Bash", summary: "make" }, T0 + 1);
+    s = reduce(s, { type: "approval_requested", threadId: "main", callId: "a", toolName: "Computer", summary: "click" }, T0 + 2);
+    s = reduce(s, { type: "approval_requested", threadId: "main", callId: "b", toolName: "Bash", summary: "make all" }, T0 + 3);
+    expect(s.pending).toMatchObject({ callId: "a" });
+    expect(s.queuedCards).toEqual([{ kind: "approval", callId: "b", toolName: "Bash", summary: "make all" }]);
+    s = reduce(s, { type: "approval_resolved", threadId: "main", callId: "a", approved: true, by: "user" }, T0 + 4);
+    s = reduce(s, { type: "approval_resolved", threadId: "main", callId: "b", approved: true, by: "user" }, T0 + 5);
+    expect(s.pending).toBeNull();
+  });
+
   test("approval_requested threads options through when the wire event carries them (SP-approvals T7)", () => {
     let s = initialState();
     const options = [
