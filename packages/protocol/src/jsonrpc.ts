@@ -96,4 +96,9 @@ export const ERR = {
   // A distinct numeric code (not INVALID_PARAMS) precisely because a client must be able to branch
   // on it programmatically without string-matching a message.
   DIVERGED: -32006,
+  // A TRANSIENT refusal the caller should simply repeat: nothing was done, and the same request is expected
+  // to succeed now (e.g. `session_replaced` -- a send that joined a session runtime replaced while it was
+  // starting). `data.code` names the case and `data.retryable` is `true`. Distinct from INTERNAL so a
+  // client can retry without treating it as a fault.
+  RETRY: -32007,
 } as const;

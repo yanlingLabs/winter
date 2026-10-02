@@ -126,6 +126,36 @@ describe("SendMessage to a session", () => {
     expect(t.ensured).toEqual([]);
   });
 
+  test("a target whose runtime was replaced while starting (session_replaced) gets the message on its next driver", async () => {
+    const t = setup();
+    const from = t.code();
+    const to = t.code();
+    const replacedErr = () => Object.assign(new Error("this session's runtime was replaced while it was starting; send again"), { code: "session_replaced" });
+    const first = t.driverFor(to);
+    first.send = async () => { t.drivers.delete(to); throw replacedErr(); };
+    const answer = await t.send(from, to, "run the tests");
+    expect(answer.status).toBe("delivered");
+    const second = t.drivers.get(to)!;
+    expect(second).not.toBe(first);
+    expect(second.sends.map((s) => s.text).join("")).toContain("run the tests");
+  });
+
+  test("replaced again on the retry: unavailable and RETRYABLE, nothing delivered", async () => {
+    const t = setup();
+    const from = t.code();
+    const to = t.code();
+    const replacedErr = () => Object.assign(new Error("this session's runtime was replaced while it was starting; send again"), { code: "session_replaced" });
+    const first = t.driverFor(to);
+    first.send = async () => {
+      t.drivers.delete(to);
+      t.driverFor(to).failNext = replacedErr();
+      throw replacedErr();
+    };
+    const answer = await t.send(from, to, "run the tests");
+    expect(answer).toMatchObject({ status: "unavailable", retryable: true });
+    expect(t.drivers.get(to)!.sends).toEqual([]);
+  });
+
   test("a session mid-turn queues it behind the running turn", async () => {
     const t = setup();
     const from = t.code();

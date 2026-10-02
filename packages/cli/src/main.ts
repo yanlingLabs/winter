@@ -58,6 +58,7 @@ import { mountAgents } from "./tui/agents-view";
 import { MEMORY_USAGE, formatDeleted, formatFactDetail, parseMemoryArgs, runMemoryRoute } from "./memory-cli";
 import { formatOptionLines, isOtherChoice, parseQuestionAnswer } from "./questions";
 import { parsePlanResponse } from "./plan-response";
+import { ShellCardQueue } from "./shell-cards";
 import { legacyFilesDoctorLine, sdkHomeDoctorSection } from "./doctor-legacy-files";
 import { makeEventBridge, type EventBridge } from "./tui/event-bridge";
 
@@ -455,7 +456,16 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   const plan = process.argv.includes("--plan"); // plan mode: agent must present a plan before editing; ignored if --auto also set
   let policy: ApprovalPolicy = auto ? "auto" : plan ? "plan" : "ask"; // seeds the mode bar; shift+tab cycles it live
   let policyInFlight = false; // in-flight guard — one setPolicy RPC at a time (repeat shift+tab ignored until it settles)
-  const pending: string[] = []; // callIds awaiting a y/n on stdin, oldest first
+  // The shell's cards, one at a time (`shell-cards.ts`): only the card being answered shows its prompt, and
+  // questions/plans read stdin only when it is their turn -- a typed answer always goes to the card on screen.
+  const cards = new ShellCardQueue({
+    emit: (text) => emit(text),
+    respond: (callId, approved) => c.request(METHODS.approvalRespond, { sessionId, callId, approved }),
+    suspendKeys: () => activeKeyListener?.suspend(),
+    resumeKeys: () => activeKeyListener?.resume(),
+    onError: (err) => emit(`${DIM}(the answer could not be sent: ${err instanceof Error ? err.message : String(err)})${RESET}\n`),
+    dim: (text) => `${DIM}${text}${RESET}`,
+  });
   let sessionId = ""; // set below, before send() — turn_completed can only fire after that
   // T5 resume replay: set ONLY on the Ink `winter resume <id>` route (see the `existingSessionId`
   // branch below) — the seq `<App>`'s replay is expected to reach before it clears its "Resuming
@@ -487,6 +497,9 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   // a plain write and the non-TTY branches keep their exact one-line-per-update output.
   let tasks: Task[] = [];
   let subagents: CliSubagent[] = []; // live child threads of the current turn (2e-ii)
+  // Agent SDK 0.0.40: a round's read-only calls run concurrently and their results arrive in COMPLETION
+  // order, so a `↳` line names its own call (by callId) instead of relying on sitting under it.
+  const toolNameByCallId = new Map<string, string>();
   const selection: FooterSelection = { selectedThreadId: "main", focusIndex: null }; // Task 6 thread selector (footer)
   let atLineStart = true;
   let pinnedLineLengths: number[] = [];
@@ -645,7 +658,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
         switchThread(action.threadId);
         break;
       case "interrupt":
-        void c.interrupt(sessionId); // wires the mode bar's "esc to interrupt" for real
+        c.interrupt(sessionId).catch(() => { /* nothing to interrupt, or the daemon went away: the turn ends on its own */ }); // wires the mode bar's "esc to interrupt" for real
         break;
       case "cyclePolicy":
         void cyclePolicy();
@@ -741,15 +754,18 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       else if (sa.action === "print_full") emit(`${AQUA}${e.text}${RESET}\n`);
       else emit("\n");
     }
-    else if (e.type === "tool_call") emit(`${DIM}⚙ ${e.name} ${e.argsJson.slice(0, 120)}${RESET}\n`);
-    else if (e.type === "tool_result") emit(`${DIM}  ↳ ${e.isError ? "ERROR: " : ""}${e.output.split("\n")[0]?.slice(0, 120) ?? ""}${RESET}\n`);
+    else if (e.type === "tool_call") {
+      toolNameByCallId.set(e.callId, e.name);
+      emit(`${DIM}⚙ ${e.name} ${e.argsJson.slice(0, 120)}${RESET}\n`);
+    }
+    else if (e.type === "tool_result") {
+      const name = toolNameByCallId.get(e.callId);
+      toolNameByCallId.delete(e.callId);
+      emit(`${DIM}  ↳ ${name !== undefined ? `${name}: ` : ""}${e.isError ? "ERROR: " : ""}${e.output.split("\n")[0]?.slice(0, 120) ?? ""}${RESET}\n`);
+    }
     else if (e.type === "approval_requested") {
-      emit(`approve ${e.toolName}? ${DIM}${e.summary}${RESET} [y/N] `);
-      const wasEmpty = pending.length === 0;
-      pending.push(e.callId);
-      // Yield raw stdin → cooked so the whole "y\n" line reaches the approval reader (only on the
-      // first of a batch; the reader resumes the key listener once the batch fully drains).
-      if (wasEmpty) activeKeyListener?.suspend();
+      // Printed when it is this card's turn (the raw key listener yields stdin to the y/N reader then).
+      cards.raiseApproval(e.callId, `approve ${e.toolName}? ${DIM}${e.summary}${RESET} [y/N] `);
     } else if (e.type === "approval_resolved") {
       // Finding 2: the approval may have been resolved WITHOUT this stdin reader ever seeing a
       // "y\n" — another attached window answered it, or the server-side broker timed it out. If
@@ -760,11 +776,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       // resolved-elsewhere approval leaves `pending` and the suspended raw listener stuck for the
       // rest of the turn, and the next typed line gets consumed answering the stale entry instead
       // of whatever it was actually meant for.
-      const idx = pending.indexOf(e.callId);
-      if (idx !== -1) {
-        pending.splice(idx, 1);
-        if (pending.length === 0) activeKeyListener?.resume();
-      }
+      cards.resolved(e.callId);
     } else if (e.type === "directory_added") emit(`${DIM}+ dir ${e.path}${e.persisted ? " (remembered)" : ""}${RESET}\n`);
     else if (e.type === "bg_task_started") emit(`${DIM}▶ bg ${e.taskId} started: ${e.command.slice(0, 80)}${RESET}\n`);
     else if (e.type === "bg_task_output") emit(`${DIM}${e.chunk}${RESET}`);
@@ -773,7 +785,8 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       // No TTY → skip rendering entirely (do NOT block reading stdin); the QuestionBroker
       // times out server-side and the engine proceeds with its "best judgment" fallback.
       if (process.stdin.isTTY) {
-        void (async () => {
+        // Its prompts and read loop start only when the card before it is done (never two stdin readers).
+        cards.raiseInteractive(e.callId, async (resolvedElsewhere) => {
           const answers: Record<string, string> = {};
           const notes: Record<string, string> = {}; // Task 3 (CC parity): optional per-question free-text note
           for (const q of e.questions) {
@@ -793,12 +806,14 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
             const promptText = q.multiSelect ? "choose (comma-separated numbers or text): " : "choose (number or text): ";
             emit(promptText);
             const input = (await readLine("")) ?? ""; // readLine now returns null on EOF; "" here (empty answer)
+            if (resolvedElsewhere.aborted) return; // answered in another window meanwhile: stop asking, send nothing
             if (isOtherChoice(input, q.options.length)) {
               // M1: choosing "Other" BY ITS MENU NUMBER isn't itself an answer — that digit is a
               // selection, not free text. Re-prompt for the real answer so the model never sees
               // the literal number as if the user had typed it as their response.
               emit("your answer: ");
               answers[q.question] = ((await readLine("")) ?? "").trim();
+              if (resolvedElsewhere.aborted) return;
             } else {
               answers[q.question] = parseQuestionAnswer(input, q.options.map((o: { label: string }) => o.label), q.multiSelect);
             }
@@ -808,28 +823,33 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
             // payload as before this feature (notes omitted below, not sent as `{}`).
             emit("note (enter to skip): ");
             const note = ((await readLine("")) ?? "").trim();
+            if (resolvedElsewhere.aborted) return;
             if (note !== "") notes[q.question] = note;
           }
           await c.askUserRespond({
             sessionId, callId: e.callId, answers,
             ...(Object.keys(notes).length > 0 ? { notes } : {}),
           });
-        })();
+        });
       }
     } else if (e.type === "plan_presented") {
       // No TTY → skip rendering entirely (do NOT block reading stdin); the server-side timeout
       // resolves the plan and the engine proceeds, same guard as question_asked above.
       if (process.stdin.isTTY) {
-        void (async () => {
+        cards.raiseInteractive(e.callId, async (resolvedElsewhere) => {
           emit(`\n${AQUA}Plan${RESET}\n${e.plan}\n\n`);
           emit(`  1) approve — I'll approve each edit\n  2) approve + auto-accept edits\n  3) reject (type: 3 <reason>)\n`);
           emit("choose (number or text): ");
           const input = (await readLine("")) ?? "";
+          if (resolvedElsewhere.aborted) return; // answered in another window meanwhile
           const r = parsePlanResponse(input);
           await c.planRespond({ sessionId, callId: e.callId, ...r });
-        })();
+        });
       }
+    } else if (e.type === "question_resolved") {
+      cards.resolved(e.callId); // answered elsewhere while waiting its turn: it never prompts here
     } else if (e.type === "plan_resolved") {
+      cards.resolved(e.callId);
       emit(`${DIM}${e.approved ? `plan approved${e.autoAccept ? " (auto-accept edits)" : ""}` : "plan rejected"}${RESET}\n`);
     } else if (e.type === "task_updated") {
       tasks = upsertTask(tasks, e.task);
@@ -1000,8 +1020,8 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   // suspended (below), so this cooked handler reads the whole "y\n" line; on the last pending
   // approval it hands stdin back to the key listener.
   {
-    process.stdin.on("data", async (d) => {
-      if (pending.length === 0) return;
+    process.stdin.on("data", (d) => {
+      if (!cards.awaitingApproval) return;
       // Claim this chunk for the approval BEFORE any concurrently-armed readLine() onData (which is
       // later in the listener array) runs for the same "data" event, so it skips instead of also
       // submitting the answer as input. Reset on the next microtask — after both synchronous "data"
@@ -1011,10 +1031,8 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       // SP-approvals T7: this legacy non-TUI reader stays plain y/N — it never renders or parses
       // `approval_requested.options` (that's the Ink TUI's pending-cards.tsx ApprovalCard only), so
       // a "y" here always means allow-once (no optionId), same as before this feature existed.
-      const yes = String(d).trim().toLowerCase() === "y";
-      const callId = pending.shift();
-      if (callId) await c.request(METHODS.approvalRespond, { sessionId, callId, approved: yes });
-      if (pending.length === 0) activeKeyListener?.resume();
+      // The card on screen takes the line (it hands stdin back to the key listener, then shows the next card).
+      void cards.answerApproval(String(d));
     });
   }
 
@@ -1031,7 +1049,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       eraseBlockIfPinned();
       keyListener.destroy();
       console.error(`\n[stalled: no progress for ${Math.round((Date.now() - wd.lastEventAt) / 1000)}s — aborting]`);
-      void c.interrupt(sessionId).finally(() => process.exit(2));
+      c.interrupt(sessionId).catch(() => {}).finally(() => process.exit(2));
     }
   }, 5000);
   wdTimer.unref?.(); // don't let the poll tick keep the process alive after normal completion

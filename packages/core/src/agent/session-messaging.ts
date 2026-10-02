@@ -52,6 +52,7 @@ import type { Activity } from "../sessions/activity";
 import { participatesInActivity } from "../sessions/activity";
 import type { SessionRow } from "../sessions/store";
 import { renderAttributedTurn } from "../runtime-sdk/messaging";
+import { isSessionReplaced } from "../runtime-sdk/session-replaced";
 
 /** The `clientName` a SendMessage delivery lands under in the target (`DispatchChildren`'s observer reads it). */
 export const MESSAGING_CLIENT_NAME = "messaging";
@@ -243,10 +244,23 @@ export class SessionMessaging {
     const undoFollowUp = ownChild ? this.deps.followUp?.()?.expectFollowUp(targetId, callerSessionId, text) : undefined;
     let sent: { queued: boolean };
     try {
-      sent = await driver.send(text, MESSAGING_CLIENT_NAME);
+      try {
+        sent = await driver.send(text, MESSAGING_CLIENT_NAME);
+      } catch (err) {
+        // The target's runtime was replaced while it was starting (`session_replaced`): nothing was taken, so
+        // the message goes ONCE to the session's next driver -- after the same shutdown/cancel re-checks.
+        if (!isSessionReplaced(err)) throw err;
+        const successor = this.deps.sessions.get(targetId) ?? await this.deps.sessions.ensure(targetId);
+        if (successor === undefined || successor === driver) throw err;
+        if (this.draining || cancelled()) throw err;
+        resumed = resumed || (successor.state !== undefined && successor.state !== "live");
+        sent = await successor.send(text, MESSAGING_CLIENT_NAME);
+      }
     } catch (err) {
       undoFollowUp?.();
       this.log(`delivering a message from ${callerSessionId} to ${targetId} failed (${err instanceof Error ? err.name : "error"})`);
+      // Still replaced after the retry (or nothing to retry on): transient -- the sender may simply send again.
+      if (isSessionReplaced(err)) return notDelivered(`session '${targetId}' was restarting while the message was sent`);
       return { status: "unavailable", reason: `could not deliver the message to session '${targetId}': ${refusalText(err)}`, retryable: false };
     }
 

@@ -223,6 +223,12 @@ export interface WinterSessionDeps {
    * no live child is HELD, not pushed), so it can never be what spawns one.
    */
   beforeTurn?: () => Promise<void>;
+  /** Checked by `open()` just before it spawns the runtime child: an error here refuses the open and spawns
+   *  nothing (the driver table's `beginShutdown` — no child is started into a daemon that is stopping). */
+  spawnRefusal?: () => Error | undefined;
+  /** The error an open is refused with when `end()` landed while it was still opening (the driver table's
+   *  typed `session_replaced`); a plain Error when absent. */
+  endedWhileOpeningRefusal?: () => Error;
   /** A projector for ONE incarnation, built on ITS generation. */
   projector: (incarnation: WinterIncarnation) => Projector;
   /** A fresh queue per incarnation (a closed queue cannot be reused). */
@@ -495,6 +501,8 @@ class WinterSessionImpl implements WinterSession {
   private endedReason: string | undefined;
   /** The open() in flight, so two concurrent sends resume ONE child, not two. */
   private opening: Promise<void> | undefined;
+  /** `end()` landed while `opening` was in flight: that open spawns nothing (checked at its spawn point). */
+  private endedWhileOpening = false;
   /** WS-27: the fold of an incarnation still being opened (`WinterIncarnationShape.noteMcpServers`). */
   private pendingMcpServerNames: string[] = [];
   private idleWaiters: Array<() => void> = [];
@@ -705,7 +713,21 @@ class WinterSessionImpl implements WinterSession {
   end(): Promise<void> {
     if (this.endingPromise !== undefined) return this.endingPromise;
     const inc = this.inc;
-    if (this.stateValue !== "live" || inc === undefined) return this.done;
+    if (this.stateValue !== "live" || inc === undefined) {
+      // An incarnation still OPENING has no child yet, and now it never will: the open checks this flag at
+      // its spawn point (the same synchronous point as `spawnRefusal`, after which the session is live at
+      // once), refuses, and spawns nothing -- no child, no replayed turn, nothing appended to a log an
+      // eviction or a delete is done with. A send that joined the open is refused with it (nothing
+      // appended either). The caller waits for the open to settle only within the end budget (2 x grace),
+      // so an open parked on something slow (its options, a run home) never holds an eviction or a delete.
+      const opening = this.opening;
+      if (opening !== undefined) {
+        this.endedWhileOpening = true;
+        const budget = 2 * (this.deps.endGraceMs ?? WINTER_SESSION_END_GRACE_MS);
+        return Promise.race([opening.then(() => undefined, () => undefined), sleep(budget)]).then(() => undefined);
+      }
+      return this.done;
+    }
     this.ending = true;
     this.clearIdleTimer();
     const grace = this.deps.endGraceMs ?? WINTER_SESSION_END_GRACE_MS;
@@ -779,6 +801,14 @@ class WinterSessionImpl implements WinterSession {
       let projector: Projector;
       let query: Query;
       try {
+        // The daemon may have begun stopping while this open awaited its options: refuse BEFORE the spawn,
+        // so no runtime child is started into a daemon that is going away (`beginShutdown`).
+        const refusal = this.deps.spawnRefusal?.();
+        if (refusal !== undefined) throw refusal;
+        // ...and an `end()` that landed while this open was in flight: it spawns nothing (see `end`).
+        if (this.endedWhileOpening) {
+          throw this.deps.endedWhileOpeningRefusal?.() ?? new Error("this session's runtime was ended while it was starting");
+        }
         generation = this.deps.records?.bumpGeneration(this.sessionId, { runtimeKind: "winter-agent", backendSessionId: this.backendSessionId }).generation ?? this.gen + 1;
         shape = { generation, resume, abort };
         queue = (this.deps.queue ?? createHostPromptQueue)();
@@ -838,7 +868,10 @@ class WinterSessionImpl implements WinterSession {
         this.appendUser(text, "messaging");
         this.beginAndPush(text, inc);
       }
-    })().finally(() => { this.opening = undefined; });
+    })().finally(() => {
+      this.opening = undefined;
+      this.endedWhileOpening = false;
+    });
     return this.opening;
   }
 

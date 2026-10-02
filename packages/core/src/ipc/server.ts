@@ -82,6 +82,7 @@ import type { ModelInfo } from "../providers/types";
 import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { WinterRuntimeSdk } from "../runtime-sdk/create";
 import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "../runtime-sdk/session-driver";
+import { isSessionReplaced, withReplacementRetry } from "../runtime-sdk/session-replaced";
 import { readWinterTasks } from "../runtime-sdk/tasks-reader";
 import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
 import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
@@ -603,6 +604,11 @@ function rpcFromWinterRefusal(err: unknown): never {
     // official leg created whose transcript cannot move to the Winter leg as it stands.
     // `session_cwd_unavailable`: the session's own working directory is gone — the user restores it
     // or starts a new session, so it is theirs to fix, not a daemon fault.
+    // `session_replaced` (`runtime-sdk/session-replaced.ts`): nothing was done and repeating the request
+    // succeeds -- RETRY, never INTERNAL. The send doors already retried once before it got here.
+    if (isSessionReplaced(err)) {
+      throw new RpcFailure(ERR.RETRY, err.message, { code: err.code, retryable: true });
+    }
     const invalid = err.code === "session_predates_winter_leg" || err.code === "not_supported_on_winter_leg"
       || err.code === "runtime_selection_refused" || err.code === "legacy_session_migration_refused"
       || err.code === "session_cwd_unavailable";
@@ -2276,7 +2282,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const winterSession = await ensureWinterSession(p.sessionId);
           if (winterSession !== undefined) {
             try {
-              const sent = await winterSession.send(p.text, socket.data.clientName, images);
+              // A driver replaced while it was starting took nothing: the message goes to its successor, once.
+              const sent = await withReplacementRetry(winterSession, () => ensureWinterSession(p.sessionId), (s) => s.send(p.text, socket.data.clientName, images));
               return { seq: sent.seq };
             } catch (err) { rpcFromWinterRefusal(err); }
           }
@@ -2307,7 +2314,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const imported = await ensureWinterSession(p.sessionId);
           if (imported !== undefined) {
             try {
-              const sent = await imported.send(p.text, socket.data.clientName, images);
+              const sent = await withReplacementRetry(imported, () => ensureWinterSession(p.sessionId), (s) => s.send(p.text, socket.data.clientName, images));
               return { seq: sent.seq };
             } catch (err) { rpcFromWinterRefusal(err); }
           }
@@ -2326,7 +2333,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const winterSession = await ensureWinterSession(p.sessionId);
           if (winterSession !== undefined) {
             try {
-              const steered = await winterSession.steer(p.text, undefined, images);
+              const steered = await withReplacementRetry(winterSession, () => ensureWinterSession(p.sessionId), (s) => s.steer(p.text, undefined, images));
               return { ok: true, injected: steered.injected };
             } catch (err) { rpcFromWinterRefusal(err); }
           }

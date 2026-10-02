@@ -107,6 +107,7 @@ import { readWinterTasks } from "./tasks-reader";
 import { keychainService } from "../profile";
 import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { createHostCredentialBroker, sessionCredentialAllowlist, type ProviderRefresher } from "./host-credentials";
+import { SESSION_REPLACED } from "./session-replaced";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -129,6 +130,13 @@ export type WinterLegRefusalCode =
   // refused before any child spawns, naming the path — never the child's generic death at spawn, and
   // never a silent fallback to another directory (`sessionCwdRefusal`).
   | "session_cwd_unavailable"
+  // The daemon is stopping (`beginShutdown`): no session is created, resumed or (re)opened from here on,
+  // so no runtime child can be spawned into a daemon that is going away and outlive it.
+  | "daemon_shutting_down"
+  // The session's driver was ended (evicted, deleted, the daemon stopping) while its incarnation was still
+  // opening: that open spawns nothing, and a send that joined it is refused, appending nothing. Sending
+  // again reaches the session's next driver.
+  | "session_replaced"
   // WS-21: a run-home router's refusal (`RunHomeError.code`), forwarded verbatim as `data.code`.
   | RunHomeErrorCode;
 
@@ -512,6 +520,14 @@ export interface WinterSessionDrivers {
   /** End every live driver (bounded each). Shutdown reaches them through `trackQuery` anyway; this
    *  is the door a test drives. */
   endAll(): Promise<void>;
+  /**
+   * The daemon is stopping: from now on no session is created or resumed (`daemon_shutting_down`), and an
+   * incarnation already opening refuses just before it would spawn its runtime child — so nothing is ever
+   * spawned into a daemon that is going away (the old belt, `trackQuery` aborting a child that registered
+   * after `dispose()` began, still stands). Called FIRST in `daemon.stop()`. Idempotent; optional so a test
+   * double need not implement it.
+   */
+  beginShutdown?(): void;
 }
 
 /**
@@ -1338,6 +1354,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       sessionId, backendSessionId, mode, runtime,
       options: optionsFor,
       beforeTurn,
+      spawnRefusal: () => (shuttingDown ? shutdownRefusal() : undefined),
+      endedWhileOpeningRefusal: () => new WinterLegRefusal(SESSION_REPLACED, "this session's runtime was replaced while it was starting; send again"),
       projector: projectorFor,
       append,
       broadcast: (event) => { deps.hub.broadcastTransient(sessionId, event); },
@@ -1482,7 +1500,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     return new WinterLegRefusal("runtime_selection_refused", neutral, refusal.reason);
   };
 
+  /** Set by `beginShutdown()` (`daemon.stop()`, first): nothing is created, resumed or spawned after it. */
+  let shuttingDown = false;
+  const shutdownRefusal = (): WinterLegRefusal => new WinterLegRefusal("daemon_shutting_down", "Winter is shutting down; no session can start now");
+  function assertNotShuttingDown(): void {
+    if (shuttingDown) throw shutdownRefusal();
+  }
+
   const create = async (sessionId: string): Promise<LegSession> => {
+    assertNotShuttingDown();
     const meta = deps.store.meta(sessionId);
     const mode = modeOf(meta.mode);
     // The executable was asserted by the caller BEFORE the product row was minted (`session.create`);
@@ -1586,6 +1612,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    * `session-driver.test.ts` pins the race.
    */
   const resume = async (sessionId: string): Promise<LegSession> => {
+    assertNotShuttingDown();
     assertSpine();
     // WS-23 (R2): a record the retired official leg wrote is adopted onto the Winter leg first — its
     // transcript re-keyed, its runtime kind and selection rewritten — or refused typed, having moved
@@ -1648,6 +1675,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     list: () => [...drivers.values()],
     async endAll() {
       await Promise.all([...drivers.entries()].map(([sessionId, s]) => s.end().catch(() => {}).finally(() => clearSession(sessionId))));
+    },
+    beginShutdown() {
+      shuttingDown = true;
     },
   };
 }

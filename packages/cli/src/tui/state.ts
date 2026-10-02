@@ -107,7 +107,10 @@ export type PendingCard =
 export interface TuiState {
   committed: Block[]; // → <Static> (Task 3)
   activeAssistant: string; // streaming text of the in-flight assistant message
-  activeTools: { name: string; argsJson: string }[]; // tool_calls emitted this turn not yet resulted
+  // tool_calls emitted this turn not yet resulted, in CALL order. Each keeps its `callId`: since agent SDK
+  // 0.0.40 a round's read-only calls run concurrently and their results arrive in COMPLETION order, so a
+  // result is paired with its own call by id, never by position.
+  activeTools: { name: string; argsJson: string; callId?: string }[];
   tasks: TaskRow[]; // raw upserted list; sort/collapse is the component's job (task-display.ts)
   agents: AgentRow[]; // CliSubagent-shaped; NEVER pruned wholesale on the main turn_completed
   turnRunning: boolean;
@@ -119,15 +122,20 @@ export interface TuiState {
   inTokens: number;
   outTokens: number;
   pending: PendingCard | null;
+  /** Cards raised while another was already showing, oldest first (absent = none). Several can be open at
+   *  once in one session -- two subagents running side by side, or two capability lanes (agent SDK 0.0.40)
+   *  -- so a second card queues behind the one on screen instead of replacing it, and each resolution
+   *  removes exactly its own card (the next queued one then takes the screen). */
+  queuedCards?: PendingCard[];
   // child-transcript-view T2: per-child mirror of `committed`, keyed by threadId, capped at
   // CHILD_BLOCK_CAP (drop-oldest) — a live view, not an archive (T3's consumer surface: read
   // `childBlocks[threadId] ?? []` to render a selected agent's transcript).
   childBlocks: Record<string, Block[]>;
-  // One in-flight child tool_call per threadId (mirrors `activeTools`, but per-thread since
-  // multiple children may each have a call outstanding at once) — internal pairing state so the
-  // matching tool_result can build a complete `{kind:"tool",...}` Block; not part of T3's primary
-  // read surface, but exposed on TuiState since `reduce` is pure (no cross-call closures).
-  childPendingTool: Record<string, { name: string; argsJson: string }>;
+  // A child's in-flight tool_calls, per threadId and then per callId (a child's round may run several
+  // read-only calls at once since agent SDK 0.0.40, and their results arrive in completion order) —
+  // internal pairing state so each tool_result can build a complete `{kind:"tool",...}` Block; not part
+  // of T3's primary read surface, but exposed on TuiState since `reduce` is pure (no cross-call closures).
+  childPendingTool: Record<string, Record<string, { name: string; argsJson: string }>>;
   // TUI renderer T5: LIVE background shell tasks — the `bg list` data folded off the events already
   // on the stream (`bg_task_started` appends, `bg_task_exited` removes; the committed one-line
   // notes for both are untouched). Feeds the status chrome's running-work line. Bounded by the
@@ -178,6 +186,35 @@ export function initialState(): TuiState {
 type WireEvent = { type: string; threadId?: string; [k: string]: unknown };
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
+
+/** A card's identity: its call id, or an elicitation's own id. */
+export const cardKey = (c: PendingCard): string => (c.kind === "elicitation" ? `elicitation:${c.elicitationId}` : `call:${c.callId}`);
+
+/** Show `card`, or queue it behind the card already on screen. A card already held (the same key raised
+ *  again -- a replay, a second attach) replaces its own copy in place, never a duplicate. */
+function raiseCard(s: TuiState, card: PendingCard): Pick<TuiState, "pending" | "queuedCards"> {
+  const key = cardKey(card);
+  if (s.pending !== null && cardKey(s.pending) === key) return { pending: card, ...(s.queuedCards !== undefined ? { queuedCards: s.queuedCards } : {}) };
+  if ((s.queuedCards ?? []).some((c) => cardKey(c) === key)) return { pending: s.pending, queuedCards: s.queuedCards!.map((c) => (cardKey(c) === key ? card : c)) };
+  if (s.pending === null) return { pending: card, ...(s.queuedCards !== undefined ? { queuedCards: s.queuedCards } : {}) };
+  return { pending: s.pending, queuedCards: [...(s.queuedCards ?? []), card] };
+}
+
+/** The card with `key` resolved: drop exactly it (the next queued card takes the screen); unknown -> unchanged. */
+function settleCard(s: TuiState, key: string): Pick<TuiState, "pending" | "queuedCards"> {
+  const queued = s.queuedCards ?? [];
+  // `queuedCards` is always restated once the state has one (the caller spreads `s` first).
+  const keep = (rest: PendingCard[]) => (s.queuedCards !== undefined ? { queuedCards: rest } : {});
+  if (s.pending !== null && cardKey(s.pending) === key) {
+    const [next, ...rest] = queued;
+    return { pending: next ?? null, ...keep(rest) };
+  }
+  return { pending: s.pending, ...keep(queued.filter((c) => cardKey(c) !== key)) };
+}
+
+/** A card this view holds (on screen or queued), by key. */
+const heldCard = (s: TuiState, key: string): PendingCard | undefined =>
+  [...(s.pending !== null ? [s.pending] : []), ...(s.queuedCards ?? [])].find((c) => cardKey(c) === key);
 const num = (v: unknown, fallback = 0): number => (typeof v === "number" ? v : fallback);
 
 /** Human label for a peripheral capability class in the CU lease notes (Phase 5 CU). Unknown
@@ -207,7 +244,7 @@ function parseStringField(json: string, key: string): string | undefined {
 
 /** Phase 5a Task 3 (NO protocol changes): a background `spawn_agent` tool_call's `argsJson` carries
  *  a `name` arg; its paired tool_result (the SAME main-thread call, per the `tool_result` case's own
- *  one-in-flight invariant below) is `{agentId,status:"running"}` JSON ONLY for a background spawn
+ *  callId pairing below) is `{agentId,status:"running"}` JSON ONLY for a background spawn
  *  — a SYNC spawn's tool_result is the child's plain-text final report, so `parseStringField` fails
  *  to parse it and this yields `undefined` by construction, same as any other non-JSON text. Also
  *  `undefined` for a nameless spawn, or any tool_call that isn't `spawn_agent` at all. */
@@ -232,8 +269,8 @@ function feedAgents(s: TuiState, e: WireEvent): TuiState {
 /** Shared tool-`Block` construction (child-transcript-view T2) — the SAME shape the main path's
  *  `tool_result` case has always built inline, now factored out so a child's own tool_call/
  *  tool_result pairing (below) produces byte-identical Block shapes without duplicating the
- *  field list. `call` is whichever pending call (main's `activeTools[0]` or a child's
- *  `childPendingTool[threadId]`) paired with this result; absent (a stray/ghost result) falls
+ *  field list. `call` is the pending call with this result's callId (main's `activeTools` row or a child's
+ *  `childPendingTool[threadId][callId]`); absent (a stray/ghost result) falls
  *  back to the same empty-string defaults the main path already tolerated. */
 function buildToolBlock(call: { name: string; argsJson: string } | undefined, output: string, isError: boolean): Block {
   return { kind: "tool", name: call?.name ?? "", argsJson: call?.argsJson ?? "", output, isError };
@@ -309,14 +346,14 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
     case "tool_call": {
       if (e.threadId !== MAIN) {
         // Child tool calls still bump toolCalls/activity via feedAgents (unchanged aggregate
-        // path) AND now stash the pending call (name/argsJson) so the matching tool_result
-        // (below) can build a complete Block — same one-in-flight-per-thread invariant as MAIN's
-        // activeTools, just keyed per child threadId since multiple children run concurrently.
+        // path) AND stash the pending call (name/argsJson) under its callId, so its own tool_result
+        // (below) builds a complete Block whatever order a concurrent round finishes in.
         const fed = feedAgents(s, e);
         const threadId = str(e.threadId);
-        return { ...fed, childPendingTool: { ...fed.childPendingTool, [threadId]: { name: str(e.name), argsJson: str(e.argsJson) } } };
+        const pending = { ...(fed.childPendingTool[threadId] ?? {}), [str(e.callId)]: { name: str(e.name), argsJson: str(e.argsJson) } };
+        return { ...fed, childPendingTool: { ...fed.childPendingTool, [threadId]: pending } };
       }
-      return { ...s, activeTools: [...s.activeTools, { name: str(e.name), argsJson: str(e.argsJson) }] };
+      return { ...s, activeTools: [...s.activeTools, { name: str(e.name), argsJson: str(e.argsJson), ...(typeof e.callId === "string" ? { callId: e.callId } : {}) }] };
     }
 
     case "tool_result": {
@@ -331,22 +368,28 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
         // the moment the silence threshold elapsed, which is the one thing that hint must not do.
         const fed = feedAgents(s, e);
         const threadId = str(e.threadId);
-        const call = fed.childPendingTool[threadId];
+        const callId = str(e.callId);
+        const pending = { ...(fed.childPendingTool[threadId] ?? {}) };
+        const call = pending[callId];
+        delete pending[callId];
         const block = buildToolBlock(call, str(e.output), e.isError === true);
         const childPendingTool = { ...fed.childPendingTool };
-        delete childPendingTool[threadId];
+        if (Object.keys(pending).length === 0) delete childPendingTool[threadId];
+        else childPendingTool[threadId] = pending;
         return { ...fed, childPendingTool, childBlocks: withChildBlock(fed.childBlocks, threadId, block) };
       }
-      // Main-thread tool_call/tool_result always alternate one at a time — the engine's dispatch
-      // loop (packages/core/src/agent/engine.ts's `for (const call of calls)`) emits tool_call,
-      // awaits execution, THEN emits that SAME call's tool_result before ever emitting the next
-      // tool_call — so activeTools holds at most one entry for "main" and this call is always the
-      // one it pairs with; no callId needs to ride the (call-id-less) activeTools/Block shapes.
-      const call = s.activeTools[0];
+      // Paired by callId: a round's tool_calls all arrive first, and since agent SDK 0.0.40 its
+      // read-only calls run concurrently, so results come back in COMPLETION order, not call order. A
+      // result whose callId names no pending row (a stray, or a writer that sends none) is rendered
+      // UNPAIRED and takes no row: guessing would label it with another call's name and drop that call's
+      // live row while it is still running.
+      const at = typeof e.callId === "string" ? s.activeTools.findIndex((t) => t.callId === e.callId) : -1;
+      const pendingRow = at >= 0 ? s.activeTools[at] : undefined;
+      const call = pendingRow === undefined ? undefined : { name: pendingRow.name, argsJson: pendingRow.argsJson };
       const output = str(e.output);
       const next: TuiState = {
         ...s,
-        activeTools: s.activeTools.slice(1),
+        activeTools: at >= 0 ? s.activeTools.filter((_, i) => i !== at) : s.activeTools,
         committed: [...s.committed, buildToolBlock(call, output, e.isError === true)],
       };
       // phase 5a T3: learn a background child's `name` off this same call/result pairing (see
@@ -487,29 +530,29 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       const fed = feedAgents(s, e);
       return {
         ...fed,
-        pending: {
+        ...raiseCard(fed, {
           kind: "approval",
           callId: str(e.callId),
           toolName: str(e.toolName),
           summary: str(e.summary),
           ...(reviewerReason !== undefined ? { reviewerReason } : {}),
           ...(options !== undefined ? { options } : {}),
-        },
+        }),
       };
     }
 
     case "approval_resolved": {
-      const pending = s.pending;
-      const toolName = pending?.kind === "approval" && pending.callId === e.callId ? pending.toolName : str(e.callId);
+      const held = heldCard(s, `call:${str(e.callId)}`);
+      const toolName = held?.kind === "approval" ? held.toolName : str(e.callId);
       const text = `${e.approved ? "approved" : "denied"} ${toolName}`;
       // task-5: the release half of approval_requested's roster feed above — the child is off the
       // human's hook and its silence is measurable again from here.
       const fed = feedAgents(s, e);
-      return { ...fed, pending: null, committed: [...fed.committed, { kind: "note", text }] };
+      return { ...fed, ...settleCard(fed, `call:${str(e.callId)}`), committed: [...fed.committed, { kind: "note", text }] };
     }
 
     case "question_asked":
-      return { ...s, pending: { kind: "question", callId: str(e.callId), questions: (e.questions as unknown[]) ?? [] } };
+      return { ...s, ...raiseCard(s, { kind: "question", callId: str(e.callId), questions: (e.questions as unknown[]) ?? [] }) };
 
     case "question_resolved": {
       // Symmetric to approval_resolved/plan_resolved: the resolution event — also fired when another
@@ -520,37 +563,38 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       // resolved elsewhere with no payload) → clear pending, commit nothing.
       const answers = (e.answers ?? {}) as Record<string, string>;
       const notes = Object.entries(answers).map(([q, a]) => ({ kind: "note" as const, text: `${q}: ${a}` }));
-      return { ...s, pending: null, committed: [...s.committed, ...notes] };
+      return { ...s, ...settleCard(s, `call:${str(e.callId)}`), committed: [...s.committed, ...notes] };
     }
 
     case "plan_presented":
-      return { ...s, pending: { kind: "plan", callId: str(e.callId), plan: str(e.plan) } };
+      return { ...s, ...raiseCard(s, { kind: "plan", callId: str(e.callId), plan: str(e.plan) }) };
 
     case "elicitation_requested": {
       if (e.threadId !== undefined && e.threadId !== MAIN) return s;
       return {
         ...s,
-        pending: { kind: "elicitation", elicitationId: str(e.elicitationId), serverName: str(e.serverName), message: str(e.message), host: str(e.host) },
+        ...raiseCard(s, { kind: "elicitation", elicitationId: str(e.elicitationId), serverName: str(e.serverName), message: str(e.message), host: str(e.host) }),
       };
     }
 
     case "elicitation_resolved": {
       // Host only — the url is never on the wire here, and never printed.
-      const card = s.pending?.kind === "elicitation" && s.pending.elicitationId === e.elicitationId ? s.pending : undefined;
+      const held = heldCard(s, `elicitation:${str(e.elicitationId)}`);
+      const card = held?.kind === "elicitation" ? held : undefined;
       const what = e.action === "accept" ? "opened" : e.action === "decline" ? "declined" : "cancelled";
       const text = `link request${card ? ` from ${card.serverName} (${card.host})` : ""} ${what}`;
-      return { ...s, pending: card ? null : s.pending, committed: [...s.committed, { kind: "note", text }] };
+      return { ...s, ...settleCard(s, `elicitation:${str(e.elicitationId)}`), committed: [...s.committed, { kind: "note", text }] };
     }
 
     case "local_elicitation_inactive": {
-      if (s.pending?.kind !== "elicitation" || s.pending.elicitationId !== e.elicitationId) return s;
-      return { ...s, pending: null };
+      if (heldCard(s, `elicitation:${str(e.elicitationId)}`) === undefined) return s;
+      return { ...s, ...settleCard(s, `elicitation:${str(e.elicitationId)}`) };
     }
 
     case "plan_resolved": {
       // Same wording as main.ts:618 (minus ANSI): "plan approved[ (auto-accept edits)]" / "plan rejected".
       const text = e.approved ? `plan approved${e.autoAccept ? " (auto-accept edits)" : ""}` : "plan rejected";
-      return { ...s, pending: null, committed: [...s.committed, { kind: "note", text }] };
+      return { ...s, ...settleCard(s, `call:${str(e.callId)}`), committed: [...s.committed, { kind: "note", text }] };
     }
 
     case "directory_added": {

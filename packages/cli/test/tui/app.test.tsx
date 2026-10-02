@@ -2469,3 +2469,38 @@ describe("App — code-mode image input", () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
+
+describe("App — several open cards (agent SDK 0.0.40: concurrent subagents, two lanes)", () => {
+  test("a queued card takes the screen fresh: what was typed into the card before it is never carried over", async () => {
+    const bridge = makeEventBridge();
+    bridge.push(ev({ type: "approval_requested", threadId: "main", callId: "a", toolName: "Computer", summary: "click" }));
+    bridge.push(ev({ type: "approval_requested", threadId: "main", callId: "b", toolName: "Bash", summary: "make" }));
+    const client = fakeClient();
+    const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+    await wait();
+    expect(lastFrame()).toContain("Computer");
+    stdin.write("y"); // typed into card a, not submitted...
+    await wait();
+    bridge.push(ev({ type: "approval_resolved", threadId: "main", callId: "a", approved: false, by: "user" })); // ...answered elsewhere
+    await wait();
+    expect(lastFrame()).toContain("Bash"); // card b is on screen now
+    stdin.write("\r");
+    await wait();
+    const answers = client.calls.filter((c) => c.method === "request" && c.args[0] === METHODS.approvalRespond).map((c) => c.args[1]);
+    // b was answered from ITS OWN empty buffer (a bare Enter denies) — never with card a's "y".
+    expect(answers).toEqual([{ sessionId: "s1", callId: "b", approved: false }]);
+  });
+
+  test("a refused send is a note and the text goes back to the composer — never an unhandled rejection", async () => {
+    const client = { ...fakeClient(), send: () => Promise.reject(new Error("this session's runtime was replaced while it was starting; send again")) };
+    const { stdin, lastFrame } = render(<App client={client} bridge={makeEventBridge()} {...baseProps} />);
+    await wait();
+    stdin.write("hello there");
+    await wait();
+    stdin.write("\r");
+    await wait(60);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("message not sent");
+    expect(frame).toContain("hello there"); // back in the composer
+  });
+});

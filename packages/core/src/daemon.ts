@@ -2988,6 +2988,9 @@ export async function startDaemon(opts: {
       // First: a draining child's last settle must not report a "finished" turn or wake Dispatch — but
       // the cards its aborted turn withdraws still close on Dispatch's log (stopped fully below,
       // after the children drained and before the store closes).
+      // Before anything else: no session is created, resumed or (re)opened from here on, and an open
+      // already under way refuses just before its spawn — no runtime child can outlive this daemon.
+      winterDrivers.beginShutdown?.();
       dispatchChildren?.beginShutdown();
       sessionMessaging?.beginShutdown(); // no SendMessage resumes a session into a daemon that is going away
       server.stop(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();

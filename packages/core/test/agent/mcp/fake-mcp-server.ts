@@ -34,8 +34,24 @@ function handle(msg: any) {
   else if (msg.method === "tools/list" && process.env.WINTER_FAKE_HANG_TOOLS_LIST === "1") { /* never answered */ }
   else if (msg.method === "tools/list") {
     const echoTool = { name: "echo", description: "Echo the msg back", inputSchema: { type: "object", properties: { msg: { type: "string" } }, required: ["msg"] } };
-    const tools = process.env.WINTER_FAKE_DUP === "1" ? [echoTool, echoTool] : [echoTool];
+    const tools: Array<Record<string, unknown>> = process.env.WINTER_FAKE_DUP === "1" ? [echoTool, echoTool] : [echoTool];
+    // WINTER_FAKE_SLOW_TOOL=1 (opt-in; agent SDK 0.0.40's concurrency e2e): `wait`, listed READ-ONLY, sleeps
+    // `ms` and answers `<label> done` -- so the runtime may run several at once.
+    if (process.env.WINTER_FAKE_SLOW_TOOL === "1") {
+      tools.push({ name: "wait", description: "Wait ms, then answer the label", inputSchema: { type: "object", properties: { label: { type: "string" }, ms: { type: "number" } }, required: ["label"] }, annotations: { readOnlyHint: true } });
+    }
     send({ jsonrpc: "2.0", id: msg.id, result: { tools } });
+  }
+  else if (msg.method === "tools/call" && msg.params?.name === "wait" && process.env.WINTER_FAKE_SLOW_TOOL === "1") {
+    const label = String(msg.params?.arguments?.label ?? "");
+    // WINTER_FAKE_MARKER_DIR: `<label>.started` / `<label>.done` files, so a test can reason CAUSALLY about
+    // what had started or finished when a result arrived, instead of measuring millisecond gaps.
+    const markers = process.env.WINTER_FAKE_MARKER_DIR;
+    if (markers) writeFileSync(`${markers}/${label}.started`, "");
+    setTimeout(() => {
+      if (markers) writeFileSync(`${markers}/${label}.done`, "");
+      send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: `${label} done` }] } });
+    }, Number(msg.params?.arguments?.ms ?? 0));
   }
   else if (msg.method === "tools/call") send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: `echo: ${msg.params?.arguments?.msg ?? ""}` }] } });
   else if (msg.method === "resources/list" && process.env.WINTER_FAKE_RESOURCES === "1") {
