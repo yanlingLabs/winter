@@ -78,7 +78,6 @@ function deps(): CapabilityDeps {
     computerUseEnabled: () => true, // every server, so every name is covered
     browser: { browser: { tabs: () => ({ tabs: [], activeTabId: undefined }) as never, openTab: () => "t", ...panel } },
     office: { office: { ...panel, dirsOf: () => [] as never } },
-    research: { search: {} },
     lsp: { lsp: () => undefined },
   };
 }

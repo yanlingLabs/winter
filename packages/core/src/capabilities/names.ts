@@ -66,8 +66,20 @@ export type { SessionMode };
  *  The protocol's `CapabilityServerInfoSchema.key` enum (`packages/protocol/src/methods.ts`) still
  *  lists `"web"`. Deliberately not narrowed: it constrains what `capabilities.list` may EMIT, a wider
  *  enum is valid for a result, and narrowing it is an RPC-schema change with a Swift mirror behind it. */
-export const CAPABILITY_SERVER_KEYS = ["sessions", "computer", "browser", "office", "research", "lsp", "external"] as const;
+export const CAPABILITY_SERVER_KEYS = ["sessions", "computer", "browser", "office", "lsp", "external"] as const;
 export type CapabilityServerKey = (typeof CAPABILITY_SERVER_KEYS)[number];
+
+/**
+ * Server keys the daemon USED to own and no longer builds — still RESERVED, so no configured server can
+ * take the name: `runtime-sdk/tool-names.ts` keeps stripping `mcp__winter__<key>__<tool>` for every one
+ * of them (old session JSONLs replay those rows), so a user server named `winter__research` or
+ * `winter__web` would otherwise mint a name that strips to the host's own `Search`/`web_fetch` — the
+ * NETWORK class, allowed under every policy.
+ *
+ *  - `research` (Winter's Exa-answer `Search`) left on 2026-10-01: `Search` is the agent SDK's built-in.
+ *  - `web` (`web_fetch`/`web_search`) left on 2026-09-18.
+ */
+export const RETIRED_CAPABILITY_SERVER_KEYS = ["research", "web"] as const;
 
 /**
  * `capabilityToolName("sessions", "list_sessions")` → `"mcp__winter__sessions__list_sessions"`.
@@ -109,76 +121,76 @@ export function capabilityServerName(serverKey: string): string {
  * because it owns no daemon MCP servers of its own to collide with.
  */
 export function reservedMcpServerNames(): Set<string> {
-  return new Set<string>([CORE_BRAND.mcpServerName, ...CAPABILITY_SERVER_KEYS.map((k) => capabilityServerName(k))]);
+  return new Set<string>([CORE_BRAND.mcpServerName, ...[...CAPABILITY_SERVER_KEYS, ...RETIRED_CAPABILITY_SERVER_KEYS].map((k) => capabilityServerName(k))]);
 }
 
 /**
- * What Task 9's per-mode exposure table has to reproduce for each capability tool.
+ * What each capability tool IS on the child's surface (the 2026-10-01 tool-surface ruling).
  *
- * `modes` is TODAY'S REGISTRATION, verbatim — the `modes` field on the tool's own `ToolDefinition`
- * (registry.ts; absent there means `["code"]`). It is NOT a wish list: the whole point of recording
- * it here is that Task 9's `CAPABILITY_TOOL_MODES` is diffed against it, so a capability that
- * silently widened a tool's reach (chat gaining `bash`-adjacent power, dispatch gaining a code-only
- * tool) fails a test rather than shipping.
+ * `modes` is the tool's REGISTRATION — the `modes` field on its own `ToolDefinition` (registry.ts;
+ * absent there means `["code"]`). Task 9's `CAPABILITY_TOOL_MODES` is diffed against it, so a capability
+ * that silently widened a tool's reach (chat gaining `bash`-adjacent power, dispatch gaining a code-only
+ * tool) fails a test rather than shipping. The servers filter by it structurally (`server.ts`).
  *
- * `deferred` mirrors `ToolDefinition.deferred` the same way. It carries NO meaning for the Winter
- * leg's `Options` — a spawned child has no ToolSearch deferral over MCP tools — and is recorded
- * only so Task 9 can reproduce today's per-mode EXPOSURE faithfully (a tool that is deferred in a
- * mode is reachable there, just not advertised up front).
+ * `plainName` — the ORDINARY tool name the model is shown in place of `mcp__winter__<key>__<tool>`
+ * (`SpawnSession`, `Computer`, …), through the agent SDK's `McpSdkServerConfig.toolNames`. That plain name
+ * is the call's identity everywhere downstream (the transcript, hook inputs, `canUseTool`, the gate via
+ * `runtime-sdk/tool-names.ts`'s pair table); the `mcp__winter__…` spelling stays an EQUIVALENT identity in
+ * the runtime, so a saved rule or an old transcript naming it keeps working. Absent: the tool keeps its
+ * MCP name (office, LSP, plugin extras).
+ *
+ * `eager` — loaded up front even while Tool Search is active (`_meta["anthropic/alwaysLoad"]`). EVERY
+ * OTHER capability tool starts DEFERRED (loaded through `ToolSearch` on first use), like every MCP tool —
+ * the ruling's default, and since this ruling a real one: the daemon turns Tool Search on for every
+ * session (`toolSearchEnabled`), on providers that can search.
  */
 export interface CapabilityToolFacts {
   modes: readonly SessionMode[];
-  deferred?: true | readonly SessionMode[];
+  plainName?: string;
+  eager?: true;
 }
 
 /**
  * THE table. A plain literal — no computed keys — so that Task 9's `CAPABILITY_TOOL_MODES` can be
  * diffed against it key-for-key by a test that reads both as data, and so that `grep`ping for a
- * capability tool name in this repo lands here.
+ * capability tool name in this repo lands here. KEYED BY THE MCP SPELLING (the stable identity old rules
+ * and transcripts carry); `plainName` is what a model sees.
  *
  * The literal spellings are asserted equal to `capabilityToolName(key, tool)` in
  * `test/capabilities/names.test.ts`; that test is what keeps the two spellings from drifting.
  */
 export const WINTER_CAPABILITY_TOOLS = {
   // `sessions` — dispatch's orchestration + fleet-management surface (`modes: ["dispatch"]` on all
-  // three defs; `list_sessions`/`manage_session` carry `deferred: true`, `session_spawn` does not).
-  "mcp__winter__sessions__session_spawn": { modes: ["dispatch"] },
-  "mcp__winter__sessions__list_sessions": { modes: ["dispatch"], deferred: true },
-  "mcp__winter__sessions__manage_session": { modes: ["dispatch"], deferred: true },
-  // `computer` — `modes: ["code","dispatch"]`, `deferred: ["dispatch"]` (immediate in code, loaded
-  // via ToolSearch in dispatch). Its PRESENCE additionally follows the LIVE
-  // `settings.computerUse.enabled`, read when the session's servers are built (`index.ts`).
-  "mcp__winter__computer__computer": { modes: ["code", "dispatch"], deferred: ["dispatch"] },
-  // `browser` — the only capability tool eligible in all three modes. Chat sees a READ-ONLY verb
-  // set, enforced INSIDE the capability (`browser.ts`'s `argsByMode`, resolved from the caller's
-  // mode), because a construction-time capability set cannot express a per-ACTION subset and a
-  // whole-tool `disallowedTools` entry would take the read verbs away too.
-  "mcp__winter__browser__browser": { modes: ["code", "dispatch", "chat"], deferred: ["code", "dispatch"] },
-  // `office` — the three LibreOffice-bridge tools, `modes: ["code","dispatch"]`, never deferred.
-  "mcp__winter__office__docs": { modes: ["code", "dispatch"] },
-  "mcp__winter__office__sheets": { modes: ["code", "dispatch"] },
-  "mcp__winter__office__slides": { modes: ["code", "dispatch"] },
-  // `research` — Winter's OWN search surface for chat and dispatch: Exa's ANSWER mode, which returns a
-  // written answer with its sources rather than links a chat session has no tool to chase (the
-  // 2026-09-18 ruling). Never deferred — `search.ts`'s own note explains why chat's small toolset must
-  // not pay a ToolSearch round trip for it.
-  //
-  // Its EXPOSURE additionally follows whether an Exa key is stored, which is runtime state and
-  // therefore not expressible here: `/answer` cannot be called anonymously, so with no key the
-  // capability server advertises no `Search` and `disallowedToolsFor` names it (and exposes the
-  // runtime's own `WebSearch` in its place). Same shape as `computer`'s live settings gate above — the
-  // `modes` row states today's REGISTRATION, and a live gate narrows it further.
-  "mcp__winter__research__Search": { modes: ["chat", "dispatch"] },
-  // `ReadPage` (chat/dispatch) and the `web` server's `web_fetch`/`web_search` (code) were HERE until
-  // the 2026-09-18 ruling retired all three. The child's own `WebFetch`/`WebSearch` are the web surface
-  // now, on both legs, with the Exa key and the dangerous-domain floor supplied through `Options.web`.
-  // Their names survive as CLASSIFICATION DATA only — `runtime-sdk/tool-names.ts`'s pair table maps
-  // `WebFetch`→`web_fetch`/`WebSearch`→`web_search` for the gate and the Mac/phone tool rows, and old
-  // session JSONLs still replay rows named `web_fetch`/`web_search`/`ReadPage`.
-  // `lsp` (fix wave, review F7) — the single multi-purpose language-server tool, reinstated as a
-  // capability: the 0.0.4 child advertises no `LSP` of its own. Today's registration verbatim:
-  // no `modes` on the def (⇒ `["code"]`), `deferred: true`.
-  "mcp__winter__lsp__lsp": { modes: ["code"], deferred: true },
+  // three defs). EAGER: the ruling lists them as ordinary dispatch tools, not as deferred ones.
+  "mcp__winter__sessions__session_spawn": { modes: ["dispatch"], plainName: "SpawnSession", eager: true },
+  "mcp__winter__sessions__list_sessions": { modes: ["dispatch"], plainName: "ListSessions", eager: true },
+  "mcp__winter__sessions__manage_session": { modes: ["dispatch"], plainName: "ManageSession", eager: true },
+  // `computer` — `modes: ["code","dispatch"]`, deferred in both. Its PRESENCE additionally follows the
+  // LIVE `settings.computerUse.enabled`, read when the session's servers are built (`index.ts`).
+  "mcp__winter__computer__computer": { modes: ["code", "dispatch"], plainName: "Computer" },
+  // `browser` — the only capability tool eligible in all three modes, deferred in all three. Chat sees a
+  // READ-ONLY verb set, enforced INSIDE the capability (`browser.ts`'s `argsByMode`, resolved from the
+  // caller's mode), because a construction-time capability set cannot express a per-ACTION subset and a
+  // whole-tool deny would take the read verbs away too.
+  "mcp__winter__browser__browser": { modes: ["code", "dispatch", "chat"], plainName: "Browser" },
+  // `office` — the three LibreOffice-bridge tools. CODE ONLY since the 2026-10-01 ruling (dispatch's
+  // allowed set names no office tool); deferred, under their MCP names.
+  "mcp__winter__office__docs": { modes: ["code"] },
+  "mcp__winter__office__sheets": { modes: ["code"] },
+  "mcp__winter__office__slides": { modes: ["code"] },
+  // `research` (Winter's own Exa-answer `Search`) was HERE until 2026-10-01: `Search` is the agent SDK's
+  // built-in now (opt-in through `Options.tools`, keyed on `Options.web.search.authRef`), and old session
+  // JSONLs' `mcp__winter__research__Search` rows still strip to `Search` for the renderers and the gate.
+  // `ReadPage` and the `web` server's `web_fetch`/`web_search` left on 2026-09-18 (their names survive
+  // as CLASSIFICATION DATA only, in `runtime-sdk/tool-names.ts`).
+  // `lsp` (fix wave, review F7) — the single multi-purpose language-server tool: code only, deferred.
+  "mcp__winter__lsp__lsp": { modes: ["code"] },
 } as const satisfies Readonly<Record<string, CapabilityToolFacts>>;
+
+/** The name the CHILD knows a capability tool by: its plain name when it has one, else its MCP name. */
+export function capabilityAdvertisedName(mcpName: string): string {
+  const facts = (WINTER_CAPABILITY_TOOLS as Readonly<Record<string, CapabilityToolFacts>>)[mcpName];
+  return facts?.plainName ?? mcpName;
+}
 
 export type WinterCapabilityToolName = keyof typeof WINTER_CAPABILITY_TOOLS;

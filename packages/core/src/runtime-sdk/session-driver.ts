@@ -43,7 +43,7 @@ import type { SecretStore } from "../auth/secret-store";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
 import type { QuestionBroker } from "../agent/questions";
-import { WINTER_CAPABILITY_TOOLS, assertNoCapabilityCollision, type CapabilityServerRecord, type CapabilitySession } from "../capabilities";
+import { RETIRED_CAPABILITY_SERVER_KEYS, WINTER_CAPABILITY_TOOLS, assertNoCapabilityCollision, capabilityServerName, reservedMcpServerNames, type CapabilityServerRecord, type CapabilitySession } from "../capabilities";
 import { createProjector, type Projector } from "../projector";
 import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-state/records";
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
@@ -57,7 +57,6 @@ import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import { elicitationHandlerFor, elicitationTurnTracker, type ElicitationBroker } from "./url-elicitation";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import { clearSession as clearDiffSession } from "./diff-attach";
-import { clearSiteIcons } from "./site-icons";
 import { credentialPresenceFrom, credentialRefFor, refMaterialPresent } from "./keychain";
 import { SHIPPED_DANGEROUS_DOMAINS } from "../agent/dangerous-domains";
 import { apiKeyProviderIsUnauthenticated, exaKeyPresent, missingCredentialDetail } from "./credentials";
@@ -77,8 +76,8 @@ import { winterSystemPromptFor } from "./system-prompt";
 import { dispatchEffortFor } from "../agent/dispatch-config";
 import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers, type LoadedAgentDefinitions } from "../agent/agent-definitions";
 
-/** Both per-session, in-memory tool_result side channels: `fileDiff` and `siteIcons`. */
-function clearSession(sessionId: string): void { clearDiffSession(sessionId); clearSiteIcons(sessionId); }
+/** The per-session, in-memory tool_result side channel: `fileDiff` (`siteIcons` now ride the runtime's own block, statelessly). */
+function clearSession(sessionId: string): void { clearDiffSession(sessionId); }
 
 /**
  * Daemon settings surface batch 3: the ONE merge the incarnation builder calls — `<home>/agents/*.md`
@@ -256,6 +255,13 @@ function userRulesFrom(home: string, runHomeApplied: boolean): { userAllow?: rea
 }
 
 /** The narrowed `SessionMode` a stored `mode` column resolves to (absent = code, as everywhere). */
+/** The capability server KEYS (`sessions`, `browser`, …) of the servers one incarnation built — the record
+ *  is keyed by server name, `winter__<key>`. A name of any other shape is not a capability server. */
+export function capabilityKeysOf(capabilities: CapabilityServerRecord): ReadonlySet<string> {
+  const prefix = capabilityServerName("");
+  return new Set(Object.keys(capabilities).filter((name) => name.startsWith(prefix) && name.length > prefix.length).map((name) => name.slice(prefix.length)));
+}
+
 const modeOf = (raw: string | undefined): SessionMode => (raw === "chat" || raw === "dispatch" ? raw : "code");
 
 /** Winter's effort strings that are also the SDK's `EffortLevel`. `none` is the wire's "unset" and
@@ -809,8 +815,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const cwd = winterCwdOf(sessionId, meta.cwd);
     const home = deps.home;
 
+    // The capability server keys the CURRENT incarnation built (set in `optionsFor`, read per call): only
+    // their `mcp__winter__<key>__*` names are the daemon's own on a live call (`tool-names.ts`'s
+    // `hostToolNameFor` `liveKeys`). Empty until the first incarnation is assembled — nothing is Winter's then.
+    let liveCapabilityKeys: ReadonlySet<string> = new Set<string>();
     const canUseTool = canUseToolFor({
       sessionId, mode, origin: meta.origin, home, cwd,
+      capabilityKeys: () => liveCapabilityKeys,
       // WS-21: "in this project" is offered only for a trusted project (live — trusting it reaches the next card).
       ...(deps.isTrusted === undefined ? {} : { projectTrusted: bridgeProjectTrustedFor(deps.isTrusted, cwd) }),
       // A getter: `session.setPolicy` mid-session is seen by the NEXT call (the engine re-reads too).
@@ -969,13 +980,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         tmpDir: deps.tmpDirOf(sessionId),
         outDir: deps.outDirOf(sessionId),
         signal: inc.abort.signal,
-        // The SAME probe `buildWinterOptions` gets below (one read, one incarnation): it decides
-        // whether this session's `research` server advertises `Search` at all, and `disallowedTools`
-        // decides the complementary `WebSearch`/`Search` withholding from the identical value. Two
-        // doors, one answer — see `capabilities/research.ts` for what disagreement would cost.
-        exaKeyPresent: exaPresent,
+        // (`exaKeyPresent` is no longer a capability input: `Search` is the agent SDK's built-in, so
+        // the key decides one door only — which of `Search`/`WebSearch` `Options.tools` names, in
+        // `buildWinterOptions` below — and the prompt that names it.)
       };
       const capabilities = deps.buildSessionCapabilities(capSession);
+      const capabilityKeys = capabilityKeysOf(capabilities);
+      liveCapabilityKeys = capabilityKeys;
       // Winter's own voice (Step 0(a)): the engine's `primaryDir`/`cwd`/`additionalWorkDirs` inputs,
       // read live so a resume sees the session's current directories.
       let primary: string | undefined = live.cwd ?? undefined;
@@ -991,9 +1002,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const systemPrompt = deps.assembler === undefined ? undefined : winterSystemPromptFor(deps.assembler, {
         mode, origin: live.origin, primary, cwd: primary ?? deps.tmpDirOf(sessionId),
         outDir: deps.outDirOf(sessionId), extraDirs, effort: live.effort,
-        // THE THIRD READER of this one probe, and the reason it is threaded rather than re-derived:
+        // THE SECOND READER of this one probe, and the reason it is threaded rather than re-derived:
         // chat's and dispatch's base prompts NAME their search tool, and the prompt must name the one
-        // `disallowedTools` and the capability server actually gave this incarnation.
+        // `Options.tools` actually gave this incarnation (`Search` with a key, `WebSearch` without).
         exaKeyPresent: exaPresent,
         // WS-21 (L3.4): the run folder carries the instructions, the output style and the code memory.
         ...(runHomeApplied ? { runHomeApplied: true } : {}),
@@ -1006,7 +1017,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // WS-21 (L3.4): on a run-home incarnation the configured servers (user, local, trusted project) are
       // the run folder's `.winter.json`; only the daemon's capability servers ride `Options.mcpServers`.
       const extra = runHomeApplied ? {} : (deps.extraMcpServers?.(capSession) ?? {});
-      try { assertNoCapabilityCollision(extra, capabilities); } catch (err) {
+      // The RETIRED server names too (`winter__research`, `winter__web`): their old tool spellings still
+      // strip to the host's own NETWORK-class names (`tool-names.ts`), so a configured server must not
+      // take one.
+      try { assertNoCapabilityCollision(extra, [...Object.keys(capabilities), ...RETIRED_CAPABILITY_SERVER_KEYS.map((k) => capabilityServerName(k))]); } catch (err) {
         throw new WinterLegRefusal("winter_leg_unavailable", err instanceof Error ? err.message : String(err));
       }
       // WS-25/27: the fold this incarnation's child will have — on a run-home incarnation the configured servers
@@ -1144,11 +1158,12 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         canUseTool,
         abort: inc.abort,
         capabilityTools: WINTER_CAPABILITY_TOOLS,
+        reservedMcpServerNames: [...reservedMcpServerNames()],
         capabilities: { ...extra, ...capabilities } as CapabilityServerRecord,
         ...(connection === undefined ? {} : { connection }),
         resume: inc.resume,
         // P8c-14 (integration round 2): lane 3's hooks facade (`hooks.ts`'s `sessionHooksFor`).
-        ...(deps.hooksFor === undefined ? {} : { hooks: deps.hooksFor(capSession).winter }),
+        ...(deps.hooksFor === undefined ? {} : { hooks: deps.hooksFor({ ...capSession, capabilityKeys }).winter }),
         // P8d-8 (D30): a LIVE read at every incarnation — `runtimes.advisorModel` when the user set
         // one, else Winter's own D30 default for this session's model family (`advisor-reviewer.ts`'s
         // `d30DefaultModel`), so `Options.advisor.model` is ALWAYS explicit rather than depending on

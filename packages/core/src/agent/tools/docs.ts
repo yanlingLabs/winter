@@ -453,7 +453,7 @@ export function docsToolDefs(deps: DocsToolDeps): ToolDefinition[] {
       + "after a timeout can add it twice. replace is safer to re-send (replacing text that is no "
       + "longer there does nothing), but re-reading first is still the honest way to confirm what "
       + "actually happened.",
-    modes: ["code", "dispatch"],
+    modes: ["code"], // 2026-10-01 tool-surface ruling: office is code-only (dispatch names no office tool)
     args: DocsArgs,
     async run(a: DocsArgs, ctx) {
       const sessionId = ctx.sessionId;

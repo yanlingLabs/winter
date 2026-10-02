@@ -18,8 +18,8 @@
  *      EXPORTED from `ipc/server.ts` and imported directly here — Winter's own capability-matrix
  *      generator is an in-repo consumer with no dependency-direction problem, unlike the CLI
  *      surface rule below.
- *   3. **The mode tool registry** (`runtime-sdk/mode-options.ts`'s `disallowedToolsFor`) — chat's
- *      own exclusions (the Winter built-ins chat has never offered, `CHAT_DISALLOWED_BUILTINS`)
+ *   3. **The mode tool surface** (`runtime-sdk/mode-options.ts`'s `toolsFor`, the 2026-10-01 ALLOWED list) — chat's
+ *      own allowed built-ins (`CHAT_BUILTIN_TOOLS` plus its search tool)
  *      are read here and folded into chat's `reason` text, so "chat is implemented on the Winter
  *      leg" carries the caveat that its tool surface is narrower BY DESIGN, not an oversight this
  *      matrix would otherwise hide.
@@ -37,7 +37,7 @@
  */
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { disallowedToolsFor } from "../src/runtime-sdk/mode-options";
+import { toolsFor } from "../src/runtime-sdk/mode-options";
 import { REMOTE_ELIGIBLE_SESSION_MODES } from "../src/ipc/server";
 
 export type CapabilityMode = "code" | "dispatch" | "chat";
@@ -87,9 +87,10 @@ function surfaceUnreachableReason(surface: CapabilitySurface, mode: CapabilityMo
 const OFFICIAL_LEG_RETIRED_REASON = "the official claude runtime was retired (WS-23): no session is created on it, and a session recorded on it is adopted onto the Winter leg at its next resume (session-driver.ts's adoptLegacyRecord)";
 
 const CHAT_MODE_TOOL_NOTE = (() => {
-  // Chat's answer with an Exa key assumed present (the narrower surface).
-  const excluded = disallowedToolsFor("chat", {});
-  return `chat's own tool registry excludes ${excluded.length} Winter built-in(s) by design (runtime-sdk/mode-options.ts's disallowedToolsFor) — narrower by mode policy, not a runtime/surface gate`;
+  // Chat's answer with an Exa key assumed present (the absent default). Since the 2026-10-01 ruling its
+  // built-ins are an ALLOWED list (`toolsFor`, claude's `Options.tools`), not a deny list.
+  const allowed = toolsFor("chat", {}) ?? [];
+  return `chat's own tool surface allows only ${allowed.length} built-in(s) by design (runtime-sdk/mode-options.ts's toolsFor) — narrower by mode policy, not a runtime/surface gate`;
 })();
 
 export function buildCapabilityMatrix(): CapabilityMatrix {

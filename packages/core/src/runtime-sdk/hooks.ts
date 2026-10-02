@@ -64,8 +64,6 @@ import { computeLineDiff } from "../diffs/myers";
 import { DIFF_PATCH_MAX_BYTES, mintDiffId, writeDiff } from "../diffs/store";
 import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
-import { attachSiteIcons, siteIconsInText } from "./site-icons";
-import { capabilityToolName } from "../capabilities/names";
 import { REVIEWER_ESCALATION_REASON, noteReviewerCleared } from "./bridge-common";
 import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFenceFor, homeFencedDirs, homeFencedFiles, isHomeWriteOnly } from "./home-fence";
 import { controlPlaneDenialMessage, controlPlaneTargetForCall } from "./control-plane";
@@ -159,6 +157,18 @@ export interface SessionHooksDeps {
    * connector-permission hook is not registered (every existing test wiring, unchanged).
    */
   connectors?: ConnectorPermissionSource;
+  /**
+   * The capability server KEYS this incarnation built (`approval-bridge.ts`'s `CanUseToolDeps.capabilityKeys`
+   * has the rule): only their `mcp__winter__<key>__*` names are exempt from the connector-permission floor.
+   * Absent: every key counts.
+   */
+  capabilityKeys?: () => ReadonlySet<string> | undefined;
+  /**
+   * The daemon's audit sink (`<home>/audit.jsonl`). `Search` writes one line per completed call through it,
+   * `{kind:"network", tool:"Search", query, outcome}` — the line the daemon's own `Search` wrote before it
+   * moved into the agent SDK (see `searchAuditHook`). The query only: never a key, never the answer.
+   */
+  audit?: (line: Record<string, unknown>) => void;
 }
 
 function readRootsOf(roots: string[], tmpDir?: string): string[] {
@@ -1337,7 +1347,9 @@ function connectorPermissionHook(deps: SessionHooksDeps): HookCallback {
     const pre = input as PreToolUseHookInput;
     const toolName = typeof pre.tool_name === "string" ? pre.tool_name : "";
     // WS-27: the runtime's own statement of the call's server (`winter_mcp_server`), when it makes one.
-    const facts = connectorFactsFor(source, toolName, hookCwd(input) ?? deps.cwd, statedServerFromHookInput(input));
+    let liveKeys: ReadonlySet<string> | undefined;
+    try { liveKeys = deps.capabilityKeys?.(); } catch { liveKeys = new Set(); }
+    const facts = connectorFactsFor(source, toolName, hookCwd(input) ?? deps.cwd, statedServerFromHookInput(input), liveKeys);
     if (facts === undefined) return allow();
     // An unwired policy reads as `ask`: the answer under which every stored value means what it says.
     const policy = deps.policy?.() ?? "ask";
@@ -1521,38 +1533,6 @@ function fileDiffPostToolUseHook(deps: SessionHooksDeps, pending: Map<string, Pe
       console.error(`hooks: failed to compute/persist a diff for ${snapshot.path}: ${err instanceof Error ? err.message : String(err)}`);
     }
     return allow();
-  };
-}
-
-/** The daemon's own `Search`, as the child names it (`capabilities/research.ts`). */
-export const SEARCH_CAPABILITY_TOOL = capabilityToolName("research", "Search");
-
-/** For the daemon's `Search` only: pairs the page icons Search's `run` recorded for this session
- *  (Exa's citation `favicon`s, `site-icons.ts`) with THIS call's id, from the urls the result text
- *  names, and hands them to the projector (`attachSiteIcons` → `takeSiteIcons`, the `fileDiff`
- *  hand-off's shape). Synchronous and side-effect-only: it never denies, never changes the output, and
- *  a failure here can only cost the pill an icon. */
-function noteSearchSiteIcons(deps: SessionHooksDeps, input: unknown): void {
-  try {
-    const post = input as PostToolUseHookInput;
-    if (post.tool_name !== SEARCH_CAPABILITY_TOOL) return;
-    const text = typeof post.tool_response === "string" ? post.tool_response : "";
-    const icons = siteIconsInText(deps.sessionId, text);
-    if (icons !== undefined && typeof post.tool_use_id === "string" && post.tool_use_id.length > 0) {
-      attachSiteIcons(deps.sessionId, post.tool_use_id, icons);
-    }
-  } catch (err) {
-    console.error(`hooks: failed to attach Search's site icons: ${err instanceof Error ? err.name : "unknown error"}`);
-  }
-}
-
-/** The unmatched plugin PostToolUse callback with the Search icon step folded in FIRST — one callback,
- *  so chat and dispatch pay no extra host round trip per call. Registered only in those two modes,
- *  where `Search` exists (`sessionHooksFor`). The plugin callback's own answer is returned untouched. */
-function withSearchSiteIcons(deps: SessionHooksDeps, inner: HookCallback): HookCallback {
-  return async (input, toolUseID, opts) => {
-    noteSearchSiteIcons(deps, input);
-    return inner(input, toolUseID, opts);
   };
 }
 
@@ -1741,6 +1721,88 @@ function webSearchFloorHook(deps: SessionHooksDeps): HookCallback {
   };
 }
 
+/** `Search` — Exa ANSWER mode, the agent SDK's built-in since 2026-10-01 (it was the daemon's own tool). */
+export const WEB_FLOOR_ANSWER_TOOL = "Search";
+
+/**
+ * `PreToolUse`, matched on `Search` — the LIVE floor on the citations it may show. The runtime's `Search`
+ * withholds every cited url on the session's `web.blockedDomains`, which is the floor as it stood at SPAWN;
+ * the daemon's own copy read `dangerousDomainsAdded` per call, so an entry the user adds mid-session was
+ * enforced on the very next search. This hook keeps that: it hands the effective floor (shipped ∪ the
+ * user's, read now) to the call as `blocked_domains` — an input the runtime's `Search` reads only to ADD
+ * to its floor (never advertised to the model, never sent to Exa, capped at the same 1000 entries).
+ *
+ * The transform carries `query` verbatim and the list, nothing else (`Search` takes no other key). A
+ * missing or blank `query` stands down: the tool's own "Missing query" is the right answer. Registered
+ * LAST with the other floors, for the same last-writer-wins reason.
+ */
+function searchFloorHook(deps: SessionHooksDeps): HookCallback {
+  return async (input) => {
+    const pre = input as PreToolUseHookInput;
+    if (pre.tool_name !== WEB_FLOOR_ANSWER_TOOL) return allow();
+    const record = plainRecord(pre.tool_input);
+    const query = record["query"];
+    if (typeof query !== "string" || query.trim().length === 0) return allow();
+    const floor = effectiveDangerousDomains(deps);
+    if (floor.length === 0) return allow();
+    const own = domainList(record["blocked_domains"]) ?? [];
+    const union = dedupeDomains([...floor, ...own]).slice(0, WEB_SEARCH_DOMAIN_LIST_CAP);
+    if (sameDomains(own, union)) return allow();
+    return transformInput({ query, blocked_domains: union });
+  };
+}
+
+/**
+ * The audit line's `outcome` for one completed `Search`, read off the runtime's own result sentences
+ * (`tools/impl/search.ts` in the agent SDK — stable for exactly this). The vocabulary is the one the
+ * daemon's own `Search` wrote (`ok`, `no_key`, `timeout`, `network_error`, `unauthorized`,
+ * `out_of_credits`, `rate_limited`, `http_error`, `parse_error`), plus what the runtime can say that the
+ * daemon's copy could not (`interrupted`, `disabled`, `unavailable`, `invalid_input`, `key_unreadable`).
+ * A failure whose text matches none of them is `error`, never `ok`.
+ */
+export function searchAuditOutcome(text: string, failed: boolean): string {
+  if (!failed) return "ok";
+  if (text.startsWith("Search needs an Exa API key")) return "no_key";
+  if (text.startsWith("search failed: an Exa API key is configured but could not be used") || text.startsWith("search failed: the key resolver failed")) return "key_unreadable";
+  if (text.startsWith("search timed out for")) return "timeout";
+  if (text === "Search was interrupted.") return "interrupted";
+  if (text.startsWith("search failed: could not reach the search service")) return "network_error";
+  if (text.startsWith("search failed: the configured Exa API key was rejected")) return "unauthorized";
+  if (text.startsWith("search failed: this Exa account is out of credits")) return "out_of_credits";
+  if (text.startsWith("search failed: the search service is rate-limiting")) return "rate_limited";
+  if (text.startsWith("search failed: the search service rejected the request") || text.startsWith("search failed: the search service is unavailable (HTTP")) return "http_error";
+  if (text.startsWith("search failed: could not parse response") || text.startsWith("search failed: malformed response")) return "parse_error";
+  if (text.startsWith("Error: Missing query")) return "invalid_input";
+  if (text.startsWith("Error: Search is not available")) return "unavailable";
+  return "error";
+}
+
+/**
+ * `PostToolUse` / `PostToolUseFailure`, matched on `Search` — one `{kind:"network", tool:"Search", query,
+ * outcome}` line in the daemon's audit log per call that RAN (a call the floors or a permission denied never
+ * ran, and the daemon's own `Search` wrote nothing for one either). The query only: never the key (the
+ * runtime holds it, not the hook input), never the answer. `Web search is turned off` is not an error
+ * result in the runtime, so it is read on the success path. An observer: it answers nothing and a throw
+ * stays inside it.
+ */
+function searchAuditHook(deps: SessionHooksDeps, failed: boolean): HookCallback {
+  return async (input) => {
+    try {
+      if (deps.audit === undefined) return {};
+      const post = input as { tool_name?: unknown; tool_input?: unknown; tool_response?: unknown; error?: unknown };
+      if (post.tool_name !== WEB_FLOOR_ANSWER_TOOL) return {};
+      const query = plainRecord(post.tool_input)["query"];
+      const raw = failed ? post.error : post.tool_response;
+      const text = typeof raw === "string" ? raw : "";
+      const outcome = !failed && text === "Web search is turned off for this session." ? "disabled" : searchAuditOutcome(text, failed);
+      deps.audit({ kind: "network", tool: WEB_FLOOR_ANSWER_TOOL, query: typeof query === "string" ? query : "", outcome });
+    } catch (err) {
+      logFacadeThrow("the Search audit line", err);
+    }
+    return {};
+  };
+}
+
 /** `tool_input` as a plain record, for any hostile shape — `null`, an array, a string, a number all
  *  read as "no fields", never a throw and never a prototype walk (`Object.create(null)`-based copy,
  *  so a `__proto__` key in the model's own JSON is data here rather than an assignment). */
@@ -1857,19 +1919,20 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   //  - The TRANSFORM does. Several hooks' `transformedInput`s compose in evaluation order, LAST
   //    WRITER WINS — so a plugin pre-tool hook that one day rewrites a `WebSearch` call's own
   //    `blocked_domains` must not be able to land after the floor and drop it. Last here means last.
-  for (const tool of [WEB_FLOOR_FETCH_TOOL, WEB_FLOOR_SEARCH_TOOL]) {
+  for (const tool of [WEB_FLOOR_FETCH_TOOL, WEB_FLOOR_SEARCH_TOOL, WEB_FLOOR_ANSWER_TOOL]) {
     preToolUse.push({
       matcher: tool,
       failClosed: true,
-      hooks: [failClosed("dangerous-domain floor", tool === WEB_FLOOR_FETCH_TOOL ? webFetchFloorHook(deps) : webSearchFloorHook(deps))],
+      hooks: [failClosed("dangerous-domain floor", tool === WEB_FLOOR_FETCH_TOOL ? webFetchFloorHook(deps) : tool === WEB_FLOOR_SEARCH_TOOL ? webSearchFloorHook(deps) : searchFloorHook(deps))],
     });
   }
 
-  // `tool_result.siteIcons` for the daemon's own Search rides INSIDE this existing unmatched callback, and
-  // only in the modes Search exists in (chat, dispatch): no extra callback, no extra host round trip per
-  // call, and code sessions are byte-identical to before (`withSearchSiteIcons`).
-  const pluginPost = pluginPostToolUseHook(deps);
-  const postToolUse: HookCallbackMatcher[] = [{ hooks: [deps.mode === "chat" || deps.mode === "dispatch" ? withSearchSiteIcons(deps, pluginPost) : pluginPost] }];
+  // (`tool_result.siteIcons` for the daemon's own Search used to ride inside this callback, in chat and
+  // dispatch. `Search` is the agent SDK's built-in since 2026-10-01 and reports its citations' icons on
+  // its own host-facing `tool_result` block, as `WebFetch`/`WebSearch` do — the projector reads them there.)
+  const postToolUse: HookCallbackMatcher[] = [{ hooks: [pluginPostToolUseHook(deps)] }];
+  // `Search`'s audit line — the daemon's own `Search` wrote one per call; the runtime's copy cannot.
+  if (deps.audit) postToolUse.push({ matcher: WEB_FLOOR_ANSWER_TOOL, hooks: [searchAuditHook(deps, false)] });
   for (const tool of Object.keys(DIFF_TOOL_FILE_PATH_ARG)) {
     const hooks: HookCallback[] = [];
     if (deps.home) hooks.push(fileDiffPostToolUseHook(deps, pending));
@@ -1881,6 +1944,7 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   // see `pluginPostToolUseFailureHook`'s own doc comment for why this is a SEPARATE SDK event
   // rather than a second branch of `PostToolUse`.
   const postToolUseFailure: HookCallbackMatcher[] = [{ hooks: [pluginPostToolUseFailureHook(deps)] }];
+  if (deps.audit) postToolUseFailure.push({ matcher: WEB_FLOOR_ANSWER_TOOL, hooks: [searchAuditHook(deps, true)] });
 
   const built: Options["hooks"] = { PreToolUse: preToolUse, PostToolUse: postToolUse, PostToolUseFailure: postToolUseFailure };
   return { winter: built };

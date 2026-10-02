@@ -734,13 +734,13 @@ func toolGroupFragment(name: String, count: Int) -> String {
     // row reads "Used bash"). Chat mode's `Search`/`ReadPage`/`AskQuestion` share the phrasing of
     // their code-mode equivalents: the user is being told what happened, not which registration
     // it came from.
-    case "browser":
+    case "browser", "Browser":
         return count == 1 ? "used the browser" : "used the browser \(count) times"
     case "web_fetch", "WebFetch", "ReadPage":
         return count == 1 ? "fetched a page" : "fetched \(count) pages"
     case "web_search", "WebSearch", "Search":
         return count == 1 ? "searched the web" : "searched the web \(count) times"
-    case "computer":
+    case "computer", "Computer":
         return count == 1 ? "used the computer" : "used the computer \(count) times"
     case "lsp":
         return count == 1 ? "checked the code" : "checked the code \(count) times"
@@ -752,7 +752,7 @@ func toolGroupFragment(name: String, count: Int) -> String {
         return count == 1 ? "ran a workflow" : "ran \(count) workflows"
     case "spawn_agent":
         return count == 1 ? "started a subagent" : "started \(count) subagents"
-    case "session_spawn":
+    case "session_spawn", "SpawnSession":
         return count == 1 ? "dispatched a session" : "dispatched \(count) sessions"
     case "enter_worktree":
         return count == 1 ? "entered a worktree" : "entered \(count) worktrees"

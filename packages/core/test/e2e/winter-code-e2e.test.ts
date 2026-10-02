@@ -226,9 +226,10 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-code-cap-")));
     const record = daemon!.buildSessionCapabilities({ sessionId: "s_probe", mode: "code", cwd, roots: [cwd], tmpDir: cwd });
     expect(Object.keys(record)).toContain("winter__computer");
-    // the server is built for every mode (P8b-36); the MODE scoping is `disallowedTools` (P8b-12)
-    expect(disallowedToolsFor("chat", {})).toContain("mcp__winter__computer__computer");
-    expect(disallowedToolsFor("code", {})).not.toContain("mcp__winter__computer__computer");
+    // the server is built for every mode (P8b-36); the MODE scoping is `disallowedTools` (P8b-12),
+    // under the plain name the child knows it by since the 2026-10-01 tool-surface ruling
+    expect(disallowedToolsFor("chat", {})).toContain("Computer");
+    expect(disallowedToolsFor("code", {})).not.toContain("Computer");
     // the tool reaches the service: build the capability with a spy and drive its instance
     const calls: Array<{ cls: string; payload: string }> = [];
     const spy = { act: async (_sid: string, cls: string, payload: string) => { calls.push({ cls, payload }); return { ok: true, resultJson: JSON.stringify({ text: "#0 window" }) }; } };
@@ -328,8 +329,10 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
     const t0 = Date.now();
     while (driver.init === undefined && Date.now() - t0 < 15_000) await Bun.sleep(20);
     expect(driver.init).toBeDefined();
-    // the daemon-owned capability servers are advertised at init as before (no shadowing)
-    expect(driver.init!.tools).toContain("mcp__winter__computer__computer");
+    // the daemon-owned capability servers are offered (no shadowing) — DEFERRED since the 2026-10-01
+    // ruling, so not in `init.tools`; the runtime still says the daemon's server connected
+    expect(driver.init!.tools).toContain("ToolSearch");
+    expect(driver.init!.tools).not.toContain("Computer");
     // MEASURED: a stdio server's tools are NOT in `system/init.tools` — the child connects
     // process-transport servers asynchronously after init (`WaitForMcpServers`/`RefreshMcpTools`
     // are advertised for exactly that), so the observable fact is the SPAWN: a `bun run

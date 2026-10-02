@@ -14,11 +14,13 @@ import { classifyPermissionMode } from "@yanlinglabs/winter-agent-sdk/messaging"
 import { DISPATCH_CHILD_APPROVAL_TIMEOUT_MS, canUseToolFor, neverPromptsMessage, type BridgeLogger } from "../../src/runtime-sdk/approval-bridge";
 import { REVIEWER_ESCALATION_REASON, noteReviewerCleared, takeReviewerCleared } from "../../src/runtime-sdk/bridge-common";
 import {
-  buildWinterOptions, permissionModeFor, disallowedToolsFor,
-  CAPABILITY_TOOL_MODES, CHAT_DISALLOWED_BUILTINS, CHAT_ALLOWED_WINTER_TOOLS, GLOBAL_READ_ALLOW_RULES,
-  WEB_BUILTIN_ALLOW_RULES, EXA_GATED_SEARCH_TOOL, type ToolExposure, type WinterOptionsInput,
+  buildWinterOptions, permissionModeFor, disallowedToolsFor, toolsFor, deferToolsFor,
+  CAPABILITY_TOOL_MODES, CHAT_BUILTIN_TOOLS, DISPATCH_BUILTIN_TOOLS, GLOBAL_READ_ALLOW_RULES,
+  WEB_BUILTIN_ALLOW_RULES, KNOWN_RUNTIME_BUILTINS, CAPABILITY_PLAIN_NAMES, LEGACY_TOOL_NAMES, toolSurfaceViolations,
+  type ToolExposure, type WinterOptionsInput,
 } from "../../src/runtime-sdk/mode-options";
-import { capabilityToolName } from "../../src/capabilities/names";
+import { WINTER_CAPABILITY_TOOLS, capabilityToolName, reservedMcpServerNames } from "../../src/capabilities/names";
+import { capabilityKeysOf } from "../../src/runtime-sdk/session-driver";
 import {
   gateClassFor, hostToolNameFor, winterToolNameFor,
   WINTER_ADVERTISED_TOOLS_0_0_4, WINTER_ADVERTISED_TOOLS_0_0_4_BASE, WINTER_ADVERTISED_MCP_TOOLS_0_0_4,
@@ -545,146 +547,150 @@ test("the Bash sandbox names real DIRECTORIES — plus, since R.3 I-4, the any-d
 // Ruling 8 — per-mode capability exposure and chat's excluded built-ins
 // -------------------------------------------------------------------------------------------
 
-test("every capability tool is either exposed to a mode or in that mode's disallowedTools", () => {
+test("every capability tool is either exposed to a mode or in that mode's disallowedTools (under the name the child knows it by)", () => {
   for (const mode of MODES) {
     const disallowed = new Set(disallowedToolsFor(mode, WINTER_LEG_WITH_EXA));
-    for (const [name, { modes }] of Object.entries(CAPABILITY_TOOL_MODES)) {
+    for (const [name, { modes, plainName }] of Object.entries(CAPABILITY_TOOL_MODES)) {
       const exposed = modes.includes(mode);
-      expect({ mode, name, exposed, disallowed: disallowed.has(name) })
+      expect({ mode, name, exposed, disallowed: disallowed.has(plainName ?? name) })
         .toEqual({ mode, name, exposed, disallowed: !exposed });
     }
   }
 });
 
-test("the per-mode capability exposure table is pinned (Winter leg, an Exa key stored)", () => {
-  // 0.0.17 / the 2026-09-18 ruling: `WebFetch` is gone from all three lists and `WebSearch` survives
-  // only in chat and dispatch, and only because an Exa key makes the daemon's `Search` the search
-  // surface there. Code mode gets both tools. The `mcp__winter__web__*` pair and
-  // `mcp__winter__research__ReadPage` are absent from every list because the tools themselves retired —
-  // a name that is no longer in `CAPABILITY_TOOL_MODES` cannot appear here at all.
-  expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).toEqual([
-    "mcp__winter__research__Search",
-    "mcp__winter__sessions__list_sessions",
-    "mcp__winter__sessions__manage_session",
-    "mcp__winter__sessions__session_spawn",
+test("the per-mode capability exposure table is pinned (the 2026-10-01 tool-surface ruling)", () => {
+  // Plain names for the renamed tools; office and LSP are code-only; the `research` server is gone.
+  // (The built-in half of chat's and dispatch's list is the fail-closed test below.)
+  const capabilityHalf = (mode: (typeof MODES)[number]): string[] => disallowedToolsFor(mode, WINTER_LEG_WITH_EXA).filter((name) => !KNOWN_RUNTIME_BUILTINS.includes(name));
+  expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).toEqual(["ListSessions", "ManageSession", "SpawnSession"]);
+  expect(capabilityHalf("dispatch")).toEqual([
+    "mcp__winter__lsp__lsp", "mcp__winter__office__docs", "mcp__winter__office__sheets", "mcp__winter__office__slides",
   ]);
-  expect(disallowedToolsFor("dispatch", WINTER_LEG_WITH_EXA)).toEqual([
-    "WebSearch",
-    // fix wave (review F7): `lsp` is code-only, as the registry door was
-    "mcp__winter__lsp__lsp",
+  expect(capabilityHalf("chat")).toEqual([
+    "Computer", "ListSessions", "ManageSession", "SpawnSession",
+    "mcp__winter__lsp__lsp", "mcp__winter__office__docs", "mcp__winter__office__sheets", "mcp__winter__office__slides",
   ]);
-  expect(disallowedToolsFor("chat", WINTER_LEG_WITH_EXA)).toEqual([...new Set([
-    ...CHAT_DISALLOWED_BUILTINS,
-    "WebSearch",
-    "mcp__winter__computer__computer",
-    "mcp__winter__lsp__lsp",
-    "mcp__winter__office__docs",
-    "mcp__winter__office__sheets",
-    "mcp__winter__office__slides",
-    "mcp__winter__sessions__list_sessions",
-    "mcp__winter__sessions__manage_session",
-    "mcp__winter__sessions__session_spawn",
-  ])].sort());
-  // The retired names must not resurface in ANY mode's list under either answer (a stale entry would
-  // be inert rather than loud, which is exactly why it is asserted).
+  // Code keeps every built-in, so the key never moves its list.
+  expect(disallowedToolsFor("code", WINTER_LEG_NO_EXA)).toEqual(disallowedToolsFor("code", WINTER_LEG_WITH_EXA));
+  // The retired names must not resurface in ANY mode's list (a stale entry would be inert rather than loud).
   for (const mode of MODES) {
-    for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA]) {
-      for (const gone of ["mcp__winter__web__web_fetch", "mcp__winter__web__web_search", "mcp__winter__research__ReadPage"]) {
-        expect(disallowedToolsFor(mode, exposure)).not.toContain(gone);
-      }
+    for (const gone of ["mcp__winter__web__web_fetch", "mcp__winter__web__web_search", "mcp__winter__research__ReadPage", "mcp__winter__research__Search"]) {
+      expect(disallowedToolsFor(mode, WINTER_LEG_WITH_EXA)).not.toContain(gone);
     }
   }
+});
+
+test("FAIL CLOSED (review): chat's and dispatch's deny list also names every KNOWN built-in their allowed list leaves out — never one it keeps", () => {
+  for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA]) {
+    for (const mode of ["chat", "dispatch"] as const) {
+      const allowed = toolsFor(mode, exposure)!;
+      const denied = disallowedToolsFor(mode, exposure);
+      expect(denied.filter((name) => KNOWN_RUNTIME_BUILTINS.includes(name))).toEqual(KNOWN_RUNTIME_BUILTINS.filter((name) => !allowed.includes(name)));
+      expect(denied.filter((name) => allowed.includes(name))).toEqual([]);
+    }
+  }
+  // The complement: with a key `WebSearch` is denied and `Search` is not; without one, the reverse.
+  expect(disallowedToolsFor("dispatch", WINTER_LEG_WITH_EXA)).toContain("WebSearch");
+  expect(disallowedToolsFor("dispatch", WINTER_LEG_WITH_EXA)).not.toContain("Search");
+  expect(disallowedToolsFor("dispatch", WINTER_LEG_NO_EXA)).toContain("Search");
+  expect(disallowedToolsFor("dispatch", WINTER_LEG_NO_EXA)).not.toContain("WebSearch");
+  // Dispatch's list denies what the ruling withholds by name: Agent, the file editors, the task graph…
+  for (const name of ["Agent", "Edit", "Write", "Glob", "Grep", "TaskCreate", "Workflow", "ListAgents", "advisor"]) expect(disallowedToolsFor("dispatch", WINTER_LEG_WITH_EXA)).toContain(name);
+  // …and chat's denies the shell and the file tools.
+  for (const name of ["Bash", "Read", "Edit", "Write", "Agent", "CronCreate"]) expect(disallowedToolsFor("chat", WINTER_LEG_WITH_EXA)).toContain(name);
+});
+
+test("FAIL CLOSED (review): `toolSurfaceViolations` names a built-in the child offered outside its allowed list; capability plain names and MCP tools are fine", () => {
+  const allowed = toolsFor("dispatch", WINTER_LEG_WITH_EXA)!;
+  const honest = [...allowed.filter((n) => n !== "CronList"), "SpawnSession", "ListSessions", "ManageSession", "mcp__winter__send_message", "mcp__github__search"];
+  expect(toolSurfaceViolations(honest, allowed, CAPABILITY_PLAIN_NAMES)).toEqual([]);
+  // A runtime that ignored `tools` offers its whole set:
+  expect(toolSurfaceViolations([...honest, "Edit", "Agent", "SomeFutureBuiltin"], allowed, CAPABILITY_PLAIN_NAMES)).toEqual(["Edit", "Agent", "SomeFutureBuiltin"]);
+  // Code states no allowed list: nothing to check.
+  expect(toolSurfaceViolations(["Edit", "Agent"], undefined, CAPABILITY_PLAIN_NAMES)).toEqual([]);
+  expect([...CAPABILITY_PLAIN_NAMES].sort()).toEqual(["Browser", "Computer", "ListSessions", "ManageSession", "SpawnSession"]);
+});
+
+test("`Options.legacyToolNames` carries the daemon's retired Search under its old name in every mode", () => {
+  expect(LEGACY_TOOL_NAMES).toEqual({ mcp__winter__research__Search: "Search" });
+});
+
+test("ALLOWED lists replace restricted lists: chat's and dispatch's `tools` are pinned; code keeps every built-in", () => {
+  expect(toolsFor("code", WINTER_LEG_WITH_EXA)).toBeUndefined();
+  expect(toolsFor("code", WINTER_LEG_NO_EXA)).toBeUndefined();
+  // Chat: unchanged by the ruling apart from ToolSearch (Browser is an MCP tool and starts deferred).
+  expect(toolsFor("chat", WINTER_LEG_WITH_EXA)).toEqual(["AskUserQuestion", "ListAgents", "ReadNotifications", "Search", "SendMessage", "ToolSearch", "WebFetch", "advisor"]);
+  // Dispatch: EXACTLY the ruling's list (+ ToolSearch so the deferred tools load). No Agent/Edit/Glob/…,
+  // and of Winter's own four only SendMessage.
+  expect(toolsFor("dispatch", WINTER_LEG_WITH_EXA)).toEqual([
+    "AskUserQuestion", "Bash", "CronCreate", "CronDelete", "CronList", "PushNotification", "Read", "ScheduleWakeup",
+    "Search", "SendMessage", "TaskStop", "ToolSearch", "WebFetch",
+  ]);
+  expect([...CHAT_BUILTIN_TOOLS].sort()).toEqual([...CHAT_BUILTIN_TOOLS]);
+  expect(DISPATCH_BUILTIN_TOOLS).not.toContain("Search");
+  expect(DISPATCH_BUILTIN_TOOLS).not.toContain("WebSearch");
 });
 
 test("with NO Exa key, chat and dispatch get WebSearch INSTEAD of Search — exactly one of the two, never neither", () => {
-  // `Search` reaches Exa's answer endpoint, which needs a key; `WebSearch`'s backend has an anonymous
-  // tier. So the absence of a key SWAPS the search surface rather than removing it, and the two rules
-  // are exact complements — the property this test exists for, since the failure of either half is a
-  // mode with no search tool at all (or two) and nothing else would say so.
+  // `Search` (the SDK built-in) reaches Exa's answer endpoint, which needs a key; `WebSearch`'s backend
+  // has an anonymous tier. The absence of a key SWAPS the search surface rather than removing it.
   for (const mode of ["chat", "dispatch"] as const) {
-    const withKey = disallowedToolsFor(mode, WINTER_LEG_WITH_EXA);
-    const noKey = disallowedToolsFor(mode, WINTER_LEG_NO_EXA);
-    expect(withKey).toContain("WebSearch");
-    expect(withKey).not.toContain(EXA_GATED_SEARCH_TOOL);
-    expect(noKey).not.toContain("WebSearch");
-    expect(noKey).toContain(EXA_GATED_SEARCH_TOOL);
-    // the two lists differ in EXACTLY those two names, in opposite directions
-    expect(withKey.filter((t) => t !== "WebSearch"))
-      .toEqual(noKey.filter((t) => t !== EXA_GATED_SEARCH_TOOL));
-  }
-  // Code mode is unaffected either way: it has both SDK tools whatever is stored, and `Search` was
-  // never a code tool at all (it is disallowed there under both answers, by mode alone).
-  for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA]) {
-    expect(disallowedToolsFor("code", exposure)).not.toContain("WebSearch");
-    expect(disallowedToolsFor("code", exposure)).not.toContain("WebFetch");
-    expect(disallowedToolsFor("code", exposure)).toContain(EXA_GATED_SEARCH_TOOL);
+    const withKey = toolsFor(mode, WINTER_LEG_WITH_EXA)!;
+    const noKey = toolsFor(mode, WINTER_LEG_NO_EXA)!;
+    expect(withKey).toContain("Search");
+    expect(withKey).not.toContain("WebSearch");
+    expect(noKey).toContain("WebSearch");
+    expect(noKey).not.toContain("Search");
+    expect(withKey.filter((t) => t !== "Search")).toEqual(noKey.filter((t) => t !== "WebSearch"));
+    // ABSENT exaKeyPresent reads as PRESENT — a caller that cannot answer must not change the surface.
+    expect(toolsFor(mode, {})).toEqual(withKey);
   }
 });
 
-test("EXA_GATED_SEARCH_TOOL is the real wire name of the `research` server's Search", () => {
-  // The one literal `disallowedToolsFor` names outside `CAPABILITY_TOOL_MODES`, diffed against the
-  // minter rather than trusted: a string that is one segment off denies nothing, silently.
-  expect(EXA_GATED_SEARCH_TOOL).toBe(capabilityToolName("research", "Search"));
-  expect(Object.keys(CAPABILITY_TOOL_MODES)).toContain(EXA_GATED_SEARCH_TOOL);
-});
-
-test("ABSENT exaKeyPresent reads as PRESENT — a caller that cannot answer must not widen the surface", () => {
+test("WebFetch is in every mode; chat names no fs/shell/repo built-in", () => {
   for (const mode of ["chat", "dispatch"] as const) {
-    expect(disallowedToolsFor(mode, {})).toEqual(disallowedToolsFor(mode, WINTER_LEG_WITH_EXA));
+    for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA, {}]) expect(toolsFor(mode, exposure)).toContain("WebFetch");
+  }
+  const chat = toolsFor("chat", WINTER_LEG_WITH_EXA)!;
+  for (const t of ["Bash", "Write", "Edit", "Read", "Glob", "Grep", "NotebookEdit", "Workflow", "Agent", "Monitor", "ReportFindings", "ScheduleWakeup", "CronList", "WaitForMcpServers", "ListMcpResourcesTool"]) {
+    expect(chat).not.toContain(t);
   }
 });
 
-test("WebFetch is never withheld, in any mode, with or without an Exa key", () => {
+test("Tool Search is on in every mode, and CronList is the one built-in that starts deferred (where it exists)", () => {
   for (const mode of MODES) {
-    for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA, {}]) {
-      expect(disallowedToolsFor(mode, exposure)).not.toContain("WebFetch");
+    const options = buildWinterOptions(optionsInput({ mode, policy: "ask" }));
+    expect(options.toolSearchEnabled).toBe(true);
+    expect(options.tools).toEqual(toolsFor(mode, {}));
+    expect(options.deferTools).toEqual(mode === "chat" ? undefined : ["CronList"]);
+  }
+  expect(deferToolsFor("chat")).toEqual([]);
+  expect(deferToolsFor("dispatch")).toEqual(["CronList"]);
+  expect(deferToolsFor("code")).toEqual(["CronList"]);
+});
+
+test("every mode states the old Search name and every capability server name as reserved — retired and unbuilt ones included", () => {
+  const reserved = [...reservedMcpServerNames()];
+  for (const mode of MODES) {
+    const options = buildWinterOptions({ ...optionsInput({ mode, policy: "ask" }), reservedMcpServerNames: reserved });
+    expect(options.legacyToolNames).toEqual({ mcp__winter__research__Search: "Search" });
+    // The runtime refuses any other server under these, from every origin: a plugin's `.mcp.json`, an agent
+    // definition's inline server, a hand-edited settings scope. `winter__computer` is there whether or not
+    // computer use is on; `winter__research`/`winter__web` although no server of that name is ever built.
+    expect(options.reservedMcpServerNames).toEqual([...reserved].sort());
+    for (const name of ["winter__research", "winter__web", "winter__computer", "winter__browser", "winter__sessions", "winter__external"]) expect(options.reservedMcpServerNames).toContain(name);
+  }
+  // A caller that states none sends none (the field is omitted, never an empty fence).
+  expect(buildWinterOptions(optionsInput({ mode: "chat", policy: "chat" })).reservedMcpServerNames).toBeUndefined();
+});
+
+test("every built-in a `tools` list names is one the child advertises (no dead allowed-list entry)", () => {
+  // The 0.0.3 measurement plus the two web built-ins and the SDK's `Search` (opt-in, 2026-10-01).
+  const known = new Set([...WINTER_ADVERTISED_TOOLS_0_0_4, "WebFetch", "WebSearch", "Search", ...WINTER_OWN_TOOL_NAMES]);
+  for (const mode of ["chat", "dispatch"] as const) {
+    for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA]) {
+      for (const t of toolsFor(mode, exposure)!) expect({ mode, t, known: known.has(t) }).toEqual({ mode, t, known: true });
     }
-  }
-  // Lane B2 retires them; until then code's daemon-owned pair is exposed exactly as before.
-  // …and the daemon's own retired pair is not in code's list either, because it no longer exists.
-  expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).not.toContain("mcp__winter__web__web_fetch");
-  expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).not.toContain("mcp__winter__web__web_search");
-});
-
-test("chat excludes every code-only built-in (and WebFetch is NOT one of them any more)", () => {
-  const chat = disallowedToolsFor("chat", WINTER_LEG_WITH_EXA);
-  expect(chat).toContain("WebSearch");
-  expect(chat).not.toContain("WebFetch");
-  for (const t of ["Bash", "Write", "Edit", "Read", "Glob", "Grep", "NotebookEdit", "Workflow", "Agent"]) {
-    expect(chat).toContain(t);
-  }
-  // …and code does NOT exclude Bash.
-  expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).not.toContain("Bash");
-});
-
-test("chat's allowed set is exactly AskUserQuestion, WebFetch and Winter's own four", () => {
-  expect(CHAT_ALLOWED_WINTER_TOOLS).toEqual(["AskUserQuestion", "WebFetch", "ListAgents", "ReadNotifications", "SendMessage", "advisor"]);
-  for (const t of CHAT_ALLOWED_WINTER_TOOLS) expect(disallowedToolsFor("chat", WINTER_LEG_WITH_EXA)).not.toContain(t);
-});
-
-test("CHAT_DISALLOWED_BUILTINS is pinned, and covers every tool the CHILD actually advertises", () => {
-  // Review F4: the previous list was derived from Winter's pair table, which MISSES three tools the
-  // child genuinely advertises — `Monitor`, `ReportFindings`, `ScheduleWakeup` — so all three were
-  // visible to a chat model that is supposed to have no fs/shell/repo surface.
-  expect(CHAT_DISALLOWED_BUILTINS).toEqual([
-    "Agent", "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EnterPlanMode", "EnterWorktree",
-    "ExitPlanMode", "ExitWorktree", "Glob", "Grep", "LSP", "ListMcpResourcesTool", "Monitor",
-    "NotebookEdit", "PushNotification", "Read", "ReadMcpResourceDirTool", "ReadMcpResourceTool",
-    "RefreshMcpTools", "ReportFindings", "ScheduleWakeup", "Skill", "TaskCreate", "TaskGet",
-    "TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "ToolSearch", "WaitForMcpServers",
-    "Workflow", "Write",
-  ]);
-  // 0.0.17: NEITHER web built-in is in this constant any more, in either direction — `WebFetch` is
-  // chat-allowed and `WebSearch`'s exposure depends on whether an Exa key is stored, so both are
-  // decided in `disallowedToolsFor` instead of half here and half there.
-  expect(CHAT_DISALLOWED_BUILTINS).not.toContain("WebFetch");
-  expect(CHAT_DISALLOWED_BUILTINS).not.toContain("WebSearch");
-  // THE invariant, stated as a set relation rather than a literal: every advertised name is either
-  // chat-allowed or chat-disallowed. An SDK bump that advertises a new tool fails here.
-  for (const t of WINTER_ADVERTISED_TOOLS_0_0_4) {
-    const allowed = CHAT_ALLOWED_WINTER_TOOLS.includes(t);
-    expect({ t, allowed, disallowed: CHAT_DISALLOWED_BUILTINS.includes(t) })
-      .toEqual({ t, allowed, disallowed: !allowed });
   }
 });
 
@@ -717,9 +723,9 @@ test("a real Winter child ALSO advertises the winter.mcp six — the union is Ta
     [...new Set([...WINTER_ADVERTISED_TOOLS_0_0_4_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_4])].sort(),
   );
   expect(WINTER_ADVERTISED_TOOLS_0_0_4).toHaveLength(37);
-  // …and all six are chat-disallowed: chat has no MCP resources beyond Winter's own capability
-  // servers, which it reaches by their `mcp__winter__*` names, never through these.
-  for (const t of WINTER_ADVERTISED_MCP_TOOLS_0_0_4) expect(CHAT_DISALLOWED_BUILTINS).toContain(t);
+  // …and of the six, chat's allowed list names only ToolSearch (Browser, an MCP tool, loads through
+  // it); the resource bookkeeping tools are not chat's, and WaitForMcpServers is the ToolSearch-off twin.
+  for (const t of WINTER_ADVERTISED_MCP_TOOLS_0_0_4) expect(toolsFor("chat", WINTER_LEG_WITH_EXA)!.includes(t)).toBe(t === "ToolSearch");
 });
 
 test("the winter.mcp housekeeping trio is classified read-only, so code and dispatch get it silently", () => {
@@ -791,6 +797,38 @@ test("the mcp__winter__ strip is refused for any server key that is not one of W
   expect(hostToolNameFor("mcp__winter__research__Search")).toBe("Search");
   expect(hostToolNameFor("mcp__winter__office__docs")).toBe("docs");
   expect(hostToolNameFor("mcp__winter__computer__computer")).toBe("computer");
+});
+
+test("LIVE calls strip only the keys the incarnation built (2026-10-01 review); replay strips every key", () => {
+  const live = new Set(["sessions", "browser", "office", "lsp", "external"]);
+  // A retired key and an unbuilt one (computer use off) stay ordinary MCP names on a live call…
+  expect(hostToolNameFor("mcp__winter__research__Search", live)).toBeUndefined();
+  expect(hostToolNameFor("mcp__winter__web__web_fetch", live)).toBeUndefined();
+  expect(hostToolNameFor("mcp__winter__computer__computer", live)).toBeUndefined();
+  expect(gateClassFor("mcp__winter__research__Search", live)).toBe("mcp__winter__research__Search");
+  // …a built one strips as ever, and so does every key on replay (no `liveKeys`).
+  expect(hostToolNameFor("mcp__winter__browser__browser", live)).toBe("browser");
+  expect(hostToolNameFor("mcp__winter__research__Search")).toBe("Search");
+  expect(hostToolNameFor("mcp__winter__computer__computer")).toBe("computer");
+  // Plain names do not depend on it.
+  expect(hostToolNameFor("Browser", live)).toBe("browser");
+  expect(hostToolNameFor("Search", new Set())).toBe("Search");
+});
+
+test("the strip names EXACT tools: every capability tool strips, and a forged `schedule`/`push_notification` under a capability key never does (the sinks act on the stripped name)", () => {
+  for (const name of Object.keys(WINTER_CAPABILITY_TOOLS)) {
+    if (name.startsWith("mcp__winter__external__")) continue;
+    expect({ name, host: hostToolNameFor(name) }).toEqual({ name, host: name.split("__").slice(3).join("__") });
+  }
+  for (const key of ["web", "research", "computer", "sessions", "browser"]) {
+    for (const tool of ["schedule", "push_notification", "bash", "read"]) expect(hostToolNameFor(`mcp__winter__${key}__${tool}`)).toBeUndefined();
+  }
+  // The retired names keep stripping for old transcripts.
+  for (const [name, host] of [["mcp__winter__research__ReadPage", "ReadPage"], ["mcp__winter__web__web_fetch", "web_fetch"], ["mcp__winter__web__web_search", "web_search"]] as const) expect(hostToolNameFor(name)).toBe(host);
+});
+
+test("the session driver's live keys are the built servers' keys, read off their `winter__<key>` names", () => {
+  expect([...capabilityKeysOf({ winter__sessions: {}, winter__browser: {}, other: {}, winter__: {} } as never)].sort()).toEqual(["browser", "sessions"]);
 });
 
 test("a spoofed capability name gets the EXTERNAL class, not READ_ONLY", async () => {

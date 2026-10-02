@@ -5,7 +5,7 @@
 // SESSION and handed to that session's own `Options.mcpServers`, not to the handle-wide
 // construction-time `capabilities` list — see `server.ts`'s header for the measurement behind that
 // (there is no per-call session identity on `callTool`, so the identity has to be a closure).
-export { capabilityToolName, capabilityServerName, WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, reservedMcpServerNames } from "./names";
+export { capabilityToolName, capabilityServerName, capabilityAdvertisedName, WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, RETIRED_CAPABILITY_SERVER_KEYS, reservedMcpServerNames } from "./names";
 export type { CapabilityServerKey, CapabilityToolFacts, WinterCapabilityToolName, SessionMode } from "./names";
 export type { CapabilitySession, CapabilityServerSpec } from "./server";
 export { capabilityServer } from "./server";
@@ -13,7 +13,6 @@ export { sessionsCapability, type SessionsCapabilityDeps } from "./sessions";
 export { computerCapability, type ComputerCapabilityDeps } from "./computer";
 export { browserCapability, type BrowserCapabilityDeps } from "./browser";
 export { officeCapability, type OfficeCapabilityDeps } from "./office";
-export { researchCapability, type ResearchCapabilityDeps } from "./research";
 export { lspCapability, type LspCapabilityDeps } from "./lsp";
 export { externalCapability, type ExternalCapabilityDeps, type ExternalToolSource } from "./external";
 
@@ -22,7 +21,6 @@ import { CORE_BRAND } from "../runtime-sdk/brand";
 import { browserCapability, type BrowserCapabilityDeps } from "./browser";
 import { computerCapability, type ComputerCapabilityDeps } from "./computer";
 import { officeCapability, type OfficeCapabilityDeps } from "./office";
-import { researchCapability, type ResearchCapabilityDeps } from "./research";
 import type { CapabilitySession } from "./server";
 import { sessionsCapability, type SessionsCapabilityDeps } from "./sessions";
 import { lspCapability, type LspCapabilityDeps } from "./lsp";
@@ -38,7 +36,6 @@ export interface CapabilityDeps {
   computer: ComputerCapabilityDeps;
   browser: BrowserCapabilityDeps;
   office: OfficeCapabilityDeps;
-  research: ResearchCapabilityDeps;
   /** Fix wave (review F7): the `lsp` capability over the daemon's single `LspManager` holder. */
   lsp: LspCapabilityDeps;
   /** Phase 8c Lane 3, Task 3.4: plugin-contributed tools, per session. Optional — absent registers
@@ -101,7 +98,6 @@ export function buildCapabilitiesFor(
   if (deps.computerUseEnabled()) servers.push(computerCapability(session, deps.computer));
   servers.push(browserCapability(session, deps.browser));
   servers.push(officeCapability(session, deps.office));
-  servers.push(researchCapability(session, deps.research));
   servers.push(lspCapability(session, deps.lsp));
   servers.push(externalCapability(session, deps.external ?? {}));
   const record: Record<string, McpSdkServerConfigWithInstance> = {};

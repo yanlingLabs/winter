@@ -437,6 +437,22 @@ final class WorkingAnimationTests: XCTestCase {
         XCTAssertEqual(workingToolSymbol(for: "something_new"), "hammer.fill", "never a blank centre")
     }
 
+    /// The 2026-10-01 tool-surface ruling: the model calls the daemon's tools by plain names. The daemon
+    /// still EMITS their host names (`session_spawn`, `browser`, …), but a plain name must draw the same
+    /// symbol, and the old MCP spellings (old transcripts) still draw theirs.
+    func testPlainToolNamesDrawTheSameSymbolsAsTheirHostNames() {
+        XCTAssertEqual(workingToolSymbol(for: "SpawnSession"), workingToolSymbol(for: "session_spawn"))
+        XCTAssertEqual(workingToolSymbol(for: "ListSessions"), "person.2.fill")
+        XCTAssertEqual(workingToolSymbol(for: "ManageSession"), "person.2.fill")
+        XCTAssertEqual(workingToolSymbol(for: "list_sessions"), "person.2.fill")
+        XCTAssertEqual(workingToolSymbol(for: "Computer"), workingToolSymbol(for: "computer"))
+        XCTAssertEqual(workingToolSymbol(for: "Browser"), workingToolSymbol(for: "browser"))
+        XCTAssertEqual(workingToolSymbol(for: "Search"), "globe")
+        XCTAssertEqual(workingToolSymbol(for: "mcp__winter__sessions__session_spawn"), "person.2.fill", "an old spelling still draws its server's symbol")
+        XCTAssertTrue(plumeIsSearchTool("search"), "the SDK's own Search")
+        XCTAssertTrue(plumeIsSearchTool("mcp__winter__research__search"), "an old transcript's daemon Search")
+    }
+
     func testEverySymbolTheAnimationCanDrawExists() {
         let names = ["bash", "read", "edit", "glob", "WebFetch", "WebSearch", "computer", "lsp", "task_create",
                      "spawn_agent", "session_spawn", "Workflow", "ask_user", "Skill", "mcp__winter__office__x",

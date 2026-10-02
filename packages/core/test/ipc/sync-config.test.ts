@@ -8,7 +8,7 @@ import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { startIpcServer } from "../../src/ipc/server";
 import { syncConfig, syncMemory, effortsForModel, clientEfforts, SYNC_PAGE_BYTES, SYNC_MEMORY_TRUNCATION_MARKER } from "../../src/ipc/sync";
 import { pickerModels } from "../../src/ipc/picker-models";
-import { EXA_API_KEY_SECRET } from "../../src/agent/tools/search";
+import { EXA_API_KEY_SECRET } from "../../src/agent/exa-key";
 import { CLIENT_EFFORTS, REASONING_EFFORTS, Settings, loadSettings } from "../../src/settings";
 import { createProvider } from "../../src/providers/manager";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";

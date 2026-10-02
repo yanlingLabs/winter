@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EXA_API_KEY_SECRET } from "../../src/agent/tools/search";
+import { EXA_API_KEY_SECRET } from "../../src/agent/exa-key";
 import { WEB_SEARCH_API_KEY_SECRET } from "../../src/agent/tools/web";
 import { FileSecretStore, type SecretStore } from "../../src/auth/secret-store";
 import { TOKEN_NAMES } from "../../src/auth/tokens";

@@ -8,7 +8,7 @@ import {
   WINTER_BRAND, disableCronEnvName, envName, pluginCacheDirEnvName, providerManagedByHostEnvName, storeHomeEnvName,
 } from "@yanlinglabs/winter-agent-sdk";
 import { escapeRulePath, escapeSandboxGlobPath, PROTECTED_ITEM_DIRS, RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
-import { EXA_API_KEY_SECRET } from "../agent/tools/search";
+import { EXA_API_KEY_SECRET } from "../agent/exa-key";
 import { approvedProjectRulesDir, homeCacheDir, sdkHomeFor, storeHomeFor, trustRecordFile } from "../agent/paths";
 import { repoRootFor } from "../agent/memory-dir";
 import { projectWalk } from "./project-walk";
@@ -21,7 +21,7 @@ import type { Mode as SessionMode } from "../agent/tools/registry";
 import { CONTROL_PLANE_FILENAMES } from "./control-plane";
 import { providerFor, testProviderNameFor } from "./provider-selection";
 import { splitTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
-import { WINTER_ADVERTISED_TOOLS_0_0_4, RUNTIME_HOST_TOOL_PAIRS, WINTER_OWN_TOOL_NAMES } from "./tool-names";
+import { WINTER_ADVERTISED_TOOLS_0_0_4, WINTER_OWN_TOOL_NAMES } from "./tool-names";
 
 /**
  * **The six Winter policies → Winter's `PermissionMode`** (P8b-7, AMENDED by the whole-branch
@@ -76,39 +76,99 @@ export function permissionModeFor(policy: SessionApprovalPolicy): PermissionMode
   }
 }
 
-/** Every capability tool the daemon owns, and the modes it is exposed to (P8b-27 ruling 8). Keyed
- *  by the canonical `mcp__winter__<serverKey>__<tool>` names Task 7's `capabilityToolName` mints.
+/** Every capability tool the daemon owns, the modes it is exposed to (P8b-27 ruling 8), and — since the
+ *  2026-10-01 tool-surface ruling — the PLAIN name the child advertises it under when it has one. Keyed
+ *  by the canonical `mcp__winter__<serverKey>__<tool>` names Task 7's `capabilityToolName` mints (the
+ *  spelling old rules and transcripts carry; the runtime still honours it as an equivalent identity).
  *
- *  **This table, not `WINTER_CAPABILITY_TOOLS`, is what `disallowedTools` is built from** — Task 7's
- *  export lands in another lane, and the integration parity test diffs the two so a capability that
- *  exists in one and not the other is a loud failure rather than a silently unexposed tool.
+ *  **This table, not `WINTER_CAPABILITY_TOOLS`, is what `disallowedTools` is built from** — this module
+ *  keeps no import edge into `capabilities/`, and the integration parity test diffs the two so a
+ *  capability that exists in one and not the other is a loud failure rather than a silently unexposed
+ *  tool.
  *
- *  Exposure mirrors today's registered `modes`, tool for tool (Winter map §5.2): `browser` is the
- *  only all-three entry (chat's read-only restriction is enforced INSIDE the capability, not by
- *  hiding the tool); `computer`/office are code+dispatch; the `sessions` trio is dispatch-only;
- *  `research` is chat+dispatch, which is the mode-scoped exposure WS-06 §5 would otherwise have
- *  collapsed into the code-mode web tools. */
-export const CAPABILITY_TOOL_MODES: Readonly<Record<string, { modes: readonly SessionMode[] }>> = {
-  "mcp__winter__sessions__session_spawn": { modes: ["dispatch"] },
-  "mcp__winter__sessions__list_sessions": { modes: ["dispatch"] },
-  "mcp__winter__sessions__manage_session": { modes: ["dispatch"] },
-  "mcp__winter__computer__computer": { modes: ["code", "dispatch"] },
-  "mcp__winter__browser__browser": { modes: ["code", "dispatch", "chat"] },
-  "mcp__winter__office__docs": { modes: ["code", "dispatch"] },
-  "mcp__winter__office__sheets": { modes: ["code", "dispatch"] },
-  "mcp__winter__office__slides": { modes: ["code", "dispatch"] },
-  // `Search` — chat's and dispatch's own search tool (Exa ANSWER mode). Its exposure ALSO depends on
-  // whether an Exa key is stored, which is runtime state, so `disallowedToolsFor` decides that half;
-  // this row states the mode registration, as every other row does.
-  "mcp__winter__research__Search": { modes: ["chat", "dispatch"] },
-  // `mcp__winter__research__ReadPage` and the `mcp__winter__web__*` pair were here until the 2026-09-18
-  // web-tools ruling. P8b-33's reason for a daemon-owned web pair ("the SDK's built-ins carry neither
-  // the Exa key nor the dangerous-domain floor") expired at agent SDK 0.0.17, which gives the child
-  // both through `Options.web` — so the daemon's copies retired rather than shadowing the real tools.
-  // See `SDK_WEB_BUILTINS` for the per-mode rule that replaces them.
+ *  `Browser` is the only all-three entry (chat's read-only restriction is enforced INSIDE the
+ *  capability, not by hiding the tool); `Computer` is code+dispatch; office and LSP are code-only; the
+ *  `sessions` trio is dispatch-only. */
+export const CAPABILITY_TOOL_MODES: Readonly<Record<string, { modes: readonly SessionMode[]; plainName?: string }>> = {
+  "mcp__winter__sessions__session_spawn": { modes: ["dispatch"], plainName: "SpawnSession" },
+  "mcp__winter__sessions__list_sessions": { modes: ["dispatch"], plainName: "ListSessions" },
+  "mcp__winter__sessions__manage_session": { modes: ["dispatch"], plainName: "ManageSession" },
+  "mcp__winter__computer__computer": { modes: ["code", "dispatch"], plainName: "Computer" },
+  "mcp__winter__browser__browser": { modes: ["code", "dispatch", "chat"], plainName: "Browser" },
+  "mcp__winter__office__docs": { modes: ["code"] },
+  "mcp__winter__office__sheets": { modes: ["code"] },
+  "mcp__winter__office__slides": { modes: ["code"] },
+  // `mcp__winter__research__Search` was here until 2026-10-01: `Search` (Exa ANSWER mode) is the agent
+  // SDK's built-in now, named in chat's and dispatch's `Options.tools` when an Exa key is stored (`toolsFor`).
+  // `mcp__winter__research__ReadPage` and the `mcp__winter__web__*` pair left with the 2026-09-18
+  // web-tools ruling (the child's own `WebFetch`/`WebSearch` carry the key and the floor through
+  // `Options.web`).
   // Fix wave (review F7): the `lsp` capability server — code-only, as the registry door was.
   "mcp__winter__lsp__lsp": { modes: ["code"] },
 };
+
+/**
+ * **CHAT's allowed built-ins** (the 2026-10-01 ruling: allowed lists replace restricted lists) — chat's
+ * `Options.tools`, less its search tool, which `toolsFor` adds by whether an Exa key is stored.
+ *
+ * Chat is "conversation-with-a-memory": no filesystem, no shell, no repo (the shipped Chat Slice A
+ * design). Its set is UNCHANGED by the ruling apart from `ToolSearch`, which deferral needs now that
+ * `Browser` (an MCP tool) starts deferred: `AskUserQuestion`, `WebFetch` (the only way chat reads a page —
+ * the SDK's own, with the daemon's domain floor and a `privateAddressPolicy` of `deny`), and Winter's own
+ * four default tools (P8b-28, allowed silently in every mode). `Browser` is not a built-in and is not
+ * named here: MCP tools are never filtered by `tools`, and the `browser` capability server is the one
+ * that decides chat gets it.
+ */
+export const CHAT_BUILTIN_TOOLS: readonly string[] = [...new Set(["AskUserQuestion", "WebFetch", "ToolSearch", ...WINTER_OWN_TOOL_NAMES])].sort();
+
+/**
+ * **DISPATCH's allowed built-ins** — EXACTLY the ruling's list (2026-10-01), less its search tool, which
+ * `toolsFor` adds: `Bash`, `Read`, `WebFetch`, `SendMessage`, `TaskStop`, the three cron tools,
+ * `AskUserQuestion`, `PushNotification`, `ScheduleWakeup`, plus `ToolSearch` so the deferred tools load.
+ * `SpawnSession`/`ListSessions`/`ManageSession`/`Computer`/`Browser` are the daemon's capability tools
+ * (MCP, never filtered by `tools`); a user/plugin MCP server's tools arrive the same way, deferred.
+ *
+ * Deliberately NOT here, because the ruling's list is exact: `Agent`, `Edit`/`Write`/`Glob`/`Grep`, the
+ * plan/worktree/task-graph/notebook/workflow/skill tools, `Monitor`, `TaskOutput`, `ReportFindings`, the
+ * MCP-resource bookkeeping tools, and Winter's own `ListAgents`/`ReadNotifications`/`advisor` (only
+ * `SendMessage` of the four is listed). No office tool reaches dispatch at all.
+ */
+export const DISPATCH_BUILTIN_TOOLS: readonly string[] = [
+  "AskUserQuestion", "Bash", "CronCreate", "CronDelete", "CronList", "PushNotification", "Read", "ScheduleWakeup",
+  "SendMessage", "TaskStop", "ToolSearch", "WebFetch",
+];
+
+/**
+ * **`Options.tools` for a mode** — the built-in set as an ALLOWED list (claude's own `tools` option).
+ * `undefined` for code, which keeps its full built-in set.
+ *
+ * The search tool is the one runtime-state member: `Search` (Exa ANSWER mode — the agent SDK's opt-in
+ * built-in, which needs a key: `/answer` has no anonymous tier) when an Exa key is stored, else
+ * `WebSearch`, whose backend has an anonymous tier. Exactly one of the two, never both and never neither.
+ * ABSENT reads as "a key is stored", as it does at every door that reads this fact.
+ */
+export function toolsFor(mode: SessionMode, exposure: ToolExposure): string[] | undefined {
+  if (mode === "code") return undefined;
+  const search = (exposure.exaKeyPresent ?? true) ? SEARCH_BUILTIN : "WebSearch";
+  return [...new Set([...(mode === "chat" ? CHAT_BUILTIN_TOOLS : DISPATCH_BUILTIN_TOOLS), search])].sort();
+}
+
+/** The agent SDK's own `Search` built-in (Exa ANSWER mode), by name — opt-in, so only a `tools` list that
+ *  names it carries it. */
+export const SEARCH_BUILTIN = "Search";
+
+/** `Options.legacyToolNames`: the daemon's own tools that became runtime built-ins, old name → new. Until
+ *  2026-10-01 `Search` was the `research` capability server's `mcp__winter__research__Search`. */
+export const LEGACY_TOOL_NAMES: Readonly<Record<string, string>> = { mcp__winter__research__Search: SEARCH_BUILTIN };
+
+/**
+ * **The built-ins that start DEFERRED** (`Options.deferTools`; the 2026-10-01 ruling): `CronList`, in
+ * every mode that has it. Every MCP tool already starts deferred by itself (the capability tools the
+ * ruling keeps up front carry `alwaysLoad`), so this names built-ins only.
+ */
+export function deferToolsFor(mode: SessionMode): string[] {
+  return mode === "chat" ? [] : ["CronList"];
+}
 
 /**
  * **The two web built-ins the Winter runtime ships**: `WebFetch`/`WebSearch` (agent SDK 0.0.17), on by
@@ -117,27 +177,17 @@ export const CAPABILITY_TOOL_MODES: Readonly<Record<string, { modes: readonly Se
  * reach) is retired: `Options.web` now carries the key as an `authRef` the child resolves itself and
  * the floor as `blockedDomains`.
  *
- * **The rule is per MODE** (user ruling, 2026-09-18) — see `disallowedToolsFor`:
+ * **The rule is per MODE** (user ruling, 2026-09-18; carried by `toolsFor` since 2026-10-01):
  *
  *   code           both tools.
  *   chat,          `WebFetch`, plus `WebSearch` ONLY when no Exa key is stored — with a key, the
- *   dispatch       daemon's `Search` (Exa answer mode) is the search surface instead, and exposing
- *                  two searches to one model is a choice nobody asked it to make.
+ *   dispatch       SDK's `Search` built-in (Exa answer mode) is the search surface instead, and
+ *                  exposing two searches to one model is a choice nobody asked it to make.
  *
  * (Until WS-23 the rule was also per LEG: the retired official `claude` leg kept claude's native pair
  * in every mode.)
  */
 export const SDK_WEB_BUILTINS: readonly string[] = ["WebFetch", "WebSearch"];
-
-/**
- * The daemon's own `Search`, by wire name — the ONE capability tool whose exposure depends on runtime
- * state rather than on the mode alone, and the exact complement of `WebSearch`'s rule above.
- *
- * A literal, like every key in `CAPABILITY_TOOL_MODES`, and for the same reason: it is diffed against
- * `capabilityToolName("research", "Search")` by the names test rather than computed here, so this
- * module keeps no import edge into `capabilities/`.
- */
-export const EXA_GATED_SEARCH_TOOL = "mcp__winter__research__Search";
 
 /**
  * The runtime state a tool list depends on beyond the mode. WS-23: it used to carry a REQUIRED `leg`
@@ -195,54 +245,6 @@ export function fsRootAnchored(pathOrPattern: string): string {
 }
 
 
-/**
- * **What CHAT is allowed to call**, by Winter name — the whole set, pinned as a literal.
- *
- * Chat is "conversation-with-a-memory": no filesystem, no shell, no repo (the shipped Chat Slice A
- * design; `registry.namesForMode("chat")` is `{AskQuestion, Search, browser}` today). On
- * the Winter leg that becomes `AskUserQuestion` (the one tool that replaced `AskQuestion`), the
- * `research` capability's `Search`, the `browser` capability tool, and Winter's own four default tools
- * (P8b-28, allowed silently in every mode).
- *
- * Everything else a Winter child advertises is in chat's `disallowedTools`.
- *
- * 2026-09-18 (user ruling): `WebFetch` joins it, and it is now the ONLY way chat reads a page — the
- * `research` capability's `ReadPage` retired in the same change. The SDK's own `WebFetch` does that act
- * the way claude does, with
- * the daemon's domain floor and a `privateAddressPolicy` of `deny` (chat never asks, so a private
- * target is refused rather than prompted). `WebSearch` is NOT in this literal: whether chat sees it
- * depends on whether an Exa key is stored, which is runtime state and therefore `disallowedToolsFor`'s
- * decision, not a module constant's.
- */
-export const CHAT_ALLOWED_WINTER_TOOLS: readonly string[] = [
-  "AskUserQuestion",
-  "WebFetch",
-  ...[...WINTER_OWN_TOOL_NAMES].sort(),
-];
-
-/**
- * The Winter built-ins CHAT excludes — **derived from what the CHILD ACTUALLY ADVERTISES**
- * (`WINTER_ADVERTISED_TOOLS_0_0_4`, measured from the built binary) minus chat's allowed set, plus
- * Winter's own pair-table names for completeness.
- *
- * **NEITHER web built-in is here, in either direction** (0.0.17): `WebFetch` is in chat's allowed set
- * and `WebSearch`'s exposure depends on whether an Exa key is stored — a runtime fact. Both are
- * therefore decided in ONE place, `disallowedToolsFor`, rather than half here and half there, which
- * is why the pair table's own two rows are filtered out below.
- *
- * Review F4: deriving this from Winter's pair table left `Monitor`, `ReportFindings` and
- * `ScheduleWakeup` — all three genuinely advertised — visible to a chat model that is supposed to
- * have no fs/shell/repo surface. The pair table is the wrong source: it has rows for tools the
- * child does not advertise and misses ones it does.
- *
- * The union with the pair table is deliberate belt-and-braces: `disallowedTools` is inert for a name
- * the child never advertises, so naming extras costs nothing, while a future SDK that starts
- * advertising `LSP` or `ToolSearch` finds them already excluded.
- */
-export const CHAT_DISALLOWED_BUILTINS: readonly string[] = [...new Set([
-  ...WINTER_ADVERTISED_TOOLS_0_0_4,
-  ...RUNTIME_HOST_TOOL_PAIRS.map(([winter]) => winter),
-])].filter((w) => !CHAT_ALLOWED_WINTER_TOOLS.includes(w) && !SDK_WEB_BUILTINS.includes(w)).sort();
 
 export interface WinterOptionsInput {
   mode: SessionMode;
@@ -281,6 +283,13 @@ export interface WinterOptionsInput {
   abort: AbortController;
   /** Task 7's `WINTER_CAPABILITY_TOOLS`, or `CAPABILITY_TOOL_MODES` until it lands. */
   capabilityTools?: Readonly<Record<string, { modes: readonly SessionMode[] }>>;
+  /**
+   * Every server name the daemon's capability servers own or have owned (`capabilities/names.ts`'s
+   * `reservedMcpServerNames()`, `computer` included when computer use is off, the retired `research`/`web`
+   * too) — `Options.reservedMcpServerNames`: the runtime refuses any other server under one of them, from
+   * every origin (a settings scope, a plugin's `.mcp.json`, an agent definition's inline server).
+   */
+  reservedMcpServerNames?: readonly string[];
   /**
    * P8b-36 (Task 16): THIS session's daemon-owned capability servers, already keyed by server name
    * (`buildSessionCapabilities(session)` — `capabilities/index.ts`'s `CapabilityServerRecord`).
@@ -723,7 +732,11 @@ export const GLOBAL_READ_ALLOW_RULES: readonly string[] = ["Read", "Glob", "Grep
  *   `Edit(<abs dir>)`                  NOT forwarded: Winter's writable-DIRECTORY declaration, which never
  *                                       silenced a card — as an allow rule it would. (Its runtime
  *                                       counterpart is `additionalDirectories`, a separate door.)
- *   `Computer`                         → `mcp__winter__computer__computer` (the capability's wire name).
+ *   `Computer`                         → `mcp__winter__computer__computer` (the capability's MCP spelling —
+ *                                       still what is SAVED since the tool became the plain-named
+ *                                       `Computer` (2026-10-01): the runtime honours that spelling as an
+ *                                       equivalent identity, so the rule works on runtimes before and after,
+ *                                       and a bare `Computer` would collide with Winter's own rule head).
  *   `Worktree`                         → `EnterWorktree` + `ExitWorktree`.
  *   `WebFetch(domain:h)`               unchanged.
  *
@@ -1072,46 +1085,52 @@ export function childSandboxConfigFor(home: string, cwd?: string | null, extraDi
 const ANY_DEPTH_PROJECT_KINDS: readonly string[] = [...PROTECTED_ITEM_DIRS, "agents"];
 
 /**
- * Every capability tool NOT exposed to this mode, plus — for chat — the Winter built-ins chat
- * excludes, plus the per-mode web-built-in rule. The literal is pinned by the matrix test; the parity
- * tripwire diffs `CAPABILITY_TOOL_MODES` against Task 7's `WINTER_CAPABILITY_TOOLS`.
+ * Every capability tool NOT exposed to this mode, by the name the child knows it under (its plain name
+ * when it has one — the runtime also matches a deny on the old `mcp__winter__…` spelling). Belt and
+ * braces: the capability servers already serve only their mode's tools (`capabilities/server.ts`), and a
+ * structural filter cannot miss. The literal is pinned by the matrix test; the parity tripwire diffs
+ * `CAPABILITY_TOOL_MODES` against Task 7's `WINTER_CAPABILITY_TOOLS`.
  *
- * **`exposure` comes SECOND** — ahead of the defaulted `capabilityTools`. The web rule it decides
- * (0.0.17, user ruling 2026-09-18):
- *
- *   code            nothing is added: both tools are the code-mode web surface.
- *   chat,           `WebSearch` is disallowed WHEN AN EXA KEY IS STORED, because the daemon's
- *   dispatch        `Search` (Exa answer mode) is then the search surface. With NO key `Search`
- *                   cannot work at all, so it is disallowed INSTEAD and `WebSearch` — whose backend
- *                   has an anonymous tier — takes its place rather than leaving those two modes with
- *                   no search. Exactly one of the two is withheld, never both and never neither.
- *
- * `WebFetch` is never disallowed in any mode any more.
+ * The BUILT-IN half of each mode's surface is an ALLOWED list (the 2026-10-01 ruling) — `toolsFor`,
+ * claude's own `tools` option, which also decides the `Search`/`WebSearch` complement. For chat and
+ * dispatch this list ALSO names every KNOWN built-in that allowed list leaves out (`KNOWN_RUNTIME_BUILTINS`
+ * minus `toolsFor`) — belt and braces, so a runtime that ignored `tools` would still deny them (the review's
+ * fail-closed rule; `toolSurfaceViolations` is the other half, for a built-in nobody knew about yet).
  */
 export function disallowedToolsFor(
   mode: SessionMode,
-  exposure: ToolExposure,
-  capabilityTools: Readonly<Record<string, { modes: readonly SessionMode[] }>> = CAPABILITY_TOOL_MODES,
+  exposure: ToolExposure = {},
+  capabilityTools: Readonly<Record<string, { modes: readonly SessionMode[]; plainName?: string }>> = CAPABILITY_TOOL_MODES,
 ): string[] {
   const out = Object.entries(capabilityTools)
     .filter(([, v]) => !v.modes.includes(mode))
-    .map(([name]) => name);
-  if (mode === "chat") out.push(...CHAT_DISALLOWED_BUILTINS);
-  // The one place either web built-in is withheld — see this function's own doc comment, and
-  // `SDK_WEB_BUILTINS` for the ruling.
-  if (mode !== "code" && (exposure.exaKeyPresent ?? true)) out.push("WebSearch");
-  // …and its EXACT COMPLEMENT: with no key stored the daemon's own `Search` is withheld instead,
-  // because Exa's `/answer` endpoint cannot be called anonymously. The capability server makes the
-  // same decision on the same value (`capabilities/research.ts`, reading `CapabilitySession.
-  // exaKeyPresent`) — both are needed, and for opposite failure modes: a `disallowedTools` entry for a
-  // tool the server never advertised denies nothing, silently, while a server that advertises a tool
-  // this list withheld offers nothing, also silently.
-  // The MODE guard mirrors the clause above deliberately (whole-branch review NIT): `Search` is a
-  // chat/dispatch tool, so code mode's answer comes from the base scan and nothing else. Without it
-  // this line also pushed the name for `code`, where it was deduped and inert — a true no-op, and an
-  // asymmetry that read as an oversight to the next person to touch either clause.
-  if (mode !== "code" && exposure.exaKeyPresent === false) out.push(EXA_GATED_SEARCH_TOOL);
+    .map(([name, v]) => v.plainName ?? name);
+  const allowed = toolsFor(mode, exposure);
+  if (allowed !== undefined) out.push(...KNOWN_RUNTIME_BUILTINS.filter((name) => !allowed.includes(name)));
   return [...new Set(out)].sort();
+}
+
+/**
+ * **Every built-in the Winter runtime is known to offer** — the measured `init.tools` set
+ * (`WINTER_ADVERTISED_TOOLS_0_0_4`, the MCP family included) plus the ones that arrived later: the web pair
+ * and `Search`, `LSP`, and Winter's own `advisor`. Only the deny-list half of the fail-closed rule reads
+ * it; a built-in missing here is still caught at init (`toolSurfaceViolations`).
+ */
+export const KNOWN_RUNTIME_BUILTINS: readonly string[] = [...new Set([...WINTER_ADVERTISED_TOOLS_0_0_4, "WebFetch", "WebSearch", SEARCH_BUILTIN, "LSP", ...WINTER_OWN_TOOL_NAMES])].sort();
+
+/**
+ * **The fail-closed check on what a chat/dispatch child actually offers** (2026-10-01 review). `init.tools`
+ * must be inside the incarnation's own allowed list (`Options.tools`), the daemon's plain-named capability
+ * tools (`plainNames`), or an MCP tool (`mcp__…`). Anything else — a built-in the runtime offered although
+ * `tools` left it out, i.e. a runtime that ignores the option — is returned, and the session refuses the
+ * incarnation typed (`winter-session.ts`, `tool_surface_unenforced`). `[]` when `tools` is absent (code).
+ */
+export const CAPABILITY_PLAIN_NAMES: ReadonlySet<string> = new Set(Object.values(CAPABILITY_TOOL_MODES).flatMap((v) => (v.plainName === undefined ? [] : [v.plainName])));
+
+export function toolSurfaceViolations(initTools: readonly string[], allowed: readonly string[] | undefined, plainNames: ReadonlySet<string>): string[] {
+  if (allowed === undefined) return [];
+  const ok = new Set(allowed);
+  return initTools.filter((name) => !ok.has(name) && !plainNames.has(name) && !name.startsWith("mcp__"));
 }
 
 /**
@@ -1157,6 +1176,25 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       input.exaKeyPresent === undefined ? {} : { exaKeyPresent: input.exaKeyPresent },
       input.capabilityTools,
     ),
+    // THE 2026-10-01 TOOL-SURFACE RULING, in three Options:
+    //  - `tools` (claude's own option): chat's and dispatch's built-ins as an ALLOWED list (`toolsFor`),
+    //    the search tool decided by whether an Exa key is stored. Code keeps every built-in (absent).
+    //  - `toolSearchEnabled`: EVERY MCP tool starts deferred and loads through `ToolSearch` — the
+    //    capability tools (but the `sessions` trio, which carry `alwaysLoad`) and every user/project/
+    //    plugin server's. A provider that cannot search gets full injection (the SDK's contract), and
+    //    the `tools` list still holds there.
+    //  - `deferTools`: `CronList`, the one built-in the ruling defers.
+    ...((): Pick<Options, "tools"> => {
+      const tools = toolsFor(input.mode, input.exaKeyPresent === undefined ? {} : { exaKeyPresent: input.exaKeyPresent });
+      return tools === undefined ? {} : { tools };
+    })(),
+    toolSearchEnabled: true,
+    ...(deferToolsFor(input.mode).length > 0 ? { deferTools: deferToolsFor(input.mode) } : {}),
+    // The daemon's own tools that became the runtime's: a resumed history's call, a saved rule or a hook
+    // matcher under the old name keeps meaning the tool (`LEGACY_TOOL_NAMES`).
+    legacyToolNames: { ...LEGACY_TOOL_NAMES },
+    // No server but the daemon's own in-process ones may take a capability server's name — whatever its origin.
+    ...(input.reservedMcpServerNames === undefined ? {} : { reservedMcpServerNames: [...input.reservedMcpServerNames].sort() }),
     // Batch 3 (item 2): the fixed control-plane fence PLUS `settings.permissions.deny` (today just
     // `Skill(<name>)` toggles) — see `permissionDenyRulesFor`'s own doc for why this reads
     // `input.settings` rather than the vestigial "no longer consumed" note this field used to carry.

@@ -33,6 +33,70 @@ function groupFor(matchers: HookCallbackMatcher[] | undefined, matcher: string |
 
 const baseDeps: SessionHooksDeps = { sessionId: "s_1", roots: ["/tmp"] };
 
+// ── Search (the agent SDK's built-in since 2026-10-01): the live floor and the audit line ──────────
+
+describe("sessionHooksFor — Search keeps the daemon's live floor and its audit line (2026-10-01 review)", () => {
+  const updated = (out: Record<string, unknown>): Record<string, unknown> | undefined => (out["hookSpecificOutput"] as { updatedInput?: Record<string, unknown> } | undefined)?.updatedInput;
+  const searchFloor = (deps: Partial<SessionHooksDeps> = {}) => groupFor(sessionHooksFor({ ...baseDeps, ...deps }).winter?.PreToolUse, "Search").hooks[0]!;
+  const run = async (input: unknown, deps: Partial<SessionHooksDeps> = {}) =>
+    (await searchFloor(deps)(preInput({ tool_name: "Search", tool_input: input, tool_use_id: "t1" }), "t1", { signal: abortSignal() })) as Record<string, unknown>;
+
+  test("the effective floor — shipped ∪ the user's additions, read AT THE CALL — rides the call as `blocked_domains`, the query verbatim", async () => {
+    let added = ["first.example"];
+    const deps = { dangerousDomainsAdded: () => added };
+    const out = updated(await run({ query: "what is new in bun" }, deps))!;
+    expect(out["query"]).toBe("what is new in bun");
+    expect(Object.keys(out).sort()).toEqual(["blocked_domains", "query"]);
+    expect(out["blocked_domains"]).toEqual([...SHIPPED_DANGEROUS_DOMAINS, "first.example"]);
+    // An entry added mid-session reaches the very next call (no respawn).
+    added = ["first.example", "later.example"];
+    expect(updated(await run({ query: "q" }, deps))!["blocked_domains"]).toContain("later.example");
+  });
+
+  test("a model-written list is unioned, never replaced; a missing or blank query stands down; the group is fail-closed and registered last", async () => {
+    expect(updated(await run({ query: "q", blocked_domains: ["mine.example"] }))!["blocked_domains"]).toEqual([...SHIPPED_DANGEROUS_DOMAINS, "mine.example"]);
+    expect(await run({})).toEqual({});
+    expect(await run({ query: "   " })).toEqual({});
+    const pre = sessionHooksFor(baseDeps).winter?.PreToolUse ?? [];
+    expect(pre.at(-1)?.matcher).toBe("Search");
+    expect((pre.at(-1) as { failClosed?: boolean }).failClosed).toBe(true);
+    // Another tool's call is not touched.
+    expect(await searchFloor()(preInput({ tool_name: "WebSearch", tool_input: { query: "q" }, tool_use_id: "t1" }), "t1", { signal: abortSignal() })).toEqual({});
+  });
+
+  test("one `{kind:'network', tool:'Search', query, outcome}` line per call that ran — success and every failure sentence — and never the key or the answer", async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const built = sessionHooksFor({ ...baseDeps, audit: (line) => lines.push(line) });
+    const ok = groupFor(built.winter?.PostToolUse, "Search").hooks[0]!;
+    const failed = groupFor(built.winter?.PostToolUseFailure, "Search").hooks[0]!;
+    await ok(postInput({ tool_name: "Search", tool_input: { query: "bun 2" }, tool_use_id: "t1", tool_response: "Bun 2 shipped.\n\nSources:\n1. Bun\n   https://bun.sh/" }), "t1", { signal: abortSignal() });
+    await ok(postInput({ tool_name: "Search", tool_input: { query: "off" }, tool_use_id: "t2", tool_response: "Web search is turned off for this session." }), "t2", { signal: abortSignal() });
+    const failures: Array<[string, string]> = [
+      ["Search needs an Exa API key (from exa.ai), and none is configured for this session", "no_key"],
+      ["search failed: the configured Exa API key was rejected — it needs to be replaced before Search can work", "unauthorized"],
+      ["search failed: this Exa account is out of credits or over its budget — top it up at exa.ai, or answer from what you already know and say the search was unavailable", "out_of_credits"],
+      ["search failed: the search service is rate-limiting this key — wait a little before searching again, and do not retry in a loop", "rate_limited"],
+      ["search failed: the search service is unavailable (HTTP 503)", "http_error"],
+      ["search failed: could not reach the search service", "network_error"],
+      ["search timed out for q", "timeout"],
+      ["search failed: malformed response from search service", "parse_error"],
+      ["something nobody wrote yet", "error"],
+    ];
+    for (const [error] of failures) {
+      await failed({ session_id: "s_1", transcript_path: "", cwd: "/tmp", hook_event_name: "PostToolUseFailure", tool_name: "Search", tool_input: { query: "q" }, tool_use_id: "t3", error } as never, "t3", { signal: abortSignal() });
+    }
+    expect(lines.map((l) => [l["kind"], l["tool"], l["query"], l["outcome"]])).toEqual([
+      ["network", "Search", "bun 2", "ok"],
+      ["network", "Search", "off", "disabled"],
+      ...failures.map(([, outcome]) => ["network", "Search", "q", outcome]),
+    ]);
+    for (const line of lines) expect(Object.keys(line).sort()).toEqual(["kind", "outcome", "query", "tool"]);
+    expect(JSON.stringify(lines)).not.toContain("Bun 2 shipped");
+    // No audit sink: no group registered at all.
+    expect((sessionHooksFor(baseDeps).winter?.PostToolUse ?? []).some((g) => g.matcher === "Search")).toBe(false);
+  });
+});
+
 describe("sessionHooksFor — plugin manifest hooks", () => {
   test("no hookFacade ⇒ PreToolUse/PostToolUse groups (unmatched) allow unconditionally", async () => {
     const { winter } = sessionHooksFor(baseDeps);
@@ -856,7 +920,7 @@ describe("sessionHooksFor — the floor's wiring, ordering and both legs", () =>
       }).winter?.PreToolUse ?? [];
       // "Bash" twice: the reviewer, then the escape floor (C3 round 3), which runs under every policy;
       // then (WS-21 §7.1/§7.2) the unmatched path fence, which answers deny/ask and never transforms
-      expect(matchers.map((m) => m.matcher)).toEqual([undefined, "Bash", "Bash", undefined, "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]);
+      expect(matchers.map((m) => m.matcher)).toEqual([undefined, "Bash", "Bash", undefined, "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Search"]);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

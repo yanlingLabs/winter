@@ -7,7 +7,7 @@ import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
-import { EXA_API_KEY_SECRET } from "../../src/agent/tools/search";
+import { EXA_API_KEY_SECRET } from "../../src/agent/exa-key";
 import { WEB_SEARCH_API_KEY_SECRET } from "../../src/agent/tools/web";
 import { CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial, readCredentialMaterial, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { createInternalProviderView } from "../../src/providers/internal-view";

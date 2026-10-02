@@ -56,7 +56,7 @@ export function sessionSpawnToolDefs(opts: { models?: string[]; spawn?: SessionS
       title: z.string().optional(),
     }),
     async run(args, ctx) {
-      if (opts.spawn === undefined) return "session_spawn is only available in the dispatch session.";
+      if (opts.spawn === undefined) return "SpawnSession is only available in the dispatch session.";
       // The schema above has validated `args` (its `model` field's type depends on the enum).
       return await opts.spawn(args as Parameters<SessionSpawner>[0], ctx);
     },

@@ -253,10 +253,10 @@ export class DispatchChildren {
    * fails after creation removes what it created.
    */
   async spawn(callerSessionId: string, args: SessionSpawnArgs): Promise<string> {
-    if (this.draining) throw new SessionSpawnRefusal("session_spawn is not available — Winter is shutting down.");
+    if (this.draining) throw new SessionSpawnRefusal("SpawnSession is not available — Winter is shutting down.");
     let caller: { mode?: string; approvalPolicy?: string };
-    try { caller = this.deps.store.meta(callerSessionId); } catch { throw new SessionSpawnRefusal("session_spawn is only available in the dispatch session."); }
-    if (caller.mode !== "dispatch") throw new SessionSpawnRefusal("session_spawn is only available in the dispatch session.");
+    try { caller = this.deps.store.meta(callerSessionId); } catch { throw new SessionSpawnRefusal("SpawnSession is only available in the dispatch session."); }
+    if (caller.mode !== "dispatch") throw new SessionSpawnRefusal("SpawnSession is only available in the dispatch session.");
     const type = args.type ?? "code";
     if (type === "cowork") throw new SessionSpawnRefusal("type 'cowork' is not yet available — use 'code'.");
     const raw = typeof args.dir === "string" ? args.dir.trim() : "";
@@ -277,7 +277,7 @@ export class DispatchChildren {
     const title = (typeof args.title === "string" && args.title.trim() !== "" ? args.title.trim() : prompt).slice(0, typeof args.title === "string" && args.title.trim() !== "" ? CHILD_TITLE_MAX : 60);
     const policy = childPolicyFor(caller.approvalPolicy);
     const create = this.deps.createSession();
-    if (create === undefined) throw new SessionSpawnRefusal("session_spawn is not ready yet — the daemon is still starting; try again in a moment.");
+    if (create === undefined) throw new SessionSpawnRefusal("SpawnSession is not ready yet — the daemon is still starting; try again in a moment.");
 
     let childId: string;
     try {
