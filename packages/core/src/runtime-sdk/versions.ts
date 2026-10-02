@@ -3,8 +3,12 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.36";
-/** Bumped to 0.0.36 (2026-09-30): tool results carry images — Read, notebooks and MCP hand the model real image
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.38";
+/** Bumped to 0.0.38 (2026-10-02; 0.0.37 was tagged but never published): the tool-surface rework — claude's `tools` option (chat's and dispatch's allowed
+ *  lists), plain-named in-process tools (`toolNames`: `Browser`, `Computer`, `SpawnSession`, …), `deferTools` and the
+ *  persisted deferred-tools announcement, `Search` (Exa answer mode) as a runtime built-in, `legacyToolNames`,
+ *  `reservedMcpServerNames` enforced for every MCP origin, and the web tools' host-only site icons.
+ *  Earlier: bumped to 0.0.36 (2026-09-30): tool results carry images — Read, notebooks and MCP hand the model real image
  *  blocks on every provider (resized to 1568 px, per-request image budgets, text-only models get a short error),
  *  which is what makes code mode's staged `[Image #n]` paths visible to the model; query() never spawns under an
  *  aborted signal.
