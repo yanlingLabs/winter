@@ -107,6 +107,7 @@ import { readWinterTasks } from "./tasks-reader";
 import { keychainService } from "../profile";
 import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { createHostCredentialBroker, sessionCredentialAllowlist, type ProviderRefresher } from "./host-credentials";
+import { SESSION_REPLACED } from "./session-replaced";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -1354,7 +1355,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       options: optionsFor,
       beforeTurn,
       spawnRefusal: () => (shuttingDown ? shutdownRefusal() : undefined),
-      endedWhileOpeningRefusal: () => new WinterLegRefusal("session_replaced", "this session's runtime was replaced while it was starting; send again"),
+      endedWhileOpeningRefusal: () => new WinterLegRefusal(SESSION_REPLACED, "this session's runtime was replaced while it was starting; send again"),
       projector: projectorFor,
       append,
       broadcast: (event) => { deps.hub.broadcastTransient(sessionId, event); },
