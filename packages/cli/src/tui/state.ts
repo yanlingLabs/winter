@@ -346,15 +346,16 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       }
       // Paired by callId: a round's tool_calls all arrive first, and since agent SDK 0.0.40 its
       // read-only calls run concurrently, so results come back in COMPLETION order, not call order. A
-      // result whose callId names no pending row (a stray, or a writer that sends none) takes the oldest.
-      const byId = typeof e.callId === "string" ? s.activeTools.findIndex((t) => t.callId === e.callId) : -1;
-      const at = byId >= 0 ? byId : 0;
-      const pendingRow = s.activeTools[at];
+      // result whose callId names no pending row (a stray, or a writer that sends none) is rendered
+      // UNPAIRED and takes no row: guessing would label it with another call's name and drop that call's
+      // live row while it is still running.
+      const at = typeof e.callId === "string" ? s.activeTools.findIndex((t) => t.callId === e.callId) : -1;
+      const pendingRow = at >= 0 ? s.activeTools[at] : undefined;
       const call = pendingRow === undefined ? undefined : { name: pendingRow.name, argsJson: pendingRow.argsJson };
       const output = str(e.output);
       const next: TuiState = {
         ...s,
-        activeTools: s.activeTools.filter((_, i) => i !== at),
+        activeTools: at >= 0 ? s.activeTools.filter((_, i) => i !== at) : s.activeTools,
         committed: [...s.committed, buildToolBlock(call, output, e.isError === true)],
       };
       // phase 5a T3: learn a background child's `name` off this same call/result pairing (see

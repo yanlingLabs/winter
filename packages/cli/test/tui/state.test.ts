@@ -69,6 +69,14 @@ describe("state.ts — tool call/result (b)", () => {
     expect(s.committed.map((b) => (b.kind === "tool" ? [b.name, b.output] : b.kind))).toEqual([["read", "B"], ["web_fetch", "C"], ["web_search", "A"]]);
   });
 
+  test("a result whose callId matches no row renders unpaired and takes no row", () => {
+    let s = initialState();
+    s = reduce(s, { type: "tool_call", threadId: "main", callId: "a", name: "read", argsJson: '{"file_path":"a"}' }, T0);
+    s = reduce(s, { type: "tool_result", threadId: "main", callId: "stray", output: "?", isError: false }, T0 + 1);
+    expect(s.activeTools.map((t) => t.callId)).toEqual(["a"]);
+    expect(s.committed).toEqual([{ kind: "tool", name: "", argsJson: "", output: "?", isError: false }]);
+  });
+
   test("a child's concurrent calls are each paired with their own result, in completion order", () => {
     let s = initialState();
     s = reduce(s, { type: "thread_started", threadId: "th", parentThreadId: "main", agentType: "general-purpose", prompt: "go" }, T0);
