@@ -123,7 +123,11 @@ private func plumeThrows(in activity: [ActivityItem], from start: Int) -> [Plume
         guard case let .tool(name, detail, callId, output, isError, _, siteIcons) = item.kind else { continue }
         let base = callId ?? "activity-\(index)"
         let lowered = name.lowercased()
-        out.append(PlumeThrow(id: base, kind: .tool(symbol: workingToolSymbol(for: name))))
+        // A search throws only the websites it found — their favicons ARE its mark (user, 2026-10-02);
+        // every other tool throws its own puff when it is called.
+        if !plumeIsSearchTool(lowered) {
+            out.append(PlumeThrow(id: base, kind: .tool(symbol: workingToolSymbol(for: name))))
+        }
         guard let output else { continue }
         var sites = plumeSites(siteIcons)
         if plumeFetchToolNames.contains(lowered) {
