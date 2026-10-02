@@ -7,7 +7,7 @@ import type { SessionApprovalPolicy } from "../agent/gate";
 import { hasOpenPanelTabs } from "../panel/store";
 import type { SessionDirs } from "./dirs";
 import { outdirPath } from "./outdir";
-import { BashEditPairer } from "./bash-edits";
+import { BashEditPairer, bashCommandOf } from "./bash-edits";
 import { removeSessionDiffs } from "../diffs/store";
 import { canonicalModelTag, isModelTag, UNSTATED_TAG } from "../runtime-sdk/model-tag";
 import { migrateBareModelId } from "../settings";
@@ -455,7 +455,7 @@ export class SessionStore {
           let cwd: string | undefined | null = null;   // looked up once, at the batch's first Bash call
           for (const e of events) {
             if (e.type === "tool_call" || e.type === "tool_result") {
-              if (e.type === "tool_call" && cwd === null) cwd = this.sessionCwd(sessionId);
+              if (e.type === "tool_call" && cwd === null && bashCommandOf(e) !== undefined) cwd = this.sessionCwd(sessionId);
               for (const path of bash.observe(e.callId, e, cwd ?? undefined)) { this.recordEditedFile(sessionId, path, e.ts); seen++; }
             }
             if (e.type !== "tool_result" || e.fileDiff === undefined) continue;
@@ -567,7 +567,8 @@ export class SessionStore {
     }
     if (event.type === "tool_call" || event.type === "tool_result") {
       try {
-        const cwd = event.type === "tool_call" ? this.sessionCwd(sessionId) : undefined;
+        // The cwd query runs only for a Bash call (every other tool_call passes through untouched).
+        const cwd = event.type === "tool_call" && bashCommandOf(event) !== undefined ? this.sessionCwd(sessionId) : undefined;
         for (const path of this.bashEdits.observe(`${sessionId}\0${event.callId}`, event, cwd)) this.recordEditedFile(sessionId, path, event.ts);
       } catch (err) { console.error(`[store] could not index a Bash edit for ${sessionId} (${err instanceof Error ? err.name : "error"}) — the next boot catches up`); }
     }
