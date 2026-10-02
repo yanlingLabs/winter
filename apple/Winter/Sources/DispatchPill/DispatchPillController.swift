@@ -1037,8 +1037,19 @@ final class DispatchPillController: ObservableObject {
     }
 
     func childPalette(for sessionId: String) -> PlumePalette {
-        session.state.children.firstIndex { $0.sessionId == sessionId }.map(PlumePalette.child(at:)) ?? .blue
+        let next = assignChildPaletteSlots(roster: session.state.children.map(\.sessionId),
+                                           assigned: childPaletteSlots, cursor: childPaletteCursor,
+                                           count: PlumePalette.childPalettes.count)
+        childPaletteSlots = next.assigned
+        childPaletteCursor = next.cursor
+        return childPaletteSlots[sessionId].map(PlumePalette.child(at:)) ?? .blue
     }
+
+    /// Each child's colour, by session id, fixed the first time it is seen (user, 2026-10-02): a
+    /// colour that followed the row position changed every time a finished child left the row, and
+    /// the windows opened in the old colours then matched someone else's pill.
+    private var childPaletteSlots: [String: Int] = [:]
+    private var childPaletteCursor = 0
 
     /// Watch exactly the children that are still working (or waiting on the user) while the pill is on
     /// screen; let go of every other — a finished child, a stopped one, or all of them once the pill

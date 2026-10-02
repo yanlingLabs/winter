@@ -58,6 +58,27 @@ enum ChildPillStatus: Equatable {
     var isStoppable: Bool { self == .working || self == .needsYou }
 }
 
+// MARK: - Colours (pure — `ChildSessionPillsTests`)
+
+/// PURE: gives every child in `roster` that has no colour yet the next one round the wheel
+/// (`cursor` onward), skipping colours a child still on the row wears. A colour, once given, is
+/// never changed — children finishing and leaving the row move no one else's. Only past `count`
+/// children on the row at once does a colour repeat.
+func assignChildPaletteSlots(roster: [String], assigned: [String: Int], cursor: Int, count: Int)
+    -> (assigned: [String: Int], cursor: Int)
+{
+    guard count > 0 else { return (assigned, cursor) }
+    var assigned = assigned, cursor = cursor
+    for id in roster where assigned[id] == nil {
+        let worn = Set(roster.compactMap { assigned[$0] })
+        let free = (0..<count).map { (cursor + $0) % count }.first { !worn.contains($0) }
+        let slot = free ?? cursor % count
+        assigned[id] = slot
+        cursor = (slot + 1) % count
+    }
+    return (assigned, cursor)
+}
+
 // MARK: - Coming and going (pure — `ChildSessionPillsTests`)
 
 /// How a child pill looks part-way into the row: `progress` 0 = still inside the main pill below it,
@@ -118,13 +139,16 @@ struct ChildSessionPillsView: View {
     /// The live child session behind a pill (`DispatchPillController.childSession`), so a working
     /// child's plume throws the tools and sites THAT child uses. Nil → a plain plume.
     var childSession: (String) -> SessionModel? = { _ in nil }
+    /// A child's own colour (`DispatchPillController.childPalette`) — fixed per session, never by its
+    /// place in the row. Nil → by place (previews, tests).
+    var palette: ((String) -> PlumePalette)? = nil
 
     private var layout: ChildPillLayout { childPillLayout(count: children.count, rowWidth: rowWidth) }
 
     var body: some View {
         HStack(spacing: DispatchPillMetrics.childPillGap) {
             ForEach(Array(children.prefix(layout.visibleCount).enumerated()), id: \.element.id) { index, child in
-                ChildSessionPill(child: child, palette: .child(at: index), session: childSession(child.sessionId),
+                ChildSessionPill(child: child, palette: palette?(child.sessionId) ?? .child(at: index), session: childSession(child.sessionId),
                                  onOpen: { onOpen(child.sessionId) },
                                  onStop: { onStop(child.sessionId) })
                     .frame(width: layout.pillWidth, height: DispatchPillMetrics.childRowHeight)
