@@ -119,7 +119,8 @@ private struct DispatchPillAccessories: View {
                     onOpen: { controller.onOpenChild?($0) },
                     onStop: { controller.onStopChild?($0) },
                     onOpenOverflow: { controller.onOpenInApp?() },
-                    childSession: { controller.childSession($0) }
+                    childSession: { controller.childSession($0) },
+                    palette: { controller.childPalette(for: $0) }
                 )
                 .transition(.childPill)
             }

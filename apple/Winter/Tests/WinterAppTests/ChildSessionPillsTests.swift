@@ -107,3 +107,40 @@ final class ChildSessionPillsTests: XCTestCase {
         XCTAssertFalse(ChildPillStatus.done.isStoppable)
     }
 }
+
+/// A child keeps its colour for life: finished children leaving the row move no one else's
+/// (user, 2026-10-02 — the windows opened in the old colours then matched someone else's pill).
+final class ChildPaletteSlotTests: XCTestCase {
+    private let n = PlumePalette.childPalettes.count
+
+    func testEachNewChildTakesTheNextColourRoundTheWheel() {
+        let r = assignChildPaletteSlots(roster: ["a", "b", "c"], assigned: [:], cursor: 0, count: n)
+        XCTAssertEqual(r.assigned, ["a": 0, "b": 1, "c": 2])
+        XCTAssertEqual(r.cursor, 3)
+    }
+
+    func testAFinishedChildLeavingMovesNoOneElsesColour() {
+        let first = assignChildPaletteSlots(roster: ["a", "b", "c"], assigned: [:], cursor: 0, count: n)
+        // "a" finished and was pruned from the row.
+        let after = assignChildPaletteSlots(roster: ["b", "c"], assigned: first.assigned, cursor: first.cursor, count: n)
+        XCTAssertEqual(after.assigned["b"], 1)
+        XCTAssertEqual(after.assigned["c"], 2)
+    }
+
+    func testANewChildDoesNotReuseAColourStillOnTheRowOrJustFreed() {
+        let first = assignChildPaletteSlots(roster: ["a", "b"], assigned: [:], cursor: 0, count: n)
+        let next = assignChildPaletteSlots(roster: ["b", "d"], assigned: first.assigned, cursor: first.cursor, count: n)
+        XCTAssertEqual(next.assigned["d"], 2, "the next colour on, not the one 'a' just left (its window may still be open)")
+    }
+
+    func testTheWheelWrapsSkippingColoursStillWorn() {
+        let ids = (0..<n).map { "c\($0)" }
+        let full = assignChildPaletteSlots(roster: ids, assigned: [:], cursor: 0, count: n)
+        // c0 and c1 leave; two newcomers take their colours back, in turn.
+        let roster = Array(ids.dropFirst(2)) + ["x", "y"]
+        let next = assignChildPaletteSlots(roster: roster, assigned: full.assigned, cursor: full.cursor, count: n)
+        XCTAssertEqual(next.assigned["x"], 0)
+        XCTAssertEqual(next.assigned["y"], 1)
+        XCTAssertEqual(Set(roster.compactMap { next.assigned[$0] }).count, n, "no colour twice on a full row")
+    }
+}
