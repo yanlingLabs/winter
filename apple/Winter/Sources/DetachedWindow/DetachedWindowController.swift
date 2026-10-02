@@ -123,34 +123,16 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
             return false
         }
 
-        let window = NSWindow(
-            contentRect: frame,
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered, defer: false)
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
+        // Drawn entirely by Winter in the dispatch pill's material (user, 2026-10-02): no macOS frame,
+        // so no system rim or corner radius — `PillChromeWindow` and the rounded black shape its
+        // SwiftUI root draws. Its traffic lights, drag band and resize grips are Winter's own.
+        let window = PillChromeWindow(contentRect: frame)
         window.title = title
         window.isReleasedWhenClosed = false // this controller owns the window's lifetime
         window.minSize = NSSize(width: 340, height: 360)
-        window.backgroundColor = .black
-        window.isOpaque = false
-        // The dispatch pill's theme (user, 2026-10-02): the same black material, and dark whatever the
-        // system's appearance, so every token below — and the AppKit composer's named colours —
-        // resolves to its dark half, exactly as the pill's panel does.
+        // Dark whatever the system's appearance, so every token below — and the AppKit composer's
+        // named colours — resolves to its dark half, exactly as the pill's panel does.
         window.appearance = NSAppearance(named: .darkAqua)
-        // LIVE-GATE W1b fix (Safari-style unified-toolbar technique, proven in this repo's
-        // history around commit dd48b68): an empty toolbar + `.unified` style inserts the taller
-        // titlebar band macOS gives a real toolbar window — traffic lights inset like Safari's
-        // (~22pt, matching the morph window's own 14pt lights) instead of a bare titled window's
-        // compact chrome, and macOS 26 gives that band the larger corner radius the morph
-        // window's shell draws (26pt, `chatWindowCornerRadius`). AppKit enforces a chrome-minimum
-        // frame (~40×220 observed historically) on toolbar windows, but that's irrelevant here:
-        // `minSize` is already 340×360, and a detached window never animates open from a tiny
-        // frame (unlike the morph panel), so there's no tiny-frame collision to guard against.
-        let toolbar = NSToolbar(identifier: "winter.detached.toolbar")
-        toolbar.displayMode = .iconOnly
-        window.toolbar = toolbar
-        window.toolbarStyle = .unified
         self.window = window
 
         let adapter = FieldStateAdapter(session: session)
@@ -353,8 +335,21 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
             onOpenDetached: { [weak self] sid in self?.onOpenSessionDetached?(sid) },
             onNewSession: { [weak self] in self?.newSession() }
         )
-        window.contentView = NSHostingView(rootView: DetachedWindowRootView(
-            adapter: adapter, sidebars: sidebars, palette: palette))
+        let hosting = NSHostingView(rootView: DetachedWindowRootView(
+            adapter: adapter, sidebars: sidebars, palette: palette,
+            onClose: { [weak window] in window?.performClose(nil) },
+            onMinimize: { [weak window] in window?.performMiniaturize(nil) },
+            onZoom: { [weak window] in window?.performZoom(nil) }))
+        // The content, with the resize grips laid over it (they claim only the edges and corners).
+        let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        hosting.frame = container.bounds
+        hosting.autoresizingMask = [.width, .height]
+        hosting.sizingOptions = []
+        container.addSubview(hosting)
+        let grips = PillWindowResizeHandles(frame: container.bounds)
+        grips.autoresizingMask = [.width, .height]
+        container.addSubview(grips)
+        window.contentView = container
         window.setFrame(frame, display: true)
     }
 
@@ -631,6 +626,11 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// The shadow follows the window's transparent outline; a new size is a new outline.
+    func windowDidResize(_ notification: Notification) {
+        window.invalidateShadow()
+    }
+
     func windowWillClose(_ notification: Notification) {
         guard !didClose else { return }
         didClose = true
@@ -664,6 +664,9 @@ struct DetachedWindowRootView: View {
     /// in-place switch plumbing is unchanged.
     let sidebars: SidebarWiring
     var palette: PlumePalette = .blue
+    var onClose: () -> Void = {}
+    var onMinimize: () -> Void = {}
+    var onZoom: () -> Void = {}
 
     /// The band the traffic lights sit in, which the transcript scrolls up under.
     static let headerBand: CGFloat = 54
@@ -690,8 +693,26 @@ struct DetachedWindowRootView: View {
             .environment(\.transcriptMarkerTint, .white)
             .environment(\.pillChromePalette, palette)
 
+            // The band the lights sit in moves the window — a frameless window has no titlebar to
+            // drag.
+            Color.clear
+                .frame(height: Self.headerBand)
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+                .gesture(WindowDragGesture())
+                .onTapGesture(count: 2, perform: onZoom)
+            MacTrafficLights(onClose: onClose, onMinimize: onMinimize, onZoom: onZoom)
+                .padding(.leading, 20)
+                .padding(.top, 20)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color.black)
+        // The window's whole shape: the pill's own radius and faint edge (`PillChromeWindow`).
+        .clipShape(RoundedRectangle(cornerRadius: PillChromeWindow.cornerRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: PillChromeWindow.cornerRadius, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
+        }
         .environment(\.colorScheme, .dark)
         .ignoresSafeArea()
     }
