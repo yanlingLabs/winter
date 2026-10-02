@@ -223,14 +223,20 @@ final class DispatchPillSnapshotTests: XCTestCase {
                          activity: [ActivityItem(kind: .tool(name: "read", detail: "project.yml", callId: "r1", output: "name: Winter")),
                                     ActivityItem(kind: .tool(name: "grep", detail: "deploymentTarget", callId: "g1", output: "13:"))  ,
                                     ActivityItem(kind: .tool(name: "bash", detail: "xcodebuild test", callId: "x1", output: "1 failure", isError: true))]),
-                Exchange(prompt: "and run sleep 24 in the foreground", reply: "",
-                         activity: [ActivityItem(kind: .tool(name: "bash", detail: "sleep 24", callId: "b1"))]),
+                Exchange(prompt: "and research rocket engines", reply: "",
+                         activity: [ActivityItem(kind: .tool(name: "web_search", detail: "rocket engines", callId: "w1", output: "https://nasa.gov https://spacex.com https://esa.int",
+                                                             siteIcons: [SiteIconRef(url: "https://nasa.gov", iconUrl: "https://nasa.gov/favicon.ico"),
+                                                                         SiteIconRef(url: "https://spacex.com", iconUrl: "https://spacex.com/favicon.ico")])),
+                                    ActivityItem(kind: .tool(name: "web_search", detail: "nozzle design", callId: "w2")),
+                                    ActivityItem(kind: .tool(name: "WebFetch", detail: "https://www.nasa.gov/rockets", callId: "f2")),
+                                    ActivityItem(kind: .tool(name: "bash", detail: "sleep 24", callId: "b1")),
+                                    ActivityItem(kind: .tool(name: "bash", detail: "ls", callId: "b2", output: "a b"))]),
             ]
             s.turnRunning = true
             s.status = .toolRunning(name: "bash")
         }
         let adapter = FieldStateAdapter(session: session)
-        let size = CGSize(width: 720, height: 560)
+        let size = CGSize(width: 720, height: 1100)
         let bleed = ProcessInfo.processInfo.environment["WINTER_PILL_SNAPSHOT_BLEED"] != nil
         let view = WindowContentView(adapter: adapter, tint: .white, topInset: bleed ? 8 : 52, sidebars: nil,
                                      topBleed: bleed ? 54 : 0, pillChrome: true) { EmptyView() }
