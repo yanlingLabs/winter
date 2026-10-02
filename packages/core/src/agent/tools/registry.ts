@@ -21,6 +21,10 @@ export interface ToolContext {
   outDir?: string;
   sessionId: string; // scopes ask/task/computer-use bridges below to this session; write/edit's out-of-root grant flow lives in engine.ts's dispatch loop (keyed per-session there), not here
   signal?: AbortSignal; // aborts when the turn is interrupted; long-running tools (bash) should honor it
+  /** Aborts only when the SESSION's runtime is going away (the incarnation ends) -- unlike `signal`, which
+   *  also aborts on an interrupted turn. A tool that holds a concurrency lane waits for its in-flight work to
+   *  stop on an interrupt (so the lane is not freed under it), but never when the session itself is ending. */
+  sessionSignal?: AbortSignal;
   markSkillLoaded?: (name: string) => void; // set by the engine; the Skill tool calls it to pin a loaded skill for the session
   markToolLoaded?: (name: string) => void; // set by the engine; the ToolSearch tool calls it to pin a deferred tool's schema as loaded for the session
   loadedTools?: Set<string>; // mcp__/plugin__ tools AND deferred:true built-ins whose schema has been loaded via ToolSearch this session (or force-visible via an engine pin — see engine.ts's pinnedTools); consulted by execute's deferral reject

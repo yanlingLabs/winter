@@ -664,15 +664,29 @@ const ABORTED = Symbol("browser-command-aborted");
  * unbounded number of commands against ONE long-lived `AbortSignal`, so leaving one listener per
  * command attached is a genuine accumulation, not a theoretical one.
  */
+/** How long an interrupted Browser call waits for its in-flight panel command to settle (see `settleOrAbort`). */
+export const BROWSER_CANCEL_SETTLE_MS = 4_000;
+
 async function settleOrAbort(
   settled: Promise<PanelCommandOutcome>,
   signal: AbortSignal | undefined,
+  sessionSignal?: AbortSignal,
 ): Promise<PanelCommandOutcome | typeof ABORTED> {
   if (!signal) return await settled;
+  // Agent SDK 0.0.40: an interrupted TURN (the call's own cancel, `signal` without `sessionSignal`) does not
+  // walk away from a command the panel is still running -- the runtime keeps `Browser`'s concurrency lane
+  // until this call returns, so returning early would let the next Browser command start beside this one.
+  // The panel has no per-command cancel, so the call waits for the command to settle, at most
+  // BROWSER_CANCEL_SETTLE_MS (inside the runtime's 5 s cancel grace). A session that is ENDING
+  // (`sessionSignal`) still returns at once: nothing will run after it.
+  const stopped = (): Promise<PanelCommandOutcome | typeof ABORTED> =>
+    sessionSignal?.aborted === true
+      ? Promise.resolve(ABORTED)
+      : Promise.race<typeof ABORTED>([settled.then((): typeof ABORTED => ABORTED), new Promise<typeof ABORTED>((r) => { const t = setTimeout(() => r(ABORTED), BROWSER_CANCEL_SETTLE_MS); (t as { unref?: () => void }).unref?.(); })]);
   // Belt for a signal that went down between `run`'s pre-check and here.
-  if (signal.aborted) return ABORTED;
+  if (signal.aborted) return await stopped();
   return await new Promise<PanelCommandOutcome | typeof ABORTED>((resolve) => {
-    const onAbort = () => resolve(ABORTED);
+    const onAbort = () => { void stopped().then(resolve); };
     signal.addEventListener("abort", onAbort, { once: true });
     // `settled` never rejects — the registry's own contract ("the promise NEVER rejects: it settles
     // as a result or as a timeout"), which is why there is no `.catch` here to swallow anything.
@@ -903,7 +917,7 @@ export function browserToolDefs(deps: BrowserToolDeps): ToolDefinition[] {
         deadlineMs,
       });
 
-      const outcome = await settleOrAbort(settled, ctx.signal);
+      const outcome = await settleOrAbort(settled, ctx.signal, ctx.sessionSignal);
 
       if (outcome === ABORTED) {
         // The turn is being torn down; the registry entry is left to run out (see `settleOrAbort`).

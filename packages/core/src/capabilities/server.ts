@@ -249,6 +249,7 @@ export function capabilityServer(
         // cancelled it: an interrupted turn). Computer and Browser stop on it; the runtime keeps their
         // concurrency lane held until this call returns, so stopping promptly frees the lane promptly.
         ...(signal === undefined ? {} : { signal }),
+        ...(session.signal === undefined ? {} : { sessionSignal: session.signal }),
         ...(session.visionCapable === undefined ? {} : { visionCapable: session.visionCapable }),
         ...(session.attachImage === undefined ? {} : { attachImage: session.attachImage }),
         ...(session.browserDomainApproved === undefined ? {} : { browserDomainApproved: session.browserDomainApproved }),
