@@ -21,6 +21,7 @@ import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate
 import { DISPATCH_CHILD_APPROVAL_TIMEOUT_MS, canUseToolFor } from "../../src/runtime-sdk/approval-bridge";
 import { sessionsCapability } from "../../src/capabilities/sessions";
 import { SessionMessaging } from "../../src/agent/session-messaging";
+import { runningTurnOrigin } from "../../src/sessions/turn-origins";
 
 class FakeDriver {
   turnRunning = false;
@@ -320,6 +321,87 @@ describe("child_update progression and the relay", () => {
     void plain("AskUserQuestion", input, { signal: new AbortController().signal, toolUseID: "q-2", requestId: "r" } as never);
     await new Promise((r) => setTimeout(r, 5));
     expect(plainSeen[0]).toBeGreaterThan(DISPATCH_CHILD_APPROVAL_TIMEOUT_MS);
+  });
+
+  test("a card from a turn the USER typed into a dispatch child waits for its human (no 10-minute bound), on the child AND relayed once — answering at the child resolves both", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    t.finish(child, { text: "done" });
+    // The user types into the child's own window (a human clientName), starting a new turn.
+    await t.driverFor(child).send("now also bump the version", "winter-mac");
+    const approvals = new ApprovalBroker();
+    const seen: number[] = [];
+    const original = approvals.wait.bind(approvals);
+    approvals.wait = (sid, cid, ms, meta) => { seen.push(ms); return original(sid, cid, ms, meta); };
+    const canUse = canUseToolFor({
+      sessionId: child, mode: "code", policy: "auto", origin: "dispatch-child",
+      turnOrigin: () => runningTurnOrigin(t.store.read(child)),
+      approvals, questions: new QuestionBroker(), gate: new PermissionGate(),
+      emit: (e) => { t.hub.append(e.sessionId, e); }, log: { info: () => {}, error: () => {} },
+    });
+    const pending = canUse("Workflow", { script: "x" }, { signal: new AbortController().signal, toolUseID: "tu-h", requestId: "r1" } as never);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBeGreaterThan(DISPATCH_CHILD_APPROVAL_TIMEOUT_MS);
+    // On the child's own log — what the child's window renders — with the ordinary (unbounded) expiry…
+    const own = t.store.read(child).filter((e) => e.type === "approval_requested");
+    expect(own).toHaveLength(1);
+    const ownCard = own[0] as { issuedAt: number; expiresAt: number };
+    expect(ownCard.expiresAt - ownCard.issuedAt).toBe(seen[0]!);
+    // …and relayed to Dispatch exactly once, carrying the same expiry.
+    const relayed = t.dispatchLog().filter((e) => e.type === "approval_requested");
+    expect(relayed).toHaveLength(1);
+    expect(relayed[0]).toMatchObject({ childSessionId: child, callId: "tu-h", expiresAt: ownCard.expiresAt });
+    // Answered from the child's window (approval.respond at the child's id): one resolution, mirrored once.
+    expect(approvals.resolve(child, "tu-h", true, "mac")).toMatchObject({ alreadyResolved: false });
+    expect((await pending)?.behavior).toBe("allow");
+    // A second answer (the copy in Dispatch, at the same child id) finds nothing pending.
+    expect(approvals.resolve(child, "tu-h", false, "mac")).toMatchObject({ alreadyResolved: true });
+    expect(t.store.read(child).filter((e) => e.type === "approval_resolved")).toHaveLength(1);
+    expect(t.dispatchLog().filter((e) => e.type === "approval_resolved")).toEqual([
+      expect.objectContaining({ childSessionId: child, callId: "tu-h", approved: true }),
+    ]);
+  });
+
+  test("a card from an AUTOMATED turn of a dispatch child (Dispatch's prompt, a peer's message) stays bounded; an unknown origin too", async () => {
+    for (const [clientName, bounded] of [["dispatch", true], ["messaging", true], ["winter-mac", false], ["session", false]] as const) {
+      const seen: number[] = [];
+      const approvals = new ApprovalBroker();
+      approvals.wait = (_sid, _cid, ms) => { seen.push(ms); return new Promise(() => {}); };
+      const questions = new QuestionBroker();
+      questions.wait = (_sid, _cid, ms) => { seen.push(ms); return new Promise(() => {}); };
+      const log: SessionEvent[] = [
+        { type: "user_message", sessionId: "s_c", threadId: "main", text: "go", clientName, seq: 1, ts: 1 } as SessionEvent,
+        { type: "turn_started", sessionId: "s_c", threadId: "main", seq: 2, ts: 2 } as SessionEvent,
+      ];
+      const canUse = canUseToolFor({
+        sessionId: "s_c", mode: "code", policy: "auto", origin: "dispatch-child",
+        turnOrigin: () => runningTurnOrigin(log),
+        approvals, questions, gate: new PermissionGate(), emit: () => {}, log: { info: () => {}, error: () => {} },
+      });
+      void canUse("Workflow", { script: "x" }, { signal: new AbortController().signal, toolUseID: `a-${clientName}`, requestId: "r" } as never);
+      const input = { questions: [{ question: "Which?", header: "Pick", options: [{ label: "a", description: "" }, { label: "b", description: "" }], multiSelect: false }] };
+      void canUse("AskUserQuestion", input, { signal: new AbortController().signal, toolUseID: `q-${clientName}`, requestId: "r" } as never);
+      await new Promise((r) => setTimeout(r, 5));
+      expect(seen).toHaveLength(2);
+      for (const ms of seen) {
+        if (bounded) expect(ms).toBe(DISPATCH_CHILD_APPROVAL_TIMEOUT_MS);
+        else expect(ms).toBeGreaterThan(DISPATCH_CHILD_APPROVAL_TIMEOUT_MS);
+      }
+    }
+    // No paired message (a runtime-internal wake) or an unreadable log: bounded, today's behaviour.
+    for (const turnOrigin of [() => undefined, () => { throw new Error("log gone"); }]) {
+      const seen: number[] = [];
+      const approvals = new ApprovalBroker();
+      approvals.wait = (_sid, _cid, ms) => { seen.push(ms); return new Promise(() => {}); };
+      const canUse = canUseToolFor({
+        sessionId: "s_c", mode: "code", policy: "auto", origin: "dispatch-child", turnOrigin,
+        approvals, questions: new QuestionBroker(), gate: new PermissionGate(), emit: () => {}, log: { info: () => {}, error: () => {} },
+      });
+      void canUse("Workflow", { script: "x" }, { signal: new AbortController().signal, toolUseID: "u", requestId: "r" } as never);
+      await new Promise((r) => setTimeout(r, 5));
+      expect(seen).toEqual([DISPATCH_CHILD_APPROVAL_TIMEOUT_MS]);
+    }
   });
 
   test("an unattended coordinator gets a notification when a child needs input or finishes", async () => {
