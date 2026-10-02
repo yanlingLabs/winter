@@ -96,6 +96,10 @@ struct WindowContentView<Accessory: View>: View {
     /// fades out there instead of being cut at a hard line — the empty strip at the top of the page
     /// the user named. Everything else keeps its old position: it is offset by exactly this much.
     var topBleed: CGFloat = 0
+    /// The dispatch pill's theme for the plain composer (`PillChromeComposer`) — the detached
+    /// session window opts in; the shell (which has its composer card) and the orb's morph window
+    /// keep what they have.
+    var pillChrome: Bool = false
     @ViewBuilder let headerAccessory: () -> Accessory
 
 
@@ -308,6 +312,9 @@ struct WindowContentView<Accessory: View>: View {
                         .transition(.blurReplace)
                     } else if let card = composerCard {
                         card.frame(maxWidth: .infinity)
+                            .transition(.blurReplace)
+                    } else if pillChrome {
+                        PillChromeComposer(adapter: adapter)
                             .transition(.blurReplace)
                     } else {
                         ComposerTextView(

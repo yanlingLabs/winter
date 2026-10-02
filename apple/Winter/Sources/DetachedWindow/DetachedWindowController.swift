@@ -131,8 +131,12 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         window.title = title
         window.isReleasedWhenClosed = false // this controller owns the window's lifetime
         window.minSize = NSSize(width: 340, height: 360)
-        window.backgroundColor = .clear
+        window.backgroundColor = .black
         window.isOpaque = false
+        // The dispatch pill's theme (user, 2026-10-02): the same black material, and dark whatever the
+        // system's appearance, so every token below — and the AppKit composer's named colours —
+        // resolves to its dark half, exactly as the pill's panel does.
+        window.appearance = NSAppearance(named: .darkAqua)
         // LIVE-GATE W1b fix (Safari-style unified-toolbar technique, proven in this repo's
         // history around commit dd48b68): an empty toolbar + `.unified` style inserts the taller
         // titlebar band macOS gives a real toolbar window — traffic lights inset like Safari's
@@ -156,6 +160,13 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
 
         window.delegate = self
         adapter.onSubmit = { [weak self] text in self?.submit(text) }
+        // The pill-themed composer's stop circle — the same interrupt Esc performs.
+        adapter.onInterrupt = { [weak self] in
+            guard let self, self.session.state.turnRunning else { return }
+            let client = self.feed.client
+            let sid = self.sessionId
+            Task { try? await client.interrupt(sessionId: sid) }
+        }
         // Code-mode image input: this window's pinned session's row, read FRESH (`sessionId` flips on
         // an in-place switch) — its mode gates the composer's image intake, its model the attach check.
         adapter.currentSessionRow = { [weak self] in
@@ -645,23 +656,20 @@ struct DetachedWindowRootView: View {
     @ObservedObject var adapter: FieldStateAdapter
     /// Task 6 (2e-iii): the width-responsive sidebar wiring built in `DetachedWindowController.init`.
     let sidebars: SidebarWiring
-    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         WindowContentView(
             adapter: adapter,
-            tint: Color(red: 0.45, green: 0.75, blue: 1.0),
+            tint: .blue,
             topInset: 52,
-            sidebars: sidebars
+            sidebars: sidebars,
+            pillChrome: true
         ) {
             EmptyView()
         }
-        .background {
-            let t = chatWindowTint(darkMode: colorScheme == .dark)
-            Rectangle()
-                .fill(.regularMaterial)
-                .overlay(Color(white: t.white).opacity(t.opacity))
-        }
+        // The dispatch pill's black, dark-themed whatever the system says (user, 2026-10-02).
+        .background(Color.black)
+        .environment(\.colorScheme, .dark)
         .ignoresSafeArea()
     }
 }
