@@ -187,25 +187,33 @@ describe("list_sessions: query", () => {
     expect(res.output).toContain("(3 more matched — refine the query to reach them)");
   });
 
-  test("the edited-files index is BACKFILLED once from logs written before it existed", async () => {
+  test("the edited-files index catches up from the LOGS when the store opens: a pre-index home, a crash between write and insert", async () => {
     const h = harness();
     const old = h.session({ title: "Legacy" });
-    // Write an edit straight into the log, bypassing `append` (as a pre-index daemon left it), and drop the index rows.
+    // An edit straight into the log, bypassing `append` (what a pre-index daemon, or a crash after the
+    // log write, leaves behind): not indexed yet.
     const ev = { type: "tool_result", sessionId: old, threadId: "main", callId: "x", output: "ok", isError: false, seq: 99, ts: at(2026, 9, 1), fileDiff: { path: "/srv/app/main.ts", added: 2, removed: 1, diffId: "d2" } };
     appendFileSync(h.store.transcriptPath(old), JSON.stringify(ev) + "\n");
     expect(h.store.editedFiles(old)).toEqual([]);
-    expect(h.store.editedFilesBackfilled()).toBe(false);
-    const res = await h.call({ query: "app/main.ts" });
-    expect(rowsOf(res.output)[0]).toStartWith(old);
-    expect(h.store.editedFiles(old)).toEqual(["/srv/app/main.ts"]);
-    expect(h.store.editedFilesBackfilled()).toBe(true);
-    expect(h.store.backfillEditedFiles()).toBe(0); // marked: never again
-    // Live edits are indexed as they are appended.
-    h.edit(old, "/srv/app/util.ts");
-    expect(h.store.editedFiles(old)).toContain("/srv/app/util.ts");
-    // A deleted session takes its index rows with it.
-    h.store.deleteSession(old);
-    expect(h.store.editedFiles(old)).toEqual([]);
+    // The next open's recovery pass indexes it (one transaction), and marks the backfill done.
+    const reopened = new SessionStore(h.home);
+    expect(reopened.editedFiles(old)).toEqual(["/srv/app/main.ts"]);
+    expect(reopened.editedFilesBackfilled()).toBe(true);
+    expect(reopened.backfillEditedFiles()).toBe(0);
+    // Live edits are indexed as they are appended; a deleted session takes its rows with it.
+    reopened.append(old, { type: "tool_result", sessionId: old, threadId: "main", callId: "y", output: "ok", isError: false, fileDiff: { path: "/srv/app/util.ts", added: 1, removed: 0, diffId: "d3" } });
+    expect(reopened.editedFiles(old)).toContain("/srv/app/util.ts");
+    reopened.deleteSession(old);
+    expect(reopened.editedFiles(old)).toEqual([]);
+  });
+
+  test("a phone sync push (appendSynced) is indexed too", () => {
+    const h = harness();
+    const id = h.session();
+    const seq = h.store.lastSeq(id) + 1;
+    const event = { type: "tool_result", sessionId: id, threadId: "main", callId: "z", output: "ok", isError: false, seq, ts: at(2026, 9, 2), fileDiff: { path: "/srv/synced.ts", added: 1, removed: 0, diffId: "d4" } };
+    h.store.appendSynced(id, [{ raw: JSON.stringify(event), event: event as never }]);
+    expect(h.store.editedFiles(id)).toEqual(["/srv/synced.ts"]);
   });
 });
 
@@ -226,6 +234,40 @@ describe("session-query: the interpreter (pure, deterministic)", () => {
     expect(labels("last month")).toEqual([["last month", "Tue Sep 01 2026", "Thu Oct 01 2026"]]);
   });
 
+  test("a month name is a date only where it is date-shaped — \"may\" in a sentence is a word", () => {
+    expect(parseSessionQuery("the session that may have fixed login", NOW).ranges).toEqual([]);
+    expect(parseSessionQuery("the session that may have fixed login", NOW).words).toContain("login");
+    const labels = (q: string) => parseSessionQuery(q, NOW).ranges.map((r) => [r.label, new Date(r.from).toDateString()]);
+    expect(labels("in may")).toEqual([["may", "Fri May 01 2026"]]);
+    expect(labels("last september")).toEqual([["september", "Tue Sep 01 2026"]]);
+    expect(labels("september 30")).toEqual([["september 30", "Wed Sep 30 2026"]]);
+    expect(labels("30 sep")).toEqual([["september 30", "Wed Sep 30 2026"]]);
+    expect(labels("may 2025")).toEqual([["may", "Thu May 01 2025"]]);
+    expect(parseSessionQuery("30 sep", NOW).words).toEqual([]);
+  });
+
+  test("\"last friday\" on a Friday is a week ago; \"friday\" is today", () => {
+    const first = (q: string) => new Date(parseSessionQuery(q, NOW).ranges[0]!.from).toDateString();
+    expect(new Date(NOW).getDay()).toBe(5);
+    expect(first("friday")).toBe("Fri Oct 02 2026");
+    expect(first("last friday")).toBe("Fri Sep 25 2026");
+    expect(first("last monday")).toBe("Mon Sep 28 2026");
+  });
+
+  test("a file-like token is matched as a WORD too: \"Update README.md\" finds the session with no recorded edit", () => {
+    const sessions = [s("s_readme", { title: "Update README.md" }), s("s_other", { title: "Something" })];
+    expect(rankSessions(sessions, parseSessionQuery("README.md", NOW)).map((r) => [r.session.sessionId, r.why])).toEqual([["s_readme", ["title: readme.md"]]]);
+    expect(rankSessions([s("s_js", { firstMessage: "migrate to Node.js 24" })], parseSessionQuery("node.js", NOW)).map((r) => r.session.sessionId)).toEqual(["s_js"]);
+  });
+
+  test("\"readme yesterday\" ranks the README session first, over one that merely ran yesterday", () => {
+    const sessions = [
+      s("s_yesterday", { title: "Other work", createdAt: at(2026, 10, 1, 9), lastEventTs: at(2026, 10, 1, 10) }),
+      s("s_readme", { title: "Fix the readme", createdAt: at(2026, 9, 20), lastEventTs: at(2026, 9, 21) }),
+    ];
+    expect(rankSessions(sessions, parseSessionQuery("readme yesterday", NOW)).map((r) => r.session.sessionId)).toEqual(["s_readme", "s_yesterday"]);
+  });
+
   test("paths, words and filler are told apart", () => {
     const p = parseSessionQuery("the session that edited ~/projects/winter/config.toml about the reaper yesterday", NOW);
     expect(p.paths).toEqual([`${require("node:os").homedir()}/projects/winter/config.toml`]);
@@ -240,11 +282,12 @@ describe("session-query: the interpreter (pure, deterministic)", () => {
       s("s_c", { title: "other", createdAt: at(2026, 10, 1, 8), lastEventTs: at(2026, 10, 1, 20) }),
     ];
     expect(rankSessions(sessions, parseSessionQuery("yesterday", NOW)).map((r) => r.session.sessionId)).toEqual(["s_c", "s_a"]);
+    // A date BOOSTS a word match and is weak on its own: the title match without the date outranks the date alone.
     const both = rankSessions(sessions, parseSessionQuery("reaper yesterday", NOW));
     expect(both.map((r) => [r.session.sessionId, r.why])).toEqual([
-      ["s_a", ["active yesterday", "title: reaper"]],
-      ["s_c", ["active yesterday"]],
+      ["s_a", ["title: reaper", "active yesterday"]],
       ["s_b", ["title: reaper"]],
+      ["s_c", ["active yesterday"]],
     ]);
   });
 

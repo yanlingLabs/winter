@@ -2033,15 +2033,8 @@ export async function startDaemon(opts: {
     log: (line) => console.error(`dispatch-children: ${line}`),
   });
   dispatchChildren.start();
-  // ListSessions' `query` reads the per-session edited-files index; a home that predates it is backfilled
-  // ONCE from its logs, off the boot path (a query that arrives first runs the same idempotent backfill).
-  if (!store.editedFilesBackfilled()) {
-    const backfill = setTimeout(() => {
-      try { const rows = store.backfillEditedFiles(); console.error(`sessions: edited-files index backfilled (${rows} edit record(s))`); }
-      catch (err) { console.error(`sessions: edited-files backfill failed (${err instanceof Error ? err.name : "error"}) — the next ListSessions query retries`); }
-    }, 0);
-    (backfill as { unref?: () => void }).unref?.();
-  }
+  // (ListSessions' edited-files index needs no boot step here: the store's `recoverAll` pass indexes every
+  // log as the store opens — the one-time backfill and the crash catch-up alike.)
   // SendMessage between sessions: resolve an `s_…` id, resume a finished session through its own driver,
   // deliver under `clientName: "messaging"`; a coordinator's message to its own child is followed by
   // `dispatchChildren` (child_update + wake). ListAgents lists the ACTIVE sessions by the SAME derivation

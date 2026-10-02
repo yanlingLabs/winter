@@ -65,6 +65,7 @@ import {
   makeActivityDeriver, makeSessionSignalsDeriver, participatesInActivity,
   type ActivityDeriver, type SessionSignalsDeriver,
 } from "../sessions/activity";
+import { runningTurnOrigin } from "../sessions/turn-origins";
 import { createActivityEnforcement } from "../sessions/activity-enforcement";
 import { setSessionActivity, type SetActivityDeps } from "../sessions/set-activity";
 import { setSessionDirs, type SetDirsDeps } from "../sessions/set-dirs";
@@ -1433,6 +1434,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     // call. So a turn killed by a closed terminal ends exactly as a user's ESC ends it:
     // `turn_completed(aborted)`, resumable, no second abort mechanism to keep in step.
     abortTurn: (sessionId) => { opts.engine?.interrupt(sessionId); },
+    // Who started the running turn, from the session's log (`sessions/turn-origins.ts`): a terminal that
+    // only attached to watch never aborts a turn another session's message, Dispatch's spawn or its wake
+    // started. Read only on a terminal's last detach from a running turn — rare, and the log is the one
+    // record that survives a held queue, a resume and a restart.
+    turnOrigin: (sessionId) => runningTurnOrigin(opts.store.read(sessionId)),
     // "No scheduled wake-up" (spec §1.2), implemented over what this daemon ACTUALLY has.
     //
     // Routines/cron have NO session linkage: a `Routine` row is {spec, prompt, policy, cwd,
@@ -3685,7 +3691,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       //
       // T8: the body moved to `setSessionActivity` (sessions/set-activity.ts) VERBATIM — same
       // refusals, same wording, same write order, same post-write re-read, same emission — because
-      // dispatch's `manage_session` tool is now a SECOND door onto this same state machine. Two
+      // dispatch's `manage_session` tool was (until 2026-10-02) a SECOND door onto this same state machine. Two
       // doors are fine; two implementations are how "archiving a running session is refused" ends
       // up true on one door and false on the other. What stays here is what is genuinely the RPC's:
       // parsing and the remote gate.

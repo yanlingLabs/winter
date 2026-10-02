@@ -35,17 +35,15 @@ export interface SetActivityDeps {
   now?: () => number;
 }
 
-/** The participation refusal, verbatim, as ONE constant: `session.setActivity` and dispatch's
- *  `manage_session` both answer with it for the three STATE-SETTING verbs (background/archive/
- *  resume), so the rule reads identically at every door instead of being near-identical sentences
- *  that drift. `manage_session`'s `stop` is governed by the same allowlist but sets no activity
- *  state, so it answers with its own honest refusal instead (`STOP_MODE_REFUSAL`,
- *  agent/tools/list-sessions.ts). */
+/** The participation refusal, verbatim, as ONE constant: `session.setActivity` answers with it for the
+ *  three STATE-SETTING verbs (background/archive/resume). (Dispatch's `manage_session` was a second door
+ *  until it was removed, 2026-10-02.) */
 export const ACTIVITY_MODE_REFUSAL = "activity states apply to code and cowork sessions only";
 
 /** activity-verb-semantics ruling 1: an ARCHIVED session is IMMUTABLE except through resume, and the
  *  refusal NAMES the one door out. Exported as a constant for the same reason the sentence above is:
- *  the RPC, dispatch's `manage_session` and the `winter agents` roster all reach this state machine,
+ *  the RPC and the `winter agents` roster both reach this state machine (dispatch's `manage_session`
+ *  did too, until 2026-10-02),
  *  and a near-identical hand-written sentence at each door is how three remedies start pointing at
  *  three different remedies. */
 export const ARCHIVED_IMMUTABLE_REFUSAL = "session is archived — resume it first";
@@ -61,8 +59,8 @@ export type SetActivityResult =
  * THE write half of the activity lifecycle (session-activity-hygiene T3, extracted in T8).
  *
  * Extracted from `session.setActivity`'s handler verbatim — same refusals, same wording, same
- * write order, same post-write re-read, same emission — because T8 gives dispatch a SECOND door
- * onto it (`manage_session`, the coordinator's management verb). Two doors onto one state machine
+ * write order, same post-write re-read, same emission — because T8 gave dispatch a SECOND door
+ * onto it (`manage_session`, removed from Dispatch 2026-10-02). Two doors onto one state machine
  * is fine; two implementations of one state machine is how "archiving a running session is refused"
  * becomes true on one door and false on the other, six months from now, silently. The RPC handler
  * and the tool both call THIS.

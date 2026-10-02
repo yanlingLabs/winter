@@ -61,20 +61,22 @@
 //     on the coordinator's log too.
 //
 // Stopping a child is the session's own interrupt — `session.interrupt` (the Mac's stop button on a
-// child pill) and `manage_session stop` both reach the child's driver; the interrupted turn settles
-// and is reported here like any other.
+// child pill) and Dispatch's `TaskStop` with the child's `s_…` id (`agent/session-messaging.ts`'s
+// `stop`) both reach the child's driver; the interrupted turn settles and is reported here like any
+// other. (`manage_session stop` was the third door until ManageSession left Dispatch, 2026-10-02.)
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { DISPATCH_WAKE_CLIENT_NAME, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { canonicalSessionCwd } from "../sessions/dirs";
+import { TurnOriginPairer } from "../sessions/turn-origins";
 
 export { DISPATCH_WAKE_CLIENT_NAME };
 /** The `clientName` of the child's first prompt (visible in the child's own transcript as its task). */
 export const DISPATCH_CLIENT_NAME = "dispatch";
 /** The `clientName` a SendMessage delivery lands under in the target (`agent/session-messaging.ts`). */
 const MESSAGING_CLIENT_NAME = "messaging";
-/** What `lastUserClient` records for a `messaging` turn the coordinator did not send: never followed. */
-const PEER_MESSAGE_MARK = "messaging-peer";
+/** The projector's own pass-through `user_message` (never a host push, never a turn's origin). */
+const PROJECTOR_PASSTHROUGH_CLIENT = "winter";
 /** The status vocabulary of `child_update` (`packages/protocol/src/events.ts`). */
 export type ChildStatus = "running" | "awaiting_approval" | "awaiting_input" | "completed" | "error";
 /** A result summary (on `child_update` and in the wake) is the child's last main-thread message, cut. */
@@ -180,7 +182,8 @@ interface ChildState {
    *  driver also settles when its idle child is ended, which reports nothing). */
   turnOpen: boolean;
   /** The `clientName` of the child's latest main-thread `user_message` — who asked for the next turn. */
-  lastUserClient?: string;
+  /** The next turn is followed whatever its origin — a child a restart interrupted, picked back up. */
+  followNext?: boolean;
   lastAssistant?: string;
   sawError?: boolean;
   aborted?: boolean;
@@ -371,9 +374,40 @@ export class DispatchChildren {
 
   // ── the observer ─────────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Which message started which turn, per session (`sessions/turn-origins.ts`): each main-thread
+   * `user_message` is tagged FOLLOWED (Dispatch's spawn prompt, or the coordinator's own SendMessage
+   * follow-up — `expectFollowUp`, matched by its exact text) or not, and each `turn_started` takes the
+   * tag of the message it answers. One FIFO per session rather than a "last client" slot: every held
+   * message is its own later turn, so a follow-up queued behind a peer's turn keeps its own tag (and
+   * its wake). Kept for every session (a forgotten child's queue must already be right when Dispatch
+   * picks it back up); an entry goes when its last owed message has started.
+   */
+  private readonly turnOrigins = new Map<string, TurnOriginPairer<boolean>>();
+
+  /** Feed one main-thread event into its session's pairer; the tag a `turn_started` takes, or of a new message. */
+  private trackOrigin(e: SessionEvent): boolean | undefined {
+    if (e.type === "user_message") {
+      if (e.clientName === PROJECTOR_PASSTHROUGH_CLIENT) return undefined;
+      const followed = e.clientName === DISPATCH_CLIENT_NAME
+        || (e.clientName === MESSAGING_CLIENT_NAME && this.consumeFollowUp(e.sessionId, (x) => x.text === e.text) !== undefined);
+      let pairer = this.turnOrigins.get(e.sessionId);
+      if (pairer === undefined) { pairer = new TurnOriginPairer<boolean>(); this.turnOrigins.set(e.sessionId, pairer); }
+      pairer.message(followed);
+      return followed;
+    }
+    const pairer = this.turnOrigins.get(e.sessionId);
+    if (pairer === undefined) return undefined;
+    if (e.type !== "turn_started") { pairer.other(); return undefined; }
+    const tag = pairer.turnStarted();
+    if (pairer.empty) this.turnOrigins.delete(e.sessionId);
+    return tag;
+  }
+
   private onEvent(e: SessionEvent): void {
     if (this.stopped) return;
     const main = (e as { threadId?: string }).threadId === "main";
+    const originTag = main ? this.trackOrigin(e) : undefined;
     let c = this.children.get(e.sessionId);
     if (c === undefined) {
       // Picked back up: a child a restart interrupted, at its next turn; a forgotten child the
@@ -385,8 +419,7 @@ export class DispatchChildren {
       if (e.type === "approval_requested" || e.type === "question_asked") c = this.relayOnlyFromLink(e.sessionId);
       else if (!main) return;
       else if (e.type === "turn_started") c = this.retrack(e.sessionId);
-      else if (e.type === "user_message" && e.clientName === DISPATCH_CLIENT_NAME) c = this.retrackFromLink(e.sessionId);
-      else if (e.type === "user_message" && e.clientName === MESSAGING_CLIENT_NAME && (this.expectedFollowUps.get(e.sessionId) ?? []).some((x) => x.text === e.text)) c = this.retrackFromLink(e.sessionId);
+      else if (e.type === "user_message" && originTag === true) c = this.retrackFromLink(e.sessionId);
       if (c === undefined) return;
     }
     if (this.draining) {
@@ -396,22 +429,13 @@ export class DispatchChildren {
     }
     switch (e.type) {
       case "user_message":
-        if (!main) return;
-        // A `messaging` turn is the coordinator's follow-up only when it said so (`expectFollowUp`);
-        // another session's SendMessage to this child is recorded as a peer message and not followed.
-        if (e.clientName === MESSAGING_CLIENT_NAME) {
-          const dispatchId = c.dispatchId;
-          const hit = this.consumeFollowUp(e.sessionId, (x) => x.coordinatorId === dispatchId && x.text === e.text);
-          c.lastUserClient = hit !== undefined ? MESSAGING_CLIENT_NAME : PEER_MESSAGE_MARK;
-          return;
-        }
-        c.lastUserClient = e.clientName;
-        return;
+        return;   // tagged above (`trackOrigin`)
       case "turn_started": {
         if (!main) return;
-        // Ongoing delegated work, or a follow-up the coordinator sent; a user working in a finished
-        // child directly is not Dispatch's to report.
-        const followed = !TERMINAL.has(c.status) || c.lastUserClient === DISPATCH_CLIENT_NAME || c.lastUserClient === MESSAGING_CLIENT_NAME;
+        // Ongoing delegated work, or a turn Dispatch started (its spawn prompt, its follow-up); a peer's
+        // message or a user working in a finished child directly is not Dispatch's to report.
+        const followed = !TERMINAL.has(c.status) || originTag === true || c.followNext === true;
+        c.followNext = false;
         if (!followed) return;
         c.relayOnly = false;
         c.turnOpen = true;
@@ -433,12 +457,12 @@ export class DispatchChildren {
         // Relayed whoever started the turn (ruling 4); only a followed turn's status moves.
         this.mirrorAsk(c, e);
         if (c.turnOpen) this.setStatus(e.sessionId, c, "awaiting_approval");
-        this.notifyUnattended(c, "needs your approval");
+        this.notifyUnattended(c, "needs your approval", e.sessionId);
         return;
       case "question_asked":
         this.mirrorAsk(c, e);
         if (c.turnOpen) this.setStatus(e.sessionId, c, "awaiting_input");
-        this.notifyUnattended(c, "has a question for you");
+        this.notifyUnattended(c, "has a question for you", e.sessionId);
         return;
       case "approval_resolved":
       case "question_resolved":
@@ -458,7 +482,7 @@ export class DispatchChildren {
     this.interruptedByRestart.delete(sessionId);
     const state = newChild(interrupted.dispatchId, interrupted.title, "", this.now());
     state.status = "error";
-    state.lastUserClient = DISPATCH_CLIENT_NAME;   // the turn resumes the coordinator's own work
+    state.followNext = true;   // the turn resumes the coordinator's own work
     this.children.set(sessionId, state);
     return state;
   }
@@ -611,9 +635,12 @@ export class DispatchChildren {
     return true;
   }
 
-  private notifyUnattended(c: ChildState, message: string): void {
+  /** `askingChildId`: for a card — when the user has the CHILD itself open, they are looking at the card
+   *  already (a turn they typed into it, say), so no "needs your approval" notification on top. */
+  private notifyUnattended(c: ChildState, message: string, askingChildId?: string): void {
     try {
       if (this.deps.hub.attachedCount(c.dispatchId) > 0) return;
+      if (askingChildId !== undefined && this.deps.hub.attachedCount(askingChildId) > 0) return;
     } catch { return; }
     const title = c.title.slice(0, NOTIFICATION_TITLE_MAX) || "Dispatch";
     this.safeAppend(c.dispatchId, { type: "notification_requested", sessionId: c.dispatchId, threadId: "main", title, message });
