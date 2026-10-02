@@ -121,9 +121,10 @@ function harnessFor(settings: (home: string) => Record<string, unknown>) {
       const stopping = s.daemon?.stop();
       s.daemon = undefined;
       await stopping;
-      // A `winter-test/hang` child spawned while the daemon was stopping can outlive it (a stop/spawn race
-      // in the daemon, reported, not fixed here). Every child's command line carries its config, whose
-      // cwd is under this home -- so any process still naming the home is ours: reap it, and say so.
+      // BACKSTOP only: the daemon no longer spawns into a stop (`beginShutdown`, `spawnRefusal`, an end
+      // mid-open -- `spawn-during-stop-e2e.test.ts` drives that race). Should a child still outlive the
+      // daemon, every child's command line carries its config, whose cwd is under this home -- so any
+      // process still naming the home is ours: reap it, and say so (a line here is a regression to chase).
       await reapStrays(s.home);
       rmSync(s.home, { recursive: true, force: true });
     },
