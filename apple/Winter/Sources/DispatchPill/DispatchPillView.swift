@@ -41,6 +41,8 @@ struct DispatchPillView: View {
                     } action: { frame in
                         controller.accessoryLayoutChanged(frame: frame)
                     }
+                    // Cards and the child row rise out of the main pill, and sink back into it.
+                    .transition(.childPill)
             }
             DispatchPillShell(morph: morph, tracksAnimatedWidth: controller.presentation != .fullScreen) {
                 if controller.presentation == .fullScreen {
@@ -115,6 +117,7 @@ private struct DispatchPillAccessories: View {
                     onOpenOverflow: { controller.onOpenInApp?() },
                     childSession: { controller.childSession($0) }
                 )
+                .transition(.childPill)
             }
         }
     }
