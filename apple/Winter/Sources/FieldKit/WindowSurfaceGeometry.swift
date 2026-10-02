@@ -218,6 +218,29 @@ func fenceAnchorForWindowCollapse(
 /// as `NSRect` (a plain `CGRect` typealias), kept as `CGRect` here to match this AppKit-free file's
 /// existing convention. App shell T6: `openStandaloneWinterWindow()`, the original motivating
 /// caller, is retired — its menu item now summons the app shell instead.
+/// PURE: where the NEXT standalone window opens when others already are — the centred frame, stepped
+/// down and to the right by `step` past every open window already sitting on that spot, so a new
+/// window never lands exactly on top of another (the user's report: with every window opening
+/// centred, a second child's window hid the first and it looked as if only one could open). A step
+/// that would leave the visible frame starts the cascade again from its top-left.
+func cascadedStandaloneFrame(visibleFrame: CGRect, occupied: [CGRect], step: CGFloat = 28) -> CGRect {
+    var frame = centeredStandaloneFrame(visibleFrame: visibleFrame)
+    func taken(_ f: CGRect) -> Bool {
+        occupied.contains { abs($0.minX - f.minX) < 4 && abs($0.maxY - f.maxY) < 4 }
+    }
+    var guardCount = 0
+    while taken(frame), guardCount < 64 {
+        guardCount += 1
+        frame.origin.x += step
+        frame.origin.y -= step
+        if frame.maxX > visibleFrame.maxX || frame.minY < visibleFrame.minY {
+            frame.origin.x = visibleFrame.minX + step * CGFloat(guardCount % 8)
+            frame.origin.y = visibleFrame.maxY - frame.height - step * CGFloat(guardCount % 8)
+        }
+    }
+    return frame
+}
+
 func centeredStandaloneFrame(visibleFrame: CGRect) -> CGRect {
     let size = chatWindowDefaultSize
     return CGRect(

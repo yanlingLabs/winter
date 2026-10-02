@@ -2,8 +2,8 @@ import AppKit
 
 /// A detached session window drawn entirely by Winter, in the dispatch pill's material (user,
 /// 2026-10-02): no macOS frame — so no system rim, corner radius or titlebar — just the black rounded
-/// shape the SwiftUI root draws (`DetachedWindowRootView`), the pill's corner radius, its faint edge,
-/// and a shadow that follows that shape (the window is transparent outside it).
+/// shape the SwiftUI root draws (`DetachedWindowRootView`) with the pill's corner radius — no rim, and
+/// no system shadow (whose edge read as one); the window is transparent outside that shape.
 ///
 /// A frameless window gives up what the frame used to do, so this class does it:
 /// - it can become key and main (a borderless window refuses both by default);
@@ -24,7 +24,10 @@ final class PillChromeWindow: NSWindow {
                    backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = true
+        // No system shadow: on a dark window the window server's shadow carries its own thin light
+        // edge — the rim the user saw even with no stroke drawn (2026-10-02). The black shape stands
+        // on its own, like the dispatch pill does.
+        hasShadow = false
     }
 
     override var canBecomeKey: Bool { true }

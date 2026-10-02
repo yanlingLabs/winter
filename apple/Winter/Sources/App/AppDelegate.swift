@@ -360,7 +360,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let resolvedFrame = frame ?? centeredStandaloneFrame(visibleFrame: visible)
+        // Cascaded past any window already open there — never exactly on top of another.
+        let resolvedFrame = frame ?? cascadedStandaloneFrame(visibleFrame: visible,
+                                                             occupied: detachedWindows.map(\.currentFrame))
         let resolvedIsChat = isChat ?? (
             DetachedWindowController.isChatSession(sessionId, in: sourceRows)
                 || DetachedWindowController.isChatSession(sessionId, in: model.directory.rows)
@@ -457,8 +459,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await self?.appModel?.elicitationURL(elicitationId: elicitationId)
         }
         // The child's window wears the child pill's own plume colours.
+        // One window per child: clicking a child whose window is already open brings that window
+        // forward instead of opening a second copy of it.
         pill.onOpenChild = { [weak self, weak pill] sessionId in
-            self?.openSessionInNewDetachedWindow(sessionId, palette: pill?.childPalette(for: sessionId) ?? .blue)
+            guard let self else { return }
+            if let open = self.detachedWindows.first(where: { $0.sessionId == sessionId }) {
+                open.bringToFront()
+                return
+            }
+            self.openSessionInNewDetachedWindow(sessionId, palette: pill?.childPalette(for: sessionId) ?? .blue)
         }
         pill.onStopChild = { [weak self] sessionId in
             guard let client = self?.appModel?.client else { return }

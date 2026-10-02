@@ -367,6 +367,13 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// Orders the window front and starts its feed (connect/attach/pump — the same `SessionFeed`
     /// mechanics any pinned window uses); installs the Esc monitor. Idempotent-ish in practice:
     /// task 4 calls this exactly once per spawned controller.
+    /// An already-open window, brought forward and given the keyboard (a child pill clicked again).
+    func bringToFront() {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+    }
+
     func show() {
         window.makeKeyAndOrderFront(nil)
         feedTask = Task { await feed.start() }
@@ -626,11 +633,6 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// The shadow follows the window's transparent outline; a new size is a new outline.
-    func windowDidResize(_ notification: Notification) {
-        window.invalidateShadow()
-    }
-
     func windowWillClose(_ notification: Notification) {
         guard !didClose else { return }
         didClose = true
@@ -707,8 +709,8 @@ struct DetachedWindowRootView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color.black)
-        // The window's whole shape: the pill's own radius, no rim (user, 2026-10-02) — its edge is
-        // the window's shadow against whatever is behind it.
+        // The window's whole shape: the pill's own radius, no rim and no system shadow (user,
+        // 2026-10-02) — the black shape against whatever is behind it.
         .clipShape(RoundedRectangle(cornerRadius: PillChromeWindow.cornerRadius, style: .continuous))
         .environment(\.colorScheme, .dark)
         .ignoresSafeArea()
