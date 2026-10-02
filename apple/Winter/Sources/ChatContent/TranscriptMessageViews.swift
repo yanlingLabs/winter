@@ -29,23 +29,29 @@ import SwiftUI
 /// unchanged) and still forwarded to `TranscriptFormattedMessageText` for the markdown accents that
 /// actually read it — list markers and the quote rule — it just paints no surface. (Headings do
 /// not: they go through `formattedText`, which never sees the tint.)
-/// A surface's own fill for the user's bubble — the dispatch-pill-themed session window tints it in
-/// the session's plume colour. `nil` (every other home) keeps `Theme.bubbleUser`.
-private struct TranscriptUserBubbleFillKey: EnvironmentKey {
-    static let defaultValue: Color? = nil
+/// How a surface draws the user's message. `.bubble` (every home but one) is the right-aligned
+/// bubble; `.ruled` — the dispatch-pill-themed session window — is the message as plain text across
+/// the column's full width, with a hairline under it separating it from the agent's turn.
+enum TranscriptUserMessageStyle {
+    case bubble
+    case ruled
+}
+
+private struct TranscriptUserMessageStyleKey: EnvironmentKey {
+    static let defaultValue: TranscriptUserMessageStyle = .bubble
 }
 
 extension EnvironmentValues {
-    var transcriptUserBubbleFill: Color? {
-        get { self[TranscriptUserBubbleFillKey.self] }
-        set { self[TranscriptUserBubbleFillKey.self] = newValue }
+    var transcriptUserMessageStyle: TranscriptUserMessageStyle {
+        get { self[TranscriptUserMessageStyleKey.self] }
+        set { self[TranscriptUserMessageStyleKey.self] = newValue }
     }
 }
 
 struct TranscriptUserBubble: View {
     let text: String
     let tint: Color
-    @Environment(\.transcriptUserBubbleFill) private var bubbleFill
+    @Environment(\.transcriptUserMessageStyle) private var style
 
     /// **A wiring pin, not coverage** (same species as `ModelPickerTests.swift:767`): hoisted so
     /// "the user's own words are NOT set in Winter's voice" is assertable without rendering. The
@@ -58,13 +64,29 @@ struct TranscriptUserBubble: View {
     }
 
     var body: some View {
-        HStack(alignment: .bottom) {
-            Spacer(minLength: 90)
+        switch style {
+        case .bubble:
+            HStack(alignment: .bottom) {
+                Spacer(minLength: 90)
 
-            content
-                .frame(maxWidth: 560, alignment: .trailing)
+                content
+                    .frame(maxWidth: 560, alignment: .trailing)
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        case .ruled:
+            VStack(alignment: .leading, spacing: 14) {
+                TranscriptFormattedMessageText(text: displayText, tint: tint, role: proseRole,
+                                               fillsAvailableWidth: true)
+                    .foregroundStyle(.primary)
+                    .fontWeight(.medium)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Rectangle()
+                    .fill(Color.white.opacity(0.12))
+                    .frame(height: 1)
+            }
+            .padding(.top, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
     private var content: some View {
@@ -74,7 +96,7 @@ struct TranscriptUserBubble: View {
                 .foregroundStyle(.primary)
         }
         .padding(14)
-        .background(bubbleFill ?? Theme.bubbleUser, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(Theme.bubbleUser, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 

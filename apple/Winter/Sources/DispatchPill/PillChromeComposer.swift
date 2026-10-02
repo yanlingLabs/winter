@@ -5,8 +5,14 @@ import SwiftUI
 /// type and caret, and the pill's own trailing circle (`PillSendStopButton`: white, stop while a turn
 /// runs, send with text, the voice glyph without). Past one line it grows into the pill's rounded
 /// rect (`dispatchPillCornerRadius`), up to `maxFieldHeight`, then scrolls inside.
+///
+/// While the session works and nothing is typed, the plume fills it (`showsPlume`) — in the
+/// session's colours (`pillChromePalette`), throwing the tools and sites the turn uses, its nozzle on
+/// the stop circle — exactly like the dispatch pill's working state. The text view stays mounted
+/// underneath, invisible, so the first keystroke lands in it, and the plume fades out for the text.
 struct PillChromeComposer: View {
     @ObservedObject var adapter: FieldStateAdapter
+    @Environment(\.pillChromePalette) private var palette
 
     static let maxFieldHeight: CGFloat = 160
     /// The pill's width in a wide window — the typing pill's own, a little wider for a window.
@@ -16,14 +22,15 @@ struct PillChromeComposer: View {
 
     var body: some View {
         let draft = adapter.composerDraft
+        let showsPlume = adapter.turnRunning && draft.isEmpty
         let fieldHeight = min(max(contentHeight, 26), Self.maxFieldHeight)
         let shape = RoundedRectangle(
             cornerRadius: dispatchPillCornerRadius(height: fieldHeight + DispatchPillMetrics.composerVerticalPadding),
             style: .continuous)
         HStack(alignment: .bottom, spacing: DispatchPillMetrics.rowSpacing) {
             ZStack(alignment: .topLeading) {
-                if draft.isEmpty {
-                    Text(adapter.turnRunning ? adapter.verbText : "Type here")
+                if draft.isEmpty && !showsPlume {
+                    Text("Type here")
                         .font(Typography.composerField())
                         .foregroundStyle(Color.white.opacity(0.45))
                         .lineLimit(1)
@@ -37,6 +44,7 @@ struct PillChromeComposer: View {
                     onContentHeightChange: { contentHeight = $0 },
                     usesAdaptiveColors: true,
                     tintOverride: .white,
+                    viewAlpha: showsPlume ? 0 : 1,
                     imageIntake: adapter.composerImageIntake
                 )
             }
@@ -54,7 +62,19 @@ struct PillChromeComposer: View {
         .padding(.trailing, DispatchPillMetrics.trailingPadding)
         // Its edge is its own surface — a shade above the window's black — never a hairline stroke:
         // a 1 pt stroke on a capsule end rasterises as a stray vertical tick at each end.
-        .background(shape.fill(pillChromeSurface))
+        .background {
+            ZStack {
+                shape.fill(pillChromeSurface)
+                if showsPlume {
+                    let thrown = plumeThrows(for: adapter.transcript.last)
+                    WorkingAnimationView(thrown: thrown, repeating: thrown,
+                                         emitterInset: DispatchPillMetrics.trailingPadding + DispatchPillMetrics.sendCircleSize / 2,
+                                         palette: palette)
+                        .clipShape(shape)
+                        .transition(.opacity.animation(.easeOut(duration: 0.25)))
+                }
+            }
+        }
         .shadow(color: .black.opacity(0.6), radius: 14, y: 4)
         .frame(maxWidth: Self.maxWidth)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: fieldHeight)
@@ -64,3 +84,15 @@ struct PillChromeComposer: View {
 /// The surface of a pill-themed window's floating pieces (its composer, its header pill): a shade
 /// above the window's black, so their edge reads without a stroke.
 let pillChromeSurface = Color(white: 0.085)
+
+private struct PillChromePaletteKey: EnvironmentKey {
+    static let defaultValue: PlumePalette = .blue
+}
+
+extension EnvironmentValues {
+    /// The plume colours a pill-themed window's composer streams in — its session's.
+    var pillChromePalette: PlumePalette {
+        get { self[PillChromePaletteKey.self] }
+        set { self[PillChromePaletteKey.self] = newValue }
+    }
+}

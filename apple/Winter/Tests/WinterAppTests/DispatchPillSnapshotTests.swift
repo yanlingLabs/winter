@@ -219,14 +219,19 @@ final class DispatchPillSnapshotTests: XCTestCase {
                 Exchange(prompt: "Search the web for the Rosetta Stone and fetch one page", reply: "The Rosetta Stone is a granodiorite stela from 196 BC, kept at the British Museum since 1802.",
                          activity: [ActivityItem(kind: .tool(name: "Search", detail: "Rosetta Stone", callId: "s1", output: "ok")),
                                     ActivityItem(kind: .tool(name: "WebFetch", detail: "https://www.britishmuseum.org", callId: "f1", output: "ok"))]),
-                Exchange(prompt: "and run sleep 24 in the foreground", reply: "slept 24s (foreground), exit 0."),
+                Exchange(prompt: "and run sleep 24 in the foreground", reply: "",
+                         activity: [ActivityItem(kind: .tool(name: "bash", detail: "sleep 24", callId: "b1"))]),
             ]
+            s.turnRunning = true
+            s.status = .toolRunning(name: "bash")
         }
         let adapter = FieldStateAdapter(session: session)
         let size = CGSize(width: 720, height: 560)
         let bleed = ProcessInfo.processInfo.environment["WINTER_PILL_SNAPSHOT_BLEED"] != nil
         let view = WindowContentView(adapter: adapter, tint: .blue, topInset: bleed ? 8 : 52, sidebars: nil,
                                      topBleed: bleed ? 54 : 0, pillChrome: true) { EmptyView() }
+            .environment(\.transcriptUserMessageStyle, .ruled)
+            .environment(\.pillChromePalette, .violet)
             .background(Color.black)
             .environment(\.colorScheme, .dark)
             .frame(width: size.width, height: size.height)
