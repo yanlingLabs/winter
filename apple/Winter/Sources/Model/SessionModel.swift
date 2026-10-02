@@ -1316,7 +1316,7 @@ enum SessionReducer {
         // these. `navigate`/`open` carry a url; `click`/`type`/`submit` a selector; `wait` an
         // `until`; and `scroll` is EITHER a direction OR a selector — the daemon refuses a call
         // naming both.
-        case "browser":
+        case "browser", "Browser":
             guard let verb = str("verb") else { return nil }
             return verbLedToolDetail(verb, str("url") ?? str("selector") ?? str("direction") ?? str("until"))
 
@@ -1348,7 +1348,7 @@ enum SessionReducer {
             // operand.
             guard let action = str("action") else { return nil }
             return verbLedToolDetail(action, str("file_path") ?? str("symbol"))
-        case "computer":
+        case "computer", "Computer":
             guard let action = str("action") else { return nil }
             return verbLedToolDetail(action, str("keys"))
         case "schedule":
@@ -1356,7 +1356,7 @@ enum SessionReducer {
             return verbLedToolDetail(op, str("spec") ?? str("id"))
 
         // ---- one-word verbs and names ---------------------------------------------------------
-        case "exit_worktree", "manage_session":
+        case "exit_worktree", "manage_session", "ManageSession":
             return str("action").flatMap(clipToolDetail)
         case "enter_worktree", "Skill", "skill_write", "Workflow":
             return str("name").flatMap(clipToolDetail)
@@ -1366,7 +1366,7 @@ enum SessionReducer {
         // brief and would fill the row with noise.
         case "spawn_agent":
             return (str("description") ?? str("agentType")).flatMap(clipToolDetail)
-        case "session_spawn":
+        case "session_spawn", "SpawnSession":
             return (str("title") ?? str("dir")).flatMap(clipToolDetail)
         case "send_message":
             return str("to").flatMap(clipToolDetail)

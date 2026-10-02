@@ -68,10 +68,10 @@ function makeHarness(opts?: {
 // ================================================================================================
 
 describe("registration", () => {
-  test("modes is exactly [\"code\", \"dispatch\"] — never chat", () => {
+  test("modes is exactly [\"code\"] — never dispatch (the 2026-10-01 ruling) or chat", () => {
     const h = makeHarness();
     expect(h.registry.namesForMode("code").has("sheets")).toBe(true);
-    expect(h.registry.namesForMode("dispatch").has("sheets")).toBe(true);
+    expect(h.registry.namesForMode("dispatch").has("sheets")).toBe(false);
     expect(h.registry.namesForMode("chat").has("sheets")).toBe(false);
   });
 

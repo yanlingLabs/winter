@@ -242,34 +242,32 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
     await client.call(METHODS.sessionSetPolicy, { sessionId: sid, policy: "auto" });
   }, 40_000);
 
-  test("(b) the subagent double spawns a child → thread_started/thread_completed + a PersistedWinterChild row that survives a simulated restart; the singleton resumes", async () => {
+  test("(b) dispatch has NO `Agent` (the 2026-10-01 ruling's exact allowed list): the subagent double's spawn is refused as no such tool, no child runs, and the singleton survives a simulated restart", async () => {
     await switchDouble("winter-test/subagent");
-    // Under `auto` — the SHIPPED dispatch policy (the singleton is minted with it and (a) restored
-    // it). Since review F1 (`auto → default`) the spawn reaches THE BRIDGE, whose gate allows
-    // `spawn_agent` silently in dispatch; before F1 this round had to run under `ask` because
-    // Winter's own classifier blocked the `Agent` call under its `auto` mode.
+    // Under `auto` — the SHIPPED dispatch policy (the singleton is minted with it and (a) restored it).
+    // Dispatch delegates through `SpawnSession` (a full code session — `dispatch-spawn-e2e.test.ts`), never
+    // through an in-session `Agent` subagent: `Agent` is not in `DISPATCH_BUILTIN_TOOLS`, so the child is
+    // never offered it and refuses the call before anything starts.
     expect(daemon!.sessions.meta(sid).approvalPolicy).toBe("auto");
     const evCount = client.events.length;
     await client.call(METHODS.sessionSend, { sessionId: sid, text: "run the subagent" });
     await client.waitFor((e) => client.events.indexOf(e) >= evCount && e.type === "turn_completed" && e.sessionId === sid);
     await Bun.sleep(100);
     const log = daemon!.sessions.read(sid);
-    const started = log.find((e) => e.type === "thread_started") as { threadId: string; agentType: string; prompt: string; description?: string } | undefined;
-    expect(started).toBeDefined();
-    expect(started!.agentType).toBe("general-purpose");
-    expect(started!.prompt).toBe("child probe text");
-    expect(started!.description).toBe("equivalence probe");
-    const completed = log.find((e) => e.type === "thread_completed") as { threadId: string; stopReason: string } | undefined;
-    expect(completed).toMatchObject({ threadId: started!.threadId, stopReason: "end_turn" });
-    // the child's own frames rode the parent's wire (`forwardSubagentText`) onto its thread
-    expect(log.some((e) => (e as { threadId?: string }).threadId === started!.threadId && e.type === "assistant_message")).toBe(true);
+    expect(daemon!.winter.get(sid)!.init?.tools).not.toContain("Agent");
+    const refused = [...log].reverse().find((e) => e.type === "tool_result") as { output: string; isError: boolean } | undefined;
+    expect(refused).toMatchObject({ isError: true });
+    // Refused twice over: `Agent` is outside `Options.tools`, and (the fail-closed review fix) dispatch's
+    // `disallowedTools` names every known built-in its allowed list leaves out — the deny rule answers first.
+    expect(refused!.output).toContain("Denied by permission rule: Agent");
+    // The projector derives `thread_started` from the spawning `tool_use` block itself (children.ts), so the
+    // ATTEMPT is still named on the log; what matters is that no child ever ran on that thread.
+    const attempted = log.filter((e) => e.type === "thread_started") as Array<{ threadId: string }>;
+    expect(attempted.length).toBeLessThanOrEqual(1);
+    for (const a of attempted) expect(log.some((e) => (e as { threadId?: string }).threadId === a.threadId && e.type === "assistant_message")).toBe(false);
     expect(log.filter((e) => e.type === "agent_error")).toEqual([]);
-    // P8b-15: the persisted child, keyed by the spawning tool_use.id, completed
-    const row = rt.children.get(sid, started!.threadId);
-    expect(row).toBeDefined();
-    expect(row!.status).toBe("completed");
-    expect(row!.completedAt).toBeDefined();
-    expect(rt.children.list(sid)).toHaveLength(1);
+    const childRows = rt.children.list(sid);
+    expect(childRows.every((r) => r.status !== "completed")).toBe(true);
     const driver = daemon!.winter.get(sid)!;
     expect(driver.generation).toBe(4);   // minted (1), tooluse under auto (2), tooluse under ask (3), subagent under auto (4)
 
@@ -279,8 +277,7 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
     await stopDaemon();
     expect(await workersGoneWithin(host, 3000)).toBe(true);
     await bootDaemon();
-    expect(rt.children.get(sid, started!.threadId)?.status).toBe("completed");
-    expect(rt.children.list(sid)).toHaveLength(1);
+    expect(rt.children.list(sid).every((r) => r.status !== "completed")).toBe(true);
     expect(sessionLegOf(rt.records.get(sid))).toBe("winter");
     expect(daemon!.winter.get(sid)).toBeUndefined();   // never cold-resumed at boot
     // the singleton is the same session, and the first RPC resumes it
@@ -293,9 +290,9 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
     expect(resumed.generation).toBe(5);
     await client.waitFor((e) => client.events.indexOf(e) >= ev2 && e.type === "turn_completed" && e.sessionId === sid);
     await Bun.sleep(100);
-    // the double saw its earlier spawn in the resumed transcript: no second child
-    expect(daemon!.sessions.read(sid).filter((e) => e.type === "thread_started")).toHaveLength(1);
-    expect(rt.children.list(sid)).toHaveLength(1);
+    // the double saw its earlier attempt in the resumed transcript: no second attempt, still no child
+    expect(daemon!.sessions.read(sid).filter((e) => e.type === "thread_started").length).toBeLessThanOrEqual(1);
+    expect(rt.children.list(sid).every((r) => r.status !== "completed")).toBe(true);
     expect(resumed.init?.sessionId).toBe(rt.records.get(sid)!.backendSessionId);
     await client.call(METHODS.sessionSetPolicy, { sessionId: sid, policy: "auto" });
   }, 60_000);

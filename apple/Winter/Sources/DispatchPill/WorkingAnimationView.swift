@@ -179,6 +179,8 @@ let plumeSitesPerSearch = 20
 let plumeThrowWindow = 200
 let plumeFetchToolNames: Set<String> = ["webfetch", "web_fetch", "readpage"]
 
+/// `search` is the agent SDK's `Search` built-in (Exa answer mode) since 2026-10-01; an old transcript's
+/// row for the daemon's retired copy may still carry its MCP name, `mcp__winter__research__Search`.
 func plumeIsSearchTool(_ lowered: String) -> Bool {
     ["websearch", "web_search", "search"].contains(lowered) || lowered.hasPrefix("mcp__winter__research__")
 }
@@ -483,7 +485,10 @@ func workingToolSymbol(for rawName: String) -> String {
     case "lsp": return "chevron.left.forwardslash.chevron.right"
     case "task_create", "task_update", "task_list", "todowrite": return "checklist"
     case "spawn_agent", "task", "agent": return "person.2.fill"
-    case "session_spawn": return "paperplane.fill"
+    // The daemon's sessions tools arrive under their host names (`session_spawn`, …); the plain names
+    // the model calls them by since 2026-10-01 (`SpawnSession`, …) are accepted too.
+    case "session_spawn", "spawnsession": return "paperplane.fill"
+    case "list_sessions", "listsessions", "manage_session", "managesession": return "person.2.fill"
     case "workflow": return "bolt.fill"
     case "ask_user", "askquestion": return "questionmark.bubble"
     case "skill", "toolsearch": return "wand.and.stars"

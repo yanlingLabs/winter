@@ -202,9 +202,9 @@ export function toolResults(frame: UserFrame, sessionId: string, threadId: strin
     if (callId === undefined || callId.length === 0) continue;
     const isError = isErrorResult(b);
     const fileDiff = takeFileDiff(sessionId, callId);
-    // `siteIcons` (`runtime-sdk/site-icons.ts`): the icons the web tool itself knew — attached by the
-    // Search hook under this id, and/or reported on the block by the runtime. Taken here for the same
-    // reason `fileDiff` is: this is the one emission site, and the take is destructive.
+    // `siteIcons` (`runtime-sdk/site-icons.ts`): the icons the web tool itself knew — reported on the
+    // block by the runtime (WebFetch/WebSearch/Search). Read here for the same
+    // reason `fileDiff` is taken here: this is the one emission site.
     const siteIcons = siteIconsForResult(sessionId, callId, b);
     out.push({
       type: "tool_result", sessionId, threadId, callId, output: toolResultOutput(b), isError,

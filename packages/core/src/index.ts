@@ -166,7 +166,7 @@ export { ToolRegistry, type ToolDefinition, type ToolContext, type ToolOutcome }
 // `WEB_SEARCH_API_KEY_SECRET` survives its tool because the CLI still needs the literal to tell a user
 // how to REMOVE a Brave key they stored before the retirement (see its own doc in `agent/tools/web.ts`).
 export { WEB_SEARCH_API_KEY_SECRET } from "./agent/tools/web";
-export { registerSearchTool, EXA_API_KEY_SECRET, type SearchToolDeps } from "./agent/tools/search";
+export { EXA_API_KEY_SECRET } from "./agent/exa-key";
 export { notifyHeadless, type OsascriptSpawnFn } from "./agent/notify-fallback";
 export { TaskStore } from "./agent/task-store";
 export { buildSeatbeltProfile, sandboxAvailable } from "./agent/sandbox";

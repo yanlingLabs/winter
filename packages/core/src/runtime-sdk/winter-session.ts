@@ -92,7 +92,7 @@ import { ALLOWED_TRANSITIONS, type RuntimeSessionState } from "../runtime-state/
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import type { attachWinterSession, WinterSessionAttachHandle, WinterSessionAttachment } from "./messaging";
 import { createHostPromptQueue, type HostPromptQueue } from "./prompt-queue";
-import { permissionModeFor } from "./mode-options";
+import { CAPABILITY_PLAIN_NAMES, permissionModeFor, toolSurfaceViolations } from "./mode-options";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { RunHome } from "@yanlinglabs/winter-runtime-sdk";
 import { disposeFailedRunHome, settleRunHome } from "./run-home-support";
@@ -454,6 +454,8 @@ interface Incarnation extends WinterIncarnation {
   attachment: WinterSessionAttachHandle | undefined;
   /** Frames seen — a child that never reached init is a spawn failure, not a turn failure. */
   sawInit: boolean;
+  /** `Options.tools` this incarnation was opened with — the allowed built-ins its init must stay inside. */
+  allowedTools: readonly string[] | undefined;
 }
 
 const sleep = (ms: number): Promise<"timeout"> => new Promise((r) => { const t = setTimeout(() => r("timeout"), ms); (t as { unref?: () => void }).unref?.(); });
@@ -805,7 +807,7 @@ class WinterSessionImpl implements WinterSession {
           /* best-effort only */
         }
       }
-      const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome, mcpServers: sessionMcpServersOf(options) };
+      const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome, mcpServers: sessionMcpServersOf(options), allowedTools: Array.isArray(options.tools) ? [...options.tools] : undefined };
       this.inc = inc;
       this.pendingMcpServerNames = [];
       this.gen = generation;
@@ -853,6 +855,30 @@ class WinterSessionImpl implements WinterSession {
             ...(typeof init.model === "string" ? { model: init.model } : {}),
             tools: Array.isArray(init.tools) ? init.tools.filter((t): t is string => typeof t === "string") : [],
           };
+          // FAIL CLOSED (2026-10-01 review): a chat/dispatch child whose runtime ignored `Options.tools`
+          // would offer built-ins the ruling withholds. The deny list names the known ones; this catches the
+          // rest. The incarnation is refused typed and ended before anything else of it is projected.
+          // An init that states NO tool list cannot be checked, and a session with an allowed list does not
+          // run on a runtime it cannot check: that is a violation too, never an empty (passing) list.
+          const violations = inc.allowedTools !== undefined && !Array.isArray(init.tools)
+            ? ["(init.tools missing)"]
+            : toolSurfaceViolations(this.initFacts.tools, inc.allowedTools, CAPABILITY_PLAIN_NAMES);
+          if (violations.length > 0) {
+            const message = `this session's runtime offered tools its allowed list leaves out (${violations.slice(0, 8).join(", ")}${violations.length > 8 ? ", …" : ""}), so it does not enforce Winter's tool surface — refused`;
+            this.log(`the winter child for ${this.sessionId}: ${message}`);
+            const refusal = new Error(message);
+            if (this.inFlight > 0) {
+              const batch = inc.projector.acceptError(refusal);
+              const typed = (e: SessionEvent): SessionEvent => (e.type === "agent_error" ? { ...e, message, code: "tool_surface_unenforced" } : e);
+              this.emit({ persist: batch.persist.map(typed), broadcast: batch.broadcast.map(typed) });
+            } else {
+              this.safeAppend({ type: "agent_error", sessionId: this.sessionId, threadId: MAIN_THREAD, message, code: "tool_surface_unenforced" });
+            }
+            // ABORT AT ONCE — no end-of-input grace: this child is not one to let finish what it started.
+            try { inc.abort.abort(); } catch { /* already aborted */ }
+            void this.end();
+            break;
+          }
           this.attachMessaging(inc);
           if (this.inFlight === 0) this.armIdleTimer();
         }

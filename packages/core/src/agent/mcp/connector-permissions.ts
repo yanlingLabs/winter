@@ -10,7 +10,9 @@
 // NOT a connector action:
 //  - the daemon's own capability tools, `mcp__winter__<key>__<tool>` — including `external`, which is
 //    how Winter's extras-tier `plugin__<id>__<tool>` tools reach a child (`capabilities/external.ts`);
-//    a `plugin__…` name itself never reaches a child at all;
+//    a `plugin__…` name itself never reaches a child at all. Keyed on `<key>` (`isWinterCapabilityName`):
+//    a `winter__foo` server's tools ARE connector actions, and on a live call only the keys that
+//    incarnation built count, so a retired or unbuilt key's spelling is a connector action too;
 //  - a user server literally named `winter` (its tools would read `mcp__winter__<tool>`, inside the
 //    capability prefix): excluded rather than guessed at, so it keeps today's external-tool treatment;
 //  - every built-in.
@@ -69,6 +71,7 @@
 
 import type { SessionApprovalPolicy } from "../gate";
 import type { Mode as SessionMode } from "../tools/registry";
+import { CAPABILITY_SERVER_KEYS, RETIRED_CAPABILITY_SERVER_KEYS } from "../../capabilities/names";
 
 /** The three things a user can say about an action. "Default" is the ABSENCE of a stored value. */
 export type ConnectorPermission = "allow" | "ask" | "deny";
@@ -82,6 +85,25 @@ export type ConnectorPermissionTable = Record<string, Record<string, ConnectorPe
 const MCP_PREFIX = "mcp__";
 /** The daemon's own capability tools (`runtime-sdk/tool-names.ts`'s `WINTER_CAPABILITY_TOOL_PREFIX`). */
 const CAPABILITY_PREFIX = "mcp__winter__";
+/** Every key a `winter__<key>` capability server has ever had — the live ones and the retired ones. */
+const ALL_CAPABILITY_KEYS: ReadonlySet<string> = new Set<string>([...CAPABILITY_SERVER_KEYS, ...RETIRED_CAPABILITY_SERVER_KEYS]);
+
+/**
+ * Is `name` one of the daemon's OWN capability tools, `mcp__winter__<key>__<tool>`? Keyed on the server
+ * KEY, never the bare prefix: a server named `winter__foo` is not Winter's and its tools are connector
+ * actions like any other. `winterKeys` narrows it to the keys a LIVE incarnation built (the approval bridge
+ * and the hook pass them; 2026-10-01 review): a retired key (`research`, `web`) or one not built this time
+ * (`computer` with computer use off) is then an ordinary server whose tools carry the user's connector
+ * permissions — never a Winter-owned exemption. Without it (display, `mcp.tools`) every key counts.
+ */
+export function isWinterCapabilityName(name: string, winterKeys?: ReadonlySet<string>): boolean {
+  if (!name.startsWith(CAPABILITY_PREFIX)) return false;
+  const rest = name.slice(CAPABILITY_PREFIX.length);
+  const sep = rest.indexOf("__");
+  if (sep <= 0) return false;
+  const key = rest.slice(0, sep);
+  return ALL_CAPABILITY_KEYS.has(key) && (winterKeys === undefined || winterKeys.has(key));
+}
 
 /**
  * EVERY way `mcp__<server>__<tool>` can be split into a server and a tool, first split first — or `[]`
@@ -95,8 +117,8 @@ const CAPABILITY_PREFIX = "mcp__winter__";
  * deny on `cf__prod` never match (the call ran under `bypass`) while `mcp.tools`, which looks up by the
  * real name, reported it denied. `resolveConnector` below weighs every candidate.
  */
-export function connectorCandidates(name: string): Array<{ server: string; tool: string }> {
-  if (typeof name !== "string" || !name.startsWith(MCP_PREFIX) || name.startsWith(CAPABILITY_PREFIX)) return [];
+export function connectorCandidates(name: string, winterKeys?: ReadonlySet<string>): Array<{ server: string; tool: string }> {
+  if (typeof name !== "string" || !name.startsWith(MCP_PREFIX) || isWinterCapabilityName(name, winterKeys)) return [];
   const rest = name.slice(MCP_PREFIX.length);
   const out: Array<{ server: string; tool: string }> = [];
   for (let sep = rest.indexOf("__"); sep !== -1; sep = rest.indexOf("__", sep + 1)) {
@@ -115,8 +137,8 @@ export function parseConnectorToolName(name: string): { server: string; tool: st
 }
 
 /** Is `name` a connector action? The narrow predicate the chat exception keys on (never `isExternalToolName`). */
-export function isConnectorToolName(name: string): boolean {
-  return parseConnectorToolName(name) !== undefined;
+export function isConnectorToolName(name: string, winterKeys?: ReadonlySet<string>): boolean {
+  return connectorCandidates(name, winterKeys).length > 0;
 }
 
 /** The wire name of a server's action. */
@@ -328,8 +350,8 @@ function statedFacts(table: ConnectorPermissionTable, toolName: string, stated: 
  *  - read-only only when at least one candidate is confirmed, every confirmed listing says read-only, and no
  *    configured candidate is unconfirmed.
  */
-export function connectorFactsFor(source: ConnectorPermissionSource, toolName: string, cwd?: string, stated?: StatedMcpServer): ConnectorFacts | undefined {
-  const candidates = connectorCandidates(toolName);
+export function connectorFactsFor(source: ConnectorPermissionSource, toolName: string, cwd?: string, stated?: StatedMcpServer, winterKeys?: ReadonlySet<string>): ConnectorFacts | undefined {
+  const candidates = connectorCandidates(toolName, winterKeys);
   if (candidates.length === 0) return undefined;
   const table = source.table();
   if (stated !== undefined) {

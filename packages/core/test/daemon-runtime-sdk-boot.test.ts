@@ -195,9 +195,10 @@ describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
       // ALWAYS present (kept, advertising zero tools, same "inert not absent" contract every other
       // capability server already follows) since this daemon boot wires no `CapabilityDeps.external`.
       expect(Object.keys(servers)).toEqual([
-        "winter__sessions", "winter__browser", "winter__office", "winter__research",
-        // `winter__web` was here until 2026-09-18: `web_fetch`/`web_search` retired in favour of the
-        // runtime child's own `WebFetch`/`WebSearch`, and the server went with them.
+        "winter__sessions", "winter__browser", "winter__office",
+        // `winter__web` was here until 2026-09-18 (`web_fetch`/`web_search` retired in favour of the
+        // runtime child's own `WebFetch`/`WebSearch`), and `winter__research` until 2026-10-01 (`Search`
+        // is the agent SDK's built-in now).
         "winter__lsp",   // fix wave F7: the `lsp` capability server
         "winter__external",   // Phase 8c Lane 3 Task 3.4: plugin-contributed tools (none wired here)
       ]);

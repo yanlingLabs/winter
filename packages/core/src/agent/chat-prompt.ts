@@ -5,14 +5,14 @@
 /**
  * The web paragraph, which is the ONE part of chat's prompt that depends on runtime state.
  *
- * Chat's search tool moves with the Exa key (the 2026-09-18 ruling): with one stored the daemon's
- * `Search` is exposed and the runtime's `WebSearch` is withheld; with none it is the other way round,
- * because Exa's `/answer` endpoint cannot be called anonymously. `disallowedToolsFor` and the `research`
- * capability server both decide that from the same value, and so does this — naming a tool the session
+ * Chat's search tool moves with the Exa key (the 2026-09-18 ruling): with one stored the agent SDK's
+ * `Search` built-in is offered and the runtime's `WebSearch` is not; with none it is the other way
+ * round, because Exa's `/answer` endpoint cannot be called anonymously. `toolsFor` (`mode-options.ts`,
+ * chat's `Options.tools`) decides that from the same value, and so does this — naming a tool the session
  * was not given is how a model ends up apologising for a tool that "failed" when it was never there.
  *
- * `exaKeyPresent` ABSENT reads as PRESENT, the same convention `ToolExposure` and `CapabilitySession`
- * keep, so all three doors agree by default rather than by coincidence.
+ * `exaKeyPresent` ABSENT reads as PRESENT, the same convention `ToolExposure` and `toolsFor` keep, so
+ * both doors agree by default rather than by coincidence.
  */
 function lookingThingsUp(exaKeyPresent: boolean): string[] {
   return exaKeyPresent
@@ -44,9 +44,10 @@ export function chatSystemPrompt(opts: { exaKeyPresent?: boolean } = {}): string
     "",
     "# Looking things up",
     ...lookingThingsUp(opts.exaKeyPresent !== false),
+    "To look at a live page the way a person would, load the Browser tool with ToolSearch (`select:Browser`) — it can read pages but not act on them.",
     "",
     "# Asking",
-    "When a choice is genuinely the user's to make, use AskQuestion rather than assuming.",
+    "When a choice is genuinely the user's to make, use AskUserQuestion rather than assuming.",
   ].join("\n");
 }
 

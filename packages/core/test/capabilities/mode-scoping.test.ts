@@ -32,7 +32,6 @@ function deps(): CapabilityDeps {
     computerUseEnabled: () => true,
     browser: { browser: { tabs: () => ({ tabs: [], activeTabId: undefined }) as never, openTab: () => "t", ...panel } },
     office: { office: { ...panel, dirsOf: () => [] as never } },
-    research: { search: {} },
     lsp: { lsp: () => undefined },
   };
 }
@@ -64,21 +63,20 @@ describe("P8b-37: what each server ADVERTISES follows the session's mode", () =>
     expect(toolsOf(serversFor("dispatch"), "sessions")).toEqual(["list_sessions", "manage_session", "session_spawn"]);
   });
 
-  test("a chat session's `research` server lists Search; a code session's lists nothing", () => {
-    expect(toolsOf(serversFor("chat"), "research")).toEqual(["Search"]);
-    expect(toolsOf(serversFor("dispatch"), "research")).toEqual(["Search"]);
-    // Code's web surface is the child's OWN WebFetch/WebSearch now (2026-09-18) — the `web` server and
-    // its `web_fetch`/`web_search` are retired, so there is no such key to list at all.
-    expect(toolsOf(serversFor("code"), "research")).toEqual([]);
-    expect(CAPABILITY_SERVER_KEYS as readonly string[]).not.toContain("web");
-    expect(serversFor("code")[capabilityServerName("web")]).toBeUndefined();
+  test("the `research` and `web` servers are retired: no such key, in any mode", () => {
+    // `Search` is the agent SDK's built-in since 2026-10-01; the `web` pair left on 2026-09-18.
+    for (const retired of ["research", "web"]) {
+      expect(CAPABILITY_SERVER_KEYS as readonly string[]).not.toContain(retired);
+      for (const mode of ["code", "dispatch", "chat"] as const) expect(serversFor(mode)[capabilityServerName(retired)]).toBeUndefined();
+    }
   });
 
-  test("`computer` and `office` are code+dispatch only; `browser` is in all three", () => {
+  test("`computer` is code+dispatch, `office` is code ONLY (2026-10-01); `browser` is in all three", () => {
     for (const mode of ["code", "dispatch"] as const) {
       expect(toolsOf(serversFor(mode), "computer")).toEqual(["computer"]);
-      expect(toolsOf(serversFor(mode), "office")).toEqual(["docs", "sheets", "slides"]);
     }
+    expect(toolsOf(serversFor("code"), "office")).toEqual(["docs", "sheets", "slides"]);
+    expect(toolsOf(serversFor("dispatch"), "office")).toEqual([]);
     expect(toolsOf(serversFor("chat"), "computer")).toEqual([]);
     expect(toolsOf(serversFor("chat"), "office")).toEqual([]);
     for (const mode of ["code", "dispatch", "chat"] as const) {
@@ -110,10 +108,10 @@ describe("P8b-37: what each server EXECUTES follows the session's mode", () => {
     expect(res.content).toEqual([{ type: "text", text: "unknown tool: manage_session" }]);
   });
 
-  test("a code session cannot execute Search, even naming it directly", async () => {
-    const searched = await call("code", "research", "Search", { query: "anything" });
-    expect(searched.isError).toBe(true);
-    expect(searched.content).toEqual([{ type: "text", text: "unknown tool: Search" }]);
+  test("a dispatch session cannot execute an office tool, even naming it directly (office is code-only)", async () => {
+    const res = await call("dispatch", "office", "docs", { verb: "read", path: "/tmp/x.docx" });
+    expect(res.isError).toBe(true);
+    expect(res.content).toEqual([{ type: "text", text: "unknown tool: docs" }]);
   });
 
   test("a dispatch session CAN execute the sessions surface — the filter is not a blanket deny", async () => {

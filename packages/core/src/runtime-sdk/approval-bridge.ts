@@ -121,6 +121,14 @@ export interface CanUseToolDeps {
    * dispatch keep their gate verdicts.
    */
   connectors?: ConnectorPermissionSource;
+  /**
+   * The capability server KEYS (`sessions`, `browser`, …) the session's CURRENT incarnation built, read per
+   * call. An `mcp__winter__<key>__<tool>` name is the daemon's own — stripped to its host name for the gate
+   * and the card, and exempt from connector permissions — only while its key is here (`tool-names.ts`'s
+   * `hostToolNameFor` `liveKeys`, `isWinterCapabilityName`). A retired key or one not built this time is an
+   * ordinary MCP server's name. Absent (a test wiring): every key counts, as on replay.
+   */
+  capabilityKeys?: () => ReadonlySet<string> | undefined;
   planBridge?: {
     onExitPlanMode(req: BridgedPlanRequest): Promise<PermissionResult>;
     /** `plan-bridge.ts`'s `respond` — present on the real bridge; used ONLY by `withdrawPending`
@@ -531,8 +539,9 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // explicit gate class is a different Winter name entirely: `Monitor` displays as itself but is
     // classified as `bash`, because its command half uses the Bash permission family and a
     // display-derived `bash_output` would be a silent allow under every policy.
-    const gateToolName = gateToolNameFor(toolName);
-    const classificationName = gateClassFor(toolName);
+    const liveKeys = deps.capabilityKeys?.();
+    const gateToolName = gateToolNameFor(toolName, liveKeys);
+    const classificationName = gateClassFor(toolName, liveKeys);
     let decision = deps.gate.evaluate(classificationName, policy);
 
     // (4b') DISPATCH'S OWN DELEGATION VERB. `session_spawn` is the coordinator's job, not a side effect
@@ -558,7 +567,7 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // allow would answer another layer's mandatory prompt with a yes. `"gate"` keeps the gate's verdict.
     // WS-27: `ctx.mcpServer` — the runtime's own statement of the call's server (agent SDK 0.0.33+; absent on
     // an older runtime, when the split resolver decides).
-    const connector = deps.connectors !== undefined ? connectorFactsFor(deps.connectors, toolName, deps.cwd, statedServerFromCanUseTool(ctx)) : undefined;
+    const connector = deps.connectors !== undefined ? connectorFactsFor(deps.connectors, toolName, deps.cwd, statedServerFromCanUseTool(ctx), liveKeys) : undefined;
     if (connector !== undefined) {
       const verdict = connectorVerdict({ setting: connector.setting, readOnly: connector.readOnly, policy, mode: deps.mode, ...(deps.origin !== undefined ? { origin: deps.origin } : {}) });
       if (verdict === "deny") {
@@ -741,7 +750,7 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // (`agent/dispatch-children.ts`), where the user answers it, and it auto-denies after
     // `DISPATCH_CHILD_APPROVAL_TIMEOUT_MS` (see `cardsRelayedToDispatch`).
     const relayed = cardsRelayedToDispatch(deps);
-    const connectorCards = isConnectorToolName(toolName);
+    const connectorCards = isConnectorToolName(toolName, liveKeys);
     const never = connectorCards || relayed ? undefined : neverPromptsAs(deps);
     if (never) {
       log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${policy} reason=never-prompts mode=${deps.mode} origin=${deps.origin ?? "none"}`);
@@ -754,7 +763,7 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // chat and dispatch (the router strips a saved allow rule from their run folders, so "Allow everywhere"
     // would never apply there) and any action with a stored connector permission (a stored "Always ask"
     // outranks a saved allow rule, so remembering one would change nothing).
-    const plainCard = isConnectorToolName(toolName) && (deps.mode !== "code" || connector?.setting !== undefined);
+    const plainCard = isConnectorToolName(toolName, liveKeys) && (deps.mode !== "code" || connector?.setting !== undefined);
     return await raiseCard(deps, { log, now, threadId, policy, state, privateTarget, plainCard }, toolName, gateToolName, input, ctx);
   };
   return Object.assign(canUse, { withdrawPending });

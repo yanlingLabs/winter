@@ -1886,12 +1886,17 @@ public struct PanelDiffPayload: Codable, Equatable, Sendable {
 /// `code`/`dispatch`/`chat` properties would silently drop a fourth mode instead of showing it.
 public struct WinterCapabilityTool: Equatable, Sendable {
     public let name: String
+    /// The ordinary name the model sees the tool under (`SpawnSession`, `Computer`, `Browser`, … — the
+    /// 2026-10-01 tool-surface ruling); `nil` when it keeps its `mcp__winter__…` name. `name` stays the
+    /// MCP identity a saved rule or an old transcript carries.
+    public let plainName: String?
     public let modes: [String]
     public let deferred: [String]
     public let exposure: [String: Bool]
 
-    public init(name: String, modes: [String], deferred: [String], exposure: [String: Bool]) {
+    public init(name: String, plainName: String? = nil, modes: [String], deferred: [String], exposure: [String: Bool]) {
         self.name = name
+        self.plainName = plainName
         self.modes = modes
         self.deferred = deferred
         self.exposure = exposure
@@ -2118,6 +2123,7 @@ extension WinterClient {
                 }
                 return WinterCapabilityTool(
                     name: name,
+                    plainName: t["plainName"]?.stringValue,
                     modes: (t["modes"]?.arrayValue ?? []).compactMap { $0.stringValue },
                     deferred: (t["deferred"]?.arrayValue ?? []).compactMap { $0.stringValue },
                     exposure: exposure

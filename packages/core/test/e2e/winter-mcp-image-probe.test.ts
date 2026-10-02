@@ -61,7 +61,10 @@ describeWithWinterBinary("item 10 probe: MCP image content through a capability 
         t8mcpsdk: {
           type: "sdk", name: "t8mcpsdk",
           instance: {
-            listTools: () => [{ name: "echo", description: "probe", inputSchema: { type: "object", properties: { x: { type: "number" } } } }],
+            // `alwaysLoad`: since the 2026-10-01 ruling every session runs with Tool Search on, so an MCP tool
+            // starts deferred — and the `mcpsdk` double calls it straight away. Loaded up front, the probe
+            // measures what it always measured.
+            listTools: () => [{ name: "echo", description: "probe", inputSchema: { type: "object", properties: { x: { type: "number" } } }, _meta: { "anthropic/alwaysLoad": true } }],
             callTool: async (name: string, args: Record<string, unknown>) => {
               calls.push({ name, args });
               return { content: [{ type: "text", text: "Screenshot captured (screen is 1×1)." }, { type: "image", data: TINY_PNG_B64, mimeType: "image/png" }], isError: false };

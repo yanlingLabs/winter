@@ -5,21 +5,24 @@ import { browserToolDefs } from "../../src/agent/tools/browser";
 import { computerToolDefs } from "../../src/agent/tools/computer";
 import { docsToolDefs } from "../../src/agent/tools/docs";
 import { listSessionsToolDefs } from "../../src/agent/tools/list-sessions";
-import { searchToolDefs } from "../../src/agent/tools/search";
 import { sessionSpawnToolDefs } from "../../src/agent/tools/session-spawn";
 import { sheetsToolDefs } from "../../src/agent/tools/sheets";
 import { slidesToolDefs } from "../../src/agent/tools/slides";
 import { lspToolDefs } from "../../src/agent/tools/lsp";
 import {
   CAPABILITY_SERVER_KEYS,
+  RETIRED_CAPABILITY_SERVER_KEYS,
   WINTER_CAPABILITY_TOOLS,
+  capabilityAdvertisedName,
   capabilityServerName,
   capabilityToolName,
+  reservedMcpServerNames,
   type CapabilityToolFacts,
 } from "../../src/capabilities/names";
 
 /**
- * P8b-12 — the canonical capability tool names.
+ * P8b-12 — the canonical capability tool names, and (the 2026-10-01 tool-surface ruling) the plain names
+ * the model sees them under and which of them load up front.
  *
  * The literals below are PASTED, not derived: this file's whole job is to prove that the table in
  * `names.ts` and the function that builds a name agree, so deriving the expectation from the thing
@@ -28,10 +31,9 @@ import {
  * silently produce `mcp__winter__list_sessions` instead.
  */
 
-/** WS-06 §5's names for the five P8b-12 servers, plus the C-6 amendment (`Search` under `research`).
- *  Spelled out, never derived. `ReadPage` and the `web` server's `web_fetch`/`web_search` were here
- *  until the 2026-09-18 web-tools ruling retired all three in favour of the runtime child's own
- *  `WebFetch`/`WebSearch`. */
+/** WS-06 §5's names for the P8b-12 servers. Spelled out, never derived. `ReadPage` and the `web`
+ *  server's `web_fetch`/`web_search` left on 2026-09-18; the `research` server's `Search` on 2026-10-01
+ *  (it is the agent SDK's built-in now). */
 const CANONICAL_NAMES = [
   // WS-06 §5 `mcp__winter__sessions` → R-1 re-brands the namespace, C-6 splits the three verbs out.
   "mcp__winter__sessions__session_spawn",
@@ -45,11 +47,7 @@ const CANONICAL_NAMES = [
   "mcp__winter__office__docs",
   "mcp__winter__office__sheets",
   "mcp__winter__office__slides",
-  // C-6 AMENDMENT to WS-06 §5, surviving the 2026-09-18 ruling: `Search` is Exa's ANSWER mode, which
-  // returns a written answer with its sources rather than links a chat session has no tool to chase.
-  "mcp__winter__research__Search",
-  // Fix wave (review F7): the single multi-purpose `lsp` tool, reinstated as a capability — the
-  // 0.0.4 child advertises no `LSP` of its own.
+  // Fix wave (review F7): the single multi-purpose `lsp` tool, reinstated as a capability.
   "mcp__winter__lsp__lsp",
 ] as const;
 
@@ -60,11 +58,9 @@ describe("capabilityToolName (P8b-12)", () => {
     expect(capabilityToolName("research", "Search")).toBe("mcp__winter__research__Search");
   });
 
-  // Since P9b-7 the daemon's own MCP namespace IS `winter` (`CORE_BRAND.mcpServerName`) — the SDK's
-  // own reserved brand name is no longer a foreign one to avoid, so a bare "does this name contain
-  // `winter`" check is meaningless: every capability tool legitimately does. What still has to hold
-  // (R-1, `capabilityServerName`'s own doc) is narrower: a capability SERVER's `winter__<key>` name
-  // can never equal the BARE brand name `"winter"` itself, which the router reserves for its
+  // Since P9b-7 the daemon's own MCP namespace IS `winter` (`CORE_BRAND.mcpServerName`). What still has
+  // to hold (R-1, `capabilityServerName`'s own doc) is narrower: a capability SERVER's `winter__<key>`
+  // name can never equal the BARE brand name `"winter"` itself, which the router reserves for its
   // standing messaging server — the `__<key>` suffix is what guarantees that.
   test("is branded `winter`; a capability server name never collides with the bare brand (R-1)", () => {
     expect(CORE_BRAND.mcpServerName).toBe("winter");
@@ -73,6 +69,14 @@ describe("capabilityToolName (P8b-12)", () => {
     }
     for (const name of Object.keys(WINTER_CAPABILITY_TOOLS)) {
       expect(name.startsWith("mcp__winter__")).toBe(true);
+    }
+  });
+
+  test("the RETIRED server names stay reserved: their old tool spellings still strip to host names", () => {
+    expect([...RETIRED_CAPABILITY_SERVER_KEYS].sort()).toEqual(["research", "web"]);
+    for (const key of RETIRED_CAPABILITY_SERVER_KEYS) {
+      expect(CAPABILITY_SERVER_KEYS as readonly string[]).not.toContain(key);
+      expect(reservedMcpServerNames().has(capabilityServerName(key))).toBe(true);
     }
   });
 });
@@ -100,20 +104,17 @@ describe("WINTER_CAPABILITY_TOOLS", () => {
 
   test("every declared server key with a STATIC tool set is represented, and every name names a declared key", () => {
     const keysUsed = new Set(Object.keys(WINTER_CAPABILITY_TOOLS).map((n) => n.slice("mcp__winter__".length).split("__")[0]));
-    // Phase 8c Lane 3 (Task 3.4): `external` is a declared server key with NO row here, deliberately
-    // — its tool set is per-plugin and runtime-defined (a name this table could never enumerate
-    // ahead of time), so mode-scoping for it lives on each `ExternalToolSource.modes` instead
-    // (`capabilities/external.ts`'s own header; `capabilities/names.ts`'s comment on
-    // `CAPABILITY_SERVER_KEYS`). Every OTHER key still must appear here — this exclusion is
-    // enumerated, not a blanket "some keys are exempt" escape hatch.
+    // `external` is a declared server key with NO row here, deliberately — its tool set is per-plugin
+    // and runtime-defined, so mode-scoping for it lives on each `ExternalToolSource.modes` instead.
     const staticKeys = CAPABILITY_SERVER_KEYS.filter((k) => k !== "external");
     expect([...keysUsed].sort()).toEqual([...staticKeys].sort());
   });
 
-  test("m1: modes and deferral are pinned against the REAL ToolDefinitions, not against comments", () => {
-    // The table is the exposure source Task 9 derives `disallowedTools` from. Pinned against pasted
-    // literals it desyncs SILENTLY the day someone edits a tool's own `modes`. So the defs are built
-    // here — the same factories both doors use — and compared field for field.
+  test("m1: modes are pinned against the REAL ToolDefinitions, not against comments", () => {
+    // The table is the exposure source Task 9 derives `disallowedTools` from, and the one the servers
+    // filter by. Pinned against pasted literals it desyncs SILENTLY the day someone edits a tool's own
+    // `modes`, so the defs are built here and compared field for field. (The defs' engine-era
+    // `deferred` fields are not compared: deferral is the table's `eager`, read by the servers.)
     const panel = { dispatch: () => ({ commandId: "c", settled: Promise.resolve({ kind: "timeout" as const, deadlineMs: 1 }) }), harnesses: () => [] };
     const defsByKey: Record<string, readonly ToolDefinition[]> = {
       sessions: [...sessionSpawnToolDefs(), ...listSessionsToolDefs({ store: { list: () => [], lastEventTs: () => 0, transcriptPath: () => "" } } as never)],
@@ -124,15 +125,8 @@ describe("WINTER_CAPABILITY_TOOLS", () => {
         ...sheetsToolDefs({ ...panel, dirsOf: () => [] as never }),
         ...slidesToolDefs({ ...panel, dirsOf: () => [] as never }),
       ],
-      research: searchToolDefs(),
       lsp: lspToolDefs({ lsp: () => undefined, cwdOf: () => undefined, rootsOf: () => [] }),
     };
-
-    // `computer`'s `deferred` is the ONE row that is not on the def: `computer.ts` leaves the field
-    // to its caller and `daemon.ts` passes `["dispatch"]` at the registration site. It stays a
-    // literal here, and this comment is why.
-    const DEFERRED_FROM_THE_CALL_SITE = new Set(["mcp__winter__computer__computer"]);
-
     const t = WINTER_CAPABILITY_TOOLS as Readonly<Record<string, CapabilityToolFacts>>;
     let checked = 0;
     for (const [key, defs] of Object.entries(defsByKey)) {
@@ -142,45 +136,31 @@ describe("WINTER_CAPABILITY_TOOLS", () => {
         expect(facts, `${name} is missing from WINTER_CAPABILITY_TOOLS`).toBeDefined();
         // `modes` absent on a def means `["code"]` (registry.ts's own documented default).
         expect([...facts!.modes].sort()).toEqual([...(def.modes ?? ["code"])].sort());
-        if (!DEFERRED_FROM_THE_CALL_SITE.has(name)) {
-          const fromDef = def.deferred === undefined || def.deferred === false ? undefined
-            : def.deferred === true ? true
-            : [...def.deferred].sort();
-          const fromTable = facts!.deferred === undefined ? undefined
-            : facts!.deferred === true ? true
-            : [...facts!.deferred].sort();
-          expect(fromTable, `${name}'s deferred disagrees with its ToolDefinition`).toEqual(fromDef as never);
-        }
         checked++;
       }
     }
     // Every row was reached — a def that stopped being built would otherwise pass by absence.
     expect(checked).toBe(Object.keys(WINTER_CAPABILITY_TOOLS).length);
-    // The one literal row, spelled out because it comes from `daemon.ts:registerComputerTool`.
-    expect(t["mcp__winter__computer__computer"]!.deferred).toEqual(["dispatch"]);
   });
 
-  test("modes and deferral mirror today's registrations", () => {
+  test("the 2026-10-01 ruling: plain names, the eager sessions trio, everything else deferred, office code-only", () => {
     const t = WINTER_CAPABILITY_TOOLS as Readonly<Record<string, CapabilityToolFacts>>;
-    // `modes: ["dispatch"]` on all three session tools (list-sessions.ts / session-spawn.ts).
-    expect(t["mcp__winter__sessions__session_spawn"]).toEqual({ modes: ["dispatch"] });
-    expect(t["mcp__winter__sessions__list_sessions"]).toEqual({ modes: ["dispatch"], deferred: true });
-    expect(t["mcp__winter__sessions__manage_session"]).toEqual({ modes: ["dispatch"], deferred: true });
-    // computer.ts declares `modes: ["code","dispatch"]`; daemon.ts passes `deferred: ["dispatch"]`.
-    expect(t["mcp__winter__computer__computer"]).toEqual({ modes: ["code", "dispatch"], deferred: ["dispatch"] });
-    // browser.ts: `modes: ["code","dispatch","chat"]`, `deferred: ["code","dispatch"]`.
-    expect(t["mcp__winter__browser__browser"]).toEqual({ modes: ["code", "dispatch", "chat"], deferred: ["code", "dispatch"] });
-    // docs/sheets/slides.ts: `modes: ["code","dispatch"]`, no deferral.
+    expect(t["mcp__winter__sessions__session_spawn"]).toEqual({ modes: ["dispatch"], plainName: "SpawnSession", eager: true });
+    expect(t["mcp__winter__sessions__list_sessions"]).toEqual({ modes: ["dispatch"], plainName: "ListSessions", eager: true });
+    expect(t["mcp__winter__sessions__manage_session"]).toEqual({ modes: ["dispatch"], plainName: "ManageSession", eager: true });
+    expect(t["mcp__winter__computer__computer"]).toEqual({ modes: ["code", "dispatch"], plainName: "Computer" });
+    expect(t["mcp__winter__browser__browser"]).toEqual({ modes: ["code", "dispatch", "chat"], plainName: "Browser" });
     for (const tool of ["docs", "sheets", "slides"]) {
-      expect(t[`mcp__winter__office__${tool}`]).toEqual({ modes: ["code", "dispatch"] });
+      expect(t[`mcp__winter__office__${tool}`]).toEqual({ modes: ["code"] });
     }
-    // search.ts: `modes: ["chat","dispatch"]`, deliberately NOT deferred.
-    expect(t["mcp__winter__research__Search"]).toEqual({ modes: ["chat", "dispatch"] });
-    // …and the three retired rows are GONE, which is the half a positive assertion cannot state
-    // (2026-09-18: `ReadPage` and the `web` server's pair left with the web-tools ruling).
-    for (const gone of ["mcp__winter__research__ReadPage", "mcp__winter__web__web_fetch", "mcp__winter__web__web_search"]) {
+    expect(t["mcp__winter__lsp__lsp"]).toEqual({ modes: ["code"] });
+    // …and the retired rows are GONE, which is the half a positive assertion cannot state.
+    for (const gone of ["mcp__winter__research__Search", "mcp__winter__research__ReadPage", "mcp__winter__web__web_fetch", "mcp__winter__web__web_search"]) {
       expect(t[gone], `${gone} is retired and must not be in the table`).toBeUndefined();
     }
+    // The name the child knows each by.
+    expect(capabilityAdvertisedName("mcp__winter__browser__browser")).toBe("Browser");
+    expect(capabilityAdvertisedName("mcp__winter__office__docs")).toBe("mcp__winter__office__docs");
   });
 
   test("is a plain data table Task 9 can diff (no functions, no getters)", () => {
