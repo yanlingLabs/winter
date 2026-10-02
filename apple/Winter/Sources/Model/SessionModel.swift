@@ -406,6 +406,45 @@ struct Exchange: Equatable {
     /// the per-exchange sibling of the state-level `lastTurnAborted` flash flag.
     var aborted: Bool = false
 
+    // MARK: Where each reply fell among the activity (user, 2026-10-02)
+    //
+    // `replies` and `activity` are two lists, and the transcript used to draw ALL the activity and
+    // then ALL the replies — a "search, write, search, write" turn read as every search at the top.
+    // These record the order the events arrived in, so the transcript can interleave them
+    // (`exchangeTimeline`). Kept by `appendActivityItem`/`appendReply` and the activity cap's drop.
+
+    /// Each activity item's place in arrival order, parallel to `activity` — fixed for the item's
+    /// life, so the drop-oldest cap removing items never re-orders the rest.
+    var activityOrdinals: [Int] = []
+    /// The ordinal the next activity item gets.
+    var nextActivityOrdinal = 0
+    /// For each reply, parallel to `replies`: how many activity items had arrived before it — every
+    /// item whose ordinal is below this draws above the reply, every other below.
+    var replyAnchors: [Int] = []
+
+    mutating func appendActivityItem(_ item: ActivityItem) {
+        activity.append(item)
+        activityOrdinals.append(nextActivityOrdinal)
+        nextActivityOrdinal += 1
+    }
+
+    mutating func removeActivityItem(at index: Int) {
+        activity.remove(at: index)
+        if activityOrdinals.indices.contains(index) { activityOrdinals.remove(at: index) }
+    }
+
+    mutating func appendReply(_ text: String) {
+        replies.append(text)
+        replyAnchors.append(nextActivityOrdinal)
+    }
+
+    /// Equality is the CONTENT — prompt, replies, activity, aborted. The ordering record above is
+    /// derived from the same events and changes only when they do, so it never decides whether two
+    /// exchanges differ (an `Exchange(prompt:reply:activity:)` a test builds has no arrival order).
+    static func == (a: Exchange, b: Exchange) -> Bool {
+        a.prompt == b.prompt && a.replies == b.replies && a.activity == b.activity && a.aborted == b.aborted
+    }
+
     /// The LAST assistant message of this exchange, or `""` when none has arrived yet. This is
     /// what the SINGLE-BUBBLE surfaces read — `FieldStateAdapter.visibleResponse`,
     /// `GlassRootView.hasReadableReply`, `OrbWindowController`'s reveal gates — and it is the same
@@ -424,6 +463,10 @@ struct Exchange: Equatable {
         self.replies = reply.isEmpty ? [] : [reply]
         self.activity = activity
         self.aborted = aborted
+        // Built whole, the reply came after its activity.
+        self.activityOrdinals = Array(activity.indices)
+        self.nextActivityOrdinal = activity.count
+        self.replyAnchors = reply.isEmpty ? [] : [activity.count]
     }
 }
 
@@ -798,7 +841,7 @@ enum SessionReducer {
                 // defence against a second producer, and an empty entry would both draw a blank
                 // transcript row and blank out `reply` for the surfaces that read it. It matches
                 // `Exchange(prompt:reply:)`, which likewise maps an empty reply to no entry.
-                s.exchanges[s.exchanges.count - 1].replies.append(v.text)
+                s.exchanges[s.exchanges.count - 1].appendReply(v.text)
             }
         case .turnCompleted(let v) where v.threadId == mainThread:
             s.turnRunning = false
@@ -841,7 +884,7 @@ enum SessionReducer {
             s.lastTurnError = v.message // T6: the one signal the pickers' probation reads
             s.queuedSteers = [] // the turn died with whatever was queued for it
             if let last = s.exchanges.indices.last, s.exchanges[last].reply.isEmpty {
-                s.exchanges[last].replies.append("⚠︎ \(v.message)")
+                s.exchanges[last].appendReply("⚠︎ \(v.message)")
             }
             s.subagents = [] // defensive prune — an errored main turn must not strand a live block
         case .taskUpdated(let v): // any thread — tasks are session-wide
@@ -1189,7 +1232,7 @@ enum SessionReducer {
         } else if state.exchanges[last].activity.last?.kind == kind {
             return
         }
-        state.exchanges[last].activity.append(ActivityItem(kind: kind))
+        state.exchanges[last].appendActivityItem(ActivityItem(kind: kind))
 
         var overflow = state.exchanges[last].activity.count - maxActivityItems
         guard overflow > 0 else { return }
@@ -1198,7 +1241,7 @@ enum SessionReducer {
             if state.exchanges[last].activity[index].interactionRecord != nil {
                 index += 1                                    // a card is never the thing that goes
             } else {
-                state.exchanges[last].activity.remove(at: index)
+                state.exchanges[last].removeActivityItem(at: index)
                 overflow -= 1
             }
         }
