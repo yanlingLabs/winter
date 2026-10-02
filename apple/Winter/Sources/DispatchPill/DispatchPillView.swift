@@ -112,7 +112,8 @@ private struct DispatchPillAccessories: View {
                     rowWidth: rowWidth,
                     onOpen: { controller.onOpenChild?($0) },
                     onStop: { controller.onStopChild?($0) },
-                    onOpenOverflow: { controller.onOpenInApp?() }
+                    onOpenOverflow: { controller.onOpenInApp?() },
+                    childSession: { controller.childSession($0) }
                 )
             }
         }

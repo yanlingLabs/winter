@@ -104,17 +104,12 @@ func plumeThrows(for exchange: Exchange?) -> [PlumeThrow] {
     return Array(plumeThrows(in: exchange.activity, from: 0).suffix(plumeThrowWindow))
 }
 
-/// PURE: the CURRENT tool round's throws — every tool call from the earliest one still running to
-/// the end of the exchange, with whatever its finished calls found — or nothing once every call has
-/// returned. A round of twenty searches therefore keeps streaming its sites for as long as any of
-/// them is still out, and stops when the round is over.
+/// PURE: what the plume streams again and again while the turn runs — EVERY tool and site the turn
+/// has used so far (user, 2026-10-02: "keep repeating the agent used tools … until the turn ends,
+/// and keep appending new tools"), so the plume is never empty of them. The plume itself is only on
+/// screen while a turn runs, so its end is the repeat's end.
 func plumeRepeatingThrows(for exchange: Exchange?) -> [PlumeThrow] {
-    guard let exchange,
-          let start = exchange.activity.firstIndex(where: {
-              if case let .tool(_, _, _, output, _, _, _) = $0.kind { return output == nil }
-              return false
-          }) else { return [] }
-    return Array(plumeThrows(in: exchange.activity, from: start).suffix(plumeThrowWindow))
+    plumeThrows(for: exchange)
 }
 
 private func plumeThrows(in activity: [ActivityItem], from start: Int) -> [PlumeThrow] {
@@ -253,7 +248,7 @@ struct PropulsionPlume: Equatable {
     /// How far past the plume's leading edge its tail lies, as a share of its height — far enough that
     /// every puff and thrown item has wholly left the pill before it is dropped, so nothing ever pops
     /// out of sight in view.
-    static let tailOvershootShare: Double = 0.32
+    static let tailOvershootShare: Double = 0.4
 
     /// The tail for a plume this high whose leading edge is at x = 0.
     static func tailX(height: CGFloat) -> CGFloat { -height * CGFloat(tailOvershootShare) }
@@ -270,10 +265,9 @@ struct PropulsionPlume: Equatable {
     }
 
     static let tokenLifetime: ClosedRange<Double> = 1.6...1.9
-    /// A thrown item's diameter at the nozzle, as a share of the plume's height.
-    static let tokenSideShare: Double = 0.56
-    /// How much of its size a TOOL puff has lost by the tail (a site keeps its size the whole way).
-    static let tokenShrinkAlongPlume: Double = 0.5
+    /// A thrown item's diameter, as a share of the plume's height — the same the whole way, tools and
+    /// sites alike.
+    static let tokenSideShare: Double = 0.7
     /// The first share of its life over which an item grows out of the nozzle.
     static let tokenEmergeShare: Double = 0.08
     /// Thrown items slow at the nozzle like the puffs, but less — they are flung, not blown.
@@ -322,19 +316,15 @@ struct PropulsionPlume: Equatable {
         tokens.map { Self.tile(for: $0, in: rect, emitterX: emitterX, tailX: tailX) }.filter { $0.side > 0.5 }
     }
 
-    /// PURE: one thrown item's disc. Both kinds grow out of the nozzle over `tokenEmergeShare` of their
-    /// life and drift to their lane. A TOOL is a puff of the plume itself — it shrinks (by distance,
-    /// like the exhaust) and cools. A SITE keeps its size the whole way. Both ride out past the pill's
-    /// leading edge (`tailX`), which clips them, before they are dropped.
+    /// PURE: one thrown item's disc. It grows out of the nozzle over `tokenEmergeShare` of its life,
+    /// drifts to its lane, keeps its size the whole way, and rides out past the pill's leading edge
+    /// (`tailX`), which clips it, before it is dropped.
     static func tile(for token: Token, in rect: CGRect, emitterX: CGFloat, tailX: CGFloat) -> PlumeTile {
         let p = min(max(token.age / token.lifetime, 0), 1)
         let travel = pow(p, tokenTravelExponent)
         let x = Double(emitterX) - travel * Double(emitterX - tailX)
         let height = Double(rect.height)
-        var side = height * tokenSideShare * min(1, 0.35 + 0.65 * p / tokenEmergeShare)
-        if case .tool = token.item.kind {
-            side *= 1 - tokenShrinkAlongPlume * travel
-        }
+        let side = height * tokenSideShare * min(1, 0.35 + 0.65 * p / tokenEmergeShare)
         let slack = max(0, (height - side) / 2)
         let y = Double(rect.midY) + token.lane * slack * min(1, p * 2.5)
         return PlumeTile(center: CGPoint(x: x, y: y), side: CGFloat(max(0, side)), heat: 1 - p, item: token.item)
@@ -599,9 +589,8 @@ struct WorkingAnimationView: View {
 
     /// One tile: a rounded square, turned by its tumble — a tool's white symbol on its own colour, or
     /// a site's favicon on white (a globe until the favicon has loaded, or if it never does).
-    /// One thrown item, a disc like everything else in the plume: a TOOL is a puff in the plume's own
-    /// colours (cooling as it goes) carrying its white symbol; a SITE is a white disc holding its
-    /// favicon (a globe until the favicon has loaded, or if it never does).
+    /// One thrown item: a white disc holding a TOOL's symbol (in the plume's deep colour) or a SITE's
+    /// favicon (a grey globe until the favicon has loaded, or if it never does).
     private static func draw(_ tile: PlumeTile, palette: PlumePalette, favicons: [String: NSImage],
                              in context: inout GraphicsContext) {
         let side = tile.side
@@ -609,8 +598,8 @@ struct WorkingAnimationView: View {
         let shape = Path(ellipseIn: disc)
         switch tile.item.kind {
         case .tool(let symbol):
-            context.fill(shape, with: .color(color(heat: 0.35 + 0.65 * tile.heat, palette)))
-            drawSymbol(symbol, color: .white, in: disc.insetBy(dx: side * 0.25, dy: side * 0.25), context: &context)
+            context.fill(shape, with: .color(.white))
+            drawSymbol(symbol, color: color(heat: 0, palette), in: disc.insetBy(dx: side * 0.25, dy: side * 0.25), context: &context)
         case .site(let host, let iconURL):
             context.fill(shape, with: .color(.white))
             let inner = disc.insetBy(dx: side * 0.18, dy: side * 0.18)

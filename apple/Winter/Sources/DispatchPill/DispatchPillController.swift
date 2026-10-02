@@ -80,6 +80,15 @@ final class DispatchPillSettings: ObservableObject {
     }
 }
 
+/// A live view onto one child session, for its pill's plume: the child's own `SessionModel`, fed by a
+/// pinned harness of its own (`AppModel.makeDetachedFeed`, the detached windows' door). Closures,
+/// not the `SessionFeed` itself, so a test can hand in a model with nothing behind it.
+struct DispatchPillChildFeed {
+    let session: SessionModel
+    let start: () async -> Void
+    let stop: () -> Void
+}
+
 /// Owns the dispatch pill: a bottom-anchored, screen-centred panel that replaces the orb as the
 /// 4-finger tap's surface. Four looks — compact (idle), expanded (typing), full screen (transcript
 /// and composer), and working (compact while a turn runs) — over the ONE dispatch session the orb
@@ -137,6 +146,11 @@ final class DispatchPillController: ObservableObject {
     var onStopChild: ((String) -> Void)?
     /// "Open Dispatch in Winter" (the ⋯ popover, and the child row's "+n").
     var onOpenInApp: (() -> Void)?
+    /// Opens a live view onto a child session, so its pill's plume can throw what THAT child uses.
+    /// Nil (tests, no daemon token) leaves the child pills with a plain plume.
+    var makeChildFeed: ((String) -> DispatchPillChildFeed?)? {
+        didSet { reconcileChildFeeds() }
+    }
     /// True while the ⋯ popover is open (`ExpandedPillAccessoryButtons` reports it): a click inside
     /// the popover's own window is not a click outside the pill.
     var auxiliaryPopoverOpen = false
@@ -285,6 +299,7 @@ final class DispatchPillController: ObservableObject {
         presentation = adapter.composerDraft.isEmpty ? .compact : .expanded
         snapToTarget()
         isVisible = true
+        reconcileChildFeeds()
         panel.orderFrontRegardless()
         installMonitors()
         engage()
@@ -302,6 +317,7 @@ final class DispatchPillController: ObservableObject {
         presentation = .compact
         removeMonitors()
         isVisible = false
+        reconcileChildFeeds()
         snapToTarget()
         panel.orderOut(nil)
         rest(restoreFocus: true)
@@ -973,7 +989,52 @@ final class DispatchPillController: ObservableObject {
         }
     }
 
+    // MARK: - Child plumes
+
+    /// The most child sessions watched at once — the widest row's worth.
+    static let maxChildFeeds = 8
+    /// The live child sessions the child pills draw their plumes from, by session id.
+    @Published private(set) var childSessions: [String: SessionModel] = [:]
+    private var childFeeds: [String: (feed: DispatchPillChildFeed, task: Task<Void, Never>)] = [:]
+
+    /// The child session behind a child pill, while it is being watched.
+    func childSession(_ sessionId: String) -> SessionModel? { childSessions[sessionId] }
+
+    /// Watch exactly the children that are still working (or waiting on the user) while the pill is on
+    /// screen; let go of every other — a finished child, a stopped one, or all of them once the pill
+    /// is put away — so no harness lingers.
+    func reconcileChildFeeds() {
+        let wanted: [String] = isVisible
+            ? session.state.children
+                .filter { ChildPillStatus(wireStatus: $0.status).isStoppable }
+                .prefix(Self.maxChildFeeds)
+                .map(\.sessionId)
+            : []
+        for id in Array(childFeeds.keys) where !wanted.contains(id) {
+            childFeeds[id]?.feed.stop()
+            childFeeds[id]?.task.cancel()
+            childFeeds[id] = nil
+            childSessions[id] = nil
+        }
+        guard let makeChildFeed else { return }
+        for id in wanted where childFeeds[id] == nil {
+            guard let feed = makeChildFeed(id) else { continue }
+            childFeeds[id] = (feed, Task { await feed.start() })
+            childSessions[id] = feed.session
+        }
+    }
+
+    var watchedChildIdsForTesting: Set<String> { Set(childFeeds.keys) }
+
     private func observeSession() {
+        // A child starting, finishing or being stopped changes which child sessions are watched.
+        // `$state` publishes on willSet — the hop reads the new roster.
+        session.$state
+            .map(\.children)
+            .removeDuplicates()
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.reconcileChildFeeds() } }
+            .store(in: &cancellables)
+
         // Typing auto-expands (and leaves a swiped-to turn). `$composerDraft` publishes on willSet,
         // so the NEW value is the sink's argument and `lastDraft` is the old one.
         adapter.$composerDraft
