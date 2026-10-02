@@ -3,8 +3,14 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.39";
-/** Bumped to 0.0.39 (2026-10-02): `Options.hostMessaging` — a session's `SendMessage` hands the daemon whatever
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.40";
+/** Bumped to 0.0.40 (2026-10-02): a tool round's results reach the host one `user` frame per call, each as soon as
+ *  its call finishes (after its PostToolUse hooks), and a round's READ-ONLY calls run concurrently (completion-order
+ *  frames), in both topologies and for subagents; before it the round
+ *  crossed in one frame after its last call, so the Mac showed every call of a parallel batch as running until
+ *  the slowest was done. The model's side is unchanged (one tool message per round). The projector needs no
+ *  change for it and keeps one `tool_result` per call itself (`projector/index.ts`).
+ *  Earlier: bumped to 0.0.39 (2026-10-02): `Options.hostMessaging` — a session's `SendMessage` hands the daemon whatever
  *  it cannot resolve in-process (`host_message_send`), and `ListAgents` lists the sessions the daemon names
  *  (`host_message_list`), in both topologies; before it, SendMessage from any session reached no other
  *  Winter session (`agent/session-messaging.ts` answers both).
