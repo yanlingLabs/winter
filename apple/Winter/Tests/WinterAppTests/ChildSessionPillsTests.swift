@@ -66,6 +66,31 @@ final class ChildSessionPillsTests: XCTestCase {
         XCTAssertEqual(childPillLayout(count: 1, rowWidth: 10).visibleCount, 1, "one child always shows")
     }
 
+    // MARK: - Coming and going
+
+    func testAChildPillRisesOutOfTheMainPillAndSinksBackIntoIt() {
+        let hidden = ChildPillEntrance(progress: 0)
+        let shown = ChildPillEntrance(progress: 1)
+        XCTAssertEqual(shown, ChildPillEntrance(progress: 1))
+        XCTAssertEqual(shown.scale, 1)
+        XCTAssertEqual(shown.offsetY, 0)
+        XCTAssertEqual(shown.opacity, 1)
+        XCTAssertEqual(shown.blur, 0, "sharp once in place")
+        XCTAssertLessThan(hidden.scale, 1, "starts smaller")
+        XCTAssertGreaterThan(hidden.offsetY, 0, "starts lower — inside the main pill below")
+        XCTAssertEqual(hidden.opacity, 0)
+        XCTAssertGreaterThan(hidden.blur, 0)
+        let mid = ChildPillEntrance(progress: 0.5)
+        XCTAssertTrue(hidden.scale < mid.scale && mid.scale < shown.scale)
+        XCTAssertTrue(hidden.offsetY > mid.offsetY && mid.offsetY > shown.offsetY)
+        XCTAssertEqual(ChildPillEntrance(progress: 3), shown, "clamped")
+    }
+
+    func testTheCanvasWaitsForALeavingPillToFinishSinking() {
+        XCTAssertGreaterThanOrEqual(DispatchPillController.accessoryShrinkDelay, 0.5,
+                                    "the canvas never tightens while a pill is still on its way out")
+    }
+
     func testStatusMapping() {
         XCTAssertEqual(ChildPillStatus(wireStatus: "running"), .working)
         XCTAssertEqual(ChildPillStatus(wireStatus: "queued"), .working, "unknown reads as working")

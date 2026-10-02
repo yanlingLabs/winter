@@ -58,6 +58,51 @@ enum ChildPillStatus: Equatable {
     var isStoppable: Bool { self == .working || self == .needsYou }
 }
 
+// MARK: - Coming and going (pure — `ChildSessionPillsTests`)
+
+/// How a child pill looks part-way into the row: `progress` 0 = still inside the main pill below it,
+/// 1 = in place. It rises out of the main pill — growing from its bottom edge, fading and sharpening
+/// in — and sinks back the same way when it leaves.
+struct ChildPillEntrance: Equatable {
+    let scale: Double
+    let offsetY: Double
+    let opacity: Double
+    let blur: Double
+
+    init(progress: Double) {
+        let p = min(max(progress, 0), 1)
+        scale = 0.55 + 0.45 * p
+        offsetY = (1 - p) * 18
+        opacity = p
+        blur = (1 - p) * 6
+    }
+}
+
+/// The spring every child-row change rides: a pill arriving or leaving, its siblings re-splitting the
+/// row's width around it, the whole row appearing above the main pill.
+let childRowSpring = Animation.spring(response: 0.45, dampingFraction: 0.8)
+
+private struct ChildPillEntranceModifier: ViewModifier {
+    let progress: Double
+    func body(content: Content) -> some View {
+        let look = ChildPillEntrance(progress: progress)
+        content
+            .scaleEffect(look.scale, anchor: .bottom)
+            .offset(y: look.offsetY)
+            .opacity(look.opacity)
+            .blur(radius: look.blur)
+    }
+}
+
+extension AnyTransition {
+    /// A child pill (or the row, or a card above the pill) rising out of the main pill, and sinking
+    /// back into it.
+    static var childPill: AnyTransition {
+        .modifier(active: ChildPillEntranceModifier(progress: 0), identity: ChildPillEntranceModifier(progress: 1))
+            .animation(childRowSpring)
+    }
+}
+
 // MARK: - The row
 
 /// The child sessions this dispatch session has spawned, as a row of small pills above the main
@@ -83,6 +128,7 @@ struct ChildSessionPillsView: View {
                                  onOpen: { onOpen(child.sessionId) },
                                  onStop: { onStop(child.sessionId) })
                     .frame(width: layout.pillWidth, height: DispatchPillMetrics.childRowHeight)
+                    .transition(.childPill)
             }
             if layout.overflowCount > 0 {
                 Button(action: onOpenOverflow) {
@@ -96,8 +142,13 @@ struct ChildSessionPillsView: View {
                 }
                 .buttonStyle(.plain)
                 .help("\(layout.overflowCount) more — open Dispatch")
+                .transition(.childPill)
             }
         }
+        // The siblings re-split the row's width around an arrival or a departure on the same spring
+        // the arrival itself rides, so nothing jumps.
+        .animation(childRowSpring, value: children.map(\.sessionId))
+        .animation(childRowSpring, value: layout.overflowCount)
         .frame(width: rowWidth, height: DispatchPillMetrics.childRowHeight)
     }
 }
@@ -157,6 +208,9 @@ private struct ChildSessionPill: View {
         .overlay(Capsule().strokeBorder(status == .needsYou ? Color.orange : Color.white.opacity(0.09),
                                         lineWidth: 1))
         .contentShape(Capsule())
+        // Working → done/failed/needs-you cross-fades (the plume out, the glyph and stop circle in),
+        // never a snap.
+        .animation(.easeInOut(duration: 0.3), value: status)
         .onTapGesture(perform: onOpen)
         .help(child.title)
     }

@@ -223,7 +223,9 @@ final class DispatchPillController: ObservableObject {
 
     /// How long an accessory-only shrink (a card resolved, a child finished — no spring running)
     /// waits, so SwiftUI's own removal has finished before the canvas tightens round what is left.
-    static let accessoryShrinkDelay: TimeInterval = 0.3
+    /// Long enough for a child pill (or the row, or a card) to finish sinking back into the main pill
+    /// (`childRowSpring`) before the canvas tightens round what is left — never clipped mid-animation.
+    static let accessoryShrinkDelay: TimeInterval = 0.6
     /// The spring's settle bar, in points and points/second.
     static let settleDistance: Double = 0.5
     static let settleSpeed: Double = 4
