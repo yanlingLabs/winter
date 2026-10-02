@@ -37,6 +37,8 @@ export interface ListSessionsDeps {
   derive: ActivityDeriver;
   /** The session's running turn's start — present only while a turn is actually running. */
   turnStartedAt(sessionId: string): number | undefined;
+  /** THE `working` signal (`makeSessionSignalsDeriver`: a turn or background work). Absent: a running turn. */
+  working?(sessionId: string): boolean;
   /** Injectable clock (the `ReaperDeps.now`/`CleanerDeps.now` precedent). */
   now?: () => number;
 }
@@ -136,10 +138,17 @@ export function listSessionsToolDefs(deps: ListSessionsDeps): ToolDefinition[] {
       }
 
       // DEFAULT: active + background, plus Dispatch's spawned sessions (the newest few inactive ones as completed).
+      const working = (id: string): boolean => deps.working?.(id) ?? deps.turnStartedAt(id) !== undefined;
       const cand = rows.map((row) => ({ row, activity: deps.derive(row, row.sessionId, at), lastEventTs: deps.store.lastEventTs(row.sessionId) }));
-      const live = cand.filter((c) => c.activity === "active" || c.activity === "background");
+      // A Dispatch-spawned session counts as LIVE only while it is open (`active`) or working: until
+      // 2026-10-02 every child was stored with the background flag from birth, so the flag alone would
+      // list every finished child a home ever had as "background".
+      const childLive = (c: (typeof cand)[number]): boolean => c.activity === "active" || working(c.row.sessionId);
+      const isChild = (c: (typeof cand)[number]): boolean => c.row.origin === "dispatch-child";
+      const live = cand.filter((c) => (isChild(c) ? c.activity !== "archived" && childLive(c) : c.activity === "active" || c.activity === "background"));
       const completedChildren = cand
-        .filter((c) => c.row.origin === "dispatch-child" && c.activity === "idle")
+        .filter((c) => isChild(c) && c.activity !== "archived" && c.activity !== undefined && !childLive(c))
+        .map((c) => ({ ...c, activity: "idle" as Activity }))
         .sort((a, b) => b.lastEventTs - a.lastEventTs);
       const recentCompleted = completedChildren.slice(0, LIST_SESSIONS_RECENT_COMPLETED_CHILDREN);
       const shownSet = [...live, ...recentCompleted].sort((a, b) => b.lastEventTs - a.lastEventTs || (a.row.sessionId < b.row.sessionId ? -1 : 1));

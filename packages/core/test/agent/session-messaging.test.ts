@@ -227,6 +227,20 @@ describe("SendMessage to a session", () => {
     expect(t.driverFor(to).sends).toHaveLength(3);
   });
 
+  test("the dedupe is scoped to the runtime INCARNATION: a restarted caller's msg-1 is a new message", async () => {
+    const t = setup();
+    const from = t.code();
+    const to = t.code();
+    const first = t.messaging.handlerFor(from, "incarnation-1");
+    const second = t.messaging.handlerFor(from, "incarnation-2");
+    const ac = new AbortController();
+    await first.send({ to, message: "continue", messageId: "msg-1" }, { signal: ac.signal });
+    await first.send({ to, message: "continue", messageId: "msg-1" }, { signal: ac.signal });
+    expect(t.driverFor(to).sends).toHaveLength(1);
+    await second.send({ to, message: "continue", messageId: "msg-1" }, { signal: ac.signal });
+    expect(t.driverFor(to).sends).toHaveLength(2);
+  });
+
   test("a cancelled sender delivers nothing — before the resume, or while the target was coming up", async () => {
     const t = setup();
     const from = t.code();

@@ -110,6 +110,26 @@ describe("list_sessions: the default listing", () => {
     expect(rowsOf((await h.call({})).output).some((l) => l.startsWith(`${kids[0]} | background`))).toBe(true);
   });
 
+  test("a spawned session still carrying the legacy background flag shows as completed when it is not working (and counts against the newest-4 cap)", async () => {
+    const h = harness();
+    const dispatch = h.session({ mode: "dispatch" });
+    // Before 2026-10-02 every child was stored backgrounded from birth.
+    const kids = [1, 2, 3, 4, 5].map((n) => { const id = h.session({ origin: "dispatch-child", parent: dispatch, last: at(2026, 10, n) }); h.store.setBackgrounded(id, true); return id; });
+    const rows = rowsOf((await h.call({})).output);
+    expect(rows.map((l) => l.split(" | ")[0])).toEqual([kids[4], kids[3], kids[2], kids[1]]);
+    for (const l of rows) expect(l).toContain("| completed |");
+    // Working again: it is live, whatever its age.
+    h.running.set(kids[0]!, NOW - 1000);
+    expect(rowsOf((await h.call({})).output).some((l) => l.startsWith(`${kids[0]} | background`))).toBe(true);
+  });
+
+  test("a relative edited path is indexed against the session's cwd", async () => {
+    const h = harness();
+    const id = h.session({ cwd: "/work/repo" });
+    h.edit(id, "src/main.ts");
+    expect(h.store.editedFiles(id)).toEqual(["/work/repo/src/main.ts"]);
+  });
+
   test(`the listing is capped at ${LIST_SESSIONS_MAX_ROWS} with an explicit count — never a silent truncation`, async () => {
     const h = harness();
     for (let i = 0; i < LIST_SESSIONS_MAX_ROWS + 7; i++) h.store.setBackgrounded(h.session(), true);

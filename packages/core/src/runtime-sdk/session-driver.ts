@@ -414,7 +414,7 @@ export interface WinterLegDeps {
    * the daemon finished wiring still answers once it has. Absent (or not yet built): the handler
    * answers a retryable `unavailable` and ListAgents lists no sessions.
    */
-  sessionMessaging?: () => { handlerFor(callerSessionId: string): NonNullable<Options["hostMessaging"]> } | undefined;
+  sessionMessaging?: () => { handlerFor(callerSessionId: string, incarnation?: string): NonNullable<Options["hostMessaging"]> } | undefined;
   /**
    * P8c-14 (integration round 2): lane 3's `sessionHooksFor(...)` module — this file never imports
    * it, only threads its result through: `.winter` goes into every incarnation's
@@ -1650,19 +1650,22 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
 
 /** `Options.hostMessaging` for one session over a LIVE (late-bound) `SessionMessaging`. */
 function hostMessagingFor(sessionId: string, messaging: NonNullable<WinterLegDeps["sessionMessaging"]>): NonNullable<Options["hostMessaging"]> {
+  // One per incarnation (`optionsFor` builds it for each): the runtime's message ids restart with every
+  // child, so the delivery dedupe is scoped to this one.
+  const incarnation = randomUUID();
   return {
     send: async (request, opts) => {
       const live = messaging();
       if (live === undefined) return { status: "unavailable", reason: "Winter is still starting; try again in a moment", retryable: true };
-      return live.handlerFor(sessionId).send(request, opts);
+      return live.handlerFor(sessionId, incarnation).send(request, opts);
     },
     list: async (request, opts) => {
       const live = messaging();
-      return live === undefined ? { sessions: [] } : live.handlerFor(sessionId).list(request, opts);
+      return live === undefined ? { sessions: [] } : live.handlerFor(sessionId, incarnation).list(request, opts);
     },
     // TaskStop on a session id (`host_session_stop`).
     stop: async (request, opts) => {
-      const handler = messaging()?.handlerFor(sessionId);
+      const handler = messaging()?.handlerFor(sessionId, incarnation);
       if (handler?.stop === undefined) return { status: "unavailable", reason: "Winter is still starting; try again in a moment" };
       return handler.stop(request, opts);
     },
