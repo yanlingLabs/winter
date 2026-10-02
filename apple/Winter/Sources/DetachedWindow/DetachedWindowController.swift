@@ -707,12 +707,9 @@ struct DetachedWindowRootView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color.black)
-        // The window's whole shape: the pill's own radius and faint edge (`PillChromeWindow`).
+        // The window's whole shape: the pill's own radius, no rim (user, 2026-10-02) — its edge is
+        // the window's shadow against whatever is behind it.
         .clipShape(RoundedRectangle(cornerRadius: PillChromeWindow.cornerRadius, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: PillChromeWindow.cornerRadius, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
-        }
         .environment(\.colorScheme, .dark)
         .ignoresSafeArea()
     }
