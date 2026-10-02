@@ -132,6 +132,10 @@ export type WinterLegRefusalCode =
   // The daemon is stopping (`beginShutdown`): no session is created, resumed or (re)opened from here on,
   // so no runtime child can be spawned into a daemon that is going away and outlive it.
   | "daemon_shutting_down"
+  // The session's driver was ended (evicted, deleted, the daemon stopping) while its incarnation was still
+  // opening: that open spawns nothing, and a send that joined it is refused, appending nothing. Sending
+  // again reaches the session's next driver.
+  | "session_replaced"
   // WS-21: a run-home router's refusal (`RunHomeError.code`), forwarded verbatim as `data.code`.
   | RunHomeErrorCode;
 
@@ -1350,6 +1354,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       options: optionsFor,
       beforeTurn,
       spawnRefusal: () => (shuttingDown ? shutdownRefusal() : undefined),
+      endedWhileOpeningRefusal: () => new WinterLegRefusal("session_replaced", "this session's runtime was replaced while it was starting; send again"),
       projector: projectorFor,
       append,
       broadcast: (event) => { deps.hub.broadcastTransient(sessionId, event); },
