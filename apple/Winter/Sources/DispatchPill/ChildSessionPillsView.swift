@@ -70,13 +70,16 @@ struct ChildSessionPillsView: View {
     let onOpen: (String) -> Void
     let onStop: (String) -> Void
     let onOpenOverflow: () -> Void
+    /// The live child session behind a pill (`DispatchPillController.childSession`), so a working
+    /// child's plume throws the tools and sites THAT child uses. Nil → a plain plume.
+    var childSession: (String) -> SessionModel? = { _ in nil }
 
     private var layout: ChildPillLayout { childPillLayout(count: children.count, rowWidth: rowWidth) }
 
     var body: some View {
         HStack(spacing: DispatchPillMetrics.childPillGap) {
             ForEach(Array(children.prefix(layout.visibleCount).enumerated()), id: \.element.id) { index, child in
-                ChildSessionPill(child: child, palette: .child(at: index),
+                ChildSessionPill(child: child, palette: .child(at: index), session: childSession(child.sessionId),
                                  onOpen: { onOpen(child.sessionId) },
                                  onStop: { onStop(child.sessionId) })
                     .frame(width: layout.pillWidth, height: DispatchPillMetrics.childRowHeight)
@@ -104,6 +107,7 @@ struct ChildSessionPillsView: View {
 private struct ChildSessionPill: View {
     let child: ChildItem
     let palette: PlumePalette
+    let session: SessionModel?
     let onOpen: () -> Void
     let onStop: () -> Void
 
@@ -143,8 +147,7 @@ private struct ChildSessionPill: View {
                 if status == .working {
                     // The main pill's plume in this child's own colours, its nozzle on this pill's
                     // stop button — a little dimmed, so the title over it stays readable.
-                    WorkingAnimationView(emitterInset: DispatchPillMetrics.trailingPadding + DispatchPillMetrics.sendCircleSize / 2,
-                                         palette: palette)
+                    ChildPlume(session: session, palette: palette)
                         .opacity(0.8)
                         .clipShape(Capsule())
                         .transition(.opacity.animation(.easeOut(duration: 0.25)))
@@ -179,6 +182,34 @@ private struct ChildSessionPill: View {
                 .font(Typography.caption(.semibold))
                 .foregroundStyle(.green)
                 .frame(width: 20, height: 20)
+        }
+    }
+}
+
+/// A working child's plume, in the child's own colours, throwing what the CHILD's current turn has
+/// used — its tools and the sites it read — again and again until that turn ends, like the main
+/// pill's. With no live session behind it (not watched yet, tests) it is a plain plume.
+private struct ChildPlume: View {
+    let session: SessionModel?
+    let palette: PlumePalette
+
+    var body: some View {
+        if let session {
+            Watched(session: session, palette: palette)
+        } else {
+            WorkingAnimationView(emitterInset: ChildPlume.emitterInset, palette: palette)
+        }
+    }
+
+    static let emitterInset = DispatchPillMetrics.trailingPadding + DispatchPillMetrics.sendCircleSize / 2
+
+    private struct Watched: View {
+        @ObservedObject var session: SessionModel
+        let palette: PlumePalette
+
+        var body: some View {
+            let thrown = plumeThrows(for: session.state.exchanges.last)
+            WorkingAnimationView(thrown: thrown, repeating: thrown, emitterInset: ChildPlume.emitterInset, palette: palette)
         }
     }
 }

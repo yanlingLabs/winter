@@ -465,6 +465,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pill.onOpenInApp = { [weak self] in
             self?.summonAppWindow(navigatingTo: .mode(.dispatch))
         }
+        // Each working child pill's plume throws what THAT child uses: a pinned harness onto the child
+        // session — the detached windows' own door — opened while the child works, closed after.
+        pill.makeChildFeed = { [weak self] sessionId in
+            guard let (feed, session) = self?.appModel?.makeDetachedFeed(sessionId: sessionId) else { return nil }
+            return DispatchPillChildFeed(session: session, start: { await feed.start() }, stop: { feed.stop() })
+        }
     }
 
     /// Plan-immunity Task 2 (mode×surface matrix): the orb's OWN sidebar row filter

@@ -232,23 +232,20 @@ final class WorkingAnimationTests: XCTestCase {
         PropulsionPlume.Token(age: age, lifetime: 1, lane: 0.6, item: item)
     }
 
-    func testAToolIsAPuffThatGrowsOutRidesTheFlowAndShrinksAway() {
+    func testAToolDiscGrowsOutThenKeepsItsSizeAllTheWay() {
         let tile = { (age: Double) in
             PropulsionPlume.tile(for: self.token(age, self.toolThrow("a")), in: self.rect, emitterX: self.emitterX, tailX: self.tailX)
         }
-        let born = tile(0), out = tile(PropulsionPlume.tokenEmergeShare), mid = tile(0.5), end = tile(1)
+        let full = rect.height * PropulsionPlume.tokenSideShare
+        let born = tile(0)
         XCTAssertEqual(born.center.x, emitterX, accuracy: 1e-9)
-        XCTAssertLessThan(born.side, out.side, "grows out of the nozzle")
-        XCTAssertEqual(out.side, rect.height * PropulsionPlume.tokenSideShare
-                       * (1 - PropulsionPlume.tokenShrinkAlongPlume
-                          * pow(PropulsionPlume.tokenEmergeShare, PropulsionPlume.tokenTravelExponent)),
-                       accuracy: 1e-6, "shrinks by distance travelled, like the exhaust")
-        XCTAssertLessThan(mid.center.x, out.center.x, "rides toward the tail")
-        XCTAssertLessThan(mid.side, out.side, "shrinks like the exhaust")
-        XCTAssertLessThan(mid.heat, out.heat, "and cools")
+        XCTAssertLessThan(born.side, full, "grows out of the nozzle")
+        for age in stride(from: PropulsionPlume.tokenEmergeShare, through: 1.0, by: 0.1) {
+            XCTAssertEqual(tile(age).side, full, accuracy: 1e-6, "one size the whole way (age \(age))")
+        }
+        XCTAssertLessThan(tile(0.5).center.x, tile(0.1).center.x, "rides toward the tail")
         let leaving = PropulsionPlume.tile(for: token(1, toolThrow("a")), in: rect, emitterX: emitterX, tailX: realTail)
         XCTAssertLessThanOrEqual(leaving.center.x + leaving.side / 2, 0, "out past the leading edge before it is dropped")
-        XCTAssertGreaterThan(end.side, 0, "never shrinks to nothing in view")
         for age in stride(from: 0.0, through: 1.0, by: 0.05) {
             let t = tile(age)
             XCTAssertGreaterThanOrEqual(t.center.y - t.side / 2, rect.minY - 1e-9)
@@ -405,17 +402,16 @@ final class WorkingAnimationTests: XCTestCase {
 
     // MARK: - A running round repeats
 
-    func testOnlyARoundStillRunningRepeatsAndItCoversFromItsEarliestRunningCall() {
+    /// The user's call (2026-10-02): everything the turn has used keeps streaming until the turn ends —
+    /// finished calls included — and new ones join as they are made.
+    func testTheWholeTurnRepeatsFinishedCallsIncluded() {
         let earlier = tool("bash", detail: "ls", callId: "b0", output: "ok")
         let doneSearch = tool("WebSearch", detail: "q", callId: "s1", output: "1. https://a.com 2. https://b.com")
-        let running = tool("WebSearch", detail: "q2", callId: "s2")
-        let finishedAfter = tool("read", detail: "f", callId: "r1", output: "x")
-        XCTAssertEqual(plumeRepeatingThrows(for: Exchange(prompt: "p", reply: "", activity: [earlier, doneSearch])), [],
-                       "every call has returned: nothing repeats")
-        let round = plumeRepeatingThrows(for: Exchange(prompt: "p", reply: "", activity: [earlier, running, finishedAfter]))
-        XCTAssertEqual(round.map(\.id), ["r1"], "from the earliest call still out, to the end (a search adds only its sites)")
-        let withSites = plumeRepeatingThrows(for: Exchange(prompt: "p", reply: "", activity: [running, doneSearch]))
-        XCTAssertEqual(withSites.map(\.id), ["s1#a.com", "s1#b.com"], "a finished search's sites keep streaming while its round runs")
+        let running = tool("read", detail: "f", callId: "r1")
+        let all = Exchange(prompt: "p", reply: "", activity: [earlier, doneSearch, running])
+        XCTAssertEqual(plumeRepeatingThrows(for: all).map(\.id), ["b0", "s1#a.com", "s1#b.com", "r1"])
+        XCTAssertEqual(plumeRepeatingThrows(for: Exchange(prompt: "p", reply: "", activity: [earlier, doneSearch])).map(\.id),
+                       ["b0", "s1#a.com", "s1#b.com"], "nothing running — still the turn's whole set")
         XCTAssertEqual(plumeRepeatingThrows(for: nil), [])
     }
 

@@ -702,6 +702,38 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertTrue(composer.contentFilters.isEmpty, "settled: sharp again")
     }
 
+    // MARK: - Child plumes
+
+    /// Each working child pill's plume throws what THAT child uses: the controller watches exactly the
+    /// children still at work while the pill is on screen, and lets every other go.
+    func testWorkingChildrenAreWatchedAndLetGoWhenTheyFinishOrThePillGoesAway() {
+        let session = SessionModel()
+        let pill = makePill(session)
+        var started: [String] = []
+        var stopped: [String] = []
+        pill.makeChildFeed = { id in
+            DispatchPillChildFeed(session: SessionModel(), start: { started.append(id) }, stop: { stopped.append(id) })
+        }
+        session.applyForTesting { s in
+            s.children = [ChildItem(sessionId: "c1", title: "a", status: "running"),
+                          ChildItem(sessionId: "c2", title: "b", status: "completed"),
+                          ChildItem(sessionId: "c3", title: "c", status: "awaiting_approval")]
+        }
+        waitUntil { true }
+        XCTAssertTrue(pill.watchedChildIdsForTesting.isEmpty, "nothing is watched while the pill is put away")
+        pill.show()
+        XCTAssertEqual(pill.watchedChildIdsForTesting, ["c1", "c3"], "the working and the waiting, not the finished")
+        XCTAssertNotNil(pill.childSession("c1"))
+        XCTAssertNil(pill.childSession("c2"))
+        waitUntil { started.count == 2 }
+        session.applyForTesting { s in s.children[0] = ChildItem(sessionId: "c1", title: "a", status: "completed") }
+        waitUntil { pill.watchedChildIdsForTesting == ["c3"] }
+        XCTAssertEqual(stopped, ["c1"], "a finished child's harness is closed")
+        pill.hide()
+        XCTAssertTrue(pill.watchedChildIdsForTesting.isEmpty, "putting the pill away lets every child go")
+        XCTAssertEqual(Set(stopped), ["c1", "c3"])
+    }
+
     // MARK: - The mouse gate
 
     func testTheMouseGateTakesClicksOnThePillAndPassesTheMarginThrough() {
