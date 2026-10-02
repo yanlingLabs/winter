@@ -122,6 +122,11 @@ export interface TuiState {
   inTokens: number;
   outTokens: number;
   pending: PendingCard | null;
+  /** Cards raised while another was already showing, oldest first (absent = none). Several can be open at
+   *  once in one session -- two subagents running side by side, or two capability lanes (agent SDK 0.0.40)
+   *  -- so a second card queues behind the one on screen instead of replacing it, and each resolution
+   *  removes exactly its own card (the next queued one then takes the screen). */
+  queuedCards?: PendingCard[];
   // child-transcript-view T2: per-child mirror of `committed`, keyed by threadId, capped at
   // CHILD_BLOCK_CAP (drop-oldest) — a live view, not an archive (T3's consumer surface: read
   // `childBlocks[threadId] ?? []` to render a selected agent's transcript).
@@ -181,6 +186,31 @@ export function initialState(): TuiState {
 type WireEvent = { type: string; threadId?: string; [k: string]: unknown };
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
+
+/** A card's identity: its call id, or an elicitation's own id. */
+const cardKey = (c: PendingCard): string => (c.kind === "elicitation" ? `elicitation:${c.elicitationId}` : `call:${c.callId}`);
+
+/** Show `card`, or queue it behind the card already on screen. */
+function raiseCard(s: TuiState, card: PendingCard): Pick<TuiState, "pending" | "queuedCards"> {
+  if (s.pending === null) return { pending: card, ...(s.queuedCards !== undefined ? { queuedCards: s.queuedCards } : {}) };
+  return { pending: s.pending, queuedCards: [...(s.queuedCards ?? []), card] };
+}
+
+/** The card with `key` resolved: drop exactly it (the next queued card takes the screen); unknown -> unchanged. */
+function settleCard(s: TuiState, key: string): Pick<TuiState, "pending" | "queuedCards"> {
+  const queued = s.queuedCards ?? [];
+  // `queuedCards` is always restated once the state has one (the caller spreads `s` first).
+  const keep = (rest: PendingCard[]) => (s.queuedCards !== undefined ? { queuedCards: rest } : {});
+  if (s.pending !== null && cardKey(s.pending) === key) {
+    const [next, ...rest] = queued;
+    return { pending: next ?? null, ...keep(rest) };
+  }
+  return { pending: s.pending, ...keep(queued.filter((c) => cardKey(c) !== key)) };
+}
+
+/** A card this view holds (on screen or queued), by key. */
+const heldCard = (s: TuiState, key: string): PendingCard | undefined =>
+  [...(s.pending !== null ? [s.pending] : []), ...(s.queuedCards ?? [])].find((c) => cardKey(c) === key);
 const num = (v: unknown, fallback = 0): number => (typeof v === "number" ? v : fallback);
 
 /** Human label for a peripheral capability class in the CU lease notes (Phase 5 CU). Unknown
@@ -496,29 +526,29 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       const fed = feedAgents(s, e);
       return {
         ...fed,
-        pending: {
+        ...raiseCard(fed, {
           kind: "approval",
           callId: str(e.callId),
           toolName: str(e.toolName),
           summary: str(e.summary),
           ...(reviewerReason !== undefined ? { reviewerReason } : {}),
           ...(options !== undefined ? { options } : {}),
-        },
+        }),
       };
     }
 
     case "approval_resolved": {
-      const pending = s.pending;
-      const toolName = pending?.kind === "approval" && pending.callId === e.callId ? pending.toolName : str(e.callId);
+      const held = heldCard(s, `call:${str(e.callId)}`);
+      const toolName = held?.kind === "approval" ? held.toolName : str(e.callId);
       const text = `${e.approved ? "approved" : "denied"} ${toolName}`;
       // task-5: the release half of approval_requested's roster feed above — the child is off the
       // human's hook and its silence is measurable again from here.
       const fed = feedAgents(s, e);
-      return { ...fed, pending: null, committed: [...fed.committed, { kind: "note", text }] };
+      return { ...fed, ...settleCard(fed, `call:${str(e.callId)}`), committed: [...fed.committed, { kind: "note", text }] };
     }
 
     case "question_asked":
-      return { ...s, pending: { kind: "question", callId: str(e.callId), questions: (e.questions as unknown[]) ?? [] } };
+      return { ...s, ...raiseCard(s, { kind: "question", callId: str(e.callId), questions: (e.questions as unknown[]) ?? [] }) };
 
     case "question_resolved": {
       // Symmetric to approval_resolved/plan_resolved: the resolution event — also fired when another
@@ -529,37 +559,38 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       // resolved elsewhere with no payload) → clear pending, commit nothing.
       const answers = (e.answers ?? {}) as Record<string, string>;
       const notes = Object.entries(answers).map(([q, a]) => ({ kind: "note" as const, text: `${q}: ${a}` }));
-      return { ...s, pending: null, committed: [...s.committed, ...notes] };
+      return { ...s, ...settleCard(s, `call:${str(e.callId)}`), committed: [...s.committed, ...notes] };
     }
 
     case "plan_presented":
-      return { ...s, pending: { kind: "plan", callId: str(e.callId), plan: str(e.plan) } };
+      return { ...s, ...raiseCard(s, { kind: "plan", callId: str(e.callId), plan: str(e.plan) }) };
 
     case "elicitation_requested": {
       if (e.threadId !== undefined && e.threadId !== MAIN) return s;
       return {
         ...s,
-        pending: { kind: "elicitation", elicitationId: str(e.elicitationId), serverName: str(e.serverName), message: str(e.message), host: str(e.host) },
+        ...raiseCard(s, { kind: "elicitation", elicitationId: str(e.elicitationId), serverName: str(e.serverName), message: str(e.message), host: str(e.host) }),
       };
     }
 
     case "elicitation_resolved": {
       // Host only — the url is never on the wire here, and never printed.
-      const card = s.pending?.kind === "elicitation" && s.pending.elicitationId === e.elicitationId ? s.pending : undefined;
+      const held = heldCard(s, `elicitation:${str(e.elicitationId)}`);
+      const card = held?.kind === "elicitation" ? held : undefined;
       const what = e.action === "accept" ? "opened" : e.action === "decline" ? "declined" : "cancelled";
       const text = `link request${card ? ` from ${card.serverName} (${card.host})` : ""} ${what}`;
-      return { ...s, pending: card ? null : s.pending, committed: [...s.committed, { kind: "note", text }] };
+      return { ...s, ...settleCard(s, `elicitation:${str(e.elicitationId)}`), committed: [...s.committed, { kind: "note", text }] };
     }
 
     case "local_elicitation_inactive": {
-      if (s.pending?.kind !== "elicitation" || s.pending.elicitationId !== e.elicitationId) return s;
-      return { ...s, pending: null };
+      if (heldCard(s, `elicitation:${str(e.elicitationId)}`) === undefined) return s;
+      return { ...s, ...settleCard(s, `elicitation:${str(e.elicitationId)}`) };
     }
 
     case "plan_resolved": {
       // Same wording as main.ts:618 (minus ANSI): "plan approved[ (auto-accept edits)]" / "plan rejected".
       const text = e.approved ? `plan approved${e.autoAccept ? " (auto-accept edits)" : ""}` : "plan rejected";
-      return { ...s, pending: null, committed: [...s.committed, { kind: "note", text }] };
+      return { ...s, ...settleCard(s, `call:${str(e.callId)}`), committed: [...s.committed, { kind: "note", text }] };
     }
 
     case "directory_added": {
