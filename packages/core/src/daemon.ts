@@ -19,9 +19,10 @@ import { SessionHub } from "./sessions/hub";
 import { reapEmptySessions } from "./sessions/reaper";
 import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
-import type { ActivityDeriver } from "./sessions/activity";
+import type { ActivityDeriver, SessionSignalsDeriver } from "./sessions/activity";
 import { startIpcServer, type InternalSessionCreator, type IpcServer, type IpcServerOptions } from "./ipc/server";
 import { DispatchChildren } from "./agent/dispatch-children";
+import { SessionMessaging } from "./agent/session-messaging";
 import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, retiredRuntimeSettingKeys, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, liveSettingsView, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor } from "./agent/memory-dir";
@@ -624,12 +625,17 @@ export async function startDaemon(opts: {
   // — see `IpcServerOptions.onActivityDeriver`. `startIpcServer` is called unconditionally further
   // down (before any turn can run), so the tool never actually observes the unset holder.
   let activityDeriver: ActivityDeriver | undefined;
+  /** The raw `working` / `attachedElsewhere` signals (`makeSessionSignalsDeriver`), published by the IPC server like `activityDeriver`. */
+  let signalsDeriver: SessionSignalsDeriver | undefined;
   // Dispatch's `session_spawn` (`agent/dispatch-children.ts`): the creation transaction is published
   // by `startIpcServer` (`onSessionCreator`, the `activityDeriver` precedent just above) and the
   // children tracker is built once the driver table exists; the `sessions` capability server reads
   // both live, at call time.
   let sessionCreator: InternalSessionCreator | undefined;
   let dispatchChildren: DispatchChildren | undefined;
+  /** SendMessage between Winter sessions (`agent/session-messaging.ts`): built right after
+   *  `dispatchChildren`; every session's `Options.hostMessaging` reads it live. */
+  let sessionMessaging: SessionMessaging | undefined;
 
   const winterHome = dirs.home;
 
@@ -1922,6 +1928,8 @@ export async function startDaemon(opts: {
     buildSessionCapabilities,
     approvals: approvalBroker,
     elicitations: elicitationBroker,
+    // SendMessage/ListAgents across sessions (agent SDK 0.0.39 `Options.hostMessaging`), late-bound.
+    sessionMessaging: () => sessionMessaging,
     questions,
     gate: new PermissionGate(),
     rootsOf: (sid) => sessionDirs.roots(sid),
@@ -2027,6 +2035,18 @@ export async function startDaemon(opts: {
     log: (line) => console.error(`dispatch-children: ${line}`),
   });
   dispatchChildren.start();
+  // SendMessage between sessions: resolve an `s_…` id, resume a finished session through its own driver,
+  // deliver under `clientName: "messaging"`; a coordinator's message to its own child is followed by
+  // `dispatchChildren` (child_update + wake). ListAgents lists the ACTIVE sessions by the SAME derivation
+  // `session.list` and ListSessions use (`activityDeriver`, published by the IPC server below — read live).
+  sessionMessaging = new SessionMessaging({
+    store,
+    derive: (row, sid, nowMs) => activityDeriver?.(row, sid, nowMs),
+    working: (sid) => signalsDeriver?.(sid).working ?? false,
+    sessions: { get: (sid) => winterDrivers.get(sid), ensure: (sid) => winterDrivers.ensure(sid) },
+    followUp: () => dispatchChildren,
+    log: (line) => console.error(`session-messaging: ${line}`),
+  });
   /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime
    *  rows with it — the reaper's 600 s grace is shorter than the 900 s idle timer, so without the
    *  first half a live child would outlive its session. The boot sweep above ran before any driver
@@ -2778,6 +2798,7 @@ export async function startDaemon(opts: {
     // this daemon serves everywhere else — including the two signals (post-turn grace, >24h
     // demotion) that exist only inside the server's own enforcement scope.
     onActivityDeriver: (derive) => { activityDeriver = derive; },
+    onSignalsDeriver: (derive) => { signalsDeriver = derive; },
     // Dispatch's `session_spawn` mints its children through `session.create`'s own transaction.
     onSessionCreator: (create) => { sessionCreator = create; },
     broker: approvalBroker,
@@ -2968,6 +2989,7 @@ export async function startDaemon(opts: {
       // the cards its aborted turn withdraws still close on Dispatch's log (stopped fully below,
       // after the children drained and before the store closes).
       dispatchChildren?.beginShutdown();
+      sessionMessaging?.beginShutdown(); // no SendMessage resumes a session into a daemon that is going away
       server.stop(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
       for (const w of sdkWatchers) w.stop();

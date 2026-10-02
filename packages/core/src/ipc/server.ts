@@ -333,6 +333,10 @@ export interface IpcServerOptions {
   // of a third hand-assembled copy that would quietly disagree in exactly those two windows.
   // Optional: every server built without it (all existing tests) is byte-identical.
   onActivityDeriver?: (derive: ActivityDeriver) => void;
+  /** The RAW signals half (`deriveSignals` below — `working` = a turn or background work), published on
+   *  the same terms: ListAgents' "background AND running" reads THIS rather than a third derivation
+   *  (`agent/session-messaging.ts`). Optional. */
+  onSignalsDeriver?: (derive: SessionSignalsDeriver) => void;
   /** The session-creation transaction (`createSessionInternal`), published for the daemon's own
    *  doors on the same terms as `onActivityDeriver`: dispatch's `session_spawn` mints its child
    *  sessions through THIS, never a second copy of `session.create`'s steps. Optional. */
@@ -1481,6 +1485,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // lazily, but handing a consumer a function it could legally call before that binding initialized
   // would be a TDZ throw waiting for a race nobody would reproduce.
   opts.onActivityDeriver?.(deriveActivity);
+  opts.onSignalsDeriver?.(deriveSignals);
   opts.onSessionCreator?.(createSessionInternal);
 
   const helloTimeoutMs = opts.helloTimeoutMs ?? 5000;

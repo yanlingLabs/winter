@@ -198,7 +198,7 @@ export function listSessionsToolDefs(deps: ListSessionsDeps & ManageSessionDeps)
       `The keyword scan is BOUNDED: at most ${Math.round(KEYWORD_SCAN_BYTES_PER_SESSION / 1024)}KB per session (its first and last halves) and`,
       `${Math.round(KEYWORD_SCAN_BYTES_TOTAL / 1024 / 1024)}MB per call, newest sessions first — the answer says how many sessions went unscanned if that budget runs out.`,
       `At most ${LIST_SESSIONS_MAX_ROWS} rows are shown; the count of further matches is always reported.`,
-      "Manage what you find with ManageSession; message one with SendMessage.",
+      "Manage what you find with ManageSession; message one with SendMessage (to: its session id) — an idle or finished session is resumed for the message.",
     ].join(" "),
     args: ListSessionsArgs,
     run(args: z.infer<typeof ListSessionsArgs>) {
@@ -283,7 +283,7 @@ export function listSessionsToolDefs(deps: ListSessionsDeps & ManageSessionDeps)
       const footer = unscanned > 0
         ? `\n${unscanned} sessions were not scanned for keywords (budget spent) — narrow with cwd or type to reach them.`
         : "";
-      return `${header}\n${lines.join("\n")}${footer}\nManage one with ManageSession (stop/background/unbackground/archive/resume); message one with SendMessage.`;
+      return `${header}\n${lines.join("\n")}${footer}\nManage one with ManageSession (stop/background/unbackground/archive/resume); message one with SendMessage (to: its session id; a finished one is resumed for it).`;
     },
   }, {
     name: MANAGE_SESSION_TOOL,
