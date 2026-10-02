@@ -129,7 +129,8 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         let window = PillChromeWindow(contentRect: frame)
         window.title = title
         window.isReleasedWhenClosed = false // this controller owns the window's lifetime
-        window.minSize = NSSize(width: 340, height: 360)
+        // Low enough for a window sharing the pill's stack with others (`SessionWindowStack`).
+        window.minSize = NSSize(width: 340, height: 200)
         // Dark whatever the system's appearance, so every token below — and the AppKit composer's
         // named colours — resolves to its dark half, exactly as the pill's panel does.
         window.appearance = NSAppearance(named: .darkAqua)
@@ -336,7 +337,8 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
             onNewSession: { [weak self] in self?.newSession() }
         )
         let hosting = FirstClickHostingView(rootView: DetachedWindowRootView(
-            adapter: adapter, sidebars: sidebars, palette: palette,
+            adapter: adapter, sidebars: sidebars, directory: directory,
+            sessionId: { [weak self] in self?.sessionId ?? "" }, fallbackTitle: title, palette: palette,
             onClose: { [weak window] in window?.performClose(nil) },
             onMinimize: { [weak window] in window?.performMiniaturize(nil) },
             onZoom: { [weak window] in window?.performZoom(nil) }))
@@ -367,6 +369,31 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// Orders the window front and starts its feed (connect/attach/pump — the same `SessionFeed`
     /// mechanics any pinned window uses); installs the Esc monitor. Idempotent-ish in practice:
     /// task 4 calls this exactly once per spawned controller.
+    // MARK: - The pill's window stack
+
+    /// The stack this window stands in (`SessionWindowStack`), or nil once it has left it.
+    weak var stackMembership: SessionWindowStack?
+    /// True while the stack itself is moving the window — so only the USER's moves take it out.
+    private var applyingStackFrame = false
+
+    func setStackFrame(_ frame: NSRect) {
+        applyingStackFrame = true
+        window.setFrame(frame, display: true)
+        applyingStackFrame = false
+    }
+
+    func setStackAlpha(_ alpha: CGFloat) { window.alphaValue = alpha }
+
+    /// The user moved or resized it (its drag band, its grips, zoom): it stays where they put it.
+    private func leaveStackIfUserMoved() {
+        guard !applyingStackFrame, let stack = stackMembership else { return }
+        window.alphaValue = 1
+        stack.remove(self)
+    }
+
+    func windowDidMove(_ notification: Notification) { leaveStackIfUserMoved() }
+    func windowDidResize(_ notification: Notification) { leaveStackIfUserMoved() }
+
     /// An already-open window, brought forward and given the keyboard (a child pill clicked again).
     func bringToFront() {
         if window.isMiniaturized { window.deminiaturize(nil) }
@@ -638,6 +665,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        stackMembership?.remove(self)
         guard !didClose else { return }
         didClose = true
         feedTask?.cancel()
@@ -669,10 +697,20 @@ struct DetachedWindowRootView: View {
     /// Not shown in the pill-themed window (one session, no switcher); kept so the controller's
     /// in-place switch plumbing is unchanged.
     let sidebars: SidebarWiring
+    /// The session's title, read live from this window's directory (a fresh session is titled later).
+    @ObservedObject var directory: SessionDirectory
+    let sessionId: () -> String
+    let fallbackTitle: String
     var palette: PlumePalette = .blue
     var onClose: () -> Void = {}
     var onMinimize: () -> Void = {}
     var onZoom: () -> Void = {}
+
+    private var title: String {
+        let id = sessionId()
+        let named = (directory.rows.first { $0.sessionId == id }?.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return named.isEmpty ? fallbackTitle : named
+    }
 
     /// The band the traffic lights sit in, which the transcript scrolls up under.
     static let headerBand: CGFloat = 54
@@ -707,6 +745,16 @@ struct DetachedWindowRootView: View {
                 .contentShape(Rectangle())
                 .gesture(WindowDragGesture())
                 .onTapGesture(count: 2, perform: onZoom)
+            // The session's name, centred on the band the lights sit in.
+            Text(title)
+                .font(Typography.label(.semibold))
+                .foregroundStyle(Color.white.opacity(0.85))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.horizontal, 96) // clear of the lights
+                .frame(maxWidth: .infinity)
+                .frame(height: 54)
+                .allowsHitTesting(false)
             MacTrafficLights(onClose: onClose, onMinimize: onMinimize, onZoom: onZoom)
                 .padding(.leading, 20)
                 .padding(.top, 20)

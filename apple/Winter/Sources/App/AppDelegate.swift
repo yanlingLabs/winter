@@ -156,6 +156,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// it again on either a programmatic `close()` or the user's own red traffic light — the list
     /// never accumulates closed controllers.
     private(set) var detachedWindows: [DetachedWindowController] = []
+    /// The session windows opened from the dispatch pill's child pills, standing on the pill.
+    let sessionWindowStack = SessionWindowStack()
 
     /// Lifecycle T3: set to `true` ONLY by the menu-bar "Quit Winter" action (T4 wires that call
     /// site) — the SOLE true-quit source. ⌘Q and the dock-tile "Quit" both route through
@@ -353,22 +355,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `setPolicy` against a real chat session — the exact shown-but-broken bug this whole slice
     /// exists to close — so checking the source first, rather than hiding-by-default for an unknown
     /// mode, is the fix: it resolves the race with real data instead of guessing.
-    private func openSessionInNewDetachedWindow(_ sessionId: String, frame: NSRect? = nil, title: String = "Winter", isChat: Bool? = nil, sourceRows: [SessionSummary] = [], palette: PlumePalette = .blue) {
+    private func openSessionInNewDetachedWindow(_ sessionId: String, frame: NSRect? = nil, title: String = "Winter", isChat: Bool? = nil, sourceRows: [SessionSummary] = [], palette: PlumePalette = .blue, stacked: Bool = false) {
         guard let model = appModel,
               let (feed, session) = model.makeDetachedFeed(sessionId: sessionId) else {
             OrbDebug.log("openSessionInNewDetachedWindow: no appModel or makeDetachedFeed nil — spawn aborted")
             return
         }
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        // Cascaded past any window already open there — never exactly on top of another.
-        let resolvedFrame = frame ?? cascadedStandaloneFrame(visibleFrame: visible,
-                                                             occupied: detachedWindows.map(\.currentFrame))
+        // A child pill's window joins the stack standing on the pill (the others make room);
+        // anything else cascades past any window already open there — never exactly on top of another.
+        let resolvedFrame = frame ?? (stacked
+            ? sessionWindowStack.frameForNewMember()
+            : cascadedStandaloneFrame(visibleFrame: visible, occupied: detachedWindows.map(\.currentFrame)))
         let resolvedIsChat = isChat ?? (
             DetachedWindowController.isChatSession(sessionId, in: sourceRows)
                 || DetachedWindowController.isChatSession(sessionId, in: model.directory.rows)
         )
-        spawnDetachedWindow(feed: feed, session: session, frame: resolvedFrame, title: title, isChat: resolvedIsChat,
-                            palette: palette)
+        let spawned = spawnDetachedWindow(feed: feed, session: session, frame: resolvedFrame, title: title,
+                                          isChat: resolvedIsChat, palette: palette)
+        if stacked { sessionWindowStack.add(spawned) }
     }
 
     /// Task 4 (detach choreography) body — extracted from `orb.onWindowDetach`'s closure (Plan-
@@ -467,7 +472,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 open.bringToFront()
                 return
             }
-            self.openSessionInNewDetachedWindow(sessionId, palette: pill?.childPalette(for: sessionId) ?? .blue)
+            self.openSessionInNewDetachedWindow(sessionId, title: pill?.childTitle(for: sessionId) ?? "Winter",
+                                                palette: pill?.childPalette(for: sessionId) ?? .blue, stacked: true)
         }
         pill.onStopChild = { [weak self] sessionId in
             guard let client = self?.appModel?.client else { return }
