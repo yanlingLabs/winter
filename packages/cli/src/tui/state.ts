@@ -107,7 +107,10 @@ export type PendingCard =
 export interface TuiState {
   committed: Block[]; // → <Static> (Task 3)
   activeAssistant: string; // streaming text of the in-flight assistant message
-  activeTools: { name: string; argsJson: string }[]; // tool_calls emitted this turn not yet resulted
+  // tool_calls emitted this turn not yet resulted, in CALL order. Each keeps its `callId`: since agent SDK
+  // 0.0.40 a round's read-only calls run concurrently and their results arrive in COMPLETION order, so a
+  // result is paired with its own call by id, never by position.
+  activeTools: { name: string; argsJson: string; callId?: string }[];
   tasks: TaskRow[]; // raw upserted list; sort/collapse is the component's job (task-display.ts)
   agents: AgentRow[]; // CliSubagent-shaped; NEVER pruned wholesale on the main turn_completed
   turnRunning: boolean;
@@ -123,11 +126,11 @@ export interface TuiState {
   // CHILD_BLOCK_CAP (drop-oldest) — a live view, not an archive (T3's consumer surface: read
   // `childBlocks[threadId] ?? []` to render a selected agent's transcript).
   childBlocks: Record<string, Block[]>;
-  // One in-flight child tool_call per threadId (mirrors `activeTools`, but per-thread since
-  // multiple children may each have a call outstanding at once) — internal pairing state so the
-  // matching tool_result can build a complete `{kind:"tool",...}` Block; not part of T3's primary
-  // read surface, but exposed on TuiState since `reduce` is pure (no cross-call closures).
-  childPendingTool: Record<string, { name: string; argsJson: string }>;
+  // A child's in-flight tool_calls, per threadId and then per callId (a child's round may run several
+  // read-only calls at once since agent SDK 0.0.40, and their results arrive in completion order) —
+  // internal pairing state so each tool_result can build a complete `{kind:"tool",...}` Block; not part
+  // of T3's primary read surface, but exposed on TuiState since `reduce` is pure (no cross-call closures).
+  childPendingTool: Record<string, Record<string, { name: string; argsJson: string }>>;
   // TUI renderer T5: LIVE background shell tasks — the `bg list` data folded off the events already
   // on the stream (`bg_task_started` appends, `bg_task_exited` removes; the committed one-line
   // notes for both are untouched). Feeds the status chrome's running-work line. Bounded by the
@@ -207,7 +210,7 @@ function parseStringField(json: string, key: string): string | undefined {
 
 /** Phase 5a Task 3 (NO protocol changes): a background `spawn_agent` tool_call's `argsJson` carries
  *  a `name` arg; its paired tool_result (the SAME main-thread call, per the `tool_result` case's own
- *  one-in-flight invariant below) is `{agentId,status:"running"}` JSON ONLY for a background spawn
+ *  callId pairing below) is `{agentId,status:"running"}` JSON ONLY for a background spawn
  *  — a SYNC spawn's tool_result is the child's plain-text final report, so `parseStringField` fails
  *  to parse it and this yields `undefined` by construction, same as any other non-JSON text. Also
  *  `undefined` for a nameless spawn, or any tool_call that isn't `spawn_agent` at all. */
@@ -232,8 +235,8 @@ function feedAgents(s: TuiState, e: WireEvent): TuiState {
 /** Shared tool-`Block` construction (child-transcript-view T2) — the SAME shape the main path's
  *  `tool_result` case has always built inline, now factored out so a child's own tool_call/
  *  tool_result pairing (below) produces byte-identical Block shapes without duplicating the
- *  field list. `call` is whichever pending call (main's `activeTools[0]` or a child's
- *  `childPendingTool[threadId]`) paired with this result; absent (a stray/ghost result) falls
+ *  field list. `call` is the pending call with this result's callId (main's `activeTools` row or a child's
+ *  `childPendingTool[threadId][callId]`); absent (a stray/ghost result) falls
  *  back to the same empty-string defaults the main path already tolerated. */
 function buildToolBlock(call: { name: string; argsJson: string } | undefined, output: string, isError: boolean): Block {
   return { kind: "tool", name: call?.name ?? "", argsJson: call?.argsJson ?? "", output, isError };
@@ -309,14 +312,14 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
     case "tool_call": {
       if (e.threadId !== MAIN) {
         // Child tool calls still bump toolCalls/activity via feedAgents (unchanged aggregate
-        // path) AND now stash the pending call (name/argsJson) so the matching tool_result
-        // (below) can build a complete Block — same one-in-flight-per-thread invariant as MAIN's
-        // activeTools, just keyed per child threadId since multiple children run concurrently.
+        // path) AND stash the pending call (name/argsJson) under its callId, so its own tool_result
+        // (below) builds a complete Block whatever order a concurrent round finishes in.
         const fed = feedAgents(s, e);
         const threadId = str(e.threadId);
-        return { ...fed, childPendingTool: { ...fed.childPendingTool, [threadId]: { name: str(e.name), argsJson: str(e.argsJson) } } };
+        const pending = { ...(fed.childPendingTool[threadId] ?? {}), [str(e.callId)]: { name: str(e.name), argsJson: str(e.argsJson) } };
+        return { ...fed, childPendingTool: { ...fed.childPendingTool, [threadId]: pending } };
       }
-      return { ...s, activeTools: [...s.activeTools, { name: str(e.name), argsJson: str(e.argsJson) }] };
+      return { ...s, activeTools: [...s.activeTools, { name: str(e.name), argsJson: str(e.argsJson), ...(typeof e.callId === "string" ? { callId: e.callId } : {}) }] };
     }
 
     case "tool_result": {
@@ -331,22 +334,27 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
         // the moment the silence threshold elapsed, which is the one thing that hint must not do.
         const fed = feedAgents(s, e);
         const threadId = str(e.threadId);
-        const call = fed.childPendingTool[threadId];
+        const callId = str(e.callId);
+        const pending = { ...(fed.childPendingTool[threadId] ?? {}) };
+        const call = pending[callId];
+        delete pending[callId];
         const block = buildToolBlock(call, str(e.output), e.isError === true);
         const childPendingTool = { ...fed.childPendingTool };
-        delete childPendingTool[threadId];
+        if (Object.keys(pending).length === 0) delete childPendingTool[threadId];
+        else childPendingTool[threadId] = pending;
         return { ...fed, childPendingTool, childBlocks: withChildBlock(fed.childBlocks, threadId, block) };
       }
-      // Main-thread tool_call/tool_result always alternate one at a time — the engine's dispatch
-      // loop (packages/core/src/agent/engine.ts's `for (const call of calls)`) emits tool_call,
-      // awaits execution, THEN emits that SAME call's tool_result before ever emitting the next
-      // tool_call — so activeTools holds at most one entry for "main" and this call is always the
-      // one it pairs with; no callId needs to ride the (call-id-less) activeTools/Block shapes.
-      const call = s.activeTools[0];
+      // Paired by callId: a round's tool_calls all arrive first, and since agent SDK 0.0.40 its
+      // read-only calls run concurrently, so results come back in COMPLETION order, not call order. A
+      // result whose callId names no pending row (a stray, or a writer that sends none) takes the oldest.
+      const byId = typeof e.callId === "string" ? s.activeTools.findIndex((t) => t.callId === e.callId) : -1;
+      const at = byId >= 0 ? byId : 0;
+      const pendingRow = s.activeTools[at];
+      const call = pendingRow === undefined ? undefined : { name: pendingRow.name, argsJson: pendingRow.argsJson };
       const output = str(e.output);
       const next: TuiState = {
         ...s,
-        activeTools: s.activeTools.slice(1),
+        activeTools: s.activeTools.filter((_, i) => i !== at),
         committed: [...s.committed, buildToolBlock(call, output, e.isError === true)],
       };
       // phase 5a T3: learn a background child's `name` off this same call/result pairing (see
