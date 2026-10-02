@@ -460,11 +460,12 @@ final class TranscriptBrandTests: XCTestCase {
         }
         // 11 since the header-only `WorkingDirsMenu.swift` was deleted (2026-09-17); 12 with
         // `ElicitationAnswer.swift` (WS-27 — this pin was not moved then and failed on main); 13 with
-        // `TranscriptFileMentions.swift` (transcript file links, 2026-09-30).
+        // `TranscriptFileMentions.swift` (transcript file links, 2026-09-30); 14 with
+        // `TranscriptAutoFollow.swift` (the smooth follow, 2026-10-02).
         // Exact, not a floor (fix round 1, review M3): `> 10` against 12 files quietly tolerated
         // deleting two of them, which would have made the ban pass by scanning less.
         XCTAssertEqual(scanned, try chatContentSources().count)
-        XCTAssertEqual(scanned, 13, "ChatContent's file count changed — confirm the new file is scanned")
+        XCTAssertEqual(scanned, 14, "ChatContent's file count changed — confirm the new file is scanned")
     }
 
     /// **The fence on IMPORTANT-1's fix itself.** The two pins above prove `HairlineElevated` is a

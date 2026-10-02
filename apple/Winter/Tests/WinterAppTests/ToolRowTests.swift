@@ -491,7 +491,9 @@ final class ToolRowTests: XCTestCase {
         }
         // 13 since `TranscriptFileMentions.swift` (transcript file links, 2026-09-30) — scanned, and
         // it reaches the panel only through the injected `onOpenFile` closure like the tool rows do.
-        XCTAssertEqual(scanned, 13, "ChatContent's file count changed — confirm the new file is scanned")
+        // 14 with `TranscriptAutoFollow.swift` (the smooth follow, 2026-10-02) — scanned; it reaches
+        // no door at all, only its own enclosing scroll view.
+        XCTAssertEqual(scanned, 14, "ChatContent's file count changed — confirm the new file is scanned")
     }
 
     // MARK: - editor-product Task 6: the file door's row-level gate

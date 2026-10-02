@@ -34,72 +34,81 @@ struct TranscriptView: View {
     var bottomOverlayInset: CGFloat = 0
     @State private var nearBottom = true
     @State private var showLatestPill = false
+    /// Follows the bottom on the display's clock (`TranscriptAutoFollow`) — the smooth glide that
+    /// replaced a `scrollTo` animation per streamed chunk.
+    @State private var follower = TranscriptFollower()
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(Array(adapter.transcript.enumerated()), id: \.offset) { index, exchange in
-                        let isLast = index == adapter.transcript.count - 1
-                        TranscriptExchangeRow(
-                            exchange: exchange,
-                            cardWiring: cardWiring,
-                            onOpenDiff: onOpenDiff,
-                            onOpenFile: onOpenFile,
-                            sessionHasWorkingDirectory: sessionHasWorkingDirectory,
-                            fileMentionBaseDirectory: fileMentionBaseDirectory,
-                            streamingText: isLast ? adapter.liveStreamingText : nil,
-                            // Live only for the newest exchange (mac-chat-parity Task 2). That is
-                            // not quite the same as "every in-flight call lives here": a main-thread
-                            // steer's `user_message` is persisted at SEND time, so it can open a NEW
-                            // exchange while a call in the previous one is still out — the case
-                            // `SessionReducer.foldToolResult` scans backwards for, pinned by
-                            // `testToolResultFoldsIntoAnEarlierExchangeWhenASteerOpenedANewOne`.
-                            // Such a call reads "no result" rather than "running" until its result
-                            // lands, then corrects itself. Deliberate: erring toward "no result" is
-                            // recoverable, while a false "running" is the permanent lie this whole
-                            // gate exists to prevent.
-                            turnIsLive: isLast && adapter.turnRunning,
-                            tint: tint
-                        )
-                        .id(index)
-                    }
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                ForEach(Array(adapter.transcript.enumerated()), id: \.offset) { index, exchange in
+                    let isLast = index == adapter.transcript.count - 1
+                    TranscriptExchangeRow(
+                        exchange: exchange,
+                        cardWiring: cardWiring,
+                        onOpenDiff: onOpenDiff,
+                        onOpenFile: onOpenFile,
+                        sessionHasWorkingDirectory: sessionHasWorkingDirectory,
+                        fileMentionBaseDirectory: fileMentionBaseDirectory,
+                        streamingText: isLast ? adapter.liveStreamingText : nil,
+                        // Live only for the newest exchange (mac-chat-parity Task 2). That is
+                        // not quite the same as "every in-flight call lives here": a main-thread
+                        // steer's `user_message` is persisted at SEND time, so it can open a NEW
+                        // exchange while a call in the previous one is still out — the case
+                        // `SessionReducer.foldToolResult` scans backwards for, pinned by
+                        // `testToolResultFoldsIntoAnEarlierExchangeWhenASteerOpenedANewOne`.
+                        // Such a call reads "no result" rather than "running" until its result
+                        // lands, then corrects itself. Deliberate: erring toward "no result" is
+                        // recoverable, while a false "running" is the permanent lie this whole
+                        // gate exists to prevent.
+                        turnIsLive: isLast && adapter.turnRunning,
+                        tint: tint
+                    )
+                    .id(index)
                 }
-                .padding(.vertical, 4)
-                // ChatGPT's reading column (2026-09-17): the messages sit in a centred column the
-                // composer's width, while the scroll view itself stays full width (scrolling and
-                // the scroller work anywhere in the pane).
-                .frame(maxWidth: newChatCardWidth)
-                .frame(maxWidth: .infinity)
             }
-            .onScrollGeometryChange(for: Bool.self) { geo in
-                geo.contentOffset.y + geo.containerSize.height >= geo.contentSize.height - 40
-            } action: { _, isNear in
-                nearBottom = isNear
-                if isNear { showLatestPill = false }
-            }
-            // Task-4 review fix: onChange fires on ANY change — including the count DROPPING to
-            // zero on session refocus (SessionModel.reset() swaps exchanges wholesale). Only a
-            // genuine growth may follow/raise the pill; a reset must do neither.
-            .onChange(of: adapter.transcript.count) { old, new in
-                if new > old { follow(proxy) }
-            }
-            .onChange(of: adapter.liveStreamingText) { old, new in
-                if (new?.count ?? 0) > (old?.count ?? 0) { follow(proxy) }
-            }
-            // mac-chat-parity Task 3: a card arriving is content growth the two signals above cannot
-            // see — an ask lands in the LAST exchange's `activity`, which changes neither the
-            // exchange count nor the streaming text. Before the cards moved inline this did not
-            // matter (the band was pinned, always visible); now, without this, an approval could
-            // appear below the fold and the agent would look hung. Growth-only, for the same reason
-            // the count watcher is (`SessionModel.reset()` drops it to zero on refocus, and a reset
-            // must neither follow nor raise the pill).
-            .onChange(of: adapter.pendingInteractions.count) { old, new in
-                if new > old { follow(proxy) }
-            }
-            .overlay(alignment: .bottomTrailing) {
-                // Above the floating composer when the transcript runs beneath it.
-                if showLatestPill { latestPill(proxy).padding(.bottom, bottomOverlayInset) }
+            .padding(.vertical, 4)
+            // ChatGPT's reading column (2026-09-17): the messages sit in a centred column the
+            // composer's width, while the scroll view itself stays full width (scrolling and
+            // the scroller work anywhere in the pane).
+            .frame(maxWidth: newChatCardWidth)
+            .frame(maxWidth: .infinity)
+            .background(TranscriptAutoFollow(follower: follower))
+        }
+        .onScrollGeometryChange(for: Bool.self) { geo in
+            geo.contentOffset.y + geo.containerSize.height >= geo.contentSize.height - 40
+        } action: { _, isNear in
+            nearBottom = isNear
+            if isNear { showLatestPill = false }
+        }
+        // Task-4 review fix: onChange fires on ANY change — including the count DROPPING to
+        // zero on session refocus (SessionModel.reset() swaps exchanges wholesale). Only a
+        // genuine growth may follow/raise the pill; a reset must do neither.
+        .onChange(of: adapter.transcript.count) { old, new in
+            if new > old { follow() }
+            // A reset (another session's history coming in) opens at the bottom again.
+            if new == 0 && old > 0 { follower.restartAtBottom() }
+        }
+        .onChange(of: adapter.liveStreamingText) { old, new in
+            if (new?.count ?? 0) > (old?.count ?? 0) { follow() }
+        }
+        // mac-chat-parity Task 3: a card arriving is content growth the two signals above cannot
+        // see — an ask lands in the LAST exchange's `activity`, which changes neither the
+        // exchange count nor the streaming text. Before the cards moved inline this did not
+        // matter (the band was pinned, always visible); now, without this, an approval could
+        // appear below the fold and the agent would look hung. Growth-only, for the same reason
+        // the count watcher is (`SessionModel.reset()` drops it to zero on refocus, and a reset
+        // must neither follow nor raise the pill).
+        .onChange(of: adapter.pendingInteractions.count) { old, new in
+            if new > old { follow() }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            // Above the floating composer when the transcript runs beneath it.
+            if showLatestPill { latestPill.padding(.bottom, bottomOverlayInset) }
+        }
+        .onAppear {
+            follower.onFollowingChanged = { following in
+                if following { showLatestPill = false }
             }
         }
     }
@@ -117,9 +126,10 @@ struct TranscriptView: View {
     /// content plane the pill floats over: 1.389:1 light / 1.431:1 dark on `cardSurface`, against the
     /// shell `hairline`'s 1.226 / 1.134. Whether a rim is wanted here AT ALL is still a gate call;
     /// which token it uses is now a measured one.
-    private func latestPill(_ proxy: ScrollViewProxy) -> some View {
+    private var latestPill: some View {
         Button {
-            scrollToBottom(proxy)
+            showLatestPill = false
+            follower.jumpToBottom()
         } label: {
             Label("latest", systemImage: "arrow.down")
                 .font(Typography.caption(.medium))
@@ -132,18 +142,14 @@ struct TranscriptView: View {
         .padding(8)
     }
 
-    private func follow(_ proxy: ScrollViewProxy) {
-        if shouldAutoscroll(nearBottom: nearBottom, contentGrew: true) {
-            scrollToBottom(proxy)
+    /// Content grew: the follower glides after it if the user is at the bottom; otherwise the
+    /// "latest" pill offers the way back.
+    private func follow() {
+        if shouldAutoscroll(nearBottom: follower.isFollowing, contentGrew: true) {
+            follower.nudge()
         } else {
             showLatestPill = true
         }
-    }
-
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        let last = adapter.transcript.count - 1
-        guard last >= 0 else { return }
-        withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(last, anchor: .bottom) }
     }
 }
 
