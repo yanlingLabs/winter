@@ -237,3 +237,35 @@ final class StandaloneWindowTests: XCTestCase {
         XCTAssertEqual(model.focusedSessionId, "s_old", "must never land on the newer CHAT session after a failed attach")
     }
 }
+
+/// Detached windows cascade: a new one never opens exactly on top of another (the user's report —
+/// with every window opening centred, a second child's window hid the first).
+final class CascadedStandaloneFrameTests: XCTestCase {
+    private let visible = CGRect(x: 0, y: 0, width: 1512, height: 944)
+
+    func testTheFirstWindowOpensCentred() {
+        XCTAssertEqual(cascadedStandaloneFrame(visibleFrame: visible, occupied: []),
+                       centeredStandaloneFrame(visibleFrame: visible))
+    }
+
+    func testEachFurtherWindowStepsDownAndRight() {
+        let first = cascadedStandaloneFrame(visibleFrame: visible, occupied: [])
+        let second = cascadedStandaloneFrame(visibleFrame: visible, occupied: [first])
+        let third = cascadedStandaloneFrame(visibleFrame: visible, occupied: [first, second])
+        XCTAssertEqual(second.minX, first.minX + 28)
+        XCTAssertEqual(second.maxY, first.maxY - 28)
+        XCTAssertEqual(third.minX, second.minX + 28)
+        XCTAssertEqual(Set([first, second, third].map { "\($0.minX),\($0.maxY)" }).count, 3, "no two on one spot")
+        XCTAssertEqual(second.size, first.size)
+    }
+
+    func testTheCascadeStaysOnScreen() {
+        var open: [CGRect] = []
+        for _ in 0..<30 { open.append(cascadedStandaloneFrame(visibleFrame: visible, occupied: open)) }
+        for frame in open {
+            XCTAssertGreaterThanOrEqual(frame.minX, visible.minX)
+            XCTAssertLessThanOrEqual(frame.maxY, visible.maxY + 0.5)
+        }
+    }
+}
+

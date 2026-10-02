@@ -82,8 +82,8 @@ final class DetachedWindowTests: XCTestCase {
         XCTAssertTrue(window.styleMask.contains(.miniaturizable))
         XCTAssertTrue(window.canBecomeKey, "a borderless window refuses the keyboard unless told otherwise")
         XCTAssertTrue(window.canBecomeMain)
-        XCTAssertFalse(window.isOpaque, "transparent outside the rounded shape, so the shadow follows it")
-        XCTAssertTrue(window.hasShadow)
+        XCTAssertFalse(window.isOpaque, "transparent outside the rounded shape")
+        XCTAssertFalse(window.hasShadow, "the system shadow draws a light rim on a dark window — none")
         XCTAssertEqual(window.frame, frame)
         XCTAssertTrue(window.contentView?.subviews.contains { $0 is PillWindowResizeHandles } ?? false,
                       "its own resize grips, over the content")
