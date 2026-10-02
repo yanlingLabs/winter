@@ -44,7 +44,14 @@ function handle(msg: any) {
   }
   else if (msg.method === "tools/call" && msg.params?.name === "wait" && process.env.WINTER_FAKE_SLOW_TOOL === "1") {
     const label = String(msg.params?.arguments?.label ?? "");
-    setTimeout(() => send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: `${label} done` }] } }), Number(msg.params?.arguments?.ms ?? 0));
+    // WINTER_FAKE_MARKER_DIR: `<label>.started` / `<label>.done` files, so a test can reason CAUSALLY about
+    // what had started or finished when a result arrived, instead of measuring millisecond gaps.
+    const markers = process.env.WINTER_FAKE_MARKER_DIR;
+    if (markers) writeFileSync(`${markers}/${label}.started`, "");
+    setTimeout(() => {
+      if (markers) writeFileSync(`${markers}/${label}.done`, "");
+      send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: `${label} done` }] } });
+    }, Number(msg.params?.arguments?.ms ?? 0));
   }
   else if (msg.method === "tools/call") send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: `echo: ${msg.params?.arguments?.msg ?? ""}` }] } });
   else if (msg.method === "resources/list" && process.env.WINTER_FAKE_RESOURCES === "1") {
