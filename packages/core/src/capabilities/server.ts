@@ -189,9 +189,13 @@ export function capabilityServer(
   // (`SpawnSession`, `Computer`, `Browser`, …) — the agent SDK's `toolNames` — and the ones the ruling
   // keeps up front carry `_meta["anthropic/alwaysLoad"]`; every other one starts deferred.
   const toolNames: Record<string, string> = {};
+  // Agent SDK 0.0.40: the tools that hold one exclusive resource run in their own concurrency LANE
+  // (`CapabilityToolFacts.lane` — `Computer`, `Browser`): one at a time within the lane, beside everything else.
+  const toolLanes: Record<string, string> = {};
   for (const def of defs) {
-    const plain = factsFor(spec.key, def)?.plainName;
-    if (plain !== undefined) toolNames[def.name] = plain;
+    const facts = factsFor(spec.key, def);
+    if (facts?.plainName !== undefined) toolNames[def.name] = facts.plainName;
+    if (facts?.lane !== undefined) toolLanes[def.name] = facts.lane;
   }
 
   const instance: WinterMcpServerInstance = {
@@ -261,5 +265,11 @@ export function capabilityServer(
     },
   };
 
-  return { type: "sdk", name: capabilityServerName(spec.key), instance, ...(Object.keys(toolNames).length > 0 ? { toolNames } : {}) };
+  return {
+    type: "sdk",
+    name: capabilityServerName(spec.key),
+    instance,
+    ...(Object.keys(toolNames).length > 0 ? { toolNames } : {}),
+    ...(Object.keys(toolLanes).length > 0 ? { toolLanes } : {}),
+  };
 }

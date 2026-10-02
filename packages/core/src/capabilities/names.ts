@@ -148,6 +148,14 @@ export interface CapabilityToolFacts {
   modes: readonly SessionMode[];
   plainName?: string;
   eager?: true;
+  /**
+   * Agent SDK 0.0.40 (user ruling 2026-10-02): the tool's CONCURRENCY LANE (`McpSdkServerConfig.toolLanes`).
+   * Calls of one lane run one at a time, in call order; a lane call otherwise runs beside the round's other
+   * calls. `Computer` and `Browser` each hold one exclusive resource (the screen, the browser), so each is
+   * its own lane — two `Computer` calls never overlap, but a `Computer` call, a `Browser` call and any
+   * read-only call may. Absent: the tool is serial (a barrier) unless it is read-only by hint.
+   */
+  lane?: string;
 }
 
 /**
@@ -166,12 +174,12 @@ export const WINTER_CAPABILITY_TOOLS = {
   "mcp__winter__sessions__list_sessions": { modes: ["dispatch"], plainName: "ListSessions", eager: true },
   // `computer` — `modes: ["code","dispatch"]`, deferred in both. Its PRESENCE additionally follows the
   // LIVE `settings.computerUse.enabled`, read when the session's servers are built (`index.ts`).
-  "mcp__winter__computer__computer": { modes: ["code", "dispatch"], plainName: "Computer" },
+  "mcp__winter__computer__computer": { modes: ["code", "dispatch"], plainName: "Computer", lane: "computer" },
   // `browser` — the only capability tool eligible in all three modes, deferred in all three. Chat sees a
   // READ-ONLY verb set, enforced INSIDE the capability (`browser.ts`'s `argsByMode`, resolved from the
   // caller's mode), because a construction-time capability set cannot express a per-ACTION subset and a
   // whole-tool deny would take the read verbs away too.
-  "mcp__winter__browser__browser": { modes: ["code", "dispatch", "chat"], plainName: "Browser" },
+  "mcp__winter__browser__browser": { modes: ["code", "dispatch", "chat"], plainName: "Browser", lane: "browser" },
   // `office` — the three LibreOffice-bridge tools. CODE ONLY since the 2026-10-01 ruling (dispatch's
   // allowed set names no office tool); deferred, under their MCP names.
   "mcp__winter__office__docs": { modes: ["code"] },
