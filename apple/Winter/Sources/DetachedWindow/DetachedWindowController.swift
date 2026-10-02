@@ -91,7 +91,8 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     ///     what pass `true` today — App shell T6 retired `createAndOpenChat()`/`openChat()`'s reopen
     ///     path, the pair that used to pass an explicit `true` here. Seeds `adapter.isChatSession`
     ///     (see that property's own doc comment for what it gates).
-    init(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String, isChat: Bool = false) {
+    init(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String, isChat: Bool = false,
+         palette: PlumePalette = .blue) {
         self.feed = feed
         self.session = session
         if let pinned = feed.pinnedSessionId {
@@ -352,7 +353,9 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
             onOpenDetached: { [weak self] sid in self?.onOpenSessionDetached?(sid) },
             onNewSession: { [weak self] in self?.newSession() }
         )
-        window.contentView = NSHostingView(rootView: DetachedWindowRootView(adapter: adapter, sidebars: sidebars))
+        window.contentView = NSHostingView(rootView: DetachedWindowRootView(
+            adapter: adapter, sidebars: sidebars, directory: directory,
+            sessionId: { [weak self] in self?.sessionId ?? "" }, fallbackTitle: title, palette: palette))
         window.setFrame(frame, display: true)
     }
 
@@ -643,31 +646,55 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     }
 }
 
-/// The detached window's content: `WindowContentView` (shared with the morph window, task 2) over
-/// a near-opaque tint + glass backdrop (reuses `chatWindowTint` — same approved values, no
-/// progress-based fade-in here since this window never morphs, it's just always-on). Deliberately
-/// NO `clipShape`/corner mask — the corner rounding comes for free from the SYSTEM window shape (a
-/// real titled `NSWindow`), unlike the morph window's self-drawn `RoundedRectangle` shell. Content
-/// bleeds up under the (hidden, transparent) native titlebar via the window's
-/// `.fullSizeContentView` style mask + this view's `topInset: 52` (LIVE-GATE W1b: bumped from 40
-/// to clear the TALLER unified-toolbar titlebar band the window construction above now attaches —
-/// tune-at-gate constant).
+/// The detached session window, in the dispatch pill's family (user, 2026-10-02: "restyle the
+/// entire window from scratch to fully match the pill"): a black slab, dark whatever the system says;
+/// the session's own child pill docked at the top (`SessionWindowHeader`), its plume running in the
+/// session's colours while it works; a centred reading column that scrolls up under the header and
+/// fades there; the user's words in capsules tinted in that same plume colour; and the pill itself
+/// floating at the bottom as the composer (`PillChromeComposer`). No session-switcher sidebar — the
+/// window is one session's.
+///
+/// The column is the shared `WindowContentView` (cards, question box, tasks, image intake, model
+/// dialogs all come with it) — laid out with a top BLEED the height of the header band, which is
+/// what makes the transcript scroll under the header and the composer float over the transcript,
+/// exactly as the app shell's page does.
 struct DetachedWindowRootView: View {
     @ObservedObject var adapter: FieldStateAdapter
     /// Task 6 (2e-iii): the width-responsive sidebar wiring built in `DetachedWindowController.init`.
+    /// Not shown in the pill-themed window (one session, no switcher); kept so the controller's
+    /// in-place switch plumbing is unchanged.
     let sidebars: SidebarWiring
+    let directory: SessionDirectory
+    let sessionId: () -> String
+    let fallbackTitle: String
+    var palette: PlumePalette = .blue
+
+    /// The header band: the traffic lights' row, with the docked pill centred on it.
+    static let headerBand: CGFloat = 54
+    /// The reading column's widest.
+    static let columnWidth: CGFloat = 760
 
     var body: some View {
-        WindowContentView(
-            adapter: adapter,
-            tint: .blue,
-            topInset: 52,
-            sidebars: sidebars,
-            pillChrome: true
-        ) {
-            EmptyView()
+        ZStack(alignment: .top) {
+            WindowContentView(
+                adapter: adapter,
+                tint: palette.bodyColor,
+                topInset: 8,
+                sidebars: nil,
+                topBleed: Self.headerBand,
+                pillChrome: true
+            ) {
+                EmptyView()
+            }
+            .frame(maxWidth: Self.columnWidth)
+            .frame(maxWidth: .infinity)
+            .environment(\.transcriptUserBubbleFill, palette.bodyColor.opacity(0.3))
+
+            SessionWindowHeader(adapter: adapter, directory: directory, sessionId: sessionId,
+                                fallbackTitle: fallbackTitle, palette: palette)
+                .padding(.top, (Self.headerBand - SessionWindowHeader.height) / 2)
+                .padding(.horizontal, 90) // clear of the traffic lights on a narrow window
         }
-        // The dispatch pill's black, dark-themed whatever the system says (user, 2026-10-02).
         .background(Color.black)
         .environment(\.colorScheme, .dark)
         .ignoresSafeArea()
