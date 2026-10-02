@@ -1031,6 +1031,11 @@ final class DispatchPillController: ObservableObject {
 
     /// A child's plume colours — the ones its pill wears (its place in the roster), so the window it
     /// opens wears them too. Dispatch's own blue for a session that is not one of its children.
+    /// A child's title, as its pill shows it — the window it opens is named the same.
+    func childTitle(for sessionId: String) -> String? {
+        session.state.children.first { $0.sessionId == sessionId }.map(\.title).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
     func childPalette(for sessionId: String) -> PlumePalette {
         session.state.children.firstIndex { $0.sessionId == sessionId }.map(PlumePalette.child(at:)) ?? .blue
     }
