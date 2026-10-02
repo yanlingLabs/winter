@@ -450,7 +450,8 @@ final class AppModel: ObservableObject {
         // reconverges to that session's true terminal state on every focus switch — self-healing;
         // it can never wedge on stale state from a session that's no longer focused.
         if case .session(let e) = ev {
-            let nextActivity = MenuBarActivity.next(after: menuBarActivity, event: e)
+            let nextActivity = MenuBarActivity.next(after: menuBarActivity, event: e,
+                                                    toolsOutstanding: SessionReducer.outstandingToolName(session.state) != nil)
             if nextActivity != menuBarActivity {
                 menuBarActivity = nextActivity
                 onActivityChange?(nextActivity)
