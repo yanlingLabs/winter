@@ -211,6 +211,35 @@ final class DispatchPillSnapshotTests: XCTestCase {
         try render(p, "12-errored-children")
     }
 
+    func test13DetachedWindowWearsThePillTheme() throws {
+        let session = SessionModel()
+        session.applyForTesting { s in
+            s.status = .idle
+            s.exchanges = [
+                Exchange(prompt: "Search the web for the Rosetta Stone and fetch one page", reply: "The Rosetta Stone is a granodiorite stela from 196 BC, kept at the British Museum since 1802.",
+                         activity: [ActivityItem(kind: .tool(name: "Search", detail: "Rosetta Stone", callId: "s1", output: "ok")),
+                                    ActivityItem(kind: .tool(name: "WebFetch", detail: "https://www.britishmuseum.org", callId: "f1", output: "ok"))]),
+                Exchange(prompt: "and run sleep 24 in the foreground", reply: "slept 24s (foreground), exit 0."),
+            ]
+        }
+        let adapter = FieldStateAdapter(session: session)
+        let size = CGSize(width: 720, height: 560)
+        let view = WindowContentView(adapter: adapter, tint: .blue, topInset: 52, sidebars: nil, pillChrome: true) { EmptyView() }
+            .background(Color.black)
+            .environment(\.colorScheme, .dark)
+            .frame(width: size.width, height: size.height)
+        let host = NSHostingView(rootView: view)
+        host.frame = CGRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = host
+        for _ in 0..<3 { host.layoutSubtreeIfNeeded(); RunLoop.main.run(until: Date().addingTimeInterval(0.3)) }
+        let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: rep)
+        try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+            .write(to: outputDirectory.appendingPathComponent("13-detached-window.png"))
+    }
+
     func test7ChildPills() throws {
         let titles = ["fix auth", "docs pass", "bump sdk", "flaky test", "perf trace", "triage"]
         let statuses = ["running", "awaiting_approval", "completed", "running", "error", "running"]
