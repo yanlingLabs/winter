@@ -158,13 +158,8 @@ struct TranscriptView: View {
 /// sentence row carrying its status and expanding to every call's arguments and output, skips
 /// `.task` entirely), one row per assistant message plus the live streaming row, stopped flag.
 ///
-/// Activity and replies are NOT interleaved chronologically — every tool row precedes every reply
-/// row, because `Exchange` stores them in two separate lists; making the transcript event-shaped is
-/// a separate, larger change. The citation here used to read "spec §5 item 6", which points at
-/// nothing: the mac-chat-parity design doc's §5 is the model/effort wiring and has no item 6. The
-/// change is item **6** of `docs/research/2026-08-12-ios-vs-mac-transcript.md` §5 ("Event-shaped
-/// rows"), which that table marks **Large** and scope-judgment — and the design doc deliberately
-/// carries no §9 gate for it. A
+/// Activity and replies ARE interleaved in arrival order (2026-10-02, `exchangeTimeline`): `Exchange`
+/// still stores them in two lists, but records where each reply fell among the activity. A
 /// dedicated `View` (not a `@ViewBuilder` func on `TranscriptView`) because it owns its own
 /// expansion `@State` — which tool runs are expanded, keyed by `toolRunExpansionKey` (the run's
 /// first `callId`, NOT its position: the reducer's drop-oldest activity cap shifts positions during
@@ -211,67 +206,83 @@ private struct TranscriptExchangeRow: View {
             if !exchange.prompt.isEmpty {
                 TranscriptUserBubble(text: exchange.prompt, tint: tint)
             }
-            ForEach(Array(groupActivity(exchange.activity).enumerated()), id: \.offset) { index, group in
-                switch group {
-                case .toolRun(let entries):
-                    let key = toolRunExpansionKey(entries, fallbackIndex: index)
-                    TranscriptToolGroupRow(
-                        entries: entries,
-                        turnIsLive: turnIsLive,
-                        isExpanded: expandedRuns.contains(key),
-                        toggle: { toggle(key) },
-                        onOpenDiff: onOpenDiff,
-                        onOpenFile: onOpenFile,
-                        sessionHasWorkingDirectory: sessionHasWorkingDirectory
-                    )
-                case .single(let item):
-                    // mac-chat-parity Task 3: an approval/question/plan draws its CARD here, in the
-                    // ACTIVITY order it was asked in — pending while the daemon waits, frozen with
-                    // its outcome forever after. Every other kind stays the one-line activity row.
-                    //
-                    // "In activity order" is the whole claim, and it is narrower than it reads:
-                    // this loop runs BEFORE the replies loop below, so every card sits above EVERY
-                    // reply in the exchange — a card asked in round 3 draws above round 1's prose.
-                    // That is the same deliberate not-interleaved layout the replies loop's own
-                    // comment records (research §5 item 6, Large, out of scope for this branch); the
-                    // card simply inherits it. Named because a live gate reads a round-3 card above
-                    // round-1 prose as misplacement otherwise.
-                    if let record = item.interactionRecord {
-                        // A PENDING question renders nowhere here — the composer has become it
-                        // (`composerMorphQuestion`, user call 2026-08-12, iOS's SP-ask-morph). It
-                        // reappears in this exact slot the moment it is answered, frozen with what
-                        // was chosen, so the scrollback record Task 3 exists to keep is unaffected:
-                        // the only thing that changed is where an UNANSWERED question is shown.
-                        //
-                        // Approvals and plans are untouched and still draw here while pending.
-                        if !questionMorphsTheComposer(record, closed: cardWiring.closedAsks) {
-                            TranscriptInteractionCard(record: record, wiring: cardWiring)
-                        }
-                    } else {
-                        TranscriptActivityRow(item: item)
-                    }
+            // Tools, cards and replies in the order they happened (`exchangeTimeline`, user
+            // 2026-10-02): each reply after exactly the activity that preceded it, so a "search,
+            // write, search, write" turn reads that way instead of every search first.
+            ForEach(Array(timeline.enumerated()), id: \.offset) { _, entry in
+                switch entry {
+                case .group(let index, let group):
+                    activityGroupRow(group, index: index)
+                case .reply(let index):
+                    // One row per assistant message (mac-chat-parity Task 1) — the engine emits one
+                    // per ROUND. `.assistant`: the transcript reply IS `docs/brand.md` § 4's serif
+                    // allowlist binding #4. A FINISHED reply gets the file door (2026-09-30); the
+                    // streaming row below never does (`TranscriptAssistantMessage.fileDoor`'s doc).
+                    TranscriptAssistantMessage(text: exchange.replies[index], isStreaming: false, role: .assistant,
+                                               fileDoor: fileDoor)
+                        .equatable()
                 }
             }
-            // One row per assistant message, in arrival order (mac-chat-parity Task 1) — the
-            // engine emits one per ROUND, and this used to render a single string that each round
-            // overwrote. The streaming row is ADDITIVE, not an `else` branch: while round N streams,
-            // rounds 1…N-1 stay on screen instead of being hidden until the turn ends.
-            // mac-chat-parity Task 8: `.assistant` — the transcript reply IS `docs/brand.md` § 4's
-            // serif allowlist binding #4, and these two are the only call sites that pass it. Both
-            // plan-card bodies compose this same view with `.sans`.
-            //
-            // Transcript file links (2026-09-30): a FINISHED reply gets the file door — paths it
-            // names link, images it names draw a thumbnail. The streaming row below never does
-            // (`TranscriptAssistantMessage.fileDoor`'s own doc).
-            ForEach(Array(exchange.replies.enumerated()), id: \.offset) { _, reply in
-                TranscriptAssistantMessage(text: reply, isStreaming: false, role: .assistant,
-                                           fileDoor: fileDoor)
-                    .equatable()
-            }
+            // The streaming row is ADDITIVE: while round N streams, rounds 1…N-1 stay on screen.
             if let streamingText {
                 TranscriptAssistantMessage(text: streamingText, isStreaming: true, role: .assistant)
             }
             if exchange.aborted { TranscriptStoppedRow() }
+        }
+    }
+
+    /// One timeline entry: an activity group (numbered across the whole exchange, so a tool run's
+    /// fallback expansion key stays unique) or a reply.
+    private enum TimelineEntry {
+        case group(index: Int, ActivityGroup)
+        case reply(Int)
+    }
+
+    private var timeline: [TimelineEntry] {
+        var entries: [TimelineEntry] = []
+        var groupIndex = 0
+        for segment in exchangeTimeline(exchange) {
+            switch segment {
+            case .activity(let items):
+                for group in groupActivity(items) {
+                    entries.append(.group(index: groupIndex, group))
+                    groupIndex += 1
+                }
+            case .reply(let index):
+                entries.append(.reply(index))
+            }
+        }
+        return entries
+    }
+
+    @ViewBuilder
+    private func activityGroupRow(_ group: ActivityGroup, index: Int) -> some View {
+        switch group {
+        case .toolRun(let entries):
+            let key = toolRunExpansionKey(entries, fallbackIndex: index)
+            TranscriptToolGroupRow(
+                entries: entries,
+                turnIsLive: turnIsLive,
+                isExpanded: expandedRuns.contains(key),
+                toggle: { toggle(key) },
+                onOpenDiff: onOpenDiff,
+                onOpenFile: onOpenFile,
+                sessionHasWorkingDirectory: sessionHasWorkingDirectory
+            )
+        case .single(let item):
+            // mac-chat-parity Task 3: an approval/question/plan draws its CARD here, where it was
+            // asked — now in true order among the replies too — pending while the daemon waits,
+            // frozen with its outcome forever after. Every other kind stays the one-line row.
+            if let record = item.interactionRecord {
+                // A PENDING question renders nowhere here — the composer has become it
+                // (`composerMorphQuestion`, user call 2026-08-12). It reappears in this exact slot
+                // the moment it is answered, frozen with what was chosen.
+                if !questionMorphsTheComposer(record, closed: cardWiring.closedAsks) {
+                    TranscriptInteractionCard(record: record, wiring: cardWiring)
+                }
+            } else {
+                TranscriptActivityRow(item: item)
+            }
         }
     }
 

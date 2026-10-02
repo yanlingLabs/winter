@@ -724,6 +724,46 @@ enum ActivityGroup: Equatable {
 /// interaction) passes through unchanged as `.single` AND breaks any tool run in progress — a bash
 /// call after an interaction starts a fresh run rather than merging across it, so the grouping
 /// reflects the actual chronological interleaving.
+/// One stretch of an exchange, in the order its events arrived: a run of activity, or one reply
+/// (by its index in `Exchange.replies`).
+enum ExchangeTimelineSegment: Equatable {
+    case activity([ActivityItem])
+    case reply(Int)
+}
+
+/// PURE: an exchange's activity and replies interleaved as they happened (user, 2026-10-02 — the
+/// transcript drew every tool above every reply, so "search, write, search, write" read as all the
+/// searches first). Each reply sits after exactly the activity that had arrived before it
+/// (`Exchange.replyAnchors` against `activityOrdinals`). An exchange with no arrival record (one a
+/// test or an old path built whole) keeps the old layout: all activity, then the replies.
+func exchangeTimeline(_ exchange: Exchange) -> [ExchangeTimelineSegment] {
+    let items = exchange.activity
+    let ordinals = exchange.activityOrdinals.count == items.count ? exchange.activityOrdinals : Array(items.indices)
+    let anchors = exchange.replyAnchors.count == exchange.replies.count
+        ? exchange.replyAnchors
+        : Array(repeating: Int.max, count: exchange.replies.count)
+    var segments: [ExchangeTimelineSegment] = []
+    var run: [ActivityItem] = []
+    var reply = 0
+    func closeRun() {
+        if !run.isEmpty { segments.append(.activity(run)); run = [] }
+    }
+    for (item, ordinal) in zip(items, ordinals) {
+        while reply < anchors.count, anchors[reply] <= ordinal {
+            closeRun()
+            segments.append(.reply(reply))
+            reply += 1
+        }
+        run.append(item)
+    }
+    closeRun()
+    while reply < anchors.count {
+        segments.append(.reply(reply))
+        reply += 1
+    }
+    return segments
+}
+
 func groupActivity(_ items: [ActivityItem]) -> [ActivityGroup] {
     var groups: [ActivityGroup] = []
     for item in items {
