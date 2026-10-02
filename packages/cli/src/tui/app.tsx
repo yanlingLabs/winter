@@ -93,7 +93,7 @@ import { readFileSync } from "node:fs";
 import { POLICY_ORDER } from "./policy-order";
 import { policySwitchNotes } from "./policy-switch-notes";
 import { modelIdPortion } from "../model-cli";
-import { initialState, reduce, statusChromeModel, type AgentRow, type Block, type LocalEvent, type PendingCard, type TuiState } from "./state";
+import { cardKey, initialState, reduce, statusChromeModel, type AgentRow, type Block, type LocalEvent, type PendingCard, type TuiState } from "./state";
 import { makeFlattenCache, makeStreamRenderer } from "./flatten-blocks";
 import { applyWheel, followBottom, onContentGrown, scrollToTop, type ScrollState } from "./scroll-model";
 import { TranscriptViewport, selectedTranscriptText, transcriptLineAt, type TranscriptPoint, type TranscriptSelection } from "./transcript";
@@ -502,6 +502,11 @@ export function App({
   // commands.ts's runCd) is what LATER commands in the same session (`/skills`, `/mcp`) receive as
   // `ctx.cwd`.
   const appendNote = useCallback((text: string) => dispatch({ type: "local_note", text }), []);
+  /** A fire-and-forget request whose failure becomes a note -- never an unhandled rejection, which would
+   *  take the whole TUI down. */
+  const noteIfFails = useCallback((work: Promise<unknown>, what: string): void => {
+    work.catch((err: unknown) => appendNote(`${what} failed: ${err instanceof Error ? err.message : String(err)}`));
+  }, [appendNote]);
   const cwdRef = useRef(cwd);
 
   // Code-mode image input (`images.ts`): the current draft's attachments, and the one door the App
@@ -569,7 +574,7 @@ export function App({
     if (path === undefined || !isRegularFile(path)) return false;
     let bytes: Uint8Array;
     try { bytes = new Uint8Array(readFileSync(path)); } catch { return false; }
-    void attachImageBytes(bytes, text);
+    attachImageBytes(bytes, text).catch((err: unknown) => appendNote(`image not attached: ${err instanceof Error ? err.message : String(err)}`));
     return true;
   };
 
@@ -605,7 +610,7 @@ export function App({
       onModelChanged,
       openChoice,
     };
-    void runCommand(ctx, text);
+    runCommand(ctx, text).catch((err: unknown) => appendNote(`${text.split(/\s/)[0]} failed: ${err instanceof Error ? err.message : String(err)}`));
   }, [client, sessionId, appendNote, onModelChanged, openChoice]);
 
   // Phase 3d T3: the "@"-file mention index (file-index.ts) — App owns the ONE lazy build for the
@@ -622,7 +627,7 @@ export function App({
     if (fileIndexRef.current) return; // already building/built — one per session
     const built = buildFileIndex(cwdRef.current);
     fileIndexRef.current = built;
-    void built.then((list) => setFileIndex(list));
+    built.then((list) => setFileIndex(list)).catch(() => { /* no index: "@" mentions simply offer nothing */ });
   }, []);
 
   // T5 double-press ctrl+C/ctrl+D exit-armed state (see the file-top doc comment's KEY ROUTING #2).
@@ -748,7 +753,7 @@ export function App({
   // Load the code-fence syntax highlighter once (best-effort, stderr-suppressed — HARD CONSTRAINT 4).
   useEffect(() => {
     let live = true;
-    void loadSafeHighlighter().then((hl) => { if (live) setHighlight(() => hl); });
+    loadSafeHighlighter().then((hl) => { if (live) setHighlight(() => hl); }).catch(() => { /* plain text, unhighlighted */ });
     return () => { live = false; };
   }, []);
 
@@ -957,7 +962,7 @@ export function App({
     } else if (transcriptAnchorRef.current) {
       const anchor = transcriptAnchorRef.current;
       if (event.kind === "release" && !pointerMovedRef.current && anchor.line === point.line && anchor.column === point.column) {
-        void transcriptFileAtCell(lineLog, index, point.column, columns, cwdRef.current).then((path) => { if (path) openFile(path); });
+        transcriptFileAtCell(lineLog, index, point.column, columns, cwdRef.current).then((path) => { if (path) openFile(path); }).catch(() => { /* not a file link */ });
       }
       setTranscriptSelection(anchor.line === point.line && anchor.column === point.column ? null : { anchor, focus: point });
       if (event.kind === "release") mouseOwnerRef.current = null;
@@ -1111,11 +1116,16 @@ export function App({
   // entry runs after the one before it has been delivered (or refused).
   const deliver = (staged: StagedDraft, steer: boolean) => {
     if (childOpen) { sendToChild(childRow!.threadId, staged.modelText); return; }
-    if (staged.images.length > 0 && staged.imagesOnSend) {
-      void (steer ? client.steer(sessionId, staged.text, staged.images) : client.send(sessionId, staged.text, staged.images));
-      return;
-    }
-    void (steer ? client.steer(sessionId, staged.modelText) : client.send(sessionId, staged.modelText));
+    const sending: unknown = staged.images.length > 0 && staged.imagesOnSend
+      ? (steer ? client.steer(sessionId, staged.text, staged.images) : client.send(sessionId, staged.text, staged.images))
+      : (steer ? client.steer(sessionId, staged.modelText) : client.send(sessionId, staged.modelText));
+    // A refused send (a typed retryable refusal included) is a note, and the text goes back to the composer
+    // -- ahead of anything typed since -- so the user can send it again. Never an unhandled rejection.
+    Promise.resolve(sending).catch((err: unknown) => {
+      appendNote(`message not sent: ${err instanceof Error ? err.message : String(err)} — it is back in the composer`);
+      const current = composerStateRef.current.text;
+      injectIntoComposer("replace", current.length === 0 ? staged.text : `${staged.text}\n${current}`);
+    });
   };
   const submitQueueRef = useRef<Promise<void>>(Promise.resolve());
   const submitDraft = (text: string, steer: boolean) => {
@@ -1143,7 +1153,7 @@ export function App({
   const onSubmit = (text: string) => submitDraft(text, false);
   const onSteer = (text: string) => submitDraft(text, true);
   // idle-Esc parity: no-op while nothing is running (legacy's idle readLine swallowed Esc).
-  const onInterrupt = () => { if (state.turnRunning) void client.interrupt(sessionId); };
+  const onInterrupt = () => { if (state.turnRunning) noteIfFails(Promise.resolve(client.interrupt(sessionId)), "interrupt"); };
   const onCyclePolicy = () => {
     if (policyInFlight.current) return; // one setPolicy RPC at a time (repeat presses dropped)
     policyInFlight.current = true;
@@ -1162,19 +1172,19 @@ export function App({
   // treats a missing optionId as plain allow-once/deny, methods.ts), never sent as a literal
   // `optionId: undefined`.
   const onApprove = (callId: string, yes: boolean, optionId?: string) => {
-    void client.request(METHODS.approvalRespond, {
+    noteIfFails(Promise.resolve(client.request(METHODS.approvalRespond, {
       sessionId, callId, approved: yes,
       ...(optionId !== undefined ? { optionId } : {}),
-    });
+    })), "the approval answer");
   };
   const onAnswer = (callId: string, payload: AnswerPayload) => {
-    void client.askUserRespond({
+    noteIfFails(Promise.resolve(client.askUserRespond({
       sessionId, callId, answers: payload.answers,
       ...(payload.notes ? { notes: payload.notes } : {}),
-    });
+    })), "the answer");
   };
   const onPlan = (callId: string, resp: ReturnType<typeof parsePlanResponse>) => {
-    void client.planRespond({ sessionId, callId, ...resp });
+    noteIfFails(Promise.resolve(client.planRespond({ sessionId, callId, ...resp })), "the plan answer");
   };
   // WS-27: a URL-mode elicitation card. Open fetches the url (`elicitation.url` — it is never on the
   // card), checks it is https to the card's own host, runs `/usr/bin/open` on it (argv, no shell), and
@@ -1188,7 +1198,7 @@ export function App({
       if (answer === "inactive") dispatch({ type: "local_elicitation_inactive", elicitationId });
       const note = elicitationAnswerNote(answer, host);
       if (note !== undefined) appendNote(note);
-    });
+    }).catch(() => appendNote(`link request (${host}): couldn't send the answer — try again`));
   };
 
   useInput(
@@ -1336,7 +1346,9 @@ export function App({
          *  the slash menu). Keys are handled in the scroll/toggle useInput above, never here. */}
         {pickerOpen ? <ChoiceMenu title={choice!.title} options={choice!.options} selected={choiceSel} columns={columns} /> : null}
         {state.pending ? (
-          <PendingCards pending={state.pending} onApprove={onApprove} onAnswer={onAnswer} onPlan={onPlan} onElicitation={onElicitation} planBodyRows={layout.planBodyRows} />
+          // Keyed by the card: a queued card that takes the screen mounts fresh, never inheriting what was typed
+          // into the card before it.
+          <PendingCards key={cardKey(state.pending)} pending={state.pending} onApprove={onApprove} onAnswer={onAnswer} onPlan={onPlan} onElicitation={onElicitation} planBodyRows={layout.planBodyRows} />
         ) : (
           <Composer
             running={state.turnRunning}

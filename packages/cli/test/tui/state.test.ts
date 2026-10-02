@@ -48,10 +48,48 @@ describe("state.ts — tool call/result (b)", () => {
   test("tool_call then tool_result: one committed tool block, activeTools empty", () => {
     let s = initialState();
     s = reduce(s, { type: "tool_call", threadId: "main", callId: "c1", name: "bash", argsJson: '{"command":"ls"}' }, T0);
-    expect(s.activeTools).toEqual([{ name: "bash", argsJson: '{"command":"ls"}' }]);
+    expect(s.activeTools).toEqual([{ name: "bash", argsJson: '{"command":"ls"}', callId: "c1" }]);
     s = reduce(s, { type: "tool_result", threadId: "main", callId: "c1", output: "file.txt", isError: false }, T0 + 5);
     expect(s.activeTools).toEqual([]);
     expect(s.committed).toEqual([{ kind: "tool", name: "bash", argsJson: '{"command":"ls"}', output: "file.txt", isError: false }]);
+  });
+
+  // Agent SDK 0.0.40: a round's tool_calls arrive first and its read-only calls run concurrently, so
+  // results come back in COMPLETION order -- each must be paired with its own call, by callId.
+  test("results in completion order are each paired with their OWN call; the rows still running stay", () => {
+    let s = initialState();
+    s = reduce(s, { type: "tool_call", threadId: "main", callId: "a", name: "web_search", argsJson: '{"query":"a"}' }, T0);
+    s = reduce(s, { type: "tool_call", threadId: "main", callId: "b", name: "read", argsJson: '{"file_path":"b"}' }, T0);
+    s = reduce(s, { type: "tool_call", threadId: "main", callId: "c", name: "web_fetch", argsJson: '{"url":"c"}' }, T0);
+    s = reduce(s, { type: "tool_result", threadId: "main", callId: "b", output: "B", isError: false }, T0 + 1);
+    expect(s.activeTools.map((t) => t.callId)).toEqual(["a", "c"]);
+    s = reduce(s, { type: "tool_result", threadId: "main", callId: "c", output: "C", isError: false }, T0 + 2);
+    s = reduce(s, { type: "tool_result", threadId: "main", callId: "a", output: "A", isError: false }, T0 + 3);
+    expect(s.activeTools).toEqual([]);
+    expect(s.committed.map((b) => (b.kind === "tool" ? [b.name, b.output] : b.kind))).toEqual([["read", "B"], ["web_fetch", "C"], ["web_search", "A"]]);
+  });
+
+  test("a result whose callId matches no row renders unpaired and takes no row", () => {
+    let s = initialState();
+    s = reduce(s, { type: "tool_call", threadId: "main", callId: "a", name: "read", argsJson: '{"file_path":"a"}' }, T0);
+    s = reduce(s, { type: "tool_result", threadId: "main", callId: "stray", output: "?", isError: false }, T0 + 1);
+    expect(s.activeTools.map((t) => t.callId)).toEqual(["a"]);
+    expect(s.committed).toEqual([{ kind: "tool", name: "", argsJson: "", output: "?", isError: false }]);
+  });
+
+  test("a child's concurrent calls are each paired with their own result, in completion order", () => {
+    let s = initialState();
+    s = reduce(s, { type: "thread_started", threadId: "th", parentThreadId: "main", agentType: "general-purpose", prompt: "go" }, T0);
+    s = reduce(s, { type: "tool_call", threadId: "th", callId: "x", name: "read", argsJson: '{"file_path":"x"}' }, T0);
+    s = reduce(s, { type: "tool_call", threadId: "th", callId: "y", name: "grep", argsJson: '{"pattern":"y"}' }, T0);
+    s = reduce(s, { type: "tool_result", threadId: "th", callId: "y", output: "Y", isError: false }, T0 + 1);
+    expect(Object.keys(s.childPendingTool["th"] ?? {})).toEqual(["x"]);
+    s = reduce(s, { type: "tool_result", threadId: "th", callId: "x", output: "X", isError: false }, T0 + 2);
+    expect(s.childPendingTool["th"]).toBeUndefined();
+    expect((s.childBlocks["th"] ?? []).map((b) => (b.kind === "tool" ? [b.name, b.argsJson, b.output] : b.kind))).toEqual([
+      ["grep", '{"pattern":"y"}', "Y"],
+      ["read", '{"file_path":"x"}', "X"],
+    ]);
   });
 });
 
@@ -384,6 +422,42 @@ describe("state.ts — pending cards (f)", () => {
     s = reduce(s, { type: "approval_resolved", threadId: "main", callId: "call1", approved: true, by: "user" }, T0 + 5);
     expect(s.pending).toBeNull();
     expect(s.committed).toContainEqual({ kind: "note", text: "approved bash" });
+  });
+
+  test("several open cards (concurrent subagents, two lanes): a second card queues behind the first; each resolution drops exactly its own", () => {
+    let s = initialState();
+    s = reduce(s, { type: "approval_requested", threadId: "main", callId: "a", toolName: "Computer", summary: "click" }, T0);
+    s = reduce(s, { type: "approval_requested", threadId: "agent-2", callId: "b", toolName: "Bash", summary: "make" }, T0 + 1);
+    s = reduce(s, { type: "question_asked", threadId: "agent-3", callId: "q", questions: [] }, T0 + 2);
+    expect(s.pending).toMatchObject({ kind: "approval", callId: "a" }); // the first stays on screen
+    expect(s.queuedCards?.map((c) => (c.kind === "elicitation" ? c.elicitationId : c.callId))).toEqual(["b", "q"]);
+    // b resolved elsewhere (another window) while a is on screen: b leaves the queue, a stays.
+    s = reduce(s, { type: "approval_resolved", threadId: "agent-2", callId: "b", approved: true, by: "user" }, T0 + 3);
+    expect(s.pending).toMatchObject({ callId: "a" });
+    expect(s.committed).toContainEqual({ kind: "note", text: "approved Bash" });
+    expect(s.queuedCards?.map((c) => (c.kind === "elicitation" ? c.elicitationId : c.callId))).toEqual(["q"]);
+    // A resolution naming no card this view holds changes nothing.
+    s = reduce(s, { type: "approval_resolved", threadId: "main", callId: "zzz", approved: false, by: "user" }, T0 + 4);
+    expect(s.pending).toMatchObject({ callId: "a" });
+    // a answered: the queued question takes the screen; then it too resolves.
+    s = reduce(s, { type: "approval_resolved", threadId: "main", callId: "a", approved: true, by: "user" }, T0 + 5);
+    expect(s.pending).toMatchObject({ kind: "question", callId: "q" });
+    expect(s.queuedCards).toEqual([]);
+    s = reduce(s, { type: "question_resolved", threadId: "agent-3", callId: "q", answers: {}, by: "user" }, T0 + 6);
+    expect(s.pending).toBeNull();
+  });
+
+  test("a card raised again (a replay, a second attach) replaces its own copy — never a duplicate", () => {
+    let s = initialState();
+    s = reduce(s, { type: "approval_requested", threadId: "main", callId: "a", toolName: "Computer", summary: "click" }, T0);
+    s = reduce(s, { type: "approval_requested", threadId: "main", callId: "b", toolName: "Bash", summary: "make" }, T0 + 1);
+    s = reduce(s, { type: "approval_requested", threadId: "main", callId: "a", toolName: "Computer", summary: "click" }, T0 + 2);
+    s = reduce(s, { type: "approval_requested", threadId: "main", callId: "b", toolName: "Bash", summary: "make all" }, T0 + 3);
+    expect(s.pending).toMatchObject({ callId: "a" });
+    expect(s.queuedCards).toEqual([{ kind: "approval", callId: "b", toolName: "Bash", summary: "make all" }]);
+    s = reduce(s, { type: "approval_resolved", threadId: "main", callId: "a", approved: true, by: "user" }, T0 + 4);
+    s = reduce(s, { type: "approval_resolved", threadId: "main", callId: "b", approved: true, by: "user" }, T0 + 5);
+    expect(s.pending).toBeNull();
   });
 
   test("approval_requested threads options through when the wire event carries them (SP-approvals T7)", () => {

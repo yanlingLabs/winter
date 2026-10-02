@@ -1,7 +1,7 @@
 import { TRANSIENT_EVENT_TYPES, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import {
   MAIN_THREAD, asApiRetryFrame, asAssistantFrame, asInitFrame, asResultFrame, asStreamEventFrame,
-  asUserFrame, assistantText, deltaText, hasToolResults, threadIdOf, toolCalls, toolResults, userText,
+  asUserFrame, assistantText, deltaText, hasToolResults, threadIdOf, toolCalls, toolResults, userText, type UserFrame,
 } from "./conversation";
 import {
   applyTodoResult, backgroundStopReason, childFromSpawn, isSpawnTool, pendingTodoFrom, spawnOutcome, threadCompleted,
@@ -219,6 +219,27 @@ class ProjectorImpl implements Projector {
    * it again. One entry is shifted per projected terminal: the turn that starts next.
    */
   private readonly queuedStarts: Array<{ announced: boolean }> = [];
+  /**
+   * The calls whose `tool_result` this projector has projected since the last terminal (agent SDK 0.0.40's
+   * per-call frames — see the `user` branch of `accept`). TURN-scoped, cleared at every terminal: a tool
+   * round never spans a terminal, so a repeat can only arrive within the turn its call ran in, and the
+   * set stays as small as one turn's calls instead of growing for the session's life.
+   */
+  private readonly resultsThisTurn = new Set<string>();
+
+  /** `frame` without the `tool_result` blocks whose call already has its result this turn; `undefined`
+   *  when that leaves nothing at all. Logged once per session — a runtime that repeats itself is news. */
+  private withoutRepeatedResults(frame: UserFrame): UserFrame | undefined {
+    const repeated = (b: { type?: unknown; tool_use_id?: unknown }): boolean =>
+      b.type === "tool_result" && typeof b.tool_use_id === "string" && this.resultsThisTurn.has(b.tool_use_id);
+    if (!frame.message.content.some(repeated)) return frame;
+    if (!this.loggedTypes.has("repeated-tool-result")) {
+      this.loggedTypes.add("repeated-tool-result");
+      this.deps.log.warn?.("[projector] a tool_result for a call that already has one this turn — dropped", { sessionId: this.deps.sessionId });
+    }
+    const content = frame.message.content.filter((b) => !repeated(b));
+    return content.length === 0 ? undefined : { ...frame, message: { ...frame.message, content } };
+  }
 
   /** Seed the to-do map from the session's persisted rows, once — see `ProjectorDeps.priorTodos`.
    *  Never throws: a failed read leaves the map empty, which is today's behaviour. */
@@ -456,12 +477,21 @@ class ProjectorImpl implements Projector {
       });
     }
 
-    const userFrame = asUserFrame(msg);
-    if (userFrame !== undefined) {
+    const asReceived = asUserFrame(msg);
+    if (asReceived !== undefined) {
       this.running = true;
       this.sawFrame = true;
       this.roundIndex++;
-      const threadId = threadIdOf(userFrame);
+      const threadId = threadIdOf(asReceived);
+      // Agent SDK 0.0.40: a tool round's results arrive ONE `user` frame PER CALL, each as its call finishes —
+      // in COMPLETION order, since a round's read-only calls run concurrently (0.0.39 and earlier sent the
+      // whole round in one frame after its last call). Nothing below depends on which: every frame is
+      // projected on its own, and every consumer folds `tool_result` by callId. One `tool_result` per call is still a rule this
+      // projector keeps itself: a block whose call already has its result this turn is dropped, never
+      // projected twice — and it is dropped BEFORE the frame's claim key is chosen, so a frame that repeats
+      // its first call cannot take the committed key of the frame that call came in and lose the others.
+      const userFrame = this.withoutRepeatedResults(asReceived);
+      if (userFrame === undefined) return EMPTY_BATCH();
       if (hasToolResults(userFrame)) {
         // C2 (2026-09-22): the child is done with these calls, so no human can still be owed an
         // answer for them — settled BEFORE this frame is stamped (see `ProjectorDeps.onToolResults`).
@@ -472,6 +502,7 @@ class ProjectorImpl implements Projector {
         const sourceId = `tr:${(firstResult?.tool_use_id as string | undefined) ?? `${this.turnIndex}:${this.roundIndex}`}`;
         return claim(sourceId, () => {
           const out = toolResults(userFrame, this.deps.sessionId, threadId);
+          for (const e of out) if (e.type === "tool_result") this.resultsThisTurn.add(e.callId);
           const resultBlocks = userFrame.message.content.filter((b) => b.type === "tool_result");
           // `tool_use_result` is FRAME-level (the official leg's structured result); it can only be
           // attributed to a block when the frame carries exactly one.
@@ -585,6 +616,7 @@ class ProjectorImpl implements Projector {
       // terminal — see the field's own doc comment for the background child that spends between turns.
       this.sharedRowActivity = false;
       this.stopAnnounced = false;
+      this.resultsThisTurn.clear();
       this.running = false;
       this.sawFrame = false;
       if (this.openTurns > 0) this.openTurns--;
@@ -734,6 +766,7 @@ class ProjectorImpl implements Projector {
     this.roundIndex = 0;
     this.roundsThisTurn = 0;
     this.sharedRowActivity = false;   // same terminal-to-terminal window as the result path above
+    this.resultsThisTurn.clear();
     // An abort is a TURN BOUNDARY, never an error (ruling P8b-24) — the same rule `terminal.ts`
     // applies to `result.interrupted`, applied here so a thrown AbortError cannot smuggle an
     // `agent_error` past it.

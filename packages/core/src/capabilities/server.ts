@@ -174,6 +174,13 @@ function textResult(text: string, isError: boolean): { content: unknown[]; isErr
  * `tools` is deliberately NOT set — the SDK populates the wire-safe list from `instance.listTools()`
  * itself (`toWireMcpServers`), so declaring it by hand would be a second copy that could drift.
  */
+/** The signal a capability call runs under: the incarnation's, the call's own, or both combined. */
+function callSignal(session: AbortSignal | undefined, call: AbortSignal | undefined): AbortSignal | undefined {
+  if (session === undefined) return call;
+  if (call === undefined) return session;
+  return AbortSignal.any([session, call]);
+}
+
 export function capabilityServer(
   spec: CapabilityServerSpec,
   session: CapabilitySession,
@@ -189,9 +196,13 @@ export function capabilityServer(
   // (`SpawnSession`, `Computer`, `Browser`, …) — the agent SDK's `toolNames` — and the ones the ruling
   // keeps up front carry `_meta["anthropic/alwaysLoad"]`; every other one starts deferred.
   const toolNames: Record<string, string> = {};
+  // Agent SDK 0.0.40: the tools that hold one exclusive resource run in their own concurrency LANE
+  // (`CapabilityToolFacts.lane` — `Computer`, `Browser`): one at a time within the lane, beside everything else.
+  const toolLanes: Record<string, string> = {};
   for (const def of defs) {
-    const plain = factsFor(spec.key, def)?.plainName;
-    if (plain !== undefined) toolNames[def.name] = plain;
+    const facts = factsFor(spec.key, def);
+    if (facts?.plainName !== undefined) toolNames[def.name] = facts.plainName;
+    if (facts?.lane !== undefined) toolLanes[def.name] = facts.lane;
   }
 
   const instance: WinterMcpServerInstance = {
@@ -219,11 +230,12 @@ export function capabilityServer(
       });
     },
 
-    async callTool(name: string, args: Record<string, unknown>) {
+    async callTool(name: string, args: Record<string, unknown>, extra?: { signal?: AbortSignal }) {
       // Unknown tool FIRST, and worded exactly as `ToolRegistry.execute` words it. A tool filtered
       // out by mode (P8b-37) lands here too, and that is the right answer: to this session it does
       // not exist, which is exactly what the registry door tells a mode that was never offered it.
       if (!names.has(name)) return textResult(`unknown tool: ${name}`, true);
+      const signal = callSignal(session.signal, extra?.signal);
       const ctx: ToolContext = {
         // Extras UNDER identity (n1) — see `contextExtras`' own doc comment.
         ...spec.contextExtras?.(session),
@@ -233,7 +245,11 @@ export function capabilityServer(
         mode: session.mode,
         ...(session.tmpDir === undefined ? {} : { tmpDir: session.tmpDir }),
         ...(session.outDir === undefined ? {} : { outDir: session.outDir }),
-        ...(session.signal === undefined ? {} : { signal: session.signal }),
+        // The incarnation's signal (the child ended) AND, since agent SDK 0.0.40, this call's own (the runtime
+        // cancelled it: an interrupted turn). Computer and Browser stop on it; the runtime keeps their
+        // concurrency lane held until this call returns, so stopping promptly frees the lane promptly.
+        ...(signal === undefined ? {} : { signal }),
+        ...(session.signal === undefined ? {} : { sessionSignal: session.signal }),
         ...(session.visionCapable === undefined ? {} : { visionCapable: session.visionCapable }),
         ...(session.attachImage === undefined ? {} : { attachImage: session.attachImage }),
         ...(session.browserDomainApproved === undefined ? {} : { browserDomainApproved: session.browserDomainApproved }),
@@ -261,5 +277,11 @@ export function capabilityServer(
     },
   };
 
-  return { type: "sdk", name: capabilityServerName(spec.key), instance, ...(Object.keys(toolNames).length > 0 ? { toolNames } : {}) };
+  return {
+    type: "sdk",
+    name: capabilityServerName(spec.key),
+    instance,
+    ...(Object.keys(toolNames).length > 0 ? { toolNames } : {}),
+    ...(Object.keys(toolLanes).length > 0 ? { toolLanes } : {}),
+  };
 }

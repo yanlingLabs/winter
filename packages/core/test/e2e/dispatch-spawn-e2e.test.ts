@@ -80,6 +80,22 @@ async function until<T>(probe: () => T | undefined, ms = 30_000, what = "a condi
   }
 }
 
+/** Every live process (other than this one) whose command line names `home` -- SIGKILLed, then waited for. */
+async function reapStrays(home: string): Promise<void> {
+  const list = (): number[] => {
+    const ps = Bun.spawnSync(["/bin/ps", "-axww", "-o", "pid=,command="], { stdout: "pipe", stderr: "ignore" });
+    return new TextDecoder().decode(ps.stdout).split("\n")
+      .filter((line) => line.includes(home))
+      .map((line) => Number.parseInt(line.trim(), 10))
+      .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid);
+  };
+  const strays = list();
+  if (strays.length === 0) return;
+  console.warn(`[dispatch-spawn-e2e] reaping ${strays.length} process(es) that outlived the test daemon`);
+  for (const pid of strays) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
+  for (let n = 0; n < 100 && list().length > 0; n++) await Bun.sleep(20);
+}
+
 type ToolResult = { content: Array<{ type: string; text: string }>; isError: boolean };
 type ChildUpdate = Extract<SessionEvent, { type: "child_update" }>;
 
@@ -105,6 +121,11 @@ function harnessFor(settings: (home: string) => Record<string, unknown>) {
       const stopping = s.daemon?.stop();
       s.daemon = undefined;
       await stopping;
+      // BACKSTOP only: the daemon no longer spawns into a stop (`beginShutdown`, `spawnRefusal`, an end
+      // mid-open -- `spawn-during-stop-e2e.test.ts` drives that race). Should a child still outlive the
+      // daemon, every child's command line carries its config, whose cwd is under this home -- so any
+      // process still naming the home is ours: reap it, and say so (a line here is a regression to chase).
+      await reapStrays(s.home);
       rmSync(s.home, { recursive: true, force: true });
     },
     async spawn(args: Record<string, unknown>): Promise<ToolResult> {

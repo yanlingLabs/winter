@@ -73,4 +73,9 @@ describe("standard error codes", () => {
     expect(ERR.INVALID_PARAMS).toBe(-32602);
     expect(ERR.INTERNAL).toBe(-32603);
   });
+
+  test("RETRY is its own code: a transient refusal the caller repeats, never INTERNAL", () => {
+    expect(ERR.RETRY).toBe(-32007);
+    expect(new Set(Object.values(ERR)).size).toBe(Object.values(ERR).length);
+  });
 });

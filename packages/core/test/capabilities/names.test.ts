@@ -148,8 +148,8 @@ describe("WINTER_CAPABILITY_TOOLS", () => {
     expect(t["mcp__winter__sessions__list_sessions"]).toEqual({ modes: ["dispatch"], plainName: "ListSessions", eager: true });
     // ManageSession was removed from Dispatch (user ruling 2026-10-02).
     expect(t["mcp__winter__sessions__manage_session"]).toBeUndefined();
-    expect(t["mcp__winter__computer__computer"]).toEqual({ modes: ["code", "dispatch"], plainName: "Computer" });
-    expect(t["mcp__winter__browser__browser"]).toEqual({ modes: ["code", "dispatch", "chat"], plainName: "Browser" });
+    expect(t["mcp__winter__computer__computer"]).toEqual({ modes: ["code", "dispatch"], plainName: "Computer", lane: "computer" });
+    expect(t["mcp__winter__browser__browser"]).toEqual({ modes: ["code", "dispatch", "chat"], plainName: "Browser", lane: "browser" });
     for (const tool of ["docs", "sheets", "slides"]) {
       expect(t[`mcp__winter__office__${tool}`]).toEqual({ modes: ["code"] });
     }
