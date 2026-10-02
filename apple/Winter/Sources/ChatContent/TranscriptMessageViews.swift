@@ -1505,11 +1505,17 @@ struct TranscriptToolGroupRow: View {
     var sessionHasWorkingDirectory: Bool = false
 
     @Environment(\.transcriptToolRowStyle) private var rowStyle
+    /// False when the run's header is drawn elsewhere — the pill-themed window lays several tools'
+    /// pills side by side and shows each one's body (failure line, diff chips, opened calls) beneath.
+    var showsHeader: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: rowStyle == .pill ? 8 : 4) {
-            if rowStyle == .pill {
+            if !showsHeader {
+                // The header is drawn in a row of pills above (`PillFlowLayout`); only the body here.
+            } else if rowStyle == .pill {
                 PillToolRunHeader(entries: entries, turnIsLive: turnIsLive, isExpanded: isExpanded, toggle: toggle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 lineHeader
             }
