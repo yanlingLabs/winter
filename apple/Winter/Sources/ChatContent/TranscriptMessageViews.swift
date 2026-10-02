@@ -716,6 +716,8 @@ struct ToolCallRecord: Equatable {
     /// The sites this call's result named, with the icons the tool reported (`tool_result.siteIcons`)
     /// — what the pill-styled row draws a web tool's discs from (`toolRunDiscs`).
     var siteIcons: [SiteIconRef] = []
+    /// A `write` call's line count (`ActivityItem.writtenLines`), for the pill-themed tool pill.
+    var writtenLines: Int? = nil
 }
 
 /// Stable identity for one `.toolRun` group's EXPANSION state.
@@ -832,7 +834,8 @@ func groupActivity(_ items: [ActivityItem]) -> [ActivityGroup] {
             continue // deliberate — see doc comment above
         case .tool(let name, let detail, let callId, let output, let isError, let fileDiff, let siteIcons):
             let record = ToolCallRecord(callId: callId, detail: detail, output: output,
-                                        isError: isError, fileDiff: fileDiff, siteIcons: siteIcons)
+                                        isError: isError, fileDiff: fileDiff, siteIcons: siteIcons,
+                                        writtenLines: item.writtenLines)
             if case .toolRun(var entries) = groups.last {
                 if let last = entries.last, last.name == name {
                     entries[entries.count - 1] = ToolRunEntry(name: name, calls: last.calls + [record])
@@ -1506,8 +1509,7 @@ struct TranscriptToolGroupRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: rowStyle == .pill ? 8 : 4) {
             if rowStyle == .pill {
-                PillToolRunHeader(entries: entries, status: toolRunStatus(entries, turnIsLive: turnIsLive),
-                                  sentence: toolRunSentence(entries), isExpanded: isExpanded, toggle: toggle)
+                PillToolRunHeader(entries: entries, turnIsLive: turnIsLive, isExpanded: isExpanded, toggle: toggle)
             } else {
                 lineHeader
             }

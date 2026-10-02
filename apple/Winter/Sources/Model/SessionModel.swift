@@ -359,6 +359,10 @@ struct ActivityItem: Equatable {
         case notice(text: String)
     }
     var kind: Kind
+    /// How many lines a `write` call is putting in its file, counted from the call's `content`
+    /// argument when the call arrives — what the pill-themed window's running tool pill says
+    /// ("Writing 120 lines to config.ts") before any result exists. `nil` for every other tool.
+    var writtenLines: Int? = nil
 }
 
 extension ActivityItem {
@@ -747,6 +751,11 @@ enum SessionReducer {
         case .toolCall(let v) where v.threadId == mainThread:
             if s.pendingInteractions.isEmpty { s.status = .toolRunning(name: v.name) }
             appendActivity(.tool(name: v.name, detail: extractToolDetail(name: v.name, argsJson: v.argsJson), callId: v.callId), to: &s)
+            if v.name.lowercased() == "write", let lines = writtenLineCount(argsJson: v.argsJson),
+               let e = s.exchanges.indices.last, let i = s.exchanges[e].activity.indices.last,
+               s.exchanges[e].activity[i].toolCallId == v.callId {
+                s.exchanges[e].activity[i].writtenLines = lines
+            }
         case .toolResult(let v) where v.threadId == mainThread:
             // The status flip is deliberately UNCONDITIONAL and comes first: it is the behaviour
             // this case has always had, and it must not become contingent on whether the fold
@@ -1341,6 +1350,16 @@ enum SessionReducer {
     /// checked first for the fs tools as a deliberate belt — it is CC's name for that argument, so a
     /// model trained on that shape does sometimes emit it, and such a call still emits its
     /// `tool_call` (and therefore its row) before failing the daemon's zod parse.
+    /// How many lines a `write` call's `content` holds (a trailing newline does not start another).
+    static func writtenLineCount(argsJson: String) -> Int? {
+        guard let data = argsJson.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let content = obj["content"] as? String else { return nil }
+        if content.isEmpty { return 0 }
+        let newlines = content.reduce(0) { $1 == "\n" ? $0 + 1 : $0 }
+        return content.hasSuffix("\n") ? newlines : newlines + 1
+    }
+
     private static func extractToolDetail(name: String, argsJson: String) -> String? {
         guard let data = argsJson.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

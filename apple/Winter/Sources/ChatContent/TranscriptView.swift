@@ -190,6 +190,7 @@ private struct TranscriptExchangeRow: View {
     let tint: Color
 
     @State private var expandedRuns: Set<String> = []
+    @Environment(\.transcriptToolRowStyle) private var toolRowStyle
 
     /// The replies' file door — only where the window layer wired `onOpenFile`, so the orb's morph
     /// window and detached windows keep plain replies.
@@ -245,8 +246,17 @@ private struct TranscriptExchangeRow: View {
             switch segment {
             case .activity(let items):
                 for group in groupActivity(items) {
-                    entries.append(.group(index: groupIndex, group))
-                    groupIndex += 1
+                    // The pill-themed window gives each tool its own pill (user, 2026-10-02): a run
+                    // that searched and then ran commands is two pills, each with its own words.
+                    if toolRowStyle == .pill, case .toolRun(let runs) = group, runs.count > 1 {
+                        for run in runs {
+                            entries.append(.group(index: groupIndex, .toolRun([run])))
+                            groupIndex += 1
+                        }
+                    } else {
+                        entries.append(.group(index: groupIndex, group))
+                        groupIndex += 1
+                    }
                 }
             case .reply(let index):
                 entries.append(.reply(index))
