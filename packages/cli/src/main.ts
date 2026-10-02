@@ -487,6 +487,9 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   // a plain write and the non-TTY branches keep their exact one-line-per-update output.
   let tasks: Task[] = [];
   let subagents: CliSubagent[] = []; // live child threads of the current turn (2e-ii)
+  // Agent SDK 0.0.40: a round's read-only calls run concurrently and their results arrive in COMPLETION
+  // order, so a `↳` line names its own call (by callId) instead of relying on sitting under it.
+  const toolNameByCallId = new Map<string, string>();
   const selection: FooterSelection = { selectedThreadId: "main", focusIndex: null }; // Task 6 thread selector (footer)
   let atLineStart = true;
   let pinnedLineLengths: number[] = [];
@@ -741,8 +744,15 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       else if (sa.action === "print_full") emit(`${AQUA}${e.text}${RESET}\n`);
       else emit("\n");
     }
-    else if (e.type === "tool_call") emit(`${DIM}⚙ ${e.name} ${e.argsJson.slice(0, 120)}${RESET}\n`);
-    else if (e.type === "tool_result") emit(`${DIM}  ↳ ${e.isError ? "ERROR: " : ""}${e.output.split("\n")[0]?.slice(0, 120) ?? ""}${RESET}\n`);
+    else if (e.type === "tool_call") {
+      toolNameByCallId.set(e.callId, e.name);
+      emit(`${DIM}⚙ ${e.name} ${e.argsJson.slice(0, 120)}${RESET}\n`);
+    }
+    else if (e.type === "tool_result") {
+      const name = toolNameByCallId.get(e.callId);
+      toolNameByCallId.delete(e.callId);
+      emit(`${DIM}  ↳ ${name !== undefined ? `${name}: ` : ""}${e.isError ? "ERROR: " : ""}${e.output.split("\n")[0]?.slice(0, 120) ?? ""}${RESET}\n`);
+    }
     else if (e.type === "approval_requested") {
       emit(`approve ${e.toolName}? ${DIM}${e.summary}${RESET} [y/N] `);
       const wasEmpty = pending.length === 0;
