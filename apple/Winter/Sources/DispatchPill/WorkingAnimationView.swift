@@ -471,7 +471,7 @@ func workingToolSymbol(for rawName: String) -> String {
         let parts = name.components(separatedBy: "__")
         guard parts.count >= 3, parts[1] == "winter" else { return "shippingbox" }
         switch parts[2] {
-        case "browser": return "globe"
+        case "browser": return "safari"
         case "computer": return "cursorarrow.rays"
         case "office": return "doc.text"
         case "sessions": return "person.2.fill"
@@ -486,7 +486,10 @@ func workingToolSymbol(for rawName: String) -> String {
     case "write", "edit", "multiedit", "notebook_edit": return "pencil"
     case "glob", "grep": return "text.magnifyingglass"
     case "webfetch", "web_fetch", "readpage": return "safari"
-    case "websearch", "web_search", "search", "browser": return "globe"
+    // A GLOBE is reserved for a website the plume throws whose favicon is missing — no tool wears
+    // one, or a search's own puff reads as one of its sites (the user's mix-up, 2026-10-02).
+    case "websearch", "web_search", "search": return "magnifyingglass"
+    case "browser": return "safari"
     case "computer": return "cursorarrow.rays"
     case "lsp": return "chevron.left.forwardslash.chevron.right"
     case "task_create", "task_update", "task_list", "todowrite": return "checklist"

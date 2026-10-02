@@ -379,7 +379,7 @@ final class WorkingAnimationTests: XCTestCase {
 
     func testASearchThrowsItsTileThenTheSitesItFound() {
         let pending = Exchange(prompt: "p", reply: "", activity: [tool("WebSearch", detail: "swift", callId: "s1")])
-        XCTAssertEqual(plumeThrows(for: pending), [PlumeThrow(id: "s1", kind: .tool(symbol: "globe"))])
+        XCTAssertEqual(plumeThrows(for: pending), [PlumeThrow(id: "s1", kind: .tool(symbol: "magnifyingglass"))])
         let output = """
         1. https://swift.org/blog — Swift
         2. https://developer.apple.com/swift/ and again https://swift.org/docs
@@ -448,6 +448,15 @@ final class WorkingAnimationTests: XCTestCase {
 
     // MARK: - Tool → symbol
 
+    /// A globe means a website with no favicon — so no TOOL may wear one, or a search's own puff reads
+    /// as one of its sites.
+    func testNoToolWearsTheMissingFaviconGlobe() {
+        for name in ["Search", "WebSearch", "web_search", "WebFetch", "Browser", "browser", "mcp__winter__browser__navigate",
+                     "mcp__winter__research__Search", "bash", "Read", "SpawnSession", "Computer", "unknown"] {
+            XCTAssertNotEqual(workingToolSymbol(for: name), "globe", name)
+        }
+    }
+
     func testToolSymbols() {
         XCTAssertEqual(workingToolSymbol(for: "bash"), "terminal")
         XCTAssertEqual(workingToolSymbol(for: "read"), "doc.text")
@@ -455,10 +464,10 @@ final class WorkingAnimationTests: XCTestCase {
         XCTAssertEqual(workingToolSymbol(for: "write"), "pencil")
         XCTAssertEqual(workingToolSymbol(for: "grep"), "text.magnifyingglass")
         XCTAssertEqual(workingToolSymbol(for: "WebFetch"), "safari", "matched case-insensitively")
-        XCTAssertEqual(workingToolSymbol(for: "WebSearch"), "globe")
+        XCTAssertEqual(workingToolSymbol(for: "WebSearch"), "magnifyingglass")
         XCTAssertEqual(workingToolSymbol(for: "session_spawn"), "paperplane.fill")
         XCTAssertEqual(workingToolSymbol(for: "task_update"), "checklist")
-        XCTAssertEqual(workingToolSymbol(for: "mcp__winter__browser__navigate"), "globe")
+        XCTAssertEqual(workingToolSymbol(for: "mcp__winter__browser__navigate"), "safari")
         XCTAssertEqual(workingToolSymbol(for: "mcp__winter__computer__click"), "cursorarrow.rays")
         XCTAssertEqual(workingToolSymbol(for: "mcp__github__create_issue"), "shippingbox", "a connector")
         XCTAssertEqual(workingToolSymbol(for: "something_new"), "hammer.fill", "never a blank centre")
@@ -474,7 +483,7 @@ final class WorkingAnimationTests: XCTestCase {
         XCTAssertEqual(workingToolSymbol(for: "list_sessions"), "person.2.fill")
         XCTAssertEqual(workingToolSymbol(for: "Computer"), workingToolSymbol(for: "computer"))
         XCTAssertEqual(workingToolSymbol(for: "Browser"), workingToolSymbol(for: "browser"))
-        XCTAssertEqual(workingToolSymbol(for: "Search"), "globe")
+        XCTAssertEqual(workingToolSymbol(for: "Search"), "magnifyingglass")
         XCTAssertEqual(workingToolSymbol(for: "mcp__winter__sessions__session_spawn"), "person.2.fill", "an old spelling still draws its server's symbol")
         XCTAssertTrue(plumeIsSearchTool("search"), "the SDK's own Search")
         XCTAssertTrue(plumeIsSearchTool("mcp__winter__research__search"), "an old transcript's daemon Search")
