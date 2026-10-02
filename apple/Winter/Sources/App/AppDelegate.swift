@@ -353,7 +353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `setPolicy` against a real chat session — the exact shown-but-broken bug this whole slice
     /// exists to close — so checking the source first, rather than hiding-by-default for an unknown
     /// mode, is the fix: it resolves the race with real data instead of guessing.
-    private func openSessionInNewDetachedWindow(_ sessionId: String, frame: NSRect? = nil, title: String = "Winter", isChat: Bool? = nil, sourceRows: [SessionSummary] = []) {
+    private func openSessionInNewDetachedWindow(_ sessionId: String, frame: NSRect? = nil, title: String = "Winter", isChat: Bool? = nil, sourceRows: [SessionSummary] = [], palette: PlumePalette = .blue) {
         guard let model = appModel,
               let (feed, session) = model.makeDetachedFeed(sessionId: sessionId) else {
             OrbDebug.log("openSessionInNewDetachedWindow: no appModel or makeDetachedFeed nil — spawn aborted")
@@ -365,7 +365,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DetachedWindowController.isChatSession(sessionId, in: sourceRows)
                 || DetachedWindowController.isChatSession(sessionId, in: model.directory.rows)
         )
-        spawnDetachedWindow(feed: feed, session: session, frame: resolvedFrame, title: title, isChat: resolvedIsChat)
+        spawnDetachedWindow(feed: feed, session: session, frame: resolvedFrame, title: title, isChat: resolvedIsChat,
+                            palette: palette)
     }
 
     /// Task 4 (detach choreography) body — extracted from `orb.onWindowDetach`'s closure (Plan-
@@ -455,8 +456,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pill.onElicitationURL = { [weak self] elicitationId in
             await self?.appModel?.elicitationURL(elicitationId: elicitationId)
         }
-        pill.onOpenChild = { [weak self] sessionId in
-            self?.openSessionInNewDetachedWindow(sessionId)
+        // The child's window wears the child pill's own plume colours.
+        pill.onOpenChild = { [weak self, weak pill] sessionId in
+            self?.openSessionInNewDetachedWindow(sessionId, palette: pill?.childPalette(for: sessionId) ?? .blue)
         }
         pill.onStopChild = { [weak self] sessionId in
             guard let client = self?.appModel?.client else { return }
@@ -902,8 +904,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
-    private func spawnDetachedWindow(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String, isChat: Bool = false) -> DetachedWindowController {
-        let detached = DetachedWindowController(feed: feed, session: session, frame: frame, title: title.isEmpty ? "Winter" : title, isChat: isChat)
+    private func spawnDetachedWindow(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String, isChat: Bool = false,
+                                     palette: PlumePalette = .blue) -> DetachedWindowController {
+        let detached = DetachedWindowController(feed: feed, session: session, frame: frame, title: title.isEmpty ? "Winter" : title,
+                                                isChat: isChat, palette: palette)
         registerDetachedWindow(detached)
         detached.show()
         return detached

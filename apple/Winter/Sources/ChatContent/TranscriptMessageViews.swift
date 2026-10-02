@@ -29,9 +29,23 @@ import SwiftUI
 /// unchanged) and still forwarded to `TranscriptFormattedMessageText` for the markdown accents that
 /// actually read it — list markers and the quote rule — it just paints no surface. (Headings do
 /// not: they go through `formattedText`, which never sees the tint.)
+/// A surface's own fill for the user's bubble — the dispatch-pill-themed session window tints it in
+/// the session's plume colour. `nil` (every other home) keeps `Theme.bubbleUser`.
+private struct TranscriptUserBubbleFillKey: EnvironmentKey {
+    static let defaultValue: Color? = nil
+}
+
+extension EnvironmentValues {
+    var transcriptUserBubbleFill: Color? {
+        get { self[TranscriptUserBubbleFillKey.self] }
+        set { self[TranscriptUserBubbleFillKey.self] = newValue }
+    }
+}
+
 struct TranscriptUserBubble: View {
     let text: String
     let tint: Color
+    @Environment(\.transcriptUserBubbleFill) private var bubbleFill
 
     /// **A wiring pin, not coverage** (same species as `ModelPickerTests.swift:767`): hoisted so
     /// "the user's own words are NOT set in Winter's voice" is assertable without rendering. The
@@ -60,7 +74,7 @@ struct TranscriptUserBubble: View {
                 .foregroundStyle(.primary)
         }
         .padding(14)
-        .background(Theme.bubbleUser, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(bubbleFill ?? Theme.bubbleUser, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 

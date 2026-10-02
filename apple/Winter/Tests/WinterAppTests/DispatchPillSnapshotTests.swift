@@ -224,7 +224,9 @@ final class DispatchPillSnapshotTests: XCTestCase {
         }
         let adapter = FieldStateAdapter(session: session)
         let size = CGSize(width: 720, height: 560)
-        let view = WindowContentView(adapter: adapter, tint: .blue, topInset: 52, sidebars: nil, pillChrome: true) { EmptyView() }
+        let bleed = ProcessInfo.processInfo.environment["WINTER_PILL_SNAPSHOT_BLEED"] != nil
+        let view = WindowContentView(adapter: adapter, tint: .blue, topInset: bleed ? 8 : 52, sidebars: nil,
+                                     topBleed: bleed ? 54 : 0, pillChrome: true) { EmptyView() }
             .background(Color.black)
             .environment(\.colorScheme, .dark)
             .frame(width: size.width, height: size.height)
@@ -238,6 +240,43 @@ final class DispatchPillSnapshotTests: XCTestCase {
         host.cacheDisplay(in: host.bounds, to: rep)
         try XCTUnwrap(rep.representation(using: .png, properties: [:]))
             .write(to: outputDirectory.appendingPathComponent("13-detached-window.png"))
+    }
+
+    /// The real detached window (its theme frame, traffic lights included), pill-themed, mid-turn —
+    /// for the header and the composer. Note: `cacheDisplay` does not capture an ON-SCREEN window's
+    /// scroll view, so the transcript renders blank here; test 13 renders the same column offscreen.
+    func test14DetachedWindowRealChrome() throws {
+        let t = DetachedScriptedTransport()
+        let session = SessionModel()
+        let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
+        let controller = DetachedWindowController(feed: feed, session: session, frame: NSRect(x: 100, y: 100, width: 820, height: 620),
+                                                  title: "Rosetta research", palette: .violet)
+        defer { controller.close() }
+        controller.show()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        // After the show: attaching the feed resets the session, so the state goes in once it has.
+        session.applyForTesting { s in
+            s.exchanges = [
+                Exchange(prompt: "Search the web for the Rosetta Stone and fetch one page",
+                         reply: "The Rosetta Stone is a granodiorite stela from 196 BC, kept at the British Museum since 1802. Its three scripts — hieroglyphic, Demotic and Greek — let Champollion decipher hieroglyphs in 1822.",
+                         activity: [ActivityItem(kind: .tool(name: "Search", detail: "Rosetta Stone", callId: "s1", output: "ok")),
+                                    ActivityItem(kind: .tool(name: "WebFetch", detail: "https://www.britishmuseum.org", callId: "f1", output: "ok"))]),
+                Exchange(prompt: "now run sleep 24 in the foreground", reply: "",
+                         activity: [ActivityItem(kind: .tool(name: "bash", detail: "sleep 24", callId: "b1"))]),
+            ]
+            s.turnRunning = true
+            s.status = .toolRunning(name: "bash")
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(session.state.exchanges.count, 2)
+        XCTAssertTrue(session.state.turnRunning)
+        let window = try XCTUnwrap(controller.windowForTesting)
+        let frameView = try XCTUnwrap(window.contentView?.superview)
+        for _ in 0..<4 { frameView.layoutSubtreeIfNeeded(); RunLoop.main.run(until: Date().addingTimeInterval(0.3)) }
+        let rep = try XCTUnwrap(frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds))
+        frameView.cacheDisplay(in: frameView.bounds, to: rep)
+        try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+            .write(to: outputDirectory.appendingPathComponent("14-detached-window-real.png"))
     }
 
     func test7ChildPills() throws {

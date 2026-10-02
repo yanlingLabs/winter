@@ -1004,6 +1004,12 @@ final class DispatchPillController: ObservableObject {
     /// The child session behind a child pill, while it is being watched.
     func childSession(_ sessionId: String) -> SessionModel? { childSessions[sessionId] }
 
+    /// A child's plume colours — the ones its pill wears (its place in the roster), so the window it
+    /// opens wears them too. Dispatch's own blue for a session that is not one of its children.
+    func childPalette(for sessionId: String) -> PlumePalette {
+        session.state.children.firstIndex { $0.sessionId == sessionId }.map(PlumePalette.child(at:)) ?? .blue
+    }
+
     /// Watch exactly the children that are still working (or waiting on the user) while the pill is on
     /// screen; let go of every other — a finished child, a stopped one, or all of them once the pill
     /// is put away — so no harness lingers.
