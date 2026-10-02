@@ -58,7 +58,10 @@ final class DetachedWindowTests: XCTestCase {
         t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
     }
 
-    func testShowCreatesNativeChromeWindowAtFrame() {
+    /// The window is Winter's own, in the dispatch pill's material (user, 2026-10-02): frameless —
+    /// no macOS titlebar, rim or corner radius — yet it can take the keyboard, and it keeps the
+    /// resize, close and minimise abilities the frame used to give it.
+    func testShowCreatesAFramelessPillWindowAtFrame() {
         let t = DetachedScriptedTransport()
         let session = SessionModel()
         let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
@@ -72,12 +75,69 @@ final class DetachedWindowTests: XCTestCase {
             XCTFail("show() must construct a real window")
             return
         }
-        XCTAssertTrue(window.styleMask.contains(.titled))
-        XCTAssertTrue(window.styleMask.contains(.miniaturizable))
+        XCTAssertTrue(window is PillChromeWindow)
+        XCTAssertFalse(window.styleMask.contains(.titled), "no macOS frame")
         XCTAssertTrue(window.styleMask.contains(.resizable))
         XCTAssertTrue(window.styleMask.contains(.closable))
-        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
+        XCTAssertTrue(window.styleMask.contains(.miniaturizable))
+        XCTAssertTrue(window.canBecomeKey, "a borderless window refuses the keyboard unless told otherwise")
+        XCTAssertTrue(window.canBecomeMain)
+        XCTAssertFalse(window.isOpaque, "transparent outside the rounded shape, so the shadow follows it")
+        XCTAssertTrue(window.hasShadow)
         XCTAssertEqual(window.frame, frame)
+        XCTAssertTrue(window.contentView?.subviews.contains { $0 is PillWindowResizeHandles } ?? false,
+                      "its own resize grips, over the content")
+    }
+
+    func testCmdWClosesTheFramelessWindow() {
+        let t = DetachedScriptedTransport()
+        let session = SessionModel()
+        let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
+        let controller = DetachedWindowController(feed: feed, session: session,
+                                                  frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter")
+        var closed = 0
+        controller.onClosed = { _ in closed += 1 }
+        controller.show()
+        controller.windowForTesting?.performClose(nil)
+        XCTAssertEqual(closed, 1, "performClose closes it — no native close button to press, no beep")
+    }
+
+    // MARK: - Resizing a frameless window (pure)
+
+    func testDraggingAnEdgeMovesOnlyThatEdge() {
+        let start = NSRect(x: 100, y: 100, width: 600, height: 500)
+        let min = NSSize(width: 340, height: 360)
+        XCTAssertEqual(pillWindowResizedFrame(start: start, delta: CGPoint(x: 50, y: 0), edges: .right, minSize: min),
+                       NSRect(x: 100, y: 100, width: 650, height: 500))
+        XCTAssertEqual(pillWindowResizedFrame(start: start, delta: CGPoint(x: 50, y: 0), edges: .left, minSize: min),
+                       NSRect(x: 150, y: 100, width: 550, height: 500), "the right edge stays put")
+        XCTAssertEqual(pillWindowResizedFrame(start: start, delta: CGPoint(x: 0, y: 40), edges: .top, minSize: min),
+                       NSRect(x: 100, y: 100, width: 600, height: 540))
+        XCTAssertEqual(pillWindowResizedFrame(start: start, delta: CGPoint(x: 0, y: 40), edges: .bottom, minSize: min),
+                       NSRect(x: 100, y: 140, width: 600, height: 460), "the top edge stays put")
+        XCTAssertEqual(pillWindowResizedFrame(start: start, delta: CGPoint(x: -30, y: -20), edges: [.left, .bottom], minSize: min),
+                       NSRect(x: 70, y: 80, width: 630, height: 520), "a corner moves two edges")
+    }
+
+    func testAResizeStopsAtTheMinimumSize() {
+        let start = NSRect(x: 100, y: 100, width: 600, height: 500)
+        let min = NSSize(width: 340, height: 360)
+        let shrunk = pillWindowResizedFrame(start: start, delta: CGPoint(x: 900, y: 900), edges: [.left, .bottom], minSize: min)
+        XCTAssertEqual(shrunk.size, min)
+        XCTAssertEqual(shrunk.maxX, start.maxX, "the far edges never move")
+        XCTAssertEqual(shrunk.maxY, start.maxY)
+    }
+
+    func testOnlyTheEdgesAndCornersAreGrips() {
+        let size = CGSize(width: 600, height: 500)
+        XCTAssertEqual(pillWindowResizeEdges(at: CGPoint(x: 2, y: 250), in: size), .left)
+        XCTAssertEqual(pillWindowResizeEdges(at: CGPoint(x: 598, y: 250), in: size), .right)
+        XCTAssertEqual(pillWindowResizeEdges(at: CGPoint(x: 300, y: 2), in: size), .bottom)
+        XCTAssertEqual(pillWindowResizeEdges(at: CGPoint(x: 300, y: 498), in: size), .top)
+        XCTAssertEqual(pillWindowResizeEdges(at: CGPoint(x: 8, y: 8), in: size), [.left, .bottom], "corners are easier to hit")
+        XCTAssertEqual(pillWindowResizeEdges(at: CGPoint(x: 595, y: 495), in: size), [.right, .top])
+        XCTAssertTrue(pillWindowResizeEdges(at: CGPoint(x: 300, y: 250), in: size).isEmpty, "the interior is the content's")
+        XCTAssertTrue(pillWindowResizeEdges(at: CGPoint(x: 20, y: 250), in: size).isEmpty)
     }
 
     func testCloseStopsFeedAndFiresOnClosedOnce() async throws {
