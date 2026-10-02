@@ -24,6 +24,11 @@ final class PillChromeWindow: NSWindow {
                    backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = .clear
+        // Open where the user IS. Opened from the dispatch pill (which floats on every Space), a second
+        // session window landed on another Space — open, key, and invisible (measured 2026-10-02:
+        // `isOnActiveSpace == false` right after `show()`); the user saw "only one window opens".
+        // `.fullScreenAuxiliary` lets it come up over a full-screen app's Space too, like the pill.
+        collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         // No system shadow: on a dark window the window server's shadow carries its own thin light
         // edge — the rim the user saw even with no stroke drawn (2026-10-02). The black shape stands
         // on its own, like the dispatch pill does.
