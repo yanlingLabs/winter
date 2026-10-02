@@ -60,6 +60,7 @@ struct AgentMessageEnvelope: Equatable {
         // sender escaped every inner one), so a `>` inside a value cannot end the tag early.
         var i = t.index(t.startIndex, offsetBy: openTag.count)
         var attributes: [String: String] = [:]
+        var order: [String] = []
         var tagEnd: String.Index?
         scan: while i < t.endIndex {
             while i < t.endIndex, t[i].isWhitespace { i = t.index(after: i) }
@@ -73,9 +74,18 @@ struct AgentMessageEnvelope: Equatable {
             i = t.index(after: i)
             guard let close = t[i...].firstIndex(of: "\"") else { return nil }
             attributes[name] = unescapeAttribute(String(t[i..<close]))
+            order.append(name)
             i = t.index(after: close)
         }
         guard let tagEnd, let from = attributes["from"], !from.isEmpty else { return nil }
+        // EXACTLY the daemon's own wrapping (`renderAttributedTurn`): these three attributes, in this order,
+        // a canonical sender and a known permission class. The daemon also escapes any wrapper text inside
+        // Dispatch's plain messages to its own child, so a `messaging` text cannot impersonate this shape.
+        guard order == ["from", "message-id", "sender-permission-class"],
+              from.hasPrefix("session:") || from.hasPrefix("agent:"),
+              let cls = attributes["sender-permission-class"], ["prompts", "bypasses", "unknown"].contains(cls),
+              let mid = attributes["message-id"], !mid.isEmpty
+        else { return nil }
 
         // Everything between the opening tag and the final closing tag. A RAW closing or opening tag
         // in there means two envelopes (or an unescaped sender): not ours to guess at.

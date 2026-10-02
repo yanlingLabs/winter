@@ -359,6 +359,16 @@ export class SessionStore {
    *  idempotent by construction (pass 1 resyncs known rows, pass 2 inserts unknown logs), so
    *  calling it again after the constructor already did costs a rescan and changes nothing. */
   recoverAll(): void {
+    // ListSessions' edited-files index rides this pass: it already parses every log, so every fileDiff
+    // it sees is (re)indexed — which is the one-time backfill of a home that predates the index AND the
+    // catch-up after a crash between a log write and its index insert, or a phone sync push. Collected
+    // here, written in ONE transaction at the end.
+    const fileDiffs: Array<{ sessionId: string; events: SessionEvent[] }> = [];
+    try { this.recoverLogs(fileDiffs); }
+    finally { this.indexEditedFilesFrom(fileDiffs, true); }
+  }
+
+  private recoverLogs(fileDiffs: Array<{ sessionId: string; events: SessionEvent[] }>): void {
     // Pass 1: resync sessions already in sqlite
     const rows = this.db.query("SELECT session_id, scope FROM sessions").all() as { session_id: string; scope: string }[];
     const known = new Set<string>();
@@ -374,6 +384,7 @@ export class SessionStore {
       }
       const lastSeq = good.length ? (JSON.parse(good[good.length - 1]!) as SessionEvent).seq : 0;
       const { title, firstMessage } = this.deriveIndexFields(parsed);
+      fileDiffs.push({ sessionId: r.session_id, events: parsed });
       this.db.run(
         "UPDATE sessions SET last_seq = ?, title = ?, first_message = ? WHERE session_id = ?",
         [lastSeq, title, firstMessage, r.session_id],
@@ -419,8 +430,32 @@ export class SessionStore {
           [sessionId, scope, createdAt, lastSeq, mode, title, firstMessage],
         );
         known.add(sessionId);
+        fileDiffs.push({ sessionId, events: parsed });
       }
     }
+  }
+
+  /** Index every `tool_result.fileDiff` in these events, in ONE transaction; with `mark`, record that the
+   *  edited-files index has seen every log (the one-time backfill is then done). Never throws: the index
+   *  is a search aid, and a failure here must not fail a boot or a sync — it is logged, and the next boot's
+   *  pass catches up. */
+  private indexEditedFilesFrom(batches: ReadonlyArray<{ sessionId: string; events: readonly SessionEvent[] }>, mark: boolean): number {
+    let seen = 0;
+    try {
+      this.db.transaction(() => {
+        for (const { sessionId, events } of batches) {
+          for (const e of events) {
+            if (e.type !== "tool_result" || e.fileDiff === undefined) continue;
+            this.recordEditedFile(sessionId, e.fileDiff.path, e.ts);
+            seen++;
+          }
+        }
+        if (mark) this.db.run("INSERT OR REPLACE INTO index_markers (name, value) VALUES ('edited_files_backfill', ?)", [String(Date.now())]);
+      })();
+    } catch (err) {
+      console.error(`[store] edited-files index update failed (${err instanceof Error ? err.name : "error"}) — the next boot catches up`);
+    }
+    return seen;
   }
 
   /** Parse all lines, skipping (not stopping at) unparseable ones. Returns both the raw
@@ -511,7 +546,12 @@ export class SessionStore {
         [event.text, sessionId],
       );
     }
-    if (event.type === "tool_result" && event.fileDiff !== undefined) this.recordEditedFile(sessionId, event.fileDiff.path, event.ts);
+    // The event is persisted: nothing after this line may make `append` throw. An index failure is logged and
+    // the next boot's `recoverAll` pass re-indexes it.
+    if (event.type === "tool_result" && event.fileDiff !== undefined) {
+      try { this.recordEditedFile(sessionId, event.fileDiff.path, event.ts); }
+      catch (err) { console.error(`[store] could not index an edited file for ${sessionId} (${err instanceof Error ? err.name : "error"}) — the next boot catches up`); }
+    }
     return event;
   }
 
@@ -555,24 +595,22 @@ export class SessionStore {
    */
   backfillEditedFiles(): number {
     if (this.editedFilesBackfilled()) return 0;
-    let seen = 0;
     const rows = this.db.query("SELECT session_id, scope FROM sessions").all() as { session_id: string; scope: string }[];
+    const batches: Array<{ sessionId: string; events: SessionEvent[] }> = [];
     for (const { session_id: sid, scope } of rows) {
       const path = this.logPath(scope, sid);
       let text: string;
       try { text = readFileSync(path, "utf8"); } catch { continue; }
+      const events: SessionEvent[] = [];
       for (const line of text.split("\n")) {
-        if (!line.includes('"fileDiff"')) continue;
-        let event: { type?: unknown; ts?: unknown; fileDiff?: { path?: unknown } };
-        try { event = JSON.parse(line); } catch { continue; }
-        if (event.type !== "tool_result" || typeof event.fileDiff?.path !== "string") continue;
-        this.recordEditedFile(sid, event.fileDiff.path, typeof event.ts === "number" ? event.ts : 0);
-        seen++;
+        if (!line.includes('"fileDiff"')) continue;   // cheap: only edit results are parsed
+        try { events.push(SessionEvent.parse(JSON.parse(line))); } catch { /* a bad line indexes nothing */ }
       }
+      if (events.length > 0) batches.push({ sessionId: sid, events });
     }
-    this.db.run("INSERT OR REPLACE INTO index_markers (name, value) VALUES ('edited_files_backfill', ?)", [String(Date.now())]);
-    return seen;
+    return this.indexEditedFilesFrom(batches, true);
   }
+
 
   /** Current last persisted seq for the session (used to stamp transient broadcast-only events). */
   lastSeq(sessionId: string): number {
@@ -1124,6 +1162,8 @@ export class SessionStore {
         );
       }
     }
+    // The edited-files index sees a synced push too (never throwing: the log already holds the events).
+    this.indexEditedFilesFrom([{ sessionId, events: entries.map((x) => x.event) }], false);
     return lastSeq;
   }
 

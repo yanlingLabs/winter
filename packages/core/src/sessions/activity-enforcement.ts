@@ -1,4 +1,5 @@
 import { ACTIVE_DEMOTION_MS, participatesInActivity, type ActivityRow } from "./activity";
+import { AUTOMATED_TURN_ORIGINS } from "./turn-origins";
 
 /** Which clients may have a running turn KILLED when they let go of a session (spec §1.2).
  *
@@ -97,6 +98,11 @@ export interface ActivityEnforcementDeps {
   /** `AgentEngine.interrupt` — the EXISTING ESC-abort path, so an enforcement abort produces the
    *  same `turn_completed(aborted)` a user's ESC does, and is resumable on identical terms. */
   abortTurn(sessionId: string): void;
+  /** The clientName of the message that started the RUNNING turn (`turn-origins.ts`'s `runningTurnOrigin`
+   *  over the session log). A turn the daemon started on someone else's behalf (`AUTOMATED_TURN_ORIGINS`:
+   *  another session's SendMessage, Dispatch's spawn prompt, its wake) is never aborted by a terminal
+   *  detach. Absent: every turn is treated as human-started (the pre-2026-10-02 rule). */
+  turnOrigin?(sessionId: string): string | undefined;
   /** True when something will start a turn on this session BY ITSELF later, so letting it settle to
    *  idle would be a lie. See the wiring in ipc/server.ts for what this actually resolves to and
    *  why routines are NOT part of it. */
@@ -137,8 +143,8 @@ export interface ActivityEnforcement {
  * once already.
  *
  * All state here is in memory and provisional. The two STORED flags stay user-explicit: nothing in
- * this file ever writes `backgrounded`/`archived` (`session.setActivity` and `dispatch-children.ts`'s
- * spawn path — which stamps a dispatch child backgrounded at birth — are their only two writers).
+ * this file ever writes `backgrounded`/`archived` (`session.setActivity` is their only writer; until
+ * 2026-10-02 `dispatch-children.ts`'s spawn path also stamped a child backgrounded at birth).
  * A daemon restart therefore forgets every auto-background and every active span, which is
  * correct — after a restart nothing is attached and no turn is running, so the derivation answers
  * from scratch.
@@ -254,9 +260,17 @@ export function createActivityEnforcement(deps: ActivityEnforcementDeps): Activi
         // has nothing to add — and no provisional mark either, since the state it would provision
         // is already the answer.
         if (!row.backgrounded && !row.archived && deps.turnRunning(sessionId)) {
-          const ownsTheTurn = harnessKindOf(client.clientName, client.role) === "terminal"
-            && !protectedTurns.has(sessionId);
-          if (ownsTheTurn) {
+          const terminal = harnessKindOf(client.clientName, client.role) === "terminal";
+          // A terminal "owns" (may abort) only a turn a HUMAN started. Since 2026-10-02 Dispatch
+          // children carry no background flag and SendMessage resumes sessions nobody has open, so a
+          // `winter watch` attaching to one of those turns and leaving must not kill it.
+          const automated = terminal && AUTOMATED_TURN_ORIGINS.has(deps.turnOrigin?.(sessionId) ?? "");
+          const ownsTheTurn = terminal && !automated && !protectedTurns.has(sessionId);
+          if (automated) {
+            // Not the watcher's turn to end — and deliberately NOT the app branch's provisional mark
+            // and protection: those arm the post-turn grace, which would show a finished, peer-messaged
+            // session as "background" for two minutes. The derivation already says what it is.
+          } else if (ownsTheTurn) {
             // The user's terminal went away mid-turn. Same abort a user's ESC performs — a
             // `turn_completed(aborted)`, resumable, no new machinery. NOT emitted as "idle" here:
             // the turn is still unwinding, so at this instant the honest derivation is "background"

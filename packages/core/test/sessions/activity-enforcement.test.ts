@@ -111,6 +111,7 @@ function harness(rows: Record<string, ActivityRow> = { s1: { mode: "code" } }) {
   const attached = new Map<string, number>();
   const emitted: (Activity | "none")[] = [];
   const aborted: string[] = [];
+  const origins = new Map<string, string>();
   const timers = fakeTimers();
   let clock = 1_700_000_000_000;
   let enf: ActivityEnforcement;
@@ -136,13 +137,14 @@ function harness(rows: Record<string, ActivityRow> = { s1: { mode: "code" } }) {
     turnRunning: (id) => running.has(id),
     attachedCount: (id) => attached.get(id) ?? 0,
     abortTurn: (id) => { aborted.push(id); },
+    turnOrigin: (id) => origins.get(id),
     scheduledWakeup: (id) => wakeup.has(id),
     now: () => clock,
     timers: timers.api,
   });
 
   return {
-    enf, meta, running, wakeup, emitted, aborted, timers,
+    enf, meta, running, wakeup, emitted, aborted, timers, origins,
     now: () => clock,
     advance: (ms: number) => { clock += ms; },
     attach(id: string): void {
@@ -161,6 +163,37 @@ function harness(rows: Record<string, ActivityRow> = { s1: { mode: "code" } }) {
     },
   };
 }
+
+describe("a terminal detach never aborts a turn the daemon started on someone else's behalf (2026-10-02)", () => {
+  for (const origin of ["messaging", "dispatch", "dispatch-wake"]) {
+    test(`a ${origin}-started turn keeps running when a terminal attaches and detaches — no provisional mark, no grace`, () => {
+      const h = harness();
+      h.running.add("s1");
+      h.origins.set("s1", origin);
+      h.attach("s1");
+      h.detach("s1", "cli-watch");
+      expect(h.aborted).toEqual([]);
+      expect(h.enf.autoBackgrounded("s1")).toBe(false);
+      // Working, nobody attached: the derivation itself says background; the settle lands idle at once.
+      expect(h.emitted.at(-1)).toBe("background");
+      h.running.delete("s1");
+      h.enf.onTurnSettled("s1");
+      expect(h.timers.count()).toBe(0);
+      expect(h.emitted.at(-1)).toBe("idle");
+    });
+  }
+
+  test("a HUMAN-started turn still aborts on a terminal's last detach, as before", () => {
+    for (const origin of ["cli-chat", "orb", undefined]) {
+      const h = harness();
+      h.running.add("s1");
+      if (origin !== undefined) h.origins.set("s1", origin);
+      h.attach("s1");
+      h.detach("s1", "cli-chat");
+      expect(h.aborted).toEqual(["s1"]);
+    }
+  });
+});
 
 describe("last-detach enforcement (session-activity-hygiene T5)", () => {
   test("a TERMINAL harness letting go of a running turn aborts it — the ESC path, nothing new", () => {
@@ -688,4 +721,25 @@ describe("wired into the IPC server (session-activity-hygiene T5)", () => {
 });
 
 describe("dispatch-spawned children default to background (session-activity-hygiene T5)", () => {
+});
+
+describe("runningTurnOrigin: who started the latest turn, from the log", () => {
+  const { runningTurnOrigin } = require("../../src/sessions/turn-origins") as typeof import("../../src/sessions/turn-origins");
+  let seq = 0;
+  const ev = (type: string, extra: Record<string, unknown> = {}) => ({ type, sessionId: "s1", threadId: "main", seq: ++seq, ts: seq, ...extra }) as never;
+  test("direct pushes pair with the message right before; queued ones with the oldest owed", () => {
+    expect(runningTurnOrigin([ev("user_message", { text: "a", clientName: "cli-chat" }), ev("turn_started")])).toBe("cli-chat");
+    // A turn running (messaging), a human message queued, then the peer's turn ends and the queued one starts.
+    const log = [
+      ev("user_message", { text: "peer", clientName: "messaging" }), ev("turn_started"),
+      ev("assistant_message", { text: "..." }),
+      ev("user_message", { text: "me", clientName: "orb" }),
+      ev("turn_completed", { stopReason: "end_turn", inputTokens: 0, outputTokens: 0 }),
+      ev("turn_started"),
+    ];
+    expect(runningTurnOrigin(log.slice(0, 2))).toBe("messaging");
+    expect(runningTurnOrigin(log)).toBe("orb");
+    // The projector's pass-through echo never counts as a host push.
+    expect(runningTurnOrigin([ev("user_message", { text: "x", clientName: "dispatch" }), ev("user_message", { text: "x", clientName: "winter" }), ev("turn_started")])).toBe("dispatch");
+  });
 });

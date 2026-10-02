@@ -42,8 +42,8 @@ export interface ActivitySignals {
   /** T5's PROVISIONAL background: the daemon auto-backgrounded this session because its APP-kind
    *  harness detached mid-turn, and the post-turn grace window has not expired yet. Ephemeral and
    *  in-memory — deliberately NOT the stored `backgrounded` flag, which stays user-explicit
-   *  (`session.setActivity` is one writer; `dispatch-children.ts`'s spawn path is the other,
-   *  sanctioned one — it stamps a dispatch child backgrounded at birth).
+   *  (`session.setActivity` is its writer; until 2026-10-02 `dispatch-children.ts`'s spawn path also
+   *  stamped every dispatch child backgrounded at birth, so older children still carry the flag).
    *
    *  A signal rather than a row overlay because that is exactly what it is: a live fact the daemon
    *  owns, on the same footing as `turnRunning`/`attachedCount`. It matters for ONE window — after

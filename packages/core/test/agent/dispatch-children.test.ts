@@ -591,6 +591,44 @@ describe("which turns are followed, the bounded roster, shutdown and restart", (
     undo(); // consumed already: a no-op
   });
 
+  test("a follow-up QUEUED behind an unfollowed peer turn (with another message behind it) keeps its own tag — followed and woken", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    t.finish(child, { text: "first" });
+    await t.drain();
+    t.finish(t.dispatchId, { text: "reported" });
+    const peer = t.store.createSession("global", { mode: "code", cwd: t.workDir });
+    const updatesBefore = t.childUpdates().length;
+    // The peer's message starts a turn; Dispatch's follow-up and then another peer message queue behind it.
+    await t.sendMessage(peer, child, "peer one");
+    expect((await t.sendMessage(t.dispatchId, child, "dispatch follow-up")).status).toBe("queued");
+    await t.sendMessage(peer, child, "peer two");
+    const startNext = () => { t.driverFor(child).turnRunning = true; t.hub.append(child, { type: "turn_started", sessionId: child, threadId: "main" }); };
+    t.finish(child, { text: "peer one done" });       // the peer's turn: not followed
+    expect(t.childUpdates().length).toBe(updatesBefore);
+    startNext();                                       // Dispatch's follow-up starts: followed
+    expect(t.childUpdates().at(-1)).toMatchObject({ childSessionId: child, status: "running" });
+    t.finish(child, { text: "follow-up done" });
+    await t.drain();
+    expect(t.childUpdates().at(-1)).toMatchObject({ childSessionId: child, status: "completed", resultSummary: "follow-up done" });
+    expect(t.driverFor(t.dispatchId).sends.at(-1)!.text).toContain("follow-up done");
+    const afterWake = t.childUpdates().length;
+    startNext();                                       // the second peer message: not followed
+    t.finish(child, { text: "peer two done" });
+    await t.drain();
+    expect(t.childUpdates().length).toBe(afterWake);
+  });
+
+  test("a card from a child the user has OPEN is still relayed, but raises no unattended notification", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    t.hub.attach({ clientName: "orb", deliver: () => true }, child, 0);
+    t.hub.append(child, approval(child, "c-open"));
+    expect(t.dispatchLog().some((e) => e.type === "approval_requested" && (e as { callId?: string }).callId === "c-open")).toBe(true);
+    expect(t.notifications).toEqual([]);
+    expect(t.dispatchLog().some((e) => e.type === "notification_requested")).toBe(false);
+  });
+
   test("shutdown: no report and no wake while the children drain — but a withdrawn card still closes on the coordinator's log", async () => {
     const t = setup();
     const child = await t.spawnOne();

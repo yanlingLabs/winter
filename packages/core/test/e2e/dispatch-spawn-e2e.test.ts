@@ -356,6 +356,42 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     expect(refused!.output).toContain("only code and Cowork sessions");
   }, 180_000);
 
+  test("(8) a TERMINAL that attaches to a turn it did not start and detaches leaves it running; a human-started turn still aborts", async () => {
+    const watch = async (sid: string): Promise<void> => {
+      const c = await TestClient.connect(h.daemon!.socketPath);
+      await c.hello(h.daemon!.tokens.harness, "cli-watch");
+      await c.call(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 });
+      c.close();
+      await Bun.sleep(300);
+    };
+    // A Dispatch child mid-turn (started by the spawn prompt — origin `dispatch`), no background flag.
+    const res = await h.spawn({ dir: h.work, prompt: "spin", model: "winter-test/hang", title: "Watched kid" });
+    const child = /spawned session (s_[0-9a-f]+)/.exec(res.content[0]!.text)![1]!;
+    await until(() => h.daemon!.winter.get(child)?.turnRunning || undefined, 30_000, "the child's turn");
+    expect(h.daemon!.sessions.meta(child).backgrounded).not.toBe(true);
+    await watch(child);
+    expect(h.daemon!.winter.get(child)?.turnRunning).toBe(true);
+    // A code session nobody has open, resumed by ANOTHER session's SendMessage (origin `messaging`).
+    const target = (await h.client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "global", cwd: h.work, approvalPolicy: "auto", model: "winter-test/hang" })).sessionId;
+    const sender = (await h.client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "global", cwd: h.work, approvalPolicy: "auto", model: "winter-test/calls" })).sessionId;
+    await h.client.call(METHODS.sessionAttach, { sessionId: sender, fromSeq: 0 });
+    await h.client.call(METHODS.sessionSend, { sessionId: sender, text: `CALL SendMessage ${JSON.stringify({ to: target, message: "work on this", summary: "work" })}` });
+    await until(() => h.daemon!.winter.get(target)?.turnRunning || undefined, 60_000, "the messaged session's turn");
+    await watch(target);
+    expect(h.daemon!.winter.get(target)?.turnRunning).toBe(true);
+    // A HUMAN-started turn from a terminal: its last detach still aborts it, as before.
+    const mine = (await h.client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "global", cwd: h.work, approvalPolicy: "auto", model: "winter-test/hang" })).sessionId;
+    const cli = await TestClient.connect(h.daemon!.socketPath);
+    await cli.hello(h.daemon!.tokens.harness, "cli-chat");
+    await cli.call(METHODS.sessionAttach, { sessionId: mine, fromSeq: 0 });
+    await cli.call(METHODS.sessionSend, { sessionId: mine, text: "do it" });
+    await until(() => h.daemon!.winter.get(mine)?.turnRunning || undefined, 30_000, "the human's turn");
+    cli.close();
+    await until(() => h.daemon!.winter.get(mine)?.turnRunning === false || undefined, 30_000, "the human's turn to be aborted");
+    for (const sid of [child, target]) await h.client.call(METHODS.sessionInterrupt, { sessionId: sid });
+    await h.client.call(METHODS.sessionAttach, { sessionId: h.dispatchId, fromSeq: 0 });
+  }, 180_000);
+
   test("(3) stopping a child interrupts its turn, and the stop is reported", async () => {
     const res = await h.spawn({ dir: h.work, prompt: "wait forever", model: "winter-test/hang", title: "Slow kid" });
     expect(res.isError).toBe(false);

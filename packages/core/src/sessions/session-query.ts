@@ -28,6 +28,9 @@ export interface QueryableSession {
 
 export interface ParsedSessionQuery {
   words: string[];
+  /** The path-like tokens' own text (`readme.md`, `node.js`), also matched as WORDS against the title and
+   *  first message — a session titled "Update README.md" is found whether or not an edit was recorded. */
+  pathWords: string[];
   paths: string[];
   ranges: Array<{ from: number; to: number; label: string }>;
 }
@@ -47,6 +50,8 @@ const FILLER = new Set([
   "one", "some", "any", "there", "had", "has", "have", "ago", "day", "days", "week", "weeks", "month", "months",
 ]);
 const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+/** Words that make a following month name a date ("in may", "last may", "since june"). */
+const MONTH_LEADS = new Set(["in", "last", "this", "since", "during", "early", "mid", "late", "of", "from", "until", "before", "after", "on"]);
 const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 
 function startOfDay(t: number): number {
@@ -83,6 +88,7 @@ function looksLikePath(token: string): boolean {
 export function parseSessionQuery(query: string, now: number): ParsedSessionQuery {
   const ranges: ParsedSessionQuery["ranges"] = [];
   const paths: string[] = [];
+  const pathWords: string[] = [];
   const words: string[] = [];
   const raw = query.trim().split(/\s+/).filter((t) => t.length > 0);
   const lower = raw.map((t) => t.toLowerCase().replace(/^[("'`]+|[)"'`,.;:!?]+$/g, ""));
@@ -91,7 +97,12 @@ export function parseSessionQuery(query: string, now: number): ParsedSessionQuer
     const t = lower[i]!;
     const next = lower[i + 1];
     const cleanRaw = raw[i]!.replace(/^[("'`]+|[)"'`,;:!?]+$/g, "");
-    if (looksLikePath(cleanRaw) && !/^\d{4}-\d{2}-\d{2}$/.test(cleanRaw)) { paths.push(expandHome(cleanRaw.replace(/\.$/, ""))); continue; }
+    if (looksLikePath(cleanRaw) && !/^\d{4}-\d{2}-\d{2}$/.test(cleanRaw)) {
+      const path = cleanRaw.replace(/\.$/, "");
+      paths.push(expandHome(path));
+      pathWords.push(path.toLowerCase());
+      continue;
+    }
     if (t === "today") { ranges.push(dayRange(today, 1, "today")); continue; }
     if (t === "yesterday") { ranges.push(dayRange(addDays(today, -1), 1, "yesterday")); continue; }
     if ((t === "this" || t === "last" || t === "past") && (next === "week" || next === "month")) {
@@ -114,19 +125,33 @@ export function parseSessionQuery(query: string, now: number): ParsedSessionQuer
       i += 2;
       continue;
     }
+    const prev = lower[i - 1];
     const weekday = WEEKDAYS.indexOf(t.replace(/s$/, ""));
     if (weekday >= 0) {
-      const back = (new Date(today).getDay() - weekday + 7) % 7;
-      ranges.push(dayRange(addDays(today, -back), 1, WEEKDAYS[weekday]!));
+      // "friday" is the most recent Friday, today counting; "last friday" is the one BEFORE today.
+      let back = (new Date(today).getDay() - weekday + 7) % 7;
+      if (prev === "last" && back === 0) back = 7;
+      ranges.push(dayRange(addDays(today, -back), 1, `${prev === "last" ? "last " : ""}${WEEKDAYS[weekday]!}`));
       continue;
     }
-    // A full month name, or its three-letter form (`sep`, `oct`) — never `may`/`mar`, which are words too.
-    const month = MONTHS.findIndex((m) => m === t || (t.length === 3 && t !== "may" && t !== "mar" && m.slice(0, 3) === t));
-    if (month >= 0) {
+    // A month name counts only where it is DATE-SHAPED — after "in"/"last"/"this"/"since"/…, or next to a
+    // day number or a year — so "the session that may have fixed login" is not a May date. Its three-letter
+    // form (`sep`, `oct`) too, never `mar` (a word).
+    const month = MONTHS.findIndex((m) => m === t || (t.length === 3 && t !== "mar" && m.slice(0, 3) === t));
+    const isDay = (x: string | undefined): x is string => x !== undefined && /^([1-9]|[12]\d|3[01])(st|nd|rd|th)?$/.test(x);
+    const isYear = (x: string | undefined): x is string => x !== undefined && /^(19|20)\d{2}$/.test(x);
+    if (month >= 0 && (MONTH_LEADS.has(prev ?? "") || isDay(prev) || isDay(next) || isYear(next))) {
       const d = new Date(today);
-      const year = month > d.getMonth() ? d.getFullYear() - 1 : d.getFullYear();
-      const from = new Date(year, month, 1);
-      ranges.push({ from: from.getTime(), to: new Date(year, month + 1, 1).getTime(), label: MONTHS[month]! });
+      const year = isYear(next) ? Number(next) : isYear(lower[i + 2]) && isDay(next) ? Number(lower[i + 2]) : month > d.getMonth() ? d.getFullYear() - 1 : d.getFullYear();
+      const day = isDay(next) ? parseInt(next, 10) : isDay(prev) ? parseInt(prev, 10) : undefined;
+      if (day !== undefined) {
+        ranges.push(dayRange(new Date(year, month, day).getTime(), 1, `${MONTHS[month]!} ${day}`));
+        if (isDay(prev)) words.splice(words.lastIndexOf(prev), words.lastIndexOf(prev) >= 0 ? 1 : 0);
+      } else {
+        ranges.push({ from: new Date(year, month, 1).getTime(), to: new Date(year, month + 1, 1).getTime(), label: MONTHS[month]! });
+      }
+      if (isDay(next)) i++;
+      if (isYear(lower[i + 1])) i++;
       continue;
     }
     const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t);
@@ -138,7 +163,7 @@ export function parseSessionQuery(query: string, now: number): ParsedSessionQuer
     if (t.length < 2 || FILLER.has(t)) continue;
     words.push(t);
   }
-  return { words: [...new Set(words)], paths: [...new Set(paths)], ranges };
+  return { words: [...new Set(words)], pathWords: [...new Set(pathWords)], paths: [...new Set(paths)], ranges };
 }
 
 function pathMatch(query: string, candidate: string): "exact" | "suffix" | "base" | undefined {
@@ -169,20 +194,28 @@ export function rankSessions(sessions: readonly QueryableSession[], parsed: Pars
         why.push(`works in ${s.cwd}`);
       }
     }
-    for (const r of parsed.ranges) {
-      if (s.createdAt < r.to && s.lastEventTs >= r.from) {
-        score += 4;
-        why.push(`active ${r.label}`);
-      }
-    }
     const title = s.title?.toLowerCase() ?? "";
     const first = s.firstMessage?.toLowerCase() ?? "";
     const cwd = s.cwd?.toLowerCase() ?? "";
+    for (const w of parsed.pathWords) {
+      if (why.some((x) => x.startsWith("edited "))) break; // the path already matched what it names
+      if (title.includes(w)) { score += 3; why.push(`title: ${w}`); }
+      else if (first.includes(w)) { score += 2; why.push(`first message: ${w}`); }
+    }
     for (const w of parsed.words) {
       if (title.includes(w)) { score += 3; why.push(`title: ${w}`); }
       else if (first.includes(w)) { score += 2; why.push(`first message: ${w}`); }
       else if (s.editedFiles.some((f) => f.toLowerCase().includes(w))) { score += 1.5; why.push(`edited a file matching ${w}`); }
       else if (cwd.includes(w)) { score += 1; why.push(`cwd: ${w}`); }
+    }
+    // Dates BOOST what else matched rather than stand beside it: with words or paths in the query, a date
+    // match alone is a weak candidate (+0.5) and a date match on a session that matched them is +4 — so
+    // "readme yesterday" ranks the README session first. A query of dates only ranks by them alone.
+    const dateHits = parsed.ranges.filter((r) => s.createdAt < r.to && s.lastEventTs >= r.from);
+    const onlyDates = parsed.words.length === 0 && parsed.paths.length === 0;
+    for (const r of dateHits) {
+      score += onlyDates || score > 0 ? 4 : 0.5;
+      why.push(`active ${r.label}`);
     }
     if (score > 0) out.push({ session: s, score, why });
   }

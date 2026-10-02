@@ -46,7 +46,7 @@
 // never a second delivery. A cancelled sender (the handler's `signal`) and a daemon that began shutting
 // down are checked again right before anything is resumed or sent.
 import { createHash } from "node:crypto";
-import { buildSessionAddress, type GlobalAgentMessage } from "@yanlinglabs/winter-agent-sdk/messaging";
+import { buildSessionAddress, escapeAttributionText, type GlobalAgentMessage } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { HostMessageListAnswer, HostMessageSendAnswer, HostMessageSendRequest, HostMessagingHandler, HostReachableSession, HostSessionStopAnswer, HostSessionStopRequest } from "@yanlinglabs/winter-agent-sdk";
 import type { Activity } from "../sessions/activity";
 import { participatesInActivity } from "../sessions/activity";
@@ -77,6 +77,8 @@ export interface MessagingDriverHandle {
   send(text: string, clientName?: string): Promise<{ seq: number; queued: boolean }>;
   /** The session's own interrupt (`session.interrupt`, the Mac's stop button). Optional on a test double. */
   interrupt?(): Promise<{ wasRunning: boolean }>;
+  /** Messages queued behind the running turn (`WinterSession.pendingSends`). Optional on a test double. */
+  readonly pendingSends?: readonly string[];
 }
 
 export interface SessionMessagingDeps {
@@ -150,7 +152,7 @@ export class SessionMessaging {
     return {
       send: (request, opts) => this.send(callerSessionId, request, opts?.signal, incarnation),
       list: async () => this.list(callerSessionId),
-      stop: (request) => this.stop(callerSessionId, request),
+      stop: (request, opts) => this.stop(callerSessionId, request, opts?.signal),
     };
   }
 
@@ -203,7 +205,9 @@ export class SessionMessaging {
 
     // Dispatch following up its OWN child: plain text (the child's delegate-user), followed and woken.
     const ownChild = caller.mode === "dispatch" && target.origin === "dispatch-child" && target.parentSessionId === callerSessionId;
-    const text = ownChild ? request.message : renderAttributedTurn({
+    // Plain, but never wrapper-shaped: any `<agent-message` sequence in Dispatch's own text is escaped the way an
+    // attributed body is, so a model cannot write a "From session …" header the Mac would render as real.
+    const text = ownChild ? escapeAttributionText(request.message) : renderAttributedTurn({
       messageId: request.messageId,
       from: buildSessionAddress(callerSessionId),
       fromGeneration: 0,
@@ -262,7 +266,9 @@ export class SessionMessaging {
   }
 
   /** `TaskStop` on a session id: interrupt its running turn (the Mac's stop button). Never throws. */
-  async stop(callerSessionId: string, request: HostSessionStopRequest): Promise<HostSessionStopAnswer> {
+  async stop(callerSessionId: string, request: HostSessionStopRequest, signal?: AbortSignal): Promise<HostSessionStopAnswer> {
+    if (this.draining) return { status: "unavailable", reason: "Winter is shutting down; nothing was stopped" };
+    if (signal?.aborted === true) return { status: "unavailable", reason: "the caller was interrupted; nothing was stopped" };
     let caller: Meta;
     try { caller = this.deps.store.meta(callerSessionId); } catch { return { status: "refused", reason: "the calling session is not known to Winter" }; }
     if (caller.mode === "chat") return { status: "refused", reason: CHAT_SENDER_REFUSAL };
@@ -272,9 +278,16 @@ export class SessionMessaging {
     }
     const driver = this.deps.sessions.get(resolved.id);
     if (driver === undefined || !driver.turnRunning || driver.interrupt === undefined) return { status: "not_running" };
+    // What an interrupt does to the queue (`WinterSession.interrupt`: the drain is paused): messages held
+    // behind the stopped turn do NOT run now — they stay in the session's log and run, in order, as soon
+    // as the session receives its next message. Said in the answer, so the caller knows.
+    const held = driver.pendingSends?.length ?? 0;
     try {
       const { wasRunning } = await driver.interrupt();
-      return wasRunning ? { status: "stopped" } : { status: "not_running" };
+      if (!wasRunning) return { status: "not_running" };
+      return held === 0
+        ? { status: "stopped" }
+        : { status: "stopped", note: `${held} message${held === 1 ? " was" : "s were"} queued behind that turn and did NOT run — ${held === 1 ? "it stays" : "they stay"} in the session's log and run${held === 1 ? "s" : ""}, in order, when the session receives its next message (SendMessage it to continue)` };
     } catch (err) {
       return { status: "unavailable", reason: `could not stop session '${resolved.id}': ${refusalText(err)}` };
     }
