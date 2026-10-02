@@ -112,6 +112,12 @@ func plumeRepeatingThrows(for exchange: Exchange?) -> [PlumeThrow] {
     plumeThrows(for: exchange)
 }
 
+/// PURE: what a stretch of activity throws, by the plume's own rules — also the discs a tool row in
+/// the pill-themed session window shows (`toolRunDiscs`).
+func plumeThrows(inActivity activity: [ActivityItem]) -> [PlumeThrow] {
+    plumeThrows(in: activity, from: 0)
+}
+
 private func plumeThrows(in activity: [ActivityItem], from start: Int) -> [PlumeThrow] {
     var out: [PlumeThrow] = []
     for (index, item) in activity.enumerated() where index >= start {

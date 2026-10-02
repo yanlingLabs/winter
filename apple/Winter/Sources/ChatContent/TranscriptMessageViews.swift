@@ -48,7 +48,23 @@ private struct TranscriptMarkerTintKey: EnvironmentKey {
     static let defaultValue: Color? = nil
 }
 
+/// How a surface draws a run of tool calls: the plain chevron line every window has drawn, or the
+/// dispatch pill's own capsule (`PillToolRunHeader`) in the pill-themed session window.
+enum TranscriptToolRowStyle {
+    case line
+    case pill
+}
+
+private struct TranscriptToolRowStyleKey: EnvironmentKey {
+    static let defaultValue: TranscriptToolRowStyle = .line
+}
+
 extension EnvironmentValues {
+    var transcriptToolRowStyle: TranscriptToolRowStyle {
+        get { self[TranscriptToolRowStyleKey.self] }
+        set { self[TranscriptToolRowStyleKey.self] = newValue }
+    }
+
     var transcriptMarkerTint: Color? {
         get { self[TranscriptMarkerTintKey.self] }
         set { self[TranscriptMarkerTintKey.self] = newValue }
@@ -656,6 +672,9 @@ struct ToolCallRecord: Equatable {
     /// (a `let` with a default is dropped from the memberwise init entirely; a `let` without one
     /// would break all four).
     var fileDiff: FileDiffRef? = nil
+    /// The sites this call's result named, with the icons the tool reported (`tool_result.siteIcons`)
+    /// — what the pill-styled row draws a web tool's discs from (`toolRunDiscs`).
+    var siteIcons: [SiteIconRef] = []
 }
 
 /// Stable identity for one `.toolRun` group's EXPANSION state.
@@ -770,9 +789,9 @@ func groupActivity(_ items: [ActivityItem]) -> [ActivityGroup] {
         switch item.kind {
         case .task:
             continue // deliberate — see doc comment above
-        case .tool(let name, let detail, let callId, let output, let isError, let fileDiff, _):
+        case .tool(let name, let detail, let callId, let output, let isError, let fileDiff, let siteIcons):
             let record = ToolCallRecord(callId: callId, detail: detail, output: output,
-                                        isError: isError, fileDiff: fileDiff)
+                                        isError: isError, fileDiff: fileDiff, siteIcons: siteIcons)
             if case .toolRun(var entries) = groups.last {
                 if let last = entries.last, last.name == name {
                     entries[entries.count - 1] = ToolRunEntry(name: name, calls: last.calls + [record])
@@ -1441,27 +1460,16 @@ struct TranscriptToolGroupRow: View {
     /// editor-product Task 6 — see `WindowContentView.sessionHasWorkingDirectory`'s own doc.
     var sessionHasWorkingDirectory: Bool = false
 
+    @Environment(\.transcriptToolRowStyle) private var rowStyle
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Button(action: toggle) {
-                HStack(spacing: 6) {
-                    Image(systemName: "chevron.right")
-                        .font(Typography.badge(.semibold))
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                        .frame(width: 10)
-                    statusGlyph(toolRunStatus(entries, turnIsLive: turnIsLive))
-                    Text(toolRunSentence(entries))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    // The whole width is the hit target — the chevron alone is a 10pt mouse target,
-                    // and the affordance has to be usable, not just visible.
-                    Spacer(minLength: 0)
-                }
-                .contentShape(Rectangle())
+        VStack(alignment: .leading, spacing: rowStyle == .pill ? 8 : 4) {
+            if rowStyle == .pill {
+                PillToolRunHeader(entries: entries, status: toolRunStatus(entries, turnIsLive: turnIsLive),
+                                  sentence: toolRunSentence(entries), isExpanded: isExpanded, toggle: toggle)
+            } else {
+                lineHeader
             }
-            .buttonStyle(.plain)
-            .font(Typography.caption())
-            .foregroundStyle(Theme.textMuted)
 
             // Only while collapsed: expanded, the failing call's whole output is already on screen.
             // `.primary` against the row's `Theme.textMuted` is the emphasis — the line carries no
@@ -1472,10 +1480,10 @@ struct TranscriptToolGroupRow: View {
             if !isExpanded, let summary = toolRunFailureSummary(entries) {
                 Text(summary)
                     .font(Typography.captionMono())
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(rowStyle == .pill ? AnyShapeStyle(Theme.textSecondary) : AnyShapeStyle(.primary))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .padding(.leading, 32)
+                    .padding(.leading, rowStyle == .pill ? 16 : 32)
             }
 
             // diff-tabs Task 9: the chips ride the COLLAPSED row too, on the failure summary's own
@@ -1485,9 +1493,33 @@ struct TranscriptToolGroupRow: View {
             // Bounded — `toolRunCollapsedDiffChips` — with the rest reachable by expanding.
             if !isExpanded { collapsedDiffChips }
 
-            if isExpanded { expandedCalls }
+            if isExpanded { expandedCalls.modifier(PillToolRunCard(active: rowStyle == .pill)) }
         }
         .animation(.easeOut(duration: 0.15), value: isExpanded)
+    }
+
+    /// The plain row every window but the pill-themed one draws: a chevron, a status glyph and the
+    /// sentence, muted.
+    private var lineHeader: some View {
+        Button(action: toggle) {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right")
+                    .font(Typography.badge(.semibold))
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .frame(width: 10)
+                statusGlyph(toolRunStatus(entries, turnIsLive: turnIsLive))
+                Text(toolRunSentence(entries))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                // The whole width is the hit target — the chevron alone is a 10pt mouse target,
+                // and the affordance has to be usable, not just visible.
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .font(Typography.caption())
+        .foregroundStyle(Theme.textMuted)
     }
 
     /// The collapsed row's diff chips — one per edit, bounded, with a note when the bound bites.
@@ -1504,7 +1536,7 @@ struct TranscriptToolGroupRow: View {
                         .foregroundStyle(Theme.textMuted)
                 }
             }
-            .padding(.leading, 32)
+            .padding(.leading, rowStyle == .pill ? 16 : 32)
         }
     }
 

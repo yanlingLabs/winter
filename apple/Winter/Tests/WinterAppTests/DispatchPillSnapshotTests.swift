@@ -219,6 +219,10 @@ final class DispatchPillSnapshotTests: XCTestCase {
                 Exchange(prompt: "Search the web for the Rosetta Stone and fetch one page", reply: "Done.\n\n- **Stone:** a granodiorite stela from 196 BC\n- **Kept:** the British Museum, since 1802\n\n1. Search\n2. Fetch",
                          activity: [ActivityItem(kind: .tool(name: "Search", detail: "Rosetta Stone", callId: "s1", output: "ok")),
                                     ActivityItem(kind: .tool(name: "WebFetch", detail: "https://www.britishmuseum.org", callId: "f1", output: "ok"))]),
+                Exchange(prompt: "Read the config and check the build", reply: "The build reads `project.yml`; one test failed.",
+                         activity: [ActivityItem(kind: .tool(name: "read", detail: "project.yml", callId: "r1", output: "name: Winter")),
+                                    ActivityItem(kind: .tool(name: "grep", detail: "deploymentTarget", callId: "g1", output: "13:"))  ,
+                                    ActivityItem(kind: .tool(name: "bash", detail: "xcodebuild test", callId: "x1", output: "1 failure", isError: true))]),
                 Exchange(prompt: "and run sleep 24 in the foreground", reply: "",
                          activity: [ActivityItem(kind: .tool(name: "bash", detail: "sleep 24", callId: "b1"))]),
             ]
@@ -231,6 +235,7 @@ final class DispatchPillSnapshotTests: XCTestCase {
         let view = WindowContentView(adapter: adapter, tint: .white, topInset: bleed ? 8 : 52, sidebars: nil,
                                      topBleed: bleed ? 54 : 0, pillChrome: true) { EmptyView() }
             .environment(\.transcriptUserMessageStyle, .ruled)
+            .environment(\.transcriptToolRowStyle, .pill)
             .environment(\.transcriptMarkerTint, .white)
             .environment(\.pillChromePalette, .violet)
             .background(Color.black)
