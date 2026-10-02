@@ -193,7 +193,7 @@ const seen = (h: Harness, type: string): SessionEvent[] => h.events.filter((e) =
 // ── tests ────────────────────────────────────────────────────────────────────────────────────────
 
 describe("shutdown never leaves a child: an end mid-open, and a spawn refused while the daemon stops", () => {
-  test("end() while the incarnation is still OPENING waits for the open and ends the child it spawned", async () => {
+  test("end() while the incarnation is still OPENING: that open spawns nothing, and a send that joined it is refused with nothing appended", async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const h = harness({
@@ -201,17 +201,64 @@ describe("shutdown never leaves a child: an end mid-open, and a spawn refused wh
         await gate; // the open is parked here, before any spawn
         return { abortController: inc.abort, cwd: "/repo", model: "winter-test/echo", sessionId: "be-x" };
       },
+      endedWhileOpeningRefusal: () => Object.assign(new Error("replaced while it was starting"), { code: "session_replaced" }),
     });
     const opening = h.session.open();
     await Bun.sleep(1);
     expect(h.queries).toHaveLength(0);
-    const ending = h.session.end(); // lands mid-open: before 0.0.40 this returned at once and ended nothing
+    const opened = opening.then(() => undefined, (e: Error) => e);
+    const ending = h.session.end(); // lands mid-open: before 0.0.40 this returned at once and the open spawned a child anyway
+    const sent = h.session.send("hello").then(() => undefined, (e: Error) => e); // joins the same open
     release();
-    await opening;
+    expect((await opened)?.message).toBe("replaced while it was starting");
+    expect((await sent)?.message).toBe("replaced while it was starting");
     await ending;
-    expect(h.queries).toHaveLength(1);
-    expect(h.q().promptClosed).toBe(true); // the child it spawned was ended
+    expect(h.queries).toHaveLength(0); // no child, ever
+    expect(h.tracked).toHaveLength(0);
+    expect(h.types()).not.toContain("user_message"); // nothing appended for the refused send
     expect(h.session.state).not.toBe("live");
+  });
+
+  test("an open parked on something slow does not hold end() past its budget, and still spawns nothing when it settles", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const h = harness({
+      options: async (inc) => {
+        await gate;
+        return { abortController: inc.abort, cwd: "/repo", model: "winter-test/echo", sessionId: "be-x" };
+      },
+    });
+    const opening = h.session.open();
+    const opened = opening.then(() => undefined, (e: Error) => e);
+    await Bun.sleep(1);
+    const started = performance.now();
+    await h.session.end(); // the open is still parked: end() resolves after 2 x endGraceMs (25 ms here)
+    expect(performance.now() - started).toBeLessThan(1_000);
+    release(); // the open settles late...
+    expect((await opened)?.message).toContain("ended while it was starting");
+    expect(h.queries).toHaveLength(0); // ...and spawns nothing
+    expect(h.session.state).not.toBe("live");
+  });
+
+  test("a later open of the same session is not refused: the flag belongs to the open end() interrupted", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let first = true;
+    const h = harness({
+      options: async (inc) => {
+        if (first) { first = false; await gate; }
+        return { abortController: inc.abort, cwd: "/repo", model: "winter-test/echo", sessionId: "be-x" };
+      },
+    });
+    const opened = h.session.open().then(() => undefined, (e: Error) => e);
+    await Bun.sleep(1);
+    const ending = h.session.end();
+    release();
+    expect(await opened).toBeInstanceOf(Error);
+    await ending;
+    await h.session.open();
+    expect(h.queries).toHaveLength(1);
+    expect(h.session.state).toBe("live");
   });
 
   test("a spawn refusal (the driver table's beginShutdown) refuses the open BEFORE any child spawns", async () => {
