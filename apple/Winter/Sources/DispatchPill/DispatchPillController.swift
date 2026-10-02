@@ -807,6 +807,8 @@ final class DispatchPillController: ObservableObject {
 
     var composerBlurRadiusForTesting: CGFloat { max(0, appliedComposerBlur) }
     var composerTextViewForTesting: NSTextView? { composerView?.documentView as? NSTextView }
+    /// The floating layers' (cards + child row) last reported frame, canvas coordinates.
+    var accessoryFrameForTesting: CGRect { accessoryFrame }
 
     // MARK: - Spring (the orb's `morphStep`, on width and height)
 
