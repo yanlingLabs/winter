@@ -350,7 +350,6 @@ final class WorkingAnimationTests: XCTestCase {
             tool("mcp__winter__research__Search", detail: "q", callId: "s1", output: output, siteIcons: icons),
         ])
         XCTAssertEqual(plumeThrows(for: done), [
-            PlumeThrow(id: "s1", kind: .tool(symbol: workingToolSymbol(for: "mcp__winter__research__Search"))),
             PlumeThrow(id: "s1#alpha.example.com", kind: .site(host: "alpha.example.com", iconURL: "https://alpha.example.com/favicon.ico")),
             PlumeThrow(id: "s1#gamma.example.com", kind: .site(host: "gamma.example.com", iconURL: nil)),
             PlumeThrow(id: "s1#beta.example.org", kind: .site(host: "beta.example.org", iconURL: "https://cdn.example.net/beta.png")),
@@ -377,9 +376,9 @@ final class WorkingAnimationTests: XCTestCase {
         XCTAssertEqual(sites.first?.iconURL, "https://a.example.com/i.png")
     }
 
-    func testASearchThrowsItsTileThenTheSitesItFound() {
+    func testASearchThrowsOnlyTheSitesItFound() {
         let pending = Exchange(prompt: "p", reply: "", activity: [tool("WebSearch", detail: "swift", callId: "s1")])
-        XCTAssertEqual(plumeThrows(for: pending), [PlumeThrow(id: "s1", kind: .tool(symbol: "magnifyingglass"))])
+        XCTAssertEqual(plumeThrows(for: pending), [], "a search has no puff of its own — only the sites it finds")
         let output = """
         1. https://swift.org/blog — Swift
         2. https://developer.apple.com/swift/ and again https://swift.org/docs
@@ -388,7 +387,7 @@ final class WorkingAnimationTests: XCTestCase {
         """
         let done = Exchange(prompt: "p", reply: "", activity: [tool("WebSearch", detail: "swift", callId: "s1", output: output)])
         XCTAssertEqual(plumeThrows(for: done).map(\.id),
-                       ["s1", "s1#swift.org", "s1#developer.apple.com", "s1#a.com", "s1#b.com", "s1#c.com"],
+                       ["s1#swift.org", "s1#developer.apple.com", "s1#a.com", "s1#b.com", "s1#c.com"],
                        "every distinct public host, in order")
     }
 
@@ -414,9 +413,9 @@ final class WorkingAnimationTests: XCTestCase {
         XCTAssertEqual(plumeRepeatingThrows(for: Exchange(prompt: "p", reply: "", activity: [earlier, doneSearch])), [],
                        "every call has returned: nothing repeats")
         let round = plumeRepeatingThrows(for: Exchange(prompt: "p", reply: "", activity: [earlier, running, finishedAfter]))
-        XCTAssertEqual(round.map(\.id), ["s2", "r1"], "from the earliest call still out, to the end")
+        XCTAssertEqual(round.map(\.id), ["r1"], "from the earliest call still out, to the end (a search adds only its sites)")
         let withSites = plumeRepeatingThrows(for: Exchange(prompt: "p", reply: "", activity: [running, doneSearch]))
-        XCTAssertEqual(withSites.map(\.id), ["s2", "s1", "s1#a.com", "s1#b.com"], "a finished search's sites keep streaming while its round runs")
+        XCTAssertEqual(withSites.map(\.id), ["s1#a.com", "s1#b.com"], "a finished search's sites keep streaming while its round runs")
         XCTAssertEqual(plumeRepeatingThrows(for: nil), [])
     }
 
