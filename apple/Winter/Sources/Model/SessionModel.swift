@@ -1481,6 +1481,16 @@ final class SessionModel: ObservableObject {
         self.notifier = notifier
     }
 
+    /// Folds a run of events with ONE publish — `SessionFeed`'s streamed chunks, a frame's worth at a
+    /// time. Only for events with no side effect of their own (the two seams in `apply(_:)` below):
+    /// anything else goes through `apply(_:)`, one at a time.
+    func apply(contentsOf events: [SessionEvent]) {
+        guard !events.isEmpty else { return }
+        var next = state
+        for event in events { next = SessionReducer.reduce(next, event) }
+        state = next
+    }
+
     func apply(_ event: SessionEvent) {
         state = SessionReducer.reduce(state, event)
         // Store-level impurity seam (wave 6, item 1): `SessionReducer.reduce` must stay pure —

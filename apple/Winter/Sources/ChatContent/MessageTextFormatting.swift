@@ -2,15 +2,29 @@ import AppKit
 import SwiftUI
 
 struct FormattedMessageBlock: Identifiable {
-    enum Kind {
+    enum Kind: Equatable {
         case text(String)
         case code(language: String?, code: String)
     }
 
-    let id = UUID()
+    /// The block's place in its message. Positional, never a fresh `UUID()` per parse: a streamed
+    /// reply is parsed again on every chunk, and new ids made SwiftUI tear down and rebuild every
+    /// text view in it each time (user, 2026-10-02: the session windows fell behind the stream).
+    /// At the same place, the same view — only its text changes.
+    fileprivate(set) var id = 0
     let kind: Kind
 
+    init(kind: Kind) { self.kind = kind }
+
     static func parse(_ text: String) -> [FormattedMessageBlock] {
+        parseUnnumbered(text).enumerated().map { index, block in
+            var block = block
+            block.id = index
+            return block
+        }
+    }
+
+    private static func parseUnnumbered(_ text: String) -> [FormattedMessageBlock] {
         var blocks: [FormattedMessageBlock] = []
         var cursor = text.startIndex
 
@@ -60,7 +74,7 @@ struct FormattedMessageBlock: Identifiable {
 }
 
 struct FormattedMarkdownBlock: Identifiable {
-    enum Kind {
+    enum Kind: Equatable {
         case paragraph(String)
         case heading(level: Int, text: String)
         case bullet(String)
@@ -69,10 +83,21 @@ struct FormattedMarkdownBlock: Identifiable {
         case math(String)
     }
 
-    let id = UUID()
+    /// Positional — see `FormattedMessageBlock.id`.
+    fileprivate(set) var id = 0
     let kind: Kind
 
+    init(kind: Kind) { self.kind = kind }
+
     static func parse(_ text: String) -> [FormattedMarkdownBlock] {
+        parseUnnumbered(text).enumerated().map { index, block in
+            var block = block
+            block.id = index
+            return block
+        }
+    }
+
+    private static func parseUnnumbered(_ text: String) -> [FormattedMarkdownBlock] {
         let lines = text
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")

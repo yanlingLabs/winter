@@ -186,7 +186,8 @@ struct TranscriptAssistantMessage: View, Equatable {
                                                role: role, fillsAvailableWidth: true,
                                                fileLink: links.map { resolved -> (String) -> URL? in
                                                    { resolved.url(forCandidate: $0) }
-                                               })
+                                               },
+                                               fileLinkState: links)
                     .foregroundStyle(.primary)
                     // A linked path draws in Winter's own accent, not the system's (see above).
                     .tint(Theme.accent)
@@ -270,6 +271,9 @@ private struct TranscriptFormattedMessageText: View {
     /// Transcript file links: asked for each path candidate in the prose; a URL links it. `nil` —
     /// every caller but a linked assistant reply — renders exactly as before.
     var fileLink: ((String) -> URL?)? = nil
+    /// What `fileLink` answers from — compared in its place, since a closure cannot be (see
+    /// `TranscriptMarkdownBlockView`'s `==`).
+    var fileLinkState: TranscriptFileLinks? = nil
 
     private var blocks: [FormattedMessageBlock] {
         FormattedMessageBlock.parse(text)
@@ -287,7 +291,8 @@ private struct TranscriptFormattedMessageText: View {
                 case .text(let content):
                     ForEach(MessageTextFormatter.chatMarkdownBlocks(content)) { markdownBlock in
                         TranscriptMarkdownBlockView(block: markdownBlock, tint: tint, role: role,
-                                                    fileLink: fileLink)
+                                                    fileLink: fileLink, fileLinkState: fileLinkState)
+                            .equatable()
                     }
                 case .code(let language, let code):
                     TranscriptCodeBlock(
@@ -310,12 +315,22 @@ private struct TranscriptFormattedMessageText: View {
 /// `.labelColor` base (unchanged from the donor), quote text is one step down, and the maths
 /// background is `Theme.elevatedSurface` (mac-chat-parity Task 8) rather than a
 /// `separatorColor`-times-an-alpha, which had no way to be tuned per appearance.
-private struct TranscriptMarkdownBlockView: View {
+private struct TranscriptMarkdownBlockView: View, Equatable {
     let block: FormattedMarkdownBlock
     let tint: Color
     let role: TranscriptProseRole
     /// Transcript file links — see `TranscriptFormattedMessageText.fileLink`.
     var fileLink: ((String) -> URL?)? = nil
+    var fileLinkState: TranscriptFileLinks? = nil
+
+    /// A block whose text, colour, face and links are unchanged is not drawn again (user,
+    /// 2026-10-02): a streamed reply re-renders its message on every chunk, and rebuilding the
+    /// attributed text of every finished paragraph each time is what made the session windows fall
+    /// behind the stream. The link closure is compared through the state it answers from.
+    static func == (a: Self, b: Self) -> Bool {
+        a.block.kind == b.block.kind && a.tint == b.tint && a.role == b.role
+            && a.fileLinkState == b.fileLinkState && (a.fileLink == nil) == (b.fileLink == nil)
+    }
 
     @Environment(\.colorScheme) private var colorScheme
 

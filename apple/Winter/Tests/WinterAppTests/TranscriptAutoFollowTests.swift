@@ -58,6 +58,12 @@ final class TranscriptAutoFollowTests: XCTestCase {
         try await super.tearDown()
     }
 
+    /// The follow runs on the display's own clock, which stops while the display sleeps (a test run
+    /// left going with the Mac's screen off) — nothing to measure then.
+    private func skipIfDisplayAsleep() throws {
+        try XCTSkipIf(CGDisplayIsAsleep(CGMainDisplayID()) != 0, "the display is asleep: its display link does not tick")
+    }
+
     private func host(_ model: Model, _ follower: TranscriptFollower) -> NSWindow {
         let w = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 400, height: 300),
                          styleMask: [.titled], backing: .buffered, defer: false)
@@ -81,6 +87,7 @@ final class TranscriptAutoFollowTests: XCTestCase {
     }
 
     func testItOpensAtTheBottomAndFollowsGrowth() throws {
+        try skipIfDisplayAsleep()
         let model = Model(), follower = TranscriptFollower()
         _ = host(model, follower)
         let sv = try XCTUnwrap(follower.scrollView, "found its scroll view")
@@ -92,6 +99,7 @@ final class TranscriptAutoFollowTests: XCTestCase {
     }
 
     func testScrollingUpLetsGoAndComingBackResumes() throws {
+        try skipIfDisplayAsleep()
         let model = Model(), follower = TranscriptFollower()
         _ = host(model, follower)
         let sv = try XCTUnwrap(follower.scrollView)

@@ -530,8 +530,14 @@ struct WorkingAnimationView: View {
         self.repeating = repeating
         self.emitterInset = emitterInset
         self.palette = palette
-        _model = State(initialValue: initialModel ?? WorkingAnimationModel())
+        _model = State(initialValue: initialModel ?? Self.freshModel)
     }
+
+    /// A new plume's starting state, pre-warmed ONCE and copied (user, 2026-10-02): a view's init runs
+    /// on every re-render of whatever holds it — a streaming window's composer, per chunk — and
+    /// `@State` keeps only the first value, so pre-warming in the init threw that work away each time.
+    /// Every default plume starts from the same seed, so one copy is every plume's start.
+    private static let freshModel = WorkingAnimationModel()
 
     var body: some View {
         TimelineView(.animation) { timeline in
