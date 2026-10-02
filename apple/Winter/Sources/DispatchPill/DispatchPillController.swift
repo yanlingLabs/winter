@@ -30,6 +30,14 @@ final class DispatchPillPanel: NSPanel {
     }
 }
 
+/// The pill's content view, which acts on the FIRST click even while the panel is not key. By
+/// default a click on a non-key window only makes it key — so with a session window holding the
+/// keyboard, the first click on a child pill was swallowed and the user had to click again
+/// (2026-10-02).
+final class FirstClickHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// The panel's canvas size — what `DispatchPillView` requests as its outer frame. Kept in lockstep
 /// with every `panel.setFrame` (`DispatchPillController.setCanvas`): `NSHostingView` resizes its
 /// window to its root view's requested frame on every layout pass (`MorphModel.activeWindowSize`'s
@@ -163,6 +171,7 @@ final class DispatchPillController: ObservableObject {
     // MARK: Test seams
 
     var panelFrameForTesting: CGRect { panel.frame }
+    var panelContentViewForTesting: NSView? { panel.contentView }
     var panelIsVisibleForTesting: Bool { panel.isVisible }
     var panelAcceptsKeyForTesting: Bool { panel.acceptsKeyInput }
     var panelCanBecomeKeyForTesting: Bool { panel.canBecomeKey }
@@ -265,7 +274,7 @@ final class DispatchPillController: ObservableObject {
         canvas.size = initialCanvas
         lockedVisibleFrame = currentVisibleFrame()
 
-        let hosting = NSHostingView(rootView: DispatchPillView(controller: self))
+        let hosting = FirstClickHostingView(rootView: DispatchPillView(controller: self))
         hosting.sizingOptions = []
         panel.contentView = hosting
         panel.onRestingMouseDown = { [weak self] location in self?.handleRestingMouseDown(at: location) }

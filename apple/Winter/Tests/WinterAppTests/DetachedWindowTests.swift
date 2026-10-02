@@ -84,13 +84,18 @@ final class DetachedWindowTests: XCTestCase {
         XCTAssertTrue(window.canBecomeMain)
         XCTAssertFalse(window.isOpaque, "transparent outside the rounded shape")
         XCTAssertFalse(window.hasShadow, "the system shadow draws a light rim on a dark window — none")
-        // The user's "only one window opens": a second window came up on ANOTHER Space. It opens on
-        // the one the user is on, over a full-screen app's too.
+        // The user's "only one window opens": with a full-screen app, a second ordinary window was put on
+        // the regular desktop. A non-activating auxiliary panel — the pill's kind — is admitted there.
         XCTAssertTrue(window.collectionBehavior.contains(.moveToActiveSpace))
+        XCTAssertTrue(window is NSPanel && window.styleMask.contains(.nonactivatingPanel),
+                      "a non-activating panel: what a full-screen app's Space admits, and no Space jump")
+        XCTAssertFalse((window as? NSPanel)?.hidesOnDeactivate ?? true, "never hidden when Winter is inactive")
         XCTAssertTrue(window.collectionBehavior.contains(.fullScreenAuxiliary))
         XCTAssertEqual(window.frame, frame)
         XCTAssertTrue(window.contentView?.subviews.contains { $0 is PillWindowResizeHandles } ?? false,
                       "its own resize grips, over the content")
+        XCTAssertTrue(window.contentView?.subviews.contains { $0.acceptsFirstMouse(for: nil) && !($0 is PillWindowResizeHandles) } ?? false,
+                      "a click into a non-key session window acts at once")
     }
 
     func testCmdWClosesTheFramelessWindow() {
