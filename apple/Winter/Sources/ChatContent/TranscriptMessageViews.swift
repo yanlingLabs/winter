@@ -41,7 +41,19 @@ private struct TranscriptUserMessageStyleKey: EnvironmentKey {
     static let defaultValue: TranscriptUserMessageStyle = .bubble
 }
 
+/// A surface's own colour for the agent's list markers, numbers and quote rule — the
+/// dispatch-pill-themed session window draws them white. `nil` (every other home) keeps
+/// `Theme.accent`.
+private struct TranscriptMarkerTintKey: EnvironmentKey {
+    static let defaultValue: Color? = nil
+}
+
 extension EnvironmentValues {
+    var transcriptMarkerTint: Color? {
+        get { self[TranscriptMarkerTintKey.self] }
+        set { self[TranscriptMarkerTintKey.self] = newValue }
+    }
+
     var transcriptUserMessageStyle: TranscriptUserMessageStyle {
         get { self[TranscriptUserMessageStyleKey.self] }
         set { self[TranscriptUserMessageStyleKey.self] = newValue }
@@ -74,17 +86,18 @@ struct TranscriptUserBubble: View {
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         case .ruled:
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 22) {
                 TranscriptFormattedMessageText(text: displayText, tint: tint, role: proseRole,
                                                fillsAvailableWidth: true)
                     .foregroundStyle(.primary)
                     .fontWeight(.medium)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Rectangle()
-                    .fill(Color.white.opacity(0.12))
+                    .fill(Theme.textPrimary.opacity(0.85)) // white: the window is dark-only
                     .frame(height: 1)
             }
-            .padding(.top, 6)
+            .padding(.top, 10)
+            .padding(.bottom, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -108,6 +121,8 @@ struct TranscriptUserBubble: View {
 /// every plan card into Winter's speaking voice, which `docs/brand.md` § 4 does not allowlist — so
 /// the transcript's two call sites pass `.assistant` and the two card bodies pass `.sans`.
 struct TranscriptAssistantMessage: View, Equatable {
+    /// The agent's list markers' colour, where a surface sets one (`transcriptMarkerTint`).
+    @Environment(\.transcriptMarkerTint) private var markerTint
     let text: String
     let isStreaming: Bool
     let role: TranscriptProseRole
@@ -167,7 +182,7 @@ struct TranscriptAssistantMessage: View, Equatable {
                 // leaves `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME` unset — so every bullet
                 // and quote rule in the transcript was drawing in whatever colour the Mac's owner
                 // had picked in General, not in Winter's teal.
-                TranscriptFormattedMessageText(text: displayText, tint: Theme.accent,
+                TranscriptFormattedMessageText(text: displayText, tint: markerTint ?? Theme.accent,
                                                role: role, fillsAvailableWidth: true,
                                                fileLink: links.map { resolved -> (String) -> URL? in
                                                    { resolved.url(forCandidate: $0) }

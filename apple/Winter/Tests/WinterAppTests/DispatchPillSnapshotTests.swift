@@ -216,7 +216,7 @@ final class DispatchPillSnapshotTests: XCTestCase {
         session.applyForTesting { s in
             s.status = .idle
             s.exchanges = [
-                Exchange(prompt: "Search the web for the Rosetta Stone and fetch one page", reply: "The Rosetta Stone is a granodiorite stela from 196 BC, kept at the British Museum since 1802.",
+                Exchange(prompt: "Search the web for the Rosetta Stone and fetch one page", reply: "Done.\n\n- **Stone:** a granodiorite stela from 196 BC\n- **Kept:** the British Museum, since 1802\n\n1. Search\n2. Fetch",
                          activity: [ActivityItem(kind: .tool(name: "Search", detail: "Rosetta Stone", callId: "s1", output: "ok")),
                                     ActivityItem(kind: .tool(name: "WebFetch", detail: "https://www.britishmuseum.org", callId: "f1", output: "ok"))]),
                 Exchange(prompt: "and run sleep 24 in the foreground", reply: "",
@@ -228,9 +228,10 @@ final class DispatchPillSnapshotTests: XCTestCase {
         let adapter = FieldStateAdapter(session: session)
         let size = CGSize(width: 720, height: 560)
         let bleed = ProcessInfo.processInfo.environment["WINTER_PILL_SNAPSHOT_BLEED"] != nil
-        let view = WindowContentView(adapter: adapter, tint: .blue, topInset: bleed ? 8 : 52, sidebars: nil,
+        let view = WindowContentView(adapter: adapter, tint: .white, topInset: bleed ? 8 : 52, sidebars: nil,
                                      topBleed: bleed ? 54 : 0, pillChrome: true) { EmptyView() }
             .environment(\.transcriptUserMessageStyle, .ruled)
+            .environment(\.transcriptMarkerTint, .white)
             .environment(\.pillChromePalette, .violet)
             .background(Color.black)
             .environment(\.colorScheme, .dark)
