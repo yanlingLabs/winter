@@ -34,7 +34,7 @@ struct DispatchPillView: View {
         let accessories = hasAccessories
         VStack(spacing: DispatchPillMetrics.stackGap) {
             if accessories {
-                DispatchPillAccessories(controller: controller, adapter: adapter, rowWidth: morph.target.width)
+                DispatchPillAccessories(controller: controller, adapter: adapter, morph: morph)
                     .fixedSize(horizontal: false, vertical: true)
                     .onGeometryChange(for: CGRect.self) { proxy in
                         proxy.frame(in: .named(Self.canvasSpace))
@@ -102,7 +102,11 @@ struct DispatchPillShell<Content: View>: View {
 private struct DispatchPillAccessories: View {
     @ObservedObject var controller: DispatchPillController
     @ObservedObject var adapter: FieldStateAdapter
-    let rowWidth: CGFloat
+    /// Observed so the child row follows the main pill's ANIMATED width frame by frame — it resizes
+    /// with the pill as it grows or compresses, instead of snapping to where the pill is heading.
+    @ObservedObject var morph: DispatchPillMorphModel
+
+    private var rowWidth: CGFloat { morph.size.width }
 
     var body: some View {
         VStack(spacing: DispatchPillMetrics.stackGap) {

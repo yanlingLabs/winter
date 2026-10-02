@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import SwiftUI
 @testable import Winter
 
 /// `DispatchPillController` against a real (harness-dimmed) panel: visibility, the bottom-centred
@@ -732,6 +733,34 @@ final class DispatchPillControllerTests: XCTestCase {
         pill.hide()
         XCTAssertTrue(pill.watchedChildIdsForTesting.isEmpty, "putting the pill away lets every child go")
         XCTAssertEqual(Set(stopped), ["c1", "c3"])
+    }
+
+    /// The user's report: the child row snapped to the pill's new width while the pill itself was
+    /// still animating. It follows the ANIMATED width now — rendered mid-spring, the row is exactly as
+    /// wide as the main pill is at that instant.
+    func testTheChildRowFollowsTheMainPillsAnimatedWidth() {
+        let session = SessionModel()
+        session.applyForTesting { s in
+            s.children = [ChildItem(sessionId: "c1", title: "a", status: "running"),
+                          ChildItem(sessionId: "c2", title: "b", status: "running")]
+        }
+        let pill = makePill(session)
+        pill.setPresentationForTesting(.expanded)
+        let midway = CGSize(width: (DispatchPillMetrics.compactWidth + DispatchPillMetrics.expandedWidth) / 2,
+                            height: DispatchPillMetrics.pillHeight)
+        pill.setAnimatedSizeForTesting(midway)
+        let host = NSHostingView(rootView: DispatchPillView(controller: pill))
+        let window = NSWindow(contentRect: CGRect(origin: .zero, size: pill.canvas.size), styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.contentView = host
+        for _ in 0..<3 {
+            host.frame = CGRect(origin: .zero, size: pill.canvas.size)
+            host.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        XCTAssertEqual(pill.accessoryFrameForTesting.width, midway.width, accuracy: 0.5,
+                       "the row is the width the main pill IS, not the width it is heading to")
+        XCTAssertNotEqual(pill.accessoryFrameForTesting.width, pill.morph.target.width)
     }
 
     // MARK: - The mouse gate
