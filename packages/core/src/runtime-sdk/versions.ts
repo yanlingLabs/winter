@@ -3,8 +3,12 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.40";
-/** Bumped to 0.0.40 (2026-10-02): a tool round's results reach the host one `user` frame per call, each as soon as
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.41";
+/** Bumped to 0.0.41 (2026-10-03): `McpSdkServerConfig.concurrentTools` — a host can declare some of its in-process
+ *  tools concurrency-safe WITHOUT making them read-only, so several `SpawnSession` calls of one Dispatch round run at
+ *  once (as claude runs several `Agent` calls of a round at once); a scheduling statement only, never a
+ *  `readOnlyHint` (`capabilities/names.ts`' `concurrent`).
+ *  Earlier: bumped to 0.0.40 (2026-10-02): a tool round's results reach the host one `user` frame per call, each as soon as
  *  its call finishes (after its PostToolUse hooks), and a round's READ-ONLY calls run concurrently (completion-order
  *  frames), in both topologies and for subagents; before it the round
  *  crossed in one frame after its last call, so the Mac showed every call of a parallel batch as running until

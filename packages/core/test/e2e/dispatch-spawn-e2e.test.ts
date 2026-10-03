@@ -233,6 +233,86 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     }
   }, 90_000);
 
+  test("(1c) THREE SpawnSession calls in ONE model round run AT ONCE (agent SDK 0.0.41 concurrentTools) and make three correct children", async () => {
+    // User ruling 2026-10-03: claude runs several Agent calls of a round at once; Dispatch's SpawnSession
+    // likewise. Proved CAUSALLY, never by milliseconds: the FIRST spawn's child start (the driver table's
+    // `create`, inside the creation transaction) is held until all three spawns have reached theirs. Run one
+    // after the other, the second spawn could never get there while the first is held — the hold gives up
+    // after 15 s and the assertion below fails rather than hangs. And a spawn appends its child's `running`
+    // child_update only at its very end, so no creation may see one of this round's updates yet.
+    await h.daemon!.winter.get(h.dispatchId)?.end();
+    h.daemon!.sessions.setModel(h.dispatchId, "winter-test/calls");
+    const store = h.daemon!.sessions;
+    const drivers = h.daemon!.winter;
+    const realCreate = store.createSession.bind(store);
+    const realStart = drivers.create.bind(drivers);
+    const baseline = h.updates().length;
+    const updatesSeenAtCreation: number[] = [];
+    let arrived = 0;
+    let allArrivedWhileFirstHeld: boolean | undefined;
+    store.createSession = ((scope, opts) => {
+      if (opts?.origin === "dispatch-child") updatesSeenAtCreation.push(h.updates().length - baseline);
+      return realCreate(scope, opts);
+    }) as typeof store.createSession;
+    drivers.create = async (sessionId) => {
+      if (store.meta(sessionId).origin === "dispatch-child" && ++arrived === 1) {
+        for (let n = 0; n < 1500 && arrived < 3; n++) await Bun.sleep(10);
+        allArrivedWhileFirstHeld = arrived >= 3;
+      }
+      return realStart(sessionId);
+    };
+    try {
+      const before = h.client.events.length;
+      const turnsBefore = h.log(h.dispatchId).filter((e) => e.type === "turn_completed").length;
+      const specs = ["one", "two", "three"].map((k) => ({ dir: h.work, prompt: `concurrent task ${k}`, model: "winter-test/echo", title: `Kid ${k}` }));
+      const script = specs.map((args, i) => `${i === 0 ? "" : "+"}CALL SpawnSession ${JSON.stringify(args)}`).join("\n");
+      await h.client.call(METHODS.sessionSend, { sessionId: h.dispatchId, text: script });
+      await until(() => h.client.events.some((e) => h.client.events.indexOf(e) >= before && e.type === "turn_completed" && e.sessionId === h.dispatchId) || undefined, 60_000, "the coordinator's spawning turn");
+      await until(() => h.log(h.dispatchId).filter((e) => e.type === "turn_completed").length > turnsBefore || undefined, 10_000, "the spawning turn on the log");
+      // THE proof: all three spawns reached their child's start while the first was still held there, and
+      // all three creations began before any of the three spawns had finished.
+      expect(allArrivedWhileFirstHeld).toBe(true);
+      expect(updatesSeenAtCreation).toEqual([0, 0, 0]);
+
+      // One round of three calls, each answered once, none an error, each naming its own child.
+      const round = h.log(h.dispatchId).filter((e) => (e.type === "tool_call" || e.type === "tool_result") && e.seq > 0);
+      const calls = round.filter((e) => e.type === "tool_call").slice(-3) as Array<SessionEvent & { callId: string; name: string; argsJson: string }>;
+      expect(calls.map((c) => c.name)).toEqual(["session_spawn", "session_spawn", "session_spawn"]);
+      expect(calls[1]!.callId).toBe(`${calls[0]!.callId}-2`);   // the double numbers a joined call `<round id>-n`
+      const results = new Map((round.filter((e) => e.type === "tool_result") as Array<SessionEvent & { callId: string; output: string; isError: boolean }>).map((r) => [r.callId, r]));
+      const children: string[] = [];
+      for (const [i, c] of calls.entries()) {
+        const r = results.get(c.callId)!;
+        expect(r.isError).toBe(false);
+        const child = /spawned session (s_[0-9a-f]+) \("([^"]*)"\)/.exec(r.output);
+        expect(child?.[2]).toBe(specs[i]!.title);
+        children.push(child![1]!);
+      }
+      expect(new Set(children).size).toBe(3);
+      // Nothing cross-wired: each child got ITS call's prompt, title, parent link and exactly one `running`.
+      for (const [i, child] of children.entries()) {
+        expect(store.meta(child)).toMatchObject({ mode: "code", origin: "dispatch-child", parentSessionId: h.dispatchId, model: "winter-test/echo" });
+        expect(store.getTitle(child)).toBe(specs[i]!.title);
+        const prompts = h.log(child).filter((e) => e.type === "user_message") as Array<{ text: string; clientName: string }>;
+        expect(prompts[0]).toMatchObject({ text: specs[i]!.prompt, clientName: "dispatch" });
+        expect(h.updates().filter((u) => u.childSessionId === child && u.status === "running")).toHaveLength(1);
+      }
+      expect(store.childrenOf(h.dispatchId).map((r) => r.sessionId)).toEqual(expect.arrayContaining(children));
+      // Each runs and reports on its own.
+      for (const [i, child] of children.entries()) {
+        const done = await until(() => h.updates().find((u) => u.childSessionId === child && u.status === "completed"), 60_000, `child ${i}'s completed update`);
+        expect(done.title).toBe(specs[i]!.title);
+        const reply = h.log(child).find((e) => e.type === "assistant_message") as { text?: string } | undefined;
+        expect(reply?.text ?? "").toContain(specs[i]!.prompt);
+      }
+    } finally {
+      store.createSession = realCreate;
+      drivers.create = realStart;
+      await h.daemon!.winter.get(h.dispatchId)?.end();
+      h.daemon!.sessions.setModel(h.dispatchId, "winter-test/echo");
+    }
+  }, 120_000);
+
   test("(2) a child's approval card is relayed onto the coordinator's log and answered at the child's id", async () => {
     const res = await h.spawn({ dir: h.work, prompt: "use the tool", model: "winter-test/tooluse", title: "Tool kid" });
     expect(res.isError).toBe(false);
