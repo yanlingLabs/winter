@@ -1,8 +1,8 @@
 // Router 3279a1d (Contract A `escapeSandboxGlobPath`) — does the daemon's sandbox fence hold under a
 // directory whose name holds `[`, on the real `winter` binary?
 //
-// The runtime reads a `sandbox.filesystem` entry holding any of `* ? [ ]` as a GLOB (a seatbelt regex —
-// claude's `Rt`, ported to the Winter runtime at agent SDK round 11, `2a118c6`), so a raw `[wip] app` entry
+// The runtime reads a `sandbox.filesystem` entry holding any of `* ? [ ]` as a GLOB (a seatbelt regex, as
+// claude reads one — the Winter runtime since agent SDK round 11, `2a118c6`), so a raw `[wip] app` entry
 // is a character class that misses the literal directory. `childSandboxConfigFor` spells it `[[]wip] app`.
 // Since SDK round 17 (`bfecbfb`) the Winter runtime ALSO fences `<cwd>/**/.winter/{skills,rules,
 // output-styles,commands,agents}` on its own, whatever the daemon sends — so a `.winter/skills` write is
@@ -120,7 +120,7 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
     expect(literal.landed).toEqual({ "pkg/.winter/rules/x.md": false, "pkg/notes.md": true });
   }, 180_000);
 
-  // The ancestor-rename bypass (`mv .winter .w2 && … && mv .w2 .winter`): claude's `Ch` closes it only for
+  // The ancestor-rename bypass (`mv .winter .w2 && … && mv .w2 .winter`): claude's sandbox closes it only for
   // `.claude`-shaped entries; the Winter runtime's cover for `.winter` is SDK round 17's. RED against the SDK
   // 5e37898 binary (this row was a `todo` then: the file WAS planted); asserted since the pin carries round 17.
   test("`[wip] app`: the ancestor-rename probe cannot plant .winter/skills/x/SKILL.md (SDK round 17)", async () => {
