@@ -965,9 +965,9 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
       // REAL PATHS, never globs (review F8) — this list is LITERAL, and is never handed to a child
       // as-is: a spawn gets `childSandboxConfigFor`'s spelling of it (below). A plain entry is
       // rendered as a seatbelt **subpath** — `(deny file-write* (subpath "<canon(p)>"))` — which
-      // denies a real directory and everything under it. Since agent SDK round 11 (`2a118c6`, claude's
-      // `Rt`: `splitDenyPathsByGlobShape`) an entry holding `* ? [ ]` is rendered as a REGEX instead, on
-      // the Winter leg exactly as on claude — so a real path that merely CONTAINS `[` (a `[wip] app`
+      // denies a real directory and everything under it. Since agent SDK round 11 (`2a118c6`,
+      // `splitDenyPathsByGlobShape`) an entry holding `* ? [ ]` is rendered as a REGEX instead, on
+      // the Winter leg as on claude — so a real path that merely CONTAINS `[` (a `[wip] app`
       // project) must be spelled for that grammar before it reaches either runtime.
       //
       // What that means for the three control-plane FILENAMES: they cannot be expressed here at all
@@ -1048,9 +1048,8 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
  * (the Winter spawn below).
  *
  * Why both legs (C-1, the R.3 SDK review): both runtimes read a `sandbox.filesystem` entry holding any of
- * `* ? [ ]` as a GLOB and render it as a seatbelt REGEX, not a `(subpath …)` — claude always has (`Rt`),
- * and the Winter runtime since agent SDK round 11 (`2a118c6`, `splitDenyPathsByGlobShape`, claude's `Rt`
- * port). So under a home or project whose path holds a `[` (a directory named `[wip] app`), a raw deny
+ * `* ? [ ]` as a GLOB and render it as a seatbelt REGEX, not a `(subpath …)` — claude always has,
+ * and the Winter runtime since agent SDK round 11 (`2a118c6`, `splitDenyPathsByGlobShape`). So under a home or project whose path holds a `[` (a directory named `[wip] app`), a raw deny
  * entry is a character class that misses the literal path and fences NOTHING: measured on both real
  * binaries (`sandbox-glob-escape-measure.e2e.test.ts`) — a sandboxed write into the raw-denied directory
  * lands, into the spelled one it does not. The router's `escapeSandboxGlobPath` spells the one escape that
