@@ -77,7 +77,7 @@ with no `vendor/` checkout of its own) actually downloads. Two forms exist:
 ```swift
 .binaryTarget(
     name: "Iroh",
-    url: "https://github.com/yanlingLabs/winter/releases/download/iroh-xcframework-v1.1.0/IrohLib.xcframework.zip",
+    url: "https://github.com/yanlingLabs/winter/releases/download/iroh-xcframework-v1.1.0-r2/IrohLib.xcframework.zip",
     checksum: "56cc44535cb91af503d7f4c6c8548b08467a1daa6ddd6e7aa2cd5a5430f5c765"
 ),
 ```
@@ -88,7 +88,7 @@ This resolves identically for local Mac builds and for a remote consumer:
 resolve error, same failure mode as `fetch-iroh.sh`'s sha256 gate but enforced
 by SPM itself), and unpacks it. No `vendor/fetch-iroh.sh` run is required.
 
-This asset is hosted on this repo's own releases (tag `iroh-xcframework-v1.1.0`
+This asset is hosted on this repo's own releases (tag `iroh-xcframework-v1.1.0-r2`, a byte-identical re-host of the original `iroh-xcframework-v1.1.0`
 — a **build-asset tag**, deliberately distinct from the `v#.#.###` product
 release tags the app itself ships under) via `scripts/publish-iroh-xcframework.ts`,
 which re-zips `vendor/IrohLib.xcframework` (`ditto -c -k --keepParent`),
