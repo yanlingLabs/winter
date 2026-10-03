@@ -49,7 +49,7 @@ export function globalGitExcludesFile(cwd: string): string {
 }
 
 /**
- * claude parity (2.1.250 D6t): inside a git repo, when `git check-ignore` says the file is not ignored,
+ * claude parity: inside a git repo, when `git check-ignore` says the file is not ignored,
  * append `**\/.winter/settings.local.json` to `git config --global core.excludesfile`, else
  * `$XDG_CONFIG_HOME/git/ignore`, else `~/.config/git/ignore`. Idempotent.
  *

@@ -1,4 +1,4 @@
-// WS-21 L3.5 (spec §4.3, F21 — claude 2.1.250 D6t): writing `.winter/settings.local.json` inside a git
+// WS-21 L3.5 (spec §4.3, F21 — claude parity): writing `.winter/settings.local.json` inside a git
 // repo that does not already ignore it appends `**/.winter/settings.local.json` to the user's GLOBAL git
 // excludes — `core.excludesfile`, else `$XDG_CONFIG_HOME/git/ignore`, else `~/.config/git/ignore`.
 // Every test runs git with a temp HOME, XDG_CONFIG_HOME and GIT_CONFIG_GLOBAL: the developer's own git
