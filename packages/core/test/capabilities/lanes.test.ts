@@ -12,6 +12,8 @@ import type { PanelTabState } from "../../src/panel/store";
 import { browserCapability } from "../../src/capabilities/browser";
 import { computerCapability } from "../../src/capabilities/computer";
 import { WINTER_CAPABILITY_TOOLS } from "../../src/capabilities/names";
+import { sessionsCapability } from "../../src/capabilities/sessions";
+import type { ListSessionsDeps } from "../../src/agent/tools/list-sessions";
 import type { CapabilitySession } from "../../src/capabilities/server";
 
 const session = (over: Partial<CapabilitySession> = {}): CapabilitySession => ({ sessionId: "s_lanes", mode: "code", cwd: "/tmp", roots: ["/tmp"], ...over });
@@ -92,6 +94,52 @@ describe("capability concurrency lanes", () => {
     const result = await call;
     expect(performance.now() - started).toBeLessThan(2_000);
     expect(JSON.stringify(result.content)).toContain("interrupted");
+  });
+
+  test("the sessions server: SpawnSession is concurrency-safe (concurrentTools), ListSessions is read-only (readOnlyHint) — neither is the other", () => {
+    const sessions = sessionsCapability(session({ mode: "dispatch" }), { sessions: {} as ListSessionsDeps });
+    expect(sessions.concurrentTools).toEqual(["session_spawn"]);
+    expect(sessions.toolLanes).toBeUndefined();
+    const listed = (sessions.instance as WinterMcpServerInstance).listTools();
+    const byName = new Map(listed.map((t) => [t.name, t]));
+    // A spawn is never stated read-only: concurrency is a scheduling statement only (agent SDK 0.0.41).
+    expect(byName.get("session_spawn")!.annotations).toBeUndefined();
+    expect(byName.get("list_sessions")!.annotations).toEqual({ readOnlyHint: true });
+    // A code session's sessions server offers neither tool, so it declares nothing.
+    const code = sessionsCapability(session({ mode: "code" }), { sessions: {} as ListSessionsDeps });
+    expect(code.concurrentTools).toBeUndefined();
+    expect((code.instance as WinterMcpServerInstance).listTools()).toEqual([]);
+    // No other capability server declares a concurrent tool or a read-only one.
+    expect(computerCapability(session(), { computerUse: () => undefined }).concurrentTools).toBeUndefined();
+    expect(browserCapability(session(), { browser: browserDeps() }).concurrentTools).toBeUndefined();
+    for (const t of (browserCapability(session(), { browser: browserDeps() }).instance as WinterMcpServerInstance).listTools()) expect(t.annotations).toBeUndefined();
+  });
+
+  test("the daemon runs several SpawnSession calls at the same time, each with its own call signal", async () => {
+    const releases: Array<() => void> = [];
+    const signals: Array<AbortSignal | undefined> = [];
+    let inFlight = 0;
+    let peak = 0;
+    const sessions = sessionsCapability(session({ mode: "dispatch" }), {
+      sessions: {} as ListSessionsDeps,
+      spawn: async (args, ctx) => {
+        signals.push(ctx.signal);
+        inFlight++; peak = Math.max(peak, inFlight);
+        await new Promise<void>((r) => releases.push(r));
+        inFlight--;
+        return `spawned for ${args.prompt}`;
+      },
+    });
+    const instance = sessions.instance as WinterMcpServerInstance;
+    const cancels = [new AbortController(), new AbortController(), new AbortController()];
+    const calls = cancels.map((c, i) => instance.callTool("session_spawn", { dir: "/tmp", prompt: `p${i}` }, { signal: c.signal }));
+    for (let n = 0; n < 50 && releases.length < 3; n++) await Bun.sleep(2);
+    expect(peak).toBe(3);
+    cancels[1]!.abort();
+    expect(signals.map((s) => s?.aborted)).toEqual([false, true, false]);
+    for (const r of releases) r();
+    const results = await Promise.all(calls);
+    expect(results.map((r) => JSON.stringify(r.content))).toEqual([0, 1, 2].map((i) => JSON.stringify([{ type: "text", text: `spawned for p${i}` }])));
   });
 
   test("the daemon runs a Computer call and a Browser call at the same time", async () => {

@@ -156,6 +156,21 @@ export interface CapabilityToolFacts {
    * read-only call may. Absent: the tool is serial (a barrier) unless it is read-only by hint.
    */
   lane?: string;
+  /**
+   * Agent SDK 0.0.41 (user ruling 2026-10-03): the tool is CONCURRENCY-SAFE without being read-only
+   * (`McpSdkServerConfig.concurrentTools`) — its calls run beside the round's other concurrent calls, so
+   * several calls of it in one round run at once, as claude runs several `Agent` calls of a round at once.
+   * A scheduling statement only: it never makes the tool read-only anywhere (its `readOnlyHint` is not
+   * set). `SpawnSession`: each call creates and starts its OWN child session.
+   */
+  concurrent?: true;
+  /**
+   * The tool is genuinely READ-ONLY: its server lists it `annotations.readOnlyHint: true`, so the runtime
+   * runs its calls concurrently by claude's ordinary MCP rule. `ListSessions` only reads the session store.
+   * (Winter's connector permissions never read this for a capability tool — `isConnectorToolName` excludes
+   * every capability name, plain or `mcp__winter__<key>__…`.)
+   */
+  readOnly?: true;
 }
 
 /**
@@ -170,8 +185,10 @@ export interface CapabilityToolFacts {
 export const WINTER_CAPABILITY_TOOLS = {
   // `sessions` — dispatch's orchestration surface (`modes: ["dispatch"]` on both defs). EAGER: the ruling
   // lists them as ordinary dispatch tools. `manage_session` (ManageSession) was removed 2026-10-02.
-  "mcp__winter__sessions__session_spawn": { modes: ["dispatch"], plainName: "SpawnSession", eager: true },
-  "mcp__winter__sessions__list_sessions": { modes: ["dispatch"], plainName: "ListSessions", eager: true },
+  // `SpawnSession` is CONCURRENCY-SAFE (user ruling 2026-10-03): several spawns of one round run at once;
+  // `ListSessions` is READ-ONLY (`readOnlyHint: true`), so it runs beside other calls too.
+  "mcp__winter__sessions__session_spawn": { modes: ["dispatch"], plainName: "SpawnSession", eager: true, concurrent: true },
+  "mcp__winter__sessions__list_sessions": { modes: ["dispatch"], plainName: "ListSessions", eager: true, readOnly: true },
   // `computer` — `modes: ["code","dispatch"]`, deferred in both. Its PRESENCE additionally follows the
   // LIVE `settings.computerUse.enabled`, read when the session's servers are built (`index.ts`).
   "mcp__winter__computer__computer": { modes: ["code", "dispatch"], plainName: "Computer", lane: "computer" },

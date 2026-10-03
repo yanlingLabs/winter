@@ -791,3 +791,156 @@ describe("which turns are followed, the bounded roster, shutdown and restart", (
     expect(t.childUpdates()).toEqual([]);
   });
 });
+
+// Agent SDK 0.0.41 (user ruling 2026-10-03): `SpawnSession` is concurrency-safe, so one coordinator round
+// can run several spawns AT ONCE. The two steps a spawn awaits (the creation transaction, the child's first
+// `send`) are gates here, released in an order the test picks.
+describe("session_spawn: several spawns of one round at once", () => {
+  function gate() {
+    let open!: () => void;
+    let fail!: (e: Error) => void;
+    const p = new Promise<void>((res, rej) => { open = res; fail = rej; });
+    return { p, open, fail };
+  }
+  /** `setup()` with each spawn's creation and its child's first `send` held until the test releases them. */
+  function concurrentSetup() {
+    const t = setup();
+    const createGates = new Map<string, ReturnType<typeof gate>>();   // keyed by the spawn's key
+    const sendGates = new Map<string, ReturnType<typeof gate>>();
+    const createStarted: string[] = [];
+    const pendingKeys: string[] = [];
+    const childOf = new Map<string, string>();
+    const realCreate = t.deps.createSession()!;
+    t.deps.createSession = () => async (input) => {
+      // The creation input carries no prompt: with no model check to await, a spawn reaches its creation
+      // synchronously, so the creations start in call order.
+      const key = pendingKeys.shift()!;
+      createStarted.push(key);
+      const g = gate(); createGates.set(key, g);
+      await g.p;
+      const out = await realCreate(input);
+      childOf.set(key, out.sessionId);
+      const sg = gate(); sendGates.set(key, sg);
+      const d = t.driverFor(out.sessionId);
+      const realSend = d.send.bind(d);
+      d.send = async (text, clientName) => { await sg.p; return realSend(text, clientName); };
+      return out;
+    };
+    const spawn = (key: string, extra: { signal?: AbortSignal } = {}) => {
+      pendingKeys.push(key);
+      return t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: `task ${key}`, title: `T-${key}` }, extra)
+        .then((text) => ({ ok: true as const, text }), (err: Error) => ({ ok: false as const, text: err.message }));
+    };
+    const settle = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0)); };
+    return { ...t, createGates, sendGates, createStarted, childOf, spawn, settle };
+  }
+
+  test("three spawns in flight together, creations and prompts released out of order: three children, nothing cross-wired", async () => {
+    const t = concurrentSetup();
+    const results = [t.spawn("a"), t.spawn("b"), t.spawn("c")];
+    await t.settle();
+    // All three creations are under way before any of them has finished.
+    expect(t.createStarted).toEqual(["a", "b", "c"]);
+    t.createGates.get("c")!.open(); await t.settle();
+    t.createGates.get("a")!.open(); await t.settle();
+    t.sendGates.get("c")!.open(); await t.settle();
+    t.createGates.get("b")!.open(); await t.settle();
+    t.sendGates.get("b")!.open(); t.sendGates.get("a")!.open();
+    const out = await Promise.all(results);
+    expect(out.every((r) => r.ok)).toBe(true);
+    const keys = ["a", "b", "c"];
+    const ids = keys.map((k) => t.childOf.get(k)!);
+    expect(new Set(ids).size).toBe(3);
+    for (const [i, key] of keys.entries()) {
+      const id = ids[i]!;
+      // Each call's answer names ITS child; each child got ITS prompt and ITS title, once.
+      expect(out[i]!.text).toContain(`spawned session ${id} ("T-${key}")`);
+      expect(t.driverFor(id).sends).toEqual([{ text: `task ${key}`, clientName: DISPATCH_CLIENT_NAME }]);
+      expect(t.store.getTitle(id)).toBe(`T-${key}`);
+      expect(t.store.meta(id)).toMatchObject({ origin: "dispatch-child", parentSessionId: t.dispatchId, mode: "code" });
+      // Exactly one `running` announcement each, with its own title.
+      expect(t.childUpdates().filter((u) => u.childSessionId === id).map((u) => [u.status, u.title])).toEqual([["running", `T-${key}`]]);
+    }
+    expect(t.dc.roster().map((r) => r.sessionId).sort()).toEqual([...ids].sort());
+    // Each finishes and reports on its own; ONE wake (the coordinator is idle) carries all three.
+    for (const [i, id] of ids.entries()) t.finish(id, { text: `done ${i}` });
+    await t.drain();
+    const wakes = t.driverFor(t.dispatchId).sends;
+    expect(wakes).toHaveLength(1);
+    for (const [i, id] of ids.entries()) expect(wakes[0]!.text).toContain(`session: ${id}\ntitle: T-${keys[i]}`);
+    for (const [i, id] of ids.entries()) {
+      expect(t.childUpdates().filter((u) => u.childSessionId === id).map((u) => [u.status, u.resultSummary])).toEqual([["running", undefined], ["completed", `done ${i}`]]);
+    }
+  });
+
+  test("one spawn's failed first message rolls back that child alone; a refused creation leaves nothing; the others stand", async () => {
+    const t = concurrentSetup();
+    const results = [t.spawn("a"), t.spawn("b"), t.spawn("c")];
+    await t.settle();
+    for (const k of ["a", "b", "c"]) t.createGates.get(k)!.open();
+    await t.settle();
+    const bId = t.childOf.get("b")!;
+    t.sendGates.get("b")!.fail(new Error("pipe closed"));
+    t.sendGates.get("a")!.open(); t.sendGates.get("c")!.open();
+    const out = await Promise.all(results);
+    expect(out.map((r) => r.ok)).toEqual([true, false, true]);
+    expect(out[1]!.text).toContain("its first message could not be delivered: pipe closed");
+    expect(t.deleted).toEqual([bId]);
+    expect(t.childUpdates().some((u) => u.childSessionId === bId)).toBe(false);
+    const kept = t.store.childrenOf(t.dispatchId).map((r) => r.sessionId).sort();
+    expect(kept).toEqual([t.childOf.get("a")!, t.childOf.get("c")!].sort());
+    expect(t.dc.roster().map((r) => r.sessionId).sort()).toEqual(kept);
+
+    // A refused creation beside another spawn: that call fails, nothing of it exists, the other stands.
+    const u = setup();
+    const first = u.dc.spawn(u.dispatchId, { dir: u.workDir, prompt: "one" });
+    u.refuse(new WinterLegRefusal("winter_executable_unavailable", "no winter binary"));
+    const second = u.dc.spawn(u.dispatchId, { dir: u.workDir, prompt: "two" });
+    const settled = await Promise.allSettled([first, second]);
+    expect(settled.map((s) => s.status)).toEqual(["fulfilled", "rejected"]);
+    expect(u.store.childrenOf(u.dispatchId)).toHaveLength(1);
+    expect(u.childUpdates()).toHaveLength(1);
+  });
+
+  test("an interrupted coordinator turn cancels its in-flight spawns: before creation nothing, created but not yet prompted removed, prompt already going in kept", async () => {
+    const t = concurrentSetup();
+    // (1) Cancelled before the call starts: nothing is created.
+    const pre = new AbortController();
+    pre.abort();
+    const early = await t.dc.spawn(t.dispatchId, { dir: t.workDir, prompt: "never" }, { signal: pre.signal }).then(() => "ok", (e: Error) => e.message);
+    expect(early).toContain("cancelled — nothing was created");
+    expect(t.created).toHaveLength(0);
+
+    // (2) Three spawns in flight when the turn is interrupted: a is still being created, b's prompt is
+    // already being delivered, c has finished.
+    const ctl = new AbortController();
+    const results = [t.spawn("a", { signal: ctl.signal }), t.spawn("b", { signal: ctl.signal }), t.spawn("c", { signal: ctl.signal })];
+    await t.settle();
+    t.createGates.get("b")!.open(); t.createGates.get("c")!.open();
+    await t.settle();
+    t.sendGates.get("c")!.open();
+    expect((await results[2]!).ok).toBe(true);
+    ctl.abort();
+    t.createGates.get("a")!.open();
+    t.sendGates.get("b")!.open();
+    await t.settle();
+    t.sendGates.get("a")?.open();
+    const [a, b] = await Promise.all([results[0]!, results[1]!]);
+    const aId = t.childOf.get("a")!;
+    const bId = t.childOf.get("b")!;
+    const cId = t.childOf.get("c")!;
+    // a was created after the interrupt and removed before any prompt reached it.
+    expect(a.ok).toBe(false);
+    expect(a.text).toContain("cancelled before the child session got its prompt");
+    expect(t.deleted).toEqual([aId]);
+    expect(t.driverFor(aId).sends).toEqual([]);
+    // b's prompt was already on its way: the child is working, so it stays (and reports like any other).
+    expect(b.ok).toBe(true);
+    for (const [id, key] of [[bId, "b"], [cId, "c"]] as const) {
+      expect(t.driverFor(id).sends).toEqual([{ text: `task ${key}`, clientName: DISPATCH_CLIENT_NAME }]);
+    }
+    expect(t.store.childrenOf(t.dispatchId).map((r) => r.sessionId).sort()).toEqual([bId, cId].sort());
+    expect(t.childUpdates().map((u) => u.childSessionId).sort()).toEqual([bId, cId].sort());
+    expect(t.dc.roster().map((r) => r.sessionId).sort()).toEqual([bId, cId].sort());
+  });
+});

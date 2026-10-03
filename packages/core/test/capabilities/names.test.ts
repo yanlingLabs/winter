@@ -144,8 +144,13 @@ describe("WINTER_CAPABILITY_TOOLS", () => {
 
   test("the 2026-10-01 ruling: plain names, the eager sessions trio, everything else deferred, office code-only", () => {
     const t = WINTER_CAPABILITY_TOOLS as Readonly<Record<string, CapabilityToolFacts>>;
-    expect(t["mcp__winter__sessions__session_spawn"]).toEqual({ modes: ["dispatch"], plainName: "SpawnSession", eager: true });
-    expect(t["mcp__winter__sessions__list_sessions"]).toEqual({ modes: ["dispatch"], plainName: "ListSessions", eager: true });
+    // 2026-10-03: SpawnSession is concurrency-safe (several spawns of a round run at once) and ListSessions
+    // is read-only — and neither is the other: a spawn is never stated read-only.
+    expect(t["mcp__winter__sessions__session_spawn"]).toEqual({ modes: ["dispatch"], plainName: "SpawnSession", eager: true, concurrent: true });
+    expect(t["mcp__winter__sessions__list_sessions"]).toEqual({ modes: ["dispatch"], plainName: "ListSessions", eager: true, readOnly: true });
+    // No other capability tool is concurrent or read-only by declaration (Computer/Browser are lanes).
+    expect(Object.entries(t).filter(([, f]) => f.concurrent === true).map(([n]) => n)).toEqual(["mcp__winter__sessions__session_spawn"]);
+    expect(Object.entries(t).filter(([, f]) => f.readOnly === true).map(([n]) => n)).toEqual(["mcp__winter__sessions__list_sessions"]);
     // ManageSession was removed from Dispatch (user ruling 2026-10-02).
     expect(t["mcp__winter__sessions__manage_session"]).toBeUndefined();
     expect(t["mcp__winter__computer__computer"]).toEqual({ modes: ["code", "dispatch"], plainName: "Computer", lane: "computer" });
