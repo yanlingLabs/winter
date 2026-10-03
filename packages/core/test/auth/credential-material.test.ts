@@ -194,7 +194,8 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // 0.0.38 → 0.0.39 (host messaging): keychain-store.ts diff EMPTY; the mirror stands.
     // 0.0.39 → 0.0.40 (per-call tool-result frames): keychain-store.ts diff EMPTY; the mirror stands.
     // 0.0.40 → 0.0.41 (host-declared concurrentTools): keychain-store.ts diff EMPTY; the mirror stands.
-    expect(pkg.version).toBe("0.0.41");
+    // 0.0.41 → 0.0.43 (clean-room rewrite; 0.0.42 never published): keychain-store.ts diff EMPTY; the mirror stands.
+    expect(pkg.version).toBe("0.0.43");
   });
 
 

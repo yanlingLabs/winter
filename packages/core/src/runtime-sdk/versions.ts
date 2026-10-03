@@ -3,8 +3,9 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.41";
-/** Bumped to 0.0.41 (2026-10-03): `McpSdkServerConfig.concurrentTools` — a host can declare some of its in-process
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.43";
+/** Bumped to 0.0.43 (2026-10-03; 0.0.42 was never published): clean-room rewrite of helpers that had mirrored claude's internals (permissions, sandbox, plugins, context, subagents, MCP, store); zero behaviour change, proven by recorded corpora.
+ *  Earlier: bumped to 0.0.41 (2026-10-03): `McpSdkServerConfig.concurrentTools` — a host can declare some of its in-process
  *  tools concurrency-safe WITHOUT making them read-only, so several `SpawnSession` calls of one Dispatch round run at
  *  once (as claude runs several `Agent` calls of a round at once); a scheduling statement only, never a
  *  `readOnlyHint` (`capabilities/names.ts`' `concurrent`).
@@ -80,7 +81,12 @@ export const REQUIRED_WINTER_AGENT_SDK = "0.0.41";
  *  v0.0.21 first; that release's CI run failed on pre-existing, unrelated test/build defects (no
  *  behavioural change), so the fixed build published as v0.0.22 instead — v0.0.21 was never
  *  published and this pin skips straight to it. */
-/** Bumped to 0.0.15 (WS-24, 2026-09-27): run-home repository-tier hardening -- a repository-shipped
+/** Bumped to 0.0.16 (2026-10-03): a clean-room rewrite of the frontmatter reader, the rule-path escape,
+ *  the MCP server-name normaliser and the metadata projection. There is no behaviour change, and recorded
+ *  corpora prove it. The two unreleased WS-24 run-home fixes ship here too: the `.git` search for a
+ *  null gitRoot continues above the trusted root, and a project output style never redefines a user's
+ *  or a built-in style. No API change.
+ *  Earlier: bumped to 0.0.15 (WS-24, 2026-09-27): run-home repository-tier hardening -- a repository-shipped
  *  (git-tracked, symlinked or submodule) `.winter/settings.local.json` is filtered as the project tier,
  *  so it can't raise the permission mode; repository tiers can't set the effort/thinking keys or the
  *  output style, and a project output style never redefines a user or built-in one; repository files
@@ -112,7 +118,7 @@ export const REQUIRED_WINTER_AGENT_SDK = "0.0.41";
  *  Readonly<Record<string, unknown>>` — the router-package wall `official-options.ts`'s own comment
  *  on `OfficialInputDeps.agents` used to name (a router version this low has no field to forward the
  *  daemon's merged subagent definitions through) is CLOSED as of that pin. */
-export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.15";
+export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.16";
 // WS-23: `REQUIRED_CLAUDE_AGENT_SDK`, `installedClaudeAgentSdkVersion` (and the embedded manifest it
 // read) and `OFFICIAL_SUBSCRIPTION_AUTH_APPROVED` are gone with the official `claude` leg; the daemon
 // no longer depends on `@anthropic-ai/claude-agent-sdk` at all.
