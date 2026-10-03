@@ -199,10 +199,14 @@ export function capabilityServer(
   // Agent SDK 0.0.40: the tools that hold one exclusive resource run in their own concurrency LANE
   // (`CapabilityToolFacts.lane` — `Computer`, `Browser`): one at a time within the lane, beside everything else.
   const toolLanes: Record<string, string> = {};
+  // Agent SDK 0.0.41: the tools whose calls may run beside each other although they are not read-only
+  // (`CapabilityToolFacts.concurrent` — `SpawnSession`): `McpSdkServerConfig.concurrentTools`.
+  const concurrentTools: string[] = [];
   for (const def of defs) {
     const facts = factsFor(spec.key, def);
     if (facts?.plainName !== undefined) toolNames[def.name] = facts.plainName;
     if (facts?.lane !== undefined) toolLanes[def.name] = facts.lane;
+    if (facts?.concurrent === true) concurrentTools.push(def.name);
   }
 
   const instance: WinterMcpServerInstance = {
@@ -226,6 +230,9 @@ export function capabilityServer(
           // MCP's own per-tool "load me up front" knob, which the agent SDK honours over its
           // deferred-by-default for MCP tools (claude's `_meta['anthropic/alwaysLoad']`).
           ...(factsFor(spec.key, def)?.eager === true ? { _meta: { "anthropic/alwaysLoad": true } } : {}),
+          // A genuinely read-only tool (`CapabilityToolFacts.readOnly` — `ListSessions`) says so, MCP's own
+          // way: the runtime then runs its calls concurrently by claude's ordinary rule.
+          ...(factsFor(spec.key, def)?.readOnly === true ? { annotations: { readOnlyHint: true } } : {}),
         };
       });
     },
@@ -283,5 +290,6 @@ export function capabilityServer(
     instance,
     ...(Object.keys(toolNames).length > 0 ? { toolNames } : {}),
     ...(Object.keys(toolLanes).length > 0 ? { toolLanes } : {}),
+    ...(concurrentTools.length > 0 ? { concurrentTools } : {}),
   };
 }

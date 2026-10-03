@@ -18,6 +18,11 @@
 //     driver (`send`), and the tool returns as soon as the message is in — it never waits for the
 //     child's turn. A `model` is stamped AT CREATION. A first message that cannot be delivered rolls
 //     the child back like a refused creation does: nothing is left behind.
+//     Several spawns of one coordinator round run AT ONCE (agent SDK 0.0.41's `concurrentTools`, user
+//     ruling 2026-10-03 — claude runs several `Agent` calls of a round at once). Each call's state is its
+//     own (its child id, its tracked entry, its rollback), so they cannot cross-wire; a spawn's call is
+//     cancelled by an interrupted coordinator turn (`signal`): before its child exists nothing is created,
+//     before the child got its prompt the child is removed, and once the prompt is in the child stays.
 //   - **Status** — a hub observer follows every tracked child's turns: `turn_started` (running), an
 //     approval or question (awaiting_approval / awaiting_input, and back to running when it resolves),
 //     the main thread's last `assistant_message` and any `agent_error`. Each change lands on the
@@ -209,6 +214,24 @@ export class SessionSpawnRefusal extends Error {
   constructor(message: string) { super(message); this.name = "SessionSpawnRefusal"; }
 }
 
+/** The spawn's call was cancelled (an interrupted coordinator turn) before its child got its prompt. */
+class SpawnCancelled extends Error {
+  constructor(message: string) { super(message); this.name = "SpawnCancelled"; }
+}
+
+/**
+ * A cancelled spawn stops where it is. Before the child exists: a refusal, nothing created. After (`created`):
+ * thrown inside the delivery `try`, so the child is rolled back with it.
+ */
+function throwIfCancelled(signal: AbortSignal | undefined, created: boolean): void {
+  if (signal?.aborted !== true) return;
+  const message = created
+    ? "SpawnSession was cancelled before the child session got its prompt — the child was removed."
+    : "SpawnSession was cancelled — nothing was created.";
+  if (created) throw new SpawnCancelled(message);
+  throw new SessionSpawnRefusal(message);
+}
+
 export class DispatchChildren {
   private readonly children = new Map<string, ChildState>();
   private readonly wakes = new Map<string, WakeEntry[]>();
@@ -270,8 +293,13 @@ export class DispatchChildren {
    * `isError` result). Every pre-flight refusal happens before anything is created, and a spawn that
    * fails after creation removes what it created.
    */
-  async spawn(callerSessionId: string, args: SessionSpawnArgs): Promise<string> {
+  async spawn(callerSessionId: string, args: SessionSpawnArgs, opts: { signal?: AbortSignal } = {}): Promise<string> {
     if (this.draining) throw new SessionSpawnRefusal("SpawnSession is not available — Winter is shutting down.");
+    // Stamped when the call BEGINS (several spawns of one round run at once since agent SDK 0.0.41, so the
+    // child that finishes being created first is not necessarily the one asked for first).
+    const startedAt = this.now();
+    const { signal } = opts;
+    throwIfCancelled(signal, false);
     let caller: { mode?: string; approvalPolicy?: string };
     try { caller = this.deps.store.meta(callerSessionId); } catch { throw new SessionSpawnRefusal("SpawnSession is only available in the dispatch session."); }
     if (caller.mode !== "dispatch") throw new SessionSpawnRefusal("SpawnSession is only available in the dispatch session.");
@@ -296,6 +324,8 @@ export class DispatchChildren {
     const policy = childPolicyFor(caller.approvalPolicy);
     const create = this.deps.createSession();
     if (create === undefined) throw new SessionSpawnRefusal("SpawnSession is not ready yet — the daemon is still starting; try again in a moment.");
+    // The model check above may have awaited: an interrupt that landed meanwhile creates nothing.
+    throwIfCancelled(signal, false);
 
     let childId: string;
     try {
@@ -312,16 +342,24 @@ export class DispatchChildren {
     this.safeAppend(childId, { type: "session_titled", sessionId: childId, threadId: "main", title });
     // Tracked BEFORE the send, so its `turn_started` and every later event find it; announced on the
     // coordinator's log only once the prompt is in.
-    this.children.set(childId, newChild(callerSessionId, title, dir, this.now()));
+    this.children.set(childId, newChild(callerSessionId, title, dir, startedAt));
     try {
+      // Interrupted while the child was being created (the runtime cancels the call — agent SDK 0.0.40 —
+      // and has already answered it `[interrupted]` to the model): the child never gets its prompt, so it is
+      // removed like a child whose first message could not be delivered. Once the prompt is in, the child is
+      // working and stays (it reports, and wakes the coordinator, like any other).
+      throwIfCancelled(signal, true);
       const driver = this.deps.sessions.get(childId) ?? await this.deps.sessions.ensure(childId);
       if (driver === undefined) throw new Error("the child session has no runtime driver");
+      throwIfCancelled(signal, true);
       await driver.send(prompt, DISPATCH_CLIENT_NAME);
     } catch (err) {
+      const cancelled = err instanceof SpawnCancelled;
       const why = refusalText(err);
-      this.log(`the first message to child ${childId} failed (${err instanceof Error ? err.name : "unknown"}) — the child is removed`);
+      this.log(`the first message to child ${childId} ${cancelled ? "was cancelled" : `failed (${err instanceof Error ? err.name : "unknown"})`} — the child is removed`);
       this.children.delete(childId);
       try { this.deps.deleteSession?.(childId); } catch { /* best effort; the refusal still stands */ }
+      if (cancelled) throw new SessionSpawnRefusal(err.message);
       throw new SessionSpawnRefusal(`could not start the child session: its first message could not be delivered: ${why}`);
     }
     this.update(childId, "running");

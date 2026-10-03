@@ -1306,7 +1306,9 @@ export async function startDaemon(opts: {
       models: spawnModelIds,
       spawn: async (args, ctx) => {
         if (dispatchChildren === undefined) throw new Error("SpawnSession is not ready yet — the daemon is still starting; try again in a moment.");
-        return await dispatchChildren.spawn(ctx.sessionId, args);
+        // `ctx.signal`: the call's own (an interrupted coordinator turn cancels it — agent SDK 0.0.40) and the
+        // incarnation's. Several spawns of one round run at once (0.0.41, `concurrentTools`), each its own.
+        return await dispatchChildren.spawn(ctx.sessionId, args, ctx.signal === undefined ? {} : { signal: ctx.signal });
       },
       // THE SAME instances the registry door gets (`registerListSessionsTools` below): a
       // management surface with its own hub/store would read every attached session as idle.
