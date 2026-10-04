@@ -37,6 +37,25 @@ class FakeDriver {
     this.hub.append(this.sessionId, { type: "turn_started", sessionId: this.sessionId, threadId: "main" });
     return { seq: ev.seq, queued: false };
   }
+  /** Agent SDK 0.0.44's folding child: a steer while running is pushed now and its `turn_started` held
+   *  until the fold (`foldIn`) — the shape `WinterSession` + the projector produce. */
+  foldsQueuedInput = false;
+  async steer(text: string, clientName?: string): Promise<{ seq: number; injected: boolean }> {
+    if (this.failNext) { const e = this.failNext; this.failNext = undefined; throw e; }
+    this.sends.push({ text, ...(clientName === undefined ? {} : { clientName }) });
+    const ev = this.hub.append(this.sessionId, { type: "user_message", sessionId: this.sessionId, threadId: "main", text, clientName: clientName ?? "steer" });
+    if (this.turnRunning) return { seq: ev.seq, injected: true };
+    this.turnRunning = true;
+    this.hub.append(this.sessionId, { type: "turn_started", sessionId: this.sessionId, threadId: "main" });
+    return { seq: ev.seq, injected: false };
+  }
+  /** One tool round, then the child folds what was steered in (`system/host_input_folded`): the
+   *  folded message's `turn_started` lands after the round's `tool_result`, before the next model text. */
+  foldIn(callId: string): void {
+    this.hub.append(this.sessionId, { type: "tool_call", sessionId: this.sessionId, threadId: "main", callId, name: "bash", argsJson: "{}" });
+    this.hub.append(this.sessionId, { type: "tool_result", sessionId: this.sessionId, threadId: "main", callId, output: "ok", isError: false });
+    this.hub.append(this.sessionId, { type: "turn_started", sessionId: this.sessionId, threadId: "main" });
+  }
 }
 
 type ChildUpdate = Extract<SessionEvent, { type: "child_update" }>;
@@ -699,6 +718,52 @@ describe("which turns are followed, the bounded roster, shutdown and restart", (
     t.finish(child, { text: "peer two done" });
     await t.drain();
     expect(t.childUpdates().length).toBe(afterWake);
+  });
+
+  test("FOLD (agent SDK 0.0.44): a follow-up steered into the child's own running turn is folded there — ONE completed, ONE wake, at that turn's end, with the turn's whole result", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    const d = t.driverFor(child);
+    d.foldsQueuedInput = true;
+    t.hub.append(child, { type: "assistant_message", sessionId: child, threadId: "main", text: "halfway through the build" });
+    const answer = await t.sendMessage(t.dispatchId, child, "also run the linter");
+    expect(answer.status).toBe("delivered");
+    expect(answer.note).toContain("after its current tool call");
+    expect(d.sends.at(-1)).toEqual({ text: "also run the linter", clientName: "messaging" });
+    d.foldIn("call_1");
+    // the fold is not a new turn: nothing reset, nothing reported, still running
+    expect(t.childUpdates().map((e) => e.status)).toEqual(["running"]);
+    const wakesBefore = t.driverFor(t.dispatchId).sends.length;
+    t.finish(child);                                   // the running turn's ONE end, no closing text
+    await t.drain();
+    expect(t.childUpdates().map((e) => e.status)).toEqual(["running", "completed"]);
+    expect(t.childUpdates().at(-1)).toMatchObject({ childSessionId: child, resultSummary: "halfway through the build" });
+    expect(t.driverFor(t.dispatchId).sends.length).toBe(wakesBefore + 1);
+    expect(t.driverFor(t.dispatchId).sends.at(-1)).toMatchObject({ clientName: DISPATCH_WAKE_CLIENT_NAME });
+  });
+
+  test("FOLD (agent SDK 0.0.44): a follow-up folded into a PEER's running turn of a FORGOTTEN child is picked back up, reported completed and wakes Dispatch when that turn ends", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    t.finish(child, { text: "first" });
+    await t.drain();
+    t.finish(t.dispatchId, { text: "reported" });
+    expect(t.dc.roster()).toEqual([]);
+    const peer = t.store.createSession("global", { mode: "code", cwd: t.workDir });
+    await t.sendMessage(peer, child, "peer asks for a refactor");   // starts an unfollowed turn
+    const d = t.driverFor(child);
+    d.foldsQueuedInput = true;
+    const updatesBefore = t.childUpdates().length;
+    const wakesBefore = t.driverFor(t.dispatchId).sends.length;
+    expect((await t.sendMessage(t.dispatchId, child, "and bump the version")).status).toBe("delivered");
+    d.foldIn("call_9");                                 // Dispatch's message joins the running turn
+    expect(t.childUpdates().slice(updatesBefore).map((e) => e.status)).toEqual(["running"]);
+    t.finish(child, { text: "refactored and bumped" });
+    await t.drain();
+    expect(t.childUpdates().slice(updatesBefore).map((e) => e.status)).toEqual(["running", "completed"]);
+    expect(t.childUpdates().at(-1)).toMatchObject({ childSessionId: child, title: "Kid", resultSummary: "refactored and bumped" });
+    expect(t.driverFor(t.dispatchId).sends.length).toBe(wakesBefore + 1);
+    expect(t.driverFor(t.dispatchId).sends.at(-1)!.text).toContain("refactored and bumped");
   });
 
   test("a card from a child the user has OPEN is still relayed, but raises no unattended notification", async () => {

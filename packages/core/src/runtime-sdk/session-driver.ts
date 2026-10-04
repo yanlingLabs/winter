@@ -194,6 +194,9 @@ export interface LegSession {
   send(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; queued: boolean }>;
   steer(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; injected: boolean }>;
   interrupt(opts?: { discardQueued?: boolean }): Promise<{ wasRunning: boolean; discarded?: number }>;
+  /** Agent SDK 0.0.44: the live child folds a mid-turn push into its running turn — see
+   *  `WinterSession.foldsQueuedInput`. Optional so a test double need not implement it (read as false). */
+  readonly foldsQueuedInput?: boolean;
   /** WS-23 (reasoning-state): compact the live child now, on its own model -- see `WinterSession.compact`. */
   compact(opts?: CompactOptions): Promise<{ retainedCount: number }>;
   /** WS-23 review r1 I-5: hold what arrives for the TARGET while a provider switch replaces this

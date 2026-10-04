@@ -9,6 +9,15 @@
 // So a `turn_started` that directly follows an unpaired message answers THAT message; any other answers
 // the OLDEST unpaired one. That is the pairing this class replays, incrementally (DispatchChildren's
 // observer) or over a whole log (`runningTurnOrigin`).
+//
+// FOLDED (agent SDK 0.0.44, user ruling 2026-10-04): a message pushed while a turn runs (a steer, a
+// SendMessage to a running session) is usually taken INTO that turn at its next tool round, and its
+// `turn_started` lands there, mid-turn, with no `turn_completed` of its own. It pairs like a queued one
+// (the oldest unpaired — ordinarily that message itself), so from then on the running turn's origin
+// reads as the folded message's: a peer's message folded into a human turn makes it automated, the
+// user's steer folded into Dispatch's turn makes it human. Exact when no daemon-held send (a `send`
+// queued while the turn ran) is older than the folded message; with one, the fold pairs with the held
+// send instead — the log does not say which messages were pushed at once and which were held.
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 
 /** The projector's own pass-through `user_message` (it echoes the child's view; never a host push). */

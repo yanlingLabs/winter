@@ -470,6 +470,10 @@ export class DispatchChildren {
         return;   // tagged above (`trackOrigin`)
       case "turn_started": {
         if (!main) return;
+        // Already following this turn: a `turn_started` now is a message the child took INTO it (agent SDK
+        // 0.0.44 folds a mid-turn push at the next tool round — user ruling 2026-10-04), not a new turn —
+        // nothing to reset, and the turn's one end reports it all, followed follow-up included.
+        if (c.turnOpen) return;
         // Ongoing delegated work, or a turn Dispatch started (its spawn prompt, its follow-up); a peer's
         // message or a user working in a finished child directly is not Dispatch's to report.
         const followed = !TERMINAL.has(c.status) || originTag === true || c.followNext === true;

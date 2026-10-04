@@ -211,7 +211,13 @@ describeWithWinterBinary("projector: a REAL winter child", (bin) => {
     expect(run.events.filter((e) => e.type === "agent_error")).toHaveLength(1);
   }, 60_000);
 
-  test("THE STEER MEASUREMENT: a mid-turn push DOES yield its own result — so a steer needs its own beginTurn", async () => {
+  test("THE STEER MEASUREMENT: a mid-turn push is owed its own terminal unless the child FOLDS it — so a steer needs its own beginTurn", async () => {
+    // AGENT SDK 0.0.44 (user ruling 2026-10-04): the child folds a mid-turn push into the running turn at
+    // its next tool round and says so with `system/host_input_folded` — then the push gets NO `result`
+    // and the running turn's one terminal closes it. Whether this binary folded the steer is read off the
+    // stream it emitted (a ≤ 0.0.43 binary never folds; a 0.0.44 one folds only when a tool round is
+    // left after the steer lands), and each branch is held to its own contract.
+    const sawFold = (run: RunResult): boolean => run.messages.some((m) => (m as { type?: string; subtype?: string }).type === "system" && (m as { subtype?: string }).subtype === "host_input_folded");
     // The Task 16 measurement obligation, and the question Task 10's recording deliberately could
     // not answer (it gated its second envelope on the first terminal "so the turns stay
     // separable"). Here the second push lands WITHOUT waiting — while the first turn is still
@@ -234,9 +240,16 @@ describeWithWinterBinary("projector: a REAL winter child", (bin) => {
         await Bun.sleep(3_000);
       },
     });
-    expect(oneBegin.results).toBe(2);                                                   // the measurement
-    expect(oneBegin.events.filter((e) => e.type === "turn_started")).toHaveLength(1);
-    expect(oneBegin.events.filter((e) => e.type === "turn_completed")).toHaveLength(1);  // one DROPPED
+    if (sawFold(oneBegin)) {
+      // FOLDED (0.0.44): one result for both pushes; the un-begun push was clamped out of the fold.
+      expect(oneBegin.results).toBe(1);
+      expect(oneBegin.events.filter((e) => e.type === "turn_started")).toHaveLength(1);
+      expect(oneBegin.events.filter((e) => e.type === "turn_completed")).toHaveLength(1);
+    } else {
+      expect(oneBegin.results).toBe(2);                                                   // the measurement
+      expect(oneBegin.events.filter((e) => e.type === "turn_started")).toHaveLength(1);
+      expect(oneBegin.events.filter((e) => e.type === "turn_completed")).toHaveLength(1);  // one DROPPED
+    }
 
     // The same stream with a `beginTurn` per push — what the driver must do — keeps both terminals.
     const twoBegins = await driveChild(bin, {
@@ -250,8 +263,15 @@ describeWithWinterBinary("projector: a REAL winter child", (bin) => {
         await Bun.sleep(3_000);
       },
     });
-    expect(twoBegins.results).toBe(2);
-    expect(twoBegins.events.filter((e) => e.type === "turn_started")).toHaveLength(2);
-    expect(twoBegins.events.filter((e) => e.type === "turn_completed")).toHaveLength(2);
+    if (sawFold(twoBegins)) {
+      // FOLDED (0.0.44): both pushes begun, the steer's turn_started announced at the fold, ONE terminal.
+      expect(twoBegins.results).toBe(1);
+      expect(twoBegins.events.filter((e) => e.type === "turn_started")).toHaveLength(2);
+      expect(twoBegins.events.filter((e) => e.type === "turn_completed")).toHaveLength(1);
+    } else {
+      expect(twoBegins.results).toBe(2);
+      expect(twoBegins.events.filter((e) => e.type === "turn_started")).toHaveLength(2);
+      expect(twoBegins.events.filter((e) => e.type === "turn_completed")).toHaveLength(2);
+    }
   }, 60_000);
 });

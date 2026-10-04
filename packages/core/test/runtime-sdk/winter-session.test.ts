@@ -101,6 +101,19 @@ class FakeQuery {
   async setPermissionMode(mode: string): Promise<void> { this.modes.push(mode); }
 }
 
+/**
+ * Agent SDK 0.0.44's folding child (user ruling 2026-10-04): it announces a fold on the stream
+ * (`emitFold`) and answers `clearQueuedInput` with `clearAnswer` pushes dropped. `calls` records the
+ * order of the two TaskStop controls (clear BEFORE interrupt).
+ */
+class FoldingFakeQuery extends FakeQuery {
+  clearAnswer = 0;
+  readonly calls: string[] = [];
+  emitFold(count: number): void { this.emit({ type: "system", subtype: "host_input_folded", count, uuid: `fold-${count}`, session_id: "be-x" }); }
+  async clearQueuedInput(): Promise<{ cleared: number }> { this.calls.push("clear"); return { cleared: this.clearAnswer }; }
+  override async interrupt(): Promise<void> { this.calls.push("interrupt"); return super.interrupt(); }
+}
+
 // ── the harness ──────────────────────────────────────────────────────────────────────────────────
 
 interface Harness {
@@ -124,9 +137,9 @@ interface Harness {
   types(): string[];
 }
 
-function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & { idleTimeoutMs?: number; transcript?: boolean } = {}): Harness {
-  // The two harness knobs are NOT driver deps — they must not be spread over the thunks below.
-  const { idleTimeoutMs: idleMs, transcript, ...over } = overrides;
+function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & { idleTimeoutMs?: number; transcript?: boolean; folding?: boolean } = {}): Harness {
+  // The harness knobs are NOT driver deps — they must not be spread over the thunks below.
+  const { idleTimeoutMs: idleMs, transcript, folding, ...over } = overrides;
   const queries: FakeQuery[] = [];
   const incarnations: WinterIncarnation[] = [];
   const events: SessionEvent[] = [];
@@ -152,7 +165,7 @@ function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & 
     types: () => events.map((e) => e.type),
   };
   const runtime = {
-    sdk: { query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: Options }) => { const q = new FakeQuery(prompt, options); queries.push(q); return q as unknown as Query; } },
+    sdk: { query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: Options }) => { const q = folding === true ? new FoldingFakeQuery(prompt, options) : new FakeQuery(prompt, options); queries.push(q); return q as unknown as Query; } },
     trackQuery: (_sid: string, abort: AbortController) => { tracked.push({ abort }); },
     untrack: () => { h.untracked++; },
   } as unknown as WinterRuntimeSdk;
@@ -1287,5 +1300,167 @@ describe("startWinterSession — code-mode image placeholders (only the model se
       ev({ text: "[Image #1] vs [Image #2] vs [Image #01]", images: [{ n: 1, path: "/a.png" }] }),
       ev({ text: "[Image #1] literal" }),
     ])).toEqual(["/a.png vs [Image #2] vs /a.png", "[Image #1] literal"]);
+  });
+});
+
+// ── the fold (agent SDK 0.0.44, user ruling 2026-10-04: "lets fold the message into the running turn") ──
+
+const fq = (h: Harness): FoldingFakeQuery => h.q() as FoldingFakeQuery;
+const stopReasons = (h: Harness): string[] => seen(h, "turn_completed").map((e) => (e as { stopReason: string }).stopReason);
+
+describe("a mid-turn push FOLDED into the running turn (agent SDK 0.0.44)", () => {
+  test("a steer folded at the next tool round: its turn_started lands at the fold, the running turn's ONE result closes both, and the session settles once", async () => {
+    let settles = 0;
+    const h = harness({ folding: true, onTurnSettled: () => { settles++; } });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    expect((await h.session.steer("also do B", "steer")).injected).toBe(true);
+    expect(h.q().pushed).toEqual(["A", "also do B"]);
+    fq(h).emitFold(1);
+    await h.settled();
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "turn_started"]);
+    expect(h.session.turnRunning).toBe(true);                // A still owes its result
+    h.q().emit(assistant("did A and B")); h.q().emit(result());
+    await h.settled();
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "turn_started", "assistant_message", "turn_completed"]);
+    expect(h.session.turnRunning).toBe(false);               // not waiting for a second result that never comes
+    expect(settles).toBe(1);
+    expect(h.records.transitions.at(-1)).toBe("idle");
+    expect(unconsumedUserMessages(h.events)).toEqual([]);    // the folded text was read: a resume owes nothing
+    // and the session takes the next message as a fresh turn at once
+    expect((await h.session.send("C", "cli")).queued).toBe(false);
+  });
+
+  test("a resume after a fold re-pushes nothing — even when the child died before the running turn's result", async () => {
+    const h = harness({ folding: true });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.steer("B", "steer");
+    fq(h).emitFold(1);
+    await h.settled();
+    h.q().fail(named("ProcessError", "child crashed"));
+    await h.settled();
+    expect(h.session.state).toBe("resumable");
+    expect(seen(h, "turn_completed")).toHaveLength(1);       // the one open turn closed, nothing for B
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
+    h.transcriptExists = true;
+    await h.session.open();
+    await h.settled();
+    expect(h.q().pushed).toEqual([]);
+  });
+
+  test("a fold of two, then a held SEND runs as its own turn after the running one (the daemon's queue is never folded early)", async () => {
+    const h = harness({ folding: true });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.steer("S1", "steer");
+    await h.session.steer("S2", "steer");
+    expect((await h.session.send("H", "cli")).queued).toBe(true);
+    expect(h.q().pushed).toEqual(["A", "S1", "S2"]);          // H is held by the daemon, not pushed
+    fq(h).emitFold(2);
+    h.q().emit(result());
+    await h.settled();
+    expect(h.q().pushed).toEqual(["A", "S1", "S2", "H"]);     // released at A's result, as its own turn
+    expect(seen(h, "turn_started")).toHaveLength(4);
+    expect(seen(h, "turn_completed")).toHaveLength(1);
+    expect(h.session.turnRunning).toBe(true);
+    h.q().emit(result());
+    await h.settled();
+    expect(h.session.turnRunning).toBe(false);
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
+  });
+
+  test("foldsQueuedInput: true for a live folding child, false on an older runtime and when not live", async () => {
+    const folding = harness({ folding: true });
+    expect(folding.session.foldsQueuedInput).toBe(false);
+    await folding.session.open();
+    expect(folding.session.foldsQueuedInput).toBe(true);
+    await folding.session.end();
+    expect(folding.session.foldsQueuedInput).toBe(false);
+    const old = harness();
+    await old.session.open();
+    expect(old.session.foldsQueuedInput).toBe(false);
+  });
+});
+
+describe("TaskStop on a folding child clears the CHILD's pending pushes too (agent SDK 0.0.44 clearQueuedInput)", () => {
+  test("cleared BEFORE the interrupt; each cleared push is closed in the log (its turn_started now, an aborted turn_completed after the stopped turn's); counted with the held sends", async () => {
+    const h = harness({ folding: true });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.steer("S1", "steer");
+    await h.session.steer("S2", "steer");                    // S1's turn_started announced before S2 lands (C2)
+    await h.session.send("H", "cli");                         // held by the daemon (S2 announced before H lands)
+    fq(h).clearAnswer = 2;
+    expect(await h.session.interrupt({ discardQueued: true })).toEqual({ wasRunning: true, discarded: 3 });
+    expect(fq(h).calls).toEqual(["clear", "interrupt"]);
+    await h.settled();
+    expect(h.q().pushed).toEqual(["A", "S1", "S2"]);
+    expect(h.types()).toEqual([
+      "user_message", "turn_started",                           // A
+      "user_message", "turn_started", "user_message",           // S1 (announced as S2 landed), S2
+      "turn_started", "user_message",                           // S2 (announced as H landed), H
+      "turn_completed",                                         // A, stopped
+      "turn_completed", "turn_completed",                       // S1, S2: cleared before they ran
+      "turn_started", "turn_completed",                         // H: dropped by the daemon
+    ]);
+    expect(stopReasons(h)).toEqual(["aborted", "aborted", "aborted", "aborted"]);
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
+    expect(h.session.turnRunning).toBe(false);
+    // the next message runs at once — nothing stale ahead of it
+    expect((await h.session.send("D", "cli")).queued).toBe(false);
+    expect(h.q().pushed).toEqual(["A", "S1", "S2", "D"]);
+  });
+
+  test("a cleared push still unannounced gets its turn_started at the clear, while it is the youngest message", async () => {
+    const h = harness({ folding: true });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.steer("S", "steer");
+    fq(h).clearAnswer = 1;
+    const q = fq(h);
+    q.interrupt = async () => { q.calls.push("interrupt"); };   // the stopped turn's terminal comes later
+    await h.session.interrupt({ discardQueued: true });
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "turn_started"]);
+    q.emit(result({ interrupted: true }));
+    await h.settled();
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "turn_started", "turn_completed", "turn_completed"]);
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
+    expect(h.session.turnRunning).toBe(false);
+  });
+
+  test("the Mac's stop (no discardQueued) never clears: the pushed steer runs after the interrupted turn", async () => {
+    const h = harness({ folding: true });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.steer("S", "steer");
+    fq(h).clearAnswer = 1;
+    expect(await h.session.interrupt()).toEqual({ wasRunning: true });
+    expect(fq(h).calls).toEqual(["interrupt"]);
+    await h.settled();
+    expect(h.session.turnRunning).toBe(true);                 // S is the next turn
+    expect(stopReasons(h)).toEqual(["aborted"]);
+    expect(seen(h, "turn_started")).toHaveLength(2);
+  });
+
+  test("an older runtime (no clearQueuedInput): TaskStop clears only the daemon's held sends, as before", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.steer("S", "steer");
+    expect(await h.session.interrupt({ discardQueued: true })).toEqual({ wasRunning: true });
+    await h.settled();
+    expect(h.session.turnRunning).toBe(true);                 // S was pushed and cannot be taken back
+    h.q().emit(result());
+    await h.settled();
+    expect(h.session.turnRunning).toBe(false);
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
   });
 });

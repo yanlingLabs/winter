@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
-import { accept, acceptError, assistantText, assistantToolUse, beginTurn, flat, init, makeProjector, result, toolResult } from "./harness";
+import { accept, acceptError, assistantText, assistantToolUse, beginTurn, flat, init, makeProjector, result, toolResult, userTextFrame } from "./harness";
 
 /**
  * 2026-09-22 (C2): TURN BOUNDARIES IN ORDER.
@@ -127,5 +127,119 @@ describe("projector: the child's tool_result settles whatever still waits on a h
     beginTurn(projector, "go");
     accept(projector, assistantToolUse("call_1", "Bash", { command: "x" }));
     expect(accept(projector, toolResult("call_1", "done")).map((e) => e.type)).toEqual(["tool_result"]);
+  });
+});
+
+/**
+ * Agent SDK 0.0.44 (user ruling 2026-10-04: "lets fold the message into the running turn"). A push made
+ * while a turn runs is folded into THAT turn at its next tool round, and the child says so with
+ * `system/host_input_folded` (`count` = its N earliest pending pushes) before the next model request.
+ * The folded pushes never get a `result`: the running turn's ONE terminal closes them.
+ */
+const folded = (count: number, extra: Record<string, unknown> = {}) =>
+  ({ type: "system", subtype: "host_input_folded", count, uuid: `u-${count}`, session_id: "be-1", ...extra }) as never;
+
+describe("projector: a push FOLDED into the running turn (agent SDK 0.0.44)", () => {
+  test("the folded push's held turn_started is announced at the fold, and the running turn's ONE terminal closes both", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    const log: SessionEvent[] = [];
+    log.push(...beginTurn(projector, "A"));
+    log.push(...accept(projector, assistantToolUse("call_1", "Bash", { command: "ls" })));
+    expect(beginTurn(projector, "steer me")).toEqual([]);
+    log.push(...accept(projector, toolResult("call_1", "ok")));
+    const atFold = accept(projector, folded(1));
+    expect(kinds(atFold)).toEqual(["turn_started"]);
+    log.push(...atFold);
+    log.push(...accept(projector, assistantText("done, and steered")));
+    log.push(...accept(projector, result()));
+    expect(kinds(log)).toEqual([
+      "turn_started", "tool_call", "tool_result", "turn_started", "assistant_message", "turn_completed:end_turn",
+    ]);
+    // nothing is owed any more: the next push announces at once (no phantom open turn)
+    expect(projector.turnRunning).toBe(false);
+    expect(kinds(beginTurn(projector, "B"))).toEqual(["turn_started"]);
+  });
+
+  test("a fold of two shifts two from the head; a third push still pending at the terminal is the next turn", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "A");
+    beginTurn(projector, "S1");
+    beginTurn(projector, "S2");
+    expect(kinds(accept(projector, folded(2)))).toEqual(["turn_started", "turn_started"]);
+    beginTurn(projector, "S3");
+    expect(kinds(accept(projector, result()))).toEqual(["turn_completed:end_turn", "turn_started"]);
+    expect(kinds(accept(projector, result()))).toEqual(["turn_completed:end_turn"]);
+    expect(projector.turnRunning).toBe(false);
+  });
+
+  test("a push already announced early (announceQueuedTurns) is not announced again by the fold", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "A");
+    beginTurn(projector, "S1");
+    expect(kinds(flat(projector.announceQueuedTurns()))).toEqual(["turn_started"]);
+    beginTurn(projector, "S2");
+    expect(kinds(accept(projector, folded(2)))).toEqual(["turn_started"]);   // S2's only
+    expect(kinds(accept(projector, result()))).toEqual(["turn_completed:end_turn"]);
+  });
+
+  test("a fold counting more than is pending is clamped (a replay, or a push never begun) — nothing invented", () => {
+    const { projector, warnings } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "A");
+    expect(accept(projector, folded(3))).toEqual([]);
+    expect(warnings.some((w) => w.includes("host_input_folded"))).toBe(true);
+    // the running turn is still owed its terminal
+    expect(kinds(accept(projector, result()))).toEqual(["turn_completed:end_turn"]);
+  });
+
+  test("a SUBAGENT's forwarded fold frame is not the session's — ignored", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "A");
+    beginTurn(projector, "S");
+    expect(accept(projector, folded(1, { parent_tool_use_id: "toolu_child" }))).toEqual([]);
+    expect(kinds(accept(projector, result()))).toEqual(["turn_completed:end_turn", "turn_started"]);
+  });
+
+  test("the fold's system-reminder wrapper, if the runtime ever surfaces it as a user text frame, is the folded push's echo — never a second user_message", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "A");
+    beginTurn(projector, "please also check the tests");
+    accept(projector, folded(1));
+    expect(accept(projector, userTextFrame("<system-reminder>The user sent a new message while you were working: please also check the tests</system-reminder>"))).toEqual([]);
+    // consumed once: a later genuine pass-through still projects
+    expect(kinds(accept(projector, userTextFrame("something else entirely")))).toEqual(["user_message"]);
+  });
+
+  test("clearQueued (TaskStop) drops pending pushes from the TAIL: the unannounced get their turn_started now, and none is owed a terminal", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "A");
+    beginTurn(projector, "S1");
+    flat(projector.announceQueuedTurns());          // S1 announced early
+    beginTurn(projector, "S2");
+    const { batch, cleared } = projector.clearQueued(2);
+    expect(cleared).toBe(2);
+    expect(kinds(flat(batch))).toEqual(["turn_started"]);   // S2's; S1's is already out
+    // the stopped turn's terminal announces nothing after it
+    expect(kinds(accept(projector, result({ interrupted: true })))).toEqual(["turn_completed:aborted"]);
+    expect(projector.turnRunning).toBe(false);
+  });
+
+  test("clearQueued after the head already started (the running turn ended while the clear was in flight) leaves the head's terminal owed", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "A");
+    beginTurn(projector, "S1");
+    beginTurn(projector, "S2");
+    expect(kinds(accept(projector, result()))).toEqual(["turn_completed:end_turn", "turn_started"]);   // S1 started
+    const { cleared } = projector.clearQueued(1);                                                       // S2 dropped
+    expect(cleared).toBe(1);
+    expect(kinds(accept(projector, result({ interrupted: true })))).toEqual(["turn_completed:aborted"]);
+    expect(projector.turnRunning).toBe(false);
   });
 });

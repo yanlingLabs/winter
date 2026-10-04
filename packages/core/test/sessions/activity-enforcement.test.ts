@@ -742,4 +742,19 @@ describe("runningTurnOrigin: who started the latest turn, from the log", () => {
     // The projector's pass-through echo never counts as a host push.
     expect(runningTurnOrigin([ev("user_message", { text: "x", clientName: "dispatch" }), ev("user_message", { text: "x", clientName: "winter" }), ev("turn_started")])).toBe("dispatch");
   });
+
+  test("a message FOLDED into the running turn (agent SDK 0.0.44) is the latest origin: its turn_started lands mid-turn and pairs with it", () => {
+    // Pinned, not argued: the running turn now carries the folded message, and the log reads it as that
+    // message's. A peer's message folded into a human turn reads as automated (a terminal's detach no
+    // longer aborts it); the user's steer folded into Dispatch's turn reads as human (its cards wait).
+    const log = [
+      ev("user_message", { text: "do it", clientName: "orb" }), ev("turn_started"),
+      ev("tool_call", { callId: "c1", name: "bash", argsJson: "{}" }),
+      ev("user_message", { text: "<agent-message>also</agent-message>", clientName: "messaging" }),
+      ev("tool_result", { callId: "c1", output: "ok", isError: false }),
+      ev("turn_started"),
+    ];
+    expect(runningTurnOrigin(log.slice(0, 2))).toBe("orb");
+    expect(runningTurnOrigin(log)).toBe("messaging");
+  });
 });

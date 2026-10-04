@@ -28,10 +28,15 @@
 //     valid targets only. Never padded with idle ones (ListSessions finds those), and a cap is reported as
 //     a count, never silently applied.
 //
-// WHAT A MESSAGE IS. The text goes in through the target's own driver (`send`, `clientName: "messaging"`),
-// exactly as the user's `session.send` would: a live session reads it now or right after the turn it is
-// running (`queued`), a finished resumable one is RESUMED for it through its driver (`ensure` — never the
-// router's cold resume). Two renderings:
+// WHAT A MESSAGE IS. The text goes in through the target's own driver under `clientName: "messaging"`. A
+// session RUNNING a turn is STEERED (user ruling 2026-10-04, "fold the message into the running turn" —
+// claude's behaviour): the text is pushed now and the child (agent SDK 0.0.44) folds it into that turn
+// after its current tool call, or runs it as its next turn if the turn ends first — `delivered`, with a
+// note saying so. An idle session gets it through `send`, exactly as the user's `session.send` would, and a
+// finished resumable one is RESUMED for it through its driver (`ensure` — never the router's cold resume).
+// A child that does not fold (≤ 0.0.43, `foldsQueuedInput` false) is never steered: there a pushed message
+// is its own next turn that a TaskStop could not take back, so it keeps `send`'s queue (`queued`). Two
+// renderings:
 //   - Dispatch to its OWN child: the plain text, like the spawn's first prompt — Dispatch is the child's
 //     delegate-user — and the child's turn is FOLLOWED (`DispatchChildren.expectFollowUp`, keyed on the
 //     coordinator and the exact text: child_update running → completed and the coordinator's wake).
@@ -76,6 +81,10 @@ export interface MessagingDriverHandle {
   /** `live` (a child is running), `resumable`, `ended` — absent on a test double, read as live. */
   readonly state?: "live" | "resumable" | "ended";
   send(text: string, clientName?: string): Promise<{ seq: number; queued: boolean }>;
+  /** Push into the RUNNING turn now (`WinterSession.steer`). Optional on a test double. */
+  steer?(text: string, clientName?: string): Promise<{ seq: number; injected: boolean }>;
+  /** The live child folds a mid-turn push into its running turn (agent SDK 0.0.44). Absent: false. */
+  readonly foldsQueuedInput?: boolean;
   /** The session's own interrupt (`session.interrupt`, the Mac's stop button); `discardQueued` also drops
    *  the messages held behind the stopped turn. Optional on a test double. */
   interrupt?(opts?: { discardQueued?: boolean }): Promise<{ wasRunning: boolean; discarded?: number }>;
@@ -243,10 +252,10 @@ export class SessionMessaging {
     if (cancelled()) return notDelivered("the sender was interrupted");
 
     const undoFollowUp = ownChild ? this.deps.followUp?.()?.expectFollowUp(targetId, callerSessionId, text) : undefined;
-    let sent: { queued: boolean };
+    let sent: { queued: boolean; steered: boolean };
     try {
       try {
-        sent = await driver.send(text, MESSAGING_CLIENT_NAME);
+        sent = await deliverInto(driver, text);
       } catch (err) {
         // The target's runtime was replaced while it was starting (`session_replaced`): nothing was taken, so
         // the message goes ONCE to the session's next driver -- after the same shutdown/cancel re-checks.
@@ -255,7 +264,7 @@ export class SessionMessaging {
         if (successor === undefined || successor === driver) throw err;
         if (this.draining || cancelled()) throw err;
         resumed = resumed || (successor.state !== undefined && successor.state !== "live");
-        sent = await successor.send(text, MESSAGING_CLIENT_NAME);
+        sent = await deliverInto(successor, text);
       }
     } catch (err) {
       undoFollowUp?.();
@@ -267,14 +276,18 @@ export class SessionMessaging {
 
     const title = this.titleOf(targetId);
     const named = title === undefined ? `session ${targetId}` : `session ${targetId} ("${title}")`;
-    const note = ownChild
-      ? `${named} is your child: you'll be woken with a <child_update> when this turn finishes.`
-      : `${named} is not one of your children, so you will not be told when it finishes${caller.mode === "dispatch" ? " — check on it with ListSessions" : ""}; it can answer you with SendMessage to ${callerSessionId}.`;
+    const notOwn = `not one of your children, so you will not be told when it finishes${caller.mode === "dispatch" ? " — check on it with ListSessions" : ""}; it can answer you with SendMessage to ${callerSessionId}.`;
+    // Steered (user ruling 2026-10-04): the running turn takes the message in at its next tool round.
+    const note = sent.steered
+      ? `${named} is working right now: it reads your message after its current tool call, as part of the turn it is running (or as its next turn, if that turn ends first). ${ownChild ? "You'll be woken with a <child_update> when that turn finishes." : `It is ${notOwn}`}`
+      : ownChild
+        ? `${named} is your child: you'll be woken with a <child_update> when this turn finishes.`
+        : `${named} is ${notOwn}`;
     const notify = request.notifyWhenIdle === true
       ? { refused: ownChild ? "no separate idle notice for a Winter session — the <child_update> wake is that notice" : "Winter sessions send no idle notice" }
       : undefined;
     return {
-      status: sent.queued ? "queued" : resumed ? "resumed_and_delivered" : "delivered",
+      status: sent.steered ? "delivered" : sent.queued ? "queued" : resumed ? "resumed_and_delivered" : "delivered",
       note,
       ...(notify !== undefined ? { notify } : {}),
     };
@@ -293,9 +306,11 @@ export class SessionMessaging {
     }
     const driver = this.deps.sessions.get(resolved.id);
     if (driver === undefined || !driver.turnRunning || driver.interrupt === undefined) return { status: "not_running" };
-    // A stop clears the queue too (user ruling 2026-10-04): the messages held behind the stopped turn are
-    // dropped once it has ended, so the next message the session gets runs straight away — never a stale
-    // one first. Said in the answer, so the caller knows.
+    // A stop clears the queue too (user ruling 2026-10-04): the messages queued behind the stopped turn are
+    // dropped — the ones the daemon holds once the turn has ended, and the steered-in ones the child holds
+    // pending (agent SDK 0.0.44 `clearQueuedInput`, cleared BEFORE the interrupt, which would keep them) —
+    // so the next message the session gets runs straight away, never a stale one first. Said in the
+    // answer, so the caller knows. (A message already folded into the stopped turn was read; nothing to drop.)
     try {
       const { wasRunning, discarded = 0 } = await driver.interrupt({ discardQueued: true });
       if (!wasRunning) return { status: "not_running" };
@@ -337,6 +352,23 @@ export class SessionMessaging {
   private titleOf(sessionId: string): string | undefined {
     try { return this.deps.store.getTitle?.(sessionId) ?? undefined; } catch { return undefined; }
   }
+}
+
+/**
+ * One delivery into `driver` (user ruling 2026-10-04, "fold the message into the running turn"): a target
+ * RUNNING a turn on a child that folds (agent SDK 0.0.44) is STEERED — the message is pushed now and the
+ * child takes it into that turn after its current tool call (or runs it as its next turn, if the turn ends
+ * first); anything else — an idle or finished target, or an older runtime, whose mid-turn push could never
+ * be taken back by a TaskStop — goes through `send`, the session's own queue.
+ */
+async function deliverInto(driver: MessagingDriverHandle, text: string): Promise<{ queued: boolean; steered: boolean }> {
+  const live = driver.state === undefined || driver.state === "live";
+  if (live && driver.turnRunning && driver.foldsQueuedInput === true && driver.steer !== undefined) {
+    await driver.steer(text, MESSAGING_CLIENT_NAME);
+    return { queued: false, steered: true };
+  }
+  const { queued } = await driver.send(text, MESSAGING_CLIENT_NAME);
+  return { queued, steered: false };
 }
 
 /** A refusal's words for the model: the message plus its typed code (never a stack). */

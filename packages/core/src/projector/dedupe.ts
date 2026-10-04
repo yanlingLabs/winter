@@ -31,6 +31,16 @@
  * all (only `system/*` frames do). Each pushed text is consumable ONCE — a user who genuinely sends
  * "ok" twice must see two `user_message`s, so a matching echo removes the entry rather than
  * leaving it to swallow every later repeat.
+ *
+ * ── A FOLDED push (agent SDK 0.0.44, user ruling 2026-10-04) ──────────────────────────────────────
+ *
+ * A push made while a turn runs is folded into that turn at its next tool round, and the model reads
+ * it WRAPPED ("The user sent a new message while you were working: …", a system-reminder). The 0.0.44
+ * contract names no output frame for it — only `system/host_input_folded` — but should a runtime ever
+ * surface the wrapper as a text-only `user` frame, it is the folded text again, never a new message:
+ * the host appended its `user_message` at push time. So a folded text is recorded (`folded`), and a
+ * later text-only frame that CONTAINS it (the wrapper) is dropped as its echo, consuming it — once,
+ * like every entry here.
  */
 
 /** How many recent pushes stay eligible for an echo match. A turn is pushed and answered long
@@ -40,24 +50,43 @@ export const ECHO_WINDOW = 8;
 export interface EchoWindow {
   /** Record a text the HOST pushed into the prompt queue (and already appended as `user_message`). */
   pushed(text: string): void;
-  /** True when `text` is an echo of a host push that has not been matched yet — consuming it. */
+  /** Record a pushed text the runtime FOLDED into its running turn (0.0.44) — its wrapper is an echo. */
+  folded(text: string): void;
+  /** True when `text` is an echo of a host push that has not been matched yet — consuming it: the
+   *  text itself, or a wrapper CONTAINING a folded one (every folded text it contains is consumed). */
   shouldDropEcho(text: string): boolean;
   readonly size: number;
 }
 
 export function createEchoWindow(limit: number = ECHO_WINDOW): EchoWindow {
   const recent: string[] = [];
+  const folds: string[] = [];
   return {
     pushed(text: string): void {
       recent.push(text);
       while (recent.length > limit) recent.shift();
     },
+    folded(text: string): void {
+      if (text.trim().length === 0) return;
+      folds.push(text.trim());
+      while (folds.length > limit) folds.shift();
+    },
     shouldDropEcho(text: string): boolean {
       const at = recent.indexOf(text);
-      if (at < 0) return false;
-      recent.splice(at, 1);
-      return true;
+      if (at >= 0) {
+        recent.splice(at, 1);
+        const f = folds.indexOf(text.trim());
+        if (f >= 0) folds.splice(f, 1);
+        return true;
+      }
+      let matched = false;
+      for (let i = folds.length - 1; i >= 0; i--) {
+        if (!text.includes(folds[i]!)) continue;
+        matched = true;
+        folds.splice(i, 1);
+      }
+      return matched;
     },
-    get size(): number { return recent.length; },
+    get size(): number { return recent.length + folds.length; },
   };
 }

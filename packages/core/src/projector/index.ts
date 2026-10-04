@@ -13,6 +13,7 @@ import { isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 import { isQuestionTool } from "./questions";
 import { boundContinuityWarningText, boundHookNoticeText, projectTerminal, sharesMainLedgerRow, totalsOf, turnUsageOf, type MainModelKey, type UsageTotals } from "./terminal";
 import { hostToolNameFor } from "../runtime-sdk/tool-names";
+import { hostInputFoldedCount } from "../runtime-sdk/fold";
 import { ProjectorRefusedError } from "./types";
 import type { CheckpointStore, ProjectedBatch, ProjectedEvent, Projector, ProjectorDeps, ProjectorRefusal, ProtocolSdkMessage } from "./types";
 
@@ -213,12 +214,16 @@ class ProjectorImpl implements Projector {
    *  is recognised as the pair of a result already projected rather than projected twice. */
   private terminalEmitted = false;
   /**
-   * C2 (2026-09-22): pushes the host made while one of its turns was still open, in PUSH order —
-   * each is a turn the child will run after the ones ahead of it. `announced` is set once its
-   * `turn_started` is out (early, through `announceQueuedTurns`), so its own start does not announce
-   * it again. One entry is shifted per projected terminal: the turn that starts next.
+   * C2 (2026-09-22): pushes the host made while one of its turns was still open, in PUSH order — the
+   * child's pending input. `announced` is set once its `turn_started` is out (early, through
+   * `announceQueuedTurns`), so it is never announced twice. An entry leaves in one of three ways:
+   *   - a projected terminal shifts ONE from the head — the push the child starts as its next turn;
+   *   - a `system/host_input_folded` (agent SDK 0.0.44, user ruling 2026-10-04) shifts `count` from the
+   *     head — pushes absorbed into the RUNNING turn, which will never get a terminal of their own;
+   *   - `clearQueued` (TaskStop) pops from the tail — pushes the runtime dropped before they ran.
+   * `text` is what was pushed (the fold's echo dedupe reads it).
    */
-  private readonly queuedStarts: Array<{ announced: boolean }> = [];
+  private readonly queuedStarts: Array<{ announced: boolean; text: string }> = [];
   /**
    * The calls whose `tool_result` this projector has projected since the last terminal (agent SDK 0.0.40's
    * per-call frames — see the `user` branch of `accept`). TURN-scoped, cleared at every terminal: a tool
@@ -282,28 +287,71 @@ class ProjectorImpl implements Projector {
    * `turn_started`, and the host appends THAT event rather than one of its own — see
    * `PROJECTED_EVENT_COVERAGE.turn_started` for what two producers would cost.
    *
-   * ── A MID-TURN PUSH IS ITS OWN TURN, AND IT STARTS WHEN THE RUNNING ONE ENDS ────────────────
+   * ── A MID-TURN PUSH IS FOLDED INTO THE RUNNING TURN, OR IS THE NEXT TURN ───────────────────
    *
-   * MEASURED (P8b-38 — `test/projector/real-child.test.ts` counts the `result`s against the built
-   * binary): a push made while a turn runs (a `steer`, a messaging delivery) yields its OWN `result`,
-   * because the child queues it as its next envelope. So the driver calls `beginTurn` for every push
-   * and the rule stays "ONE `result` per begun turn". See `Projector.beginTurn` (`types.ts`) for the
-   * C2 hold below and the one assumption it rests on.
+   * Every push is begun here, a mid-turn one too (P8b-38: it is owed a terminal unless the child says
+   * otherwise). Agent SDK 0.0.44 (user ruling 2026-10-04): the child FOLDS it into the running turn at
+   * that turn's next tool round and says so with `system/host_input_folded` — the push then never gets a
+   * `result` and its turn is closed by the running turn's ONE terminal (`acceptFold`). A push still
+   * pending when the running turn ends is that turn's successor, with its own `result` — the only shape
+   * a ≤ 0.0.43 child knows. See `Projector.beginTurn` (`types.ts`) for the C2 hold below.
    */
   beginTurn(input: { text: string; at?: string }): ProjectedBatch {
     this.commitPending();
-    // C2 (2026-09-22): on the Winter wire a mid-turn push is the child's NEXT turn, so its
-    // `turn_started` is held and announced right after the running turn's terminal (or earlier,
-    // through `announceQueuedTurns`). "Running" is this projector's own push count — see the
-    // interface doc for what that rests on.
+    // C2 (2026-09-22): a mid-turn push is not started yet, so its `turn_started` is held — announced
+    // when the child takes it up: folded into the running turn (`acceptFold`), or as its successor right
+    // after the running turn's terminal (or earlier, through `announceQueuedTurns`). "Running" is this
+    // projector's own push count — see the interface doc for what that rests on.
     const running = this.openTurns > 0;
     this.openTurns++;
     this.echo.pushed(input.text);
     if (running && this.holdsTurnStarts) {
-      this.queuedStarts.push({ announced: false });
+      this.queuedStarts.push({ announced: false, text: input.text });
       return EMPTY_BATCH();
     }
     return this.stampBatch([this.turnStarted()]);
+  }
+
+  /**
+   * `system/host_input_folded` (agent SDK 0.0.44): the child absorbed its `count` EARLIEST pending
+   * pushes into the running turn. Each is shifted off the head of `queuedStarts` and no longer owed a
+   * terminal (`openTurns`) — the running turn's ONE `result` covers it — and each still unannounced is
+   * announced NOW: the log keeps its invariant that every pushed `user_message` is paired with a
+   * `turn_started` (`unconsumedUserMessages`), so a resume never re-pushes a folded text, and a client
+   * sees the message's `turn_started` mid-turn, then the running turn's single `turn_completed`.
+   *
+   * Clamped to what this projector holds: a fresh projector replaying a transcript (or a child that
+   * counted a push the host never began) announces nothing it did not push. Stamped outside `claimed()`
+   * like `beginTurn`'s own — a `turn_started` is the host's push, not a projected source.
+   */
+  private acceptFold(count: number): ProjectedBatch {
+    const k = Math.min(count, this.queuedStarts.length);
+    if (k < count && !this.loggedTypes.has("fold-overcount")) {
+      this.loggedTypes.add("fold-overcount");
+      this.deps.log.warn?.("[projector] host_input_folded counted more pushes than are pending here — clamped", {
+        sessionId: this.deps.sessionId, count, pending: this.queuedStarts.length,
+      });
+    }
+    const folded = this.queuedStarts.splice(0, k);
+    this.openTurns = Math.max(0, this.openTurns - k);
+    const out: ProjectedEvent[] = [];
+    for (const q of folded) {
+      this.echo.folded(q.text);
+      if (!q.announced) out.push(this.turnStarted());
+    }
+    return out.length === 0 ? EMPTY_BATCH() : this.stampBatch(out);
+  }
+
+  clearQueued(count: number): { batch: ProjectedBatch; cleared: number } {
+    this.commitPending();
+    const k = Math.min(Math.max(0, Math.floor(count)), this.queuedStarts.length);
+    if (k === 0) return { batch: EMPTY_BATCH(), cleared: 0 };
+    // From the TAIL: if the running turn ended while the clear was in flight, the child has already
+    // started the head as its next turn, and that one's terminal is still coming.
+    const dropped = this.queuedStarts.splice(this.queuedStarts.length - k, k);
+    this.openTurns = Math.max(0, this.openTurns - k);
+    const out: ProjectedEvent[] = dropped.filter((q) => !q.announced).map(() => this.turnStarted());
+    return { batch: out.length === 0 ? EMPTY_BATCH() : this.stampBatch(out), cleared: k };
   }
 
   announceQueuedTurns(): ProjectedBatch {
@@ -323,9 +371,11 @@ class ProjectorImpl implements Projector {
   /**
    * Only the Winter leg holds a mid-turn push's `turn_started` (C2). The retired official leg's child
    * was claude, which folds a message that arrives mid-turn INTO the running turn (a `queued_command`
-   * attachment at the next tool round — no terminal of its own), so a held announcement there would
-   * have been released by a terminal that is not its own. A projector built with any other
-   * `runtimeKind` keeps the push-time announcement; since WS-23 the driver builds none.
+   * attachment at the next tool round — no terminal of its own) WITHOUT telling the host, so a held
+   * announcement there would have been released by a terminal that is not its own. The Winter runtime
+   * folds the same way since agent SDK 0.0.44 but SAYS so (`system/host_input_folded`), which is what
+   * lets the hold stay exact here (`acceptFold`). A projector built with any other `runtimeKind` keeps
+   * the push-time announcement; since WS-23 the driver builds none.
    */
   private get holdsTurnStarts(): boolean { return (this.deps.runtimeKind ?? "winter-agent") === "winter-agent"; }
   get lastResultAt(): string | undefined { return this.resultAt; }
@@ -356,6 +406,11 @@ class ProjectorImpl implements Projector {
       });
       return EMPTY_BATCH();
     }
+
+    // Agent SDK 0.0.44: pending pushes folded into the running turn (see `acceptFold`). Never persisted
+    // itself; the only events it yields are the folded pushes' own `turn_started`s.
+    const folded = hostInputFoldedCount(msg);
+    if (folded !== undefined) return this.acceptFold(folded);
 
     // 0.0.17 (P-B1): an in-runtime `session.setModel` RE-KEYS the ledger row and emits NO second
     // `system/init` (only an unsolicited turn does), so a projector that learned the row key from
@@ -546,8 +601,9 @@ class ProjectorImpl implements Projector {
       }
       // A text-only `user` frame is NOT an echo of a host push on the 0.0.3 wire (measured: the
       // runtime never re-emits the host's input frames) — it is an inbound delivery rendered into
-      // the child's input. The echo window is consulted anyway, so a future echo is dropped here
-      // rather than double-appended; see dedupe.ts.
+      // the child's input. The echo window is consulted anyway, so a future echo — or a 0.0.44 fold's
+      // system-reminder wrapper around a folded push — is dropped here rather than double-appended;
+      // see dedupe.ts.
       const text = userText(userFrame).trim();
       if (text.length === 0) return EMPTY_BATCH();
       if (this.echo.shouldDropEcho(text)) {
@@ -622,9 +678,11 @@ class ProjectorImpl implements Projector {
       if (this.openTurns > 0) this.openTurns--;
       this.terminalEmitted = true;
       this.resultAt = this.deps.now();
-      // C2: the turn queued next starts NOW — its `turn_started` follows this `turn_completed`, in
-      // the same batch, unless `announceQueuedTurns` already put it out. Stamped outside the claim,
-      // exactly like `beginTurn`'s own: a `turn_started` is the host's push, not a projected source.
+      // C2: the push still pending when this turn ended (not folded into it — agent SDK 0.0.44 folds at
+      // a tool round, and a turn can end without another one) starts NOW as its own turn — its
+      // `turn_started` follows this `turn_completed`, in the same batch, unless `announceQueuedTurns`
+      // already put it out. Stamped outside the claim, exactly like `beginTurn`'s own: a
+      // `turn_started` is the host's push, not a projected source.
       //
       // RESIDUAL GAP, documented rather than fixed (C2 review): the shift is one per terminal, FIFO,
       // and assumes the next terminal on the wire belongs to the next HOST push. A turn the CHILD

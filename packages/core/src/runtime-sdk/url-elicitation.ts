@@ -186,7 +186,11 @@ export function elicitationTurnTracker(broker: ElicitationBroker, sessionId: str
     observe(event) {
       if (event.type !== "turn_started" && event.type !== "turn_completed") return;
       if (event.threadId !== undefined && event.threadId !== "main") return;
-      if (event.type === "turn_started") { current = ++count; return; }
+      // A main `turn_started` while a turn is open starts nothing new: it is a message the child took INTO
+      // the running turn (agent SDK 0.0.44's fold — user ruling 2026-10-04 — announced mid-turn, with no
+      // `turn_completed` of its own) or one announced ahead of its turn (C2). The open turn's one
+      // `turn_completed` must still cancel every card raised in it.
+      if (event.type === "turn_started") { if (current === undefined) current = ++count; return; }
       if (current !== undefined) broker.cancelTurn(sessionId, current, "turn-ended");
       current = undefined;
     },
