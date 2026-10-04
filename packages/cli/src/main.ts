@@ -745,9 +745,10 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       // child's turn_started reset the parent's clock/token estimate and a child's turn_completed
       // flipped turnRunning off mid-parent-turn — the status line flickered/vanished while the
       // real turn was still running.
+      // While a turn runs, a main turn_started is a message folded INTO it (agent SDK 0.0.44): the
+      // turn's clock and its streamed-size estimate carry on.
+      if (!turnRunning) { turnStartMs = Date.now(); streamedChars = 0; }
       turnRunning = true;
-      turnStartMs = Date.now();
-      streamedChars = 0;
       refreshBlock(); // show the status line immediately rather than waiting up to 120ms for the first tick
     } else if (e.type === "assistant_message") {
       if (sa.action === "close_then_print_full") { emit("\n"); emit(`${AQUA}${e.text}${RESET}\n`); }

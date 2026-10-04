@@ -157,10 +157,11 @@ export function resolveWinterExecutable(input: {
  *  `undefined` when the binary reports the pinned version (or cannot be asked), else one line for the log.
  *  The answer is cached per path + size + mtime, so a session start costs one `--version` per rebuild. */
 const explicitVersionCache = new Map<string, string | undefined>();
-export function explicitRuntimeVersionNote(
-  path: string,
-  deps: { runVersion?: (path: string) => string | undefined; statKey?: (path: string) => string | undefined } = {},
-): string | undefined {
+type VersionProbeDeps = { runVersion?: (path: string) => string | undefined; statKey?: (path: string) => string | undefined };
+
+/** The version a `winter` binary at `path` reports (`--version`), cached per path + size + mtime;
+ *  `undefined` when it cannot be asked. */
+export function winterBinaryVersion(path: string, deps: VersionProbeDeps = {}): string | undefined {
   const statKey = deps.statKey ?? ((p: string) => { try { const s = statSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return undefined; } });
   const key = `${path}\0${statKey(path) ?? ""}`;
   if (explicitVersionCache.has(key)) return explicitVersionCache.get(key);
@@ -169,9 +170,13 @@ export function explicitRuntimeVersionNote(
     return r.status === 0 ? r.stdout.trim().split("\n").pop()?.trim() : undefined;
   });
   const reported = runVersion(path);
-  const note = reported === undefined || reported === REQUIRED_WINTER_AGENT_SDK
+  explicitVersionCache.set(key, reported);
+  return reported;
+}
+
+export function explicitRuntimeVersionNote(path: string, deps: VersionProbeDeps = {}): string | undefined {
+  const reported = winterBinaryVersion(path, deps);
+  return reported === undefined || reported === REQUIRED_WINTER_AGENT_SDK
     ? undefined
     : `code sessions run ${path}, which reports winter ${reported}, but this daemon is pinned to ${REQUIRED_WINTER_AGENT_SDK} — rebuild it (bun run build:winter) or unset runtimes.winterExecutable / $WINTER_RUNTIME_EXECUTABLE`;
-  explicitVersionCache.set(key, note);
-  return note;
 }

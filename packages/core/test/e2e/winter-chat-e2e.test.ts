@@ -146,9 +146,12 @@ const projectsSignature = (home: string): string => walkHome(join(home, "project
 /** Every `dist/winter` process on the box, whoever spawned it (the survivors check) — matched on
  *  the EXECUTABLE (the command line starts with the binary), not `pgrep -f`'s substring, which also
  *  catches the shell that exported `WINTER_RUNTIME_EXECUTABLE=<bin>` to run this very file. */
-const winterSurvivors = (bin: string): string[] =>
-  Bun.spawnSync(["ps", "-axo", "pid=,command="]).stdout.toString().split("\n")
-    .map((l) => l.trim()).filter((l) => l.replace(/^\d+\s+/, "").startsWith(bin));
+/** THIS file's surviving children only: a `winter` process whose command line names this file's own home (its
+ *  `--config-json` carries the daemon's sandbox paths under it) — never a stray from another run, which would
+ *  fail every file's check at once. */
+const winterSurvivors = (bin: string, home: string): string[] =>
+  Bun.spawnSync(["ps", "-axww", "-o", "pid=,command="]).stdout.toString().split("\n")
+    .map((l) => l.trim()).filter((l) => l.replace(/^\d+\s+/, "").startsWith(bin) && l.includes(home));
 
 /** `pgrep -f` takes a REGEX. The npm platform binary's path carries `+` and `.`
  *  (`…/@yanlinglabs+winter-agent-sdk-darwin-arm64@0.0.35/…`), so an unescaped path matched nothing and
@@ -631,7 +634,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     // every child this file spawned is gone ((e) stopped the last daemon; a filtered run stops it here)
     if (daemon !== undefined) await stopDaemon();
     const t0 = Date.now();
-    while (winterSurvivors(bin).length > 0 && Date.now() - t0 < 3000) await Bun.sleep(50);
-    expect(winterSurvivors(bin).map((l) => l.slice(0, 120))).toEqual([]);
+    while (winterSurvivors(bin, home).length > 0 && Date.now() - t0 < 3000) await Bun.sleep(50);
+    expect(winterSurvivors(bin, home).map((l) => l.slice(0, 120))).toEqual([]);
   });
 });

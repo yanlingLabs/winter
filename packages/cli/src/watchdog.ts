@@ -6,7 +6,9 @@ export interface WatchdogState { turnRunning: boolean; toolsInFlight: number; ap
 export function applyEvent(s: WatchdogState, e: { type: string }, now: number): void {
   s.lastEventAt = now;
   switch (e.type) {
-    case "turn_started": s.turnRunning = true; s.toolsInFlight = 0; s.approvalsPending = 0; break;
+    // A turn_started while a turn runs is a message folded INTO it (agent SDK 0.0.44): what is in
+    // flight stays in flight.
+    case "turn_started": if (!s.turnRunning) { s.toolsInFlight = 0; s.approvalsPending = 0; } s.turnRunning = true; break;
     case "turn_completed": s.turnRunning = false; break;
     case "tool_call": s.toolsInFlight++; break;
     case "tool_result": s.toolsInFlight = Math.max(0, s.toolsInFlight - 1); break;

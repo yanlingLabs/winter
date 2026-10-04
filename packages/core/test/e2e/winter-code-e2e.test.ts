@@ -105,8 +105,11 @@ function walkHome(dir: string, describe: (rel: string, st: Stats) => string): st
 }
 const homeSignature = (dir: string): string => walkHome(dir, (rel, st) => (st.isDirectory() ? `${rel}/` : rel));
 const projectsSignature = (home: string): string => walkHome(join(home, "projects"), (rel, st) => `${rel} ${st.size} ${st.mtimeMs}`);
-const winterSurvivors = (bin: string): string[] =>
-  Bun.spawnSync(["ps", "-axo", "pid=,command="]).stdout.toString().split("\n").map((l) => l.trim()).filter((l) => l.replace(/^\d+\s+/, "").startsWith(bin));
+/** THIS file's surviving children only: a `winter` process whose command line names this file's own home (its
+ *  `--config-json` carries the daemon's sandbox paths under it) — never a stray from another run, which would
+ *  fail every file's check at once. */
+const winterSurvivors = (bin: string, home: string): string[] =>
+  Bun.spawnSync(["ps", "-axww", "-o", "pid=,command="]).stdout.toString().split("\n").map((l) => l.trim()).filter((l) => l.replace(/^\d+\s+/, "").startsWith(bin) && l.includes(home));
 /** `pgrep -f` takes a REGEX. The npm platform binary's path carries `+` and `.`
  *  (`…/@yanlinglabs+winter-agent-sdk-darwin-arm64@0.0.35/…`), so an unescaped path matched nothing and
  *  every child scan came back empty whenever `$WINTER_RUNTIME_EXECUTABLE` was unset. */
@@ -340,6 +343,11 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
     // probe copy has the test process as its parent, so the parent pid is what tells them apart).
     const winterPid = winterChildren(bin).find((p) => !before.has(p));
     expect(winterPid).toBeDefined();
+    // The home-scoped survivor scan is not vacuous: it DOES see this file's live child (its command line
+    // names this home), so the zero-survivor check at the end means something — while a home it never
+    // spawned under sees nothing.
+    expect(winterSurvivors(bin, home).some((l) => l.startsWith(`${winterPid} `))).toBe(true);
+    expect(winterSurvivors(bin, join(home, "not-this-home")).some((l) => l.startsWith(`${winterPid} `))).toBe(false);
     const spawnedByChild = (): string[] =>
       Bun.spawnSync(["pgrep", "-P", winterPid!, "-f", "fake-mcp-server"]).stdout.toString().trim().split("\n").filter(Boolean);
     const t1 = Date.now();
@@ -359,7 +367,7 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
       expect(projectsSignature(h)).toBe(projectsBefore.get(h)!);
     }
     const t0 = Date.now();
-    while (winterSurvivors(bin).length > 0 && Date.now() - t0 < 3000) await Bun.sleep(50);
-    expect(winterSurvivors(bin).map((l) => l.slice(0, 120))).toEqual([]);
+    while (winterSurvivors(bin, home).length > 0 && Date.now() - t0 < 3000) await Bun.sleep(50);
+    expect(winterSurvivors(bin, home).map((l) => l.slice(0, 120))).toEqual([]);
   });
 });

@@ -252,6 +252,24 @@ describe("state.ts — THE BUG FIX: bg-agent finish survives the main turn_compl
   });
 });
 
+describe("state.ts — a main turn_started while a main turn runs is a CONTINUATION (agent SDK 0.0.44's fold)", () => {
+  test("finished subagent rows are NOT pruned and the turn's clock keeps running; the next real turn prunes as before", () => {
+    let s = initialState();
+    s = reduce(s, { type: "turn_started", threadId: "main" }, T0);
+    s = reduce(s, { type: "thread_started", threadId: "th_x", parentThreadId: "main", agentType: "general-purpose", prompt: "p", description: "helper" }, T0 + 10);
+    s = reduce(s, { type: "turn_started", threadId: "th_x", ts: T0 + 20 }, T0 + 20);
+    s = reduce(s, { type: "thread_completed", threadId: "th_x", stopReason: "end_turn", ts: T0 + 30 }, T0 + 30);
+    expect(s.agents.find((a) => a.threadId === "th_x")?.status).toBe("done");
+    s = reduce(s, { type: "turn_started", threadId: "main" }, T0 + 500);   // the folded message's announcement
+    expect(s.agents.map((a) => a.threadId)).toEqual(["th_x"]);
+    expect(s.turnStartMs).toBe(T0);
+    s = reduce(s, { type: "turn_completed", threadId: "main", stopReason: "end_turn", inputTokens: 1, outputTokens: 1 }, T0 + 900);
+    s = reduce(s, { type: "turn_started", threadId: "main" }, T0 + 1000); // a NEW turn
+    expect(s.agents).toEqual([]);
+    expect(s.turnStartMs).toBe(T0 + 1000);
+  });
+});
+
 describe("state.ts — roster honesty: finish note verb from thread_completed.stopReason (no-timeout task)", () => {
   test("a FAILED child (stopReason 'error' — incl. a stalled one) commits 'Failed (...)', never 'Done'", () => {
     let s = initialState();

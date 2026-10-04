@@ -3,8 +3,15 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.43";
-/** Bumped to 0.0.43 (2026-10-03; 0.0.42 was never published): clean-room rewrite of helpers that had mirrored claude's internals (permissions, sandbox, plugins, context, subagents, MCP, store); zero behaviour change, proven by recorded corpora.
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.44";
+/** Bumped to 0.0.44 (2026-10-04, user ruling "lets fold the message into the running turn"): host input sent while a
+ *  turn runs is FOLDED into that turn just before its next request (after the next tool round), with
+ *  `system/host_input_folded` (`SDKHostInputFoldedMessage`, `count` = the host's earliest pending pushes absorbed —
+ *  they never get a `result`); a turn stopped by an interrupt, a budget or a hook before that request does not fold;
+ *  `UserPromptSubmit` runs per folded prompt (a block ends the fold there) and `/compact` or a resolver-expanded
+ *  `/name` ends it. New control `Query.clearQueuedInput()` (`clear_queued_input`) drops every pending push — TaskStop's
+ *  clear (`runtime-sdk/fold.ts`).
+ *  Earlier: bumped to 0.0.43 (2026-10-03; 0.0.42 was never published): clean-room rewrite of helpers that had mirrored claude's internals (permissions, sandbox, plugins, context, subagents, MCP, store); zero behaviour change, proven by recorded corpora.
  *  Earlier: bumped to 0.0.41 (2026-10-03): `McpSdkServerConfig.concurrentTools` — a host can declare some of its in-process
  *  tools concurrency-safe WITHOUT making them read-only, so several `SpawnSession` calls of one Dispatch round run at
  *  once (as claude runs several `Agent` calls of a round at once); a scheduling statement only, never a

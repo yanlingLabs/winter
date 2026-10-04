@@ -51,7 +51,7 @@ import { moveTranscriptFiles, transcriptEntriesOf, type TranscriptMoveResult } f
 import { recordLazyRekey } from "../migration/migrate-c";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { runningTurnOrigin } from "../sessions/turn-origins";
+import { mainTurnOpenInLog, runningTurnOrigin } from "../sessions/turn-origins";
 import { CLAUDE_FIRST_PARTY_PROVIDER_IDS, DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, ownProviderFor, permittedProviders, pinsFor, providerBaseUrlFor, sdkAllowRules, sdkDenyRules, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
@@ -99,7 +99,7 @@ function mergedAgentDefinitions(
 import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import type { SkillStore } from "../agent/skills";
-import { startWinterSession, unconsumedUserMessages, withRunHome, withSessionMcpServers, type CompactOptions, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
+import { startWinterSession, unconsumedUserMessages, withRunHome, withRuntimeVersion, withSessionMcpServers, type CompactOptions, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 import type { UserMessageImageRef } from "@yanlinglabs/winter-protocol";
 import { RunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, type RunHomeInput } from "@yanlinglabs/winter-runtime-sdk";
 import { projectScopeTrusted, type RunHomeSessionFacts } from "./run-home-input";
@@ -194,6 +194,9 @@ export interface LegSession {
   send(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; queued: boolean }>;
   steer(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; injected: boolean }>;
   interrupt(opts?: { discardQueued?: boolean }): Promise<{ wasRunning: boolean; discarded?: number }>;
+  /** Agent SDK 0.0.44: the live child folds a mid-turn push into its running turn — see
+   *  `WinterSession.foldsQueuedInput`. Optional so a test double need not implement it (read as false). */
+  readonly foldsQueuedInput?: boolean;
   /** WS-23 (reasoning-state): compact the live child now, on its own model -- see `WinterSession.compact`. */
   compact(opts?: CompactOptions): Promise<{ retainedCount: number }>;
   /** WS-23 review r1 I-5: hold what arrives for the TARGET while a provider switch replaces this
@@ -672,6 +675,8 @@ export function coldResumeRunHomeFor(deps: {
 
 export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDrivers {
   const drivers = new Map<string, LegSession>();
+  /** An evicted driver still ending (`evict`): the session's next driver waits for it before its first open. */
+  const evictedPredecessors = new Map<string, Promise<void>>();
   /** Per live Winter-leg child: the provider its `runtimes.advisorModel` pin names when that is ANOTHER
    *  provider (set at every incarnation's options build) — `advisorProviderOf`, read by
    *  `evictSessionsForCredential`. */
@@ -1250,6 +1255,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // WS-25: the same fold, kept with the incarnation (a symbol key — never on the wire), so a sign-in
       // door can ask a live session which of its servers sit at a URL (`WinterSession.mcpServerNamesFor`).
       withSessionMcpServers(options, configuredMcp);
+      // The runtime version this child will run (a configured binary may predate the pin): what the session
+      // may assume of it — whether it folds a mid-turn push (`fold.ts`'s `runtimeFolds`).
+      withRuntimeVersion(options, hook.runtimeVersion);
       // WS-21 (spec §3.1): LAST, so a refusal above never leaves a run folder behind. The router's Winter
       // overload reads `options.runtime.runHome` and applies it synchronously; `WinterSession` disposes it
       // when the incarnation ends (or at once, if the open fails before the child iterates).
@@ -1373,7 +1381,12 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       ...(deps.onTurnSettled === undefined ? {} : { onTurnSettled: () => deps.onTurnSettled!(sessionId) }),
       ...(deps.onSupportedAgents === undefined ? {} : { onSupportedAgents: (agents) => deps.onSupportedAgents!(sessionId, agents) }),
       // P8b-39: the session log is the durable queue — what `open()` re-pushes is read from it.
-      unconsumed: () => unconsumedUserMessages(deps.store.read(sessionId)),
+      // ONE read of the log per open (`logFacts`): what is still owed, and whether a turn was left open.
+      logFacts: () => {
+        const events = deps.store.read(sessionId);
+        return { unconsumed: unconsumedUserMessages(events), danglingTurn: mainTurnOpenInLog(events) };
+      },
+      ...(evictedPredecessors.has(sessionId) ? { predecessorDone: evictedPredecessors.get(sessionId)! } : {}),
       idleTimeoutMs: deps.idleTimeoutMs ?? (() => winterOptionsFromSettings(deps.settings()).idleTimeoutSec * 1000),
       ...(deps.endGraceMs === undefined ? {} : { endGraceMs: deps.endGraceMs }),
       log,
@@ -1670,7 +1683,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // never made it into the log before eviction) must not linger forever under a dead id.
       clearSession(sessionId);
       if (session === undefined) return;
-      try { await session.end(); } catch (err) { log(`evicting ${sessionId}: end failed (${err instanceof Error ? err.name : "unknown"})`); }
+      // The driver left the table BEFORE its child is gone, so a resume racing this eviction builds a new
+      // driver at once: that driver's first open waits for THIS one's iteration to close its books
+      // (`WinterSessionDeps.predecessorDone`, bounded), so it never reads the log — and closes a turn as
+      // dangling — while the old child's own terminal is still on its way.
+      const ended = session.end().catch((err: unknown) => { log(`evicting ${sessionId}: end failed (${err instanceof Error ? err.name : "unknown"})`); });
+      const ending = ended.then(() => session.done.catch(() => {}));
+      evictedPredecessors.set(sessionId, ending);
+      void ending.finally(() => { if (evictedPredecessors.get(sessionId) === ending) evictedPredecessors.delete(sessionId); });
+      await ended;
     },
     list: () => [...drivers.values()],
     async endAll() {

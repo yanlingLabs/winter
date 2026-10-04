@@ -19,7 +19,18 @@ class FakeDriver implements MessagingDriverHandle {
   failNext?: Error;
   interrupts = 0;
   pendingSends: string[] = [];
+  /** Agent SDK 0.0.44's folding child (`WinterSession.foldsQueuedInput`). */
+  foldsQueuedInput = false;
+  readonly steers: Array<{ text: string; clientName?: string }> = [];
   constructor(private readonly hub: SessionHub, readonly sessionId: string) {}
+  async steer(text: string, clientName?: string): Promise<{ seq: number; injected: boolean }> {
+    if (this.failNext) { const e = this.failNext; this.failNext = undefined; throw e; }
+    this.steers.push({ text, ...(clientName === undefined ? {} : { clientName }) });
+    const ev = this.hub.append(this.sessionId, { type: "user_message", sessionId: this.sessionId, threadId: "main", text, clientName: clientName ?? "steer" });
+    const injected = this.turnRunning;
+    this.turnRunning = true;
+    return { seq: ev.seq, injected };
+  }
   readonly interruptOpts: Array<{ discardQueued?: boolean } | undefined> = [];
   async interrupt(opts?: { discardQueued?: boolean }): Promise<{ wasRunning: boolean; discarded?: number }> {
     this.interrupts++;
@@ -160,12 +171,15 @@ describe("SendMessage to a session", () => {
     expect(t.drivers.get(to)!.sends).toEqual([]);
   });
 
-  test("a session mid-turn queues it behind the running turn", async () => {
+  test("a running session whose steer would not reach its turn (foldsQueuedInput false: a handoff pending, ending) queues it behind the running turn — never steered", async () => {
     const t = setup();
     const from = t.code();
     const to = t.code();
     t.driverFor(to).turnRunning = true;
-    expect((await t.send(from, to)).status).toBe("queued");
+    const answer = await t.send(from, to);
+    expect(answer.status).toBe("queued");
+    expect(answer.note).not.toContain("tool call");
+    expect(t.driverFor(to).steers).toEqual([]);
   });
 
   test("a FINISHED session (no live driver) is resumed through its driver for the message", async () => {
@@ -310,6 +324,115 @@ describe("SendMessage to a session", () => {
     t.messaging.beginShutdown();
     expect(await t.send(t.code(), t.code())).toMatchObject({ status: "unavailable", retryable: true });
     expect(t.ensured).toEqual([]);
+  });
+});
+
+describe("SendMessage to a RUNNING session folds into its turn (user ruling 2026-10-04, agent SDK 0.0.44)", () => {
+  test("a running target on a folding child is STEERED: delivered now, read after its current tool call — never queued behind the turn", async () => {
+    const t = setup();
+    const from = t.code();
+    const to = t.code({ title: "Fix login" });
+    const d = t.driverFor(to);
+    d.turnRunning = true;
+    d.foldsQueuedInput = true;
+    const answer = await t.send(from, to, "also update the changelog");
+    expect(answer.status).toBe("delivered");
+    expect(answer.note).toContain(`session ${to} ("Fix login") is working right now: it reads your message after its current tool call`);
+    expect(answer.note).toContain("or as its next turn, if that turn ends first");
+    expect(answer.note).toContain("It is not one of your children");
+    expect(answer.note).toContain(`SendMessage to ${from}`);
+    expect(d.sends).toEqual([]);
+    expect(d.steers).toHaveLength(1);
+    expect(d.steers[0]!.clientName).toBe("messaging");
+    expect(d.steers[0]!.text).toContain("also update the changelog");
+    expect(d.steers[0]!.text).toStartWith(`<agent-message from="session:${from}"`);
+  });
+
+  test("FIFO with the session's own queue: a running target that already holds queued sends gets `send` (queued BEHIND them), never a steer past them — and the note says so", async () => {
+    const t = setup();
+    const from = t.code();
+    const to = t.code();
+    const d = t.driverFor(to);
+    d.turnRunning = true;
+    d.foldsQueuedInput = true;
+    d.pendingSends = ["the user's earlier message"];
+    const answer = await t.send(from, to, "do this too");
+    expect(answer.status).toBe("queued");
+    expect(answer.note).toContain("has 1 message queued ahead of yours, so yours runs after it, in order, once its current turn ends");
+    expect(d.steers).toEqual([]);
+    expect(d.sends).toHaveLength(1);
+  });
+
+  test("the outcome is what the steer DID: a steer that was not injected (no turn running any more, or held for a provider switch) is not reported as read after the current tool call", async () => {
+    const t = setup();
+    const from = t.code();
+    const to = t.code();
+    const d = t.driverFor(to);
+    d.turnRunning = true;
+    d.foldsQueuedInput = true;
+    d.steer = async (text, clientName) => { d.steers.push({ text, ...(clientName === undefined ? {} : { clientName }) }); return { seq: 1, injected: false }; };
+    const answer = await t.send(from, to, "hello");
+    expect(answer.status).toBe("delivered");
+    expect(answer.note).not.toContain("after its current tool call");
+  });
+
+  test("an IDLE target on a folding child still gets `send` — it starts a turn of its own", async () => {
+    const t = setup();
+    const from = t.code();
+    const to = t.code();
+    t.driverFor(to).foldsQueuedInput = true;
+    expect((await t.send(from, to)).status).toBe("delivered");
+    expect(t.driverFor(to).sends).toHaveLength(1);
+    expect(t.driverFor(to).steers).toEqual([]);
+  });
+
+  test("Dispatch steering its OWN running child: plain text, the follow-up hook armed, and the wake promised for the running turn's end", async () => {
+    const t = setup();
+    const dispatch = t.store.createSession("global", { mode: "dispatch", origin: "dispatch" });
+    const child = t.store.createSession("global", { mode: "code", origin: "dispatch-child", parentSessionId: dispatch, cwd: t.home });
+    const d = t.driverFor(child);
+    d.turnRunning = true;
+    d.foldsQueuedInput = true;
+    const answer = await t.send(dispatch, child, "use the staging database");
+    expect(answer.status).toBe("delivered");
+    expect(answer.note).toContain("after its current tool call");
+    expect(answer.note).toContain("You'll be woken with a <child_update> when that turn finishes.");
+    expect(d.steers).toEqual([{ text: "use the staging database", clientName: "messaging" }]);
+    // the follow-up was expected and consumed by the steered user_message (DispatchChildren picked the child up)
+    expect(t.dc.roster().map((r) => r.sessionId)).toEqual([child]);
+  });
+
+  test("a target replaced while starting (session_replaced) is steered on its next driver", async () => {
+    const t = setup();
+    const from = t.code();
+    const to = t.code();
+    const first = t.driverFor(to);
+    first.turnRunning = true;
+    first.foldsQueuedInput = true;
+    first.steer = async () => {
+      t.drivers.delete(to);
+      const next = t.driverFor(to);
+      next.turnRunning = true;
+      next.foldsQueuedInput = true;
+      throw Object.assign(new Error("this session's runtime was replaced while it was starting; send again"), { code: "session_replaced" });
+    };
+    const answer = await t.send(from, to, "run the tests");
+    expect(answer.status).toBe("delivered");
+    expect(t.drivers.get(to)!.steers.map((s) => s.text).join("")).toContain("run the tests");
+  });
+
+  test("a steer that fails is unavailable, and the Dispatch follow-up it armed is withdrawn", async () => {
+    const t = setup();
+    const dispatch = t.store.createSession("global", { mode: "dispatch", origin: "dispatch" });
+    const child = t.store.createSession("global", { mode: "code", origin: "dispatch-child", parentSessionId: dispatch, cwd: t.home });
+    const d = t.driverFor(child);
+    d.turnRunning = true;
+    d.foldsQueuedInput = true;
+    d.failNext = new Error("queue closed");
+    expect(await t.send(dispatch, child, "x")).toMatchObject({ status: "unavailable", retryable: false });
+    // withdrawn: the same text arriving later from someone else is not taken for Dispatch's follow-up
+    t.hub.append(child, { type: "user_message", sessionId: child, threadId: "main", text: "x", clientName: "messaging" });
+    expect(t.dc.roster()).toEqual([]);
   });
 });
 

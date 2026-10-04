@@ -31,6 +31,14 @@
  * all (only `system/*` frames do). Each pushed text is consumable ONCE — a user who genuinely sends
  * "ok" twice must see two `user_message`s, so a matching echo removes the entry rather than
  * leaving it to swallow every later repeat.
+ *
+ * ── A FOLDED push (agent SDK 0.0.44, user ruling 2026-10-04) has NO echo ──────────────────────────
+ *
+ * A push made while a turn runs is folded into that turn at its next tool round; the model reads it
+ * wrapped in a system-reminder, but the 0.0.44 contract puts nothing on the output stream for it except
+ * `system/host_input_folded`. So there is nothing to dedupe and nothing here does: a speculative
+ * "contains a folded text" match (tried, then removed in review) would linger and swallow any later
+ * genuine pass-through that merely quoted the steer ("ok", "run the tests in …").
  */
 
 /** How many recent pushes stay eligible for an echo match. A turn is pushed and answered long

@@ -259,6 +259,23 @@ describe("elicitationHandlerFor", () => {
     expect(await between).toEqual({ action: "decline" });
   });
 
+  test("the turn tracker: a main turn_started INSIDE an open turn (a message folded into it — agent SDK 0.0.44) starts nothing, and the turn's one end still cancels its earlier card", async () => {
+    const broker = new ElicitationBroker();
+    const turns = elicitationTurnTracker(broker, "s1");
+    const tagged = elicitationHandlerFor({ sessionId: "s1", mode: "code", policy: () => "ask", broker, emit: () => {}, log: { info: () => {}, error: () => {} }, currentTurn: () => turns.current() });
+    turns.observe({ type: "turn_started", threadId: "main" });
+    const beforeFold = tagged(urlRequest(), { signal: new AbortController().signal, requestId: "a" });
+    await Bun.sleep(2);
+    turns.observe({ type: "turn_started", threadId: "main" });   // the folded message's announcement
+    expect(turns.current()).toBe(1);
+    turns.observe({ type: "turn_completed", threadId: "main" }); // the running turn's ONE terminal
+    expect(await beforeFold).toEqual({ action: "cancel" });
+    expect(broker.pendingIds("s1")).toEqual([]);
+    // and the next real turn is a new one
+    turns.observe({ type: "turn_started", threadId: "main" });
+    expect(turns.current()).toBe(2);
+  });
+
   test("a card that cannot be raised declines and leaves nothing pending", async () => {
     const broker = new ElicitationBroker();
     const logs: string[] = [];

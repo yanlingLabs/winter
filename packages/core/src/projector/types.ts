@@ -183,30 +183,48 @@ export interface Projector {
    * `true`, into every child's model-greppable transcript as well. It also records the pushed text
    * in the echo window, which is what makes `dedupe.ts` reachable at all.
    *
-   * ── A MID-TURN PUSH IS ITS OWN TURN, AND IT STARTS WHEN THE RUNNING ONE ENDS ────────────────
+   * ── A MID-TURN PUSH IS FOLDED INTO THE RUNNING TURN, OR IS THE NEXT TURN ───────────────────
    *
    * MEASURED (P8b-38, `test/projector/real-child.test.ts`'s steer measurement against the built
-   * binary): on the Winter wire a push made while a turn runs — a `steer`, a messaging delivery —
-   * yields its OWN `result`, because the child queues it as its next envelope (agent SDK 0.0.17
-   * `engine.ts`: a `user` frame goes to `userFrames`, drained one turn at a time). So the driver calls
-   * `beginTurn` for every push, a steer included, and the rule stays "ONE `result` per begun turn".
+   * binary): up to agent SDK 0.0.43 a push made while a turn runs — a `steer`, a messaging delivery —
+   * yields its OWN `result`, because the child queues it as its next envelope. Since 0.0.44 (user ruling
+   * 2026-10-04, "fold the message into the running turn") the child FOLDS every pending push into the
+   * running turn at its next tool round — claude's behaviour — and says so on the stream
+   * (`system/host_input_folded`, `count` = its N earliest pending pushes): those pushes never get a
+   * `result`, and the running turn's ONE terminal closes them. A push still pending when the running
+   * turn ends (no tool round left) is still its own next turn with its own `result`. So the driver calls
+   * `beginTurn` for every push, a steer included, and the rule is "ONE `result` per begun turn that was
+   * not folded".
    *
-   * Since C2 (2026-09-22) such a push's `turn_started` is NOT returned here: it is held and announced
-   * right after the running turn's `turn_completed` — where that turn actually starts — or earlier
-   * through `announceQueuedTurns`. Whether "a turn is running" is the projector's own push count
-   * (`openTurns`), so the hold rests on P8b-38 staying true: if a child ever answered two pushes
-   * with ONE `result`, the second push's `turn_started` would wait for a terminal that never comes
-   * (until the next host message announces it), and a resume in between would re-push its text.
-   * The official leg (claude folds a mid-turn message into the running turn) never holds.
+   * Since C2 (2026-09-22) such a push's `turn_started` is NOT returned here: it is held until the child
+   * takes the push up — announced by the fold frame (mid-turn: the message joins the running turn), or
+   * right after the running turn's `turn_completed` (it is the next turn) — or earlier through
+   * `announceQueuedTurns`. Whether "a turn is running" is the projector's own push count (`openTurns`),
+   * so the hold rests on the child accounting for every push: a `result`, or a place in a fold's
+   * `count`. A child that silently absorbed a push (claude, the retired official leg) would leave its
+   * `turn_started` waiting for a terminal that never comes; the official leg never holds.
    */
   beginTurn(input: { text: string; at?: string }): ProjectedBatch;
+  /**
+   * TaskStop (user ruling 2026-10-04): the child dropped `count` pending pushes before they ran (agent
+   * SDK 0.0.44 `Query.clearQueuedInput`). They leave the held queue from its TAIL (the head may already
+   * have started, if the running turn ended while the clear was in flight) and are no longer owed a
+   * terminal. Returns the `turn_started` of each that was still unannounced — appended NOW, while those
+   * pushes are still the youngest messages in the log (the adjacency pairing) — and how many left; the
+   * DRIVER closes each with an `aborted` `turn_completed` once the stopped turn has ended.
+   */
+  clearQueued(count: number): { batch: ProjectedBatch; cleared: number };
+  /** The pushes still held (C2), oldest first, and whether each one's `turn_started` is out — a copy.
+   *  The driver snapshots it when it SENDS a clear (TaskStop), to close exactly what the clear dropped. */
+  readonly pendingPushes: readonly { announced: boolean }[];
   /**
    * 2026-09-22 (C2): announce NOW every push whose `turn_started` `beginTurn` is still holding.
    *
    * On the Winter leg a push made while one of the host's turns is still open (a steer, a delivery,
    * a held send released at a `result` while a steer runs) returns NO `turn_started` from `beginTurn`:
-   * the child queues it as its own later turn, so it is announced right after the running turn's
-   * `turn_completed`, one per terminal — the log's turn boundaries in the order they happen.
+   * the child holds it pending, so it is announced when the child takes it up — folded into the running
+   * turn (0.0.44's `host_input_folded`) or right after the running turn's `turn_completed`, one per
+   * terminal — the log's turn boundaries in the order they happen.
    *
    * The durable queue's adjacency pairing (`winter-session.ts`'s `unconsumedUserMessages`: a
    * `turn_started` pairs with the NEAREST PRECEDING unpaired `user_message`) needs a pushed message
