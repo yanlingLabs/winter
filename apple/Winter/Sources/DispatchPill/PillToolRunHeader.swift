@@ -390,7 +390,7 @@ private struct PillTextShimmer: ViewModifier {
                         let t = timeline.date.timeIntervalSinceReferenceDate
                         let phase = min(1, t.truncatingRemainder(dividingBy: Self.period) / (Self.period * Self.sweepShare))
                         GeometryReader { geo in
-                            let band = max(40, geo.size.width * 0.4)
+                            let band = max(60, geo.size.width * 0.6)
                             ZStack(alignment: .leading) {
                                 Color.black.opacity(0.5)
                                 LinearGradient(colors: [.black.opacity(0), .black, .black.opacity(0)],
