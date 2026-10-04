@@ -20,11 +20,15 @@ class FakeDriver implements MessagingDriverHandle {
   interrupts = 0;
   pendingSends: string[] = [];
   constructor(private readonly hub: SessionHub, readonly sessionId: string) {}
-  async interrupt(): Promise<{ wasRunning: boolean }> {
+  readonly interruptOpts: Array<{ discardQueued?: boolean } | undefined> = [];
+  async interrupt(opts?: { discardQueued?: boolean }): Promise<{ wasRunning: boolean; discarded?: number }> {
     this.interrupts++;
+    this.interruptOpts.push(opts);
     const wasRunning = this.turnRunning;
     this.turnRunning = false;
-    return { wasRunning };
+    const discarded = wasRunning && opts?.discardQueued === true ? this.pendingSends.length : 0;
+    if (discarded > 0) this.pendingSends = [];
+    return discarded > 0 ? { wasRunning, discarded } : { wasRunning };
   }
   async send(text: string, clientName?: string): Promise<{ seq: number; queued: boolean }> {
     if (this.failNext) { const e = this.failNext; this.failNext = undefined; throw e; }
@@ -376,7 +380,7 @@ describe("TaskStop on a session (host_session_stop)", () => {
 });
 
 describe("TaskStop: the queue, cancellation and shutdown", () => {
-  test("a stopped turn with messages queued behind it says they did NOT run and when they will", async () => {
+  test("a stop clears the messages queued behind the stopped turn (user ruling 2026-10-04) and says so", async () => {
     const t = setup();
     const from = t.code();
     const busy = t.code();
@@ -384,7 +388,9 @@ describe("TaskStop: the queue, cancellation and shutdown", () => {
     t.driverFor(busy).pendingSends = ["a", "b"];
     const answer = await t.messaging.stop(from, { id: busy });
     expect(answer.status).toBe("stopped");
-    expect(answer.note).toContain("2 messages were queued behind that turn and did NOT run");
+    expect(t.driverFor(busy).interruptOpts).toEqual([{ discardQueued: true }]);
+    expect(answer.note).toContain("2 messages were queued behind that turn — they were cleared and will not run");
+    expect(t.driverFor(busy).pendingSends).toEqual([]);
   });
 
   test("a cancelled caller or a stopping daemon stops nothing", async () => {

@@ -504,6 +504,67 @@ describe("startWinterSession — one incarnation", () => {
     expect(seen(h, "turn_started")).toHaveLength(3);
   });
 
+  test("TaskStop (discardQueued, user ruling 2026-10-04): the sends held behind the stopped turn are CLOSED in the log once it ends — never re-pushed on resume — and the next send runs at once", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.send("B", "cli");
+    await h.session.send("C", "cli");
+    expect(h.session.pendingSends).toEqual(["B", "C"]);
+    expect(await h.session.interrupt({ discardQueued: true })).toEqual({ wasRunning: true, discarded: 2 });
+    await h.settled();
+    expect(h.session.pendingSends).toEqual([]);
+    expect(h.q().pushed).toEqual(["A"]);
+    // A's own aborted terminal, then one stopped-before-it-ran pair per cleared message
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "user_message", "turn_completed",
+      "turn_started", "turn_completed", "turn_started", "turn_completed"]);
+    expect(seen(h, "turn_completed").map((e) => (e as { stopReason?: string }).stopReason)).toEqual(["aborted", "aborted", "aborted"]);
+    expect(unconsumedUserMessages(h.events)).toEqual([]);   // a resume owes nothing
+    // the next message is not queued behind a stale one: it runs now
+    const d = await h.session.send("D", "cli");
+    expect(d.queued).toBe(false);
+    expect(h.q().pushed).toEqual(["A", "D"]);
+  });
+
+  test("TaskStop's clear: a send arriving before the stopped turn has ended waits for the clear, then runs at once — the cleared text never runs under it", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.send("B", "cli");
+    const q = h.q();
+    const realInterrupt = q.interrupt.bind(q);
+    // the stopped turn's terminal lands only after a newer message was sent
+    q.interrupt = async () => { q.interrupts++; };
+    expect(await h.session.interrupt({ discardQueued: true })).toEqual({ wasRunning: true, discarded: 1 });
+    const c = h.session.send("C", "cli");
+    await h.settled();
+    expect(h.q().pushed).toEqual(["A"]);                  // C is waiting, B has not run
+    q.interrupt = realInterrupt;
+    q.emit(result({ interrupted: true }));
+    expect((await c).queued).toBe(false);
+    expect(h.q().pushed).toEqual(["A", "C"]);
+    expect(h.session.pendingSends).toEqual([]);
+    expect(unconsumedUserMessages(h.events)).toEqual([]);   // C was pushed (its turn begun); B is closed
+  });
+
+  test("TaskStop's clear is bounded: if the stopped turn's terminal never comes, the clear runs after STOP_SETTLE_MAX_MS and a waiting send goes ahead", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.send("B", "cli");
+    const q = h.q();
+    q.interrupt = async () => { q.interrupts++; };
+    await h.session.interrupt({ discardQueued: true });
+    const c = h.session.send("C", "cli");
+    h.timers.armed.find((t) => t.ms === 2_000)!.fn();
+    await c;
+    expect(h.session.pendingSends).toEqual(["C"]);        // A never ended, so C waits behind it
+    expect(unconsumedUserMessages(h.events)).toEqual(["C"]);
+  });
+
   test("Task 17 Step 0(c): a messaging DELIVERY after an interrupt re-arms the drain too — its own text first, then the held one at its result", async () => {
     const h = harness();
     await h.session.open();

@@ -76,8 +76,9 @@ export interface MessagingDriverHandle {
   /** `live` (a child is running), `resumable`, `ended` — absent on a test double, read as live. */
   readonly state?: "live" | "resumable" | "ended";
   send(text: string, clientName?: string): Promise<{ seq: number; queued: boolean }>;
-  /** The session's own interrupt (`session.interrupt`, the Mac's stop button). Optional on a test double. */
-  interrupt?(): Promise<{ wasRunning: boolean }>;
+  /** The session's own interrupt (`session.interrupt`, the Mac's stop button); `discardQueued` also drops
+   *  the messages held behind the stopped turn. Optional on a test double. */
+  interrupt?(opts?: { discardQueued?: boolean }): Promise<{ wasRunning: boolean; discarded?: number }>;
   /** Messages queued behind the running turn (`WinterSession.pendingSends`). Optional on a test double. */
   readonly pendingSends?: readonly string[];
 }
@@ -279,7 +280,7 @@ export class SessionMessaging {
     };
   }
 
-  /** `TaskStop` on a session id: interrupt its running turn (the Mac's stop button). Never throws. */
+  /** `TaskStop` on a session id: interrupt its running turn and clear what was queued behind it. Never throws. */
   async stop(callerSessionId: string, request: HostSessionStopRequest, signal?: AbortSignal): Promise<HostSessionStopAnswer> {
     if (this.draining) return { status: "unavailable", reason: "Winter is shutting down; nothing was stopped" };
     if (signal?.aborted === true) return { status: "unavailable", reason: "the caller was interrupted; nothing was stopped" };
@@ -292,16 +293,15 @@ export class SessionMessaging {
     }
     const driver = this.deps.sessions.get(resolved.id);
     if (driver === undefined || !driver.turnRunning || driver.interrupt === undefined) return { status: "not_running" };
-    // What an interrupt does to the queue (`WinterSession.interrupt`: the drain is paused): messages held
-    // behind the stopped turn do NOT run now — they stay in the session's log and run, in order, as soon
-    // as the session receives its next message. Said in the answer, so the caller knows.
-    const held = driver.pendingSends?.length ?? 0;
+    // A stop clears the queue too (user ruling 2026-10-04): the messages held behind the stopped turn are
+    // dropped once it has ended, so the next message the session gets runs straight away — never a stale
+    // one first. Said in the answer, so the caller knows.
     try {
-      const { wasRunning } = await driver.interrupt();
+      const { wasRunning, discarded = 0 } = await driver.interrupt({ discardQueued: true });
       if (!wasRunning) return { status: "not_running" };
-      return held === 0
+      return discarded === 0
         ? { status: "stopped" }
-        : { status: "stopped", note: `${held} message${held === 1 ? " was" : "s were"} queued behind that turn and did NOT run — ${held === 1 ? "it stays" : "they stay"} in the session's log and run${held === 1 ? "s" : ""}, in order, when the session receives its next message (SendMessage it to continue)` };
+        : { status: "stopped", note: `${discarded} message${discarded === 1 ? " was" : "s were"} queued behind that turn — ${discarded === 1 ? "it was" : "they were"} cleared and will not run. SendMessage the session to give it new work.` };
     } catch (err) {
       return { status: "unavailable", reason: `could not stop session '${resolved.id}': ${refusalText(err)}` };
     }

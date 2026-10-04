@@ -193,7 +193,7 @@ export interface LegSession {
   /** `images`: see `WinterSession.send` — appended with `text` as written, the child given the paths. */
   send(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; queued: boolean }>;
   steer(text: string, clientName?: string, images?: readonly UserMessageImageRef[]): Promise<{ seq: number; injected: boolean }>;
-  interrupt(): Promise<{ wasRunning: boolean }>;
+  interrupt(opts?: { discardQueued?: boolean }): Promise<{ wasRunning: boolean; discarded?: number }>;
   /** WS-23 (reasoning-state): compact the live child now, on its own model -- see `WinterSession.compact`. */
   compact(opts?: CompactOptions): Promise<{ retainedCount: number }>;
   /** WS-23 review r1 I-5: hold what arrives for the TARGET while a provider switch replaces this
