@@ -738,8 +738,9 @@ struct DetachedWindowRootView: View {
             .environment(\.transcriptMarkerTint, .white)
             .environment(\.pillChromePalette, palette)
 
-            // Until the history has landed: the grey Winter mark, shimmering, over the column (the
-            // band and the lights stay above it), faded out once the replay is in.
+            // Until the history has landed the window is black with only the grey Winter mark,
+            // shimmering (user, 2026-10-04) — no title, no lights — faded out once the replay is in.
+            // The band above still drags the window.
             if adapter.isLoadingHistory {
                 SessionLoadingView()
                     .transition(.opacity)
@@ -763,10 +764,13 @@ struct DetachedWindowRootView: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 54)
                 .allowsHitTesting(false)
+                .opacity(adapter.isLoadingHistory ? 0 : 1)
             MacTrafficLights(onClose: onClose, onMinimize: onMinimize, onZoom: onZoom)
                 .padding(.leading, 20)
                 .padding(.top, 20)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .opacity(adapter.isLoadingHistory ? 0 : 1)
+                .allowsHitTesting(!adapter.isLoadingHistory)
         }
         .background(Color.black)
         .animation(.easeOut(duration: 0.3), value: adapter.isLoadingHistory)
