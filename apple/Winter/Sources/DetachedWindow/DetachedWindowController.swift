@@ -746,11 +746,13 @@ struct DetachedWindowRootView: View {
             .environment(\.transcriptMarkerTint, .white)
             .environment(\.pillChromePalette, palette)
             // A landing while a history is still on its way (the emptied transcript of a re-pin) is not it.
-            .environment(\.transcriptOnLanded) { if !adapter.isLoadingHistory { transcriptLanded = true } }
+            .environment(\.transcriptOnLanded) {
+                if !adapter.isLoadingHistory { OrbDebug.log("session window: transcript landed"); transcriptLanded = true }
+            }
 
             // Until the history has landed the window is black with only the grey Winter mark,
-            // shimmering (user, 2026-10-04) — no title, no lights — faded out once the replay is in.
-            // The band above still drags the window.
+            // shimmering, and the lights (user, 2026-10-04) — no title — faded out once the replay
+            // is in. The band above still drags the window.
             if showsLoading {
                 SessionLoadingView()
                     .transition(.opacity)
@@ -779,8 +781,6 @@ struct DetachedWindowRootView: View {
                 .padding(.leading, 20)
                 .padding(.top, 20)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .opacity(showsLoading ? 0 : 1)
-                .allowsHitTesting(!showsLoading)
         }
         .background(Color.black)
         .animation(.easeOut(duration: 0.3), value: showsLoading)
@@ -791,7 +791,10 @@ struct DetachedWindowRootView: View {
             if adapter.transcript.isEmpty { transcriptLanded = true; return }
             let generation = landingGeneration
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.landingCap) {
-                if generation == landingGeneration { transcriptLanded = true }
+                if generation == landingGeneration, !transcriptLanded {
+                    OrbDebug.log("session window: landing cap reached")
+                    transcriptLanded = true
+                }
             }
         }
         // The window's whole shape: the pill's own radius, no rim and no system shadow (user,

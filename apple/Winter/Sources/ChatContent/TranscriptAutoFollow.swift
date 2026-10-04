@@ -128,6 +128,13 @@ final class TranscriptFollower: NSObject {
     func restartAtBottom() {
         snapNext = true
         landingPending = true
+        logGeometry("restart at bottom")
+        // The far jump and the settle are logged as they happen; these follow the geometry after.
+        for delay in [0.5, 1.0, 2.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                MainActor.assumeIsolated { self?.logGeometry("+\(delay)s") }
+            }
+        }
         setFollowing(true)
         nudge()
     }
@@ -171,6 +178,7 @@ final class TranscriptFollower: NSObject {
         let target = bottomOffset(of: scrollView)
         let viewport = scrollView.contentView.bounds.height
         if let farJump, abs(target - current) >= 1, snapNext || abs(target - current) > viewport * 1.5 {
+            logGeometry("far jump from \(Int(current)) to \(Int(target))")
             farJump()
             settledFrames = 0
             if (scrollView.documentView?.frame.height ?? 0) > 0 { snapNext = false }
@@ -187,10 +195,35 @@ final class TranscriptFollower: NSObject {
             if (scrollView.documentView?.frame.height ?? 0) > 0 { snapNext = false }
             if landingPending, !snapNext, settledFrames >= Self.landedAfterFrames {
                 landingPending = false
+                logGeometry("landed")
+                refreshLazyLayout(scrollView)
                 onLanded?()
             }
             if settledFrames > 30 { link.isPaused = true; lastTimestamp = nil }
         }
+    }
+
+    /// A landing's last step: one small scroll up and back through the scroll view's OWN event path,
+    /// as the user's hand would make it. Jumped into while its rows were still estimates, a lazy stack
+    /// could keep drawing nothing at the bottom until a real scroll made it lay out the rows that are
+    /// on screen (user, 2026-10-04: "I have to do a little scroll to actually show the transcript").
+    /// Net zero, at the bottom, inside the resume distance — following is untouched.
+    private func refreshLazyLayout(_ scrollView: NSScrollView) {
+        for dy: Int32 in [1, -1] {
+            guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: dy, wheel2: 0, wheel3: 0),
+                  let event = NSEvent(cgEvent: cg) else { continue }
+            scrollView.scrollWheel(with: event)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            MainActor.assumeIsolated { self?.logGeometry("after refresh") }
+        }
+    }
+
+    /// `WINTER_ORB_DEBUG=1` diagnostics for the window-opening landing.
+    private func logGeometry(_ what: String) {
+        guard OrbDebug.enabled, let scrollView else { return }
+        let clip = scrollView.contentView.bounds
+        OrbDebug.log("transcript \(what): offset \(Int(clip.origin.y)) viewport \(Int(clip.height)) document \(Int(scrollView.documentView?.frame.height ?? -1)) following \(isFollowing)")
     }
 
     private func apply(_ y: CGFloat, in scrollView: NSScrollView) {

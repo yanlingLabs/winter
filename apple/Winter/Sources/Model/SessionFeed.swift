@@ -238,6 +238,7 @@ final class SessionFeed {
         replayCeiling = nil
         guard let events = replayBuffer else { return }
         replayBuffer = nil
+        OrbDebug.log("feed \(pinnedSessionId ?? "-"): replay folded — \(events.count) events")
         session.apply(replay: events)
         session.isLoadingHistory = false
     }
