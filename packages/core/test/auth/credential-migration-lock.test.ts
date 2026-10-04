@@ -155,7 +155,7 @@ describe("the credential migration lock (the holder process itself, never a sock
     expect(answers.size).toBe(1);
     expect(processStartSecondsViaSysctl(DEAD)).toBeUndefined();
     expect(processStartSecondsViaPs(DEAD)).toBeUndefined();
-  });
+  }, 30_000); // three cold `bun` spawns, each compiling the module and running `ps`: well past 5 s on a loaded machine
 
   test("I-A: a lock written by a holder under one locale and zone is judged HELD by a taker under another", async () => {
     const h = home();
