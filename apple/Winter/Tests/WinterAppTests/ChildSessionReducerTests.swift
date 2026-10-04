@@ -109,4 +109,15 @@ final class ChildSessionReducerTests: XCTestCase {
         XCTAssertEqual(s.exchanges.map(\.prompt), ["go", ""])
         XCTAssertTrue(s.queuedSteers.isEmpty)
     }
+
+    /// A `turn_started` while the main turn already runs is a message FOLDED into that turn (agent SDK
+    /// 0.0.44): the same turn goes on, so finished children are NOT pruned — that happens at the next
+    /// genuinely new turn.
+    func testAFoldedMessagesTurnStartedDoesNotPruneFinishedChildren() {
+        var s = reduce(OrbSessionState(), [turnStarted(seq: 1), childUpdate(childSessionId: "c1", status: "completed", seq: 2)])
+        s = reduce(s, [turnStarted(seq: 3)])
+        XCTAssertEqual(s.children.map(\.sessionId), ["c1"], "a folded message's turn_started is not a new turn")
+        s = reduce(s, [#"{"type":"turn_completed","seq":4,"sessionId":"s","ts":0,"threadId":"main","stopReason":"end_turn","inputTokens":1,"outputTokens":1}"#, turnStarted(seq: 5)])
+        XCTAssertTrue(s.children.isEmpty, "the next new turn prunes as before")
+    }
 }

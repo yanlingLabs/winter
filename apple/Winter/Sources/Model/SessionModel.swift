@@ -531,6 +531,11 @@ struct OrbSessionState: Equatable {
     /// turn the queued text was riding on ends — absorbed (`turnCompleted`) or died
     /// (`agentError`) — since a queued steer never survives past the turn it was queued for.
     var queuedSteers: [String] = []
+    /// The exchange the running main turn belongs to — stamped by a turn-opening `turn_started` — so an
+    /// `aborted` terminal marks THAT exchange, not whichever opened last: a message held behind a turn
+    /// that has already replied opens its own exchange while the turn runs, and the daemon closes a turn
+    /// a crash left open with an `aborted` `turn_completed` when the session reopens (review M2, 2026-10-04).
+    var runningTurnExchange: Int?
     /// provider-correctness T6: the message of the `agent_error` that ENDED THE TURN THAT JUST RAN
     /// — set on a main-thread `agent_error`, cleared by the next `turn_started` and by any clean
     /// `turn_completed`. Nil at every other moment.
@@ -734,14 +739,24 @@ enum SessionReducer {
                 }
             }
         case .turnStarted(let v) where v.threadId == mainThread:
+            // One that lands while the turn already runs is a message FOLDED into it (agent SDK
+            // 0.0.44: a message sent mid-turn reaches the model after the next tool call) — the same
+            // turn goes on, so nothing a fresh turn resets is reset.
+            let continuing = s.turnRunning
             s.turnRunning = true
             s.status = .thinking
             s.streamingText = ""
-            s.lastTurnAborted = false // a fresh turn clears any prior interrupt flag
-            s.lastTurnError = nil     // T6: and any prior turn's error — this one hasn't failed yet
-            // Dispatch (Phase 7): prune finished children on the NEXT main turn — same cadence as
-            // the CLI TUI's `state.agents` prune on `turn_started` (subagent-roster precedent).
-            s.children.removeAll { $0.status == "completed" || $0.status == "error" }
+            if continuing {
+                // The folded message is no longer waiting: it reached the model inside this turn.
+                if !s.queuedSteers.isEmpty { s.queuedSteers.removeFirst() }
+            } else {
+                s.runningTurnExchange = s.exchanges.indices.last
+                s.lastTurnAborted = false // a fresh turn clears any prior interrupt flag
+                s.lastTurnError = nil     // T6: and any prior turn's error — this one hasn't failed yet
+                // Dispatch (Phase 7): prune finished children on the NEXT main turn — same cadence as
+                // the CLI TUI's `state.agents` prune on `turn_started` (subagent-roster precedent).
+                s.children.removeAll { $0.status == "completed" || $0.status == "error" }
+            }
         case .turnStarted(let v):
             // CHILD thread got a SubagentManager slot — the active timer starts here, not at
             // thread_started (queued-but-idle time must NOT count — spec §2).
@@ -880,9 +895,12 @@ enum SessionReducer {
             s.lastTurnAborted = (v.stopReason == "aborted") // Esc-interrupt feedback (gate polish)
             if v.stopReason == "aborted", !s.exchanges.isEmpty {
                 // Per-exchange record of the interrupt (2d-ii-a task 1) — unlike the transient
-                // lastTurnAborted flash above, this stays on the exchange for the transcript.
-                s.exchanges[s.exchanges.count - 1].aborted = true
+                // lastTurnAborted flash above, this stays on the exchange for the transcript. On the
+                // exchange the stopped turn belongs to (`runningTurnExchange`), not merely the last.
+                let i = s.runningTurnExchange.flatMap { s.exchanges.indices.contains($0) ? $0 : nil } ?? s.exchanges.count - 1
+                s.exchanges[i].aborted = true
             }
+            s.runningTurnExchange = nil
             s.subagents = [] // 2e-ii prune: children always complete before the main turn does
         case .turnCompleted(let v):
             // CHILD turn window closed — bank the active span. Status stays "working" (alive)
@@ -910,6 +928,7 @@ enum SessionReducer {
             s.status = .idle
             s.lastTurnError = v.message // T6: the one signal the pickers' probation reads
             s.queuedSteers = [] // the turn died with whatever was queued for it
+            s.runningTurnExchange = nil
             if let last = s.exchanges.indices.last, s.exchanges[last].reply.isEmpty {
                 s.exchanges[last].appendReply("⚠︎ \(v.message)")
             }
@@ -1601,14 +1620,16 @@ final class SessionModel: ObservableObject {
         guard !events.isEmpty else { return }
         var next = state
         for event in events {
+            let wasRunning = next.turnRunning
             next = SessionReducer.reduce(next, event)
-            if case .turnStarted(let v) = event, v.threadId == "main" { next.workingVerb = WorkingVerbs.random() }
+            if case .turnStarted(let v) = event, v.threadId == "main", !wasRunning { next.workingVerb = WorkingVerbs.random() }
         }
         state = next
         for event in events { afterApply(event) }
     }
 
     func apply(_ event: SessionEvent) {
+        let wasRunning = state.turnRunning
         state = SessionReducer.reduce(state, event)
         // Store-level impurity seam (wave 6, item 1): `SessionReducer.reduce` must stay pure —
         // no `Bool`/`Int`/`Array.randomElement` inside it, or two calls with identical inputs
@@ -1617,7 +1638,8 @@ final class SessionModel: ObservableObject {
         // reduce, keyed off the same `turnStarted(main)` case the reducer used to flip
         // `turnRunning`/`status` — this and `apply(replay:)`'s fold are the only places `workingVerb`
         // is assigned by production code; `OrbSessionState.workingVerb`'s doc comment points here.
-        if case .turnStarted(let v) = event, v.threadId == "main" {
+        // A folded message's `turn_started` (the turn already running) keeps the verb it has.
+        if case .turnStarted(let v) = event, v.threadId == "main", !wasRunning {
             state.workingVerb = WorkingVerbs.random()
         }
         afterApply(event)

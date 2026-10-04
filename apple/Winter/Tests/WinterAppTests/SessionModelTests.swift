@@ -974,4 +974,39 @@ final class SessionModelTests: XCTestCase {
         session.apply(taskUpdated(id: "1", subject: "a", status: "pending"))
         XCTAssertTrue(poster.posts.isEmpty)
     }
+
+    // MARK: - Folded messages and a crash-closed turn (agent SDK 0.0.44, review 2026-10-04)
+
+    private func userMessage(_ text: String, seq: Int) -> SessionEvent {
+        ev(#"{"type":"user_message","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"main","text":"\#(text)","clientName":"orb"}"#)
+    }
+    private func assistantMessage(_ text: String, seq: Int) -> SessionEvent {
+        ev(#"{"type":"assistant_message","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"main","text":"\#(text)"}"#)
+    }
+
+    /// A message held behind a turn that already replied opens its own exchange; when the daemon closes
+    /// the crashed turn with an `aborted` terminal at reopen, the STOPPED turn's exchange is marked, not
+    /// the held message's (which then runs to completion).
+    func testAnAbortedTerminalMarksTheRunningTurnsExchangeNotTheLatest() {
+        var s = OrbSessionState()
+        for e in [userMessage("u1", seq: 1), turnStarted(seq: 2), assistantMessage("part of the answer", seq: 3),
+                  userMessage("u2", seq: 4), turnCompleted(seq: 5, stopReason: "aborted")] {
+            s = SessionReducer.reduce(s, e)
+        }
+        XCTAssertEqual(s.exchanges.count, 2)
+        XCTAssertTrue(s.exchanges[0].aborted, "the crashed turn's own exchange")
+        XCTAssertFalse(s.exchanges[1].aborted, "the held message has not run yet")
+    }
+
+    /// A folded message's `turn_started` (the turn already running) takes it off the "queued" list.
+    func testAFoldedSteerLeavesTheQueuedList() {
+        var s = OrbSessionState()
+        for e in [userMessage("u1", seq: 1), turnStarted(seq: 2), userMessage("also this", seq: 3)] {
+            s = SessionReducer.reduce(s, e)
+        }
+        XCTAssertEqual(s.queuedSteers, ["also this"])
+        s = SessionReducer.reduce(s, turnStarted(seq: 4))
+        XCTAssertEqual(s.queuedSteers, [], "folded into the running turn: no longer waiting")
+        XCTAssertTrue(s.turnRunning)
+    }
 }
