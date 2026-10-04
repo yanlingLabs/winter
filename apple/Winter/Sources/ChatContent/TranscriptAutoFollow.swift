@@ -42,6 +42,19 @@ final class TranscriptFollower: NSObject {
     private(set) var isFollowing = true
     /// Told when following starts or stops (the "latest" pill).
     var onFollowingChanged: ((Bool) -> Void)?
+    /// Makes a move too far to glide — the first landing, a history arriving, a large result — through
+    /// SwiftUI's own scroll-to-row (`TranscriptView`'s reader), never by moving the clip view: a lazy
+    /// stack jumped into directly while its row heights are still estimates can keep a stale height
+    /// and sit drawing nothing in an empty tail until the user scrolls (user, 2026-10-04, reproduced
+    /// on their own session). Glides stay on the clip view — they never leave the rows already laid
+    /// out. Without one, the far move lands on the clip view as before.
+    var farJump: (() -> Void)?
+    /// Told once a landing (`restartAtBottom`) has come to rest at the bottom — `landedAfterFrames`
+    /// display frames without a move. A session window keeps its loading screen up until then, so the
+    /// lazy rows settling into their real heights is never seen (user, 2026-10-04).
+    var onLanded: (() -> Void)?
+    private var landingPending = false
+    static let landedAfterFrames = 12
 
     private(set) weak var scrollView: NSScrollView?
     private var link: CADisplayLink?
@@ -114,6 +127,7 @@ final class TranscriptFollower: NSObject {
     /// A different history is coming in (the transcript was reset): land at its bottom, following.
     func restartAtBottom() {
         snapNext = true
+        landingPending = true
         setFollowing(true)
         nudge()
     }
@@ -155,8 +169,14 @@ final class TranscriptFollower: NSObject {
         lastTimestamp = now
         let current = scrollView.contentView.bounds.origin.y
         let target = bottomOffset(of: scrollView)
-        let next = snapNext ? target : transcriptFollowStep(current: current, target: target, dt: dt,
-                                                           viewport: scrollView.contentView.bounds.height)
+        let viewport = scrollView.contentView.bounds.height
+        if let farJump, abs(target - current) >= 1, snapNext || abs(target - current) > viewport * 1.5 {
+            farJump()
+            settledFrames = 0
+            if (scrollView.documentView?.frame.height ?? 0) > 0 { snapNext = false }
+            return
+        }
+        let next = snapNext ? target : transcriptFollowStep(current: current, target: target, dt: dt, viewport: viewport)
         if abs(next - current) > 0.01 {
             apply(next, in: scrollView)
             settledFrames = 0
@@ -165,6 +185,10 @@ final class TranscriptFollower: NSObject {
             settledFrames += 1
             // Content has to be there before the first landing counts.
             if (scrollView.documentView?.frame.height ?? 0) > 0 { snapNext = false }
+            if landingPending, !snapNext, settledFrames >= Self.landedAfterFrames {
+                landingPending = false
+                onLanded?()
+            }
             if settledFrames > 30 { link.isPaused = true; lastTimestamp = nil }
         }
     }

@@ -37,8 +37,24 @@ struct TranscriptView: View {
     /// Follows the bottom on the display's clock (`TranscriptAutoFollow`) — the smooth glide that
     /// replaced a `scrollTo` animation per streamed chunk.
     @State private var follower = TranscriptFollower()
+    /// Told when a history that arrived into this transcript has come to rest at its bottom.
+    @Environment(\.transcriptOnLanded) private var onLanded
 
     var body: some View {
+        // The reader lets the follower make its far moves through SwiftUI (`TranscriptFollower.farJump`).
+        ScrollViewReader { proxy in
+            transcriptScroll
+                .onAppear {
+                    follower.onLanded = onLanded
+                    follower.farJump = { [adapter] in
+                        let count = adapter.transcript.count
+                        if count > 0 { proxy.scrollTo(count - 1, anchor: .bottom) }
+                    }
+                }
+        }
+    }
+
+    private var transcriptScroll: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
                 ForEach(Array(adapter.transcript.enumerated()), id: \.offset) { index, exchange in
@@ -86,8 +102,14 @@ struct TranscriptView: View {
         // genuine growth may follow/raise the pill; a reset must do neither.
         .onChange(of: adapter.transcript.count) { old, new in
             // A history arriving into an empty transcript (a window opening — its replay lands in one
-            // fold, `SessionFeed.finishReplay`) lands at its bottom at once, never glides down it.
-            if old == 0 && new > 0 { follower.restartAtBottom() } else if new > old { follow() }
+            // fold, `SessionFeed.finishReplay`) lands at its bottom at once, never glides down it —
+            // through SwiftUI's own scroll-to-row, once the rows exist (`TranscriptFollower.farJump`).
+            if old == 0 && new > 0 {
+                follower.restartAtBottom()
+                DispatchQueue.main.async { follower.farJump?() }
+            } else if new > old {
+                follow()
+            }
             // A reset (another session's history coming in) opens at the bottom again.
             if new == 0 && old > 0 { follower.restartAtBottom() }
         }
@@ -353,5 +375,18 @@ private struct TranscriptExchangeRow: View {
         } else {
             expandedRuns.insert(key)
         }
+    }
+}
+
+private struct TranscriptOnLandedKey: EnvironmentKey {
+    static let defaultValue: (() -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    /// Told when a history arriving into an empty transcript has come to rest at its bottom
+    /// (`TranscriptFollower.onLanded`) — the session window's loading screen waits for it.
+    var transcriptOnLanded: (() -> Void)? {
+        get { self[TranscriptOnLandedKey.self] }
+        set { self[TranscriptOnLandedKey.self] = newValue }
     }
 }

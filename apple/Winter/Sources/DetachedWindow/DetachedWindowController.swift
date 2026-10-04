@@ -705,6 +705,14 @@ struct DetachedWindowRootView: View {
     var onClose: () -> Void = {}
     var onMinimize: () -> Void = {}
     var onZoom: () -> Void = {}
+    /// The history has landed AND the transcript has come to rest at its bottom (`transcriptOnLanded`),
+    /// or `landingCap` has passed — until then the loading screen stays, so neither the fold nor the
+    /// rows settling is ever seen.
+    @State private var transcriptLanded = false
+    @State private var landingGeneration = 0
+    static let landingCap: TimeInterval = 1.0
+
+    private var showsLoading: Bool { adapter.isLoadingHistory || !transcriptLanded }
 
     private var title: String {
         let id = sessionId()
@@ -737,11 +745,13 @@ struct DetachedWindowRootView: View {
             .environment(\.transcriptToolRowStyle, .pill)
             .environment(\.transcriptMarkerTint, .white)
             .environment(\.pillChromePalette, palette)
+            // A landing while a history is still on its way (the emptied transcript of a re-pin) is not it.
+            .environment(\.transcriptOnLanded) { if !adapter.isLoadingHistory { transcriptLanded = true } }
 
             // Until the history has landed the window is black with only the grey Winter mark,
             // shimmering (user, 2026-10-04) — no title, no lights — faded out once the replay is in.
             // The band above still drags the window.
-            if adapter.isLoadingHistory {
+            if showsLoading {
                 SessionLoadingView()
                     .transition(.opacity)
             }
@@ -764,16 +774,26 @@ struct DetachedWindowRootView: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 54)
                 .allowsHitTesting(false)
-                .opacity(adapter.isLoadingHistory ? 0 : 1)
+                .opacity(showsLoading ? 0 : 1)
             MacTrafficLights(onClose: onClose, onMinimize: onMinimize, onZoom: onZoom)
                 .padding(.leading, 20)
                 .padding(.top, 20)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .opacity(adapter.isLoadingHistory ? 0 : 1)
-                .allowsHitTesting(!adapter.isLoadingHistory)
+                .opacity(showsLoading ? 0 : 1)
+                .allowsHitTesting(!showsLoading)
         }
         .background(Color.black)
-        .animation(.easeOut(duration: 0.3), value: adapter.isLoadingHistory)
+        .animation(.easeOut(duration: 0.3), value: showsLoading)
+        .onChange(of: adapter.isLoadingHistory, initial: true) { _, loading in
+            landingGeneration += 1
+            if loading { transcriptLanded = false; return }
+            // Nothing to land (an empty session, a failed attach): straight in.
+            if adapter.transcript.isEmpty { transcriptLanded = true; return }
+            let generation = landingGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.landingCap) {
+                if generation == landingGeneration { transcriptLanded = true }
+            }
+        }
         // The window's whole shape: the pill's own radius, no rim and no system shadow (user,
         // 2026-10-02) — the black shape against whatever is behind it.
         .clipShape(RoundedRectangle(cornerRadius: PillChromeWindow.cornerRadius, style: .continuous))

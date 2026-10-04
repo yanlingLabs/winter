@@ -117,4 +117,35 @@ final class TranscriptAutoFollowTests: XCTestCase {
         XCTAssertTrue(follower.isFollowing)
         XCTAssertLessThan(distanceFromBottom(sv), 1, "the latest pill brings it back")
     }
+
+    /// A far move — a history landing into an emptied transcript — is handed to `farJump` (SwiftUI's
+    /// own scroll-to-row in `TranscriptView`), never made on the clip view: jumped into directly, a
+    /// lazy stack still on estimated row heights could sit drawing nothing until the user scrolled
+    /// (user, 2026-10-04). Once it rests at the bottom, `onLanded` is told, once.
+    func testAFarMoveIsHandedToFarJumpAndTheLandingIsAnnounced() throws {
+        try skipIfDisplayAsleep()
+        let model = Model(), follower = TranscriptFollower()
+        _ = host(model, follower)
+        let sv = try XCTUnwrap(follower.scrollView)
+        var farJumps = 0, landings = 0
+        follower.farJump = {
+            farJumps += 1
+            // What the reader does: put the clip at the bottom (here, by hand).
+            var r = sv.contentView.bounds; r.origin.y = 1e9
+            sv.contentView.scroll(to: sv.contentView.constrainBoundsRect(r).origin)
+            sv.reflectScrolledClipView(sv.contentView)
+        }
+        follower.onLanded = { landings += 1 }
+        sv.contentView.scroll(to: .zero)
+        sv.reflectScrolledClipView(sv.contentView)
+        model.rows += 200 // pages below
+        follower.restartAtBottom()
+        pump(0.8)
+        XCTAssertGreaterThan(farJumps, 0, "the far move went through farJump")
+        XCTAssertLessThan(distanceFromBottom(sv), 1)
+        XCTAssertEqual(landings, 1, "the landing is announced once it rests")
+        model.rows += 1
+        pump(0.5)
+        XCTAssertEqual(landings, 1, "ordinary growth afterwards is not another landing")
+    }
 }
