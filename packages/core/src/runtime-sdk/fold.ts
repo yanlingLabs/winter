@@ -18,11 +18,31 @@
 //      that has neither started a turn nor been folded and answers how many. `Query.interrupt()` is unchanged
 //      and KEEPS pending pushes (they run after the interrupted turn).
 //
-// A Winter daemon on 0.0.44 always runs a 0.0.44 runtime (`REQUIRED_WINTER_AGENT_SDK`, version-locked: the
-// spawned binary by the executable ladder, the embedded one by `embeddedVersionCheck`), so nothing here is
-// feature-detected any more. The ONE defensive guard left is the clear's rejection: an older runtime answers
-// `clear_queued_input` with `WinterRpcError` `unknown_subtype` (the SDK tells hosts to catch it), and any
-// failure of the control means "nothing was cleared", never a thrown TaskStop.
+// The embedded runtime, the platform package and a Release bundle are version-locked to the pin
+// (`REQUIRED_WINTER_AGENT_SDK`). A CONFIGURED code runtime is not: `runtimes.winterExecutable`,
+// `$WINTER_RUNTIME_EXECUTABLE` and `<home>/runtimes/bin/winter` run whatever binary is there (logged when it
+// differs, never refused). So what a session may assume is read from the version its spawn hook reports
+// (`WinterSpawnHook.runtimeVersion`, the binary's own `--version`): `runtimeFolds` says whether that runtime
+// folds. An older one never sends the fold frame (each push then gets its own `result`, ordinary C2
+// accounting) and answers `clear_queued_input` with `WinterRpcError` `unknown_subtype` — caught here, as
+// the SDK tells hosts to: any failure of the control means "nothing was cleared", never a thrown TaskStop.
+
+/** The first agent SDK release whose runtime folds a mid-turn push and knows `clear_queued_input`. */
+export const FOLD_SINCE = "0.0.44";
+
+/** Does a runtime reporting `version` fold (≥ `FOLD_SINCE`)? `undefined` (unknown) never does. */
+export function runtimeFolds(version: string | undefined): boolean {
+  if (version === undefined) return false;
+  const parse = (v: string): number[] | undefined => {
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v.trim());
+    return m === null ? undefined : [Number(m[1]), Number(m[2]), Number(m[3])];
+  };
+  const have = parse(version);
+  const need = parse(FOLD_SINCE)!;
+  if (have === undefined) return false;
+  for (let i = 0; i < 3; i++) if (have[i] !== need[i]) return have[i]! > need[i]!;
+  return true;
+}
 import type { Query, SDKHostInputFoldedMessage } from "@yanlinglabs/winter-agent-sdk";
 
 /** `system/host_input_folded` → its `count`; `undefined` for every other frame (or a malformed one). */

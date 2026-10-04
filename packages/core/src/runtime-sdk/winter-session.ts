@@ -109,7 +109,7 @@ import { CAPABILITY_PLAIN_NAMES, permissionModeFor, toolSurfaceViolations } from
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { RunHome } from "@yanlinglabs/winter-runtime-sdk";
 import { disposeFailedRunHome, settleRunHome } from "./run-home-support";
-import { clearQueuedInput, hostInputFoldedCount } from "./fold";
+import { clearQueuedInput, hostInputFoldedCount, runtimeFolds } from "./fold";
 
 /**
  * WS-21 (spec §3.1): the per-run folder an incarnation's `Options` carry as `runtime.runHome` — the
@@ -136,6 +136,18 @@ export function withRunHome(options: Options, runHome: RunHome): Options {
  * object spread (`withRunHome`) keeps it. Absent: `options.mcpServers` is the whole configuration.
  */
 export const SESSION_MCP_SERVERS: unique symbol = Symbol("winter.sessionMcpServers");
+
+/** The runtime version an incarnation's spawn hook reported (`WinterSpawnHook.runtimeVersion`), riding the
+ *  `Options` object under a symbol key like `SESSION_MCP_SERVERS` — never on the wire. */
+export const SESSION_RUNTIME_VERSION: unique symbol = Symbol("winter.sessionRuntimeVersion");
+
+export function withRuntimeVersion(options: Options, version: string | undefined): Options {
+  return version === undefined ? options : Object.assign(options, { [SESSION_RUNTIME_VERSION]: version });
+}
+
+function runtimeVersionOf(options: Options): string | undefined {
+  return (options as { [SESSION_RUNTIME_VERSION]?: string })[SESSION_RUNTIME_VERSION];
+}
 
 export function withSessionMcpServers(options: Options, servers: Readonly<Record<string, McpServerConfig>>): Options {
   return Object.assign(options, { [SESSION_MCP_SERVERS]: servers });
@@ -268,6 +280,11 @@ export interface WinterSessionDeps {
    *  every `open()`, which then closes it (`aborted`) before anything new runs — the incarnation boundary
    *  a daemon killed mid-turn left unmarked. Absent: never (a unit harness). */
   danglingTurn?: () => boolean;
+  /** Both of the above from ONE read of the log (`session-driver.ts`); preferred when present. */
+  logFacts?: () => { unconsumed: string[]; danglingTurn: boolean };
+  /** An EVICTED driver of this same session that is still ending (`session-driver.ts`'s `evict`): the first
+   *  `open()` waits for it (bounded by the end budget) before reading the log. */
+  predecessorDone?: Promise<void>;
   /** HOT: `winterOptionsFromSettings(settings()).idleTimeoutSec * 1000`, read when the timer is armed. */
   idleTimeoutMs: () => number;
   /** Test seam for `WINTER_SESSION_END_GRACE_MS`. */
@@ -386,9 +403,10 @@ export interface WinterSession {
    *  0.0.44) the pushes the child holds pending, cleared BEFORE the interrupt; `discarded` counts both.
    *  See `interrupt`. Without it (`session.interrupt`, the Mac's stop) nothing queued is dropped. */
   interrupt(opts?: { discardQueued?: boolean }): Promise<{ wasRunning: boolean; discarded?: number }>;
-  /** A steer now reaches the running turn: the live child (agent SDK 0.0.44, version-locked) folds a mid-turn
-   *  push into it. False while not live, ending, or with a provider handoff pending (a steer is then HELD for
-   *  the target). SendMessage steers a running session only when true. */
+  /** A steer now reaches the running turn: the live child folds a mid-turn push into it — its runtime reports
+   *  agent SDK ≥ 0.0.44 (`WinterSpawnHook.runtimeVersion`; a configured code binary may be older, and an
+   *  unknown version counts as not folding). False while not live, ending, or with a provider handoff
+   *  pending (a steer is then HELD for the target). SendMessage steers a running session only when true. */
   readonly foldsQueuedInput: boolean;
   /**
    * WS-23 (reasoning-state, decision 5): compacts the LIVE child's conversation NOW, on the model it runs
@@ -490,6 +508,8 @@ interface Incarnation extends WinterIncarnation {
   sawInit: boolean;
   /** `Options.tools` this incarnation was opened with — the allowed built-ins its init must stay inside. */
   allowedTools: readonly string[] | undefined;
+  /** The runtime folds a mid-turn push (≥ 0.0.44 by its spawn hook's reported version — `fold.ts`'s `runtimeFolds`). */
+  folds: boolean;
 }
 
 const sleep = (ms: number): Promise<"timeout"> => new Promise((r) => { const t = setTimeout(() => r("timeout"), ms); (t as { unref?: () => void }).unref?.(); });
@@ -556,6 +576,8 @@ class WinterSessionImpl implements WinterSession {
   /** WS-27: the fold of an incarnation still being opened (`WinterIncarnationShape.noteMcpServers`). */
   private pendingMcpServerNames: string[] = [];
   private idleWaiters: Array<() => void> = [];
+  /** `deps.predecessorDone` is waited for once, by the first open. */
+  private awaitedPredecessor = false;
   private turnStart: number | undefined;
   /** Review r1 M-4: a `compact` control is running -- the idle clock must not end the child under it. */
   private compacting = 0;
@@ -582,7 +604,7 @@ class WinterSessionImpl implements WinterSession {
   get heldDeliveries(): readonly string[] { return this.held; }
   get handoffPending(): boolean { return this.handoff !== undefined; }
   /** False during a pending provider handoff too: a steer then is HELD for the target, never in the running turn. */
-  get foldsQueuedInput(): boolean { return this.stateValue === "live" && this.inc !== undefined && !this.ending && this.handoff === undefined; }
+  get foldsQueuedInput(): boolean { return this.stateValue === "live" && this.inc !== undefined && !this.ending && this.handoff === undefined && this.inc.folds; }
 
   // ── the doors ──────────────────────────────────────────────────────────────────────────────
 
@@ -651,6 +673,19 @@ class WinterSessionImpl implements WinterSession {
   }
 
   /** `deferredDeliveries`, in order, once no TaskStop is in progress. */
+  /** The log's facts for one `open()`, read ONCE: `deps.logFacts`, else the two single-purpose readers (a
+   *  unit harness). `undefined` when nothing reads the log (the in-memory cache stands in). */
+  private readLogFacts(): { unconsumed: string[]; danglingTurn: boolean } | undefined {
+    try {
+      if (this.deps.logFacts !== undefined) return this.deps.logFacts();
+      if (this.deps.unconsumed === undefined && this.deps.danglingTurn === undefined) return undefined;
+      return { unconsumed: this.deps.unconsumed?.() ?? [...this.pending], danglingTurn: this.deps.danglingTurn?.() ?? false };
+    } catch (err) {
+      this.log(`reading ${this.sessionId}'s log at open failed: ${err instanceof Error ? err.name : "unknown"}`);
+      return undefined;
+    }
+  }
+
   private releaseDeliveries(): void {
     while (this.clearing === undefined && this.stopSettled === undefined && this.deferredDeliveries.length > 0) {
       this.deliverNow(this.deferredDeliveries.shift()!);
@@ -696,7 +731,7 @@ class WinterSessionImpl implements WinterSession {
       this.discardOnSettle = held;
       let resolve!: () => void;
       const promise = new Promise<void>((r) => { resolve = r; });
-      const timer = this.timers.set(() => { this.discardHeld(); this.releaseDeliveries(); }, WinterSessionImpl.STOP_SETTLE_MAX_MS);
+      const timer = this.timers.set(() => this.onStopSettleTimeout(), WinterSessionImpl.STOP_SETTLE_MAX_MS);
       const gate = { promise, resolve, timer };
       this.stopSettled = gate;
       let clearDone!: () => void;
@@ -881,7 +916,7 @@ class WinterSessionImpl implements WinterSession {
       // it did not -- it failed, or the session was not evicted -- the texts held for it run HERE, in the
       // log's order, rather than waiting for an incarnation nobody is opening.
       if (heldTurns > 0 && this.stateValue === "live" && this.inc !== undefined && !this.ending && this.inFlight === 0) {
-        const owed = this.deps.unconsumed !== undefined ? this.deps.unconsumed() : [];
+        const owed = this.deps.logFacts !== undefined || this.deps.unconsumed !== undefined ? (this.readLogFacts()?.unconsumed ?? []) : [];
         if (owed.length > 0) {
           this.beginAndPush(owed[0]!, this.inc);
           this.pending.push(...owed.slice(1));
@@ -974,6 +1009,18 @@ class WinterSessionImpl implements WinterSession {
     this.opening = (async () => {
       this.assertNotEnded();
       await this.lastDone;
+      // An EVICTED predecessor driver (another `WinterSession` for this session, still ending) must close its
+      // books first — its child's own terminal is the log's to see before this one decides a turn was left
+      // open. Bounded by the end budget, once: a predecessor that outlives it has been aborted already.
+      const predecessor = this.deps.predecessorDone;
+      if (predecessor !== undefined && !this.awaitedPredecessor) {
+        this.awaitedPredecessor = true;
+        await Promise.race([predecessor, sleep(2 * (this.deps.endGraceMs ?? WINTER_SESSION_END_GRACE_MS))]);
+      }
+      // ONE read of the log for this open (`deps.logFacts`): what it still owes and whether a turn was left
+      // open. Nothing appends to it until the replay below (a `send` opens before it appends, a delivery
+      // to a resumable session is held), so the one read serves every use.
+      const facts = this.readLogFacts();
       // WS-19 (review N2): A REPLAY IS A TURN, so it passes the same gate `send`/`steer` do.
       //
       // `open()` re-pushes what the log still OWES (`deps.unconsumed`) and any delivery HELD while
@@ -985,7 +1032,7 @@ class WinterSessionImpl implements WinterSession {
       // only the NEXT text was refused.
       //
       // Nothing is owed on a fresh `create()`, so this costs that path nothing.
-      const owedAtOpen = this.deps.unconsumed !== undefined ? this.deps.unconsumed() : this.pending;
+      const owedAtOpen = facts?.unconsumed ?? this.pending;
       if (owedAtOpen.length + this.held.length > 0) await this.deps.beforeTurn?.();
       const abort = new AbortController();
       const resume = await this.deps.hasTranscript();
@@ -1045,7 +1092,7 @@ class WinterSessionImpl implements WinterSession {
           /* best-effort only */
         }
       }
-      const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome, mcpServers: sessionMcpServersOf(options), allowedTools: Array.isArray(options.tools) ? [...options.tools] : undefined };
+      const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome, mcpServers: sessionMcpServersOf(options), allowedTools: Array.isArray(options.tools) ? [...options.tools] : undefined, folds: runtimeFolds(runtimeVersionOf(options)) };
       this.inc = inc;
       this.pendingMcpServerNames = [];
       this.gen = generation;
@@ -1067,15 +1114,11 @@ class WinterSessionImpl implements WinterSession {
       // A turn the previous child never closed (the daemon died mid-turn): closed now, at the incarnation
       // boundary, so the log's turn boundaries — what every reader decides "a turn is open" by (a fold's
       // continuation rule) — restart here, and no client shows that dead turn running.
-      try {
-        if (this.deps.danglingTurn?.() === true) {
-          this.safeAppend({ type: "turn_completed", sessionId: this.sessionId, threadId: MAIN_THREAD, stopReason: "aborted", inputTokens: 0, outputTokens: 0 });
-        }
-      } catch (err) {
-        this.log(`reading ${this.sessionId}'s log for an unclosed turn failed: ${err instanceof Error ? err.name : "unknown"}`);
+      if (facts?.danglingTurn === true) {
+        this.safeAppend({ type: "turn_completed", sessionId: this.sessionId, threadId: MAIN_THREAD, stopReason: "aborted", inputTokens: 0, outputTokens: 0 });
       }
       const cached = this.pending.splice(0);
-      const owed = this.deps.unconsumed !== undefined ? this.deps.unconsumed() : cached;
+      const owed = facts?.unconsumed ?? cached;
       if (owed.length > 0) {
         this.beginAndPush(owed[0]!, inc);
         this.pending.push(...owed.slice(1));
@@ -1214,14 +1257,16 @@ class WinterSessionImpl implements WinterSession {
     // An ending incarnation's queue is closed: a push would throw inside the iteration and cost
     // the held text a spurious `agent_error`. It stays owed (it is in the log) for the next one.
     if (this.ending || inc.queue.closed) return;
+    // The stopped turn's terminal is out: what its TaskStop cleared (the child's pushes, and held sends
+    // the settle bound already took off the queue) is closed right after it — before any send released
+    // meanwhile starts its own turn.
+    if (this.inFlight === 0) this.closeCleared();
     if (!this.drainPaused && this.handoff === undefined) {
       // P8b-5: one held text per result; its turn is begun as it is pushed (P8b-39).
       const next = this.pending.shift();
       if (next !== undefined) { this.beginAndPush(next, inc); return; }
     }
     if (this.inFlight === 0) {
-      // The stopped turn's terminal is out: the pushes its TaskStop cleared are closed right after it.
-      this.closeCleared();
       if (this.stopSettled !== undefined) this.discardHeld();
       this.settleQueue(inc);
       this.releaseDeliveries();
@@ -1281,6 +1326,42 @@ class WinterSessionImpl implements WinterSession {
       this.safeAppend({ type: "turn_started", sessionId: this.sessionId, threadId: MAIN_THREAD });
       this.safeAppend({ type: "turn_completed", sessionId: this.sessionId, threadId: MAIN_THREAD, stopReason: "aborted", inputTokens: 0, outputTokens: 0 });
     }
+  }
+
+  /**
+   * `STOP_SETTLE_MAX_MS` after a TaskStop, its terminal has NOT come (a slow clear, a slow-to-cancel tool:
+   * an interrupted `Browser` call waits up to 4 s, `Computer`'s `act` cannot be aborted). The bound only
+   * RELEASES what waits on the stop — never an `aborted` `turn_completed` while the stopped turn still
+   * runs, which would read as "idle" to every client, close DispatchChildren's open turn and cancel the
+   * turn's elicitation cards. So the held sends are taken off the daemon's queue NOW with only their
+   * `turn_started` — appended while they are still the youngest messages, before a released send lands
+   * (adjacency pairing), and read by every client as a continuation of the running turn — and their
+   * `aborted` terminals join the cleared pushes', closed after the stopped turn's own (`closeCleared`).
+   * If nothing is running any more, the full close happens at once (`discardHeld`).
+   */
+  private onStopSettleTimeout(): void {
+    if (this.stopSettled === undefined) return;
+    if (this.inFlight === 0 || this.stateValue !== "live") {
+      this.discardHeld();
+      this.releaseDeliveries();
+      return;
+    }
+    const count = this.discardOnSettle;
+    const settled = this.stopSettled;
+    this.discardOnSettle = 0;
+    this.stopSettled = undefined;
+    if (count > 0) {
+      if (this.pending.length !== count) {
+        this.log(`a stop of ${this.sessionId} held ${count} message(s) to clear, but ${this.pending.length} are held now — left queued`);
+      } else {
+        if (this.inc !== undefined) this.emit(this.inc.projector.announceQueuedTurns());
+        this.pending.length = 0;
+        for (let i = 0; i < count; i++) this.safeAppend({ type: "turn_started", sessionId: this.sessionId, threadId: MAIN_THREAD });
+        this.clearedAwaitingTerminal += count;
+      }
+    }
+    settled.resolve();
+    this.releaseDeliveries();
   }
 
   /** THE one push door: `beginTurn`'s batch appended (its `turn_started`), then the push. */

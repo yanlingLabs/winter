@@ -12,7 +12,7 @@ import { SHUTDOWN_QUERY_GRACE_MS, type WinterRuntimeSdk } from "../../src/runtim
 import { createProjector, type Projector } from "../../src/projector";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";
 import {
-  WINTER_SESSION_END_GRACE_MS, startWinterSession, unconsumedUserMessages, type WinterIncarnation, type WinterSession, type WinterSessionDeps, type WinterTimers,
+  WINTER_SESSION_END_GRACE_MS, startWinterSession, unconsumedUserMessages, withRuntimeVersion, type WinterIncarnation, type WinterSession, type WinterSessionDeps, type WinterTimers,
 } from "../../src/runtime-sdk/winter-session";
 import { PROJECTOR_PASSTHROUGH_CLIENT } from "../../src/projector/index";
 import type { WinterSessionAttachment } from "../../src/runtime-sdk/messaging";
@@ -148,9 +148,9 @@ interface Harness {
   types(): string[];
 }
 
-function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & { idleTimeoutMs?: number; transcript?: boolean } = {}): Harness {
+function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & { idleTimeoutMs?: number; transcript?: boolean; runtimeVersion?: string | null } = {}): Harness {
   // The harness knobs are NOT driver deps — they must not be spread over the thunks below.
-  const { idleTimeoutMs: idleMs, transcript, ...over } = overrides;
+  const { idleTimeoutMs: idleMs, transcript, runtimeVersion, ...over } = overrides;
   const queries: FakeQuery[] = [];
   const incarnations: WinterIncarnation[] = [];
   const events: SessionEvent[] = [];
@@ -183,7 +183,7 @@ function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & 
   const idle = idleMs ?? 60_000;
   h.session = startWinterSession({
     sessionId: "s_x", backendSessionId: "be-x", mode: "chat", runtime,
-    options: (inc) => { incarnations.push({ ...inc, generation: h.records.generation + 1 }); return { abortController: inc.abort, cwd: "/repo", model: "winter-test/echo", ...(inc.resume ? { resume: "be-x" } : { sessionId: "be-x" }) }; },
+    options: (inc) => { incarnations.push({ ...inc, generation: h.records.generation + 1 }); return withRuntimeVersion({ abortController: inc.abort, cwd: "/repo", model: "winter-test/echo", ...(inc.resume ? { resume: "be-x" } : { sessionId: "be-x" }) }, runtimeVersion === null ? undefined : (runtimeVersion ?? "0.0.44")); },
     projector: (inc): Projector => createProjector({ sessionId: "s_x", mode: "chat", generation: inc.generation, winterSessionId: "s_x", nextSeq: () => seq + 1, checkpoint: checkpoints, now: () => new Date().toISOString(), log: {} }),
     queue: createHostPromptQueue,
     append: (e: NewSessionEvent) => { const stamped = { ...e, seq: ++seq, ts: Date.now() } as SessionEvent; events.push(stamped); return stamped; },
@@ -587,6 +587,34 @@ describe("startWinterSession — one incarnation", () => {
     await c;
     expect(h.session.pendingSends).toEqual(["C"]);        // A never ended, so C waits behind it
     expect(unconsumedUserMessages(h.events)).toEqual(["C"]);
+  });
+
+  test("M1: the stopped turn's terminal comes AFTER the settle bound (a slow-to-cancel tool): no aborted terminal is appended while it still runs; the waiting send is released at the bound and runs after it", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.send("B", "cli");                         // held behind A — the stop clears it
+    const q = h.q();
+    q.interrupt = async () => { q.interrupts++; };            // A keeps running (an unabortable act)
+    expect(await h.session.interrupt({ discardQueued: true })).toEqual({ wasRunning: true, discarded: 1 });
+    const c = h.session.send("C", "cli");
+    await h.settled();
+    expect(seen(h, "turn_completed")).toEqual([]);
+    h.timers.armed.find((t) => t.ms === 2_000)!.fn();         // the bound: 2 s, A still running
+    expect((await c).queued).toBe(true);                       // released — queued behind the running A
+    await h.settled();
+    expect(seen(h, "turn_completed")).toEqual([]);            // NOTHING closed mid-turn
+    expect(h.session.turnRunning).toBe(true);
+    // B left the daemon's queue with its turn_started (a continuation to every client), BEFORE C landed
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "turn_started", "user_message"]);
+    q.emit(result({ interrupted: true }));                     // A's terminal, at 3 s
+    await h.settled();
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "turn_started", "user_message",
+      "turn_completed", "turn_completed", "turn_started"]);    // A's, then B's aborted close, then C runs
+    expect(stopReasons(h)).toEqual(["aborted", "aborted"]);
+    expect(h.q().pushed).toEqual(["A", "C"]);
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
   });
 
   test("Task 17 Step 0(c): a messaging DELIVERY after an interrupt re-arms the drain too — its own text first, then the held one at its result", async () => {
@@ -1334,6 +1362,24 @@ describe("a turn the previous child never closed (the daemon died mid-turn) is c
     expect(mainTurnOpenInLog(h.events)).toBe(true);           // M1's turn, now
   });
 
+  test("L7: one open reads the log ONCE (logFacts) — what it owes and whether a turn was left open, from the same read", async () => {
+    let reads = 0;
+    const h: Harness = harness({
+      transcript: true,
+      logFacts: () => { reads++; return { unconsumed: unconsumedUserMessages(h.events), danglingTurn: mainTurnOpenInLog(h.events) }; },
+    });
+    h.events.push(
+      { type: "user_message", sessionId: "s_x", threadId: "main", seq: 1, ts: 1, text: "M0", clientName: "cli" } as unknown as SessionEvent,
+      { type: "turn_started", sessionId: "s_x", threadId: "main", seq: 2, ts: 2 } as unknown as SessionEvent,
+      { type: "user_message", sessionId: "s_x", threadId: "main", seq: 3, ts: 3, text: "M1", clientName: "cli" } as unknown as SessionEvent,
+    );
+    await h.session.open();
+    await h.settled();
+    expect(reads).toBe(1);
+    expect(h.q().pushed).toEqual(["M1"]);                      // owed, from that read
+    expect(seen(h, "turn_completed")).toHaveLength(1);         // the dangling turn, from that read
+  });
+
   test("a log whose last turn closed appends nothing at open", async () => {
     const h: Harness = harness({ transcript: true, danglingTurn: () => mainTurnOpenInLog(h.events) });
     h.events.push(
@@ -1415,6 +1461,18 @@ describe("a mid-turn push FOLDED into the running turn (agent SDK 0.0.44)", () =
     await h.settled();
     expect(h.session.turnRunning).toBe(false);
     expect(unconsumedUserMessages(h.events)).toEqual([]);
+  });
+
+  test("foldsQueuedInput is FALSE for a runtime reporting 0.0.43 (a configured older binary) and for an unknown version — never assumed", async () => {
+    const old = harness({ runtimeVersion: "0.0.43" });
+    await old.session.open();
+    expect(old.session.foldsQueuedInput).toBe(false);
+    const unknown = harness({ runtimeVersion: null });
+    await unknown.session.open();
+    expect(unknown.session.foldsQueuedInput).toBe(false);
+    const newer = harness({ runtimeVersion: "0.1.0" });
+    await newer.session.open();
+    expect(newer.session.foldsQueuedInput).toBe(true);
   });
 
   test("foldsQueuedInput: true for a live child, false when not live", async () => {

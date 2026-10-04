@@ -34,14 +34,14 @@ import type { SecretStore } from "../auth/secret-store";
 import { retentionFromSettings } from "../runtime-state/retention";
 import { winterOptionsFromSettings, type Settings } from "../settings";
 import { buildCoreBrand } from "./brand";
-import { explicitRuntimeVersionNote, resolveWinterExecutable, type WinterExecutableUnavailable } from "./executable";
+import { explicitRuntimeVersionNote, resolveWinterExecutable, winterBinaryVersion, type WinterExecutableUnavailable } from "./executable";
 import { EmbeddedRuntimeUnavailable, embeddedVersionCheck, runsEmbedded, type EmbeddedSessionHost } from "./embedded";
 import { credentialPresenceFrom } from "./keychain";
 import { familyListingFromCatalog } from "./provider-selection";
 import { splitTag, WINTER_TEST_PREFIX } from "./model-tag";
 import { releaseAllHeld } from "./messaging";
 import { daemonResolveEndpoint } from "../providers/registry";
-import { WINTER_PEER_VERSIONS } from "./versions";
+import { REQUIRED_WINTER_AGENT_SDK, WINTER_PEER_VERSIONS } from "./versions";
 import type { RecoveryReport, RunHomeFor, RunHomeOutcome } from "@yanlinglabs/winter-runtime-sdk";
 import { runHomeHandleOf } from "./run-home-support";
 
@@ -82,6 +82,11 @@ export const SHUTDOWN_QUERY_GRACE_MS = 300;
 export interface WinterSpawnHook {
   pathToClaudeCodeExecutable: string;
   spawnClaudeCodeProcess?: SpawnClaudeCodeProcess;
+  /** The runtime version this hook will run, when known: the pin for the version-locked rungs (embedded,
+   *  the platform package, a Release bundle), the binary's own `--version` for a configured or home-
+   *  installed one (which nothing refuses for a version mismatch). `undefined`: it could not be asked.
+   *  What a session may assume of its child reads it (`fold.ts`'s `runtimeFolds`). */
+  runtimeVersion?: string;
 }
 
 export interface WinterRuntimeSdkDeps {
@@ -391,7 +396,7 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
         // and it keeps the refusal at the one topology site rather than a boot flag someone must read.
         const versionRefusal = embeddedVersionCheck();
         if (versionRefusal !== undefined) return versionRefusal;
-        return { pathToClaudeCodeExecutable: "winter-embedded", spawnClaudeCodeProcess: (options) => embedded.spawn(options) };
+        return { pathToClaudeCodeExecutable: "winter-embedded", spawnClaudeCodeProcess: (options) => embedded.spawn(options), runtimeVersion: REQUIRED_WINTER_AGENT_SDK };
       }
       const resolution = resolveWinterExecutable({
         setting: winterOptionsFromSettings(deps.settings()).winterExecutable,
@@ -408,7 +413,12 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
           deps.log?.(note);
         }
       }
-      return { pathToClaudeCodeExecutable: resolution.path };
+      // The platform package is refused unless it IS the pin, and a Release bundle ships the pinned
+      // runtime; a configured or home-installed binary is whatever it says it is.
+      const runtimeVersion = resolution.source === "platform-package" || resolution.source === "bundle"
+        ? REQUIRED_WINTER_AGENT_SDK
+        : winterBinaryVersion(resolution.path);
+      return { pathToClaudeCodeExecutable: resolution.path, ...(runtimeVersion === undefined ? {} : { runtimeVersion }) };
     },
     async selectRuntimeFor(input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<RuntimeSelection | SelectionRefusal> {
       try {

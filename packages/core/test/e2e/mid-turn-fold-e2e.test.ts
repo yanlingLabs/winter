@@ -10,6 +10,8 @@
 //     mid-turn (after the tool_result), the model read the text, nothing left owed in the log.
 // (2) SendMessage from another session to a RUNNING one is steered and folded the same way; the sender's
 //     answer says so.
+// Every scripted Bash waits on a SENTINEL file the test writes only once the message is in the target's log
+// (or, for the stop, never before it) — an explicit sync point, never a race against a cold spawn.
 // (3) TaskStop (another session's) on a session holding a pushed-but-pending steer: the steer is CLEARED
 //     (never reaches the model), the stopped turn ends aborted, and the cleared message is closed in the log
 //     after it (turn_started + an aborted turn_completed) — a resume owes nothing.
@@ -108,6 +110,16 @@ describeWithWinterBinary("a message sent mid-turn is FOLDED into the running tur
     await on.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
     return sessionId;
   };
+  /** A Bash call that runs until the TEST says so (it writes the sentinel) — the explicit sync point, so a
+   *  message is in the target's log while the tool still runs, however slow a cold sender is to start. */
+  let gates = 0;
+  const gatedBash = (): { text: string; release: () => void } => {
+    const sentinel = join(cwd, `release-${++gates}`);
+    const text = `CALL Bash ${JSON.stringify({ command: `while [ ! -f ${sentinel} ]; do sleep 0.05; done; echo first` })}`;
+    return { text, release: () => writeFileSync(sentinel, "") };
+  };
+  const inTargetLog = (sid: string, pred: (e: SessionEvent) => boolean) => () => main(daemon!.sessions.read(sid)).some(pred);
+
   const secondClient = async (): Promise<TestClient> => {
     const c = await TestClient.connect(daemon!.socketPath);
     await c.call(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: daemon!.tokens.harness, clientName: "e2e-2" });
@@ -122,9 +134,12 @@ describeWithWinterBinary("a message sent mid-turn is FOLDED into the running tur
     client.onEvent = (e) => {
       if (steered === undefined && e.sessionId === a && e.type === "tool_call") steered = client.call(METHODS.sessionSteer, { sessionId: a, text: steer });
     };
-    await client.call(METHODS.sessionSend, { sessionId: a, text: `CALL Bash ${JSON.stringify({ command: "sleep 2; echo first" })}` });
-    await client.until(() => count(d.sessions.read(a), "turn_completed") >= 1, "the turn's end");
+    const gate = gatedBash();
+    await client.call(METHODS.sessionSend, { sessionId: a, text: gate.text });
+    await client.until(inTargetLog(a, (e) => e.type === "user_message" && (e as { text?: string }).text === steer), "the steer in the log");
     await steered;
+    gate.release();                                            // only now may the tool round end
+    await client.until(() => count(d.sessions.read(a), "turn_completed") >= 1, "the turn's end");
     await Bun.sleep(300);                                      // nothing else may follow
     client.onEvent = undefined;
     const log = d.sessions.read(a);
@@ -139,7 +154,7 @@ describeWithWinterBinary("a message sent mid-turn is FOLDED into the running tur
     expect(answer.text).toContain("marmalade");                 // the next request carried the folded text
     expect(answer.text).toContain("The user sent a new message while you were working");
     expect(unconsumedUserMessages(log)).toEqual([]);           // a resume re-pushes nothing
-    expect(main(log).filter((e) => e.type === "user_message").map((e) => (e as { text: string }).text)).toEqual([`CALL Bash ${JSON.stringify({ command: "sleep 2; echo first" })}`, steer]);
+    expect(main(log).filter((e) => e.type === "user_message").map((e) => (e as { text: string }).text)).toEqual([gate.text, steer]);
   }, 60_000);
 
   test("SendMessage to a RUNNING session is steered and folded; the sender is told it reads it after its current tool call", async () => {
@@ -153,7 +168,10 @@ describeWithWinterBinary("a message sent mid-turn is FOLDED into the running tur
       sent = true;
       void other.call(METHODS.sessionSend, { sessionId: sender, text: `CALL SendMessage ${JSON.stringify({ to: target, message: "please also check the changelog", summary: "changelog" })}` });
     };
-    await client.call(METHODS.sessionSend, { sessionId: target, text: `CALL Bash ${JSON.stringify({ command: "sleep 4; echo first" })}` });
+    const gate = gatedBash();
+    await client.call(METHODS.sessionSend, { sessionId: target, text: gate.text });
+    await client.until(inTargetLog(target, (e) => e.type === "user_message" && (e as { clientName?: string }).clientName === "messaging"), "the message in the target's log", 60_000);
+    gate.release();                                            // the round ends only once the message is pending
     await client.until(() => count(d.sessions.read(target), "turn_completed") >= 1 && count(d.sessions.read(sender), "turn_completed") >= 1, "both turns' ends");
     await Bun.sleep(300);
     client.onEvent = undefined;
@@ -186,9 +204,16 @@ describeWithWinterBinary("a message sent mid-turn is FOLDED into the running tur
         await other.call(METHODS.sessionSend, { sessionId: stopper, text: `CALL TaskStop ${JSON.stringify({ task_id: target })}` });
       })();
     };
-    await client.call(METHODS.sessionSend, { sessionId: target, text: `CALL Bash ${JSON.stringify({ command: "sleep 6; echo first" })}` });
-    await client.until(() => count(d.sessions.read(stopper), "turn_completed") >= 1, "the stopper's turn");
-    await client.until(() => count(d.sessions.read(target), "turn_completed") >= 2, "the stopped turn and the cleared message closed");
+    // The gate is NEVER released before the stop: the tool runs until TaskStop interrupts it, so the steer is
+    // still pending (not folded) when the clear arrives, however slow the stopper is to start.
+    const gate = gatedBash();
+    await client.call(METHODS.sessionSend, { sessionId: target, text: gate.text });
+    try {
+      await client.until(() => count(d.sessions.read(stopper), "turn_completed") >= 1, "the stopper's turn", 60_000);
+      await client.until(() => count(d.sessions.read(target), "turn_completed") >= 2, "the stopped turn and the cleared message closed");
+    } finally {
+      gate.release();
+    }
     await Bun.sleep(500);
     client.onEvent = undefined;
     const tlog = d.sessions.read(target);

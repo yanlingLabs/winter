@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { explicitRuntimeVersionNote, resolvePlatformPackageWinter, resolveWinterExecutable, WinterExecutableUnavailable } from "../../src/runtime-sdk/executable";
+import { explicitRuntimeVersionNote, resolvePlatformPackageWinter, resolveWinterExecutable, WinterExecutableUnavailable, winterBinaryVersion } from "../../src/runtime-sdk/executable";
 import { bundleRuntimePath } from "../../src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../../src/runtime-sdk/versions";
 
@@ -231,6 +231,15 @@ describe("resolvePlatformPackageWinter (P9a-9, fix wave C1/M2)", () => {
     // as a function signature (fromUrl defaults to import.meta.url) without asserting what it
     // finds — this worktree's ambient node_modules may or may not carry m1's staged residue.
     expect(() => resolvePlatformPackageWinter()).not.toThrow();
+  });
+});
+
+describe("winterBinaryVersion: what a configured binary reports — the spawn hook's runtimeVersion", () => {
+  test("the reported version, cached per path + size + mtime; undefined when it cannot be asked", () => {
+    expect(winterBinaryVersion("/x/winter-v1", { runVersion: () => "0.0.43", statKey: () => "1:1" })).toBe("0.0.43");
+    expect(winterBinaryVersion("/x/winter-v1", { runVersion: () => "0.0.44", statKey: () => "1:1" })).toBe("0.0.43");   // cached
+    expect(winterBinaryVersion("/x/winter-v1", { runVersion: () => "0.0.44", statKey: () => "2:2" })).toBe("0.0.44");   // rebuilt
+    expect(winterBinaryVersion("/x/winter-v2", { runVersion: () => undefined, statKey: () => "1:1" })).toBeUndefined();
   });
 });
 

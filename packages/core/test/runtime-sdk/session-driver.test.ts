@@ -273,6 +273,26 @@ describe("createWinterSessionDrivers — the table", () => {
     } finally { t.close(); }
   });
 
+  test("L2: a resume racing an eviction waits for the evicted child's own terminal — ONE turn_completed for the stopped turn, never a second synthetic one", async () => {
+    const t = table({ endGraceMs: 30 });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      await session.send("A", "cli");                        // a turn the child never finishes
+      await Bun.sleep(10);
+      // Evict (the old child ends: closed, aborted, its iteration appends the aborted terminal) and, in the
+      // same tick, resume: the new driver's open must not read the log before the old turn's terminal.
+      const evicting = t.drivers.evict(sid);
+      const reopened = (async () => { const s2 = await t.drivers.ensure(sid); await s2!.open(); return s2!; })();
+      const [, s2] = await Promise.all([evicting, reopened]);
+      await Bun.sleep(150);
+      const main = t.store.read(sid).filter((e) => (e as { threadId?: string }).threadId === "main");
+      expect(main.filter((e) => e.type === "turn_completed")).toHaveLength(1);
+      expect(main.filter((e) => e.type === "turn_started")).toHaveLength(1);
+      await s2.end();
+    } finally { t.close(); }
+  });
+
   test("m6: a records store that throws makes `legOf` undefined and `ensure` undefined — logged, never thrown", async () => {
     const t = table({ records: { get: () => { throw new Error("db closed"); } } as unknown as RuntimeSessionRecords });
     try {

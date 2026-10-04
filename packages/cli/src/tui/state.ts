@@ -409,6 +409,10 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
 
     case "turn_started": {
       if (e.threadId !== MAIN) return feedAgents(s, e);
+      // A main turn_started while a main turn is open is a CONTINUATION — a message folded into the
+      // running turn (agent SDK 0.0.44) — never a new turn: nothing is pruned and the clock keeps running,
+      // as on the Mac.
+      if (s.turnRunning) return s;
       // Drop finished subagents from the live roster at the next main turn. Their named finish notes are
       // already committed on thread_completed, so nothing is lost — this keeps the don't-prune-on-
       // turn_completed guard (the `Agent "" · 0s` fix) intact while bounding the pinned live region's
@@ -423,7 +427,7 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       const childPendingTool = pruneChildEntries(s.childPendingTool, doneIds);
       // A main turn_started while a turn runs is a message folded INTO it (agent SDK 0.0.44): the turn's
       // clock keeps running.
-      return { ...s, turnRunning: true, turnStartMs: s.turnRunning && s.turnStartMs !== undefined ? s.turnStartMs : nowMs, agents, childBlocks, childPendingTool };
+      return { ...s, turnRunning: true, turnStartMs: nowMs, agents, childBlocks, childPendingTool };
     }
 
     case "turn_completed": {
