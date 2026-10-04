@@ -124,7 +124,8 @@ final class SessionFeedTests: XCTestCase {
     /// The replay a window opens on is folded ONCE (user, 2026-10-04: the transcript slid down through
     /// a resumed session's history item by item): however the events trickle in, no intermediate state
     /// is ever published — here, the mid-turn `turnRunning` — and the history lands as soon as the
-    /// attach's own `harness_attached` (the ceiling) arrives, well before the fallback.
+    /// attach's own `harness_attached` (the ceiling) arrives, well before the fallback; a transient
+    /// stamped with the ceiling's seq does not end it early.
     func testPinnedReplayIsFoldedInOnePublishAtTheCeiling() async throws {
         let t = FeedScriptedTransport()
         let session = SessionModel()
@@ -146,6 +147,9 @@ final class SessionFeedTests: XCTestCase {
         let replay = [
             #"{"jsonrpc":"2.0","method":"event","params":{"type":"user_message","seq":1,"sessionId":"S1","ts":0,"threadId":"main","text":"hi","clientName":"orb"}}"#,
             #"{"jsonrpc":"2.0","method":"event","params":{"type":"turn_started","seq":2,"sessionId":"S1","ts":0,"threadId":"main"}}"#,
+            // A transient broadcast mid-replay carries the store's last seq — the ceiling's own —
+            // and must not be taken for the end of the replay.
+            #"{"jsonrpc":"2.0","method":"event","params":{"type":"assistant_delta","seq":4,"sessionId":"S1","ts":0,"threadId":"main","delta":"he"}}"#,
             #"{"jsonrpc":"2.0","method":"event","params":{"type":"turn_completed","seq":3,"sessionId":"S1","ts":0,"threadId":"main","stopReason":"end_turn","inputTokens":1,"outputTokens":1}}"#,
             #"{"jsonrpc":"2.0","method":"event","params":{"type":"harness_attached","seq":4,"sessionId":"S1","ts":0,"clientName":"orb"}}"#,
         ]

@@ -167,7 +167,7 @@ final class SessionFeed {
             if case .pinned(let sessionId) = mode, e.sessionId == sessionId {
                 if replayBuffer != nil {
                     replayBuffer?.append(e)
-                    if let ceiling = replayCeiling, e.seq >= ceiling { finishReplay() }
+                    if let ceiling = replayCeiling, !e.isTransient, e.seq >= ceiling { finishReplay() } else { armReplayDeadline() }
                 } else if case .assistantDelta = e {
                     pendingChunks.append(e)
                     scheduleChunkFlush()
@@ -194,8 +194,12 @@ final class SessionFeed {
     /// (`SessionModel.apply(replay:)`) when it is complete: when the event at `session.attach`'s
     /// ceiling arrives — the `harness_attached` of this very attach, the replay's last event — or
     /// at once if that is already in hand, or if the attach failed (no replay is coming).
-    /// `replayFallback` bounds the wait should the ceiling never come; a connection change folds
-    /// what has arrived first, so the order of events is kept.
+    /// Only a PERSISTED event can be the ceiling: a transient (a streamed chunk of a child at work) is
+    /// stamped with the store's current last seq, so one sent just after the attach carries the
+    /// ceiling's own seq while the replay is still arriving. `replayFallback` bounds the wait should
+    /// the ceiling never come — an idle timer, restarted by every event held, so a long history that
+    /// takes a while to arrive is never cut in two; a connection change folds what has arrived first,
+    /// so the order of events is kept.
     private var replayBuffer: [SessionEvent]?
     private var replayCeiling: Int?
     private var replayDeadline: DispatchWorkItem?
@@ -212,7 +216,13 @@ final class SessionFeed {
         guard replayBuffer != nil else { return }
         guard let ceilingSeq else { finishReplay(); return }
         replayCeiling = ceilingSeq
-        if replayBuffer?.contains(where: { $0.seq >= ceilingSeq }) == true { finishReplay(); return }
+        if replayBuffer?.contains(where: { !$0.isTransient && $0.seq >= ceilingSeq }) == true { finishReplay(); return }
+        armReplayDeadline()
+    }
+
+    private func armReplayDeadline() {
+        guard replayCeiling != nil else { return } // armed once the attach has answered
+        replayDeadline?.cancel()
         let deadline = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated { self?.finishReplay() }
         }
