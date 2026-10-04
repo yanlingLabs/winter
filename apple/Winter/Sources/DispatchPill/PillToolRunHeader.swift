@@ -209,15 +209,14 @@ func pillToolLabel(_ entry: ToolRunEntry, turnIsLive: Bool) -> PillToolLabel {
 /// the plume's discs and a sentence that says what is happening — "Searching the web · 12 websites",
 /// "Reading nytimes.com" — and then what happened — "Searched 20 websites", "Ran 3 shell commands".
 /// Counts climb one by one as they arrive; names rotate every half second with their favicons; a
-/// running pill carries a bright sweep in the session's colour; a failed one turns red. One pill per
-/// tool: a turn that searched and then ran commands shows two.
+/// running pill carries a bright white sweep (white, not the session's colour — user, 2026-10-04); a
+/// failed one turns red. One pill per tool: a turn that searched and then ran commands shows two.
 struct PillToolRunHeader: View {
     let entries: [ToolRunEntry]
     let turnIsLive: Bool
     let isExpanded: Bool
     let toggle: () -> Void
 
-    @Environment(\.pillChromePalette) private var palette
     /// Bumped while a favicon is still loading, so the row looks again (the cache is not observable).
     @State private var faviconTick = 0
 
@@ -258,10 +257,10 @@ struct PillToolRunHeader: View {
                 .frame(height: Self.height)
                 .background(Capsule().fill(failed ? Self.failureRed.opacity(0.10) : Color.white.opacity(0.06)))
                 .overlay {
-                    if running { PillRunningSweep(color: palette.bodyColor) }
+                    if running { PillRunningSweep(color: .white) }
                 }
                 .overlay(Capsule().strokeBorder(failed ? Self.failureRed.opacity(0.45)
-                                                : running ? palette.bodyColor.opacity(0.55) : Color.white.opacity(0.08),
+                                                : running ? Color.white.opacity(0.55) : Color.white.opacity(0.08),
                                                 lineWidth: 1))
                 .clipShape(Capsule())
                 .contentShape(Capsule())
@@ -299,19 +298,19 @@ struct PillToolRunHeader: View {
         let rotatingDisc = label.rotation.isEmpty ? nil : label.rotation[tick % label.rotation.count].disc
         let siteDiscs = discs.filter { if case .site = $0.kind { return true } else { return false } }
         if running, let rotatingDisc {
-            PillToolDisc(disc: rotatingDisc, palette: palette, size: Self.discSize, tick: faviconTick)
+            PillToolDisc(disc: rotatingDisc, size: Self.discSize, tick: faviconTick)
                 .id(rotatingDisc.kind)
                 .transition(.opacity)
         } else if running, PillToolKind(toolName: entry.name) == .search, !siteDiscs.isEmpty {
             let disc = siteDiscs[tick % siteDiscs.count]
-            PillToolDisc(disc: disc, palette: palette, size: Self.discSize, tick: faviconTick)
+            PillToolDisc(disc: disc, size: Self.discSize, tick: faviconTick)
                 .id(disc.kind)
                 .transition(.opacity)
         } else {
             let shown = Array(discs.prefix(Self.maxDiscs))
             HStack(spacing: -7) {
                 ForEach(Array(shown.enumerated()), id: \.offset) { index, disc in
-                    PillToolDisc(disc: disc, palette: palette, size: Self.discSize, tick: faviconTick)
+                    PillToolDisc(disc: disc, size: Self.discSize, tick: faviconTick)
                         .zIndex(Double(shown.count - index))
                 }
                 if discs.count > Self.maxDiscs {
@@ -372,7 +371,7 @@ struct PillCountUp<Content: View>: View {
     }
 }
 
-/// The running pill's brightness: a soft band of the session's colour sweeping across the capsule,
+/// The running pill's brightness: a soft band of `color` sweeping across the capsule,
 /// added rather than painted, so the pill glows while its tool works.
 private struct PillRunningSweep: View {
     let color: Color
@@ -395,12 +394,11 @@ private struct PillRunningSweep: View {
     }
 }
 
-/// One white disc: a tool's symbol in the session's deep colour, or a site's favicon (a grey globe
+/// One white disc: a tool's symbol in black, or a site's favicon (a grey globe
 /// until it loads) — the plume's own tile, standing still. A thin black ring keeps overlapped discs
 /// apart.
 private struct PillToolDisc: View {
     let disc: PlumeThrow
-    let palette: PlumePalette
     let size: CGFloat
     /// Read so a newly loaded favicon draws (`PillToolRunHeader.faviconTick`).
     let tick: Int
@@ -413,7 +411,7 @@ private struct PillToolDisc: View {
                 Image(systemName: symbol)
                     .resizable()
                     .scaledToFit()
-                    .foregroundStyle(Color(red: palette.tail.red, green: palette.tail.green, blue: palette.tail.blue))
+                    .foregroundStyle(Color.black)
                     .frame(width: size * 0.5, height: size * 0.5)
             case .site(let host, let iconURL):
                 if let image = FaviconCache.shared.image(host: host, iconURL: iconURL) {
