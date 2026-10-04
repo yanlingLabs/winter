@@ -76,6 +76,10 @@ async function driveChild(bin: string, opts: {
   provider: string;
   /** Called with the queue and a "turn N pushed" signal so a test can choose WHEN to push. */
   pushes: (q: ReturnType<typeof createHostPromptQueue>, sawResult: () => Promise<void>, beginTurn: () => void) => Promise<void>;
+  /** Every wire message as it arrives, BEFORE the projector sees it — a test's deterministic push point. */
+  onMessage?: (m: ProtocolSdkMessage, q: ReturnType<typeof createHostPromptQueue>, beginTurn: (text: string) => void) => void;
+  /** Extra `Options` (a permission mode). */
+  extraOptions?: Record<string, unknown>;
 }): Promise<RunResult> {
   const home = mkdtempSync(join(tmpdir(), "winter-e2e-home-"));
   const cwd = mkdtempSync(join(tmpdir(), "winter-e2e-cwd-"));
@@ -103,6 +107,7 @@ async function driveChild(bin: string, opts: {
       model: `winter-test/${opts.provider}`,
       cwd,
       includePartialMessages: true,
+      ...(opts.extraOptions ?? {}),
       // CONSTRUCTED, never spread from process.env — see the header.
       env: {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
@@ -122,6 +127,7 @@ async function driveChild(bin: string, opts: {
   try {
     for await (const m of q) {
       messages.push(m);
+      opts.onMessage?.(m, queue, (text) => keep(projector.beginTurn({ text })));
       keep(projector.accept(m));
       if ((m as { type?: string }).type === "result") { results++; resolveResult?.(); resolveResult = undefined; }
     }
@@ -209,6 +215,44 @@ describeWithWinterBinary("projector: a REAL winter child", (bin) => {
     expect(run.threw).toBe("ResultError");
     // and `acceptError` did NOT project it twice — one agent_error for the one error result
     expect(run.events.filter((e) => e.type === "agent_error")).toHaveLength(1);
+  }, 60_000);
+
+  test("THE FOLD, deterministically (agent SDK 0.0.44): a push made while a tool runs is folded into the running turn — ONE result, its turn_started mid-turn, the model's next request carries its text", async () => {
+    // `winter-test/calls` runs the prompt's `CALL` lines as tool rounds and then answers with the round's
+    // tool results as JSON — which is where a folded message lands (the runtime folds it into the tool
+    // result it sends), so the answer text PROVES the model's next request carried the folded text.
+    // The push goes in the moment the tool_use frame arrives, while `sleep 1` is still running: it is
+    // pending at the round's end, so it folds before the next request — no timing guess.
+    const steer = "steered in mid-turn: also mention the word marmalade";
+    let steered = false;
+    const run = await driveChild(bin, {
+      provider: "calls",
+      extraOptions: { permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true },
+      onMessage: (m, queue, beginTurn) => {
+        if (steered || (m as { type?: string }).type !== "assistant") return;
+        steered = true;
+        beginTurn(steer);
+        queue.push(steer);
+      },
+      pushes: async (queue, sawResult, beginTurn) => {
+        const done = sawResult();
+        beginTurn();
+        queue.push('CALL Bash {"command":"sleep 1; echo first"}');
+        await Promise.race([done, Bun.sleep(30_000)]);
+        await Bun.sleep(500);                 // nothing else may follow: no second result
+      },
+    });
+    const kinds = run.messages.map((m) => (shapeOf(m) as { kind: string }).kind);
+    expect(kinds).toContain("system/host_input_folded");
+    expect(run.messages.find((m) => (m as { subtype?: string }).subtype === "host_input_folded")).toMatchObject({ count: 1 });
+    expect(run.results).toBe(1);                                                          // ONE result for both pushes
+    const main = run.events.filter((e) => (e as { threadId?: string }).threadId === MAIN_THREAD).map((e) => e.type);
+    expect(main).toEqual(["turn_started", "tool_call", "tool_result", "turn_started", "assistant_message", "turn_completed"]);
+    const answer = run.events.find((e) => e.type === "assistant_message") as { text: string };
+    expect(answer.text).toContain("marmalade");                                           // the model read it
+    expect(answer.text).toContain("The user sent a new message while you were working");
+    // no echo of the folded text as a user_message of its own
+    expect(run.events.filter((e) => e.type === "user_message")).toEqual([]);
   }, 60_000);
 
   test("THE STEER MEASUREMENT: a mid-turn push is owed its own terminal unless the child FOLDS it — so a steer needs its own beginTurn", async () => {

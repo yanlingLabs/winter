@@ -72,7 +72,10 @@
 // is accounting, not a new path: the projector announces the folded pushes' held `turn_started`s and
 // stops owing them a terminal (`Projector.beginTurn`), and the driver drops them from `inFlight`
 // (`onFold`). A held SEND is never pushed early for this — it is the daemon's queue (P8b-5), and only
-// what was pushed can be folded. `fold.ts` holds the 0.0.44 shapes, feature-detected.
+// what was pushed can be folded. `fold.ts` holds the 0.0.44 frame and the clear (version-locked, so not
+// feature-detected; only the clear's rejection is caught). The fold happens just before the next REQUEST:
+// a turn an interrupt, a budget or a hook stops before then does not fold, and its pending pushes run as
+// their own turns — ordinary C2 accounting (one terminal each).
 //
 // "A turn is running" is a HOST-SIDE count (`inFlight` = pushes − results − folded), never the
 // projector's `turnRunning`: `beginTurn` opens a projector turn before the push, so reading the
@@ -106,7 +109,7 @@ import { CAPABILITY_PLAIN_NAMES, permissionModeFor, toolSurfaceViolations } from
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { RunHome } from "@yanlinglabs/winter-runtime-sdk";
 import { disposeFailedRunHome, settleRunHome } from "./run-home-support";
-import { clearQueuedInputOf, foldsQueuedInput, hostInputFoldedCount } from "./fold";
+import { clearQueuedInput, hostInputFoldedCount } from "./fold";
 
 /**
  * WS-21 (spec §3.1): the per-run folder an incarnation's `Options` carry as `runtime.runHome` — the
@@ -383,9 +386,9 @@ export interface WinterSession {
    *  0.0.44) the pushes the child holds pending, cleared BEFORE the interrupt; `discarded` counts both.
    *  See `interrupt`. Without it (`session.interrupt`, the Mac's stop) nothing queued is dropped. */
   interrupt(opts?: { discardQueued?: boolean }): Promise<{ wasRunning: boolean; discarded?: number }>;
-  /** The live child FOLDS a mid-turn push into its running turn (agent SDK 0.0.44 — `fold.ts`'s
-   *  `foldsQueuedInput`); false while not live and on an older runtime, whose mid-turn push is always its
-   *  own next turn and can never be taken back. SendMessage steers a running session only when true. */
+  /** A steer now reaches the running turn: the live child (agent SDK 0.0.44, version-locked) folds a mid-turn
+   *  push into it. False while not live, ending, or with a provider handoff pending (a steer is then HELD for
+   *  the target). SendMessage steers a running session only when true. */
   readonly foldsQueuedInput: boolean;
   /**
    * WS-23 (reasoning-state, decision 5): compacts the LIVE child's conversation NOW, on the model it runs
@@ -579,7 +582,7 @@ class WinterSessionImpl implements WinterSession {
   get heldDeliveries(): readonly string[] { return this.held; }
   get handoffPending(): boolean { return this.handoff !== undefined; }
   /** False during a pending provider handoff too: a steer then is HELD for the target, never in the running turn. */
-  get foldsQueuedInput(): boolean { return this.stateValue === "live" && this.inc !== undefined && !this.ending && this.handoff === undefined && foldsQueuedInput(this.inc.query); }
+  get foldsQueuedInput(): boolean { return this.stateValue === "live" && this.inc !== undefined && !this.ending && this.handoff === undefined; }
 
   // ── the doors ──────────────────────────────────────────────────────────────────────────────
 
@@ -735,8 +738,8 @@ class WinterSessionImpl implements WinterSession {
    * NOW, while those pushes are the youngest messages in the log (nothing could push while the clear was
    * in flight — `clearing`), so the adjacency pairing stays exact and a resume never re-pushes them; their
    * `aborted` `turn_completed`s wait for the stopped turn's own terminal (`clearedAwaitingTerminal`).
-   * Returns how many were cleared; 0 on an older runtime (feature-detected — its pushes cannot be taken
-   * back and run after the stopped turn, as before) or when the control fails.
+   * Returns how many were cleared; 0 when the control fails (an older runtime's `unknown_subtype`
+   * included — its pushes then run after the stopped turn, as before).
    *
    * The pushes held when the clear was SENT are snapshotted: if the child died while it was in flight (its
    * projector forgot them — `acceptError`), the last `cleared` of that snapshot are still closed in the
@@ -744,13 +747,9 @@ class WinterSessionImpl implements WinterSession {
    * re-pushed them from the log — then they run, and that is logged.)
    */
   private async clearPushed(inc: Incarnation): Promise<number> {
-    const clear = clearQueuedInputOf(inc.query);
-    if (clear === undefined) return 0;
     const snapshot = inc.projector.pendingPushes;
-    const answered = clear().then((a) => a.cleared, (err: unknown) => {
-      this.log(`clearing the queued input of ${this.sessionId} failed: ${err instanceof Error ? err.name : "unknown"}`);
-      return 0;
-    });
+    // Never rejects: a failed control (an older runtime's `unknown_subtype`, a child gone) clears nothing.
+    const answered = clearQueuedInput(inc.query, (line) => this.log(`${this.sessionId}: ${line}`));
     // BOUNDED: a child that never answers the control must not wedge the session (every send waiting on
     // `clearing`, the interrupt never sent). After `STOP_SETTLE_MAX_MS`, or when the session's iteration
     // ends (`releaseClearing`), the stop goes on as if nothing was cleared; a LATE answer is still applied

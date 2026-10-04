@@ -171,7 +171,7 @@ describe("SendMessage to a session", () => {
     expect(t.drivers.get(to)!.sends).toEqual([]);
   });
 
-  test("a session mid-turn on a runtime that does not fold (≤ 0.0.43) queues it behind the running turn — never steered", async () => {
+  test("a running session whose steer would not reach its turn (foldsQueuedInput false: a handoff pending, ending) queues it behind the running turn — never steered", async () => {
     const t = setup();
     const from = t.code();
     const to = t.code();

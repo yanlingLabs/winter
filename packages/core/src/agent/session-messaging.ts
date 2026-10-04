@@ -36,8 +36,8 @@
 // running turn (`pendingSends`), the message is `send`-queued behind them (FIFO, `queued`, the note says
 // how many are ahead). An idle session gets it through `send`, exactly as the user's `session.send` would, and a
 // finished resumable one is RESUMED for it through its driver (`ensure` — never the router's cold resume).
-// A child that does not fold (≤ 0.0.43, `foldsQueuedInput` false) is never steered: there a pushed message
-// is its own next turn that a TaskStop could not take back, so it keeps `send`'s queue (`queued`). Two
+// A driver whose steer would not reach the running turn (`foldsQueuedInput` false: not live, ending, or a
+// provider handoff pending, which holds a steer for the target) gets `send` (`queued`). Two
 // renderings:
 //   - Dispatch to its OWN child: the plain text, like the spawn's first prompt — Dispatch is the child's
 //     delegate-user — and the child's turn is FOLLOWED (`DispatchChildren.expectFollowUp`, keyed on the
@@ -85,7 +85,7 @@ export interface MessagingDriverHandle {
   send(text: string, clientName?: string): Promise<{ seq: number; queued: boolean }>;
   /** Push into the RUNNING turn now (`WinterSession.steer`). Optional on a test double. */
   steer?(text: string, clientName?: string): Promise<{ seq: number; injected: boolean }>;
-  /** The live child folds a mid-turn push into its running turn (agent SDK 0.0.44). Absent: false. */
+  /** A steer now reaches the running turn (`WinterSession.foldsQueuedInput`). Absent: false. */
   readonly foldsQueuedInput?: boolean;
   /** The session's own interrupt (`session.interrupt`, the Mac's stop button); `discardQueued` also drops
    *  the messages held behind the stopped turn. Optional on a test double. */
@@ -362,8 +362,8 @@ export class SessionMessaging {
  * One delivery into `driver` (user ruling 2026-10-04, "fold the message into the running turn"): a target
  * RUNNING a turn on a child that folds (agent SDK 0.0.44) is STEERED — the message is pushed now and the
  * child takes it into that turn after its current tool call (or runs it as its next turn, if the turn ends
- * first); anything else — an idle or finished target, or an older runtime, whose mid-turn push could never
- * be taken back by a TaskStop — goes through `send`, the session's own queue.
+ * first); anything else — an idle or finished target, or one whose steer would not reach the running turn
+ * (`foldsQueuedInput` false) — goes through `send`, the session's own queue.
  */
 async function deliverInto(driver: MessagingDriverHandle, text: string): Promise<{ queued: boolean; steered: boolean; behind: number }> {
   const live = driver.state === undefined || driver.state === "live";

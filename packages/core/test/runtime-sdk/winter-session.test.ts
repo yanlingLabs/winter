@@ -6,7 +6,7 @@
 // projector suite's `FakeCheckpoints`; the store is an array. What is under test is the state
 // machine and the push/hold/resume discipline (P8b-5/24/32/38), not the fold.
 import { describe, expect, test } from "bun:test";
-import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
+import { WinterRpcError, type Options, type Query } from "@yanlinglabs/winter-agent-sdk";
 import type { NewSessionEvent, SessionEvent } from "@yanlinglabs/winter-protocol";
 import { SHUTDOWN_QUERY_GRACE_MS, type WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createProjector, type Projector } from "../../src/projector";
@@ -148,9 +148,9 @@ interface Harness {
   types(): string[];
 }
 
-function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & { idleTimeoutMs?: number; transcript?: boolean; folding?: boolean } = {}): Harness {
+function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & { idleTimeoutMs?: number; transcript?: boolean } = {}): Harness {
   // The harness knobs are NOT driver deps — they must not be spread over the thunks below.
-  const { idleTimeoutMs: idleMs, transcript, folding, ...over } = overrides;
+  const { idleTimeoutMs: idleMs, transcript, ...over } = overrides;
   const queries: FakeQuery[] = [];
   const incarnations: WinterIncarnation[] = [];
   const events: SessionEvent[] = [];
@@ -176,7 +176,7 @@ function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & 
     types: () => events.map((e) => e.type),
   };
   const runtime = {
-    sdk: { query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: Options }) => { const q = folding === true ? new FoldingFakeQuery(prompt, options) : new FakeQuery(prompt, options); queries.push(q); return q as unknown as Query; } },
+    sdk: { query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: Options }) => { const q = new FoldingFakeQuery(prompt, options); queries.push(q); return q as unknown as Query; } },
     trackQuery: (_sid: string, abort: AbortController) => { tracked.push({ abort }); },
     untrack: () => { h.untracked++; },
   } as unknown as WinterRuntimeSdk;
@@ -1355,7 +1355,7 @@ const stopReasons = (h: Harness): string[] => seen(h, "turn_completed").map((e) 
 describe("a mid-turn push FOLDED into the running turn (agent SDK 0.0.44)", () => {
   test("a steer folded at the next tool round: its turn_started lands at the fold, the running turn's ONE result closes both, and the session settles once", async () => {
     let settles = 0;
-    const h = harness({ folding: true, onTurnSettled: () => { settles++; } });
+    const h = harness({ onTurnSettled: () => { settles++; } });
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.session.send("A", "cli");
@@ -1377,7 +1377,7 @@ describe("a mid-turn push FOLDED into the running turn (agent SDK 0.0.44)", () =
   });
 
   test("a resume after a fold re-pushes nothing — even when the child died before the running turn's result", async () => {
-    const h = harness({ folding: true });
+    const h = harness();
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.session.send("A", "cli");
@@ -1396,7 +1396,7 @@ describe("a mid-turn push FOLDED into the running turn (agent SDK 0.0.44)", () =
   });
 
   test("a fold of two, then a held SEND runs as its own turn after the running one (the daemon's queue is never folded early)", async () => {
-    const h = harness({ folding: true });
+    const h = harness();
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.session.send("A", "cli");
@@ -1417,20 +1417,17 @@ describe("a mid-turn push FOLDED into the running turn (agent SDK 0.0.44)", () =
     expect(unconsumedUserMessages(h.events)).toEqual([]);
   });
 
-  test("foldsQueuedInput: true for a live folding child, false on an older runtime and when not live", async () => {
-    const folding = harness({ folding: true });
-    expect(folding.session.foldsQueuedInput).toBe(false);
-    await folding.session.open();
-    expect(folding.session.foldsQueuedInput).toBe(true);
-    await folding.session.end();
-    expect(folding.session.foldsQueuedInput).toBe(false);
-    const old = harness();
-    await old.session.open();
-    expect(old.session.foldsQueuedInput).toBe(false);
+  test("foldsQueuedInput: true for a live child, false when not live", async () => {
+    const h = harness();
+    expect(h.session.foldsQueuedInput).toBe(false);
+    await h.session.open();
+    expect(h.session.foldsQueuedInput).toBe(true);
+    await h.session.end();
+    expect(h.session.foldsQueuedInput).toBe(false);
   });
 
   test("foldsQueuedInput is false during a pending provider handoff (a steer then is held for the target, never in the running turn)", async () => {
-    const h = harness({ folding: true });
+    const h = harness();
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.settled();
@@ -1446,7 +1443,7 @@ describe("a mid-turn push FOLDED into the running turn (agent SDK 0.0.44)", () =
 
 describe("TaskStop on a folding child clears the CHILD's pending pushes too (agent SDK 0.0.44 clearQueuedInput)", () => {
   test("cleared BEFORE the interrupt; each cleared push is closed in the log (its turn_started now, an aborted turn_completed after the stopped turn's); counted with the held sends", async () => {
-    const h = harness({ folding: true });
+    const h = harness();
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.session.send("A", "cli");
@@ -1475,7 +1472,7 @@ describe("TaskStop on a folding child clears the CHILD's pending pushes too (age
   });
 
   test("a cleared push still unannounced gets its turn_started at the clear, while it is the youngest message", async () => {
-    const h = harness({ folding: true });
+    const h = harness();
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.session.send("A", "cli");
@@ -1494,7 +1491,7 @@ describe("TaskStop on a folding child clears the CHILD's pending pushes too (age
 
   test("the race: the child drops its pending input and THEN ends the running turn by itself — the result lands before the clear's answer, and the session still comes to rest (nothing owed, idle, next send runs)", async () => {
     let settles = 0;
-    const h = harness({ folding: true, onTurnSettled: () => { settles++; } });
+    const h = harness({ onTurnSettled: () => { settles++; } });
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.session.send("A", "cli");
@@ -1516,7 +1513,7 @@ describe("TaskStop on a folding child clears the CHILD's pending pushes too (age
   });
 
   test("a steer and a messaging delivery landing WHILE the clear is in flight wait for it: the clear closes exactly the pushes held when it was sent, and the two new ones run afterwards", async () => {
-    const h = harness({ folding: true });
+    const h = harness();
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.settled();
@@ -1548,7 +1545,7 @@ describe("TaskStop on a folding child clears the CHILD's pending pushes too (age
   });
 
   test("the settle timer firing before the clear answers appends NO aborted terminal while the stopped turn still runs — cleared pushes close only after its terminal", async () => {
-    const h = harness({ folding: true });
+    const h = harness();
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.session.send("A", "cli");
@@ -1572,7 +1569,7 @@ describe("TaskStop on a folding child clears the CHILD's pending pushes too (age
   });
 
   test("the child dies while the clear is in flight: the cleared pushes are still closed in the log, and a resume re-runs none of them", async () => {
-    const h = harness({ folding: true });
+    const h = harness();
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.session.send("A", "cli");
@@ -1591,7 +1588,7 @@ describe("TaskStop on a folding child clears the CHILD's pending pushes too (age
   });
 
   test("a clear the child NEVER answers does not wedge the session: within STOP_SETTLE_MAX_MS the stop goes on — the interrupt is sent, TaskStop returns, a waiting send proceeds", async () => {
-    const h = harness({ folding: true });
+    const h = harness();
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.settled();
@@ -1613,7 +1610,7 @@ describe("TaskStop on a folding child clears the CHILD's pending pushes too (age
   });
 
   test("end() while a clear is in flight (never answered) releases every waiter: the stop returns, a waiting send and a deferred delivery go on", async () => {
-    const h = harness({ folding: true });
+    const h = harness();
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.settled();
@@ -1638,7 +1635,7 @@ describe("TaskStop on a folding child clears the CHILD's pending pushes too (age
   });
 
   test("the Mac's stop (no discardQueued) never clears: the pushed steer runs after the interrupted turn", async () => {
-    const h = harness({ folding: true });
+    const h = harness();
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.session.send("A", "cli");
@@ -1652,13 +1649,16 @@ describe("TaskStop on a folding child clears the CHILD's pending pushes too (age
     expect(seen(h, "turn_started")).toHaveLength(2);
   });
 
-  test("an older runtime (no clearQueuedInput): TaskStop clears only the daemon's held sends, as before", async () => {
-    const h = harness();
+  test("a clear the runtime REJECTS (an older runtime's WinterRpcError unknown_subtype) is caught: TaskStop clears only the daemon's held sends, and the pushed steer runs after the stopped turn", async () => {
+    const logs: string[] = [];
+    const h = harness({ log: (line) => logs.push(line) });
     await h.session.open();
     h.q().emit(init(h.q().options));
     await h.session.send("A", "cli");
     await h.session.steer("S", "steer");
+    fq(h).clearQueuedInput = async () => { throw new WinterRpcError("unknown_subtype", "unknown control subtype clear_queued_input"); };
     expect(await h.session.interrupt({ discardQueued: true })).toEqual({ wasRunning: true });
+    expect(logs.some((l) => l.includes("does not know clear_queued_input"))).toBe(true);
     await h.settled();
     expect(h.session.turnRunning).toBe(true);                 // S was pushed and cannot be taken back
     h.q().emit(result());
