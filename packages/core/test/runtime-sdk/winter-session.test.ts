@@ -110,7 +110,14 @@ class FoldingFakeQuery extends FakeQuery {
   clearAnswer = 0;
   readonly calls: string[] = [];
   emitFold(count: number): void { this.emit({ type: "system", subtype: "host_input_folded", count, uuid: `fold-${count}`, session_id: "be-x" }); }
-  async clearQueuedInput(): Promise<{ cleared: number }> { this.calls.push("clear"); return { cleared: this.clearAnswer }; }
+  /** Runs inside the clear, before it answers (a race a test stages). */
+  duringClear: (() => void) | undefined;
+  async clearQueuedInput(): Promise<{ cleared: number }> {
+    this.calls.push("clear");
+    this.duringClear?.();
+    await Bun.sleep(1);
+    return { cleared: this.clearAnswer };
+  }
   override async interrupt(): Promise<void> { this.calls.push("interrupt"); return super.interrupt(); }
 }
 
@@ -1432,6 +1439,29 @@ describe("TaskStop on a folding child clears the CHILD's pending pushes too (age
     expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "turn_started", "turn_completed", "turn_completed"]);
     expect(unconsumedUserMessages(h.events)).toEqual([]);
     expect(h.session.turnRunning).toBe(false);
+  });
+
+  test("the race: the child drops its pending input and THEN ends the running turn by itself — the result lands before the clear's answer, and the session still comes to rest (nothing owed, idle, next send runs)", async () => {
+    let settles = 0;
+    const h = harness({ folding: true, onTurnSettled: () => { settles++; } });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.steer("S1", "steer");
+    await h.session.steer("S2", "steer");
+    const q = fq(h);
+    q.clearAnswer = 2;
+    q.duringClear = () => { q.emit(result()); };          // A ends on its own; the projector moves S1 up
+    expect(await h.session.interrupt({ discardQueued: true })).toEqual({ wasRunning: true, discarded: 2 });
+    await h.settled();
+    expect(q.calls).toEqual(["clear"]);                    // nothing left to interrupt
+    expect(h.session.turnRunning).toBe(false);
+    expect(settles).toBe(1);
+    expect(h.records.transitions.at(-1)).toBe("idle");
+    expect(seen(h, "turn_started")).toHaveLength(3);
+    expect(stopReasons(h)).toEqual(["end_turn", "aborted", "aborted"]);
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
+    expect((await h.session.send("D", "cli")).queued).toBe(false);
   });
 
   test("the Mac's stop (no discardQueued) never clears: the pushed steer runs after the interrupted turn", async () => {

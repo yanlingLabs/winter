@@ -660,6 +660,9 @@ class WinterSessionImpl implements WinterSession {
       if (this.stopSettled === gate) {
         this.clearedOnSettle += cleared;
         if (discarded === 0) this.discardHeld();   // nothing queued: release the gate now
+        // The child dropped its input and then ended the turn by itself (`clearPushed`): nothing is running
+        // now and no `result` is coming, so the settle `onResult` would have run happens here.
+        else if (this.inFlight === 0 && this.inc === inc) { this.discardHeld(); this.settleQueue(inc); return { wasRunning: true, discarded }; }
       } else {
         // The stopped turn already ended while the clear was in flight (its settle ran `discardHeld`).
         this.closeCleared(cleared);
@@ -693,10 +696,14 @@ class WinterSessionImpl implements WinterSession {
       return 0;
     }
     if (cleared === 0 || this.inc !== inc) return 0;
-    const { batch, cleared: k } = inc.projector.clearQueued(cleared);
+    const { batch } = inc.projector.clearQueued(cleared);
     this.emit(batch);
-    this.inFlight = Math.max(Math.min(this.inFlight, 1), this.inFlight - k);
-    return k;
+    // Every dropped push leaves `inFlight` — `cleared`, not what the projector still held: when the child
+    // dropped its pending input and THEN ended the running turn on its own, the `result` was handled first
+    // and the projector announced the head as the next turn; that push never runs either, and with it
+    // counted out nothing is left owed (no `result` will come — the interrupt finds no turn).
+    this.inFlight = Math.max(0, this.inFlight - cleared);
+    return cleared;
   }
 
   /** The `aborted` terminal of each push `clearPushed` dropped — its `turn_started` is already in the log. */
@@ -1083,15 +1090,18 @@ class WinterSessionImpl implements WinterSession {
       if (next !== undefined) { this.beginAndPush(next, inc); return; }
     }
     if (this.inFlight === 0 && this.stopSettled !== undefined) this.discardHeld();
-    if (this.inFlight === 0) {
-      // I-5: texts queued before a provider switch are left in the log for the target -- counted, so
-      // the handoff resumes the session to answer them.
-      if (this.handoff !== undefined) { this.heldForHandoff += this.pending.length; this.pending.length = 0; }
-      this.recordState("idle");
-      inc.attachment?.refresh();
-      this.armIdleTimer();
-      this.settleIdle();
-    }
+    if (this.inFlight === 0) this.settleQueue(inc);
+  }
+
+  /** Nothing is in flight any more: the session is idle. */
+  private settleQueue(inc: Incarnation): void {
+    // I-5: texts queued before a provider switch are left in the log for the target -- counted, so
+    // the handoff resumes the session to answer them.
+    if (this.handoff !== undefined) { this.heldForHandoff += this.pending.length; this.pending.length = 0; }
+    this.recordState("idle");
+    inc.attachment?.refresh();
+    this.armIdleTimer();
+    this.settleIdle();
   }
 
   /**

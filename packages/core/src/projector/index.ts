@@ -344,12 +344,17 @@ class ProjectorImpl implements Projector {
 
   clearQueued(count: number): { batch: ProjectedBatch; cleared: number } {
     this.commitPending();
-    const k = Math.min(Math.max(0, Math.floor(count)), this.queuedStarts.length);
+    const n = Math.max(0, Math.floor(count));
+    const k = Math.min(n, this.queuedStarts.length);
+    // Not one terminal is owed for any push the child dropped — including one this projector already
+    // moved to "started" (the race below), hence `n`, not `k`.
+    this.openTurns = Math.max(0, this.openTurns - n);
     if (k === 0) return { batch: EMPTY_BATCH(), cleared: 0 };
     // From the TAIL: if the running turn ended while the clear was in flight, the child has already
-    // started the head as its next turn, and that one's terminal is still coming.
+    // started the head as its next turn, and that one's terminal is still coming. (The reverse race —
+    // the child dropped the head, then ended the turn, and this projector saw the `result` first and
+    // announced the head as started — shows as `count > k`: the driver closes the excess.)
     const dropped = this.queuedStarts.splice(this.queuedStarts.length - k, k);
-    this.openTurns = Math.max(0, this.openTurns - k);
     const out: ProjectedEvent[] = dropped.filter((q) => !q.announced).map(() => this.turnStarted());
     return { batch: out.length === 0 ? EMPTY_BATCH() : this.stampBatch(out), cleared: k };
   }

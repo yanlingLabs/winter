@@ -3,6 +3,17 @@ import { isStalled, applyEvent, type WatchdogState } from "../src/watchdog";
 
 function fresh(): WatchdogState { return { turnRunning: false, toolsInFlight: 0, approvalsPending: 0, lastEventAt: 0 }; }
 
+describe("watchdog: a message folded into the running turn (agent SDK 0.0.44)", () => {
+  test("a turn_started while a turn runs keeps what is in flight — a pending approval is still legitimate silence", () => {
+    const s = fresh();
+    applyEvent(s, { type: "turn_started" }, 0);
+    applyEvent(s, { type: "approval_requested" }, 100);
+    applyEvent(s, { type: "turn_started" }, 200);        // the fold's announcement
+    expect(s.approvalsPending).toBe(1);
+    expect(isStalled(s, 60_000, 5000)).toBe(false);
+  });
+});
+
 describe("watchdog isStalled", () => {
   test("fires only when running, no tool in-flight, no approval pending, past threshold", () => {
     const s = fresh();

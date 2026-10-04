@@ -421,7 +421,9 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       // childPendingTool entries would otherwise linger forever — drop them alongside the row.
       const childBlocks = pruneChildEntries(s.childBlocks, doneIds);
       const childPendingTool = pruneChildEntries(s.childPendingTool, doneIds);
-      return { ...s, turnRunning: true, turnStartMs: nowMs, agents, childBlocks, childPendingTool };
+      // A main turn_started while a turn runs is a message folded INTO it (agent SDK 0.0.44): the turn's
+      // clock keeps running.
+      return { ...s, turnRunning: true, turnStartMs: s.turnRunning && s.turnStartMs !== undefined ? s.turnStartMs : nowMs, agents, childBlocks, childPendingTool };
     }
 
     case "turn_completed": {
