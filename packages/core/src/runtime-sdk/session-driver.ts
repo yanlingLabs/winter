@@ -51,7 +51,7 @@ import { moveTranscriptFiles, transcriptEntriesOf, type TranscriptMoveResult } f
 import { recordLazyRekey } from "../migration/migrate-c";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { runningTurnOrigin } from "../sessions/turn-origins";
+import { mainTurnOpenInLog, runningTurnOrigin } from "../sessions/turn-origins";
 import { CLAUDE_FIRST_PARTY_PROVIDER_IDS, DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, ownProviderFor, permittedProviders, pinsFor, providerBaseUrlFor, sdkAllowRules, sdkDenyRules, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
@@ -1377,6 +1377,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       ...(deps.onSupportedAgents === undefined ? {} : { onSupportedAgents: (agents) => deps.onSupportedAgents!(sessionId, agents) }),
       // P8b-39: the session log is the durable queue — what `open()` re-pushes is read from it.
       unconsumed: () => unconsumedUserMessages(deps.store.read(sessionId)),
+      danglingTurn: () => mainTurnOpenInLog(deps.store.read(sessionId)),
       idleTimeoutMs: deps.idleTimeoutMs ?? (() => winterOptionsFromSettings(deps.settings()).idleTimeoutSec * 1000),
       ...(deps.endGraceMs === undefined ? {} : { endGraceMs: deps.endGraceMs }),
       log,

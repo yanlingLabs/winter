@@ -261,6 +261,10 @@ export interface WinterSessionDeps {
    *  re-pushed in order by every `open()`. Absent, the driver falls back to what it held in memory
    *  (a unit harness with no log). */
   unconsumed?: () => string[];
+  /** The LOG ends with a main turn no child closed (`turn-origins.ts`'s `mainTurnOpenInLog`): read by
+   *  every `open()`, which then closes it (`aborted`) before anything new runs — the incarnation boundary
+   *  a daemon killed mid-turn left unmarked. Absent: never (a unit harness). */
+  danglingTurn?: () => boolean;
   /** HOT: `winterOptionsFromSettings(settings()).idleTimeoutSec * 1000`, read when the timer is armed. */
   idleTimeoutMs: () => number;
   /** Test seam for `WINTER_SESSION_END_GRACE_MS`. */
@@ -533,6 +537,9 @@ class WinterSessionImpl implements WinterSession {
    *  a delivery is deferred (`deferredDeliveries`) — so the pushes it drops are exactly the ones held when
    *  it was sent, and the log closes exactly those. */
   private clearing: Promise<void> | undefined;
+  private clearDone: (() => void) | undefined;
+  /** Gives up the in-flight clear's wait (its bound, or the iteration ending). */
+  private clearAbort: (() => void) | undefined;
   /** Messaging deliveries that arrived while a clear or a stop settle was in progress: run, in order, the
    *  moment both have ended (`releaseDeliveries`). The sink is synchronous, so it cannot wait itself. */
   private readonly deferredDeliveries: string[] = [];
@@ -579,6 +586,8 @@ class WinterSessionImpl implements WinterSession {
   /** Wait out a TaskStop in progress — its clear, then its settle — so no push lands under it. */
   private async quiesce(): Promise<void> {
     while (this.clearing !== undefined || this.stopSettled !== undefined) await (this.clearing ?? this.stopSettled!.promise);
+    // The session may have ended (a store error) while this send waited.
+    this.assertNotEnded();
   }
 
   async send(text: string, clientName = "session", images?: readonly UserMessageImageRef[]): Promise<{ seq: number; queued: boolean }> {
@@ -689,12 +698,12 @@ class WinterSessionImpl implements WinterSession {
       this.stopSettled = gate;
       let clearDone!: () => void;
       this.clearing = new Promise<void>((r) => { clearDone = r; });
+      this.clearDone = clearDone;
       let cleared: number;
       try {
         cleared = await this.clearPushed(inc);
       } finally {
-        this.clearing = undefined;
-        clearDone();
+        this.releaseClearing();
       }
       discarded = held + cleared;
       if (this.inc === inc && this.stateValue === "live") {
@@ -738,13 +747,33 @@ class WinterSessionImpl implements WinterSession {
     const clear = clearQueuedInputOf(inc.query);
     if (clear === undefined) return 0;
     const snapshot = inc.projector.pendingPushes;
-    let cleared: number;
-    try {
-      ({ cleared } = await clear());
-    } catch (err) {
+    const answered = clear().then((a) => a.cleared, (err: unknown) => {
       this.log(`clearing the queued input of ${this.sessionId} failed: ${err instanceof Error ? err.name : "unknown"}`);
       return 0;
+    });
+    // BOUNDED: a child that never answers the control must not wedge the session (every send waiting on
+    // `clearing`, the interrupt never sent). After `STOP_SETTLE_MAX_MS`, or when the session's iteration
+    // ends (`releaseClearing`), the stop goes on as if nothing was cleared; a LATE answer is still applied
+    // (`applyCleared`), so pushes the child did drop are still closed in the log.
+    let timer: unknown;
+    const bounded = new Promise<"gave-up">((resolve) => {
+      timer = this.timers.set(() => resolve("gave-up"), WinterSessionImpl.STOP_SETTLE_MAX_MS);
+      this.clearAbort = () => resolve("gave-up");
+    });
+    const first = await Promise.race([answered, bounded]);
+    this.timers.clear(timer);
+    this.clearAbort = undefined;
+    if (first === "gave-up") {
+      this.log(`the stop of ${this.sessionId} got no answer to its clear — going on as if nothing was cleared`);
+      void answered.then((late) => { if (late > 0) this.applyCleared(inc, snapshot, late, true); });
+      return 0;
     }
+    return this.applyCleared(inc, snapshot, first, false);
+  }
+
+  /** The bookkeeping of `cleared` pushes the child dropped (see `clearPushed`). `late`: the clear's answer
+   *  came after the stop had already gone on — the stopped turn may have ended, so settle if nothing runs. */
+  private applyCleared(inc: Incarnation, snapshot: readonly { announced: boolean }[], cleared: number, late: boolean): number {
     if (cleared === 0) return 0;
     if (this.inc !== inc) {
       if (this.inc !== undefined) {
@@ -766,7 +795,22 @@ class WinterSessionImpl implements WinterSession {
     // counted out nothing is left owed (no `result` will come — the interrupt finds no turn).
     this.inFlight = Math.max(0, this.inFlight - cleared);
     this.clearedAwaitingTerminal += cleared;
+    if (late) {
+      this.log(`a late clear answer for ${this.sessionId}: ${cleared} message(s) the child dropped are closed now`);
+      if (this.inFlight === 0 && this.stateValue === "live") { this.closeCleared(); this.settleQueue(inc); }
+    }
     return cleared;
+  }
+
+  /** End the in-flight clear's wait (its answer, its bound, or the session's iteration ending) and
+   *  release whatever was waiting on it. Idempotent. */
+  private releaseClearing(): void {
+    this.clearAbort?.();
+    this.clearAbort = undefined;
+    const done = this.clearDone;
+    this.clearDone = undefined;
+    this.clearing = undefined;
+    done?.();
   }
 
   /** The `aborted` terminal of each push `clearPushed` dropped (its `turn_started` is already in the log),
@@ -1021,6 +1065,16 @@ class WinterSessionImpl implements WinterSession {
       // (`deps.unconsumed` reads the whole session log: O(log) per RESUME, never per push) —
       // (its `turn_started` appended now, the only one it will ever get), the rest wait one per
       // `result` (P8b-5). The in-memory list is only a cache of the same facts and is discarded.
+      // A turn the previous child never closed (the daemon died mid-turn): closed now, at the incarnation
+      // boundary, so the log's turn boundaries — what every reader decides "a turn is open" by (a fold's
+      // continuation rule) — restart here, and no client shows that dead turn running.
+      try {
+        if (this.deps.danglingTurn?.() === true) {
+          this.safeAppend({ type: "turn_completed", sessionId: this.sessionId, threadId: MAIN_THREAD, stopReason: "aborted", inputTokens: 0, outputTokens: 0 });
+        }
+      } catch (err) {
+        this.log(`reading ${this.sessionId}'s log for an unclosed turn failed: ${err instanceof Error ? err.name : "unknown"}`);
+      }
       const cached = this.pending.splice(0);
       const owed = this.deps.unconsumed !== undefined ? this.deps.unconsumed() : cached;
       if (owed.length > 0) {
@@ -1132,6 +1186,14 @@ class WinterSessionImpl implements WinterSession {
       this.recordState(ended === "ended" ? "failed" : "exited");
       if (this.inc === inc) this.inc = undefined;
       this.stateValue = ended ?? "resumable";
+      // A TaskStop still in progress has nothing left to stop: end its clear's wait and its settle, and let
+      // every waiting send and deferred delivery go on — a delivery is held for the next incarnation (or
+      // dropped, the session having ended), a send reopens or is refused.
+      if (this.inc === undefined) {
+        this.releaseClearing();
+        if (this.stopSettled !== undefined) this.discardHeld();
+        this.releaseDeliveries();
+      }
       // WS-21 (spec §3.8; L2 fix round 1): the iteration is over (drained, closed or failed), which is
       // exactly when the router reports a Winter run home `safe` — dispose it only then.
       if (inc.runHome !== undefined) {

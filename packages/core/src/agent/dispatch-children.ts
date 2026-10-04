@@ -280,6 +280,12 @@ export class DispatchChildren {
     this.stopped = true;
     this.off?.();
     this.off = undefined;
+    this.mainTurnOpen.clear();
+  }
+
+  /** Test/diagnostic view: how many sessions the observer holds a main turn open for. */
+  openMainTurnCount(): number {
+    return this.mainTurnOpen.size;
   }
 
   /** Test/diagnostic view: the tracked children, in spawn order. */
@@ -397,6 +403,9 @@ export class DispatchChildren {
 
   /** Every session's driver calls this when its turn queue goes idle (or its child ends). */
   onTurnSettled(sessionId: string): void {
+    // Its driver is idle: no main turn is open any more, whether or not the log closed the last one (a
+    // child that died without a terminal) — never kept for a session that settled (bounded set).
+    this.mainTurnOpen.delete(sessionId);
     if (this.draining) return;
     const child = this.children.get(sessionId);
     if (child !== undefined && child.turnOpen) this.reportTurnEnd(sessionId, child);

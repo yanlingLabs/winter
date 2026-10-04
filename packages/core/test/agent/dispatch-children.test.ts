@@ -720,6 +720,16 @@ describe("which turns are followed, the bounded roster, shutdown and restart", (
     expect(t.childUpdates().length).toBe(afterWake);
   });
 
+  test("the open-main-turn set never keeps a session whose driver settled — even one whose last turn never got a turn_completed", async () => {
+    const t = setup();
+    const plain = t.store.createSession("global", { mode: "code", cwd: t.workDir });
+    t.hub.append(plain, { type: "user_message", sessionId: plain, threadId: "main", text: "hi", clientName: "cli" });
+    t.hub.append(plain, { type: "turn_started", sessionId: plain, threadId: "main" });   // its child dies: no terminal
+    expect(t.dc.openMainTurnCount()).toBe(1);
+    t.dc.onTurnSettled(plain);
+    expect(t.dc.openMainTurnCount()).toBe(0);
+  });
+
   test("BACK-TO-BACK (no settle between): an error turn, then a held send's turn that succeeds — reported completed with the second turn's result, never error", async () => {
     const t = setup();
     const child = await t.spawnOne({ title: "Kid" });

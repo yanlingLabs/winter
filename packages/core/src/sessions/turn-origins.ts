@@ -73,6 +73,24 @@ export function runningTurnOrigin(events: readonly SessionEvent[]): string | und
   return origin;
 }
 
+/**
+ * Does the log end with its MAIN turn open — a main `turn_started` after the last main `turn_completed`?
+ * While a child runs that is simply "a turn is running"; read at a NEW incarnation's open it means the
+ * previous child died without closing its turn (a daemon killed mid-turn: an in-process child death is
+ * closed by the projector's `acceptError`), and the driver closes it in the log then (`danglingTurn`), so
+ * every log reader's notion of "open" — the fold-continuation rule above, `DispatchChildren`, the
+ * elicitation tracker — restarts at the incarnation boundary.
+ */
+export function mainTurnOpenInLog(events: readonly SessionEvent[]): boolean {
+  let open = false;
+  for (const e of events) {
+    if ((e as { threadId?: string }).threadId !== "main") continue;
+    if (e.type === "turn_started") open = true;
+    else if (e.type === "turn_completed") open = false;
+  }
+  return open;
+}
+
 /** Turns started by the daemon on someone else's behalf — never "owned" by a terminal that merely
  *  attached to watch (`activity-enforcement.ts`): another session's SendMessage, Dispatch's spawn
  *  prompt and its own wake. */
