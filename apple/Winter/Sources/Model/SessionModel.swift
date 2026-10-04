@@ -1587,6 +1587,23 @@ final class SessionModel: ObservableObject {
         state = next
     }
 
+    /// Folds a session's REPLAYED history with ONE publish (`SessionFeed`, on attach): applied one
+    /// event at a time, a long history re-rendered every view showing it once per event, and the
+    /// transcript slid down through it item by item as it arrived (user, 2026-10-04). Same result as
+    /// `apply(_:)` per event — the working verb is rolled at each main `turn_started` inside the fold,
+    /// and each event's own side effects (the notification gate, `events`) run after the one publish,
+    /// in order.
+    func apply(replay events: [SessionEvent]) {
+        guard !events.isEmpty else { return }
+        var next = state
+        for event in events {
+            next = SessionReducer.reduce(next, event)
+            if case .turnStarted(let v) = event, v.threadId == "main" { next.workingVerb = WorkingVerbs.random() }
+        }
+        state = next
+        for event in events { afterApply(event) }
+    }
+
     func apply(_ event: SessionEvent) {
         state = SessionReducer.reduce(state, event)
         // Store-level impurity seam (wave 6, item 1): `SessionReducer.reduce` must stay pure —
@@ -1594,13 +1611,18 @@ final class SessionModel: ObservableObject {
         // could produce different outputs, which breaks the reducer's testability/replay
         // contract. So the ONE random roll a turn needs happens HERE, right after the pure
         // reduce, keyed off the same `turnStarted(main)` case the reducer used to flip
-        // `turnRunning`/`status` — this is the one and only place `workingVerb` is assigned by
-        // production code; `OrbSessionState.workingVerb`'s doc comment points back here.
+        // `turnRunning`/`status` — this and `apply(replay:)`'s fold are the only places `workingVerb`
+        // is assigned by production code; `OrbSessionState.workingVerb`'s doc comment points here.
         if case .turnStarted(let v) = event, v.threadId == "main" {
             state.workingVerb = WorkingVerbs.random()
         }
-        // task-30 (push-notification track): a SECOND impurity seam, same shape as workingVerb
-        // above — posting a native OS notification is a real side effect, so it can never live in
+        afterApply(event)
+    }
+
+    /// An applied event's side effects outside `state` — shared by `apply(_:)` and `apply(replay:)`.
+    private func afterApply(_ event: SessionEvent) {
+        // task-30 (push-notification track): a SECOND impurity seam, same shape as `apply(_:)`'s
+        // workingVerb — posting a native OS notification is a real side effect, so it can never live in
         // the pure `SessionReducer`. REPLAY SAFETY is the reason this isn't a plain unconditional
         // post: `notification_requested` is persisted and replayed like any other event, and
         // AppModel.refocus/SessionFeed.repin/a fresh app launch all replay a session's ENTIRE

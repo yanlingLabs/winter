@@ -85,7 +85,9 @@ struct TranscriptView: View {
         // zero on session refocus (SessionModel.reset() swaps exchanges wholesale). Only a
         // genuine growth may follow/raise the pill; a reset must do neither.
         .onChange(of: adapter.transcript.count) { old, new in
-            if new > old { follow() }
+            // A history arriving into an empty transcript (a window opening — its replay lands in one
+            // fold, `SessionFeed.finishReplay`) lands at its bottom at once, never glides down it.
+            if old == 0 && new > 0 { follower.restartAtBottom() } else if new > old { follow() }
             // A reset (another session's history coming in) opens at the bottom again.
             if new == 0 && old > 0 { follower.restartAtBottom() }
         }

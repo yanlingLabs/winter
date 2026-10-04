@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 import WinterProtocol
 import WinterKit
 @testable import Winter
@@ -118,6 +119,70 @@ final class SessionFeedTests: XCTestCase {
         t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"turn_started","seq":1,"sessionId":"S1","ts":0,"threadId":"main"}}"#)
         await feedWaitUntil { session.state.turnRunning }
         XCTAssertTrue(session.state.turnRunning)
+    }
+
+    /// The replay a window opens on is folded ONCE (user, 2026-10-04: the transcript slid down through
+    /// a resumed session's history item by item): however the events trickle in, no intermediate state
+    /// is ever published — here, the mid-turn `turnRunning` — and the history lands as soon as the
+    /// attach's own `harness_attached` (the ceiling) arrives, well before the fallback.
+    func testPinnedReplayIsFoldedInOnePublishAtTheCeiling() async throws {
+        let t = FeedScriptedTransport()
+        let session = SessionModel()
+        var sawRunning = false
+        var publishesWithHistory = 0
+        let watch = session.$state.sink { state in
+            if state.turnRunning { sawRunning = true }
+            if !state.exchanges.isEmpty { publishesWithHistory += 1 }
+        }
+        defer { watch.cancel() }
+        let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
+        let startTask = Task { await feed.start() }
+        defer { startTask.cancel(); feed.stop() }
+
+        await answerPinnedHandshake(t)
+        await waitUntilSent(t, 2)
+        let attach = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":4}}"#)
+        let replay = [
+            #"{"jsonrpc":"2.0","method":"event","params":{"type":"user_message","seq":1,"sessionId":"S1","ts":0,"threadId":"main","text":"hi","clientName":"orb"}}"#,
+            #"{"jsonrpc":"2.0","method":"event","params":{"type":"turn_started","seq":2,"sessionId":"S1","ts":0,"threadId":"main"}}"#,
+            #"{"jsonrpc":"2.0","method":"event","params":{"type":"turn_completed","seq":3,"sessionId":"S1","ts":0,"threadId":"main","stopReason":"end_turn","inputTokens":1,"outputTokens":1}}"#,
+            #"{"jsonrpc":"2.0","method":"event","params":{"type":"harness_attached","seq":4,"sessionId":"S1","ts":0,"clientName":"orb"}}"#,
+        ]
+        let started = Date()
+        for line in replay {
+            t.feed(line)
+            try? await Task.sleep(nanoseconds: 30_000_000) // a frame or two apart, as a socket delivers
+        }
+        await feedWaitUntil(1.2) { !session.state.exchanges.isEmpty }
+        XCTAssertEqual(session.state.exchanges.count, 1)
+        XCTAssertLessThan(Date().timeIntervalSince(started), SessionFeed.replayFallback,
+                          "the replay waited for the fallback instead of landing at its ceiling")
+        XCTAssertFalse(sawRunning, "an intermediate replay state was published")
+        XCTAssertEqual(publishesWithHistory, 1, "the replay was published more than once")
+
+        // Live events after the replay apply one by one, as before.
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"turn_started","seq":5,"sessionId":"S1","ts":0,"threadId":"main"}}"#)
+        await feedWaitUntil { session.state.turnRunning }
+        XCTAssertTrue(session.state.turnRunning)
+    }
+
+    /// An attach that fails sends no replay: nothing is held back waiting for one.
+    func testPinnedReplayIsNotHeldWhenTheAttachFails() async throws {
+        let t = FeedScriptedTransport()
+        let session = SessionModel()
+        let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
+        let startTask = Task { await feed.start() }
+        defer { startTask.cancel(); feed.stop() }
+
+        await answerPinnedHandshake(t)
+        await waitUntilSent(t, 2)
+        let attach = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"error":{"code":-32001,"message":"no such session"}}"#)
+        await feedWaitUntil { session.state.status != .disconnected }
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"turn_started","seq":1,"sessionId":"S1","ts":0,"threadId":"main"}}"#)
+        await feedWaitUntil(0.5) { session.state.turnRunning }
+        XCTAssertTrue(session.state.turnRunning, "a live event was held back as if a replay were coming")
     }
 
     func testPinnedFeedIgnoresSessionCreated() async throws {

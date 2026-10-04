@@ -112,8 +112,10 @@ final class SessionFeed {
             // ATTACH ITSELF for every feed with no hook wired — which is every one but the shell's
             // (`DetachedWindowController`, the chat window, most tests). Caught by the full suite:
             // two rows timed out having seen only `protocol.hello` on the wire.
+            beginReplay()
             let ceilingSeq = try? await client.attach(sessionId: sessionId, fromSeq: 0)
             onPinnedAttach?(sessionId, ceilingSeq)
+            armReplayCeiling(ceilingSeq)
         }
         session.markConnected() // M2: connect() success IS the connected signal
         onConnected?()
@@ -131,6 +133,7 @@ final class SessionFeed {
     /// Verbatim (AppModel.swift original :63-66): cancel the pump, then a deliberate, detached
     /// close — deliberate closes must not trigger WinterClient's reconnect loop (Task 9).
     func stop() {
+        replayDeadline?.cancel()
         pumpTask?.cancel()
         Task { await client.close() }
     }
@@ -148,9 +151,13 @@ final class SessionFeed {
         mode = .pinned(sessionId: sessionId)
         pendingChunks.removeAll() // the old session's — never folded into the new one
         session.reset()
+        // Buffering starts BEFORE the attach: the pump is already running here, so the replay can
+        // arrive while the attach is still awaited.
+        beginReplay()
         // Same two lines, and for the same reason — see `start()`'s pinned branch.
         let ceilingSeq = try? await client.attach(sessionId: sessionId, fromSeq: 0)
         onPinnedAttach?(sessionId, ceilingSeq)
+        armReplayCeiling(ceilingSeq)
     }
 
     private func handle(_ ev: WinterEvent) async {
@@ -158,7 +165,10 @@ final class SessionFeed {
         switch ev {
         case .session(let e):
             if case .pinned(let sessionId) = mode, e.sessionId == sessionId {
-                if case .assistantDelta = e {
+                if replayBuffer != nil {
+                    replayBuffer?.append(e)
+                    if let ceiling = replayCeiling, e.seq >= ceiling { finishReplay() }
+                } else if case .assistantDelta = e {
                     pendingChunks.append(e)
                     scheduleChunkFlush()
                 } else {
@@ -168,11 +178,55 @@ final class SessionFeed {
             }
             // followFocus always supplies onEvent (returns true above) — no fallback needed here.
         case .connection(let s):
+            finishReplay()
             flushChunks()
             session.apply(connection: s)
         case .unknown:
             break // newer daemon event — nothing to render for it
         }
+    }
+
+    // MARK: - The replay, in one fold
+
+    /// A pinned attach replays the session's whole log from seq 0. Folded event by event, a long
+    /// history reached the window over many frames and its transcript slid down through it one item
+    /// at a time (user, 2026-10-04). So the replay is held here and folded ONCE
+    /// (`SessionModel.apply(replay:)`) when it is complete: when the event at `session.attach`'s
+    /// ceiling arrives — the `harness_attached` of this very attach, the replay's last event — or
+    /// at once if that is already in hand, or if the attach failed (no replay is coming).
+    /// `replayFallback` bounds the wait should the ceiling never come; a connection change folds
+    /// what has arrived first, so the order of events is kept.
+    private var replayBuffer: [SessionEvent]?
+    private var replayCeiling: Int?
+    private var replayDeadline: DispatchWorkItem?
+    static let replayFallback: TimeInterval = 1.5
+
+    private func beginReplay() {
+        replayDeadline?.cancel()
+        replayDeadline = nil
+        replayBuffer = []
+        replayCeiling = nil
+    }
+
+    private func armReplayCeiling(_ ceilingSeq: Int?) {
+        guard replayBuffer != nil else { return }
+        guard let ceilingSeq else { finishReplay(); return }
+        replayCeiling = ceilingSeq
+        if replayBuffer?.contains(where: { $0.seq >= ceilingSeq }) == true { finishReplay(); return }
+        let deadline = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.finishReplay() }
+        }
+        replayDeadline = deadline
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.replayFallback, execute: deadline)
+    }
+
+    private func finishReplay() {
+        replayDeadline?.cancel()
+        replayDeadline = nil
+        replayCeiling = nil
+        guard let events = replayBuffer else { return }
+        replayBuffer = nil
+        session.apply(replay: events)
     }
 
     // MARK: - Streamed chunks, a frame at a time
