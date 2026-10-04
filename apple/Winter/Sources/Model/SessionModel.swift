@@ -1550,6 +1550,10 @@ enum SessionReducer {
 @MainActor
 final class SessionModel: ObservableObject {
     @Published private(set) var state = OrbSessionState()
+    /// A pinned feed's session window is still waiting for its history (`SessionFeed`: raised when
+    /// the feed is made, and at every re-pin; lowered once the replay has been folded, or when the
+    /// attach failed and none is coming). The window shows `SessionLoadingView` meanwhile.
+    @Published var isLoadingHistory = false
     private let notifier: NotificationPosting
 
     /// provider_retry (WinterProtocol Swift mirror): a raw pass-through of every event `apply`

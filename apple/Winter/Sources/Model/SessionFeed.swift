@@ -72,6 +72,7 @@ final class SessionFeed {
         client = WinterClient(makeTransport: makeTransport, token: token, clientName: clientName)
         self.mode = mode
         self.session = session
+        if case .pinned = mode { session.isLoadingHistory = true }
     }
 
     /// Task 3: the fixed session id in `.pinned` mode; `nil` in `.followFocus` mode (which has no
@@ -210,6 +211,7 @@ final class SessionFeed {
         replayDeadline = nil
         replayBuffer = []
         replayCeiling = nil
+        session.isLoadingHistory = true
     }
 
     private func armReplayCeiling(_ ceilingSeq: Int?) {
@@ -237,6 +239,7 @@ final class SessionFeed {
         guard let events = replayBuffer else { return }
         replayBuffer = nil
         session.apply(replay: events)
+        session.isLoadingHistory = false
     }
 
     // MARK: - Streamed chunks, a frame at a time

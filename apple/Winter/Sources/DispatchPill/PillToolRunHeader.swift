@@ -209,7 +209,7 @@ func pillToolLabel(_ entry: ToolRunEntry, turnIsLive: Bool) -> PillToolLabel {
 /// the plume's discs and a sentence that says what is happening — "Searching the web · 12 websites",
 /// "Reading nytimes.com" — and then what happened — "Searched 20 websites", "Ran 3 shell commands".
 /// Counts climb one by one as they arrive; names rotate every half second with their favicons; a
-/// running pill's text shimmers (`PillTextShimmer`); a failed one turns red. One pill per tool: a
+/// running pill's text shimmers (`BandShimmer`); a failed one turns red. One pill per tool: a
 /// turn that searched and then ran commands shows two.
 struct PillToolRunHeader: View {
     let entries: [ToolRunEntry]
@@ -240,7 +240,7 @@ struct PillToolRunHeader: View {
                     HStack(spacing: 10) {
                         discStack(discs, label: label, running: running, tick: tick)
                         labelText(label, tick: tick)
-                            .modifier(PillTextShimmer(active: running))
+                            .modifier(BandShimmer(active: running, rest: 0.5, inactive: 0.9, minBand: 60, bandShare: 0.6))
                         if failed {
                             Image(systemName: "exclamationmark.circle.fill")
                                 .font(Typography.label(.semibold))
@@ -365,45 +365,6 @@ struct PillCountUp<Content: View>: View {
                 }
                 if current > target { shown = target }
             }
-    }
-}
-
-/// The running pill's text shimmer (user, 2026-10-04 — in place of a band across the whole capsule):
-/// the label dims, and a bright band passes through its letters, left to right, then rests a beat.
-/// The label is drawn ONCE and masked (never duplicated, so the climbing count and the rotating names
-/// stay single). Off under Reduce Motion, where the label simply stays lit.
-private struct PillTextShimmer: ViewModifier {
-    let active: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    static let period: TimeInterval = 2.0
-    /// The share of a period the band takes to cross; the rest is the pause before the next pass.
-    static let sweepShare: Double = 0.7
-
-    func body(content: Content) -> some View {
-        if active && !reduceMotion {
-            // White text whose opacity is the mask's: half everywhere, full under the moving band.
-            content
-                .foregroundStyle(Color.white)
-                .mask {
-                    TimelineView(.animation) { timeline in
-                        let t = timeline.date.timeIntervalSinceReferenceDate
-                        let phase = min(1, t.truncatingRemainder(dividingBy: Self.period) / (Self.period * Self.sweepShare))
-                        GeometryReader { geo in
-                            let band = max(60, geo.size.width * 0.6)
-                            ZStack(alignment: .leading) {
-                                Color.black.opacity(0.5)
-                                LinearGradient(colors: [.black.opacity(0), .black, .black.opacity(0)],
-                                               startPoint: .leading, endPoint: .trailing)
-                                    .frame(width: band)
-                                    .offset(x: -band + (geo.size.width + band) * phase)
-                            }
-                        }
-                    }
-                }
-        } else {
-            content.foregroundStyle(Color.white.opacity(0.9))
-        }
     }
 }
 

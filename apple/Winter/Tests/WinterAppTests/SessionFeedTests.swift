@@ -137,6 +137,7 @@ final class SessionFeedTests: XCTestCase {
         }
         defer { watch.cancel() }
         let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
+        XCTAssertTrue(session.isLoadingHistory, "a pinned window shows its loading screen from the start")
         let startTask = Task { await feed.start() }
         defer { startTask.cancel(); feed.stop() }
 
@@ -164,6 +165,7 @@ final class SessionFeedTests: XCTestCase {
                           "the replay waited for the fallback instead of landing at its ceiling")
         XCTAssertFalse(sawRunning, "an intermediate replay state was published")
         XCTAssertEqual(publishesWithHistory, 1, "the replay was published more than once")
+        XCTAssertFalse(session.isLoadingHistory, "the loading screen outlived the replay")
 
         // Live events after the replay apply one by one, as before.
         t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"turn_started","seq":5,"sessionId":"S1","ts":0,"threadId":"main"}}"#)
@@ -184,6 +186,7 @@ final class SessionFeedTests: XCTestCase {
         let attach = feedLineJSON(t.sent[1])
         t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"error":{"code":-32001,"message":"no such session"}}"#)
         await feedWaitUntil { session.state.status != .disconnected }
+        XCTAssertFalse(session.isLoadingHistory, "a failed attach left the loading screen up")
         t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"turn_started","seq":1,"sessionId":"S1","ts":0,"threadId":"main"}}"#)
         await feedWaitUntil(0.5) { session.state.turnRunning }
         XCTAssertTrue(session.state.turnRunning, "a live event was held back as if a replay were coming")

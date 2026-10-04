@@ -738,6 +738,13 @@ struct DetachedWindowRootView: View {
             .environment(\.transcriptMarkerTint, .white)
             .environment(\.pillChromePalette, palette)
 
+            // Until the history has landed: the grey Winter mark, shimmering, over the column (the
+            // band and the lights stay above it), faded out once the replay is in.
+            if adapter.isLoadingHistory {
+                SessionLoadingView()
+                    .transition(.opacity)
+            }
+
             // The band the lights sit in moves the window — a frameless window has no titlebar to
             // drag.
             Color.clear
@@ -762,6 +769,7 @@ struct DetachedWindowRootView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color.black)
+        .animation(.easeOut(duration: 0.3), value: adapter.isLoadingHistory)
         // The window's whole shape: the pill's own radius, no rim and no system shadow (user,
         // 2026-10-02) — the black shape against whatever is behind it.
         .clipShape(RoundedRectangle(cornerRadius: PillChromeWindow.cornerRadius, style: .continuous))

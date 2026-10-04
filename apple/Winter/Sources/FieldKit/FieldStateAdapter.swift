@@ -686,6 +686,10 @@ final class FieldStateAdapter: ObservableObject {
     /// fetches and checks the link, opens it, and only then tells the daemon.
     var onElicitationRespond: (String, Bool, String, Int) -> Void = { _, _, _, _ in }
 
+    /// The session's history has not landed yet (`SessionModel.isLoadingHistory`) — the session
+    /// window's loading screen.
+    var isLoadingHistory: Bool { session.isLoadingHistory }
+
     // MARK: - Task 4 (2d-iii): ⋯ menu — per-session approval-mode policy
 
     /// The approval-policy readout every picker on this screen renders — `WindowContentView`'s ⋯
