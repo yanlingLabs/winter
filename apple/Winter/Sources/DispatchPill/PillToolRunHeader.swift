@@ -370,8 +370,8 @@ struct PillCountUp<Content: View>: View {
 
 /// The running pill's text shimmer (user, 2026-10-04 — in place of a band across the whole capsule):
 /// the label dims, and a bright band passes through its letters, left to right, then rests a beat.
-/// Drawn ONCE over the label and kept to its glyphs by `.sourceAtop`, so the climbing count and the
-/// rotating names are never duplicated. Off under Reduce Motion, where the label simply stays lit.
+/// The label is drawn ONCE and masked (never duplicated, so the climbing count and the rotating names
+/// stay single). Off under Reduce Motion, where the label simply stays lit.
 private struct PillTextShimmer: ViewModifier {
     let active: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -382,25 +382,25 @@ private struct PillTextShimmer: ViewModifier {
 
     func body(content: Content) -> some View {
         if active && !reduceMotion {
+            // White text whose opacity is the mask's: half everywhere, full under the moving band.
             content
-                .foregroundStyle(Color.white.opacity(0.5))
-                .overlay {
+                .foregroundStyle(Color.white)
+                .mask {
                     TimelineView(.animation) { timeline in
                         let t = timeline.date.timeIntervalSinceReferenceDate
                         let phase = min(1, t.truncatingRemainder(dividingBy: Self.period) / (Self.period * Self.sweepShare))
                         GeometryReader { geo in
                             let band = max(40, geo.size.width * 0.4)
-                            LinearGradient(colors: [.white.opacity(0), .white, .white.opacity(0)],
-                                           startPoint: .leading, endPoint: .trailing)
-                                .frame(width: band)
-                                .offset(x: -band + (geo.size.width + band) * phase)
+                            ZStack(alignment: .leading) {
+                                Color.black.opacity(0.5)
+                                LinearGradient(colors: [.black.opacity(0), .black, .black.opacity(0)],
+                                               startPoint: .leading, endPoint: .trailing)
+                                    .frame(width: band)
+                                    .offset(x: -band + (geo.size.width + band) * phase)
+                            }
                         }
                     }
-                    .blendMode(.sourceAtop)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
                 }
-                .compositingGroup()
         } else {
             content.foregroundStyle(Color.white.opacity(0.9))
         }
