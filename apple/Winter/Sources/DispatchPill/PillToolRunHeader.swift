@@ -209,8 +209,8 @@ func pillToolLabel(_ entry: ToolRunEntry, turnIsLive: Bool) -> PillToolLabel {
 /// the plume's discs and a sentence that says what is happening — "Searching the web · 12 websites",
 /// "Reading nytimes.com" — and then what happened — "Searched 20 websites", "Ran 3 shell commands".
 /// Counts climb one by one as they arrive; names rotate every half second with their favicons; a
-/// running pill carries a bright white sweep (white, not the session's colour — user, 2026-10-04); a
-/// failed one turns red. One pill per tool: a turn that searched and then ran commands shows two.
+/// running pill's text shimmers (`PillTextShimmer`); a failed one turns red. One pill per tool: a
+/// turn that searched and then ran commands shows two.
 struct PillToolRunHeader: View {
     let entries: [ToolRunEntry]
     let turnIsLive: Bool
@@ -240,6 +240,7 @@ struct PillToolRunHeader: View {
                     HStack(spacing: 10) {
                         discStack(discs, label: label, running: running, tick: tick)
                         labelText(label, tick: tick)
+                            .modifier(PillTextShimmer(active: running))
                         if failed {
                             Image(systemName: "exclamationmark.circle.fill")
                                 .font(Typography.label(.semibold))
@@ -256,9 +257,6 @@ struct PillToolRunHeader: View {
                 .padding(.trailing, 14)
                 .frame(height: Self.height)
                 .background(Capsule().fill(failed ? Self.failureRed.opacity(0.10) : Color.white.opacity(0.06)))
-                .overlay {
-                    if running { PillRunningSweep(color: .white) }
-                }
                 .overlay(Capsule().strokeBorder(failed ? Self.failureRed.opacity(0.45)
                                                 : running ? Color.white.opacity(0.55) : Color.white.opacity(0.08),
                                                 lineWidth: 1))
@@ -285,7 +283,6 @@ struct PillToolRunHeader: View {
             Text(label.tail)
         }
         .font(Typography.label(.medium))
-        .foregroundStyle(Color.white.opacity(0.9))
         .lineLimit(1)
         .truncationMode(.middle)
         .animation(.easeInOut(duration: 0.18), value: tick)
@@ -371,26 +368,42 @@ struct PillCountUp<Content: View>: View {
     }
 }
 
-/// The running pill's brightness: a soft band of `color` sweeping across the capsule,
-/// added rather than painted, so the pill glows while its tool works.
-private struct PillRunningSweep: View {
-    let color: Color
+/// The running pill's text shimmer (user, 2026-10-04 — in place of a band across the whole capsule):
+/// the label dims, and a bright band passes through its letters, left to right, then rests a beat.
+/// Drawn ONCE over the label and kept to its glyphs by `.sourceAtop`, so the climbing count and the
+/// rotating names are never duplicated. Off under Reduce Motion, where the label simply stays lit.
+private struct PillTextShimmer: ViewModifier {
+    let active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    var body: some View {
-        TimelineView(.animation) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate
-            let phase = (t.truncatingRemainder(dividingBy: 1.6)) / 1.6
-            GeometryReader { geo in
-                let band = geo.size.width * 0.45
-                LinearGradient(colors: [color.opacity(0), color.opacity(0.55), Color.white.opacity(0.35), color.opacity(0.55), color.opacity(0)],
-                               startPoint: .leading, endPoint: .trailing)
-                    .frame(width: band)
-                    .offset(x: -band + (geo.size.width + band) * phase)
-                    .blendMode(.plusLighter)
-            }
+    static let period: TimeInterval = 2.0
+    /// The share of a period the band takes to cross; the rest is the pause before the next pass.
+    static let sweepShare: Double = 0.7
+
+    func body(content: Content) -> some View {
+        if active && !reduceMotion {
+            content
+                .foregroundStyle(Color.white.opacity(0.5))
+                .overlay {
+                    TimelineView(.animation) { timeline in
+                        let t = timeline.date.timeIntervalSinceReferenceDate
+                        let phase = min(1, t.truncatingRemainder(dividingBy: Self.period) / (Self.period * Self.sweepShare))
+                        GeometryReader { geo in
+                            let band = max(40, geo.size.width * 0.4)
+                            LinearGradient(colors: [.white.opacity(0), .white, .white.opacity(0)],
+                                           startPoint: .leading, endPoint: .trailing)
+                                .frame(width: band)
+                                .offset(x: -band + (geo.size.width + band) * phase)
+                        }
+                    }
+                    .blendMode(.sourceAtop)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                }
+                .compositingGroup()
+        } else {
+            content.foregroundStyle(Color.white.opacity(0.9))
         }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
     }
 }
 
