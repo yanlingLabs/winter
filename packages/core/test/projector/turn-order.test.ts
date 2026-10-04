@@ -204,15 +204,15 @@ describe("projector: a push FOLDED into the running turn (agent SDK 0.0.44)", ()
     expect(kinds(accept(projector, result()))).toEqual(["turn_completed:end_turn", "turn_started"]);
   });
 
-  test("the fold's system-reminder wrapper, if the runtime ever surfaces it as a user text frame, is the folded push's echo — never a second user_message", () => {
+  test("a folded text NEVER suppresses a later user_message — on the main thread or a subagent's — that merely contains it (the contract has no fold echo)", () => {
     const { projector } = makeProjector();
     accept(projector, init());
     beginTurn(projector, "A");
-    beginTurn(projector, "please also check the tests");
+    beginTurn(projector, "run the tests");
     accept(projector, folded(1));
-    expect(accept(projector, userTextFrame("<system-reminder>The user sent a new message while you were working: please also check the tests</system-reminder>"))).toEqual([]);
-    // consumed once: a later genuine pass-through still projects
-    expect(kinds(accept(projector, userTextFrame("something else entirely")))).toEqual(["user_message"]);
+    expect(kinds(accept(projector, userTextFrame("run the tests in packages/core")))).toEqual(["user_message"]);
+    const sub = { ...(userTextFrame("ok, run the tests") as Record<string, unknown>), parent_tool_use_id: "toolu_sub" } as never;
+    expect(kinds(accept(projector, sub))).toEqual(["user_message"]);
   });
 
   test("clearQueued (TaskStop) drops pending pushes from the TAIL: the unannounced get their turn_started now, and none is owed a terminal", () => {

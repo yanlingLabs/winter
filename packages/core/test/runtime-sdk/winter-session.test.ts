@@ -112,10 +112,13 @@ class FoldingFakeQuery extends FakeQuery {
   emitFold(count: number): void { this.emit({ type: "system", subtype: "host_input_folded", count, uuid: `fold-${count}`, session_id: "be-x" }); }
   /** Runs inside the clear, before it answers (a race a test stages). */
   duringClear: (() => void) | undefined;
+  /** Holds the clear's answer until it resolves. */
+  clearGate: Promise<void> | undefined;
   async clearQueuedInput(): Promise<{ cleared: number }> {
     this.calls.push("clear");
     this.duringClear?.();
     await Bun.sleep(1);
+    if (this.clearGate !== undefined) await this.clearGate;
     return { cleared: this.clearAnswer };
   }
   override async interrupt(): Promise<void> { this.calls.push("interrupt"); return super.interrupt(); }
@@ -1391,6 +1394,20 @@ describe("a mid-turn push FOLDED into the running turn (agent SDK 0.0.44)", () =
     await old.session.open();
     expect(old.session.foldsQueuedInput).toBe(false);
   });
+
+  test("foldsQueuedInput is false during a pending provider handoff (a steer then is held for the target, never in the running turn)", async () => {
+    const h = harness({ folding: true });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    let finish!: () => void;
+    const pending = h.session.beginHandoff(() => new Promise<void>((r) => { finish = r; }));
+    expect(h.session.foldsQueuedInput).toBe(false);
+    await h.settled();
+    finish();
+    await pending;
+    expect(h.session.foldsQueuedInput).toBe(true);
+  });
 });
 
 describe("TaskStop on a folding child clears the CHILD's pending pushes too (agent SDK 0.0.44 clearQueuedInput)", () => {
@@ -1462,6 +1479,81 @@ describe("TaskStop on a folding child clears the CHILD's pending pushes too (age
     expect(stopReasons(h)).toEqual(["end_turn", "aborted", "aborted"]);
     expect(unconsumedUserMessages(h.events)).toEqual([]);
     expect((await h.session.send("D", "cli")).queued).toBe(false);
+  });
+
+  test("a steer and a messaging delivery landing WHILE the clear is in flight wait for it: the clear closes exactly the pushes held when it was sent, and the two new ones run afterwards", async () => {
+    const h = harness({ folding: true });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    await h.session.send("A", "cli");
+    await h.session.steer("S1", "steer");
+    const q = fq(h);
+    q.clearAnswer = 1;
+    let answer!: () => void;
+    q.clearGate = new Promise<void>((r) => { answer = r; });
+    const stop = h.session.interrupt({ discardQueued: true });
+    await h.settled();
+    const late = h.session.steer("late steer", "steer");
+    h.attachments[0]!.session.push("<agent-message>late delivery</agent-message>");
+    await h.settled();
+    expect(q.pushed).toEqual(["A", "S1"]);                   // nothing pushed under the clear
+    answer();
+    expect(await stop).toEqual({ wasRunning: true, discarded: 1 });
+    await late;
+    await h.settled();
+    // S1 cleared (its turn_started at the clear, its aborted terminal after A's); the late two are pushed after
+    // (the deferred delivery is released the moment the stop settles, ahead of the steer's await resuming)
+    expect(q.pushed.slice(0, 2)).toEqual(["A", "S1"]);
+    expect([...q.pushed.slice(2)].sort()).toEqual(["<agent-message>late delivery</agent-message>", "late steer"]);
+    // S1 is closed; only the late steer — pushed behind the delivery's running turn, its turn_started held
+    // (C2) until the child takes it up — reads as not started yet. Never S1.
+    expect(unconsumedUserMessages(h.events)).toEqual(["late steer"]);
+    expect(stopReasons(h)).toEqual(["aborted", "aborted"]);  // A, then S1 — none for the late ones
+    expect(h.session.turnRunning).toBe(true);                 // the late steer's turn runs
+  });
+
+  test("the settle timer firing before the clear answers appends NO aborted terminal while the stopped turn still runs — cleared pushes close only after its terminal", async () => {
+    const h = harness({ folding: true });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.steer("S", "steer");
+    const q = fq(h);
+    q.clearAnswer = 1;
+    q.interrupt = async () => { q.calls.push("interrupt"); };   // the stopped turn's terminal comes later
+    let answer!: () => void;
+    q.clearGate = new Promise<void>((r) => { answer = r; });
+    const stop = h.session.interrupt({ discardQueued: true });
+    await h.settled();
+    h.timers.armed.find((t) => t.ms === 2_000)!.fn();          // the bound fires first
+    answer();
+    await stop;
+    await h.settled();
+    expect(stopReasons(h)).toEqual([]);                        // A still running: nothing closed yet
+    q.emit(result({ interrupted: true }));
+    await h.settled();
+    expect(stopReasons(h)).toEqual(["aborted", "aborted"]);    // A's own terminal, THEN S's
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
+  });
+
+  test("the child dies while the clear is in flight: the cleared pushes are still closed in the log, and a resume re-runs none of them", async () => {
+    const h = harness({ folding: true });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.steer("S", "steer");
+    const q = fq(h);
+    q.clearAnswer = 1;
+    q.duringClear = () => { q.fail(named("ProcessError", "child crashed")); };
+    await h.session.interrupt({ discardQueued: true });
+    await h.settled();
+    expect(h.session.state).toBe("resumable");
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
+    h.transcriptExists = true;
+    await h.session.open();
+    await h.settled();
+    expect(h.q().pushed).toEqual([]);
   });
 
   test("the Mac's stop (no discardQueued) never clears: the pushed steer runs after the interrupted turn", async () => {

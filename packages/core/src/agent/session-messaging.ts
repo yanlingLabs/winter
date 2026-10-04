@@ -32,7 +32,9 @@
 // session RUNNING a turn is STEERED (user ruling 2026-10-04, "fold the message into the running turn" —
 // claude's behaviour): the text is pushed now and the child (agent SDK 0.0.44) folds it into that turn
 // after its current tool call, or runs it as its next turn if the turn ends first — `delivered`, with a
-// note saying so. An idle session gets it through `send`, exactly as the user's `session.send` would, and a
+// note saying so. NEVER past the session's own queue: when the daemon already holds sends behind the
+// running turn (`pendingSends`), the message is `send`-queued behind them (FIFO, `queued`, the note says
+// how many are ahead). An idle session gets it through `send`, exactly as the user's `session.send` would, and a
 // finished resumable one is RESUMED for it through its driver (`ensure` — never the router's cold resume).
 // A child that does not fold (≤ 0.0.43, `foldsQueuedInput` false) is never steered: there a pushed message
 // is its own next turn that a TaskStop could not take back, so it keeps `send`'s queue (`queued`). Two
@@ -252,7 +254,7 @@ export class SessionMessaging {
     if (cancelled()) return notDelivered("the sender was interrupted");
 
     const undoFollowUp = ownChild ? this.deps.followUp?.()?.expectFollowUp(targetId, callerSessionId, text) : undefined;
-    let sent: { queued: boolean; steered: boolean };
+    let sent: { queued: boolean; steered: boolean; behind: number };
     try {
       try {
         sent = await deliverInto(driver, text);
@@ -280,7 +282,9 @@ export class SessionMessaging {
     // Steered (user ruling 2026-10-04): the running turn takes the message in at its next tool round.
     const note = sent.steered
       ? `${named} is working right now: it reads your message after its current tool call, as part of the turn it is running (or as its next turn, if that turn ends first). ${ownChild ? "You'll be woken with a <child_update> when that turn finishes." : `It is ${notOwn}`}`
-      : ownChild
+      : sent.behind > 0
+        ? `${named} is working right now and has ${sent.behind} message${sent.behind === 1 ? "" : "s"} queued ahead of yours, so yours runs after ${sent.behind === 1 ? "it" : "them"}, in order, once its current turn ends. ${ownChild ? "You'll be woken with a <child_update> when your message's turn finishes." : `It is ${notOwn}`}`
+        : ownChild
         ? `${named} is your child: you'll be woken with a <child_update> when this turn finishes.`
         : `${named} is ${notOwn}`;
     const notify = request.notifyWhenIdle === true
@@ -361,14 +365,19 @@ export class SessionMessaging {
  * first); anything else — an idle or finished target, or an older runtime, whose mid-turn push could never
  * be taken back by a TaskStop — goes through `send`, the session's own queue.
  */
-async function deliverInto(driver: MessagingDriverHandle, text: string): Promise<{ queued: boolean; steered: boolean }> {
+async function deliverInto(driver: MessagingDriverHandle, text: string): Promise<{ queued: boolean; steered: boolean; behind: number }> {
   const live = driver.state === undefined || driver.state === "live";
-  if (live && driver.turnRunning && driver.foldsQueuedInput === true && driver.steer !== undefined) {
-    await driver.steer(text, MESSAGING_CLIENT_NAME);
-    return { queued: false, steered: true };
+  // FIFO with the session's own queue: messages the daemon already holds behind the running turn (the
+  // user's queued sends) run first, so a message is never steered PAST them — it queues behind them.
+  const behind = driver.pendingSends?.length ?? 0;
+  if (live && driver.turnRunning && behind === 0 && driver.foldsQueuedInput === true && driver.steer !== undefined) {
+    // What actually happened, not what was asked: a steer that found no running turn (it ended meanwhile)
+    // or was held for a provider switch is not "in the running turn".
+    const { injected } = await driver.steer(text, MESSAGING_CLIENT_NAME);
+    return { queued: false, steered: injected, behind: 0 };
   }
   const { queued } = await driver.send(text, MESSAGING_CLIENT_NAME);
-  return { queued, steered: false };
+  return { queued, steered: false, behind: queued ? behind : 0 };
 }
 
 /** A refusal's words for the model: the message plus its typed code (never a stack). */

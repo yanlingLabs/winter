@@ -720,6 +720,59 @@ describe("which turns are followed, the bounded roster, shutdown and restart", (
     expect(t.childUpdates().length).toBe(afterWake);
   });
 
+  test("BACK-TO-BACK (no settle between): an error turn, then a held send's turn that succeeds — reported completed with the second turn's result, never error", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    const ev = (e: Record<string, unknown>) => t.hub.append(child, { sessionId: child, threadId: "main", ...e } as never);
+    ev({ type: "agent_error", message: "provider 500" });
+    ev({ type: "turn_completed", stopReason: "error", inputTokens: 0, outputTokens: 0 });
+    ev({ type: "turn_started" });                      // the held send drained at the result: no settle yet
+    ev({ type: "assistant_message", text: "recovered" });
+    t.finish(child);
+    await t.drain();
+    expect(t.childUpdates().at(-1)).toMatchObject({ childSessionId: child, status: "completed", resultSummary: "recovered" });
+  });
+
+  test("BACK-TO-BACK: a stopped turn with a steer queued behind it, then that steer's turn succeeds — reported completed, never 'Stopped before it finished'", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    const ev = (e: Record<string, unknown>) => t.hub.append(child, { sessionId: child, threadId: "main", ...e } as never);
+    ev({ type: "turn_completed", stopReason: "aborted", inputTokens: 0, outputTokens: 0 });
+    ev({ type: "turn_started" });                      // the queued steer starts right after (C2)
+    ev({ type: "assistant_message", text: "did the steer" });
+    t.finish(child);
+    await t.drain();
+    expect(t.childUpdates().at(-1)).toMatchObject({ status: "completed", resultSummary: "did the steer" });
+  });
+
+  test("FOLD with an older held send: Dispatch's folded follow-up keeps its OWN tag (adjacency) — followed and woken at the turn's end; the held send's later turn is not taken for it", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    t.finish(child, { text: "first" });
+    await t.drain();
+    t.finish(t.dispatchId, { text: "reported" });             // forgotten
+    const ev = (e: Record<string, unknown>) => t.hub.append(child, { sessionId: child, threadId: "main", ...e } as never);
+    ev({ type: "user_message", text: "user's own task", clientName: "cli-chat" });
+    ev({ type: "turn_started" });                              // the user's turn (unfollowed)
+    ev({ type: "tool_call", callId: "c1", name: "bash", argsJson: "{}" });
+    ev({ type: "user_message", text: "user's next one", clientName: "cli-chat" });   // held by the daemon
+    t.dc.expectFollowUp(child, t.dispatchId, "dispatch adds this");
+    ev({ type: "user_message", text: "dispatch adds this", clientName: "messaging" }); // steered
+    ev({ type: "tool_result", callId: "c1", output: "ok", isError: false });
+    const updatesBefore = t.childUpdates().length;
+    ev({ type: "turn_started" });                              // the fold: Dispatch's message
+    expect(t.childUpdates().slice(updatesBefore).map((e) => e.status)).toEqual(["running"]);
+    t.finish(child, { text: "both done" });
+    await t.drain();
+    expect(t.childUpdates().at(-1)).toMatchObject({ status: "completed", resultSummary: "both done" });
+    const afterWake = t.childUpdates().length;
+    t.finish(t.dispatchId, { text: "noted" });                // forgotten again
+    ev({ type: "turn_started" });                              // the user's held send runs: not Dispatch's
+    t.finish(child, { text: "user's thing" });
+    await t.drain();
+    expect(t.childUpdates().length).toBe(afterWake);
+  });
+
   test("FOLD (agent SDK 0.0.44): a follow-up steered into the child's own running turn is folded there — ONE completed, ONE wake, at that turn's end, with the turn's whole result", async () => {
     const t = setup();
     const child = await t.spawnOne({ title: "Kid" });

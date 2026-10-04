@@ -348,6 +348,34 @@ describe("SendMessage to a RUNNING session folds into its turn (user ruling 2026
     expect(d.steers[0]!.text).toStartWith(`<agent-message from="session:${from}"`);
   });
 
+  test("FIFO with the session's own queue: a running target that already holds queued sends gets `send` (queued BEHIND them), never a steer past them — and the note says so", async () => {
+    const t = setup();
+    const from = t.code();
+    const to = t.code();
+    const d = t.driverFor(to);
+    d.turnRunning = true;
+    d.foldsQueuedInput = true;
+    d.pendingSends = ["the user's earlier message"];
+    const answer = await t.send(from, to, "do this too");
+    expect(answer.status).toBe("queued");
+    expect(answer.note).toContain("has 1 message queued ahead of yours, so yours runs after it, in order, once its current turn ends");
+    expect(d.steers).toEqual([]);
+    expect(d.sends).toHaveLength(1);
+  });
+
+  test("the outcome is what the steer DID: a steer that was not injected (no turn running any more, or held for a provider switch) is not reported as read after the current tool call", async () => {
+    const t = setup();
+    const from = t.code();
+    const to = t.code();
+    const d = t.driverFor(to);
+    d.turnRunning = true;
+    d.foldsQueuedInput = true;
+    d.steer = async (text, clientName) => { d.steers.push({ text, ...(clientName === undefined ? {} : { clientName }) }); return { seq: 1, injected: false }; };
+    const answer = await t.send(from, to, "hello");
+    expect(answer.status).toBe("delivered");
+    expect(answer.note).not.toContain("after its current tool call");
+  });
+
   test("an IDLE target on a folding child still gets `send` — it starts a turn of its own", async () => {
     const t = setup();
     const from = t.code();

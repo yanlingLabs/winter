@@ -757,4 +757,19 @@ describe("runningTurnOrigin: who started the latest turn, from the log", () => {
     expect(runningTurnOrigin(log.slice(0, 2))).toBe("orb");
     expect(runningTurnOrigin(log)).toBe("messaging");
   });
+
+  test("a fold pairs by ADJACENCY: an older daemon-held send (queued, not yet run) is not taken for the folded message", () => {
+    const log = [
+      ev("user_message", { text: "do it", clientName: "orb" }), ev("turn_started"),
+      ev("tool_call", { callId: "c1", name: "bash", argsJson: "{}" }),
+      ev("user_message", { text: "held for later", clientName: "cli-chat" }),          // a send, held by the daemon
+      ev("user_message", { text: "<agent-message>also</agent-message>", clientName: "messaging" }), // a steer
+      ev("tool_result", { callId: "c1", output: "ok", isError: false }),
+      ev("turn_started"),                                                                  // the steer, folded
+      ev("turn_completed", { stopReason: "end_turn", inputTokens: 0, outputTokens: 0 }),
+      ev("turn_started"),                                                                  // the held send runs next
+    ];
+    expect(runningTurnOrigin(log.slice(0, 7))).toBe("messaging");
+    expect(runningTurnOrigin(log)).toBe("cli-chat");
+  });
 });

@@ -221,9 +221,8 @@ class ProjectorImpl implements Projector {
    *   - a `system/host_input_folded` (agent SDK 0.0.44, user ruling 2026-10-04) shifts `count` from the
    *     head — pushes absorbed into the RUNNING turn, which will never get a terminal of their own;
    *   - `clearQueued` (TaskStop) pops from the tail — pushes the runtime dropped before they ran.
-   * `text` is what was pushed (the fold's echo dedupe reads it).
    */
-  private readonly queuedStarts: Array<{ announced: boolean; text: string }> = [];
+  private readonly queuedStarts: Array<{ announced: boolean }> = [];
   /**
    * The calls whose `tool_result` this projector has projected since the last terminal (agent SDK 0.0.40's
    * per-call frames — see the `user` branch of `accept`). TURN-scoped, cleared at every terminal: a tool
@@ -306,7 +305,7 @@ class ProjectorImpl implements Projector {
     this.openTurns++;
     this.echo.pushed(input.text);
     if (running && this.holdsTurnStarts) {
-      this.queuedStarts.push({ announced: false, text: input.text });
+      this.queuedStarts.push({ announced: false });
       return EMPTY_BATCH();
     }
     return this.stampBatch([this.turnStarted()]);
@@ -334,13 +333,12 @@ class ProjectorImpl implements Projector {
     }
     const folded = this.queuedStarts.splice(0, k);
     this.openTurns = Math.max(0, this.openTurns - k);
-    const out: ProjectedEvent[] = [];
-    for (const q of folded) {
-      this.echo.folded(q.text);
-      if (!q.announced) out.push(this.turnStarted());
-    }
+    // No echo bookkeeping: the 0.0.44 contract emits nothing for a folded text (dedupe.ts).
+    const out: ProjectedEvent[] = folded.filter((q) => !q.announced).map(() => this.turnStarted());
     return out.length === 0 ? EMPTY_BATCH() : this.stampBatch(out);
   }
+
+  get pendingPushes(): readonly { announced: boolean }[] { return this.queuedStarts.map((q) => ({ ...q })); }
 
   clearQueued(count: number): { batch: ProjectedBatch; cleared: number } {
     this.commitPending();
@@ -606,9 +604,8 @@ class ProjectorImpl implements Projector {
       }
       // A text-only `user` frame is NOT an echo of a host push on the 0.0.3 wire (measured: the
       // runtime never re-emits the host's input frames) — it is an inbound delivery rendered into
-      // the child's input. The echo window is consulted anyway, so a future echo — or a 0.0.44 fold's
-      // system-reminder wrapper around a folded push — is dropped here rather than double-appended;
-      // see dedupe.ts.
+      // the child's input. The echo window is consulted anyway, so a future exact echo is dropped here
+      // rather than double-appended; see dedupe.ts (a 0.0.44 fold emits no echo at all).
       const text = userText(userFrame).trim();
       if (text.length === 0) return EMPTY_BATCH();
       if (this.echo.shouldDropEcho(text)) {

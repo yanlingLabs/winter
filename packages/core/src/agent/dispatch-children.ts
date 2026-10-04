@@ -422,9 +422,18 @@ export class DispatchChildren {
    * picks it back up); an entry goes when its last owed message has started.
    */
   private readonly turnOrigins = new Map<string, TurnOriginPairer<boolean>>();
+  /**
+   * Sessions whose MAIN turn is open on the log: a main `turn_started` since the last main `turn_completed`.
+   * A main `turn_started` that arrives while one is open is a CONTINUATION — a message the child took into
+   * the running turn (agent SDK 0.0.44's fold, user ruling 2026-10-04) or one C2 announced ahead of its
+   * turn — never a new turn. Read off the log's own boundaries, NEVER the driver's idle settle
+   * (`onTurnSettled`), which can come several turns later: back-to-back turns (a held send drained at a
+   * `result`) each start fresh.
+   */
+  private readonly mainTurnOpen = new Set<string>();
 
   /** Feed one main-thread event into its session's pairer; the tag a `turn_started` takes, or of a new message. */
-  private trackOrigin(e: SessionEvent): boolean | undefined {
+  private trackOrigin(e: SessionEvent, continuation: boolean): boolean | undefined {
     if (e.type === "user_message") {
       if (e.clientName === PROJECTOR_PASSTHROUGH_CLIENT) return undefined;
       const followed = e.clientName === DISPATCH_CLIENT_NAME
@@ -437,7 +446,7 @@ export class DispatchChildren {
     const pairer = this.turnOrigins.get(e.sessionId);
     if (pairer === undefined) return undefined;
     if (e.type !== "turn_started") { pairer.other(); return undefined; }
-    const tag = pairer.turnStarted();
+    const tag = pairer.turnStarted(continuation);
     if (pairer.empty) this.turnOrigins.delete(e.sessionId);
     return tag;
   }
@@ -445,7 +454,14 @@ export class DispatchChildren {
   private onEvent(e: SessionEvent): void {
     if (this.stopped) return;
     const main = (e as { threadId?: string }).threadId === "main";
-    const originTag = main ? this.trackOrigin(e) : undefined;
+    let continuation = false;
+    if (main && e.type === "turn_started") {
+      continuation = this.mainTurnOpen.has(e.sessionId);
+      this.mainTurnOpen.add(e.sessionId);
+    } else if (main && e.type === "turn_completed") {
+      this.mainTurnOpen.delete(e.sessionId);
+    }
+    const originTag = main ? this.trackOrigin(e, continuation) : undefined;
     let c = this.children.get(e.sessionId);
     if (c === undefined) {
       // Picked back up: a child a restart interrupted, at its next turn; a forgotten child the
@@ -470,10 +486,11 @@ export class DispatchChildren {
         return;   // tagged above (`trackOrigin`)
       case "turn_started": {
         if (!main) return;
-        // Already following this turn: a `turn_started` now is a message the child took INTO it (agent SDK
-        // 0.0.44 folds a mid-turn push at the next tool round — user ruling 2026-10-04), not a new turn —
-        // nothing to reset, and the turn's one end reports it all, followed follow-up included.
-        if (c.turnOpen) return;
+        // A CONTINUATION of the main turn already followed (`mainTurnOpen`: a message the child took INTO
+        // it — agent SDK 0.0.44's fold, user ruling 2026-10-04): not a new turn — nothing to reset, and the
+        // turn's one end reports it all, followed follow-up included. A turn_started after the previous
+        // turn's turn_completed is a new turn even before the driver settles: reset below.
+        if (continuation && c.turnOpen) return;
         // Ongoing delegated work, or a turn Dispatch started (its spawn prompt, its follow-up); a peer's
         // message or a user working in a finished child directly is not Dispatch's to report.
         const followed = !TERMINAL.has(c.status) || originTag === true || c.followNext === true;

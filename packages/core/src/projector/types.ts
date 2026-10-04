@@ -214,6 +214,9 @@ export interface Projector {
    * DRIVER closes each with an `aborted` `turn_completed` once the stopped turn has ended.
    */
   clearQueued(count: number): { batch: ProjectedBatch; cleared: number };
+  /** The pushes still held (C2), oldest first, and whether each one's `turn_started` is out — a copy.
+   *  The driver snapshots it when it SENDS a clear (TaskStop), to close exactly what the clear dropped. */
+  readonly pendingPushes: readonly { announced: boolean }[];
   /**
    * 2026-09-22 (C2): announce NOW every push whose `turn_started` `beginTurn` is still holding.
    *

@@ -10,14 +10,15 @@
 // the OLDEST unpaired one. That is the pairing this class replays, incrementally (DispatchChildren's
 // observer) or over a whole log (`runningTurnOrigin`).
 //
-// FOLDED (agent SDK 0.0.44, user ruling 2026-10-04): a message pushed while a turn runs (a steer, a
-// SendMessage to a running session) is usually taken INTO that turn at its next tool round, and its
-// `turn_started` lands there, mid-turn, with no `turn_completed` of its own. It pairs like a queued one
-// (the oldest unpaired — ordinarily that message itself), so from then on the running turn's origin
-// reads as the folded message's: a peer's message folded into a human turn makes it automated, the
-// user's steer folded into Dispatch's turn makes it human. Exact when no daemon-held send (a `send`
-// queued while the turn ran) is older than the folded message; with one, the fold pairs with the held
-// send instead — the log does not say which messages were pushed at once and which were held.
+// CONTINUATION (agent SDK 0.0.44, user ruling 2026-10-04): a main `turn_started` that arrives while a main
+// turn is OPEN on the log (a `turn_started` since the last `turn_completed`) is a message the child took
+// INTO the running turn at its next tool round — or one C2 announced ahead of its turn, right before a
+// younger message landed. Either way it pairs by ADJACENCY, like `unconsumedUserMessages`: with the
+// NEAREST PRECEDING unpaired message, never the oldest — the driver announces any held push before the
+// next message is appended (`appendUser`), so a pushed message is always the youngest unpaired one when
+// its continuation lands, and a daemon-held `send` queued earlier keeps its own place. From then on the
+// running turn's origin reads as the folded message's: a peer's message folded into a human turn makes
+// it automated, the user's steer folded into Dispatch's turn makes it human.
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 
 /** The projector's own pass-through `user_message` (it echoes the child's view; never a host push). */
@@ -33,9 +34,10 @@ export class TurnOriginPairer<T> {
     this.lastWasMessage = true;
   }
 
-  /** A main-thread `turn_started`: the tag of the message it answers (undefined when none is owed). */
-  turnStarted(): T | undefined {
-    const tag = this.lastWasMessage ? this.unpaired.pop() : this.unpaired.shift();
+  /** A main-thread `turn_started`: the tag of the message it answers (undefined when none is owed).
+   *  `continuation`: a main turn is open on the log (see the header) — it pairs by adjacency. */
+  turnStarted(continuation = false): T | undefined {
+    const tag = this.lastWasMessage || continuation ? this.unpaired.pop() : this.unpaired.shift();
     this.lastWasMessage = false;
     return tag;
   }
@@ -54,14 +56,17 @@ export class TurnOriginPairer<T> {
 export function runningTurnOrigin(events: readonly SessionEvent[]): string | undefined {
   const pairer = new TurnOriginPairer<string>();
   let origin: string | undefined;
+  let open = false;
   for (const e of events) {
     if ((e as { threadId?: string }).threadId !== "main") continue;
     if (e.type === "user_message") {
       if (e.clientName === PROJECTOR_PASSTHROUGH_CLIENT) continue;
       pairer.message(e.clientName ?? "session");
     } else if (e.type === "turn_started") {
-      origin = pairer.turnStarted();
+      origin = pairer.turnStarted(open);
+      open = true;
     } else {
+      if (e.type === "turn_completed") open = false;
       pairer.other();
     }
   }
