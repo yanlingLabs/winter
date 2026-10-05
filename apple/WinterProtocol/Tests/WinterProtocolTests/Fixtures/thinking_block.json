@@ -1,0 +1,15 @@
+{
+  "type": "thinking_block",
+  "sessionId": "s_1",
+  "threadId": "main",
+  "seq": 38,
+  "ts": 1700000000028,
+  "blockId": "rb_1",
+  "kind": "summary",
+  "title": "Planning the migration",
+  "text": "**Planning the migration**\n\nI need to read the schema first.\n\n**Checking the tests**\n\nThe suite pins the count.",
+  "truncated": false,
+  "provider": "openai",
+  "model": "gpt-5.6-terra",
+  "durationMs": 4200
+}

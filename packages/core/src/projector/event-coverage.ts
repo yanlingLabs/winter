@@ -147,6 +147,11 @@ export const SUBAGENT_TRANSCRIPT_INCLUDE = {
   // WS-23 review r1 I-3: a continuity warning is for the HUMAN (what a switch or a failed write lost);
   // the model continues from the conversation itself. Kept out of a child's model-greppable transcript.
   continuity_warning: false,
+  // The thinking pill (2026-10-05): reasoning text is for the HUMAN (a pill, a future expand view) —
+  // never a model-greppable file. A child's own model already had its reasoning; a parent reading it
+  // back as a transcript would be reading another model's private chain of thought.
+  thinking_block: false,
+  thinking_delta: false,
 } satisfies Record<SessionEvent["type"], boolean>;
 
 /**
@@ -186,6 +191,11 @@ export const PROJECTED_EVENT_COVERAGE = {
   hook_notice: true,
   // WS-23 review r1 I-3: the runtime's `system/continuity_warning` frame, all but the three resume-time kinds (`index.ts`).
   continuity_warning: true,
+  // The thinking pill (2026-10-05): the runtime's `system/reasoning_progress` frames — `start`/`delta`
+  // → `thinking_delta` (TRANSIENT: broadcast, never persisted), `end` → `thinking_block` (persisted;
+  // also closed by the projector when the turn or the child ends with the block still open).
+  thinking_block: true,
+  thinking_delta: true,
   // `user_message` is produced ONLY as a pass-through: a `user` text frame that the host's own
   // push queue does not account for (an inbound agent-message delivery rendered into the child's
   // input). The ordinary path is the HOST appending `user_message` before it pushes (P8b-5), and

@@ -478,6 +478,25 @@ describe("sync.heads / sync.pull / sync.push (Chat Slice D task 2)", () => {
     c.close();
   });
 
+  // The thinking pill (2026-10-05): `thinking_block`/`thinking_delta` are the daemon's own projection
+  // of the runtime's reasoning frames; the phone's chat engine produces neither yet, so both are refused.
+  test("a thinking_block or thinking_delta rejects the whole batch", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "sync-client");
+    const id = uuid();
+    await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true });
+    const block = ev(id, 2, { type: "thinking_block", threadId: "main", blockId: "rb_1", kind: "summary", title: "Planning", text: "**Planning**" });
+    const delta = ev(id, 2, { type: "thinking_delta", threadId: "main", blockId: "rb_1", kind: "summary", phase: "start" });
+    for (const pushed of [block, delta]) {
+      const bad = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([pushed])), complete: true });
+      expect(bad.error?.code).toBe(ERR.INVALID_PARAMS);
+      expect(bad.error?.message).toContain((pushed as { type: string }).type);
+      expect(store.lastSeq(id)).toBe(1);
+    }
+    c.close();
+  });
+
   test("a schema-invalid event (unknown type) rejects the whole batch", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);

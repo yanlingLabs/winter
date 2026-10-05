@@ -671,6 +671,63 @@ export const ContinuityWarningEvent = ThreadBase.extend({
   text: z.string().min(1).max(4_000),
 });
 
+/** The thinking pill (2026-10-05): what kind of reasoning a block carried — the agent SDK's
+ *  `system/reasoning_progress` `kind`, verbatim:
+ *   - `summary` — a provider-written readable summary (OpenAI/xAI Responses, Gemini thought
+ *     summaries, Anthropic "summarized" thinking, Bedrock reasoning summaries);
+ *   - `update`  — an Anthropic progress-update block (`display: "updates"`);
+ *   - `exposed` — raw full reasoning (`reasoning_content` and friends on a full-exposed row);
+ *   - `hidden`  — a reasoning block with no readable text (an omitted/encrypted-only block).
+ *  A block may change from `hidden` to `update` mid-stream; the LAST kind seen is the block's. */
+export const ThinkingKind = z.enum(["summary", "update", "exposed", "hidden"]);
+export type ThinkingKind = z.infer<typeof ThinkingKind>;
+/** A thinking block's persisted `text` is at most this many UTF-16 code units — at ≤ 3 UTF-8 bytes
+ *  each, always under `session.history`/the remote stream's 64 KiB per-string cap, so that cap never
+ *  rewrites it. The daemon keeps the HEAD and sets `truncated`. */
+export const THINKING_TEXT_MAX_LENGTH = 20_000;
+/** A thinking pill's title (the provider's own `**heading**`, or an update's text) is at most this long. */
+export const THINKING_TITLE_MAX_LENGTH = 200;
+/** `blockId`/`provider`/`model` bounds — ids and catalog names, never prose. */
+export const THINKING_ID_MAX_LENGTH = 256;
+
+/** The thinking pill (2026-10-05): ONE reasoning block, appended when it closes. Projected from the
+ *  agent SDK's `system/reasoning_progress` `end` frame (or closed by the daemon when the turn or the
+ *  child ends with the block still open). Clients render it as a pill reading `title`, or "Thought"
+ *  when there is none; the live pill before it is fed by `thinking_delta` (transient), and a client
+ *  REPLACES its live item by `blockId` when this arrives — on a replay only this exists.
+ *
+ *  `text` is the block's readable reasoning (summary parts joined with a blank line), capped at
+ *  `THINKING_TEXT_MAX_LENGTH` with `truncated` set; empty for a `hidden` block. It is for the HUMAN
+ *  (a future expand view) and never reaches a model-readable transcript, a model call of the
+ *  daemon's own (titles, dreamer, cleaner) or a log line. Opaque provider state (signatures,
+ *  encrypted content) never rides it. `durationMs` is the daemon's own start→end measure. */
+export const ThinkingBlockEvent = ThreadBase.extend({
+  type: z.literal("thinking_block"),
+  blockId: z.string().min(1).max(THINKING_ID_MAX_LENGTH),
+  kind: ThinkingKind,
+  title: z.string().min(1).max(THINKING_TITLE_MAX_LENGTH).optional(),
+  text: z.string().max(THINKING_TEXT_MAX_LENGTH),
+  truncated: z.boolean().optional(),
+  provider: z.string().min(1).max(THINKING_ID_MAX_LENGTH).optional(),
+  model: z.string().min(1).max(THINKING_ID_MAX_LENGTH).optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+});
+
+/** TRANSIENT (broadcast-only, never persisted — same posture as `assistant_delta`): a reasoning
+ *  block's LIVE progress, projected from the agent SDK's `system/reasoning_progress` `start`/`delta`
+ *  frames. `start` opens the pill ("Thinking", shimmering); each `delta` carries the text increment
+ *  (absent once the block reached `THINKING_TEXT_MAX_LENGTH`, or when only the title changed) and —
+ *  only when it CHANGED — the block's current derived `title` (the daemon derives it; clients never
+ *  parse the text). The persisted `thinking_block` with the same `blockId` replaces it. */
+export const ThinkingDeltaEvent = ThreadBase.extend({
+  type: z.literal("thinking_delta"),
+  blockId: z.string().min(1).max(THINKING_ID_MAX_LENGTH),
+  kind: ThinkingKind,
+  phase: z.enum(["start", "delta"]),
+  text: z.string().min(1).max(THINKING_TEXT_MAX_LENGTH).optional(),
+  title: z.string().min(1).max(THINKING_TITLE_MAX_LENGTH).optional(),
+});
+
 export const NotificationRequestedEvent = ThreadBase.extend({
   type: z.literal("notification_requested"),
   title: z.string().min(1).max(100),
@@ -1006,6 +1063,8 @@ export const SessionEvent = z.discriminatedUnion("type", [
   NotificationRequestedEvent,
   HookNoticeEvent,
   ContinuityWarningEvent,
+  ThinkingBlockEvent,
+  ThinkingDeltaEvent,
   ChildUpdateEvent,
   WorkflowStartedEvent,
   WorkflowProgressEvent,
@@ -1087,6 +1146,9 @@ export const TRANSIENT_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<
   // either). 9 → 11.
   "provider_login_progress",
   "provider_login_finished",
+  // The thinking pill (2026-10-05): a reasoning block's live progress; its persisted record is
+  // `thinking_block` (in `HISTORY_EVENT_TYPES`). 12 → 13.
+  "thinking_delta",
 ]);
 
 /** Event payload before the store assigns seq/ts (distributes Omit over the union). */

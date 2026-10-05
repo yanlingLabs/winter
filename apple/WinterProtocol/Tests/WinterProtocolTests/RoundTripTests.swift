@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 78, "expected 78 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 80, "expected 80 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 

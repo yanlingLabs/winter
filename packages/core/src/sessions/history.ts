@@ -1,7 +1,7 @@
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionStore } from "./store";
 
-/** The 12 persisted, phone-foldable event types history is allowed to return. Allowlist, never a
+/** The 13 persisted, phone-foldable event types history is allowed to return. Allowlist, never a
  *  denylist: an unknown future type stays out until deliberately added — and adding one REQUIRES
  *  re-checking the per-event cap covers its large strings (capJson bounds strings at ANY depth,
  *  which is what admitted question_asked's nested options[].description). `reasoning_item` (opaque
@@ -55,6 +55,13 @@ export const HISTORY_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<Se
   // carry across, a summary before a switch, reasoning state that could not be saved. `text` is
   // capped at 4,000 characters, `warning` at 64 -- both inside this file's per-event string cap.
   "continuity_warning",
+  // The thinking pill (2026-10-05): `thinking_block` -- one reasoning block's pill (its title) and
+  // text. Bounded at every depth: `text` ≤ 20,000 UTF-16 units (≤ 60,000 UTF-8 bytes, under this
+  // file's 64 KiB per-string cap, so `capEvent` never rewrites it), `title` ≤ 200, `blockId`/
+  // `provider`/`model` ≤ 256 -- flat strings, no nesting. Its live half (`thinking_delta`) is
+  // TRANSIENT and reaches the remote stream through `TRANSIENT_EVENT_TYPES`. An old phone skips it
+  // exactly as it skips `hook_notice` (see above). `reasoning_item` stays OUT: opaque provider state.
+  "thinking_block",
 ]);
 
 /** Truncates `value` to `cap` UTF-8 bytes (backed off to a char boundary) plus a deterministic

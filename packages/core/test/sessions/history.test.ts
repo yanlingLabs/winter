@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolResultEvent, FileDiffSummary, type SessionEvent } from "@yanlinglabs/winter-protocol";
+import { ToolResultEvent, FileDiffSummary, THINKING_ID_MAX_LENGTH, THINKING_TEXT_MAX_LENGTH, THINKING_TITLE_MAX_LENGTH, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { SessionStore } from "../../src/sessions/store";
 import { HISTORY_EVENT_TYPES, readHistoryPage, capEvent, WHOLE_EVENT_CEILING } from "../../src/sessions/history";
 
@@ -24,7 +24,7 @@ describe("readHistoryPage", () => {
     return { store, sessionId };
   }
 
-  test("the allowlist is exactly the 12 persisted foldable types", () => {
+  test("the allowlist is exactly the 13 persisted foldable types", () => {
     // Widening cast: HISTORY_EVENT_TYPES is a ReadonlySet<SessionEvent["type"]>, so the plain
     // string[] literal below (not a member of that narrower union type) would otherwise fail
     // toEqual's generic inference (bound to the `expect(...)` receiver's type) under tsc.
@@ -36,8 +36,11 @@ describe("readHistoryPage", () => {
         // (see history.ts's HISTORY_EVENT_TYPES doc comment).
         "continuity_warning", "hook_notice",
         "question_asked", "question_resolved", "tool_call", "tool_result", "turn_completed", "user_message",
+        // The thinking pill (2026-10-05): the persisted block only; its live half is transient.
+        "thinking_block",
       ].sort(),
     );
+    expect(HISTORY_EVENT_TYPES.has("thinking_delta" as SessionEvent["type"])).toBe(false);
     // Security: the opaque reasoning_item is NOT allowlisted.
     expect(HISTORY_EVENT_TYPES.has("reasoning_item" as SessionEvent["type"])).toBe(false);
   });
@@ -57,6 +60,28 @@ describe("readHistoryPage", () => {
     const [notice, warning] = page.events;
     expect(notice).toMatchObject({ type: "hook_notice", text: "a hook stopped this turn", level: "warning", stopsTurn: true });
     expect(warning).toMatchObject({ type: "continuity_warning", warning: "model_switch_lossy", text: "reasoning state did not carry over" });
+  });
+
+  test("the thinking pill: a thinking_block comes back field-for-field, and a maximal one is never rewritten by the cap", () => {
+    const { store, sessionId } = boot();
+    store.append(sessionId, {
+      type: "thinking_block", sessionId, threadId: "main", blockId: "rb_1", kind: "summary",
+      title: "Planning the migration", text: "**Planning the migration**\n\nread the schema", provider: "openai", model: "gpt-5.6-terra", durationMs: 4200,
+    });
+    // Worst case for the per-string cap: every unit a 3-byte UTF-8 character, at the schema's maxima.
+    const maximal = {
+      type: "thinking_block" as const, sessionId, threadId: "main", blockId: "b".repeat(THINKING_ID_MAX_LENGTH), kind: "exposed" as const,
+      title: "界".repeat(THINKING_TITLE_MAX_LENGTH), text: "界".repeat(THINKING_TEXT_MAX_LENGTH), truncated: true,
+      provider: "p".repeat(THINKING_ID_MAX_LENGTH), model: "m".repeat(THINKING_ID_MAX_LENGTH), durationMs: 1,
+    };
+    store.append(sessionId, maximal);
+    const page = readHistoryPage(store, { sessionId });
+    expect(page.events.map((e) => e.type)).toEqual(["thinking_block", "thinking_block"]);
+    expect(page.events[0]).toMatchObject({ blockId: "rb_1", kind: "summary", title: "Planning the migration", durationMs: 4200 });
+    const back = page.events[1]!;
+    expect((back as typeof maximal).text).toBe(maximal.text);   // capEvent left it byte-identical
+    expect((back as typeof maximal).title).toBe(maximal.title);
+    expect(capEvent(back)).toBe(back);                          // the same reference: nothing needed capping
   });
 
   test("filters out non-allowlisted events; returns ascending page with oldestSeq/hasMore", () => {

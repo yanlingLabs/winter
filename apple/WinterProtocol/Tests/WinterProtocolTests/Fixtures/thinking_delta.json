@@ -1,0 +1,12 @@
+{
+  "type": "thinking_delta",
+  "sessionId": "s_1",
+  "threadId": "main",
+  "seq": 38,
+  "ts": 1700000000029,
+  "blockId": "rb_2",
+  "kind": "update",
+  "phase": "delta",
+  "text": "Reading the schema before changing it.",
+  "title": "Reading the schema before changing it."
+}

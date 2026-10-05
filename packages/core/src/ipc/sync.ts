@@ -520,6 +520,12 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
     if (event.type === "tool_result" && event.siteIcons !== undefined) {
       throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a tool_result with siteIcons — chat logs from the phone carry none; nothing was appended`);
     }
+    // The thinking pill (2026-10-05): `thinking_block`/`thinking_delta` are the daemon's own projection
+    // of the runtime's reasoning frames. The phone's chat engine produces neither (yet), so a pushed one
+    // is refused rather than replicated — a second producer is added deliberately, never by accident.
+    if (event.type === "thinking_block" || event.type === "thinking_delta") {
+      throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a ${event.type} — chat logs from the phone carry none; nothing was appended`);
+    }
     if (i > 0 && event.seq !== entries[i - 1]!.event.seq + 1) {
       throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push seqs must be contiguous: event ${i + 1} has seq ${event.seq}, expected ${entries[i - 1]!.event.seq + 1} — nothing was appended`);
     }
