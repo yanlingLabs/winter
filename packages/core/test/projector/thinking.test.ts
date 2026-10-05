@@ -59,8 +59,10 @@ describe("deriveThinkingTitle (pure)", () => {
     expect(deriveThinkingTitle("update", ["   "])).toBeUndefined();
   });
 
-  test("exposed and hidden have no title", () => {
-    expect(deriveThinkingTitle("exposed", ["**Looks like a heading**"])).toBeUndefined();
+  test("exposed titles like summary (heading, else the activity rule — thinking-title.test.ts); hidden has no title", () => {
+    expect(deriveThinkingTitle("exposed", ["**Looks like a heading**"])).toBe("Looks like a heading");
+    expect(deriveThinkingTitle("exposed", ["Small project. Let me read all the files."])).toBe("Reading all the files");
+    expect(deriveThinkingTitle("exposed", ["Raw thoughts with no activity in them."])).toBeUndefined();
     expect(deriveThinkingTitle("hidden", ["anything"])).toBeUndefined();
   });
 
@@ -204,7 +206,7 @@ describe("projector: system/reasoning_progress → thinking_delta / thinking_blo
     accept(projector, init());
     accept(projector, rp("rb_s", "start", "hidden", { provider: "anthropic" }));
     accept(projector, rp("rb_s", "delta", "summary", { text: "I should read the schema first." }));
-    expect(of(accept(projector, rp("rb_s", "end", "summary")), "thinking_block")[0]).toMatchObject({ kind: "summary", text: "I should read the schema first." });
+    expect(of(accept(projector, rp("rb_s", "end", "summary")), "thinking_block")[0]).toMatchObject({ kind: "summary", text: "I should read the schema first.", title: "Reading the schema" });
     accept(projector, rp("rb_e", "start", "hidden"));
     accept(projector, rp("rb_e", "delta", "exposed", { text: "raw" }));
     expect(of(accept(projector, rp("rb_e", "end", "exposed")), "thinking_block")[0]).toMatchObject({ kind: "exposed", text: "raw" });
@@ -242,15 +244,21 @@ describe("projector: system/reasoning_progress → thinking_delta / thinking_blo
     expect(accept(projector, rp("rb_k", "delta", "update", { text: "" }))).toEqual([]);
   });
 
-  test("exposed reasoning streams its text with no title; a hidden block persists empty text and no title", () => {
+  test("exposed reasoning streams its text, titled only by a heading or an activity; a hidden block persists empty text and no title", () => {
     const { projector } = makeProjector();
     accept(projector, init());
     accept(projector, rp("rb_5", "start", "exposed", { provider: "deepseek", model: "deepseek-v4-pro" }));
+    // A bold span followed by text on its line is no heading, and the sentence names no activity.
     const d = accept(projector, rp("rb_5", "delta", "exposed", { text: "**Not a heading** for raw CoT" }));
     expect((d[0] as Any).title).toBeUndefined();
     const exposed = of(accept(projector, rp("rb_5", "end", "exposed")), "thinking_block")[0]!;
     expect(exposed).toMatchObject({ kind: "exposed", text: "**Not a heading** for raw CoT" });
     expect(exposed.title).toBeUndefined();
+
+    accept(projector, rp("rb_5b", "start", "exposed", { provider: "deepseek", model: "deepseek-v4-pro" }));
+    const d2 = accept(projector, rp("rb_5b", "delta", "exposed", { text: "Small project. Let me read all the files." }));
+    expect((d2[0] as Any).title).toBe("Reading all the files");
+    expect(of(accept(projector, rp("rb_5b", "end", "exposed")), "thinking_block")[0]).toMatchObject({ kind: "exposed", title: "Reading all the files" });
 
     accept(projector, rp("rb_6", "start", "hidden"));
     const hidden = of(accept(projector, rp("rb_6", "end", "hidden")), "thinking_block")[0]!;

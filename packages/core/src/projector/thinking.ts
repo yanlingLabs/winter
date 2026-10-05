@@ -1,8 +1,11 @@
 import {
-  THINKING_ID_MAX_LENGTH, THINKING_TEXT_MAX_LENGTH, THINKING_TITLE_MAX_LENGTH, type ThinkingKind,
+  THINKING_ID_MAX_LENGTH, THINKING_TEXT_MAX_LENGTH, type ThinkingKind,
 } from "@yanlinglabs/winter-protocol";
 import { threadIdOf } from "./conversation";
+import { ActivityTitleTracker, activityTitleOf, clipTitle, collapse, lastValidHeading, sliceUnits } from "./thinking-title";
 import type { ProjectedEvent, ProtocolSdkMessage } from "./types";
+
+export { gerundOf, sliceUnits } from "./thinking-title";
 
 /**
  * ── THE THINKING PILL (2026-10-05) ──────────────────────────────────────────────────────────────
@@ -55,64 +58,39 @@ export function asReasoningProgressFrame(m: ProtocolSdkMessage): ReasoningProgre
 
 // ── the title ──────────────────────────────────────────────────────────────────────────────────
 
-/** The first `n` UTF-16 units of `s`, never ending on half of a surrogate pair — a lone surrogate
- *  would survive `JSON.stringify` as an escape that strict decoders (Swift's) refuse. */
-export function sliceUnits(s: string, n: number): string {
-  if (s.length <= n) return s;
-  const cut = s.slice(0, Math.max(0, n));
-  const last = cut.charCodeAt(cut.length - 1);
-  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
-}
-
-/** Whitespace collapsed to single spaces, trimmed. */
-const collapse = (s: string): string => s.replace(/\s+/g, " ").trim();
-
-/** At most `THINKING_TITLE_MAX_LENGTH` characters, an ellipsis marking a cut. */
-function clipTitle(s: string): string {
-  if (s.length <= THINKING_TITLE_MAX_LENGTH) return s;
-  return `${sliceUnits(s, THINKING_TITLE_MAX_LENGTH - 1).trimEnd()}…`;
-}
-
-/** A COMPLETE `**…**` span that opens a line (after optional spaces/tabs), closed on that same line. */
-const LINE_HEADING = /^[ \t]*\*\*(.+?)\*\*/gm;
-
-/** The LAST complete heading that sits at the start of a line anywhere in `text`, collapsed —
- *  `undefined` when there is none (a heading whose closing `**` has not arrived yet is not one). */
-function lastLineHeading(text: string): string | undefined {
-  let found: string | undefined;
-  for (const m of text.matchAll(LINE_HEADING)) {
-    const inner = collapse(m[1] ?? "");
-    if (inner.length > 0) found = inner;
-  }
-  return found === undefined ? undefined : clipTitle(found);
-}
-
 /**
  * PURE: a reasoning block's pill title, from its kind and the text of its parts so far (oldest
  * first). The one place a title is derived — clients render no title as "Thinking"/"Thought".
  *
- *  - `summary` → the LAST complete `**…**` heading that sits at the START OF A LINE anywhere in the
- *    LATEST part. OpenAI-style summaries open each part with `**Heading**\n\nbody` (Codex's
- *    `extract_first_bold`); Gemini's adapter sends no part numbers, so a whole block is ONE part whose
- *    chunks each open with their own heading — the last one wins. A heading still missing its closing
- *    `**` does not count (the one before it still does); a bold word mid-line is not a heading.
+ *  - `summary` / `exposed` (any provider) → from the LATEST part, in this order (user ruling
+ *    2026-10-05, `thinking-title.ts`):
+ *      1. the provider's own heading: the LAST valid `**…**` heading standing alone at the START OF A
+ *         LINE (OpenAI-style summaries open each part with `**Heading**\n\nbody`; Gemini's adapter sends
+ *         no part numbers, so a whole block is ONE part whose chunks each open with their own heading —
+ *         the last one wins). A heading still missing its closing `**` does not count (the one before
+ *         it still does); a bold word mid-line is not a heading, nor is a file name or a label
+ *         (`**src/calc.js:**`);
+ *      2. otherwise the ACTIVITY rule over the prose ("Let me read the files." → "Reading the files"),
+ *         no model call. `final` (the block has ended) lets the trailing sentence count whatever it
+ *         ends with; while streaming only complete sentences do.
  *  - `update`  → the update's own text (an Anthropic progress update is a sentence or two),
  *    whitespace-collapsed and trimmed.
- *  - `exposed` / `hidden` → none: raw chain of thought has no title, and a hidden block no text.
+ *  - `hidden` → none: a hidden block has no text.
  *
  * Capped at `THINKING_TITLE_MAX_LENGTH` with an ellipsis.
  */
-export function deriveThinkingTitle(kind: ThinkingKind, parts: readonly string[]): string | undefined {
+export function deriveThinkingTitle(kind: ThinkingKind, parts: readonly string[], opts: { final?: boolean } = {}): string | undefined {
   switch (kind) {
-    case "summary": {
+    case "summary":
+    case "exposed": {
       const latest = parts[parts.length - 1];
-      return latest === undefined ? undefined : lastLineHeading(latest);
+      if (latest === undefined) return undefined;
+      return lastValidHeading(latest) ?? activityTitleOf(latest, opts.final ?? false);
     }
     case "update": {
       const text = collapse(parts.join(" "));
       return text.length > 0 ? clipTitle(text) : undefined;
     }
-    case "exposed":
     case "hidden":
       return undefined;
   }
@@ -123,11 +101,28 @@ export function deriveThinkingTitle(kind: ThinkingKind, parts: readonly string[]
 /** How much of each part's START is kept for an update's title (an update is a sentence or two; the
  *  title is cut at 200 anyway). */
 const TITLE_HEAD_CHARS = 600;
-/** How much of each part's END is scanned for a summary's heading — the per-delta cost stays bounded
- *  (a window, never the whole part). A heading that scrolled out of the window stays the title
- *  (sticky) until a newer one arrives. Both are bounded separately from the persisted text, so a block
- *  whose text is already at its cap still titles its later headings. */
+/** How much of each part's END is scanned for a heading — the per-delta cost stays bounded (a window,
+ *  never the whole part). A heading that scrolled out of the window stays the part's heading until a
+ *  newer one arrives (`TitlePart.heading`). The activity rule needs no window: its tracker sees each
+ *  unit once (`ActivityTitleTracker`). All are bounded separately from the persisted text, so a block
+ *  whose text is already at its cap still titles what comes later. */
 const TITLE_TAIL_CHARS = 4096;
+
+/** One part's title state. */
+interface TitlePart {
+  /** The frame's part number (`undefined` = the frame named none). */
+  part: number | undefined;
+  /** The head of its text (an update's title), and its tail window (`tailCut`: the window lost its
+   *  start, so its first line is partial). */
+  head: string;
+  tail: string;
+  tailCut: boolean;
+  /** The last valid heading seen in this part — kept once it scrolls out of the window, so the rule
+   *  never takes over from a provider's own heading. */
+  heading: string | undefined;
+  /** The activity rule over the part's whole text, incremental. */
+  rule: ActivityTitleTracker;
+}
 
 interface OpenBlock {
   blockId: string;
@@ -136,9 +131,8 @@ interface OpenBlock {
   /** The persisted text so far: parts joined with "\n\n", at most `THINKING_TEXT_MAX_LENGTH`. */
   body: string;
   truncated: boolean;
-  /** Each part's number (`undefined` = the frame named none), the head of its text and its tail
-   *  window (`tailCut`: the window lost its start, so its first line is partial). */
-  parts: Array<{ part: number | undefined; head: string; tail: string; tailCut: boolean }>;
+  /** Each part's title state, oldest first. */
+  parts: TitlePart[];
   /** The last NON-EMPTY title derived — sticky (see `delta`). */
   title: string | undefined;
   provider: string | undefined;
@@ -224,10 +218,11 @@ export class ThinkingBlocks {
     if (raw.length > 0) {
       const last = b.parts[b.parts.length - 1];
       const newPart = last === undefined || (partNo !== undefined && partNo !== last.part);
-      if (newPart) b.parts.push({ part: partNo, head: "", tail: "", tailCut: false });
+      if (newPart) b.parts.push({ part: partNo, head: "", tail: "", tailCut: false, heading: undefined, rule: new ActivityTitleTracker() });
       const current = b.parts[b.parts.length - 1]!;
       if (current.head.length < TITLE_HEAD_CHARS) current.head += sliceUnits(raw, TITLE_HEAD_CHARS - current.head.length);
       current.tail += raw;
+      current.rule.push(raw);
       if (current.tail.length > TITLE_TAIL_CHARS) {
         current.tail = current.tail.slice(-TITLE_TAIL_CHARS);
         current.tailCut = true;
@@ -244,9 +239,7 @@ export class ThinkingBlocks {
       }
     }
 
-    const derived = deriveThinkingTitle(b.kind, b.parts.map((p) => (b.kind === "update" ? p.head : scanWindow(p))));
-    const titleChanged = derived !== undefined && derived !== b.title;
-    if (titleChanged) b.title = derived;
+    const titleChanged = this.retitle(b, false);
     if (increment.length === 0 && !titleChanged && !kindChanged) return [];
     // The CURRENT title rides every delta that carries text (review r1), not only a change: a client
     // that joins mid-block (a reattach, the phone) learns it from the next delta it sees.
@@ -258,13 +251,38 @@ export class ThinkingBlocks {
     }];
   }
 
-  /** `end`: the block closes — its persisted record. Nothing for a block already closed. */
+  /**
+   * The block's current title — `deriveThinkingTitle`'s answer, kept incrementally: the update's head,
+   * or the latest part's heading (its window scanned) else its activity rule. `final` (the block's own
+   * `end`) lets the trailing sentence count. Sticky: an `undefined` answer keeps the last title.
+   * Returns whether the title changed.
+   */
+  private retitle(b: OpenBlock, final: boolean): boolean {
+    let derived: string | undefined;
+    if (b.kind === "update") {
+      derived = deriveThinkingTitle("update", b.parts.map((p) => p.head));
+    } else if (b.kind !== "hidden") {
+      const p = b.parts[b.parts.length - 1];
+      if (p !== undefined) {
+        const scanned = lastValidHeading(scanWindow(p));
+        if (scanned !== undefined || !p.tailCut) p.heading = scanned;
+        derived = p.heading ?? p.rule.title(final);
+      }
+    }
+    if (derived === undefined || derived === b.title) return false;
+    b.title = derived;
+    return true;
+  }
+
+  /** `end`: the block closes — its persisted record, titled with its trailing sentence counted (a
+   *  block's last sentence may end with no punctuation). Nothing for a block already closed. */
   end(f: ReasoningProgressFrame): ProjectedEvent[] {
     if (this.ended.has(f.block_id)) return [];
     const b = this.openBlock(f);
     b.kind = f.kind;
     if (b.provider === undefined) b.provider = boundedName(f.provider);
     if (b.model === undefined) b.model = boundedName(f.model);
+    this.retitle(b, true);
     return [this.close(b)];
   }
 
