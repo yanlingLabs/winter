@@ -58,7 +58,8 @@ final class ThinkingPillTests: XCTestCase {
         XCTAssertEqual(pillThinkingLabel(thinking(s)[0], turnIsLive: s.turnRunning), "Thinking")
         s = SessionReducer.reduce(s, delta("delta", text: "ning**", title: "Planning"))
         XCTAssertEqual(thinking(s).count, 1, "one item per block, however many deltas")
-        XCTAssertEqual(thinking(s)[0].text, "**Planning**")
+        XCTAssertEqual(thinking(s)[0].text, "", "the live item carries no text — O(delta) per delta; the block brings it")
+        XCTAssertEqual(thinking(s)[0].liveTextLength, "**Planning**".utf16.count)
         XCTAssertEqual(pillThinkingLabel(thinking(s)[0], turnIsLive: s.turnRunning), "Planning")
         XCTAssertEqual(s.streamingText, "", "thinking never feeds the reply's streaming row")
     }
@@ -72,6 +73,7 @@ final class ThinkingPillTests: XCTestCase {
         XCTAssertNotNil(activity[0].thinkingItem, "the block keeps the place where its pill started")
         XCTAssertFalse(activity[0].thinkingItem!.isLive)
         XCTAssertEqual(activity[0].thinkingItem!.durationMs, 900)
+        XCTAssertEqual(activity[0].thinkingItem!.text, "Reading.", "the persisted block brings the text")
         XCTAssertEqual(activity[1].toolCallId, "c1")
         // A late delta for the closed block changes nothing.
         let after = SessionReducer.reduce(s, delta("delta", text: "late", title: "Other"))

@@ -361,8 +361,9 @@ struct ActivityItem: Equatable {
         /// `thinking_delta` and replaced in place by its persisted `thinking_block` (the shared kit's
         /// fold, `ThinkingItem`), so it keeps the place in the timeline where it started. The pill-
         /// themed window draws it as a pill beside the tool pills (`PillThinkingHeader`); every other
-        /// transcript as a quiet line (`TranscriptThinkingRow`). Its `text` is kept for a future
-        /// expand view and rendered nowhere yet.
+        /// transcript as a quiet line (`TranscriptThinkingRow`). The LIVE item carries no text (its
+        /// fold is O(the delta)); the persisted block's `text` is kept for a future expand view and
+        /// rendered nowhere yet.
         case thinking(ThinkingItem)
     }
     var kind: Kind

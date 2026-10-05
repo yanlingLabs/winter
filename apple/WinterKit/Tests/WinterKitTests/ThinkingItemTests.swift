@@ -25,7 +25,7 @@ final class ThinkingItemTests: XCTestCase {
         XCTAssertFalse(item.isRunning(turnIsLive: false))
     }
 
-    func testDeltasAppendTextAndTheTitleChangesOnlyWhenCarried() {
+    func testDeltasCountTextWithoutKeepingItAndTheTitleChangesOnlyWhenCarried() {
         var item = ThinkingItem.folding(nil, delta: delta("start"))
         item = ThinkingItem.folding(item, delta: delta("delta", text: "**Plan"))
         XCTAssertEqual(item.label(turnIsLive: true), "Thinking")
@@ -33,8 +33,15 @@ final class ThinkingItemTests: XCTestCase {
         XCTAssertEqual(item.label(turnIsLive: true), "Planning")
         item = ThinkingItem.folding(item, delta: delta("delta", text: "\n\n**Next"))
         XCTAssertEqual(item.title, "Planning", "an absent title means unchanged, never cleared")
-        XCTAssertEqual(item.text, "**Planning**\n\nbody\n\n**Next")
+        XCTAssertEqual(item.text, "", "a live item carries no text — O(delta) per fold; the block brings it")
+        XCTAssertEqual(item.liveTextLength, "**Planning**\n\nbody\n\n**Next".utf16.count)
         XCTAssertEqual(item.label(turnIsLive: false), "Planning", "a titled pill keeps its title when done")
+    }
+
+    func testAClientJoiningMidBlockGetsTheTitleFromItsFirstDelta() {
+        let item = ThinkingItem.folding(nil, delta: delta("delta", text: " more", title: "Planning"))
+        XCTAssertTrue(item.isLive)
+        XCTAssertEqual(item.label(turnIsLive: true), "Planning")
     }
 
     func testHiddenToUpdateFollowsTheLastKind() {
@@ -65,12 +72,22 @@ final class ThinkingItemTests: XCTestCase {
         XCTAssertFalse(item.isRunning(turnIsLive: true))
     }
 
-    func testLiveTextIsCapped() {
-        var item = ThinkingItem.folding(nil, delta: delta("delta", text: String(repeating: "a", count: ThinkingItem.maxTextLength - 2)))
-        item = ThinkingItem.folding(item, delta: delta("delta", text: "bcdef"))
-        XCTAssertEqual(item.text.count, ThinkingItem.maxTextLength)
+    func testALongLiveBlockHoldsOnlyACount() {
+        var item = ThinkingItem.folding(nil, delta: delta("start", kind: "exposed"))
+        let chunk = String(repeating: "a", count: 1_000)
+        for _ in 0..<50 { item = ThinkingItem.folding(item, delta: delta("delta", kind: "exposed", text: chunk)) }
+        XCTAssertEqual(item.liveTextLength, 50_000)
+        XCTAssertEqual(item.text, "")
+        XCTAssertEqual(item.label(turnIsLive: true), "Thinking")
+    }
+
+    func testAPhoneBlockWithItsTextWithheldStillLabels() throws {
+        // The phone-facing paths send `text: ""` — the pill needs only the title / kind / state.
+        let item = try XCTUnwrap(ThinkingItem.folding(nil, json: json(["type": "thinking_block", "seq": 4, "sessionId": "s1", "ts": 0,
+                                                                        "threadId": "main", "blockId": "rb_9", "kind": "exposed", "text": "",
+                                                                        "truncated": true, "durationMs": 9000])))
+        XCTAssertEqual(item.label(turnIsLive: false), "Thought")
         XCTAssertTrue(item.truncated)
-        XCTAssertTrue(item.text.hasSuffix("bc"))
     }
 
     // MARK: - Opaque JSON (the phone's envelopes)

@@ -4,8 +4,8 @@ import WinterProtocol
 /// One reasoning block as a transcript shows it — the "thinking pill" (2026-10-05).
 ///
 /// The daemon projects the runtime's reasoning frames into two events: a TRANSIENT `thinking_delta`
-/// (`phase: "start"` opens the pill, each `"delta"` appends text and, when it changed, carries the
-/// block's title) and a PERSISTED `thinking_block` appended when the block closes. A client keeps ONE
+/// (`phase: "start"` opens the pill, each `"delta"` carries a text increment and the block's current
+/// title) and a PERSISTED `thinking_block` appended when the block closes. A client keeps ONE
 /// item per `blockId`: deltas build it live, the persisted block REPLACES it, and a replay (history,
 /// a reattach) sees only persisted blocks. The daemon derives the title (the provider's own
 /// `**heading**`, or a progress update's sentence); a client never parses reasoning text.
@@ -13,15 +13,20 @@ import WinterProtocol
 /// SHARED by the Mac app (`SessionReducer` folds it into an exchange's activity) and the phone (its
 /// transcript builder), so both fold the two events the same way and both say "Thinking" / title /
 /// "Thought" alike. Typed entry points for a decoded `SessionEvent`, JSON ones for the phone's opaque
-/// `SessionEnvelope.json`. `text` is kept whole on the item so an expand view can show it later; the
-/// pill itself never renders it.
+/// `SessionEnvelope.json`.
+///
+/// A LIVE item carries NO text (review r1): folding a delta costs O(the delta) — the kind, the title and
+/// a running count (`liveTextLength`) — never a copy of everything streamed so far, which made every
+/// delta O(n) for a long raw-reasoning block. The persisted block brings the text (on the Mac; the
+/// phone-facing paths withhold it until the phone has a body view), kept whole on the item for that
+/// future expand view. The pill itself never renders it.
 public struct ThinkingItem: Equatable, Sendable {
     /// What a pill with no title says while its block is still streaming.
     public static let liveLabel = "Thinking"
     /// What a pill with no title says once its block is done (past tense, like the tool pills).
     public static let doneLabel = "Thought"
-    /// The daemon's own cap on a block's text (`THINKING_TEXT_MAX_LENGTH`, packages/protocol) — a
-    /// client holds no more than this of the live text either.
+    /// The daemon's own cap on a block's text (`THINKING_TEXT_MAX_LENGTH`, packages/protocol, in
+    /// UTF-16 units) — what `liveTextLength` is measured against.
     public static let maxTextLength = 20_000
     /// The wire's two type names.
     public static let blockType = "thinking_block"
@@ -33,9 +38,12 @@ public struct ThinkingItem: Equatable, Sendable {
     public var kind: String
     /// The daemon-derived title, if the block has one so far.
     public var title: String?
-    /// The readable reasoning so far (live: every delta's increment, concatenated; done: the persisted
-    /// text). Empty for a hidden block.
+    /// The block's readable reasoning, from its persisted record — EMPTY on a live item (see the type's
+    /// doc), on a hidden block, and on the phone until it gets a body view.
     public var text: String
+    /// How much text (UTF-16 units) the live deltas have carried so far — a running count, kept in O(1)
+    /// per delta. 0 on an item built from a persisted block.
+    public var liveTextLength: Int
     public var truncated: Bool
     /// True while only `thinking_delta`s have built the item — its `thinking_block` has not arrived.
     public var isLive: Bool
@@ -45,7 +53,8 @@ public struct ThinkingItem: Equatable, Sendable {
 
     public init(blockId: String, threadId: String, kind: String, title: String? = nil, text: String = "",
                 truncated: Bool = false, isLive: Bool, durationMs: Int? = nil, provider: String? = nil,
-                model: String? = nil) {
+                model: String? = nil, liveTextLength: Int = 0) {
+        self.liveTextLength = liveTextLength
         self.blockId = blockId
         self.threadId = threadId
         self.kind = kind
@@ -77,24 +86,14 @@ public struct ThinkingItem: Equatable, Sendable {
 
     /// The ONE fold of a `thinking_delta` onto what a client holds for its block (`nil` = nothing yet).
     /// A delta for a block already replaced by its persisted record is ignored (the record is the
-    /// truth); otherwise the kind follows the delta, the text grows by the increment (capped at
-    /// `maxTextLength`), and the title changes only when the delta carries one — an absent title
-    /// means "unchanged".
+    /// truth); otherwise the kind follows the delta, `liveTextLength` grows by the increment's length
+    /// (the text itself is not kept — O(the delta), never O(the block)), and the title changes only
+    /// when the delta carries one — an absent title means "unchanged / none yet".
     public static func folding(_ existing: ThinkingItem?, delta: SessionEvent.ThinkingDelta) -> ThinkingItem {
         if let existing, !existing.isLive { return existing }
         var item = existing ?? ThinkingItem(blockId: delta.blockId, threadId: delta.threadId, kind: delta.kind, isLive: true)
         item.kind = delta.kind
-        if let increment = delta.text, !increment.isEmpty {
-            let room = maxTextLength - item.text.count
-            if room <= 0 {
-                item.truncated = true
-            } else if increment.count <= room {
-                item.text += increment
-            } else {
-                item.text += String(increment.prefix(room))
-                item.truncated = true
-            }
-        }
+        if let increment = delta.text { item.liveTextLength += increment.utf16.count }
         if let title = nonEmpty(delta.title) { item.title = title }
         return item
     }
