@@ -716,9 +716,12 @@ export const ThinkingBlockEvent = ThreadBase.extend({
 /** TRANSIENT (broadcast-only, never persisted — same posture as `assistant_delta`): a reasoning
  *  block's LIVE progress, projected from the agent SDK's `system/reasoning_progress` `start`/`delta`
  *  frames. `start` opens the pill ("Thinking", shimmering); each `delta` carries the text increment
- *  (absent once the block reached `THINKING_TEXT_MAX_LENGTH`, or when only the title changed) and —
- *  only when it CHANGED — the block's current derived `title` (the daemon derives it; clients never
- *  parse the text). The persisted `thinking_block` with the same `blockId` replaces it. */
+ *  (absent once the block reached `THINKING_TEXT_MAX_LENGTH`, or when only the title changed) and the
+ *  block's CURRENT derived `title` — on every delta that carries text and on any where it changed, so a
+ *  client joining mid-block learns it from the next delta (the daemon derives it; clients never parse
+ *  the text; absent = unchanged/none yet, never "cleared"). The persisted `thinking_block` with the
+ *  same `blockId` replaces it. The PHONE-facing paths (the remote stream, `session.history`) withhold
+ *  `text` on both events until the phone has a body view, and drop a delta left with nothing to say. */
 export const ThinkingDeltaEvent = ThreadBase.extend({
   type: z.literal("thinking_delta"),
   blockId: z.string().min(1).max(THINKING_ID_MAX_LENGTH),

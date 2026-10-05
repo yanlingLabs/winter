@@ -456,16 +456,19 @@ class ProjectorImpl implements Projector {
     // (`thinking_delta`, never checkpointed, like `assistant_delta`); `end` is the block's persisted
     // record, claimed under its own stable id so a replay appends it once. A subagent's frame
     // (`parent_tool_use_id`) lands on the child's thread (`threadIdOf`), like its other content, and
-    // only a MAIN-thread frame counts as evidence the session's own turn is running.
+    // only a MAIN-thread `start`/`delta` that PRODUCED something counts as evidence the session's own
+    // turn is running (review r1: a late frame for a block the result already closed projects nothing,
+    // and must not mark a turn running that has ended; an `end` only ever closes, so it never does).
     const reasoning = asReasoningProgressFrame(msg);
     if (reasoning !== undefined) {
-      if (!fromSubagent(reasoning)) {
+      const batch = reasoning.phase === "start" ? this.stampBatch(this.thinking.start(reasoning))
+        : reasoning.phase === "delta" ? this.stampBatch(this.thinking.delta(reasoning))
+          : claim(`tb:${reasoning.block_id}`, () => this.thinking.end(reasoning));
+      if (reasoning.phase !== "end" && !fromSubagent(reasoning) && batch.broadcast.length > 0) {
         this.running = true;
         this.sawFrame = true;
       }
-      if (reasoning.phase === "start") return this.stampBatch(this.thinking.start(reasoning));
-      if (reasoning.phase === "delta") return this.stampBatch(this.thinking.delta(reasoning));
-      return claim(`tb:${reasoning.block_id}`, () => this.thinking.end(reasoning));
+      return batch;
     }
 
     // WS-23: `system/informational` -- the runtime's text notice for the host (a hook's

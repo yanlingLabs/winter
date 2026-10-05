@@ -180,6 +180,22 @@ export function capEvent(event: SessionEvent, outputCap: number = DEFAULT_OUTPUT
   return capJson(event, tighterCap) as SessionEvent;
 }
 
+/** The thinking pill (2026-10-05, review r1): what the PHONE gets of a reasoning event. Until the
+ *  phone has a view that shows a block's body, its `text` is withheld — the pill reads only
+ *  `blockId`/`kind`/`title`/`truncated`/`durationMs` — so a session heavy with raw reasoning (DeepSeek's
+ *  full chain of thought, up to 20,000 units a block) does not fill the 256 KiB history page or the
+ *  live stream. The session log keeps the text, and the Mac (a harness connection) still gets it.
+ *  Applied on BOTH phone paths (`readHistoryPage` and `filterRemoteStreamEvent`), so a block re-read
+ *  from history is the same bytes it was live. Every other event comes back as the same reference. */
+export function phoneViewOf(event: SessionEvent): SessionEvent {
+  if (event.type === "thinking_block") return event.text.length === 0 ? event : { ...event, text: "" };
+  if (event.type === "thinking_delta" && event.text !== undefined) {
+    const { text: _withheld, ...rest } = event;
+    return rest;
+  }
+  return event;
+}
+
 export function readHistoryPage(
   store: SessionStore,
   opts: { sessionId: string; beforeSeq?: number; limit?: number; byteBudget?: number; outputCap?: number },
@@ -197,7 +213,7 @@ export function readHistoryPage(
   // Candidate = the newest `limit` of the filtered list (ascending).
   const candidate = filtered.slice(Math.max(0, filtered.length - limit));
   // Per-event cap, then byte-budget walk newest→oldest, always keeping at least the newest.
-  const capped = candidate.map((e) => capEvent(e, outputCap));
+  const capped = candidate.map((e) => capEvent(phoneViewOf(e), outputCap));
   const kept: SessionEvent[] = [];
   let used = 0;
   for (let i = capped.length - 1; i >= 0; i--) {

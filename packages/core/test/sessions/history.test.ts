@@ -62,7 +62,26 @@ describe("readHistoryPage", () => {
     expect(warning).toMatchObject({ type: "continuity_warning", warning: "model_switch_lossy", text: "reasoning state did not carry over" });
   });
 
-  test("the thinking pill: a thinking_block comes back field-for-field, and a maximal one is never rewritten by the cap", () => {
+  test("the thinking pill: a thinking_block comes back WITHOUT its text (the phone's view); the log keeps it", () => {
+    const { store, sessionId } = boot();
+    const text = "deep raw reasoning ".repeat(1000);
+    store.append(sessionId, {
+      type: "thinking_block", sessionId, threadId: "main", blockId: "rb_1", kind: "exposed",
+      text, truncated: true, provider: "deepseek", model: "deepseek-v4-pro", durationMs: 9000,
+    });
+    store.append(sessionId, { type: "thinking_block", sessionId, threadId: "main", blockId: "rb_2", kind: "summary", title: "Planning", text: "**Planning**", durationMs: 10 });
+    const page = readHistoryPage(store, { sessionId });
+    expect(page.events).toMatchObject([
+      { type: "thinking_block", blockId: "rb_1", kind: "exposed", text: "", truncated: true, durationMs: 9000 },
+      { type: "thinking_block", blockId: "rb_2", kind: "summary", title: "Planning", text: "", durationMs: 10 },
+    ]);
+    // The session log itself keeps the text.
+    expect(store.read(sessionId, 0).find((e) => e.type === "thinking_block")).toMatchObject({ text });
+    // And the withheld text does not eat the page's byte budget.
+    expect(Buffer.byteLength(JSON.stringify(page.events[0]), "utf8")).toBeLessThan(400);
+  });
+
+  test("the thinking pill: a maximal thinking_block (every string at its schema bound) is never rewritten by the cap", () => {
     const { store, sessionId } = boot();
     store.append(sessionId, {
       type: "thinking_block", sessionId, threadId: "main", blockId: "rb_1", kind: "summary",
@@ -78,10 +97,12 @@ describe("readHistoryPage", () => {
     const page = readHistoryPage(store, { sessionId });
     expect(page.events.map((e) => e.type)).toEqual(["thinking_block", "thinking_block"]);
     expect(page.events[0]).toMatchObject({ blockId: "rb_1", kind: "summary", title: "Planning the migration", durationMs: 4200 });
-    const back = page.events[1]!;
-    expect((back as typeof maximal).text).toBe(maximal.text);   // capEvent left it byte-identical
-    expect((back as typeof maximal).title).toBe(maximal.title);
-    expect(capEvent(back)).toBe(back);                          // the same reference: nothing needed capping
+    expect((page.events[1] as typeof maximal).title).toBe(maximal.title);
+    // The cap itself, on the stored event WITH its text (the phone's view withholds it, but should a
+    // body view ever carry it): byte-identical, the same reference — nothing needed capping.
+    const stored = store.read(sessionId, 0).find((e) => e.type === "thinking_block" && e.kind === "exposed")!;
+    expect((stored as typeof maximal).text).toBe(maximal.text);
+    expect(capEvent(stored)).toBe(stored);
   });
 
   test("filters out non-allowlisted events; returns ascending page with oldestSeq/hasMore", () => {

@@ -839,8 +839,9 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     /// TRANSIENT (see `transientTypes` at the bottom of this file): a reasoning block's LIVE progress
     /// — broadcast-only, never persisted/replayed. Mirrors TS `ThinkingDeltaEvent`. `phase` is `start`
     /// (the pill opens, "Thinking") or `delta` (`text` = the increment to append, when there is one;
-    /// `title` = the daemon-derived title, only when it CHANGED — absent means "unchanged", never
-    /// "cleared"). The persisted `ThinkingBlock` with the same `blockId` replaces it.
+    /// `title` = the daemon-derived CURRENT title, on every delta that carries text and on any where
+    /// it changed — absent means "unchanged / none yet", never "cleared"). The persisted
+    /// `ThinkingBlock` with the same `blockId` replaces it. The phone-facing paths withhold `text`.
     public struct ThinkingDelta: Codable, Equatable, Sendable {
         public let seq: Int
         public let sessionId: String

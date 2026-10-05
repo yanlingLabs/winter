@@ -458,9 +458,10 @@ describe("sync.heads / sync.pull / sync.push (Chat Slice D task 2)", () => {
     c.close();
   });
 
-  // `tool_result.siteIcons` is the daemon's own stamp — urls the Mac fetches. The phone's chat engine
-  // never writes it, so a pushed one is refused whole (and the same result without it is accepted).
-  test("a tool_result carrying siteIcons rejects the whole batch", async () => {
+  // `tool_result.siteIcons` is the daemon's own stamp — urls the Mac FETCHES, so a phone-supplied list is
+  // never stored. Review r1: refusing it wedged a fork of a daemon-born chat log (which carries the
+  // daemon's own icons) forever, so it is STRIPPED instead — that key alone, every other byte as sent.
+  test("a tool_result carrying siteIcons is stored WITHOUT them; the rest of its line is byte-identical", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "sync-client");
@@ -468,32 +469,61 @@ describe("sync.heads / sync.pull / sync.push (Chat Slice D task 2)", () => {
     await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true });
     const result = { type: "tool_result", threadId: "main", callId: "call_1", output: "ok", isError: false };
     const withIcons = ev(id, 2, { ...result, siteIcons: [{ url: "https://a.example.com/x", iconUrl: "https://a.example.com/favicon.ico" }] });
-    const bad = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([withIcons])), complete: true });
-    expect(bad.error?.code).toBe(ERR.INVALID_PARAMS);
-    expect(bad.error?.message).toContain("siteIcons");
-    expect(store.lastSeq(id)).toBe(1);
-    const good = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([ev(id, 2, result)])), complete: true });
-    expect(good.error).toBeUndefined();
+    const res = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([withIcons])), complete: true });
+    expect(res.error).toBeUndefined();
     expect(store.lastSeq(id)).toBe(2);
+    const { bytes } = await pullAll(c, id, 1);
+    expect(bytes.toString("utf8")).toBe(JSON.stringify(ev(id, 2, result)) + "\n");
     c.close();
   });
 
-  // The thinking pill (2026-10-05): `thinking_block`/`thinking_delta` are the daemon's own projection
-  // of the runtime's reasoning frames; the phone's chat engine produces neither yet, so both are refused.
-  test("a thinking_block or thinking_delta rejects the whole batch", async () => {
+  // The thinking pill (2026-10-05): a `thinking_delta` is transient — never in a log — so a pushed one is
+  // refused; a `thinking_block` IS in daemon chat logs and is accepted byte for byte.
+  test("a thinking_delta rejects the whole batch; a thinking_block is accepted as sent", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "sync-client");
     const id = uuid();
     await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true });
-    const block = ev(id, 2, { type: "thinking_block", threadId: "main", blockId: "rb_1", kind: "summary", title: "Planning", text: "**Planning**" });
     const delta = ev(id, 2, { type: "thinking_delta", threadId: "main", blockId: "rb_1", kind: "summary", phase: "start" });
-    for (const pushed of [block, delta]) {
-      const bad = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([pushed])), complete: true });
-      expect(bad.error?.code).toBe(ERR.INVALID_PARAMS);
-      expect(bad.error?.message).toContain((pushed as { type: string }).type);
-      expect(store.lastSeq(id)).toBe(1);
-    }
+    const bad = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([delta])), complete: true });
+    expect(bad.error?.code).toBe(ERR.INVALID_PARAMS);
+    expect(bad.error?.message).toContain("thinking_delta");
+    expect(store.lastSeq(id)).toBe(1);
+    const block = ev(id, 2, { type: "thinking_block", threadId: "main", blockId: "rb_1", kind: "summary", title: "Planning", text: "**Planning**" });
+    const good = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([block])), complete: true });
+    expect(good.error).toBeUndefined();
+    const { bytes } = await pullAll(c, id, 1);
+    expect(bytes.toString("utf8")).toBe(JSON.stringify(block) + "\n");
+    c.close();
+  });
+
+  // Review r1: the phone's `SyncClient.forkAndReconcile` re-pushes the WHOLE local log — pulled from the
+  // daemon — at baseSeq 0 under a new id. A daemon chat log now carries `thinking_block`s and
+  // `tool_result.siteIcons`; neither may wedge that push.
+  test("a daemon-born chat log (thinking_block + siteIcons), pulled and re-pushed as a fork, lands", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "sync-client");
+    const original = store.createSession("global", { mode: "chat" });
+    store.append(original, { type: "user_message", sessionId: original, threadId: "main", text: "look it up", clientName: "orb" });
+    store.append(original, { type: "thinking_block", sessionId: original, threadId: "main", blockId: "rb_1", kind: "summary", title: "Searching", text: "**Searching**\n\nfor it", durationMs: 800 });
+    store.append(original, { type: "tool_call", sessionId: original, threadId: "main", callId: "c1", name: "WebFetch", argsJson: "{}" });
+    store.append(original, { type: "tool_result", sessionId: original, threadId: "main", callId: "c1", output: "page", isError: false,
+      siteIcons: [{ url: "https://example.com/a", iconUrl: "https://example.com/favicon.ico" }] });
+    store.append(original, { type: "assistant_message", sessionId: original, threadId: "main", text: "found it" });
+    const { bytes } = await pullAll(c, original);
+    // The phone's fork: the same lines under its own new id.
+    const forkId = uuid();
+    const lines = bytes.toString("utf8").trim().split("\n").map((l) => ({ ...JSON.parse(l), sessionId: forkId }));
+    expect(lines.map((l) => l.type)).toContain("thinking_block");
+    expect(lines.find((l) => l.type === "tool_result").siteIcons).toHaveLength(1);
+    const res = await pushChunked(c, forkId, 0, jsonl(lines));
+    expect(res.error).toBeUndefined();
+    expect(store.lastSeq(forkId)).toBe(lines.length);
+    const stored = (await pullAll(c, forkId)).bytes.toString("utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(stored.find((e) => e.type === "thinking_block")).toMatchObject({ blockId: "rb_1", title: "Searching", text: "**Searching**\n\nfor it" });
+    expect(stored.find((e) => e.type === "tool_result").siteIcons).toBeUndefined();
     c.close();
   });
 

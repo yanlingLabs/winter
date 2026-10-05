@@ -442,6 +442,22 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     expect(filterRemoteStreamEvent(continuityWarning)).toBe(continuityWarning);
   });
 
+  test("the thinking pill: the phone's stream gets reasoning events WITHOUT their text; a title-less delta is not sent", () => {
+    const base = { seq: 5, sessionId: "s1", ts: 0, threadId: "main", blockId: "rb_1" };
+    const block: SessionEvent = { ...base, type: "thinking_block", kind: "exposed", text: "raw reasoning ".repeat(500), truncated: true, durationMs: 900 };
+    const out = filterRemoteStreamEvent(block);
+    expect(out).toMatchObject({ type: "thinking_block", blockId: "rb_1", kind: "exposed", text: "", truncated: true, durationMs: 900 });
+    expect((block as { text: string }).text.length).toBeGreaterThan(0);          // the hub's own event is untouched
+    const titled: SessionEvent = { ...base, type: "thinking_delta", kind: "summary", phase: "delta", text: "**Plan**\n\nbody", title: "Plan" };
+    const titledOut = filterRemoteStreamEvent(titled) as Record<string, unknown>;
+    expect(titledOut).toMatchObject({ type: "thinking_delta", phase: "delta", title: "Plan" });
+    expect("text" in titledOut).toBe(false);
+    const start: SessionEvent = { ...base, type: "thinking_delta", kind: "summary", phase: "start" };
+    expect(filterRemoteStreamEvent(start)).toBe(start);
+    const raw: SessionEvent = { ...base, type: "thinking_delta", kind: "exposed", phase: "delta", text: "raw chain of thought" };
+    expect(filterRemoteStreamEvent(raw)).toBeNull();
+  });
+
   test("TRANSIENT_EVENT_TYPES is EXACTLY the thirteen — the Swift mirror pins the same literals", () => {
     // Parity, remote-allowlist style: neither side imports the other, each pins its own copy to
     // these literal strings, so editing one alone fails here or in

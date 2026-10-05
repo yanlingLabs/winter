@@ -29,8 +29,20 @@ const of = (events: SessionEvent[], type: string): Any[] => (events as unknown a
 describe("deriveThinkingTitle (pure)", () => {
   test("summary: the latest part's leading complete **…** span", () => {
     expect(deriveThinkingTitle("summary", ["**Planning the migration**\n\nI will read the schema."])).toBe("Planning the migration");
-    expect(deriveThinkingTitle("summary", ["**Planning**\n\nbody", "**Checking  the\ntests**\n\nmore"])).toBe("Checking the tests");
+    expect(deriveThinkingTitle("summary", ["**Planning**\n\nbody", "**Checking  the tests**\n\nmore"])).toBe("Checking the tests");
+    // A heading must close on its own line.
+    expect(deriveThinkingTitle("summary", ["**Checking the\ntests**"])).toBeUndefined();
     expect(deriveThinkingTitle("summary", ["  \n**Leading whitespace is fine**"])).toBe("Leading whitespace is fine");
+  });
+
+  test("summary: the LAST complete heading at the start of a line anywhere in the part (a part-less Gemini block)", () => {
+    const gemini = "**Reading the schema**\n\nIt has three tables.\n\n**Planning the migration**\n\nTwo steps.";
+    expect(deriveThinkingTitle("summary", [gemini])).toBe("Planning the migration");
+    // A newer heading still missing its closing ** does not count; the one before it still does.
+    expect(deriveThinkingTitle("summary", [`${gemini}\n\n**Writing the te`])).toBe("Planning the migration");
+    // A bold word mid-line is not a heading, even after a heading.
+    expect(deriveThinkingTitle("summary", [`${gemini}\n\nthe **users** table first`])).toBe("Planning the migration");
+    expect(deriveThinkingTitle("summary", [`${gemini}\n  **Indented heading**`])).toBe("Indented heading");
   });
 
   test("summary: a partial opening ** yields nothing yet, nor does a part with no leading heading", () => {
@@ -109,7 +121,7 @@ describe("projector: system/reasoning_progress → thinking_delta / thinking_blo
     expect(d2[0]).toMatchObject({ text: "ning**\n\nread the schema", title: "Planning" });
     const d3 = accept(projector, rp("rb_2", "delta", "summary", { text: "**Check", part: 1 }));
     expect(d3[0]).toMatchObject({ text: "\n\n**Check" });             // the separator rides the increment
-    expect((d3[0] as Any).title).toBeUndefined();                    // unchanged → not repeated, not cleared
+    expect((d3[0] as Any).title).toBe("Planning");                   // the CURRENT title rides every text delta — kept, not cleared
     const d4 = accept(projector, rp("rb_2", "delta", "summary", { text: "ing the tests**", part: 1 }));
     expect(d4[0]).toMatchObject({ text: "ing the tests**", title: "Checking the tests" });
     const block = of(accept(projector, rp("rb_2", "end", "summary")), "thinking_block")[0]!;
@@ -117,6 +129,62 @@ describe("projector: system/reasoning_progress → thinking_delta / thinking_blo
     expect(block.title).toBe("Checking the tests");
     // A client that concatenates every increment holds exactly the persisted text.
     expect([d1, d2, d3, d4].map((d) => (d[0] as Any).text).join("")).toBe(block.text as string);
+  });
+
+  test("a part-less block (Gemini) whose chunks each open with a heading follows the newest heading", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    accept(projector, rp("rb_g", "start", "summary", { provider: "google", model: "gemini-3-pro" }));
+    const d1 = accept(projector, rp("rb_g", "delta", "summary", { text: "**Reading the schema**\n\nThree tables." }));
+    expect(d1[0]).toMatchObject({ title: "Reading the schema" });
+    const d2 = accept(projector, rp("rb_g", "delta", "summary", { text: "\n\n**Planning the" }));
+    expect(d2[0]).toMatchObject({ title: "Reading the schema" });           // partial: the current one rides on
+    const d3 = accept(projector, rp("rb_g", "delta", "summary", { text: " migration**\n\nTwo steps." }));
+    expect(d3[0]).toMatchObject({ title: "Planning the migration" });
+    const block = of(accept(projector, rp("rb_g", "end", "summary")), "thinking_block")[0]!;
+    expect(block.title).toBe("Planning the migration");
+    expect(block.text).toBe("**Reading the schema**\n\nThree tables.\n\n**Planning the migration**\n\nTwo steps.");
+  });
+
+  test("the heading scan stays bounded: a heading far past the window start is still found, one before it is not re-read", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    accept(projector, rp("rb_w", "delta", "summary", { text: "**First**\n\n" }));
+    // 10,000 units of body, then a new heading — the window holds the tail only.
+    accept(projector, rp("rb_w", "delta", "summary", { text: `${"word ".repeat(2000)}\n` }));
+    const d = accept(projector, rp("rb_w", "delta", "summary", { text: "**Second**\n\nmore" }));
+    expect(d[0]).toMatchObject({ title: "Second" });
+    // A long line that scrolls the window past "**Second**" keeps it (sticky), and a "**" cut in half at
+    // the window's edge is never read as a heading.
+    const after = accept(projector, rp("rb_w", "delta", "summary", { text: "x".repeat(5000) }));
+    expect(after[0]).toMatchObject({ title: "Second" });
+  });
+
+  test("a client joining mid-block learns the title from the next text delta", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    accept(projector, rp("rb_j", "start", "summary"));
+    accept(projector, rp("rb_j", "delta", "summary", { text: "**Planning**\n\nfirst", part: 0 }));
+    // A client attaching NOW saw neither the start nor the title change — the next delta carries it.
+    const joined = accept(projector, rp("rb_j", "delta", "summary", { text: " and more", part: 0 }));
+    expect(joined[0]).toMatchObject({ phase: "delta", text: " and more", title: "Planning" });
+    // A delta with no text and no change stays empty.
+    expect(accept(projector, rp("rb_j", "delta", "summary", { text: "", part: 0 }))).toEqual([]);
+  });
+
+  test("a late frame after the result projects nothing and does not mark a turn running", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "go");
+    accept(projector, rp("rb_late", "start", "summary"));
+    accept(projector, result());                                          // closes rb_late
+    expect(projector.turnRunning).toBe(false);
+    expect(accept(projector, rp("rb_late", "delta", "summary", { text: "late" }))).toEqual([]);
+    expect(accept(projector, rp("rb_late", "end", "summary"))).toEqual([]);
+    expect(projector.turnRunning).toBe(false);
+    // An `end` never marks a turn running, even one that persists.
+    expect(of(accept(projector, rp("rb_orphan", "end", "hidden")), "thinking_block")).toHaveLength(1);
+    expect(projector.turnRunning).toBe(false);
   });
 
   test("a part with no heading keeps the last title (the pill never regresses to 'Thinking' mid-block)", () => {
