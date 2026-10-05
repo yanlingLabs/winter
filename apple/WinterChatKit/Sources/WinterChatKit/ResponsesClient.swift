@@ -180,7 +180,13 @@ enum ResponsesRequestBody {
             "include": request.reasoningEffort != nil ? ["reasoning.encrypted_content"] : [],
         ]
         if let effort = request.reasoningEffort {
-            body["reasoning"] = ["effort": effort]
+            // The thinking pill: a readable summary is asked for ONLY alongside reasoning, exactly as
+            // the daemon does for the same codex rows (the agent SDK's `resolveReasoning`: requested
+            // AND reasoning on → the descriptor's first `reasoning.summary` value, `"auto"` for every
+            // `codex-oauth/*` row in the pinned catalog). Codex-rs sends the same `"auto"` default.
+            body["reasoning"] = request.requestSummary
+                ? ["effort": effort, "summary": "auto"]
+                : ["effort": effort]
         }
         return try JSONSerialization.data(withJSONObject: body)
     }
@@ -264,18 +270,52 @@ final class ResponsesSSEParser {
         switch type {
         case "response.output_text.delta":
             return [.textDelta(stringValue(json["delta"]))]
+        case "response.output_item.added":
+            // The thinking pill: a reasoning item OPENS a live block — `hidden` until readable text
+            // arrives (an encrypted-only item, no summary asked for, stays hidden to its close).
+            guard let item = json["item"] as? [String: Any], item["type"] as? String == "reasoning" else { return [] }
+            let block = reasoningBlock(json, id: item["id"], opening: true)
+            return [.reasoningProgress(ProviderReasoningProgress(blockId: block, phase: .start, kind: "hidden"))]
+        case "response.reasoning_summary_text.delta":
+            // A provider-written SUMMARY part (`summary_index`). Display-only: it never reaches the
+            // assistant text and never the next request.
+            let delta = stringValue(json["delta"])
+            guard !delta.isEmpty else { return [] }
+            let block = reasoningBlock(json, id: json["item_id"])
+            return [.reasoningProgress(ProviderReasoningProgress(
+                blockId: block, phase: .delta, kind: "summary", text: delta,
+                part: partNumber(block, channel: "summary", json["summary_index"])))]
+        case "response.reasoning_text.delta":
+            // The reasoning TEXT channel. Every codex row's catalog claim is `readableState:
+            // "summary"`, so — the agent SDK's rule for a non-`full-exposed` row — it reads as a summary
+            // too, on its own part numbers (a block's two channels both count from 0).
+            let delta = stringValue(json["delta"])
+            guard !delta.isEmpty else { return [] }
+            let block = reasoningBlock(json, id: json["item_id"])
+            return [.reasoningProgress(ProviderReasoningProgress(
+                blockId: block, phase: .delta, kind: "summary", text: delta,
+                part: partNumber(block, channel: "text", json["content_index"])))]
         case "response.output_item.done":
             guard let item = json["item"] as? [String: Any], let itemType = item["type"] as? String else { return [] }
-            // whole-branch #2: capture ONLY reasoning items carrying a non-empty encrypted_content
-            // (the replayable ones); a summary-only reasoning item has nothing to replay.
-            if itemType == "reasoning", let enc = item["encrypted_content"] as? String, !enc.isEmpty {
-                // Codex parity: strip `id` (always cleared under store:false) and `status` (never
-                // echoed back). encrypted_content is preserved VERBATIM — opaque, never logged.
-                var stripped = item
-                stripped.removeValue(forKey: "id")
-                stripped.removeValue(forKey: "status")
-                guard let json = try? JSONSerialization.data(withJSONObject: stripped) else { return [] }
-                return [.reasoningItem(itemJSON: String(decoding: json, as: UTF8.self))]
+            if itemType == "reasoning" {
+                var out: [ProviderEvent] = []
+                // whole-branch #2: capture ONLY reasoning items carrying a non-empty encrypted_content
+                // (the replayable ones); a summary-only reasoning item has nothing to replay.
+                if let enc = item["encrypted_content"] as? String, !enc.isEmpty {
+                    // Codex parity: strip `id` (always cleared under store:false) and `status` (never
+                    // echoed back). encrypted_content is preserved VERBATIM — opaque, never logged.
+                    var stripped = item
+                    stripped.removeValue(forKey: "id")
+                    stripped.removeValue(forKey: "status")
+                    if let json = try? JSONSerialization.data(withJSONObject: stripped) {
+                        out.append(.reasoningItem(itemJSON: String(decoding: json, as: UTF8.self)))
+                    }
+                }
+                // The item is complete, so its live block closes. The close names no kind (the block
+                // keeps the last one it reported) and never carries the item's opaque content.
+                out.append(.reasoningProgress(ProviderReasoningProgress(
+                    blockId: reasoningBlock(json, id: item["id"]), phase: .end)))
+                return out
             }
             if itemType == "function_call" {
                 sawToolCall = true
@@ -298,6 +338,52 @@ final class ResponsesSSEParser {
         default:
             return [] // forward-compat: ignore unknown event types (incl. argument deltas)
         }
+    }
+
+    // MARK: reasoning blocks (the thinking pill)
+
+    /// Each reasoning item's block id, remembered under EVERY name an event gave it — the agent SDK's
+    /// `reasoningKey` (`adapters/openai/responses.ts`): `output_item.added` names the item by `item.id`,
+    /// a delta by `item_id`, and both carry `output_index`, but a compatible backend may drop either.
+    private var blockById: [String: String] = [:]
+    private var blockByIndex: [Int: String] = [:]
+    /// The block named last: where a delta naming neither its item nor its position belongs.
+    private var lastBlock: String?
+    /// Per block, each distinct (channel, index) → its part number, in first-appearance order (the
+    /// SDK's `partNumber`): the summary and text channels both count from 0.
+    private var partNumbers: [String: [String: Int]] = [:]
+
+    /// The block an event belongs to. The provider's own item id IS the block id when it gave one
+    /// (unique per response item); otherwise — a position only, or nothing — a minted id, never a
+    /// position: `#0` would repeat every round and the transcript keys its rows by block id.
+    private func reasoningBlock(_ payload: [String: Any], id: Any?, opening: Bool = false) -> String {
+        let named = (id as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let index = (payload["output_index"] as? NSNumber)?.intValue
+        var block = named.flatMap { blockById[$0] } ?? index.flatMap { blockByIndex[$0] }
+        if block == nil {
+            if let named, named.utf16.count <= ThinkingTitle.idMaxLength {
+                block = named
+            } else if named == nil, index == nil, !opening, let lastBlock {
+                block = lastBlock
+            } else {
+                block = "rb_" + UUID().uuidString.lowercased()
+            }
+        }
+        let resolved = block!
+        if let named { blockById[named] = resolved }
+        if let index { blockByIndex[index] = resolved }
+        lastBlock = resolved
+        return resolved
+    }
+
+    private func partNumber(_ block: String, channel: String, _ raw: Any?) -> Int {
+        let key = "\(channel):\((raw as? NSNumber)?.intValue ?? 0)"
+        var parts = partNumbers[block] ?? [:]
+        if let existing = parts[key] { return existing }
+        let next = parts.count
+        parts[key] = next
+        partNumbers[block] = parts
+        return next
     }
 
     private func stringValue(_ any: Any?) -> String {

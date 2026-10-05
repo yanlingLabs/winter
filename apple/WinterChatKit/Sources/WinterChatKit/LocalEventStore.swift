@@ -274,13 +274,15 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
     // MARK: the persist-on-emit sink
 
     /// Persists an emitted `SessionEvent`. The daemon-faithful `emit` sink (Task 11 wires
-    /// `runTurn(emit:)` to this): a TRANSIENT `assistant_delta` is dropped (its seq rides the head,
-    /// it is never in the log — mirrors `hub.broadcastTransient`), every other event is appended
-    /// verbatim. Trusts the engine's already-stamped seq (the engine is the single writer and stamps
-    /// contiguously from `lastSeq + 1`); a non-advancing seq is ignored defensively so a double-emit
-    /// can never rewind the head.
+    /// `runTurn(emit:)` to this): a TRANSIENT event — `assistant_delta`, the thinking pill's
+    /// `thinking_delta`, any member of `SessionEvent.transientTypes` — is dropped (its seq rides the
+    /// head, it is never in the log — mirrors `hub.broadcastTransient`; `sync.push` would refuse a
+    /// `thinking_delta` outright), every other event is appended verbatim. Trusts the engine's
+    /// already-stamped seq (the engine is the single writer and stamps contiguously from
+    /// `lastSeq + 1`); a non-advancing seq is ignored defensively so a double-emit can never rewind
+    /// the head.
     public func persist(_ event: SessionEvent) {
-        if case .assistantDelta = event { return } // transient — never persisted
+        if event.isTransient { return } // transient — never persisted
         guard let data = try? JSONEncoder().encode(event) else { return }
         let seq = Self.seqOf(event)
         lock.withLock {
@@ -482,7 +484,9 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
 
     /// The ONE event→input mapping, faithful to `engine.ts`'s `eventToInput`. Reads the type-specific
     /// fields off the already-parsed line. Returns nil for events with no provider shape
-    /// (session_created, turn_started/completed, question_asked/resolved, agent_error, …).
+    /// (session_created, turn_started/completed, question_asked/resolved, agent_error, …) — and, by
+    /// design, for the thinking pill's `thinking_block`: reasoning text is for the human and never
+    /// re-enters a model's input (the opaque `reasoning_item` is the one continuity carrier).
     static func eventToInput(_ env: LineEnvelope) -> ProviderInputItem? {
         let o = env.object
         switch env.type {

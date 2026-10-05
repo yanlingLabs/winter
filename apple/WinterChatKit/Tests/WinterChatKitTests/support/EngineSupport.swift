@@ -117,6 +117,8 @@ extension SessionEvent {
         case .questionResolved: return "question_resolved"
         case .agentError: return "agent_error"
         case .turnCompleted: return "turn_completed"
+        case .thinkingDelta: return "thinking_delta"
+        case .thinkingBlock: return "thinking_block"
         default: return "other"
         }
     }

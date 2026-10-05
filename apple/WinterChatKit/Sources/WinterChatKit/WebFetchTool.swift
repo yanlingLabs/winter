@@ -332,7 +332,7 @@ public enum WebFetchTool {
                     usage = ToolUsage(inputTokens: usage.inputTokens + input,
                                       outputTokens: usage.outputTokens + output)
                 case .error: failed = true
-                case .reasoningItem, .toolCall, .done: break
+                case .reasoningItem, .reasoningProgress, .toolCall, .done: break
                 }
             }
             return (text, usage, failed)
