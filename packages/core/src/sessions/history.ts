@@ -1,7 +1,7 @@
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionStore } from "./store";
 
-/** The 12 persisted, phone-foldable event types history is allowed to return. Allowlist, never a
+/** The 13 persisted, phone-foldable event types history is allowed to return. Allowlist, never a
  *  denylist: an unknown future type stays out until deliberately added — and adding one REQUIRES
  *  re-checking the per-event cap covers its large strings (capJson bounds strings at ANY depth,
  *  which is what admitted question_asked's nested options[].description). `reasoning_item` (opaque
@@ -55,6 +55,13 @@ export const HISTORY_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<Se
   // carry across, a summary before a switch, reasoning state that could not be saved. `text` is
   // capped at 4,000 characters, `warning` at 64 -- both inside this file's per-event string cap.
   "continuity_warning",
+  // The thinking pill (2026-10-05): `thinking_block` -- one reasoning block's pill (its title) and
+  // text. Bounded at every depth: `text` ≤ 20,000 UTF-16 units (≤ 60,000 UTF-8 bytes, under this
+  // file's 64 KiB per-string cap, so `capEvent` never rewrites it), `title` ≤ 200, `blockId`/
+  // `provider`/`model` ≤ 256 -- flat strings, no nesting. Its live half (`thinking_delta`) is
+  // TRANSIENT and reaches the remote stream through `TRANSIENT_EVENT_TYPES`. An old phone skips it
+  // exactly as it skips `hook_notice` (see above). `reasoning_item` stays OUT: opaque provider state.
+  "thinking_block",
 ]);
 
 /** Truncates `value` to `cap` UTF-8 bytes (backed off to a char boundary) plus a deterministic
@@ -173,6 +180,22 @@ export function capEvent(event: SessionEvent, outputCap: number = DEFAULT_OUTPUT
   return capJson(event, tighterCap) as SessionEvent;
 }
 
+/** The thinking pill (2026-10-05, review r1): what the PHONE gets of a reasoning event. Until the
+ *  phone has a view that shows a block's body, its `text` is withheld — the pill reads only
+ *  `blockId`/`kind`/`title`/`truncated`/`durationMs` — so a session heavy with raw reasoning (DeepSeek's
+ *  full chain of thought, up to 20,000 units a block) does not fill the 256 KiB history page or the
+ *  live stream. The session log keeps the text, and the Mac (a harness connection) still gets it.
+ *  Applied on BOTH phone paths (`readHistoryPage` and `filterRemoteStreamEvent`), so a block re-read
+ *  from history is the same bytes it was live. Every other event comes back as the same reference. */
+export function phoneViewOf(event: SessionEvent): SessionEvent {
+  if (event.type === "thinking_block") return event.text.length === 0 ? event : { ...event, text: "" };
+  if (event.type === "thinking_delta" && event.text !== undefined) {
+    const { text: _withheld, ...rest } = event;
+    return rest;
+  }
+  return event;
+}
+
 export function readHistoryPage(
   store: SessionStore,
   opts: { sessionId: string; beforeSeq?: number; limit?: number; byteBudget?: number; outputCap?: number },
@@ -190,7 +213,7 @@ export function readHistoryPage(
   // Candidate = the newest `limit` of the filtered list (ascending).
   const candidate = filtered.slice(Math.max(0, filtered.length - limit));
   // Per-event cap, then byte-budget walk newest→oldest, always keeping at least the newest.
-  const capped = candidate.map((e) => capEvent(e, outputCap));
+  const capped = candidate.map((e) => capEvent(phoneViewOf(e), outputCap));
   const kept: SessionEvent[] = [];
   let used = 0;
   for (let i = capped.length - 1; i >= 0; i--) {

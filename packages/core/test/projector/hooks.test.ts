@@ -87,9 +87,11 @@ describe("projector/hooks: observed, never persisted", () => {
     for (const kind of ["system/task_started", "system/task_progress", "system/task_updated", "system/task_notification"]) {
       expect({ kind, known: isKnownUnpersistedKind(kind) }).toEqual({ kind, known: true });
     }
-    // +2: `system/api_retry` (projects a transient) and `system/continuity_warning` (persisted since WS-23
-    // review r1 I-3) stay KNOWN kinds for the log allowlist.
-    expect(UNPERSISTED_KINDS.length).toBe(unpersisted.length + 4 + 2);
+    // +3: `system/api_retry` (projects a transient), `system/continuity_warning` (persisted since WS-23
+    // review r1 I-3) and `system/reasoning_progress` (the thinking pill, 2026-10-05: projected, provider
+    // alone allowlisted) stay KNOWN kinds for the log allowlist.
+    expect(UNPERSISTED_KINDS.length).toBe(unpersisted.length + 4 + 3);
+    expect(isKnownUnpersistedKind("system/reasoning_progress")).toBe(true);
   });
 
   test("the coverage map gains nothing from these families — the hook LIFECYCLE rows stay unpersisted (P8b-21); WS-23's hook_notice is the SDK's informational frame, not a hook_* row", () => {
@@ -98,7 +100,9 @@ describe("projector/hooks: observed, never persisted", () => {
     // the full protocol checklist -- and none of the families listed above.
     const produced = Object.entries(PROJECTED_EVENT_COVERAGE).filter(([, v]) => v === true).map(([k]) => k).sort();
     expect(produced).toEqual([
-      "agent_error", "assistant_delta", "assistant_message", "continuity_warning", "hook_notice", "provider_retry", "task_updated", "thread_completed",
+      "agent_error", "assistant_delta", "assistant_message", "continuity_warning", "hook_notice", "provider_retry", "task_updated",
+      // The thinking pill (2026-10-05): `system/reasoning_progress`, not one of the families above.
+      "thinking_block", "thinking_delta", "thread_completed",
       "thread_started", "tool_call", "tool_result", "turn_completed", "turn_started", "user_message",
     ]);
   });

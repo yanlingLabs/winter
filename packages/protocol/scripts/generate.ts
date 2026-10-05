@@ -145,6 +145,11 @@ const fixtures: Record<string, unknown> = {
   // full switch-trap discipline.
   elicitation_requested: { type: "elicitation_requested", sessionId: "s_1", threadId: "main", seq: 36, ts: 1700000000026, elicitationId: "el_1", mode: "url", serverName: "linear", message: "Connect your Linear workspace to continue.", host: "linear.app", origin: "https://linear.app", issuedAt: 1700000000026, expiresAt: 1700000600026 },
   elicitation_resolved: { type: "elicitation_resolved", sessionId: "s_1", threadId: "main", seq: 37, ts: 1700000000027, elicitationId: "el_1", action: "accept", by: "orb" },
+  // The thinking pill (2026-10-05): a persisted reasoning block and its TRANSIENT live progress -- a
+  // NEW SessionEvent variant pair, full switch-trap discipline. The block carries every optional
+  // field so the Swift round-trip exercises them all.
+  thinking_block: { type: "thinking_block", sessionId: "s_1", threadId: "main", seq: 38, ts: 1700000000028, blockId: "rb_1", kind: "summary", title: "Planning the migration", text: "**Planning the migration**\n\nI need to read the schema first.\n\n**Checking the tests**\n\nThe suite pins the count.", truncated: false, provider: "openai", model: "gpt-5.6-terra", durationMs: 4200 },
+  thinking_delta: { type: "thinking_delta", sessionId: "s_1", threadId: "main", seq: 38, ts: 1700000000029, blockId: "rb_2", kind: "update", phase: "delta", text: "Reading the schema before changing it.", title: "Reading the schema before changing it." },
   "child_update": { ...base, threadId: "main", type: "child_update", childSessionId: "s_child000001", status: "completed", title: "Fix login bug", resultSummary: "Fixed the null token check; tests pass." },
   // Dispatch relay (Phase 7): childSessionId is additive/optional on the four existing
   // approval/question shapes — dedicated with-fixtures so Swift round-trips carriers, mirroring

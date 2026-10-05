@@ -285,7 +285,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
   // The correction the plan itself nearly got wrong: transients must SURVIVE this filter
   // ---------------------------------------------------------------------------------------------
 
-  test("all twelve TRANSIENT types reach a remote client — the live policy is history's allowlist PLUS these", async () => {
+  test("all thirteen TRANSIENT types reach a remote client — the live policy is history's allowlist PLUS these", async () => {
     const { store, hub, socketPath, remoteToken } = await boot();
     const sessionId = store.createSession("global", { mode: "code" });
 
@@ -312,6 +312,8 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // plugin_tile_updated above.
     hub.broadcastTransient(sessionId, { type: "provider_login_progress", sessionId, provider: "anthropic", line: "Opening browser to sign in..." });
     hub.broadcastTransient(sessionId, { type: "provider_login_finished", sessionId, provider: "anthropic", ok: true });
+    // The thinking pill (2026-10-05): a reasoning block's live progress — the phone's pill streams too.
+    hub.broadcastTransient(sessionId, { type: "thinking_delta", sessionId, threadId: "main", blockId: "rb_1", kind: "update", phase: "delta", text: "Reading the schema.", title: "Reading the schema." });
 
     // Keyed to this broadcast's own VALUE, not just its type: since T5 the attach above emits a
     // `session_activity` of its own ("active"), so a type-only wait would already be satisfied
@@ -391,7 +393,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
   // The policy itself
   // ---------------------------------------------------------------------------------------------
 
-  test("REMOTE_STREAM_EVENT_TYPES is EXACTLY history's allowlist + the twelve transients + the three stream-control types", () => {
+  test("REMOTE_STREAM_EVENT_TYPES is EXACTLY history's allowlist + the thirteen transients + the three stream-control types", () => {
     const expected = new Set<string>([
       ...HISTORY_EVENT_TYPES,
       ...TRANSIENT_EVENT_TYPES,
@@ -413,7 +415,11 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // 25 → 27 (WS-24 lane `phone`: hook_notice/continuity_warning — via HISTORY_EVENT_TYPES, which
     // grew 10 → 12; confirmed safe for an old phone with no capability gate, see history.ts's own
     // doc comment).
-    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(27);
+    // 27 → 29 (the thinking pill, 2026-10-05: `thinking_block` via HISTORY_EVENT_TYPES, 12 → 13, and
+    // `thinking_delta` via the transients, 12 → 13).
+    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(29);
+    expect(REMOTE_STREAM_EVENT_TYPES.has("thinking_block")).toBe(true);
+    expect(REMOTE_STREAM_EVENT_TYPES.has("thinking_delta")).toBe(true);
     // The one exclusion the whole first half of this file is about.
     expect(REMOTE_STREAM_EVENT_TYPES.has("reasoning_item" as SessionEvent["type"])).toBe(false);
     // ...and the ones that would have quietly reverted the phone-client streaming fix.
@@ -436,7 +442,23 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     expect(filterRemoteStreamEvent(continuityWarning)).toBe(continuityWarning);
   });
 
-  test("TRANSIENT_EVENT_TYPES is EXACTLY the twelve — the Swift mirror pins the same literals", () => {
+  test("the thinking pill: the phone's stream gets reasoning events WITHOUT their text; a title-less delta is not sent", () => {
+    const base = { seq: 5, sessionId: "s1", ts: 0, threadId: "main", blockId: "rb_1" };
+    const block: SessionEvent = { ...base, type: "thinking_block", kind: "exposed", text: "raw reasoning ".repeat(500), truncated: true, durationMs: 900 };
+    const out = filterRemoteStreamEvent(block);
+    expect(out).toMatchObject({ type: "thinking_block", blockId: "rb_1", kind: "exposed", text: "", truncated: true, durationMs: 900 });
+    expect((block as { text: string }).text.length).toBeGreaterThan(0);          // the hub's own event is untouched
+    const titled: SessionEvent = { ...base, type: "thinking_delta", kind: "summary", phase: "delta", text: "**Plan**\n\nbody", title: "Plan" };
+    const titledOut = filterRemoteStreamEvent(titled) as Record<string, unknown>;
+    expect(titledOut).toMatchObject({ type: "thinking_delta", phase: "delta", title: "Plan" });
+    expect("text" in titledOut).toBe(false);
+    const start: SessionEvent = { ...base, type: "thinking_delta", kind: "summary", phase: "start" };
+    expect(filterRemoteStreamEvent(start)).toBe(start);
+    const raw: SessionEvent = { ...base, type: "thinking_delta", kind: "exposed", phase: "delta", text: "raw chain of thought" };
+    expect(filterRemoteStreamEvent(raw)).toBeNull();
+  });
+
+  test("TRANSIENT_EVENT_TYPES is EXACTLY the thirteen — the Swift mirror pins the same literals", () => {
     // Parity, remote-allowlist style: neither side imports the other, each pins its own copy to
     // these literal strings, so editing one alone fails here or in
     // `apple/WinterProtocol/.../SessionEventTransientTests.swift` (SessionEvent.transientTypes).
@@ -445,6 +467,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // 8 → 9 (panel-shell T3, `panel_command`).
     // 9 → 11 (Winter Phase 10a O5, P10a-6: provider_login_progress, provider_login_finished).
     // 11 → 12 (2026-09-17, retry progress: `provider_retry`).
+    // 12 → 13 (the thinking pill, 2026-10-05: `thinking_delta`).
     expect([...TRANSIENT_EVENT_TYPES].sort()).toEqual([
       "assistant_delta",
       "hardware_requested",
@@ -458,8 +481,9 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
       "provider_login_progress",
       "provider_retry",
       "session_activity",
+      "thinking_delta",
     ]);
-    expect(TRANSIENT_EVENT_TYPES.size).toBe(12);
+    expect(TRANSIENT_EVENT_TYPES.size).toBe(13);
   });
 
   // ---------------------------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import { TRANSIENT_EVENT_TYPES, type SessionEvent } from "@yanlinglabs/winter-protocol";
-import { HISTORY_EVENT_TYPES, capEvent } from "./history";
+import { HISTORY_EVENT_TYPES, capEvent, phoneViewOf } from "./history";
 
 // ================================================================================================
 // The policy for the LIVE + REPLAY event stream of a REMOTE-role connection (the phone).
@@ -103,5 +103,10 @@ export const REMOTE_STREAM_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new 
  *  capping (the overwhelmingly common case), so the fan-out to other clients is unaffected. */
 export function filterRemoteStreamEvent(event: SessionEvent): SessionEvent | null {
   if (!REMOTE_STREAM_EVENT_TYPES.has(event.type)) return null;
-  return capEvent(event);
+  // The thinking pill (review r1): the phone gets a reasoning event WITHOUT its text (`phoneViewOf`,
+  // the same view `session.history` serves). A live `delta` left with neither text nor a title — raw
+  // reasoning, which has no title, streams nothing else — is not sent at all.
+  const view = phoneViewOf(event);
+  if (view.type === "thinking_delta" && view.phase === "delta" && view.title === undefined) return null;
+  return capEvent(view);
 }

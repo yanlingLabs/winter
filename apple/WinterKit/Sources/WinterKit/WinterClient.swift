@@ -308,6 +308,8 @@ extension SessionEvent {
         case .elicitationRequested(let v): return v.seq
         case .elicitationResolved(let v): return v.seq
         case .continuityWarning(let v): return v.seq
+        case .thinkingBlock(let v): return v.seq
+        case .thinkingDelta(let v): return v.seq
         case .childUpdate(let v): return v.seq
         case .workflowStarted(let v): return v.seq
         case .workflowProgress(let v): return v.seq
@@ -370,6 +372,8 @@ extension SessionEvent {
         case .elicitationRequested(let v): return v.sessionId
         case .elicitationResolved(let v): return v.sessionId
         case .continuityWarning(let v): return v.sessionId
+        case .thinkingBlock(let v): return v.sessionId
+        case .thinkingDelta(let v): return v.sessionId
         case .childUpdate(let v): return v.sessionId
         case .workflowStarted(let v): return v.sessionId
         case .workflowProgress(let v): return v.sessionId

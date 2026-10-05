@@ -263,13 +263,14 @@ private struct TranscriptExchangeRow: View {
     private enum TimelineEntry {
         case group(index: Int, ActivityGroup)
         case reply(Int)
-        /// Consecutive tools' pills, side by side (pill-themed window only).
+        /// Consecutive tools' pills — and thinking pills — side by side (pill-themed window only).
         case pillRow([PillRowItem])
     }
 
-    private struct PillRowItem {
-        let index: Int
-        let entry: ToolRunEntry
+    /// One pill in a row: a tool's calls, or a reasoning block (the thinking pill, 2026-10-05).
+    private enum PillRowItem {
+        case tool(index: Int, entry: ToolRunEntry)
+        case thinking(ThinkingItem)
     }
 
     private var timeline: [TimelineEntry] {
@@ -288,9 +289,13 @@ private struct TranscriptExchangeRow: View {
                     // commands is one row of three pills, each with its own words.
                     if toolRowStyle == .pill, case .toolRun(let runs) = group {
                         for run in runs {
-                            row.append(PillRowItem(index: groupIndex, entry: run))
+                            row.append(.tool(index: groupIndex, entry: run))
                             groupIndex += 1
                         }
+                    } else if toolRowStyle == .pill, case .single(let item) = group, let thinking = item.thinkingItem {
+                        // The thinking pill joins the same flow as the tool pills where adjacent.
+                        row.append(.thinking(thinking))
+                        groupIndex += 1
                     } else {
                         closeRow()
                         entries.append(.group(index: groupIndex, group))
@@ -313,28 +318,41 @@ private struct TranscriptExchangeRow: View {
         VStack(alignment: .leading, spacing: 8) {
             PillFlowLayout(spacing: 8, lineSpacing: 8) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    let key = toolRunExpansionKey([item.entry], fallbackIndex: item.index)
-                    PillToolRunHeader(entries: [item.entry], turnIsLive: turnIsLive,
-                                      isExpanded: expandedRuns.contains(key), toggle: { toggle(key) })
+                    switch item {
+                    case .tool(let index, let entry):
+                        let key = toolRunExpansionKey([entry], fallbackIndex: index)
+                        PillToolRunHeader(entries: [entry], turnIsLive: turnIsLive,
+                                          isExpanded: expandedRuns.contains(key), toggle: { toggle(key) })
+                    case .thinking(let thinking):
+                        PillThinkingHeader(item: thinking, turnIsLive: turnIsLive)
+                    }
                 }
             }
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                let key = toolRunExpansionKey([item.entry], fallbackIndex: item.index)
-                let expanded = expandedRuns.contains(key)
-                if expanded || toolRunFailureSummary([item.entry]) != nil
-                    || !toolRunCollapsedDiffChips([item.entry]).chips.isEmpty {
-                    TranscriptToolGroupRow(
-                        entries: [item.entry],
-                        turnIsLive: turnIsLive,
-                        isExpanded: expanded,
-                        toggle: { toggle(key) },
-                        onOpenDiff: onOpenDiff,
-                        onOpenFile: onOpenFile,
-                        sessionHasWorkingDirectory: sessionHasWorkingDirectory,
-                        showsHeader: false
-                    )
+                if case .tool(let index, let entry) = item {
+                    toolPillBody(entry, index: index)
                 }
             }
+        }
+    }
+
+    /// Beneath a tool pill: its opened calls, a failure line, its diff chips — when it has any.
+    @ViewBuilder
+    private func toolPillBody(_ entry: ToolRunEntry, index: Int) -> some View {
+        let key = toolRunExpansionKey([entry], fallbackIndex: index)
+        let expanded = expandedRuns.contains(key)
+        if expanded || toolRunFailureSummary([entry]) != nil
+            || !toolRunCollapsedDiffChips([entry]).chips.isEmpty {
+            TranscriptToolGroupRow(
+                entries: [entry],
+                turnIsLive: turnIsLive,
+                isExpanded: expanded,
+                toggle: { toggle(key) },
+                onOpenDiff: onOpenDiff,
+                onOpenFile: onOpenFile,
+                sessionHasWorkingDirectory: sessionHasWorkingDirectory,
+                showsHeader: false
+            )
         }
     }
 
@@ -363,6 +381,9 @@ private struct TranscriptExchangeRow: View {
                 if !questionMorphsTheComposer(record, closed: cardWiring.closedAsks) {
                     TranscriptInteractionCard(record: record, wiring: cardWiring)
                 }
+            } else if let thinking = item.thinkingItem {
+                // The thinking pill (2026-10-05), in the quiet line style of every other activity row.
+                TranscriptThinkingRow(item: thinking, turnIsLive: turnIsLive)
             } else {
                 TranscriptActivityRow(item: item)
             }

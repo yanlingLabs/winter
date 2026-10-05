@@ -24,8 +24,9 @@ final class SessionEventTransientTests: XCTestCase {
     /// Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`); 8 → 9 (panel-shell T3,
     /// `panel_command`); 9 → 11 (Winter Phase 10a O5, P10a-6: `provider_login_progress`,
     /// `provider_login_finished`); 11 → 12 (`provider_retry` — a per-provider retry attempt
-    /// projected from the child's system/api_retry frame).
-    private static let twelve: Set<String> = [
+    /// projected from the child's system/api_retry frame); 12 → 13 (`thinking_delta` — the thinking
+    /// pill's live progress, 2026-10-05).
+    private static let thirteen: Set<String> = [
         "assistant_delta",
         "provider_retry",
         "lease_granted",
@@ -38,12 +39,13 @@ final class SessionEventTransientTests: XCTestCase {
         "panel_command",
         "provider_login_progress",
         "provider_login_finished",
+        "thinking_delta",
     ]
 
-    func testTransientTypesIsExactlyTheTwelve() {
-        XCTAssertEqual(SessionEvent.transientTypes, Self.twelve,
+    func testTransientTypesIsExactlyTheThirteen() {
+        XCTAssertEqual(SessionEvent.transientTypes, Self.thirteen,
                        "SessionEvent.transientTypes must stay in lockstep with TRANSIENT_EVENT_TYPES in packages/protocol/src/events.ts")
-        XCTAssertEqual(SessionEvent.transientTypes.count, 12)
+        XCTAssertEqual(SessionEvent.transientTypes.count, 13)
     }
 
     /// `isTransient` (the case switch, used by `WinterClient` on decoded events) and

@@ -44,6 +44,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     case notificationRequested(NotificationRequested)
     case hookNotice(HookNotice)
     case continuityWarning(ContinuityWarning)
+    case thinkingBlock(ThinkingBlock)
+    case thinkingDelta(ThinkingDelta)
     case childUpdate(ChildUpdate)
     case workflowStarted(WorkflowStarted)
     case workflowProgress(WorkflowProgress)
@@ -806,6 +808,57 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let text: String
     }
 
+    /// The thinking pill (2026-10-05): ONE reasoning block, appended when it closes. Mirrors TS
+    /// `ThinkingBlockEvent` (`packages/protocol/src/events.ts`). A client renders it as a pill reading
+    /// `title`, or "Thought" when there is none, and REPLACES its live item (fed by `ThinkingDelta`)
+    /// by `blockId`. `kind` is `summary | update | exposed | hidden` — a plain String (an open set, like
+    /// `HookNotice.level`), so a future kind decodes. `text` is the readable reasoning (capped by the
+    /// daemon, `truncated` set when cut; empty for a hidden block) — for the human, never a model.
+    public struct ThinkingBlock: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let blockId: String
+        public let kind: String
+        public let title: String?
+        public let text: String
+        public let truncated: Bool?
+        public let provider: String?
+        public let model: String?
+        public let durationMs: Int?
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, blockId: String, kind: String,
+                    title: String? = nil, text: String, truncated: Bool? = nil, provider: String? = nil,
+                    model: String? = nil, durationMs: Int? = nil) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
+            self.blockId = blockId; self.kind = kind; self.title = title; self.text = text
+            self.truncated = truncated; self.provider = provider; self.model = model; self.durationMs = durationMs
+        }
+    }
+
+    /// TRANSIENT (see `transientTypes` at the bottom of this file): a reasoning block's LIVE progress
+    /// — broadcast-only, never persisted/replayed. Mirrors TS `ThinkingDeltaEvent`. `phase` is `start`
+    /// (the pill opens, "Thinking") or `delta` (`text` = the increment to append, when there is one;
+    /// `title` = the daemon-derived CURRENT title, on every delta that carries text and on any where
+    /// it changed — absent means "unchanged / none yet", never "cleared"). The persisted
+    /// `ThinkingBlock` with the same `blockId` replaces it. The phone-facing paths withhold `text`.
+    public struct ThinkingDelta: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let blockId: String
+        public let kind: String
+        public let phase: String
+        public let text: String?
+        public let title: String?
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, blockId: String, kind: String,
+                    phase: String, text: String? = nil, title: String? = nil) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
+            self.blockId = blockId; self.kind = kind; self.phase = phase; self.text = text; self.title = title
+        }
+    }
+
     /// Dispatch (Phase 7): appended to the DISPATCH session's stream whenever a child session's
     /// status changes materially (spawned, turn ended, error, stopped). `status` is a plain
     /// String (like `ThreadCompleted.stopReason` above) — validation of its allowed values lives
@@ -1051,6 +1104,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case notification_requested
         case hook_notice
         case continuity_warning
+        case thinking_block
+        case thinking_delta
         case child_update
         case workflow_started
         case workflow_progress
@@ -1114,6 +1169,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case .notification_requested: self = .notificationRequested(try NotificationRequested(from: decoder))
         case .hook_notice: self = .hookNotice(try HookNotice(from: decoder))
         case .continuity_warning: self = .continuityWarning(try ContinuityWarning(from: decoder))
+        case .thinking_block:       self = .thinkingBlock(try ThinkingBlock(from: decoder))
+        case .thinking_delta:       self = .thinkingDelta(try ThinkingDelta(from: decoder))
         case .child_update:         self = .childUpdate(try ChildUpdate(from: decoder))
         case .workflow_started:     self = .workflowStarted(try WorkflowStarted(from: decoder))
         case .workflow_progress:    self = .workflowProgress(try WorkflowProgress(from: decoder))
@@ -1304,6 +1361,14 @@ public enum SessionEvent: Codable, Equatable, Sendable {
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
             try c.encode(Discriminator.continuity_warning.rawValue, forKey: .type)
+        case .thinkingBlock(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.thinking_block.rawValue, forKey: .type)
+        case .thinkingDelta(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.thinking_delta.rawValue, forKey: .type)
         case .childUpdate(let v):
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
@@ -1400,6 +1465,8 @@ extension SessionEvent {
         // Winter Phase 10a (O5, P10a-6): the console-login progress/outcome pair (9 → 11).
         "provider_login_progress",
         "provider_login_finished",
+        // The thinking pill (2026-10-05): a reasoning block's live progress (12 → 13).
+        "thinking_delta",
     ]
 
     /// Case-level mirror of `transientTypes`, for callers holding a DECODED event (`WinterClient`)
@@ -1412,7 +1479,7 @@ extension SessionEvent {
         switch self {
         case .assistantDelta, .providerRetry, .leaseGranted, .leaseLost, .peripheralCallRequested,
              .pluginToolInvoke, .hardwareRequested, .pluginTileUpdated, .sessionActivity,
-             .panelCommand, .providerLoginProgress, .providerLoginFinished:
+             .panelCommand, .providerLoginProgress, .providerLoginFinished, .thinkingDelta:
             return true
         default:
             return false

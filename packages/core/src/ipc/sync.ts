@@ -439,6 +439,15 @@ function parseBatch(buf: Buffer): SyncedEntry[] {
   return entries;
 }
 
+/** A pushed `tool_result` without its `siteIcons` — the client's own parsed line with that ONE key
+ *  deleted (`JSON.parse` keeps the client's key order), re-validated so the stored line still parses. */
+function stripSiteIcons(entry: SyncedEntry): SyncedEntry {
+  const json = JSON.parse(entry.raw) as Record<string, unknown>;
+  delete json.siteIcons;
+  const raw = JSON.stringify(json);
+  return { raw, event: SessionEvent.parse(json) };
+}
+
 /** Buffers a chunk and, on the final one, validates and applies the whole batch atomically.
  *  Returns the current head plus buffering progress; `applied` is true only once bytes are on disk. */
 export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResult {
@@ -515,10 +524,20 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
       throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a user_message with images — chat sessions carry none; nothing was appended`);
     }
     // `tool_result.siteIcons` is the daemon's own stamp (`runtime-sdk/site-icons.ts`) — urls a Mac
-    // client fetches. The phone's chat engine never produces it, so a pushed one is refused rather
-    // than letting a remote caller name hosts for the Mac to fetch.
+    // client FETCHES, so a list a remote caller supplies must never be stored. But the daemon's own chat
+    // logs carry it (the runtime's WebFetch/WebSearch report icons in chat too), `sync.pull` copies them
+    // to the phone, and `SyncClient.forkAndReconcile` re-pushes that whole log on divergence — so a
+    // refusal would wedge the fork forever. The field is STRIPPED instead: that one line is stored
+    // without it (the only exception to byte-for-byte replication, made by deleting the one key from the
+    // client's own parsed line, so every other byte and the key order stay as sent).
     if (event.type === "tool_result" && event.siteIcons !== undefined) {
-      throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a tool_result with siteIcons — chat logs from the phone carry none; nothing was appended`);
+      entries[i] = stripSiteIcons(entries[i]!);
+    }
+    // The thinking pill (2026-10-05): a `thinking_delta` is TRANSIENT — it is never in a log, so a pushed
+    // one is a protocol violation. A `thinking_block` IS in a daemon chat log (pulled to the phone and
+    // re-pushed by a fork, like `siteIcons` above): schema-bounded, display-only, accepted as is.
+    if (event.type === "thinking_delta") {
+      throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push event ${i + 1} is a thinking_delta, which is transient and never in a log; nothing was appended`);
     }
     if (i > 0 && event.seq !== entries[i - 1]!.event.seq + 1) {
       throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push seqs must be contiguous: event ${i + 1} has seq ${event.seq}, expected ${entries[i - 1]!.event.seq + 1} — nothing was appended`);

@@ -617,6 +617,56 @@ func activityGlyphAndLabel(_ item: ActivityItem) -> (glyph: String, label: Strin
         return ("⚠", record.summary)
     case .notice(let text):
         return ("ⓘ", text)
+    case .thinking(let item):
+        // Unreachable from the transcript (it diverts `.thinking` to `TranscriptThinkingRow` /
+        // `PillThinkingHeader`, which know whether the turn is live); kept exhaustive and correct for
+        // the item's own liveness.
+        return (thinkingGlyph, item.label(turnIsLive: item.isLive))
+    }
+}
+
+/// The thinking line's glyph — the quiet-row sibling of the pill's disc.
+let thinkingGlyph = "✻"
+
+/// The thinking pill (2026-10-05) in every transcript that is NOT pill-themed: one quiet line in the
+/// activity-row style — "Thinking" (gently pulsing) while the block streams with no title, its title
+/// once one arrives, "Thought" when it is done with none. Not interactive yet: the body view comes
+/// later, and the item keeps the text for it.
+struct TranscriptThinkingRow: View {
+    let item: ThinkingItem
+    let turnIsLive: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let running = item.isRunning(turnIsLive: turnIsLive)
+        HStack(spacing: 6) {
+            Text(thinkingGlyph)
+            Text(item.label(turnIsLive: turnIsLive))
+        }
+        .font(Typography.caption())
+        .foregroundStyle(Theme.textMuted)
+        .lineLimit(1)
+        .truncationMode(.tail)
+        .modifier(ThinkingPulse(active: running && !reduceMotion))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// A slow opacity breath while a quiet thinking line is live — the line-style stand-in for the pill's
+/// shimmer (which paints white, a pill-only treatment).
+private struct ThinkingPulse: ViewModifier {
+    let active: Bool
+
+    func body(content: Content) -> some View {
+        if active {
+            TimelineView(.animation) { timeline in
+                let t = timeline.date.timeIntervalSinceReferenceDate
+                content.opacity(0.55 + 0.45 * (0.5 + 0.5 * cos(t * .pi)))
+            }
+        } else {
+            content
+        }
     }
 }
 
