@@ -1,5 +1,5 @@
 {
-  "about": "Real reasoning blocks from live runs on a toy project (2026-10-05) and the pill title each must get. Shared by packages/core/test/projector/thinking-title.test.ts and apple/WinterChatKit's ThinkingTitleRuleTests — change both rules together.",
+  "about": "Real reasoning blocks from live runs on a toy project (2026-10-05), plus synthetic blocks for provider-heading shapes, CJK and Unicode edge cases (id synthetic/…), and the pill title each must get. Shared by packages/core/test/projector/thinking-title.test.ts and apple/WinterChatKit's ThinkingTitleRuleTests — change both rules together.",
   "blocks": [
     {
       "id": "anthropic/claude-opus-4.6#31",
@@ -379,6 +379,78 @@
       "note": "bold fix: '**Lines per file (sorted by size):**'; list items skipped",
       "title": null,
       "text": "The user wants me to:\n\n1. Use a shell command to count lines per fileI ran a quick shell command to count lines per file across the project (excluding .git and binary stuff), then pulled the recent git log. Here's what I found:\n\n**Lines per file (sorted by size):**\n- main.swift: 1,247 lines\n- VerbProbe."
+    },
+    {
+      "id": "synthetic/openai-shaped",
+      "model": "synthetic",
+      "kind": "summary",
+      "note": "OpenAI-shaped: the last heading beats the 'Let me …' prose, and a heading may name a file",
+      "title": "Running the test suite",
+      "text": "**Inspecting package.json scripts**\n\nLet me check the build config before running anything. I'll read the scripts section.\n\n**Running the test suite**\n\nLet me run bun test to see which tests fail."
+    },
+    {
+      "id": "synthetic/openai-shaped-one-heading",
+      "model": "synthetic",
+      "kind": "summary",
+      "note": "OpenAI-shaped: one heading, prose after it never takes over",
+      "title": "Inspecting package.json scripts",
+      "text": "**Inspecting package.json scripts**\n\nThe scripts look fine. Let me check the build config next."
+    },
+    {
+      "id": "synthetic/gemini-shaped",
+      "model": "synthetic",
+      "kind": "summary",
+      "note": "Gemini-shaped (no part numbers): headings naming code and a dotted name are headings",
+      "title": "Checking `foo` usage",
+      "text": "**Reviewing Node.js setup**\n\nI'm checking the engines field. Let me look at .nvmrc too.\n\n**Checking `foo` usage**\n\nLet me grep for foo across src."
+    },
+    {
+      "id": "synthetic/file-name-heading",
+      "model": "synthetic",
+      "kind": "summary",
+      "note": "a heading that is only a file name is markdown: the prose rule answers",
+      "title": "Reading calc.js",
+      "text": "**`calc.js`**\n\nLet me read calc.js first."
+    },
+    {
+      "id": "synthetic/qwen-mixed",
+      "model": "synthetic",
+      "kind": "exposed",
+      "note": "CJK: 。 ends a sentence, ， cuts the object",
+      "title": "Checking 这个函数的实现",
+      "text": "用户想让我检查这个项目。Let me check 这个函数的实现，看看它是否正确处理了所有的边界情况以及异常输入的情况。"
+    },
+    {
+      "id": "synthetic/glm-mixed-long",
+      "model": "synthetic",
+      "kind": "exposed",
+      "note": "CJK: a long Chinese object is capped by characters (4 per word)",
+      "title": "Reading 配置文件和所有的测试用例以及相关的文档说明内容还有构建脚本的输出…",
+      "text": "好的。I need to read 配置文件和所有的测试用例以及相关的文档说明内容还有构建脚本的输出日志和缓存目录里面的全部文件。"
+    },
+    {
+      "id": "synthetic/pure-chinese",
+      "model": "synthetic",
+      "kind": "exposed",
+      "note": "pure Chinese reasoning: no title, never garbage",
+      "title": null,
+      "text": "让我读取文件。我需要检查代码。然后运行测试！最后总结结果；完成。"
+    },
+    {
+      "id": "synthetic/unicode-oddities",
+      "model": "synthetic",
+      "kind": "exposed",
+      "note": "\\v, NEL, U+FEFF, ZWSP, long s, Kelvin sign: the same answer in both engines, no control units in the title",
+      "title": "Checking the logs",
+      "text": "Let me read the\u000bfile.\nLet me ſcan the logs.\nLet me checK the cache.\nChecking﻿thelogs​ now."
+    },
+    {
+      "id": "synthetic/bidi-heading",
+      "model": "synthetic",
+      "kind": "summary",
+      "note": "bidi and zero-width controls are stripped from a heading",
+      "title": "Reading the logs",
+      "text": "**Reading‮ the​ logs**\n\nbody"
     }
   ]
 }

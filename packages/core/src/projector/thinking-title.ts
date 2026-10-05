@@ -16,8 +16,15 @@ import { THINKING_TITLE_MAX_LENGTH } from "@yanlinglabs/winter-protocol";
  * (`test/projector/fixtures/thinking-titles.json`) is shared verbatim with the phone engine's Swift
  * port (`apple/WinterChatKit/Sources/WinterChatKit/ThinkingTitleRule.swift`) — change both together.
  *
- * Everything here works on UTF-16 code units and ASCII regexes (no `\b`, whose ICU meaning differs),
- * so the Swift port can match it unit for unit.
+ * ENGINE-INDEPENDENT BY CONSTRUCTION (review r1). Everything works on UTF-16 code units. Every text a
+ * rule reads is first CLEANED (`cleanText`): whitespace — JS `\s` plus NEL — becomes single spaces,
+ * control/zero-width/bidi units are dropped, curly apostrophes become `'`. Matching then runs on an
+ * ASCII-only lower-cased copy (same length, so positions map back), with no case-insensitive flag, no
+ * `\s`, no `\b` and no `.` outside a trailing `(.*)$` over line-free text — so V8 and ICU cannot
+ * disagree on Unicode case folding (`ſ`, the Kelvin sign), on what is whitespace, or on what `.`
+ * matches. Every pattern is linear: no quantified group holds an unbounded quantifier and no two
+ * unbounded quantifiers can share a span (`test/projector/thinking-title.test.ts` audits each one and
+ * fuzzes them against a time budget; the Swift tripwire does the same on its side).
  */
 
 // ── shared text helpers ─────────────────────────────────────────────────────────────────────────
@@ -31,8 +38,34 @@ export function sliceUnits(s: string, n: number): string {
   return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
 }
 
-/** Whitespace collapsed to single spaces, trimmed. */
-export const collapse = (s: string): string => s.replace(/\s+/g, " ").trim();
+/** Whitespace for every rule here: JS `\s` (incl. line terminators and U+FEFF) plus NEL (U+0085). */
+export function isSpaceUnit(u: number): boolean {
+  return (u >= 0x09 && u <= 0x0d) || u === 0x20 || u === 0x85 || u === 0xa0 || u === 0x1680 || (u >= 0x2000 && u <= 0x200a)
+    || u === 0x2028 || u === 0x2029 || u === 0x202f || u === 0x205f || u === 0x3000 || u === 0xfeff;
+}
+
+/** Units no title may carry: C0/C1 controls, DEL, zero-width and bidi controls. */
+function isDroppedUnit(u: number): boolean {
+  return u <= 0x1f || (u >= 0x7f && u <= 0x9f) || (u >= 0x200b && u <= 0x200f) || (u >= 0x202a && u <= 0x202e)
+    || (u >= 0x2060 && u <= 0x2064) || (u >= 0x2066 && u <= 0x2069) || u === 0x061c;
+}
+
+/** Whitespace runs → one space (trimmed), controls/zero-width/bidi dropped, ‘’ → '. */
+export function cleanText(s: string): string {
+  let out = "";
+  let space = false;
+  for (let i = 0; i < s.length; i++) {
+    const u = s.charCodeAt(i);
+    if (isSpaceUnit(u)) { space = out.length > 0; continue; }
+    if (isDroppedUnit(u)) continue;
+    if (space) { out += " "; space = false; }
+    out += u === 0x2018 || u === 0x2019 ? "'" : s[i];
+  }
+  return out;
+}
+
+/** Kept for the update title: the same cleaning. */
+export const collapse = cleanText;
 
 /** At most `THINKING_TITLE_MAX_LENGTH` characters, an ellipsis marking a cut. */
 export function clipTitle(s: string): string {
@@ -40,43 +73,66 @@ export function clipTitle(s: string): string {
   return `${sliceUnits(s, THINKING_TITLE_MAX_LENGTH - 1).trimEnd()}…`;
 }
 
+/** A–Z → a–z, nothing else (same length: positions map back to the original). */
+const asciiLower = (s: string): string => s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+
+/** Han, kana and Hangul: a run of them is words without spaces. */
+function isCjkCodePoint(cp: number): boolean {
+  return (cp >= 0x3040 && cp <= 0x30ff) || (cp >= 0x3400 && cp <= 0x4dbf) || (cp >= 0x4e00 && cp <= 0x9fff)
+    || (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xac00 && cp <= 0xd7af) || (cp >= 0x20000 && cp <= 0x2ffff);
+}
+
 // ── 1. the provider's bold heading ──────────────────────────────────────────────────────────────
 
 /** A `**…**` span that OPENS a line (after optional spaces/tabs): the first closing `**` at least one
  *  unit past the opening, and whatever follows it on that line. */
 const LINE_HEADING = /^[ \t]*\*\*(.+?)\*\*(.*)$/gm;
-/** Nothing but spaces/tabs after the closing `**`: a heading stands alone on its line (the end of the
- *  text counts — a heading whose line has not ended yet is already one). */
+/** Nothing but spaces/tabs after the closing `**`: a heading stands alone on its line. */
 const BLANK_REST = /^[ \t]*$/;
-/** A file-name-like token (`calc.js`, `Node.js`, `e.g`): a word character, a dot, a letter-led
- *  extension of at most 5. */
+/** A file-name-like token (`calc.js`, `Node.js`): a word character, a dot, a letter-led extension. */
 const FILE_TOKEN = /[A-Za-z0-9_]\.[A-Za-z][A-Za-z0-9]{0,4}(?![A-Za-z0-9])/;
-/** At most this many words. */
+/** One path-or-file token and nothing else. */
+const SINGLE_TOKEN = /^[A-Za-z0-9_./-]+$/;
 const HEADING_MAX_WORDS = 10;
 
-/** Whether a collapsed heading is a TITLE, not markdown structure: raw reasoning (DeepSeek, also when
- *  served over the Anthropic dialect and labelled `summary`) bolds file names and labels —
- *  `**src/calc.js:**`, `**test/calc.test.js:**`, `**Lines per file (sorted by size):**`. */
+/** Whether a cleaned heading is a TITLE, not markdown structure. Raw reasoning (DeepSeek, also when
+ *  served over the Anthropic dialect and labelled `summary`) bolds labels and file names —
+ *  `**src/calc.js:**`, `**Lines per file (sorted by size):**`, `**src/format.js**`, `` **`calc.js`** `` —
+ *  while a real heading may well NAME a file (`**Inspecting package.json scripts**`). */
 function isTitleHeading(inner: string): boolean {
   if (inner.length === 0 || inner.endsWith(":")) return false;
-  if (inner.includes("/") || inner.includes("`") || FILE_TOKEN.test(inner)) return false;
-  return inner.split(" ").length <= HEADING_MAX_WORDS;
+  if (inner.split(" ").length > HEADING_MAX_WORDS) return false;
+  const bare = inner.replace(/`/g, "");
+  if (SINGLE_TOKEN.test(bare) && (bare.includes("/") || FILE_TOKEN.test(bare))) return false;
+  return true;
+}
+
+/** The last valid heading on a CLOSED line (one a line break follows) and the last valid one counting
+ *  the open last line too. */
+export function scanHeadings(text: string): { closed: string | undefined; latest: string | undefined } {
+  let closed: string | undefined;
+  let latest: string | undefined;
+  for (const m of text.matchAll(LINE_HEADING)) {
+    if (!BLANK_REST.test(m[2] ?? "")) continue;
+    const inner = cleanText(m[1] ?? "");
+    if (!isTitleHeading(inner)) continue;
+    latest = inner;
+    if (m.index + m[0].length < text.length) closed = inner;
+  }
+  return { closed: closed === undefined ? undefined : clipTitle(closed), latest: latest === undefined ? undefined : clipTitle(latest) };
 }
 
 /**
- * The LAST valid heading anywhere in `text`, collapsed and clipped — `undefined` when there is none.
+ * The LAST valid heading anywhere in `text`, cleaned and clipped — `undefined` when there is none.
  * A heading opens its line, closes on it with nothing after, and passes `isTitleHeading`; one still
  * missing its closing `**` does not count (the one before it still does), nor does a bold word
  * mid-line, nor a bold span followed by more text on its line (`**src/calc.js** (5 lines):`).
+ * `includeOpenLine: false` ignores a heading on the last line while no line break has closed it yet
+ * (text may still follow it on that line).
  */
-export function lastValidHeading(text: string): string | undefined {
-  let found: string | undefined;
-  for (const m of text.matchAll(LINE_HEADING)) {
-    if (!BLANK_REST.test(m[2] ?? "")) continue;
-    const inner = collapse(m[1] ?? "");
-    if (isTitleHeading(inner)) found = inner;
-  }
-  return found === undefined ? undefined : clipTitle(found);
+export function lastValidHeading(text: string, includeOpenLine = true): string | undefined {
+  const h = scanHeadings(text);
+  return includeOpenLine ? h.latest : h.closed;
 }
 
 // ── 2. the activity rule ────────────────────────────────────────────────────────────────────────
@@ -85,20 +141,24 @@ export function lastValidHeading(text: string): string | undefined {
  *  candidate (a sentence or a clause of one) longer than `CANDIDATE_MAX` is skipped. */
 const SEGMENT_MAX = 600;
 const CANDIDATE_MAX = 220;
-/** A title has at most this many words (the verb included), "…" marking a cut. */
+/** A title has at most this many words (the verb included), "…" marking a cut. A run of CJK
+ *  characters counts one word per `CJK_CHARS_PER_WORD`. */
 const TITLE_MAX_WORDS = 9;
+const CJK_CHARS_PER_WORD = 4;
 /** The head of a segment kept for classifying the line it opens (fence/list/heading/table). */
 const SEGMENT_HEAD = 16;
 
-const words = (...lists: string[]): ReadonlySet<string> => new Set(lists.join(" ").split(/\s+/).filter((w) => w.length > 0));
+const words = (...lists: string[]): ReadonlySet<string> => new Set(lists.join(" ").split(" ").filter((w) => w.length > 0));
+const alt = (list: string): string => list.split(" ").filter((w) => w.length > 0).join("|");
 
 /** Discourse words a candidate may open with ("Now", "So,", "OK, next"). */
 const LEAD_WORDS = "now first firstly also quickly carefully actually just then next still again briefly finally lastly so ok okay alright right and but well anyway instead meanwhile second secondly third thirdly further simply really properly directly thoroughly wait hmm ah oh great good perfect fine sure yes yeah";
 /** Adverbs between a modal and its verb ("Let me QUICKLY check"). */
 const MID_WORDS = "now first also quickly carefully actually just then next still again briefly finally properly really simply directly thoroughly systematically further explicitly manually separately immediately quick";
-const alt = (list: string): string => list.split(/\s+/).filter((w) => w.length > 0).join("|");
-const LEAD = String.raw`^(?:(?:${alt(LEAD_WORDS)})(?![A-Za-z'])\s*,?\s+)*`;
-const MID = String.raw`(?:(?:${alt(MID_WORDS)})(?![A-Za-z'])\s+)*`;
+/** Each lead word is followed by an optional comma and exactly one space (the text is cleaned, so a
+ *  run of whitespace is one space): one way to match, so the group never backtracks into itself. */
+const LEAD = `^(?:(?:${alt(LEAD_WORDS)})(?![a-z'])(?: ?,)? )*`;
+const MID = `(?:(?:${alt(MID_WORDS)})(?![a-z']) )*`;
 /** Phrases that announce what the writer does next. Longer alternatives first. */
 const MODAL = [
   "let me", "let's", "let us",
@@ -108,30 +168,33 @@ const MODAL = [
   "i'm planning to", "i am planning to", "i plan to",
   "we need to", "we should", "we'll", "we will",
   "it's time to", "time to",
-].map((m) => m.replace(/ /g, "\\s+")).join("|");
-const STOP = String.raw`(?=[\s,.:;!?]|$)`;
+].join("|");
+/** What may follow a word: a space, punctuation (ASCII or fullwidth), or the end. */
+const END = "(?=[ ,.:;!?，。；：！？]|$)";
+const PAST_STEPS = "checked double-checked counted ran reviewed examined inspected verified tested searched scanned explored gathered analyzed analysed compared traced read opened grepped listed located measured reran re-ran";
 
 /** "Let me start by exploring …" — the gerund itself. */
-const P_START_BY = new RegExp(String.raw`${LEAD}(?:${MODAL})\s+${MID}(?:start|begin)\s+(?:off\s+)?by\s+([a-z]+ing)${STOP}(.*)$`, "i");
+const P_START_BY = new RegExp(`${LEAD}(?:${MODAL}) ${MID}(?:start|begin) (?:off )?by ([a-z]+ing)${END}(.*)$`);
 /** "Let me read …", "I'll count …", "Now I need to check …" — a base verb, made a gerund. */
-const P_MODAL = new RegExp(String.raw`${LEAD}(?:${MODAL})\s+${MID}([a-z][a-z-]*)${STOP}(.*)$`, "i");
+const P_MODAL = new RegExp(`${LEAD}(?:${MODAL}) ${MID}([a-z][a-z-]*)${END}(.*)$`);
 /** "I'm exploring …", "I am now analyzing …". */
-const P_IM = new RegExp(String.raw`${LEAD}i(?:'m|\s+am)\s+${MID}([a-z]+ing)${STOP}(.*)$`, "i");
+const P_IM = new RegExp(`${LEAD}i(?:'m| am) ${MID}([a-z]+ing)${END}(.*)$`);
 /** "Found two bugs …", "I've identified the bugs …" — kept as written. */
-const P_FOUND = new RegExp(String.raw`${LEAD}(?:i(?:'ve|\s+have)\s+(?:(?:just|now|also|already)\s+)*)?(found|confirmed|identified|spotted)${STOP}(.*)$`, "i");
+const P_FOUND = new RegExp(`${LEAD}(?:i(?:'ve| have) (?:(?:just|now|also|already) )*)?(found|confirmed|identified|spotted)${END}(.*)$`);
 /** A step the writer reports as done, in the first person: "I checked the git log." → "Checked the git
  *  log" (only these activity verbs: "I decided …", "I think …" are not steps). */
-const PAST_STEPS = "checked double-checked counted ran reviewed examined inspected verified tested searched scanned explored gathered analyzed analysed compared traced read opened grepped listed located measured reran re-ran";
-const P_PAST = new RegExp(String.raw`${LEAD}i(?:'ve|\s+have)?\s+(?:(?:just|now|also|already|quickly|carefully|first)\s+)*(${alt(PAST_STEPS)})${STOP}(.*)$`, "i");
+const P_PAST = new RegExp(`${LEAD}i(?:'ve| have)? (?:(?:just|now|also|already|quickly|carefully|first) )*(${alt(PAST_STEPS)})${END}(.*)$`);
 /** "Scanning the project …", "Now checking pad …". */
-const P_GERUND = new RegExp(String.raw`${LEAD}([a-z]+ing)${STOP}(.*)$`, "i");
+const P_GERUND = new RegExp(`${LEAD}([a-z]+ing)${END}(.*)$`);
 
 /** "go ahead and run" / "go through and read" / "try and fix" → the second verb. */
-const GO_AND = /^\s+(?:(?:ahead|through|back|on)\s+)?and\s+([a-z][a-z-]*)(?=[\s,.:;!?]|$)(.*)$/i;
+const GO_AND = new RegExp(`^ (?:(?:ahead|through|back|on) )?and ([a-z][a-z-]*)${END}(.*)$`);
 /** "double check" → "Double-checking". */
-const DOUBLE_CHECK = /^[\s-]+check(?=[\s,.:;!?]|$)(.*)$/i;
+const DOUBLE_CHECK = new RegExp(`^[ -]check${END}(.*)$`);
 /** "Starting to analyze …" → "Analyzing …". */
-const TO_VERB = /^\s+to\s+([a-z][a-z-]*)(?=[\s,.:;!?]|$)(.*)$/i;
+const TO_VERB = new RegExp(`^ to ([a-z][a-z-]*)${END}(.*)$`);
+/** "Verifying by checking X" → "Checking X": a bare verb whose object is a "by" clause. */
+const BY_GERUND = new RegExp(`^ by ([a-z]+ing)${END}(.*)$`);
 
 /** A base verb that is not a verb (or not an activity) after a modal: "I should NOT …", "Let me BE …". */
 const STOP_VERBS = words("not never be been being have has had also probably maybe likely definitely certainly so the a an it this that there here just");
@@ -170,28 +233,35 @@ const SUBORDINATORS = words("whether if that what which how why where when who w
 /** Trailing words dropped from a title ("Reading the source next" → "Reading the source"). */
 const TRAILING_ADVERBS = words("now next first then again too also here directly quickly briefly carefully");
 const TRAILING_DANGLING = words("the a an and or of to for with in on at by as from etc");
+/** Trailing punctuation stripped from a title's last word. */
+const TRAILING_PUNCTUATION = new Set([..."．.,;:!?…。，；：！？、"].map((c) => c.charCodeAt(0)));
 
 /** Where a title's object is cut: purpose and reason clauses, coordinated next steps, punctuation. */
 const PURPOSES = "identify see understand find confirm check figure determine get make know verify ensure learn decide catch spot locate gather compare validate inspect review map trace reproduce isolate avoid prevent count orient answer";
 /** Verbs that, after "and", start the writer's NEXT step ("read X and check Y") — never words that are
  *  as often nouns ("source and test files", "plan and report"). */
 const NEXT_VERBS = "check read run look lay write fix add verify confirm try give review examine inspect identify count find explore compare make keep summarize glance outline produce present provide propose suggest finalize mention explain describe grep focus dig figure determine think consider decide proceed continue begin maybe possibly am i";
-const W = (w: string): string => `${w.replace(/ /g, "\\s+")}(?![A-Za-z])`;
 const CUT_WORDS = [
-  `to\\s+(?:${alt(PURPOSES)})(?![A-Za-z])`,
-  ...["in order to", "so that", "so", "because", "before", "after", "which", "since", "then", "and then", "and also", "while", "whereas", "though", "although", "but", "or if", "or whether"].map(W),
-  `and\\s+(?:${alt(NEXT_VERBS)})(?![A-Za-z])`,
-  "by\\s+[a-z]+ing(?![A-Za-z])",
-  "that\\s+(?:might|could|would|may|will|can|should|is|are|was|were)(?![A-Za-z])",
+  `to (?:${alt(PURPOSES)})(?![a-z])`,
+  ...["in order to", "so that", "so", "because", "before", "after", "which", "since", "then", "and then", "and also", "while", "whereas", "though", "although", "but", "or if", "or whether"].map((w) => `${w}(?![a-z])`),
+  `and (?:${alt(NEXT_VERBS)})(?![a-z])`,
+  "by [a-z]+ing(?![a-z])",
+  "that (?:might|could|would|may|will|can|should|is|are|was|were)(?![a-z])",
 ].join("|");
-const CUT = new RegExp(String.raw`\s+(?:${CUT_WORDS})|\s+\(|\s+[-–]+\s|\s*—|[,;:!?]`, "gi");
+const CUT = new RegExp(` (?:${CUT_WORDS})| \\(| (?:-{1,3}|–) |—|[,;:!?，；：！？、]`, "g");
 /** Where a sentence splits into later clauses, each its own candidate ("…, so I'll just read X"). */
-const CLAUSE = /,\s+(?=(?:so|and|then|but|now|next|i'll|i will|i'm|i am|i need|i should|i want|let me|let's)(?![A-Za-z]))|;\s+|\s*—\s*|\s+–\s+|\s+--\s+|:\s+/gi;
-/** "Verifying by checking X" → "Checking X": a bare verb whose object is a "by" clause. */
-const BY_GERUND = /^\s+by\s+([a-z]+ing)(?=[\s,.:;!?]|$)(.*)$/i;
-/** A line that is structure, not prose: a list item, a markdown heading, a table row, a quote. */
-const STRUCTURE_LINE = /^(?:[-*+•]\s|\d{1,3}[.)](?:\s|$)|#{1,6}(?:\s|$)|\||>)/;
+const CLAUSE = /, (?=(?:so|and|then|but|now|next|i'll|i will|i'm|i am|i need|i should|i want|let me|let's)(?![a-z]))|; | ?— ?| – | -- |: /g;
+/** A line that is structure, not prose: a list item, a markdown heading, a table row, a quote. Read
+ *  on the line's cleaned head. */
+const STRUCTURE_LINE = /^(?:[-*+•] |[0-9]{1,3}[.)](?: |$)|#{1,6}(?: |$)|\||>)/;
 const FENCE_LINE = /^(?:```|~~~)/;
+
+/** EVERY pattern this module compiles — the test suite audits each for nested or adjacent unbounded
+ *  quantifiers and runs them against adversarial input on a time budget. */
+export const TITLE_PATTERNS: readonly RegExp[] = [
+  LINE_HEADING, BLANK_REST, FILE_TOKEN, SINGLE_TOKEN, P_START_BY, P_MODAL, P_IM, P_FOUND, P_PAST, P_GERUND,
+  GO_AND, DOUBLE_CHECK, TO_VERB, BY_GERUND, CUT, CLAUSE, STRUCTURE_LINE, FENCE_LINE,
+];
 
 // ── gerunds ──
 
@@ -229,7 +299,7 @@ function doublesFinal(v: string): boolean {
 /** The -ing form of a base verb, lower case: drop a silent e, -ie → -ying, CVC doubling. A hyphenated
  *  verb takes the ending on its last part ("re-examine" → "re-examining", "double-check"). */
 export function gerundOf(verb: string): string {
-  const v = verb.toLowerCase();
+  const v = asciiLower(verb);
   const hyphen = v.lastIndexOf("-");
   if (hyphen > 0 && hyphen < v.length - 1) return v.slice(0, hyphen + 1) + gerundOf(v.slice(hyphen + 1));
   const irregular = IRREGULAR_GERUNDS[v];
@@ -259,14 +329,14 @@ function protectedMask(s: string): boolean[] {
   return mask;
 }
 
-/** Whitespace-separated words, a code span or bracket group staying inside its word. */
+/** Space-separated words of CLEANED text, a code span or bracket group staying inside its word. */
 function tokens(s: string): string[] {
   const mask = protectedMask(s);
   const out: string[] = [];
   let cur = "";
   for (let i = 0; i < s.length; i++) {
     const c = s[i]!;
-    if (!mask[i] && c !== "`" && /\s/.test(c)) {
+    if (!mask[i] && c === " ") {
       if (cur.length > 0) out.push(cur);
       cur = "";
     } else cur += c;
@@ -275,15 +345,43 @@ function tokens(s: string): string[] {
   return out;
 }
 
-/** A word's letters, lower case, for list lookups ("`pad`," → "pad", "isn't" stays). */
-const bare = (w: string): string => w.toLowerCase().replace(/[^a-z'-]/g, "");
+/** A word's letters, ASCII lower case, for list lookups ("`Pad`," → "pad", "isn't" stays). */
+const bare = (w: string): string => asciiLower(w).replace(/[^a-z'-]/g, "");
+
+/** How many words a token weighs: 1, or one per `CJK_CHARS_PER_WORD` CJK characters. */
+function cjkCount(w: string): number {
+  let n = 0;
+  for (const ch of w) if (isCjkCodePoint(ch.codePointAt(0)!)) n += 1;
+  return n;
+}
+const weightOf = (w: string): number => Math.max(1, Math.ceil(cjkCount(w) / CJK_CHARS_PER_WORD));
+
+/** The head of a token holding at most `n` CJK characters. */
+function cjkPrefix(w: string, n: number): string {
+  let out = "";
+  let seen = 0;
+  for (const ch of w) {
+    if (isCjkCodePoint(ch.codePointAt(0)!)) {
+      if (seen === n) break;
+      seen += 1;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+function stripTrailingPunctuation(w: string): string {
+  let end = w.length;
+  while (end > 0 && TRAILING_PUNCTUATION.has(w.charCodeAt(end - 1))) end -= 1;
+  return w.slice(0, end);
+}
 
 function trimTail(list: string[]): string[] {
   const out = [...list];
   for (;;) {
     const last = out[out.length - 1];
     if (last === undefined) return out;
-    const stripped = last.replace(/[.,;:!?…]+$/, "");
+    const stripped = stripTrailingPunctuation(last);
     if (stripped.length === 0) { out.pop(); continue; }
     if (stripped !== last) { out[out.length - 1] = stripped; continue; }
     const b = bare(last);
@@ -297,16 +395,20 @@ function trimTail(list: string[]): string[] {
 function shortenObject(rest: string): string {
   const mask = protectedMask(rest);
   let end = rest.length;
-  for (const m of rest.matchAll(CUT)) {
+  for (const m of asciiLower(rest).matchAll(CUT)) {
     if (!mask[m.index]) { end = m.index; break; }
   }
-  let list = trimTail(tokens(rest.slice(0, end)));
-  if (list.length > TITLE_MAX_WORDS - 1) {
-    list = trimTail(list.slice(0, TITLE_MAX_WORDS - 1));
-    if (list.length === 0) return "";
-    return `${list.join(" ")}…`;
+  const list = trimTail(tokens(rest.slice(0, end)));
+  let budget = TITLE_MAX_WORDS - 1;
+  const kept: string[] = [];
+  for (const w of list) {
+    const weight = weightOf(w);
+    if (weight <= budget) { kept.push(w); budget -= weight; continue; }
+    if (budget > 0 && cjkCount(w) > 0) kept.push(cjkPrefix(w, budget * CJK_CHARS_PER_WORD));
+    const cut = trimTail(kept);
+    return cut.length === 0 ? "" : `${cut.join(" ")}…`;
   }
-  return list.join(" ");
+  return kept.join(" ");
 }
 
 /** A leading gerund is the sentence's SUBJECT when a finite verb follows it before any subordinate
@@ -335,76 +437,85 @@ interface RuleTitle { title: string; weak: boolean }
 
 type Shape = "converted" | "gerund" | "found";
 
+/** Runs an anchored pattern ending in `(.*)$` on the lower-cased copy of `s`: its first group (lower
+ *  case) and the REST in its original casing (the last group is a suffix of `s`). */
+function execTail(re: RegExp, s: string): { word: string; rest: string } | undefined {
+  const m = re.exec(asciiLower(s));
+  if (m === null) return undefined;
+  const tail = m[m.length - 1] ?? "";
+  return { word: m.length > 2 ? (m[1] ?? "") : "", rest: s.slice(s.length - tail.length) };
+}
+
 /** The title for a verb (already a gerund, or "Found"-like) and the rest of its candidate. */
 function build(verbIng: string, rest: string, shape: Shape): RuleTitle | undefined {
-  let verb = verbIng.toLowerCase();
+  let verb = asciiLower(verbIng);
   let tail = rest;
   if (shape !== "found") {
     if (NOT_GERUNDS.has(verb)) return undefined;
     if (shape === "gerund" && isStatement(tail)) return undefined;
     // "Starting to analyze X" → "Analyzing X".
     if (verb === "starting" || verb === "beginning" || verb === "continuing") {
-      const m = TO_VERB.exec(tail);
-      if (m !== null && !STOP_VERBS.has(m[1]!.toLowerCase())) { verb = gerundOf(m[1]!); tail = m[2] ?? ""; }
+      const m = execTail(TO_VERB, tail);
+      if (m !== undefined && !STOP_VERBS.has(m.word)) { verb = gerundOf(m.word); tail = m.rest; }
     }
     // "Verifying by checking X" → "Checking X".
-    const by = BY_GERUND.exec(tail);
-    if (by !== null && !NOT_GERUNDS.has(by[1]!.toLowerCase())) { verb = by[1]!.toLowerCase(); tail = by[2] ?? ""; }
+    const by = execTail(BY_GERUND, tail);
+    if (by !== undefined && !NOT_GERUNDS.has(by.word)) { verb = by.word; tail = by.rest; }
   }
   const object = shortenObject(tail);
   if (countOf(object, "`") % 2 !== 0) return undefined;           // a cut inside inline code
   const objectWords = tokens(object).map(bare).filter((w) => w.length > 0);
-  if (META_VERBS.has(verb) && (objectWords.length === 0 || objectWords.some((w) => META_OBJECTS.has(w)))) return undefined;
+  const hasCjk = cjkCount(object) > 0;
+  if (META_VERBS.has(verb) && ((objectWords.length === 0 && !hasCjk) || objectWords.some((w) => META_OBJECTS.has(w)))) return undefined;
   let weak = false;
-  if (objectWords.length === 0) {
+  if (objectWords.length === 0 && !hasCjk) {
     if (shape === "found" || GENERIC.has(verb)) return undefined;
     weak = true;
-  } else if (objectWords.every((w) => PRONOUNISH.has(w))) {
+  } else if (!hasCjk && objectWords.every((w) => PRONOUNISH.has(w))) {
     return undefined;
   }
   const head = verb.charAt(0).toUpperCase() + verb.slice(1);
   return { title: clipTitle(object.length > 0 ? `${head} ${object}` : head), weak };
 }
 
-/** One candidate (a sentence, or a clause of one) → a title, or `undefined`. */
+/** One cleaned candidate (a sentence, or a clause of one) → a title, or `undefined`. */
 function matchCandidate(c: string): RuleTitle | undefined {
-  let m = P_START_BY.exec(c);
-  if (m !== null) return build(m[1]!, m[2] ?? "", "gerund");
-  m = P_MODAL.exec(c);
-  if (m !== null) {
-    let verb = m[1]!.toLowerCase();
-    let rest = m[2] ?? "";
+  let m = execTail(P_START_BY, c);
+  if (m !== undefined) return build(m.word, m.rest, "gerund");
+  m = execTail(P_MODAL, c);
+  if (m !== undefined) {
+    let verb = m.word;
+    let rest = m.rest;
     if (STOP_VERBS.has(verb)) return undefined;
     if (verb === "go" || verb === "try" || verb === "come") {
-      const g = GO_AND.exec(rest);
-      if (g !== null) { verb = g[1]!.toLowerCase(); rest = g[2] ?? ""; }
+      const g = execTail(GO_AND, rest);
+      if (g !== undefined) { verb = g.word; rest = g.rest; }
       if (STOP_VERBS.has(verb)) return undefined;
     }
     if (verb === "double") {
-      const d = DOUBLE_CHECK.exec(rest);
-      if (d !== null) return build("double-checking", d[1] ?? "", "converted");
+      const d = execTail(DOUBLE_CHECK, rest);
+      if (d !== undefined) return build("double-checking", d.rest, "converted");
     }
     return build(gerundOf(verb), rest, "converted");
   }
-  m = P_IM.exec(c);
-  if (m !== null) return build(m[1]!, m[2] ?? "", "converted");
-  m = P_FOUND.exec(c) ?? P_PAST.exec(c);
-  if (m !== null) return build(m[1]!, m[2] ?? "", "found");
-  m = P_GERUND.exec(c);
-  if (m !== null) return build(m[1]!, m[2] ?? "", "gerund");
+  m = execTail(P_IM, c);
+  if (m !== undefined) return build(m.word, m.rest, "converted");
+  m = execTail(P_FOUND, c) ?? execTail(P_PAST, c);
+  if (m !== undefined) return build(m.word, m.rest, "found");
+  m = execTail(P_GERUND, c);
+  if (m !== undefined) return build(m.word, m.rest, "gerund");
   return undefined;
 }
 
 /** A complete sentence → the title of its LATEST matching candidate (the sentence itself, then every
  *  clause that opens after `CLAUSE`), or `undefined`. */
 function evaluateSentence(segment: string): RuleTitle | undefined {
-  let s = segment.replace(/[‘’]/g, "'").trim();
+  if (countOf(segment, "**") % 2 !== 0) return undefined;        // half a bold span (a heading cut by a line break)
+  const s = cleanText(segment.replace(/\*\*/g, ""));
   if (s.length === 0) return undefined;
-  if (countOf(s, "**") % 2 !== 0) return undefined;             // half a bold span (a heading cut by a line break)
-  s = s.replace(/\*\*/g, "");
   const mask = protectedMask(s);
   const starts = [0];
-  for (const m of s.matchAll(CLAUSE)) if (!mask[m.index]) starts.push(m.index + m[0].length);
+  for (const m of asciiLower(s).matchAll(CLAUSE)) if (!mask[m.index]) starts.push(m.index + m[0].length);
   for (let i = starts.length - 1; i >= 0; i--) {
     const c = s.slice(starts[i]).trim();
     if (c.length === 0 || c.length > CANDIDATE_MAX || c.startsWith("`")) continue;
@@ -414,17 +525,24 @@ function evaluateSentence(segment: string): RuleTitle | undefined {
   return undefined;
 }
 
-const isLineBreak = (c: string): boolean => c === "\n" || c === "\r" || c === " " || c === " ";
-const isSentenceEnd = (c: string): boolean => c === "." || c === "!" || c === "?";
+const isLineBreak = (u: number): boolean => u === 0x0a || u === 0x0d || u === 0x2028 || u === 0x2029;
+/** `.` `!` `?` end a sentence when whitespace follows; the fullwidth `。！？；` end one by themselves. */
+const isAsciiSentenceEnd = (u: number): boolean => u === 0x2e || u === 0x21 || u === 0x3f;
+const isCjkSentenceEnd = (u: number): boolean => u === 0x3002 || u === 0xff01 || u === 0xff1f || u === 0xff1b;
+
+/** The head of a line, cleaned for classification. */
+const lineHead = (head: string): string => cleanText(head);
 
 /**
  * The activity rule over a stream of text, INCREMENTAL: every pushed unit is looked at once, and only
  * a sentence that has just COMPLETED is evaluated — so a block of any length costs O(n) in total.
  *
- * Sentences end at a line break, or at `.`/`!`/`?` followed by whitespace. While the block streams,
- * only complete sentences count — plus the trailing one if it already ends with `.`/`!`/`?` (a
- * one-sentence summary gets its title live, not only at the block's end). At the block's end
- * (`title(true)`) the trailing sentence counts whatever it ends with.
+ * Sentences end at a line break, at `.`/`!`/`?` followed by whitespace (never inside inline code), or
+ * right after a fullwidth `。！？；`. `committedTitle()` is the latest match among COMPLETE sentences;
+ * `title(false)` also reads the trailing sentence if it already ends with sentence punctuation (a
+ * one-sentence summary gets its title live) — a PROVISIONAL answer that text still to come may change,
+ * so it is shown, never persisted; `title(true)` (the block's end) reads the trailing sentence
+ * whatever it ends with.
  *
  * Skipped: fenced code, list items, markdown headings, table rows and quotes (a whole line), and any
  * sentence over `SEGMENT_MAX`. The LATEST match wins — except that a WEAK one (a bare verb) never
@@ -443,35 +561,49 @@ export class ActivityTitleTracker {
   /** The rest of the current line is structure (a list item, a heading, a table row). */
   private lineSkip = false;
   private inFence = false;
-  private prev = "";
+  private prev = 0;
   private committed: RuleTitle | undefined;
 
   push(text: string): void {
     for (let i = 0; i < text.length; i++) {
-      const c = text[i]!;
-      if (isLineBreak(c)) {
+      const u = text.charCodeAt(i);
+      if (isLineBreak(u)) {
         this.endSegment();
         this.segAtLineStart = true;
         this.lineSkip = false;
-      } else if (isSentenceEnd(this.prev) && !this.segInCode && /\s/.test(c)) {
+      } else if (isAsciiSentenceEnd(this.prev) && !this.segInCode && isSpaceUnit(u)) {
         this.endSegment();
         this.segAtLineStart = false;
       } else {
-        if (c === "`") this.segInCode = !this.segInCode;
-        if (this.segHead.length < SEGMENT_HEAD) this.segHead += c;
-        if (!this.segOverlong) {
-          if (this.seg.length >= SEGMENT_MAX) { this.segOverlong = true; this.seg = ""; } else this.seg += c;
+        this.append(text[i]!, u);
+        if (isCjkSentenceEnd(u) && !this.segInCode) {
+          this.endSegment();
+          this.segAtLineStart = false;
         }
       }
-      this.prev = c;
+      this.prev = u;
     }
   }
 
-  /** The current title: the latest committed match, or the trailing sentence's when it counts. */
+  private append(c: string, u: number): void {
+    if (u === 0x60) this.segInCode = !this.segInCode;
+    if (this.segHead.length < SEGMENT_HEAD) this.segHead += c;
+    if (!this.segOverlong) {
+      if (this.seg.length >= SEGMENT_MAX) { this.segOverlong = true; this.seg = ""; } else this.seg += c;
+    }
+  }
+
+  /** The latest match among COMPLETE sentences — what a block may keep. */
+  committedTitle(): string | undefined {
+    return this.committed?.title;
+  }
+
+  /** The current title: the committed match, or the trailing sentence's when it counts (`final`, or
+   *  it already ends with sentence punctuation). */
   title(final: boolean): string | undefined {
     let best = this.committed;
     const tail = this.seg;
-    if (!this.segOverlong && tail.length > 0 && (final || isSentenceEnd(tail.trimEnd().slice(-1))) && this.readable(false)) {
+    if (!this.segOverlong && tail.length > 0 && (final || endsSentence(tail)) && this.readable(false)) {
       best = prefer(best, evaluateSentence(tail));
     }
     return best?.title;
@@ -481,7 +613,7 @@ export class ActivityTitleTracker {
    *  structure line skips the rest of its line. */
   private readable(commit: boolean): boolean {
     if (this.segAtLineStart) {
-      const head = this.segHead.trimStart();
+      const head = lineHead(this.segHead);
       if (FENCE_LINE.test(head)) {
         if (commit) { this.inFence = !this.inFence; this.lineSkip = true; }
         return false;
@@ -499,7 +631,7 @@ export class ActivityTitleTracker {
   private endSegment(): void {
     const text = this.seg;
     const overlong = this.segOverlong;
-    const empty = !overlong && text.trim().length === 0;
+    const empty = !overlong && isBlank(text);
     const readable = empty ? !this.inFence : this.readable(true);
     if (readable && !overlong && !empty) this.committed = prefer(this.committed, evaluateSentence(text));
     this.seg = "";
@@ -507,6 +639,20 @@ export class ActivityTitleTracker {
     this.segOverlong = false;
     this.segInCode = false;
   }
+}
+
+function isBlank(s: string): boolean {
+  for (let i = 0; i < s.length; i++) if (!isSpaceUnit(s.charCodeAt(i))) return false;
+  return true;
+}
+
+/** Whether `s`'s last non-space unit ends a sentence. */
+function endsSentence(s: string): boolean {
+  let i = s.length - 1;
+  while (i >= 0 && isSpaceUnit(s.charCodeAt(i))) i -= 1;
+  if (i < 0) return false;
+  const u = s.charCodeAt(i);
+  return isAsciiSentenceEnd(u) || isCjkSentenceEnd(u);
 }
 
 /** The later of two matches, unless the later one is weak and the earlier one is not. */

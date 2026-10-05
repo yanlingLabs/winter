@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ThinkingKind } from "@yanlinglabs/winter-protocol";
 import { ThinkingBlocks, deriveThinkingTitle, gerundOf, type ReasoningProgressFrame } from "../../src/projector/thinking";
-import { ActivityTitleTracker, activityTitleOf, lastValidHeading } from "../../src/projector/thinking-title";
+import { ActivityTitleTracker, TITLE_PATTERNS, activityTitleOf, lastValidHeading } from "../../src/projector/thinking-title";
 
 interface FixtureBlock { id: string; model: string; kind: ThinkingKind; note?: string; title: string | null; text: string }
 const fixture = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "thinking-titles.json"), "utf8")) as { blocks: FixtureBlock[] };
@@ -32,9 +32,9 @@ function stream(kind: ThinkingKind, text: string, size: number): { live: Array<s
 }
 
 describe("the fixture: real reasoning blocks and the title each gets", () => {
-  test("the fixture is the size the report quotes (49 blocks, 40 titled)", () => {
-    expect(fixture.blocks).toHaveLength(49);
-    expect(fixture.blocks.filter((b) => b.title !== null)).toHaveLength(40);
+  test("the fixture is the size the report quotes (58 blocks — 49 real, 9 synthetic — 48 titled)", () => {
+    expect(fixture.blocks).toHaveLength(58);
+    expect(fixture.blocks.filter((b) => b.title !== null)).toHaveLength(48);
   });
 
   for (const b of fixture.blocks) {
@@ -222,7 +222,7 @@ describe("the bold heading", () => {
   });
 
   test("BUG FIX: markdown labels and file names are not headings (DeepSeek over the Anthropic dialect)", () => {
-    for (const t of ["**src/calc.js:**", "**test/calc.test.js:**", "**src/format.js**", "**src/calc.js** (5 lines):", "**src/format.js**:", "**Lines per file (sorted by size):**", "**Note:**", "**`div` is wrong**", "**calc.js**"]) {
+    for (const t of ["**src/calc.js:**", "**test/calc.test.js:**", "**src/format.js**", "**src/calc.js** (5 lines):", "**src/format.js**:", "**Lines per file (sorted by size):**", "**Note:**", "**calc.js**", "**`calc.js`**", "**src/**"]) {
       expect({ t, h: lastValidHeading(`${t}\n1. body`) ?? null }).toEqual({ t, h: null });
     }
     expect(lastValidHeading(`**${"word ".repeat(11).trim()}**`)).toBeUndefined();   // > 10 words

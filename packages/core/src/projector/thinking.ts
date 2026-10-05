@@ -2,7 +2,7 @@ import {
   THINKING_ID_MAX_LENGTH, THINKING_TEXT_MAX_LENGTH, type ThinkingKind,
 } from "@yanlinglabs/winter-protocol";
 import { threadIdOf } from "./conversation";
-import { ActivityTitleTracker, activityTitleOf, clipTitle, collapse, lastValidHeading, sliceUnits } from "./thinking-title";
+import { ActivityTitleTracker, activityTitleOf, clipTitle, collapse, lastValidHeading, scanHeadings, sliceUnits } from "./thinking-title";
 import type { ProjectedEvent, ProtocolSdkMessage } from "./types";
 
 export { gerundOf, sliceUnits } from "./thinking-title";
@@ -133,8 +133,10 @@ interface OpenBlock {
   truncated: boolean;
   /** Each part's title state, oldest first. */
   parts: TitlePart[];
-  /** The last NON-EMPTY title derived — sticky (see `delta`). */
+  /** The last NON-EMPTY COMMITTED title — sticky, and what the block persists (see `retitle`). */
   title: string | undefined;
+  /** The last title a delta carried (live; may be provisional) — sticky too. */
+  shown: string | undefined;
   provider: string | undefined;
   model: string | undefined;
   /** epoch ms of the `start` frame; `undefined` for a block first seen at a `delta`/`end`. */
@@ -175,7 +177,7 @@ export class ThinkingBlocks {
     if (existing !== undefined) return existing;
     const block: OpenBlock = {
       blockId: f.block_id, threadId: threadIdOf(f), kind: f.kind, body: "", truncated: false, parts: [],
-      title: undefined, provider: boundedName(f.provider), model: boundedName(f.model),
+      title: undefined, shown: undefined, provider: boundedName(f.provider), model: boundedName(f.model),
       startedAt: f.phase === "start" ? this.nowMs() : undefined,
     };
     this.open.set(f.block_id, block);
@@ -239,11 +241,13 @@ export class ThinkingBlocks {
       }
     }
 
-    const titleChanged = this.retitle(b, false);
+    const live = this.retitle(b, false);
+    const titleChanged = live !== undefined && live !== b.shown;
+    if (titleChanged) b.shown = live;
     if (increment.length === 0 && !titleChanged && !kindChanged) return [];
     // The CURRENT title rides every delta that carries text (review r1), not only a change: a client
     // that joins mid-block (a reattach, the phone) learns it from the next delta it sees.
-    const title = titleChanged || increment.length > 0 ? b.title : undefined;
+    const title = titleChanged || increment.length > 0 ? b.shown : undefined;
     return [{
       type: "thinking_delta", sessionId: this.sessionId, threadId: b.threadId, blockId: b.blockId, kind: b.kind, phase: "delta",
       ...(increment.length > 0 ? { text: increment } : {}),
@@ -252,26 +256,33 @@ export class ThinkingBlocks {
   }
 
   /**
-   * The block's current title — `deriveThinkingTitle`'s answer, kept incrementally: the update's head,
-   * or the latest part's heading (its window scanned) else its activity rule. `final` (the block's own
-   * `end`) lets the trailing sentence count. Sticky: an `undefined` answer keeps the last title.
-   * Returns whether the title changed.
+   * The block's titles — `deriveThinkingTitle`'s answer, kept incrementally — returning the LIVE one.
+   *
+   *  - COMMITTED (`b.title`, what the block persists): the update's head; or the latest part's last
+   *    heading on a CLOSED line (its window scanned; kept once it scrolls out), else its activity rule
+   *    over COMPLETE sentences. Sticky: an `undefined` answer keeps the last committed title.
+   *  - LIVE (the delta's `title`): the same, but also reading what the text still to come may change —
+   *    a heading on the open last line, the trailing sentence once it ends with `.`/`!`/`?` — so the
+   *    pill does not wait for the next sentence. It is shown, never persisted (review r1: a streamed
+   *    title must never persist what the whole text would not produce).
+   *  - `final` (the block's own `end`): everything counts — the committed title is then exactly the
+   *    whole-text derivation.
    */
-  private retitle(b: OpenBlock, final: boolean): boolean {
-    let derived: string | undefined;
+  private retitle(b: OpenBlock, final: boolean): string | undefined {
     if (b.kind === "update") {
-      derived = deriveThinkingTitle("update", b.parts.map((p) => p.head));
-    } else if (b.kind !== "hidden") {
-      const p = b.parts[b.parts.length - 1];
-      if (p !== undefined) {
-        const scanned = lastValidHeading(scanWindow(p));
-        if (scanned !== undefined || !p.tailCut) p.heading = scanned;
-        derived = p.heading ?? p.rule.title(final);
-      }
+      const derived = deriveThinkingTitle("update", b.parts.map((p) => p.head));
+      if (derived !== undefined) b.title = derived;
+      return b.title;
     }
-    if (derived === undefined || derived === b.title) return false;
-    b.title = derived;
-    return true;
+    const p = b.parts[b.parts.length - 1];
+    if (b.kind === "hidden" || p === undefined) return b.title;
+    const scanned = scanHeadings(scanWindow(p));
+    if (scanned.closed !== undefined || !p.tailCut) p.heading = scanned.closed;
+    const heading = scanned.latest ?? p.heading;
+    const committed = final ? heading ?? p.rule.title(true) : p.heading ?? p.rule.committedTitle();
+    if (committed !== undefined) b.title = committed;
+    if (final) return b.title;
+    return heading ?? p.rule.title(false) ?? b.title;
   }
 
   /** `end`: the block closes — its persisted record, titled with its trailing sentence counted (a

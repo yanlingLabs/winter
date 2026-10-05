@@ -71,7 +71,7 @@ import { setSessionActivity, type SetActivityDeps } from "../sessions/set-activi
 import { setSessionDirs, type SetDirsDeps } from "../sessions/set-dirs";
 import { canonicalSessionCwd } from "../sessions/dirs";
 import { reapEmptySessions } from "../sessions/reaper";
-import { filterRemoteStreamEvent } from "../sessions/remote-stream";
+import { createRemoteStreamFilter } from "../sessions/remote-stream";
 import { foldPanelTabs } from "../panel/store";
 import { mintPanelTab } from "../panel/open-tab";
 import type { PanelCommandRegistry } from "../panel/commands";
@@ -2187,6 +2187,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // has exactly one seam to cover — both REPLAY (hub.attach's read loop calls deliver) and
         // LIVE (hub.fanOut calls the same deliver).
         const isRemote = socket.data.authedRole === "remote";
+        // Per client: the remote policy also drops repeats of an unchanged thinking-pill title.
+        const remoteFilter = isRemote ? createRemoteStreamFilter() : undefined;
         const hubClient: HubClient = {
           clientName: socket.data.clientName,
           // T5: carried so the hub's detach hook can classify this harness by the daemon's OWN
@@ -2197,8 +2199,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // The remote live/replay policy (sessions/remote-stream.ts): allowlist the type,
             // then bound the serialized size. Harness/admin connections are untouched — they
             // still receive every event byte-identically.
-            if (isRemote) {
-              const allowed = filterRemoteStreamEvent(event);
+            if (remoteFilter !== undefined) {
+              const allowed = remoteFilter(event);
               // Filtered, not failed: return `true` so hub.attach's replay loop keeps going and
               // still advances its lastSeq past this event. `false` means "this client is dead"
               // and would abort the replay mid-way.
