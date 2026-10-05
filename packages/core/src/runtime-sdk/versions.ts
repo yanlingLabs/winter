@@ -3,8 +3,12 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.46";
-/** Bumped to 0.0.46 (2026-10-05; 0.0.45 was tagged but never published): a spawned runtime stops when its host dies, even
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.47";
+/** Bumped to 0.0.47 (2026-10-05, the thinking pill): every provider family's reasoning streams live to the host as the
+ *  Winter-only `system/reasoning_progress` frame (start → delta* → end per block, `kind` summary/update/exposed/hidden,
+ *  the last kind wins), which the projector turns into `thinking_delta`/`thinking_block` (`projector/thinking.ts`);
+ *  Claude 5.x rows request `display: "updates"`, whose progress-update blocks title the pill.
+ *  Earlier: bumped to 0.0.46 (2026-10-05; 0.0.45 was tagged but never published): a spawned runtime stops when its host dies, even
  *  mid-turn -- it watches its parent (`WINTER_HOST_PID`, passed by the wrapper's spawn) and, once the host is gone, kills
  *  every process group it started and exits, so a crashed daemon no longer leaves a session running unsupervised.
  *  Earlier: bumped to 0.0.44 (2026-10-04, user ruling "lets fold the message into the running turn"): host input sent while a

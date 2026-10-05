@@ -187,6 +187,29 @@ describe("projector: system/reasoning_progress → thinking_delta / thinking_blo
     expect(projector.turnRunning).toBe(false);
   });
 
+  test("agent SDK 0.0.47: a SUBAGENT's end arriving after the parent's result is ignored — no duplicate block, no turn marked running", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "go");
+    accept(projector, rp("rb_kid", "start", "summary", { parent_tool_use_id: "toolu_fg" }));
+    accept(projector, rp("rb_kid", "delta", "summary", { text: "**Child**\n\nwork", parent_tool_use_id: "toolu_fg" }));
+    const atResult = accept(projector, result());
+    expect(of(atResult, "thinking_block").map((e) => e.blockId)).toEqual(["rb_kid"]);   // closed with the turn
+    expect(accept(projector, rp("rb_kid", "end", "summary", { parent_tool_use_id: "toolu_fg" }))).toEqual([]);
+    expect(projector.turnRunning).toBe(false);
+  });
+
+  test("agent SDK 0.0.47: hidden → summary and hidden → exposed promote the block (the last kind wins)", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    accept(projector, rp("rb_s", "start", "hidden", { provider: "anthropic" }));
+    accept(projector, rp("rb_s", "delta", "summary", { text: "I should read the schema first." }));
+    expect(of(accept(projector, rp("rb_s", "end", "summary")), "thinking_block")[0]).toMatchObject({ kind: "summary", text: "I should read the schema first." });
+    accept(projector, rp("rb_e", "start", "hidden"));
+    accept(projector, rp("rb_e", "delta", "exposed", { text: "raw" }));
+    expect(of(accept(projector, rp("rb_e", "end", "exposed")), "thinking_block")[0]).toMatchObject({ kind: "exposed", text: "raw" });
+  });
+
   test("a part with no heading keeps the last title (the pill never regresses to 'Thinking' mid-block)", () => {
     const { projector } = makeProjector();
     accept(projector, init());
