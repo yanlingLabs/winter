@@ -357,6 +357,13 @@ struct ActivityItem: Equatable {
         /// continuity warning (`continuity_warning`): what a model switch could not carry across, a
         /// summary before a switch to a smaller model, reasoning state that could not be saved.
         case notice(text: String)
+        /// The thinking pill (2026-10-05): one reasoning block of the main thread — built live from
+        /// `thinking_delta` and replaced in place by its persisted `thinking_block` (the shared kit's
+        /// fold, `ThinkingItem`), so it keeps the place in the timeline where it started. The pill-
+        /// themed window draws it as a pill beside the tool pills (`PillThinkingHeader`); every other
+        /// transcript as a quiet line (`TranscriptThinkingRow`). Its `text` is kept for a future
+        /// expand view and rendered nowhere yet.
+        case thinking(ThinkingItem)
     }
     var kind: Kind
     /// How many lines a `write` call is putting in its file, counted from the call's `content`
@@ -383,6 +390,13 @@ extension ActivityItem {
     /// `.task`/`.worktree` item cannot carry a meaningless copy of it.
     var interactionRecord: InteractionRecord? {
         if case .interaction(let record) = kind { return record }
+        return nil
+    }
+
+    /// The reasoning block a `.thinking` item carries — `nil` for every other kind. The join key
+    /// `SessionReducer.foldThinking` searches on (`blockId`).
+    var thinkingItem: ThinkingItem? {
+        if case .thinking(let item) = kind { return item }
         return nil
     }
 }
@@ -916,6 +930,13 @@ enum SessionReducer {
             // exchange has no reply, so without this the user saw their bubble and nothing else.
             let line = v.text.split(separator: "\n", omittingEmptySubsequences: true).joined(separator: " — ")
             appendActivity(.notice(text: line), to: &s)
+        case .thinkingDelta(let v) where v.threadId == mainThread:
+            // The thinking pill: deltas build ONE live item per block (the shared kit's fold); a delta
+            // for a block already replaced by its record leaves the record alone.
+            foldThinking(&s, blockId: v.blockId) { ThinkingItem.folding($0, delta: v) }
+        case .thinkingBlock(let v) where v.threadId == mainThread:
+            // …and the persisted block replaces the live item IN PLACE. On a replay only this exists.
+            foldThinking(&s, blockId: v.blockId) { _ in ThinkingItem(block: v) }
         case .continuityWarning(let v) where v.threadId == mainThread:
             // WS-23 review r1 I-3: what the conversation lost or what Winter did to it (a lossy
             // switch, a summary before a switch, unsaved reasoning state) -- the same quiet line.
@@ -1129,6 +1150,23 @@ enum SessionReducer {
             )
             return
         }
+    }
+
+    /// The thinking pill: lands a reasoning block on the `.thinking` item its `blockId` already has
+    /// (newest exchanges first, bounded like `foldToolResult` — a block opens and closes inside one
+    /// round), or appends a new one to the open exchange through `appendActivity` (its adjacent-dupe
+    /// collapse cannot fire — no item has this `blockId` — and its cap applies). An item the cap evicted
+    /// simply reappears at the end with its record — the same miss semantics as a tool result.
+    private static func foldThinking(_ state: inout OrbSessionState, blockId: String,
+                                     _ fold: (ThinkingItem?) -> ThinkingItem) {
+        for e in state.exchanges.indices.reversed().prefix(toolResultFoldSearchDepth) {
+            guard let i = state.exchanges[e].activity.lastIndex(where: { $0.thinkingItem?.blockId == blockId }),
+                  let existing = state.exchanges[e].activity[i].thinkingItem else { continue }
+            let next = fold(existing)
+            if next != existing { state.exchanges[e].activity[i].kind = .thinking(next) }
+            return
+        }
+        appendActivity(.thinking(fold(nil)), to: &state)
     }
 
     /// Finds the `.interaction` item a callId opened, newest exchange first. Returns the

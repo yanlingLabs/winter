@@ -370,8 +370,8 @@ struct PillCountUp<Content: View>: View {
 
 /// One white disc: a tool's symbol in black, or a site's favicon (a grey globe
 /// until it loads) — the plume's own tile, standing still. A thin black ring keeps overlapped discs
-/// apart.
-private struct PillToolDisc: View {
+/// apart. Internal (not private) so the thinking pill (`PillThinkingHeader`) wears the same disc.
+struct PillToolDisc: View {
     let disc: PlumeThrow
     let size: CGFloat
     /// Read so a newly loaded favicon draws (`PillToolRunHeader.faviconTick`).
