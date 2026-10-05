@@ -49,6 +49,9 @@ const LOGGABLE_FIELDS: Readonly<Record<string, readonly string[]>> = {
   "system/model_refusal_fallback": ["trigger", "direction"],
   "system/model_refusal_no_fallback": ["trigger"],
   "system/reasoning_summary": ["provider"],
+  // The thinking pill (2026-10-05): projected (`thinking_delta`/`thinking_block`), so this line is only
+  // ever written for a frame too malformed to project. Its `text` is reasoning — never logged.
+  "system/reasoning_progress": ["provider"],
   "system/model_switch": ["reason"],
   "system/continuity_warning": ["warning"],
   "system/permission_denied": ["tool_name", "decision_reason_type"],

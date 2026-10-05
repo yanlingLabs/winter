@@ -258,6 +258,14 @@ export interface Projector {
    * when the throw is the "error-result-then-throw" pair of a result already projected).
    */
   acceptError(err: unknown): ProjectedBatch;
+  /**
+   * The thinking pill (2026-10-05): the child's iteration is over — persist every reasoning block it
+   * left open (a `thinking_block` each, oldest first). `accept`'s terminal and `acceptError` already
+   * close what their turn or stream left open; this is the door for an iteration that ended cleanly
+   * with a block still open (the runtime promises an `end` for every `start`, so this is the
+   * exception). Empty when nothing is open. The driver calls it once, before `flush()`.
+   */
+  closeOpenThinking(): ProjectedBatch;
   /** Every projection this projector declined, in order. Never silently empty of a real refusal. */
   readonly refusals: readonly ProjectorRefusal[];
 }

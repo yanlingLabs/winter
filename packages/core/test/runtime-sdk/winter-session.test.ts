@@ -863,6 +863,24 @@ describe("WS-23 review r1: the idle clock during a compaction (M-4), and the han
     expect(h.q().compactions).toEqual([undefined]);
   });
 
+  test("the thinking pill: deltas are broadcast, never appended; a block the child left open when its iteration ENDED CLEANLY is persisted", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    const rp = (phase: string, extra: Frame = {}): Frame =>
+      ({ type: "system", subtype: "reasoning_progress", block_id: "rb_1", phase, kind: "summary", provider: "openai", model: "m", parent_tool_use_id: null, uuid: `rp-${phase}`, session_id: "be-x", ...extra });
+    h.q().emit(rp("start"));
+    h.q().emit(rp("delta", { text: "**Reading**\n\nthe schema" }));
+    await h.settled();
+    expect(h.broadcasts.filter((e) => e.type === "thinking_delta").map((e) => (e as { phase: string }).phase)).toEqual(["start", "delta"]);
+    expect(seen(h, "thinking_delta")).toEqual([]);
+    expect(seen(h, "thinking_block")).toEqual([]);
+    h.q().end();                                       // no `end` frame, no result, no throw
+    await h.session.end();
+    expect(seen(h, "thinking_block")).toMatchObject([{ threadId: "main", blockId: "rb_1", title: "Reading", text: "**Reading**\n\nthe schema" }]);
+  });
+
   test("I-5: a send during a pending handoff reaches the log, never the SOURCE child; the work's end reports it held", async () => {
     const h = harness();
     await h.session.open();

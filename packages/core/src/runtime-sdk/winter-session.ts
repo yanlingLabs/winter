@@ -1212,6 +1212,9 @@ class WinterSessionImpl implements WinterSession {
         if (!this.ending) this.log(`the winter child for ${this.sessionId} stopped: ${cls.code}`);
       }
     } finally {
+      // The thinking pill: a reasoning block the child left open (no `end`, no terminal, no throw) is
+      // persisted now rather than lost — empty in the ordinary case.
+      try { this.emit(inc.projector.closeOpenThinking()); } catch { /* bounded: the store may be closed */ }
       try { inc.projector.flush(); } catch { /* the checkpoint store may already be closed */ }
       this.clearIdleTimer();
       try { inc.attachment?.detach(); } catch { /* detach never throws by contract; belt only */ }

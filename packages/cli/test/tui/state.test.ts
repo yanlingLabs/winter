@@ -635,6 +635,18 @@ describe("state.ts — note one-liners match main.ts's wording (bg-task/worktree
     expect(s.committed.at(-1)).toEqual({ kind: "note", text: "note: switching from a to b: — 2 images cannot be read." });
   });
 
+  // The thinking pill (2026-10-05): the TUI does not render thinking (yet) — both events pass through
+  // without touching the transcript or the turn, live and replayed.
+  test("thinking_delta / thinking_block are ignored", () => {
+    let s = initialState();
+    s = reduce(s, { type: "turn_started", threadId: "main" }, T0);
+    const before = s;
+    s = reduce(s, { type: "thinking_delta", threadId: "main", blockId: "rb_1", kind: "summary", phase: "delta", text: "**Plan**", title: "Plan" }, T0);
+    s = reduce(s, { type: "thinking_block", threadId: "main", blockId: "rb_1", kind: "summary", title: "Plan", text: "**Plan**" }, T0);
+    expect(s.committed).toEqual(before.committed);
+    expect(s.turnRunning).toBe(true);
+  });
+
   test("lease_granted / lease_lost (Phase 5 CU) — CU control notes with friendly class labels", () => {
     let s = initialState();
     const holder = { kind: "session", id: "s1" };

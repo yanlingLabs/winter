@@ -11,6 +11,7 @@ import { createEchoWindow, type EchoWindow } from "./dedupe";
 import { classifyThrown, sanitizeDetail } from "./errors";
 import { isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 import { isQuestionTool } from "./questions";
+import { ThinkingBlocks, asReasoningProgressFrame } from "./thinking";
 import { boundContinuityWarningText, boundHookNoticeText, projectTerminal, sharesMainLedgerRow, totalsOf, turnUsageOf, type MainModelKey, type UsageTotals } from "./terminal";
 import { hostToolNameFor } from "../runtime-sdk/tool-names";
 import { hostInputFoldedCount } from "../runtime-sdk/fold";
@@ -31,6 +32,7 @@ export {
 } from "./children";
 export { UNPERSISTED_KINDS, isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 export { QUESTION_TOOLS, isQuestionTool } from "./questions";
+export { ThinkingBlocks, asReasoningProgressFrame, deriveThinkingTitle, type ReasoningProgressFrame } from "./thinking";
 export { MAIN_THREAD, threadIdOf } from "./conversation";
 export { hostToolNameFor } from "../runtime-sdk/tool-names";
 export { ProjectorRefusedError } from "./types";
@@ -230,6 +232,11 @@ class ProjectorImpl implements Projector {
    * set stays as small as one turn's calls instead of growing for the session's life.
    */
   private readonly resultsThisTurn = new Set<string>();
+  /** The thinking pill (2026-10-05): the reasoning blocks `system/reasoning_progress` has opened and
+   *  not yet closed — see `thinking.ts`. Closed by their own `end` frame, or here when the turn (main +
+   *  foreground children, at the `result`), the stream (`acceptError`) or the child
+   *  (`closeOpenThinking`) ends with one still open. */
+  private readonly thinking: ThinkingBlocks;
 
   /** `frame` without the `tool_result` blocks whose call already has its result this turn; `undefined`
    *  when that leaves nothing at all. Logged once per session — a runtime that repeats itself is news. */
@@ -268,6 +275,10 @@ class ProjectorImpl implements Projector {
     this.winterSessionId = deps.winterSessionId ?? deps.sessionId;
     this.generation = deps.generation;
     this.echo = createEchoWindow();
+    this.thinking = new ThinkingBlocks(deps.sessionId, () => {
+      const t = Date.parse(this.deps.now());
+      return Number.isFinite(t) ? t : Date.now();
+    });
   }
 
   get turnRunning(): boolean { return this.openTurns > 0 || this.sawFrame; }
@@ -440,6 +451,22 @@ class ProjectorImpl implements Projector {
     }
 
     const claim = (sourceId: string, produce: () => ProjectedEvent[]): ProjectedBatch => this.claimed(sourceId, produce);
+
+    // The thinking pill (2026-10-05): `system/reasoning_progress` — `start`/`delta` are TRANSIENT
+    // (`thinking_delta`, never checkpointed, like `assistant_delta`); `end` is the block's persisted
+    // record, claimed under its own stable id so a replay appends it once. A subagent's frame
+    // (`parent_tool_use_id`) lands on the child's thread (`threadIdOf`), like its other content, and
+    // only a MAIN-thread frame counts as evidence the session's own turn is running.
+    const reasoning = asReasoningProgressFrame(msg);
+    if (reasoning !== undefined) {
+      if (!fromSubagent(reasoning)) {
+        this.running = true;
+        this.sawFrame = true;
+      }
+      if (reasoning.phase === "start") return this.stampBatch(this.thinking.start(reasoning));
+      if (reasoning.phase === "delta") return this.stampBatch(this.thinking.delta(reasoning));
+      return claim(`tb:${reasoning.block_id}`, () => this.thinking.end(reasoning));
+    }
 
     // WS-23: `system/informational` -- the runtime's text notice for the host (a hook's
     // `systemMessage`, a blocked prompt's reason, a hook's `continue: false`). Persisted as
@@ -656,6 +683,10 @@ class ProjectorImpl implements Projector {
       // this very window whether or not a frame said so — the same reading as a `task_*` frame.
       const sawSharedRowActivity = this.sharedRowActivity || this.backgroundChildren.size > 0;
       const events = claim(sourceId, () => {
+        // A reasoning block still open when the turn ends is closed here, BEFORE the terminal and
+        // inside its claim (one claim per `accept`): the main thread's and every foreground child's —
+        // a child running in the background outlives this terminal, and so does its block.
+        const closed = this.thinking.closeWhere((t) => t === MAIN_THREAD || !this.backgroundChildren.has(t));
         const out = projectTerminal({
           result: resultFrame, sessionId: this.deps.sessionId, threadId: MAIN_THREAD,
           previous: this.totals, rounds, ...(this.mainModel === undefined ? {} : { mainModel: this.mainModel }),
@@ -663,7 +694,7 @@ class ProjectorImpl implements Projector {
           ...(this.stopAnnounced ? { stopAlreadyAnnounced: true } : {}),
         });
         this.totals = out.totals ?? this.totals;
-        return out.events;
+        return [...closed, ...out.events];
       });
       // The turn closes whether or not the result projected (a replayed prefix must still advance
       // the turn counter, or every later source id would collide with the first pass's).
@@ -810,9 +841,12 @@ class ProjectorImpl implements Projector {
       });
       return EMPTY_BATCH();
     }
+    // The stream is gone: every reasoning block still open (any thread — a background child dies with
+    // the stream too) is closed, whether or not a turn was running.
+    const closed = this.thinking.closeWhere(() => true);
     if (!this.turnRunning) {
       this.deps.log.warn?.("[projector] the stream failed with no turn running", { sessionId: this.deps.sessionId, code: classified.code });
-      return EMPTY_BATCH();
+      return closed.length === 0 ? EMPTY_BATCH() : this.stampBatch(closed);
     }
     this.running = false;
     this.sawFrame = false;
@@ -831,12 +865,21 @@ class ProjectorImpl implements Projector {
     // applies to `result.interrupted`, applied here so a thrown AbortError cannot smuggle an
     // `agent_error` past it.
     const aborted = classified.code === "aborted";
-    return this.stampBatch(aborted
-      ? [{ type: "turn_completed", sessionId: this.deps.sessionId, threadId: MAIN_THREAD, stopReason: "aborted", inputTokens: 0, outputTokens: 0 }]
-      : [
-          { type: "agent_error", sessionId: this.deps.sessionId, threadId: MAIN_THREAD, message: classified.message, code: classified.code },
-          { type: "turn_completed", sessionId: this.deps.sessionId, threadId: MAIN_THREAD, stopReason: "error", inputTokens: 0, outputTokens: 0 },
-        ]);
+    return this.stampBatch([
+      ...closed,
+      ...(aborted
+        ? [{ type: "turn_completed", sessionId: this.deps.sessionId, threadId: MAIN_THREAD, stopReason: "aborted", inputTokens: 0, outputTokens: 0 } as const]
+        : [
+            { type: "agent_error", sessionId: this.deps.sessionId, threadId: MAIN_THREAD, message: classified.message, code: classified.code } as const,
+            { type: "turn_completed", sessionId: this.deps.sessionId, threadId: MAIN_THREAD, stopReason: "error", inputTokens: 0, outputTokens: 0 } as const,
+          ]),
+    ]);
+  }
+
+  closeOpenThinking(): ProjectedBatch {
+    this.commitPending();
+    const closed = this.thinking.closeWhere(() => true);
+    return closed.length === 0 ? EMPTY_BATCH() : this.stampBatch(closed);
   }
 
   /**
