@@ -198,7 +198,9 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // 0.0.43 → 0.0.44 (mid-turn fold, clearQueuedInput): keychain-store.ts diff EMPTY; the mirror stands.
     // 0.0.44 → 0.0.46 (exit on host death; 0.0.45 never published): keychain-store.ts diff EMPTY; the mirror stands.
     // 0.0.46 → 0.0.47 (system/reasoning_progress, Claude display "updates"): keychain-store.ts diff EMPTY; the mirror stands.
-    expect(pkg.version).toBe("0.0.47");
+    // 0.0.47 → 0.0.48 (Claude "summarized" again, more summary rows, unverified-org fallback): the keychain-store
+    // module of the two PUBLISHED runtime bundles (and its .d.ts) is byte-identical; the mirror stands.
+    expect(pkg.version).toBe("0.0.48");
   });
 
 
