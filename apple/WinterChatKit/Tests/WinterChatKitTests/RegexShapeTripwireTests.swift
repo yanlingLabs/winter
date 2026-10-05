@@ -425,7 +425,9 @@ final class RegexShapeTripwireTests: XCTestCase {
         XCTAssertTrue(opaque.first?.pattern.hasPrefix(Self.runtimeCheckedIndirection.argumentPrefix) ?? false,
                       "the `JSRegex` forwarding site changed shape: \(opaque)")
         XCTAssertTrue(src.contains("fileprivate struct JSRegex"), "JSRegex must stay fileprivate to this file")
-        let constructionSites = src.components(separatedBy: "JSRegex(").count - 1
+        // Every construction form: `JSRegex(…)`, `JSRegex.init(…)` and a typed `let x: JSRegex = .init(…)`.
+        let count = { (needle: String) in src.components(separatedBy: needle).count - 1 }
+        let constructionSites = count("JSRegex(") + count("JSRegex.init(") + count(": JSRegex = .init(")
         let patterns = ActivityTitleRule.compiledPatterns
         XCTAssertEqual(patterns.count, constructionSites, "compiledPatterns must list every JSRegex the file builds")
         XCTAssertEqual(Set(patterns).count, patterns.count)
@@ -440,6 +442,10 @@ final class RegexShapeTripwireTests: XCTestCase {
         XCTAssertFalse(Self.quantifierHazards(#"\s*,?\s+"#).isEmpty)
         XCTAssertFalse(Self.quantifierHazards(#"(a+)+b"#).isEmpty)
         XCTAssertFalse(Self.quantifierHazards(#"(?:x\s+)*"#).isEmpty)
+        XCTAssertFalse(Self.quantifierHazards(#"(?:now|now )*"#).isEmpty)          // overlapping alternatives
+        XCTAssertFalse(Self.quantifierHazards(#"(?:a|ab)+c"#).isEmpty)
+        XCTAssertEqual(Self.quantifierHazards(#"(?:a|b)*"#), [])
+        XCTAssertEqual(Self.quantifierHazards(#"(?:ok|okay)(?![a-z])"#), [])         // not under a quantifier
         XCTAssertEqual(Self.quantifierHazards(#"^[ \t]*\*\*(.+?)\*\*(.*)$"#), [])
         XCTAssertEqual(Self.quantifierHazards(#"^(?:(?:now|so)(?![a-z'])(?: ?,)? )*([a-z]+ing)(?=[ ,]|\z)([^\n]*)\z"#), [])
     }
@@ -478,6 +484,7 @@ final class RegexShapeTripwireTests: XCTestCase {
                 var atom = Shape()
                 var zeroWidth = false
                 var isGroup = false
+                var groupBody = ""
                 if c == "\\" { i += 2 }
                 else if c == "[" { i = skipClass(s, i) }
                 else if c == "(" {
@@ -486,6 +493,7 @@ final class RegexShapeTripwireTests: XCTestCase {
                     var body = String(s[(i + 1)..<max(i + 1, end - 1)])
                     if body.hasPrefix("?=") || body.hasPrefix("?!") || body.hasPrefix("?<=") || body.hasPrefix("?<!") { zeroWidth = true }
                     for prefix in ["?<=", "?<!", "?:", "?=", "?!"] where body.hasPrefix(prefix) { body.removeFirst(prefix.count); break }
+                    groupBody = body
                     atom = scan(Array(body))
                     i = end
                 } else if c == "^" || c == "$" { zeroWidth = true; i += 1 }
@@ -503,6 +511,7 @@ final class RegexShapeTripwireTests: XCTestCase {
                 }
                 if let q, "*+?}".contains(q), i < s.count, s[i] == "?" || s[i] == "+" { i += 1 }   // lazy / possessive
                 if unbounded && atom.hasUnbounded { hazards.append("nested unbounded quantifier") }
+                if unbounded && isGroup && overlappingAlternatives(groupBody) { hazards.append("overlapping alternatives under a quantifier") }
                 if isGroup && zeroWidth {
                     shape.hasUnbounded = shape.hasUnbounded || atom.hasUnbounded
                     prevEnds = false
@@ -521,6 +530,28 @@ final class RegexShapeTripwireTests: XCTestCase {
         }
         _ = scan(Array(pattern))
         return hazards
+    }
+
+    /// A group body's TOP-LEVEL alternatives that are plain literals, one a prefix of another (`now|now `,
+    /// `a|ab`, an empty one): under `*`/`+` the engine can split one run of text several ways. An
+    /// alternative with any regex syntax is not compared (quiet rather than guessing).
+    static func overlappingAlternatives(_ body: String) -> Bool {
+        var alts: [String] = []
+        var depth = 0
+        var cur = ""
+        var chars = Array(body)[...]
+        while let c = chars.popFirst() {
+            if c == "\\" { cur.append(c); if let n = chars.popFirst() { cur.append(n) }; continue }
+            if c == "(" || c == "[" { depth += 1 } else if c == ")" || c == "]" { depth -= 1 }
+            if c == "|" && depth == 0 { alts.append(cur); cur = ""; continue }
+            cur.append(c)
+        }
+        alts.append(cur)
+        guard alts.count >= 2 else { return false }
+        let meta = Set("\\()[]{}*+?.^$|")
+        guard alts.allSatisfy({ !$0.contains(where: meta.contains) }) else { return false }
+        for i in alts.indices { for j in alts.indices where i != j && alts[j].hasPrefix(alts[i]) { return true } }
+        return false
     }
 
     func testTheAllowlistIsEmptyAndAddingToItMustBeDeliberate() {

@@ -125,7 +125,8 @@ describe("projector: system/reasoning_progress → thinking_delta / thinking_blo
     expect(d3[0]).toMatchObject({ text: "\n\n**Check" });             // the separator rides the increment
     expect((d3[0] as Any).title).toBe("Planning");                   // the CURRENT title rides every text delta — kept, not cleared
     const d4 = accept(projector, rp("rb_2", "delta", "summary", { text: "ing the tests**", part: 1 }));
-    expect(d4[0]).toMatchObject({ text: "ing the tests**", title: "Checking the tests" });
+    // A heading counts once its LINE is closed (review r2: no provisional titles) — or at the block's end.
+    expect(d4[0]).toMatchObject({ text: "ing the tests**", title: "Planning" });
     const block = of(accept(projector, rp("rb_2", "end", "summary")), "thinking_block")[0]!;
     expect(block.text).toBe("**Planning**\n\nread the schema\n\n**Checking the tests**");
     expect(block.title).toBe("Checking the tests");
@@ -257,7 +258,9 @@ describe("projector: system/reasoning_progress → thinking_delta / thinking_blo
 
     accept(projector, rp("rb_5b", "start", "exposed", { provider: "deepseek", model: "deepseek-v4-pro" }));
     const d2 = accept(projector, rp("rb_5b", "delta", "exposed", { text: "Small project. Let me read all the files." }));
-    expect((d2[0] as Any).title).toBe("Reading all the files");
+    expect((d2[0] as Any).title).toBeUndefined();                       // the sentence is not closed yet
+    const d3 = accept(projector, rp("rb_5b", "delta", "exposed", { text: "\nThe files are small." }));
+    expect((d3[0] as Any).title).toBe("Reading all the files");
     expect(of(accept(projector, rp("rb_5b", "end", "exposed")), "thinking_block")[0]).toMatchObject({ kind: "exposed", title: "Reading all the files" });
 
     accept(projector, rp("rb_6", "start", "hidden"));

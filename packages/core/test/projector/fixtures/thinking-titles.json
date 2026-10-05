@@ -451,6 +451,54 @@
       "note": "bidi and zero-width controls are stripped from a heading",
       "title": "Reading the logs",
       "text": "**Reading‮ the​ logs**\n\nbody"
+    },
+    {
+      "id": "synthetic/raw-answer-draft-headers",
+      "model": "synthetic",
+      "kind": "exposed",
+      "note": "raw reasoning: late answer-draft headers never override the activity",
+      "title": "Running the tests",
+      "text": "Let me read all the files.\n\nI'll run the tests next.\n\n**`div` is wrong**\n\nIt multiplies instead of dividing.\n\n**Riskiest: `div`**\n\n**Bug in `div()`**\n"
+    },
+    {
+      "id": "synthetic/raw-heading-then-activity",
+      "model": "synthetic",
+      "kind": "exposed",
+      "note": "raw reasoning: an activity after the next heading beats the opening heading",
+      "title": "Checking the tests",
+      "text": "**Plan**\n\nThe project is small.\n\n**`wc -l` output**\n\nLet me check the tests now.\n"
+    },
+    {
+      "id": "synthetic/raw-opening-heading-body",
+      "model": "synthetic",
+      "kind": "exposed",
+      "note": "raw reasoning: an opening heading beats the activity in its own body",
+      "title": "Planning the fix",
+      "text": "**Planning the fix**\n\nLet me read calc.js first.\nThe function multiplies.\n"
+    },
+    {
+      "id": "synthetic/summary-raw-looking",
+      "model": "synthetic",
+      "kind": "summary",
+      "note": "a summary that does not open with a heading is raw-looking: the activity wins",
+      "title": "Running the tests",
+      "text": "I'll run the tests.\n\n**`wc -l` output**\n\n17 lines in total.\n"
+    },
+    {
+      "id": "synthetic/single-code-span-heading",
+      "model": "synthetic",
+      "kind": "summary",
+      "note": "a heading that is one code span is no heading",
+      "title": "Checking div against its test",
+      "text": "**`div`**\n\nLet me check div against its test.\n"
+    },
+    {
+      "id": "synthetic/openai-heading-then-activity",
+      "model": "synthetic",
+      "kind": "summary",
+      "note": "provider-written (opens with a heading): its latest heading wins over 'Let me …' prose anywhere",
+      "title": "Reviewing constraints",
+      "text": "**Planning the migration**\n\nLet me read the schema first. I'll check the tables.\n\n**Reviewing constraints**\n\nLet me look at the foreign keys.\n"
     }
   ]
 }

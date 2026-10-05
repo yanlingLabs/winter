@@ -99,40 +99,92 @@ const HEADING_MAX_WORDS = 10;
  *  served over the Anthropic dialect and labelled `summary`) bolds labels and file names —
  *  `**src/calc.js:**`, `**Lines per file (sorted by size):**`, `**src/format.js**`, `` **`calc.js`** `` —
  *  while a real heading may well NAME a file (`**Inspecting package.json scripts**`). */
+/** One inline code span and nothing else (`` **`div`** ``). */
+const SINGLE_CODE_SPAN = /^`[^`]+`$/;
+
 function isTitleHeading(inner: string): boolean {
   if (inner.length === 0 || inner.endsWith(":")) return false;
   if (inner.split(" ").length > HEADING_MAX_WORDS) return false;
+  if (SINGLE_CODE_SPAN.test(inner)) return false;
   const bare = inner.replace(/`/g, "");
   if (SINGLE_TOKEN.test(bare) && (bare.includes("/") || FILE_TOKEN.test(bare))) return false;
   return true;
 }
 
-/** The last valid heading on a CLOSED line (one a line break follows) and the last valid one counting
- *  the open last line too. */
-export function scanHeadings(text: string): { closed: string | undefined; latest: string | undefined } {
-  let closed: string | undefined;
-  let latest: string | undefined;
+/** A title and where it starts in its part (UTF-16 offset). */
+export interface Placed { title: string; pos: number }
+
+/** What a part's headings say about its title (offsets relative to the text scanned, plus `base`). */
+export interface HeadingFacts {
+  /** The last valid heading. */
+  latest: Placed | undefined;
+  /** The part's OPENING heading: its first non-blank line, a valid heading. */
+  opening: Placed | undefined;
+  /** Where the opening heading's body ends: the next heading-shaped line after it (valid or not). */
+  protectEnd: number | undefined;
+  /** Every counted heading-shaped line's offset, in order. */
+  lines: number[];
+}
+
+/**
+ * The headings of `text`. A heading line opens its line (after spaces/tabs), closes its `**` on it and
+ * has nothing after; it counts once a line break has CLOSED its line — or, with `final`, at the end of
+ * the text too (no more text can follow it on that line). `isTitleHeading` decides which are titles;
+ * any heading-shaped line ends the opening heading's body. `base` is added to every offset.
+ */
+export function scanHeadings(text: string, final: boolean, base = 0): HeadingFacts {
+  let latest: Placed | undefined;
+  let opening: Placed | undefined;
+  let protectEnd: number | undefined;
+  const lines: number[] = [];
+  let firstContent = 0;
+  while (firstContent < text.length && isSpaceUnit(text.charCodeAt(firstContent))) firstContent += 1;
+  const firstLineStart = text.lastIndexOf("\n", firstContent - 1) + 1;
   for (const m of text.matchAll(LINE_HEADING)) {
     if (!BLANK_REST.test(m[2] ?? "")) continue;
+    if (!final && m.index + m[0].length >= text.length) continue;    // its line is still open
+    lines.push(base + m.index);
+    if (opening !== undefined && protectEnd === undefined) protectEnd = base + m.index;
     const inner = cleanText(m[1] ?? "");
     if (!isTitleHeading(inner)) continue;
-    latest = inner;
-    if (m.index + m[0].length < text.length) closed = inner;
+    const placed = { title: clipTitle(inner), pos: base + m.index };
+    latest = placed;
+    if (m.index === firstLineStart && m.index <= firstContent) opening = placed;
   }
-  return { closed: closed === undefined ? undefined : clipTitle(closed), latest: latest === undefined ? undefined : clipTitle(latest) };
+  return { latest, opening, protectEnd, lines };
 }
 
 /**
  * The LAST valid heading anywhere in `text`, cleaned and clipped — `undefined` when there is none.
  * A heading opens its line, closes on it with nothing after, and passes `isTitleHeading`; one still
  * missing its closing `**` does not count (the one before it still does), nor does a bold word
- * mid-line, nor a bold span followed by more text on its line (`**src/calc.js** (5 lines):`).
- * `includeOpenLine: false` ignores a heading on the last line while no line break has closed it yet
- * (text may still follow it on that line).
+ * mid-line, a bold span followed by more text on its line (`**src/calc.js** (5 lines):`), a label
+ * (`**Note:**`), a lone path/file name or a lone code span. `includeOpenLine: false` ignores a heading
+ * on the last line while no line break has closed it yet (text may still follow it on that line).
  */
 export function lastValidHeading(text: string, includeOpenLine = true): string | undefined {
-  const h = scanHeadings(text);
-  return includeOpenLine ? h.latest : h.closed;
+  return scanHeadings(text, includeOpenLine).latest?.title;
+}
+
+/**
+ * PRECEDENCE between a part's headings and its activity rule (review r2):
+ *
+ *  - a `summary` part that OPENS with a heading is provider-written (OpenAI, Gemini — each chunk opens
+ *    with `**Heading**` and the prose under it is that heading's body): its latest heading wins;
+ *  - otherwise (any `exposed` part, a raw-looking `summary` — DeepSeek served over the Anthropic
+ *    dialect): an activity title beats every heading, EXCEPT an opening heading over the rule titles
+ *    of its own body (up to the next heading-shaped line). Bold lines in raw reasoning are mostly
+ *    answer drafts (`` **`div` is wrong** ``, `` **Riskiest: `div`** ``) — never the activity;
+ *  - with no activity title, the latest heading.
+ */
+export function decideTitle(kind: "summary" | "exposed", h: HeadingFacts, rule: Placed | undefined): string | undefined {
+  if (kind === "summary" && h.opening !== undefined) return h.latest?.title ?? rule?.title;
+  if (rule !== undefined) {
+    if (h.opening === undefined) return rule.title;
+    if (h.protectEnd !== undefined && rule.pos >= h.protectEnd) return rule.title;
+    return h.opening.title;
+  }
+  return h.latest?.title;
 }
 
 // ── 2. the activity rule ────────────────────────────────────────────────────────────────────────
@@ -544,11 +596,11 @@ const lineHead = (head: string): string => cleanText(head);
  * a sentence that has just COMPLETED is evaluated — so a block of any length costs O(n) in total.
  *
  * Sentences end at a line break, at `.`/`!`/`?` followed by whitespace (never inside inline code), or
- * right after a fullwidth `。！？；`. `committedTitle()` is the latest match among COMPLETE sentences;
- * `title(false)` also reads the trailing sentence if it already ends with sentence punctuation (a
- * one-sentence summary gets its title live) — a PROVISIONAL answer that text still to come may change,
- * so it is shown, never persisted; `title(true)` (the block's end) reads the trailing sentence
- * whatever it ends with.
+ * right after a fullwidth `。！？；`. While the text streams only COMPLETE sentences count
+ * (`placed(false)`, review r2: a title read off text still to come could be refuted by what follows
+ * and would then stick on screen); at the block's end (`placed(true)`) the trailing sentence counts
+ * whatever it ends with. Each title carries its sentence's start offset (`pos`) for the precedence
+ * against headings (`decideTitle`).
  *
  * Skipped: fenced code, list items, markdown headings, table rows and quotes (a whole line), and any
  * sentence over `SEGMENT_MAX`. The LATEST match wins — except that a WEAK one (a bare verb) never
@@ -564,11 +616,15 @@ export class ActivityTitleTracker {
   private segAtLineStart = true;
   /** An odd number of backticks so far: inside inline code, where ". " ends no sentence. */
   private segInCode = false;
+  /** The offset of the current segment's first unit. */
+  private segStart = 0;
+  /** Units pushed so far. */
+  private total = 0;
   /** The rest of the current line is structure (a list item, a heading, a table row). */
   private lineSkip = false;
   private inFence = false;
   private prev = 0;
-  private committed: RuleTitle | undefined;
+  private committed: PlacedRule | undefined;
 
   push(text: string): void {
     for (let i = 0; i < text.length; i++) {
@@ -588,10 +644,12 @@ export class ActivityTitleTracker {
         }
       }
       this.prev = u;
+      this.total += 1;
     }
   }
 
   private append(c: string, u: number): void {
+    if (this.segHead.length === 0) this.segStart = this.total;
     if (u === 0x60) this.segInCode = !this.segInCode;
     if (this.segHead.length < SEGMENT_HEAD) this.segHead += c;
     if (!this.segOverlong) {
@@ -599,20 +657,19 @@ export class ActivityTitleTracker {
     }
   }
 
-  /** The latest match among COMPLETE sentences — what a block may keep. */
-  committedTitle(): string | undefined {
-    return this.committed?.title;
+  /** The latest match among COMPLETE sentences, with its offset; with `final`, the trailing sentence
+   *  counts too (the text has ended). */
+  placed(final: boolean): Placed | undefined {
+    let best = this.committed;
+    if (final && !this.segOverlong && this.seg.length > 0 && this.readable(false)) {
+      best = prefer(best, placeRule(evaluateSentence(this.seg), this.segStart));
+    }
+    return best === undefined ? undefined : { title: best.title, pos: best.pos };
   }
 
-  /** The current title: the committed match, or the trailing sentence's when it counts (`final`, or
-   *  it already ends with sentence punctuation). */
+  /** `placed(final)`'s title. */
   title(final: boolean): string | undefined {
-    let best = this.committed;
-    const tail = this.seg;
-    if (!this.segOverlong && tail.length > 0 && (final || endsSentence(tail)) && this.readable(false)) {
-      best = prefer(best, evaluateSentence(tail));
-    }
-    return best?.title;
+    return this.placed(final)?.title;
   }
 
   /** Whether the current segment is prose to read; with `commit`, a fence line toggles the fence and a
@@ -639,7 +696,7 @@ export class ActivityTitleTracker {
     const overlong = this.segOverlong;
     const empty = !overlong && isBlank(text);
     const readable = empty ? !this.inFence : this.readable(true);
-    if (readable && !overlong && !empty) this.committed = prefer(this.committed, evaluateSentence(text));
+    if (readable && !overlong && !empty) this.committed = prefer(this.committed, placeRule(evaluateSentence(text), this.segStart));
     this.seg = "";
     this.segHead = "";
     this.segOverlong = false;
@@ -647,22 +704,16 @@ export class ActivityTitleTracker {
   }
 }
 
+interface PlacedRule extends RuleTitle { pos: number }
+const placeRule = (r: RuleTitle | undefined, pos: number): PlacedRule | undefined => (r === undefined ? undefined : { ...r, pos });
+
 function isBlank(s: string): boolean {
   for (let i = 0; i < s.length; i++) if (!isSpaceUnit(s.charCodeAt(i))) return false;
   return true;
 }
 
-/** Whether `s`'s last non-space unit ends a sentence. */
-function endsSentence(s: string): boolean {
-  let i = s.length - 1;
-  while (i >= 0 && isSpaceUnit(s.charCodeAt(i))) i -= 1;
-  if (i < 0) return false;
-  const u = s.charCodeAt(i);
-  return isAsciiSentenceEnd(u) || isCjkSentenceEnd(u);
-}
-
 /** The later of two matches, unless the later one is weak and the earlier one is not. */
-function prefer(earlier: RuleTitle | undefined, later: RuleTitle | undefined): RuleTitle | undefined {
+function prefer<T extends RuleTitle>(earlier: T | undefined, later: T | undefined): T | undefined {
   if (later === undefined) return earlier;
   if (earlier !== undefined && later.weak && !earlier.weak) return earlier;
   return later;

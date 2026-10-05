@@ -125,11 +125,11 @@ const REMOTE_THINKING_BLOCKS_MAX = 64;
  * few thousand deltas would otherwise reach the phone as a few thousand identical title-only frames
  * (measured: ~7–9 MB for one long DeepSeek block). Per block this forwards the `start`, the FIRST
  * title-bearing delta THIS client sees (a mid-block joiner learns the title from the next delta), and
- * each CHANGE of title; repeats are dropped, and the block is forgotten at its `thinking_block`.
+ * each CHANGE of title or kind; repeats are dropped, and the block is forgotten at its `thinking_block`.
  * Construct one per remote `HubClient` (a re-attach builds a new one, so it relearns).
  */
 export function createRemoteStreamFilter(): (event: SessionEvent) => SessionEvent | null {
-  const sent = new Map<string, string | undefined>();
+  const sent = new Map<string, string>();
   return (event) => {
     const allowed = filterRemoteStreamEvent(event);
     if (allowed === null) return null;
@@ -142,9 +142,11 @@ export function createRemoteStreamFilter(): (event: SessionEvent) => SessionEven
       sent.delete(allowed.blockId);
       return allowed;
     }
-    if (sent.has(allowed.blockId) && sent.get(allowed.blockId) === allowed.title) return null;
+    // Keyed on (kind, title): a kind change with the same title (hidden → summary) still reaches the phone.
+    const key = `${allowed.kind}\u0000${allowed.title ?? ""}`;
+    if (sent.get(allowed.blockId) === key) return null;
     sent.delete(allowed.blockId);            // re-insert: the map's order is recency
-    sent.set(allowed.blockId, allowed.title);
+    sent.set(allowed.blockId, key);
     if (sent.size > REMOTE_THINKING_BLOCKS_MAX) sent.delete(sent.keys().next().value!);
     return allowed;
   };

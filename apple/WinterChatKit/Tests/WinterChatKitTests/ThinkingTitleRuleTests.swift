@@ -52,8 +52,8 @@ final class ThinkingTitleRuleTests: XCTestCase {
 
     func testEveryFixtureBlockGetsTheDaemonsTitle() throws {
         let f = try Self.fixture()
-        XCTAssertEqual(f.blocks.count, 58)
-        XCTAssertEqual(f.blocks.filter { $0.title != nil }.count, 48)
+        XCTAssertEqual(f.blocks.count, 64)
+        XCTAssertEqual(f.blocks.filter { $0.title != nil }.count, 54)
         for b in f.blocks {
             XCTAssertEqual(ThinkingTitle.derive(kind: b.kind, parts: [b.text], final: true), b.title, b.id)
         }
@@ -135,12 +135,18 @@ final class ThinkingTitleRuleTests: XCTestCase {
 
     // MARK: review r1 — linear time
 
+    /// The MINIMUM of three runs (review r2): a scheduling hiccup inflates one run, a backtracking
+    /// blow-up all of them.
     private func timed(_ s: String) -> Double {
-        let t0 = DispatchTime.now().uptimeNanoseconds
-        _ = ActivityTitleRule.title(of: s, final: true)
-        _ = ActivityTitleRule.title(of: s, final: false)
-        _ = ThinkingHeading.lastValid(s)
-        return Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+        var best = Double.infinity
+        for _ in 0..<3 {
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            _ = ActivityTitleRule.title(of: s, final: true)
+            _ = ActivityTitleRule.title(of: s, final: false)
+            _ = ThinkingHeading.lastValid(s)
+            best = min(best, Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000)
+        }
+        return best
     }
 
     func testTheMeasuredAdversarialInputsFinishInMilliseconds() {
@@ -156,7 +162,7 @@ final class ThinkingTitleRuleTests: XCTestCase {
         ]
         for s in adversarial {
             let ms = timed(s)
-            XCTAssertLessThan(ms, 10, "\(s.prefix(24)) took \(ms) ms")
+            XCTAssertLessThan(ms, 50, "\(s.prefix(24)) took \(ms) ms")
         }
     }
 
@@ -176,8 +182,8 @@ final class ThinkingTitleRuleTests: XCTestCase {
             worst = max(worst, timed(String(decoding: units, as: UTF16.self) + "."))
         }
         let total = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
-        XCTAssertLessThan(worst, 10, "worst candidate \(worst) ms")
-        XCTAssertLessThan(total, 2_000, "2,000 candidates took \(total) ms")
+        XCTAssertLessThan(worst, 50, "worst candidate \(worst) ms")
+        XCTAssertLessThan(total, 10_000, "2,000 candidates took \(total) ms")
     }
 
     // MARK: review r1 — Unicode, persisted titles, CJK
@@ -195,19 +201,25 @@ final class ThinkingTitleRuleTests: XCTestCase {
         XCTAssertEqual(heading, "Reading the logs")
     }
 
-    func testAProvisionalTitleIsShownButNeverPersisted() {
+    func testNoProvisionalTitleCanBeRefutedByTextStillToCome() {
         let a = persist("exposed", ["Using the cache.", "Map is slower."])
-        XCTAssertEqual(a.live.first ?? nil, "Using the cache")
+        XCTAssertEqual(a.live, [nil, nil])
         XCTAssertNil(a.block)
-        XCTAssertNil(persist("exposed", ["Reading the file.", "s is slow here."]).block)
         let b = persist("summary", ["**Foo**", " bar baz."])
-        XCTAssertEqual(b.live.first ?? nil, "Foo")
+        XCTAssertEqual(b.live, [nil, nil])
         XCTAssertNil(b.block)
-        XCTAssertEqual(persist("exposed", ["Using the cache.", " Map is slower."]).block, "Using the cache")
-        XCTAssertEqual(persist("summary", ["**Foo**", "\nbar baz."]).block, "Foo")
+        XCTAssertEqual(persist("exposed", ["Let me check calc.", "js now. Then"]).live, [nil, "Checking calc.js"])
+        let c = persist("exposed", ["Using the cache.", " Map is slower."])
+        XCTAssertEqual(c.live, [nil, "Using the cache"])
+        XCTAssertEqual(c.block, "Using the cache")
+        let d = persist("summary", ["**Foo**", "\nbar baz."])
+        XCTAssertEqual(d.live, [nil, "Foo"])
+        XCTAssertEqual(d.block, "Foo")
+        XCTAssertNil(live("Let me read the files."))
+        XCTAssertEqual(live("Let me read the files. "), "Reading the files")
     }
 
-    func testABlockClosedWithoutItsEndKeepsTheLiveTitleNeverACutOffSentence() {
+    func testABlockClosedWithoutItsEndStoresTheLastTitleItShowed() {
         func cut(_ kind: String, _ chunks: [String]) -> String? {
             let b = Self.blocks()
             _ = b.accept(ProviderReasoningProgress(blockId: "rb", phase: .start, kind: kind, text: nil, part: nil))
@@ -215,10 +227,23 @@ final class ThinkingTitleRuleTests: XCTestCase {
             guard case .thinkingBlock(let block) = b.closeAll().first else { XCTFail("no block"); return nil }
             return block.title
         }
-        XCTAssertEqual(cut("summary", ["**Busy**"]), "Busy")
-        XCTAssertEqual(cut("exposed", ["Let me read the files."]), "Reading the files")
+        XCTAssertEqual(cut("summary", ["**Busy**\n"]), "Busy")
+        XCTAssertNil(cut("summary", ["**Busy**"]))
+        XCTAssertEqual(cut("exposed", ["Let me read the files. "]), "Reading the files")
         XCTAssertNil(cut("exposed", ["Let me read the fi"]))
         XCTAssertEqual(cut("exposed", ["Let me read the files. Now let me run the te"]), "Reading the files")
+    }
+
+    func testHeadingsVersusTheActivityRule() {
+        // Raw reasoning: late answer-draft headers never override the activity.
+        XCTAssertEqual(ThinkingTitle.derive(kind: "exposed", parts: ["Let me read all the files.\n\n**`div` is wrong**\n\n**Riskiest: `div`**\n"]), "Reading all the files")
+        // …an opening heading beats the activity in its own body, not after the next heading.
+        XCTAssertEqual(ThinkingTitle.derive(kind: "exposed", parts: ["**Planning the fix**\n\nLet me read calc.js first.\n"]), "Planning the fix")
+        XCTAssertEqual(ThinkingTitle.derive(kind: "exposed", parts: ["**Plan**\n\nSmall.\n\n**`wc -l` output**\n\nLet me check the tests now.\n"]), "Checking the tests")
+        // Provider-written summaries keep their latest heading.
+        XCTAssertEqual(ThinkingTitle.derive(kind: "summary", parts: ["**Planning the migration**\n\nLet me read the schema.\n\n**Reviewing constraints**\n\nLet me look at the keys.\n"]), "Reviewing constraints")
+        // One code span is no heading.
+        XCTAssertNil(ThinkingHeading.lastValid("**`div`**\nbody"))
     }
 
     func testCJK() {

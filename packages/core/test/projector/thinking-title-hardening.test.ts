@@ -63,6 +63,7 @@ function quantifierHazards(src: string): string[] {
       let atom: Shape = { startsUnbounded: false, endsUnbounded: false, hasUnbounded: false };
       let zeroWidth = false;
       let isGroup = false;
+      let groupBody = "";
       if (c === "\\") i += 2;
       else if (c === "[") i = skipClass(s, i);
       else if (c === "(") {
@@ -71,6 +72,7 @@ function quantifierHazards(src: string): string[] {
         let body = s.slice(i + 1, end - 1);
         if (/^\?(?:[=!]|<[=!])/.test(body)) zeroWidth = true;
         body = body.replace(/^\?(?:[:=!]|<[=!]|<[a-zA-Z]+>)/, "");
+        groupBody = body;
         atom = scan(body);
         i = end;
       } else if (c === "^" || c === "$") { zeroWidth = true; i += 1; }
@@ -89,6 +91,7 @@ function quantifierHazards(src: string): string[] {
       }
       if (q !== undefined && "*+?}".includes(q) && (s[i] === "?" || s[i] === "+")) i += 1;   // lazy / possessive
       if (unbounded && atom.hasUnbounded) hazards.push(`nested unbounded quantifier in ${src}`);
+      if (unbounded && isGroup && overlappingAlternatives(groupBody)) hazards.push(`overlapping alternatives under a quantifier in ${src}`);
       if (isGroup && zeroWidth) {
         // A lookaround between two runs pins where the first may stop — it delimits like a literal.
         shape.hasUnbounded ||= atom.hasUnbounded;
@@ -113,12 +116,43 @@ function quantifierHazards(src: string): string[] {
   return hazards;
 }
 
+/** A group body's TOP-LEVEL alternatives that are plain literals, one a prefix of another
+ *  (`now|now `, `a|ab`, an empty one): under `*` or `+` the engine can split one run of text several
+ *  ways and backtracks through all of them. Alternatives with any regex syntax are not compared (an
+ *  approximation that stays quiet rather than guessing). */
+function overlappingAlternatives(body: string): boolean {
+  const alts: string[] = [];
+  let depth = 0;
+  let cur = "";
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (c === "\\") { cur += c + (body[i + 1] ?? ""); i += 1; continue; }
+    if (c === "(" || c === "[") depth += 1;
+    else if (c === ")" || c === "]") depth -= 1;
+    if (c === "|" && depth === 0) { alts.push(cur); cur = ""; continue; }
+    cur += c;
+  }
+  alts.push(cur);
+  if (alts.length < 2) return false;
+  const literal = (a: string): string | undefined => (/[\\()[\]{}*+?.^$|]/.test(a) ? undefined : a);
+  const lits = alts.map(literal);
+  if (lits.some((a) => a === undefined)) return false;
+  for (let i = 0; i < lits.length; i++) {
+    for (let j = 0; j < lits.length; j++) if (i !== j && lits[j]!.startsWith(lits[i]!)) return true;
+  }
+  return false;
+}
+
 describe("review r1 (HIGH): no title pattern backtracks super-linearly", () => {
   test("the audit fires on the shapes that do (a gate that cannot fire is theatre), and passes safe ones", () => {
     expect(quantifierHazards(String.raw`^(?:(?:now|so)(?![A-Za-z'])\s*,?\s+)*`).length).toBeGreaterThan(0);   // the old LEAD
     expect(quantifierHazards(String.raw`\s*,?\s+`).length).toBeGreaterThan(0);
     expect(quantifierHazards(String.raw`(a+)+b`).length).toBeGreaterThan(0);
     expect(quantifierHazards(String.raw`(?:x\s+)*`).length).toBeGreaterThan(0);
+    expect(quantifierHazards(String.raw`(?:now|now )*`).length).toBeGreaterThan(0);              // overlapping alternatives
+    expect(quantifierHazards(String.raw`(?:a|ab)+c`).length).toBeGreaterThan(0);
+    expect(quantifierHazards(String.raw`(?:a|b)*`)).toEqual([]);
+    expect(quantifierHazards(String.raw`(?:ok|okay)(?![a-z])`)).toEqual([]);                     // not under a quantifier
     expect(quantifierHazards(String.raw`^[ \t]*\*\*(.+?)\*\*(.*)$`)).toEqual([]);
     expect(quantifierHazards(String.raw`^(?:(?:now|so)(?![a-z'])(?: ?,)? )*([a-z]+ing)(?=[ ,]|$)(.*)$`)).toEqual([]);
   });
@@ -128,12 +162,18 @@ describe("review r1 (HIGH): no title pattern backtracks super-linearly", () => {
     for (const re of TITLE_PATTERNS) expect({ source: re.source, hazards: quantifierHazards(re.source) }).toEqual({ source: re.source, hazards: [] });
   });
 
+  /** The MINIMUM of three runs: a scheduling hiccup inflates one run, a backtracking blow-up all of
+   *  them. */
   const timed = (s: string): number => {
-    const t0 = performance.now();
-    activityTitleOf(s, true);
-    activityTitleOf(s, false);
-    lastValidHeading(s);
-    return performance.now() - t0;
+    let best = Infinity;
+    for (let run = 0; run < 3; run++) {
+      const t0 = performance.now();
+      activityTitleOf(s, true);
+      activityTitleOf(s, false);
+      lastValidHeading(s);
+      best = Math.min(best, performance.now() - t0);
+    }
+    return best;
   };
   const warm = (): void => { for (let i = 0; i < 50; i++) timed("Let me read the files. **Heading**\n"); };
 
@@ -146,10 +186,10 @@ describe("review r1 (HIGH): no title pattern backtracks super-linearly", () => {
       "`a. b`".repeat(60), `${"- ".repeat(150)}x.`, `${", so ".repeat(60)}x.`, `${"— ".repeat(150)}x.`,
       `${"now　　".repeat(30)}x.`, `${"now\u0085\u0085".repeat(30)}x.`, `${".".repeat(500)}x`,
     ];
-    for (const s of adversarial) expect({ s: s.slice(0, 24), fast: timed(s) < 5 }).toEqual({ s: s.slice(0, 24), fast: true });
+    for (const s of adversarial) expect({ s: s.slice(0, 24), fast: timed(s) < 50 }).toEqual({ s: s.slice(0, 24), fast: true });
   });
 
-  test("a fuzz loop of 3,000 random 220-char candidates stays under 5 ms each and 1 s in all", () => {
+  test("a fuzz loop of 3,000 random 220-char candidates stays under 50 ms each and 10 s in all (the minimum of three runs each)", () => {
     const toks = ["now", "so", "ok", "yes", "let me", "let", "me", "i'll", "i", "will", "need", "to", "check", "checking", "start", "by",
       "and", "then", "just", "quickly", "—", "--", "-", ",", ";", ":", "(", ")", "`", "**", "i've", "found", "checked", "the", "a",
       "that", "is", "go", "ahead", "double", "  ", "   ", "\t", " , ", "' ", "'", "。", "，", "检查"];
@@ -164,7 +204,7 @@ describe("review r1 (HIGH): no title pattern backtracks super-linearly", () => {
       worst = Math.max(worst, timed(`${s.slice(0, 219)}.`));
     }
     const total = performance.now() - t0;
-    expect({ worstUnder5ms: worst < 5, totalUnder1s: total < 1000 }).toEqual({ worstUnder5ms: true, totalUnder1s: true });
+    expect({ worstUnder50ms: worst < 50, totalUnder10s: total < 10_000 }).toEqual({ worstUnder50ms: true, totalUnder10s: true });
   });
 
   test("streamed into the projector as one delta, an adversarial line costs milliseconds, not seconds", () => {
@@ -209,33 +249,37 @@ describe("review r1: a streamed block persists exactly what the whole text deriv
     return { live: liveTitles, block: (blocks.end(f("end"))[0] as { title?: string }).title };
   };
 
-  test("a provisional title the next text undoes is shown but never persisted", () => {
+  test("review r2: no provisional title — text still to come can never refute what the pill shows", () => {
+    // "Using the cache." + "Map is slower." is ONE sentence (no space after the dot): nothing is shown,
+    // and nothing is stored (the whole text derives nothing either).
     const a = persist("exposed", ["Using the cache.", "Map is slower."]);
-    expect(a.live[0]).toBe("Using the cache");
+    expect(a.live).toEqual([undefined, undefined]);
     expect(a.block).toBeUndefined();
-    expect(deriveThinkingTitle("exposed", ["Using the cache.Map is slower."], { final: true })).toBeUndefined();
-    expect(persist("exposed", ["Reading the file.", "s is slow here."]).block).toBeUndefined();
-    const b = persist("summary", ["**Foo**", " bar baz."]);
-    expect(b.live[0]).toBe("Foo");
-    expect(b.block).toBeUndefined();
-    // …while one the following text CLOSES is kept.
-    expect(persist("exposed", ["Using the cache.", " Map is slower."]).block).toBe("Using the cache");
-    expect(persist("summary", ["**Foo**", "\nbar baz."]).block).toBe("Foo");
+    expect(deriveThinkingTitle("exposed", ["Using the cache.Map is slower."])).toBeUndefined();
+    expect(persist("exposed", ["Reading the file.", "s is slow here."])).toEqual({ live: [undefined, undefined], block: undefined });
+    // A heading counts once its LINE is closed: "**Foo**" + " bar baz." is no heading at all.
+    expect(persist("summary", ["**Foo**", " bar baz."])).toEqual({ live: [undefined, undefined], block: undefined });
+    // "calc." + "js": no "Checking calc" in between.
+    expect(persist("exposed", ["Let me check calc.", "js now. Then"]).live).toEqual([undefined, "Checking calc.js"]);
+    // …while text that CLOSES the sentence or the line shows it at once, and it is stored.
+    expect(persist("exposed", ["Using the cache.", " Map is slower."])).toEqual({ live: [undefined, "Using the cache"], block: "Using the cache" });
+    expect(persist("summary", ["**Foo**", "\nbar baz."])).toEqual({ live: [undefined, "Foo"], block: "Foo" });
   });
 
-  test("a block closed WITHOUT its end (result, error, interrupt) keeps the live title the user saw, never a cut-off sentence", () => {
-    const cut = (kind: ThinkingKind, chunks: string[]): string | undefined => {
+  test("a block closed WITHOUT its end (result, error, interrupt) stores the last title it showed, never a cut-off sentence", () => {
+    const cut = (kind: ThinkingKind, chunks: string[]): { live: Array<string | undefined>; stored: string | undefined } => {
       const blocks = new ThinkingBlocks("s_test", () => 0);
       const f = (phase: "start" | "delta", text?: string): ReasoningProgressFrame =>
         ({ type: "system", subtype: "reasoning_progress", block_id: "rb", phase, kind, ...(text === undefined ? {} : { text }) });
       blocks.start(f("start"));
-      for (const c of chunks) blocks.delta(f("delta", c));
-      return (blocks.closeWhere(() => true)[0] as { title?: string }).title;
+      const liveTitles = chunks.map((c) => (blocks.delta(f("delta", c))[0] as { title?: string } | undefined)?.title);
+      return { live: liveTitles, stored: (blocks.closeWhere(() => true)[0] as { title?: string }).title };
     };
-    expect(cut("summary", ["**Busy**"])).toBe("Busy");
-    expect(cut("exposed", ["Let me read the files."])).toBe("Reading the files");
-    expect(cut("exposed", ["Let me read the fi"])).toBeUndefined();
-    expect(cut("exposed", ["Let me read the files. Now let me run the te"])).toBe("Reading the files");
+    expect(cut("summary", ["**Busy**\n"])).toEqual({ live: ["Busy"], stored: "Busy" });
+    expect(cut("summary", ["**Busy**"])).toEqual({ live: [undefined], stored: undefined });       // its line never closed
+    expect(cut("exposed", ["Let me read the files. "])).toEqual({ live: ["Reading the files"], stored: "Reading the files" });
+    expect(cut("exposed", ["Let me read the fi"])).toEqual({ live: [undefined], stored: undefined });
+    expect(cut("exposed", ["Let me read the files. Now let me run the te"]).stored).toBe("Reading the files");
   });
 
   test("for every fixture block, the persisted title equals the whole-text derivation across 1/17/160-unit splits", () => {

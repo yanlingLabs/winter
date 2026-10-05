@@ -98,6 +98,31 @@ fileprivate struct JSRegex {
 
 // MARK: - 1. the provider's bold heading
 
+/// A title and where it starts in its part (UTF-16 offset).
+struct Placed: Equatable { let title: String; let pos: Int }
+
+/// What a part's headings say about its title (`HeadingFacts` in the daemon).
+struct HeadingFacts {
+    var latest: Placed?
+    var opening: Placed?
+    var protectEnd: Int?
+    var lines: [Int] = []
+}
+
+/// `decideTitle`: a `summary` part that OPENS with a heading is provider-written (OpenAI, Gemini) and
+/// keeps its latest heading; otherwise (any `exposed` part, a raw-looking `summary`) an activity title
+/// beats every heading, except an opening heading over the rule titles of its own body; with no
+/// activity title, the latest heading.
+func decideTitle(kind: String, _ h: HeadingFacts, _ rule: Placed?) -> String? {
+    if kind == "summary", h.opening != nil { return h.latest?.title ?? rule?.title }
+    if let rule {
+        guard let opening = h.opening else { return rule.title }
+        if let end = h.protectEnd, rule.pos >= end { return rule.title }
+        return opening.title
+    }
+    return h.latest?.title
+}
+
 enum ThinkingHeading {
     private static let lineBreaks: Set<UInt16> = [0x0A, 0x0D, 0x2028, 0x2029]
     private static let star: UInt16 = 0x2A
@@ -105,44 +130,56 @@ enum ThinkingHeading {
     fileprivate static let singleToken = JSRegex(#"^[A-Za-z0-9_./-]+\z"#)
     static let maxWords = 10
 
-    /// `isTitleHeading`: not a label (`…:`), at most 10 words, and not ONLY a path or file token.
+    /// `isTitleHeading`: not a label (`…:`), at most 10 words, not ONE code span, and not ONLY a path
+    /// or file token.
     static func isTitle(_ inner: String) -> Bool {
         if inner.isEmpty || inner.hasSuffix(":") { return false }
         if inner.components(separatedBy: " ").count > maxWords { return false }
+        let u = Array(inner.utf16)
+        if u.count >= 3, u.first == 0x60, u.last == 0x60, !u[1..<(u.count - 1)].contains(0x60) { return false }   // `^`[^`]+`$`
         let bare = inner.replacingOccurrences(of: "`", with: "")
         if singleToken.test(bare) && (bare.contains("/") || fileToken.test(bare)) { return false }
         return true
     }
 
-    /// `scanHeadings`: the last valid heading on a CLOSED line (a line break follows it) and the last
-    /// valid one counting the open last line too. Per line: optional spaces/tabs, `**`, at least one
-    /// unit, the FIRST closing `**` after it, then nothing but spaces/tabs to the line's end.
-    static func scan(_ text: String) -> (closed: String?, latest: String?) {
-        var closed: String?
-        var latest: String?
+    /// `scanHeadings`: the headings of `text` — the last valid one, the part's OPENING heading (its first
+    /// non-blank line, a valid heading), where that heading's body ends (the next heading-shaped line)
+    /// and every heading-shaped line's offset. A line counts once a line break has CLOSED it, or with
+    /// `final` at the end of the text too. `base` is added to every offset.
+    static func scan(_ text: String, final: Bool, base: Int = 0) -> HeadingFacts {
+        var facts = HeadingFacts()
         let units = Array(text.utf16)
+        var firstContent = 0
+        while firstContent < units.count, isSpaceUnit(units[firstContent]) { firstContent += 1 }
+        var firstLineStart = 0
+        if firstContent > 0 {
+            var k = firstContent - 1
+            while k >= 0 { if units[k] == 0x0A { firstLineStart = k + 1; break }; k -= 1 }
+        }
         var lineStart = 0
         var i = 0
         while i <= units.count {
             if i == units.count || lineBreaks.contains(units[i]) {
-                if let inner = headingInner(units[lineStart..<i]) {
+                if let inner = headingInner(units[lineStart..<i]), final || i < units.count {
+                    facts.lines.append(base + lineStart)
+                    if facts.opening != nil && facts.protectEnd == nil { facts.protectEnd = base + lineStart }
                     let cleaned = cleanText(String(decoding: inner, as: UTF16.self))
                     if isTitle(cleaned) {
-                        latest = cleaned
-                        if i < units.count { closed = cleaned }
+                        let placed = Placed(title: ThinkingTitle.clip(cleaned), pos: base + lineStart)
+                        facts.latest = placed
+                        if lineStart == firstLineStart && lineStart <= firstContent { facts.opening = placed }
                     }
                 }
                 lineStart = i + 1
             }
             i += 1
         }
-        return (closed.map(ThinkingTitle.clip), latest.map(ThinkingTitle.clip))
+        return facts
     }
 
     /// `lastValidHeading(text, includeOpenLine)`.
     static func lastValid(_ text: String, includeOpenLine: Bool = true) -> String? {
-        let h = scan(text)
-        return includeOpenLine ? h.latest : h.closed
+        scan(text, final: includeOpenLine).latest?.title
     }
 
     private static func headingInner(_ line: ArraySlice<UInt16>) -> ArraySlice<UInt16>? {
@@ -510,17 +547,21 @@ enum ActivityTitleRule {
 }
 
 /// `ActivityTitleTracker`: the activity rule over a stream, incremental — each unit is looked at
-/// once and only a just-COMPLETED sentence is evaluated. See the daemon's twin for the contract.
+/// once and only a just-COMPLETED sentence is evaluated. While streaming only complete sentences
+/// count (no provisional titles, review r2); at the end the trailing sentence counts too. Each title
+/// carries its sentence's start offset. See the daemon's twin for the contract.
 final class ActivityTitleTracker {
     private var seg: [UInt16] = []
     private var segHead: [UInt16] = []
     private var segOverlong = false
     private var segAtLineStart = true
     private var segInCode = false
+    private var segStart = 0
+    private var total = 0
     private var lineSkip = false
     private var inFence = false
     private var prev: UInt16 = 0
-    private var committed: ActivityTitleRule.RuleTitle?
+    private var committed: (rule: ActivityTitleRule.RuleTitle, pos: Int)?
 
     private static func isLineBreak(_ u: UInt16) -> Bool { u == 0x0A || u == 0x0D || u == 0x2028 || u == 0x2029 }
     private static func isAsciiSentenceEnd(_ u: UInt16) -> Bool { u == 0x2E || u == 0x21 || u == 0x3F }
@@ -543,10 +584,12 @@ final class ActivityTitleTracker {
                 }
             }
             prev = u
+            total += 1
         }
     }
 
     private func append(_ u: UInt16) {
+        if segHead.isEmpty { segStart = total }
         if u == 0x60 { segInCode.toggle() }
         if segHead.count < ActivityTitleRule.segmentHead { segHead.append(u) }
         if !segOverlong {
@@ -554,21 +597,23 @@ final class ActivityTitleTracker {
         }
     }
 
-    /// The latest match among COMPLETE sentences — what a block may keep.
-    func committedTitle() -> String? { committed?.title }
-
-    /// The current title: the committed match, or the trailing sentence's when it counts.
-    func title(final: Bool) -> String? {
+    /// The latest match among COMPLETE sentences, with its offset; with `final` the trailing sentence
+    /// counts too.
+    func placed(final: Bool) -> Placed? {
         var best = committed
-        if !segOverlong, !seg.isEmpty, final || endsSentence(), readable(commit: false) {
-            best = ActivityTitleRule.prefer(best, ActivityTitleRule.evaluateSentence(String(decoding: seg, as: UTF16.self)))
+        if final, !segOverlong, !seg.isEmpty, readable(commit: false),
+           let r = ActivityTitleRule.evaluateSentence(String(decoding: seg, as: UTF16.self)) {
+            best = Self.prefer(best, (r, segStart))
         }
-        return best?.title
+        return best.map { Placed(title: $0.rule.title, pos: $0.pos) }
     }
 
-    private func endsSentence() -> Bool {
-        guard let last = seg.last(where: { !isSpaceUnit($0) }) else { return false }
-        return Self.isAsciiSentenceEnd(last) || Self.isCjkSentenceEnd(last)
+    func title(final: Bool) -> String? { placed(final: final)?.title }
+
+    private static func prefer(_ earlier: (rule: ActivityTitleRule.RuleTitle, pos: Int)?,
+                               _ later: (rule: ActivityTitleRule.RuleTitle, pos: Int)) -> (rule: ActivityTitleRule.RuleTitle, pos: Int)? {
+        if let earlier, later.rule.weak && !earlier.rule.weak { return earlier }
+        return later
     }
 
     private func readable(commit: Bool) -> Bool {
@@ -592,8 +637,9 @@ final class ActivityTitleTracker {
         let overlong = segOverlong
         let empty = !overlong && seg.allSatisfy(isSpaceUnit)
         let readable = empty ? !inFence : readable(commit: true)
-        if readable && !overlong && !empty {
-            committed = ActivityTitleRule.prefer(committed, ActivityTitleRule.evaluateSentence(String(decoding: seg, as: UTF16.self)))
+        if readable && !overlong && !empty,
+           let r = ActivityTitleRule.evaluateSentence(String(decoding: seg, as: UTF16.self)) {
+            committed = Self.prefer(committed, (r, segStart))
         }
         seg = []
         segHead = []

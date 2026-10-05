@@ -70,6 +70,17 @@ describe("the remote stream's thinking-pill dedupe", () => {
     expect(createRemoteStreamFilter()(msg)).toBe(msg);
   });
 
+  test("review r2: a kind change with an unchanged title still reaches the phone (keyed on kind AND title)", () => {
+    const filter = createRemoteStreamFilter();
+    const delta = (kind: string, title: string): SessionEvent =>
+      ({ type: "thinking_delta", seq: ++seq, ts: "2026-10-05T10:00:00.000Z", sessionId: "s", threadId: "main", blockId: "rb_k", kind, phase: "delta", text: "x", title }) as unknown as SessionEvent;
+    const sent = [delta("hidden", "Reading the files"), delta("summary", "Reading the files"), delta("summary", "Reading the files"), delta("summary", "Running the tests")]
+      .map(filter).filter((e): e is SessionEvent => e !== null);
+    expect(sent.map((e) => [(e as { kind: string }).kind, (e as { title?: string }).title])).toEqual([
+      ["hidden", "Reading the files"], ["summary", "Reading the files"], ["summary", "Running the tests"],
+    ]);
+  });
+
   test("the per-client map stays bounded when blocks never end", () => {
     const filter = createRemoteStreamFilter();
     for (let i = 0; i < 500; i++) {

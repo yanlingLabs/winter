@@ -32,9 +32,9 @@ function stream(kind: ThinkingKind, text: string, size: number): { live: Array<s
 }
 
 describe("the fixture: real reasoning blocks and the title each gets", () => {
-  test("the fixture is the size the report quotes (58 blocks — 49 real, 9 synthetic — 48 titled)", () => {
-    expect(fixture.blocks).toHaveLength(58);
-    expect(fixture.blocks.filter((b) => b.title !== null)).toHaveLength(48);
+  test("the fixture is the size the report quotes (64 blocks — 49 real, 15 synthetic — 54 titled)", () => {
+    expect(fixture.blocks).toHaveLength(64);
+    expect(fixture.blocks.filter((b) => b.title !== null)).toHaveLength(54);
   });
 
   for (const b of fixture.blocks) {
@@ -249,19 +249,20 @@ describe("kinds", () => {
 });
 
 describe("streaming", () => {
-  test("an incomplete sentence yields nothing yet; the title appears when it completes", () => {
+  test("an incomplete sentence yields nothing yet; the title appears only once the sentence is CLOSED (review r2: no provisional titles)", () => {
     expect(live("Let me read the fi")).toBeUndefined();
     expect(live("Let me read the files")).toBeUndefined();
-    expect(live("Let me read the files.")).toBe("Reading the files");               // a trailing "." already counts
+    expect(live("Let me read the files.")).toBeUndefined();                          // what follows could still continue it
+    expect(live("Let me read the files. ")).toBe("Reading the files");
     expect(live("Let me read the files.\n")).toBe("Reading the files");
     // At the block's end the trailing sentence counts whatever it ends with.
     expect(final("Let me read the files")).toBe("Reading the files");
   });
 
-  test("a '.' that the next delta continues is not a sentence end (\"src/calc.\" + \"js\")", () => {
+  test("a '.' that the next delta continues is not a sentence end (\"src/calc.\" + \"js\") — and no title is shown meanwhile", () => {
     const t = new ActivityTitleTracker();
     t.push("Let me read src/calc.");
-    expect(t.title(false)).toBe("Reading src/calc");                                // provisional
+    expect(t.title(false)).toBeUndefined();
     t.push("js first. The");
     expect(t.title(false)).toBe("Reading src/calc.js");
   });

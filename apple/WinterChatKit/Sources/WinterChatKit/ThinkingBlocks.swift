@@ -39,11 +39,13 @@ public enum ThinkingTitle {
     ///  - `hidden` (and any unknown kind) → none.
     ///
     /// Capped at `titleMaxLength` UTF-16 units with an ellipsis.
-    public static func derive(kind: String, parts: [String], final: Bool = false) -> String? {
+    public static func derive(kind: String, parts: [String], final: Bool = true) -> String? {
         switch kind {
         case "summary", "exposed":
             guard let latest = parts.last else { return nil }
-            return ThinkingHeading.lastValid(latest) ?? ActivityTitleRule.title(of: latest, final: final)
+            let rule = ActivityTitleTracker()
+            rule.push(latest)
+            return decideTitle(kind: kind, ThinkingHeading.scan(latest, final: final), rule.placed(final: final))
         case "update":
             let text = collapse(parts.joined(separator: " "))
             return text.isEmpty ? nil : clip(text)
@@ -103,18 +105,23 @@ final class ThinkingBlocks: @unchecked Sendable {
         var head: [UInt16] = []
         var tail: [UInt16] = []
         var tailCut = false
-        /// The last valid heading seen in this part — kept once it scrolls out of the window, so the
-        /// activity rule never takes over from a provider's own heading.
-        var heading: String?
+        /// Units pushed to this part so far.
+        var total = 0
+        /// The last valid heading on a closed line, with its offset — kept once it scrolls out of the
+        /// window.
+        var heading: Placed?
+        /// Where the part's opening heading's body ends (the next heading-shaped line), once seen.
+        var protectEnd: Int?
         /// The activity rule over the part's whole text, incremental.
         let rule = ActivityTitleTracker()
 
-        /// The tail window, its partial first line dropped once the window has lost its start (a `**`
-        /// there could be mid-line in the real text).
-        var scanWindow: String {
-            guard tailCut else { return String(decoding: tail, as: UTF16.self) }
-            guard let nl = tail.firstIndex(of: 0x0A) else { return "" }
-            return String(decoding: tail[(nl + 1)...], as: UTF16.self)
+        /// The tail window and its offset in the part, its partial first line dropped once the window
+        /// has lost its start (a `**` there could be mid-line in the real text).
+        var scanWindow: (text: String, start: Int) {
+            let start = total - tail.count
+            guard tailCut else { return (String(decoding: tail, as: UTF16.self), start) }
+            guard let nl = tail.firstIndex(of: 0x0A) else { return ("", total) }
+            return (String(decoding: tail[(nl + 1)...], as: UTF16.self), start + nl + 1)
         }
     }
 
@@ -127,8 +134,6 @@ final class ThinkingBlocks: @unchecked Sendable {
         var parts: [Part] = []
         /// The last NON-EMPTY COMMITTED title — sticky, and what the block persists.
         var title: String?
-        /// The last title a delta carried (live; may be provisional) — sticky too.
-        var shown: String?
         var startedAt: Int?
     }
 
@@ -213,6 +218,7 @@ final class ThinkingBlocks: @unchecked Sendable {
                 current.head += Array(ThinkingTitle.sliceUnits(raw, Self.titleHeadUnits - current.head.count).utf16)
             }
             current.tail += rawUnits
+            current.total += rawUnits.count
             current.rule.push(raw)
             if current.tail.count > Self.titleTailUnits {
                 current.tail = Array(current.tail.suffix(Self.titleTailUnits))
@@ -234,13 +240,13 @@ final class ThinkingBlocks: @unchecked Sendable {
             }
         }
 
-        let live = retitle(&b, .delta)
-        let titleChanged = live != nil && live != b.shown
-        if titleChanged { b.shown = live }
+        let before = b.title
+        retitle(&b, .delta)
+        let titleChanged = b.title != nil && b.title != before
         open[b.blockId] = b
         if increment.isEmpty && !titleChanged && !kindChanged { return [] }
         // The CURRENT title rides every delta that carries text, not only a change (review r1).
-        let title = (titleChanged || !increment.isEmpty) ? b.shown : nil
+        let title = (titleChanged || !increment.isEmpty) ? b.title : nil
         return [deltaEvent(b, phase: "delta", text: increment.isEmpty ? nil : increment, title: title)]
     }
 
@@ -255,34 +261,41 @@ final class ThinkingBlocks: @unchecked Sendable {
         return [close(b)]
     }
 
-    /// The block's titles (`retitle` in the daemon), returning the LIVE one. COMMITTED (`b.title`, what
-    /// the block persists): the update's head, or the latest part's last heading on a CLOSED line (kept
-    /// once it scrolls out of the window) else its activity rule over COMPLETE sentences — sticky. LIVE
-    /// (the delta's title) also reads what text still to come may change (an open heading line, a
-    /// trailing sentence ending in `.`/`!`/`?`): shown, never persisted. `.end` (the block's own end):
-    /// everything counts, so the persisted title is exactly the whole-text derivation. `.cut` (closed
-    /// without its end — the round's end, an error, an interrupt): the live title is committed, but a
-    /// trailing sentence without its end punctuation still does not count.
+    /// The block's title (`retitle` in the daemon), kept incrementally — no provisional titles
+    /// (review r2). `.delta`/`.cut` (closed without its end): CLOSED text only — headings on closed lines
+    /// (the latest kept once it scrolls out of the window), complete sentences — so a cut block stores
+    /// the last title it showed. `.end`: the whole text counts, so the stored title is exactly the
+    /// whole-text derivation. Sticky: no answer keeps the last title.
     private enum RetitleMode { case delta, end, cut }
 
-    @discardableResult
-    private func retitle(_ b: inout OpenBlock, _ mode: RetitleMode) -> String? {
+    private func retitle(_ b: inout OpenBlock, _ mode: RetitleMode) {
         if b.kind == "update" {
             if let derived = ThinkingTitle.derive(kind: "update", parts: b.parts.map { String(decoding: $0.head, as: UTF16.self) }) {
                 b.title = derived
             }
-            return b.title
+            return
         }
-        guard b.kind == "summary" || b.kind == "exposed", !b.parts.isEmpty else { return b.title }
+        guard b.kind == "summary" || b.kind == "exposed", !b.parts.isEmpty else { return }
+        let final = mode == .end
         var p = b.parts[b.parts.count - 1]
-        let scanned = ThinkingHeading.scan(p.scanWindow)
-        if scanned.closed != nil || !p.tailCut { p.heading = scanned.closed }
+        let win = p.scanWindow
+        let scanned = ThinkingHeading.scan(win.text, final: final, base: win.start)
+        let closed = final ? ThinkingHeading.scan(win.text, final: false, base: win.start) : scanned
+        if closed.latest != nil || !p.tailCut { p.heading = closed.latest }
+        let latest = final ? (scanned.latest ?? p.heading) : p.heading
+        // The opening heading sits in the part's first line, always inside `head`.
+        let opening = ThinkingHeading.scan(String(decoding: p.head, as: UTF16.self), final: final && p.total == p.head.count).opening
+        var protectEnd = p.protectEnd
+        if let opening, protectEnd == nil {
+            if let firstClosed = closed.lines.first(where: { $0 > opening.pos }) { p.protectEnd = firstClosed; protectEnd = firstClosed }
+            else if final { protectEnd = scanned.lines.first(where: { $0 > opening.pos }) }
+        }
         b.parts[b.parts.count - 1] = p
-        let heading = scanned.latest ?? p.heading
-        let liveTitle = heading ?? p.rule.title(final: mode == .end)
-        let committed = mode == .delta ? (p.heading ?? p.rule.committedTitle()) : liveTitle
-        if let committed { b.title = committed }
-        return mode == .delta ? (liveTitle ?? b.title) : b.title
+        var facts = HeadingFacts()
+        facts.latest = latest
+        facts.opening = opening
+        facts.protectEnd = protectEnd
+        if let derived = decideTitle(kind: b.kind, facts, p.rule.placed(final: final)) { b.title = derived }
     }
 
     private func close(_ b: OpenBlock) -> SessionEvent {
