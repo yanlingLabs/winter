@@ -86,9 +86,39 @@ public enum ProviderEvent: Sendable {
     case textDelta(String)
     case toolCall(callId: String, name: String, argumentsJSON: String)
     case reasoningItem(itemJSON: String)
+    /// The thinking pill (2026-10-05): one live step of a READABLE reasoning block — the phone's port
+    /// of the agent SDK's `reasoning_progress` provider event. Display-only: it never feeds a request
+    /// (the opaque `reasoningItem` above is the one continuity carrier) and is never logged.
+    case reasoningProgress(ProviderReasoningProgress)
     case usage(inputTokens: Int, outputTokens: Int)
     case done(ProviderStopReason)
     case error(ProviderError)
+}
+
+/// One live step of a reasoning block — the agent SDK's `reasoning_progress` provider event, minus
+/// what the phone has no use for. `blockId` is unique within the session (the provider's own item id
+/// when it gave one, else a minted one) and stable across the block's start/delta/end.
+///
+/// `kind` follows the SDK's vocabulary (`summary | update | exposed | hidden`) and is `nil` on an
+/// `end`: the adapter's own close says `hidden` while the host takes the LAST kind it saw, so the
+/// phone's close carries none rather than a value the consumer must know to ignore. `part` is the
+/// SDK's per-block part number (a new number starts a new part, joined with a blank line).
+public struct ProviderReasoningProgress: Sendable, Equatable {
+    public enum Phase: String, Sendable, Equatable { case start, delta, end }
+
+    public let blockId: String
+    public let phase: Phase
+    public let kind: String?
+    public let text: String?
+    public let part: Int?
+
+    public init(blockId: String, phase: Phase, kind: String? = nil, text: String? = nil, part: Int? = nil) {
+        self.blockId = blockId
+        self.phase = phase
+        self.kind = kind
+        self.text = text
+        self.part = part
+    }
 }
 
 public enum ProviderStopReason: String, Sendable, Equatable {
@@ -169,14 +199,20 @@ public struct ProviderTurnRequest: Sendable {
     public let tools: [ProviderToolSpec]
     /// Reasoning-effort slug (`low` for research). Omitted → no reasoning field on the wire.
     public let reasoningEffort: String?
+    /// Ask the provider for a READABLE reasoning summary (the thinking pill's title source) — the
+    /// agent SDK's `TurnRequest.requestSummary`. Honoured only alongside a `reasoningEffort` (the
+    /// daemon's rule: a summary is requested only when reasoning is), and never a request for raw
+    /// reasoning. The chat turn sets it; `WebFetch`'s digest pass does not (nobody shows its thinking).
+    public let requestSummary: Bool
 
     public init(model: String, instructions: String?, input: [ProviderInputItem],
-                tools: [ProviderToolSpec], reasoningEffort: String?) {
+                tools: [ProviderToolSpec], reasoningEffort: String?, requestSummary: Bool = false) {
         self.model = model
         self.instructions = instructions
         self.input = input
         self.tools = tools
         self.reasoningEffort = reasoningEffort
+        self.requestSummary = requestSummary
     }
 }
 

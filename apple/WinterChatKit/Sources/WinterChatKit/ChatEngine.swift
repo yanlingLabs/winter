@@ -15,6 +15,13 @@ func modelIdPortion(of tag: String) -> String {
     return String(tag[tag.index(after: slash)...])
 }
 
+/// The provider half of a tag (`nil` for a bare model) — what a `thinking_block` names as its
+/// `provider`, like the daemon's (the runtime's provider id, e.g. `codex-oauth`).
+func providerPortion(of tag: String) -> String? {
+    guard let slash = tag.firstIndex(of: "/"), slash != tag.startIndex else { return nil }
+    return String(tag[..<slash])
+}
+
 /// The phone's standalone chat turn-loop — the Swift counterpart of the daemon's chat turn
 /// (`packages/core/src/agent/engine.ts`), radically reduced to exactly what a phone-local chat
 /// session needs: stream from the provider, emit typed WinterProtocol `SessionEvent`s, dispatch chat's
@@ -260,6 +267,17 @@ public final class ChatEngine: @unchecked Sendable {
         var contextTokens = 0
         var stopReason = "end_turn"
 
+        // The thinking pill: this turn's reasoning blocks. A live step is a TRANSIENT `thinking_delta`
+        // at the head seq (like `assistant_delta`); a closed block is a PERSISTED `thinking_block`,
+        // emitted the moment it closes — mid-round, so the pill reads "Thought" while the answer
+        // streams. Display-only: nothing here ever joins `input`.
+        let thinking = ThinkingBlocks(
+            sessionId: sid, threadId: MainThread,
+            provider: providerPortion(of: model), model: modelIdPortion(of: model),
+            stamp: .init(transientSeq: { seq.current }, nextSeq: { seq.next() }, nowMs: { [now = self.now] in
+                Int((now().timeIntervalSince1970 * 1000).rounded())
+            }))
+
         var round = 0
         loop: while round < Self.maxRounds {
             round += 1
@@ -273,15 +291,21 @@ public final class ChatEngine: @unchecked Sendable {
             let exaKeyPresent = tools.exaKeyPresent
             let request = ProviderTurnRequest(model: modelIdPortion(of: model), instructions: tools.systemPrompt,
                                               input: input, tools: Self.toolSpecs(exaKeyPresent: exaKeyPresent),
-                                              reasoningEffort: tools.reasoningEffort)
+                                              reasoningEffort: tools.reasoningEffort,
+                                              requestSummary: true)
             let stream = provider.streamTurn(request)
-            // Transient assistant_delta seq = the current head (non-advancing) — captured as a
-            // constant so the concurrently-consuming task never touches the allocator.
-            let deltaSeq = seq.current
-            let outcome = await consumeRound(stream, signal: signal) { delta in
-                emit(.assistantDelta(.init(seq: deltaSeq, sessionId: sid, ts: self.nowMs(),
+            // Transient assistant_delta seq = the current head (non-advancing), read at emit time —
+            // a `thinking_block` persisted mid-round advances it. The allocator is lock-guarded, and
+            // the consuming task is the only one touching it while this loop awaits.
+            let outcome = await consumeRound(stream, signal: signal, onDelta: { delta in
+                emit(.assistantDelta(.init(seq: seq.current, sessionId: sid, ts: self.nowMs(),
                                            threadId: MainThread, delta: delta)))
-            }
+            }, onThinking: { progress in
+                for event in thinking.accept(progress) { emit(event) }
+            })
+            // Every block the round opened gets its record — a stream that ended, failed or was
+            // interrupted with one still open closes it here, before anything else this round emits.
+            for event in thinking.closeAll() { emit(event) }
 
             if signal.isAborted { stopReason = "aborted"; break }
             inputTokens += outcome.inputTokens
@@ -380,7 +404,8 @@ public final class ChatEngine: @unchecked Sendable {
     /// caller re-checks `signal.isAborted` to decide the turn is aborted.
     private func consumeRound(_ stream: AsyncStream<ProviderEvent>,
                               signal: ChatAbortSignal,
-                              onDelta: @escaping @Sendable (String) -> Void) async -> Round {
+                              onDelta: @escaping @Sendable (String) -> Void,
+                              onThinking: @escaping @Sendable (ProviderReasoningProgress) -> Void) async -> Round {
         let task = Task { () -> Round in
             var round = Round()
             for await event in stream {
@@ -389,6 +414,8 @@ public final class ChatEngine: @unchecked Sendable {
                     if !delta.isEmpty { round.text += delta; onDelta(delta) }
                 case .reasoningItem(let itemJSON):
                     round.reasoning.append(itemJSON)
+                case .reasoningProgress(let progress):
+                    onThinking(progress)
                 case .toolCall(let id, let name, let args):
                     round.calls.append(RoundCall(id: id, name: name, argumentsJSON: args))
                 case .usage(let inTok, let outTok):
@@ -595,12 +622,14 @@ public final class ChatEngine: @unchecked Sendable {
 let MainThread = "main"
 
 /// Allocates monotonic seq for a turn, seeded from the session head. `next()` advances (a persisted
-/// event); `current` reads the head without advancing (a transient `assistant_delta`, whose seq is
-/// the head at broadcast time). Turns are serialized, so a plain counter is sufficient — the engine
-/// never allocates from two tasks at once (the concurrent delta task reads a captured constant).
-final class SeqAllocator {
+/// event); `current` reads the head without advancing (a transient `assistant_delta`/`thinking_delta`,
+/// whose seq is the head at broadcast time). Turns are serialized and the round's consuming task is
+/// the only allocator while the loop awaits it — the lock makes that hand-off explicit rather than
+/// assumed (the consuming task persists a `thinking_block` mid-round).
+final class SeqAllocator: @unchecked Sendable {
+    private let lock = NSLock()
     private var head: Int
     init(lastSeq: Int) { self.head = lastSeq }
-    var current: Int { head }
-    func next() -> Int { head += 1; return head }
+    var current: Int { lock.withLock { head } }
+    func next() -> Int { lock.withLock { head += 1; return head } }
 }
