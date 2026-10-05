@@ -52,8 +52,8 @@ final class ThinkingTitleRuleTests: XCTestCase {
 
     func testEveryFixtureBlockGetsTheDaemonsTitle() throws {
         let f = try Self.fixture()
-        XCTAssertEqual(f.blocks.count, 67)
-        XCTAssertEqual(f.blocks.filter { $0.title != nil }.count, 58)
+        XCTAssertEqual(f.blocks.count, 70)
+        XCTAssertEqual(f.blocks.filter { $0.title != nil }.count, 61)
         for b in f.blocks {
             XCTAssertEqual(ThinkingTitle.derive(kind: b.kind, parts: [b.text], final: true), b.title, b.id)
         }
@@ -254,6 +254,21 @@ final class ThinkingTitleRuleTests: XCTestCase {
         XCTAssertEqual(final("Let me check for hidden files and git log to be thorough."), "Checking for hidden files and git log")
         XCTAssertNil(final("Let me note this."))
         XCTAssertEqual(final("I found a bug in div."), "Found a bug in div")
+    }
+
+    func testCoordinatedVerbsAndAnswerWriting() {
+        XCTAssertEqual(final("Let me implement and compute exact mean for random arrays."), "Implementing and computing exact mean for random arrays")
+        XCTAssertEqual(final("Let me check and fix the tests."), "Checking and fixing the tests")
+        XCTAssertEqual(final("Let me compute the theoretical bound and show the empirical ratio."), "Computing the theoretical bound")
+        XCTAssertEqual(final("Let me compute the mean and show exact ratios."), "Computing the mean")
+        XCTAssertEqual(final("Let me read the source and test files."), "Reading the source and test files")
+        XCTAssertEqual(final("Let me check the logs and the config."), "Checking the logs and the config")
+        XCTAssertEqual(final("Let me implement and compute exact mean for random arrays with heavy cancellation."),
+                       "Implementing and computing exact mean for random arrays…")
+        for s in ["Let me produce the final response.", "Now I'll generate the final answer.", "I'll keep code blocks.", "Let me compose the reply."] {
+            XCTAssertEqual(final("Let me check the bound. \(s)"), "Checking the bound", s)
+        }
+        XCTAssertEqual(final("Let me write code to reproduce it."), "Writing code")
     }
 
     func testCJK() {

@@ -245,10 +245,16 @@ const GO_AND = new RegExp(`^ (?:(?:ahead|through|back|on) )?and ([a-z][a-z-]*)${
 const DOUBLE_CHECK = new RegExp(`^[ -]check${END}(.*)$`);
 /** "Starting to analyze …" → "Analyzing …". */
 const TO_VERB = new RegExp(`^ to ([a-z][a-z-]*)${END}(.*)$`);
+/** A determiner or possessive: after "and <word>", it makes <word> a verb starting the next step
+ *  ("compute the bound and SHOW THE ratio"); as <word> itself it starts a noun phrase ("and the tests"). */
+const DETERMINERS = "the a an this that these those its their all each every some any my our your his her";
+/** "implement and compute X" (the first verb has no object) → both verbs, made gerunds. */
+const AND_VERB = new RegExp(`^ and ([a-z][a-z-]*)${END}(.*)$`);
 /** "Verifying by checking X" → "Checking X": a bare verb whose object is a "by" clause. */
 const BY_GERUND = new RegExp(`^ by ([a-z]+ing)${END}(.*)$`);
 
 /** A base verb that is not a verb (or not an activity) after a modal: "I should NOT …", "Let me BE …". */
+const DETERMINER_SET = words(DETERMINERS);
 const STOP_VERBS = words("not never be been being have has had also probably maybe likely definitely certainly so the a an it this that there here just");
 /** -ing words that are adjectives or nouns, never an activity's verb. */
 const NOT_GERUNDS = words(
@@ -263,11 +269,11 @@ const GENERIC = words(
 );
 /** Writing the ANSWER is not an activity worth a title ("Writing a concise final answer") — a verb
  *  from here AND an object word from `META_OBJECTS` (or none). */
-const META_VERBS = words("writing giving presenting keeping answering providing composing responding replying formatting wrapping finalizing drafting putting outputting delivering sharing stating summarizing framing phrasing structuring crafting preparing leaving");
+const META_VERBS = words("writing giving presenting keeping answering providing composing responding replying formatting wrapping finalizing drafting putting outputting delivering sharing stating summarizing framing phrasing structuring crafting preparing leaving producing generating creating compiling assembling constructing");
 const META_OBJECTS = words(
   "answer answers response reply final concise concisely clear clearly tight short brief briefly bullet bullets sentence sentences",
   "prose summary report up it them this that output findings together list user message words paragraph paragraphs format plan",
-  "recommendation conclusion verdict",
+  "recommendation conclusion verdict blocks headers headings markdown tone length",
 );
 /** An object made only of these is no object ("Analyzing them", "Checking it", "Taking a look"). */
 const PRONOUNISH = words(
@@ -294,11 +300,12 @@ const TRAILING_PUNCTUATION = new Set([..."．.,;:!?…。，；：！？、"].ma
 const PURPOSES = "identify see understand find confirm check figure determine get make know verify ensure learn decide catch spot locate gather compare validate inspect review map trace reproduce isolate avoid prevent count orient answer be";
 /** Verbs that, after "and", start the writer's NEXT step ("read X and check Y") — never words that are
  *  as often nouns ("source and test files", "plan and report"). */
-const NEXT_VERBS = "check read run look lay write fix add verify confirm try give review examine inspect identify count find explore compare make keep summarize glance outline produce present provide propose suggest finalize mention explain describe grep focus dig figure determine think consider decide proceed continue begin maybe possibly am i return";
+const NEXT_VERBS = "check read run look lay write fix add verify confirm try give review examine inspect identify count find explore compare make keep summarize glance outline produce present provide propose suggest finalize mention explain describe grep focus dig figure determine think consider decide proceed continue begin maybe possibly am i return show compute implement build print plot measure calculate derive prove simulate generate create apply sort refactor rewrite rerun execute evaluate analyze analyse assess debug parse handle";
 const CUT_WORDS = [
   `to (?:${alt(PURPOSES)})(?![a-z])`,
   ...["in order to", "so that", "so", "because", "before", "after", "which", "since", "then", "and then", "and also", "while", "whereas", "though", "although", "but", "or if", "or whether"].map((w) => `${w}(?![a-z])`),
   `and (?:${alt(NEXT_VERBS)})(?![a-z])`,
+  `and (?!(?:${alt(DETERMINERS)})(?![a-z]))[a-z][a-z-]* (?:${alt(DETERMINERS)})(?![a-z])`,
   "by [a-z]+ing(?![a-z])",
   "that (?:might|could|would|may|will|can|should|is|are|was|were)(?![a-z])",
 ].join("|");
@@ -314,7 +321,7 @@ const FENCE_LINE = /^(?:```|~~~)/;
  *  quantifiers and runs them against adversarial input on a time budget. */
 export const TITLE_PATTERNS: readonly RegExp[] = [
   LINE_HEADING, BLANK_REST, FILE_TOKEN, SINGLE_TOKEN, P_START_BY, P_MODAL, P_IM, P_FOUND, P_PAST, P_GERUND,
-  GO_AND, DOUBLE_CHECK, TO_VERB, BY_GERUND, CUT, CLAUSE, STRUCTURE_LINE, FENCE_LINE,
+  GO_AND, DOUBLE_CHECK, TO_VERB, BY_GERUND, AND_VERB, CUT, CLAUSE, STRUCTURE_LINE, FENCE_LINE,
 ];
 
 // ── gerunds ──
@@ -455,9 +462,9 @@ function cutIndex(rest: string): number {
   return rest.length;
 }
 
-function shortenObject(rest: string): string {
+function shortenObject(rest: string, verbWords = 1): string {
   const list = trimTail(tokens(rest.slice(0, cutIndex(rest))));
-  let budget = TITLE_MAX_WORDS - 1;
+  let budget = TITLE_MAX_WORDS - verbWords;
   const kept: string[] = [];
   for (const w of list) {
     const weight = weightOf(w);
@@ -520,7 +527,15 @@ function build(verbIng: string, rest: string, shape: Shape): RuleTitle | undefin
     const by = execTail(BY_GERUND, tail);
     if (by !== undefined && !NOT_GERUNDS.has(by.word)) { verb = by.word; tail = by.rest; }
   }
-  const object = shortenObject(tail);
+  // "Let me implement and compute X" (the first verb has no object): both verbs, as gerunds.
+  if (shape === "converted") {
+    const and = execTail(AND_VERB, tail);
+    if (and !== undefined && !STOP_VERBS.has(and.word) && !DETERMINER_SET.has(and.word)) {
+      verb = `${verb} and ${gerundOf(and.word)}`;
+      tail = and.rest;
+    }
+  }
+  const object = shortenObject(tail, verb.split(" ").length);
   if (countOf(object, "`") % 2 !== 0) return undefined;           // a cut inside inline code
   const objectWords = tokens(object).map(bare).filter((w) => w.length > 0);
   const hasCjk = cjkCount(object) > 0;

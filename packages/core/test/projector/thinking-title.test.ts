@@ -32,9 +32,9 @@ function stream(kind: ThinkingKind, text: string, size: number): { live: Array<s
 }
 
 describe("the fixture: real reasoning blocks and the title each gets", () => {
-  test("the fixture is the size the report quotes (67 blocks — 52 real, 15 synthetic — 58 titled)", () => {
-    expect(fixture.blocks).toHaveLength(67);
-    expect(fixture.blocks.filter((b) => b.title !== null)).toHaveLength(58);
+  test("the fixture is the size the report quotes (70 blocks — 52 real, 18 synthetic — 61 titled)", () => {
+    expect(fixture.blocks).toHaveLength(70);
+    expect(fixture.blocks.filter((b) => b.title !== null)).toHaveLength(61);
   });
 
   for (const b of fixture.blocks) {

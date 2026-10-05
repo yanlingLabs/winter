@@ -517,6 +517,30 @@
       "text": "**`div`**\n\nLet me check div against its test.\n"
     },
     {
+      "id": "synthetic/coordinated-verbs-bare-first",
+      "model": "synthetic",
+      "kind": "summary",
+      "note": "two verbs, the first with no object: both made gerunds",
+      "title": "Implementing and computing exact mean for random arrays",
+      "text": "Let me implement and compute exact mean for random arrays.\n"
+    },
+    {
+      "id": "synthetic/coordinated-verbs-object-first",
+      "model": "synthetic",
+      "kind": "summary",
+      "note": "the first verb has an object: cut at 'and <verb> <determiner>'",
+      "title": "Computing the theoretical bound",
+      "text": "Let me compute the theoretical bound and show the empirical ratio.\n"
+    },
+    {
+      "id": "synthetic/answer-writing-at-end",
+      "model": "synthetic",
+      "kind": "summary",
+      "note": "'produce the final response', 'keep code blocks' are answer-writing: the activity before them stands",
+      "title": "Checking the bound for case B",
+      "text": "Let me check the bound for case B.\n\nWrite the answer now. I'll keep code blocks.\n\nLet me produce the final response.\n"
+    },
+    {
       "id": "synthetic/openai-heading-then-activity",
       "model": "synthetic",
       "kind": "summary",

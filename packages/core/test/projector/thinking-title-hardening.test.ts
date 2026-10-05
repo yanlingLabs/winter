@@ -158,7 +158,7 @@ describe("review r1 (HIGH): no title pattern backtracks super-linearly", () => {
   });
 
   test("every pattern the module compiles passes the audit", () => {
-    expect(TITLE_PATTERNS.length).toBe(18);
+    expect(TITLE_PATTERNS.length).toBe(19);
     for (const re of TITLE_PATTERNS) expect({ source: re.source, hazards: quantifierHazards(re.source) }).toEqual({ source: re.source, hazards: [] });
   });
 
@@ -308,6 +308,28 @@ describe("agent SDK 0.0.48 live gate (2026-10-06): titles it showed wrong", () =
     expect(final("Let me check for hidden files and git log to be thorough.")).toBe("Checking for hidden files and git log");
     expect(final("Let me note this.")).toBeUndefined();
     expect(final("I found a bug in div.")).toBe("Found a bug in div");
+  });
+});
+
+describe("live misfires on the dev daemon (2026-10-06): coordinated verbs, answer-writing", () => {
+  test("two verbs: both gerunds when the first has no object; else cut at 'and <verb> <determiner>'", () => {
+    expect(final("Let me implement and compute exact mean for random arrays.")).toBe("Implementing and computing exact mean for random arrays");
+    expect(final("Let me check and fix the tests.")).toBe("Checking and fixing the tests");
+    expect(final("Let me compute the theoretical bound and show the empirical ratio.")).toBe("Computing the theoretical bound");
+    expect(final("Let me compute the mean and show exact ratios.")).toBe("Computing the mean");
+    // Coordinated NOUNS stay.
+    expect(final("Let me read the source and test files.")).toBe("Reading the source and test files");
+    expect(final("Let me check the logs and the config.")).toBe("Checking the logs and the config");
+    expect(final("Let me read the code and its tests.")).toBe("Reading the code and its tests");
+    // The pair counts toward the 9-word cap.
+    expect(final("Let me implement and compute exact mean for random arrays with heavy cancellation.")).toBe("Implementing and computing exact mean for random arrays…");
+  });
+
+  test("answer-writing at a block's end is skipped: produce/generate the final response, keep code blocks", () => {
+    for (const s of ["Let me produce the final response.", "Now I'll generate the final answer.", "I'll keep code blocks.", "Let me compose the reply."]) {
+      expect(final(`Let me check the bound. ${s}`)).toBe("Checking the bound");
+    }
+    expect(final("Let me write code to reproduce it.")).toBe("Writing code");              // writing code is work, not the answer
   });
 });
 

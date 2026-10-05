@@ -244,6 +244,12 @@ enum ActivityTitleRule {
     fileprivate static let doubleCheck = JSRegex(#"^[ \-]check"# + end + rest)
     fileprivate static let toVerb = JSRegex("^ to ([a-z][a-z-]*)" + end + rest)
     fileprivate static let byGerund = JSRegex("^ by ([a-z]+ing)" + end + rest)
+    /// A determiner or possessive: after "and <word>" it makes <word> a verb starting the next step;
+    /// as <word> itself it starts a noun phrase.
+    private static let determiners = "the a an this that these those its their all each every some any my our your his her"
+    private static let determinerSet = words(determiners)
+    /// "implement and compute X" (the first verb has no object) → both verbs, made gerunds.
+    fileprivate static let andVerb = JSRegex("^ and ([a-z][a-z-]*)" + end + rest)
 
     private static let stopVerbs = words("not never be been being have has had also probably maybe likely definitely certainly so the a an it this that there here just")
     private static let notGerunds = words(
@@ -253,11 +259,11 @@ enum ActivityTitleRule {
     private static let generic = words(
         "thinking analyzing analysing continuing proceeding starting working beginning going trying doing getting having looking seeing",
         "considering reconsidering reflecting pondering reasoning focusing moving waiting wondering deciding finishing finalizing noting")
-    private static let metaVerbs = words("writing giving presenting keeping answering providing composing responding replying formatting wrapping finalizing drafting putting outputting delivering sharing stating summarizing framing phrasing structuring crafting preparing leaving")
+    private static let metaVerbs = words("writing giving presenting keeping answering providing composing responding replying formatting wrapping finalizing drafting putting outputting delivering sharing stating summarizing framing phrasing structuring crafting preparing leaving producing generating creating compiling assembling constructing")
     private static let metaObjects = words(
         "answer answers response reply final concise concisely clear clearly tight short brief briefly bullet bullets sentence sentences",
         "prose summary report up it them this that output findings together list user message words paragraph paragraphs format plan",
-        "recommendation conclusion verdict")
+        "recommendation conclusion verdict blocks headers headings markdown tone length")
     private static let pronounish = words(
         "it them this that these those things everything something anything more all both stuff again now here there further",
         "at into over through on for with about to up out in a an the bit little closer deeper look one")
@@ -273,11 +279,12 @@ enum ActivityTitleRule {
     private static let trailingPunctuation: Set<UInt16> = Set("．.,;:!?…。，；：！？、".utf16)
 
     private static let purposes = "identify see understand find confirm check figure determine get make know verify ensure learn decide catch spot locate gather compare validate inspect review map trace reproduce isolate avoid prevent count orient answer be"
-    private static let nextVerbs = "check read run look lay write fix add verify confirm try give review examine inspect identify count find explore compare make keep summarize glance outline produce present provide propose suggest finalize mention explain describe grep focus dig figure determine think consider decide proceed continue begin maybe possibly am i return"
+    private static let nextVerbs = "check read run look lay write fix add verify confirm try give review examine inspect identify count find explore compare make keep summarize glance outline produce present provide propose suggest finalize mention explain describe grep focus dig figure determine think consider decide proceed continue begin maybe possibly am i return show compute implement build print plot measure calculate derive prove simulate generate create apply sort refactor rewrite rerun execute evaluate analyze analyse assess debug parse handle"
     private static let cutWords = (
         ["to (?:" + alt(purposes) + ")(?![a-z])"]
         + ["in order to", "so that", "so", "because", "before", "after", "which", "since", "then", "and then", "and also", "while", "whereas", "though", "although", "but", "or if", "or whether"].map { $0 + "(?![a-z])" }
         + ["and (?:" + alt(nextVerbs) + ")(?![a-z])",
+           "and (?!(?:" + alt(determiners) + ")(?![a-z]))[a-z][a-z-]* (?:" + alt(determiners) + ")(?![a-z])",
            "by [a-z]+ing(?![a-z])",
            "that (?:might|could|would|may|will|can|should|is|are|was|were)(?![a-z])"]
     ).joined(separator: "|")
@@ -413,10 +420,10 @@ enum ActivityTitleRule {
         return u.count
     }
 
-    private static func shortenObject(_ rest: String) -> String {
+    private static func shortenObject(_ rest: String, verbWords: Int = 1) -> String {
         let u = Array(rest.utf16)
         let list = trimTail(tokens(String(decoding: u[0..<cutIndex(rest)], as: UTF16.self)))
-        var budget = titleMaxWords - 1
+        var budget = titleMaxWords - verbWords
         var kept: [String] = []
         for w in list {
             let weight = weightOf(w)
@@ -476,7 +483,12 @@ enum ActivityTitleRule {
                 tail = by.rest
             }
         }
-        let object = shortenObject(tail)
+        // "Let me implement and compute X" (the first verb has no object): both verbs, as gerunds.
+        if shape == .converted, let and = execTail(andVerb, tail), !stopVerbs.contains(and.word), !determinerSet.contains(and.word) {
+            verb = verb + " and " + gerund(and.word)
+            tail = and.rest
+        }
+        let object = shortenObject(tail, verbWords: verb.split(separator: " ").count)
         if countOccurrences(object, "`") % 2 != 0 { return nil }
         let objectWords = tokens(object).map(bare).filter { !$0.isEmpty }
         let hasCjk = cjkCount(object) > 0
@@ -548,7 +560,7 @@ enum ActivityTitleRule {
     /// from word lists, so `RegexShapeTripwireTests` cannot read them as literals; it reads them here,
     /// at run time, checks this list's length against the file's construction sites, and audits each.
     static var compiledPatterns: [String] {
-        [pStartBy, pModal, pIm, pFound, pPast, pGerund, goAnd, doubleCheck, toVerb, byGerund, cut, clause,
+        [pStartBy, pModal, pIm, pFound, pPast, pGerund, goAnd, doubleCheck, toVerb, byGerund, andVerb, cut, clause,
          structureLine, fenceLine, ThinkingHeading.fileToken, ThinkingHeading.singleToken].map(\.re.pattern)
     }
 }
