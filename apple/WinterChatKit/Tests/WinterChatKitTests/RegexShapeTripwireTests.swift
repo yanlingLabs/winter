@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+@testable import WinterChatKit
 
 /// THE STRUCTURAL TRIPWIRE for the HTML-scanning regex class, on the Swift side — the mirror of
 /// `packages/core/test/agent/tools/regex-shapes.test.ts`, and the reason both exist: Task 6b found the
@@ -66,6 +67,13 @@ final class RegexShapeTripwireTests: XCTestCase {
     /// checked. Its presence is asserted, not assumed, so renaming or rewriting the helper trips the gate
     /// instead of quietly widening this hole.
     private static let analyzedIndirection = (file: "HtmlToText.swift", argumentPrefix: "pattern)")
+
+    /// The SECOND unreadable site, checked another way: `ThinkingTitleRule.swift`'s `JSRegex` (the
+    /// thinking pill's title rule, a port of the daemon's) builds its patterns from word lists, so no
+    /// literal exists to read. They are read at RUN TIME instead (`ActivityTitleRule.compiledPatterns`,
+    /// tied to the file's `JSRegex(` construction sites by count) and held to the same rule —
+    /// `testTheThinkingTitleRulesRuntimePatternsPassTheRule`.
+    private static let runtimeCheckedIndirection = (file: "ThinkingTitleRule.swift", argumentPrefix: "pattern, options:")
 
     // MARK: - the Swift-source lexer
 
@@ -379,6 +387,10 @@ final class RegexShapeTripwireTests: XCTestCase {
                     sawAnalyzedIndirection = true
                     continue
                 }
+                if file == Self.runtimeCheckedIndirection.file,
+                   p.pattern.hasPrefix(Self.runtimeCheckedIndirection.argumentPrefix) {
+                    continue   // checked at run time — see `testTheThinkingTitleRulesRuntimePatternsPassTheRule`
+                }
                 unreadable.append("\(file):\(p.line)  \(p.pattern)")
             }
             for p in found {
@@ -393,6 +405,25 @@ final class RegexShapeTripwireTests: XCTestCase {
         XCTAssertTrue(sawAnalyzedIndirection,
                       "the `compile` helper's forwarding site is gone — re-derive what this gate may skip")
         XCTAssertEqual(offenders.joined(separator: "\n"), "")
+    }
+
+    /// The runtime half of the gate for `ThinkingTitleRule.swift`: exactly one opaque site (its `JSRegex`
+    /// forwarding `pattern`), `compiledPatterns` names one pattern per `JSRegex(` construction site in the
+    /// file (so a new regex cannot be added without being listed), and every one passes the rule.
+    func testTheThinkingTitleRulesRuntimePatternsPassTheRule() throws {
+        let src = try Self.read(Self.runtimeCheckedIndirection.file)
+        let (found, opaque) = Self.regexPatterns(in: src)
+        XCTAssertEqual(found.count, 0, "a literal here would be checked by the main gate; this file has none: \(found)")
+        XCTAssertEqual(opaque.count, 1, "unexpected unreadable regex site(s): \(opaque)")
+        XCTAssertTrue(opaque.first?.pattern.hasPrefix(Self.runtimeCheckedIndirection.argumentPrefix) ?? false,
+                      "the `JSRegex` forwarding site changed shape: \(opaque)")
+        let constructionSites = src.components(separatedBy: "JSRegex(").count - 1
+        let patterns = ActivityTitleRule.compiledPatterns
+        XCTAssertEqual(patterns.count, constructionSites, "compiledPatterns must list every JSRegex the file builds")
+        XCTAssertEqual(Set(patterns).count, patterns.count)
+        for p in patterns where Self.mentionsMarkup(p) {
+            XCTAssertFalse(Self.unboundedQuantifierBeforeMore(p), "unbounded scan before more in \(p)")
+        }
     }
 
     func testTheAllowlistIsEmptyAndAddingToItMustBeDeliberate() {

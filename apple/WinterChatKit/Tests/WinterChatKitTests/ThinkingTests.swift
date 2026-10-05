@@ -42,8 +42,10 @@ final class ThinkingTitleTests: XCTestCase {
         XCTAssertNil(t("update", ["   "]))
     }
 
-    func testExposedAndHiddenHaveNoTitle() {
-        XCTAssertNil(t("exposed", ["**Looks like a heading**"]))
+    func testExposedTitlesLikeSummaryAndHiddenHasNoTitle() {
+        XCTAssertEqual(t("exposed", ["**Looks like a heading**"]), "Looks like a heading")
+        XCTAssertEqual(t("exposed", ["Small project. Let me read all the files."]), "Reading all the files")
+        XCTAssertNil(t("exposed", ["Raw thoughts with no activity in them."]))
         XCTAssertNil(t("hidden", ["anything"]))
     }
 
