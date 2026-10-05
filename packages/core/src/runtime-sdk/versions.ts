@@ -3,8 +3,11 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.44";
-/** Bumped to 0.0.44 (2026-10-04, user ruling "lets fold the message into the running turn"): host input sent while a
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.46";
+/** Bumped to 0.0.46 (2026-10-05; 0.0.45 was tagged but never published): a spawned runtime stops when its host dies, even
+ *  mid-turn -- it watches its parent (`WINTER_HOST_PID`, passed by the wrapper's spawn) and, once the host is gone, kills
+ *  every process group it started and exits, so a crashed daemon no longer leaves a session running unsupervised.
+ *  Earlier: bumped to 0.0.44 (2026-10-04, user ruling "lets fold the message into the running turn"): host input sent while a
  *  turn runs is FOLDED into that turn just before its next request (after the next tool round), with
  *  `system/host_input_folded` (`SDKHostInputFoldedMessage`, `count` = the host's earliest pending pushes absorbed —
  *  they never get a `result`); a turn stopped by an interrupt, a budget or a hook before that request does not fold;
