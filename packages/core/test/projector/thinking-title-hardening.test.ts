@@ -146,10 +146,10 @@ describe("review r1 (HIGH): no title pattern backtracks super-linearly", () => {
       "`a. b`".repeat(60), `${"- ".repeat(150)}x.`, `${", so ".repeat(60)}x.`, `${"— ".repeat(150)}x.`,
       `${"now　　".repeat(30)}x.`, `${"now\u0085\u0085".repeat(30)}x.`, `${".".repeat(500)}x`,
     ];
-    for (const s of adversarial) expect({ s: s.slice(0, 24), fast: timed(s) < 10 }).toEqual({ s: s.slice(0, 24), fast: true });
+    for (const s of adversarial) expect({ s: s.slice(0, 24), fast: timed(s) < 5 }).toEqual({ s: s.slice(0, 24), fast: true });
   });
 
-  test("a fuzz loop of 3,000 random 220-char candidates stays under 10 ms each and 1 s in all", () => {
+  test("a fuzz loop of 3,000 random 220-char candidates stays under 5 ms each and 1 s in all", () => {
     const toks = ["now", "so", "ok", "yes", "let me", "let", "me", "i'll", "i", "will", "need", "to", "check", "checking", "start", "by",
       "and", "then", "just", "quickly", "—", "--", "-", ",", ";", ":", "(", ")", "`", "**", "i've", "found", "checked", "the", "a",
       "that", "is", "go", "ahead", "double", "  ", "   ", "\t", " , ", "' ", "'", "。", "，", "检查"];
@@ -164,7 +164,7 @@ describe("review r1 (HIGH): no title pattern backtracks super-linearly", () => {
       worst = Math.max(worst, timed(`${s.slice(0, 219)}.`));
     }
     const total = performance.now() - t0;
-    expect({ worstUnder10ms: worst < 10, totalUnder1s: total < 1000 }).toEqual({ worstUnder10ms: true, totalUnder1s: true });
+    expect({ worstUnder5ms: worst < 5, totalUnder1s: total < 1000 }).toEqual({ worstUnder5ms: true, totalUnder1s: true });
   });
 
   test("streamed into the projector as one delta, an adversarial line costs milliseconds, not seconds", () => {
@@ -221,6 +221,21 @@ describe("review r1: a streamed block persists exactly what the whole text deriv
     // …while one the following text CLOSES is kept.
     expect(persist("exposed", ["Using the cache.", " Map is slower."]).block).toBe("Using the cache");
     expect(persist("summary", ["**Foo**", "\nbar baz."]).block).toBe("Foo");
+  });
+
+  test("a block closed WITHOUT its end (result, error, interrupt) keeps the live title the user saw, never a cut-off sentence", () => {
+    const cut = (kind: ThinkingKind, chunks: string[]): string | undefined => {
+      const blocks = new ThinkingBlocks("s_test", () => 0);
+      const f = (phase: "start" | "delta", text?: string): ReasoningProgressFrame =>
+        ({ type: "system", subtype: "reasoning_progress", block_id: "rb", phase, kind, ...(text === undefined ? {} : { text }) });
+      blocks.start(f("start"));
+      for (const c of chunks) blocks.delta(f("delta", c));
+      return (blocks.closeWhere(() => true)[0] as { title?: string }).title;
+    };
+    expect(cut("summary", ["**Busy**"])).toBe("Busy");
+    expect(cut("exposed", ["Let me read the files."])).toBe("Reading the files");
+    expect(cut("exposed", ["Let me read the fi"])).toBeUndefined();
+    expect(cut("exposed", ["Let me read the files. Now let me run the te"])).toBe("Reading the files");
   });
 
   test("for every fixture block, the persisted title equals the whole-text derivation across 1/17/160-unit splits", () => {

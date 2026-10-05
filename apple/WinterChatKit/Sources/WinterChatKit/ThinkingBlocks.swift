@@ -61,10 +61,9 @@ public enum ThinkingTitle {
         return String(decoding: cut, as: UTF16.self)
     }
 
-    /// Whitespace runs collapsed to single spaces, trimmed (`s.replace(/\s+/g, " ").trim()`).
-    static func collapse(_ s: String) -> String {
-        s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-    }
+    /// The daemon's `cleanText` (its `collapse`): whitespace runs → one space, trimmed; control,
+    /// zero-width and bidi units dropped (`ThinkingTitleRule.swift`).
+    static func collapse(_ s: String) -> String { cleanText(s) }
 
     /// At most `titleMaxLength` units, an ellipsis marking a cut.
     static func clip(_ s: String) -> String {
@@ -126,8 +125,10 @@ final class ThinkingBlocks: @unchecked Sendable {
         var bodyUnits = 0
         var truncated = false
         var parts: [Part] = []
-        /// The last NON-EMPTY title derived — sticky.
+        /// The last NON-EMPTY COMMITTED title — sticky, and what the block persists.
         var title: String?
+        /// The last title a delta carried (live; may be provisional) — sticky too.
+        var shown: String?
         var startedAt: Int?
     }
 
@@ -169,7 +170,11 @@ final class ThinkingBlocks: @unchecked Sendable {
     func closeAll() -> [SessionEvent] {
         lock.withLock {
             let ids = order.filter { open[$0] != nil }
-            return ids.compactMap { id in open[id].map { close($0) } }
+            return ids.compactMap { id -> SessionEvent? in
+                guard var b = open[id] else { return nil }
+                retitle(&b, .cut)   // no end frame: commit the live title, never a cut-off sentence
+                return close(b)
+            }
         }
     }
 
@@ -229,11 +234,13 @@ final class ThinkingBlocks: @unchecked Sendable {
             }
         }
 
-        let titleChanged = retitle(&b, final: false)
+        let live = retitle(&b, .delta)
+        let titleChanged = live != nil && live != b.shown
+        if titleChanged { b.shown = live }
         open[b.blockId] = b
         if increment.isEmpty && !titleChanged && !kindChanged { return [] }
         // The CURRENT title rides every delta that carries text, not only a change (review r1).
-        let title = (titleChanged || !increment.isEmpty) ? b.title : nil
+        let title = (titleChanged || !increment.isEmpty) ? b.shown : nil
         return [deltaEvent(b, phase: "delta", text: increment.isEmpty ? nil : increment, title: title)]
     }
 
@@ -244,28 +251,38 @@ final class ThinkingBlocks: @unchecked Sendable {
         // is a report like any other.
         if let kind = p.kind { b.kind = kind }
         // The block's own end counts its trailing sentence (it may end with no punctuation).
-        retitle(&b, final: true)
+        retitle(&b, .end)
         return [close(b)]
     }
 
-    /// The block's current title (`retitle` in the daemon): the update's head, or the latest part's
-    /// heading (its window scanned) else its activity rule. Sticky: no answer keeps the last title.
-    /// Whether the title changed.
+    /// The block's titles (`retitle` in the daemon), returning the LIVE one. COMMITTED (`b.title`, what
+    /// the block persists): the update's head, or the latest part's last heading on a CLOSED line (kept
+    /// once it scrolls out of the window) else its activity rule over COMPLETE sentences — sticky. LIVE
+    /// (the delta's title) also reads what text still to come may change (an open heading line, a
+    /// trailing sentence ending in `.`/`!`/`?`): shown, never persisted. `.end` (the block's own end):
+    /// everything counts, so the persisted title is exactly the whole-text derivation. `.cut` (closed
+    /// without its end — the round's end, an error, an interrupt): the live title is committed, but a
+    /// trailing sentence without its end punctuation still does not count.
+    private enum RetitleMode { case delta, end, cut }
+
     @discardableResult
-    private func retitle(_ b: inout OpenBlock, final: Bool) -> Bool {
-        var derived: String?
+    private func retitle(_ b: inout OpenBlock, _ mode: RetitleMode) -> String? {
         if b.kind == "update" {
-            derived = ThinkingTitle.derive(kind: "update", parts: b.parts.map { String(decoding: $0.head, as: UTF16.self) })
-        } else if b.kind == "summary" || b.kind == "exposed", !b.parts.isEmpty {
-            var p = b.parts[b.parts.count - 1]
-            let scanned = ThinkingHeading.lastValid(p.scanWindow)
-            if scanned != nil || !p.tailCut { p.heading = scanned }
-            b.parts[b.parts.count - 1] = p
-            derived = p.heading ?? p.rule.title(final: final)
+            if let derived = ThinkingTitle.derive(kind: "update", parts: b.parts.map { String(decoding: $0.head, as: UTF16.self) }) {
+                b.title = derived
+            }
+            return b.title
         }
-        guard let derived, derived != b.title else { return false }
-        b.title = derived
-        return true
+        guard b.kind == "summary" || b.kind == "exposed", !b.parts.isEmpty else { return b.title }
+        var p = b.parts[b.parts.count - 1]
+        let scanned = ThinkingHeading.scan(p.scanWindow)
+        if scanned.closed != nil || !p.tailCut { p.heading = scanned.closed }
+        b.parts[b.parts.count - 1] = p
+        let heading = scanned.latest ?? p.heading
+        let liveTitle = heading ?? p.rule.title(final: mode == .end)
+        let committed = mode == .delta ? (p.heading ?? p.rule.committedTitle()) : liveTitle
+        if let committed { b.title = committed }
+        return mode == .delta ? (liveTitle ?? b.title) : b.title
     }
 
     private func close(_ b: OpenBlock) -> SessionEvent {

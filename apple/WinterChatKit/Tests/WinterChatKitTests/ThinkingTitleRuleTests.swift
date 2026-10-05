@@ -3,9 +3,10 @@ import XCTest
 @testable import WinterChatKit
 
 /// The thinking pill's title rule on the phone engine — the daemon's OWN fixture
-/// (`packages/core/test/projector/fixtures/thinking-titles.json`, real reasoning from live runs) and
-/// the daemon's unit cases (`packages/core/test/projector/thinking-title.test.ts`), so both engines
-/// title every block identically.
+/// (`packages/core/test/projector/fixtures/thinking-titles.json`: real reasoning from live runs plus
+/// synthetic provider-heading, CJK and Unicode blocks) and the daemon's unit cases
+/// (`thinking-title.test.ts`, `thinking-title-hardening.test.ts`), so both engines title every block
+/// identically.
 final class ThinkingTitleRuleTests: XCTestCase {
     private struct Fixture: Decodable {
         struct Block: Decodable { let id: String; let kind: String; let title: String?; let text: String }
@@ -23,32 +24,50 @@ final class ThinkingTitleRuleTests: XCTestCase {
     private func final(_ s: String) -> String? { ActivityTitleRule.title(of: s, final: true) }
     private func live(_ s: String) -> String? { ActivityTitleRule.title(of: s, final: false) }
 
+    private static func blocks() -> ThinkingBlocks {
+        ThinkingBlocks(sessionId: "s", threadId: "main", provider: nil, model: nil,
+                       stamp: .init(transientSeq: { 0 }, nextSeq: { 1 }, nowMs: { 0 }))
+    }
+
+    /// Streams `chunks` through a fresh `ThinkingBlocks`: every delta's title, and the persisted block's.
+    private func persist(_ kind: String, _ chunks: [String]) -> (live: [String?], block: String?) {
+        let b = Self.blocks()
+        _ = b.accept(ProviderReasoningProgress(blockId: "rb", phase: .start, kind: kind, text: nil, part: nil))
+        let liveTitles: [String?] = chunks.map { c in
+            guard case .thinkingDelta(let d) = b.accept(ProviderReasoningProgress(blockId: "rb", phase: .delta, kind: kind, text: c, part: 0)).first
+            else { return nil }
+            return d.title
+        }
+        guard case .thinkingBlock(let block) = b.accept(ProviderReasoningProgress(blockId: "rb", phase: .end, kind: nil, text: nil, part: nil)).first
+        else { XCTFail("no block"); return (liveTitles, nil) }
+        return (liveTitles, block.title)
+    }
+
+    private static func split(_ text: String, _ size: Int) -> [String] {
+        let units = Array(text.utf16)
+        return stride(from: 0, to: units.count, by: size).map { String(decoding: units[$0..<min($0 + size, units.count)], as: UTF16.self) }
+    }
+
+    // MARK: the fixture
+
     func testEveryFixtureBlockGetsTheDaemonsTitle() throws {
         let f = try Self.fixture()
-        XCTAssertEqual(f.blocks.count, 49)
+        XCTAssertEqual(f.blocks.count, 58)
+        XCTAssertEqual(f.blocks.filter { $0.title != nil }.count, 48)
         for b in f.blocks {
             XCTAssertEqual(ThinkingTitle.derive(kind: b.kind, parts: [b.text], final: true), b.title, b.id)
         }
     }
 
-    func testEveryFixtureBlockStreamedThroughThinkingBlocksPersistsTheSameTitle() throws {
+    func testEveryFixtureBlockStreamedPersistsTheWholeTextTitleAcrossSplits() throws {
         for b in try Self.fixture().blocks {
             for size in b.text.utf16.count <= 1500 ? [1, 17, 160] : [17, 160] {
-                let blocks = ThinkingBlocks(sessionId: "s", threadId: "main", provider: nil, model: nil,
-                                            stamp: .init(transientSeq: { 0 }, nextSeq: { 1 }, nowMs: { 0 }))
-                let units = Array(b.text.utf16)
-                var i = 0
-                while i < units.count {
-                    let chunk = String(decoding: units[i..<min(i + size, units.count)], as: UTF16.self)
-                    _ = blocks.accept(ProviderReasoningProgress(blockId: "rb", phase: .delta, kind: b.kind, text: chunk, part: 0))
-                    i += size
-                }
-                let end = blocks.accept(ProviderReasoningProgress(blockId: "rb", phase: .end, kind: nil, text: nil, part: nil))
-                guard case .thinkingBlock(let block) = end.first else { return XCTFail("no block for \(b.id)") }
-                XCTAssertEqual(block.title, b.title, "\(b.id) @\(size)")
+                XCTAssertEqual(persist(b.kind, Self.split(b.text, size)).block, b.title, "\(b.id) @\(size)")
             }
         }
     }
+
+    // MARK: gerunds, patterns, filters
 
     func testGerunds() {
         XCTAssertEqual(["read", "examine", "write", "use", "take", "lie", "tie", "see", "agree", "be", "dye", "panic", "quit", "verify", "try"].map(ActivityTitleRule.gerund),
@@ -97,25 +116,123 @@ final class ThinkingTitleRuleTests: XCTestCase {
         XCTAssertNil(final("**Checking the\ntests**"))
     }
 
-    func testTheBoldHeadingFix() {
+    // MARK: the bold heading
+
+    func testTheBoldRuleRejectsLabelsAndLoneFileNamesButAcceptsHeadingsThatNameThem() {
         XCTAssertEqual(ThinkingHeading.lastValid("**Listing source files for inspection**\n\nI will run ls."), "Listing source files for inspection")
-        for t in ["**src/calc.js:**", "**test/calc.test.js:**", "**src/format.js**", "**src/calc.js** (5 lines):", "**Lines per file (sorted by size):**", "**calc.js**"] {
+        for t in ["**src/calc.js:**", "**test/calc.test.js:**", "**src/format.js**", "**src/calc.js** (5 lines):", "**Lines per file (sorted by size):**", "**calc.js**", "**`calc.js`**", "**src/**"] {
             XCTAssertNil(ThinkingHeading.lastValid("\(t)\n1. body"), t)
         }
+        XCTAssertEqual(ThinkingHeading.lastValid("**Inspecting package.json scripts**\n\nbody"), "Inspecting package.json scripts")
+        XCTAssertEqual(ThinkingHeading.lastValid("**Reviewing Node.js setup**\n\nbody"), "Reviewing Node.js setup")
+        XCTAssertEqual(ThinkingHeading.lastValid("**Checking `foo` usage**\n\nbody"), "Checking `foo` usage")
         XCTAssertNil(ThinkingHeading.lastValid("**Not a heading** for raw CoT"))
+        XCTAssertEqual(ThinkingHeading.lastValid("**Foo**"), "Foo")
+        XCTAssertNil(ThinkingHeading.lastValid("**Foo**", includeOpenLine: false))
         XCTAssertEqual(ThinkingTitle.derive(kind: "summary", parts: ["**Listing source files for inspection**\n\nLet me run the tests first."], final: true),
                        "Listing source files for inspection")
     }
 
-    func testStreaming() {
-        XCTAssertNil(live("Let me read the fi"))
-        XCTAssertNil(live("Let me read the files"))
-        XCTAssertEqual(live("Let me read the files."), "Reading the files")
-        XCTAssertEqual(final("Let me read the files"), "Reading the files")
-        let t = ActivityTitleTracker()
-        t.push("Let me read src/calc.")
-        XCTAssertEqual(t.title(final: false), "Reading src/calc")
-        t.push("js first. The")
-        XCTAssertEqual(t.title(final: false), "Reading src/calc.js")
+    // MARK: review r1 — linear time
+
+    private func timed(_ s: String) -> Double {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        _ = ActivityTitleRule.title(of: s, final: true)
+        _ = ActivityTitleRule.title(of: s, final: false)
+        _ = ThinkingHeading.lastValid(s)
+        return Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+    }
+
+    func testTheMeasuredAdversarialInputsFinishInMilliseconds() {
+        for _ in 0..<20 { _ = timed("Let me read the files. **Heading**\n") }
+        let adversarial = [
+            String(repeating: "now  ", count: 22) + "xyz qq.", String(repeating: "now  ", count: 44) + "x.",
+            String(repeating: "now   ", count: 14) + "xyz qq.", String(repeating: "so , ", count: 40) + "xyz qq.",
+            String(repeating: "yes        ", count: 19) + "no.", String(repeating: "ok      ok      fine    yes     ", count: 6) + "x.",
+            String(repeating: "now ,", count: 60), String(repeating: "I'll  ", count: 30) + "x.", String(repeating: "let me  ", count: 25) + "x.",
+            String(repeating: "Checking ", count: 40) + "x.", String(repeating: "*", count: 400), String(repeating: "`a. b`", count: 60),
+            String(repeating: "- ", count: 150) + "x.", String(repeating: ", so ", count: 60) + "x.", String(repeating: "— ", count: 150) + "x.",
+            String(repeating: "now\u{3000}\u{3000}", count: 30) + "x.", String(repeating: "now\u{85}\u{85}", count: 30) + "x.", String(repeating: ".", count: 500) + "x",
+        ]
+        for s in adversarial {
+            let ms = timed(s)
+            XCTAssertLessThan(ms, 10, "\(s.prefix(24)) took \(ms) ms")
+        }
+    }
+
+    func testAFuzzLoopOfRandomCandidatesStaysWithinBudget() {
+        let toks = ["now", "so", "ok", "yes", "let me", "let", "me", "i'll", "i", "will", "need", "to", "check", "checking", "start", "by",
+                    "and", "then", "just", "quickly", "—", "--", "-", ",", ";", ":", "(", ")", "`", "**", "i've", "found", "checked", "the", "a",
+                    "that", "is", "go", "ahead", "double", "  ", "   ", "\t", " , ", "' ", "'", "。", "，", "检查"]
+        var seed: UInt64 = 1
+        func rnd() -> Double { seed = (seed &* 1103515245 &+ 12345) % 2147483648; return Double(seed) / 2147483648 }
+        for _ in 0..<20 { _ = timed("Let me read the files.") }
+        var worst = 0.0
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        for _ in 0..<2000 {
+            var s = ""
+            while s.utf16.count < 219 { s += toks[Int(rnd() * Double(toks.count))] + (rnd() < 0.5 ? " " : rnd() < 0.5 ? "  " : "") }
+            let units = Array(s.utf16).prefix(219)
+            worst = max(worst, timed(String(decoding: units, as: UTF16.self) + "."))
+        }
+        let total = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+        XCTAssertLessThan(worst, 10, "worst candidate \(worst) ms")
+        XCTAssertLessThan(total, 2_000, "2,000 candidates took \(total) ms")
+    }
+
+    // MARK: review r1 — Unicode, persisted titles, CJK
+
+    func testUnicodeIsReadAsTheDaemonReadsIt() {
+        XCTAssertEqual(final("Let me read the\u{0B}file."), "Reading the file")
+        XCTAssertEqual(final("Let me read the\u{85}file."), "Reading the file")
+        XCTAssertEqual(final("Checking\u{FEFF}the logs."), "Checking the logs")
+        XCTAssertEqual(final("Checking the\u{200B} lo\u{202E}gs."), "Checking the logs")
+        XCTAssertNil(final("Let me \u{17F}can the files."))
+        XCTAssertNil(final("Let me chec\u{212A} the files."))
+        XCTAssertEqual(final("LET ME READ THE FILES."), "Reading THE FILES")
+        XCTAssertEqual(ThinkingTitle.derive(kind: "update", parts: ["Reading\u{202E} the\u{85}logs"]), "Reading the logs")
+        let heading = ThinkingHeading.lastValid("**Reading\u{202E} the\u{200B} logs\u{07}**\nbody")
+        XCTAssertEqual(heading, "Reading the logs")
+    }
+
+    func testAProvisionalTitleIsShownButNeverPersisted() {
+        let a = persist("exposed", ["Using the cache.", "Map is slower."])
+        XCTAssertEqual(a.live.first ?? nil, "Using the cache")
+        XCTAssertNil(a.block)
+        XCTAssertNil(persist("exposed", ["Reading the file.", "s is slow here."]).block)
+        let b = persist("summary", ["**Foo**", " bar baz."])
+        XCTAssertEqual(b.live.first ?? nil, "Foo")
+        XCTAssertNil(b.block)
+        XCTAssertEqual(persist("exposed", ["Using the cache.", " Map is slower."]).block, "Using the cache")
+        XCTAssertEqual(persist("summary", ["**Foo**", "\nbar baz."]).block, "Foo")
+    }
+
+    func testABlockClosedWithoutItsEndKeepsTheLiveTitleNeverACutOffSentence() {
+        func cut(_ kind: String, _ chunks: [String]) -> String? {
+            let b = Self.blocks()
+            _ = b.accept(ProviderReasoningProgress(blockId: "rb", phase: .start, kind: kind, text: nil, part: nil))
+            for c in chunks { _ = b.accept(ProviderReasoningProgress(blockId: "rb", phase: .delta, kind: kind, text: c, part: 0)) }
+            guard case .thinkingBlock(let block) = b.closeAll().first else { XCTFail("no block"); return nil }
+            return block.title
+        }
+        XCTAssertEqual(cut("summary", ["**Busy**"]), "Busy")
+        XCTAssertEqual(cut("exposed", ["Let me read the files."]), "Reading the files")
+        XCTAssertNil(cut("exposed", ["Let me read the fi"]))
+        XCTAssertEqual(cut("exposed", ["Let me read the files. Now let me run the te"]), "Reading the files")
+    }
+
+    func testCJK() {
+        XCTAssertEqual(live("让我想想。Let me read 配置文件。"), "Reading 配置文件")
+        XCTAssertEqual(live("Let me read 配置文件！还有"), "Reading 配置文件")
+        XCTAssertEqual(live("Let me read the files；"), "Reading the files")
+        XCTAssertEqual(final("Let me check 这个函数的实现，看看它是否正确。"), "Checking 这个函数的实现")
+        let unit = "配置文件和测试用例"
+        XCTAssertEqual(final("I need to read \(String(repeating: unit, count: 10))。"),
+                       "Reading \(String(String(repeating: unit, count: 4).prefix(32)))…")
+        for s in ["让我读取文件。我需要检查代码。", "首先，我要检查这个项目的结构；然后运行测试！", "这是一个很小的项目"] {
+            XCTAssertNil(final(s))
+            XCTAssertNil(ThinkingTitle.derive(kind: "exposed", parts: [s], final: true))
+        }
+        XCTAssertEqual(ThinkingTitle.derive(kind: "summary", parts: ["**分析代码结构**\n\n内容"]), "分析代码结构")
     }
 }

@@ -241,7 +241,7 @@ export class ThinkingBlocks {
       }
     }
 
-    const live = this.retitle(b, false);
+    const live = this.retitle(b, "delta");
     const titleChanged = live !== undefined && live !== b.shown;
     if (titleChanged) b.shown = live;
     if (increment.length === 0 && !titleChanged && !kindChanged) return [];
@@ -265,10 +265,13 @@ export class ThinkingBlocks {
    *    a heading on the open last line, the trailing sentence once it ends with `.`/`!`/`?` — so the
    *    pill does not wait for the next sentence. It is shown, never persisted (review r1: a streamed
    *    title must never persist what the whole text would not produce).
-   *  - `final` (the block's own `end`): everything counts — the committed title is then exactly the
+   *  - `"end"` (the block's own `end`): everything counts — the committed title is then exactly the
    *    whole-text derivation.
+   *  - `"cut"` (the block closed WITHOUT its `end`: the turn's result, an error, an interrupt): no more
+   *    text is coming, so the live title is committed — what the user saw last — but a trailing
+   *    sentence without its end punctuation still does not count (it may be cut mid-word).
    */
-  private retitle(b: OpenBlock, final: boolean): string | undefined {
+  private retitle(b: OpenBlock, mode: "delta" | "end" | "cut"): string | undefined {
     if (b.kind === "update") {
       const derived = deriveThinkingTitle("update", b.parts.map((p) => p.head));
       if (derived !== undefined) b.title = derived;
@@ -279,10 +282,10 @@ export class ThinkingBlocks {
     const scanned = scanHeadings(scanWindow(p));
     if (scanned.closed !== undefined || !p.tailCut) p.heading = scanned.closed;
     const heading = scanned.latest ?? p.heading;
-    const committed = final ? heading ?? p.rule.title(true) : p.heading ?? p.rule.committedTitle();
+    const liveTitle = heading ?? p.rule.title(mode === "end");
+    const committed = mode === "delta" ? p.heading ?? p.rule.committedTitle() : liveTitle;
     if (committed !== undefined) b.title = committed;
-    if (final) return b.title;
-    return heading ?? p.rule.title(false) ?? b.title;
+    return mode === "delta" ? liveTitle ?? b.title : b.title;
   }
 
   /** `end`: the block closes — its persisted record, titled with its trailing sentence counted (a
@@ -293,7 +296,7 @@ export class ThinkingBlocks {
     b.kind = f.kind;
     if (b.provider === undefined) b.provider = boundedName(f.provider);
     if (b.model === undefined) b.model = boundedName(f.model);
-    this.retitle(b, true);
+    this.retitle(b, "end");
     return [this.close(b)];
   }
 
@@ -301,7 +304,11 @@ export class ThinkingBlocks {
    *  block still open. Oldest first (insertion order). */
   closeWhere(select: (threadId: string) => boolean): ProjectedEvent[] {
     const out: ProjectedEvent[] = [];
-    for (const b of [...this.open.values()]) if (select(b.threadId)) out.push(this.close(b));
+    for (const b of [...this.open.values()]) {
+      if (!select(b.threadId)) continue;
+      this.retitle(b, "cut");
+      out.push(this.close(b));
+    }
     return out;
   }
 

@@ -4,27 +4,56 @@ import Foundation
 ///
 /// The faithful Swift port of the daemon's `packages/core/src/projector/thinking-title.ts`: the
 /// provider's own BOLD HEADING first, else an ACTIVITY title inferred from the prose by fixed rules
-/// (no model call), else none. Both engines must title a block identically, so this port works on
-/// UTF-16 units and the same ASCII regexes (no `\b`), and its tests run the daemon's own fixture
-/// (`packages/core/test/projector/fixtures/thinking-titles.json`). Change both together.
+/// (no model call), else none. Both engines must title a block identically; the tests run the
+/// daemon's own fixture (`packages/core/test/projector/fixtures/thinking-titles.json`). Change both
+/// together.
+///
+/// ENGINE-INDEPENDENT BY CONSTRUCTION (review r1): everything works on UTF-16 units; every text a rule
+/// reads is CLEANED first (`cleanText`: JS whitespace + NEL → one space, control/zero-width/bidi
+/// units dropped, ‘’ → '); matching runs on an ASCII-only lower-cased copy with NO case-insensitive
+/// option, a literal space instead of `\s`, `[^\n\r\u{2028}\u{2029}]` instead of `.` and `\z` instead
+/// of `$` — so ICU and V8 cannot disagree. No pattern nests or abuts unbounded quantifiers
+/// (`RegexShapeTripwireTests` audits every one at run time; the tests fuzz them on a time budget).
 
-// MARK: - JS-compatible text helpers
+// MARK: - text helpers (UTF-16, engine-independent)
 
-/// JS `\s` for one UTF-16 unit (whitespace and line terminators).
-@inline(__always) func jsSpace(_ u: UInt16) -> Bool {
+/// Whitespace for every rule here: JS `\s` (incl. line terminators and U+FEFF) plus NEL (U+0085).
+@inline(__always) func isSpaceUnit(_ u: UInt16) -> Bool {
     switch u {
-    case 0x09...0x0D, 0x20, 0xA0, 0x1680, 0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF: return true
+    case 0x09...0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF: return true
     default: return false
     }
 }
 
-/// JS `String.prototype.trim` on UTF-16 units.
-func jsTrim(_ s: String) -> String {
-    let u = Array(s.utf16)
-    var a = 0, b = u.count
-    while a < b, jsSpace(u[a]) { a += 1 }
-    while b > a, jsSpace(u[b - 1]) { b -= 1 }
-    return a == 0 && b == u.count ? s : String(decoding: u[a..<b], as: UTF16.self)
+/// Units no title may carry: C0/C1 controls, DEL, zero-width and bidi controls.
+@inline(__always) func isDroppedUnit(_ u: UInt16) -> Bool {
+    u <= 0x1F || (0x7F...0x9F).contains(u) || (0x200B...0x200F).contains(u) || (0x202A...0x202E).contains(u)
+        || (0x2060...0x2064).contains(u) || (0x2066...0x2069).contains(u) || u == 0x061C
+}
+
+/// `cleanText`: whitespace runs → one space (trimmed), controls/zero-width/bidi dropped, ‘’ → '.
+func cleanText(_ s: String) -> String {
+    var out: [UInt16] = []
+    out.reserveCapacity(s.utf16.count)
+    var space = false
+    for u in s.utf16 {
+        if isSpaceUnit(u) { space = !out.isEmpty; continue }
+        if isDroppedUnit(u) { continue }
+        if space { out.append(0x20); space = false }
+        out.append(u == 0x2018 || u == 0x2019 ? 0x27 : u)
+    }
+    return String(decoding: out, as: UTF16.self)
+}
+
+/// A–Z → a–z, nothing else (same length: positions map back to the original).
+func asciiLower(_ s: String) -> String {
+    String(decoding: s.utf16.map { (0x41...0x5A).contains($0) ? $0 + 0x20 : $0 }, as: UTF16.self)
+}
+
+/// Han, kana and Hangul: a run of them is words without spaces.
+@inline(__always) func isCjkScalar(_ v: UInt32) -> Bool {
+    (0x3040...0x30FF).contains(v) || (0x3400...0x4DBF).contains(v) || (0x4E00...0x9FFF).contains(v)
+        || (0xF900...0xFAFF).contains(v) || (0xAC00...0xD7AF).contains(v) || (0x20000...0x2FFFF).contains(v)
 }
 
 /// Non-overlapping occurrences, left to right (`s.split(sub).length - 1`).
@@ -32,18 +61,22 @@ func countOccurrences(_ s: String, _ sub: String) -> Int {
     let h = Array(s.utf16), n = Array(sub.utf16)
     guard !n.isEmpty, h.count >= n.count else { return 0 }
     var count = 0, i = 0
-    while i + n.count <= h.count {
-        if Array(h[i..<(i + n.count)]) == n { count += 1; i += n.count } else { i += 1 }
+    outer: while i + n.count <= h.count {
+        for k in 0..<n.count where h[i + k] != n[k] { i += 1; continue outer }
+        count += 1
+        i += n.count
     }
     return count
 }
 
 /// A compiled pattern with JS-like helpers (NSRegularExpression works in UTF-16 units, like JS).
-struct JSRegex {
+/// FILEPRIVATE: every pattern of this file is built here, so `RegexShapeTripwireTests` can tie its
+/// runtime audit to this file's construction sites.
+fileprivate struct JSRegex {
     let re: NSRegularExpression
-    init(_ pattern: String, caseInsensitive: Bool = false) {
+    init(_ pattern: String) {
         // swiftlint:disable:next force_try
-        re = try! NSRegularExpression(pattern: pattern, options: caseInsensitive ? [.caseInsensitive] : [])
+        re = try! NSRegularExpression(pattern: pattern, options: [])
     }
     func test(_ s: String) -> Bool {
         re.firstMatch(in: s, range: NSRange(location: 0, length: (s as NSString).length)) != nil
@@ -68,34 +101,48 @@ struct JSRegex {
 enum ThinkingHeading {
     private static let lineBreaks: Set<UInt16> = [0x0A, 0x0D, 0x2028, 0x2029]
     private static let star: UInt16 = 0x2A
-    static let fileToken = JSRegex(#"[A-Za-z0-9_]\.[A-Za-z][A-Za-z0-9]{0,4}(?![A-Za-z0-9])"#)
+    fileprivate static let fileToken = JSRegex(#"[A-Za-z0-9_]\.[A-Za-z][A-Za-z0-9]{0,4}(?![A-Za-z0-9])"#)
+    fileprivate static let singleToken = JSRegex(#"^[A-Za-z0-9_./-]+\z"#)
     static let maxWords = 10
 
-    /// `isTitleHeading`: not a label (`…:`), not a path, code or file name, at most 10 words.
+    /// `isTitleHeading`: not a label (`…:`), at most 10 words, and not ONLY a path or file token.
     static func isTitle(_ inner: String) -> Bool {
         if inner.isEmpty || inner.hasSuffix(":") { return false }
-        if inner.contains("/") || inner.contains("`") || fileToken.test(inner) { return false }
-        return inner.components(separatedBy: " ").count <= maxWords
+        if inner.components(separatedBy: " ").count > maxWords { return false }
+        let bare = inner.replacingOccurrences(of: "`", with: "")
+        if singleToken.test(bare) && (bare.contains("/") || fileToken.test(bare)) { return false }
+        return true
     }
 
-    /// `lastValidHeading`: per line, optional spaces/tabs, `**`, at least one unit, the FIRST closing
-    /// `**` after it, then nothing but spaces/tabs to the line's end. The last valid one wins, clipped.
-    static func lastValid(_ text: String) -> String? {
-        var found: String?
+    /// `scanHeadings`: the last valid heading on a CLOSED line (a line break follows it) and the last
+    /// valid one counting the open last line too. Per line: optional spaces/tabs, `**`, at least one
+    /// unit, the FIRST closing `**` after it, then nothing but spaces/tabs to the line's end.
+    static func scan(_ text: String) -> (closed: String?, latest: String?) {
+        var closed: String?
+        var latest: String?
         let units = Array(text.utf16)
         var lineStart = 0
         var i = 0
         while i <= units.count {
             if i == units.count || lineBreaks.contains(units[i]) {
                 if let inner = headingInner(units[lineStart..<i]) {
-                    let collapsed = ThinkingTitle.collapse(String(decoding: inner, as: UTF16.self))
-                    if isTitle(collapsed) { found = collapsed }
+                    let cleaned = cleanText(String(decoding: inner, as: UTF16.self))
+                    if isTitle(cleaned) {
+                        latest = cleaned
+                        if i < units.count { closed = cleaned }
+                    }
                 }
                 lineStart = i + 1
             }
             i += 1
         }
-        return found.map(ThinkingTitle.clip)
+        return (closed.map(ThinkingTitle.clip), latest.map(ThinkingTitle.clip))
+    }
+
+    /// `lastValidHeading(text, includeOpenLine)`.
+    static func lastValid(_ text: String, includeOpenLine: Bool = true) -> String? {
+        let h = scan(text)
+        return includeOpenLine ? h.latest : h.closed
     }
 
     private static func headingInner(_ line: ArraySlice<UInt16>) -> ArraySlice<UInt16>? {
@@ -122,6 +169,8 @@ enum ActivityTitleRule {
     static let segmentMax = 600
     static let candidateMax = 220
     static let titleMaxWords = 9
+    static let cjkCharsPerWord = 4
+    static let maxClauses = 8
     static let segmentHead = 16
 
     private static func words(_ lists: String...) -> Set<String> {
@@ -131,8 +180,8 @@ enum ActivityTitleRule {
 
     private static let leadWords = "now first firstly also quickly carefully actually just then next still again briefly finally lastly so ok okay alright right and but well anyway instead meanwhile second secondly third thirdly further simply really properly directly thoroughly wait hmm ah oh great good perfect fine sure yes yeah"
     private static let midWords = "now first also quickly carefully actually just then next still again briefly finally properly really simply directly thoroughly systematically further explicitly manually separately immediately quick"
-    private static let lead = #"^(?:(?:"# + alt(leadWords) + #")(?![A-Za-z'])\s*,?\s+)*"#
-    private static let mid = #"(?:(?:"# + alt(midWords) + #")(?![A-Za-z'])\s+)*"#
+    private static let lead = "^(?:(?:" + alt(leadWords) + ")(?![a-z'])(?: ?,)? )*"
+    private static let mid = "(?:(?:" + alt(midWords) + ")(?![a-z']) )*"
     private static let modal = [
         "let me", "let's", "let us",
         "i'll need to", "i will need to", "i'll have to", "i will have to", "i'll", "i will",
@@ -141,21 +190,23 @@ enum ActivityTitleRule {
         "i'm planning to", "i am planning to", "i plan to",
         "we need to", "we should", "we'll", "we will",
         "it's time to", "time to",
-    ].map { $0.replacingOccurrences(of: " ", with: #"\s+"#) }.joined(separator: "|")
-    private static let stop = #"(?=[\s,.:;!?]|$)"#
-
-    private static let pStartBy = JSRegex(lead + "(?:" + modal + #")\s+"# + mid + #"(?:start|begin)\s+(?:off\s+)?by\s+([a-z]+ing)"# + stop + "(.*)$", caseInsensitive: true)
-    private static let pModal = JSRegex(lead + "(?:" + modal + #")\s+"# + mid + "([a-z][a-z-]*)" + stop + "(.*)$", caseInsensitive: true)
-    private static let pIm = JSRegex(lead + #"i(?:'m|\s+am)\s+"# + mid + "([a-z]+ing)" + stop + "(.*)$", caseInsensitive: true)
-    private static let pFound = JSRegex(lead + #"(?:i(?:'ve|\s+have)\s+(?:(?:just|now|also|already)\s+)*)?(found|confirmed|identified|spotted)"# + stop + "(.*)$", caseInsensitive: true)
+    ].joined(separator: "|")
+    private static let end = #"(?=[ ,.:;!?，。；：！？]|\z)"#
+    /// JS `(.*)$` over line-free text.
+    private static let rest = #"([^\n\r  ]*)\z"#
     private static let pastSteps = "checked double-checked counted ran reviewed examined inspected verified tested searched scanned explored gathered analyzed analysed compared traced read opened grepped listed located measured reran re-ran"
-    private static let pPast = JSRegex(lead + #"i(?:'ve|\s+have)?\s+(?:(?:just|now|also|already|quickly|carefully|first)\s+)*("# + alt(pastSteps) + ")" + stop + "(.*)$", caseInsensitive: true)
-    private static let pGerund = JSRegex(lead + "([a-z]+ing)" + stop + "(.*)$", caseInsensitive: true)
 
-    private static let goAnd = JSRegex(#"^\s+(?:(?:ahead|through|back|on)\s+)?and\s+([a-z][a-z-]*)(?=[\s,.:;!?]|$)(.*)$"#, caseInsensitive: true)
-    private static let doubleCheck = JSRegex(#"^[\s\-]+check(?=[\s,.:;!?]|$)(.*)$"#, caseInsensitive: true)
-    private static let toVerb = JSRegex(#"^\s+to\s+([a-z][a-z-]*)(?=[\s,.:;!?]|$)(.*)$"#, caseInsensitive: true)
-    private static let byGerund = JSRegex(#"^\s+by\s+([a-z]+ing)(?=[\s,.:;!?]|$)(.*)$"#, caseInsensitive: true)
+    fileprivate static let pStartBy = JSRegex(lead + "(?:" + modal + ") " + mid + "(?:start|begin) (?:off )?by ([a-z]+ing)" + end + rest)
+    fileprivate static let pModal = JSRegex(lead + "(?:" + modal + ") " + mid + "([a-z][a-z-]*)" + end + rest)
+    fileprivate static let pIm = JSRegex(lead + "i(?:'m| am) " + mid + "([a-z]+ing)" + end + rest)
+    fileprivate static let pFound = JSRegex(lead + "(?:i(?:'ve| have) (?:(?:just|now|also|already) )*)?(found|confirmed|identified|spotted)" + end + rest)
+    fileprivate static let pPast = JSRegex(lead + "i(?:'ve| have)? (?:(?:just|now|also|already|quickly|carefully|first) )*(" + alt(pastSteps) + ")" + end + rest)
+    fileprivate static let pGerund = JSRegex(lead + "([a-z]+ing)" + end + rest)
+
+    fileprivate static let goAnd = JSRegex("^ (?:(?:ahead|through|back|on) )?and ([a-z][a-z-]*)" + end + rest)
+    fileprivate static let doubleCheck = JSRegex(#"^[ \-]check"# + end + rest)
+    fileprivate static let toVerb = JSRegex("^ to ([a-z][a-z-]*)" + end + rest)
+    fileprivate static let byGerund = JSRegex("^ by ([a-z]+ing)" + end + rest)
 
     private static let stopVerbs = words("not never be been being have has had also probably maybe likely definitely certainly so the a an it this that there here just")
     private static let notGerunds = words(
@@ -180,22 +231,21 @@ enum ActivityTitleRule {
     private static let subordinators = words("whether if that what which how why where when who whose to for because so since while as than until unless before after though although")
     private static let trailingAdverbs = words("now next first then again too also here directly quickly briefly carefully")
     private static let trailingDangling = words("the a an and or of to for with in on at by as from etc")
+    private static let trailingPunctuation: Set<UInt16> = Set("．.,;:!?…。，；：！？、".utf16)
 
     private static let purposes = "identify see understand find confirm check figure determine get make know verify ensure learn decide catch spot locate gather compare validate inspect review map trace reproduce isolate avoid prevent count orient answer"
     private static let nextVerbs = "check read run look lay write fix add verify confirm try give review examine inspect identify count find explore compare make keep summarize glance outline produce present provide propose suggest finalize mention explain describe grep focus dig figure determine think consider decide proceed continue begin maybe possibly am i"
-    private static func w(_ s: String) -> String { s.replacingOccurrences(of: " ", with: #"\s+"#) + "(?![A-Za-z])" }
     private static let cutWords = (
-        [#"to\s+(?:"# + alt(purposes) + ")(?![A-Za-z])"]
-        + ["in order to", "so that", "so", "because", "before", "after", "which", "since", "then", "and then", "and also", "while", "whereas", "though", "although", "but", "or if", "or whether"].map(w)
-        + [#"and\s+(?:"# + alt(nextVerbs) + ")(?![A-Za-z])",
-           #"by\s+[a-z]+ing(?![A-Za-z])"#,
-           #"that\s+(?:might|could|would|may|will|can|should|is|are|was|were)(?![A-Za-z])"#]
+        ["to (?:" + alt(purposes) + ")(?![a-z])"]
+        + ["in order to", "so that", "so", "because", "before", "after", "which", "since", "then", "and then", "and also", "while", "whereas", "though", "although", "but", "or if", "or whether"].map { $0 + "(?![a-z])" }
+        + ["and (?:" + alt(nextVerbs) + ")(?![a-z])",
+           "by [a-z]+ing(?![a-z])",
+           "that (?:might|could|would|may|will|can|should|is|are|was|were)(?![a-z])"]
     ).joined(separator: "|")
-    private static let cut = JSRegex(#"\s+(?:"# + cutWords + #")|\s+\(|\s+[-–]+\s|\s*—|[,;:!?]"#, caseInsensitive: true)
-    private static let clause = JSRegex(#",\s+(?=(?:so|and|then|but|now|next|i'll|i will|i'm|i am|i need|i should|i want|let me|let's)(?![A-Za-z]))|;\s+|\s*—\s*|\s+–\s+|\s+--\s+|:\s+"#, caseInsensitive: true)
-    static let structureLine = JSRegex(#"^(?:[-*+•]\s|[0-9]{1,3}[.)](?:\s|$)|#{1,6}(?:\s|$)|\||>)"#)
-    static let fenceLine = JSRegex(#"^(?:```|~~~)"#)
-    private static let trailingPunctuation = JSRegex(#"[.,;:!?…]+$"#)
+    fileprivate static let cut = JSRegex(" (?:" + cutWords + #")| \(| (?:-{1,3}|–) |—|[,;:!?，；：！？、]"#)
+    fileprivate static let clause = JSRegex(", (?=(?:so|and|then|but|now|next|i'll|i will|i'm|i am|i need|i should|i want|let me|let's)(?![a-z]))|; | ?— ?| – | -- |: ")
+    fileprivate static let structureLine = JSRegex(#"^(?:[-*+•] |[0-9]{1,3}[.)](?: |\z)|#{1,6}(?: |\z)|\||>)"#)
+    fileprivate static let fenceLine = JSRegex(#"^(?:```|~~~)"#)
 
     // MARK: gerunds
 
@@ -230,7 +280,7 @@ enum ActivityTitleRule {
 
     /// `gerundOf`: the -ing form of a base verb, lower case.
     static func gerund(_ verb: String) -> String {
-        let v = verb.lowercased()
+        let v = asciiLower(verb)
         if let hyphen = v.lastIndex(of: "-"), hyphen != v.startIndex, v.index(after: hyphen) != v.endIndex {
             return String(v[...hyphen]) + gerund(String(v[v.index(after: hyphen)...]))
         }
@@ -259,18 +309,18 @@ enum ActivityTitleRule {
         return mask
     }
 
+    /// Space-separated words of CLEANED text, a code span or bracket group staying inside its word.
     private static func tokens(_ s: String) -> [String] {
         let u = Array(s.utf16)
         let mask = protectedMask(u)
         var out: [String] = []
         var cur: [UInt16] = []
         for i in 0..<u.count {
-            let c = u[i]
-            if !mask[i] && c != 0x60 && jsSpace(c) {
+            if !mask[i] && u[i] == 0x20 {
                 if !cur.isEmpty { out.append(String(decoding: cur, as: UTF16.self)) }
                 cur = []
             } else {
-                cur.append(c)
+                cur.append(u[i])
             }
         }
         if !cur.isEmpty { out.append(String(decoding: cur, as: UTF16.self)) }
@@ -278,15 +328,35 @@ enum ActivityTitleRule {
     }
 
     private static func bare(_ w: String) -> String {
-        String(String.UnicodeScalarView(w.lowercased().unicodeScalars.filter { ($0 >= "a" && $0 <= "z") || $0 == "'" || $0 == "-" }))
+        String(decoding: asciiLower(w).utf16.filter { (0x61...0x7A).contains($0) || $0 == 0x27 || $0 == 0x2D }, as: UTF16.self)
+    }
+
+    private static func cjkCount(_ w: String) -> Int { w.unicodeScalars.filter { isCjkScalar($0.value) }.count }
+    private static func weightOf(_ w: String) -> Int { max(1, (cjkCount(w) + cjkCharsPerWord - 1) / cjkCharsPerWord) }
+
+    private static func cjkPrefix(_ w: String, _ n: Int) -> String {
+        var out = String.UnicodeScalarView()
+        var seen = 0
+        for s in w.unicodeScalars {
+            if isCjkScalar(s.value) {
+                if seen == n { break }
+                seen += 1
+            }
+            out.append(s)
+        }
+        return String(out)
+    }
+
+    private static func stripTrailingPunctuation(_ w: String) -> String {
+        var u = Array(w.utf16)
+        while let last = u.last, trailingPunctuation.contains(last) { u.removeLast() }
+        return String(decoding: u, as: UTF16.self)
     }
 
     private static func trimTail(_ list: [String]) -> [String] {
         var out = list
         while let last = out.last {
-            let ns = last as NSString
-            var stripped = last
-            if let r = trailingPunctuation.matches(last).first { stripped = ns.substring(to: r.location) }
+            let stripped = stripTrailingPunctuation(last)
             if stripped.isEmpty { out.removeLast(); continue }
             if stripped != last { out[out.count - 1] = stripped; continue }
             let b = bare(last)
@@ -299,15 +369,19 @@ enum ActivityTitleRule {
     private static func shortenObject(_ rest: String) -> String {
         let u = Array(rest.utf16)
         let mask = protectedMask(u)
-        var end = u.count
-        for r in cut.matches(rest) where !mask[r.location] { end = r.location; break }
-        var list = trimTail(tokens(String(decoding: u[0..<end], as: UTF16.self)))
-        if list.count > titleMaxWords - 1 {
-            list = trimTail(Array(list.prefix(titleMaxWords - 1)))
-            if list.isEmpty { return "" }
-            return list.joined(separator: " ") + "…"
+        var stop = u.count
+        for r in cut.matches(asciiLower(rest)) where !mask[r.location] { stop = r.location; break }
+        let list = trimTail(tokens(String(decoding: u[0..<stop], as: UTF16.self)))
+        var budget = titleMaxWords - 1
+        var kept: [String] = []
+        for w in list {
+            let weight = weightOf(w)
+            if weight <= budget { kept.append(w); budget -= weight; continue }
+            if budget > 0 && cjkCount(w) > 0 { kept.append(cjkPrefix(w, budget * cjkCharsPerWord)) }
+            let cutList = trimTail(kept)
+            return cutList.isEmpty ? "" : cutList.joined(separator: " ") + "…"
         }
-        return list.joined(separator: " ")
+        return kept.joined(separator: " ")
     }
 
     private static let clauseBreaks: Set<UInt16> = [0x2C, 0x3B, 0x3A, 0x2014, 0x2013, 0x28]   // , ; : — – (
@@ -332,31 +406,42 @@ enum ActivityTitleRule {
 
     private enum Shape { case converted, gerund, found }
 
+    /// `execTail`: an anchored pattern ending in the rest group, run on the lower-cased copy: its first
+    /// group (lower case) and the REST in its original casing (a suffix of `s`).
+    private static func execTail(_ re: JSRegex, _ s: String, _ lower: String? = nil) -> (word: String, rest: String)? {
+        guard let m = re.exec(lower ?? asciiLower(s)) else { return nil }
+        let tail = m[m.count - 1] ?? ""
+        let u = Array(s.utf16)
+        let restUnits = u[(u.count - tail.utf16.count)...]
+        return (m.count > 2 ? (m[1] ?? "") : "", String(decoding: restUnits, as: UTF16.self))
+    }
+
     private static func build(_ verbIng: String, _ rest: String, _ shape: Shape) -> RuleTitle? {
-        var verb = verbIng.lowercased()
+        var verb = asciiLower(verbIng)
         var tail = rest
         if shape != .found {
             if notGerunds.contains(verb) { return nil }
             if shape == .gerund && isStatement(tail) { return nil }
             if verb == "starting" || verb == "beginning" || verb == "continuing",
-               let m = toVerb.exec(tail), let v2 = m[1], !stopVerbs.contains(v2.lowercased()) {
-                verb = gerund(v2)
-                tail = m[2] ?? ""
+               let m = execTail(toVerb, tail), !stopVerbs.contains(m.word) {
+                verb = gerund(m.word)
+                tail = m.rest
             }
-            if let by = byGerund.exec(tail), let g = by[1], !notGerunds.contains(g.lowercased()) {
-                verb = g.lowercased()
-                tail = by[2] ?? ""
+            if let by = execTail(byGerund, tail), !notGerunds.contains(by.word) {
+                verb = by.word
+                tail = by.rest
             }
         }
         let object = shortenObject(tail)
         if countOccurrences(object, "`") % 2 != 0 { return nil }
         let objectWords = tokens(object).map(bare).filter { !$0.isEmpty }
-        if metaVerbs.contains(verb) && (objectWords.isEmpty || objectWords.contains(where: metaObjects.contains)) { return nil }
+        let hasCjk = cjkCount(object) > 0
+        if metaVerbs.contains(verb) && ((objectWords.isEmpty && !hasCjk) || objectWords.contains(where: metaObjects.contains)) { return nil }
         var weak = false
-        if objectWords.isEmpty {
+        if objectWords.isEmpty && !hasCjk {
             if shape == .found || generic.contains(verb) { return nil }
             weak = true
-        } else if objectWords.allSatisfy(pronounish.contains) {
+        } else if !hasCjk && objectWords.allSatisfy(pronounish.contains) {
             return nil
         }
         let head = verb.prefix(1).uppercased() + verb.dropFirst()
@@ -364,36 +449,37 @@ enum ActivityTitleRule {
     }
 
     private static func matchCandidate(_ c: String) -> RuleTitle? {
-        if let m = pStartBy.exec(c) { return build(m[1] ?? "", m[2] ?? "", .gerund) }
-        if let m = pModal.exec(c) {
-            var verb = (m[1] ?? "").lowercased()
-            var rest = m[2] ?? ""
+        let low = asciiLower(c)
+        if let m = execTail(pStartBy, c, low) { return build(m.word, m.rest, .gerund) }
+        if let m = execTail(pModal, c, low) {
+            var verb = m.word
+            var rest = m.rest
             if stopVerbs.contains(verb) { return nil }
             if verb == "go" || verb == "try" || verb == "come" {
-                if let g = goAnd.exec(rest) { verb = (g[1] ?? "").lowercased(); rest = g[2] ?? "" }
+                if let g = execTail(goAnd, rest) { verb = g.word; rest = g.rest }
                 if stopVerbs.contains(verb) { return nil }
             }
-            if verb == "double", let d = doubleCheck.exec(rest) { return build("double-checking", d[1] ?? "", .converted) }
+            if verb == "double", let d = execTail(doubleCheck, rest) { return build("double-checking", d.rest, .converted) }
             return build(gerund(verb), rest, .converted)
         }
-        if let m = pIm.exec(c) { return build(m[1] ?? "", m[2] ?? "", .converted) }
-        if let m = pFound.exec(c) ?? pPast.exec(c) { return build(m[1] ?? "", m[2] ?? "", .found) }
-        if let m = pGerund.exec(c) { return build(m[1] ?? "", m[2] ?? "", .gerund) }
+        if let m = execTail(pIm, c, low) { return build(m.word, m.rest, .converted) }
+        if let m = execTail(pFound, c, low) ?? execTail(pPast, c, low) { return build(m.word, m.rest, .found) }
+        if let m = execTail(pGerund, c, low) { return build(m.word, m.rest, .gerund) }
         return nil
     }
 
     /// `evaluateSentence`: the latest matching candidate of a complete sentence.
     static func evaluateSentence(_ segment: String) -> RuleTitle? {
-        var s = jsTrim(segment.replacingOccurrences(of: "\u{2018}", with: "'").replacingOccurrences(of: "\u{2019}", with: "'"))
+        if countOccurrences(segment, "**") % 2 != 0 { return nil }
+        let s = cleanText(segment.replacingOccurrences(of: "**", with: ""))
         if s.isEmpty { return nil }
-        if countOccurrences(s, "**") % 2 != 0 { return nil }
-        s = s.replacingOccurrences(of: "**", with: "")
         let u = Array(s.utf16)
         let mask = protectedMask(u)
-        var starts = [0]
-        for r in clause.matches(s) where !mask[r.location] { starts.append(r.location + r.length) }
+        var clauses: [Int] = []
+        for r in clause.matches(asciiLower(s)) where !mask[r.location] { clauses.append(r.location + r.length) }
+        let starts = [0] + clauses.suffix(maxClauses)   // the sentence, and its latest `maxClauses` clauses
         for start in starts.reversed() {
-            let c = jsTrim(String(decoding: u[start...], as: UTF16.self))
+            let c = cleanText(String(decoding: u[start...], as: UTF16.self))
             if c.isEmpty || c.utf16.count > candidateMax || c.hasPrefix("`") { continue }
             if let r = matchCandidate(c) { return r }
         }
@@ -416,11 +502,10 @@ enum ActivityTitleRule {
 
     /// EVERY pattern this file compiles (one per construction of a JSRegex). Its patterns are built
     /// from word lists, so `RegexShapeTripwireTests` cannot read them as literals; it reads them here,
-    /// at run time, checks this list's length against the file's construction sites, and applies its
-    /// rule to each one.
+    /// at run time, checks this list's length against the file's construction sites, and audits each.
     static var compiledPatterns: [String] {
         [pStartBy, pModal, pIm, pFound, pPast, pGerund, goAnd, doubleCheck, toVerb, byGerund, cut, clause,
-         structureLine, fenceLine, trailingPunctuation, ThinkingHeading.fileToken].map(\.re.pattern)
+         structureLine, fenceLine, ThinkingHeading.fileToken, ThinkingHeading.singleToken].map(\.re.pattern)
     }
 }
 
@@ -437,44 +522,58 @@ final class ActivityTitleTracker {
     private var prev: UInt16 = 0
     private var committed: ActivityTitleRule.RuleTitle?
 
-    private static func isLineBreak(_ c: UInt16) -> Bool { c == 0x0A || c == 0x0D || c == 0x2028 || c == 0x2029 }
-    private static func isSentenceEnd(_ c: UInt16) -> Bool { c == 0x2E || c == 0x21 || c == 0x3F }
+    private static func isLineBreak(_ u: UInt16) -> Bool { u == 0x0A || u == 0x0D || u == 0x2028 || u == 0x2029 }
+    private static func isAsciiSentenceEnd(_ u: UInt16) -> Bool { u == 0x2E || u == 0x21 || u == 0x3F }
+    private static func isCjkSentenceEnd(_ u: UInt16) -> Bool { u == 0x3002 || u == 0xFF01 || u == 0xFF1F || u == 0xFF1B }
 
     func push(_ text: String) {
-        for c in text.utf16 {
-            if Self.isLineBreak(c) {
+        for u in text.utf16 {
+            if Self.isLineBreak(u) {
                 endSegment()
                 segAtLineStart = true
                 lineSkip = false
-            } else if Self.isSentenceEnd(prev) && !segInCode && jsSpace(c) {
+            } else if Self.isAsciiSentenceEnd(prev) && !segInCode && isSpaceUnit(u) {
                 endSegment()
                 segAtLineStart = false
             } else {
-                if c == 0x60 { segInCode.toggle() }
-                if segHead.count < ActivityTitleRule.segmentHead { segHead.append(c) }
-                if !segOverlong {
-                    if seg.count >= ActivityTitleRule.segmentMax { segOverlong = true; seg = [] } else { seg.append(c) }
+                append(u)
+                if Self.isCjkSentenceEnd(u) && !segInCode {
+                    endSegment()
+                    segAtLineStart = false
                 }
             }
-            prev = c
+            prev = u
         }
     }
 
+    private func append(_ u: UInt16) {
+        if u == 0x60 { segInCode.toggle() }
+        if segHead.count < ActivityTitleRule.segmentHead { segHead.append(u) }
+        if !segOverlong {
+            if seg.count >= ActivityTitleRule.segmentMax { segOverlong = true; seg = [] } else { seg.append(u) }
+        }
+    }
+
+    /// The latest match among COMPLETE sentences — what a block may keep.
+    func committedTitle() -> String? { committed?.title }
+
+    /// The current title: the committed match, or the trailing sentence's when it counts.
     func title(final: Bool) -> String? {
         var best = committed
-        // The trailing sentence counts at the block's end, or once it already ends with . ! ?
-        if !segOverlong, !seg.isEmpty,
-           final || seg.last(where: { !jsSpace($0) }).map(Self.isSentenceEnd) == true,
-           readable(commit: false) {
+        if !segOverlong, !seg.isEmpty, final || endsSentence(), readable(commit: false) {
             best = ActivityTitleRule.prefer(best, ActivityTitleRule.evaluateSentence(String(decoding: seg, as: UTF16.self)))
         }
         return best?.title
     }
 
+    private func endsSentence() -> Bool {
+        guard let last = seg.last(where: { !isSpaceUnit($0) }) else { return false }
+        return Self.isAsciiSentenceEnd(last) || Self.isCjkSentenceEnd(last)
+    }
+
     private func readable(commit: Bool) -> Bool {
         if segAtLineStart {
-            let start = segHead.firstIndex(where: { !jsSpace($0) }) ?? segHead.count
-            let head = String(decoding: segHead[start...], as: UTF16.self)
+            let head = cleanText(String(decoding: segHead, as: UTF16.self))
             if ActivityTitleRule.fenceLine.test(head) {
                 if commit { inFence.toggle(); lineSkip = true }
                 return false
@@ -491,7 +590,7 @@ final class ActivityTitleTracker {
 
     private func endSegment() {
         let overlong = segOverlong
-        let empty = !overlong && seg.allSatisfy(jsSpace)
+        let empty = !overlong && seg.allSatisfy(isSpaceUnit)
         let readable = empty ? !inFence : readable(commit: true)
         if readable && !overlong && !empty {
             committed = ActivityTitleRule.prefer(committed, ActivityTitleRule.evaluateSentence(String(decoding: seg, as: UTF16.self)))

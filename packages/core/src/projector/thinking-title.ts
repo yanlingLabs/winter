@@ -439,8 +439,8 @@ type Shape = "converted" | "gerund" | "found";
 
 /** Runs an anchored pattern ending in `(.*)$` on the lower-cased copy of `s`: its first group (lower
  *  case) and the REST in its original casing (the last group is a suffix of `s`). */
-function execTail(re: RegExp, s: string): { word: string; rest: string } | undefined {
-  const m = re.exec(asciiLower(s));
+function execTail(re: RegExp, s: string, lower = asciiLower(s)): { word: string; rest: string } | undefined {
+  const m = re.exec(lower);
   if (m === null) return undefined;
   const tail = m[m.length - 1] ?? "";
   return { word: m.length > 2 ? (m[1] ?? "") : "", rest: s.slice(s.length - tail.length) };
@@ -480,9 +480,10 @@ function build(verbIng: string, rest: string, shape: Shape): RuleTitle | undefin
 
 /** One cleaned candidate (a sentence, or a clause of one) → a title, or `undefined`. */
 function matchCandidate(c: string): RuleTitle | undefined {
-  let m = execTail(P_START_BY, c);
+  const low = asciiLower(c);
+  let m = execTail(P_START_BY, c, low);
   if (m !== undefined) return build(m.word, m.rest, "gerund");
-  m = execTail(P_MODAL, c);
+  m = execTail(P_MODAL, c, low);
   if (m !== undefined) {
     let verb = m.word;
     let rest = m.rest;
@@ -498,24 +499,29 @@ function matchCandidate(c: string): RuleTitle | undefined {
     }
     return build(gerundOf(verb), rest, "converted");
   }
-  m = execTail(P_IM, c);
+  m = execTail(P_IM, c, low);
   if (m !== undefined) return build(m.word, m.rest, "converted");
-  m = execTail(P_FOUND, c) ?? execTail(P_PAST, c);
+  m = execTail(P_FOUND, c, low) ?? execTail(P_PAST, c, low);
   if (m !== undefined) return build(m.word, m.rest, "found");
-  m = execTail(P_GERUND, c);
+  m = execTail(P_GERUND, c, low);
   if (m !== undefined) return build(m.word, m.rest, "gerund");
   return undefined;
 }
 
-/** A complete sentence → the title of its LATEST matching candidate (the sentence itself, then every
- *  clause that opens after `CLAUSE`), or `undefined`. */
+/** At most this many clauses of one sentence are read (the latest ones), besides the sentence itself —
+ *  a sentence of sixty ", so"s is noise, and each candidate costs a few regex runs. */
+const MAX_CLAUSES = 8;
+
+/** A complete sentence → the title of its LATEST matching candidate (the sentence itself, then the
+ *  latest `MAX_CLAUSES` clauses that open after `CLAUSE`), or `undefined`. */
 function evaluateSentence(segment: string): RuleTitle | undefined {
   if (countOf(segment, "**") % 2 !== 0) return undefined;        // half a bold span (a heading cut by a line break)
   const s = cleanText(segment.replace(/\*\*/g, ""));
   if (s.length === 0) return undefined;
   const mask = protectedMask(s);
-  const starts = [0];
-  for (const m of asciiLower(s).matchAll(CLAUSE)) if (!mask[m.index]) starts.push(m.index + m[0].length);
+  const clauses: number[] = [];
+  for (const m of asciiLower(s).matchAll(CLAUSE)) if (!mask[m.index]) clauses.push(m.index + m[0].length);
+  const starts = [0, ...clauses.slice(-MAX_CLAUSES)];
   for (let i = starts.length - 1; i >= 0; i--) {
     const c = s.slice(starts[i]).trim();
     if (c.length === 0 || c.length > CANDIDATE_MAX || c.startsWith("`")) continue;
