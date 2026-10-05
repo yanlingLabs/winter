@@ -295,6 +295,22 @@ describe("review r1: a streamed block persists exactly what the whole text deriv
   });
 });
 
+describe("agent SDK 0.0.48 live gate (2026-10-06): titles it showed wrong", () => {
+  test("a finite verb after an infinitive is the main clause's: 'Adding X to reduce would yield …' is a statement", () => {
+    expect(final("Adding a zero initial value to reduce would yield NaN for empty input.")).toBeUndefined();
+    // …while a purpose clause is cut before the search, so the activity stands.
+    expect(final("Running the tests to make sure they are green.")).toBe("Running the tests");
+    expect(final("Checking pad to see if it is broken.")).toBe("Checking pad");
+  });
+
+  test("'and return' starts the next step; 'to be' is a purpose; a bare 'Noting' is no title; 'I found …' is kept", () => {
+    expect(final("So I'll guard for empty lists and return 0 instead.")).toBe("Guarding for empty lists");
+    expect(final("Let me check for hidden files and git log to be thorough.")).toBe("Checking for hidden files and git log");
+    expect(final("Let me note this.")).toBeUndefined();
+    expect(final("I found a bug in div.")).toBe("Found a bug in div");
+  });
+});
+
 describe("review r1: CJK reasoning", () => {
   test("。！？； end a sentence by themselves (no space needed), live too", () => {
     expect(live("让我想想。Let me read 配置文件。")).toBe("Reading 配置文件");

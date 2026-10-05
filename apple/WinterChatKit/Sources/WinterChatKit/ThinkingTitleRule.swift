@@ -236,7 +236,7 @@ enum ActivityTitleRule {
     fileprivate static let pStartBy = JSRegex(lead + "(?:" + modal + ") " + mid + "(?:start|begin) (?:off )?by ([a-z]+ing)" + end + rest)
     fileprivate static let pModal = JSRegex(lead + "(?:" + modal + ") " + mid + "([a-z][a-z-]*)" + end + rest)
     fileprivate static let pIm = JSRegex(lead + "i(?:'m| am) " + mid + "([a-z]+ing)" + end + rest)
-    fileprivate static let pFound = JSRegex(lead + "(?:i(?:'ve| have) (?:(?:just|now|also|already) )*)?(found|confirmed|identified|spotted)" + end + rest)
+    fileprivate static let pFound = JSRegex(lead + "(?:i(?:'ve| have)? (?:(?:just|now|also|already) )*)?(found|confirmed|identified|spotted)" + end + rest)
     fileprivate static let pPast = JSRegex(lead + "i(?:'ve| have)? (?:(?:just|now|also|already|quickly|carefully|first) )*(" + alt(pastSteps) + ")" + end + rest)
     fileprivate static let pGerund = JSRegex(lead + "([a-z]+ing)" + end + rest)
 
@@ -252,7 +252,7 @@ enum ActivityTitleRule {
         "concerning pending outstanding upcoming ongoing trailing leading underlying misleading promising boring willing ending being")
     private static let generic = words(
         "thinking analyzing analysing continuing proceeding starting working beginning going trying doing getting having looking seeing",
-        "considering reconsidering reflecting pondering reasoning focusing moving waiting wondering deciding finishing finalizing")
+        "considering reconsidering reflecting pondering reasoning focusing moving waiting wondering deciding finishing finalizing noting")
     private static let metaVerbs = words("writing giving presenting keeping answering providing composing responding replying formatting wrapping finalizing drafting putting outputting delivering sharing stating summarizing framing phrasing structuring crafting preparing leaving")
     private static let metaObjects = words(
         "answer answers response reply final concise concisely clear clearly tight short brief briefly bullet bullets sentence sentences",
@@ -265,13 +265,15 @@ enum ActivityTitleRule {
         "is are was were will would can could should may might must does did has had isn't aren't wasn't weren't doesn't don't didn't",
         "won't wouldn't can't cannot couldn't shouldn't hasn't haven't works returns increases decreases means uses throws yields produces",
         "requires seems appears becomes breaks fails gives makes causes prevents ensures depends")
-    private static let subordinators = words("whether if that what which how why where when who whose to for because so since while as than until unless before after though although")
+    /// (Not "to"/"for": a finite verb after an infinitive is the main clause's; a purpose clause is cut
+    /// off before the search, `cutIndex`.)
+    private static let subordinators = words("whether if that what which how why where when who whose because so since while as than until unless before after though although")
     private static let trailingAdverbs = words("now next first then again too also here directly quickly briefly carefully")
     private static let trailingDangling = words("the a an and or of to for with in on at by as from etc")
     private static let trailingPunctuation: Set<UInt16> = Set("．.,;:!?…。，；：！？、".utf16)
 
-    private static let purposes = "identify see understand find confirm check figure determine get make know verify ensure learn decide catch spot locate gather compare validate inspect review map trace reproduce isolate avoid prevent count orient answer"
-    private static let nextVerbs = "check read run look lay write fix add verify confirm try give review examine inspect identify count find explore compare make keep summarize glance outline produce present provide propose suggest finalize mention explain describe grep focus dig figure determine think consider decide proceed continue begin maybe possibly am i"
+    private static let purposes = "identify see understand find confirm check figure determine get make know verify ensure learn decide catch spot locate gather compare validate inspect review map trace reproduce isolate avoid prevent count orient answer be"
+    private static let nextVerbs = "check read run look lay write fix add verify confirm try give review examine inspect identify count find explore compare make keep summarize glance outline produce present provide propose suggest finalize mention explain describe grep focus dig figure determine think consider decide proceed continue begin maybe possibly am i return"
     private static let cutWords = (
         ["to (?:" + alt(purposes) + ")(?![a-z])"]
         + ["in order to", "so that", "so", "because", "before", "after", "which", "since", "then", "and then", "and also", "while", "whereas", "though", "although", "but", "or if", "or whether"].map { $0 + "(?![a-z])" }
@@ -403,12 +405,17 @@ enum ActivityTitleRule {
         return out
     }
 
-    private static func shortenObject(_ rest: String) -> String {
+    /// `cutIndex`: the first `cut` match outside code and brackets, else the end.
+    private static func cutIndex(_ rest: String) -> Int {
         let u = Array(rest.utf16)
         let mask = protectedMask(u)
-        var stop = u.count
-        for r in cut.matches(asciiLower(rest)) where !mask[r.location] { stop = r.location; break }
-        let list = trimTail(tokens(String(decoding: u[0..<stop], as: UTF16.self)))
+        for r in cut.matches(asciiLower(rest)) where !mask[r.location] { return r.location }
+        return u.count
+    }
+
+    private static func shortenObject(_ rest: String) -> String {
+        let u = Array(rest.utf16)
+        let list = trimTail(tokens(String(decoding: u[0..<cutIndex(rest)], as: UTF16.self)))
         var budget = titleMaxWords - 1
         var kept: [String] = []
         for w in list {
@@ -424,8 +431,8 @@ enum ActivityTitleRule {
     private static let clauseBreaks: Set<UInt16> = [0x2C, 0x3B, 0x3A, 0x2014, 0x2013, 0x28]   // , ; : — – (
 
     private static func isStatement(_ rest: String) -> Bool {
-        let u = Array(rest.utf16)
-        let stopAt = u.firstIndex(where: { clauseBreaks.contains($0) }) ?? u.count
+        let u = Array(rest.utf16)[0..<cutIndex(rest)]
+        let stopAt = u.firstIndex(where: { clauseBreaks.contains($0) }) ?? u.endIndex
         var finiteCount = 0
         var subordinate = false
         for t in tokens(String(decoding: u[0..<stopAt], as: UTF16.self)) {

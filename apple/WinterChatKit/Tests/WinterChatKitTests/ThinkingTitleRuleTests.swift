@@ -52,8 +52,8 @@ final class ThinkingTitleRuleTests: XCTestCase {
 
     func testEveryFixtureBlockGetsTheDaemonsTitle() throws {
         let f = try Self.fixture()
-        XCTAssertEqual(f.blocks.count, 64)
-        XCTAssertEqual(f.blocks.filter { $0.title != nil }.count, 54)
+        XCTAssertEqual(f.blocks.count, 67)
+        XCTAssertEqual(f.blocks.filter { $0.title != nil }.count, 58)
         for b in f.blocks {
             XCTAssertEqual(ThinkingTitle.derive(kind: b.kind, parts: [b.text], final: true), b.title, b.id)
         }
@@ -244,6 +244,16 @@ final class ThinkingTitleRuleTests: XCTestCase {
         XCTAssertEqual(ThinkingTitle.derive(kind: "summary", parts: ["**Planning the migration**\n\nLet me read the schema.\n\n**Reviewing constraints**\n\nLet me look at the keys.\n"]), "Reviewing constraints")
         // One code span is no heading.
         XCTAssertNil(ThinkingHeading.lastValid("**`div`**\nbody"))
+    }
+
+    func testTheLiveGateFixes() {
+        XCTAssertNil(final("Adding a zero initial value to reduce would yield NaN for empty input."))
+        XCTAssertEqual(final("Running the tests to make sure they are green."), "Running the tests")
+        XCTAssertEqual(final("Checking pad to see if it is broken."), "Checking pad")
+        XCTAssertEqual(final("So I'll guard for empty lists and return 0 instead."), "Guarding for empty lists")
+        XCTAssertEqual(final("Let me check for hidden files and git log to be thorough."), "Checking for hidden files and git log")
+        XCTAssertNil(final("Let me note this."))
+        XCTAssertEqual(final("I found a bug in div."), "Found a bug in div")
     }
 
     func testCJK() {

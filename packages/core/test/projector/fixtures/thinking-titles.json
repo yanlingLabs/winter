@@ -185,7 +185,7 @@
       "model": "deepseek/deepseek-flash",
       "kind": "exposed",
       "note": "misfire (f): 'Giving the answer in two sentences' / 'Keep concise' skipped",
-      "title": null,
+      "title": "Found the data",
       "text": "I found the data. The riskiest function: `div` — it's wrong (returns a*b instead of a/b), the test expects div(6,3)=2 which would fail (6*3=18), so the bug is masked? Actually the test would fail. Hmm. But also `avg([])` returns NaN (0/0), test expects 0 — fails. So two bugs.\n\nRiskiest function: `div` — implements multiplication instead of division, silently producing wrong results anywhere it's used. Also avg is risky with empty array NaN. But \"riskiest\" — div is a clear correctness bug. The div test would catch it though. Actually since the test exists for div, it's caught. avg empty — test also exists but fails. Hmm, both have tests that would fail. Wait, but does it matter for \"riskiest\"? The div bug is a wrong operation returning plausible numbers; avg empty gives NaN.\n\nLet me give the answer in two sentences. Also note single \"init\" commit, no churn history.\n\nKeep concise, two sentences as requested."
     },
     {
@@ -379,6 +379,30 @@
       "note": "bold fix: '**Lines per file (sorted by size):**'; list items skipped",
       "title": null,
       "text": "The user wants me to:\n\n1. Use a shell command to count lines per fileI ran a quick shell command to count lines per file across the project (excluding .git and binary stuff), then pulled the recent git log. Here's what I found:\n\n**Lines per file (sorted by size):**\n- main.swift: 1,247 lines\n- VerbProbe."
+    },
+    {
+      "id": "anthropic/claude-opus-5-5#gate-2026-10-06",
+      "model": "anthropic/claude-opus-5-5",
+      "kind": "summary",
+      "note": "live gate: '… guard for empty lists and return 0 instead' — 'and return' starts the next step",
+      "title": "Guarding for empty lists",
+      "text": "I'm spotting a few bugs: the division function mistakenly multiplies instead of dividing, and the average function throws on empty arrays since reduce has no initial value — I need to guard for empty lists and return 0 instead, which also fixes the NaN showing up in reports.\n\nThere's also no package.json or jest config in the project, so the test suite can't actually run with ESM imports as-is — that's a real project-level issue worth flagging. Minor things like pad not handling non-string input, div-by-zero returning Infinity, and the README claiming report \"prints\" when it just returns a string are lower priority but worth a quick mention.\n\n"
+    },
+    {
+      "id": "xai/grok-4.7#gate-2026-10-06",
+      "model": "xai/grok-4.7",
+      "kind": "summary",
+      "note": "live gate: 'Adding a zero initial value to reduce would yield …' is a statement (the finite verb follows an infinitive)",
+      "title": "Found two bugs in src/calc.js",
+      "text": "I will read the source and test files to find every bug. Each bug will be listed with a one-line fix.\n\nFound two bugs in src/calc.js. The div function multiplies instead of dividing. The avg function throws on empty arrays because reduce lacks an initial value.\n\nThe pad function is correct. The test file expects avg([]) to return 0, which confirms the empty-array crash.\n\nThe test file uses `test` and `expect` without imports. Those are Jest globals, so the tests will fail if no Jest config exists.\n\nThe avg fix must explicitly return 0 for empty arrays. Adding a zero initial value to reduce would yield NaN instead.\n\nThe avg fix should use an explicit empty check: `if (!xs.length) return 0;` before the reduce. A zero-length array would still crash even with a zero initial value.\n\nThe report function is not a separate bug once avg is fixed, since it simply delegates to avg and toFixed safely handles NaN.\n\nThe pad function could receive non-string input, but that is acceptable if the contract assumes strings.\n\nThe pad function has an edge case where n is Infinity, which would cause an infinite loop. The README does not specify whether padding should be left or right."
+    },
+    {
+      "id": "deepseek/deepseek-v4-pro#gate-2026-10-06",
+      "model": "deepseek/deepseek-v4-pro",
+      "kind": "exposed",
+      "note": "live gate: a bare 'Noting' is no title",
+      "title": "Found a bug",
+      "text": "I found a bug. `div(a, b)` returns `a * b` instead of `a / b`. This is clearly the riskiest function.\n\nLet me also note: `avg([])` returns `reduce(add) / 0` = 0/0 = NaN, but the test expects 0, so that's also buggy. And `avg` on empty array would crash? Actually `[].reduce(add)` with no initial value throws TypeError: Reduce of empty array with no initial value. So the test \"avg empty\" would actually throw, not return NaN.\n\nSo there are multiple bugs. The riskiest is `div` because it silently returns the wrong arithmetic result (multiplication instead of division), and it's used in a test that would catch it (div(6,3) should be 2, but returns 18).\n\nLet me answer in two sentences as requested.\n\nThe question: \"tell me which function is riskiest and why, in two sentences.\"\n\nThe riskiest function is `div` in src/calc.js: it returns `a * b` instead of `a / b`, silently producing multiplication results. That's riskier than `avg` (which breaks on empty arrays) because division is core arithmetic and the error passes silently unless a test catches it."
     },
     {
       "id": "synthetic/openai-shaped",

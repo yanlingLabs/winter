@@ -232,7 +232,7 @@ const P_MODAL = new RegExp(`${LEAD}(?:${MODAL}) ${MID}([a-z][a-z-]*)${END}(.*)$`
 /** "I'm exploring …", "I am now analyzing …". */
 const P_IM = new RegExp(`${LEAD}i(?:'m| am) ${MID}([a-z]+ing)${END}(.*)$`);
 /** "Found two bugs …", "I've identified the bugs …" — kept as written. */
-const P_FOUND = new RegExp(`${LEAD}(?:i(?:'ve| have) (?:(?:just|now|also|already) )*)?(found|confirmed|identified|spotted)${END}(.*)$`);
+const P_FOUND = new RegExp(`${LEAD}(?:i(?:'ve| have)? (?:(?:just|now|also|already) )*)?(found|confirmed|identified|spotted)${END}(.*)$`);
 /** A step the writer reports as done, in the first person: "I checked the git log." → "Checked the git
  *  log" (only these activity verbs: "I decided …", "I think …" are not steps). */
 const P_PAST = new RegExp(`${LEAD}i(?:'ve| have)? (?:(?:just|now|also|already|quickly|carefully|first) )*(${alt(PAST_STEPS)})${END}(.*)$`);
@@ -259,7 +259,7 @@ const NOT_GERUNDS = words(
 /** Gerunds that say nothing without an object. */
 const GENERIC = words(
   "thinking analyzing analysing continuing proceeding starting working beginning going trying doing getting having looking seeing",
-  "considering reconsidering reflecting pondering reasoning focusing moving waiting wondering deciding finishing finalizing",
+  "considering reconsidering reflecting pondering reasoning focusing moving waiting wondering deciding finishing finalizing noting",
 );
 /** Writing the ANSWER is not an activity worth a title ("Writing a concise final answer") — a verb
  *  from here AND an object word from `META_OBJECTS` (or none). */
@@ -281,7 +281,9 @@ const FINITE = words(
   "requires seems appears becomes breaks fails gives makes causes prevents ensures depends",
 );
 /** Where a finite-verb search stops: what follows is a subordinate clause ("Checking whether X is …"). */
-const SUBORDINATORS = words("whether if that what which how why where when who whose to for because so since while as than until unless before after though although");
+/** (Not "to"/"for": "Adding X to reduce would yield …" — the finite verb after an infinitive is the main
+ *  clause's; a purpose clause, "to see if …", is already cut off before the search, `cutIndex`.) */
+const SUBORDINATORS = words("whether if that what which how why where when who whose because so since while as than until unless before after though although");
 /** Trailing words dropped from a title ("Reading the source next" → "Reading the source"). */
 const TRAILING_ADVERBS = words("now next first then again too also here directly quickly briefly carefully");
 const TRAILING_DANGLING = words("the a an and or of to for with in on at by as from etc");
@@ -289,10 +291,10 @@ const TRAILING_DANGLING = words("the a an and or of to for with in on at by as f
 const TRAILING_PUNCTUATION = new Set([..."．.,;:!?…。，；：！？、"].map((c) => c.charCodeAt(0)));
 
 /** Where a title's object is cut: purpose and reason clauses, coordinated next steps, punctuation. */
-const PURPOSES = "identify see understand find confirm check figure determine get make know verify ensure learn decide catch spot locate gather compare validate inspect review map trace reproduce isolate avoid prevent count orient answer";
+const PURPOSES = "identify see understand find confirm check figure determine get make know verify ensure learn decide catch spot locate gather compare validate inspect review map trace reproduce isolate avoid prevent count orient answer be";
 /** Verbs that, after "and", start the writer's NEXT step ("read X and check Y") — never words that are
  *  as often nouns ("source and test files", "plan and report"). */
-const NEXT_VERBS = "check read run look lay write fix add verify confirm try give review examine inspect identify count find explore compare make keep summarize glance outline produce present provide propose suggest finalize mention explain describe grep focus dig figure determine think consider decide proceed continue begin maybe possibly am i";
+const NEXT_VERBS = "check read run look lay write fix add verify confirm try give review examine inspect identify count find explore compare make keep summarize glance outline produce present provide propose suggest finalize mention explain describe grep focus dig figure determine think consider decide proceed continue begin maybe possibly am i return";
 const CUT_WORDS = [
   `to (?:${alt(PURPOSES)})(?![a-z])`,
   ...["in order to", "so that", "so", "because", "before", "after", "which", "since", "then", "and then", "and also", "while", "whereas", "though", "although", "but", "or if", "or whether"].map((w) => `${w}(?![a-z])`),
@@ -444,13 +446,17 @@ function trimTail(list: string[]): string[] {
 
 /** The title's object: `rest` cut at its first purpose/reason clause or punctuation (never inside code
  *  or brackets), trailing adverbs and dangling words dropped, at most `TITLE_MAX_WORDS - 1` words. */
-function shortenObject(rest: string): string {
+/** Where a title's object is cut: the first `CUT` match outside code and brackets, else the end. */
+function cutIndex(rest: string): number {
   const mask = protectedMask(rest);
-  let end = rest.length;
   for (const m of asciiLower(rest).matchAll(CUT)) {
-    if (!mask[m.index]) { end = m.index; break; }
+    if (!mask[m.index]) return m.index;
   }
-  const list = trimTail(tokens(rest.slice(0, end)));
+  return rest.length;
+}
+
+function shortenObject(rest: string): string {
+  const list = trimTail(tokens(rest.slice(0, cutIndex(rest))));
   let budget = TITLE_MAX_WORDS - 1;
   const kept: string[] = [];
   for (const w of list) {
@@ -468,7 +474,7 @@ function shortenObject(rest: string): string {
  *  one, the main clause the other: "Dividing by zero when the array is empty also produces NaN").
  *  Read up to the first punctuation. */
 function isStatement(rest: string): boolean {
-  const clause = rest.split(/[,;:—–(]/, 1)[0] ?? "";
+  const clause = rest.slice(0, cutIndex(rest)).split(/[,;:—–(]/, 1)[0] ?? "";
   let finite = 0;
   let subordinate = false;
   for (const w of tokens(clause)) {
