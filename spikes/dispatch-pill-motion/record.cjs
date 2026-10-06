@@ -1,7 +1,9 @@
-// Renders scene.html frame by frame in headless Chromium and pipes the frames into ffmpeg.
+// Renders scene.html frame by frame in headless Chromium and pipes the frames into ffmpeg, with the
+// soundtrack (music.js, rendered offline in the same page) muxed underneath.
 //   node record.cjs stills 300 600 900        → out/stills/f0300.png …
-//   node record.cjs video [out.mp4] [from] [to] → out/dispatch-pill.mp4 (1920×1080, 60 fps)
-// Needs Playwright's Chromium and ffmpeg (libx264) on the PATH.
+//   node record.cjs music                     → out/music.wav
+//   node record.cjs video [out.mp4] [from] [to] → out/dispatch-pill.mp4 (1920×1080, 60 fps, AAC audio)
+// Needs Playwright's Chromium and ffmpeg (libx264, aac) on the PATH.
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
@@ -31,7 +33,17 @@ function brandPaths() {
   await page.waitForFunction(() => window.sceneReady === true);
   const total = await page.evaluate(() => window.TOTAL_FRAMES);
 
-  if (mode === 'stills') {
+  const renderMusic = async () => {
+    const { wav, peak } = await page.evaluate(() => window.renderMusic());
+    const file = path.join(outDir, 'music.wav');
+    fs.writeFileSync(file, Buffer.from(wav, 'base64'));
+    console.log('wrote', file, `(pre-normalise peak ${peak.toFixed(3)})`);
+    return file;
+  };
+
+  if (mode === 'music') {
+    await renderMusic();
+  } else if (mode === 'stills') {
     fs.mkdirSync(path.join(outDir, 'stills'), { recursive: true });
     let at = -1;
     for (const f of rest.map(Number).sort((a, b) => a - b)) {
@@ -44,7 +56,9 @@ function brandPaths() {
   } else {
     const out = path.resolve(outDir, rest[0] || 'dispatch-pill.mp4');
     const from = Number(rest[1] || 0), to = Number(rest[2] || total);
-    const ff = spawn('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', '60', '-c:v', 'mjpeg', '-i', '-',
+    const wav = await renderMusic();
+    const audio = from === 0 ? ['-i', wav, '-map', '0:v', '-map', '1:a', '-c:a', 'aac', '-b:a', '256k', '-shortest'] : [];
+    const ff = spawn('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', '60', '-c:v', 'mjpeg', '-i', '-', ...audio,
       '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '14', '-preset', 'slow', '-tune', 'animation', '-movflags', '+faststart', out],
       { stdio: ['pipe', 'inherit', 'inherit'] });
     const t0 = Date.now();

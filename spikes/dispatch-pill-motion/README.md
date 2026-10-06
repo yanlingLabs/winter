@@ -22,13 +22,21 @@ Stand-ins: Inter for SF Pro (when SF is not available), hand-drawn glyphs for SF
 monogram discs for site favicons. The story (prompt, sessions, tool calls) is scripted in
 `scene.js`'s `CHILD_DEFS` and `EVENTS`.
 
+**The soundtrack** (`music.js`) is composed to the cut and synthesised offline with Web Audio in the
+same page: 120 BPM, a bar every 2 s. Pads, bass, plucked arpeggios, drums, bells and sweeps are
+scheduled against the story — a chime for each session that rises out of the pill, the big hit on
+the first window, a chime per finished session, the sink when Dispatch wakes, the logo hit at 34 s —
+and the picture's events sit on the same beat grid. `window.MUSIC` (kicks, impacts) also drives a
+small camera push on every kick and a bigger one on each impact.
+
 ## Render
 
 ```sh
 cd spikes/dispatch-pill-motion
 node record.cjs stills 200 700 1150     # spot-check frames → out/stills/
-node record.cjs video                   # → out/dispatch-pill.mp4 (~36 s)
+node record.cjs music                   # → out/music.wav (the soundtrack alone)
+node record.cjs video                   # → out/dispatch-pill.mp4 (~36 s, with the soundtrack)
 ```
 
 Needs Playwright with its Chromium (`npm i -g playwright && npx playwright install chromium`) and
-`ffmpeg` with libx264. `out/` is git-ignored (`spikes/*/out/`).
+`ffmpeg` with libx264 and aac. `out/` is git-ignored (`spikes/*/out/`).

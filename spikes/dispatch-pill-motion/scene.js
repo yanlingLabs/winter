@@ -321,9 +321,9 @@ const REPLY_2 = 'All three are done and CI is green: the login fix matches a kno
 
 const CHILD_DEFS = [
   {
-    id: 'A', title: 'Fix flaky login test', pal: PAL.violet, spawn: 8.6, done: 24.0,
+    id: 'A', title: 'Fix flaky login test', pal: PAL.violet, spawn: 8.5, done: 24.0,
     items: [
-      { type: 'user', at: 8.6, text: 'Fix the flaky login test in packages/auth. It fails about one run in five on CI; check for known upstream issues first.' },
+      { type: 'user', at: 8.5, text: 'Fix the flaky login test in packages/auth. It fails about one run in five on CI; check for known upstream issues first.' },
       { type: 'think', id: 'think1', at: 8.7, titleAt: 8.85, done: 9.15, title: 'Reproducing the flaky test' },
       { type: 'tool', at: 9.2, kind: 'read', file: 'login.test.ts', calls: [9.2], done: 10.0 },
       { type: 'tool', at: 10.15, kind: 'search', calls: [10.15], resultAt: 11.0, done: 11.3,
@@ -337,9 +337,9 @@ const CHILD_DEFS = [
     ],
   },
   {
-    id: 'B', title: 'Bump dependencies', pal: PAL.mint, spawn: 9.3, done: 22.4,
+    id: 'B', title: 'Bump dependencies', pal: PAL.mint, spawn: 9.25, done: 22.5,
     items: [
-      { type: 'user', at: 9.3, text: 'Bump our dependencies to their latest compatible versions. Read each changelog for breaking changes, and keep the build green.' },
+      { type: 'user', at: 9.25, text: 'Bump our dependencies to their latest compatible versions. Read each changelog for breaking changes, and keep the build green.' },
       { type: 'think', id: 'think1', at: 9.4, titleAt: 9.55, done: 9.85, title: 'Checking for newer releases' },
       { type: 'tool', at: 9.9, kind: 'search', calls: [9.9], resultAt: 11.2, done: 11.6,
         sites: ['npmjs.com', 'github.com', 'nodejs.org', 'typescriptlang.org', 'vitejs.dev', 'bun.sh'] },
@@ -740,32 +740,35 @@ function toolLabel(it, t) {
 }
 
 // ---------------------------------------------------------------- timeline
+// Every beat-worthy moment lands on the soundtrack's grid (music.js: 120 BPM, a beat every 0.5 s).
+const TYPE_AT = 3.5;
 const EVENTS = [
-  [2.9, () => { main.visible = true; }],
-  [3.6, t => { typing = { start: t, times: typingTimes(PROMPT) }; }],
-  [7.35, t => submit(t)],
-  [7.6, () => mainThrow({ id: 'ls1', kind: 'tool', symbol: 'person.2.fill' })],
-  [7.8, () => mainThrow({ id: 'wf1', kind: 'tool', symbol: 'safari' })],
-  [8.1, () => mainThrow({ id: 'wf1#github.com', kind: 'site', host: 'github.com' })],
-  [8.25, () => mainThrow({ id: 'sp1', kind: 'tool', symbol: 'paperplane.fill' })],
-  [8.6, t => spawnChild(0, t)],
+  [3.0, () => { main.visible = true; }],
+  [TYPE_AT, t => { typing = { start: t, times: typingTimes(PROMPT) }; }],
+  [7.5, t => submit(t)],
+  [7.75, () => mainThrow({ id: 'ls1', kind: 'tool', symbol: 'person.2.fill' })],
+  [7.95, () => mainThrow({ id: 'wf1', kind: 'tool', symbol: 'safari' })],
+  [8.15, () => mainThrow({ id: 'wf1#github.com', kind: 'site', host: 'github.com' })],
+  [8.2, () => mainThrow({ id: 'sp1', kind: 'tool', symbol: 'paperplane.fill' })],
+  [8.5, t => spawnChild(0, t)],
   [8.95, () => mainThrow({ id: 'sp2', kind: 'tool', symbol: 'paperplane.fill' })],
-  [9.3, t => spawnChild(1, t)],
-  [9.65, () => mainThrow({ id: 'sp3', kind: 'tool', symbol: 'paperplane.fill' })],
+  [9.25, t => spawnChild(1, t)],
+  [9.7, () => mainThrow({ id: 'sp3', kind: 'tool', symbol: 'paperplane.fill' })],
   [10.0, t => spawnChild(2, t)],
-  [10.9, t => endTurn(t, REPLY_1)],
-  [13.2, () => esc()],
-  [13.7, () => esc()],
-  [15.9, t => openWindow(0, t)],
-  [17.4, t => openWindow(1, t)],
-  [18.9, t => openWindow(2, t)],
-  [20.35, t => windows.find(w => w.def === CHILD_DEFS[2])?.openThinking('think2', t)],
-  [27.1, t => wake(t)],
-  [27.45, () => mainThrow({ id: 'ls2', kind: 'tool', symbol: 'person.2.fill' })],
-  [27.75, () => mainThrow({ id: 'wf2', kind: 'tool', symbol: 'safari' })],
-  [28.15, () => mainThrow({ id: 'wf2#github.com', kind: 'site', host: 'github.com' })],
-  [29.4, t => endTurn(t, REPLY_2)],
+  [11.0, t => endTurn(t, REPLY_1)],
+  [13.0, () => esc()],
+  [13.5, () => esc()],
+  [16.0, t => openWindow(0, t)],
+  [17.5, t => openWindow(1, t)],
+  [19.0, t => openWindow(2, t)],
+  [20.5, t => windows.find(w => w.def === CHILD_DEFS[2])?.openThinking('think2', t)],
+  [27.0, t => wake(t)],
+  [27.35, () => mainThrow({ id: 'ls2', kind: 'tool', symbol: 'person.2.fill' })],
+  [27.6, () => mainThrow({ id: 'wf2', kind: 'tool', symbol: 'safari' })],
+  [28.0, () => mainThrow({ id: 'wf2#github.com', kind: 'site', host: 'github.com' })],
+  [29.5, t => endTurn(t, REPLY_2)],
 ];
+window.KEYSTROKES = [];   // filled below, once typingTimes exists; music.js clicks a key on each
 function typingTimes(text) {
   // A (fast) human cadence: ~40 chars/s, a little longer after spaces and punctuation.
   const times = []; let at = 0;
@@ -782,8 +785,8 @@ function typingTimes(text) {
 // ---------------------------------------------------------------- camera, cursor, captions, keys
 const CAM = [ // t, zoom, centre x, centre y (points; clamped so the screen always fills the frame)
   [0, 2.9, 768, 820], [3.0, 2.9, 768, 820], [3.9, 2.5, 768, 820], [7.5, 2.5, 768, 820],
-  [9.2, 2.1, 768, 820], [13.9, 2.1, 768, 820], [15.3, 0.85, 768, 432], [26.1, 0.85, 768, 432],
-  [27.4, 1.9, 768, 820], [31.0, 1.9, 768, 820], [32.3, 0.85, 768, 432], [36, 0.85, 768, 432],
+  [9.2, 2.1, 768, 820], [14.0, 2.1, 768, 820], [15.5, 0.85, 768, 432], [26.0, 0.85, 768, 432],
+  [27.3, 1.9, 768, 820], [31.0, 1.9, 768, 820], [32.3, 0.85, 768, 432], [36, 0.85, 768, 432],
 ];
 function camera(t) {
   let i = 0; while (i < CAM.length - 2 && t >= CAM[i + 1][0]) i++;
@@ -795,18 +798,25 @@ function camera(t) {
   // leaving the band at the top to the chapter headings.
   const tx = SW * S >= 1920 ? clamp(960 - lerp(a[2], b[2], p) * S, 1920 - SW * S, 0) : (1920 - SW * S) / 2;
   const ty = SH * S >= 1080 ? clamp(540 - lerp(a[3], b[3], p) * S, 1080 - SH * S, 0) : (1080 - SH * S) * 0.84;
-  return { S, tx, ty };
+  const m = 1 + beatPush(t);   // scaled about the frame's centre
+  return { S: S * m, tx: 960 - (960 - tx) * m, ty: 540 - (540 - ty) * m };
+}
+function beatPush(t) {
+  let push = 0;
+  for (const k of window.MUSIC.KICKS) if (t >= k.t && t - k.t < 0.6) push += 0.0045 * k.v * Math.exp(-(t - k.t) / 0.1);
+  for (const h of window.MUSIC.IMPACTS) if (t >= h.t && t - h.t < 1.2) push += 0.013 * h.a * Math.exp(-(t - h.t) / 0.22);
+  return push;
 }
 const CHILD_Y = PILL_BOTTOM - M.pillHeight - M.stackGap - M.pillHeight / 2;
 const CURSOR_PATH = [ // t0, t1, to (a point, or a function resolved once when the segment starts)
-  [15.0, 15.75, [652, CHILD_Y + 2]],
-  [16.55, 17.25, [760, CHILD_Y + 2]],
-  [18.05, 18.75, [868, CHILD_Y + 2]],
-  [19.6, 20.25, () => elementCentre(windows.find(w => w.def === CHILD_DEFS[2])?.items.find(i => i.it.id === 'think2')?.lbl)],
-  [20.8, 21.6, from => [from[0] + 170, from[1] + 110]],
+  [15.1, 15.85, [652, CHILD_Y + 2]],
+  [16.65, 17.35, [760, CHILD_Y + 2]],
+  [18.15, 18.85, [868, CHILD_Y + 2]],
+  [19.75, 20.4, () => elementCentre(windows.find(w => w.def === CHILD_DEFS[2])?.items.find(i => i.it.id === 'think2')?.lbl)],
+  [20.95, 21.75, from => [from[0] + 170, from[1] + 110]],
 ];
 const CURSOR_START = [990, 560];
-const CLICKS = [15.9, 17.4, 18.9, 20.35];
+const CLICKS = [16.0, 17.5, 19.0, 20.5];
 const resolvedTargets = [];
 /** An element's centre in screen points, through the camera. */
 function elementCentre(e) {
@@ -823,7 +833,7 @@ function cursorAt(t) {
     pos = [lerp(from[0], b[0], p), lerp(from[1], b[1], p)];
     from = b;
   });
-  const alpha = ramp(t, 14.85, 0.3) * (1 - ramp(t, 21.0, 0.5));
+  const alpha = ramp(t, 14.95, 0.3) * (1 - ramp(t, 21.15, 0.5));
   return { pos, alpha };
 }
 // The narration: each chapter's heading sits straight on the frame in a heavy face, in the band at
@@ -831,17 +841,17 @@ function cursorAt(t) {
 // quick cascade and leave upward the same way as the next heading comes in, while a bar in the
 // chapter's plume colour draws in beneath and retracts with them. No container.
 const CHAPTERS = [   // t: the letters start rising; end: the last one has left (the next heading rises just before)
-  { t: 2.55, end: 7.45, pal: PAL.blue, head: 'Get anything done' },
-  { t: 7.35, end: 14.05, pal: PAL.violet, head: 'It fans the work out' },
-  { t: 13.95, end: 20.65, pal: PAL.mint, head: 'Open any session' },
-  { t: 20.55, end: 24.1, pal: PAL.rose, head: 'Watch them work' },
-  { t: 24.0, end: 26.6, pal: PAL.blue, head: 'Then it reports back' },
+  { t: 2.5, end: 7.6, pal: PAL.blue, head: 'Get anything done' },
+  { t: 7.5, end: 14.1, pal: PAL.violet, head: 'It fans the work out' },
+  { t: 14.0, end: 20.1, pal: PAL.mint, head: 'Open any session' },
+  { t: 20.0, end: 24.1, pal: PAL.rose, head: 'Watch them work' },
+  { t: 24.0, end: 26.4, pal: PAL.blue, head: 'Then it reports back' },
 ];
 const TITLE = { top: 20, line: 88, barGap: 6 };
 const KEYS = [   // the key hints: a keycap and what it did, top right
-  { presses: [2.9], cap: 'grid4', labels: ['Summon Dispatch'] },
-  { presses: [7.35], cap: 'return', labels: ['Send'] },
-  { presses: [13.2, 13.7], text: 'esc', labels: ['Close the reply', 'Collapse'] },
+  { presses: [3.0], cap: 'grid4', labels: ['Summon Dispatch'] },
+  { presses: [7.5], cap: 'return', labels: ['Send'] },
+  { presses: [13.0, 13.5], text: 'esc', labels: ['Close the reply', 'Collapse'] },
 ];
 const easeOutBack = x => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
 const easeInCubic = x => x * x * x;
@@ -885,7 +895,7 @@ const keyViews = KEYS.map(k => {
   return { e, cap, labels, spans, measured: false };
 });
 // Opening: the Winter mark alone. Ending: the mark, which then slides aside as the name slides out from behind it.
-const OUTRO = { icon: 200, gap: 34, arrive: 33.05, slideAt: 33.95, slideDur: 0.95 };
+const OUTRO = { icon: 200, gap: 30, arrive: 33.0, slideAt: 34.0, slideDur: 0.95 };
 const introMark = brandSVG(240, '#0b0b0f'), outroMark = brandSVG(OUTRO.icon, '#0b0b0f');
 $('intro').innerHTML = `<div id="introMark">${introMark.svg}</div>`;
 $('outro').innerHTML = `<div id="outroMark">${outroMark.svg}</div><div id="outroWord">Winter</div>`;
@@ -1120,7 +1130,7 @@ function renderOverlays(t) {
   renderKeys(t);
   // Intro: the mark arrives soft and settles, a band passing through it as it turns solid.
   const intro = $('intro');
-  const ia = 1 - ramp(t, 1.95, 0.6, easeInOut);
+  const ia = 1 - ramp(t, 2.0, 0.6, easeInOut);
   intro.style.display = ia > 0 ? 'flex' : 'none';
   if (ia > 0) {
     intro.style.opacity = ia;
@@ -1131,7 +1141,7 @@ function renderOverlays(t) {
   // Outro: the mark arrives, then slides aside while "Winter" slides out from behind it — the name is
   // anchored to the mark's right edge and masked there, so it seems to come from under the mark.
   const outro = $('outro');
-  const oa = ramp(t, 32.6, 0.8, easeInOut);
+  const oa = ramp(t, 32.4, 0.8, easeInOut);
   outro.style.display = oa > 0 ? 'block' : 'none';
   if (oa > 0) {
     outro.style.opacity = oa;
@@ -1160,7 +1170,7 @@ window.renderFrame = function (n) {
   render(T);
   return T;
 };
-Promise.all(['800 76px WD', '800 150px WD', '700 24px WD', '400 14px W', '500 14px W', '600 16px W'].map(f => document.fonts.load(f)))
+Promise.all(['800 76px WD', '600 150px WD', '700 24px WD', '400 14px W', '500 14px W', '600 16px W'].map(f => document.fonts.load(f)))
   .then(() => document.fonts.ready)
   .then(() => {
     measureTitles();
@@ -1170,3 +1180,5 @@ Promise.all(['800 76px WD', '800 150px WD', '700 24px WD', '400 14px W', '500 14
     word.style.display = 'none'; outro.style.display = 'none';
     window.sceneReady = true;
   });
+
+window.KEYSTROKES = typingTimes(PROMPT).map(x => TYPE_AT + x);
