@@ -229,12 +229,20 @@ struct PillToolRunHeader: View {
     private var status: ToolCallStatus { toolRunStatus(entries, turnIsLive: turnIsLive) }
     private static let failureRed = Color(red: 1.0, green: 0.45, blue: 0.40)
 
+    /// A SEARCH pill opens INTO itself (2026-10-06): the capsule morphs into a rounded rectangle
+    /// holding the same row, then the queries and one flat pill per website the run found. Every other
+    /// kind keeps its body beneath the pill (`TranscriptExchangeRow.toolPillBody`).
+    static func opensInPlace(_ entry: ToolRunEntry) -> Bool { PillToolKind(toolName: entry.name) == .search }
+
     var body: some View {
         let label = pillToolLabel(entry, turnIsLive: turnIsLive)
         let discs = toolRunDiscs(entries)
         let running = status == .running
         let failed = status == .failed && !running
-        Button(action: toggle) {
+        let inPlace = Self.opensInPlace(entry)
+        let open = inPlace && isExpanded
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: toggle) {
                 TimelineView(.periodic(from: .now, by: Self.rotationPeriod)) { timeline in
                     let tick = Int(timeline.date.timeIntervalSinceReferenceDate / Self.rotationPeriod)
                     HStack(spacing: 10) {
@@ -247,25 +255,33 @@ struct PillToolRunHeader: View {
                                 .foregroundStyle(Self.failureRed)
                                 .accessibilityLabel("Failed")
                         }
-                        Image(systemName: "chevron.down")
-                            .font(Typography.badge(.bold))
-                            .foregroundStyle(Color.white.opacity(0.45))
-                            .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                        PillChevron(isExpanded: isExpanded,
+                                    label: inPlace ? (isExpanded ? "Hide sources" : "Show sources")
+                                                   : (isExpanded ? "Hide calls" : "Show calls"))
                     }
                 }
                 .padding(.leading, 6)
                 .padding(.trailing, 14)
                 .frame(height: Self.height)
-                .background(Capsule().fill(failed ? Self.failureRed.opacity(0.10) : Color.white.opacity(0.06)))
-                .overlay(Capsule().strokeBorder(failed ? Self.failureRed.opacity(0.45)
-                                                : running ? Color.white.opacity(0.55) : Color.white.opacity(0.08),
-                                                lineWidth: 1))
-                .clipShape(Capsule())
-                .contentShape(Capsule())
-                .animation(.easeInOut(duration: 0.3), value: status)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open {
+                PillSearchSources(entry: entry, turnIsLive: turnIsLive)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 2)
+                    .padding(.bottom, 14)
+                    .transition(.opacity)
+            }
         }
-        .buttonStyle(.plain)
-        .fixedSize()
+        .fixedSize(horizontal: !open, vertical: true)
+        .frame(maxWidth: open ? .infinity : nil, alignment: .leading)
+        .modifier(PillMorphChrome(expanded: open,
+                                  fill: failed ? Self.failureRed.opacity(0.10) : PillMorphChrome.fill,
+                                  rim: failed ? Self.failureRed.opacity(0.45)
+                                      : running ? PillMorphChrome.liveRim : PillMorphChrome.restRim))
+        .animation(.easeInOut(duration: 0.3), value: status)
         .task(id: discs) { await waitForFavicons(discs) }
     }
 
@@ -435,32 +451,59 @@ struct PillToolRunCard: ViewModifier {
     }
 }
 
+/// A pill that has opened into a card (`PillMorphChrome`) leaves the side-by-side flow while open: it
+/// takes a line of its own at the column's whole width (`PillFlowLayout`). The SAME view stays at the
+/// same place in the flow, so opening and closing it animate as one shape changing size.
+struct PillFlowFullWidth: LayoutValueKey {
+    static let defaultValue = false
+}
+
 /// Tool pills side by side (user, 2026-10-02: "the pills should be in front of each other"): left to
-/// right in their arrival order, wrapping onto the next line when the column runs out of width.
+/// right in their arrival order, wrapping onto the next line when the column runs out of width. A
+/// subview marked `PillFlowFullWidth` sits alone on its line, at the full width offered.
 struct PillFlowLayout: Layout {
     var spacing: CGFloat = 8
     var lineSpacing: CGFloat = 8
 
-    private func rows(_ sizes: [CGSize], width: CGFloat) -> [[Int]] {
+    /// PURE (`PillExpansionTests`): the subviews' indices, line by line.
+    static func rows(_ sizes: [CGSize], fullWidth: [Bool], width: CGFloat, spacing: CGFloat) -> [[Int]] {
         var rows: [[Int]] = [[]]
         var x: CGFloat = 0
         for (i, size) in sizes.enumerated() {
-            if !rows[rows.count - 1].isEmpty, x + spacing + size.width > width {
+            let alone = fullWidth.indices.contains(i) && fullWidth[i]
+            if !rows[rows.count - 1].isEmpty, alone || x + spacing + size.width > width {
                 rows.append([])
                 x = 0
             }
             x += (rows[rows.count - 1].isEmpty ? 0 : spacing) + size.width
             rows[rows.count - 1].append(i)
+            if alone {
+                rows.append([])
+                x = 0
+            }
         }
-        return rows
+        return rows.filter { !$0.isEmpty }
+    }
+
+    private func rows(_ sizes: [CGSize], _ subviews: Subviews, width: CGFloat) -> [[Int]] {
+        Self.rows(sizes, fullWidth: subviews.map { $0[PillFlowFullWidth.self] }, width: width, spacing: spacing)
+    }
+
+    /// A full-width subview is offered the width; every other one is asked its own size.
+    private func sizes(_ subviews: Subviews, width: CGFloat?) -> [CGSize] {
+        subviews.map { subview in
+            subview[PillFlowFullWidth.self]
+                ? subview.sizeThatFits(ProposedViewSize(width: width, height: nil))
+                : subview.sizeThatFits(.unspecified)
+        }
     }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let sizes = sizes(subviews, width: proposal.width)
         let width = proposal.width ?? .infinity
         var height: CGFloat = 0
         var widest: CGFloat = 0
-        for row in rows(sizes, width: width) where !row.isEmpty {
+        for row in rows(sizes, subviews, width: width) {
             let rowWidth = row.map { sizes[$0].width }.reduce(0, +) + spacing * CGFloat(row.count - 1)
             widest = max(widest, rowWidth)
             height += (height == 0 ? 0 : lineSpacing) + (row.map { sizes[$0].height }.max() ?? 0)
@@ -469,9 +512,9 @@ struct PillFlowLayout: Layout {
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let sizes = sizes(subviews, width: bounds.width)
         var y = bounds.minY
-        for row in rows(sizes, width: bounds.width) where !row.isEmpty {
+        for row in rows(sizes, subviews, width: bounds.width) {
             var x = bounds.minX
             let rowHeight = row.map { sizes[$0].height }.max() ?? 0
             for i in row {

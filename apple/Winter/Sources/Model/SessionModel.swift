@@ -362,8 +362,8 @@ struct ActivityItem: Equatable {
         /// fold, `ThinkingItem`), so it keeps the place in the timeline where it started. The pill-
         /// themed window draws it as a pill beside the tool pills (`PillThinkingHeader`); every other
         /// transcript as a quiet line (`TranscriptThinkingRow`). The LIVE item carries no text (its
-        /// fold is O(the delta)); the persisted block's `text` is kept for a future expand view and
-        /// rendered nowhere yet.
+        /// fold is O(the delta)); the pill window's opened pill (`PillThinkingText`) shows the
+        /// streamed text from `SessionModel.liveThinking` until the persisted block's `text` replaces it.
         case thinking(ThinkingItem)
     }
     var kind: Kind
@@ -1613,6 +1613,10 @@ final class SessionModel: ObservableObject {
     /// attach failed and none is coming). The window shows `SessionLoadingView` meanwhile.
     @Published var isLoadingHistory = false
     private let notifier: NotificationPosting
+    /// The Mac's live reasoning text (`ThinkingLiveText`): kept beside `state`, never in it, so a
+    /// streaming block's text grows in O(the delta). Fed by every `apply` before the reducer runs, so a
+    /// view re-rendered by the new state already reads the text that state counts.
+    let liveThinking = ThinkingLiveText()
 
     /// provider_retry (WinterProtocol Swift mirror): a raw pass-through of every event `apply`
     /// receives, one event at a time, in arrival order — for UI-only consumers that need a
@@ -1645,7 +1649,10 @@ final class SessionModel: ObservableObject {
     func apply(contentsOf events: [SessionEvent]) {
         guard !events.isEmpty else { return }
         var next = state
-        for event in events { next = SessionReducer.reduce(next, event) }
+        for event in events {
+            liveThinking.fold(event)
+            next = SessionReducer.reduce(next, event)
+        }
         state = next
     }
 
@@ -1660,6 +1667,7 @@ final class SessionModel: ObservableObject {
         var next = state
         for event in events {
             let wasRunning = next.turnRunning
+            liveThinking.fold(event)
             next = SessionReducer.reduce(next, event)
             if case .turnStarted(let v) = event, v.threadId == "main", !wasRunning { next.workingVerb = WorkingVerbs.random() }
         }
@@ -1669,6 +1677,7 @@ final class SessionModel: ObservableObject {
 
     func apply(_ event: SessionEvent) {
         let wasRunning = state.turnRunning
+        liveThinking.fold(event)
         state = SessionReducer.reduce(state, event)
         // Store-level impurity seam (wave 6, item 1): `SessionReducer.reduce` must stay pure —
         // no `Bool`/`Int`/`Array.randomElement` inside it, or two calls with identical inputs
@@ -1721,6 +1730,7 @@ final class SessionModel: ObservableObject {
     /// New focus target: drop per-session state before replaying another session.
     func reset() {
         let wasConnected = state.status != .disconnected
+        liveThinking.reset()
         state = OrbSessionState()
         if wasConnected { state.status = .idle }
     }

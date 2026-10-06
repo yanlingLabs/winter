@@ -188,6 +188,10 @@ struct TranscriptAssistantMessage: View, Equatable {
     /// window and both plan-card bodies pass — renders this reply exactly as before: no links, no
     /// thumbnails, no stat. A STREAMING reply ignores it too; it links once its round has finished.
     var fileDoor: TranscriptFileDoor? = nil
+    /// Whether this reply carries the copy button (2026-10-06): in the transcript only the FINAL reply
+    /// of a turn does (`exchangeFinalReplyIndex`) — never the short messages between tool calls. The
+    /// plan cards' bodies keep the default.
+    var showsCopyButton: Bool = true
 
     @State private var isMessageCopyHovering = false
     @State private var didCopyMessage = false
@@ -256,7 +260,7 @@ struct TranscriptAssistantMessage: View, Equatable {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if !isStreaming {
+            if !isStreaming && showsCopyButton {
                 Button {
                     copyMessageToPasteboard()
                 } label: {
@@ -303,6 +307,7 @@ struct TranscriptAssistantMessage: View, Equatable {
     /// Used through `.equatable()` at the transcript's replies loop.
     static func == (lhs: TranscriptAssistantMessage, rhs: TranscriptAssistantMessage) -> Bool {
         lhs.text == rhs.text && lhs.isStreaming == rhs.isStreaming && lhs.role == rhs.role
+            && lhs.showsCopyButton == rhs.showsCopyButton
             && (lhs.fileDoor == nil) == (rhs.fileDoor == nil)
             && lhs.fileDoor?.baseDirectory == rhs.fileDoor?.baseDirectory
             && lhs.fileDoor?.sessionHasWorkingDirectory == rhs.fileDoor?.sessionHasWorkingDirectory
@@ -318,7 +323,7 @@ struct TranscriptAssistantMessage: View, Equatable {
 
 /// Donor `ChatFormattedMessageText` — splits fenced code out via `FormattedMessageBlock.parse`,
 /// renders remaining text as markdown blocks and code as `TranscriptCodeBlock`.
-private struct TranscriptFormattedMessageText: View {
+struct TranscriptFormattedMessageText: View {
     let text: String
     let tint: Color
     /// Which face the PROSE blocks take. Fenced code is unaffected — a code block is monospaced in
@@ -874,6 +879,25 @@ func exchangeTimeline(_ exchange: Exchange) -> [ExchangeTimelineSegment] {
         reply += 1
     }
     return segments
+}
+
+/// PURE: which of an exchange's replies carries the copy button (user, 2026-10-06): only the FINAL
+/// agent message of the turn — the reply nothing drawn follows. A reply with tool calls, thinking or a
+/// card after it is a message BETWEEN steps and gets none; while a turn is live, the newest reply gets
+/// one only while nothing has come after it (a reply streaming in after it counts). An activity stretch
+/// that draws nothing (`groupActivity` skips task transitions) does not count as following. `nil`: no
+/// reply qualifies.
+func exchangeFinalReplyIndex(_ exchange: Exchange, isStreaming: Bool) -> Int? {
+    guard !isStreaming else { return nil }
+    for segment in exchangeTimeline(exchange).reversed() {
+        switch segment {
+        case .reply(let index):
+            return index
+        case .activity(let items):
+            if !groupActivity(items).isEmpty { return nil }
+        }
+    }
+    return nil
 }
 
 func groupActivity(_ items: [ActivityItem]) -> [ActivityGroup] {
