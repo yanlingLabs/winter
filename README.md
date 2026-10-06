@@ -27,7 +27,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/readme/dispatch.png" width="100%" alt="Dispatch on a Mac: three Code sessions it started work side by side in their own windows, reading code, running commands and searching the web, while their pills sit above the Dispatch pill.">
+  <img src="assets/readme/dispatch.gif" width="100%" alt="Dispatch on a Mac: a prompt goes in, three Code sessions rise above the Dispatch pill, their windows open while they work, and Dispatch reports back when all three are done.">
 </p>
 
 ## Dispatch

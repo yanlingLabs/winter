@@ -5,8 +5,9 @@
 //   node record.cjs video [out.mp4] [from] [to] → out/dispatch-pill.mp4 (1920×1080, 60 fps, AAC audio)
 //   node record.cjs poster [frame]            → out/poster.png (the README's picture, 1600×900)
 //   node record.cjs web                       → out/winter-dispatch.mp4 (the video for GitHub's player)
+//   node record.cjs gif [fps] [width] [lossy] → out/dispatch.gif (the README's moving picture)
 //   node record.cjs card [t] [variant…]       → out/social-preview[-v].png (GitHub's 1280×640 social card)
-// Needs Playwright's Chromium and ffmpeg (libx264, aac) on the PATH.
+// Needs Playwright's Chromium, ffmpeg (libx264, aac) and gifsicle on the PATH.
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
@@ -33,8 +34,9 @@ function brandPaths() {
   page.on('console', m => console.log('[page]', m.text()));
   page.on('pageerror', e => console.log('[pageerror]', e.message));
   await page.addInitScript(paths => { window.BRAND_PATHS = paths; }, brandPaths());
-  // The card's still keeps the plume's tiles off the session titles.
-  await page.goto('file://' + path.join(__dirname, 'scene.html') + (mode === 'card' ? '?card' : ''));
+  // The card's still keeps the plume's tiles off the session titles; the GIF has no soundtrack, so no
+  // push on the beat.
+  await page.goto('file://' + path.join(__dirname, 'scene.html') + ({ card: '?card', gif: '?silent' }[mode] || ''));
   await page.waitForFunction(() => window.sceneReady === true);
   const total = await page.evaluate(() => window.TOTAL_FRAMES);
 
@@ -108,6 +110,40 @@ function brandPaths() {
       '-map', '[v]', '-map', '2:a', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-preset', 'slow', '-tune', 'animation',
       '-c:a', 'aac', '-b:a', '160k', '-shortest', '-movflags', '+faststart', out]);
     console.log('wrote', out, `(${(fs.statSync(out).size / 1048576).toFixed(2)} MB)`);
+  } else if (mode === 'gif') {
+    // The README's moving picture, as a GIF: the one animated format Safari and GitHub's iPhone app play
+    // at the right speed (animated AVIF and WebP crawl there, slower and slower, since Apple's decoders
+    // rebuild each frame from the last full one). The whole cut, silent, starting at 3.6 s (the heading
+    // and the pill: a fair still while it loads or when autoplay is off) and wrapping through the end
+    // card and the intro back to it. One palette for the whole loop and ordered dithering, so what does
+    // not move stays byte-identical from frame to frame; gifsicle then trims what is left.
+    const fps = Number(rest[0] || 15), W = Number(rest[1] || 800), lossy = rest[2] || '30';
+    const step = 60 / fps, START = 216, frames = path.join(outDir, 'gif-frames');
+    const [from, to] = [Number(rest[3] || 0), Number(rest[4] || total)];   // a sub-range, to try settings
+    fs.rmSync(frames, { recursive: true, force: true });
+    fs.mkdirSync(frames, { recursive: true });
+    const order = [];
+    const t0 = Date.now();
+    for (let f = from; f < to; f += step) {
+      await page.evaluate(n => window.renderFrame(n), f);
+      const file = path.join(frames, `src${String(f).padStart(5, '0')}.jpg`);
+      await page.screenshot({ path: file, type: 'jpeg', quality: 95 });
+      order.push([f, file]);
+      if (f % 240 === 0) console.log(`frame ${f}/${to}  ${((Date.now() - t0) / 1000).toFixed(0)}s`);
+    }
+    const whole = from === 0 && to === total;
+    const seq = whole ? [...order.filter(([f]) => f >= START), ...order.filter(([f]) => f < START)] : order;
+    seq.forEach(([, file], i) => fs.symlinkSync(file, path.join(frames, `seq${String(i).padStart(5, '0')}.jpg`)));
+    const raw = path.join(frames, 'raw.gif'), out = path.join(outDir, whole ? 'dispatch.gif' : 'dispatch-try.gif');
+    await ffmpeg(['-framerate', String(fps), '-i', path.join(frames, 'seq%05d.jpg'), '-filter_complex',
+      `scale=${W}:-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=full:max_colors=256[p];[b][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle`,
+      '-loop', '0', raw]);
+    await new Promise((resolve, reject) => {
+      const p = spawn('gifsicle', ['-O3', `--lossy=${lossy}`, '-o', out, raw], { stdio: 'inherit' });
+      p.on('close', code => (code === 0 ? resolve() : reject(new Error('gifsicle exited ' + code))));
+    });
+    console.log('wrote', out, `(${(fs.statSync(raw).size / 1048576).toFixed(2)} MB before gifsicle, ${(fs.statSync(out).size / 1048576).toFixed(2)} MB after)`);
+    if (whole) fs.rmSync(frames, { recursive: true, force: true });
   } else if (mode === 'stills') {
     fs.mkdirSync(path.join(outDir, 'stills'), { recursive: true });
     let at = -1;
