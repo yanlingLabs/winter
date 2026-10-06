@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dispatch Motion</title>
+<style>
+/* The app's face is the system's (SF Pro); Inter stands in where that is not installed (Linux). */
+@font-face { font-family: 'W'; src: local('Inter Regular'), local('Inter-Regular'), url('file:///usr/share/fonts/opentype/inter/Inter-Regular.otf'); font-weight: 400; }
+@font-face { font-family: 'W'; src: local('Inter Medium'), local('Inter-Medium'), url('file:///usr/share/fonts/opentype/inter/Inter-Medium.otf'); font-weight: 500; }
+@font-face { font-family: 'W'; src: local('Inter SemiBold'), local('Inter-SemiBold'), url('file:///usr/share/fonts/opentype/inter/Inter-SemiBold.otf'); font-weight: 600; }
+@font-face { font-family: 'W'; src: local('Inter Bold'), local('Inter-Bold'), url('file:///usr/share/fonts/opentype/inter/Inter-Bold.otf'); font-weight: 700; }
+@font-face { font-family: 'WD'; src: local('Inter Display SemiBold'), local('InterDisplay-SemiBold'), url('file:///usr/share/fonts/opentype/inter/InterDisplay-SemiBold.otf'); font-weight: 600; }
+@font-face { font-family: 'WD'; src: local('Inter Display Medium'), local('InterDisplay-Medium'), url('file:///usr/share/fonts/opentype/inter/InterDisplay-Medium.otf'); font-weight: 500; }
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; width: 1920px; height: 1080px; overflow: hidden; background: #000; }
+body { font-family: 'W', sans-serif; -webkit-font-smoothing: antialiased; color: #fff; }
+#viewport { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden; background: #000; }
+#screen { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; transform-origin: 0 0; overflow: hidden; background: #000; }
+
+/* ---------- desktop ---------- */
+#wallpaper { position: absolute; inset: 0;
+  background:
+    radial-gradient(900px 620px at 12% 8%, rgba(132, 98, 255, .60), transparent 62%),
+    radial-gradient(760px 540px at 92% 14%, rgba(40, 170, 255, .38), transparent 60%),
+    radial-gradient(1100px 640px at 72% 104%, rgba(255, 118, 92, .55), transparent 62%),
+    radial-gradient(700px 520px at 20% 96%, rgba(255, 70, 170, .30), transparent 60%),
+    linear-gradient(162deg, #0b1233 0%, #1b2366 40%, #3b1f62 72%, #160a26 100%); }
+#wallpaper::after { content: ''; position: absolute; inset: 0;
+  background:
+    radial-gradient(1400px 300px at 50% 58%, rgba(255, 255, 255, .07), transparent 70%),
+    repeating-linear-gradient(118deg, rgba(255,255,255,.018) 0 2px, transparent 2px 9px); }
+#menubar { position: absolute; left: 0; top: 0; right: 0; height: 25px; display: flex; align-items: center;
+  padding: 0 14px; gap: 19px; font-size: 13px; font-weight: 500; color: rgba(255,255,255,.94);
+  background: rgba(12, 12, 34, .30); backdrop-filter: blur(22px) saturate(1.5); letter-spacing: -0.1px; }
+#menubar .app { font-weight: 700; }
+#menubar .spacer { flex: 1; }
+#menubar .mi { font-weight: 400; color: rgba(255,255,255,.9); }
+
+/* ---------- the dispatch pill ---------- */
+#pillLayer { position: absolute; inset: 0; pointer-events: none; }
+#pill { position: absolute; }
+.pshape { position: absolute; inset: 0; background: #000; overflow: hidden; box-shadow: 0 4px 28px rgba(0,0,0,.45); }
+.pstroke { position: absolute; inset: 0; border: 1px solid rgba(255,255,255,.09); }
+#pcontent { position: absolute; left: 0; }
+#mainPlume { position: absolute; left: 0; bottom: 0; }
+#composerRow { position: absolute; left: 0; top: 0; right: 0; bottom: 0; }
+#fieldSlot { position: absolute; left: 18px; top: 0; bottom: 0; overflow: hidden; }
+#fieldText { position: absolute; left: 0; bottom: 9px; }
+.ctext { font-size: 14px; line-height: 17px; letter-spacing: -0.15px; white-space: pre-wrap; overflow-wrap: break-word; }
+#placeholder { position: absolute; left: 2px; top: 4px; white-space: nowrap; }
+#draft { position: absolute; left: 2px; top: 4px; color: #fff; }
+.caret { display: inline-block; width: 1.6px; height: 17px; background: #fff; vertical-align: top; margin-left: 0.5px; border-radius: 1px; }
+.circleBtn { position: absolute; width: 32px; height: 32px; border-radius: 16px; background: #fff; }
+.circleBtn .g { position: absolute; left: 0; top: 0; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; }
+#accessories { position: absolute; display: flex; gap: 6px; }
+.acc { width: 28px; height: 28px; border-radius: 14px; background: rgba(255,255,255,.12); display: flex; align-items: center; justify-content: center; }
+#preview { position: absolute; left: 0; top: 0; right: 0; bottom: 0; padding: 12px 18px; display: flex; flex-direction: column; gap: 4px; }
+#preview .prow { display: flex; align-items: baseline; gap: 8px; }
+#preview .pprompt { flex: 1; min-width: 0; font-size: 14px; line-height: 17px; font-weight: 500; color: rgba(255,255,255,.5); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -0.15px; }
+#preview .ppos { font-size: 11px; color: rgba(255,255,255,.35); }
+#preview .preply { font-size: 14px; line-height: 17px; color: #fff; letter-spacing: -0.15px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* child row */
+#childRow { position: absolute; height: 44px; transform-origin: 50% 100%; }
+.child { position: absolute; top: 0; height: 44px; transform-origin: 50% 100%; }
+.child .cbody { position: absolute; inset: 0; border-radius: 22px; background: #000; overflow: hidden; }
+.child canvas { position: absolute; left: 0; top: 0; }
+.child .cstroke { position: absolute; inset: 0; border-radius: 22px; border: 1px solid rgba(255,255,255,.09); }
+.child .cglyph { position: absolute; top: 12px; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; }
+.child .ctitle { position: absolute; top: 0; height: 44px; line-height: 44px; font-size: 12px; font-weight: 500; color: #fff;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -0.1px; }
+.child .cstop { position: absolute; top: 6px; width: 32px; height: 32px; border-radius: 16px; display: flex; align-items: center; justify-content: center; }
+
+/* ---------- session windows ---------- */
+#windows { position: absolute; inset: 0; }
+.win { position: absolute; }
+.wclip { position: absolute; inset: 0; border-radius: 22px; background: #000; overflow: hidden; }
+.wscroll { position: absolute; left: 0; right: 0; top: 0; bottom: 0;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, transparent 46px, #000 96px, #000 100%); }
+.wcol { position: absolute; left: 0; right: 0; bottom: 74px; padding: 0 30px; display: flex; flex-direction: column; gap: 16px; }
+.ruled { padding-top: 10px; padding-bottom: 10px; }
+.ruled .rtext { font-size: 14px; line-height: 23px; font-weight: 500; color: #fff; letter-spacing: -0.15px; margin-bottom: 20px; }
+.ruled .rrule { height: 1px; background: rgba(255,255,255,.85); }
+.flow { display: flex; flex-wrap: wrap; gap: 8px; }
+.tp { position: relative; height: 34px; border-radius: 17px; display: inline-flex; align-items: center; gap: 10px; padding: 0 14px 0 6px; background: rgba(255,255,255,.06); }
+.tp .rim { position: absolute; inset: 0; border-radius: 17px; border: 1px solid rgba(255,255,255,.08); }
+.tp .discs { display: flex; align-items: center; }
+.disc { width: 22px; height: 22px; border-radius: 11px; background: #fff; border: 1.5px solid #000; display: flex; align-items: center; justify-content: center; position: relative; flex: none; }
+.disc + .disc { margin-left: -7px; }
+.fav { border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; color: #fff; }
+.tp .tl { font-size: 12px; font-weight: 500; white-space: nowrap; letter-spacing: -0.1px; }
+.tp .more { font-size: 9px; font-weight: 700; color: rgba(255,255,255,.7); padding-left: 4px; }
+.tk { position: relative; display: inline-block; height: 34px; vertical-align: top; }
+.tkbg { position: absolute; left: 0; top: 0; bottom: 0; width: 100%; border-radius: 17px; background: rgba(255,255,255,.06); box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+.tkrow { position: relative; display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 14px 0 6px; white-space: nowrap; }
+.tkrow .tl { font-size: 12px; font-weight: 500; letter-spacing: -0.1px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+.tkrow .chev { display: flex; }
+.tktext { position: absolute; left: 16px; top: 36px; display: none; font-size: 14px; line-height: 23px; color: #fff; opacity: .72; letter-spacing: -0.15px; white-space: pre-wrap; }
+.asst { font-size: 14px; line-height: 23px; color: rgba(255,255,255,.94); letter-spacing: -0.15px; }
+.asst code { font-family: ui-monospace, 'DejaVu Sans Mono', monospace; font-size: 12.5px; background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 5px; }
+.wskirt { position: absolute; left: 0; right: 0; bottom: 0; height: 38px; background: #000; }
+.wcomposer { position: absolute; left: 16px; right: 16px; bottom: 16px; height: 44px; border-radius: 22px; background: #161616; box-shadow: 0 4px 28px rgba(0,0,0,.6); overflow: hidden; }
+.wcomposer canvas { position: absolute; left: 0; top: 0; }
+.wcomposer .wph { position: absolute; left: 20px; top: 13px; font-size: 14px; line-height: 17px; color: rgba(255,255,255,.45); letter-spacing: -0.15px; }
+.wloading { position: absolute; inset: 0; background: #000; display: flex; align-items: center; justify-content: center; }
+.wtitle { position: absolute; left: 96px; right: 96px; top: 0; height: 54px; line-height: 54px; text-align: center; font-size: 12px; font-weight: 600; color: rgba(255,255,255,.85);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wlights { position: absolute; left: 20px; top: 20px; display: flex; gap: 9px; }
+.wlights i { display: block; width: 14px; height: 14px; border-radius: 7px; box-shadow: inset 0 0 0 0.5px rgba(0,0,0,.12); }
+
+/* cursor */
+#cursor { position: absolute; left: 0; top: 0; width: 20px; height: 26px; transform-origin: 0 0; }
+#ring { position: absolute; border-radius: 50%; border: 2px solid rgba(255,255,255,.9); }
+
+/* ---------- overlays (video space) ---------- */
+.cap { position: absolute; width: 760px; }
+.cap .over { font-size: 15px; font-weight: 600; letter-spacing: 3.2px; color: rgba(255,255,255,.62); text-transform: uppercase; margin-bottom: 12px; display: flex; align-items: center; gap: 12px; }
+.cap .over b { display: inline-block; width: 28px; height: 2px; background: rgba(255,255,255,.62); border-radius: 1px; }
+.cap .head { font-family: 'WD', 'W', sans-serif; font-size: 50px; line-height: 58px; font-weight: 600; letter-spacing: -1.2px; color: #fff; text-shadow: 0 2px 24px rgba(0,0,0,.35); }
+.cap.small { width: 640px; }
+.cap.small.narrow { width: 470px; }
+.cap.small .head { font-size: 38px; line-height: 44px; letter-spacing: -0.8px; }
+.cap.small .sub { font-size: 19px; line-height: 26px; margin-top: 8px; }
+.cap.small .over { margin-bottom: 8px; }
+.cap .sub { margin-top: 12px; font-size: 22px; line-height: 31px; color: rgba(255,255,255,.78); letter-spacing: -0.2px; text-shadow: 0 2px 18px rgba(0,0,0,.4); }
+.key { position: absolute; display: flex; align-items: center; gap: 12px; padding: 0 22px; height: 58px; border-radius: 16px;
+  background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.28); backdrop-filter: blur(18px);
+  box-shadow: 0 6px 0 rgba(0,0,0,.25), 0 14px 40px rgba(0,0,0,.35); font-size: 22px; font-weight: 600; color: #fff; letter-spacing: -0.2px; }
+.key .kg { font-size: 24px; opacity: .9; }
+#intro, #outro { position: absolute; inset: 0; background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.brandTitle { font-family: 'WD', 'W', sans-serif; font-size: 84px; font-weight: 600; letter-spacing: -2.6px; margin-top: 34px; }
+.brandSub { font-size: 26px; color: rgba(255,255,255,.6); margin-top: 14px; letter-spacing: -0.2px; }
+#measure { position: absolute; left: -9999px; top: 0; visibility: hidden; }
+</style>
+</head>
+<body>
+<div id="viewport">
+  <div id="screen">
+    <div id="wallpaper"></div>
+    <div id="menubar"></div>
+    <div id="windows"></div>
+    <div id="pillLayer">
+      <div id="childRow"></div>
+      <div id="pill">
+        <div class="pshape">
+          <div id="pcontent">
+            <canvas id="mainPlume"></canvas>
+            <div id="composerRow">
+              <div id="fieldSlot">
+                <div id="fieldText">
+                  <div id="placeholder" class="ctext"></div>
+                  <div id="draft" class="ctext"></div>
+                </div>
+              </div>
+              <div id="accessories"></div>
+              <div id="sendBtn" class="circleBtn"><div class="g" id="sendG1"></div><div class="g" id="sendG2"></div></div>
+            </div>
+            <div id="preview">
+              <div class="prow"><div class="pprompt"></div><div class="ppos"></div></div>
+              <div class="preply"></div>
+            </div>
+          </div>
+        </div>
+        <div class="pstroke"></div>
+      </div>
+    </div>
+    <svg id="cursor" viewBox="0 0 20 26"><path d="M1.5 1.5 L1.5 20.2 L6.1 15.9 L9.1 22.9 L12.3 21.5 L9.4 14.6 L15.6 14.6 Z" fill="#000" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/></svg>
+    <div id="ring"></div>
+  </div>
+  <div id="overlays"></div>
+  <div id="intro"></div>
+  <div id="outro"></div>
+</div>
+<div id="measure"><span id="mLine" class="ctext" style="white-space:pre"></span><div id="mBlock" class="ctext" style="width:494px"></div><span id="mReply" class="ctext" style="white-space:pre"></span></div>
+<script src="scene.js"></script>
+</body>
+</html>
