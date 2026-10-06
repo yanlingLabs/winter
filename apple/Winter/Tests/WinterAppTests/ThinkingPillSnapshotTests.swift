@@ -204,7 +204,7 @@ final class ThinkingPillSnapshotTests: XCTestCase {
         try render(expandEvents(live: false), pill: false, "expand-8-copy-line-dark", height: 620, appearance: .darkAqua)
     }
 
-    /// A long user message in the pill window: clamped, dissolving into the hairline, "Show more" on top.
+    /// A long user message in the pill window: clamped, fading out above the hairline, "Show more" on top.
     func testE9LongUserMessageCollapsed() throws {
         let long = (1...14).map { "Line \($0): the detached window should hide most of a long prompt behind a soft blur, keep the hairline right under it and offer Show more." }
             .joined(separator: "\n\n")
@@ -217,8 +217,7 @@ final class ThinkingPillSnapshotTests: XCTestCase {
         try render(events, pill: true, "expand-9-long-user-message", height: 460)
     }
 
-    /// The same block alone through `ImageRenderer`, which draws `.blur` (the `cacheDisplay` path
-    /// above drops Core Animation filters, so it shows the fade but never the blur).
+    /// The same block alone through `ImageRenderer` (SwiftUI's own renderer, closest to the window).
     func testE10LongUserMessageBlur() throws {
         let long = (1...14).map { "Line \($0): the detached window should hide most of a long prompt behind a soft blur, keep the hairline right under it and offer Show more." }
             .joined(separator: "\n\n")
@@ -233,7 +232,7 @@ final class ThinkingPillSnapshotTests: XCTestCase {
         guard let image = renderer.cgImage else { return XCTFail("no image") }
         let rep = NSBitmapImageRep(cgImage: image)
         guard let png = rep.representation(using: .png, properties: [:]) else { return XCTFail("no png") }
-        try png.write(to: outputDirectory.appendingPathComponent("expand-10-long-user-message-blur.png"))
+        try png.write(to: outputDirectory.appendingPathComponent("expand-10-long-user-message-fade.png"))
     }
 
     func test1PillLiveUntitled() throws { try render(liveEvents(titled: false), pill: true, "pill-1-live-thinking") }

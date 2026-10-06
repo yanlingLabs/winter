@@ -168,8 +168,8 @@ struct TranscriptUserBubble: View {
 }
 
 /// The user's message in the `.ruled` (pill-themed window) style. A long message is clamped to
-/// `collapsedHeight` and dissolves into the hairline under it — the bottom band blurs and fades
-/// rather than cutting hard — with a flat "Show more" capsule sitting on the blur. Expanded, the whole
+/// `collapsedHeight` and fades out over a short band just above the hairline under it — never a hard
+/// cut — with a flat "Show more" capsule sitting on the fade. Expanded, the whole
 /// text shows with "Show less" under it. A message only a little over the limit is never clamped
 /// (`collapseSlack`): hiding three lines behind a button is worse than showing them.
 struct RuledUserMessageText: View {
@@ -179,8 +179,8 @@ struct RuledUserMessageText: View {
 
     static let collapsedHeight: CGFloat = 200
     static let collapseSlack: CGFloat = 60
-    /// How tall the dissolving band at the bottom of a clamped message is.
-    static let fadeHeight: CGFloat = 120
+    /// How tall the fading band at the bottom of a clamped message is.
+    static let fadeHeight: CGFloat = 72
 
     /// PURE (`RuledUserMessageTests`): whether a message of this laid-out height is clamped.
     static func isCollapsible(fullHeight: CGFloat) -> Bool {
@@ -215,24 +215,13 @@ struct RuledUserMessageText: View {
         VStack(alignment: .leading, spacing: 0) {
             if isCollapsed {
                 ZStack(alignment: .bottom) {
-                    // Sharp text, fading out over the band…
+                    // The text fades out over the bottom band, ending just above the hairline.
                     clamped
                         .mask(LinearGradient(stops: [.init(color: .black, location: 0),
                                                      .init(color: .black, location: fadeStart),
-                                                     .init(color: .black.opacity(0.45), location: fadeStart + 0.2),
-                                                     .init(color: .clear, location: fadeStart + 0.4)],
-                                             startPoint: .top, endPoint: .bottom))
-                    // …under a blurred copy that takes over inside the band, so the text dissolves
-                    // instead of ending on a sliced line. The two ramps overlap across the band's
-                    // first half, so no line is ever drawn sharp-but-cut.
-                    clamped
-                        .blur(radius: 8)
-                        .mask(LinearGradient(stops: [.init(color: .clear, location: fadeStart),
-                                                     .init(color: .black, location: fadeStart + 0.22),
-                                                     .init(color: .black.opacity(0.5), location: 0.9),
+                                                     .init(color: .black.opacity(0.4), location: fadeStart + (1 - fadeStart) * 0.5),
                                                      .init(color: .clear, location: 1)],
                                              startPoint: .top, endPoint: .bottom))
-                        .allowsHitTesting(false)
                     expandButton(title: "Show more", symbol: "chevron.down")
                         .padding(.bottom, 10)
                 }
