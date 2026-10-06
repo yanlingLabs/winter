@@ -132,9 +132,11 @@ body { font-family: 'W', sans-serif; -webkit-font-smoothing: antialiased; color:
 .klabels { position: relative; height: 30px; }
 .klabels span { position: absolute; left: 0; top: 0; white-space: nowrap; font-family: 'WD', 'W', sans-serif; font-size: 26px; line-height: 30px;
   font-weight: 700; color: #0b0b0f; letter-spacing: -0.4px; }
-#intro, #outro { position: absolute; inset: 0; background: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-.brandTitle { font-family: 'WD', 'W', sans-serif; font-size: 84px; font-weight: 600; letter-spacing: -2.6px; margin-top: 34px; color: #0b0b0f; }
-.brandSub { font-size: 26px; color: rgba(0,0,0,.5); margin-top: 14px; letter-spacing: -0.2px; }
+#intro, #outro { position: absolute; inset: 0; background: #fff; }
+#intro { display: flex; align-items: center; justify-content: center; }
+#outroMark { position: absolute; width: 200px; height: 200px; }
+#outroWord { position: absolute; display: none; white-space: nowrap; font-family: 'WD', 'W', sans-serif; font-weight: 800;
+  font-size: 150px; line-height: 180px; letter-spacing: -5px; color: #0b0b0f; }
 #measure { position: absolute; left: -9999px; top: 0; visibility: hidden; }
 </style>
 </head>

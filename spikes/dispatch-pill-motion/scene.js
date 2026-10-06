@@ -831,7 +831,7 @@ function cursorAt(t) {
 // quick cascade and leave upward the same way as the next heading comes in, while a bar in the
 // chapter's plume colour draws in beneath and retracts with them. No container.
 const CHAPTERS = [   // t: the letters start rising; end: the last one has left (the next heading rises just before)
-  { t: 2.55, end: 7.45, pal: PAL.blue, head: 'Ask Dispatch anything' },
+  { t: 2.55, end: 7.45, pal: PAL.blue, head: 'Get anything done' },
   { t: 7.35, end: 14.05, pal: PAL.violet, head: 'It fans the work out' },
   { t: 13.95, end: 20.65, pal: PAL.mint, head: 'Open any session' },
   { t: 20.55, end: 24.1, pal: PAL.rose, head: 'Watch them work' },
@@ -884,9 +884,12 @@ const keyViews = KEYS.map(k => {
   const spans = k.labels.map(l => el('span', '', labels, l));
   return { e, cap, labels, spans, measured: false };
 });
-const introMark = brandSVG(132, '#0b0b0f'), outroMark = brandSVG(132, '#0b0b0f');
-$('intro').innerHTML = `<div id="introMark">${introMark.svg}</div><div class="brandTitle" id="introTitle">Dispatch</div><div class="brandSub" id="introSub">in Winter for Mac</div>`;
-$('outro').innerHTML = `<div id="outroMark">${outroMark.svg}</div><div class="brandTitle" id="outroTitle">Dispatch</div><div class="brandSub" id="outroSub">One pill. Every session.</div>`;
+// Opening: the Winter mark alone. Ending: the mark, which then slides aside as the name slides out from behind it.
+const OUTRO = { icon: 200, gap: 34, arrive: 33.05, slideAt: 33.95, slideDur: 0.95 };
+const introMark = brandSVG(240, '#0b0b0f'), outroMark = brandSVG(OUTRO.icon, '#0b0b0f');
+$('intro').innerHTML = `<div id="introMark">${introMark.svg}</div>`;
+$('outro').innerHTML = `<div id="outroMark">${outroMark.svg}</div><div id="outroWord">Winter</div>`;
+let outroWordWidth = 0;
 
 // ---------------------------------------------------------------- simulate one fixed step
 function simulate(t) {
@@ -1115,33 +1118,36 @@ function renderKeys(t) {
 function renderOverlays(t) {
   renderTitles(t);
   renderKeys(t);
-  // Intro.
+  // Intro: the mark arrives soft and settles, a band passing through it as it turns solid.
   const intro = $('intro');
   const ia = 1 - ramp(t, 1.95, 0.6, easeInOut);
   intro.style.display = ia > 0 ? 'flex' : 'none';
   if (ia > 0) {
     intro.style.opacity = ia;
-    const m = ramp(t, 0.25, 0.8, easeOutCubic);
-    css($('introMark'), { opacity: m, transform: `scale(${0.86 + 0.14 * m})`, filter: m < 1 ? `blur(${(1 - m) * 10}px)` : 'none' });
-    shimmerMark(intro, introMark.id, 132, t + 0.6, 0.55, 1, 60, 0.7);
-    const tt = ramp(t, 0.6, 0.7, easeOutCubic);
-    css($('introTitle'), { opacity: tt, transform: `translateY(${(1 - tt) * 16}px)` });
-    const ts = ramp(t, 0.85, 0.7, easeOutCubic);
-    css($('introSub'), { opacity: ts, transform: `translateY(${(1 - ts) * 12}px)` });
+    const m = ramp(t, 0.2, 0.9, easeOutCubic);
+    css($('introMark'), { opacity: m, transform: `scale(${(0.82 + 0.18 * m + 0.03 * ramp(t, 0.2, 2.4, easeOutCubic)).toFixed(4)})`, filter: m < 1 ? `blur(${(1 - m) * 12}px)` : 'none' });
+    shimmerMark(intro, introMark.id, 240, t + 0.5, lerp(0.35, 1, ramp(t, 0.7, 1.0)), 1, 90, 0.7);
   }
-  // Outro.
+  // Outro: the mark arrives, then slides aside while "Winter" slides out from behind it — the name is
+  // anchored to the mark's right edge and masked there, so it seems to come from under the mark.
   const outro = $('outro');
   const oa = ramp(t, 32.6, 0.8, easeInOut);
-  outro.style.display = oa > 0 ? 'flex' : 'none';
+  outro.style.display = oa > 0 ? 'block' : 'none';
   if (oa > 0) {
     outro.style.opacity = oa;
-    const m = ramp(t, 33.1, 0.8, easeOutCubic);
-    css($('outroMark'), { opacity: m * (1 - ramp(t, 35.3, 0.6)), transform: `scale(${0.86 + 0.14 * m})`, filter: m < 1 ? `blur(${(1 - m) * 10}px)` : 'none' });
-    shimmerMark(outro, outroMark.id, 132, t, 0.55, 1, 60, 0.7);
-    const tt = ramp(t, 33.4, 0.7, easeOutCubic), fade = 1 - ramp(t, 35.3, 0.6);
-    css($('outroTitle'), { opacity: tt * fade, transform: `translateY(${(1 - tt) * 16}px)` });
-    const ts = ramp(t, 33.65, 0.7, easeOutCubic);
-    css($('outroSub'), { opacity: ts * fade, transform: `translateY(${(1 - ts) * 12}px)` });
+    const m = ramp(t, OUTRO.arrive, 0.8, easeOutCubic);
+    const p = easeInOut(clamp((t - OUTRO.slideAt) / OUTRO.slideDur, 0, 1));
+    const total = OUTRO.icon + OUTRO.gap + outroWordWidth;
+    const iconX = lerp(960 - OUTRO.icon / 2, 960 - total / 2, p);
+    css($('outroMark'), { left: iconX.toFixed(2) + 'px', top: (540 - OUTRO.icon / 2) + 'px', opacity: m,
+      transform: `scale(${(0.82 + 0.18 * m).toFixed(4)})`, filter: m < 1 ? `blur(${(1 - m) * 12}px)` : 'none' });
+    shimmerMark(outro, outroMark.id, OUTRO.icon, t, lerp(0.35, 1, ramp(t, OUTRO.arrive + 0.4, 1.0)), 1, 80, 0.7);
+    const q = easeOutCubic(clamp((t - OUTRO.slideAt - 0.06) / OUTRO.slideDur, 0, 1));
+    const edge = iconX + OUTRO.icon;   // the mark's right edge, moving left
+    const left = edge + OUTRO.gap - (1 - q) * (outroWordWidth + OUTRO.gap);
+    const hidden = Math.max(0, edge + 4 - left);   // what is still behind the mark
+    css($('outroWord'), { display: q > 0 ? 'block' : 'none', left: left.toFixed(2) + 'px', top: (540 - 90) + 'px',
+      clipPath: `inset(-30px -40px -40px ${hidden.toFixed(2)}px)` });
   }
 }
 
@@ -1154,6 +1160,13 @@ window.renderFrame = function (n) {
   render(T);
   return T;
 };
-Promise.all(['800 76px WD', '700 24px WD', '400 14px W', '500 14px W', '600 16px W'].map(f => document.fonts.load(f)))
+Promise.all(['800 76px WD', '800 150px WD', '700 24px WD', '400 14px W', '500 14px W', '600 16px W'].map(f => document.fonts.load(f)))
   .then(() => document.fonts.ready)
-  .then(() => { measureTitles(); window.sceneReady = true; });
+  .then(() => {
+    measureTitles();
+    const word = $('outroWord'), outro = $('outro');
+    outro.style.display = 'block'; word.style.display = 'block';
+    outroWordWidth = Math.ceil(word.getBoundingClientRect().width);
+    word.style.display = 'none'; outro.style.display = 'none';
+    window.sceneReady = true;
+  });
