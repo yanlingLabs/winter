@@ -104,9 +104,50 @@ export const REMOTE_STREAM_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new 
 export function filterRemoteStreamEvent(event: SessionEvent): SessionEvent | null {
   if (!REMOTE_STREAM_EVENT_TYPES.has(event.type)) return null;
   // The thinking pill (review r1): the phone gets a reasoning event WITHOUT its text (`phoneViewOf`,
-  // the same view `session.history` serves). A live `delta` left with neither text nor a title — raw
-  // reasoning, which has no title, streams nothing else — is not sent at all.
+  // the same view `session.history` serves). A live `delta` left with no title is not sent at all —
+  // with its text gone it says nothing. (Repeats of an unchanged title are dropped per CLIENT, by
+  // `createRemoteStreamFilter` below.)
   const view = phoneViewOf(event);
   if (view.type === "thinking_delta" && view.phase === "delta" && view.title === undefined) return null;
   return capEvent(view);
+}
+
+/** How many open reasoning blocks one remote client remembers a title for — a block whose
+ *  `thinking_block` never arrives (a dropped child) must not grow the map forever. */
+const REMOTE_THINKING_BLOCKS_MAX = 64;
+
+/**
+ * The remote live/replay policy for ONE remote client: `filterRemoteStreamEvent`, plus a per-client
+ * dedupe of the thinking pill's title-only deltas (review r1, MEDIUM).
+ *
+ * The daemon puts the block's CURRENT title on every text-carrying `thinking_delta` (so a client
+ * joining mid-block learns it), and the phone's view strips the text — so a raw-reasoning block of a
+ * few thousand deltas would otherwise reach the phone as a few thousand identical title-only frames
+ * (measured: ~7–9 MB for one long DeepSeek block). Per block this forwards the `start`, the FIRST
+ * title-bearing delta THIS client sees (a mid-block joiner learns the title from the next delta), and
+ * each CHANGE of title or kind; repeats are dropped, and the block is forgotten at its `thinking_block`.
+ * Construct one per remote `HubClient` (a re-attach builds a new one, so it relearns).
+ */
+export function createRemoteStreamFilter(): (event: SessionEvent) => SessionEvent | null {
+  const sent = new Map<string, string>();
+  return (event) => {
+    const allowed = filterRemoteStreamEvent(event);
+    if (allowed === null) return null;
+    if (allowed.type === "thinking_block") {
+      sent.delete(allowed.blockId);
+      return allowed;
+    }
+    if (allowed.type !== "thinking_delta") return allowed;
+    if (allowed.phase === "start") {
+      sent.delete(allowed.blockId);
+      return allowed;
+    }
+    // Keyed on (kind, title): a kind change with the same title (hidden → summary) still reaches the phone.
+    const key = `${allowed.kind}\u0000${allowed.title ?? ""}`;
+    if (sent.get(allowed.blockId) === key) return null;
+    sent.delete(allowed.blockId);            // re-insert: the map's order is recency
+    sent.set(allowed.blockId, key);
+    if (sent.size > REMOTE_THINKING_BLOCKS_MAX) sent.delete(sent.keys().next().value!);
+    return allowed;
+  };
 }

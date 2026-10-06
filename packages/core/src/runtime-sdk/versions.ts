@@ -3,8 +3,18 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.47";
-/** Bumped to 0.0.47 (2026-10-05, the thinking pill): every provider family's reasoning streams live to the host as the
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.49";
+/** Bumped to 0.0.49 (2026-10-06): a mid-stream Anthropic `error` frame carries the vendor's own message (control
+ *  characters collapsed, quoted spans over 40 chars elided, capped at 300) and is classified by its type in the
+ *  runtime (bad_request/auth/rate_limit/timeout, else server). That code does not reach this daemon as structure: the
+ *  result is still `terminal_reason: "api_error"` with `api_error_status: null`, so `projector/errors.ts` keeps
+ *  reading it as `server`, now with the explanation in its bounded (200-char) detail.
+ *  Earlier: bumped to 0.0.48 (2026-10-05): Claude 5.x rows (Fable 5.1, Opus 5.5, Sonnet 5.5, Fable 5) request thinking display
+ *  "summarized" again (no updates beta), so their reasoning reaches the pill as readable `summary` text titled by the
+ *  daemon's rule; readable reasoning summaries are requested for 17 more openai rows, 23 azure, 8 google, 11 vertex and
+ *  Opus 4.7/4.8; a 400 refusing `reasoning.summary` (an unverified OpenAI org) is retried once without it (memoised
+ *  1 h); no summary is requested at effort "none".
+ *  Earlier: bumped to 0.0.47 (2026-10-05, the thinking pill): every provider family's reasoning streams live to the host as the
  *  Winter-only `system/reasoning_progress` frame (start → delta* → end per block, `kind` summary/update/exposed/hidden,
  *  the last kind wins), which the projector turns into `thinking_delta`/`thinking_block` (`projector/thinking.ts`);
  *  Claude 5.x rows request `display: "updates"`, whose progress-update blocks title the pill.

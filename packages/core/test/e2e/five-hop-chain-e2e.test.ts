@@ -101,7 +101,9 @@ describe("A-5 part 1: the five-hop chain's prompt rule, against the REAL daemon 
 
   test("catalog premises this whole table rests on (measured against SDK 0.0.11, the amendment's own GLM overlay)", () => {
     const endpoints = endpointsFresh();
-    expect(endpoints.gpt.readableState).toBe("none"); // hidden reasoning source
+    // Hidden reasoning with a readable SUMMARY since agent SDK 0.0.48 (openai rows request reasoning
+    // summaries); still never full-exposed, which is what the hops below rest on.
+    expect(endpoints.gpt.readableState).toBe("summary");
     expect(endpoints.gpt.continuation).not.toBe("none");
     expect(endpoints.claude.readableState).not.toBe("full-exposed"); // native replay only within claude
     expect(endpoints.deepseek.readableState).toBe("full-exposed"); // complete exposed

@@ -42,8 +42,10 @@ final class ThinkingTitleTests: XCTestCase {
         XCTAssertNil(t("update", ["   "]))
     }
 
-    func testExposedAndHiddenHaveNoTitle() {
-        XCTAssertNil(t("exposed", ["**Looks like a heading**"]))
+    func testExposedTitlesLikeSummaryAndHiddenHasNoTitle() {
+        XCTAssertEqual(t("exposed", ["**Looks like a heading**"]), "Looks like a heading")
+        XCTAssertEqual(t("exposed", ["Small project. Let me read all the files."]), "Reading all the files")
+        XCTAssertNil(t("exposed", ["Raw thoughts with no activity in them."]))
         XCTAssertNil(t("hidden", ["anything"]))
     }
 
@@ -144,7 +146,7 @@ final class ThinkingBlocksTests: XCTestCase {
         XCTAssertEqual(d3.text, "\n\n**Check", "the separator rides the increment")
         XCTAssertEqual(d3.title, "Planning", "the CURRENT title rides every text delta — kept, not cleared")
         let d4 = delta(b.accept(p("rb_2", .delta, "summary", "ing the tests**", part: 1)))!
-        XCTAssertEqual(d4.title, "Checking the tests")
+        XCTAssertEqual(d4.title, "Planning", "a heading counts once its LINE is closed (review r2), or at the end")
         let end = block(b.accept(p("rb_2", .end)))!
         XCTAssertEqual(end.text, "**Planning**\n\nread the schema\n\n**Checking the tests**")
         XCTAssertEqual(end.title, "Checking the tests")
@@ -390,7 +392,8 @@ final class ChatEngineThinkingTests: XCTestCase {
                                          "thinking_block", "agent_error", "turn_completed"])
 
         // An interrupt mid-block.
-        let hanging = HangingProvider(prefix: [rp("rs_y", .start, "hidden"), rp("rs_y", .delta, "summary", "**Busy**")])
+        // The heading's line is closed, so the pill showed it — and the cut block keeps it.
+        let hanging = HangingProvider(prefix: [rp("rs_y", .start, "hidden"), rp("rs_y", .delta, "summary", "**Busy**\n")])
         let interrupted = EventCollector()
         let eng = engine(hanging)
         let turn = Task {

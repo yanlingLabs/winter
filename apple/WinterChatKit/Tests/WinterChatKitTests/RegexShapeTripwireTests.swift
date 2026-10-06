@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+@testable import WinterChatKit
 
 /// THE STRUCTURAL TRIPWIRE for the HTML-scanning regex class, on the Swift side — the mirror of
 /// `packages/core/test/agent/tools/regex-shapes.test.ts`, and the reason both exist: Task 6b found the
@@ -66,6 +67,13 @@ final class RegexShapeTripwireTests: XCTestCase {
     /// checked. Its presence is asserted, not assumed, so renaming or rewriting the helper trips the gate
     /// instead of quietly widening this hole.
     private static let analyzedIndirection = (file: "HtmlToText.swift", argumentPrefix: "pattern)")
+
+    /// The SECOND unreadable site, checked another way: `ThinkingTitleRule.swift`'s `JSRegex` (the
+    /// thinking pill's title rule, a port of the daemon's) builds its patterns from word lists, so no
+    /// literal exists to read. They are read at RUN TIME instead (`ActivityTitleRule.compiledPatterns`,
+    /// tied to the file's `JSRegex(` construction sites by count) and held to the same rule —
+    /// `testTheThinkingTitleRulesRuntimePatternsPassTheRule`.
+    private static let runtimeCheckedIndirection = (file: "ThinkingTitleRule.swift", argumentPrefix: "pattern, options:")
 
     // MARK: - the Swift-source lexer
 
@@ -371,6 +379,7 @@ final class RegexShapeTripwireTests: XCTestCase {
         var offenders: [String] = []
         var unreadable: [String] = []
         var sawAnalyzedIndirection = false
+        var sawRuntimeCheckedIndirection = false
         for file in try Self.sourceFiles() {
             let (found, opaque) = Self.regexPatterns(in: try Self.read(file))
             for p in opaque {
@@ -378,6 +387,11 @@ final class RegexShapeTripwireTests: XCTestCase {
                    p.pattern.hasPrefix(Self.analyzedIndirection.argumentPrefix) {
                     sawAnalyzedIndirection = true
                     continue
+                }
+                if file == Self.runtimeCheckedIndirection.file,
+                   p.pattern.hasPrefix(Self.runtimeCheckedIndirection.argumentPrefix) {
+                    sawRuntimeCheckedIndirection = true
+                    continue   // checked at run time — see `testTheThinkingTitleRulesRuntimePatternsPassTheRule`
                 }
                 unreadable.append("\(file):\(p.line)  \(p.pattern)")
             }
@@ -392,7 +406,152 @@ final class RegexShapeTripwireTests: XCTestCase {
                        "a regex built from something other than a literal cannot be checked — fail closed")
         XCTAssertTrue(sawAnalyzedIndirection,
                       "the `compile` helper's forwarding site is gone — re-derive what this gate may skip")
+        XCTAssertTrue(sawRuntimeCheckedIndirection,
+                      "the `JSRegex` forwarding site is gone — re-derive what this gate may skip (and its runtime check)")
         XCTAssertEqual(offenders.joined(separator: "\n"), "")
+    }
+
+    /// The runtime half of the gate for `ThinkingTitleRule.swift`: exactly one opaque site (its `JSRegex`
+    /// forwarding `pattern`), `JSRegex` is FILEPRIVATE (so no other file can build one past this gate),
+    /// `compiledPatterns` names one pattern per construction site in the file (so a new regex cannot be
+    /// added without being listed), and EVERY one passes both rules — the markup rule above where it
+    /// applies, and, for all of them, the nested/adjacent unbounded-quantifier audit (review r1: the
+    /// title rule's lead-word pattern backtracked for seconds on the daemon's main thread).
+    func testTheThinkingTitleRulesRuntimePatternsPassTheRule() throws {
+        let src = try Self.read(Self.runtimeCheckedIndirection.file)
+        let (found, opaque) = Self.regexPatterns(in: src)
+        XCTAssertEqual(found.count, 0, "a literal here would be checked by the main gate; this file has none: \(found)")
+        XCTAssertEqual(opaque.count, 1, "unexpected unreadable regex site(s): \(opaque)")
+        XCTAssertTrue(opaque.first?.pattern.hasPrefix(Self.runtimeCheckedIndirection.argumentPrefix) ?? false,
+                      "the `JSRegex` forwarding site changed shape: \(opaque)")
+        XCTAssertTrue(src.contains("fileprivate struct JSRegex"), "JSRegex must stay fileprivate to this file")
+        // Every construction form: `JSRegex(…)`, `JSRegex.init(…)` and a typed `let x: JSRegex = .init(…)`.
+        let count = { (needle: String) in src.components(separatedBy: needle).count - 1 }
+        let constructionSites = count("JSRegex(") + count("JSRegex.init(") + count(": JSRegex = .init(")
+        let patterns = ActivityTitleRule.compiledPatterns
+        XCTAssertEqual(patterns.count, constructionSites, "compiledPatterns must list every JSRegex the file builds")
+        XCTAssertEqual(Set(patterns).count, patterns.count)
+        for p in patterns {
+            if Self.mentionsMarkup(p) { XCTAssertFalse(Self.unboundedQuantifierBeforeMore(p), "unbounded scan before more in \(p)") }
+            XCTAssertEqual(Self.quantifierHazards(p), [], "nested/adjacent unbounded quantifiers in \(p)")
+        }
+    }
+
+    func testTheQuantifierAuditFiresOnTheShapesThatBacktrack() {
+        XCTAssertFalse(Self.quantifierHazards(#"^(?:(?:now|so)(?![A-Za-z'])\s*,?\s+)*"#).isEmpty)   // the old lead-word pattern
+        XCTAssertFalse(Self.quantifierHazards(#"\s*,?\s+"#).isEmpty)
+        XCTAssertFalse(Self.quantifierHazards(#"(a+)+b"#).isEmpty)
+        XCTAssertFalse(Self.quantifierHazards(#"(?:x\s+)*"#).isEmpty)
+        XCTAssertFalse(Self.quantifierHazards(#"(?:now|now )*"#).isEmpty)          // overlapping alternatives
+        XCTAssertFalse(Self.quantifierHazards(#"(?:a|ab)+c"#).isEmpty)
+        XCTAssertEqual(Self.quantifierHazards(#"(?:a|b)*"#), [])
+        XCTAssertEqual(Self.quantifierHazards(#"(?:ok|okay)(?![a-z])"#), [])         // not under a quantifier
+        XCTAssertEqual(Self.quantifierHazards(#"^[ \t]*\*\*(.+?)\*\*(.*)$"#), [])
+        XCTAssertEqual(Self.quantifierHazards(#"^(?:(?:now|so)(?![a-z'])(?: ?,)? )*([a-z]+ing)(?=[ ,]|\z)([^\n]*)\z"#), [])
+    }
+
+    /// The Swift port of the daemon's `quantifierHazards` (`thinking-title-hardening.test.ts`): a quantified
+    /// group whose body holds an unbounded quantifier, or two unbounded runs with only optional atoms
+    /// between them (a lookaround delimits). An approximation that errs toward flagging.
+    static func quantifierHazards(_ pattern: String) -> [String] {
+        var hazards: [String] = []
+        struct Shape { var startsUnbounded = false; var endsUnbounded = false; var hasUnbounded = false }
+        func skipClass(_ s: [Character], _ i: Int) -> Int {
+            var j = i + 1
+            while j < s.count, s[j] != "]" { if s[j] == "\\" { j += 1 }; j += 1 }
+            return j + 1
+        }
+        func groupEnd(_ s: [Character], _ i: Int) -> Int {
+            var depth = 0
+            var j = i
+            while j < s.count {
+                let c = s[j]
+                if c == "\\" { j += 2; continue }
+                if c == "[" { j = skipClass(s, j); continue }
+                if c == "(" { depth += 1 } else if c == ")" { depth -= 1; if depth == 0 { return j + 1 } }
+                j += 1
+            }
+            return s.count
+        }
+        func scan(_ s: [Character]) -> Shape {
+            var shape = Shape()
+            var prevEnds = false
+            var first = true
+            var i = 0
+            while i < s.count {
+                let c = s[i]
+                if c == "|" { prevEnds = false; first = true; i += 1; continue }
+                var atom = Shape()
+                var zeroWidth = false
+                var isGroup = false
+                var groupBody = ""
+                if c == "\\" { i += 2 }
+                else if c == "[" { i = skipClass(s, i) }
+                else if c == "(" {
+                    isGroup = true
+                    let end = groupEnd(s, i)
+                    var body = String(s[(i + 1)..<max(i + 1, end - 1)])
+                    if body.hasPrefix("?=") || body.hasPrefix("?!") || body.hasPrefix("?<=") || body.hasPrefix("?<!") { zeroWidth = true }
+                    for prefix in ["?<=", "?<!", "?:", "?=", "?!"] where body.hasPrefix(prefix) { body.removeFirst(prefix.count); break }
+                    groupBody = body
+                    atom = scan(Array(body))
+                    i = end
+                } else if c == "^" || c == "$" { zeroWidth = true; i += 1 }
+                else { i += 1 }
+                var unbounded = false
+                var optional = zeroWidth
+                let q: Character? = i < s.count ? s[i] : nil
+                if q == "*" || q == "+" { unbounded = true; if q == "*" { optional = true }; i += 1 }
+                else if q == "?" { optional = true; i += 1 }
+                else if q == "{", let close = s[i...].firstIndex(of: "}") {
+                    let body = String(s[(i + 1)..<close])
+                    if body.hasSuffix(","), body.dropLast().allSatisfy(\.isNumber), !body.dropLast().isEmpty { unbounded = true }
+                    if body == "0" || body.hasPrefix("0,") { optional = true }
+                    i = close + 1
+                }
+                if let q, "*+?}".contains(q), i < s.count, s[i] == "?" || s[i] == "+" { i += 1 }   // lazy / possessive
+                if unbounded && atom.hasUnbounded { hazards.append("nested unbounded quantifier") }
+                if unbounded && isGroup && overlappingAlternatives(groupBody) { hazards.append("overlapping alternatives under a quantifier") }
+                if isGroup && zeroWidth {
+                    shape.hasUnbounded = shape.hasUnbounded || atom.hasUnbounded
+                    prevEnds = false
+                    continue
+                }
+                let starts = isGroup ? atom.startsUnbounded : unbounded
+                let ends = isGroup ? atom.endsUnbounded : unbounded
+                if prevEnds && starts { hazards.append("adjacent unbounded quantifiers") }
+                shape.hasUnbounded = shape.hasUnbounded || unbounded || atom.hasUnbounded
+                if first && !zeroWidth { shape.startsUnbounded = shape.startsUnbounded || starts }
+                if !zeroWidth { first = false }
+                if ends { prevEnds = true } else if !optional { prevEnds = false }
+                shape.endsUnbounded = ends || (optional && shape.endsUnbounded)
+            }
+            return shape
+        }
+        _ = scan(Array(pattern))
+        return hazards
+    }
+
+    /// A group body's TOP-LEVEL alternatives that are plain literals, one a prefix of another (`now|now `,
+    /// `a|ab`, an empty one): under `*`/`+` the engine can split one run of text several ways. An
+    /// alternative with any regex syntax is not compared (quiet rather than guessing).
+    static func overlappingAlternatives(_ body: String) -> Bool {
+        var alts: [String] = []
+        var depth = 0
+        var cur = ""
+        var chars = Array(body)[...]
+        while let c = chars.popFirst() {
+            if c == "\\" { cur.append(c); if let n = chars.popFirst() { cur.append(n) }; continue }
+            if c == "(" || c == "[" { depth += 1 } else if c == ")" || c == "]" { depth -= 1 }
+            if c == "|" && depth == 0 { alts.append(cur); cur = ""; continue }
+            cur.append(c)
+        }
+        alts.append(cur)
+        guard alts.count >= 2 else { return false }
+        let meta = Set("\\()[]{}*+?.^$|")
+        guard alts.allSatisfy({ !$0.contains(where: meta.contains) }) else { return false }
+        for i in alts.indices { for j in alts.indices where i != j && alts[j].hasPrefix(alts[i]) { return true } }
+        return false
     }
 
     func testTheAllowlistIsEmptyAndAddingToItMustBeDeliberate() {
