@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Winter social card</title>
+<style>
+/* GitHub's social preview card (1280×640). The pills are a still of the video's own render (record.cjs card). */
+@font-face { font-family: 'W'; src: local('Inter Regular'), local('Inter-Regular'), url('file:///usr/share/fonts/opentype/inter/Inter-Regular.otf'); font-weight: 400; }
+@font-face { font-family: 'W'; src: local('Inter Medium'), local('Inter-Medium'), url('file:///usr/share/fonts/opentype/inter/Inter-Medium.otf'); font-weight: 500; }
+@font-face { font-family: 'WD'; src: local('Inter Display Regular'), local('InterDisplay-Regular'), url('file:///usr/share/fonts/opentype/inter/InterDisplay-Regular.otf'); font-weight: 400; }
+@font-face { font-family: 'WD'; src: local('Inter Display Medium'), local('InterDisplay-Medium'), url('file:///usr/share/fonts/opentype/inter/InterDisplay-Medium.otf'); font-weight: 500; }
+@font-face { font-family: 'WD'; src: local('Inter Display ExtraBold'), local('InterDisplay-ExtraBold'), url('file:///usr/share/fonts/opentype/inter/InterDisplay-ExtraBold.otf'); font-weight: 800; }
+
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 1280px; height: 640px; overflow: hidden; }
+body { font-family: 'W', sans-serif; -webkit-font-smoothing: antialiased; color: #0b0b0f; position: relative;
+  /* The video's desktop, opened up: the same three washes over near-white. */
+  background:
+    radial-gradient(760px 520px at 6% 0%, rgba(120, 132, 255, .12), transparent 68%),
+    radial-gradient(700px 500px at 98% 8%, rgba(90, 200, 255, .10), transparent 66%),
+    radial-gradient(900px 520px at 70% 108%, rgba(255, 150, 120, .12), transparent 66%),
+    linear-gradient(180deg, #fdfdfe 0%, #f3f4f7 100%); }
+
+.lockup { position: absolute; display: flex; align-items: center; }
+.lockup .word { font-family: 'WD', 'W', sans-serif; font-weight: 400; white-space: nowrap; }
+.eyebrow { position: absolute; font-family: 'WD', 'W', sans-serif; font-weight: 500; color: #6b6f76; white-space: nowrap; }
+.head { position: absolute; left: 0; right: 0; text-align: center; font-family: 'WD', 'W', sans-serif; font-weight: 800; white-space: nowrap; }
+.head .bar { display: block; margin: 0 auto; border-radius: 4px;
+  background: linear-gradient(90deg, rgb(13, 84, 255), rgb(41, 140, 255)); }
+.sub { position: absolute; left: 0; right: 0; text-align: center; color: #565a61; white-space: nowrap; }
+#pills { position: absolute; left: 50%; transform: translateX(-50%); }
+</style>
+</head>
+<body>
+<script>
+// The mark, cropped to its ink so it sits optically level with the word beside it.
+function markSVG(height, color) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const probe = document.createElementNS(ns, 'svg');
+  probe.setAttribute('viewBox', '0 0 240 240');
+  probe.style.cssText = 'position:absolute;left:-9999px;width:240px;height:240px';
+  const g = document.createElementNS(ns, 'g');
+  for (const d of (window.BRAND_PATHS || [])) { const p = document.createElementNS(ns, 'path'); p.setAttribute('d', d); g.appendChild(p); }
+  probe.appendChild(g); document.body.appendChild(probe);
+  const b = g.getBBox(); probe.remove();
+  const w = height * b.width / b.height;
+  return `<svg width="${w.toFixed(2)}" height="${height}" viewBox="${b.x} ${b.y} ${b.width} ${b.height}"><g fill="${color}">${
+    (window.BRAND_PATHS || []).map(d => `<path d="${d}"/>`).join('')}</g></svg>`;
+}
+
+const V = new URLSearchParams(location.search).get('v') || 'b';
+const add = (cls, html, style) => { const e = document.createElement('div'); e.className = cls; e.innerHTML = html; Object.assign(e.style, style); document.body.appendChild(e); return e; };
+
+if (V === 'b') {
+  // Lockup top left, the promise centred, the pills beneath it as the picture.
+  add('lockup', `${markSVG(44, '#0b0b0f')}<span class="word" style="font-size:50px;letter-spacing:-1.2px;margin-left:14px;line-height:1">winter</span>`, { left: '64px', top: '50px' });
+  add('eyebrow', 'Open-source AI assistant for macOS', { right: '66px', top: '64px', fontSize: '22px', letterSpacing: '-0.2px' });
+  add('head', `Get anything done.<span class="bar" style="width:0;height:7px;margin-top:6px"></span>`, { top: '128px', fontSize: '92px', lineHeight: '100px', letterSpacing: '-3.4px' });
+  add('sub', 'Hand it a job. It starts the sessions, watches them work and reports back.', { top: '262px', fontSize: '28px', lineHeight: '36px', letterSpacing: '-0.3px' });
+  add('', `<img id="pills" src="out/card-pills.png">`, {});
+} else {
+  // The end card's lockup as the hero, the pills beneath it.
+  add('lockup', `${markSVG(92, '#0b0b0f')}<span class="word" style="font-size:104px;letter-spacing:-2.4px;margin-left:24px;line-height:1">winter</span>`, { left: '50%', top: '70px', transform: 'translateX(-50%)' });
+  add('sub', 'Get anything done. It fans the work out and reports back.', { top: '204px', fontSize: '30px', lineHeight: '38px', letterSpacing: '-0.3px' });
+  add('', `<img id="pills" src="out/card-pills.png">`, {});
+}
+
+const img = document.getElementById('pills');
+Promise.all([...['400 50px WD', '500 22px WD', '800 92px WD', '400 28px W'].map(f => document.fonts.load(f)),
+  img.decode ? img.decode() : new Promise(r => (img.onload = r))])
+  .then(() => document.fonts.ready)
+  .then(() => {
+    // The underline spans the heading's ink, like the video's chapter bars.
+    const head = document.querySelector('.head');
+    if (head) {
+      const r = document.createRange(); r.selectNodeContents(head.firstChild);
+      head.querySelector('.bar').style.width = Math.round(r.getBoundingClientRect().width) + 'px';
+    }
+    // The pills, placed by their opaque bounds (the still carries room for the shadow around them).
+    const cv = document.createElement('canvas'); cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+    const cx = cv.getContext('2d'); cx.drawImage(img, 0, 0);
+    const px = cx.getImageData(0, 0, cv.width, cv.height).data;
+    let x0 = cv.width, y0 = cv.height, x1 = 0, y1 = 0;
+    for (let y = 0; y < cv.height; y++) for (let x = 0; x < cv.width; x++) if (px[(y * cv.width + x) * 4 + 3] > 200) {
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    const W = V === 'b' ? 1080 : 1080, top = V === 'b' ? 340 : 312;
+    const k = W / (x1 - x0 + 1);
+    Object.assign(img.style, { left: (640 - W / 2 - x0 * k) + 'px', top: (top - y0 * k) + 'px', width: (cv.width * k) + 'px', transform: 'none' });
+    window.cardReady = true;
+  });
+</script>
+</body>
+</html>

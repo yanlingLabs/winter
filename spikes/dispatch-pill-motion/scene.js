@@ -236,7 +236,7 @@ class WorkingModel {
 
 /** One plume drawn into its own canvas (WorkingAnimationView's Canvas). */
 class PlumeView {
-  constructor(canvas, scale) { this.cv = canvas; this.scale = scale; this.glow = document.createElement('canvas'); }
+  constructor(canvas, scale) { this.cv = canvas; this.scale = scale; this.glow = document.createElement('canvas'); this.clearX = -Infinity; }
   draw(cssW, cssH, model, pal, emitterInset = EMITTER_INSET) {
     const s = this.scale, W = Math.max(1, Math.round(cssW * s)), H = Math.max(1, Math.round(cssH * s));
     const cv = this.cv, g = this.glow;
@@ -261,7 +261,7 @@ class PlumeView {
     for (const c of circles) if (c.spark) disc(ctx, c.x, c.y, c.d);
     for (const tk of model.plume.tokens) {
       const t = tokenTile(tk, cssH, emitterX, tailX);
-      if (t.side <= 0.5) continue;
+      if (t.side <= 0.5 || t.x - t.side / 2 < this.clearX) continue;   // clearX: the social card keeps titles clear
       ctx.fillStyle = '#fff'; disc(ctx, t.x, t.y, t.side);
       if (t.item.kind === 'tool') drawIcon(ctx, t.item.symbol, t.x, t.y, t.side * 0.5, rgbStr(plumeRGB(0, pal)));
       else {
@@ -801,8 +801,12 @@ function camera(t) {
   const m = 1 + beatPush(t);   // scaled about the frame's centre
   return { S: S * m, tx: 960 - (960 - tx) * m, ty: 540 - (540 - ty) * m };
 }
+const PARAMS = new URLSearchParams(location.search);
+const SILENT = PARAMS.has('silent');   // the README loop has no soundtrack to move with
+const CARD = PARAMS.has('card');       // the social card's still (record.cjs card)
 function beatPush(t) {
   let push = 0;
+  if (SILENT) return push;
   for (const k of window.MUSIC.KICKS) if (t >= k.t && t - k.t < 0.6) push += 0.0045 * k.v * Math.exp(-(t - k.t) / 0.1);
   for (const h of window.MUSIC.IMPACTS) if (t >= h.t && t - h.t < 1.2) push += 0.013 * h.a * Math.exp(-(t - h.t) / 0.22);
   return push;
@@ -1037,6 +1041,8 @@ function renderChildren(t) {
       filter: e < 0.999 ? `blur(${((1 - e) * 6 * 0.8).toFixed(2)}px)` : 'none',
     });
     const done = c.doneA.value(t), pa = c.plumeA.value(t);
+    // The social card's still keeps the tiles off the title, so it reads at thumbnail size.
+    if (CARD) c.pv.clearX = 12 + 20 * done + 6 * done + c.titleW + 4;
     c.pv.draw(w, M.pillHeight, c.model, c.def.pal);
     c.pv.cv.style.opacity = 0.8 * pa;
     // HStack(spacing 6): [glyph] [title] [stop], padded 12 / 6.
@@ -1058,6 +1064,8 @@ function buildChildDom(c) {
   stop.style.background = rgbStr(c.def.pal.body);
   c.dom = { root, glyph, title, stop };
   c.pv = new PlumeView(cv, 4);
+  const mc = document.createElement('canvas').getContext('2d'); mc.font = '500 12px W';
+  c.titleW = mc.measureText(c.def.title).width - 0.1 * c.def.title.length;   // .ctitle: 12 px medium, -0.1 px tracking
 }
 
 const cursorEl = $('cursor'), ringEl = $('ring');
