@@ -315,15 +315,15 @@ function shimmerText(e, w, T, active) {
 }
 
 // ---------------------------------------------------------------- the story
-const PROMPT = 'Get the 2.4 release out: fix the flaky login test, bump our dependencies and draft the release notes.';
-const REPLY_1 = "I've started three sessions — one for each task. I'll report back as each one finishes.";
-const REPLY_2 = 'All three are done: the login test is fixed, 14 packages are bumped, and the release notes are in RELEASE.md.';
+const PROMPT = 'Get 2.4 out: check the milestone, fix the flaky login test, bump deps (read the changelogs) and draft release notes.';
+const REPLY_1 = 'I’ve started three sessions, one per task. They’ll check upstream issues and changelogs first; I’ll report back as each one finishes.';
+const REPLY_2 = 'All three are done and CI is green: the login fix matches a known Jest issue, 14 packages are bumped, and RELEASE.md links every PR.';
 
 const CHILD_DEFS = [
   {
     id: 'A', title: 'Fix flaky login test', pal: PAL.violet, spawn: 8.6, done: 24.0,
     items: [
-      { type: 'user', at: 8.6, text: 'Fix the flaky login test in packages/auth — it fails about one run in five on CI.' },
+      { type: 'user', at: 8.6, text: 'Fix the flaky login test in packages/auth. It fails about one run in five on CI; check for known upstream issues first.' },
       { type: 'think', id: 'think1', at: 8.7, titleAt: 8.85, done: 9.15, title: 'Reproducing the flaky test' },
       { type: 'tool', at: 9.2, kind: 'read', file: 'login.test.ts', calls: [9.2], done: 10.0 },
       { type: 'tool', at: 10.15, kind: 'search', calls: [10.15], resultAt: 11.0, done: 11.3,
@@ -333,13 +333,13 @@ const CHILD_DEFS = [
       { type: 'think', id: 'think2', at: 17.25, titleAt: 17.4, done: 17.85, title: 'Tracing the cookie race' },
       { type: 'tool', at: 17.95, kind: 'edit', file: 'login.test.ts', calls: [17.95], done: 19.3 },
       { type: 'tool', at: 19.5, kind: 'shell', calls: [19.5], done: 23.4 },
-      { type: 'assistant', at: 23.5, text: 'Fixed — the test raced the session-cookie write. It now awaits the store’s <code>ready</code> promise before asserting, and 50 runs in a row pass.' },
+      { type: 'assistant', at: 23.5, text: 'Fixed. It matches a known Jest issue: the test raced the session-cookie write. It now awaits the store’s <code>ready</code> promise, and 50 runs in a row pass.' },
     ],
   },
   {
     id: 'B', title: 'Bump dependencies', pal: PAL.mint, spawn: 9.3, done: 22.4,
     items: [
-      { type: 'user', at: 9.3, text: 'Bump our dependencies to their latest compatible versions and make sure the build still passes.' },
+      { type: 'user', at: 9.3, text: 'Bump our dependencies to their latest compatible versions. Read each changelog for breaking changes, and keep the build green.' },
       { type: 'think', id: 'think1', at: 9.4, titleAt: 9.55, done: 9.85, title: 'Checking for newer releases' },
       { type: 'tool', at: 9.9, kind: 'search', calls: [9.9], resultAt: 11.2, done: 11.6,
         sites: ['npmjs.com', 'github.com', 'nodejs.org', 'typescriptlang.org', 'vitejs.dev', 'bun.sh'] },
@@ -351,13 +351,13 @@ const CHILD_DEFS = [
         sites: ['github.com', 'typescriptlang.org', 'npmjs.com', 'vitejs.dev'] },
       { type: 'tool', at: 19.25, kind: 'fetch', calls: [19.25, 19.55], hosts: ['github.com', 'typescriptlang.org'], callDone: [20.3, 20.75], done: 20.75 },
       { type: 'tool', at: 20.95, kind: 'shell', calls: [20.95], done: 21.9 },
-      { type: 'assistant', at: 22.0, text: 'Bumped 14 packages, none across a major version. Install, build and the full test suite are all green.' },
+      { type: 'assistant', at: 22.0, text: 'Bumped 14 packages, none across a major version. TypeScript’s release notes flagged one stricter check, fixed in one line. Build and tests are green.' },
     ],
   },
   {
     id: 'C', title: 'Draft release notes', pal: PAL.rose, spawn: 10.0, done: 25.0,
     items: [
-      { type: 'user', at: 10.0, text: 'Draft the 2.4 release notes from the commits since v2.3 and save them as RELEASE.md.' },
+      { type: 'user', at: 10.0, text: 'Draft the 2.4 release notes from the commits since v2.3, in Keep a Changelog style with each change linked to its PR. Save as RELEASE.md.' },
       { type: 'think', id: 'think1', at: 10.1, titleAt: 10.25, done: 10.55, title: 'Reading the commit log' },
       { type: 'tool', at: 10.6, kind: 'shell', calls: [10.6], done: 12.2 },
       { type: 'tool', at: 12.35, kind: 'fetch', calls: [12.35], hosts: ['github.com'], callDone: [13.2], done: 13.2 },
@@ -365,11 +365,11 @@ const CHILD_DEFS = [
       { type: 'tool', at: 14.2, kind: 'write', file: 'RELEASE.md', calls: [14.2], linesAt: 14.6, lines: 42, done: 16.0 },
       { type: 'tool', at: 16.4, kind: 'grep', pattern: 'BREAKING', calls: [16.4], done: 18.0 },
       // The one the cursor opens: its reasoning streams in while it is live (PillThinkingText).
-      { type: 'think', id: 'think2', at: 18.1, titleAt: 18.4, done: 21.2, title: 'Grouping the changes by area', rate: 100,
-        text: '**Grouping the changes by area**\n\nThe log since v2.3 has 31 commits: three user-facing features, seven fixes — most of them in packages/auth — and the dependency bump. Readers will look for the login fix first, so I’ll lead with Fixes, then Features, then Maintenance, and link every line to its PR.' },
+      { type: 'think', id: 'think2', at: 18.1, titleAt: 18.4, done: 21.2, title: 'Grouping the changes by area', rate: 110,
+        text: '**Grouping the changes by area**\n\nThe log since v2.3 has 31 commits: three user-facing features, seven fixes — most of them in packages/auth — and the dependency bump. Keep a Changelog wants Added, Changed and Fixed; readers will look for the login fix first, so Fixed leads, and every line links its PR.' },
       { type: 'tool', at: 21.35, kind: 'fetch', calls: [21.35, 21.65], hosts: ['keepachangelog.com', 'github.com'], callDone: [22.1, 22.45], done: 22.45 },
       { type: 'tool', at: 22.6, kind: 'edit', file: 'RELEASE.md', calls: [22.6], done: 24.5 },
-      { type: 'assistant', at: 24.6, text: 'RELEASE.md is drafted: three features, seven fixes and the dependency bump, grouped by area.' },
+      { type: 'assistant', at: 24.6, text: 'RELEASE.md is drafted in Keep a Changelog style: three features, seven fixes and the dependency bump, each linked to its PR.' },
     ],
   },
 ];
@@ -703,7 +703,7 @@ class SessionWindow {
   }
 }
 function thinkingBody(it, t) {
-  const n = Math.max(0, Math.floor((t - it.at) * it.rate));
+  const n = t >= it.done ? it.text.length : Math.max(0, Math.floor((t - it.at) * it.rate));   // done: the whole block
   const sofar = it.text.slice(0, Math.min(n, it.text.length));
   const head = `**${it.title}**`;
   if (sofar.startsWith(head)) return sofar.slice(head.length).replace(/^\s+/, '');
@@ -760,18 +760,18 @@ const EVENTS = [
   [17.4, t => openWindow(1, t)],
   [18.9, t => openWindow(2, t)],
   [20.35, t => windows.find(w => w.def === CHILD_DEFS[2])?.openThinking('think2', t)],
-  [26.2, t => wake(t)],
-  [26.55, () => mainThrow({ id: 'ls2', kind: 'tool', symbol: 'person.2.fill' })],
-  [26.85, () => mainThrow({ id: 'wf2', kind: 'tool', symbol: 'safari' })],
-  [27.25, () => mainThrow({ id: 'wf2#github.com', kind: 'site', host: 'github.com' })],
-  [28.2, t => endTurn(t, REPLY_2)],
+  [27.1, t => wake(t)],
+  [27.45, () => mainThrow({ id: 'ls2', kind: 'tool', symbol: 'person.2.fill' })],
+  [27.75, () => mainThrow({ id: 'wf2', kind: 'tool', symbol: 'safari' })],
+  [28.15, () => mainThrow({ id: 'wf2#github.com', kind: 'site', host: 'github.com' })],
+  [29.4, t => endTurn(t, REPLY_2)],
 ];
 function typingTimes(text) {
-  // A human cadence: ~31 chars/s, a little longer after spaces and punctuation.
+  // A (fast) human cadence: ~40 chars/s, a little longer after spaces and punctuation.
   const times = []; let at = 0;
   for (let i = 0; i < text.length; i++) {
     const h = Math.abs(Math.sin(i * 12.9898) * 43758.5453) % 1;
-    let d = (1 / 31) * (0.55 + 0.9 * h);
+    let d = (1 / 40) * (0.55 + 0.9 * h);
     if (text[i - 1] === ' ') d *= 1.25;
     if (',.:'.includes(text[i - 1] || '')) d += 0.09;
     at += d; times.push(at);
@@ -782,8 +782,8 @@ function typingTimes(text) {
 // ---------------------------------------------------------------- camera, cursor, captions, keys
 const CAM = [ // t, zoom, centre x, centre y (points; clamped so the screen always fills the frame)
   [0, 2.9, 768, 820], [3.0, 2.9, 768, 820], [3.9, 2.5, 768, 820], [7.5, 2.5, 768, 820],
-  [9.2, 2.1, 768, 820], [13.9, 2.1, 768, 820], [15.3, 0.85, 768, 432], [24.3, 0.85, 768, 432],
-  [25.7, 1.9, 768, 820], [30.4, 1.9, 768, 820], [31.9, 0.85, 768, 432], [36, 0.85, 768, 432],
+  [9.2, 2.1, 768, 820], [13.9, 2.1, 768, 820], [15.3, 0.85, 768, 432], [26.1, 0.85, 768, 432],
+  [27.4, 1.9, 768, 820], [31.0, 1.9, 768, 820], [32.3, 0.85, 768, 432], [36, 0.85, 768, 432],
 ];
 function camera(t) {
   let i = 0; while (i < CAM.length - 2 && t >= CAM[i + 1][0]) i++;
@@ -792,7 +792,7 @@ function camera(t) {
   const zoom = Math.exp(lerp(Math.log(a[1]), Math.log(b[1]), p));
   const S = BASE * zoom;
   // Zoomed in, the screen always fills the frame; pulled back past it, it is centred and sits low,
-  // leaving the band at the top to the caption island.
+  // leaving the band at the top to the chapter headings.
   const tx = SW * S >= 1920 ? clamp(960 - lerp(a[2], b[2], p) * S, 1920 - SW * S, 0) : (1920 - SW * S) / 2;
   const ty = SH * S >= 1080 ? clamp(540 - lerp(a[3], b[3], p) * S, 1080 - SH * S, 0) : (1080 - SH * S) * 0.84;
   return { S, tx, ty };
@@ -826,25 +826,25 @@ function cursorAt(t) {
   const alpha = ramp(t, 14.85, 0.3) * (1 - ramp(t, 21.0, 0.5));
   return { pos, alpha };
 }
-// The narration: one glass capsule floating above the footage in its own band. Each chapter's icon
-// badge glows in a plume colour, its words blur in one by one, and the step dots track progress —
-// the active one a pill that fills as its chapter plays. Between chapters the capsule morphs its
-// width on a spring, the way the Dispatch pill does.
+// The narration: each chapter's heading is stamped straight onto the frame in a heavy face — word by
+// word, each landing from large and soft to crisp with a touch of overshoot — and a bar in the
+// chapter's plume colour swipes in beneath it. No container: the words sit on the footage itself,
+// in the band at the top that every shot leaves clear.
 const CHAPTERS = [
-  { t: 2.55, icon: 'ibeam', pal: PAL.blue, head: 'Ask Dispatch anything', sub: 'A four-finger tap brings up the pill. Type, and it grows with you.' },
-  { t: 7.4, icon: 'paperplane.fill', pal: PAL.violet, head: 'It fans the work out', sub: 'Each task becomes its own session, rising out of the pill in its own colour.' },
-  { t: 14.0, icon: 'macwindow', pal: PAL.mint, head: 'Open any session', sub: 'Click a pill and its window stacks up above Dispatch.' },
-  { t: 20.6, icon: 'brain', pal: PAL.rose, head: 'Watch them work', sub: 'Plumes throw each session’s tools and sites. Thinking pills open into its reasoning.' },
-  { t: 24.5, icon: 'checkmark', pal: PAL.blue, head: 'Then it reports back', sub: 'Finished sessions sink into the pill as Dispatch sums up.' },
+  { t: 2.55, end: 7.4, pal: PAL.blue, head: 'Ask Dispatch anything' },
+  { t: 7.4, end: 14.0, pal: PAL.violet, head: 'It fans the work out' },
+  { t: 14.0, end: 20.6, pal: PAL.mint, head: 'Open any session' },
+  { t: 20.6, end: 24.3, pal: PAL.rose, head: 'Watch them work' },
+  { t: 24.3, end: 26.35, pal: PAL.blue, head: 'Then it reports back' },
 ];
-const ISLAND_OUT = 31.6;
-const ISL = { top: 22, h: 92, textLeft: 94, chrome: 94 + 28 + 86 + 26 };   // text left edge; width = chrome + text
-const KEYS = [   // the key hints: a keycap and what it did, popping in beside the island
+const STAMP = { top: 20, line: 88, barGap: 4 };
+const KEYS = [   // the key hints: a keycap and what it did, top right
   { presses: [2.9], cap: 'grid4', labels: ['Summon Dispatch'] },
   { presses: [7.35], cap: 'return', labels: ['Send'] },
   { presses: [13.2, 13.7], text: 'esc', labels: ['Close the reply', 'Collapse'] },
 ];
 const easeOutBack = x => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+const easeInCubic = x => x * x * x;
 
 // ---------------------------------------------------------------- build static DOM
 function buildDesktop() {
@@ -866,23 +866,13 @@ accEl.innerHTML = `<div class="acc">${svgIcon('ellipsis', 14, '#fff')}</div><div
 
 const overlays = $('overlays');
 const words = text => text.split(' ').map(w => `<span class="w">${w}</span>`).join(' ');
-const islandEl = el('div', '', overlays); islandEl.id = 'island';
-el('div', 'isl-bg', islandEl);
-const islClip = el('div', 'isl-clip', islandEl);
-const islBadge = el('div', 'isl-badge', islClip);
-const islRing = el('div', 'isl-ring', islandEl);
-const islText = el('div', 'isl-text', islClip);
-const islSteps = el('div', 'isl-steps', islClip);
-const chapterViews = CHAPTERS.map(c => {
-  const body = rgbStr(c.pal.body), tail = rgbStr(c.pal.tail), hot = rgbStr(c.pal.hot);
-  const face = el('div', 'isl-face', islBadge, svgIcon(c.icon, 28, '#fff'));
-  css(face, { background: `radial-gradient(circle at 32% 26%, ${hot} 0%, ${body} 46%, ${tail} 100%)`, boxShadow: `0 8px 20px ${rgbStr(c.pal.body, 0.42)}` });
-  const layer = el('div', 'isl-layer', islText, `<div class="isl-head">${words(c.head)}</div><div class="isl-sub">${words(c.sub)}</div>`);
-  const dot = el('div', 'dot', islSteps); const fill = el('div', 'fill', dot);
-  fill.style.background = `linear-gradient(90deg, ${tail}, ${body})`;
-  return { face, layer, head: [...layer.querySelectorAll('.isl-head .w')], sub: [...layer.querySelectorAll('.isl-sub .w')], dot, fill, width: null };
+const stampEl = el('div', '', overlays); stampEl.id = 'stamp';
+const stampViews = CHAPTERS.map(c => {
+  const line = el('div', 'stamp-line', stampEl, words(c.head));
+  const bar = el('div', 'stamp-bar', stampEl);
+  bar.style.background = `linear-gradient(90deg, ${rgbStr(c.pal.tail)}, ${rgbStr(c.pal.body)})`;
+  return { line, bar, words: [...line.querySelectorAll('.w')], width: 0 };
 });
-let islandSpring = null;
 const keyViews = KEYS.map(k => {
   const e = el('div', 'key', overlays);
   const cap = el('div', 'kcap', e, k.text ? k.text : svgIcon(k.cap, 18, '#1d1d1f'));
@@ -941,12 +931,6 @@ function simulate(t) {
     }
   }
   for (const w of windows) w.update(t);
-  const ci = islandChapter(t);
-  if (ci >= 0) {
-    const target = islandWidth(ci);
-    if (!islandSpring) islandSpring = new Spring(target, 0.55, 0.8);
-    islandSpring.target = target; islandSpring.step(DT);
-  }
 }
 
 // ---------------------------------------------------------------- render
@@ -1074,65 +1058,36 @@ function renderCursor(t) {
   } else ringEl.style.display = 'none';
 }
 
-function islandChapter(t) { let c = -1; CHAPTERS.forEach((ch, i) => { if (t >= ch.t) c = i; }); return c; }
-function islandWidth(i) { return ISL.chrome + chapterViews[i].width; }
-/** Each chapter's text width, measured once its faces have loaded and while the island is laid out. */
-function measureIsland() {
-  islandEl.style.display = 'block';
-  for (const v of chapterViews) v.width = Math.ceil(v.layer.getBoundingClientRect().width);
-  islandEl.style.display = 'none';
+/** Each heading's width, measured once its face has loaded. */
+function measureStamps() {
+  for (const v of stampViews) {
+    v.line.style.display = 'block';
+    v.width = Math.ceil(v.line.getBoundingClientRect().width);
+    v.line.style.display = 'none';
+  }
 }
-/** Words rising into place one after another, sharpening as they land. */
-function wordsIn(spans, t0, t) {
-  spans.forEach((w, i) => {
-    const a = easeOutCubic(clamp((t - (t0 + i * 0.045)) / 0.5, 0, 1));
-    w.style.opacity = a.toFixed(3);
-    w.style.transform = `translateY(${((1 - a) * 11).toFixed(2)}px)`;
-    w.style.filter = a < 1 ? `blur(${((1 - a) * 7).toFixed(2)}px)` : 'none';
+function renderStamp(t) {
+  stampViews.forEach((v, i) => {
+    const ch = CHAPTERS[i], exit = easeInOut(clamp((t - ch.end) / 0.3, 0, 1));
+    if (t < ch.t || exit >= 1) { v.line.style.display = 'none'; v.bar.style.display = 'none'; return; }
+    css(v.line, { display: 'block', top: STAMP.top + 'px', opacity: (1 - exit).toFixed(3),
+      transform: `translateX(-50%) translateY(${(-16 * exit).toFixed(2)}px) scale(${(1 - 0.05 * exit).toFixed(4)})`,
+      filter: exit > 0 ? `blur(${(8 * exit).toFixed(2)}px)` : 'none' });
+    // Each word stamps down: in large and soft, landing crisp a touch under size, then settling.
+    v.words.forEach((w, k) => {
+      const p = clamp((t - (ch.t + 0.06 + k * 0.08)) / 0.34, 0, 1);
+      const sc = p < 0.45 ? lerp(1.8, 0.94, easeInCubic(p / 0.45)) : lerp(0.94, 1, easeOutCubic((p - 0.45) / 0.55));
+      w.style.opacity = clamp(p / 0.3, 0, 1).toFixed(3);
+      w.style.transform = `scale(${sc.toFixed(4)})`;
+      w.style.filter = p < 0.45 ? `blur(${((1 - p / 0.45) * 10).toFixed(2)}px)` : 'none';
+    });
+    // The bar swipes in once the last word has landed, and leaves from the left with the line.
+    const landed = ch.t + 0.06 + (v.words.length - 1) * 0.08 + 0.22;
+    const grow = easeOutCubic(clamp((t - landed) / 0.45, 0, 1)), out = easeInOut(clamp((t - ch.end) / 0.22, 0, 1));
+    const w0 = v.width * grow, left = 960 - v.width / 2;
+    css(v.bar, { display: grow > 0 ? 'block' : 'none', left: (left + w0 * out).toFixed(2) + 'px', width: (w0 * (1 - out)).toFixed(2) + 'px',
+      top: (STAMP.top + STAMP.line + STAMP.barGap) + 'px', opacity: (1 - exit).toFixed(3) });
   });
-}
-function renderIsland(t) {
-  const ci = islandChapter(t);
-  if (ci < 0 || t >= ISLAND_OUT + 0.6 || !islandSpring) { islandEl.style.display = 'none'; islRing.style.display = 'none'; return; }
-  const ch = CHAPTERS[ci], next = CHAPTERS[ci + 1];
-  // In on a soft overshoot, out with a blur.
-  const pin = easeOutBack(clamp((t - CHAPTERS[0].t) / 0.7, 0, 1)), pout = ramp(t, ISLAND_OUT, 0.5, easeInOut);
-  const W = islandSpring.x;
-  css(islandEl, {
-    display: 'block', left: (960 - W / 2).toFixed(2) + 'px', top: ISL.top + 'px', width: W.toFixed(2) + 'px',
-    opacity: (clamp(pin, 0, 1) * (1 - pout)).toFixed(3),
-    transform: `translateY(${((1 - pin) * -22 - pout * 14).toFixed(2)}px) scale(${(0.9 + 0.1 * pin - 0.05 * pout).toFixed(4)})`,
-    filter: (1 - clamp(pin, 0, 1)) + pout > 0.001 ? `blur(${(((1 - clamp(pin, 0, 1)) * 12) + pout * 10).toFixed(2)}px)` : 'none',
-  });
-  chapterViews.forEach((v, i) => {
-    // Text: the chapter's words blur in; the one it replaces lifts away.
-    if (i === ci) { css(v.layer, { opacity: 1, transform: 'none', filter: 'none' }); wordsIn(v.head, ch.t + 0.1, t); wordsIn(v.sub, ch.t + 0.3, t); }
-    else if (i === ci - 1 && t < ch.t + 0.32) {
-      const e = easeInOut((t - ch.t) / 0.32);
-      css(v.layer, { opacity: (1 - e).toFixed(3), transform: `translateY(${(-12 * e).toFixed(2)}px)`, filter: `blur(${(8 * e).toFixed(2)}px)` });
-    } else v.layer.style.opacity = 0;
-    // The badge: the new icon springs in with a turn, the old one shrinks away.
-    if (i === ci) {
-      const a = clamp((t - ch.t) / 0.5, 0, 1), b = easeOutBack(a);
-      css(v.face, { opacity: Math.min(1, a * 2.5).toFixed(3), transform: `scale(${(0.45 + 0.55 * b).toFixed(4)}) rotate(${((1 - b) * -28).toFixed(2)}deg)` });
-    } else if (i === ci - 1 && t < ch.t + 0.3) {
-      const e = easeInOut((t - ch.t) / 0.3);
-      css(v.face, { opacity: (1 - e).toFixed(3), transform: `scale(${(1 - 0.3 * e).toFixed(4)})` });
-    } else v.face.style.opacity = 0;
-    // Steps: done dots dark, upcoming faint, the active one a pill filling with its chapter.
-    const wasActive = i === ci - 1, isActive = i === ci, m = easeInOut(clamp((t - ch.t) / 0.4, 0, 1));
-    const width = isActive ? lerp(8, 30, m) : wasActive ? lerp(30, 8, m) : 8;
-    const end = next ? next.t : ISLAND_OUT;
-    css(v.dot, { width: width.toFixed(2) + 'px', background: i < ci ? 'rgba(15,18,30,.5)' : 'rgba(15,18,30,.13)' });
-    v.fill.style.width = isActive ? (clamp((t - ch.t) / (end - ch.t), 0, 1) * 100).toFixed(2) + '%' : '0%';
-  });
-  // A ring of the chapter's colour pulses out of the badge as it changes.
-  const rp = (t - ch.t) / 0.9;
-  if (rp >= 0 && rp < 1) {
-    const r = 30 + 22 * easeOutCubic(rp);
-    css(islRing, { display: 'block', left: (46 - r).toFixed(2) + 'px', top: (46 - r).toFixed(2) + 'px',   // the badge's centre, in the island
-      width: (2 * r).toFixed(2) + 'px', height: (2 * r).toFixed(2) + 'px', borderColor: rgbStr(ch.pal.body, (0.5 * (1 - rp) * (1 - pout)).toFixed(3)) });
-  } else islRing.style.display = 'none';
 }
 function renderKeys(t) {
   KEYS.forEach((k, i) => {
@@ -1155,7 +1110,7 @@ function renderKeys(t) {
   });
 }
 function renderOverlays(t) {
-  renderIsland(t);
+  renderStamp(t);
   renderKeys(t);
   // Intro.
   const intro = $('intro');
@@ -1173,16 +1128,16 @@ function renderOverlays(t) {
   }
   // Outro.
   const outro = $('outro');
-  const oa = ramp(t, 32.4, 0.8, easeInOut);
+  const oa = ramp(t, 32.6, 0.8, easeInOut);
   outro.style.display = oa > 0 ? 'flex' : 'none';
   if (oa > 0) {
     outro.style.opacity = oa;
-    const m = ramp(t, 32.9, 0.8, easeOutCubic);
+    const m = ramp(t, 33.1, 0.8, easeOutCubic);
     css($('outroMark'), { opacity: m * (1 - ramp(t, 35.3, 0.6)), transform: `scale(${0.86 + 0.14 * m})`, filter: m < 1 ? `blur(${(1 - m) * 10}px)` : 'none' });
     shimmerMark(outro, outroMark.id, 132, t, 0.55, 1, 60, 0.7);
-    const tt = ramp(t, 33.2, 0.7, easeOutCubic), fade = 1 - ramp(t, 35.3, 0.6);
+    const tt = ramp(t, 33.4, 0.7, easeOutCubic), fade = 1 - ramp(t, 35.3, 0.6);
     css($('outroTitle'), { opacity: tt * fade, transform: `translateY(${(1 - tt) * 16}px)` });
-    const ts = ramp(t, 33.45, 0.7, easeOutCubic);
+    const ts = ramp(t, 33.65, 0.7, easeOutCubic);
     css($('outroSub'), { opacity: ts * fade, transform: `translateY(${(1 - ts) * 12}px)` });
   }
 }
@@ -1196,6 +1151,6 @@ window.renderFrame = function (n) {
   render(T);
   return T;
 };
-Promise.all(['600 27px WD', '400 17px W', '500 14px W', '600 19px W'].map(f => document.fonts.load(f)))
+Promise.all(['800 76px WD', '700 24px WD', '400 14px W', '500 14px W', '600 16px W'].map(f => document.fonts.load(f)))
   .then(() => document.fonts.ready)
-  .then(() => { measureIsland(); window.sceneReady = true; });
+  .then(() => { measureStamps(); window.sceneReady = true; });

@@ -11,6 +11,8 @@
 @font-face { font-family: 'W'; src: local('Inter Bold'), local('Inter-Bold'), url('file:///usr/share/fonts/opentype/inter/Inter-Bold.otf'); font-weight: 700; }
 @font-face { font-family: 'WD'; src: local('Inter Display SemiBold'), local('InterDisplay-SemiBold'), url('file:///usr/share/fonts/opentype/inter/InterDisplay-SemiBold.otf'); font-weight: 600; }
 @font-face { font-family: 'WD'; src: local('Inter Display Medium'), local('InterDisplay-Medium'), url('file:///usr/share/fonts/opentype/inter/InterDisplay-Medium.otf'); font-weight: 500; }
+@font-face { font-family: 'WD'; src: local('Inter Display Bold'), local('InterDisplay-Bold'), url('file:///usr/share/fonts/opentype/inter/InterDisplay-Bold.otf'); font-weight: 700; }
+@font-face { font-family: 'WD'; src: local('Inter Display ExtraBold'), local('InterDisplay-ExtraBold'), url('file:///usr/share/fonts/opentype/inter/InterDisplay-ExtraBold.otf'); font-weight: 800; }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; width: 1920px; height: 1080px; overflow: hidden; background: #fff; }
@@ -114,31 +116,20 @@ body { font-family: 'W', sans-serif; -webkit-font-smoothing: antialiased; color:
 #ring { position: absolute; border-radius: 50%; border: 2px solid rgba(0,0,0,.55); }
 
 /* ---------- overlays (video space) ---------- */
-/* The caption island: narration in its own glass capsule above the footage. */
-#island { position: absolute; height: 92px; transform-origin: 50% 0; }
-.isl-bg { position: absolute; inset: 0; border-radius: 46px; background: rgba(255,255,255,.86); backdrop-filter: blur(26px) saturate(1.7);
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.75), 0 0 0 1px rgba(17,24,39,.07), 0 18px 48px rgba(17,24,39,.16), 0 3px 10px rgba(17,24,39,.07); }
-.isl-clip { position: absolute; inset: 0; border-radius: 46px; overflow: hidden; }
-.isl-badge { position: absolute; left: 16px; top: 16px; width: 60px; height: 60px; }
-.isl-face { position: absolute; inset: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; opacity: 0; }
-.isl-ring { position: absolute; border-radius: 50%; border: 2px solid transparent; display: none; }
-.isl-text { position: absolute; left: 94px; top: 0; bottom: 0; }
-.isl-layer { position: absolute; left: 0; top: 17px; white-space: nowrap; opacity: 0; }
-.isl-head { font-family: 'WD', 'W', sans-serif; font-size: 27px; line-height: 33px; font-weight: 600; letter-spacing: -0.6px; color: #0b0b0f; }
-.isl-sub { margin-top: 3px; font-size: 17px; line-height: 22px; color: rgba(15,18,30,.58); letter-spacing: -0.1px; }
-.isl-layer .w { display: inline-block; }
-.isl-steps { position: absolute; right: 26px; top: 42px; height: 8px; display: flex; gap: 6px; align-items: center; }
-.isl-steps .dot { position: relative; width: 8px; height: 8px; border-radius: 4px; background: rgba(15,18,30,.13); overflow: hidden; }
-.isl-steps .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 4px; }
-/* Key hints: a keycap and what it did, in the island's material. */
-.key { position: absolute; right: 40px; top: 36px; display: flex; align-items: center; gap: 12px; height: 64px; padding: 0 22px 0 12px; border-radius: 32px;
-  background: rgba(255,255,255,.86); backdrop-filter: blur(24px) saturate(1.6); transform-origin: 100% 50%;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.75), 0 0 0 1px rgba(17,24,39,.07), 0 18px 48px rgba(17,24,39,.16), 0 3px 10px rgba(17,24,39,.07); }
-.kcap { min-width: 44px; height: 40px; padding: 0 11px; border-radius: 11px; display: flex; align-items: center; justify-content: center;
-  background: linear-gradient(#ffffff, #eef0f4); border: 1px solid rgba(0,0,0,.12); box-shadow: 0 3px 0 rgba(0,0,0,.10), 0 1px 2px rgba(0,0,0,.08);
-  font-size: 16px; font-weight: 600; color: #1d1d1f; letter-spacing: 0.2px; }
-.klabels { position: relative; height: 24px; }
-.klabels span { position: absolute; left: 0; top: 0; white-space: nowrap; font-size: 19px; line-height: 24px; font-weight: 600; color: rgba(15,18,30,.8); letter-spacing: -0.2px; }
+/* Chapter headings, stamped onto the frame: a heavy face, no container. */
+#stamp { position: absolute; left: 0; top: 0; width: 1920px; height: 140px; }
+.stamp-line { position: absolute; left: 50%; display: none; white-space: nowrap; font-family: 'WD', 'W', sans-serif; font-weight: 800;
+  font-size: 76px; line-height: 88px; letter-spacing: -2.6px; word-spacing: 8px; color: #0b0b0f; }
+.stamp-line .w { display: inline-block; transform-origin: 50% 70%; }
+.stamp-bar { position: absolute; display: none; height: 8px; border-radius: 4px; }
+/* Key hints: the key itself and what it did, top right. */
+.key { position: absolute; right: 56px; top: 42px; display: flex; align-items: center; gap: 14px; transform-origin: 100% 50%; }
+.kcap { min-width: 54px; height: 50px; padding: 0 13px; border-radius: 13px; display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(#ffffff, #eef0f4); border: 1px solid rgba(0,0,0,.14); box-shadow: 0 4px 0 rgba(0,0,0,.12), 0 8px 18px rgba(17,24,39,.10);
+  font-size: 18px; font-weight: 600; color: #1d1d1f; letter-spacing: 0.2px; }
+.klabels { position: relative; height: 30px; }
+.klabels span { position: absolute; left: 0; top: 0; white-space: nowrap; font-family: 'WD', 'W', sans-serif; font-size: 26px; line-height: 30px;
+  font-weight: 700; color: #0b0b0f; letter-spacing: -0.4px; }
 #intro, #outro { position: absolute; inset: 0; background: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .brandTitle { font-family: 'WD', 'W', sans-serif; font-size: 84px; font-weight: 600; letter-spacing: -2.6px; margin-top: 34px; color: #0b0b0f; }
 .brandSub { font-size: 26px; color: rgba(0,0,0,.5); margin-top: 14px; letter-spacing: -0.2px; }
