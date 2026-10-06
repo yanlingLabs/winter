@@ -345,6 +345,10 @@ final class FieldStateAdapter: ObservableObject {
     /// ignores exchangeIndex entirely — scrollback replaces swipe-history there (spec §3).
     var transcript: [Exchange] { session.state.exchanges }
 
+    /// The streamed text of a reasoning block still in flight (`ThinkingLiveText`) — what an opened
+    /// thinking pill shows until the block's persisted record replaces it. Read only by an OPENED pill.
+    func liveThinkingText(_ blockId: String) -> String? { session.liveThinking.text(for: blockId) }
+
     /// Live partial reply for the window's streaming row — deliberately NOT `visibleResponse`
     /// (that one is exchangeIndex-pinned for the field).
     var liveStreamingText: String? {

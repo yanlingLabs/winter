@@ -37,6 +37,10 @@ struct TranscriptView: View {
     /// Follows the bottom on the display's clock (`TranscriptAutoFollow`) — the smooth glide that
     /// replaced a `scrollTo` animation per streamed chunk.
     @State private var follower = TranscriptFollower()
+    /// Which tool runs and pills are open, for the whole transcript (`TranscriptExpansion`) — here
+    /// rather than per exchange row, so a row the lazy stack recycles comes back as it was.
+    @State private var expansion = TranscriptExpansion()
+    @Environment(\.transcriptSeededExpansion) private var seededExpansion
     /// Told when a history that arrived into this transcript has come to rest at its bottom.
     @Environment(\.transcriptOnLanded) private var onLanded
 
@@ -61,6 +65,9 @@ struct TranscriptView: View {
                     let isLast = index == adapter.transcript.count - 1
                     TranscriptExchangeRow(
                         exchange: exchange,
+                        exchangeIndex: index,
+                        expansion: $expansion,
+                        liveThinkingText: { [adapter] in adapter.liveThinkingText($0) },
                         cardWiring: cardWiring,
                         onOpenDiff: onOpenDiff,
                         onOpenFile: onOpenFile,
@@ -110,8 +117,11 @@ struct TranscriptView: View {
             } else if new > old {
                 follow()
             }
-            // A reset (another session's history coming in) opens at the bottom again.
-            if new == 0 && old > 0 { follower.restartAtBottom() }
+            // A reset (another session's history coming in) opens at the bottom again, all closed.
+            if new == 0 && old > 0 {
+                follower.restartAtBottom()
+                expansion.removeAll()
+            }
         }
         .onChange(of: adapter.liveStreamingText) { old, new in
             if (new?.count ?? 0) > (old?.count ?? 0) { follow() }
@@ -134,6 +144,7 @@ struct TranscriptView: View {
             follower.onFollowingChanged = { following in
                 if following { showLatestPill = false }
             }
+            if !seededExpansion.isEmpty { expansion.open(seededExpansion) }
         }
     }
 
@@ -183,15 +194,23 @@ struct TranscriptView: View {
 /// `.task` entirely), one row per assistant message plus the live streaming row, stopped flag.
 ///
 /// Activity and replies ARE interleaved in arrival order (2026-10-02, `exchangeTimeline`): `Exchange`
-/// still stores them in two lists, but records where each reply fell among the activity. A
-/// dedicated `View` (not a `@ViewBuilder` func on `TranscriptView`) because it owns its own
-/// expansion `@State` — which tool runs are expanded, keyed by `toolRunExpansionKey` (the run's
-/// first `callId`, NOT its position: the reducer's drop-oldest activity cap shifts positions during
-/// a marathon turn, which would silently re-point an open row at a neighbouring run's output) —
-/// scoped per-exchange-row and reset on view recycle (fine: expansion is a transient reading aid,
-/// not persisted state).
+/// still stores them in two lists, but records where each reply fell among the activity. Which tool
+/// runs and pills are open is NOT this row's state: it reads and toggles the transcript's one
+/// `TranscriptExpansion` (`TranscriptView.expansion`), keyed by item identity — a run's
+/// `toolRunExpansionKey` (its first `callId`, NOT its position: the reducer's drop-oldest activity cap
+/// shifts positions during a marathon turn, which would silently re-point an open row at a
+/// neighbouring run's output), a reasoning block's `thinkingExpansionKey` — so a row the lazy stack
+/// recycles comes back as it was (expansion is still a transient reading aid, never persisted).
 private struct TranscriptExchangeRow: View {
     let exchange: Exchange
+    /// The exchange's place in the transcript — scopes a positional expansion key
+    /// (`transcriptExpansionKey`).
+    let exchangeIndex: Int
+    /// The transcript's open rows and pills (`TranscriptView.expansion`).
+    @Binding var expansion: TranscriptExpansion
+    /// A streaming reasoning block's text so far (`FieldStateAdapter.liveThinkingText`), read only for
+    /// an OPEN thinking pill.
+    let liveThinkingText: (String) -> String?
     /// mac-chat-parity Task 3 — see `TranscriptView.cardWiring`.
     let cardWiring: InteractionCardWiring
     /// diff-tabs Task 9 — see `TranscriptView.onOpenDiff`. Carried, never captured: this view is a
@@ -213,7 +232,6 @@ private struct TranscriptExchangeRow: View {
     let turnIsLive: Bool
     let tint: Color
 
-    @State private var expandedRuns: Set<String> = []
     @Environment(\.transcriptToolRowStyle) private var toolRowStyle
 
     /// The replies' file door — only where the window layer wired `onOpenFile`, so the orb's morph
@@ -227,6 +245,8 @@ private struct TranscriptExchangeRow: View {
     }
 
     var body: some View {
+        // Only the turn's final reply carries the copy button (`exchangeFinalReplyIndex`).
+        let finalReply = exchangeFinalReplyIndex(exchange, isStreaming: streamingText != nil)
         VStack(alignment: .leading, spacing: 10) {
             if !exchange.prompt.isEmpty || exchange.promptEnvelope != nil {
                 TranscriptUserBubble(text: exchange.prompt, tint: tint, envelope: exchange.promptEnvelope)
@@ -246,7 +266,7 @@ private struct TranscriptExchangeRow: View {
                     // allowlist binding #4. A FINISHED reply gets the file door (2026-09-30); the
                     // streaming row below never does (`TranscriptAssistantMessage.fileDoor`'s doc).
                     TranscriptAssistantMessage(text: exchange.replies[index], isStreaming: false, role: .assistant,
-                                               fileDoor: fileDoor)
+                                               fileDoor: fileDoor, showsCopyButton: index == finalReply)
                         .equatable()
                 }
             }
@@ -313,19 +333,37 @@ private struct TranscriptExchangeRow: View {
 
     /// A row of tool pills, then — beneath it — each pill's body that has something to show: an
     /// opened pill's calls, a failure line, its diff chips.
+    /// The open-state key of a tool pill, unique across the transcript.
+    private func toolKey(_ entry: ToolRunEntry, index: Int) -> String {
+        transcriptExpansionKey(toolRunExpansionKey([entry], fallbackIndex: index), exchangeIndex: exchangeIndex)
+    }
+
+    /// Whether a pill is open INTO itself right now — a thinking pill with text, a search pill — and so
+    /// takes a line of its own (`PillFlowFullWidth`).
+    private func isOpenInPlace(_ item: PillRowItem) -> Bool {
+        switch item {
+        case .tool(let index, let entry):
+            return PillToolRunHeader.opensInPlace(entry) && expansion.contains(toolKey(entry, index: index))
+        case .thinking(let thinking):
+            return openThinkingText(thinking) != nil
+        }
+    }
+
+    /// The text an OPEN thinking pill shows — nil while it is closed or has nothing readable yet (a
+    /// live block whose increments so far are whitespace). The live buffer is read only for a pill
+    /// that is open: its text is O(n).
+    private func openThinkingText(_ thinking: ThinkingItem) -> String? {
+        guard thinkingHasReadableText(thinking), expansion.contains(thinkingExpansionKey(thinking.blockId)) else { return nil }
+        return thinkingDisplayText(thinking, liveText: thinking.isLive ? liveThinkingText(thinking.blockId) : nil)
+    }
+
     @ViewBuilder
     private func pillRow(_ items: [PillRowItem]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             PillFlowLayout(spacing: 8, lineSpacing: 8) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    switch item {
-                    case .tool(let index, let entry):
-                        let key = toolRunExpansionKey([entry], fallbackIndex: index)
-                        PillToolRunHeader(entries: [entry], turnIsLive: turnIsLive,
-                                          isExpanded: expandedRuns.contains(key), toggle: { toggle(key) })
-                    case .thinking(let thinking):
-                        PillThinkingHeader(item: thinking, turnIsLive: turnIsLive)
-                    }
+                    pill(item)
+                        .layoutValue(key: PillFlowFullWidth.self, value: isOpenInPlace(item))
                 }
             }
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
@@ -336,18 +374,37 @@ private struct TranscriptExchangeRow: View {
         }
     }
 
-    /// Beneath a tool pill: its opened calls, a failure line, its diff chips — when it has any.
+    @ViewBuilder
+    private func pill(_ item: PillRowItem) -> some View {
+        switch item {
+        case .tool(let index, let entry):
+            let key = toolKey(entry, index: index)
+            PillToolRunHeader(entries: [entry], turnIsLive: turnIsLive, isExpanded: expansion.contains(key),
+                              toggle: { toggle(key, morph: PillToolRunHeader.opensInPlace(entry)) })
+        case .thinking(let thinking):
+            let key = thinkingExpansionKey(thinking.blockId)
+            let text = openThinkingText(thinking)
+            PillThinkingHeader(item: thinking, turnIsLive: turnIsLive, isExpanded: text != nil, text: text,
+                               toggle: { toggle(key, morph: true) })
+        }
+    }
+
+    /// Beneath a tool pill: its opened calls, a failure line, its diff chips — when it has any. A
+    /// search pill opens into itself instead, so it shows nothing here while open.
     @ViewBuilder
     private func toolPillBody(_ entry: ToolRunEntry, index: Int) -> some View {
-        let key = toolRunExpansionKey([entry], fallbackIndex: index)
-        let expanded = expandedRuns.contains(key)
-        if expanded || toolRunFailureSummary([entry]) != nil
+        let key = toolKey(entry, index: index)
+        let opensInPlace = PillToolRunHeader.opensInPlace(entry)
+        let expanded = expansion.contains(key) && !opensInPlace
+        if opensInPlace && expansion.contains(key) {
+            EmptyView()
+        } else if expanded || toolRunFailureSummary([entry]) != nil
             || !toolRunCollapsedDiffChips([entry]).chips.isEmpty {
             TranscriptToolGroupRow(
                 entries: [entry],
                 turnIsLive: turnIsLive,
                 isExpanded: expanded,
-                toggle: { toggle(key) },
+                toggle: { toggle(key, morph: false) },
                 onOpenDiff: onOpenDiff,
                 onOpenFile: onOpenFile,
                 sessionHasWorkingDirectory: sessionHasWorkingDirectory,
@@ -360,12 +417,12 @@ private struct TranscriptExchangeRow: View {
     private func activityGroupRow(_ group: ActivityGroup, index: Int) -> some View {
         switch group {
         case .toolRun(let entries):
-            let key = toolRunExpansionKey(entries, fallbackIndex: index)
+            let key = transcriptExpansionKey(toolRunExpansionKey(entries, fallbackIndex: index), exchangeIndex: exchangeIndex)
             TranscriptToolGroupRow(
                 entries: entries,
                 turnIsLive: turnIsLive,
-                isExpanded: expandedRuns.contains(key),
-                toggle: { toggle(key) },
+                isExpanded: expansion.contains(key),
+                toggle: { toggle(key, morph: false) },
                 onOpenDiff: onOpenDiff,
                 onOpenFile: onOpenFile,
                 sessionHasWorkingDirectory: sessionHasWorkingDirectory
@@ -390,11 +447,13 @@ private struct TranscriptExchangeRow: View {
         }
     }
 
-    private func toggle(_ key: String) {
-        if expandedRuns.contains(key) {
-            expandedRuns.remove(key)
+    /// Opens or closes one row or pill. A pill that opens into itself morphs on a spring
+    /// (`pillMorphAnimation`); every other row keeps its own short animation.
+    private func toggle(_ key: String, morph: Bool) {
+        if morph {
+            withAnimation(pillMorphAnimation) { expansion.toggle(key) }
         } else {
-            expandedRuns.insert(key)
+            expansion.toggle(key)
         }
     }
 }
