@@ -108,6 +108,28 @@ describe("projector/errors: an error message can NEVER carry opaque provider sta
     });
   }
 
+  test("credential-shaped runs in a vendor's text are scrubbed, ordinary identifiers and urls are not", () => {
+    const keys = [
+      "sk-ant-api03-AbCdEf0123456789xyzXYZ",
+      "sk-proj-0123456789abcdefABCDEF",
+      "xai-0123456789abcdefABCDEFghij",
+      "AIzaSyA0123456789abcdefghijklmnopqrstuv",
+      "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8",
+    ];
+    for (const key of keys) {
+      const detail = sanitizeDetail(`invalid x-api-key: ${key} was rejected`)!;
+      expect(detail).not.toContain(key);
+      expect(detail).toContain("[redacted]");
+    }
+    expect(sanitizeDetail("Authorization: Bearer eyJhbGciOi.abc.def failed")).toBe("Authorization: [redacted] failed");
+    const plain =
+      "invalid_request_error: Your organization must be verified. Go to https://platform.openai.com/settings/organization/general";
+    expect(sanitizeDetail(plain)).toBe(plain);
+    expect(sanitizeDetail("Your credit balance is too low to access the Anthropic API.")).toBe(
+      "Your credit balance is too low to access the Anthropic API.",
+    );
+  });
+
   test("a long detail is bounded, so a megabyte of provider prose can never reach the phone's frame cap", () => {
     const detail = sanitizeDetail("x".repeat(5000));
     expect(detail!.length).toBe(AGENT_ERROR_DETAIL_MAX + 1);

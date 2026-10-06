@@ -129,12 +129,25 @@ const OPAQUE_MARKERS = ["encrypted_content", "itemJson", "reasoning_item", "reda
  */
 export const AGENT_ERROR_DETAIL_MAX = 400;
 
-/** A short, bounded, opaque-free detail, or undefined. The ONLY door foreign text uses. */
+/**
+ * Credential-shaped runs in a vendor's own text (since 0.0.49 more of it reaches the message): known key
+ * prefixes, a bearer value, and any 32+ run of token characters mixing letters and digits. Targeted on
+ * purpose — role-health's blanket 20-char rule would eat ordinary identifiers like `invalid_request_error`.
+ */
+const CREDENTIAL_SHAPES: readonly RegExp[] = [
+  /\b(?:sk|pk|rk|xai|gsk|ghp|gho|ghs|github_pat)[-_][A-Za-z0-9_-]{12,}/g,
+  /\bAIza[0-9A-Za-z_-]{30,}/g,
+  /\bBearer\s+[^\s,;"']+/gi,
+  /\b(?=[A-Za-z0-9_-]{0,200}\d)(?=[A-Za-z0-9_-]{0,200}[A-Za-z])[A-Za-z0-9_-]{32,}/g,
+];
+
+/** A short, bounded, opaque-free, credential-scrubbed detail, or undefined. The ONLY door foreign text uses. */
 export function sanitizeDetail(raw: unknown): string | undefined {
   if (typeof raw !== "string") return undefined;
-  const text = raw.trim();
+  let text = raw.trim();
   if (text.length === 0) return undefined;
   for (const marker of OPAQUE_MARKERS) if (text.includes(marker)) return undefined;
+  for (const shape of CREDENTIAL_SHAPES) text = text.replace(shape, "[redacted]");
   return text.length <= AGENT_ERROR_DETAIL_MAX ? text : `${text.slice(0, AGENT_ERROR_DETAIL_MAX)}…`;
 }
 
