@@ -74,6 +74,7 @@ const ICONS = {
   'checkmark': [['s', 'M4.8 12.7l4.7 4.7L19.3 7.4', 2.9]],
   'globe': [['s', C(12, 12, 9), 1.8], ['s', 'M12 3c-2.9 2.7-2.9 15.3 0 18M12 3c2.9 2.7 2.9 15.3 0 18M3.4 9h17.2M3.4 15h17.2', 1.6]],
   'chevron.down': [['s', 'M6.5 9.4 12 14.9l5.5-5.5', 3]],
+  'safari': [['s', C(12, 12, 9), 1.9], ['f', 'M16.2 7.8l-2.7 5.7-5.7 2.7 2.7-5.7z']],
   'hammer.fill': [['f', 'M13.5 3.5l6.8 6.8-2.4 2.4-2-2-8.8 8.8a1.7 1.7 0 0 1-2.4-2.4l8.8-8.8-2-2z']],
   'brain': [['s', 'M12 5.3c-.5-1.3-1.8-2.1-3.2-2.1-1.9 0-3.4 1.4-3.5 3.3-1.4.4-2.5 1.8-2.5 3.3 0 .7.2 1.4.6 1.9-.6.6-.9 1.5-.9 2.4 0 1.6 1.1 3 2.7 3.4.3 1.8 1.8 3.1 3.7 3.1 1.5 0 2.8-.9 3.1-2.2zM12 5.3c.5-1.3 1.8-2.1 3.2-2.1 1.9 0 3.4 1.4 3.5 3.3 1.4.4 2.5 1.8 2.5 3.3 0 .7-.2 1.4-.6 1.9.6.6.9 1.5.9 2.4 0 1.6-1.1 3-2.7 3.4-.3 1.8-1.8 3.1-3.7 3.1-1.5 0-2.8-.9-3.1-2.2', 1.8],
             ['s', 'M8.3 9.1c1.1.1 1.9.9 2.1 2M15.7 9.1c-1.1.1-1.9.9-2.1 2M8 14.8c1-.7 2.2-.7 3.2 0M16 14.8c-1-.7-2.2-.7-3.2 0', 1.6]],
@@ -101,6 +102,8 @@ function drawIcon(ctx, name, cx, cy, size, color) {
 const SITES = {
   'npmjs.com': { bg: '#CB3837', t: 'n' }, 'github.com': { bg: '#1F2328', t: 'G' }, 'nodejs.org': { bg: '#3C873A', t: 'N' },
   'typescriptlang.org': { bg: '#3178C6', t: 'TS' }, 'vitejs.dev': { bg: '#7C6CFF', t: 'V' }, 'bun.sh': { bg: '#F4E1C8', t: 'b', fg: '#3B2A1E' },
+  'stackoverflow.com': { bg: '#F48024', t: 'S' }, 'jestjs.io': { bg: '#99425B', t: 'J' }, 'developer.mozilla.org': { bg: '#15141A', t: 'M' },
+  'keepachangelog.com': { bg: '#E05735', t: 'K' },
 };
 function drawFavicon(ctx, host, cx, cy, d) {
   const s = SITES[host] || { bg: '#888', t: '?' };
@@ -277,11 +280,11 @@ const css = (e, o) => { for (const k in o) e.style[k] = o[k]; };
 const BRAND = (window.BRAND_PATHS || []).filter(p => p.startsWith('M'));   // injected by record.cjs from the asset catalog
 let gradSeq = 0;
 /** The Winter mark as SVG, its fill a gradient whose band we slide for BandShimmer. */
-function brandSVG(size) {
+function brandSVG(size, color = '#fff') {
   const id = 'bg' + (gradSeq++);
   const svg = `<svg viewBox="0 0 240 240" width="${size}" height="${size}" style="display:block;overflow:visible">
     <defs><linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="240" y2="0" spreadMethod="pad">
-      <stop offset="0" stop-color="#fff" stop-opacity="1"/><stop offset="0.5" stop-color="#fff" stop-opacity="1"/><stop offset="1" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="0" stop-color="${color}" stop-opacity="1"/><stop offset="0.5" stop-color="${color}" stop-opacity="1"/><stop offset="1" stop-color="${color}" stop-opacity="1"/>
     </linearGradient></defs><g fill="url(#${id})">${BRAND.map(d => `<path d="${d}"/>`).join('')}</g></svg>`;
   return { svg, id };
 }
@@ -318,8 +321,11 @@ const CHILD_DEFS = [
     items: [
       { type: 'user', at: 8.6, text: 'Fix the flaky login test in packages/auth — it fails about one run in five on CI.' },
       { type: 'think', id: 'think1', at: 8.7, titleAt: 8.85, done: 9.15, title: 'Reproducing the flaky test' },
-      { type: 'tool', at: 9.2, kind: 'read', file: 'login.test.ts', calls: [9.2], done: 10.4 },
-      { type: 'tool', at: 10.6, kind: 'shell', calls: [10.6, 12.8, 15.0], done: 17.2 },
+      { type: 'tool', at: 9.2, kind: 'read', file: 'login.test.ts', calls: [9.2], done: 10.0 },
+      { type: 'tool', at: 10.15, kind: 'search', calls: [10.15], resultAt: 11.0, done: 11.3,
+        sites: ['github.com', 'stackoverflow.com', 'jestjs.io', 'nodejs.org', 'developer.mozilla.org'] },
+      { type: 'tool', at: 11.45, kind: 'fetch', calls: [11.45], hosts: ['github.com'], callDone: [12.3], done: 12.3 },
+      { type: 'tool', at: 12.5, kind: 'shell', calls: [12.5, 14.0, 15.4], done: 17.0 },
       { type: 'think', id: 'think2', at: 17.25, titleAt: 17.4, done: 17.85, title: 'Tracing the cookie race' },
       { type: 'tool', at: 17.95, kind: 'edit', file: 'login.test.ts', calls: [17.95], done: 19.3 },
       { type: 'tool', at: 19.5, kind: 'shell', calls: [19.5], done: 23.4 },
@@ -336,7 +342,11 @@ const CHILD_DEFS = [
       { type: 'tool', at: 12.0, kind: 'read', file: 'package.json', calls: [12.0], done: 12.9 },
       { type: 'think', id: 'think2', at: 12.95, titleAt: 13.1, done: 13.55, title: 'Choosing safe upgrades' },
       { type: 'tool', at: 13.65, kind: 'edit', file: 'package.json', calls: [13.65], done: 15.3 },
-      { type: 'tool', at: 15.5, kind: 'shell', calls: [15.5, 18.0], done: 21.9 },
+      { type: 'tool', at: 15.5, kind: 'shell', calls: [15.5], done: 17.6 },
+      { type: 'tool', at: 17.8, kind: 'search', calls: [17.8], resultAt: 18.75, done: 19.05,
+        sites: ['github.com', 'typescriptlang.org', 'npmjs.com', 'vitejs.dev'] },
+      { type: 'tool', at: 19.25, kind: 'fetch', calls: [19.25, 19.55], hosts: ['github.com', 'typescriptlang.org'], callDone: [20.3, 20.75], done: 20.75 },
+      { type: 'tool', at: 20.95, kind: 'shell', calls: [20.95], done: 21.9 },
       { type: 'assistant', at: 22.0, text: 'Bumped 14 packages, none across a major version. Install, build and the full test suite are all green.' },
     ],
   },
@@ -346,25 +356,30 @@ const CHILD_DEFS = [
       { type: 'user', at: 10.0, text: 'Draft the 2.4 release notes from the commits since v2.3 and save them as RELEASE.md.' },
       { type: 'think', id: 'think1', at: 10.1, titleAt: 10.25, done: 10.55, title: 'Reading the commit log' },
       { type: 'tool', at: 10.6, kind: 'shell', calls: [10.6], done: 12.2 },
-      { type: 'tool', at: 12.4, kind: 'read', file: 'CHANGELOG.md', calls: [12.4], done: 13.4 },
-      { type: 'tool', at: 13.8, kind: 'write', file: 'RELEASE.md', calls: [13.8], linesAt: 14.3, lines: 42, done: 16.0 },
+      { type: 'tool', at: 12.35, kind: 'fetch', calls: [12.35], hosts: ['github.com'], callDone: [13.2], done: 13.2 },
+      { type: 'tool', at: 13.35, kind: 'read', file: 'CHANGELOG.md', calls: [13.35], done: 14.0 },
+      { type: 'tool', at: 14.2, kind: 'write', file: 'RELEASE.md', calls: [14.2], linesAt: 14.6, lines: 42, done: 16.0 },
       { type: 'tool', at: 16.4, kind: 'grep', pattern: 'BREAKING', calls: [16.4], done: 18.0 },
       // The one the cursor opens: its reasoning streams in while it is live (PillThinkingText).
       { type: 'think', id: 'think2', at: 18.1, titleAt: 18.4, done: 21.2, title: 'Grouping the changes by area', rate: 100,
         text: '**Grouping the changes by area**\n\nThe log since v2.3 has 31 commits: three user-facing features, seven fixes — most of them in packages/auth — and the dependency bump. Readers will look for the login fix first, so I’ll lead with Fixes, then Features, then Maintenance, and link every line to its PR.' },
-      { type: 'tool', at: 21.3, kind: 'edit', file: 'RELEASE.md', calls: [21.3], done: 24.5 },
+      { type: 'tool', at: 21.35, kind: 'fetch', calls: [21.35, 21.65], hosts: ['keepachangelog.com', 'github.com'], callDone: [22.1, 22.45], done: 22.45 },
+      { type: 'tool', at: 22.6, kind: 'edit', file: 'RELEASE.md', calls: [22.6], done: 24.5 },
       { type: 'assistant', at: 24.6, text: 'RELEASE.md is drafted: three features, seven fixes and the dependency bump, grouped by area.' },
     ],
   },
 ];
-const TOOL_SYMBOL = { read: 'doc.text', shell: 'terminal', edit: 'pencil', write: 'pencil', grep: 'text.magnifyingglass', search: 'magnifyingglass' };
+const TOOL_SYMBOL = { read: 'doc.text', shell: 'terminal', edit: 'pencil', write: 'pencil', grep: 'text.magnifyingglass', search: 'magnifyingglass', fetch: 'safari' };
 // What a child's turn has thrown by time T (plumeThrows): a tool puff per call — a search throws its sites instead.
 for (const def of CHILD_DEFS) {
   def.throws = [];
   def.items.forEach((it, i) => {
     if (it.type !== 'tool') return;
     if (it.kind === 'search') it.sites.forEach(h => def.throws.push({ at: it.resultAt, item: { id: `${def.id}${i}#${h}`, kind: 'site', host: h } }));
-    else it.calls.forEach((c, j) => def.throws.push({ at: c, item: { id: `${def.id}${i}.${j}`, kind: 'tool', symbol: TOOL_SYMBOL[it.kind] } }));
+    else it.calls.forEach((c, j) => {
+      def.throws.push({ at: c, item: { id: `${def.id}${i}.${j}`, kind: 'tool', symbol: TOOL_SYMBOL[it.kind] } });
+      if (it.kind === 'fetch') def.throws.push({ at: it.callDone[j], item: { id: `${def.id}${i}.${j}#${it.hosts[j]}`, kind: 'site', host: it.hosts[j] } });
+    });
   });
   def.throws.sort((a, b) => a.at - b.at);
 }
@@ -656,6 +671,7 @@ class SessionWindow {
       text += `${cu.shown} ${cu.shown === 1 ? lab.noun[0] : lab.noun[1]}`;
     }
     if (lab.rot) text += lab.rot;
+    if (lab.rots) text += lab.rots[Math.floor(t / 0.5) % lab.rots.length];   // a rotating name, every half second
     text += lab.tail || '';
     if (x.lbl.textContent !== text) x.lbl.textContent = text;
     shimmerText(x.lbl, x.lbl.offsetWidth, t, running);
@@ -663,7 +679,15 @@ class SessionWindow {
     x.rim.style.borderColor = `rgba(255,255,255,${(0.08 + 0.47 * easeInOut(live)).toFixed(3)})`;
     // Discs: a tool's symbol; a search's favicons (one rotating while it runs, up to five once done).
     let key, html;
-    if (it.kind === 'search' && t >= it.resultAt) {
+    if (it.kind === 'fetch') {
+      if (running && lab.rots) { const h = lab.rots[Math.floor(t / 0.5) % lab.rots.length]; key = 'r' + h; html = `<div class="disc">${faviconHTML(h, 14)}</div>`; }
+      else {   // toolRunDiscs: its own tile, then each page's favicon — each distinct disc once
+        const hosts = [...new Set(it.hosts)];
+        key = 'done';
+        html = [`<div class="disc" style="z-index:9">${svgIcon('safari', 12, '#000')}</div>`]
+          .concat(hosts.slice(0, 4).map((h, i) => `<div class="disc" style="z-index:${8 - i}">${faviconHTML(h, 14)}</div>`)).join('');
+      }
+    } else if (it.kind === 'search' && t >= it.resultAt) {
       if (running) { const h = it.sites[Math.floor(t / 0.5) % it.sites.length]; key = 'r' + h; html = `<div class="disc">${faviconHTML(h, 14)}</div>`; }
       else {
         key = 'done';
@@ -689,6 +713,14 @@ function toolLabel(it, t) {
     case 'edit': return running ? { lead: 'Editing ', rot: it.file } : { lead: `Edited ${it.file}` };
     case 'shell': return running ? { lead: 'Running ', count: n, noun: cmd } : { lead: 'Ran ', count: n, noun: cmd };
     case 'grep': return running ? { lead: 'Searching for ', rot: `“${it.pattern}”` } : { lead: `Searched for “${it.pattern}”` };
+    case 'fetch': {
+      const called = it.calls.map((c, i) => ({ at: c, host: it.hosts[i], done: it.callDone[i] })).filter(c => c.at <= t);
+      if (running) {
+        const live = called.filter(c => t < c.done), names = (live.length ? live : called).map(c => c.host);
+        return names.length ? { lead: 'Reading ', rots: names } : { lead: 'Reading a page' };
+      }
+      return it.hosts.length === 1 ? { lead: `Read ${it.hosts[0]}` } : { lead: 'Read ', count: it.hosts.length, noun: ['page', 'pages'] };
+    }
     case 'search': {
       const sites = t >= it.resultAt ? it.sites.length : 0, noun = ['website', 'websites'];
       if (running) return sites ? { lead: 'Searching the web · ', count: sites, noun } : { lead: 'Searching the web' };
@@ -708,7 +740,9 @@ const EVENTS = [
   [2.9, () => { main.visible = true; }],
   [3.6, t => { typing = { start: t, times: typingTimes(PROMPT) }; }],
   [7.35, t => submit(t)],
-  [7.65, () => mainThrow({ id: 'ls1', kind: 'tool', symbol: 'person.2.fill' })],
+  [7.6, () => mainThrow({ id: 'ls1', kind: 'tool', symbol: 'person.2.fill' })],
+  [7.8, () => mainThrow({ id: 'wf1', kind: 'tool', symbol: 'safari' })],
+  [8.1, () => mainThrow({ id: 'wf1#github.com', kind: 'site', host: 'github.com' })],
   [8.25, () => mainThrow({ id: 'sp1', kind: 'tool', symbol: 'paperplane.fill' })],
   [8.6, t => spawnChild(0, t)],
   [8.95, () => mainThrow({ id: 'sp2', kind: 'tool', symbol: 'paperplane.fill' })],
@@ -724,6 +758,8 @@ const EVENTS = [
   [20.35, t => windows.find(w => w.def === CHILD_DEFS[2])?.openThinking('think2', t)],
   [26.2, t => wake(t)],
   [26.55, () => mainThrow({ id: 'ls2', kind: 'tool', symbol: 'person.2.fill' })],
+  [26.85, () => mainThrow({ id: 'wf2', kind: 'tool', symbol: 'safari' })],
+  [27.25, () => mainThrow({ id: 'wf2#github.com', kind: 'site', host: 'github.com' })],
   [28.2, t => endTurn(t, REPLY_2)],
 ];
 function typingTimes(text) {
@@ -788,7 +824,7 @@ const CAPTIONS = [
   { t0: 2.55, t1: 7.0, place: 'top', head: 'Ask Dispatch anything', sub: 'A four-finger tap brings up the pill. Type, and it grows with you.' },
   { t0: 7.45, t1: 13.95, place: 'top', head: 'It fans the work out', sub: 'Each task becomes its own session, rising out of the pill in its own colour.' },
   { t0: 14.6, t1: 20.6, place: 'bottom', head: 'Open any session', sub: 'Click a pill and its window stands on the stack above Dispatch.' },
-  { t0: 20.8, t1: 24.4, place: 'bottom', head: 'Watch them work', sub: 'Plumes throw the tools each session uses; a thinking pill opens into its reasoning.' },
+  { t0: 20.8, t1: 24.4, place: 'bottom', head: 'Watch them work', sub: 'Plumes throw the tools and sites each session uses; a thinking pill opens into its reasoning.' },
   { t0: 24.75, t1: 27.95, place: 'bottom', narrow: true, head: 'Then it reports back', sub: 'Finished sessions sink back into the pill as Dispatch sums up.' },
 ];
 const KEYS = [
@@ -801,11 +837,11 @@ const KEYS = [
 // ---------------------------------------------------------------- build static DOM
 function buildDesktop() {
   const mb = $('menubar');
-  mb.innerHTML = `<span style="display:flex;align-items:center">${brandSVG(15).svg}</span><span class="app">Winter</span>`
+  mb.innerHTML = `<span style="display:flex;align-items:center">${brandSVG(15, '#1d1d1f').svg}</span><span class="app">Winter</span>`
     + ['File', 'Edit', 'View', 'Window', 'Help'].map(s => `<span class="mi">${s}</span>`).join('')
     + `<span class="spacer"></span>`
-    + `<span style="display:flex;align-items:center;opacity:.95">${brandSVG(14).svg}</span>`
-    + `<span class="mi" style="display:flex;align-items:center;gap:3px"><svg width="22" height="11" viewBox="0 0 22 11"><rect x=".5" y=".5" width="18" height="10" rx="3" fill="none" stroke="rgba(255,255,255,.55)"/><rect x="2" y="2" width="12.5" height="7" rx="1.6" fill="#fff"/><rect x="19.6" y="3.6" width="1.6" height="3.8" rx=".8" fill="rgba(255,255,255,.55)"/></svg></span>`
+    + `<span style="display:flex;align-items:center;opacity:.9">${brandSVG(14, '#1d1d1f').svg}</span>`
+    + `<span class="mi" style="display:flex;align-items:center;gap:3px"><svg width="22" height="11" viewBox="0 0 22 11"><rect x=".5" y=".5" width="18" height="10" rx="3" fill="none" stroke="rgba(0,0,0,.45)"/><rect x="2" y="2" width="12.5" height="7" rx="1.6" fill="#1d1d1f"/><rect x="19.6" y="3.6" width="1.6" height="3.8" rx=".8" fill="rgba(0,0,0,.45)"/></svg></span>`
     + `<span class="mi">Tue 6 Oct&nbsp;&nbsp;9:41</span>`;
   // Menu-bar marks are static (no shimmer): full white.
   mb.querySelectorAll('stop').forEach(s => s.setAttribute('stop-opacity', 1));
@@ -822,7 +858,7 @@ const capEls = CAPTIONS.map(c => {
   return e;
 });
 const keyEls = KEYS.map(k => el('div', 'key', overlays, (k.glyph ? `<span class="kg">${k.glyph}</span>` : '') + `<span>${k.label}</span>`));
-const introMark = brandSVG(132), outroMark = brandSVG(132);
+const introMark = brandSVG(132, '#0b0b0f'), outroMark = brandSVG(132, '#0b0b0f');
 $('intro').innerHTML = `<div id="introMark">${introMark.svg}</div><div class="brandTitle" id="introTitle">Dispatch</div><div class="brandSub" id="introSub">in Winter for Mac</div>`;
 $('outro').innerHTML = `<div id="outroMark">${outroMark.svg}</div><div class="brandTitle" id="outroTitle">Dispatch</div><div class="brandSub" id="outroSub">One pill. Every session.</div>`;
 
@@ -1016,7 +1052,7 @@ function renderOverlays(t) {
     const pressed = t >= k.t && t < k.t + 0.16;
     css(e, { display: 'flex', right: '96px', top: '100px', opacity: a,
       transform: `translateY(${pressed ? 4 : (1 - a) * 14}px) scale(${pressed ? 0.96 : 1})`,
-      background: pressed ? 'rgba(255,255,255,.26)' : 'rgba(255,255,255,.14)' });
+      background: pressed ? '#ececf0' : '#ffffff' });
   });
   // Intro.
   const intro = $('intro');
