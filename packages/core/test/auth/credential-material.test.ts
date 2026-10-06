@@ -200,7 +200,9 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // 0.0.46 → 0.0.47 (system/reasoning_progress, Claude display "updates"): keychain-store.ts diff EMPTY; the mirror stands.
     // 0.0.47 → 0.0.48 (Claude "summarized" again, more summary rows, unverified-org fallback): the keychain-store
     // module of the two PUBLISHED runtime bundles (and its .d.ts) is byte-identical; the mirror stands.
-    expect(pkg.version).toBe("0.0.48");
+    // 0.0.48 → 0.0.49 (mid-stream Anthropic error frames explained and classified by type): keychain-store.ts
+    // untouched in source; its region of the published runtime bundle (and its .d.ts) is byte-identical; the mirror stands.
+    expect(pkg.version).toBe("0.0.49");
   });
 
 
