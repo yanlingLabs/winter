@@ -802,11 +802,9 @@ function camera(t) {
   return { S: S * m, tx: 960 - (960 - tx) * m, ty: 540 - (540 - ty) * m };
 }
 const PARAMS = new URLSearchParams(location.search);
-const SILENT = PARAMS.has('silent');   // the README loop has no soundtrack to move with
 const CARD = PARAMS.has('card');       // the social card's still (record.cjs card)
 function beatPush(t) {
   let push = 0;
-  if (SILENT) return push;
   for (const k of window.MUSIC.KICKS) if (t >= k.t && t - k.t < 0.6) push += 0.0045 * k.v * Math.exp(-(t - k.t) / 0.1);
   for (const h of window.MUSIC.IMPACTS) if (t >= h.t && t - h.t < 1.2) push += 0.013 * h.a * Math.exp(-(t - h.t) / 0.22);
   return push;

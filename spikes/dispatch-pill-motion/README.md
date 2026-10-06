@@ -39,29 +39,30 @@ node record.cjs video                   # → out/dispatch-pill.mp4 (~36 s, with
 ```
 
 Needs Playwright with its Chromium (`npm i -g playwright && npx playwright install chromium`) and
-`ffmpeg` with libx264, aac and libsvtav1. `out/` is git-ignored (`spikes/*/out/`).
+`ffmpeg` with libx264 and aac. `out/` is git-ignored (`spikes/*/out/`).
 
 ## The repository's README assets
 
 The README's media come from the same render, so they never drift from the video:
 
 ```sh
-node record.cjs loop        # → out/dispatch-loop.avif   → assets/readme/dispatch.avif
-node record.cjs card        # → out/social-preview.png   → assets/readme/social-preview.png
+node record.cjs poster      # → out/poster.png              → assets/readme/dispatch.png
+node record.cjs web         # → out/winter-dispatch.mp4     (after `video` and `poster`)
+node record.cjs card        # → out/social-preview.png      → assets/readme/social-preview.png
 node lockup.cjs             # → out/lockup-on-{light,dark}.svg → assets/brand/
-ffmpeg -i out/dispatch-pill.mp4 -i out/music.wav -map 0:v -map 1:a -c:v libx264 -crf 23 -preset slow \
-  -tune animation -pix_fmt yuv420p -c:a aac -b:a 160k -shortest -movflags +faststart \
-  ../../assets/readme/winter-dispatch.mp4   # the video with sound, under GitHub's 10 MB upload limit
 ```
 
-- **`loop`** is the README's hero: the whole cut at 30 fps and 1600 wide, silent (`scene.html?silent`
-  turns off the camera's push on the beat, which only makes sense with the music), as an animated
-  AVIF (AV1 at 10 bits, about 4 MB). Animated WebP was tried first and smeared every camera move
-  (its encoder reuses "unchanged" blocks from the frame before) at two and a half times the size.
-  The loop starts at 3.6 s, so its first frame (the heading and the pill) is a fair still when
-  autoplay is off, and wraps through the end card and the intro.
-- **`card`** is GitHub's 1280×640 social preview: the pills at 12.55 s, cut out of the video's
-  own render (`scene.html?card` keeps the plume's tiles off the session titles so they read at
+- **`poster`** is the README's picture: "Watch them work" at 21.6 s (frame 1296), every window busy,
+  at 1600×900 with a hairline rim.
+- **`web`** is the video for GitHub's own player: the full cut with its soundtrack, under the free
+  plan's 10 MB upload cap, its first frame the poster so the player shows a real picture before
+  you press play. GitHub plays only videos uploaded through github.com (drop the file into a
+  comment or the README editor and use the link it gives): an MP4 committed to the repository just
+  downloads. An animated image was tried as an autoplaying stand-in and dropped: animated AVIF
+  (4 MB) plays in slow motion in Safari, which hands its decoding to the OS, and animated WebP
+  smears every camera move (its encoder reuses "unchanged" blocks from the frame before) at 10 MB.
+- **`card`** is GitHub's 1280×640 social preview: the pills at 12.55 s, cut out of the video's own
+  render (`scene.html?card` keeps the plume's tiles off the session titles so they read at
   thumbnail size), framed by `card.html`.
 - **`lockup.cjs`** sets the mark and "winter" exactly as the end card does, as outlines (GitHub
   shows SVGs as images, without web fonts). Needs `opentype.js`.

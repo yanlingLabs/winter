@@ -3,9 +3,10 @@
 //   node record.cjs stills 300 600 900        → out/stills/f0300.png …
 //   node record.cjs music                     → out/music.wav
 //   node record.cjs video [out.mp4] [from] [to] → out/dispatch-pill.mp4 (1920×1080, 60 fps, AAC audio)
-//   node record.cjs loop                      → out/dispatch-loop.avif (the README's silent hero loop)
+//   node record.cjs poster [frame]            → out/poster.png (the README's picture, 1600×900)
+//   node record.cjs web                       → out/winter-dispatch.mp4 (the video for GitHub's player)
 //   node record.cjs card [t] [variant…]       → out/social-preview[-v].png (GitHub's 1280×640 social card)
-// Needs Playwright's Chromium and ffmpeg (libx264, aac, libsvtav1) on the PATH.
+// Needs Playwright's Chromium and ffmpeg (libx264, aac) on the PATH.
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
@@ -32,9 +33,8 @@ function brandPaths() {
   page.on('console', m => console.log('[page]', m.text()));
   page.on('pageerror', e => console.log('[pageerror]', e.message));
   await page.addInitScript(paths => { window.BRAND_PATHS = paths; }, brandPaths());
-  // The loop plays without its soundtrack, so the camera does not push on the beat; the card's still
-  // keeps the plume's tiles off the session titles.
-  await page.goto('file://' + path.join(__dirname, 'scene.html') + ({ loop: '?silent', card: '?card' }[mode] || ''));
+  // The card's still keeps the plume's tiles off the session titles.
+  await page.goto('file://' + path.join(__dirname, 'scene.html') + (mode === 'card' ? '?card' : ''));
   await page.waitForFunction(() => window.sceneReady === true);
   const total = await page.evaluate(() => window.TOTAL_FRAMES);
 
@@ -88,32 +88,25 @@ function brandPaths() {
       await ffmpeg(['-i', big, '-vf', 'scale=1280:640:flags=lanczos', '-pix_fmt', 'rgb24', out]);
       console.log('wrote', out, `(${(fs.statSync(out).size / 1024).toFixed(0)} KB)`);
     }
-  } else if (mode === 'loop') {
-    // The README's hero: the whole cut at 30 fps, silent, 1600 wide with a hairline rim, as an animated
-    // AVIF (AV1, 10-bit). WebP was tried first: its encoder keeps "unchanged" blocks from the frame
-    // before, which smears every camera move, and it came out at 10 MB against AVIF's 4. The loop
-    // starts at 3.6 s (the heading up, the pill there — a still worth showing when autoplay is off)
-    // and wraps through the end card and the intro back to it.
-    const START = 216, frames = path.join(outDir, 'loop-frames');
-    fs.rmSync(frames, { recursive: true, force: true });
-    fs.mkdirSync(frames, { recursive: true });
-    const t0 = Date.now();
-    const order = [];
-    for (let f = 0; f < total; f += 2) {
-      await page.evaluate(n => window.renderFrame(n), f);
-      const file = path.join(frames, `src${String(f).padStart(5, '0')}.jpg`);
-      await page.screenshot({ path: file, type: 'jpeg', quality: 95 });
-      order.push(file);
-      if (f % 240 === 0) console.log(`frame ${f}/${total}  ${((Date.now() - t0) / 1000).toFixed(0)}s`);
-    }
-    const at = f => Number(path.basename(f).slice(3, 8));
-    const rotated = [...order.filter(f => at(f) >= START), ...order.filter(f => at(f) < START)];
-    rotated.forEach((f, i) => fs.symlinkSync(f, path.join(frames, `seq${String(i).padStart(5, '0')}.jpg`)));
-    const out = path.join(outDir, 'dispatch-loop.avif');
-    await ffmpeg(['-framerate', '30', '-i', path.join(frames, 'seq%05d.jpg'),
-      '-vf', 'scale=1600:900:flags=lanczos,drawbox=x=0:y=0:w=iw:h=ih:color=0x111827@0.10:t=1,format=yuv420p10le',
-      '-c:v', 'libsvtav1', '-preset', '4', '-crf', rest[0] || '32', '-g', '600', '-svtav1-params', 'tune=0', '-loop', '0', out]);
-    fs.rmSync(frames, { recursive: true, force: true });
+  } else if (mode === 'poster') {
+    // The README's picture, and the first frame of the video GitHub plays: "Watch them work" at 21.6 s,
+    // every window busy, brought down to 1600×900 with a hairline rim.
+    await page.evaluate(n => window.renderRange(0, n), Number(rest[0] || 1296));
+    const full = path.join(outDir, 'poster@1080.png'), out = path.join(outDir, 'poster.png');
+    await page.screenshot({ path: full });
+    await ffmpeg(['-i', full, '-vf', 'scale=1600:900:flags=lanczos,drawbox=x=0:y=0:w=iw:h=ih:color=0x111827@0.10:t=1', out]);
+    console.log('wrote', out, `(${(fs.statSync(out).size / 1024).toFixed(0)} KB)`);
+  } else if (mode === 'web') {
+    // The video for GitHub's own player, which plays only videos uploaded through github.com (an MP4
+    // in the repository just downloads, and Safari plays animated AVIF slowly): the full cut under the
+    // free plan's 10 MB upload cap, its first frame the poster so the player shows a real picture
+    // before you press play. Run `video` and `poster` first.
+    const master = path.join(outDir, 'dispatch-pill.mp4'), poster = path.join(outDir, 'poster@1080.png');
+    const wav = path.join(outDir, 'music.wav'), out = path.join(outDir, 'winter-dispatch.mp4');
+    for (const f of [master, poster, wav]) if (!fs.existsSync(f)) throw new Error(`no ${path.basename(f)}: run video and poster first`);
+    await ffmpeg(['-i', master, '-i', poster, '-i', wav, '-filter_complex', "[0:v][1:v]overlay=enable='eq(n,0)'[v]",
+      '-map', '[v]', '-map', '2:a', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-preset', 'slow', '-tune', 'animation',
+      '-c:a', 'aac', '-b:a', '160k', '-shortest', '-movflags', '+faststart', out]);
     console.log('wrote', out, `(${(fs.statSync(out).size / 1048576).toFixed(2)} MB)`);
   } else if (mode === 'stills') {
     fs.mkdirSync(path.join(outDir, 'stills'), { recursive: true });
