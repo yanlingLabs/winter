@@ -34,6 +34,10 @@ export interface HubClient {
    *  daemon's own record rather than by string-matching its name (`harnessKindOf`). */
   role?: string | null;
   deliver(event: SessionEvent): boolean;
+  /** Bracket `attach`'s synchronous replay loop: a socket-backed client suspends its slow-consumer
+   *  cap for the burst (`ConnWriter.beginBulk`/`endBulk`) — a log past the cap must still replay. */
+  beginReplay?(): void;
+  endReplay?(): void;
 }
 
 export class SessionHub {
@@ -89,12 +93,17 @@ export class SessionHub {
     const prev = this.byClient.get(client);
     if (prev && prev !== sessionId) this.detach(client);
     let lastSeq = fromSeq;
-    for (const e of this.store.read(sessionId, fromSeq)) {
-      // A client that dies mid-replay (e.g. a slow-consumer backlog cap trips) was never
-      // really attached — don't add it, don't announce it. Return the seq of the last event
-      // it successfully received so the caller still gets a coherent, non-sentinel lastSeq.
-      if (!client.deliver(e)) return lastSeq;
-      lastSeq = e.seq;
+    client.beginReplay?.();
+    try {
+      for (const e of this.store.read(sessionId, fromSeq)) {
+        // A client that dies mid-replay (e.g. its socket closed) was never really attached —
+        // don't add it, don't announce it. Return the seq of the last event it successfully
+        // received so the caller still gets a coherent, non-sentinel lastSeq.
+        if (!client.deliver(e)) return lastSeq;
+        lastSeq = e.seq;
+      }
+    } finally {
+      client.endReplay?.();
     }
     let set = this.attachments.get(sessionId);
     if (!set) { set = new Set(); this.attachments.set(sessionId, set); }

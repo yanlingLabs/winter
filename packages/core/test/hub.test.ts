@@ -147,6 +147,32 @@ describe("SessionHub", () => {
     expect(names).toEqual(["flaky1", "flaky2"]); // exactly one each, no dupes
   });
 
+  test("attach brackets its replay with beginReplay/endReplay — even when the client dies mid-replay", () => {
+    const { store, hub } = setup();
+    const id = store.createSession("global");
+    store.append(id, { type: "user_message", sessionId: id, threadId: "main", text: "one", clientName: "x" });
+    const calls: string[] = [];
+    const ok: HubClient = {
+      clientName: "ok",
+      deliver(e) { calls.push(`deliver:${e.type}`); return true; },
+      beginReplay() { calls.push("begin"); },
+      endReplay() { calls.push("end"); },
+    };
+    hub.attach(ok, id, 0);
+    // The replayed events sit inside the bracket; the live harness_attached comes after it.
+    expect(calls).toEqual(["begin", "deliver:session_created", "deliver:user_message", "end", "deliver:harness_attached"]);
+
+    const ended: string[] = [];
+    const dying: HubClient = {
+      clientName: "dying",
+      deliver() { return false; },
+      beginReplay() { ended.push("begin"); },
+      endReplay() { ended.push("end"); },
+    };
+    hub.attach(dying, id, 0);
+    expect(ended).toEqual(["begin", "end"]);
+  });
+
   test("attach evicts a client that dies mid-replay — never left half-attached", () => {
     const { store, hub } = setup();
     const id = store.createSession("global");

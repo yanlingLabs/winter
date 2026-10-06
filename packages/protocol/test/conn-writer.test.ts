@@ -57,4 +57,38 @@ describe("ConnWriter", () => {
     expect(s.ended).toBe(true);
     expect(w.enqueue(new Uint8Array(1))).toBe(false); // post-end writes refused
   });
+
+  // 2026-10-06: a Dispatch log reached 4.1 MB, so its attach replay (enqueued in one synchronous
+  // loop) tripped the 4 MiB cap every time and the session could never be attached again.
+  test("a bulk burst past the cap is kept; the backlog becomes a one-time allowance", () => {
+    const s = mockSocket(0); // the client has not read a byte yet
+    const w = new ConnWriter(s, 16);
+    w.beginBulk();
+    for (let i = 0; i < 10; i++) expect(w.enqueue(new Uint8Array(10))).toBe(true); // 100 > 16
+    w.endBulk();
+    expect(s.ended).toBe(false);
+    expect(w.bufferedBytes).toBe(100);
+    // Live traffic gets the cap ON TOP of the unread backlog: 100 + 16 is still fine…
+    expect(w.enqueue(new Uint8Array(16))).toBe(true);
+    expect(s.ended).toBe(false);
+    // …one byte more is a stuck client.
+    expect(w.enqueue(new Uint8Array(1))).toBe(false);
+    expect(s.ended).toBe(true);
+  });
+
+  test("the allowance shrinks as the client drains — never room for live traffic again", () => {
+    const s = mockSocket(0);
+    const w = new ConnWriter(s, 16);
+    w.beginBulk();
+    w.enqueue(new Uint8Array(100));
+    w.endBulk();
+    s.setAccept(90); // the client reads 90 of the 100
+    w.onDrain();
+    expect(w.bufferedBytes).toBe(10);
+    s.setAccept(0);
+    // Allowance is now 10 (the unread remainder): 10 + 16 is the most the backlog may reach.
+    expect(w.enqueue(new Uint8Array(16))).toBe(true);
+    expect(w.enqueue(new Uint8Array(1))).toBe(false);
+    expect(s.ended).toBe(true);
+  });
 });

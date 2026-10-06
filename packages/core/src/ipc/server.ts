@@ -2209,6 +2209,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             }
             return socket.data.writer.enqueue(encodeLine({ jsonrpc: "2.0", method: METHODS.event, params: event }));
           },
+          // A whole log replays before the socket can drain once; the slow-consumer cap is for
+          // live traffic, not for that burst (ConnWriter.beginBulk's doc).
+          beginReplay() { socket.data.writer.beginBulk(); },
+          endReplay() { socket.data.writer.endBulk(); },
         };
         // Detach the old client before attaching a new one (re-attach = move semantics).
         if (socket.data.hubClient) hub.detach(socket.data.hubClient);
