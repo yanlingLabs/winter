@@ -22,7 +22,7 @@ export { PROJECTED_EVENT_COVERAGE, SUBAGENT_TRANSCRIPT_INCLUDE } from "./event-c
 export { createEchoWindow, ECHO_WINDOW, type EchoWindow } from "./dedupe";
 export { projectTerminal, sharesMainLedgerRow, totalsOf, turnUsageOf, type MainModelKey, type UsageTotals } from "./terminal";
 export {
-  AGENT_ERROR_CODES, classifyResult, classifyThrown, codeForHttpStatus, sanitizeDetail,
+  AGENT_ERROR_CODES, AGENT_ERROR_DETAIL_MAX, agentErrorDetail, classifyResult, classifyThrown, codeForHttpStatus, runtimeFailureClass, sanitizeDetail,
   type AgentErrorCode, type ClassifiedError,
 } from "./errors";
 export {

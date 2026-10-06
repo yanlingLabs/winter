@@ -463,8 +463,36 @@ describe("the completion wake", () => {
     t.finish(a, { error: "provider 500" });
     t.finish(b, { text: "halfway", aborted: true });
     const ups = t.childUpdates();
-    expect(ups.find((e) => e.childSessionId === a && e.status !== "running")).toMatchObject({ status: "error" });
+    expect(ups.find((e) => e.childSessionId === a && e.status !== "running")).toMatchObject({ status: "error", resultSummary: "It ended with an error: provider 500" });
     expect(ups.find((e) => e.childSessionId === b && e.status !== "running")).toMatchObject({ status: "completed", resultSummary: "Stopped before it finished. Its last message: halfway" });
+  });
+
+  test("agent SDK 0.0.49: an error turn's report carries the classed reason, so Dispatch can tell a refusal from a transient failure", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    const ev = (e: Record<string, unknown>) => t.hub.append(child, { sessionId: child, threadId: "main", ...e } as never);
+    ev({ type: "assistant_message", text: "Reading the files." });
+    ev({ type: "agent_error", code: "bad_request", message: "the provider refused the request: Your credit balance is too low to access the Anthropic API." });
+    ev({ type: "turn_completed", stopReason: "error", inputTokens: 0, outputTokens: 0 });
+    t.driverFor(child).turnRunning = false;
+    t.dc.onTurnSettled(child);
+    await t.drain();
+    const report = t.childUpdates().at(-1);
+    expect(report).toMatchObject({ childSessionId: child, status: "error" });
+    expect(report?.resultSummary).toBe("It ended with an error: the provider refused the request: Your credit balance is too low to access the Anthropic API.\nIts last message: Reading the files.");
+  });
+
+  test("an error turn followed back-to-back by a successful one reports no stale error", async () => {
+    const t = setup();
+    const child = await t.spawnOne({ title: "Kid" });
+    const ev = (e: Record<string, unknown>) => t.hub.append(child, { sessionId: child, threadId: "main", ...e } as never);
+    ev({ type: "agent_error", message: "the provider refused the request: nope" });
+    ev({ type: "turn_completed", stopReason: "error", inputTokens: 0, outputTokens: 0 });
+    ev({ type: "turn_started" });
+    ev({ type: "assistant_message", text: "recovered" });
+    t.finish(child);
+    await t.drain();
+    expect(t.childUpdates().at(-1)).toMatchObject({ status: "completed", resultSummary: "recovered" });
   });
 
   test("COALESCING: children finishing while the coordinator works wake it ONCE, at its turn's end", async () => {

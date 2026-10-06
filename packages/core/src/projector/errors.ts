@@ -52,8 +52,11 @@ const CLASS_MESSAGE: Record<AgentErrorCode, string> = {
   auth: "the provider rejected these credentials",
   rate_limit: "the provider is rate limiting this account",
   server: "the provider is unavailable or overloaded",
-  network: "the provider could not be reached",
-  bad_request: "the provider rejected the request as invalid",
+  network: "the provider could not be reached or stopped responding",
+  // Every refusal of the request ITSELF: a malformed request, but also (agent SDK 0.0.49) an
+  // Anthropic `invalid_request_error` that is really a spend limit or an exhausted credit balance.
+  // Never a retry hint; the vendor's own reason follows it in the detail.
+  bad_request: "the provider refused the request",
   billing: "this account cannot be billed for the request",
   model_not_found: "the requested model is not available to this account",
   max_output_tokens: "the reply hit the model's output limit",
@@ -118,13 +121,95 @@ export function codeForHttpStatus(status: number): AgentErrorCode {
  */
 const OPAQUE_MARKERS = ["encrypted_content", "itemJson", "reasoning_item", "redacted_thinking", "signature_delta"];
 
+/**
+ * The longest detail an `agent_error.message` carries. 400 since agent SDK 0.0.49: the runtime caps a
+ * provider's own message at 400 too (`provider/bridge.ts`'s `MAX_ERROR_MESSAGE_CHARS`), and a vendor's
+ * explanation (Anthropic's credit-balance sentence is ~120 chars) must survive whole. Still far inside
+ * `session.history`'s and the remote stream's 64 KiB per-string cap.
+ */
+export const AGENT_ERROR_DETAIL_MAX = 400;
+
 /** A short, bounded, opaque-free detail, or undefined. The ONLY door foreign text uses. */
 export function sanitizeDetail(raw: unknown): string | undefined {
   if (typeof raw !== "string") return undefined;
   const text = raw.trim();
   if (text.length === 0) return undefined;
   for (const marker of OPAQUE_MARKERS) if (text.includes(marker)) return undefined;
-  return text.length <= 200 ? text : `${text.slice(0, 200)}…`;
+  return text.length <= AGENT_ERROR_DETAIL_MAX ? text : `${text.slice(0, AGENT_ERROR_DETAIL_MAX)}…`;
+}
+
+/**
+ * The runtime's own wrapping of a provider failure (`provider/bridge.ts`'s `providerErrorToTurnError`):
+ * `provider request failed (<code>): <message>`, where `<code>` is the provider seam's typed class
+ * (`ProviderError["code"]`). A raw throw it normalised has no parenthetical (`provider request failed:
+ * <message>`). The prefix is the only place the runtime's class reaches this daemon for a failure with
+ * no HTTP status (a mid-stream error frame, a stall, a timeout) — the result frame carries
+ * `api_error_status: null` and no taxonomy member.
+ */
+const RUNTIME_FAILURE_PREFIX = /^provider request failed(?: \(([a-z_]+)\))?: /;
+
+/** The runtime's typed class → this module's code. Only the classes a status-less failure can carry;
+ *  `capability` keeps its own door (below), `aborted` never reaches a result, and anything else (a
+ *  class a later SDK adds) reads as `server`, the pre-0.0.49 reading. `timeout`/`stall` are `network`,
+ *  as `providers/runtime-provider.ts`'s `mapErrorCode` already reads them for the internal jobs. */
+const RUNTIME_CLASS_CODE: Readonly<Record<string, AgentErrorCode>> = {
+  bad_request: "bad_request",
+  auth: "auth",
+  rate_limit: "rate_limit",
+  server: "server",
+  network: "network",
+  timeout: "network",
+  stall: "network",
+};
+
+/** The runtime's typed class from its failure prefix, or undefined. */
+export function runtimeFailureClass(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  return RUNTIME_FAILURE_PREFIX.exec(raw)?.[1];
+}
+
+/**
+ * Anthropic's mid-stream error frame, as the agent SDK words it (0.0.49 `streamErrorFrame`):
+ * `the provider ended the stream with an error frame (<type>): <the vendor's message>` — or with no
+ * message, or no type. The class sentence already says the provider refused or failed, so the detail
+ * keeps only the vendor's own sentence (the part a user can act on), or the type when that is all
+ * there is.
+ */
+const STREAM_ERROR_FRAME = /^the provider ended the stream with an error frame(?: \(([A-Za-z0-9_]+)\))?(?:: ([\s\S]+))?$/;
+
+/** The text worth showing: the runtime's failure prefix dropped, a stream error frame reduced to the
+ *  vendor's own sentence. Everything else passes through unchanged (`sanitizeDetail` still bounds it).
+ *  Also read by role health for the internal jobs' provider errors, which carry the same frame wording. */
+export function readableFailureText(raw: string): string;
+export function readableFailureText(raw: unknown): unknown;
+export function readableFailureText(raw: unknown): unknown {
+  if (typeof raw !== "string") return raw;
+  const text = raw.replace(RUNTIME_FAILURE_PREFIX, "");
+  const frame = STREAM_ERROR_FRAME.exec(text);
+  if (frame === null) return text;
+  const [, type, vendor] = frame;
+  if (vendor !== undefined && vendor.trim().length > 0) return vendor;
+  return type !== undefined ? `the stream ended with an error frame (${type})` : "the stream ended with an error frame";
+}
+
+/** Anthropic's `billing_error` (HTTP 402 when it is refused up front, which `codeForHttpStatus` already
+ *  reads as `billing`): the agent SDK files it under `bad_request` mid-stream, so it is recognised here
+ *  by the frame's own type, the same structured fact the status carries up front. */
+function isBillingStreamFrame(raw: unknown): boolean {
+  if (typeof raw !== "string") return false;
+  return STREAM_ERROR_FRAME.exec(raw.replace(RUNTIME_FAILURE_PREFIX, ""))?.[1] === "billing_error";
+}
+
+/**
+ * The detail that follows a class sentence, for a reader that has its own sentence for the class (role
+ * health's dispatch note): the message with this module's class sentence dropped, or undefined when
+ * the message is the bare sentence or is not one of ours.
+ */
+export function agentErrorDetail(code: string | undefined, message: string): string | undefined {
+  const sentence = code !== undefined && Object.hasOwn(CLASS_MESSAGE, code) ? CLASS_MESSAGE[code as AgentErrorCode] : undefined;
+  if (sentence === undefined || !message.startsWith(`${sentence}: `)) return undefined;
+  const detail = message.slice(sentence.length + 2).trim();
+  return detail.length > 0 ? detail : undefined;
 }
 
 /** SDK 0.0.14's wording for a ChatGPT Codex `usage_limit_reached` 429 (`provider-runtime/src/errors.ts`
@@ -202,12 +287,13 @@ const NAMED_TERMINAL_CODE: Readonly<Record<string, AgentErrorCode>> = {
  *
  * Precedence, most specific first: the provider taxonomy (a named class), then the runtime's own
  * named terminal verdicts (`NAMED_TERMINAL_CODE`, WS-23), then `api_error_status` (a structural HTTP
- * class), then the remaining `terminal_reason`s, then `subtype`. Anything unrecognised is
+ * class), then the remaining `terminal_reason`s (a status-less `api_error` by the runtime's own
+ * class from its failure prefix — 0.0.49), then `subtype`. Anything unrecognised is
  * `unknown_error` — never a pass-through of the runtime's own string as a code, which would make
  * the field unswitchable.
  */
 export function classifyResult(result: ResultFrame): ClassifiedError {
-  const detail = sanitizeDetail(result.result);
+  const detail = sanitizeDetail(readableFailureText(result.result));
 
   const taxonomy = typeof result.error === "string" ? PROVIDER_TAXONOMY[result.error] : undefined;
   if (taxonomy !== undefined) return compose(taxonomy, detail);
@@ -227,11 +313,19 @@ export function classifyResult(result: ResultFrame): ClassifiedError {
   if (reason === "api_error") {
     if (isCapabilityRefusal(result.result)) return { code: "bad_request", message: detail === undefined ? CAPABILITY_REFUSAL_MESSAGE : `${CAPABILITY_REFUSAL_MESSAGE}: ${detail}` };
     // A credential-resolution failure specifically (see the marker doc comment above) is an `auth`
-    // problem, not a `server` one — checked BEFORE the generic api_error fallback, never instead of
-    // it, so every other pre-request resolution failure (an unknown model, say) keeps reading as
-    // `server` exactly as it does today.
+    // problem, not a `server` one — checked BEFORE the runtime's own class (it arrives wrapped as
+    // `provider request failed (network): …`), so the stored record reads as the credential it is.
     if (isCredentialResolutionFailure(result.result)) return compose("auth", detail);
-    return compose("server", detail);
+    // Agent SDK 0.0.49: a status-less provider failure (a mid-stream error frame, a stall, a timeout)
+    // is classed by the runtime itself, and that class rides the failure prefix. Read it, so a request
+    // the provider REFUSED mid-stream (an exhausted credit balance) is never shown as "unavailable or
+    // overloaded" and never fed to a consumer as a transient server failure. A billing frame is
+    // `billing`, as its HTTP 402 is up front. No prefix (a pre-request resolution failure, an unknown
+    // model) or a class this table does not know keeps the `server` reading it always had.
+    if (isBillingStreamFrame(result.result)) return compose("billing", detail);
+    const runtimeClass = runtimeFailureClass(result.result);
+    const byRuntime = runtimeClass !== undefined && Object.hasOwn(RUNTIME_CLASS_CODE, runtimeClass) ? RUNTIME_CLASS_CODE[runtimeClass] : undefined;
+    return compose(byRuntime ?? "server", detail);
   }
 
   const bySubtype = typeof result.subtype === "string" ? SUBTYPE_CODE[result.subtype] : undefined;

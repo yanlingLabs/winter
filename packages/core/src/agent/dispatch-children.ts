@@ -191,6 +191,11 @@ interface ChildState {
   followNext?: boolean;
   lastAssistant?: string;
   sawError?: boolean;
+  /** The followed turn's last main-thread `agent_error.message` — the projector's classed sentence plus
+   *  the provider's own reason (agent SDK 0.0.49: "the provider refused the request: Your credit balance
+   *  is too low …"). Reported with an `error` status so the coordinator can tell a refusal it must not
+   *  retry from a transient failure; already sanitized and bounded by `projector/errors.ts`. */
+  lastError?: string;
   aborted?: boolean;
   /** The coordinator has been sent the wake carrying this child's terminal status. */
   reported: boolean;
@@ -507,7 +512,7 @@ export class DispatchChildren {
         if (!followed) return;
         c.relayOnly = false;
         c.turnOpen = true;
-        c.lastAssistant = undefined; c.sawError = false; c.aborted = false;
+        c.lastAssistant = undefined; c.sawError = false; c.aborted = false; c.lastError = undefined;
         if (c.status !== "running") { c.status = "running"; c.reported = false; this.update(e.sessionId, "running"); }
         return;
       }
@@ -515,7 +520,7 @@ export class DispatchChildren {
         if (main && c.turnOpen) c.lastAssistant = e.text;
         return;
       case "agent_error":
-        if (main && c.turnOpen) c.sawError = true;
+        if (main && c.turnOpen) { c.sawError = true; c.lastError = e.message; }
         return;
       case "turn_completed":
         if (main && c.turnOpen && e.stopReason === "aborted") c.aborted = true;
@@ -586,14 +591,17 @@ export class DispatchChildren {
   private reportTurnEnd(childId: string, c: ChildState): void {
     const status: ChildStatus = c.sawError ? "error" : "completed";
     const last = c.lastAssistant?.trim() ? c.lastAssistant.trim() : undefined;
+    const failure = c.lastError?.trim() ? c.lastError.trim() : undefined;
     const summary = c.aborted
       ? `Stopped before it finished.${last ? ` Its last message: ${last}` : ""}`
-      : last;
+      : status === "error" && failure !== undefined
+        ? `It ended with an error: ${failure}${last ? `\nIts last message: ${last}` : ""}`
+        : last;
     const cut = summary === undefined ? undefined : summary.slice(0, CHILD_RESULT_SUMMARY_MAX);
     c.status = status;
     c.turnOpen = false;
     c.reported = false;
-    c.lastAssistant = undefined; c.sawError = false; c.aborted = false;
+    c.lastAssistant = undefined; c.sawError = false; c.aborted = false; c.lastError = undefined;
     this.update(childId, status, cut);
     this.notifyUnattended(c, status === "error" ? "hit an error" : "finished");
     const queue = this.wakes.get(c.dispatchId) ?? [];

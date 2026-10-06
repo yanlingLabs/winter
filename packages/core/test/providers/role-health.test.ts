@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyDispatchAgentError, classifyProviderFailure, RoleHealthRegistry, recordDispatchOutcome, withProblem } from "../../src/providers/role-health";
+import { CLASS_MESSAGE, classifyResult } from "../../src/projector/errors";
 
 
 // A base64 secret contains `+`, `/` and `=`. If those were outside the redactor's character class the
@@ -125,6 +126,58 @@ describe("classifyDispatchAgentError — coarse AgentErrorCode only, no status/p
     for (const code of ["max_turns", "max_budget", "structured_output_exhausted", "tool_failure", "aborted", "process_death", "protocol_decode", "connection_closed", "store_error", "store_lease", "unknown_error", undefined]) {
       expect(classifyDispatchAgentError(code)).toBeUndefined();
     }
+  });
+
+  // Agent SDK 0.0.49: the projector now classes a mid-stream refusal by the runtime's own code, so
+  // the dispatch note must follow — end to end from the projector's own classification.
+  describe("a mid-stream refusal reaches dispatch's note as what it is (0.0.49)", () => {
+    const CREDIT = "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.";
+    const frame = (code: string, type: string, vendor: string) => classifyResult({
+      type: "result", subtype: "success", is_error: true, terminal_reason: "api_error", api_error_status: null,
+      result: `provider request failed (${code}): the provider ended the stream with an error frame (${type}): ${vendor}`,
+    } as never);
+
+    test("an exhausted credit balance: a refused request whose note is the vendor's own sentence, never 'unavailable'", () => {
+      const c = frame("bad_request", "invalid_request_error", CREDIT);
+      const note = classifyDispatchAgentError(c.code, c.message);
+      expect(note?.reason).toBe("other");
+      expect(note?.detail).toBe(CREDIT);
+      expect(note?.retryAt).toBeUndefined();
+    });
+
+    test("billing_error → out-of-credits; auth → the stored credential; rate_limit → rate-limited; overloaded → unavailable", () => {
+      const billing = frame("bad_request", "billing_error", "Billing issue.");
+      expect(classifyDispatchAgentError(billing.code, billing.message)?.reason).toBe("out-of-credits");
+      const auth = frame("auth", "authentication_error", "invalid x-api-key");
+      const authNote = classifyDispatchAgentError(auth.code, auth.message);
+      expect(authNote?.reason).toBe("credential-rejected");
+      expect(authNote?.detail).not.toContain("x-api-key"); // never the provider's text for auth
+      const rl = frame("rate_limit", "rate_limit_error", "slow down");
+      expect(classifyDispatchAgentError(rl.code, rl.message)?.reason).toBe("rate-limited");
+      const over = frame("server", "overloaded_error", "Overloaded");
+      expect(classifyDispatchAgentError(over.code, over.message)?.reason).toBe("provider-unavailable");
+    });
+
+    test("recordDispatchOutcome passes the event's message through", () => {
+      const reg = new RoleHealthRegistry(mkdtempSync(join(tmpdir(), "winter-role-health-")));
+      const c = frame("bad_request", "invalid_request_error", CREDIT);
+      recordDispatchOutcome({ type: "agent_error", sessionId: "s_1", threadId: "main", message: c.message, code: c.code } as never, "anthropic/claude-sonnet-5-5", reg);
+      expect(reg.problemFor("pins.dispatch", "anthropic/claude-sonnet-5-5")).toMatchObject({ reason: "other", detail: CREDIT });
+    });
+
+    test("the internal jobs' own provider error (the adapter's frame wording, no runtime prefix) notes the vendor's sentence, unredacted", () => {
+      const note = classifyProviderFailure({ code: "bad_request", providerCode: "invalid_request_error", message: `the provider ended the stream with an error frame (invalid_request_error): ${CREDIT}` });
+      expect(note.reason).toBe("other");
+      expect(note.detail).toBe(CREDIT);
+      expect(note.detail).not.toContain("[redacted]");
+      // A frame with no vendor message still says what happened (its type is a 21-char run, redacted).
+      expect(classifyProviderFailure({ code: "bad_request", message: "the provider ended the stream with an error frame" }).detail).toBe("the stream ended with an error frame");
+    });
+
+    test("a bad_request with no detail keeps the fixed fallback line", () => {
+      expect(classifyDispatchAgentError("bad_request", CLASS_MESSAGE.bad_request)?.detail).toBe("the provider returned an unrecognized error");
+      expect(classifyDispatchAgentError("bad_request")?.detail).toBe("the provider returned an unrecognized error");
+    });
   });
 });
 
