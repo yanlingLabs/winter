@@ -477,7 +477,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         pill.onStopChild = { [weak self] sessionId in
             guard let client = self?.appModel?.client else { return }
-            Task { _ = try? await client.interrupt(sessionId: sessionId) }
+            Task {
+                // Never `try?` — a stop that silently fails reads as "the button does nothing".
+                do { _ = try await client.interrupt(sessionId: sessionId) }
+                catch { NSLog("[DispatchPill] stop for child %@ failed: %@", sessionId, String(describing: error)) }
+            }
         }
         pill.onOpenInApp = { [weak self] in
             self?.summonAppWindow(navigatingTo: .mode(.dispatch))

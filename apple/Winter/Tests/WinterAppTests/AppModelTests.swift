@@ -470,6 +470,42 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(attaches.count, 1, "no attach to the newer code session: \(t.sent)")
     }
 
+    /// Live 2026-10-06: the startup focus's `session.list` failed (the first connection dropped right
+    /// after hello), nothing was attached, and the client's own reconnect re-attaches only a session
+    /// it already had — so the orb sat connected but attached to nothing until relaunched. The
+    /// reconnect hook (`focusNewestSessionIfUnattached`) must list again and attach the newest
+    /// dispatch session; once attached, a second call is a no-op.
+    func testReconnectFocusesNewestDispatchWhenTheStartupFocusNeverLanded() async throws {
+        let t = AppScriptedTransport()
+        let model = AppModel(makeTransport: { t }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await waitUntilSent(t, 1)
+        let hello = lineJSON(t.sent[0])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        let failedList = await waitUntilMethod(t, "session.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(failedList["id"] as! Int),"error":{"code":-32603,"message":"boom"}}"#)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNil(model.focusedSessionId, "the startup focus failed: nothing focused yet")
+
+        let refocus = Task { await model.focusNewestSessionIfUnattached() }
+        let list = await waitUntilMethod(t, "session.list", occurrence: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"sessions":[{"sessionId":"s_dispatch","scope":"global","createdAt":3,"lastSeq":0,"mode":"dispatch"}]}}"#)
+        let attach = await waitUntilMethod(t, "session.attach")
+        XCTAssertEqual((attach["params"] as? [String: Any])?["sessionId"] as? String, "s_dispatch")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        await refocus.value
+        XCTAssertEqual(model.focusedSessionId, "s_dispatch")
+
+        // Already attached: another reconnect's call sends nothing new.
+        let before = t.sent.count
+        await model.focusNewestSessionIfUnattached()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        let lists = t.sent.dropFirst(before).filter { lineJSON($0)["method"] as? String == "session.list" }
+        XCTAssertTrue(lists.isEmpty, "no re-list once attached: \(t.sent)")
+    }
+
     /// No dispatch session exists yet — the correct pre-first-summon state is `focusedSessionId ==
     /// nil` (never falling back to the newest CODE session). `ensureFocusedSession()` mints the
     /// dispatch singleton on the first deliberate summon/submit; that is out of scope here.

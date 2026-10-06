@@ -435,7 +435,10 @@ final class AppModel: ObservableObject {
             // `PeripheralProvider.advertiseIfConnected()` runs again on reconnect too — otherwise a
             // daemon restart/socket drop leaves the provider's ghost `activeLeases` never cleared
             // (the fix lives in `advertiseIfConnected()` itself; this is what actually invokes it).
-            if s == .connected { onClientConnected?() }
+            if s == .connected {
+                onClientConnected?()
+                Task { [weak self] in await self?.focusNewestSessionIfUnattached() }
+            }
         case .unknown:
             break // newer daemon event — orb has nothing to render for it
         }
@@ -481,6 +484,18 @@ final class AppModel: ObservableObject {
         guard let sessions = try? await client.listSessions() else { return }
         guard let newest = sessions.filter({ $0.mode == "dispatch" }).max(by: { $0.createdAt < $1.createdAt }) else { return }
         await refocus(onto: newest.sessionId)
+    }
+
+    /// A reconnect re-attaches only a session the client was ALREADY attached to
+    /// (`WinterClient+Reconnect`'s `attachedSessionId`). If the initial focus never landed — the
+    /// first connection dropped before `focusNewestSession()`'s list/attach answered, seen live on
+    /// 2 of 4 dev launches on 2026-10-06 — nothing would ever attach again: the orb sat connected
+    /// but deaf (no events, a stale working state, a stop button that interrupted nothing) until the
+    /// app was relaunched. Every reconnect therefore re-runs the startup focus when nothing is
+    /// attached; when something is, the client's own re-attach already covered it.
+    func focusNewestSessionIfUnattached() async {
+        if focusedSessionId != nil, await client.attachedSession != nil { return }
+        await focusNewestSession()
     }
 
     private func refocus(onto sessionId: String) async {
