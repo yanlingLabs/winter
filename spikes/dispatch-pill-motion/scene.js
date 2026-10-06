@@ -75,6 +75,10 @@ const ICONS = {
   'globe': [['s', C(12, 12, 9), 1.8], ['s', 'M12 3c-2.9 2.7-2.9 15.3 0 18M12 3c2.9 2.7 2.9 15.3 0 18M3.4 9h17.2M3.4 15h17.2', 1.6]],
   'chevron.down': [['s', 'M6.5 9.4 12 14.9l5.5-5.5', 3]],
   'safari': [['s', C(12, 12, 9), 1.9], ['f', 'M16.2 7.8l-2.7 5.7-5.7 2.7 2.7-5.7z']],
+  'ibeam': [['s', 'M8.6 4.4h6.8M8.6 19.6h6.8M12 4.4v15.2', 2.3]],
+  'macwindow': [['s', 'M4.6 5h14.8a1.6 1.6 0 0 1 1.6 1.6v10.8a1.6 1.6 0 0 1-1.6 1.6H4.6A1.6 1.6 0 0 1 3 17.4V6.6A1.6 1.6 0 0 1 4.6 5zM3 9.2h18', 1.9], ['f', C(6.1, 7.1, 0.8) + C(8.5, 7.1, 0.8) + C(10.9, 7.1, 0.8)]],
+  'grid4': [['f', C(8.6, 8.6, 2) + C(15.4, 8.6, 2) + C(8.6, 15.4, 2) + C(15.4, 15.4, 2)]],
+  'return': [['s', 'M19.2 5.5v6.2a2.4 2.4 0 0 1-2.4 2.4H5.4M9.4 10.1 5.4 14.1l4 4', 2.3]],
   'hammer.fill': [['f', 'M13.5 3.5l6.8 6.8-2.4 2.4-2-2-8.8 8.8a1.7 1.7 0 0 1-2.4-2.4l8.8-8.8-2-2z']],
   'brain': [['s', 'M12 5.3c-.5-1.3-1.8-2.1-3.2-2.1-1.9 0-3.4 1.4-3.5 3.3-1.4.4-2.5 1.8-2.5 3.3 0 .7.2 1.4.6 1.9-.6.6-.9 1.5-.9 2.4 0 1.6 1.1 3 2.7 3.4.3 1.8 1.8 3.1 3.7 3.1 1.5 0 2.8-.9 3.1-2.2zM12 5.3c.5-1.3 1.8-2.1 3.2-2.1 1.9 0 3.4 1.4 3.5 3.3 1.4.4 2.5 1.8 2.5 3.3 0 .7-.2 1.4-.6 1.9.6.6.9 1.5.9 2.4 0 1.6-1.1 3-2.7 3.4-.3 1.8-1.8 3.1-3.7 3.1-1.5 0-2.8-.9-3.1-2.2', 1.8],
             ['s', 'M8.3 9.1c1.1.1 1.9.9 2.1 2M15.7 9.1c-1.1.1-1.9.9-2.1 2M8 14.8c1-.7 2.2-.7 3.2 0M16 14.8c-1-.7-2.2-.7-3.2 0', 1.6]],
@@ -778,8 +782,8 @@ function typingTimes(text) {
 // ---------------------------------------------------------------- camera, cursor, captions, keys
 const CAM = [ // t, zoom, centre x, centre y (points; clamped so the screen always fills the frame)
   [0, 2.9, 768, 820], [3.0, 2.9, 768, 820], [3.9, 2.5, 768, 820], [7.5, 2.5, 768, 820],
-  [9.2, 2.1, 768, 820], [13.9, 2.1, 768, 820], [15.3, 1.0, 768, 432], [24.3, 1.0, 768, 432],
-  [25.7, 1.9, 768, 820], [30.4, 1.9, 768, 820], [31.9, 1.0, 768, 432], [36, 1.0, 768, 432],
+  [9.2, 2.1, 768, 820], [13.9, 2.1, 768, 820], [15.3, 0.85, 768, 432], [24.3, 0.85, 768, 432],
+  [25.7, 1.9, 768, 820], [30.4, 1.9, 768, 820], [31.9, 0.85, 768, 432], [36, 0.85, 768, 432],
 ];
 function camera(t) {
   let i = 0; while (i < CAM.length - 2 && t >= CAM[i + 1][0]) i++;
@@ -787,8 +791,10 @@ function camera(t) {
   const p = easeInOut(clamp((t - a[0]) / Math.max(1e-6, b[0] - a[0]), 0, 1));
   const zoom = Math.exp(lerp(Math.log(a[1]), Math.log(b[1]), p));
   const S = BASE * zoom;
-  let tx = 960 - lerp(a[2], b[2], p) * S, ty = 540 - lerp(a[3], b[3], p) * S;
-  tx = clamp(tx, 1920 - SW * S, 0); ty = clamp(ty, 1080 - SH * S, 0);
+  // Zoomed in, the screen always fills the frame; pulled back past it, it is centred and sits low,
+  // leaving the band at the top to the caption island.
+  const tx = SW * S >= 1920 ? clamp(960 - lerp(a[2], b[2], p) * S, 1920 - SW * S, 0) : (1920 - SW * S) / 2;
+  const ty = SH * S >= 1080 ? clamp(540 - lerp(a[3], b[3], p) * S, 1080 - SH * S, 0) : (1080 - SH * S) * 0.84;
   return { S, tx, ty };
 }
 const CHILD_Y = PILL_BOTTOM - M.pillHeight - M.stackGap - M.pillHeight / 2;
@@ -820,19 +826,25 @@ function cursorAt(t) {
   const alpha = ramp(t, 14.85, 0.3) * (1 - ramp(t, 21.0, 0.5));
   return { pos, alpha };
 }
-const CAPTIONS = [
-  { t0: 2.55, t1: 7.0, place: 'top', head: 'Ask Dispatch anything', sub: 'A four-finger tap brings up the pill. Type, and it grows with you.' },
-  { t0: 7.45, t1: 13.95, place: 'top', head: 'It fans the work out', sub: 'Each task becomes its own session, rising out of the pill in its own colour.' },
-  { t0: 14.6, t1: 20.6, place: 'bottom', head: 'Open any session', sub: 'Click a pill and its window stands on the stack above Dispatch.' },
-  { t0: 20.8, t1: 24.4, place: 'bottom', head: 'Watch them work', sub: 'Plumes throw the tools and sites each session uses; a thinking pill opens into its reasoning.' },
-  { t0: 24.75, t1: 27.95, place: 'bottom', narrow: true, head: 'Then it reports back', sub: 'Finished sessions sink back into the pill as Dispatch sums up.' },
+// The narration: one glass capsule floating above the footage in its own band. Each chapter's icon
+// badge glows in a plume colour, its words blur in one by one, and the step dots track progress —
+// the active one a pill that fills as its chapter plays. Between chapters the capsule morphs its
+// width on a spring, the way the Dispatch pill does.
+const CHAPTERS = [
+  { t: 2.55, icon: 'ibeam', pal: PAL.blue, head: 'Ask Dispatch anything', sub: 'A four-finger tap brings up the pill. Type, and it grows with you.' },
+  { t: 7.4, icon: 'paperplane.fill', pal: PAL.violet, head: 'It fans the work out', sub: 'Each task becomes its own session, rising out of the pill in its own colour.' },
+  { t: 14.0, icon: 'macwindow', pal: PAL.mint, head: 'Open any session', sub: 'Click a pill and its window stacks up above Dispatch.' },
+  { t: 20.6, icon: 'brain', pal: PAL.rose, head: 'Watch them work', sub: 'Plumes throw each session’s tools and sites. Thinking pills open into its reasoning.' },
+  { t: 24.5, icon: 'checkmark', pal: PAL.blue, head: 'Then it reports back', sub: 'Finished sessions sink into the pill as Dispatch sums up.' },
 ];
-const KEYS = [
-  { t: 2.9, label: 'four-finger tap', glyph: '⠿' },
-  { t: 7.35, label: 'return', glyph: '⏎' },
-  { t: 13.2, label: 'esc', glyph: '' },
-  { t: 13.7, label: 'esc', glyph: '' },
+const ISLAND_OUT = 31.6;
+const ISL = { top: 22, h: 92, textLeft: 94, chrome: 94 + 28 + 86 + 26 };   // text left edge; width = chrome + text
+const KEYS = [   // the key hints: a keycap and what it did, popping in beside the island
+  { presses: [2.9], cap: 'grid4', labels: ['Summon Dispatch'] },
+  { presses: [7.35], cap: 'return', labels: ['Send'] },
+  { presses: [13.2, 13.7], text: 'esc', labels: ['Close the reply', 'Collapse'] },
 ];
+const easeOutBack = x => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
 
 // ---------------------------------------------------------------- build static DOM
 function buildDesktop() {
@@ -853,11 +865,31 @@ const mainPV = new PlumeView($('mainPlume'), 4);
 accEl.innerHTML = `<div class="acc">${svgIcon('ellipsis', 14, '#fff')}</div><div class="acc">${svgIcon('expand', 13, '#fff')}</div>`;
 
 const overlays = $('overlays');
-const capEls = CAPTIONS.map(c => {
-  const e = el('div', c.place === 'bottom' ? (c.narrow ? 'cap small narrow' : 'cap small') : 'cap', overlays, `<div class="over"><b></b>Winter · Dispatch</div><div class="head">${c.head}</div><div class="sub">${c.sub}</div>`);
-  return e;
+const words = text => text.split(' ').map(w => `<span class="w">${w}</span>`).join(' ');
+const islandEl = el('div', '', overlays); islandEl.id = 'island';
+el('div', 'isl-bg', islandEl);
+const islClip = el('div', 'isl-clip', islandEl);
+const islBadge = el('div', 'isl-badge', islClip);
+const islRing = el('div', 'isl-ring', islandEl);
+const islText = el('div', 'isl-text', islClip);
+const islSteps = el('div', 'isl-steps', islClip);
+const chapterViews = CHAPTERS.map(c => {
+  const body = rgbStr(c.pal.body), tail = rgbStr(c.pal.tail), hot = rgbStr(c.pal.hot);
+  const face = el('div', 'isl-face', islBadge, svgIcon(c.icon, 28, '#fff'));
+  css(face, { background: `radial-gradient(circle at 32% 26%, ${hot} 0%, ${body} 46%, ${tail} 100%)`, boxShadow: `0 8px 20px ${rgbStr(c.pal.body, 0.42)}` });
+  const layer = el('div', 'isl-layer', islText, `<div class="isl-head">${words(c.head)}</div><div class="isl-sub">${words(c.sub)}</div>`);
+  const dot = el('div', 'dot', islSteps); const fill = el('div', 'fill', dot);
+  fill.style.background = `linear-gradient(90deg, ${tail}, ${body})`;
+  return { face, layer, head: [...layer.querySelectorAll('.isl-head .w')], sub: [...layer.querySelectorAll('.isl-sub .w')], dot, fill, width: null };
 });
-const keyEls = KEYS.map(k => el('div', 'key', overlays, (k.glyph ? `<span class="kg">${k.glyph}</span>` : '') + `<span>${k.label}</span>`));
+let islandSpring = null;
+const keyViews = KEYS.map(k => {
+  const e = el('div', 'key', overlays);
+  const cap = el('div', 'kcap', e, k.text ? k.text : svgIcon(k.cap, 18, '#1d1d1f'));
+  const labels = el('div', 'klabels', e);
+  const spans = k.labels.map(l => el('span', '', labels, l));
+  return { e, cap, labels, spans, measured: false };
+});
 const introMark = brandSVG(132, '#0b0b0f'), outroMark = brandSVG(132, '#0b0b0f');
 $('intro').innerHTML = `<div id="introMark">${introMark.svg}</div><div class="brandTitle" id="introTitle">Dispatch</div><div class="brandSub" id="introSub">in Winter for Mac</div>`;
 $('outro').innerHTML = `<div id="outroMark">${outroMark.svg}</div><div class="brandTitle" id="outroTitle">Dispatch</div><div class="brandSub" id="outroSub">One pill. Every session.</div>`;
@@ -909,6 +941,12 @@ function simulate(t) {
     }
   }
   for (const w of windows) w.update(t);
+  const ci = islandChapter(t);
+  if (ci >= 0) {
+    const target = islandWidth(ci);
+    if (!islandSpring) islandSpring = new Spring(target, 0.55, 0.8);
+    islandSpring.target = target; islandSpring.step(DT);
+  }
 }
 
 // ---------------------------------------------------------------- render
@@ -1036,24 +1074,89 @@ function renderCursor(t) {
   } else ringEl.style.display = 'none';
 }
 
-function renderOverlays(t) {
-  CAPTIONS.forEach((c, i) => {
-    const e = capEls[i];
-    const a = ramp(t, c.t0, 0.55, easeOutCubic) * (1 - ramp(t, c.t1 - 0.45, 0.45, easeInOut));
-    if (a <= 0) { e.style.display = 'none'; return; }
-    const y = c.place === 'top' ? 96 : 905;
-    css(e, { display: 'block', left: '96px', top: y + 'px', opacity: a, transform: `translateY(${((1 - ramp(t, c.t0, 0.7, easeOutCubic)) * 18).toFixed(2)}px)`, filter: a < 1 ? `blur(${((1 - a) * 6).toFixed(2)}px)` : 'none' });
-    const sub = e.querySelector('.sub'); sub.style.opacity = ramp(t, c.t0 + 0.18, 0.6, easeOutCubic);
+function islandChapter(t) { let c = -1; CHAPTERS.forEach((ch, i) => { if (t >= ch.t) c = i; }); return c; }
+function islandWidth(i) { return ISL.chrome + chapterViews[i].width; }
+/** Each chapter's text width, measured once its faces have loaded and while the island is laid out. */
+function measureIsland() {
+  islandEl.style.display = 'block';
+  for (const v of chapterViews) v.width = Math.ceil(v.layer.getBoundingClientRect().width);
+  islandEl.style.display = 'none';
+}
+/** Words rising into place one after another, sharpening as they land. */
+function wordsIn(spans, t0, t) {
+  spans.forEach((w, i) => {
+    const a = easeOutCubic(clamp((t - (t0 + i * 0.045)) / 0.5, 0, 1));
+    w.style.opacity = a.toFixed(3);
+    w.style.transform = `translateY(${((1 - a) * 11).toFixed(2)}px)`;
+    w.style.filter = a < 1 ? `blur(${((1 - a) * 7).toFixed(2)}px)` : 'none';
   });
+}
+function renderIsland(t) {
+  const ci = islandChapter(t);
+  if (ci < 0 || t >= ISLAND_OUT + 0.6 || !islandSpring) { islandEl.style.display = 'none'; islRing.style.display = 'none'; return; }
+  const ch = CHAPTERS[ci], next = CHAPTERS[ci + 1];
+  // In on a soft overshoot, out with a blur.
+  const pin = easeOutBack(clamp((t - CHAPTERS[0].t) / 0.7, 0, 1)), pout = ramp(t, ISLAND_OUT, 0.5, easeInOut);
+  const W = islandSpring.x;
+  css(islandEl, {
+    display: 'block', left: (960 - W / 2).toFixed(2) + 'px', top: ISL.top + 'px', width: W.toFixed(2) + 'px',
+    opacity: (clamp(pin, 0, 1) * (1 - pout)).toFixed(3),
+    transform: `translateY(${((1 - pin) * -22 - pout * 14).toFixed(2)}px) scale(${(0.9 + 0.1 * pin - 0.05 * pout).toFixed(4)})`,
+    filter: (1 - clamp(pin, 0, 1)) + pout > 0.001 ? `blur(${(((1 - clamp(pin, 0, 1)) * 12) + pout * 10).toFixed(2)}px)` : 'none',
+  });
+  chapterViews.forEach((v, i) => {
+    // Text: the chapter's words blur in; the one it replaces lifts away.
+    if (i === ci) { css(v.layer, { opacity: 1, transform: 'none', filter: 'none' }); wordsIn(v.head, ch.t + 0.1, t); wordsIn(v.sub, ch.t + 0.3, t); }
+    else if (i === ci - 1 && t < ch.t + 0.32) {
+      const e = easeInOut((t - ch.t) / 0.32);
+      css(v.layer, { opacity: (1 - e).toFixed(3), transform: `translateY(${(-12 * e).toFixed(2)}px)`, filter: `blur(${(8 * e).toFixed(2)}px)` });
+    } else v.layer.style.opacity = 0;
+    // The badge: the new icon springs in with a turn, the old one shrinks away.
+    if (i === ci) {
+      const a = clamp((t - ch.t) / 0.5, 0, 1), b = easeOutBack(a);
+      css(v.face, { opacity: Math.min(1, a * 2.5).toFixed(3), transform: `scale(${(0.45 + 0.55 * b).toFixed(4)}) rotate(${((1 - b) * -28).toFixed(2)}deg)` });
+    } else if (i === ci - 1 && t < ch.t + 0.3) {
+      const e = easeInOut((t - ch.t) / 0.3);
+      css(v.face, { opacity: (1 - e).toFixed(3), transform: `scale(${(1 - 0.3 * e).toFixed(4)})` });
+    } else v.face.style.opacity = 0;
+    // Steps: done dots dark, upcoming faint, the active one a pill filling with its chapter.
+    const wasActive = i === ci - 1, isActive = i === ci, m = easeInOut(clamp((t - ch.t) / 0.4, 0, 1));
+    const width = isActive ? lerp(8, 30, m) : wasActive ? lerp(30, 8, m) : 8;
+    const end = next ? next.t : ISLAND_OUT;
+    css(v.dot, { width: width.toFixed(2) + 'px', background: i < ci ? 'rgba(15,18,30,.5)' : 'rgba(15,18,30,.13)' });
+    v.fill.style.width = isActive ? (clamp((t - ch.t) / (end - ch.t), 0, 1) * 100).toFixed(2) + '%' : '0%';
+  });
+  // A ring of the chapter's colour pulses out of the badge as it changes.
+  const rp = (t - ch.t) / 0.9;
+  if (rp >= 0 && rp < 1) {
+    const r = 30 + 22 * easeOutCubic(rp);
+    css(islRing, { display: 'block', left: (46 - r).toFixed(2) + 'px', top: (46 - r).toFixed(2) + 'px',   // the badge's centre, in the island
+      width: (2 * r).toFixed(2) + 'px', height: (2 * r).toFixed(2) + 'px', borderColor: rgbStr(ch.pal.body, (0.5 * (1 - rp) * (1 - pout)).toFixed(3)) });
+  } else islRing.style.display = 'none';
+}
+function renderKeys(t) {
   KEYS.forEach((k, i) => {
-    const e = keyEls[i];
-    const a = ramp(t, k.t - 0.3, 0.25, easeOutCubic) * (1 - ramp(t, k.t + 0.55, 0.3));
-    if (a <= 0) { e.style.display = 'none'; return; }
-    const pressed = t >= k.t && t < k.t + 0.16;
-    css(e, { display: 'flex', right: '96px', top: '100px', opacity: a,
-      transform: `translateY(${pressed ? 4 : (1 - a) * 14}px) scale(${pressed ? 0.96 : 1})`,
-      background: pressed ? '#ececf0' : '#ffffff' });
+    const v = keyViews[i], first = k.presses[0], last = k.presses[k.presses.length - 1];
+    const pin = easeOutBack(clamp((t - (first - 0.32)) / 0.42, 0, 1)), pout = ramp(t, last + 0.7, 0.35, easeInOut);
+    if (t < first - 0.32 || pout >= 1) { v.e.style.display = 'none'; return; }
+    v.e.style.display = 'flex';
+    if (!v.measured) { v.labels.style.width = Math.ceil(Math.max(...v.spans.map(s => s.offsetWidth))) + 'px'; v.measured = true; }
+    css(v.e, { opacity: (clamp(pin, 0, 1) * (1 - pout)).toFixed(3),
+      transform: `translateY(${((1 - pin) * -14 - pout * 10).toFixed(2)}px) scale(${(0.86 + 0.14 * pin).toFixed(4)})`,
+      filter: (1 - clamp(pin, 0, 1)) + pout > 0.001 ? `blur(${(((1 - clamp(pin, 0, 1)) * 8) + pout * 8).toFixed(2)}px)` : 'none' });
+    const pressed = k.presses.some(p => t >= p && t < p + 0.16);
+    css(v.cap, { transform: `translateY(${pressed ? 2.5 : 0}px)`, boxShadow: pressed ? '0 0.5px 0 rgba(0,0,0,.12), 0 1px 2px rgba(0,0,0,.06)' : '' });
+    const n = Math.max(0, k.presses.filter(p => t >= p).length - 1);
+    v.spans.forEach((sp, j) => {
+      const since = t - k.presses[j];
+      const a = j === n ? (j === 0 ? 1 : easeOutCubic(clamp(since / 0.25, 0, 1))) : (j === n - 1 ? 1 - easeInOut(clamp((t - k.presses[n]) / 0.2, 0, 1)) : 0);
+      css(sp, { opacity: a.toFixed(3), filter: a < 1 ? `blur(${((1 - a) * 6).toFixed(2)}px)` : 'none' });
+    });
   });
+}
+function renderOverlays(t) {
+  renderIsland(t);
+  renderKeys(t);
   // Intro.
   const intro = $('intro');
   const ia = 1 - ramp(t, 1.95, 0.6, easeInOut);
@@ -1093,4 +1196,6 @@ window.renderFrame = function (n) {
   render(T);
   return T;
 };
-document.fonts.ready.then(() => { window.sceneReady = true; });
+Promise.all(['600 27px WD', '400 17px W', '500 14px W', '600 19px W'].map(f => document.fonts.load(f)))
+  .then(() => document.fonts.ready)
+  .then(() => { measureIsland(); window.sceneReady = true; });

@@ -15,8 +15,11 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; width: 1920px; height: 1080px; overflow: hidden; background: #fff; }
 body { font-family: 'W', sans-serif; -webkit-font-smoothing: antialiased; color: #fff; }
-#viewport { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden; background: #fff; }
-#screen { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; transform-origin: 0 0; overflow: hidden; background: #fff; }
+#viewport { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden;
+  background: radial-gradient(1500px 950px at 50% 38%, #f6f7f9 0%, #e9ebf0 70%, #e2e5eb 100%); }
+/* The Mac's screen. Pulled back past its edges (wide shots), it floats as a display on the canvas. */
+#screen { position: absolute; left: 0; top: 0; width: 1536px; height: 864px; transform-origin: 0 0; overflow: hidden; background: #fff;
+  border-radius: 16px; box-shadow: 0 0 0 1px rgba(17,24,39,.08), 0 26px 70px rgba(17,24,39,.20), 0 4px 14px rgba(17,24,39,.08); }
 
 /* ---------- desktop ---------- */
 #wallpaper { position: absolute; inset: 0;
@@ -111,20 +114,31 @@ body { font-family: 'W', sans-serif; -webkit-font-smoothing: antialiased; color:
 #ring { position: absolute; border-radius: 50%; border: 2px solid rgba(0,0,0,.55); }
 
 /* ---------- overlays (video space) ---------- */
-.cap { position: absolute; width: 760px; }
-.cap .over { font-size: 15px; font-weight: 600; letter-spacing: 3.2px; color: rgba(0,0,0,.45); text-transform: uppercase; margin-bottom: 12px; display: flex; align-items: center; gap: 12px; }
-.cap .over b { display: inline-block; width: 28px; height: 2px; background: rgba(0,0,0,.45); border-radius: 1px; }
-.cap .head { font-family: 'WD', 'W', sans-serif; font-size: 50px; line-height: 58px; font-weight: 600; letter-spacing: -1.2px; color: #0b0b0f; }
-.cap.small { width: 640px; }
-.cap.small.narrow { width: 470px; }
-.cap.small .head { font-size: 38px; line-height: 44px; letter-spacing: -0.8px; }
-.cap.small .sub { font-size: 19px; line-height: 26px; margin-top: 8px; }
-.cap.small .over { margin-bottom: 8px; }
-.cap .sub { margin-top: 12px; font-size: 22px; line-height: 31px; color: rgba(0,0,0,.62); letter-spacing: -0.2px; }
-.key { position: absolute; display: flex; align-items: center; gap: 12px; padding: 0 22px; height: 58px; border-radius: 16px;
-  background: #fff; border: 1px solid rgba(0,0,0,.12);
-  box-shadow: 0 4px 0 rgba(0,0,0,.08), 0 14px 36px rgba(0,0,0,.10); font-size: 22px; font-weight: 600; color: #111; letter-spacing: -0.2px; }
-.key .kg { font-size: 24px; opacity: .9; }
+/* The caption island: narration in its own glass capsule above the footage. */
+#island { position: absolute; height: 92px; transform-origin: 50% 0; }
+.isl-bg { position: absolute; inset: 0; border-radius: 46px; background: rgba(255,255,255,.86); backdrop-filter: blur(26px) saturate(1.7);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.75), 0 0 0 1px rgba(17,24,39,.07), 0 18px 48px rgba(17,24,39,.16), 0 3px 10px rgba(17,24,39,.07); }
+.isl-clip { position: absolute; inset: 0; border-radius: 46px; overflow: hidden; }
+.isl-badge { position: absolute; left: 16px; top: 16px; width: 60px; height: 60px; }
+.isl-face { position: absolute; inset: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; opacity: 0; }
+.isl-ring { position: absolute; border-radius: 50%; border: 2px solid transparent; display: none; }
+.isl-text { position: absolute; left: 94px; top: 0; bottom: 0; }
+.isl-layer { position: absolute; left: 0; top: 17px; white-space: nowrap; opacity: 0; }
+.isl-head { font-family: 'WD', 'W', sans-serif; font-size: 27px; line-height: 33px; font-weight: 600; letter-spacing: -0.6px; color: #0b0b0f; }
+.isl-sub { margin-top: 3px; font-size: 17px; line-height: 22px; color: rgba(15,18,30,.58); letter-spacing: -0.1px; }
+.isl-layer .w { display: inline-block; }
+.isl-steps { position: absolute; right: 26px; top: 42px; height: 8px; display: flex; gap: 6px; align-items: center; }
+.isl-steps .dot { position: relative; width: 8px; height: 8px; border-radius: 4px; background: rgba(15,18,30,.13); overflow: hidden; }
+.isl-steps .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 4px; }
+/* Key hints: a keycap and what it did, in the island's material. */
+.key { position: absolute; right: 40px; top: 36px; display: flex; align-items: center; gap: 12px; height: 64px; padding: 0 22px 0 12px; border-radius: 32px;
+  background: rgba(255,255,255,.86); backdrop-filter: blur(24px) saturate(1.6); transform-origin: 100% 50%;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.75), 0 0 0 1px rgba(17,24,39,.07), 0 18px 48px rgba(17,24,39,.16), 0 3px 10px rgba(17,24,39,.07); }
+.kcap { min-width: 44px; height: 40px; padding: 0 11px; border-radius: 11px; display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(#ffffff, #eef0f4); border: 1px solid rgba(0,0,0,.12); box-shadow: 0 3px 0 rgba(0,0,0,.10), 0 1px 2px rgba(0,0,0,.08);
+  font-size: 16px; font-weight: 600; color: #1d1d1f; letter-spacing: 0.2px; }
+.klabels { position: relative; height: 24px; }
+.klabels span { position: absolute; left: 0; top: 0; white-space: nowrap; font-size: 19px; line-height: 24px; font-weight: 600; color: rgba(15,18,30,.8); letter-spacing: -0.2px; }
 #intro, #outro { position: absolute; inset: 0; background: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .brandTitle { font-family: 'WD', 'W', sans-serif; font-size: 84px; font-weight: 600; letter-spacing: -2.6px; margin-top: 34px; color: #0b0b0f; }
 .brandSub { font-size: 26px; color: rgba(0,0,0,.5); margin-top: 14px; letter-spacing: -0.2px; }
