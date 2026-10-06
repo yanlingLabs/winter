@@ -895,10 +895,10 @@ const keyViews = KEYS.map(k => {
   return { e, cap, labels, spans, measured: false };
 });
 // Opening: the Winter mark alone. Ending: the mark, which then slides aside as the name slides out from behind it.
-const OUTRO = { icon: 200, gap: 30, arrive: 33.0, slideAt: 34.0, slideDur: 0.95 };
+const OUTRO = { icon: 200, gap: 26, wordTop: 540 - 80, arrive: 33.0, slideAt: 34.0, slideDur: 0.95 };   // wordTop: x-height centred on the mark
 const introMark = brandSVG(240, '#0b0b0f'), outroMark = brandSVG(OUTRO.icon, '#0b0b0f');
 $('intro').innerHTML = `<div id="introMark">${introMark.svg}</div>`;
-$('outro').innerHTML = `<div id="outroMark">${outroMark.svg}</div><div id="outroWord">Winter</div>`;
+$('outro').innerHTML = `<div id="outroMark">${outroMark.svg}</div><div id="outroWord">winter</div>`;
 let outroWordWidth = 0;
 
 // ---------------------------------------------------------------- simulate one fixed step
@@ -1148,7 +1148,7 @@ function renderOverlays(t) {
     const m = ramp(t, OUTRO.arrive, 0.8, easeOutCubic);
     const p = easeInOut(clamp((t - OUTRO.slideAt) / OUTRO.slideDur, 0, 1));
     const total = OUTRO.icon + OUTRO.gap + outroWordWidth;
-    const iconX = lerp(960 - OUTRO.icon / 2, 960 - total / 2, p);
+    const iconX = lerp(960 - OUTRO.icon / 2, 960 - total / 2 - 7, p);   // -7: the mark's ink sits inside its box
     css($('outroMark'), { left: iconX.toFixed(2) + 'px', top: (540 - OUTRO.icon / 2) + 'px', opacity: m,
       transform: `scale(${(0.82 + 0.18 * m).toFixed(4)})`, filter: m < 1 ? `blur(${(1 - m) * 12}px)` : 'none' });
     shimmerMark(outro, outroMark.id, OUTRO.icon, t, lerp(0.35, 1, ramp(t, OUTRO.arrive + 0.4, 1.0)), 1, 80, 0.7);
@@ -1156,7 +1156,7 @@ function renderOverlays(t) {
     const edge = iconX + OUTRO.icon;   // the mark's right edge, moving left
     const left = edge + OUTRO.gap - (1 - q) * (outroWordWidth + OUTRO.gap);
     const hidden = Math.max(0, edge + 4 - left);   // what is still behind the mark
-    css($('outroWord'), { display: q > 0 ? 'block' : 'none', left: left.toFixed(2) + 'px', top: (540 - 90) + 'px',
+    css($('outroWord'), { display: q > 0 ? 'block' : 'none', left: left.toFixed(2) + 'px', top: OUTRO.wordTop + 'px',
       clipPath: `inset(-30px -40px -40px ${hidden.toFixed(2)}px)` });
   }
 }
@@ -1170,7 +1170,7 @@ window.renderFrame = function (n) {
   render(T);
   return T;
 };
-Promise.all(['800 76px WD', '600 150px WD', '700 24px WD', '400 14px W', '500 14px W', '600 16px W'].map(f => document.fonts.load(f)))
+Promise.all(['800 76px WD', '400 120px WD', '700 24px WD', '400 14px W', '500 14px W', '600 16px W'].map(f => document.fonts.load(f)))
   .then(() => document.fonts.ready)
   .then(() => {
     measureTitles();
