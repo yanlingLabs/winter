@@ -116,12 +116,14 @@ body { font-family: 'W', sans-serif; -webkit-font-smoothing: antialiased; color:
 #ring { position: absolute; border-radius: 50%; border: 2px solid rgba(0,0,0,.55); }
 
 /* ---------- overlays (video space) ---------- */
-/* Chapter headings, stamped onto the frame: a heavy face, no container. */
-#stamp { position: absolute; left: 0; top: 0; width: 1920px; height: 140px; }
-.stamp-line { position: absolute; left: 50%; display: none; white-space: nowrap; font-family: 'WD', 'W', sans-serif; font-weight: 800;
+/* Chapter headings, straight on the frame: a heavy face, no container. */
+#titles { position: absolute; left: 0; top: 0; width: 1920px; height: 140px; }
+.title-line { position: absolute; left: 50%; display: none; white-space: nowrap; font-family: 'WD', 'W', sans-serif; font-weight: 800;
   font-size: 76px; line-height: 88px; letter-spacing: -2.6px; word-spacing: 8px; color: #0b0b0f; }
-.stamp-line .w { display: inline-block; transform-origin: 50% 70%; }
-.stamp-bar { position: absolute; display: none; height: 8px; border-radius: 4px; }
+/* One mask per word (padded so descenders are never cut); its letters ride up through it. */
+.title-line .mask { display: inline-block; overflow: hidden; vertical-align: top; padding: 6px 0 20px; margin: -6px 0 -20px; }
+.title-line .ch { display: inline-block; }
+.title-bar { position: absolute; display: none; height: 6px; border-radius: 3px; }
 /* Key hints: the key itself and what it did, top right. */
 .key { position: absolute; right: 56px; top: 42px; display: flex; align-items: center; gap: 14px; transform-origin: 100% 50%; }
 .kcap { min-width: 54px; height: 50px; padding: 0 13px; border-radius: 13px; display: flex; align-items: center; justify-content: center;

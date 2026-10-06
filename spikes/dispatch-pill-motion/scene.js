@@ -826,18 +826,18 @@ function cursorAt(t) {
   const alpha = ramp(t, 14.85, 0.3) * (1 - ramp(t, 21.0, 0.5));
   return { pos, alpha };
 }
-// The narration: each chapter's heading is stamped straight onto the frame in a heavy face — word by
-// word, each landing from large and soft to crisp with a touch of overshoot — and a bar in the
-// chapter's plume colour swipes in beneath it. No container: the words sit on the footage itself,
-// in the band at the top that every shot leaves clear.
-const CHAPTERS = [
-  { t: 2.55, end: 7.4, pal: PAL.blue, head: 'Ask Dispatch anything' },
-  { t: 7.4, end: 14.0, pal: PAL.violet, head: 'It fans the work out' },
-  { t: 14.0, end: 20.6, pal: PAL.mint, head: 'Open any session' },
-  { t: 20.6, end: 24.3, pal: PAL.rose, head: 'Watch them work' },
-  { t: 24.3, end: 26.35, pal: PAL.blue, head: 'Then it reports back' },
+// The narration: each chapter's heading sits straight on the frame in a heavy face, in the band at
+// the top that every shot leaves clear. Its letters rise into place from behind the baseline in a
+// quick cascade and leave upward the same way as the next heading comes in, while a bar in the
+// chapter's plume colour draws in beneath and retracts with them. No container.
+const CHAPTERS = [   // t: the letters start rising; end: the last one has left (the next heading rises just before)
+  { t: 2.55, end: 7.45, pal: PAL.blue, head: 'Ask Dispatch anything' },
+  { t: 7.35, end: 14.05, pal: PAL.violet, head: 'It fans the work out' },
+  { t: 13.95, end: 20.65, pal: PAL.mint, head: 'Open any session' },
+  { t: 20.55, end: 24.1, pal: PAL.rose, head: 'Watch them work' },
+  { t: 24.0, end: 26.6, pal: PAL.blue, head: 'Then it reports back' },
 ];
-const STAMP = { top: 20, line: 88, barGap: 4 };
+const TITLE = { top: 20, line: 88, barGap: 6 };
 const KEYS = [   // the key hints: a keycap and what it did, top right
   { presses: [2.9], cap: 'grid4', labels: ['Summon Dispatch'] },
   { presses: [7.35], cap: 'return', labels: ['Send'] },
@@ -845,6 +845,9 @@ const KEYS = [   // the key hints: a keycap and what it did, top right
 ];
 const easeOutBack = x => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
 const easeInCubic = x => x * x * x;
+const easeOutQuint = x => 1 - Math.pow(1 - x, 5);
+const easeInQuint = x => x * x * x * x * x;
+const easeInOutQuart = x => (x < 0.5 ? 8 * x * x * x * x : 1 - Math.pow(-2 * x + 2, 4) / 2);
 
 // ---------------------------------------------------------------- build static DOM
 function buildDesktop() {
@@ -865,13 +868,14 @@ const mainPV = new PlumeView($('mainPlume'), 4);
 accEl.innerHTML = `<div class="acc">${svgIcon('ellipsis', 14, '#fff')}</div><div class="acc">${svgIcon('expand', 13, '#fff')}</div>`;
 
 const overlays = $('overlays');
-const words = text => text.split(' ').map(w => `<span class="w">${w}</span>`).join(' ');
-const stampEl = el('div', '', overlays); stampEl.id = 'stamp';
-const stampViews = CHAPTERS.map(c => {
-  const line = el('div', 'stamp-line', stampEl, words(c.head));
-  const bar = el('div', 'stamp-bar', stampEl);
+// Letters in a mask per word, so each can rise from behind the baseline.
+const maskedLetters = text => text.split(' ').map(w => `<span class="mask">${[...w].map(c => `<span class="ch">${c}</span>`).join('')}</span>`).join(' ');
+const titleEl = el('div', '', overlays); titleEl.id = 'titles';
+const titleViews = CHAPTERS.map(c => {
+  const line = el('div', 'title-line', titleEl, maskedLetters(c.head));
+  const bar = el('div', 'title-bar', titleEl);
   bar.style.background = `linear-gradient(90deg, ${rgbStr(c.pal.tail)}, ${rgbStr(c.pal.body)})`;
-  return { line, bar, words: [...line.querySelectorAll('.w')], width: 0 };
+  return { line, bar, chars: [...line.querySelectorAll('.ch')], width: 0 };
 });
 const keyViews = KEYS.map(k => {
   const e = el('div', 'key', overlays);
@@ -1059,34 +1063,33 @@ function renderCursor(t) {
 }
 
 /** Each heading's width, measured once its face has loaded. */
-function measureStamps() {
-  for (const v of stampViews) {
+function measureTitles() {
+  for (const v of titleViews) {
     v.line.style.display = 'block';
     v.width = Math.ceil(v.line.getBoundingClientRect().width);
     v.line.style.display = 'none';
   }
 }
-function renderStamp(t) {
-  stampViews.forEach((v, i) => {
-    const ch = CHAPTERS[i], exit = easeInOut(clamp((t - ch.end) / 0.3, 0, 1));
-    if (t < ch.t || exit >= 1) { v.line.style.display = 'none'; v.bar.style.display = 'none'; return; }
-    css(v.line, { display: 'block', top: STAMP.top + 'px', opacity: (1 - exit).toFixed(3),
-      transform: `translateX(-50%) translateY(${(-16 * exit).toFixed(2)}px) scale(${(1 - 0.05 * exit).toFixed(4)})`,
-      filter: exit > 0 ? `blur(${(8 * exit).toFixed(2)}px)` : 'none' });
-    // Each word stamps down: in large and soft, landing crisp a touch under size, then settling.
-    v.words.forEach((w, k) => {
-      const p = clamp((t - (ch.t + 0.06 + k * 0.08)) / 0.34, 0, 1);
-      const sc = p < 0.45 ? lerp(1.8, 0.94, easeInCubic(p / 0.45)) : lerp(0.94, 1, easeOutCubic((p - 0.45) / 0.55));
-      w.style.opacity = clamp(p / 0.3, 0, 1).toFixed(3);
-      w.style.transform = `scale(${sc.toFixed(4)})`;
-      w.style.filter = p < 0.45 ? `blur(${((1 - p / 0.45) * 10).toFixed(2)}px)` : 'none';
+const TITLE_IN = { stagger: 0.022, dur: 0.8 }, TITLE_OUT = { stagger: 0.01, dur: 0.36 };
+function renderTitles(t) {
+  titleViews.forEach((v, i) => {
+    const ch = CHAPTERS[i], n = v.chars.length;
+    const leave = ch.end - ((n - 1) * TITLE_OUT.stagger + TITLE_OUT.dur);   // the exit starts here and is over by `end`
+    if (t < ch.t || t >= ch.end) { v.line.style.display = 'none'; v.bar.style.display = 'none'; return; }
+    css(v.line, { display: 'block', top: TITLE.top + 'px', transform: 'translateX(-50%)' });
+    // Each letter rises from below its word's baseline mask on a long ease-out, a beat after the one
+    // before it; it leaves upward through the top of the mask on an ease-in.
+    v.chars.forEach((c, k) => {
+      const inP = easeOutQuint(clamp((t - (ch.t + k * TITLE_IN.stagger)) / TITLE_IN.dur, 0, 1));
+      const outP = easeInQuint(clamp((t - (leave + k * TITLE_OUT.stagger)) / TITLE_OUT.dur, 0, 1));
+      c.style.transform = `translateY(${((1 - inP) * 112 - outP * 112).toFixed(2)}%)`;
     });
-    // The bar swipes in once the last word has landed, and leaves from the left with the line.
-    const landed = ch.t + 0.06 + (v.words.length - 1) * 0.08 + 0.22;
-    const grow = easeOutCubic(clamp((t - landed) / 0.45, 0, 1)), out = easeInOut(clamp((t - ch.end) / 0.22, 0, 1));
-    const w0 = v.width * grow, left = 960 - v.width / 2;
-    css(v.bar, { display: grow > 0 ? 'block' : 'none', left: (left + w0 * out).toFixed(2) + 'px', width: (w0 * (1 - out)).toFixed(2) + 'px',
-      top: (STAMP.top + STAMP.line + STAMP.barGap) + 'px', opacity: (1 - exit).toFixed(3) });
+    // The bar draws in from the left as the letters land, and retracts to the right as they leave.
+    const grow = easeInOutQuart(clamp((t - (ch.t + 0.18)) / 0.85, 0, 1));
+    const shrink = easeInQuint(clamp((t - leave) / 0.45, 0, 1));
+    const left = 960 - v.width / 2, w = v.width * Math.max(0, grow - shrink);
+    css(v.bar, { display: w > 0.5 ? 'block' : 'none', left: (left + v.width * shrink).toFixed(2) + 'px', width: w.toFixed(2) + 'px',
+      top: (TITLE.top + TITLE.line + TITLE.barGap) + 'px' });
   });
 }
 function renderKeys(t) {
@@ -1110,7 +1113,7 @@ function renderKeys(t) {
   });
 }
 function renderOverlays(t) {
-  renderStamp(t);
+  renderTitles(t);
   renderKeys(t);
   // Intro.
   const intro = $('intro');
@@ -1153,4 +1156,4 @@ window.renderFrame = function (n) {
 };
 Promise.all(['800 76px WD', '700 24px WD', '400 14px W', '500 14px W', '600 16px W'].map(f => document.fonts.load(f)))
   .then(() => document.fonts.ready)
-  .then(() => { measureStamps(); window.sceneReady = true; });
+  .then(() => { measureTitles(); window.sceneReady = true; });
