@@ -204,6 +204,38 @@ final class ThinkingPillSnapshotTests: XCTestCase {
         try render(expandEvents(live: false), pill: false, "expand-8-copy-line-dark", height: 620, appearance: .darkAqua)
     }
 
+    /// A long user message in the pill window: clamped, dissolving into the hairline, "Show more" on top.
+    func testE9LongUserMessageCollapsed() throws {
+        let long = (1...14).map { "Line \($0): the detached window should hide most of a long prompt behind a soft blur, keep the hairline right under it and offer Show more." }
+            .joined(separator: "\n\n")
+        let events = [
+            event(["type": "user_message", "text": long, "clientName": "cli"]),
+            event(["type": "turn_started"]),
+            event(["type": "assistant_message", "text": "Got it."]),
+            event(["type": "turn_completed", "stopReason": "end_turn", "inputTokens": 1, "outputTokens": 1]),
+        ].compactMap { $0 }
+        try render(events, pill: true, "expand-9-long-user-message", height: 460)
+    }
+
+    /// The same block alone through `ImageRenderer`, which draws `.blur` (the `cacheDisplay` path
+    /// above drops Core Animation filters, so it shows the fade but never the blur).
+    func testE10LongUserMessageBlur() throws {
+        let long = (1...14).map { "Line \($0): the detached window should hide most of a long prompt behind a soft blur, keep the hairline right under it and offer Show more." }
+            .joined(separator: "\n\n")
+        let view = TranscriptUserBubble(text: long, tint: .white)
+            .environment(\.transcriptUserMessageStyle, .ruled)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 688)
+            .padding(16)
+            .background(Color.black)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 2
+        guard let image = renderer.cgImage else { return XCTFail("no image") }
+        let rep = NSBitmapImageRep(cgImage: image)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return XCTFail("no png") }
+        try png.write(to: outputDirectory.appendingPathComponent("expand-10-long-user-message-blur.png"))
+    }
+
     func test1PillLiveUntitled() throws { try render(liveEvents(titled: false), pill: true, "pill-1-live-thinking") }
     func test2PillLiveTitled() throws { try render(liveEvents(titled: true), pill: true, "pill-2-live-titled") }
     func test3PillDone() throws { try render(doneEvents(), pill: true, "pill-3-done") }

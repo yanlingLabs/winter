@@ -137,14 +137,11 @@ struct TranscriptUserBubble: View {
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         case .ruled:
-            VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 0) {
                 senderBlock
+                    .padding(.bottom, envelope == nil ? 0 : 22)
                 if !displayText.isEmpty {
-                    TranscriptFormattedMessageText(text: displayText, tint: tint, role: proseRole,
-                                                   fillsAvailableWidth: true)
-                    .foregroundStyle(.primary)
-                    .transcriptRuledUserMessageWeight()
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    RuledUserMessageText(text: displayText, tint: tint, role: proseRole)
                 }
                 Rectangle()
                     .fill(Theme.textPrimary.opacity(0.85)) // white: the window is dark-only
@@ -167,6 +164,118 @@ struct TranscriptUserBubble: View {
         }
         .padding(14)
         .background(Theme.bubbleUser, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+}
+
+/// The user's message in the `.ruled` (pill-themed window) style. A long message is clamped to
+/// `collapsedHeight` and dissolves into the hairline under it — the bottom band blurs and fades
+/// rather than cutting hard — with a flat "Show more" capsule sitting on the blur. Expanded, the whole
+/// text shows with "Show less" under it. A message only a little over the limit is never clamped
+/// (`collapseSlack`): hiding three lines behind a button is worse than showing them.
+struct RuledUserMessageText: View {
+    let text: String
+    let tint: Color
+    let role: TranscriptProseRole
+
+    static let collapsedHeight: CGFloat = 200
+    static let collapseSlack: CGFloat = 60
+    /// How tall the dissolving band at the bottom of a clamped message is.
+    static let fadeHeight: CGFloat = 120
+
+    /// PURE (`RuledUserMessageTests`): whether a message of this laid-out height is clamped.
+    static func isCollapsible(fullHeight: CGFloat) -> Bool {
+        fullHeight > collapsedHeight + collapseSlack
+    }
+
+    @State private var fullHeight: CGFloat = 0
+    @State private var isExpanded = false
+
+    private var isCollapsed: Bool { Self.isCollapsible(fullHeight: fullHeight) && !isExpanded }
+
+    private var message: some View {
+        TranscriptFormattedMessageText(text: text, tint: tint, role: role, fillsAvailableWidth: true)
+            .foregroundStyle(.primary)
+            .transcriptRuledUserMessageWeight()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// The band's share of the clamped frame, top to bottom.
+    private var fadeStart: CGFloat { 1 - Self.fadeHeight / Self.collapsedHeight }
+
+    /// The message cut to the clamped frame FIRST, so the masks below are laid over that frame and
+    /// not over the full (unclamped, `fixedSize`) text.
+    private var clamped: some View {
+        message
+            .frame(height: Self.collapsedHeight, alignment: .top)
+            .clipped()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if isCollapsed {
+                ZStack(alignment: .bottom) {
+                    // Sharp text, fading out over the band…
+                    clamped
+                        .mask(LinearGradient(stops: [.init(color: .black, location: 0),
+                                                     .init(color: .black, location: fadeStart),
+                                                     .init(color: .black.opacity(0.45), location: fadeStart + 0.2),
+                                                     .init(color: .clear, location: fadeStart + 0.4)],
+                                             startPoint: .top, endPoint: .bottom))
+                    // …under a blurred copy that takes over inside the band, so the text dissolves
+                    // instead of ending on a sliced line. The two ramps overlap across the band's
+                    // first half, so no line is ever drawn sharp-but-cut.
+                    clamped
+                        .blur(radius: 8)
+                        .mask(LinearGradient(stops: [.init(color: .clear, location: fadeStart),
+                                                     .init(color: .black, location: fadeStart + 0.22),
+                                                     .init(color: .black.opacity(0.5), location: 0.9),
+                                                     .init(color: .clear, location: 1)],
+                                             startPoint: .top, endPoint: .bottom))
+                        .allowsHitTesting(false)
+                    expandButton(title: "Show more", symbol: "chevron.down")
+                        .padding(.bottom, 10)
+                }
+                .frame(height: Self.collapsedHeight, alignment: .top)
+                .clipped()
+                .padding(.bottom, 6)
+            } else {
+                message
+                    .padding(.bottom, isExpanded ? 12 : 22)
+                if isExpanded {
+                    expandButton(title: "Show less", symbol: "chevron.up")
+                        .frame(maxWidth: .infinity)
+                        .padding(.bottom, 16)
+                }
+            }
+        }
+        // Measured off the unclamped layout (`fixedSize` above), so the clamp never feeds back into
+        // the decision to clamp.
+        .background(alignment: .top) {
+            message
+                .hidden()
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { fullHeight = $0 }
+        }
+    }
+
+    private func expandButton(title: String, symbol: String) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.25)) { isExpanded.toggle() }
+        } label: {
+            HStack(spacing: 5) {
+                Text(title)
+                Image(systemName: symbol)
+                    .font(Typography.badge(.semibold))
+            }
+            .font(Typography.caption(.medium))
+            .foregroundStyle(Theme.textPrimary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Theme.controlSurface, in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isExpanded ? "Show less of this message" : "Show the whole message")
     }
 }
 
