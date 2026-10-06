@@ -5,7 +5,7 @@
 // a finished answer. The frames below are the exact shapes `packages/runtime/src/engine.ts` writes.
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
-import { CLASS_MESSAGE } from "../../src/projector/errors";
+import { AGENT_ERROR_DETAIL_MAX, CLASS_MESSAGE } from "../../src/projector/errors";
 import { accept, assistantText, beginTurn, init, makeProjector, result } from "./harness";
 
 function endTurnWith(frame: Record<string, unknown>): SessionEvent[] {
@@ -68,9 +68,9 @@ describe("projector: the runtime's own terminal reasons are visible (WS-23)", ()
     expect(stopReasonOf(events)).toBe("end_turn");
   });
 
-  test("the refusal text reaches the message through the one bounded door (200 chars + an ellipsis)", () => {
-    const err = agentErrorOf(endTurnWith({ is_error: true, result: "R".repeat(500), terminal_reason: "refusal" }));
-    expect(err.message).toBe(`${CLASS_MESSAGE.refusal}: ${"R".repeat(200)}…`);
+  test("the refusal text reaches the message through the one bounded door (AGENT_ERROR_DETAIL_MAX chars + an ellipsis)", () => {
+    const err = agentErrorOf(endTurnWith({ is_error: true, result: "R".repeat(5000), terminal_reason: "refusal" }));
+    expect(err.message).toBe(`${CLASS_MESSAGE.refusal}: ${"R".repeat(AGENT_ERROR_DETAIL_MAX)}…`);
   });
 
   test("an empty refusal still says what happened, with no dangling separator", () => {

@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { ModelRole } from "../settings";
+import { agentErrorDetail } from "../projector/errors";
 
 /**
  * 2026-09-18: quiet per-ROLE failure notes for the Mac app's Roles pane ("Notes" section) — when a
@@ -166,7 +167,7 @@ export function classifyProviderFailure(input: ClassifyInput, now: () => number 
  * exactly the "if all you get is prose, don't guess" posture extended one step further: if you don't
  * even get a provider-shaped CODE, there is nothing to classify.
  */
-export function classifyDispatchAgentError(code: string | undefined): ClassifiedFailure | undefined {
+export function classifyDispatchAgentError(code: string | undefined, message = ""): ClassifiedFailure | undefined {
   switch (code) {
     case "auth":
     case "rate_limit":
@@ -176,14 +177,14 @@ export function classifyDispatchAgentError(code: string | undefined): Classified
     case "billing":
       return classifyProviderFailure({ code, message: "" });
     case "bad_request":
-      // `agent_error.message` IS already sanitized (`projector/errors.ts`'s `sanitizeDetail`,
-      // opaque-marker-stripped and capped at 200 chars) before it ever reaches this event, so
-      // reading it here would be safe on the SAME terms that module already established. Passed as
-      // `""` anyway — the safer choice, and consistent with every other dispatch-side call above:
-      // this function has no way to tell "the sanitizer ran and left nothing interesting" from "the
-      // sanitizer ran and left something", and `classifyProviderFailure`'s own "other" bucket then
-      // reports its fixed fallback line rather than a possibly-empty fragment.
-      return classifyProviderFailure({ code, message: "" });
+      // A refused request lands in `classifyProviderFailure`'s `"other"` bucket, whose note is the
+      // detail itself — and since agent SDK 0.0.49 that detail is the vendor's own reason (a mid-stream
+      // Anthropic refusal: "Your credit balance is too low …"), the one thing that tells the user what
+      // to fix. So the detail AFTER the class sentence is passed (`agentErrorDetail`), never the class
+      // sentence and never anything for another code: it is `agent_error.message`, already sanitized by
+      // `projector/errors.ts`'s `sanitizeDetail` (opaque-marker-free, bounded), and `"other"` caps it
+      // again and strips anything key-shaped (`safeDetail`). No detail → the fixed fallback line.
+      return classifyProviderFailure({ code, message: agentErrorDetail(code, message) ?? "" });
     default:
       return undefined;
   }
@@ -323,7 +324,7 @@ export class RoleHealthRegistry {
  */
 export function recordDispatchOutcome(event: SessionEvent, tag: string, roleHealth: RoleHealthRegistry): void {
   if (event.type === "agent_error") {
-    const classified = classifyDispatchAgentError(event.code);
+    const classified = classifyDispatchAgentError(event.code, event.message);
     if (classified !== undefined) roleHealth.recordFailure("pins.dispatch", tag, classified);
   } else if (event.type === "turn_completed" && event.stopReason === "end_turn") {
     roleHealth.recordSuccess("pins.dispatch");

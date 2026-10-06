@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
 import { makeDaemonRoutineRunner, type WinterTurnRunner } from "../../src/routines/runner";
+import { classifyResult } from "../../src/projector/errors";
 
 function makeHome(): string {
   return mkdtempSync(join(tmpdir(), "winter-routine-runner-"));
@@ -142,6 +143,28 @@ describe("makeDaemonRoutineRunner — runHeadless", () => {
     expect(result.ok).toBe(false);
     expect(result.quotaLimited).toBeUndefined();
   });
+
+  // Agent SDK 0.0.49: the projector classes a mid-stream Anthropic error frame by the runtime's own
+  // code. A rate_limit_error frame now defers the routine like a 429 (it was `server` and re-ran on
+  // schedule); a refused request (an exhausted credit balance) is a plain error, never deferred as quota.
+  for (const [code, type, quota] of [["rate_limit", "rate_limit_error", true], ["bad_request", "invalid_request_error", false]] as const) {
+    test(`a mid-stream ${type} frame, as the projector classifies it, is ${quota ? "" : "NOT "}quotaLimited`, async () => {
+      const classified = classifyResult({
+        type: "result", subtype: "success", is_error: true, terminal_reason: "api_error", api_error_status: null,
+        result: `provider request failed (${code}): the provider ended the stream with an error frame (${type}): Your credit balance is too low.`,
+      } as never);
+      const store = new SessionStore(makeHome());
+      const hub = new SessionHub(store);
+      const winter = winterOver(hub, async (sessionId) => {
+        hub.append(sessionId, { type: "agent_error", sessionId, threadId: "main", message: classified.message, code: classified.code });
+        hub.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "error", inputTokens: 0, outputTokens: 0 });
+      });
+      const result = await makeDaemonRoutineRunner({ store, hub, winter }).runHeadless({ prompt: "x", policy: "auto", cwd: "/tmp", origin: "routine/r7" });
+      expect(result.ok).toBe(false);
+      expect(result.quotaLimited).toBe(quota ? true : undefined);
+      expect(result.error).toBe(classified.message);
+    });
+  }
 
   test("non-quota error: an agent_error NOT starting with HTTP 429 is a plain error (not quotaLimited)", async () => {
     const store = new SessionStore(makeHome());

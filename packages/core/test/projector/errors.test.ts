@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { AGENT_ERROR_CODES, classifyResult, classifyThrown, codeForHttpStatus, sanitizeDetail } from "../../src/projector";
+import { AGENT_ERROR_CODES, AGENT_ERROR_DETAIL_MAX, agentErrorDetail, classifyResult, classifyThrown, codeForHttpStatus, runtimeFailureClass, sanitizeDetail } from "../../src/projector";
+import { CLASS_MESSAGE } from "../../src/projector/errors";
 import type { AgentErrorCode } from "../../src/projector";
 import { accept, acceptError, assistantText, init, makeProjector, result } from "./harness";
 
@@ -109,7 +110,8 @@ describe("projector/errors: an error message can NEVER carry opaque provider sta
 
   test("a long detail is bounded, so a megabyte of provider prose can never reach the phone's frame cap", () => {
     const detail = sanitizeDetail("x".repeat(5000));
-    expect(detail!.length).toBeLessThanOrEqual(201);
+    expect(detail!.length).toBe(AGENT_ERROR_DETAIL_MAX + 1);
+    expect(AGENT_ERROR_DETAIL_MAX).toBeLessThanOrEqual(400);
   });
 
   test("the end-to-end path is clean too: nothing opaque survives into the emitted agent_error", () => {
@@ -186,8 +188,10 @@ describe("projector/errors: a credential-resolution api_error classifies as auth
       result: "provider request failed (network): the keychain record for keychain:com.winter.core.dev/codex-access-token is not valid JSON credential material",
     }));
     expect(classified.code).toBe("auth");
+    // The runtime's own `provider request failed (network): ` wrapper is dropped from the detail
+    // (0.0.49): the class sentence already says what kind of failure it is.
     expect(classified.message).toBe(
-      "the provider rejected these credentials: provider request failed (network): the keychain record for keychain:com.winter.core.dev/codex-access-token is not valid JSON credential material",
+      "the provider rejected these credentials: the keychain record for keychain:com.winter.core.dev/codex-access-token is not valid JSON credential material",
     );
   });
 
@@ -248,5 +252,140 @@ describe("Winter-side capability refusal (2026-09-17 field report)", () => {
     expect(c.code).toBe("bad_request");
     expect(c.message.startsWith("Winter refused the request before sending it")).toBe(true);
     expect(c.message).not.toContain("unavailable or overloaded");
+  });
+});
+
+/**
+ * Agent SDK 0.0.49: a mid-stream Anthropic `error` frame carries the vendor's message and is classed
+ * by its type IN THE RUNTIME. The result reaching the daemon is still `terminal_reason: "api_error"`,
+ * `api_error_status: null`, so the class rides only the runtime's `provider request failed (<code>):`
+ * prefix. These are the runtime's exact wordings (`provider/bridge.ts` + `streamErrorFrame`).
+ */
+describe("status-less provider failures are classed by the runtime's own code (agent SDK 0.0.49)", () => {
+  const CREDIT = "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.";
+  const midStream = (code: string, type: string | undefined, vendor: string | undefined) =>
+    res({
+      is_error: true,
+      terminal_reason: "api_error",
+      api_error_status: null,
+      result: `provider request failed (${code}): the provider ended the stream with an error frame${type !== undefined ? ` (${type})` : ""}${vendor !== undefined ? `: ${vendor}` : ""}`,
+    });
+
+  test("the live case: an exhausted credit balance mid-stream is a refused request, its vendor sentence whole", () => {
+    const c = classifyResult(midStream("bad_request", "invalid_request_error", CREDIT));
+    expect(c.code).toBe("bad_request");
+    expect(c.message).toBe(`the provider refused the request: ${CREDIT}`);
+    expect(c.message).not.toContain("unavailable or overloaded");
+    expect(c.message).not.toContain("provider request failed");
+    expect(c.message).not.toContain("error frame");
+  });
+
+  const cases: Array<[string, string, AgentErrorCode, string]> = [
+    ["bad_request", "invalid_request_error", "bad_request", CLASS_MESSAGE.bad_request],
+    ["bad_request", "not_found_error", "bad_request", CLASS_MESSAGE.bad_request],
+    ["bad_request", "request_too_large", "bad_request", CLASS_MESSAGE.bad_request],
+    // billing_error is `bad_request` in the runtime, `billing` here — what its HTTP 402 is up front.
+    ["bad_request", "billing_error", "billing", CLASS_MESSAGE.billing],
+    ["auth", "authentication_error", "auth", CLASS_MESSAGE.auth],
+    ["auth", "permission_error", "auth", CLASS_MESSAGE.auth],
+    ["rate_limit", "rate_limit_error", "rate_limit", CLASS_MESSAGE.rate_limit],
+    ["timeout", "timeout_error", "network", CLASS_MESSAGE.network],
+    ["server", "overloaded_error", "server", CLASS_MESSAGE.server],
+    ["server", "api_error", "server", CLASS_MESSAGE.server],
+  ];
+  for (const [runtimeCode, type, code, sentence] of cases) {
+    test(`(${runtimeCode}) ${type} → ${code}, with its own sentence and the vendor's`, () => {
+      const c = classifyResult(midStream(runtimeCode, type, "Something the vendor said."));
+      expect(c.code).toBe(code);
+      expect(c.message).toBe(`${sentence}: Something the vendor said.`);
+    });
+  }
+
+  test("a refusal, a billing block and a credential failure never read as a transient overload", () => {
+    for (const [runtimeCode, type] of [["bad_request", "invalid_request_error"], ["bad_request", "billing_error"], ["auth", "authentication_error"]] as const) {
+      const c = classifyResult(midStream(runtimeCode, type, CREDIT));
+      expect(c.code).not.toBe("server");
+      expect(c.code).not.toBe("network");
+      expect(c.message).not.toMatch(/unavailable|overloaded|try again|could not be reached/);
+    }
+  });
+
+  test("a frame with no message keeps its type; one with neither still says what happened", () => {
+    expect(classifyResult(midStream("bad_request", "invalid_request_error", undefined)).message)
+      .toBe(`${CLASS_MESSAGE.bad_request}: the stream ended with an error frame (invalid_request_error)`);
+    const bare = classifyResult(midStream("server", undefined, undefined));
+    expect(bare.code).toBe("server");
+    expect(bare.message).toBe(`${CLASS_MESSAGE.server}: the stream ended with an error frame`);
+  });
+
+  test("stall and timeout from the runtime are network; an unknown runtime class keeps the server reading", () => {
+    const stall = classifyResult(res({ terminal_reason: "api_error", api_error_status: null, result: "provider request failed (stall): no bytes for 90s" }));
+    expect(stall.code).toBe("network");
+    expect(stall.message).toBe(`${CLASS_MESSAGE.network}: no bytes for 90s`);
+    expect(classifyResult(res({ terminal_reason: "api_error", api_error_status: null, result: "provider request failed (network): fetch failed" })).code).toBe("network");
+    expect(classifyResult(res({ terminal_reason: "api_error", api_error_status: null, result: "provider request failed (quantum): ???" })).code).toBe("server");
+    // A prototype member is not a class.
+    expect(classifyResult(res({ terminal_reason: "api_error", api_error_status: null, result: "provider request failed (constructor): x" })).code).toBe("server");
+  });
+
+  test("a raw throw the runtime normalised (no parenthetical) keeps server, its prefix dropped", () => {
+    const c = classifyResult(res({ terminal_reason: "api_error", api_error_status: null, result: "provider request failed: socket hang up" }));
+    expect(c.code).toBe("server");
+    expect(c.message).toBe(`${CLASS_MESSAGE.server}: socket hang up`);
+  });
+
+  test("a real HTTP status still wins over the runtime's class, and the prefix is dropped there too", () => {
+    const c = classifyResult(res({ terminal_reason: "api_error", api_error_status: 400, result: `provider request failed (bad_request): HTTP 400 — ${CREDIT}` }));
+    expect(c.code).toBe("bad_request");
+    expect(c.message).toBe(`${CLASS_MESSAGE.bad_request}: HTTP 400 — ${CREDIT}`);
+    expect(classifyResult(res({ terminal_reason: "api_error", api_error_status: 503, result: "provider request failed (bad_request): odd" })).code).toBe("server");
+  });
+
+  test("the capability refusal and the credential marker keep their own doors", () => {
+    const cap = classifyResult(res({ terminal_reason: "api_error", api_error_status: null, result: "provider request failed (capability): a bare model id needs a provider" }));
+    expect(cap.code).toBe("bad_request");
+    expect(cap.message).toBe("Winter refused the request before sending it: a bare model id needs a provider");
+    const cred = classifyResult(res({ terminal_reason: "api_error", api_error_status: null, result: "provider request failed (network): the keychain record for x is not valid JSON credential material" }));
+    expect(cred.code).toBe("auth");
+  });
+
+  test("the vendor's longest message (300 chars after the runtime's own cap) survives whole, and the whole stays bounded", () => {
+    const vendor = `${"v".repeat(299)}…`;
+    const c = classifyResult(midStream("bad_request", "invalid_request_error", vendor));
+    expect(c.message).toBe(`${CLASS_MESSAGE.bad_request}: ${vendor}`);
+    const huge = classifyResult(res({ terminal_reason: "api_error", api_error_status: null, result: `provider request failed (bad_request): ${"y".repeat(5000)}` }));
+    expect(huge.message.length).toBeLessThanOrEqual(CLASS_MESSAGE.bad_request.length + 2 + AGENT_ERROR_DETAIL_MAX + 1);
+  });
+
+  test("an opaque marker in the vendor's text still refuses the detail", () => {
+    const c = classifyResult(midStream("bad_request", "invalid_request_error", "bad redacted_thinking block AAAABBBB"));
+    expect(c.code).toBe("bad_request");
+    expect(c.message).toBe(CLASS_MESSAGE.bad_request);
+  });
+
+  test("runtimeFailureClass and agentErrorDetail read exactly the shapes they name", () => {
+    expect(runtimeFailureClass("provider request failed (rate_limit): HTTP 429")).toBe("rate_limit");
+    expect(runtimeFailureClass("provider request failed: x")).toBeUndefined();
+    expect(runtimeFailureClass("something provider request failed (auth): x")).toBeUndefined();
+    expect(runtimeFailureClass(undefined)).toBeUndefined();
+    expect(agentErrorDetail("bad_request", `${CLASS_MESSAGE.bad_request}: ${CREDIT}`)).toBe(CREDIT);
+    expect(agentErrorDetail("bad_request", CLASS_MESSAGE.bad_request)).toBeUndefined();
+    expect(agentErrorDetail("auth", `${CLASS_MESSAGE.bad_request}: x`)).toBeUndefined();
+    expect(agentErrorDetail(undefined, "anything: x")).toBeUndefined();
+    expect(agentErrorDetail("toString", "x: y")).toBeUndefined();
+  });
+
+  test("end to end through the projector: the agent_error a client renders", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    accept(projector, assistantText("working"));
+    const out = accept(projector, result({
+      is_error: true, subtype: "success", terminal_reason: "api_error", api_error_status: null,
+      result: `provider request failed (bad_request): the provider ended the stream with an error frame (invalid_request_error): ${CREDIT}`,
+    }));
+    const err = out.find((e) => (e as TC).type === "agent_error") as TC;
+    expect(err.code).toBe("bad_request");
+    expect(err.message).toBe(`the provider refused the request: ${CREDIT}`);
+    expect((out.at(-1) as TC).stopReason).toBe("error");
   });
 });
