@@ -165,6 +165,15 @@ describe("classifyDispatchAgentError — coarse AgentErrorCode only, no status/p
       expect(reg.problemFor("pins.dispatch", "anthropic/claude-sonnet-5-5")).toMatchObject({ reason: "other", detail: CREDIT });
     });
 
+    test("the internal jobs' own provider error (the adapter's frame wording, no runtime prefix) notes the vendor's sentence, unredacted", () => {
+      const note = classifyProviderFailure({ code: "bad_request", providerCode: "invalid_request_error", message: `the provider ended the stream with an error frame (invalid_request_error): ${CREDIT}` });
+      expect(note.reason).toBe("other");
+      expect(note.detail).toBe(CREDIT);
+      expect(note.detail).not.toContain("[redacted]");
+      // A frame with no vendor message still says what happened (its type is a 21-char run, redacted).
+      expect(classifyProviderFailure({ code: "bad_request", message: "the provider ended the stream with an error frame" }).detail).toBe("the stream ended with an error frame");
+    });
+
     test("a bad_request with no detail keeps the fixed fallback line", () => {
       expect(classifyDispatchAgentError("bad_request", CLASS_MESSAGE.bad_request)?.detail).toBe("the provider returned an unrecognized error");
       expect(classifyDispatchAgentError("bad_request")?.detail).toBe("the provider returned an unrecognized error");

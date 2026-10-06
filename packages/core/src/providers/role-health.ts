@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { ModelRole } from "../settings";
-import { agentErrorDetail } from "../projector/errors";
+import { agentErrorDetail, readableFailureText } from "../projector/errors";
 
 /**
  * 2026-09-18: quiet per-ROLE failure notes for the Mac app's Roles pane ("Notes" section) — when a
@@ -139,7 +139,10 @@ export function classifyProviderFailure(input: ClassifyInput, now: () => number 
       if (input.providerCode !== undefined && OUT_OF_CREDITS_CODES.has(input.providerCode)) {
         return { reason: "out-of-credits", detail: "billing/credits are exhausted for this provider" };
       }
-      return { reason: "other", detail: safeDetail(input.message) };
+      // The vendor's own sentence, not the agent SDK's stream-frame wrapper around it (0.0.49): the
+      // wrapper's `(invalid_request_error)` is a 21-char run `safeDetail` would redact, and it spends
+      // the 160-char budget before the reason a user can act on ("Your credit balance is too low …").
+      return { reason: "other", detail: safeDetail(readableFailureText(input.message)) };
     }
     case "model_not_found":
       return { reason: "model-unavailable", detail: "the model is not available to this account" };

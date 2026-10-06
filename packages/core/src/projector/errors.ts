@@ -178,8 +178,11 @@ export function runtimeFailureClass(raw: unknown): string | undefined {
 const STREAM_ERROR_FRAME = /^the provider ended the stream with an error frame(?: \(([A-Za-z0-9_]+)\))?(?:: ([\s\S]+))?$/;
 
 /** The text worth showing: the runtime's failure prefix dropped, a stream error frame reduced to the
- *  vendor's own sentence. Everything else passes through unchanged (`sanitizeDetail` still bounds it). */
-function readableFailureText(raw: unknown): unknown {
+ *  vendor's own sentence. Everything else passes through unchanged (`sanitizeDetail` still bounds it).
+ *  Also read by role health for the internal jobs' provider errors, which carry the same frame wording. */
+export function readableFailureText(raw: string): string;
+export function readableFailureText(raw: unknown): unknown;
+export function readableFailureText(raw: unknown): unknown {
   if (typeof raw !== "string") return raw;
   const text = raw.replace(RUNTIME_FAILURE_PREFIX, "");
   const frame = STREAM_ERROR_FRAME.exec(text);
