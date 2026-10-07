@@ -3,8 +3,12 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.49";
-/** Bumped to 0.0.49 (2026-10-06): a mid-stream Anthropic `error` frame carries the vendor's own message (control
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.50";
+/** Bumped to 0.0.50 (2026-10-07): catalog only — GPT-6.1 Sol (`openai/gpt-6.1-sol`, `codex-oauth/gpt-6.1-sol`) joins
+ *  the catalog and the `gpt` family's `sol` slot moves to it from gpt-6-sol, so a `sol` pin and the picker's "sol"
+ *  facing name now mean 6.1. Its efforts are low..max with no `none` (a session's `"none"` already sends no effort, and
+ *  an internal role's `"none"` gets the row's lowest tier, `low`); Codex's default is `low`, the API's `medium`.
+ *  Earlier: bumped to 0.0.49 (2026-10-06): a mid-stream Anthropic `error` frame carries the vendor's own message (control
  *  characters collapsed, quoted spans over 40 chars elided, capped at 300) and is classified by its type in the
  *  runtime (bad_request/auth/rate_limit/timeout, else server). That code does not reach this daemon as structure: the
  *  result is still `terminal_reason: "api_error"` with `api_error_status: null`, so `projector/errors.ts` keeps

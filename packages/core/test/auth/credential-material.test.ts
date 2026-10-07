@@ -202,7 +202,8 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // module of the two PUBLISHED runtime bundles (and its .d.ts) is byte-identical; the mirror stands.
     // 0.0.48 → 0.0.49 (mid-stream Anthropic error frames explained and classified by type): keychain-store.ts
     // untouched in source; its region of the published runtime bundle (and its .d.ts) is byte-identical; the mirror stands.
-    expect(pkg.version).toBe("0.0.49");
+    // 0.0.49 → 0.0.50 (GPT-6.1 Sol catalog rows): keychain-store.ts diff EMPTY; the mirror stands.
+    expect(pkg.version).toBe("0.0.50");
   });
 
 
