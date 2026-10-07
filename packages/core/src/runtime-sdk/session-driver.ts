@@ -1038,6 +1038,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // chat's and dispatch's base prompts NAME their search tool, and the prompt must name the one
         // `Options.tools` actually gave this incarnation (`Search` with a key, `WebSearch` without).
         exaKeyPresent: exaPresent,
+        // The same rule for `Computer`, read off the record this incarnation just BUILT (not the setting
+        // again), so a toggle landing between the two reads can never split the prompt from the tool list.
+        computerOffered: capabilityKeys.has("computer"),
         // WS-21 (L3.4): the run folder carries the instructions, the output style and the code memory.
         ...(runHomeApplied ? { runHomeApplied: true } : {}),
       });

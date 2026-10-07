@@ -1331,7 +1331,7 @@ export async function startDaemon(opts: {
     // Minor 5e (fix wave): `computerUseEnabledFrom` (settings.ts) — the ONE reader this gate shares
     // with the boot registration below, `settings-apply.ts`'s `cuEnabled`, and `ipc/server.ts`'s
     // `capabilities.list` handler.
-    computerUseEnabled: () => (settings ? computerUseEnabledFrom(settings) : false),
+    computerUseEnabled: () => (settings ? computerUseEnabledFrom(settings) : true),
     // THE SAME four closures `registerBrowserTool` gets below — `mintPanelTab` and
     // `panelCommands.dispatch` are what emit `panel_tab_opened`/`panel_tab_activated`/
     // `panel_command`, so a capability with its own would open tabs nobody can see and dispatch
@@ -2297,15 +2297,15 @@ export async function startDaemon(opts: {
     // reads from — one store, so a skill written here is immediately loadable via Skill with no
     // second handle to keep in sync. ALWAYS_ASK-gated (gate.ts): a card under BOTH ask and auto,
     // and excluded from every child's tool set (engine.ts childExcludeTools).
-    // Computer use (Phase 5 CU): opt-in via settings.computerUse.enabled (the strongest reading of
-    // "full-auto CU requires explicit opt-in" — absent/false, the `computer` tool does not exist).
+    // Computer use (Phase 5 CU): on unless settings.computerUse.enabled is explicitly false (default
+    // ON since 2026-10-07, user ruling; it was opt-in before — absent now means on).
     // The service holds leases on the SAME `peripheral` broker (hoisted above this gate) that
     // Winter.app serves screenshot/ax-read/input-drive behind. reuses settings.peripheral.heartbeatMs.
     // P8b Task 6: the `let` itself is HOISTED above the Winter runtime block (it is the holder the
     // `computer` capability server's getter reads — one service, one lease set, two doors); only
     // the construction stays here, unchanged.
     // Minor 5e (fix wave): `computerUseEnabledFrom` — the ONE reader, see this const's own doc.
-    if (settings && computerUseEnabledFrom(settings)) {
+    if (settings ? computerUseEnabledFrom(settings) : true) {
       computerUse = new ComputerUseService({ broker: peripheral, heartbeatMs: settings?.peripheral?.heartbeatMs });
       // D1-T2: `deferred: ["dispatch"]` — immediate in code (unchanged), deferred only for the
       // dispatch coordinator (matches the hot-toggle re-registration below, registerComputer).

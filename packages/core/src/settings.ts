@@ -501,9 +501,9 @@ export const Settings = z.object({
     heartbeatMs: z.number().int().positive().optional(),
     expiryMs: z.number().int().positive().optional(),
   }).optional(),
-  /** Computer use (Phase 5 CU). `enabled` is the capability opt-in: the `computer` tool is
-   *  registered ONLY when true (the strongest reading of "full-auto CU requires explicit opt-in" —
-   *  absent/false means CU does not exist for the session). `screenshotMaxDim` caps the longest
+  /** Computer use (Phase 5 CU). `enabled` is the capability switch, default ON (user ruling
+   *  2026-10-07): the `computer` tool is registered unless it is explicitly `false` — absent means
+   *  on, `false` means CU does not exist for the session (`computerUseEnabledFrom`). `screenshotMaxDim` caps the longest
    *  side of a captured screenshot (default 1280, Winter.app-side) to bound the base64 payload well
    *  under the NDJSON line limit and the model's image budget. The lease heartbeat/expiry reuse the
    *  `peripheral` block above. */
@@ -1303,14 +1303,15 @@ export const lspAutoDiagnosticsEnabledFrom = (s: Settings): boolean => s.lsp?.au
  *  so the two can never drift. */
 export const cleanerEnabledFrom = (s: Settings): boolean => s.cleaner?.enabled !== false;
 
-/** Minor 5e (fix wave, pre-merge review): computer use (Phase 5 CU) opt-in gate — the ONE place
- *  `settings.computerUse.enabled === true` is decided, replacing THREE independently hand-spelled
- *  copies (daemon.ts's boot registration gate, daemon.ts's own `computerUseEnabled` live getter,
- *  and `ipc/server.ts`'s `capabilities.list` handler — `settings-apply.ts`'s `cuEnabled` closure is
- *  the fourth). Deliberately `=== true` (not the `!== false` shape every OTHER gate in this file
- *  has) — computer use is opt-in/default-OFF, "the strongest reading of 'full-auto CU requires
- *  explicit opt-in'" (the schema's own doc on `computerUse.enabled`). */
-export const computerUseEnabledFrom = (s: Settings): boolean => s.computerUse?.enabled === true;
+/** Minor 5e (fix wave, pre-merge review): computer use (Phase 5 CU) gate — the ONE place
+ *  `settings.computerUse.enabled` is decided, replacing THREE independently hand-spelled copies
+ *  (daemon.ts's boot registration gate, daemon.ts's own `computerUseEnabled` live getter, and
+ *  `ipc/server.ts`'s `capabilities.list` handler — `settings-apply.ts`'s `cuEnabled` closure is the
+ *  fourth). Default-ON since 2026-10-07 (user ruling: "default should be on"), the same `!== false`
+ *  shape as `lspEnabledFrom` below — only an explicit `false` takes the `computer` tool away. It was
+ *  opt-in (`=== true`) before, and a Winter Dev home with no `computerUse` block then handed Dispatch
+ *  a prompt naming a tool it did not have. */
+export const computerUseEnabledFrom = (s: Settings): boolean => s.computerUse?.enabled !== false;
 
 /** Minor 5e (fix wave, pre-merge review): LSP integration (Phase 5f) opt-out gate — the ONE place
  *  `settings.lsp.enabled !== false` is decided, same "one reader" consolidation as

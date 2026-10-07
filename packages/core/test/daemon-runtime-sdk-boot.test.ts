@@ -190,12 +190,13 @@ describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
       const d = await boot(home);
       const servers = d.buildSessionCapabilities(session());
       // KEYED BY NAME — the record IS `Options.mcpServers`' shape, and the child derives each tool's
-      // wire name from the key, so the key set is the thing to assert. Computer use is off in this
-      // temp home, so it is absent too — plus `external` (Phase 8c Lane 3, Task 3.4), which is
-      // ALWAYS present (kept, advertising zero tools, same "inert not absent" contract every other
-      // capability server already follows) since this daemon boot wires no `CapabilityDeps.external`.
+      // wire name from the key, so the key set is the thing to assert. Computer use is default-ON
+      // (2026-10-07) and this temp home does not turn it off, so `winter__computer` is present — plus
+      // `external` (Phase 8c Lane 3, Task 3.4), which is ALWAYS present (kept, advertising zero tools,
+      // same "inert not absent" contract every other capability server already follows) since this
+      // daemon boot wires no `CapabilityDeps.external`.
       expect(Object.keys(servers)).toEqual([
-        "winter__sessions", "winter__browser", "winter__office",
+        "winter__sessions", "winter__computer", "winter__browser", "winter__office",
         // `winter__web` was here until 2026-09-18 (`web_fetch`/`web_search` retired in favour of the
         // runtime child's own `WebFetch`/`WebSearch`), and `winter__research` until 2026-10-01 (`Search`
         // is the agent SDK's built-in now).
@@ -218,9 +219,10 @@ describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
 
   test("the computer server follows the LIVE computerUse.enabled setting — no restart (M2)", async () => {
     await withTempHome(async (home) => {
-      writeFileSync(join(home, "settings.json"), JSON.stringify({ computerUse: { enabled: true } }));
+      // Default-ON since 2026-10-07, so the meaningful setting is the explicit opt-out.
+      writeFileSync(join(home, "settings.json"), JSON.stringify({ computerUse: { enabled: false } }));
       const d = await boot(home);
-      expect(Object.keys(d.buildSessionCapabilities(session()))).toContain("winter__computer");
+      expect(Object.keys(d.buildSessionCapabilities(session()))).not.toContain("winter__computer");
     });
   });
 

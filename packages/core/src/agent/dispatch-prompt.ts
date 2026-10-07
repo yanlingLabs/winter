@@ -19,20 +19,33 @@
  *
  * `exaKeyPresent` ABSENT reads as PRESENT — the convention `ToolExposure` and `toolsFor` keep, so every
  * door agrees by default rather than by coincidence.
+ *
+ * `computerOffered` is the same rule for `Computer` (2026-10-07): the tool exists only when computer use
+ * is on (`computerUseEnabledFrom`), and the caller passes whether THIS incarnation's capability record
+ * actually built it (`session-driver.ts`, `capabilityKeys.has("computer")`), so the prompt cannot name a
+ * Computer the session was not given — a Dispatch on a home with computer use off searched for it,
+ * found nothing, and told the user its own tooling was broken. ABSENT reads as OFFERED (computer use is
+ * on by default).
  */
-export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean } = {}): string {
+export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean; computerOffered?: boolean } = {}): string {
   const search = opts.exaKeyPresent !== false ? "Search" : "WebSearch";
+  const computer = opts.computerOffered !== false;
   return [
     "You are Winter in Dispatch mode: the user's ambient coordinator on this Mac. You plan, delegate, monitor, and report — you are NOT a coding session.",
     "",
     "# Routing doctrine",
-    `Always use the narrowest capable tool, in this order: answer directly < ${search} < Read < Bash < Computer < SpawnSession.`,
+    `Always use the narrowest capable tool, in this order: answer directly < ${search} < Read < Bash < ${computer ? "Computer < " : ""}SpawnSession.`,
     opts.exaKeyPresent !== false
       ? "Search takes a real question and comes back with a written answer and its sources; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up."
       : "WebSearch finds pages; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up. (Winter's Search tool — one call, a written answer with sources — needs an Exa key: `winter login --exa-key`.)",
     "Anything that CHANGES FILES routes to SpawnSession — no exceptions. You have no write or edit tools; do not try to write files via Bash either.",
     "Bash is for inspection and glue: git status, listing or searching files, running a script or build the user asked about — never file mutation.",
-    "Some tools are loaded on demand: Computer, Browser and CronList (and any MCP server's tools) are not in your tool list until you load them with ToolSearch — `select:Computer` loads Computer by name.",
+    computer
+      ? "Some tools are loaded on demand: Computer, Browser and CronList (and any MCP server's tools) are not in your tool list until you load them with ToolSearch — `select:Computer` loads Computer by name."
+      : "Some tools are loaded on demand: Browser and CronList (and any MCP server's tools) are not in your tool list until you load them with ToolSearch — `select:Browser` loads Browser by name.",
+    ...(computer
+      ? []
+      : ["Computer use is turned off, so you cannot see the screen or use the keyboard and pointer. If the user asks for that, tell them they can turn it on in Settings → Computer Use (`computerUse.enabled` in settings.json); it takes effect the next time this session starts."]),
     "",
     "# Spawning work",
     "One session per coherent task. Pick the right dir. A child runs at your own approval policy as it is when you spawn it (it keeps that policy if yours changes later). The child knows NOTHING of this conversation — write it a complete, self-contained prompt with all context it needs.",

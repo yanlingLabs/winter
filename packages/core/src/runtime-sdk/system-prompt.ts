@@ -46,6 +46,13 @@ export interface WinterSystemPromptInput {
    * list can never disagree. ABSENT reads as PRESENT, as it does at every other door.
    */
   exaKeyPresent?: boolean;
+  /**
+   * Did this incarnation's capability record build the `computer` server? (2026-10-07.) Dispatch's base
+   * prompt names `Computer` only when it did, so the prompt and the tool list cannot disagree when computer
+   * use is off. ABSENT reads as built (computer use is on by default). Chat never has Computer and its prompt
+   * never names it; code mode keeps the runtime's own prompt.
+   */
+  computerOffered?: boolean;
   /** WS-21: the incarnation runs on a router-built run folder — see `ContextAssembler.assemble`'s own
    *  `runHomeApplied` for exactly what stops being composed here. Absent/false: byte-identical. */
   runHomeApplied?: boolean;
@@ -63,7 +70,9 @@ export function winterSystemPromptFor(assembler: Pick<ContextAssembler, "assembl
     // The engine's per-session `loadedSkills` set is empty at a session's first turn; on the Winter
     // leg the `Skill` tool is Winter's own, so nothing ever fills it host-side.
     loadedSkills: [],
-    basePromptOverride: isDispatch ? dispatchSystemPrompt(webOpts) : isChat ? chatSystemPrompt(webOpts) : undefined,
+    basePromptOverride: isDispatch
+      ? dispatchSystemPrompt({ ...webOpts, ...(input.computerOffered === undefined ? {} : { computerOffered: input.computerOffered }) })
+      : isChat ? chatSystemPrompt(webOpts) : undefined,
     // Dreaming (Phase 7b) + Chat Slice A: dispatch AND chat read the shared `_assistant` bucket.
     memoryBucket: isDispatch || isChat ? "assistant" : "project",
     skipOutputStyle: input.origin === "dispatch-child",

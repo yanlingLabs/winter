@@ -101,19 +101,29 @@ describe("capabilities.list", () => {
     c.close();
   });
 
-  test("a disabled capability (computerUse.enabled absent) reports enabled:false; lsp defaults enabled:true", async () => {
+  test("with no settings for them, computer and lsp both default enabled:true", async () => {
+    // Computer use is default-ON since 2026-10-07 (user ruling); it was opt-in before.
     const { socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.capabilitiesList, {});
     const byKey = new Map<string, any>(result.result.capabilities.map((x: any) => [x.key, x]));
-    expect(byKey.get("computer").enabled).toBe(false);
+    expect(byKey.get("computer").enabled).toBe(true);
     expect(byKey.get("lsp").enabled).toBe(true);
     // Every other key has no settings gate at all — always live.
     for (const key of CAPABILITY_SERVER_KEYS) {
       if (key === "computer" || key === "lsp") continue;
       expect(byKey.get(key).enabled).toBe(true);
     }
+    c.close();
+  });
+
+  test("settings.computerUse.enabled:false reports computer off", async () => {
+    const { socketPath, harnessToken } = await boot({ computerUse: { enabled: false } });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.capabilitiesList, {});
+    expect(result.result.capabilities.find((x: any) => x.key === "computer").enabled).toBe(false);
     c.close();
   });
 

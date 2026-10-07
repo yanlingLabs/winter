@@ -787,15 +787,15 @@ describe("cleanerEnabledFrom (session-activity-hygiene T7: cleaner.enabled defau
 // used to be FOUR independently hand-spelled copies each (daemon.ts's boot gate + its own live
 // getter, settings-apply.ts's hot-toggle closure, and ipc/server.ts's capabilities.list handler)
 // into one reader apiece.
-describe("computerUseEnabledFrom (Minor 5e: opt-in / default-OFF)", () => {
+describe("computerUseEnabledFrom (opt-out / default-ON since 2026-10-07; it was opt-in before)", () => {
   const base = { schemaVersion: 3 as const, provider: { model: "codex-oauth/gpt-5.4" } };
 
-  test("computerUse block absent → disabled", () => {
-    expect(computerUseEnabledFrom(Settings.parse(base))).toBe(false);
+  test("computerUse block absent → enabled", () => {
+    expect(computerUseEnabledFrom(Settings.parse(base))).toBe(true);
   });
 
-  test("computerUse.enabled absent (block present, field absent) → disabled", () => {
-    expect(computerUseEnabledFrom(Settings.parse({ ...base, computerUse: {} }))).toBe(false);
+  test("computerUse.enabled absent (block present, field absent) → enabled", () => {
+    expect(computerUseEnabledFrom(Settings.parse({ ...base, computerUse: {} }))).toBe(true);
   });
 
   test("computerUse.enabled: true → enabled", () => {

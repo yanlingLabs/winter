@@ -2906,7 +2906,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // Minor 5e: `computerUseEnabledFrom`/`lspEnabledFrom` (settings.ts) — the ONE reader for
           // each gate, rather than a third hand-spelled copy of what daemon.ts's boot registration
           // and `settings-apply.ts`'s hot-toggle closures already decide.
-          const enabled = key === "computer" ? (settings ? computerUseEnabledFrom(settings) : false)
+          const enabled = key === "computer" ? (settings ? computerUseEnabledFrom(settings) : true)
             : key === "lsp" ? (settings ? lspEnabledFrom(settings) : true)
             : true;
           return { key, enabled, tools };

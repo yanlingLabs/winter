@@ -243,3 +243,44 @@ describe("chat/dispatch base prompts follow the Exa key", () => {
       .toBe(winterSystemPromptFor(w.assembler, { mode: "code", primary: w.cwd, cwd: w.cwd, exaKeyPresent: true }));
   });
 });
+
+// 2026-10-07: a Dispatch on a home with computer use off was told to load `Computer`, found nothing, and told
+// the user its own tooling was broken. The prompt now names Computer only when the incarnation built it.
+describe("dispatch's base prompt follows whether the Computer tool was built", () => {
+  test("offered: Computer is in the routing order and is the tool `select:` loads by name", () => {
+    const text = dispatchSystemPrompt({ computerOffered: true });
+    expect(text).toContain("< Bash < Computer < SpawnSession.");
+    expect(text).toContain("`select:Computer` loads Computer by name");
+    expect(text).not.toContain("Computer use is turned off");
+  });
+
+  test("not offered: Computer is never named as a tool to use, and the model is told how the user turns it on", () => {
+    for (const exaKeyPresent of [true, false]) {
+      const text = dispatchSystemPrompt({ exaKeyPresent, computerOffered: false });
+      expect(text).toContain("< Bash < SpawnSession.");
+      expect(text).not.toContain("select:Computer");
+      expect(text).not.toContain("Computer < ");
+      expect(text).toContain("`select:Browser` loads Browser by name");
+      expect(text).toContain("Computer use is turned off");
+      expect(text).toContain("Settings → Computer Use");
+      // The Exa rule is independent of this one.
+      expect(text).toContain(exaKeyPresent ? "< Search <" : "< WebSearch <");
+    }
+  });
+
+  test("ABSENT reads as OFFERED — computer use is on by default", () => {
+    expect(dispatchSystemPrompt()).toBe(dispatchSystemPrompt({ computerOffered: true }));
+    expect(dispatchSystemPrompt({ exaKeyPresent: false })).toBe(dispatchSystemPrompt({ exaKeyPresent: false, computerOffered: true }));
+  });
+
+  test("winterSystemPromptFor threads it to dispatch only; chat and code are unaffected", () => {
+    const w = world();
+    const at = (mode: "chat" | "code" | "dispatch", computerOffered?: boolean) =>
+      winterSystemPromptFor(w.assembler, { mode, primary: w.cwd, cwd: w.cwd, ...(computerOffered === undefined ? {} : { computerOffered }) });
+    expect(at("dispatch", false)).toContain("Computer use is turned off");
+    expect(at("dispatch", true)).not.toContain("Computer use is turned off");
+    expect(at("dispatch")).toBe(at("dispatch", true));
+    expect(at("chat", false)).toBe(at("chat", true));
+    expect(at("code", false)).toBe(at("code", true));
+  });
+});

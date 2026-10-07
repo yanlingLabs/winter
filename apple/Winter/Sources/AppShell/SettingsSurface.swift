@@ -233,8 +233,8 @@ func settingsSectionSubtitle(_ section: SettingsSection) -> String {
 /// - the summon hotkey is NOT edited anywhere — it is a fixed Hyper-Space. What the library's
 ///   Plugins tab edits is the shortcuts PLUGINS declare, and `.shortcuts` separates the two;
 /// - there is no default-approval-policy key: a session's policy is chosen in its composer;
-/// - there is no switch for the browser, only for computer use (`computerUse.enabled`, opt-in —
-///   `computerUseEnabledFrom` is `=== true`), so `.browser` names no on/off key;
+/// - there is no switch for the browser, only for computer use (`computerUse.enabled`, default on
+///   since 2026-10-07 — `computerUseEnabledFrom` is `!== false`), so `.browser` names no on/off key;
 /// - only Code sessions are archived (`sessions/activity.ts`'s `ACTIVITY_MODES` is code + cowork,
 ///   and Cowork has no landing yet), so `.archivedChats` points at the Code page's Archived tab.
 ///
@@ -262,7 +262,7 @@ func settingsSectionComingCopy(_ section: SettingsSection) -> String? {
             + "tab, where opening one resumes it. Chats are never archived."
     case .computerUse:
         return "Whether Winter may see the screen and use the keyboard and pointer. Today that is "
-            + "computerUse.enabled in settings.json, off unless it is set to true. When it is on, "
+            + "computerUse.enabled in settings.json, on unless it is set to false. When it is on, "
             + "Code and Dispatch sessions get the computer tool; Chat never does. A change applies "
             + "to the next session that starts; one already running keeps its tool list. "
             + "computerUse.screenshotMaxDim caps the size of the screenshots it takes."
