@@ -482,5 +482,76 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.123.0/Winter-0.123.0.zip" sparkle:edSignature="Wg7ijaJqJze86kAL57CESJv0p+YFRl3IJBO7/7ho9EiFmtCIJQEOfigXKi0b5sVqcV3eP0U8pVfvR87ESIEgAA==" length="426866447" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.124.0</title>
+      <description><![CDATA[<p>Winter agent SDK 0.0.53</p>
+<h2>The Dispatch pill</h2>
+<ul>
+  <li>The 4-finger tap, the hotkey and the menu's summon item now bring up a Dispatch pill at the bottom of the screen, just above the Dock, instead of the orb. The same gesture puts it away.</li>
+  <li>It grows as you type and can open to full screen with the whole conversation. While Dispatch works, its tools stream out of the pill, with the websites it reads shown by their own icons.</li>
+  <li>Approvals and questions float above the pill as cards.</li>
+  <li>An unsent draft is kept when you put the pill away and cleared after 15 minutes. Change that in Settings → Dispatch.</li>
+</ul>
+<h2>Commands in the pill</h2>
+<ul>
+  <li>Type <code>/</code> for a menu of commands, each with a short description. The closest match is marked in blue. ↑ and ↓ move the mark, Enter completes the command and Enter again runs it, and a click runs it at once. A fully typed command turns blue.</li>
+  <li><code>/compact</code> summarizes the conversation now. A small pill shows how long it has been running.</li>
+  <li><code>/permissions</code> turns the pill into the permission modes. Pick one with a click, or with the arrow keys and Enter; × or Esc goes back. <code>/permissions auto</code>, <code>/permissions accept edits</code> and the others set the mode directly, with a menu of modes as you type.</li>
+  <li><code>/spawn</code> is listed but not available yet. It will open a Cowork window.</li>
+</ul>
+<h2>Dispatch starts sessions again</h2>
+<ul>
+  <li>Dispatch can start code sessions for you again, several at once. Each one shows as a small pill above the main pill. Click it to open the session in its own window, or stop it from there.</li>
+  <li>A session Dispatch started brings its approvals and questions to Dispatch, and Dispatch hears back when it finishes ("Update from your sessions").</li>
+  <li>Session windows share the pill's look. They open on the Space you are on, show over full-screen apps, and stack above the pill with the newest at the bottom. A window you move stays where you put it.</li>
+  <li>Dispatch can find past sessions by date ("yesterday", "last week"), by a file they changed, or by words in their title and first message.</li>
+</ul>
+<h2>Sessions can message each other</h2>
+<ul>
+  <li>SendMessage sends a message to another code session, and resumes it if it has finished.</li>
+  <li>A message to a session that is still working joins its current turn after the next tool call, instead of waiting for the turn to end.</li>
+  <li>TaskStop stops another session's running turn and drops the messages queued behind it.</li>
+</ul>
+<h2>Faster tool runs</h2>
+<ul>
+  <li>Tools that only read run at the same time: reading and searching files, web lookups, subagents and read-only shell commands. Each result shows as soon as it is ready.</li>
+  <li>Computer and Browser each do one thing at a time, but run beside other tools.</li>
+  <li>Tool pills sit side by side and say what they are doing, then what they did.</li>
+  <li>MCP tools load the first time the model needs them, which keeps every request smaller.</li>
+</ul>
+<h2>The thinking pill</h2>
+<ul>
+  <li>A model's reasoning shows live as a pill in the conversation, titled with what it is doing: the provider's own heading when it gives one, otherwise worked out from the text ("Reading the files"). Click it to read the reasoning.</li>
+</ul>
+<h2>Computer use and screenshots</h2>
+<ul>
+  <li>Computer use is on by default. To turn it off, set <code>computerUse.enabled</code> to false in <code>settings.json</code>.</li>
+  <li>Screenshots from Computer and Browser now reach the model as images. Before, the model was told an image was attached but never saw it.</li>
+  <li>Dispatch's instructions mention Computer only when it can use it.</li>
+</ul>
+<h2>Compaction</h2>
+<ul>
+  <li><code>/compact</code> works in every session, including <code>/compact &lt;focus&gt;</code> in the terminal app.</li>
+  <li>Every compaction now shows in the conversation with how large it was, and a failed one is shown too.</li>
+  <li>After a compaction the model is told where the full transcript is, so it can look up exact details from before.</li>
+</ul>
+<h2>Models</h2>
+<ul>
+  <li>GPT-6.1 Sol, on OpenAI and on ChatGPT sign-in. The GPT family's "sol" choice now means 6.1.</li>
+  <li>ChatGPT sign-in models use their full 872,000-token context window, so long sessions compact far less often. Before, they compacted at about 250,000 tokens.</li>
+  <li>When a provider fails mid-reply, the error shows the provider's own message, with anything that looks like a key removed.</li>
+</ul>
+<h2>Fixes</h2>
+<ul>
+  <li>A very long session (over 4 MB of history) opens again. Before, the app kept reconnecting to it and showed a working pill that never stopped.</li>
+  <li>A message sent while a session restarts is retried instead of failing.</li>
+  <li>Nothing a session started keeps running after Winter's background service stops.</li>
+</ul>
+<p>This release runs on Winter agent SDK 0.0.53 and runtime SDK 0.0.16.</p>]]></description>
+      <sparkle:version>0.124.0</sparkle:version>
+      <sparkle:shortVersionString>0.124.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.124.0/Winter-0.124.0.zip" sparkle:edSignature="G+X6D4ntcd9dPVa1mMw+p4iLtpwRCEV4kP6XgOUyxOTzymmtPO2eaNa2lFUyF07kdG8ySwM5m+/ApQbq2/qXAQ==" length="427440567" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
