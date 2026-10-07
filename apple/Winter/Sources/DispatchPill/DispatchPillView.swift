@@ -27,6 +27,7 @@ struct DispatchPillView: View {
         guard controller.presentation != .fullScreen else { return false }
         return !adapter.dispatchChildren.isEmpty
             || controller.permissionsPickerOpen
+            || controller.commandNotice != nil
             || adapter.compactionStartedAt != nil
             || !pendingInteractionRecords(in: adapter.transcript, live: adapter.pendingInteractions,
                                           inactive: adapter.inactiveElicitations).isEmpty
@@ -143,6 +144,10 @@ private struct DispatchPillAccessories: View {
                     onClose: { controller.closePermissionsPicker() }
                 )
                 .transition(.childPill)
+            }
+            if let notice = controller.commandNotice {
+                DispatchPillNoticePill(text: notice)
+                    .transition(.childPill)
             }
         }
         .animation(childRowSpring, value: adapter.compactionStartedAt != nil)

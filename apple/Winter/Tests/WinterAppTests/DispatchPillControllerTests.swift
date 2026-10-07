@@ -537,6 +537,7 @@ final class DispatchPillControllerTests: XCTestCase {
     func testLocalCommandsAreTheWholeMessageOnly() {
         XCTAssertEqual(dispatchPillLocalCommand("/permissions"), .permissions)
         XCTAssertEqual(dispatchPillLocalCommand("  /Permissions \n"), .permissions)
+        XCTAssertEqual(dispatchPillLocalCommand("/spawn"), .spawn)
         XCTAssertNil(dispatchPillLocalCommand("/compact"), "the session's own built-in — sent as typed")
         XCTAssertNil(dispatchPillLocalCommand("/permissions please"))
         XCTAssertNil(dispatchPillLocalCommand("what are my /permissions"))
@@ -593,6 +594,27 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertEqual(pill.adapter.policyRefusal, policyRefusalText("bypass"))
         XCTAssertEqual(pill.adapter.sessionPolicy, "auto", "a refused change leaves the true mode")
         XCTAssertTrue(pill.permissionsPickerOpen)
+    }
+
+    func testSpawnSaysItIsNotAvailableYetAndSendsNothing() {
+        let pill = makePill()
+        var sent = 0
+        pill.onSubmit = { _ in sent += 1; return true }
+        pill.show()
+        pill.adapter.composerDraft = "/spawn"
+        pill.submit("/spawn")
+        XCTAssertEqual(sent, 0)
+        XCTAssertEqual(pill.adapter.composerDraft, "")
+        XCTAssertEqual(pill.commandNotice, dispatchPillSpawnComingSoon)
+
+        // Once Cowork windows exist, the same command runs the hook instead.
+        let wired = makePill()
+        var spawned = 0
+        wired.onSpawnCowork = { spawned += 1 }
+        wired.show()
+        wired.submit("/spawn")
+        XCTAssertEqual(spawned, 1)
+        XCTAssertNil(wired.commandNotice)
     }
 
     func testPickingTheCurrentModeJustCloses() {

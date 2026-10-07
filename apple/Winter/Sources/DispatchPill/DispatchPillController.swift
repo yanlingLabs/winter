@@ -135,6 +135,9 @@ final class DispatchPillController: ObservableObject {
     @Published private(set) var permissionsPickerOpen = false
     /// The mode a pick is setting right now (nil when none is in flight).
     @Published private(set) var policyPending: String?
+    /// A short line a command left above the pill (`DispatchPillNoticePill`), cleared after a few seconds.
+    @Published private(set) var commandNotice: String?
+    private var noticeTask: Task<Void, Never>?
 
     let adapter: FieldStateAdapter
     let canvas = DispatchPillCanvasModel()
@@ -172,6 +175,9 @@ final class DispatchPillController: ObservableObject {
     var currentPolicy: (() -> String?)?
     /// `session.setPolicy` for the bound session. Returns success.
     var onSetPolicy: ((String) async -> Bool)?
+    /// `/spawn`: open a Cowork session in a detached window. Nil until Cowork windows exist — the pill
+    /// then says `/spawn` is not available yet.
+    var onSpawnCowork: (() -> Void)?
     /// The session the adapter's policy readout belongs to — a re-seed is due when the pill's session changes.
     private var policySessionId: String?
 
@@ -506,8 +512,21 @@ final class DispatchPillController: ObservableObject {
         historyIndex = nil
         switch command {
         case .permissions: openPermissionsPicker()
+        case .spawn:
+            if let spawn = onSpawnCowork { spawn() } else { showCommandNotice(dispatchPillSpawnComingSoon) }
         }
         if presentation == .expanded { setPresentation(.compact) } else { retargetMain() }
+    }
+
+    /// A line above the pill for a few seconds — what a command has to say when it has nothing to open.
+    func showCommandNotice(_ text: String, seconds: Double = 3) {
+        noticeTask?.cancel()
+        withAnimation(childRowSpring) { commandNotice = text }
+        noticeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            withAnimation(childRowSpring) { self.commandNotice = nil }
+        }
     }
 
     /// `/permissions`: the approval-mode picker opens above the pill, marking the session's current mode.

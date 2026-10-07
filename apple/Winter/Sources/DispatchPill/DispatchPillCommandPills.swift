@@ -112,3 +112,25 @@ struct DispatchPillCompactionPill: View {
         }
     }
 }
+
+/// A command's short answer, floating above the pill for a few seconds (`DispatchPillController.commandNotice`).
+struct DispatchPillNoticePill: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle")
+                .font(Typography.caption(.semibold))
+                .foregroundStyle(Color.white.opacity(0.7))
+            Text(text)
+                .font(Typography.label(.medium))
+                .foregroundStyle(Theme.textPrimary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: DispatchPillMetrics.pillHeight)
+        .background(Capsule().fill(Color.black))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
+        .fixedSize()
+    }
+}

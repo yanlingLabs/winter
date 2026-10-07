@@ -404,12 +404,19 @@ func dispatchPillStrippingMarkdownLead(_ line: String) -> String {
 enum DispatchPillLocalCommand: Equatable {
     /// `/permissions` — the approval-mode picker opens above the pill.
     case permissions
+    /// `/spawn` — will open a Cowork session in a detached window. Not built yet: until it is, the pill
+    /// says so (`dispatchPillSpawnComingSoon`).
+    case spawn
 }
+
+/// What `/spawn` says until Cowork windows exist.
+let dispatchPillSpawnComingSoon = "/spawn will open a Cowork window — not available yet"
 
 /// PURE: the local command `text` is, if it is one — the whole message, trimmed, case-insensitive.
 func dispatchPillLocalCommand(_ text: String) -> DispatchPillLocalCommand? {
     switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
     case "/permissions", "/permission": return .permissions
+    case "/spawn": return .spawn
     default: return nil
     }
 }
