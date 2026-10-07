@@ -532,6 +532,81 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertEqual(sent, 0)
     }
 
+    // MARK: - Commands typed into the pill (2026-10-07)
+
+    func testLocalCommandsAreTheWholeMessageOnly() {
+        XCTAssertEqual(dispatchPillLocalCommand("/permissions"), .permissions)
+        XCTAssertEqual(dispatchPillLocalCommand("  /Permissions \n"), .permissions)
+        XCTAssertNil(dispatchPillLocalCommand("/compact"), "the session's own built-in — sent as typed")
+        XCTAssertNil(dispatchPillLocalCommand("/permissions please"))
+        XCTAssertNil(dispatchPillLocalCommand("what are my /permissions"))
+    }
+
+    func testElapsedText() {
+        XCTAssertEqual(dispatchPillElapsedText(seconds: 0), "0:00")
+        XCTAssertEqual(dispatchPillElapsedText(seconds: 7), "0:07")
+        XCTAssertEqual(dispatchPillElapsedText(seconds: 161), "2:41")
+        XCTAssertEqual(dispatchPillElapsedText(seconds: 3725), "1:02:05")
+        XCTAssertEqual(dispatchPillElapsedText(seconds: -3), "0:00")
+    }
+
+    func testPermissionsOpensThePickerAndSendsNothing() {
+        let pill = makePill()
+        var sent = 0
+        pill.onSubmit = { _ in sent += 1; return true }
+        pill.currentPolicy = { "auto" }
+        pill.show()
+        pill.adapter.composerDraft = "/permissions"
+        pill.submit("/permissions")
+        XCTAssertEqual(sent, 0, "a local command never reaches the session")
+        XCTAssertTrue(pill.permissionsPickerOpen)
+        XCTAssertEqual(pill.adapter.composerDraft, "", "the command line is spent")
+        XCTAssertEqual(pill.adapter.sessionPolicy, "auto")
+        XCTAssertTrue(pill.adapter.sessionPolicyKnown)
+        pill.closePermissionsPicker()
+        XCTAssertFalse(pill.permissionsPickerOpen)
+    }
+
+    func testPickingAModeSetsItAndThePickerCloses() async {
+        let pill = makePill()
+        var set: [String] = []
+        pill.currentPolicy = { "auto" }
+        pill.onSetPolicy = { set.append($0); return true }
+        pill.show()
+        pill.openPermissionsPicker()
+        pill.choosePolicy("bypass")
+        for _ in 0..<100 where pill.permissionsPickerOpen { try? await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(set, ["bypass"])
+        XCTAssertEqual(pill.adapter.sessionPolicy, "bypass")
+        XCTAssertFalse(pill.permissionsPickerOpen)
+        XCTAssertNil(pill.policyPending)
+    }
+
+    func testARefusedModeSaysSoAndKeepsThePickerOpen() async {
+        let pill = makePill()
+        pill.currentPolicy = { "auto" }
+        pill.onSetPolicy = { _ in false }
+        pill.show()
+        pill.openPermissionsPicker()
+        pill.choosePolicy("bypass")
+        for _ in 0..<100 where pill.adapter.policyRefusal == nil { try? await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(pill.adapter.policyRefusal, policyRefusalText("bypass"))
+        XCTAssertEqual(pill.adapter.sessionPolicy, "auto", "a refused change leaves the true mode")
+        XCTAssertTrue(pill.permissionsPickerOpen)
+    }
+
+    func testPickingTheCurrentModeJustCloses() {
+        let pill = makePill()
+        var set = 0
+        pill.currentPolicy = { "ask" }
+        pill.onSetPolicy = { _ in set += 1; return true }
+        pill.show()
+        pill.openPermissionsPicker()
+        pill.choosePolicy("ask")
+        XCTAssertEqual(set, 0)
+        XCTAssertFalse(pill.permissionsPickerOpen)
+    }
+
     // MARK: - The 2-finger swipe
 
     func testSwipingOlderPinsTheNewestTurnAndExpandsTheCompactPill() {

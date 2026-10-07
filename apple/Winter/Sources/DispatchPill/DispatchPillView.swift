@@ -26,6 +26,8 @@ struct DispatchPillView: View {
     private var hasAccessories: Bool {
         guard controller.presentation != .fullScreen else { return false }
         return !adapter.dispatchChildren.isEmpty
+            || controller.permissionsPickerOpen
+            || adapter.compactionStartedAt != nil
             || !pendingInteractionRecords(in: adapter.transcript, live: adapter.pendingInteractions,
                                           inactive: adapter.inactiveElicitations).isEmpty
     }
@@ -98,7 +100,10 @@ struct DispatchPillShell<Content: View>: View {
     }
 }
 
-/// What floats above the pill: the asks waiting on the user, then the child-session row.
+/// What floats above the pill, top to bottom: the asks waiting on the user, the child-session row, then
+/// the pills a command spawned — a running compaction's clock and the `/permissions` picker. Each layer
+/// is present only while it has something to show, and the stack closes up around one that leaves, so
+/// the child sessions always stay on top and the command pills sit right above the main pill.
 private struct DispatchPillAccessories: View {
     @ObservedObject var controller: DispatchPillController
     @ObservedObject var adapter: FieldStateAdapter
@@ -124,7 +129,23 @@ private struct DispatchPillAccessories: View {
                 )
                 .transition(.childPill)
             }
+            if let startedAt = adapter.compactionStartedAt {
+                DispatchPillCompactionPill(startedAtMs: startedAt, width: rowWidth)
+                    .transition(.childPill)
+            }
+            if controller.permissionsPickerOpen {
+                DispatchPillPermissionsPill(
+                    modes: dispatchSettablePolicyModes,
+                    current: adapter.sessionPolicyKnown ? adapter.sessionPolicy : nil,
+                    pending: controller.policyPending,
+                    refusal: adapter.policyRefusal,
+                    onPick: { controller.choosePolicy($0) },
+                    onClose: { controller.closePermissionsPicker() }
+                )
+                .transition(.childPill)
+            }
         }
+        .animation(childRowSpring, value: adapter.compactionStartedAt != nil)
     }
 }
 

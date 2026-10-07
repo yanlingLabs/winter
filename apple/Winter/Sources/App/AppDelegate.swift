@@ -423,6 +423,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// a child approval floating above the pill after Dispatch's turn ended could never be answered.
     private func wireDispatchPill(_ pill: DispatchPillController, model: AppModel) {
         pill.currentSessionId = { [weak model] in model?.focusedSessionId }
+        // `/permissions`: the picker marks the mode the directory reports for the bound session and
+        // sets a new one through the same `session.setPolicy` the orb's ⋯ picker uses.
+        pill.currentPolicy = { [weak model] in
+            guard let model, let sid = model.focusedSessionId else { return nil }
+            return wireApprovalPolicy(sid, in: model.directory.rows)
+        }
+        pill.onSetPolicy = { [weak model] policy in
+            await model?.setSessionPolicy(policy) ?? false
+        }
         pill.onSubmit = { [weak self] text in
             guard let model = self?.appModel else { return false }
             let ok = await model.sendOrSteer(text)

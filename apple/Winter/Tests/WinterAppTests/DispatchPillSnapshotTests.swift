@@ -158,6 +158,26 @@ final class DispatchPillSnapshotTests: XCTestCase {
         try render(p, "9-working-children")
     }
 
+    /// 2026-10-07: the pills a command spawns stack UNDER the child sessions — children on top, then a
+    /// running compaction's clock, then the `/permissions` picker, then the main pill.
+    func test12CommandPillsStackUnderTheChildren() throws {
+        let now = Int(Date().timeIntervalSince1970 * 1000)
+        let p = pill { s in
+            s.turnRunning = true
+            s.status = .thinking
+            s.compactionStartedAt = now - 83_000
+            s.children = [ChildItem(sessionId: "c0", title: "fix auth", status: "running"),
+                          ChildItem(sessionId: "c1", title: "docs pass", status: "completed")]
+        }
+        p.currentPolicy = { "auto" }
+        p.setPresentationForTesting(.compact)
+        p.openPermissionsPicker()
+        try render(p, "12-command-pills-with-children")
+        let alone = pill { s in s.compactionStartedAt = now - 5_000 }
+        alone.setPresentationForTesting(.compact)
+        try render(alone, "12-compaction-pill-alone")
+    }
+
     func test10PinnedTurnShowsAlone() throws {
         let p = pill { s in
             s.exchanges = [Exchange(prompt: "can you spawn a session in code and tell it to set a sleep 30 in foreground",

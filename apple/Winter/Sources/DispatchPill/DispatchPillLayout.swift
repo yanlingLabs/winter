@@ -396,3 +396,28 @@ func dispatchPillStrippingMarkdownLead(_ line: String) -> String {
     if s.hasPrefix("- ") || s.hasPrefix("* ") || s.hasPrefix("+ ") { s = s.dropFirst(2) }
     return s.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "**", with: "")
 }
+
+// MARK: - Commands typed into the pill
+
+/// A command the pill handles ITSELF — never sent to the session. (`/compact` is not one: it goes to the
+/// session as typed, and the runtime runs it as its built-in; the pill then shows the compaction pill.)
+enum DispatchPillLocalCommand: Equatable {
+    /// `/permissions` — the approval-mode picker opens above the pill.
+    case permissions
+}
+
+/// PURE: the local command `text` is, if it is one — the whole message, trimmed, case-insensitive.
+func dispatchPillLocalCommand(_ text: String) -> DispatchPillLocalCommand? {
+    switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "/permissions", "/permission": return .permissions
+    default: return nil
+    }
+}
+
+/// PURE: a running compaction's elapsed time — "0:07", "2:41", "1:02:05". Never negative (a clock that
+/// started a moment in the future, on a skewed event stamp, reads 0:00).
+func dispatchPillElapsedText(seconds: Int) -> String {
+    let s = max(0, seconds)
+    let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60)
+    return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
+}

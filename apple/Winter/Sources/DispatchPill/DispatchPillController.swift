@@ -131,6 +131,11 @@ final class DispatchPillController: ObservableObject {
     /// full-screen composer's.
     @Published private(set) var composerContentHeight: CGFloat = 0
 
+    /// `/permissions` opened the approval-mode picker above the pill (`DispatchPillPermissionsPill`).
+    @Published private(set) var permissionsPickerOpen = false
+    /// The mode a pick is setting right now (nil when none is in flight).
+    @Published private(set) var policyPending: String?
+
     let adapter: FieldStateAdapter
     let canvas = DispatchPillCanvasModel()
     let morph = DispatchPillMorphModel()
@@ -162,6 +167,13 @@ final class DispatchPillController: ObservableObject {
     /// True while the ⋯ popover is open (`ExpandedPillAccessoryButtons` reports it): a click inside
     /// the popover's own window is not a click outside the pill.
     var auxiliaryPopoverOpen = false
+
+    /// The bound session's approval mode as the directory last reported it (`session.list`), or nil.
+    var currentPolicy: (() -> String?)?
+    /// `session.setPolicy` for the bound session. Returns success.
+    var onSetPolicy: ((String) async -> Bool)?
+    /// The session the adapter's policy readout belongs to — a re-seed is due when the pill's session changes.
+    private var policySessionId: String?
 
     /// The session this pill is bound to, read fresh (card drafts are keyed by it).
     var currentSessionId: (() -> String?)? {
@@ -459,6 +471,11 @@ final class DispatchPillController: ObservableObject {
     /// Enter / the send circle.
     func submit(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        // A command the pill handles itself is never sent (`dispatchPillLocalCommand`).
+        if let command = dispatchPillLocalCommand(text) {
+            runLocalCommand(command)
+            return
+        }
         guard adapter.beginComposerSubmit() else { return }
         let stayFullScreen = presentation == .fullScreen
         Task { @MainActor [weak self] in
@@ -479,6 +496,62 @@ final class DispatchPillController: ObservableObject {
 
     /// The stop button.
     func interrupt() { onInterrupt?() }
+
+    // MARK: - Commands the pill handles itself
+
+    private func runLocalCommand(_ command: DispatchPillLocalCommand) {
+        // The command line is spent: it leaves the composer like a sent message does.
+        adapter.composerDraft = ""
+        draftCache.clear()
+        historyIndex = nil
+        switch command {
+        case .permissions: openPermissionsPicker()
+        }
+        if presentation == .expanded { setPresentation(.compact) } else { retargetMain() }
+    }
+
+    /// `/permissions`: the approval-mode picker opens above the pill, marking the session's current mode.
+    func openPermissionsPicker() {
+        let sessionId = currentSessionId?()
+        // The readout belongs to one session: a different one (or none known yet) is read from the directory.
+        if policySessionId != sessionId || !adapter.sessionPolicyKnown {
+            if let policy = currentPolicy?() { adapter.adoptSessionPolicy(policy) }
+            policySessionId = sessionId
+        }
+        adapter.policyRefusal = nil
+        withAnimation(childRowSpring) { permissionsPickerOpen = true }
+    }
+
+    func closePermissionsPicker() {
+        guard permissionsPickerOpen else { return }
+        withAnimation(childRowSpring) { permissionsPickerOpen = false }
+        adapter.policyRefusal = nil
+    }
+
+    /// A chip: set the mode; the picker closes once the daemon has taken it, and says so if it refused.
+    func choosePolicy(_ policy: String) {
+        guard policyPending == nil else { return }
+        if adapter.sessionPolicyKnown, adapter.sessionPolicy == policy {
+            closePermissionsPicker()
+            return
+        }
+        policyPending = policy
+        adapter.policyRefusal = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let ok = await self.onSetPolicy?(policy) ?? false
+            self.policyPending = nil
+            if ok {
+                self.adapter.adoptSessionPolicy(policy)
+                self.policySessionId = self.currentSessionId?()
+                // A beat on the new mode before the pill sinks back.
+                try? await Task.sleep(nanoseconds: 350_000_000)
+                self.closePermissionsPicker()
+            } else {
+                self.adapter.policyRefusal = policyRefusalText(policy)
+            }
+        }
+    }
 
     /// "Clear Draft" (⋯).
     func clearDraft() {

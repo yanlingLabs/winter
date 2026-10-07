@@ -389,6 +389,8 @@ final class FieldStateAdapter: ObservableObject {
     /// above, which additionally filters an all-done batch to empty: the reducer's own prune
     /// already keeps this list honest, no second filter needed here.
     var dispatchChildren: [ChildItem] { session.state.children }
+    /// When the compaction now running began (epoch ms), or nil — the dispatch pill's compaction pill.
+    var compactionStartedAt: Int? { session.state.compactionStartedAt }
 
     /// Dispatch (Phase 7), Task 9 review carry-over: the visible-cap that used to live as an
     /// inline `.prefix(5)` in `WinterFieldView`'s ForEach — hoisted here so it's a testable seam

@@ -551,6 +551,12 @@ struct OrbSessionState: Equatable {
     /// that has already replied opens its own exchange while the turn runs, and the daemon closes a turn
     /// a crash left open with an `aborted` `turn_completed` when the session reopens (review M2, 2026-10-04).
     var runningTurnExchange: Int?
+    /// When the compaction now running began (epoch ms, off the event that started it — so a replay
+    /// restores the same clock), or nil when none is: a `/compact` turn from its `turn_started`, a
+    /// switch's summary from its `switch_compaction` warning. Cleared by the `compacted`/
+    /// `compaction_failed` notice and by the turn's end. The dispatch pill's compaction pill reads it.
+    /// An auto-compaction mid-turn announces nothing before it finishes, so it starts no clock.
+    var compactionStartedAt: Int?
     /// The prompt of the exchange the running turn belongs to (`runningTurnExchange`), if any — what
     /// `WorkingVerbs.forTurn` reads to say "Compacting" for a `/compact` turn.
     var runningTurnPrompt: String? {
@@ -772,6 +778,8 @@ enum SessionReducer {
                 if !s.queuedSteers.isEmpty { s.queuedSteers.removeFirst() }
             } else {
                 s.runningTurnExchange = s.exchanges.indices.last
+                // A `/compact` turn is the compaction itself: its clock starts with the turn.
+                s.compactionStartedAt = s.runningTurnPrompt.map(WorkingVerbs.isCompactCommand) == true ? v.ts : nil
                 s.lastTurnAborted = false // a fresh turn clears any prior interrupt flag
                 s.lastTurnError = nil     // T6: and any prior turn's error — this one hasn't failed yet
                 // Dispatch (Phase 7): prune finished children on the NEXT main turn — same cadence as
@@ -922,6 +930,7 @@ enum SessionReducer {
                 s.exchanges[i].aborted = true
             }
             s.runningTurnExchange = nil
+            s.compactionStartedAt = nil // whatever compaction the turn ran is over with it
             s.subagents = [] // 2e-ii prune: children always complete before the main turn does
         case .turnCompleted(let v):
             // CHILD turn window closed — bank the active span. Status stays "working" (alive)
@@ -945,12 +954,20 @@ enum SessionReducer {
             // …and the persisted block replaces the live item IN PLACE. On a replay only this exists.
             foldThinking(&s, blockId: v.blockId) { _ in ThinkingItem(block: v) }
         case .continuityWarning(let v) where v.threadId == mainThread:
+            // 2026-10-07: a switch's summary starts the compaction clock; the finished (or failed)
+            // compaction stops it.
+            switch v.warning {
+            case "switch_compaction": s.compactionStartedAt = s.compactionStartedAt ?? v.ts
+            case "compacted", "compaction_failed": s.compactionStartedAt = nil
+            default: break
+            }
             // WS-23 review r1 I-3: what the conversation lost or what Winter did to it (a lossy
             // switch, a summary before a switch, unsaved reasoning state) -- the same quiet line.
             let line = v.text.split(separator: "\n", omittingEmptySubsequences: true).joined(separator: " — ")
             appendActivity(.notice(text: line), to: &s)
         case .agentError(let v) where v.threadId == mainThread:
             s.turnRunning = false
+            s.compactionStartedAt = nil
             endOutstandingInteractions(&s) // clears pendingInteractions, freezing each as `.ended`
             s.streamingText = ""
             s.status = .idle

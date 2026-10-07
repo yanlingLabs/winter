@@ -366,6 +366,36 @@ final class SessionModelTests: XCTestCase {
         XCTAssertTrue(WorkingVerbs.all.contains(other.state.workingVerb))
     }
 
+    /// 2026-10-07: the dispatch pill's compaction clock. A `/compact` turn starts it at its own
+    /// `turn_started` stamp (so a replay restores the same start), a switch's `switch_compaction`
+    /// warning starts it too, and the `compacted` notice or the turn's end stops it.
+    @MainActor
+    func testCompactionClockFollowsTheCompaction() {
+        func warning(_ kind: String, seq: Int, ts: Int) -> SessionEvent {
+            ev(#"{"type":"continuity_warning","seq":\#(seq),"sessionId":"s","ts":\#(ts),"threadId":"main","warning":"\#(kind)","text":"x"}"#)
+        }
+        func started(seq: Int, ts: Int) -> SessionEvent {
+            ev(#"{"type":"turn_started","seq":\#(seq),"sessionId":"s","ts":\#(ts),"threadId":"main"}"#)
+        }
+        let session = SessionModel()
+        session.markConnected()
+        session.apply(userMessage("/compact", seq: 1))
+        session.apply(started(seq: 2, ts: 1_000))
+        XCTAssertEqual(session.state.compactionStartedAt, 1_000)
+        session.apply(warning("compacted", seq: 3, ts: 9_000))
+        XCTAssertNil(session.state.compactionStartedAt, "the finished compaction stops the clock")
+        session.apply(turnCompleted(seq: 4))
+
+        // An ordinary turn starts no clock; a switch's summary does, and the turn's end stops it.
+        session.apply(userMessage("hello", seq: 5))
+        session.apply(started(seq: 6, ts: 20_000))
+        XCTAssertNil(session.state.compactionStartedAt)
+        session.apply(warning("switch_compaction", seq: 7, ts: 21_000))
+        XCTAssertEqual(session.state.compactionStartedAt, 21_000)
+        session.apply(turnCompleted(seq: 8))
+        XCTAssertNil(session.state.compactionStartedAt)
+    }
+
     /// End-to-end store wiring: `turnStarted(main)` rolls a real verb (member of the curated
     /// list), it stays STABLE across mid-turn tool activity (not re-rolled per event), and
     /// `FieldStateAdapter.statusText` shows exactly that verb with no tool name and no "☑ n/m"
