@@ -1,14 +1,23 @@
+import AppKit
 import SwiftUI
 
-// MARK: - The pills a command spawns above the main pill
+// MARK: - What the pill's commands show
 //
-// Both float in the same stack as the child-session row (`DispatchPillAccessories`), BELOW it: the
-// spawned sessions stay on top, and these sit between them and the main pill. Same shape language as
-// a child pill — a black capsule at the main pill's height with the faint white rim.
+// The `/` menu, the compaction clock and a command's notice float in the same stack as the child-session
+// row (`DispatchPillAccessories`), BELOW it: the spawned sessions stay on top. `/permissions` floats
+// nothing — `DispatchPillPermissionsRow` is drawn inside the main pill, which morphs to hold it. Same
+// shape language as a child pill: black, the main pill's height or corner radius, the faint white rim.
 
-/// `/permissions`: the approval modes Dispatch can hold, as chips in one capsule. Picking one sets it
-/// (`DispatchPillController.choosePolicy`); × closes the pill without changing anything.
-struct DispatchPillPermissionsPill: View {
+/// The blue the `/` menu marks its closest match with, and the composer draws a fully typed command in.
+let dispatchPillCommandBlue = Color(red: 0.42, green: 0.64, blue: 1.0)
+let dispatchPillCommandBlueNS = NSColor(red: 0.42, green: 0.64, blue: 1.0, alpha: 1)
+/// The closest match's row fill in the `/` menu.
+let dispatchPillCommandMatchFill = Color(red: 0.20, green: 0.42, blue: 0.95).opacity(0.42)
+
+/// `/permissions`: the approval modes Dispatch can hold, as chips — drawn INSIDE the main pill, which
+/// morphs to `permissionsPickerWidth` to hold them (`DispatchPillController.permissionsPickerOpen`).
+/// Picking one sets it (`choosePolicy`); × (or Esc) morphs the pill back into the composer.
+struct DispatchPillPermissionsRow: View {
     let modes: [String]
     /// The session's current mode, or nil while it is not known (no chip is marked then).
     let current: String?
@@ -37,6 +46,7 @@ struct DispatchPillPermissionsPill: View {
             } else {
                 ForEach(modes, id: \.self) { chip($0) }
             }
+            Spacer(minLength: 4)
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(Typography.caption(.bold))
@@ -46,15 +56,11 @@ struct DispatchPillPermissionsPill: View {
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .padding(.leading, 4)
-            .help("Close")
+            .help("Back (Esc)")
         }
         .padding(.leading, 14)
         .padding(.trailing, DispatchPillMetrics.trailingPadding)
-        .frame(height: DispatchPillMetrics.pillHeight)
-        .background(Capsule().fill(Color.black))
-        .overlay(Capsule().strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
-        .fixedSize()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeOut(duration: 0.15), value: hovered)
         .animation(.easeOut(duration: 0.2), value: current)
     }
@@ -79,6 +85,82 @@ struct DispatchPillPermissionsPill: View {
     }
 }
 
+/// The `/` menu: every command with its description, in a rounded rectangle the main pill's width and
+/// corner radius, right above it. Commands matching what is typed stay bright (the matched letters in
+/// full white), the rest fade; the closest match — the one Enter completes to — sits on a blue fill.
+/// A click on a row runs that command.
+struct DispatchPillCommandMenuView: View {
+    let menu: DispatchPillCommandMenu
+    let width: CGFloat
+    var commands: [DispatchPillCommandSpec] = dispatchPillCommands
+    let onPick: (String) -> Void
+
+    @State private var hovered: String?
+
+    var body: some View {
+        let radius = DispatchPillMetrics.maxCornerRadius
+        let inset = DispatchPillMetrics.commandMenuInset
+        VStack(spacing: 0) {
+            ForEach(commands, id: \.name) { command in
+                row(command, rowRadius: radius - inset)
+            }
+        }
+        .padding(inset)
+        .frame(width: width)
+        .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Color.black))
+        .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
+        .animation(.easeOut(duration: 0.12), value: menu)
+        .animation(.easeOut(duration: 0.12), value: hovered)
+    }
+
+    private func row(_ command: DispatchPillCommandSpec, rowRadius: CGFloat) -> some View {
+        let matching = menu.matches.contains(command.name)
+        let best = menu.best == command.name
+        return Button { onPick(command.name) } label: {
+            HStack(spacing: 10) {
+                name(command.name, matching: matching)
+                    .font(Typography.label(.semibold))
+                Text(command.summary)
+                    .font(Typography.label())
+                    .foregroundStyle(Color.white.opacity(matching ? 0.55 : 0.3))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+                if best {
+                    Image(systemName: "return")
+                        .font(Typography.caption(.semibold))
+                        .foregroundStyle(Color.white.opacity(0.6))
+                        .help("Enter completes it")
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: DispatchPillMetrics.commandRowHeight)
+            .background(RoundedRectangle(cornerRadius: rowRadius, style: .continuous)
+                .fill(best ? dispatchPillCommandMatchFill : Color.white.opacity(hovered == command.name ? 0.07 : 0)))
+            .contentShape(RoundedRectangle(cornerRadius: rowRadius, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 ? command.name : (hovered == command.name ? nil : hovered) }
+    }
+
+    /// "/permissions" with the typed letters in full white and the rest softer — or all faded when the
+    /// command does not match.
+    private func name(_ name: String, matching: Bool) -> Text {
+        guard matching, !menu.query.isEmpty, let r = name.range(of: menu.query) else {
+            return Text("/\(name)").foregroundColor(Color.white.opacity(matching ? 0.85 : 0.35))
+        }
+        func run(_ text: String, _ color: Color) -> AttributedString {
+            var piece = AttributedString(text)
+            piece.foregroundColor = color
+            return piece
+        }
+        return Text(run("/", Color.white.opacity(0.85))
+            + run(String(name[..<r.lowerBound]), Color.white.opacity(0.6))
+            + run(String(name[r]), Color.white)
+            + run(String(name[r.upperBound...]), Color.white.opacity(0.6)))
+    }
+}
+
 /// A compaction running: what it is and how long it has been going — no progress, which nothing can
 /// honestly report (`OrbSessionState.compactionStartedAt` is the clock's start, off the event that
 /// began it).
@@ -100,8 +182,7 @@ struct DispatchPillCompactionPill: View {
                     .truncationMode(.tail)
                 Spacer(minLength: 8)
                 Text(dispatchPillElapsedText(seconds: elapsed))
-                    .font(Typography.label(.medium))
-                    .monospacedDigit()
+                    .font(Typography.labelMono(.medium)) // fixed-width, so the ticking seconds never jitter
                     .foregroundStyle(Color.white.opacity(0.7))
             }
             .padding(.horizontal, 16)

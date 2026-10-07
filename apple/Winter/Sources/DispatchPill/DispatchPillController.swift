@@ -131,7 +131,8 @@ final class DispatchPillController: ObservableObject {
     /// full-screen composer's.
     @Published private(set) var composerContentHeight: CGFloat = 0
 
-    /// `/permissions` opened the approval-mode picker above the pill (`DispatchPillPermissionsPill`).
+    /// `/permissions` turned the main pill into the approval-mode picker (`DispatchPillPermissionsRow`):
+    /// the shape morphs to `permissionsPickerWidth`, the composer stays mounted underneath, hidden.
     @Published private(set) var permissionsPickerOpen = false
     /// The mode a pick is setting right now (nil when none is in flight).
     @Published private(set) var policyPending: String?
@@ -463,6 +464,12 @@ final class DispatchPillController: ObservableObject {
         guard isVisible else { return }
         let wasPreviewing = historyIndex != nil
         historyIndex = nil
+        if permissionsPickerOpen {
+            // A click away leaves the picker the way × does; the shape change rides the compress below.
+            permissionsPickerOpen = false
+            adapter.policyRefusal = nil
+            if presentation == .compact { retargetMain() }
+        }
         stashDraft()
         if presentation != .compact {
             setPresentation(.compact)
@@ -477,6 +484,12 @@ final class DispatchPillController: ObservableObject {
     /// Enter / the send circle.
     func submit(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        // The `/` menu: the first Enter completes a partly typed command to the closest match; the
+        // next one (the command now typed in full) runs it.
+        if case .complete(let full) = dispatchPillEnterAction(draft: text) {
+            adapter.composerDraft = full
+            return
+        }
         // A command the pill handles itself is never sent (`dispatchPillLocalCommand`).
         if let command = dispatchPillLocalCommand(text) {
             runLocalCommand(command)
@@ -505,6 +518,14 @@ final class DispatchPillController: ObservableObject {
 
     // MARK: - Commands the pill handles itself
 
+    /// A click on a row of the `/` menu: the command, run at once — the same as typing it and pressing
+    /// Enter (a local command opens here; `/compact` goes to the session).
+    func runMenuCommand(_ name: String) {
+        let full = "/\(name)"
+        adapter.composerDraft = full
+        submit(full)
+    }
+
     private func runLocalCommand(_ command: DispatchPillLocalCommand) {
         // The command line is spent: it leaves the composer like a sent message does.
         adapter.composerDraft = ""
@@ -515,7 +536,7 @@ final class DispatchPillController: ObservableObject {
         case .spawn:
             if let spawn = onSpawnCowork { spawn() } else { showCommandNotice(dispatchPillSpawnComingSoon) }
         }
-        if presentation == .expanded { setPresentation(.compact) } else { retargetMain() }
+        if presentation != .compact { setPresentation(.compact) } else { retargetMain() }
     }
 
     /// A line above the pill for a few seconds — what a command has to say when it has nothing to open.
@@ -538,13 +559,17 @@ final class DispatchPillController: ObservableObject {
             policySessionId = sessionId
         }
         adapter.policyRefusal = nil
-        withAnimation(childRowSpring) { permissionsPickerOpen = true }
+        permissionsPickerOpen = true
+        retargetMain()
+        engage() // Esc goes back, so the panel needs the keyboard
     }
 
+    /// × or Esc: the picker morphs back into the composer.
     func closePermissionsPicker() {
         guard permissionsPickerOpen else { return }
-        withAnimation(childRowSpring) { permissionsPickerOpen = false }
+        permissionsPickerOpen = false
         adapter.policyRefusal = nil
+        retargetMain()
     }
 
     /// A chip: set the mode; the picker closes once the daemon has taken it, and says so if it refused.
@@ -678,6 +703,11 @@ final class DispatchPillController: ObservableObject {
     @discardableResult
     func handleEscape() -> Bool {
         guard isVisible else { return false }
+        // The picker first: Esc morphs it back into the composer, whatever else is going on.
+        if permissionsPickerOpen {
+            closePermissionsPicker()
+            return true
+        }
         let action = dispatchPillEscAction(presentation: presentation, previewing: historyIndex != nil,
                                            escConsumed: { self.onEsc?() == true })
         switch action {
@@ -785,7 +815,11 @@ final class DispatchPillController: ObservableObject {
     }
 
     private func mainTarget() -> CGSize {
-        dispatchPillMainSize(presentation: presentation,
+        // `/permissions`: the main pill IS the mode picker until it closes.
+        if permissionsPickerOpen, presentation != .fullScreen {
+            return CGSize(width: DispatchPillMetrics.permissionsPickerWidth, height: DispatchPillMetrics.pillHeight)
+        }
+        return dispatchPillMainSize(presentation: presentation,
                              composerContentHeight: composerContentHeight,
                              previewHeight: previewHeight,
                              visibleFrame: lockedVisibleFrame)
@@ -1194,6 +1228,8 @@ final class DispatchPillController: ObservableObject {
                 // By the hop the new draft is stored, so the same layout agrees with the text view.
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.adapter.composerDraft == new else { return }
+                    // Typing while the picker is up means the user went back to writing.
+                    if self.permissionsPickerOpen, !new.isEmpty { self.closePermissionsPicker() }
                     if self.historyIndex != nil, !new.isEmpty {
                         self.historyIndex = nil
                         self.retargetMain()

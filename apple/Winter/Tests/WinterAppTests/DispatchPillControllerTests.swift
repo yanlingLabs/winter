@@ -543,6 +543,74 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertNil(dispatchPillLocalCommand("what are my /permissions"))
     }
 
+    func testSlashMenuMatchesAndPicksTheClosest() {
+        XCTAssertEqual(dispatchPillCommandMenu(draft: "/")?.matches, ["compact", "permissions", "spawn"])
+        XCTAssertEqual(dispatchPillCommandMenu(draft: "/")?.best, "compact")
+        // The prefix match leads; commands that merely contain the letter follow.
+        XCTAssertEqual(dispatchPillCommandMenu(draft: "/p")?.matches, ["permissions", "compact", "spawn"])
+        XCTAssertEqual(dispatchPillCommandMenu(draft: "/p")?.best, "permissions")
+        XCTAssertEqual(dispatchPillCommandMenu(draft: "/pe")?.matches, ["permissions"])
+        XCTAssertEqual(dispatchPillCommandMenu(draft: "/SP")?.best, "spawn", "case-insensitive")
+        // Prefix matches first, then the ones that merely contain what is typed.
+        XCTAssertEqual(dispatchPillCommandMenu(draft: "/a")?.matches, ["compact", "spawn"])
+        XCTAssertNil(dispatchPillCommandMenu(draft: "/zzz"), "nothing matches: no menu")
+        XCTAssertNil(dispatchPillCommandMenu(draft: "/compact keep the API"), "past the space it is the command's arguments")
+        XCTAssertNil(dispatchPillCommandMenu(draft: "hello"))
+    }
+
+    func testEnterCompletesThenSubmits() {
+        XCTAssertEqual(dispatchPillEnterAction(draft: "/per"), .complete("/permissions"))
+        XCTAssertEqual(dispatchPillEnterAction(draft: "/"), .complete("/compact"))
+        XCTAssertEqual(dispatchPillEnterAction(draft: "/permissions"), .submit)
+        XCTAssertEqual(dispatchPillEnterAction(draft: "/zzz"), .submit)
+        XCTAssertEqual(dispatchPillEnterAction(draft: "hello"), .submit)
+    }
+
+    func testAFullyTypedCommandIsHighlighted() {
+        XCTAssertEqual(dispatchPillCommandHighlightRange("/permissions"), NSRange(location: 0, length: 12))
+        XCTAssertEqual(dispatchPillCommandHighlightRange("/compact keep the API"), NSRange(location: 0, length: 8))
+        XCTAssertNil(dispatchPillCommandHighlightRange("/perm"))
+        XCTAssertNil(dispatchPillCommandHighlightRange("hello /compact"))
+        XCTAssertNil(dispatchPillCommandHighlightRange("/compaction"))
+    }
+
+    func testTheFirstEnterCompletesTheSecondRuns() {
+        let pill = makePill()
+        var sent = 0
+        pill.onSubmit = { _ in sent += 1; return true }
+        pill.currentPolicy = { "auto" }
+        pill.show()
+        pill.adapter.composerDraft = "/per"
+        pill.submit("/per")
+        XCTAssertEqual(pill.adapter.composerDraft, "/permissions", "completed to the closest match")
+        XCTAssertFalse(pill.permissionsPickerOpen)
+        pill.submit(pill.adapter.composerDraft)
+        XCTAssertTrue(pill.permissionsPickerOpen)
+        XCTAssertEqual(sent, 0)
+    }
+
+    func testAMenuClickRunsTheCommand() {
+        let pill = makePill()
+        pill.show()
+        pill.adapter.composerDraft = "/"
+        pill.runMenuCommand("spawn")
+        XCTAssertEqual(pill.commandNotice, dispatchPillSpawnComingSoon)
+        XCTAssertEqual(pill.adapter.composerDraft, "")
+    }
+
+    func testThePickerIsTheMainPillAndEscGoesBack() {
+        let pill = makePill()
+        pill.currentPolicy = { "auto" }
+        pill.show()
+        pill.submit("/permissions")
+        XCTAssertTrue(pill.permissionsPickerOpen)
+        XCTAssertEqual(pill.morph.target, CGSize(width: DispatchPillMetrics.permissionsPickerWidth, height: DispatchPillMetrics.pillHeight),
+                       "the main pill morphs into the picker")
+        XCTAssertTrue(pill.handleEscape())
+        XCTAssertFalse(pill.permissionsPickerOpen)
+        XCTAssertEqual(pill.morph.target.width, DispatchPillMetrics.compactWidth, "and back into the composer")
+    }
+
     func testElapsedText() {
         XCTAssertEqual(dispatchPillElapsedText(seconds: 0), "0:00")
         XCTAssertEqual(dispatchPillElapsedText(seconds: 7), "0:07")

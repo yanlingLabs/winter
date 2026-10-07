@@ -83,6 +83,12 @@ enum DispatchPillMetrics {
     static let morphBlurFalloff: CGFloat = 12
     /// The rounded-rect radius a tall pill settles on — a capsule's radius at `pillHeight`.
     static let maxCornerRadius: CGFloat = 22
+    /// The main pill's width while `/permissions` has turned it into the mode picker — the five chips,
+    /// the hand and the close circle.
+    static let permissionsPickerWidth: CGFloat = 452
+    /// One row of the `/` menu, and the inset its highlight keeps from the menu's edge.
+    static let commandRowHeight: CGFloat = 36
+    static let commandMenuInset: CGFloat = 6
 
     /// Where ⋯'s leading edge sits in the typing pill's field — the line the typed text "reaches".
     static var fieldWidthBesideAccessories: CGFloat {
@@ -407,6 +413,66 @@ enum DispatchPillLocalCommand: Equatable {
     /// `/spawn` — will open a Cowork session in a detached window. Not built yet: until it is, the pill
     /// says so (`dispatchPillSpawnComingSoon`).
     case spawn
+}
+
+/// One command the `/` menu offers: its name (typed after the slash) and a short description.
+struct DispatchPillCommandSpec: Equatable {
+    let name: String
+    let summary: String
+}
+
+/// Every command the pill offers, in the menu's order. `/compact` goes to the session (the runtime's
+/// built-in); the others are the pill's own (`DispatchPillLocalCommand`).
+let dispatchPillCommands: [DispatchPillCommandSpec] = [
+    DispatchPillCommandSpec(name: "compact", summary: "Summarize older messages to free up context"),
+    DispatchPillCommandSpec(name: "permissions", summary: "Choose how Dispatch asks before acting"),
+    DispatchPillCommandSpec(name: "spawn", summary: "Open a Cowork window — coming soon"),
+]
+
+/// The `/` menu for what is typed: which commands match and which one Enter would complete to.
+struct DispatchPillCommandMenu: Equatable {
+    /// What follows the slash, lowercased.
+    let query: String
+    /// The matching command names — prefix matches first, then the ones that merely contain the query.
+    let matches: [String]
+    /// The closest match: the one Enter completes to and the menu marks.
+    var best: String? { matches.first }
+}
+
+/// PURE: the `/` menu for `draft`, or nil when it does not show — the draft must be a slash and the
+/// command being typed (no space yet: past one, the rest is the command's arguments), and something
+/// must match (a message that merely starts with a slash gets no menu).
+func dispatchPillCommandMenu(draft: String, commands: [DispatchPillCommandSpec] = dispatchPillCommands) -> DispatchPillCommandMenu? {
+    guard draft.hasPrefix("/"), !draft.contains(where: { $0.isWhitespace || $0.isNewline }) else { return nil }
+    let query = String(draft.dropFirst()).lowercased()
+    let prefixed = commands.filter { $0.name.hasPrefix(query) }.map(\.name)
+    let containing = commands.filter { !$0.name.hasPrefix(query) && $0.name.contains(query) }.map(\.name)
+    let matches = prefixed + containing
+    return matches.isEmpty ? nil : DispatchPillCommandMenu(query: query, matches: matches)
+}
+
+/// What Enter does with the draft: complete a partly typed command to the closest match (the FIRST
+/// Enter), or submit (the second, or anything that is not a command being typed).
+enum DispatchPillEnterAction: Equatable {
+    case complete(String)
+    case submit
+}
+
+func dispatchPillEnterAction(draft: String) -> DispatchPillEnterAction {
+    guard let best = dispatchPillCommandMenu(draft: draft)?.best else { return .submit }
+    let full = "/\(best)"
+    return draft == full ? .submit : .complete(full)
+}
+
+/// PURE: the UTF-16 range of a command typed IN FULL at the start of `draft` — `/permissions`, or
+/// `/compact` ahead of its instructions — which the composer draws in blue; nil for anything else
+/// (a partial `/perm`, a message that merely starts with a slash).
+func dispatchPillCommandHighlightRange(_ draft: String, commands: [DispatchPillCommandSpec] = dispatchPillCommands) -> NSRange? {
+    guard draft.hasPrefix("/") else { return nil }
+    let token = String(draft.prefix { !$0.isWhitespace && !$0.isNewline })
+    let name = token.dropFirst().lowercased()
+    guard commands.contains(where: { $0.name == name }) else { return nil }
+    return NSRange(location: 0, length: (token as NSString).length)
 }
 
 /// What `/spawn` says until Cowork windows exist.

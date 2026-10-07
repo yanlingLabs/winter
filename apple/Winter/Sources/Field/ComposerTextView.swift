@@ -103,6 +103,12 @@ struct ComposerTextView: NSViewRepresentable {
     /// site — the orb field, the detached window, the new-chat page — is byte-identical.
     var onEscape: (() -> Bool)?
 
+    /// Ranges of the text to draw in `highlightColor` — the dispatch pill colours a fully typed command
+    /// (`/permissions`). Applied as the layout manager's TEMPORARY attributes, so the text itself, its
+    /// undo stack and the binding never change. `nil` (the default) leaves every other surface as it was.
+    var highlightRanges: ((String) -> [NSRange])? = nil
+    var highlightColor: NSColor = .systemBlue
+
     /// Code-mode image input (`ComposerImages.swift`): paste of image data / image files and drops of
     /// image files become `[Image #n]` attachments while `isEnabled()` answers true. `nil` (the
     /// default) — or `isEnabled() == false` — leaves paste and drop exactly as AppKit does them, so
@@ -210,6 +216,7 @@ struct ComposerTextView: NSViewRepresentable {
         if textView.string != text {
             textView.string = text
         }
+        context.coordinator.applyHighlights(textView)
         textView.textContainer?.containerSize = NSSize(
             width: max(1, nsView.contentSize.width),
             height: .greatestFiniteMagnitude
@@ -255,7 +262,19 @@ struct ComposerTextView: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             parent.text = textView.string
+            applyHighlights(textView)
             reportHeight(textView)
+        }
+
+        /// `highlightRanges`, drawn as temporary foreground colour — cleared first, so a range that no
+        /// longer applies (a command edited away) goes back to the text's own colour.
+        func applyHighlights(_ textView: NSTextView) {
+            guard let highlight = parent.highlightRanges, let layoutManager = textView.layoutManager else { return }
+            let length = (textView.string as NSString).length
+            layoutManager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: NSRange(location: 0, length: length))
+            for range in highlight(textView.string) where range.location >= 0 && NSMaxRange(range) <= length && range.length > 0 {
+                layoutManager.addTemporaryAttribute(.foregroundColor, value: parent.highlightColor, forCharacterRange: range)
+            }
         }
 
         /// v1 port (`TextField/ComposerTextView.swift:301-315`, verbatim measurement): the

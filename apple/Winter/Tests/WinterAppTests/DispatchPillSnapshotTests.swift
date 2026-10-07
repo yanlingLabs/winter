@@ -158,13 +158,12 @@ final class DispatchPillSnapshotTests: XCTestCase {
         try render(p, "9-working-children")
     }
 
-    /// 2026-10-07: the pills a command spawns stack UNDER the child sessions — children on top, then a
-    /// running compaction's clock, then the `/permissions` picker, then the main pill.
+    /// 2026-10-07: what a command floats stacks UNDER the child sessions — children on top, then a running
+    /// compaction's clock; `/permissions` turns the main pill itself into the picker; typing `/` shows the
+    /// command menu right above the pill, the closest match on blue.
     func test12CommandPillsStackUnderTheChildren() throws {
         let now = Int(Date().timeIntervalSince1970 * 1000)
         let p = pill { s in
-            s.turnRunning = true
-            s.status = .thinking
             s.compactionStartedAt = now - 83_000
             s.children = [ChildItem(sessionId: "c0", title: "fix auth", status: "running"),
                           ChildItem(sessionId: "c1", title: "docs pass", status: "completed")]
@@ -172,10 +171,22 @@ final class DispatchPillSnapshotTests: XCTestCase {
         p.currentPolicy = { "auto" }
         p.setPresentationForTesting(.compact)
         p.openPermissionsPicker()
-        try render(p, "12-command-pills-with-children")
+        try render(p, "12-permissions-picker-with-children")
         let alone = pill { s in s.compactionStartedAt = now - 5_000 }
         alone.setPresentationForTesting(.compact)
         try render(alone, "12-compaction-pill-alone")
+        let menu = pill()
+        menu.adapter.composerDraft = "/pe"
+        menu.setPresentationForTesting(.expanded)
+        try render(menu, "12-slash-menu-pe")
+        let slash = pill()
+        slash.adapter.composerDraft = "/"
+        slash.setPresentationForTesting(.expanded)
+        try render(slash, "12-slash-menu-all")
+        let typed = pill()
+        typed.adapter.composerDraft = "/permissions"
+        typed.setPresentationForTesting(.expanded)
+        try render(typed, "12-typed-command-blue")
     }
 
     func test10PinnedTurnShowsAlone() throws {

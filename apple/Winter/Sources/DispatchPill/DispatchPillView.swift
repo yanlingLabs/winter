@@ -26,18 +26,24 @@ struct DispatchPillView: View {
     private var hasAccessories: Bool {
         guard controller.presentation != .fullScreen else { return false }
         return !adapter.dispatchChildren.isEmpty
-            || controller.permissionsPickerOpen
+            || commandMenu != nil
             || controller.commandNotice != nil
             || adapter.compactionStartedAt != nil
             || !pendingInteractionRecords(in: adapter.transcript, live: adapter.pendingInteractions,
                                           inactive: adapter.inactiveElicitations).isEmpty
     }
 
+    /// The `/` menu for what is typed — never over the picker, a pinned turn or full screen.
+    private var commandMenu: DispatchPillCommandMenu? {
+        guard controller.presentation != .fullScreen, !controller.permissionsPickerOpen, controller.historyIndex == nil else { return nil }
+        return dispatchPillCommandMenu(draft: adapter.composerDraft)
+    }
+
     var body: some View {
         let accessories = hasAccessories
         VStack(spacing: DispatchPillMetrics.stackGap) {
             if accessories {
-                DispatchPillAccessories(controller: controller, adapter: adapter, morph: morph)
+                DispatchPillAccessories(controller: controller, adapter: adapter, morph: morph, commandMenu: commandMenu)
                     .fixedSize(horizontal: false, vertical: true)
                     .onGeometryChange(for: CGRect.self) { proxy in
                         proxy.frame(in: .named(Self.canvasSpace))
@@ -101,16 +107,18 @@ struct DispatchPillShell<Content: View>: View {
     }
 }
 
-/// What floats above the pill, top to bottom: the asks waiting on the user, the child-session row, then
-/// the pills a command spawned — a running compaction's clock and the `/permissions` picker. Each layer
-/// is present only while it has something to show, and the stack closes up around one that leaves, so
-/// the child sessions always stay on top and the command pills sit right above the main pill.
+/// What floats above the pill, top to bottom: the asks waiting on the user, the child-session row, a
+/// running compaction's clock, a command's notice, and — right above the main pill — the `/` menu while a
+/// command is being typed. Each layer is present only while it has something to show, and the stack
+/// closes up around one that leaves, so the child sessions always stay on top. (`/permissions` floats
+/// nothing: it turns the main pill itself into the picker.)
 private struct DispatchPillAccessories: View {
     @ObservedObject var controller: DispatchPillController
     @ObservedObject var adapter: FieldStateAdapter
     /// Observed so the child row follows the main pill's ANIMATED width frame by frame — it resizes
     /// with the pill as it grows or compresses, instead of snapping to where the pill is heading.
     @ObservedObject var morph: DispatchPillMorphModel
+    let commandMenu: DispatchPillCommandMenu?
 
     private var rowWidth: CGFloat { morph.size.width }
 
@@ -134,19 +142,13 @@ private struct DispatchPillAccessories: View {
                 DispatchPillCompactionPill(startedAtMs: startedAt, width: rowWidth)
                     .transition(.childPill)
             }
-            if controller.permissionsPickerOpen {
-                DispatchPillPermissionsPill(
-                    modes: dispatchSettablePolicyModes,
-                    current: adapter.sessionPolicyKnown ? adapter.sessionPolicy : nil,
-                    pending: controller.policyPending,
-                    refusal: adapter.policyRefusal,
-                    onPick: { controller.choosePolicy($0) },
-                    onClose: { controller.closePermissionsPicker() }
-                )
-                .transition(.childPill)
-            }
             if let notice = controller.commandNotice {
                 DispatchPillNoticePill(text: notice)
+                    .transition(.childPill)
+            }
+            if let commandMenu {
+                DispatchPillCommandMenuView(menu: commandMenu, width: rowWidth,
+                                            onPick: { controller.runMenuCommand($0) })
                     .transition(.childPill)
             }
         }
@@ -175,13 +177,27 @@ struct DispatchPillComposerBar: View {
         let draft = adapter.composerDraft
         let working = !expanded && running
         let preview = expanded ? controller.turnPreview : nil
-        let showsAccessories = expanded && preview == nil
+        let picker = controller.permissionsPickerOpen
+        let showsAccessories = expanded && preview == nil && !picker
             && dispatchPillAccessoryButtonsVisible(draft: draft, textWidth: dispatchPillDraftTextWidth(draft))
         ZStack(alignment: .top) {
-            composerRow(draft: draft, expanded: expanded, running: running, working: working,
-                        hidesComposer: working || preview != nil, showsAccessories: showsAccessories)
-                .animation(.easeOut(duration: 0.2)) { $0.opacity(preview == nil ? 1 : 0) }
-                .allowsHitTesting(preview == nil)
+            composerRow(draft: draft, expanded: expanded, running: running, working: working && !picker,
+                        hidesComposer: working || preview != nil || picker, showsAccessories: showsAccessories)
+                .animation(.easeOut(duration: 0.2)) { $0.opacity(preview == nil && !picker ? 1 : 0) }
+                .allowsHitTesting(preview == nil && !picker)
+            // `/permissions`: the pill IS the picker — the composer stays mounted underneath, hidden, and
+            // comes back on × or Esc.
+            if picker {
+                DispatchPillPermissionsRow(
+                    modes: dispatchSettablePolicyModes,
+                    current: adapter.sessionPolicyKnown ? adapter.sessionPolicy : nil,
+                    pending: controller.policyPending,
+                    refusal: adapter.policyRefusal,
+                    onPick: { controller.choosePolicy($0) },
+                    onClose: { controller.closePermissionsPicker() }
+                )
+                .transition(.opacity.animation(.easeOut(duration: 0.2)))
+            }
             // A pinned turn shows ALONE — no composer. The composer stays mounted underneath,
             // invisible, so typing still lands in it (and the first keystroke leaves the turn).
             if let preview {
@@ -253,7 +269,10 @@ struct DispatchPillComposerBar: View {
                         usesAdaptiveColors: true,
                         tintOverride: .white,
                         onViewCreated: { controller.registerComposerView($0) },
-                        viewAlpha: hidden ? 0 : 1
+                        viewAlpha: hidden ? 0 : 1,
+                        // A command typed in full reads in blue.
+                        highlightRanges: { dispatchPillCommandHighlightRange($0).map { [$0] } ?? [] },
+                        highlightColor: dispatchPillCommandBlueNS
                     )
                 }
                 .frame(width: controller.composerFieldWidth, height: controller.composerFieldHeight)
