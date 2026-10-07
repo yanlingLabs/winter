@@ -3,8 +3,13 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.52";
-/** Bumped to 0.0.52 (2026-10-07): a compaction summary ends with claude's "…read the full transcript at: <path>"
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.53";
+/** Bumped to 0.0.53 (2026-10-07): a host tool's MCP `image` item reaches the model as an image block (the
+ *  `sdk_mcp_call` bridge used to join it into the result's text as base64). This daemon now returns every image a
+ *  capability call stages — Computer's and Browser's screenshots — as such an item (`capabilities/server.ts`'s
+ *  `resultWithImages`), so the model finally SEES them; on an older runtime that would be base64 text, which is
+ *  why the two land together.
+ *  Earlier: bumped to 0.0.52 (2026-10-07): a compaction summary ends with claude's "…read the full transcript at: <path>"
  *  paragraph when the model can use it (a main session with a durable transcript whose tools include `Read` —
  *  code and dispatch, never chat), naming the store home's `projects/<key>/<session>.jsonl`; and a fresh process's
  *  compaction records the estimated size as `pre_tokens` instead of 0, so this daemon's `compacted` notice

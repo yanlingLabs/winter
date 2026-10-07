@@ -47,7 +47,7 @@ describe("computerCapability: the server shape", () => {
 });
 
 describe("computerCapability: callTool", () => {
-  test("a screenshot returns the SAME content the registry path returns", async () => {
+  test("a screenshot returns the registry path's text AND the image itself, as an MCP image item (2026-10-07)", async () => {
     const dataUrl = "data:image/png;base64,ABC";
     const result: CuActResult = { ok: true, resultJson: JSON.stringify({ dataUrl, width: 1512, height: 982 }) } as CuActResult;
 
@@ -56,7 +56,7 @@ describe("computerCapability: callTool", () => {
     const viaRegistryCu = fakeCu(result);
     const viaRegistry = await registry.execute("computer", { action: "screenshot" }, {
       cwd: "/tmp", roots: ["/tmp"], sessionId: "s_code", mode: "code",
-      computerUse: viaRegistryCu.service, visionCapable: true,
+      computerUse: viaRegistryCu.service, visionCapable: true, attachImage: () => {},
     });
 
     const capCu = fakeCu(result);
@@ -67,7 +67,9 @@ describe("computerCapability: callTool", () => {
 
     expect(viaRegistry.isError).toBe(false);
     expect(viaCapability.isError).toBe(false);
-    expect(viaCapability.content).toEqual([{ type: "text", text: viaRegistry.output }]);
+    // Before 2026-10-07 the image went nowhere on the Winter leg: only the text came back.
+    expect(viaCapability.content).toEqual([{ type: "text", text: viaRegistry.output }, { type: "image", data: "ABC", mimeType: "image/png" }]);
+    expect(viaRegistry.output).toContain("The image is attached to this result.");
     expect(capCu.calls[0]!.cls).toBe("screenshot");
     // The session identity the call was bound to — not a guess, not a default.
     expect(capCu.calls[0]!.sid).toBe("s_code");
@@ -122,5 +124,23 @@ describe("computerCapability: callTool", () => {
     const res = await (server.instance as WinterMcpServerInstance).callTool("computer", { action: "ax_snapshot" });
     expect(res.isError).toBe(false);
     expect((res.content[0] as { text: string }).text).not.toContain("ToolSearch");
+  });
+});
+
+describe("mcpImageItem (2026-10-07)", () => {
+  test("a base64 image data URL becomes an MCP image item; anything else is not one", async () => {
+    const { mcpImageItem } = await import("../../src/capabilities/server");
+    expect(mcpImageItem("data:image/png;base64,iVBORw0K")).toEqual({ type: "image", data: "iVBORw0K", mimeType: "image/png" });
+    expect(mcpImageItem("data:IMAGE/JPEG;base64,/9j/4A==")).toEqual({ type: "image", data: "/9j/4A==", mimeType: "image/jpeg" });
+    expect(mcpImageItem("data:text/plain;base64,aGk=")).toBeUndefined();
+    expect(mcpImageItem("https://example.com/x.png")).toBeUndefined();
+    expect(mcpImageItem("data:image/png,raw")).toBeUndefined();
+  });
+
+  test("a call that stages no image is the plain text result, byte-identical to before", async () => {
+    const cu = fakeCu({ ok: true, resultJson: JSON.stringify({ text: "#0 window" }) } as CuActResult);
+    const server = computerCapability(session({ computerUse: cu.service }), { computerUse: () => undefined });
+    const res = await (server.instance as WinterMcpServerInstance).callTool("computer", { action: "ax_snapshot" });
+    expect(res.content).toEqual([{ type: "text", text: "#0 window" }]);
   });
 });

@@ -104,26 +104,25 @@ describeWithWinterBinary("item 10 probe: MCP image content through a capability 
     const toolResults = lines.filter((l) => JSON.stringify(l).includes("tool_result"));
     expect(files).toHaveLength(1);
     expect(toolResults).toHaveLength(1);
-    // ── THE MEASUREMENT (2026-09-11, dist/winter @ v0.0.4) — pinned, so an SDK bump that changes
-    // it is a loud signal rather than a silent one. The child FLATTENS the MCP content array to ONE
-    // TEXT STRING: the transcript's `tool_result.content` is a string in which the non-text block
-    // is JSON-serialized and joined with "\n" — `"Screenshot captured (…).\n{\"type\":\"image\",
-    // \"data\":\"iVBOR…\",\"mimeType\":\"image/png\"}"`. No `{ type: "image" }` block reaches the
-    // model's input; the bytes reach it as base64 TEXT, which no vision model reads as an image.
-    // Verdict: `attachImage` cannot be shipped through MCP image content at 0.0.4 — the carry is
-    // the SDK's (forward image blocks from `sdk_mcp_call` results as image content blocks in the
-    // `tool_result`). THE DAY THE ASSERTIONS BELOW FLIP, item 10's fix becomes shippable:
-    // `capabilities/server.ts` staging `ctx.attachImage` data URLs as `{ type: "image" }` blocks.
+    // ── THE MEASUREMENT, FLIPPED (2026-10-07, dist/winter @ v0.0.53). At 0.0.4 (2026-09-11) the child
+    // FLATTENED the MCP content array to one text string -- the image block JSON-serialized into the text,
+    // its base64 reaching the model as TEXT -- and this test pinned that so the day it changed would be
+    // loud. Agent SDK 0.0.53 sends a host tool's image item down the same path as an external server's
+    // (`mcpResultWithImages`), and the daemon now returns the images its Computer/Browser calls stage as
+    // MCP image items (`capabilities/server.ts`'s `resultWithImages`) -- item 10's fix, shipped.
     const transcriptToolResultContent = (toolResults[0] as { message?: { content?: Array<{ content?: unknown }> } } | undefined)?.message?.content?.[0]?.content;
-    expect(typeof transcriptToolResultContent).toBe("string");                 // flattened, not an array of blocks
-    expect(String(transcriptToolResultContent)).toContain("Screenshot captured");
-    expect(String(transcriptToolResultContent)).toContain('{"type":"image"');   // the block, serialized INTO the text
-    expect(String(transcriptToolResultContent)).toContain(TINY_PNG_B64);        // the bytes, as text
-    expect(toolResults.some((l) => JSON.stringify(l).includes('"type":"image","source"') || (l as { message?: { content?: Array<{ content?: unknown }> } }).message?.content?.some((b) => Array.isArray((b as { content?: unknown }).content)))).toBe(false);
-    // and the host-side rendering agrees: the projector saw a STRING (no `[image]` marker)
+    expect(Array.isArray(transcriptToolResultContent)).toBe(true);                    // an array of blocks now
+    const blocks = transcriptToolResultContent as Array<{ type: string; text?: string; source?: { type?: string; media_type?: string; data?: string } }>;
+    expect(blocks.map((b) => b.type)).toEqual(["text", "image"]);
+    expect(blocks[0]!.text).toContain("Screenshot captured");
+    expect(blocks[1]!.source?.type).toBe("base64");
+    expect(blocks[1]!.source?.media_type).toBe("image/png");
+    expect((blocks[1]!.source?.data ?? "").length).toBeGreaterThan(0);              // the image, as an image
+    expect(JSON.stringify(blocks[0])).not.toContain('{\\"type\\":\\"image\\"');    // never serialized into the text
+    // and the host-side rendering agrees: the projector saw an image block, never the bytes as text
     expect(res!.output).toContain("Screenshot captured");
-    expect(res!.output).not.toContain("[image]");
-    expect(res!.output).toContain('{"type":"image"');
+    expect(res!.output).not.toContain(TINY_PNG_B64);
+    expect(res!.output).not.toContain('{"type":"image"');
     await session.end();
   }, 40_000);
 });

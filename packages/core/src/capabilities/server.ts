@@ -84,14 +84,11 @@ export interface CapabilitySession {
    *  with today's message; unset means unknown and is not a block. */
   visionCapable?: boolean;
   /**
-   * Stage a vision image for the model.
-   *
-   * NO WINTER ANALOG TODAY, and left optional on purpose rather than faked: on the engine the
-   * screenshot's `data:` URL is appended to the turn's input as an `{type:"image"}` item
-   * (`engine.ts`'s `pendingImages`). A spawned child's turn input is not ours to append to, and the
-   * brief pins the MCP result mapping to text, so absent → `computer` returns the label alone and
-   * says the image follows only when something is actually staging it. Recorded as a follow-up:
-   * MCP `content` admits `{ type: "image" }`, which is the honest fix once it is ruled on.
+   * Also told about every image a call stages (tests observe it here). The image itself no longer needs
+   * it: since 2026-10-07 each call collects what it stages (`ctx.attachImage`) and returns it as an MCP
+   * `image` item beside the text (`resultWithImages`), which agent SDK 0.0.53+ hands the model as an
+   * image block. Before, nothing staged it on the Winter leg and Computer/Browser screenshots never
+   * reached the model at all — only a line saying one had been captured.
    */
   attachImage?: (dataUrl: string) => void;
   /**
@@ -165,6 +162,18 @@ function modesFor(serverKey: string, def: ToolDefinition): readonly SessionMode[
  *  omitted flag on a failure reads as success on the far side). */
 function textResult(text: string, isError: boolean): { content: unknown[]; isError: boolean } {
   return { content: [{ type: "text", text }], isError };
+}
+
+/** A `data:` URL a tool staged (`ctx.attachImage`) as an MCP `image` item, or undefined for anything else. */
+export function mcpImageItem(dataUrl: string): { type: "image"; data: string; mimeType: string } | undefined {
+  const m = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(dataUrl);
+  return m === null ? undefined : { type: "image", data: m[2]!, mimeType: m[1]!.toLowerCase() };
+}
+
+/** The text result plus every image the call staged, as MCP `image` items after it (2026-10-07). */
+function resultWithImages(text: string, isError: boolean, images: readonly string[]): { content: unknown[]; isError: boolean } {
+  const items = images.map(mcpImageItem).filter((i): i is NonNullable<typeof i> => i !== undefined);
+  return { content: [{ type: "text", text }, ...items], isError };
 }
 
 /**
@@ -243,6 +252,8 @@ export function capabilityServer(
       // not exist, which is exactly what the registry door tells a mode that was never offered it.
       if (!names.has(name)) return textResult(`unknown tool: ${name}`, true);
       const signal = callSignal(session.signal, extra?.signal);
+      // The images THIS call stages (a Computer or Browser screenshot) ride its own result — never another call's.
+      const staged: string[] = [];
       const ctx: ToolContext = {
         // Extras UNDER identity (n1) — see `contextExtras`' own doc comment.
         ...spec.contextExtras?.(session),
@@ -258,7 +269,7 @@ export function capabilityServer(
         ...(signal === undefined ? {} : { signal }),
         ...(session.signal === undefined ? {} : { sessionSignal: session.signal }),
         ...(session.visionCapable === undefined ? {} : { visionCapable: session.visionCapable }),
-        ...(session.attachImage === undefined ? {} : { attachImage: session.attachImage }),
+        attachImage: (dataUrl: string) => { staged.push(dataUrl); session.attachImage?.(dataUrl); },
         ...(session.browserDomainApproved === undefined ? {} : { browserDomainApproved: session.browserDomainApproved }),
         ...(session.computerUse === undefined ? {} : { computerUse: session.computerUse }),
       };
@@ -274,7 +285,7 @@ export function capabilityServer(
         // produces one (`diff-report.ts` serves edit/write, which are class (a) and retire), and if
         // one ever does, the diff belongs on the projector's `tool_result` (Task 11), not in this
         // return value.
-        return textResult(outcome.output, outcome.isError);
+        return staged.length > 0 ? resultWithImages(outcome.output, outcome.isError, staged) : textResult(outcome.output, outcome.isError);
       } catch (err) {
         // `execute` already converts a tool throw; this catches the pathological rest (a def whose
         // schema itself throws). NEVER rethrow: the SDK would render it as `sdk_tool_threw`, which

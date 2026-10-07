@@ -196,7 +196,9 @@ function formatResult(a: ComputerArgsT, resultJson: string, attachImage?: (u: st
       ? ` The image was downscaled to ${sw}×${sh}; multiply positions read off the image by ${((w as number) / (sw as number)).toFixed(3)} first${a.action === "zoom" ? ", then add the origin" : ""} — or better, target ax_snapshot element ids.`
       : "";
     const label = a.action === "zoom" ? `Zoomed region captured (${dims} at screen origin ${typeof parsed.originX === "number" ? `(${parsed.originX},${parsed.originY})` : "?"})` : `Screenshot captured (screen is ${dims})`;
-    return dataUrl ? `${label}. The image follows this result as the next message.${originNote}${scaleNote}` : `${label}.`;
+    // Only claim an image when something took it (`attachImage`): on the Winter leg the capability server
+    // returns it inside this result (`capabilities/server.ts`'s `resultWithImages`).
+    return dataUrl && attachImage ? `${label}. The image is attached to this result.${originNote}${scaleNote}` : `${label}.`;
   }
   // input actions: prefer a provider-supplied detail, else a generic confirmation.
   if (typeof parsed.detail === "string") return parsed.detail;
