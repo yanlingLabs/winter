@@ -3,8 +3,12 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.50";
-/** Bumped to 0.0.50 (2026-10-07): catalog only — GPT-6.1 Sol (`openai/gpt-6.1-sol`, `codex-oauth/gpt-6.1-sol`) joins
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.51";
+/** Bumped to 0.0.51 (2026-10-07): catalog only — every `codex-oauth/*` row's context window is 872,000 (the
+ *  backend's override ceiling) instead of 272,000 (Codex's own default compaction point), so a session on the
+ *  ChatGPT sign-in compacts near 802K rather than 250K, and a switch onto it no longer summarizes a history the
+ *  backend could hold (a 329K Dispatch history did). `openai/*` rows keep the API's own windows.
+ *  Earlier: bumped to 0.0.50 (2026-10-07): catalog only — GPT-6.1 Sol (`openai/gpt-6.1-sol`, `codex-oauth/gpt-6.1-sol`) joins
  *  the catalog and the `gpt` family's `sol` slot moves to it from gpt-6-sol, so a `sol` pin and the picker's "sol"
  *  facing name now mean 6.1. Its efforts are low..max with no `none` (a session's `"none"` already sends no effort, and
  *  an internal role's `"none"` gets the row's lowest tier, `low`); Codex's default is `low`, the API's `medium`.
