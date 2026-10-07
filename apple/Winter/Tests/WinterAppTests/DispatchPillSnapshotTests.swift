@@ -187,6 +187,17 @@ final class DispatchPillSnapshotTests: XCTestCase {
         typed.adapter.composerDraft = "/permissions"
         typed.setPresentationForTesting(.expanded)
         try render(typed, "12-typed-command-blue")
+        let modes = pill()
+        modes.currentPolicy = { "auto" }
+        modes.adapter.composerDraft = "/permissions acc"
+        modes.setPresentationForTesting(.expanded)
+        try render(modes, "12-permission-modes-menu")
+        let picked = pill()
+        picked.currentPolicy = { "auto" }
+        picked.setPresentationForTesting(.compact)
+        picked.openPermissionsPicker()
+        _ = picked.handleHorizontalKey(left: false)
+        try render(picked, "12-picker-keyboard-focus")
     }
 
     func test10PinnedTurnShowsAlone() throws {

@@ -85,7 +85,7 @@ enum DispatchPillMetrics {
     static let maxCornerRadius: CGFloat = 22
     /// The main pill's width while `/permissions` has turned it into the mode picker — the five chips,
     /// the hand and the close circle.
-    static let permissionsPickerWidth: CGFloat = 452
+    static let permissionsPickerWidth: CGFloat = 410
     /// One row of the `/` menu, and the inset its highlight keeps from the menu's edge.
     static let commandRowHeight: CGFloat = 36
     static let commandMenuInset: CGFloat = 6
@@ -406,10 +406,14 @@ func dispatchPillStrippingMarkdownLead(_ line: String) -> String {
 // MARK: - Commands typed into the pill
 
 /// A command the pill handles ITSELF — never sent to the session. (`/compact` is not one: it goes to the
-/// session as typed, and the runtime runs it as its built-in; the pill then shows the compaction pill.)
+/// session as typed, and the runtime runs it as its built-in; the pill then shows the compaction clock.)
 enum DispatchPillLocalCommand: Equatable {
-    /// `/permissions` — the approval-mode picker opens above the pill.
+    /// `/permissions` alone — the main pill turns into the approval-mode picker.
     case permissions
+    /// `/permissions <mode>` naming a mode Dispatch can hold — set it (the wire value, e.g. `accept-edits`).
+    case setPermissions(String)
+    /// `/permissions <something>` that names no mode — the pill says so.
+    case unknownPermissions(String)
     /// `/spawn` — will open a Cowork session in a detached window. Not built yet: until it is, the pill
     /// says so (`dispatchPillSpawnComingSoon`).
     case spawn
@@ -429,62 +433,161 @@ let dispatchPillCommands: [DispatchPillCommandSpec] = [
     DispatchPillCommandSpec(name: "spawn", summary: "Open a Cowork window — coming soon"),
 ]
 
-/// The `/` menu for what is typed: which commands match and which one Enter would complete to.
-struct DispatchPillCommandMenu: Equatable {
-    /// What follows the slash, lowercased.
+/// What each approval mode Dispatch can hold does, in a few words — the mode menu's second column.
+func dispatchPillPermissionSummary(_ mode: String) -> String {
+    switch mode {
+    case "dont-ask": return "Never asks — declines anything that needs an OK"
+    case "ask": return "Asks before anything that changes things"
+    case "accept-edits": return "Allows file edits, asks for the rest"
+    case "auto": return "Runs what looks safe, asks for the rest"
+    case "bypass": return "Allows everything without asking"
+    default: return ""
+    }
+}
+
+/// One row of a `/` menu: what it is (`id`), how it reads, and the draft Enter completes it to.
+struct DispatchPillMenuItem: Equatable {
+    let id: String
+    let title: String
+    let summary: String
+    /// The draft this row stands for — `/permissions`, `/permissions accept edits`.
+    let completion: String
+}
+
+/// The `/` menu showing for what is typed: the commands while one is being typed, the approval modes
+/// once `/permissions ` has a space after it.
+struct DispatchPillMenu: Equatable {
+    enum Kind: Equatable { case commands, permissionModes }
+    let kind: Kind
+    /// Every row, in display order (non-matching rows show faded).
+    let items: [DispatchPillMenuItem]
+    /// What is being matched, lowercased (for the modes, normalized: `dispatchPillModeKey`).
     let query: String
-    /// The matching command names — prefix matches first, then the ones that merely contain the query.
+    /// The matching rows' ids — prefix matches first, then the ones that merely contain the query.
     let matches: [String]
-    /// The closest match: the one Enter completes to and the menu marks.
+    /// The mode in effect (permission modes only), marked "current".
+    var current: String? = nil
+    /// The closest match: the one Enter completes to and the menu marks, until the arrows move it.
     var best: String? { matches.first }
+
+    func item(_ id: String) -> DispatchPillMenuItem? { items.first { $0.id == id } }
+
+    /// PURE: the row the arrows land on, from `selected` (nil = the closest match) — through the
+    /// MATCHING rows only, in display order, wrapping at either end.
+    func moved(from selected: String?, down: Bool) -> String? {
+        let order = items.map(\.id).filter { matches.contains($0) }
+        guard !order.isEmpty else { return nil }
+        guard let from = selected ?? best, let i = order.firstIndex(of: from) else { return order.first }
+        return order[(i + (down ? 1 : order.count - 1)) % order.count]
+    }
 }
 
-/// PURE: the `/` menu for `draft`, or nil when it does not show — the draft must be a slash and the
-/// command being typed (no space yet: past one, the rest is the command's arguments), and something
-/// must match (a message that merely starts with a slash gets no menu).
-func dispatchPillCommandMenu(draft: String, commands: [DispatchPillCommandSpec] = dispatchPillCommands) -> DispatchPillCommandMenu? {
-    guard draft.hasPrefix("/"), !draft.contains(where: { $0.isWhitespace || $0.isNewline }) else { return nil }
+/// A mode as typed, made comparable: lowercase, apostrophes dropped, hyphens and runs of spaces as one
+/// space — so "Accept Edits", "accept-edits" and "accept   edits" are one key, and "dont ask" is "Don't Ask".
+func dispatchPillModeKey(_ text: String) -> String {
+    text.lowercased()
+        .replacingOccurrences(of: "'", with: "").replacingOccurrences(of: "\u{2019}", with: "")
+        .replacingOccurrences(of: "-", with: " ")
+        .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+}
+
+/// PURE: the mode `text` names exactly (by label or wire value, `dispatchPillModeKey`-compared), or nil.
+func dispatchPillPermissionMode(_ text: String, modes: [String] = dispatchSettablePolicyModes) -> String? {
+    let key = dispatchPillModeKey(text)
+    guard !key.isEmpty else { return nil }
+    return modes.first { dispatchPillModeKey($0) == key || dispatchPillModeKey(policyDisplayLabel($0)) == key }
+}
+
+/// `/permissions`'s spellings, and the argument after it when there is one (nil: the command alone).
+private func dispatchPillPermissionsArgument(_ draft: String) -> (isPermissions: Bool, argument: String?) {
+    let token = String(draft.prefix { !$0.isWhitespace && !$0.isNewline }).lowercased()
+    guard token == "/permissions" || token == "/permission" else { return (false, nil) }
+    let rest = draft.dropFirst(token.count)
+    guard let first = rest.first, first.isWhitespace else { return (true, nil) }
+    return (true, String(rest.drop { $0.isWhitespace || $0.isNewline }))
+}
+
+private func dispatchPillMatches(_ query: String, in items: [DispatchPillMenuItem], keys: (DispatchPillMenuItem) -> [String]) -> [String] {
+    guard !query.isEmpty else { return items.map(\.id) }
+    let prefixed = items.filter { keys($0).contains { $0.hasPrefix(query) } }.map(\.id)
+    let containing = items.filter { item in !prefixed.contains(item.id) && keys(item).contains { $0.contains(query) } }.map(\.id)
+    return prefixed + containing
+}
+
+/// PURE: the `/` menu for `draft`, or nil when none shows.
+///   - The COMMANDS while one is being typed: a slash and no space yet (past one, the rest is the
+///     command's arguments), and only when something matches (a message that merely starts with a slash
+///     gets no menu).
+///   - The approval MODES once `/permissions ` has a space after it, matched against what follows (by
+///     label and by wire value); `currentPolicy` is marked. Hidden when nothing matches.
+func dispatchPillMenu(draft: String, currentPolicy: String? = nil, commands: [DispatchPillCommandSpec] = dispatchPillCommands,
+                      modes: [String] = dispatchSettablePolicyModes) -> DispatchPillMenu? {
+    guard draft.hasPrefix("/"), !draft.contains(where: \.isNewline) else { return nil }
+    let permissions = dispatchPillPermissionsArgument(draft)
+    if permissions.isPermissions, let argument = permissions.argument {
+        let items = modes.map { mode in
+            DispatchPillMenuItem(id: mode, title: policyDisplayLabel(mode), summary: dispatchPillPermissionSummary(mode),
+                                 completion: "/permissions \(policyDisplayLabel(mode).lowercased())")
+        }
+        let query = dispatchPillModeKey(argument)
+        let matches = dispatchPillMatches(query, in: items) { [dispatchPillModeKey($0.title), dispatchPillModeKey($0.id)] }
+        return matches.isEmpty ? nil : DispatchPillMenu(kind: .permissionModes, items: items, query: query, matches: matches, current: currentPolicy)
+    }
+    guard !draft.contains(where: \.isWhitespace) else { return nil }
+    let items = commands.map { DispatchPillMenuItem(id: $0.name, title: "/\($0.name)", summary: $0.summary, completion: "/\($0.name)") }
     let query = String(draft.dropFirst()).lowercased()
-    let prefixed = commands.filter { $0.name.hasPrefix(query) }.map(\.name)
-    let containing = commands.filter { !$0.name.hasPrefix(query) && $0.name.contains(query) }.map(\.name)
-    let matches = prefixed + containing
-    return matches.isEmpty ? nil : DispatchPillCommandMenu(query: query, matches: matches)
+    let matches = dispatchPillMatches(query, in: items) { [$0.id] }
+    return matches.isEmpty ? nil : DispatchPillMenu(kind: .commands, items: items, query: query, matches: matches)
 }
 
-/// What Enter does with the draft: complete a partly typed command to the closest match (the FIRST
-/// Enter), or submit (the second, or anything that is not a command being typed).
+/// What Enter does with the draft (no row chosen with the arrows): complete a partly typed command — or
+/// mode — to the closest match (the FIRST Enter), or submit (the second, or anything that is not being
+/// completed: a mode typed in full submits at once, however it is spelled).
 enum DispatchPillEnterAction: Equatable {
     case complete(String)
     case submit
 }
 
-func dispatchPillEnterAction(draft: String) -> DispatchPillEnterAction {
-    guard let best = dispatchPillCommandMenu(draft: draft)?.best else { return .submit }
-    let full = "/\(best)"
-    return draft == full ? .submit : .complete(full)
+func dispatchPillEnterAction(draft: String, currentPolicy: String? = nil) -> DispatchPillEnterAction {
+    guard let menu = dispatchPillMenu(draft: draft, currentPolicy: currentPolicy),
+          let best = menu.best, let item = menu.item(best) else { return .submit }
+    switch menu.kind {
+    case .commands:
+        return draft == item.completion ? .submit : .complete(item.completion)
+    case .permissionModes:
+        let argument = dispatchPillPermissionsArgument(draft).argument ?? ""
+        return dispatchPillPermissionMode(argument) != nil ? .submit : .complete(item.completion)
+    }
 }
 
-/// PURE: the UTF-16 range of a command typed IN FULL at the start of `draft` — `/permissions`, or
-/// `/compact` ahead of its instructions — which the composer draws in blue; nil for anything else
-/// (a partial `/perm`, a message that merely starts with a slash).
+/// PURE: the UTF-16 range the composer draws in blue — a command typed IN FULL at the start of `draft`
+/// (`/permissions`, or `/compact` ahead of its instructions), and for `/permissions <mode>` the whole line
+/// once the mode is one Dispatch can hold; nil for anything else (a partial `/perm`, a plain message).
 func dispatchPillCommandHighlightRange(_ draft: String, commands: [DispatchPillCommandSpec] = dispatchPillCommands) -> NSRange? {
     guard draft.hasPrefix("/") else { return nil }
     let token = String(draft.prefix { !$0.isWhitespace && !$0.isNewline })
     let name = token.dropFirst().lowercased()
     guard commands.contains(where: { $0.name == name }) else { return nil }
+    let permissions = dispatchPillPermissionsArgument(draft)
+    if permissions.isPermissions, let argument = permissions.argument, dispatchPillPermissionMode(argument) != nil {
+        let trimmed = draft.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+        return NSRange(location: 0, length: (trimmed as NSString).length)
+    }
     return NSRange(location: 0, length: (token as NSString).length)
 }
 
 /// What `/spawn` says until Cowork windows exist.
 let dispatchPillSpawnComingSoon = "/spawn will open a Cowork window — not available yet"
 
-/// PURE: the local command `text` is, if it is one — the whole message, trimmed, case-insensitive.
+/// PURE: the local command `text` is, if it is one — trimmed, the command case-insensitive.
 func dispatchPillLocalCommand(_ text: String) -> DispatchPillLocalCommand? {
-    switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-    case "/permissions", "/permission": return .permissions
-    case "/spawn": return .spawn
-    default: return nil
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    let permissions = dispatchPillPermissionsArgument(trimmed)
+    if permissions.isPermissions {
+        guard let argument = permissions.argument, !argument.isEmpty else { return .permissions }
+        return dispatchPillPermissionMode(argument).map(DispatchPillLocalCommand.setPermissions) ?? .unknownPermissions(argument)
     }
+    return trimmed.lowercased() == "/spawn" ? .spawn : nil
 }
 
 /// PURE: a running compaction's elapsed time — "0:07", "2:41", "1:02:05". Never negative (a clock that

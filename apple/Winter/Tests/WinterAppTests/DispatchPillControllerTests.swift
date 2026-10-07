@@ -539,23 +539,24 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertEqual(dispatchPillLocalCommand("  /Permissions \n"), .permissions)
         XCTAssertEqual(dispatchPillLocalCommand("/spawn"), .spawn)
         XCTAssertNil(dispatchPillLocalCommand("/compact"), "the session's own built-in — sent as typed")
-        XCTAssertNil(dispatchPillLocalCommand("/permissions please"))
+        XCTAssertEqual(dispatchPillLocalCommand("/permissions please"), .unknownPermissions("please"),
+                       "an argument that names no mode is answered, not sent")
         XCTAssertNil(dispatchPillLocalCommand("what are my /permissions"))
     }
 
     func testSlashMenuMatchesAndPicksTheClosest() {
-        XCTAssertEqual(dispatchPillCommandMenu(draft: "/")?.matches, ["compact", "permissions", "spawn"])
-        XCTAssertEqual(dispatchPillCommandMenu(draft: "/")?.best, "compact")
+        XCTAssertEqual(dispatchPillMenu(draft: "/")?.matches, ["compact", "permissions", "spawn"])
+        XCTAssertEqual(dispatchPillMenu(draft: "/")?.best, "compact")
         // The prefix match leads; commands that merely contain the letter follow.
-        XCTAssertEqual(dispatchPillCommandMenu(draft: "/p")?.matches, ["permissions", "compact", "spawn"])
-        XCTAssertEqual(dispatchPillCommandMenu(draft: "/p")?.best, "permissions")
-        XCTAssertEqual(dispatchPillCommandMenu(draft: "/pe")?.matches, ["permissions"])
-        XCTAssertEqual(dispatchPillCommandMenu(draft: "/SP")?.best, "spawn", "case-insensitive")
+        XCTAssertEqual(dispatchPillMenu(draft: "/p")?.matches, ["permissions", "compact", "spawn"])
+        XCTAssertEqual(dispatchPillMenu(draft: "/p")?.best, "permissions")
+        XCTAssertEqual(dispatchPillMenu(draft: "/pe")?.matches, ["permissions"])
+        XCTAssertEqual(dispatchPillMenu(draft: "/SP")?.best, "spawn", "case-insensitive")
         // Prefix matches first, then the ones that merely contain what is typed.
-        XCTAssertEqual(dispatchPillCommandMenu(draft: "/a")?.matches, ["compact", "spawn"])
-        XCTAssertNil(dispatchPillCommandMenu(draft: "/zzz"), "nothing matches: no menu")
-        XCTAssertNil(dispatchPillCommandMenu(draft: "/compact keep the API"), "past the space it is the command's arguments")
-        XCTAssertNil(dispatchPillCommandMenu(draft: "hello"))
+        XCTAssertEqual(dispatchPillMenu(draft: "/a")?.matches, ["compact", "spawn"])
+        XCTAssertNil(dispatchPillMenu(draft: "/zzz"), "nothing matches: no menu")
+        XCTAssertNil(dispatchPillMenu(draft: "/compact keep the API"), "past the space it is the command's arguments")
+        XCTAssertNil(dispatchPillMenu(draft: "hello"))
     }
 
     func testEnterCompletesThenSubmits() {
@@ -609,6 +610,106 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertTrue(pill.handleEscape())
         XCTAssertFalse(pill.permissionsPickerOpen)
         XCTAssertEqual(pill.morph.target.width, DispatchPillMetrics.compactWidth, "and back into the composer")
+    }
+
+    func testPermissionModesMenuAfterTheSpace() {
+        let all = dispatchPillMenu(draft: "/permissions ", currentPolicy: "auto")
+        XCTAssertEqual(all?.kind, .permissionModes)
+        XCTAssertEqual(all?.matches, ["dont-ask", "ask", "accept-edits", "auto", "bypass"])
+        XCTAssertEqual(all?.current, "auto")
+        XCTAssertEqual(dispatchPillMenu(draft: "/permissions acc")?.best, "accept-edits")
+        XCTAssertEqual(dispatchPillMenu(draft: "/permissions accept e")?.matches, ["accept-edits"])
+        XCTAssertEqual(dispatchPillMenu(draft: "/permissions dont")?.best, "dont-ask")
+        XCTAssertEqual(dispatchPillMenu(draft: "/Permissions AU")?.best, "auto")
+        XCTAssertNil(dispatchPillMenu(draft: "/permissions xyz"), "nothing matches: no menu")
+        XCTAssertEqual(dispatchPillMenu(draft: "/permissions accept edits")?.item("accept-edits")?.completion, "/permissions accept edits")
+        XCTAssertEqual(dispatchPillMenu(draft: "/permissions")?.kind, .commands, "no space yet: still the command list")
+    }
+
+    func testModeNamesMatchHoweverTheyAreSpelled() {
+        XCTAssertEqual(dispatchPillPermissionMode("auto"), "auto")
+        XCTAssertEqual(dispatchPillPermissionMode("Accept Edits"), "accept-edits")
+        XCTAssertEqual(dispatchPillPermissionMode("accept-edits"), "accept-edits")
+        XCTAssertEqual(dispatchPillPermissionMode("accept   edits "), "accept-edits")
+        XCTAssertEqual(dispatchPillPermissionMode("don't ask"), "dont-ask")
+        XCTAssertEqual(dispatchPillPermissionMode("dont ask"), "dont-ask")
+        XCTAssertNil(dispatchPillPermissionMode("plan"), "Dispatch cannot hold plan")
+        XCTAssertNil(dispatchPillPermissionMode("acc"))
+    }
+
+    func testPermissionsWithAModeIsItsOwnCommand() {
+        XCTAssertEqual(dispatchPillLocalCommand("/permissions"), .permissions)
+        XCTAssertEqual(dispatchPillLocalCommand("/permissions auto"), .setPermissions("auto"))
+        XCTAssertEqual(dispatchPillLocalCommand("/permissions accept edits"), .setPermissions("accept-edits"))
+        XCTAssertEqual(dispatchPillLocalCommand("/permissions  Bypass "), .setPermissions("bypass"))
+        XCTAssertEqual(dispatchPillLocalCommand("/permissions nope"), .unknownPermissions("nope"))
+        // Enter completes a partly typed mode first; a mode typed in full submits at once.
+        XCTAssertEqual(dispatchPillEnterAction(draft: "/permissions acc"), .complete("/permissions accept edits"))
+        XCTAssertEqual(dispatchPillEnterAction(draft: "/permissions accept edits"), .submit)
+        XCTAssertEqual(dispatchPillEnterAction(draft: "/permissions accept-edits"), .submit)
+        // …and reads in blue as a whole once it names a mode.
+        XCTAssertEqual(dispatchPillCommandHighlightRange("/permissions accept edits"), NSRange(location: 0, length: 25))
+        XCTAssertEqual(dispatchPillCommandHighlightRange("/permissions acc"), NSRange(location: 0, length: 12))
+    }
+
+    func testArrowsWalkTheMatchingRowsAndWrap() {
+        let menu = dispatchPillMenu(draft: "/")!
+        XCTAssertEqual(menu.moved(from: nil, down: true), "permissions", "from the closest match")
+        XCTAssertEqual(menu.moved(from: "spawn", down: true), "compact", "wraps")
+        XCTAssertEqual(menu.moved(from: "compact", down: false), "spawn")
+        let narrowed = dispatchPillMenu(draft: "/a")!   // compact, spawn match; permissions does not
+        XCTAssertEqual(narrowed.moved(from: "compact", down: true), "spawn", "skips rows that do not match")
+    }
+
+    func testArrowsThenEnterRunsTheRowAtOnce() {
+        let pill = makePill()
+        var sent = 0
+        pill.onSubmit = { _ in sent += 1; return true }
+        pill.currentPolicy = { "auto" }
+        pill.show()
+        pill.adapter.composerDraft = "/"
+        XCTAssertTrue(pill.handleMenuKey(.down))
+        XCTAssertEqual(pill.menuSelection, "permissions")
+        XCTAssertTrue(pill.handleMenuKey(.enter), "Enter on a row the arrows chose runs it")
+        XCTAssertTrue(pill.permissionsPickerOpen)
+        XCTAssertEqual(sent, 0)
+        XCTAssertFalse(makePill().handleMenuKey(.up), "no menu: the arrow is the caret's")
+    }
+
+    func testPermissionsWithAModeSetsItAndSaysSo() async {
+        let pill = makePill()
+        var set: [String] = []
+        pill.currentPolicy = { "auto" }
+        pill.onSetPolicy = { set.append($0); return true }
+        pill.show()
+        pill.adapter.composerDraft = "/permissions accept edits"
+        pill.submit("/permissions accept edits")
+        for _ in 0..<100 where pill.commandNotice == nil { try? await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(set, ["accept-edits"])
+        XCTAssertEqual(pill.adapter.sessionPolicy, "accept-edits")
+        XCTAssertEqual(pill.commandNotice, "Permissions set to Accept Edits")
+        XCTAssertFalse(pill.permissionsPickerOpen, "a mode named in the command opens no picker")
+        XCTAssertEqual(pill.adapter.composerDraft, "")
+    }
+
+    func testPickerChipsFollowTheArrowKeys() async {
+        let pill = makePill()
+        var set: [String] = []
+        pill.currentPolicy = { "auto" }
+        pill.onSetPolicy = { set.append($0); return true }
+        pill.show()
+        pill.openPermissionsPicker()
+        XCTAssertEqual(pill.pickerFocus, "auto", "the keyboard starts on the current mode")
+        XCTAssertTrue(pill.handleHorizontalKey(left: false))
+        XCTAssertEqual(pill.pickerFocus, "bypass")
+        XCTAssertTrue(pill.handleMenuKey(.down))
+        XCTAssertEqual(pill.pickerFocus, "dont-ask", "wraps")
+        XCTAssertTrue(pill.handleMenuKey(.up))
+        XCTAssertEqual(pill.pickerFocus, "bypass")
+        XCTAssertTrue(pill.handleMenuKey(.enter))
+        for _ in 0..<100 where pill.permissionsPickerOpen { try? await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(set, ["bypass"])
+        XCTAssertFalse(makePill().handleHorizontalKey(left: true), "no picker: the arrow is the caret's")
     }
 
     func testElapsedText() {

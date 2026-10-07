@@ -33,11 +33,8 @@ struct DispatchPillView: View {
                                           inactive: adapter.inactiveElicitations).isEmpty
     }
 
-    /// The `/` menu for what is typed — never over the picker, a pinned turn or full screen.
-    private var commandMenu: DispatchPillCommandMenu? {
-        guard controller.presentation != .fullScreen, !controller.permissionsPickerOpen, controller.historyIndex == nil else { return nil }
-        return dispatchPillCommandMenu(draft: adapter.composerDraft)
-    }
+    /// The `/` menu for what is typed (`DispatchPillController.currentMenu`).
+    private var commandMenu: DispatchPillMenu? { controller.currentMenu }
 
     var body: some View {
         let accessories = hasAccessories
@@ -118,7 +115,7 @@ private struct DispatchPillAccessories: View {
     /// Observed so the child row follows the main pill's ANIMATED width frame by frame — it resizes
     /// with the pill as it grows or compresses, instead of snapping to where the pill is heading.
     @ObservedObject var morph: DispatchPillMorphModel
-    let commandMenu: DispatchPillCommandMenu?
+    let commandMenu: DispatchPillMenu?
 
     private var rowWidth: CGFloat { morph.size.width }
 
@@ -147,8 +144,8 @@ private struct DispatchPillAccessories: View {
                     .transition(.childPill)
             }
             if let commandMenu {
-                DispatchPillCommandMenuView(menu: commandMenu, width: rowWidth,
-                                            onPick: { controller.runMenuCommand($0) })
+                DispatchPillMenuView(menu: commandMenu, selected: controller.menuSelection, width: rowWidth,
+                                     onPick: { controller.runMenuItem($0) })
                     .transition(.childPill)
             }
         }
@@ -193,6 +190,7 @@ struct DispatchPillComposerBar: View {
                     current: adapter.sessionPolicyKnown ? adapter.sessionPolicy : nil,
                     pending: controller.policyPending,
                     refusal: adapter.policyRefusal,
+                    focused: controller.pickerFocus,
                     onPick: { controller.choosePolicy($0) },
                     onClose: { controller.closePermissionsPicker() }
                 )
@@ -271,8 +269,10 @@ struct DispatchPillComposerBar: View {
                         onViewCreated: { controller.registerComposerView($0) },
                         viewAlpha: hidden ? 0 : 1,
                         // A command typed in full reads in blue.
+                        onFocusKey: { key, _, _ in controller.handleMenuKey(key) },
                         highlightRanges: { dispatchPillCommandHighlightRange($0).map { [$0] } ?? [] },
-                        highlightColor: dispatchPillCommandBlueNS
+                        highlightColor: dispatchPillCommandBlueNS,
+                        onHorizontalKey: { controller.handleHorizontalKey(left: $0) }
                     )
                 }
                 .frame(width: controller.composerFieldWidth, height: controller.composerFieldHeight)

@@ -108,6 +108,9 @@ struct ComposerTextView: NSViewRepresentable {
     /// undo stack and the binding never change. `nil` (the default) leaves every other surface as it was.
     var highlightRanges: ((String) -> [NSRange])? = nil
     var highlightColor: NSColor = .systemBlue
+    /// ←/→, consulted before the caret moves (`true` = consumed) — the dispatch pill's picker walks its
+    /// chips with them while the composer is hidden under it. `nil` (the default) leaves the caret's own.
+    var onHorizontalKey: ((_ left: Bool) -> Bool)? = nil
 
     /// Code-mode image input (`ComposerImages.swift`): paste of image data / image files and drops of
     /// image files become `[Image #n]` attachments while `isEnabled()` answers true. `nil` (the
@@ -169,6 +172,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.string = text
         textView.onSubmit = onSubmit
         textView.onFocusKey = onFocusKey
+        textView.onHorizontalKey = onHorizontalKey
         textView.onTypingRefocus = onTypingRefocus
         textView.onEscape = onEscape
         textView.imageIntake = imageIntake
@@ -201,6 +205,7 @@ struct ComposerTextView: NSViewRepresentable {
         context.coordinator.parent = self
         textView.onSubmit = onSubmit
         textView.onFocusKey = onFocusKey
+        textView.onHorizontalKey = onHorizontalKey
         textView.onTypingRefocus = onTypingRefocus
         // office-live-ux Job 1: re-assigned on EVERY update, exactly like the three above it. The
         // closure captures `adapter.turnRunning` freshly at CALL time (it asks the host, it does
@@ -339,6 +344,7 @@ func composerShouldClaimFirstResponder(current: NSResponder?, composer: NSView) 
 final class CommandTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onFocusKey: ((FieldFocusKey, _ caretAtFirstLine: Bool, _ caretAtLastLine: Bool) -> Bool)?
+    var onHorizontalKey: ((_ left: Bool) -> Bool)?
     var onTypingRefocus: (() -> Void)?
     /// office-live-ux Job 1 — see `ComposerTextView.onEscape` for why this hangs off `keyDown`
     /// rather than off `doCommand(by:)` or a window-level monitor.
@@ -365,6 +371,12 @@ final class CommandTextView: NSTextView {
             super.doCommand(by: selector)
         case #selector(NSResponder.moveDown(_:)):
             if onFocusKey?(.down, first, last) == true { return }
+            super.doCommand(by: selector)
+        case #selector(NSResponder.moveLeft(_:)):
+            if onHorizontalKey?(true) == true { return }
+            super.doCommand(by: selector)
+        case #selector(NSResponder.moveRight(_:)):
+            if onHorizontalKey?(false) == true { return }
             super.doCommand(by: selector)
         case #selector(insertNewline(_:)):
             if onFocusKey?(.enter, first, last) == true { return }

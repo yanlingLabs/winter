@@ -136,6 +136,12 @@ final class DispatchPillController: ObservableObject {
     @Published private(set) var permissionsPickerOpen = false
     /// The mode a pick is setting right now (nil when none is in flight).
     @Published private(set) var policyPending: String?
+    /// The `/` menu row the ↑/↓ keys moved to (an item id), or nil — the closest match is marked then.
+    /// Cleared by any change to the draft, so typing hands the mark back to the closest match.
+    @Published private(set) var menuSelection: String?
+    /// The picker chip the keyboard is on (←/→ or ↑/↓ move it, Enter picks it) — the current mode when
+    /// the picker opens.
+    @Published private(set) var pickerFocus: String?
     /// A short line a command left above the pill (`DispatchPillNoticePill`), cleared after a few seconds.
     @Published private(set) var commandNotice: String?
     private var noticeTask: Task<Void, Never>?
@@ -484,9 +490,13 @@ final class DispatchPillController: ObservableObject {
     /// Enter / the send circle.
     func submit(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        // The `/` menu: the first Enter completes a partly typed command to the closest match; the
-        // next one (the command now typed in full) runs it.
-        if case .complete(let full) = dispatchPillEnterAction(draft: text) {
+        // The `/` menu: a row the arrows moved to runs at once; otherwise the first Enter completes a
+        // partly typed command (or mode) to the closest match, and the next one runs it.
+        if let menu = currentMenu, let selected = menuSelection, menu.matches.contains(selected) {
+            runMenuItem(selected)
+            return
+        }
+        if case .complete(let full) = dispatchPillEnterAction(draft: text, currentPolicy: knownPolicy) {
             adapter.composerDraft = full
             return
         }
@@ -518,12 +528,70 @@ final class DispatchPillController: ObservableObject {
 
     // MARK: - Commands the pill handles itself
 
-    /// A click on a row of the `/` menu: the command, run at once — the same as typing it and pressing
-    /// Enter (a local command opens here; `/compact` goes to the session).
+    /// The `/` menu for what is typed (`dispatchPillMenu`) — never over the picker, a pinned turn or full screen.
+    var currentMenu: DispatchPillMenu? {
+        guard presentation != .fullScreen, !permissionsPickerOpen, historyIndex == nil else { return nil }
+        return dispatchPillMenu(draft: adapter.composerDraft, currentPolicy: knownPolicy)
+    }
+
+    /// The bound session's mode as this pill knows it: confirmed here, else as the directory reports it.
+    private var knownPolicy: String? {
+        adapter.sessionPolicyKnown ? adapter.sessionPolicy : currentPolicy?()
+    }
+
+    /// A row of the `/` menu, run at once — a click, or Enter on a row the arrows moved to: the same as
+    /// typing it in full and pressing Enter (a local command runs here; `/compact` goes to the session).
+    func runMenuItem(_ id: String) {
+        guard let item = currentMenu?.item(id) else { return }
+        menuSelection = nil
+        adapter.composerDraft = item.completion
+        submit(item.completion)
+    }
+
+    /// The command row `name` (`/permissions`), run at once — what a click on a command row does.
     func runMenuCommand(_ name: String) {
         let full = "/\(name)"
+        menuSelection = nil
         adapter.composerDraft = full
         submit(full)
+    }
+
+    /// ↑/↓/Enter from the composer (`ComposerTextView.onFocusKey`). In the picker they move between the
+    /// chips and pick one; over a `/` menu ↑/↓ move the mark through the matching rows and Enter runs the
+    /// row they moved to. Anything else is the text view's own (false).
+    func handleMenuKey(_ key: FieldFocusKey) -> Bool {
+        if permissionsPickerOpen {
+            switch key {
+            case .up: movePickerFocus(back: true)
+            case .down: movePickerFocus(back: false)
+            case .enter: if let mode = pickerFocus { choosePolicy(mode) }
+            }
+            return true
+        }
+        guard let menu = currentMenu else { return false }
+        switch key {
+        case .up, .down:
+            menuSelection = menu.moved(from: menuSelection, down: key == .down)
+            return true
+        case .enter:
+            guard menuSelection != nil else { return false } // the ordinary Enter: complete, then run
+            submit(adapter.composerDraft)
+            return true
+        }
+    }
+
+    /// ←/→ from the composer: between the picker's chips while it is up; the caret's own otherwise.
+    func handleHorizontalKey(left: Bool) -> Bool {
+        guard permissionsPickerOpen else { return false }
+        movePickerFocus(back: left)
+        return true
+    }
+
+    private func movePickerFocus(back: Bool) {
+        let modes = dispatchSettablePolicyModes
+        guard !modes.isEmpty else { return }
+        let from = pickerFocus.flatMap { modes.firstIndex(of: $0) } ?? (back ? 0 : modes.count - 1)
+        pickerFocus = modes[(from + (back ? modes.count - 1 : 1)) % modes.count]
     }
 
     private func runLocalCommand(_ command: DispatchPillLocalCommand) {
@@ -533,10 +601,34 @@ final class DispatchPillController: ObservableObject {
         historyIndex = nil
         switch command {
         case .permissions: openPermissionsPicker()
+        case .setPermissions(let mode): setPolicyFromCommand(mode)
+        case .unknownPermissions(let argument):
+            showCommandNotice("No permission mode called “\(dispatchPillShortened(argument, limit: 30))”")
         case .spawn:
             if let spawn = onSpawnCowork { spawn() } else { showCommandNotice(dispatchPillSpawnComingSoon) }
         }
         if presentation != .compact { setPresentation(.compact) } else { retargetMain() }
+    }
+
+    /// `/permissions <mode>`: set it straight away, and say so above the pill.
+    private func setPolicyFromCommand(_ mode: String) {
+        if knownPolicy == mode {
+            showCommandNotice("Permissions are already \(policyDisplayLabel(mode))")
+            return
+        }
+        policyPending = mode
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let ok = await self.onSetPolicy?(mode) ?? false
+            self.policyPending = nil
+            if ok {
+                self.adapter.adoptSessionPolicy(mode)
+                self.policySessionId = self.currentSessionId?()
+                self.showCommandNotice("Permissions set to \(policyDisplayLabel(mode))")
+            } else {
+                self.showCommandNotice(policyRefusalText(mode))
+            }
+        }
     }
 
     /// A line above the pill for a few seconds — what a command has to say when it has nothing to open.
@@ -559,6 +651,7 @@ final class DispatchPillController: ObservableObject {
             policySessionId = sessionId
         }
         adapter.policyRefusal = nil
+        pickerFocus = adapter.sessionPolicyKnown ? adapter.sessionPolicy : dispatchSettablePolicyModes.first
         permissionsPickerOpen = true
         retargetMain()
         engage() // Esc goes back, so the panel needs the keyboard
@@ -1228,6 +1321,8 @@ final class DispatchPillController: ObservableObject {
                 // By the hop the new draft is stored, so the same layout agrees with the text view.
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.adapter.composerDraft == new else { return }
+                    // A changed draft hands the `/` menu's mark back to the closest match.
+                    self.menuSelection = nil
                     // Typing while the picker is up means the user went back to writing.
                     if self.permissionsPickerOpen, !new.isEmpty { self.closePermissionsPicker() }
                     if self.historyIndex != nil, !new.isEmpty {
