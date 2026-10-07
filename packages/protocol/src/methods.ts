@@ -517,12 +517,24 @@ export const SessionSteerResult = z.object({ ok: z.literal(true), injected: z.bo
 export const SessionInterruptParams = z.object({ sessionId: z.string() });
 export const SessionInterruptResult = z.object({ ok: z.literal(true), wasRunning: z.boolean() });
 
-export const SessionCompactParams = z.object({ sessionId: z.string().min(1) });
+/** 2026-10-07: on the Winter leg `session.compact` asks the SESSION to compact -- it sends `/compact
+ *  [instructions]` through the session's own driver (queued behind a running turn, resuming an idle
+ *  session), which the runtime runs as its built-in command. It returns at once with `requested: true`
+ *  and the `user_message`'s `seq`; the compaction lands in the log as a `continuity_warning`
+ *  (`compacted`, or `compaction_failed`). `compacted`/`uptoSeq`/`summaryChars` are the engine era's
+ *  synchronous answer, kept for older clients and always `false`/0/0 on a request. */
+export const SessionCompactParams = z.object({
+  sessionId: z.string().min(1),
+  /** What the summary should focus on — `/compact <instructions>`. */
+  instructions: z.string().max(4_000).optional(),
+});
 export const SessionCompactResult = z.object({
   ok: z.literal(true),
   compacted: z.boolean(),
   uptoSeq: z.number().int().nonnegative(),
   summaryChars: z.number().int().nonnegative(),
+  requested: z.boolean().optional(),
+  seq: z.number().int().nonnegative().optional(),
 });
 
 /** Mirrors `SkillMeta` (core/src/agent/skills.ts) field-for-field — this schema drifting behind

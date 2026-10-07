@@ -259,9 +259,12 @@ export class WinterClient {
   async agentStop(sessionId: string, agent: string): Promise<{ ok: true; status: "running" | "completed" | "failed" | "stopped" | "timeout" }> {
     return this.validated(AgentStopResult, await this.request(METHODS.agentStop, { sessionId, agent }), METHODS.agentStop);
   }
-  async compact(sessionId: string): Promise<{ compacted: boolean; uptoSeq: number; summaryChars: number }> {
-    const r = this.validated(SessionCompactResult, await this.request(METHODS.sessionCompact, { sessionId }), METHODS.sessionCompact);
-    return { compacted: r.compacted, uptoSeq: r.uptoSeq, summaryChars: r.summaryChars };
+  /** On the Winter leg the daemon answers `requested: true` at once: the session runs `/compact` as its
+   *  next turn and the log says when it is done (a `continuity_warning`). */
+  async compact(sessionId: string, instructions?: string): Promise<{ compacted: boolean; uptoSeq: number; summaryChars: number; requested: boolean }> {
+    const params = instructions !== undefined && instructions.trim().length > 0 ? { sessionId, instructions: instructions.trim() } : { sessionId };
+    const r = this.validated(SessionCompactResult, await this.request(METHODS.sessionCompact, params), METHODS.sessionCompact);
+    return { compacted: r.compacted, uptoSeq: r.uptoSeq, summaryChars: r.summaryChars, requested: r.requested === true };
   }
   async listSkills(cwd?: string): Promise<Array<{ name: string; description: string; source: string; path: string; loadsInSessions?: boolean; sessionNote?: string }>> {
     return this.validated(SkillsListResult, await this.request(METHODS.skillsList, { cwd }), METHODS.skillsList).skills;

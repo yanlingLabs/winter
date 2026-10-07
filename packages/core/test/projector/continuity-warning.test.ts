@@ -50,3 +50,57 @@ describe("projector: WS-23 continuity warnings are shown", () => {
     }
   });
 });
+
+// 2026-10-07: a compaction is something Winter did to the conversation. The runtime's `compact_boundary`
+// (and its `status` failure pair) used to be dropped, so a `/compact` or an auto-compaction left no trace
+// the user could see.
+describe("projector: compactions are shown as continuity warnings", () => {
+  const boundary = (meta: Record<string, unknown>, uuid = "cb-1"): ProtocolSdkMessage =>
+    ({ type: "system", subtype: "compact_boundary", compact_metadata: meta, uuid, session_id: "s" }) as unknown as ProtocolSdkMessage;
+
+  test("a manual compaction that kept messages says so, with the size it started from", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "/compact");
+    const out = accept(projector, boundary({ trigger: "manual", pre_tokens: 329_439, duration_ms: 5_000, preserved_messages: { anchor_uuid: "a", uuids: ["1", "2", "3"] } }));
+    expect(out).toEqual([
+      expect.objectContaining({
+        type: "continuity_warning", threadId: MAIN_THREAD, warning: "compacted",
+        text: "Conversation compacted on request (it was about 329,439 tokens): the older part is now a summary, and the last 3 messages carry over as they are.",
+      }),
+    ]);
+  });
+
+  test("an auto compaction that kept nothing, with no measured size, states no number", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    const out = accept(projector, boundary({ trigger: "auto", pre_tokens: 0 }));
+    expect((out[0] as { text: string }).text).toBe("Conversation compacted: everything before this point is now a summary.");
+  });
+
+  test("one kept message reads in the singular; a replayed boundary (same uuid) is appended once", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    const frame = boundary({ trigger: "auto", pre_tokens: 1200, preserved_messages: { anchor_uuid: "a", uuids: ["1"] } }, "cb-once");
+    const out = accept(projector, frame);
+    expect((out[0] as { text: string }).text).toBe("Conversation compacted (it was about 1,200 tokens): the older part is now a summary, and the last message carries over as it is.");
+    expect(accept(projector, frame)).toEqual([]);
+  });
+
+  test("a failed compaction says the conversation continues as it was, with the runtime's reason scrubbed", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    const out = accept(projector, ({ type: "system", subtype: "status", status: null, compact_result: "failed", compact_error: "there is nothing to compact: the whole conversation (2 message(s)) already fits", uuid: "cf-1", session_id: "s" }) as unknown as ProtocolSdkMessage);
+    expect(out).toEqual([
+      expect.objectContaining({ type: "continuity_warning", warning: "compaction_failed", text: "Compaction failed; the conversation continues as it was: there is nothing to compact: the whole conversation (2 message(s)) already fits" }),
+    ]);
+    const secret = accept(projector, ({ type: "system", subtype: "status", status: null, compact_result: "failed", compact_error: "provider said Bearer abcdefghijklmnopqrstuvwxyz0123456789 was bad", uuid: "cf-2", session_id: "s" }) as unknown as ProtocolSdkMessage);
+    expect((secret[0] as { text: string }).text).not.toContain("abcdefghijklmnopqrstuvwxyz0123456789");
+  });
+
+  test("a plain status frame (no failure) still projects nothing", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    expect(accept(projector, ({ type: "system", subtype: "status", status: "compacting", uuid: "st", session_id: "s" }) as unknown as ProtocolSdkMessage)).toEqual([]);
+  });
+});

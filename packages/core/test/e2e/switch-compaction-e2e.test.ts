@@ -210,7 +210,10 @@ describeWithWinterBinary("WS-24: the compaction-on-switch prompt, end to end (re
     expect(last).toContain(`short question ${SOURCE_TURNS}`); // the recent exchanges carried over verbatim
     expect(last).toContain("after the switch");
     expect(last.includes(LONG_RUN)).toBe(false);
-    expect(client.events.filter((e) => e.type === "continuity_warning" && e.sessionId === sessionId)).toHaveLength(1);
+    // The switch announces the summary before it runs, and (2026-10-07) the finished compaction is shown too.
+    const warnings = client.events.filter((e) => e.type === "continuity_warning" && e.sessionId === sessionId) as Array<{ warning: string; text: string }>;
+    expect(warnings.map((w) => w.warning)).toEqual(["switch_compaction", "compacted"]);
+    expect(warnings[1]!.text).toStartWith("Conversation compacted");
     // The source was not asked for anything after its compaction: the post-switch turn is the target's.
     expect(sourceLog.filter((r) => r.kind === "turn")).toHaveLength(SOURCE_TURNS);
     const lastReply = [...client.events].reverse().find((e) => e.type === "assistant_message" && e.sessionId === sessionId) as (SessionEvent & { text?: string }) | undefined;

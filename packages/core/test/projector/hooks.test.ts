@@ -19,7 +19,6 @@ describe("projector/hooks: observed, never persisted", () => {
     ["rate_limit_event", { type: "rate_limit_event", rate_limit_info: { status: "allowed_warning", resetsAt: 1 } }],
     ["auth_status", { type: "auth_status", isAuthenticating: true, output: ["SECRET_LOGIN_URL"] }],
     ["system/status", { type: "system", subtype: "status", status: "compacting", compact_result: "success" }],
-    ["system/compact_boundary", { type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "auto", pre_tokens: 100000, preserved_messages: 4 } }],
     ["system/thinking_tokens", { type: "system", subtype: "thinking_tokens", estimated_tokens: 120, estimated_tokens_delta: 20 }],
     ["system/model_refusal_fallback", { type: "system", subtype: "model_refusal_fallback", trigger: "refusal", direction: "down", original_model: "a", fallback_model: "b", request_id: "r", api_refusal_explanation: "SECRET_REFUSAL_PROSE", content: "SECRET_REFUSAL_PROSE" }],
     ["system/model_refusal_no_fallback", { type: "system", subtype: "model_refusal_no_fallback", trigger: "refusal", original_model: "a", request_id: "r", api_refusal_explanation: "SECRET_REFUSAL_PROSE" }],
@@ -87,10 +86,11 @@ describe("projector/hooks: observed, never persisted", () => {
     for (const kind of ["system/task_started", "system/task_progress", "system/task_updated", "system/task_notification"]) {
       expect({ kind, known: isKnownUnpersistedKind(kind) }).toEqual({ kind, known: true });
     }
-    // +3: `system/api_retry` (projects a transient), `system/continuity_warning` (persisted since WS-23
-    // review r1 I-3) and `system/reasoning_progress` (the thinking pill, 2026-10-05: projected, provider
-    // alone allowlisted) stay KNOWN kinds for the log allowlist.
-    expect(UNPERSISTED_KINDS.length).toBe(unpersisted.length + 4 + 3);
+    // +4: `system/api_retry` (projects a transient), `system/continuity_warning` (persisted since WS-23
+    // review r1 I-3), `system/reasoning_progress` (the thinking pill, 2026-10-05: projected, provider
+    // alone allowlisted) and `system/compact_boundary` (2026-10-07: projected as a `compacted`
+    // continuity_warning) stay KNOWN kinds for the log allowlist.
+    expect(UNPERSISTED_KINDS.length).toBe(unpersisted.length + 4 + 4);
     expect(isKnownUnpersistedKind("system/reasoning_progress")).toBe(true);
   });
 

@@ -134,14 +134,14 @@ describe("WinterClient", () => {
     client.close();
   });
 
-  // Re-scoped (fix wave 2): on the Winter leg `session.compact` is a TYPED refusal
-  // (`not_supported_on_winter_leg`, SDK 0.0.4 carry) — the engine's `compacted: false` no-op is gone
-  // with the engine. The client-side round-trip is the rejection reaching the caller intact.
-  sessionTest("compact client method round-trip (the Winter leg refuses typed: not supported on this leg)", async () => {
+  // 2026-10-07: on the Winter leg `session.compact` asks the session to compact — `/compact` goes through
+  // its driver as its next turn — and answers `requested: true` at once (it was a typed
+  // `not_supported_on_winter_leg` refusal from the SDK 0.0.4 carry until then).
+  sessionTest("compact client method round-trip (the Winter leg answers requested)", async () => {
     await boot();
     const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cc", onEvent: () => {} });
     const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "winter-cc-")), approvalPolicy: "auto" });
-    await expect(client.compact(sessionId)).rejects.toThrow(/not supported on (the Winter|this runtime) leg/);
+    await expect(client.compact(sessionId)).resolves.toEqual({ compacted: false, uptoSeq: 0, summaryChars: 0, requested: true });
     client.close();
   });
 

@@ -551,6 +551,12 @@ struct OrbSessionState: Equatable {
     /// that has already replied opens its own exchange while the turn runs, and the daemon closes a turn
     /// a crash left open with an `aborted` `turn_completed` when the session reopens (review M2, 2026-10-04).
     var runningTurnExchange: Int?
+    /// The prompt of the exchange the running turn belongs to (`runningTurnExchange`), if any — what
+    /// `WorkingVerbs.forTurn` reads to say "Compacting" for a `/compact` turn.
+    var runningTurnPrompt: String? {
+        guard let i = runningTurnExchange, exchanges.indices.contains(i) else { return nil }
+        return exchanges[i].prompt
+    }
     /// provider-correctness T6: the message of the `agent_error` that ENDED THE TURN THAT JUST RAN
     /// — set on a main-thread `agent_error`, cleared by the next `turn_started` and by any clean
     /// `turn_completed`. Nil at every other moment.
@@ -1669,7 +1675,7 @@ final class SessionModel: ObservableObject {
             let wasRunning = next.turnRunning
             liveThinking.fold(event)
             next = SessionReducer.reduce(next, event)
-            if case .turnStarted(let v) = event, v.threadId == "main", !wasRunning { next.workingVerb = WorkingVerbs.random() }
+            if case .turnStarted(let v) = event, v.threadId == "main", !wasRunning { next.workingVerb = WorkingVerbs.forTurn(prompt: next.runningTurnPrompt) }
         }
         state = next
         for event in events { afterApply(event) }
@@ -1688,7 +1694,7 @@ final class SessionModel: ObservableObject {
         // is assigned by production code; `OrbSessionState.workingVerb`'s doc comment points here.
         // A folded message's `turn_started` (the turn already running) keeps the verb it has.
         if case .turnStarted(let v) = event, v.threadId == "main", !wasRunning {
-            state.workingVerb = WorkingVerbs.random()
+            state.workingVerb = WorkingVerbs.forTurn(prompt: state.runningTurnPrompt)
         }
         afterApply(event)
     }

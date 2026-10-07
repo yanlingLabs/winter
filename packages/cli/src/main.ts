@@ -1175,7 +1175,7 @@ export async function runInterruptRoute(c: WinterClient, sessionId: string): Pro
   return { ok: true, wasRunning: r.wasRunning };
 }
 
-export async function runCompactRoute(c: WinterClient, sessionId: string): Promise<{ ok: true; compacted: boolean; uptoSeq: number; summaryChars: number } | { ok: false; message: string }> {
+export async function runCompactRoute(c: WinterClient, sessionId: string): Promise<{ ok: true; compacted: boolean; uptoSeq: number; summaryChars: number; requested?: boolean } | { ok: false; message: string }> {
   const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
   const check = checkCodeSession(sessions, sessionId);
   if (!check.ok) return { ok: false, message: check.message };
@@ -1909,7 +1909,9 @@ if (import.meta.main) {
     const c = await connect("cli-compact");
     const result = await runCompactRoute(c, sid);
     if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
-    console.log(result.compacted ? `${AQUA}compacted${RESET} (through seq ${result.uptoSeq}, ${result.summaryChars} char summary)` : "nothing to compact yet");
+    console.log(result.requested
+      ? `${AQUA}compaction requested${RESET} — it runs as the session's next turn`
+      : result.compacted ? `${AQUA}compacted${RESET} (through seq ${result.uptoSeq}, ${result.summaryChars} char summary)` : "nothing to compact yet");
     c.close();
     process.exit(0);
   }

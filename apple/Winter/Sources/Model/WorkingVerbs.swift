@@ -73,4 +73,19 @@ enum WorkingVerbs {
     static func random() -> String {
         all.randomElement() ?? "Working"
     }
+
+    /// The verb for a turn about to run `prompt`: a `/compact [instructions]` command (the runtime's
+    /// built-in — the model never sees it) is "Compacting"; anything else rolls a random verb.
+    static func forTurn(prompt: String?) -> String {
+        if let prompt, isCompactCommand(prompt) { return "Compacting" }
+        return random()
+    }
+
+    /// The runtime's own rule (`resolveBuiltinCommand`): the WHOLE first token is `/compact`, at the
+    /// very start of the text.
+    static func isCompactCommand(_ text: String) -> Bool {
+        guard text.hasPrefix("/compact") else { return false }
+        let rest = text.dropFirst("/compact".count)
+        return rest.first.map { $0.isWhitespace } ?? true
+    }
 }

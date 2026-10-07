@@ -72,8 +72,11 @@ async function runHelp(ctx: CommandCtx): Promise<void> {
 /** Mirrors main.ts `case "compact"` (~:1039): `client.compact(sessionId)`, then the same
  *  compacted/"nothing to compact yet" branch and wording (minus the `winter compact` exit-code
  *  path, which has no meaning inside a running chat). */
-async function runCompact(ctx: CommandCtx): Promise<void> {
-  const r = await ctx.client.compact(ctx.sessionId);
+async function runCompact(ctx: CommandCtx, argText = ""): Promise<void> {
+  const instructions = argText.trim();
+  const r = instructions.length > 0 ? await ctx.client.compact(ctx.sessionId, instructions) : await ctx.client.compact(ctx.sessionId);
+  // Winter leg: the session compacts as its next turn, and the transcript shows when it is done.
+  if (r.requested) { ctx.appendNote("compaction requested — it runs as the session's next turn"); return; }
   ctx.appendNote(r.compacted ? `compacted (through seq ${r.uptoSeq}, ${r.summaryChars} char summary)` : "nothing to compact yet");
 }
 
@@ -627,7 +630,7 @@ async function runSetActivity(ctx: CommandCtx, verb: "background" | "archive", a
 
 export const COMMANDS: SlashCommand[] = [
   { name: "help", description: "List commands and keybindings", run: (ctx) => runHelp(ctx) },
-  { name: "compact", description: "Compact conversation history to a summary", run: (ctx) => runCompact(ctx) },
+  { name: "compact", description: "Compact conversation history to a summary", run: (ctx, argText) => runCompact(ctx, argText) },
   // Winter Phase 8d (Task 4.3): the displayed args/description string is deliberately UNCHANGED
   // (not "…| --advisor <slug|auto>]") — `composer.test.tsx`'s slash-command menu asserts this
   // exact wording is visible within the menu's fixed truncation width, and growing the hint text

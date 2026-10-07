@@ -2362,11 +2362,26 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionCompact: {
         const p = parseParams(SessionCompactParams, params);
-        // P8b Task 16 (ledger:30): Winter's `Query` has no compaction control at 0.0.4 — a typed
-        // "not supported on this leg", never a silent `compacted: false` (SDK 0.0.4 carry).
-        if (opts.winter?.get(p.sessionId) !== undefined || isRunnableLeg(p.sessionId)) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, "session.compact is not supported on this runtime leg (the child compacts on its own; SDK 0.0.4 carry)", { code: "not_supported_on_winter_leg" });
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        // 2026-10-07: the session compacts ITSELF. `/compact [instructions]` goes through the session's own
+        // driver exactly as a typed message would — queued behind a running turn, an idle session resumed
+        // for it — and the runtime runs it as its built-in command (never a model turn; the model never sees
+        // the text). One door for every client: the TUI's `/compact`, `winter compact <id>`, and the same
+        // text typed into the Mac's composer. The outcome lands in the log as a `continuity_warning`
+        // (`compacted` / `compaction_failed`, projector/index.ts). Until 0.0.4's carry this was a typed
+        // `not_supported_on_winter_leg`; the runtime has had the built-in all along.
+        if (opts.winter !== undefined && (opts.winter.get(p.sessionId) !== undefined || isRunnableLeg(p.sessionId))) {
+          const instructions = p.instructions?.trim() ?? "";
+          const text = instructions.length > 0 ? `/compact ${instructions}` : "/compact";
+          const winterSession = await ensureWinterSession(p.sessionId);
+          if (winterSession !== undefined) {
+            try {
+              const sent = await withReplacementRetry(winterSession, () => ensureWinterSession(p.sessionId), (s) => s.send(text, socket.data.clientName));
+              return { ok: true, compacted: false, uptoSeq: 0, summaryChars: 0, requested: true, seq: sent.seq };
+            } catch (err) { rpcFromWinterRefusal(err); }
+          }
         }
+        refuseIfPredatesWinterLeg(p.sessionId);
         return { ok: true, compacted: false, uptoSeq: 0, summaryChars: 0 };
       }
       case METHODS.skillsList: {

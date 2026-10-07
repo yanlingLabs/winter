@@ -139,6 +139,21 @@ function mainModelKeyFrom(init: Record<string, unknown>): MainModelKey | undefin
 /** Review r2: `continuity_warning` kinds re-emitted on every resume -- logged, never shown (see the projector's branch). */
 const RESUME_TIME_CONTINUITY_WARNINGS: ReadonlySet<string> = new Set(["provider_state_missing", "provider_state_deleted", "sidecar_unreadable"]);
 
+/** The `compacted` notice's text, from the boundary's `compact_metadata` (counts and the trigger only --
+ *  never the summary). A `pre_tokens` of 0 (a runtime that had measured nothing yet) states no size. */
+export function compactionNoticeText(raw: unknown): string {
+  const meta = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  const manual = meta.trigger === "manual";
+  const pre = typeof meta.pre_tokens === "number" && Number.isFinite(meta.pre_tokens) && meta.pre_tokens > 0 ? Math.round(meta.pre_tokens) : undefined;
+  const preserved = typeof meta.preserved_messages === "object" && meta.preserved_messages !== null ? (meta.preserved_messages as { uuids?: unknown }).uuids : undefined;
+  const kept = Array.isArray(preserved) ? preserved.length : 0;
+  const head = `Conversation compacted${manual ? " on request" : ""}${pre !== undefined ? ` (it was about ${pre.toLocaleString("en-US")} tokens)` : ""}`;
+  const tail = kept > 1
+    ? `the older part is now a summary, and the last ${kept} messages carry over as they are.`
+    : kept === 1 ? "the older part is now a summary, and the last message carries over as it is." : "everything before this point is now a summary.";
+  return `${head}: ${tail}`;
+}
+
 class ProjectorImpl implements Projector {
   private readonly checkpoint: CheckpointStore;
   private readonly winterSessionId: string;
@@ -515,6 +530,30 @@ class ProjectorImpl implements Projector {
       const uuid = typeof m.uuid === "string" && m.uuid.length > 0 ? m.uuid : `${this.turnIndex}:${this.roundIndex}:${warning}:${text.length}`;
       return claim(`cw:${uuid}`, () => [
         { type: "continuity_warning", sessionId: this.deps.sessionId, threadId, warning, text: boundContinuityWarningText(text) },
+      ]);
+    }
+
+    // 2026-10-07: a COMPACTION is something Winter did to the conversation, so the user sees it as a
+    // `continuity_warning` -- the variant's own contract ("what Winter did to it"; an open `warning`
+    // kind a client renders by its `text`, no table), so every client shows it with no protocol change.
+    // `compacted` from the runtime's `system/compact_boundary` (a `/compact`, an auto or overflow
+    // compaction, a switch's), `compaction_failed` from its `system/status` failure pair. Before this the
+    // projector dropped both, and a compaction was invisible unless a switch had announced it.
+    if (kindOf(msg) === "system/compact_boundary") {
+      const m = msg as Record<string, unknown>;
+      const threadId = threadIdOf(m as { parent_tool_use_id?: string | null });
+      const uuid = typeof m.uuid === "string" && m.uuid.length > 0 ? m.uuid : `${this.turnIndex}:${this.roundIndex}:compact`;
+      return claim(`cb:${uuid}`, () => [
+        { type: "continuity_warning", sessionId: this.deps.sessionId, threadId, warning: "compacted", text: boundContinuityWarningText(compactionNoticeText(m.compact_metadata)) },
+      ]);
+    }
+    if (kindOf(msg) === "system/status" && (msg as Record<string, unknown>).compact_result === "failed") {
+      const m = msg as Record<string, unknown>;
+      const threadId = threadIdOf(m as { parent_tool_use_id?: string | null });
+      const detail = sanitizeDetail(m.compact_error);
+      const uuid = typeof m.uuid === "string" && m.uuid.length > 0 ? m.uuid : `${this.turnIndex}:${this.roundIndex}:compact-failed`;
+      return claim(`cf:${uuid}`, () => [
+        { type: "continuity_warning", sessionId: this.deps.sessionId, threadId, warning: "compaction_failed", text: boundContinuityWarningText(detail === undefined ? "Compaction failed; the conversation continues as it was." : `Compaction failed; the conversation continues as it was: ${detail}`) },
       ]);
     }
 

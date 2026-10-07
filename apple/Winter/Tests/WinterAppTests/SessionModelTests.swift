@@ -341,6 +341,31 @@ final class SessionModelTests: XCTestCase {
         }
     }
 
+    /// 2026-10-07: a `/compact` turn (the runtime's built-in, which the model never sees) reads
+    /// "Compacting" rather than a random verb; the command must be the WHOLE first token at the start,
+    /// as the runtime's own `resolveBuiltinCommand` decides.
+    @MainActor
+    func testCompactTurnSaysCompacting() {
+        XCTAssertTrue(WorkingVerbs.isCompactCommand("/compact"))
+        XCTAssertTrue(WorkingVerbs.isCompactCommand("/compact keep the API decisions"))
+        XCTAssertFalse(WorkingVerbs.isCompactCommand("/compaction"))
+        XCTAssertFalse(WorkingVerbs.isCompactCommand("please /compact"))
+        XCTAssertFalse(WorkingVerbs.isCompactCommand(" /compact"))
+
+        let session = SessionModel()
+        session.markConnected()
+        session.apply(userMessage("/compact", seq: 1))
+        session.apply(turnStarted(seq: 2))
+        XCTAssertEqual(session.state.workingVerb, "Compacting")
+        XCTAssertEqual(FieldStateAdapter(session: session).statusText, "Compacting…")
+
+        let other = SessionModel()
+        other.markConnected()
+        other.apply(userMessage("summarize this", seq: 1))
+        other.apply(turnStarted(seq: 2))
+        XCTAssertTrue(WorkingVerbs.all.contains(other.state.workingVerb))
+    }
+
     /// End-to-end store wiring: `turnStarted(main)` rolls a real verb (member of the curated
     /// list), it stays STABLE across mid-turn tool activity (not re-rolled per event), and
     /// `FieldStateAdapter.statusText` shows exactly that verb with no tool name and no "☑ n/m"
