@@ -117,6 +117,8 @@ struct SystemClock: CUClock {
 }
 
 /// The package's log. Tests swap `sink` to observe messages.
+/// Every line is a persisted `.notice` with public content: `log show --predicate 'subsystem == "com.winter.computeruse"'`
+/// (add `--info` for nothing more; notices are kept by default).
 enum PresentationLog {
     private static let logger = Logger(subsystem: "com.winter.computeruse", category: "presentation")
     nonisolated(unsafe) static var sink: (String) -> Void = { message in

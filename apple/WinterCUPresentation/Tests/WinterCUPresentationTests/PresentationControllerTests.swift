@@ -404,6 +404,90 @@ import XCTest
         XCTAssertEqual(windows.aboveReads, reads + 1)
     }
 
+    /// Every presentation log line, while `body` runs.
+    func capturingLogs(_ body: () -> Void) -> [String] {
+        let saved = PresentationLog.sink
+        var lines: [String] = []
+        PresentationLog.sink = { lines.append($0) }
+        defer { PresentationLog.sink = saved }
+        body()
+        return lines
+    }
+
+    /// The live-gate case: the target is on this desktop and nothing of anyone else's is over the cursor's point; only
+    /// the helper's own panels (overlay, mirror, even an ordinary-level one), the menu bar and the target app's own tab
+    /// strip lie above it. The cursor shows, and the log says why.
+    func testAVisibleTargetShowsItsCursorWhateverTheHelperAndTheAppDrawAboveIt() {
+        let target = CGRect(x: 29, y: 67, width: 1211, height: 824)
+        addWindow(1, target)
+        windows.above[1] = [
+            StackWindow(id: 90, pid: 4242, layer: 3, bounds: target, ownerName: "Winter Computer Use"),
+            StackWindow(id: 91, pid: 4242, layer: 0, bounds: CGRect(x: 0, y: 0, width: 1512, height: 982)),
+            StackWindow(id: 92, pid: 77, layer: 24, bounds: CGRect(x: 0, y: 0, width: 1512, height: 33), ownerName: "Menubar"),
+            StackWindow(id: 93, pid: 500, layer: 0, bounds: CGRect(x: 29, y: 40, width: 1211, height: 68), ownerName: "App1"),
+        ]
+        let lines = capturingLogs {
+            controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 90), kind: .move)
+            controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 600, y: 400), kind: .press)
+            clock.now += 1
+            ticker.fire()
+        }
+        let o = try! XCTUnwrap(surfaces.overlay(1))
+        XCTAssertTrue(o.shown)
+        XCTAssertEqual(o.occluded, [false], "decided once: visible")
+        XCTAssertTrue(lines.contains { $0.contains("first event") && $0.contains("App1 window 1") }, "\(lines)")
+        XCTAssertTrue(lines.contains { $0.contains("visible at") && $0.contains("4 windows above, none covering") },
+                      "\(lines)")
+    }
+
+    /// No covered decision is made before the windows above are known: the cursor shows, and the first look decides.
+    func testNoCoveredDecisionBeforeTheWindowsAboveAreKnown() {
+        addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400))
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 200), kind: .move)
+        let o = try! XCTUnwrap(surfaces.overlay(1))
+        XCTAssertTrue(o.shown)
+        XCTAssertEqual(o.occluded, [], "nothing known yet: not faded")
+        windows.above[1] = []
+        clock.now += 0.02
+        ticker.fire()
+        XCTAssertEqual(o.occluded, [false], "the first look happens on the next tick, unthrottled")
+    }
+
+    func testEveryHideAndCoverIsLoggedWithItsReason() {
+        // No geometry at all.
+        var lines = capturingLogs {
+            controller.cursor(sessionId: "s", target: ref(7), point: CGPoint(x: 10, y: 10), kind: .move)
+            controller.cursor(sessionId: "s", target: ref(7), point: CGPoint(x: 20, y: 10), kind: .move)
+        }
+        XCTAssertEqual(lines.filter { $0.contains("App7 window 7") && $0.contains("no geometry") }.count, 1,
+                       "logged once, not per event: \(lines)")
+
+        // Covered by another app's window: named.
+        addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400))
+        windows.above[1] = [StackWindow(id: 9, pid: 600, layer: 0, bounds: CGRect(x: 250, y: 150, width: 200, height: 150),
+                                        ownerName: "Winter Dev")]
+        lines = capturingLogs {
+            controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 200), kind: .press)
+        }
+        XCTAssertTrue(lines.contains { $0.contains("covered by Winter Dev window 9 (pid 600, layer 0") }, "\(lines)")
+
+        // Minimized (or on another Space): the overlay hides, once, with the reason; it comes back with the window.
+        lines = capturingLogs {
+            addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400), onScreen: false)
+            clock.now += 0.1
+            ticker.fire()
+            clock.now += 0.1
+            ticker.fire()
+            addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400))
+            clock.now += 0.1
+            ticker.fire()
+        }
+        XCTAssertEqual(lines.filter { $0.hasSuffix("hidden: the window is minimized or on another Space") }.count, 1,
+                       "\(lines)")
+        XCTAssertTrue(lines.contains { $0.contains("showing again") && $0.contains("was hidden: the window is minimized") },
+                      "\(lines)")
+    }
+
     func testForegroundTakesOverTheLook() {
         addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400))
         controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 200), kind: .move)

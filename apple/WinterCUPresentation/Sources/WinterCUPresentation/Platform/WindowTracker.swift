@@ -4,8 +4,8 @@ import Foundation
 /// The window-server queries the presentation layer needs, behind a seam so tests can count them. Each is scoped to a
 /// few windows, never a listing of every window on the system.
 protocol WindowServer: Sendable {
-    /// Descriptions of exactly these windows (`CGWindowListCreateDescriptionFromArray`), in the given order. Gone windows
-    /// are missing from the result.
+    /// Descriptions of exactly these windows (`CGWindowListCreateDescriptionFromArray`; a window that call leaves out is
+    /// asked about on its own). Gone windows are missing from the result.
     func describe(_ ids: [CGWindowID]) -> [StackWindow]
     /// The on-screen windows ABOVE `id`, front to back (`.optionOnScreenAboveWindow`): what could cover it.
     func windowsAbove(_ id: CGWindowID) -> [StackWindow]
@@ -13,12 +13,34 @@ protocol WindowServer: Sendable {
 
 struct SystemWindowServer: WindowServer {
     func describe(_ ids: [CGWindowID]) -> [StackWindow] {
+        Self.describe(ids, batch: Self.batchDescription, single: Self.singleDescription)
+    }
+
+    /// The batch description, then each window it left out asked about on its own (belt and braces: the batch call
+    /// has been seen to describe every window asked, but a missing one would read as gone and hide its cursor).
+    static func describe(_ ids: [CGWindowID], batch: ([CGWindowID]) -> [StackWindow],
+                         single: (CGWindowID) -> StackWindow?) -> [StackWindow] {
         guard !ids.isEmpty else { return [] }
+        var found = batch(ids)
+        let missing = Set(ids).subtracting(found.map(\.id))
+        for id in ids where missing.contains(id) {
+            if let entry = single(id) { found.append(entry) }
+        }
+        return found
+    }
+
+    private static func batchDescription(_ ids: [CGWindowID]) -> [StackWindow] {
         // The array holds raw CGWindowID values, the way CGWindowListCreate returns them.
         var values: [UnsafeRawPointer?] = ids.map { UnsafeRawPointer(bitPattern: UInt($0)) }
         guard let array = CFArrayCreate(nil, &values, values.count, nil),
               let list = CGWindowListCreateDescriptionFromArray(array) as? [[String: Any]] else { return [] }
-        return list.compactMap(Self.entry)
+        return list.compactMap(entry)
+    }
+
+    private static func singleDescription(_ id: CGWindowID) -> StackWindow? {
+        (CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]])?
+            .first { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == id }
+            .flatMap(entry)
     }
 
     func windowsAbove(_ id: CGWindowID) -> [StackWindow] {
@@ -37,7 +59,8 @@ struct SystemWindowServer: WindowServer {
                            bounds: bounds,
                            alpha: CGFloat((info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1),
                            // Absent, not false, for a window that is off screen.
-                           isOnScreen: (info[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false)
+                           isOnScreen: (info[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false,
+                           ownerName: info[kCGWindowOwnerName as String] as? String)
     }
 }
 

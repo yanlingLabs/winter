@@ -24,6 +24,11 @@ import Foundation
     private var occluded: [TargetKey: Bool] = [:]
     private var lastOcclusionCheck: TimeInterval = -.infinity
     private let ownPID: pid_t
+    /// Targets whose cursor events were announced (first event) or dropped (no geometry), so each is logged once.
+    private var announced: Set<TargetKey> = []
+    private var dropped: Set<TargetKey> = []
+    /// Why each overlay is hidden, as last logged.
+    private var hiddenReason: [TargetKey: String] = [:]
 
     /// Mirror panels that exist (shown, or hidden but still wanted so they can come back quickly).
     private var mirrors: [TargetKey: MirrorSurface] = [:]
@@ -74,9 +79,19 @@ import Foundation
         let now = clock.now
         guard let frame = windows.snapshot(of: target.windowID)?.frame ?? windowFrames[key] else {
             // Nowhere to put it yet; the event still counts as activity on the target.
+            if dropped.insert(key).inserted {
+                PresentationLog.notice("cursor for \(target.appName) window \(target.windowID) (pid \(target.pid)) not drawn: "
+                    + "the window server has no geometry for that window")
+            }
             if kind != .done { state.noteCursor(key, fraction: nil, now: now) }
             refresh()
             return
+        }
+        dropped.remove(key)
+        if announced.insert(key).inserted {
+            PresentationLog.notice("cursor for \(target.appName) window \(target.windowID) (pid \(target.pid)): first event "
+                // The case name only: a caption's text can carry an element's label.
+                + "\(String(describing: kind).prefix { $0 != "(" }) at \(point), window frame \(frame)")
         }
         windowFrames[key] = frame
         let local = { (p: CGPoint) in CGPoint(x: p.x - frame.minX, y: p.y - frame.minY) }
@@ -172,11 +187,23 @@ import Foundation
             let p = presence(of: key)
             if let f = p.frame { windowFrames[key] = f }
             guard case .visible(let frame) = p else {
+                let reason: String
+                if case .hidden(let last) = p, last != nil {
+                    reason = (windows.snapshot(of: key.target.windowID)?.isOnScreen ?? false)
+                        ? "the window is off every screen" : "the window is minimized or on another Space"
+                } else {
+                    reason = "the window server has no geometry for the window"
+                }
+                logHidden(key, reason)
                 if shownOverlays.remove(key) != nil {
                     overlays[key]?.setShown(false)
                     occluded[key] = nil
                 }
                 continue
+            }
+            if let was = hiddenReason.removeValue(forKey: key) {
+                PresentationLog.notice("cursor overlay for \(key.target.appName) window \(key.target.windowID) showing again "
+                    + "at \(frame) (was hidden: \(was))")
             }
             let overlay = overlays[key] ?? surfaces.makeOverlay(target: key.target)
             overlays[key] = overlay
@@ -186,6 +213,7 @@ import Foundation
             if shownOverlays.insert(key).inserted { overlay.setShown(true) }
         }
         for key in shownOverlays where !live.contains(key) {
+            logHidden(key, "the cursor faded out (turn ended, idle or done)")
             overlays[key]?.setShown(false)
             shownOverlays.remove(key)
             occluded[key] = nil
@@ -221,12 +249,29 @@ import Foundation
                   let above = windows.windowsAbove(key.target.windowID) else { continue }
             let tip = timeline.frame(at: now).tip
             let point = CGPoint(x: frame.minX + tip.x, y: frame.minY + tip.y)
-            let covered = !CursorOcclusion.isVisible(at: point, above: above, ownPID: ownPID)
+            let cover = CursorOcclusion.coveringWindow(at: point, above: above, ownPID: ownPID, targetPID: key.target.pid,
+                                                       targetFrame: frame)
+            let covered = cover != nil
             if occluded[key] != covered {
                 occluded[key] = covered
                 overlays[key]?.setOccluded(covered)
+                if let cover {
+                    PresentationLog.notice("cursor for \(key.target.appName) window \(key.target.windowID) hidden at \(point): "
+                        + "covered by \(cover.ownerName ?? "?") window \(cover.id) (pid \(cover.pid), layer \(cover.layer), "
+                        + "\(cover.bounds))")
+                } else {
+                    PresentationLog.notice("cursor for \(key.target.appName) window \(key.target.windowID) visible at \(point) "
+                        + "(\(above.count) windows above, none covering)")
+                }
             }
         }
+    }
+
+    /// Logs why a target's overlay is hidden, once per reason.
+    private func logHidden(_ key: TargetKey, _ reason: String) {
+        guard hiddenReason[key] != reason else { return }
+        hiddenReason[key] = reason
+        PresentationLog.notice("cursor overlay for \(key.target.appName) window \(key.target.windowID) hidden: \(reason)")
     }
 
     /// Hands every cursor's current frame to its overlay and mirror, and runs the frame driver at the rate the
@@ -270,6 +315,9 @@ import Foundation
         cursors[key] = nil
         windowFrames[key] = nil
         occluded[key] = nil
+        announced.remove(key)
+        dropped.remove(key)
+        hiddenReason[key] = nil
     }
 
     // MARK: - Test hooks
