@@ -566,8 +566,9 @@ test("the per-mode capability exposure table is pinned (the 2026-10-01 tool-surf
   expect(capabilityHalf("dispatch")).toEqual([
     "mcp__winter__lsp__lsp", "mcp__winter__office__docs", "mcp__winter__office__sheets", "mcp__winter__office__slides",
   ]);
+  // ComputerV2 (2026-10-08) is code + dispatch, never chat (R14).
   expect(capabilityHalf("chat")).toEqual([
-    "Computer", "ListSessions", "SpawnSession",
+    "Computer", "ComputerV2", "ListSessions", "SpawnSession",
     "mcp__winter__lsp__lsp", "mcp__winter__office__docs", "mcp__winter__office__sheets", "mcp__winter__office__slides",
   ]);
   // Code keeps every built-in, so the key never moves its list.
@@ -608,7 +609,7 @@ test("FAIL CLOSED (review): `toolSurfaceViolations` names a built-in the child o
   expect(toolSurfaceViolations([...honest, "Edit", "Agent", "SomeFutureBuiltin"], allowed, CAPABILITY_PLAIN_NAMES)).toEqual(["Edit", "Agent", "SomeFutureBuiltin"]);
   // Code states no allowed list: nothing to check.
   expect(toolSurfaceViolations(["Edit", "Agent"], undefined, CAPABILITY_PLAIN_NAMES)).toEqual([]);
-  expect([...CAPABILITY_PLAIN_NAMES].sort()).toEqual(["Browser", "Computer", "ListSessions", "SpawnSession"]);
+  expect([...CAPABILITY_PLAIN_NAMES].sort()).toEqual(["Browser", "Computer", "ComputerV2", "ListSessions", "SpawnSession"]);
 });
 
 test("`Options.legacyToolNames` carries the daemon's retired Search under its old name in every mode", () => {
@@ -819,7 +820,9 @@ test("LIVE calls strip only the keys the incarnation built (2026-10-01 review); 
 test("the strip names EXACT tools: every capability tool strips, and a forged `schedule`/`push_notification` under a capability key never does (the sinks act on the stripped name)", () => {
   for (const name of Object.keys(WINTER_CAPABILITY_TOOLS)) {
     if (name.startsWith("mcp__winter__external__")) continue;
-    expect({ name, host: hostToolNameFor(name) }).toEqual({ name, host: name.split("__").slice(3).join("__") });
+    // ComputerV2's server tool is `script`, but its host name is `computer_v2` (its pair in the table).
+    const host = name === "mcp__winter__computer_v2__script" ? "computer_v2" : name.split("__").slice(3).join("__");
+    expect({ name, host: hostToolNameFor(name) }).toEqual({ name, host });
   }
   for (const key of ["web", "research", "computer", "sessions", "browser"]) {
     for (const tool of ["schedule", "push_notification", "bash", "read"]) expect(hostToolNameFor(`mcp__winter__${key}__${tool}`)).toBeUndefined();

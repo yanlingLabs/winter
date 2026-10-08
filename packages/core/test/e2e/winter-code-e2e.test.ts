@@ -225,10 +225,15 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
     const modes = WINTER_CAPABILITY_TOOLS["mcp__winter__computer__computer"].modes as readonly string[];
     expect(modes).toContain("code");
     expect(modes).not.toContain("chat");
-    // the daemon's own builder includes `computer` for a code session (computerUse.enabled: true)
+    // the daemon's own builder includes a computer server for a code session (computerUse.enabled: true) —
+    // since ComputerV2 (2026-10-08) `computer_v2`, never beside the legacy `computer` (built only with
+    // `computerUse.legacyComputer`; the spy below still drives the legacy capability directly)
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-code-cap-")));
     const record = daemon!.buildSessionCapabilities({ sessionId: "s_probe", mode: "code", cwd, roots: [cwd], tmpDir: cwd });
-    expect(Object.keys(record)).toContain("winter__computer");
+    expect(Object.keys(record)).toContain("winter__computer_v2");
+    expect(Object.keys(record)).not.toContain("winter__computer");
+    expect(disallowedToolsFor("chat", {})).toContain("ComputerV2");
+    expect(disallowedToolsFor("code", {})).not.toContain("ComputerV2");
     // the server is built for every mode (P8b-36); the MODE scoping is `disallowedTools` (P8b-12),
     // under the plain name the child knows it by since the 2026-10-01 tool-surface ruling
     expect(disallowedToolsFor("chat", {})).toContain("Computer");

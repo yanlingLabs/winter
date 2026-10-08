@@ -101,18 +101,25 @@ describe("capabilities.list", () => {
     c.close();
   });
 
-  test("with no settings for them, computer and lsp both default enabled:true", async () => {
-    // Computer use is default-ON since 2026-10-07 (user ruling); it was opt-in before.
+  test("with no settings for them, computer_v2 and lsp default enabled:true — the legacy computer off", async () => {
+    // Computer use is default-ON since 2026-10-07 (user ruling); it was opt-in before. Since ComputerV2
+    // (2026-10-08) the live computer server is `computer_v2`; the old `computer` only with legacyComputer.
     const { socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.capabilitiesList, {});
     const byKey = new Map<string, any>(result.result.capabilities.map((x: any) => [x.key, x]));
-    expect(byKey.get("computer").enabled).toBe(true);
+    expect(byKey.get("computer_v2").enabled).toBe(true);
+    expect(byKey.get("computer").enabled).toBe(false);
+    expect(byKey.get("computer_v2").tools).toEqual([{
+      name: "mcp__winter__computer_v2__script", plainName: "ComputerV2", modes: ["code", "dispatch"],
+      ...(byKey.get("computer_v2").tools[0].deferred === undefined ? {} : { deferred: byKey.get("computer_v2").tools[0].deferred }),
+      exposure: { code: true, dispatch: true, chat: false },
+    }]);
     expect(byKey.get("lsp").enabled).toBe(true);
     // Every other key has no settings gate at all — always live.
     for (const key of CAPABILITY_SERVER_KEYS) {
-      if (key === "computer" || key === "lsp") continue;
+      if (key === "computer" || key === "computer_v2" || key === "lsp") continue;
       expect(byKey.get(key).enabled).toBe(true);
     }
     c.close();
@@ -124,16 +131,18 @@ describe("capabilities.list", () => {
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.capabilitiesList, {});
     expect(result.result.capabilities.find((x: any) => x.key === "computer").enabled).toBe(false);
+    expect(result.result.capabilities.find((x: any) => x.key === "computer_v2").enabled).toBe(false);
     c.close();
   });
 
-  test("settings.computerUse.enabled:true flips computer live; settings.lsp.enabled:false flips lsp off", async () => {
-    const { socketPath, harnessToken } = await boot({ computerUse: { enabled: true }, lsp: { enabled: false } });
+  test("settings.computerUse.legacyComputer:true flips the OLD computer live instead; settings.lsp.enabled:false flips lsp off", async () => {
+    const { socketPath, harnessToken } = await boot({ computerUse: { enabled: true, legacyComputer: true }, lsp: { enabled: false } });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.capabilitiesList, {});
     const byKey = new Map<string, any>(result.result.capabilities.map((x: any) => [x.key, x]));
     expect(byKey.get("computer").enabled).toBe(true);
+    expect(byKey.get("computer_v2").enabled).toBe(false);
     expect(byKey.get("lsp").enabled).toBe(false);
     c.close();
   });
