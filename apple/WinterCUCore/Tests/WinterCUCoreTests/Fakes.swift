@@ -86,11 +86,14 @@ final class FakeAX: CUAXBackend {
     func isSettable(_ e: AXUIElement, _ name: String) -> Bool { settable.contains("\(token(e)):\(name)") }
     /// "token:attribute" writes the app accepts and ignores (the value stays what it was).
     var ignoresWrites: Set<String> = []
+    /// Runs after each write that went through ("token:attribute"), to change the fake world.
+    var onSet: ((String) -> Void)?
     func set(_ e: AXUIElement, _ name: String, _ value: CFTypeRef) throws {
         written.append("\(token(e)):\(name)")
         if let err = setError { throw err }
         if ignoresWrites.contains("\(token(e)):\(name)") { return }
         attrs[AXIdentity(element: e), default: [:]][name] = value
+        onSet?("\(token(e)):\(name)")
     }
     /// "token:action" pairs the app refuses as unsupported (an AX error, like Finder's AXOpen).
     var refuses: Set<String> = []
@@ -158,7 +161,12 @@ final class FakeSystem: CUSystemBackend {
     }
     func windowStack() -> [CUWindowServerWindow] { stack }
     func frontmostPid() -> pid_t? { front }
-    func activate(pid: pid_t) -> Bool { activated.append(pid); front = pid; return true }
+    /// The active Space (nil: unreadable, as on a Mac whose SkyLight lacks the call).
+    var space: UInt64? = 1
+    func activeSpace() -> UInt64? { space }
+    /// Runs on every activation (after `front` is set): a test moves the Space back as macOS would.
+    var onActivate: ((pid_t) -> Void)?
+    func activate(pid: pid_t) -> Bool { activated.append(pid); front = pid; onActivate?(pid); return true }
     var stageManager = false
     func stageManagerEnabled() -> Bool { stageManager }
     func cursorLocation() -> CGPoint? { cursor }

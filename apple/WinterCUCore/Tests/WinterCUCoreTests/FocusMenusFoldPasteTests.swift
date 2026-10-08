@@ -8,12 +8,15 @@ import XCTest
 enum FocusSPI {
     nonisolated(unsafe) static var calls: [String] = []
     nonisolated(unsafe) static var frontPid: pid_t = 1
+    /// Runs after each focus record (not a defocus), to change the fake world as an app might react.
+    nonisolated(unsafe) static var onFocus: (() -> Void)?
     static func pid(_ psn: UnsafeRawPointer) -> pid_t { pid_t(psn.load(fromByteOffset: 4, as: UInt32.self)) }
 }
 
 private let fakePostRecord: CUSkyLight.PostEventRecordTo = { psn, bytes in
     let wid = UInt32(bytes[0x3C]) | UInt32(bytes[0x3D]) << 8 | UInt32(bytes[0x3E]) << 16 | UInt32(bytes[0x3F]) << 24
     FocusSPI.calls.append("\(bytes[0x8A] == 1 ? "focus" : "defocus") pid \(FocusSPI.pid(psn)) window \(wid)")
+    if bytes[0x8A] == 1 { FocusSPI.onFocus?() }
     return 0
 }
 private let fakeGetFront: CUSkyLight.GetFrontProcess = { buf in
@@ -26,10 +29,6 @@ private let fakeProcessForPid: CUSkyLight.GetProcessForPID = { pid, buf in
     buf.storeBytes(of: UInt32(pid), toByteOffset: 4, as: UInt32.self)
     return 0
 }
-private let fakeSetFront: CUSkyLight.SetFrontProcess = { psn, wid, options in
-    FocusSPI.calls.append("front pid \(FocusSPI.pid(psn)) window \(wid) options \(String(options, radix: 16))")
-    return 0
-}
 
 /// SkyLight with only the focus SPIs, recording into `FocusSPI`.
 func focusSkyLight() -> CUSkyLight {
@@ -38,7 +37,6 @@ func focusSkyLight() -> CUSkyLight {
         case "SLPSPostEventRecordTo": return unsafeBitCast(fakePostRecord, to: UnsafeMutableRawPointer.self)
         case "_SLPSGetFrontProcess": return unsafeBitCast(fakeGetFront, to: UnsafeMutableRawPointer.self)
         case "GetProcessForPID": return unsafeBitCast(fakeProcessForPid, to: UnsafeMutableRawPointer.self)
-        case "SLPSSetFrontProcessWithOptions": return unsafeBitCast(fakeSetFront, to: UnsafeMutableRawPointer.self)
         default: return nil
         }
     }
@@ -64,6 +62,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
     override func setUp() {
         FocusSPI.calls = []
         FocusSPI.frontPid = 1
+        FocusSPI.onFocus = nil
     }
 
     /// Finder (pid 5252) in the background behind the user's app (pid 1, its key window 31); a File menu with
@@ -88,7 +87,9 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         ax.add(apple, role: "AXMenuBarItem", title: "Apple")
         ax.add(file, role: "AXMenuBarItem", title: "File", extra: [kAXChildrenAttribute: [fileMenu]])
         ax.add(fileMenu, role: kAXMenuRole, extra: [kAXChildrenAttribute: [trash!]])
-        ax.add(trash, role: kAXMenuItemRole, title: "Move to Trash", extra: [kAXEnabledAttribute: trashEnabled])
+        ax.add(trash, role: kAXMenuItemRole, title: "Move to Trash",
+               extra: [kAXEnabledAttribute: trashEnabled, kAXMenuItemCmdCharAttribute: "", kAXMenuItemCmdVirtualKeyAttribute: 0x33,
+                       kAXMenuItemCmdModifiersAttribute: 0])
         ax.setActions(trash, [kAXPressAction])
 
         sys = FakeSystem()
@@ -104,7 +105,6 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         pb = clip
         core = CUCore(events: nil, clock: CUSystemClock(), skyLight: focusSkyLight(), poster: poster, ax: ax, sys: sys,
                       pasteboard: { clip }, startMonitors: false)
-        core.keepFrontmostLater = false
         target = CUTarget(id: "t1", sessionId: "s", pid: pid, bundleId: "com.apple.finder", appName: "Finder",
                           isChromium: false, mirror: false, windowID: 77, windowTitle: "Downloads")
         core.registerForTesting(target, windowElement: window)
@@ -127,14 +127,10 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         var during: [String] = []
         ax.onPerform = { _ in during = FocusSPI.calls }
         let r = try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
-        XCTAssertEqual(during, [
-            "defocus pid 1 window 77", "focus pid 5252 window 77",            // yabai: key without raise
-            "front pid 5252 window 77 options 400",                            // kCPSNoWindows, no window forward
-        ], "the command ran with the bound window key")
-        XCTAssertEqual(Array(FocusSPI.calls.dropFirst(3)), [
-            "front pid 1 window 0 options 400",                                // the front handed back
-            "defocus pid 5252 window 77", "focus pid 1 window 31",            // and the user's key window
-        ])
+        XCTAssertEqual(during, ["defocus pid 1 window 77", "focus pid 5252 window 77"], "yabai: key without raise")
+        XCTAssertEqual(Array(FocusSPI.calls.dropFirst(2)), ["defocus pid 5252 window 77", "focus pid 1 window 31"],
+                       "the user's key window handed back")
+        XCTAssertFalse(FocusSPI.calls.contains { $0.hasPrefix("front ") }, "never the front process: that switches Spaces")
         XCTAssertEqual(ax.performed, ["\(token(trash)):AXPress"])
         XCTAssertEqual(sys.frontmostPid(), 1, "the user's app stayed frontmost")
         XCTAssertTrue(sys.activated.isEmpty, "nothing was activated")
@@ -144,23 +140,36 @@ final class FocusMenusFoldPasteTests: XCTestCase {
     func testIfTheTargetActivatesItselfTheUsersAppGetsTheFrontBack() async throws {
         finder()
         ax.onPerform = { [unowned self] _ in sys.front = pid }  // Finder brings itself forward
-        try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
-        XCTAssertEqual(sys.activated, [1], "re-activated after 50 ms")
+        let r = try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
+        XCTAssertEqual(sys.activated, [1], "the user's app re-activated at once")
         XCTAssertEqual(sys.frontmostPid(), 1)
+        XCTAssertTrue(r.detail?.hasSuffix("Finder activated itself — the user's app was put back") ?? false, r.detail ?? "")
     }
 
-    func testAStillDisabledCommandAsksForTheForegroundRung() async throws {
+    func testADisabledCommandPointsAtTheUIRoutesFirstAndOnlyThenAsksForTheForeground() async throws {
         finder(trashEnabled: false)
+        do {
+            try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
+            XCTFail("expected the UI routes")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "unsupported", "no foreground card yet")
+            XCTAssertTrue(e.message.contains("“Move to Trash” is disabled while Finder is in the background"), e.message)
+            XCTAssertTrue(e.message.contains("its context menu (action(ref, \"showMenu\") on the selected item"), e.message)
+            XCTAssertTrue(e.message.contains("the window's toolbar or Action menu"), e.message)
+            XCTAssertTrue(e.message.contains("key(\"cmd+delete\")"), "the item's own shortcut: \(e.message)")
+            XCTAssertTrue(e.message.contains("Only if those are disabled too, call menu() again"), e.message)
+        }
+        // Asked again (the UI routes were disabled too): now the consented foreground card.
         do {
             try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
             XCTFail("expected needs_foreground")
         } catch let e as CUError {
             XCTAssertEqual(e.code, "needs_foreground")
-            XCTAssertTrue(e.message.contains("“Move to Trash” is disabled right now"), e.message)
             XCTAssertTrue(e.message.contains("stays disabled while Finder is in the background, even with its window made key"), e.message)
         }
         XCTAssertTrue(ax.performed.isEmpty)
         XCTAssertEqual(sys.frontmostPid(), 1)
+        XCTAssertFalse(FocusSPI.calls.contains { $0.hasPrefix("front ") })
         // With the user's consent (the daemon retries with allowForeground) Finder comes forward, then gives it back.
         do {
             try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])), foreground: true)
@@ -172,6 +181,39 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         XCTAssertEqual(sys.activated, [pid, 1], "forward for the command, the front given back")
     }
 
+    func testTheContextMenuRouteWorksEndToEnd() async throws {
+        finder(trashEnabled: false)
+        let app = ax.application(pid)
+        let icon = fakeElement(98_030), menu = fakeElement(98_031), item = fakeElement(98_032)
+        ax.put(window, [kAXChildrenAttribute: [field, icon]])
+        ax.add(icon, role: kAXImageRole, title: "report.pdf", frame: CGRect(x: 400, y: 300, width: 64, height: 64),
+               extra: [kAXSelectedAttribute: true])
+        ax.setActions(icon, [kAXShowMenuAction])
+        ax.add(menu, role: kAXMenuRole, extra: [kAXChildrenAttribute: [item]])
+        ax.add(item, role: kAXMenuItemRole, title: "Move to Trash", extra: [kAXEnabledAttribute: true])
+        ax.setActions(item, [kAXPressAction])
+        // The context menu opens under the application element, as AppKit puts it.
+        ax.onPerform = { [unowned self] what in
+            if what == "\(token(icon)):AXShowMenu" { ax.put(app, [kAXChildrenAttribute: [window, menu]]) }
+        }
+        // (State is read by the live tree reader; here the same pieces are driven directly.)
+        let iconRef = target.refs.ref(for: AXIdentity(element: icon))
+        XCTAssertTrue(CUCore.openMenus(app: app, boundWindow: window, ax: ax).isEmpty)
+        let shown = try await act(.action(CUAXAction(ref: iconRef, name: "showMenu")))
+        XCTAssertEqual(shown.rung, 1)
+        // What state() puts first: the menus open under the application, with the item in them.
+        let open = CUCore.openMenus(app: app, boundWindow: window, ax: ax)
+        XCTAssertEqual(open.map { token($0) }, [token(menu)])
+        let found = try XCTUnwrap(open.flatMap { ax.elements($0, kAXChildrenAttribute) }
+            .first { ax.string($0, kAXTitleAttribute) == "Move to Trash" && ax.bool($0, kAXEnabledAttribute) == true })
+        let itemRef = target.refs.ref(for: AXIdentity(element: found))
+        let r = try await act(.click(CUClickAction(ref: itemRef)))
+        XCTAssertEqual(r.rung, 1)
+        XCTAssertEqual(ax.performed, ["\(token(icon)):AXShowMenu", "\(token(item)):AXPress"], "the item's own menu, by AX")
+        XCTAssertTrue(sys.activated.isEmpty)
+        XCTAssertFalse(FocusSPI.calls.contains { $0.hasPrefix("front ") })
+    }
+
     func testWithThePrivatePathOffNothingPrivateIsCalled() async throws {
         finder()
         try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])), privatePath: false)
@@ -179,10 +221,11 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         XCTAssertEqual(ax.performed, ["\(token(trash)):AXPress"])
     }
 
-    func testShortcutsGetTheFrontTypingOnlyKeyFocus() async throws {
+    func testShortcutsAndTypingGetKeyFocusNeverTheFront() async throws {
         finder(focusedField: true)
         try await act(.key(CUKeyAction(combo: "cmd+delete")))
-        XCTAssertTrue(FocusSPI.calls.contains("front pid 5252 window 77 options 400"), "a shortcut: front, no windows")
+        XCTAssertTrue(FocusSPI.calls.contains("focus pid 5252 window 77"), "a shortcut: the bound window made key")
+        XCTAssertFalse(FocusSPI.calls.contains { $0.hasPrefix("front ") }, "never the front process")
         XCTAssertEqual(poster.keyDowns.last?.keycode, 51)
         FocusSPI.calls = []
         try await act(.type(CUTypeAction(text: "ab")))

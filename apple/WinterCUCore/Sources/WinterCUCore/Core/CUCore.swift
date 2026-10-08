@@ -72,7 +72,14 @@ public final class CUCore: @unchecked Sendable {
         self.monitor = CUAXActivityMonitor(clock: clock)
         AX.configureProcessTimeout()
         monitor.onDestroyed = { [weak self] pid in self?.windowMaybeClosed(pid: pid) }
-        if startMonitors { startMonitoring() }
+        if startMonitors {
+            startMonitoring()
+        } else {
+            // A core without monitors is a test's: its fakes answer at once, and its checks are synchronous.
+            userViewSettleMs = 0
+            stepSettleMs = 0
+            userViewLateCheck = false
+        }
     }
 
     deinit {
@@ -146,9 +153,26 @@ public final class CUCore: @unchecked Sendable {
 
     public func targetBind(_ p: TargetBindParams) async throws -> TargetBindResult {
         try requireAccessibility()
+        // Launching, reopening or asking for a new window can bring the app forward: checked like an act.
+        let before = userView()
+        var named: (app: String, pid: pid_t)?
+        do {
+            var r = try await bind(p) { named = ($0, $1) }
+            if let named, let note = viewNoteAfterBind(before, app: named.app, pid: named.pid, route: "bind") {
+                r.detail = [r.detail, note].compactMap { $0 }.joined(separator: "; ")
+            }
+            return r
+        } catch {
+            if let named { _ = viewNoteAfterBind(before, app: named.app, pid: named.pid, route: "a failed bind") }
+            throw error
+        }
+    }
+
+    private func bind(_ p: TargetBindParams, named: (String, pid_t) -> Void) async throws -> TargetBindResult {
         let app = try await resolveBindApp(p.app, self)
         let launched = app.launched
         let appName = app.name ?? app.bundleIdentifier ?? p.app
+        named(appName, app.pid)
         try refuseFloorApp(bundleId: app.bundleIdentifier, pid: app.pid, name: appName, processName: app.executableName)
         let pid = app.pid
         let chromium = app.isChromium
@@ -297,8 +321,15 @@ public final class CUCore: @unchecked Sendable {
         if p.pasteboard.changeCount == p.ours { _ = p.pasteboard.write(p.saved) }
     }
 
-    /// Whether `keepFrontmost` also checks once more after the act (off in tests, which check synchronously).
-    var keepFrontmostLater = true
+    /// The user-view guard (CUCore+UserView): how long an act's check waits for an activation the act set off
+    /// (an app reacting to an event a few ms later), how long a background step's check waits, and whether a
+    /// late check runs 300 ms after the act. A test's core (no monitors) waits 0 and runs no late check.
+    var userViewSettleMs: Double = 60
+    var stepSettleMs: Double = 20
+    var userViewLateCheck = true
+    /// Background steps that once moved the user's view: never used again while the helper runs.
+    let retiredStepsLock = NSLock()
+    var retiredSteps: Set<CUBackgroundStep> = []
 
     /// The window's tree for the off-desktop hit test; replaceable by tests (the live reader walks real AX).
     var treeReadOverride: ((CUTarget) -> [CUNode])?
@@ -362,7 +393,22 @@ public final class CUCore: @unchecked Sendable {
     public func targetUseWindow(_ p: TargetUseWindowParams) async throws -> TargetUseWindowResult {
         try requireAccessibility()
         let t = try target(p.targetId)
-        let outcome = try await queues.run(t.pid) { [self] in
+        let before = userView()
+        let outcome: CUWindowResolver.Outcome
+        do {
+            outcome = try await resolveUseWindow(p, t)
+        } catch {
+            _ = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "a failed useWindow")
+            throw error
+        }
+        let note = viewNoteAfterBind(before, app: t.appName, pid: t.pid, route: "useWindow")
+        var r = try await switchWindow(t, outcome)
+        if let note { r.detail = [r.detail, note].compactMap { $0 }.joined(separator: "; ") }
+        return r
+    }
+
+    private func resolveUseWindow(_ p: TargetUseWindowParams, _ t: CUTarget) async throws -> CUWindowResolver.Outcome {
+        try await queues.run(t.pid) { [self] in
             let server = sys.windows(pid: t.pid)
             return try CUWindowResolver.resolve(
                 appName: t.appName, axWindows: CUAXWindows.list(pid: t.pid, ax: ax, server: server), server: server,
@@ -370,6 +416,9 @@ public final class CUCore: @unchecked Sendable {
                 windowEffects(pid: t.pid, appName: t.appName, chromium: t.isChromium, privatePath: t.privatePath,
                               sessionId: t.sessionId, appKey: t.bundleId ?? "pid:\(t.pid)"))
         }
+    }
+
+    private func switchWindow(_ t: CUTarget, _ outcome: CUWindowResolver.Outcome) async throws -> TargetUseWindowResult {
         let chosen = outcome.window
         let old = t.windowID
         if old != chosen.id {

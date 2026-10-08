@@ -19,7 +19,7 @@ public struct CUSkyLight: @unchecked Sendable {
     typealias PostEventRecordTo = @convention(c) (UnsafeRawPointer, UnsafePointer<UInt8>) -> Int32
     typealias GetFrontProcess = @convention(c) (UnsafeMutableRawPointer) -> Int32
     typealias GetProcessForPID = @convention(c) (pid_t, UnsafeMutableRawPointer) -> Int32
-    typealias SetFrontProcess = @convention(c) (UnsafeRawPointer, UInt32, UInt32) -> Int32
+    typealias GetProcessPID = @convention(c) (UnsafeRawPointer, UnsafeMutablePointer<pid_t>) -> Int32
     typealias SetAuthMessage = @convention(c) (CGEvent, UnsafeMutableRawPointer) -> Void
     typealias AuthFactory = @convention(c) (AnyClass, Selector, UnsafeMutableRawPointer, Int32, UInt32) -> UnsafeMutableRawPointer?
     typealias MainConnection = @convention(c) () -> UInt32
@@ -36,7 +36,7 @@ public struct CUSkyLight: @unchecked Sendable {
     var postEventRecordToFn: PostEventRecordTo?
     var getFrontProcessFn: GetFrontProcess?
     var getProcessForPIDFn: GetProcessForPID?
-    var setFrontProcessFn: SetFrontProcess?
+    var getProcessPIDFn: GetProcessPID?
     var setAuthMessageFn: SetAuthMessage?
     var authFactoryFn: AuthFactory?
     var mainConnectionFn: MainConnection?
@@ -73,8 +73,7 @@ public struct CUSkyLight: @unchecked Sendable {
         s.postEventRecordToFn = fn("SLPSPostEventRecordTo", PostEventRecordTo.self)
         s.getFrontProcessFn = fn("_SLPSGetFrontProcess", GetFrontProcess.self)
         s.getProcessForPIDFn = fn("GetProcessForPID", GetProcessForPID.self)
-        s.setFrontProcessFn = fn("SLPSSetFrontProcessWithOptions", SetFrontProcess.self)
-            ?? fn("_SLPSSetFrontProcessWithOptions", SetFrontProcess.self)
+        s.getProcessPIDFn = fn("GetProcessPID", GetProcessPID.self)
         s.setAuthMessageFn = fn("SLEventSetAuthenticationMessage", SetAuthMessage.self)
         s.authFactoryFn = fn("objc_msgSend", AuthFactory.self)
         s.mainConnectionFn = fn("SLSMainConnectionID", MainConnection.self) ?? fn("CGSMainConnectionID", MainConnection.self)
@@ -174,8 +173,9 @@ public struct CUSkyLight: @unchecked Sendable {
         return buf
     }
 
-    /// Makes `pid`'s `windowID` key without raising it or switching Spaces: the current front process gets a
-    /// defocus record, the target a focus record. The front process stays frontmost for the user.
+    /// Makes `pid`'s `windowID` key without raising it: the current front process gets a defocus record, the
+    /// target a focus record, and the front process stays frontmost. Nothing proves in advance that an app
+    /// takes it quietly, so the caller checks every use (`CUCore.keyWithoutRaise`).
     @discardableResult
     func focusWithoutRaise(pid: pid_t, windowID: UInt32) -> Bool {
         guard let postEventRecordToFn, let getFrontProcessFn, let getProcessForPIDFn else { return false }
@@ -189,29 +189,6 @@ public struct CUSkyLight: @unchecked Sendable {
         let a = front.withUnsafeBytes { psn in defocus.withUnsafeBufferPointer { postEventRecordToFn(psn.baseAddress!, $0.baseAddress!) } }
         let b = target.withUnsafeBytes { psn in focus.withUnsafeBufferPointer { postEventRecordToFn(psn.baseAddress!, $0.baseAddress!) } }
         return a == 0 && b == 0
-    }
-
-    /// `kCPSNoWindows`: make a process front without bringing any of its windows forward.
-    static let cpsNoWindows: UInt32 = 0x400
-
-    /// Makes `pid` WindowServer-front for its `windowID` WITHOUT bringing any window forward (cua-driver's
-    /// menu-shortcut activation): AppKit then validates and dispatches menu commands against that window.
-    /// Returns the previous front process's PSN to hand back with `restoreFront`, or nil when not done.
-    func frontNoWindows(pid: pid_t, windowID: UInt32) -> [UInt8]? {
-        guard let setFrontProcessFn, let getFrontProcessFn, let getProcessForPIDFn else { return nil }
-        var previous = [UInt8](repeating: 0, count: 8)
-        var target = [UInt8](repeating: 0, count: 8)
-        guard previous.withUnsafeMutableBytes({ getFrontProcessFn($0.baseAddress!) }) == 0,
-              target.withUnsafeMutableBytes({ getProcessForPIDFn(pid, $0.baseAddress!) }) == 0,
-              target.withUnsafeBytes({ setFrontProcessFn($0.baseAddress!, windowID, Self.cpsNoWindows) }) == 0
-        else { return nil }
-        return previous
-    }
-
-    /// Hands the front back to the process `frontNoWindows` took it from (no window raised).
-    func restoreFront(_ psn: [UInt8]) {
-        guard let setFrontProcessFn, psn.count == 8 else { return }
-        _ = psn.withUnsafeBytes { setFrontProcessFn($0.baseAddress!, 0, Self.cpsNoWindows) }
     }
 
     /// Undoes `focusWithoutRaise`: the target window loses key focus and the user's previous key window
@@ -229,6 +206,26 @@ public struct CUSkyLight: @unchecked Sendable {
         let a = target.withUnsafeBytes { psn in defocus.withUnsafeBufferPointer { postEventRecordToFn(psn.baseAddress!, $0.baseAddress!) } }
         let b = prev.withUnsafeBytes { psn in focus.withUnsafeBufferPointer { postEventRecordToFn(psn.baseAddress!, $0.baseAddress!) } }
         return a == 0 && b == 0
+    }
+
+    // MARK: what the user is looking at
+
+    /// The window server's front process, as a pid: the app the user is in. Read straight from the window
+    /// server, so an activation shows at once (NSWorkspace learns of it later, on the main run loop).
+    public func frontProcessPid() -> pid_t? {
+        guard let getFrontProcessFn, let getProcessPIDFn else { return nil }
+        var psn = [UInt8](repeating: 0, count: 8)
+        guard psn.withUnsafeMutableBytes({ getFrontProcessFn($0.baseAddress!) }) == 0 else { return nil }
+        var pid: pid_t = 0
+        guard psn.withUnsafeBytes({ getProcessPIDFn($0.baseAddress!, &pid) }) == 0, pid > 0 else { return nil }
+        return pid
+    }
+
+    /// The active Space (of the display with the menu bar): the desktop the user is looking at.
+    public func activeSpace() -> UInt64? {
+        guard let mainConnectionFn, let activeSpaceFn else { return nil }
+        let space = activeSpaceFn(mainConnectionFn())
+        return space == 0 ? nil : space
     }
 
     // MARK: Spaces

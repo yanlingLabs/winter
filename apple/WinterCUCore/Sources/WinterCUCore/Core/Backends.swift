@@ -74,7 +74,11 @@ protocol CUSystemBackend: AnyObject {
     func windowStack() -> [CUWindowServerWindow]
     /// Moves a window to the active Space (SkyLight, private); true only when verified.
     func moveWindowToActiveSpace(_ id: UInt32) -> Bool
+    /// The app the user is in: the window server's front process (NSWorkspace's answer when that can't be read).
     func frontmostPid() -> pid_t?
+    /// The desktop the user is looking at (the active Space), when it can be read.
+    func activeSpace() -> UInt64?
+    /// Activates an app. Only the consented foreground rung and the restores of the user's own app call it.
     func activate(pid: pid_t) -> Bool
     /// Stage Manager is on (windows of other stage sets sit off stage on this Space).
     func stageManagerEnabled() -> Bool
@@ -100,7 +104,12 @@ final class CULiveSystem: CUSystemBackend {
     }
     func windowStack() -> [CUWindowServerWindow] { CUWindowServer.windows(onScreenOnly: true, includeOtherLayers: true) }
     func moveWindowToActiveSpace(_ id: UInt32) -> Bool { CUSkyLight.system.moveWindowToActiveSpace(windowID: id) }
-    func frontmostPid() -> pid_t? { NSWorkspace.shared.frontmostApplication?.processIdentifier }
+    func frontmostPid() -> pid_t? {
+        // The window server's front process changes the moment an app activates; NSWorkspace hears of it later,
+        // on the main run loop — too late for the check right after an act.
+        CUSkyLight.system.frontProcessPid() ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
+    func activeSpace() -> UInt64? { CUSkyLight.system.activeSpace() }
     func activate(pid: pid_t) -> Bool {
         guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
         return DispatchQueue.main.sync { app.activate() }

@@ -273,7 +273,7 @@ final class OffDesktopActTests: XCTestCase {
 
     // MARK: Stage Manager
 
-    func testAWindowOffStageIsUnminimizedAddedToTheStageAndTheFrontAppRestored() async throws {
+    func testAWindowOffStageIsActedOnWhereItIsNeverBroughtOnStage() async throws {
         world()
         // On this Space (AX lists it) but off stage: minimized, off screen, Stage Manager on.
         ax.put(ax.application(pid), [kAXWindowsAttribute: [window]])
@@ -282,19 +282,16 @@ final class OffDesktopActTests: XCTestCase {
         ax.setActions(window, ["AXAddToStage", kAXRaiseAction])
         sys.stageManager = true
         sys.front = 1
-        ax.onPerform = { [unowned self] what in
-            guard what.hasSuffix(":AXAddToStage") else { return }
-            sys.windows[77]?.onScreen = true
-            sys.front = pid  // adding to the stage brings the app forward
-        }
-        sys.stack = [sys.windows[77]!]
         let s = shot()
-        let r = try await act(.click(CUClickAction(point: [500, 400], shotId: s)))
-        XCTAssertTrue(ax.written.contains("\(token(window)):AXMinimized"))
-        XCTAssertTrue(ax.performed.contains("\(token(window)):AXAddToStage"))
-        XCTAssertEqual(sys.activated.last, 1, "the user's app is back in front")
-        XCTAssertEqual(downs.count, 1)
-        XCTAssertTrue(r.detail?.contains("off stage (Stage Manager), so it was un-minimized and added to the stage") ?? false, r.detail ?? "")
+        let r = try await act(.click(CUClickAction(point: [30, 55], shotId: s)))  // the link's text
+        XCTAssertFalse(ax.written.contains("\(token(window)):AXMinimized"), "never un-minimized: that pulls the user's view")
+        XCTAssertFalse(ax.performed.contains("\(token(window)):AXAddToStage"), "never added to the stage: that activates the app")
+        XCTAssertTrue(sys.activated.isEmpty)
+        XCTAssertEqual(ax.performed.count, 1)
+        XCTAssertTrue(ax.performed.first?.hasSuffix(":AXPress") ?? false, "the element under the point, over accessibility")
+        XCTAssertTrue(poster.entries.isEmpty, "no pointer events")
+        XCTAssertTrue(r.detail?.contains("Safari's window is off screen (minimized, or off stage in Stage Manager), so the element was sent")
+                      ?? false, r.detail ?? "")
     }
 
     // MARK: event construction and route choice (pure)

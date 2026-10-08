@@ -74,6 +74,37 @@ final class CUTarget: @unchecked Sendable {
     private(set) var refusedActions: [String: Set<String>] = [:]
     func noteRefused(action: String, role: String) { refusedActions[role, default: []].insert(action) }
 
+    // The user-view guard (CUCore+UserView). Guarded by `lock`: a late check reads them from another queue.
+    private var _actSeq = 0
+    private var _consentedForeground = false
+    private var _viewNotes: [String] = []
+
+    /// Starts an act: its number, and no foreground consent used yet.
+    func beginAct() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        _actSeq += 1
+        _consentedForeground = false
+        return _actSeq
+    }
+    var actSeq: Int { lock.lock(); defer { lock.unlock() }; return _actSeq }
+    /// The act brought the app forward on the consented foreground rung (the user agreed to that).
+    var consentedForeground: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _consentedForeground }
+        set { lock.lock(); _consentedForeground = newValue; lock.unlock() }
+    }
+    /// What moved the user's view (and what was put back), for the next act result to say.
+    func addViewNote(_ note: String) { lock.lock(); _viewNotes.append(note); lock.unlock() }
+    func takeViewNotes() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let notes = _viewNotes
+        _viewNotes = []
+        return notes
+    }
+
+    /// Menu commands found disabled in the background and answered with the UI routes that check the item
+    /// itself; asking for one of them again asks for the foreground. Pid-queue only.
+    var disabledMenuCommands: Set<String> = []
+
     static let keptSnapshots = 8
     static let keptShots = 8
 

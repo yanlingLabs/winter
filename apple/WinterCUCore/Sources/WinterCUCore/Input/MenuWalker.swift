@@ -18,7 +18,8 @@ enum CUMenuWalker {
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
     }
 
-    static func resolve<N: CUMenuNode>(_ path: [String], in roots: [N]) throws -> N {
+    /// `requireEnabled` false finds a disabled item too (to read its shortcut).
+    static func resolve<N: CUMenuNode>(_ path: [String], in roots: [N], requireEnabled: Bool = true) throws -> N {
         guard !path.isEmpty else { throw CUError.invalidParams("menu path is empty") }
         var level = roots
         var found: N?
@@ -33,7 +34,7 @@ enum CUMenuWalker {
                 let where_ = depth == 0 ? "the menu bar" : "“\(path[depth - 1])”"
                 throw CUError.invalidParams("no “\(raw)” in \(where_) — it has: \(have)")
             }
-            if !m.menuEnabled {
+            if requireEnabled, !m.menuEnabled {
                 throw CUError(code: "unsupported",
                               message: "“\(m.menuTitle)” is disabled right now — apps enable menu commands for their active window and what is selected in it",
                               data: ["disabled": .string(m.menuTitle)])

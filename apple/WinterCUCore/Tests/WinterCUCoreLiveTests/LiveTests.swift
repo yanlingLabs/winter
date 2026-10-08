@@ -74,6 +74,50 @@ final class LiveTests: XCTestCase {
         XCTAssertNotNil(Data(base64Encoded: shot.imageBase64))
     }
 
+    /// Every kind of act on a window on ANOTHER desktop leaves the user where they are: the active Space and the
+    /// frontmost app read the same after each, and no act had to put them back. Arrange first: a TextEdit
+    /// document (any text, nothing you mind changing) on another desktop, then run from this one. Skips when
+    /// TextEdit's bound window is on this desktop.
+    func testActsOnAnOffSpaceWindowLeaveTheActiveSpaceAndFrontmostAppAlone() async throws {
+        try requireAccessibility()
+        core.userViewSettleMs = 60
+        core.stepSettleMs = 20
+        let sky = CUSkyLight.system
+        let bound = try await core.targetBind(TargetBindParams(sessionId: "live-view", app: "TextEdit", mirror: false, privatePath: true))
+        defer { Task { _ = try? await core.targetRelease(TargetReleaseParams(targetId: bound.targetId)) } }
+        let t = try core.target(bound.targetId)
+        try XCTSkipUnless(core.isOffThisDesktop(t), "put a TextEdit document window on another desktop first")
+        let areas = try await core.targetFind(TargetFindParams(targetId: bound.targetId, query: .fields(role: "text area", name: nil, text: nil)))
+        let area = try XCTUnwrap(areas.elements.first)
+
+        let acts: [(String, CUAction)] = [
+            ("click", .click(CUClickAction(ref: area.ref))),
+            ("type", .type(CUTypeAction(text: "w", into: area.ref))),
+            ("key", .key(CUKeyAction(combo: "cmd+z"))),
+            ("select", .select(CUSelectAction(ref: area.ref, text: String(area.value?.prefix(1) ?? "w")))),
+            ("scroll", .scroll(CUScrollAction(ref: area.ref, direction: .down))),
+            ("scroll back", .scroll(CUScrollAction(ref: area.ref, direction: .up))),
+            ("menu", .menu(CUMenuAction(path: ["Edit", "Select All"]))),
+            ("context menu", .action(CUAXAction(ref: area.ref, name: "showMenu"))),
+            ("escape", .key(CUKeyAction(combo: "escape"))),
+            ("right click", .click(CUClickAction(ref: area.ref, button: .right))),
+            ("escape again", .key(CUKeyAction(combo: "escape"))),
+        ]
+        for (i, (name, action)) in acts.enumerated() {
+            let space = sky.activeSpace(), front = sky.frontProcessPid()
+            let r = try? await core.targetAct(TargetActParams(targetId: bound.targetId, sessionId: "live-view", callId: "v\(i)",
+                                                              action: action, access: .full, allowForeground: false, privatePath: true))
+            try await Task.sleep(nanoseconds: 500_000_000)  // past the late check
+            XCTAssertEqual(sky.activeSpace(), space, "\(name) switched the desktop")
+            XCTAssertEqual(sky.frontProcessPid(), front, "\(name) changed the frontmost app")
+            for said in ["activated itself", "switched desktops", "frontmost app changed"] {
+                XCTAssertFalse(r?.detail?.contains(said) ?? false, "\(name) had to be put back: \(r?.detail ?? "")")
+            }
+        }
+        _ = try await core.targetScreenshot(TargetScreenshotParams(targetId: bound.targetId, budget: CUImageBudget(maxLongEdge: 800, quality: 0.6)))
+        _ = try await core.targetSnapshot(TargetSnapshotParams(targetId: bound.targetId))
+    }
+
     func testStaleRefAfterRelease() async throws {
         try requireAccessibility()
         let bound = try await core.targetBind(TargetBindParams(sessionId: "live", app: "TextEdit", mirror: false))

@@ -79,9 +79,9 @@ public struct CUError: Error, Codable, Sendable, Equatable, CustomStringConverti
 
     /// Pointer input (`what`: the click, the drag) that has no AX equivalent, to a window on another desktop,
     /// with no way to address events to a window that is off screen (the private event path is off).
-    public static func windowElsewhere(_ app: String, sending what: String) -> CUError {
+    public static func windowElsewhere(_ app: String, sending what: String, subject: String? = nil) -> CUError {
         CUError(code: "window_elsewhere",
-                message: "\(app)'s window is on another desktop, and \(what) can't be sent there with the private event path off — click elements by ref, scroll, type and use keys, or ask the user to bring the window here")
+                message: "\(subject ?? "\(app)'s window is on another desktop"), and \(what) can't be sent there with the private event path off — click elements by ref, scroll, type and use keys, or ask the user to bring the window here")
     }
 
 
