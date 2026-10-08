@@ -49,13 +49,17 @@ async function failsWith(p: Promise<unknown>, kind: AutomationFailure["kind"]): 
 }
 
 describe("the policy matrix", () => {
-  test("plan: observe and bind without a card, every act NotAllowed", async () => {
-    const { policy, events } = setup({ policy: "plan" });
+  test("plan: the per-app card on BIND (the ruling), then observe only — every act NotAllowed", async () => {
+    const { policy, events } = setup({ policy: "plan", answer: (c, b, sid) => b.resolve(sid, c, true, "orb") });
     const run = newRunGrants("s1");
     await policy.authorize(run, NOTES, { kind: "bind" });
+    expect(cards(events)).toHaveLength(1);
     await policy.authorize(run, NOTES, { kind: "observe" });
     expect(await failsWith(policy.authorize(run, NOTES, { kind: "act", primitive: "click" }), "NotAllowed")).toContain("plan mode");
-    expect(cards(events)).toHaveLength(0);
+    expect(cards(events)).toHaveLength(1);
+    // A denied card under plan refuses the bind.
+    const denied = setup({ policy: "plan", answer: (c, b, sid) => b.resolve(sid, c, false, "orb") });
+    await failsWith(denied.policy.authorize(newRunGrants("s1"), NOTES, { kind: "bind" }), "NotAllowed");
   });
 
   test("bypass: no cards at all", async () => {
@@ -66,11 +70,12 @@ describe("the policy matrix", () => {
     expect(cards(events)).toHaveLength(0);
   });
 
-  test("dont-ask: binds without a card; acts only on an Always-allow app", async () => {
+  test("dont-ask: binds and acts ONLY on an Always-allow app (the ruling), never a card", async () => {
     const { policy, events } = setup({ policy: "dont-ask", apps: { "com.apple.TextEdit": { grant: "always" } } });
     const run = newRunGrants("s1");
-    await policy.authorize(run, NOTES, { kind: "bind" });
+    expect(await failsWith(policy.authorize(run, NOTES, { kind: "bind" }), "NotAllowed")).toContain("Always allow");
     expect(await failsWith(policy.authorize(run, NOTES, { kind: "act", primitive: "click" }), "NotAllowed")).toContain("Always allow");
+    await policy.authorize(run, { bundleId: "com.apple.TextEdit", name: "TextEdit" }, { kind: "bind" });
     await policy.authorize(run, { bundleId: "com.apple.TextEdit", name: "TextEdit" }, { kind: "act", primitive: "type" });
     expect(cards(events)).toHaveLength(0);
   });
@@ -82,7 +87,8 @@ describe("the policy matrix", () => {
       await Promise.all([policy.authorize(run, NOTES, { kind: "bind" }), policy.authorize(run, NOTES, { kind: "act", primitive: "click" })]);
       const c = cards(events);
       expect(c).toHaveLength(1);
-      expect(c[0]).toMatchObject({ toolName: "ComputerV2", summary: "Allow Winter to use Notes?", threadId: "main" });
+      // The summary names the bundle id — a look-alike app cannot borrow a trusted name (the ruling).
+      expect(c[0]).toMatchObject({ toolName: "ComputerV2", summary: "Allow Winter to use Notes (com.apple.Notes)?", threadId: "main" });
       expect(c[0]!.options).toEqual([...APP_CARD_OPTIONS]);
       expect(c[0]!.options!.every((o) => o.rule === undefined)).toBe(true);
       expect(c[0]!.callId).toMatch(/^cu_[0-9a-f]{12}$/);
@@ -225,7 +231,7 @@ describe("rung 4 — the foreground", () => {
     const { policy, events } = setup({ answer: (callId, b) => b.resolve("s1", callId, true, "orb", "once") });
     expect(await policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(true);
     const c = cards(events)[0]!;
-    expect(c.summary).toBe("Winter needs to bring Notes to the front and use your mouse for a moment");
+    expect(c.summary).toBe("Winter needs to bring Notes (com.apple.Notes) to the front and use your mouse for a moment");
     expect(c.options).toEqual([{ id: "once", label: "Allow once" }]);
   });
 
@@ -237,10 +243,25 @@ describe("rung 4 — the foreground", () => {
     expect(await setup({ policy: "dont-ask" }).policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(false);
   });
 
-  test("bypass: no card, but someone must be watching", async () => {
-    const watched = setup({ policy: "bypass" });
+  test("bypass too: taking the real pointer ALWAYS needs the card (the ruling), and someone must be watching", async () => {
+    const watched = setup({ policy: "bypass", answer: (c, b, sid) => b.resolve(sid, c, true, "orb") });
     expect(await watched.policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(true);
-    expect(cards(watched.events)).toHaveLength(0);
-    expect(await setup({ policy: "bypass", attended: false }).policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(false);
+    expect(cards(watched.events)).toHaveLength(1);
+    const declined = setup({ policy: "bypass", answer: (c, b, sid) => b.resolve(sid, c, false, "orb") });
+    expect(await declined.policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(false);
+    const unattended = setup({ policy: "bypass", attended: false });
+    expect(await unattended.policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(false);
+    expect(cards(unattended.events)).toHaveLength(0);
+  });
+
+  test("persistentlyAllowed: bypass, Always allow and Allow for this session outlive the call; Allow once does not", async () => {
+    expect(setup({ policy: "bypass" }).policy.persistentlyAllowed("s1", NOTES.bundleId)).toBe(true);
+    expect(setup({ policy: "ask", apps: { "com.apple.Notes": { grant: "always" } } }).policy.persistentlyAllowed("s1", NOTES.bundleId)).toBe(true);
+    const once = setup({ answer: (c, b, sid) => b.resolve(sid, c, true, "orb") });
+    await once.policy.authorize(newRunGrants("s1"), NOTES, { kind: "bind" });
+    expect(once.policy.persistentlyAllowed("s1", NOTES.bundleId)).toBe(false);
+    const session = setup({ answer: (c, b, sid) => b.resolve(sid, c, true, "orb", "session") });
+    await session.policy.authorize(newRunGrants("s1"), NOTES, { kind: "bind" });
+    expect(session.policy.persistentlyAllowed("s1", NOTES.bundleId)).toBe(true);
   });
 });

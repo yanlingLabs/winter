@@ -662,8 +662,8 @@ class ProjectorImpl implements Projector {
             this.children.delete(callId);
             for (const [t, th] of this.taskToThread) if (th === callId) this.taskToThread.delete(t);
             if (outcome.failed) {
-              // The wire may carry no error flag for a failed spawn (the engine drops a returned
-              // `isError`), so the row that says so is corrected here too.
+              // An older engine sent no error flag for a failed spawn (agent SDK 0.0.53 keeps it — `is_error`),
+              // so the row a pinned `Error:` prefix marks as failed is corrected here too (belt and braces).
               for (const e of out) if (e.type === "tool_result" && e.callId === callId) e.isError = true;
             }
             out.push(threadCompleted(callId, outcome.stopReason, this.deps.sessionId));

@@ -2,27 +2,32 @@
 // the helper enforces only its hard floors, and those are enforced here as well, so a bug in one does not open
 // them. Rulings R16/R17/R19, spec §13, spine §5:
 //
-//   policy                 observe (bind, state, find, screenshot, wait)   act (click, type, key, …)
-//   plan                   allowed, no card                                 NotAllowed
-//   ask / accept-edits /   a per-APP card on first bind                     the same card, if the app holds no
+//   policy                 bind (apps.open, screen.appAt)                   act (click, type, key, …)
+//   plan                   the per-APP card (then observe only)             NotAllowed
+//   ask / accept-edits /   the per-APP card                                 the same card, if the app holds no
 //   auto                   (once / this session / always; deny = refuse)    grant for this call
-//   bypass                 allowed, no card                                 allowed, no card
-//   dont-ask               allowed, no card                                 only an "Always allow" app
+//   bypass                 no card                                          no card
+//   dont-ask               only an "Always allow" app (no card)             only an "Always allow" app
 //
-// and, under EVERY policy (bypass included): the floors (Winter never controls itself; the system's
-// authentication dialogs, the login window and Keychain Access are refused) and the user's per-app setting —
-// `deny` (never bound), `view` (observe only), `click` (click, scroll and AX actions only), `full`. A password
-// manager with no setting reads as `deny` (spec §13.3 — the user lifts it in Settings).
+// (the controller's rulings after the daemon review: per-app consent covers BINDING, not only acting.) Observing
+// an app this call may already use (state, find, screenshot, waits) needs no second card. And, under EVERY
+// policy (bypass included): the floors (Winter never controls itself; the system's authentication dialogs, the
+// login window and Keychain Access are refused) and the user's per-app setting — `deny` (never bound), `view`
+// (observe only), `click` (click, scroll and AX actions only), `full`. A known password manager with no setting
+// reads as `deny` (spine §5 — the helper does not enforce this; the daemon does).
 //
 // The card is DAEMON-RAISED mid-script, not a `canUseTool` card: `buildLeasePolicy`'s wait-before-emit shape
-// with a `cu_<hex>` call id, `toolName: "ComputerV2"`, options with no `rule` (so `approval.respond` persists
-// nothing — `always` is this module's own `computerUse.apps.<id>.grant` write). A dispatch child's card rides
-// the existing mirror to its coordinator, bounded like every relayed card (`dispatchChildCardTimeoutMs`).
+// with a `cu_<hex>` call id, `toolName: "ComputerV2"`, a summary that names the BUNDLE ID (a look-alike app
+// cannot borrow a trusted name), options with no `rule` (so `approval.respond` persists nothing — `always` is
+// this module's own `computerUse.apps.<id>.grant` write). A dispatch child's card rides the existing mirror to
+// its coordinator, bounded like every relayed card (`dispatchChildCardTimeoutMs`). A Dispatch COORDINATOR raises
+// these cards too — an exception to "Dispatch never prompts", like a connector's card.
 //
-// RUNG 4 (the foreground: the user's real pointer) gets its own card — "Winter needs to bring <App> to the front
-// and use your mouse for a moment" — and is refused `NeedsForeground` without one when nobody is there to see
-// the pointer move (no window attached to the session, or to its Dispatch coordinator), under `dont-ask`, and
-// when the user declines. Under `bypass` it needs no card, but still someone watching.
+// RUNG 4 (the foreground: the user's real pointer) ALWAYS needs its own card — "Winter needs to bring <App> to
+// the front and use your mouse for a moment" — under every policy that can card, `bypass` included; `dont-ask`
+// (which never cards) and `plan` (which never acts) refuse it, and so does a session nobody is watching from
+// the Mac (`attended`: a Mac or terminal harness on the session itself — never the phone, never the Dispatch
+// pill alone).
 import { randomBytes } from "node:crypto";
 import type { ApprovalOption, NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -70,6 +75,16 @@ export const APP_CARD_OPTIONS: readonly ApprovalOption[] = [
 ];
 export const FOREGROUND_CARD_OPTIONS: readonly ApprovalOption[] = [{ id: "once", label: "Allow once" }];
 
+/** "Allow Winter to use Notes (com.apple.Notes)?" — the bundle id is part of the question (the ruling). */
+export function appCardSummary(app: AppRef): string {
+  return `Allow Winter to use ${app.name} (${app.bundleId})?`;
+}
+
+/** The rung-4 card's question. */
+export function foregroundCardSummary(app: AppRef): string {
+  return `Winter needs to bring ${app.name} (${app.bundleId}) to the front and use your mouse for a moment`;
+}
+
 export interface SessionFacts {
   policy: SessionApprovalPolicy;
   mode: SessionMode;
@@ -87,7 +102,8 @@ export interface ComputerPolicyDeps {
   session(sessionId: string): SessionFacts;
   /** Who started the running turn (a dispatch child's relayed card is bounded unless a human did). */
   turnOrigin?(sessionId: string): string | undefined;
-  /** Is someone looking at this session (a window attached, or at its Dispatch coordinator)? */
+  /** Is someone at the Mac looking at THIS session — a Mac window or a terminal attached to it? The phone does
+   *  not count, and neither does the Dispatch pill alone (`wiring.ts`). */
   attended(sessionId: string): boolean;
   now?(): number;
   log?(line: string): void;
@@ -131,6 +147,8 @@ export class ComputerPolicy {
     return this.sessionGrants.get(sessionId)?.has(bundleId) === true;
   }
 
+  /** The session is GONE (deleted, or the daemon stops): its "Allow for this session" grants go with it. A
+   *  worker's idle end does not call this — the grants live as long as the session. */
   clearSession(sessionId: string): void { this.sessionGrants.delete(sessionId); }
 
   /** The user removed an app's "Always allow": no session keeps the grant its card left behind either. */
@@ -167,7 +185,7 @@ export class ComputerPolicy {
       throw new AutomationFailure("NotAllowed", `${app.name} is set to Don't allow in Settings → Computer Use — ask the user if you need it`);
     }
     const facts = this.deps.session(run.sessionId);
-    if (facts.mode === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
+    if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
     if (purpose.kind === "observe") return;
     if (purpose.kind === "act") {
       if (access === "view") throw new AutomationFailure("NotAllowed", `${app.name} is set to view only in Settings → Computer Use — you can look but not act`);
@@ -180,18 +198,16 @@ export class ComputerPolicy {
         return;
       case "plan":
         if (purpose.kind === "act") throw new AutomationFailure("NotAllowed", "this session is in plan mode — ComputerV2 can look but not act");
-        return;
+        break; // binding still asks: per-app consent covers binding (the controller's ruling)
       case "dont-ask":
-        if (purpose.kind === "act" && !this.hasAlwaysGrant(app.bundleId)) {
+        if (!this.hasAlwaysGrant(app.bundleId)) {
           throw new AutomationFailure("NotAllowed", `${app.name} has no "Always allow" grant, and this session never asks (don't ask) — the user can allow it in Settings → Computer Use`);
         }
         return;
-      case "chat":
-        throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
       default:
         break;
     }
-    // ask / accept-edits / auto: one card per app (R16, and under auto too — R19).
+    // plan (bind) / ask / accept-edits / auto: one card per app (R16, and under auto too — R19).
     if (this.hasAlwaysGrant(app.bundleId) || this.hasSessionGrant(run.sessionId, app.bundleId) || run.once.has(app.bundleId)) return;
     if (run.denied.has(app.bundleId)) throw this.declined(app);
     let card = run.cards.get(app.bundleId);
@@ -202,13 +218,25 @@ export class ComputerPolicy {
     if (!(await card)) throw this.declined(app);
   }
 
+  /**
+   * Does the app stay usable AFTER this call (`once` covers the call — the controller's ruling)? True under
+   * `bypass`, for an "Always allow" app and for one granted for this session; false for an app this call used on
+   * an "Allow once" answer, whose targets the service releases when the call ends.
+   */
+  persistentlyAllowed(sessionId: string, bundleId: string): boolean {
+    let policy: SessionFacts["policy"];
+    try { policy = this.deps.session(sessionId).policy; } catch { return false; }
+    return policy === "bypass" || this.hasAlwaysGrant(bundleId) || this.hasSessionGrant(sessionId, bundleId);
+  }
+
   private declined(app: AppRef): AutomationFailure {
     return new AutomationFailure("NotAllowed", `The user did not allow Winter to use ${app.name}. Don't retry — ask the user what to do instead.`);
   }
 
   /** The per-app card. Resolves `true` when allowed (recording the grant), `false` otherwise. */
   private async appCard(run: RunGrants, app: AppRef, signal?: AbortSignal): Promise<boolean> {
-    const res = await this.card(run, `Allow Winter to use ${app.name}?`, APP_CARD_OPTIONS, signal);
+    // The bundle id is part of the question: a look-alike app cannot borrow a trusted name (the ruling).
+    const res = await this.card(run, appCardSummary(app), APP_CARD_OPTIONS, signal);
     if (!res.approved) {
       if (res.human) run.denied.add(app.bundleId);
       return false;
@@ -243,10 +271,11 @@ export class ComputerPolicy {
    */
   async allowForeground(run: RunGrants, app: AppRef, signal?: AbortSignal): Promise<boolean> {
     const facts = this.deps.session(run.sessionId);
-    if (facts.policy === "dont-ask" || facts.policy === "plan" || facts.policy === "chat") return false;
+    // Taking the user's real pointer ALWAYS needs explicit consent — a card under every policy that can card,
+    // `bypass` included (the controller's ruling). `dont-ask` never cards and `plan` never acts.
+    if (facts.policy === "dont-ask" || facts.policy === "plan" || facts.policy === "chat" || facts.mode === "chat") return false;
     if (!this.deps.attended(run.sessionId)) return false;
-    if (facts.policy === "bypass") return true;
-    const res = await this.card(run, `Winter needs to bring ${app.name} to the front and use your mouse for a moment`, FOREGROUND_CARD_OPTIONS, signal);
+    const res = await this.card(run, foregroundCardSummary(app), FOREGROUND_CARD_OPTIONS, signal);
     return res.approved;
   }
 

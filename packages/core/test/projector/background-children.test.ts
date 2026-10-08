@@ -12,7 +12,8 @@ import { FakeCheckpoints, accept, assistantToolUse, init, makeProjector, result,
  * leg, SDK 0.0.14) and `winter-agent-sdk/packages/runtime/src/tools/impl/agent.ts`: an async spawn's
  * `tool_result` is `{"status":"async_launched","agentId","taskId",…}` and the real finish arrives
  * later as `system/task_notification` carrying `tool_use_id` = the spawning call's id. A failed
- * spawn's result is `Error: …` with NO error flag on the wire (engine.ts drops the tool's `isError`).
+ * spawn's result is `Error: …` — an older engine sent it with NO error flag (agent SDK 0.0.53 keeps it), so the
+ * prefix alone must still close the thread as an error.
  */
 type Any = Record<string, unknown>;
 
@@ -129,7 +130,7 @@ describe("projector: a background (async-launched) subagent", () => {
 });
 
 describe("projector: a spawn that failed immediately", () => {
-  test("an `Error:` result with no error flag (the SDK drops it) closes the thread as `error` and marks the tool_result", () => {
+  test("an `Error:` result with no error flag (an older engine's shape) closes the thread as `error` and marks the tool_result", () => {
     const { projector } = makeProjector();
     const out = run(projector, [
       init(), spawnBg("call_e"),

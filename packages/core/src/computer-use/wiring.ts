@@ -144,13 +144,14 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       return { policy: meta.approvalPolicy, mode, ...(meta.origin === undefined ? {} : { origin: meta.origin }), ...(meta.parentSessionId === undefined ? {} : { parentSessionId: meta.parentSessionId }) };
     },
     turnOrigin: (sessionId) => { try { return runningTurnOrigin(deps.store.read(sessionId)); } catch { return undefined; } },
-    // Someone is looking: a window attached to the session, or (a Dispatch child) to its coordinator.
+    // Someone at the MAC is looking at THIS session (the controller's ruling for rung 4): a Mac window or a terminal
+    // attached to the session itself. The phone never counts (its gateway connects as the remote role), and a
+    // Dispatch coordinator never does: the Mac's Dispatch pill is attached to it all the time, under the same
+    // client name as a window (`orb`), and no wire fact tells the two apart — so the pill alone cannot count.
+    // A Dispatch child counts only its OWN window, never its coordinator's pill.
     attended: (sessionId) => {
-      if (deps.hub.attachedCount(sessionId) > 0) return true;
-      try {
-        const parent = deps.store.meta(sessionId).parentSessionId;
-        return parent !== undefined && deps.hub.attachedCount(parent) > 0;
-      } catch { return false; }
+      try { if (deps.store.meta(sessionId).mode === "dispatch") return false; } catch { return false; }
+      return deps.hub.attachedHarnesses(sessionId).some((h) => h.role !== "remote" && h.clientName !== "iphone-gateway");
     },
     log,
   });
@@ -160,7 +161,8 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     telemetry: new AutomationTelemetry(deps.home),
     ...(deps.audit === undefined ? {} : { audit: deps.audit }),
     ...(deps.interrupt === undefined ? {} : { interrupt: deps.interrupt }),
-    ...(deps.inject?.worker === undefined ? {} : { worker: deps.inject.worker }),
+    // The worker never reads the daemon's own home, whatever its profile would otherwise allow (review I2).
+    worker: { ...(deps.inject?.worker ?? {}), denyRead: [deps.home, ...(deps.inject?.worker?.denyRead ?? [])] },
     ...(deps.inject?.startWorker === undefined ? {} : { startWorker: deps.inject.startWorker }),
     ...(deps.inject?.idleMs === undefined ? {} : { idleMs: deps.inject.idleMs }),
     log,
@@ -214,11 +216,13 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     },
     appsSet(p) {
       if (!BUNDLE_ID.test(p.bundleId)) throw new ComputerUseControlError("invalid_params", "bundleId is not a bundle identifier");
+      // A password manager's default is `deny`, so `full` must be STORED to mean anything (review I5).
+      const defaultAccess: ComputerUseAccess = PASSWORD_MANAGER_BUNDLE_IDS.has(p.bundleId) ? "deny" : "full";
       writeSettings((s) => setComputerUseApp(s, p.bundleId, {
         ...(p.access === undefined ? {} : { access: p.access }),
         ...(p.grant === undefined ? {} : { grant: p.grant }),
         ...(p.name === undefined ? {} : { name: p.name }),
-      }));
+      }, { defaultAccess }));
       // A revoked "Always allow" must not survive as this daemon's in-memory session grant from its card.
       if (p.grant === null) policy.forgetGrant(p.bundleId);
     },

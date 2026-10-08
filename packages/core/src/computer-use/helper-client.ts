@@ -128,6 +128,8 @@ export class HelperClient {
   private helperVersion: string | undefined;
   private permissionsCache: HelperPermissions | undefined;
   private closedByUs = false;
+  private connectionGeneration = 0;
+  private connectingLaunches = false;
   private readonly transport: HelperTransport;
   private readonly launcher: HelperLauncher;
   private readonly verifier: HelperVerifier;
@@ -143,6 +145,8 @@ export class HelperClient {
   }
 
   get connected(): boolean { return this.conn !== undefined; }
+  /** Bumped on every verified connection — a run tells `script.active` again on a helper relaunched mid-run. */
+  get generation(): number { return this.connectionGeneration; }
   get version(): string | undefined { return this.helperVersion; }
   get permissions(): HelperPermissions | undefined { return this.permissionsCache; }
 
@@ -151,14 +155,30 @@ export class HelperClient {
   /** Connected and verified, launching the helper if needed. Throws `HelperUnavailableError`. */
   ensure(): Promise<HelperConnection> {
     if (this.conn !== undefined) return Promise.resolve(this.conn);
-    this.connecting ??= this.open().finally(() => { this.connecting = undefined; });
-    return this.connecting;
+    // A `status()` connect in flight does not launch: wait for it, then launch if it found nothing.
+    if (this.connecting !== undefined && !this.connectingLaunches) return this.connecting.then((c) => c, () => this.ensure());
+    return this.connecting ?? this.startConnect(true);
   }
 
-  private async open(): Promise<HelperConnection> {
+  private startConnect(launch: boolean): Promise<HelperConnection> {
+    this.connectingLaunches = launch;
+    const p: Promise<HelperConnection> = this.open(launch).finally(() => { if (this.connecting === p) this.connecting = undefined; });
+    this.connecting = p;
+    return p;
+  }
+
+  /** The single-flight connect WITHOUT a launch (`status()`): joins a connect already in flight, never opens a
+   *  second connection beside it (the review's helper-client minor), and never starts the helper. */
+  private connectIfRunning(): Promise<HelperConnection | undefined> {
+    if (this.conn !== undefined) return Promise.resolve(this.conn);
+    return (this.connecting ?? this.startConnect(false)).then((c) => c, () => undefined);
+  }
+
+  private async open(launch: boolean): Promise<HelperConnection> {
     const socketPath = helperSocketPath(this.deps.home);
     let conn = await this.tryConnect(socketPath);
     if (conn === undefined) {
+      if (!launch) throw new HelperUnavailableError("Winter Computer Use is not running");
       if (!this.deps.launchAllowed) {
         throw new HelperUnavailableError("Winter Computer Use is not running, and this daemon does not launch it (it serves only the profile's own Winter home)", false);
       }
@@ -206,6 +226,7 @@ export class HelperClient {
     }
     this.helperVersion = hello.helperVersion;
     this.conn = conn;
+    this.connectionGeneration++;
     this.closedByUs = false;
     this.log(`computer-use: connected to Winter Computer Use ${hello.helperVersion} (pid ${hello.pid})`);
     return conn;
@@ -274,6 +295,8 @@ export class HelperClient {
    * request answers `cancelled` — or fails locally after a 1 s grace if the helper does not answer.
    */
   async request<T>(method: string, params: Record<string, unknown>, opts: { signal?: AbortSignal; callId?: string; timeoutMs?: number } = {}): Promise<T> {
+    // An already-cancelled call never connects, let alone launches the helper (the review's helper-client minor).
+    if (opts.signal?.aborted) throw new HelperRpcError("cancelled", "cancelled");
     const conn = await this.ensure();
     const pending = this.send(conn, method, params, opts.timeoutMs ?? this.deps.requestTimeoutMs ?? REQUEST_TIMEOUT_MS);
     const signal = opts.signal;
@@ -314,11 +337,8 @@ export class HelperClient {
   async status(): Promise<HelperStatus> {
     let installed = false;
     try { installed = this.launcher.installed(this.appPath); } catch { installed = false; }
-    if (this.conn === undefined) {
-      // Not connected: connect only if it is already running (no launch).
-      const conn = await this.tryConnect(helperSocketPath(this.deps.home));
-      if (conn !== undefined) { try { await this.handshake(conn); } catch { /* reported as not running */ } }
-    }
+    // Not connected: connect only if it is already running (no launch), inside the single-flight connect.
+    if (this.conn === undefined) await this.connectIfRunning();
     if (this.conn === undefined) return { installed, running: false };
     try {
       const st = await this.request<StatusResult>("status", {}, { timeoutMs: 5_000 });

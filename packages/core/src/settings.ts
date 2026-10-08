@@ -1369,15 +1369,17 @@ export function computerUseAppsFrom(s: Settings | null | undefined): Record<stri
 
 /**
  * ComputerV2: a pure `Settings -> Settings` transform for ONE app's row (`computerUse.apps.<bundleId>`) —
- * `undefined` for a field leaves it as is, `null` clears it. `access: "full"` is the default and is stored
- * as absent. A row is NEVER deleted by this door (spine §6: "Remove always-allow" sends `grant: null` and the
- * app stays listed) — it is left as `{name}` or `{}`. The caller owes `saveSettings` a call.
+ * `undefined` for a field leaves it as is, `null` clears it. An access equal to the app's DEFAULT
+ * (`opts.defaultAccess`: `full`, or `deny` for a known password manager) is stored as absent; any other is
+ * stored explicitly — so a password manager set to `full` keeps `"full"` (the daemon review's I5). A row is
+ * NEVER deleted by this door (spine §6: "Remove always-allow" sends `grant: null` and the app stays listed) — it
+ * is left as `{name}` or `{}`. The caller owes `saveSettings` a call.
  */
-export function setComputerUseApp(settings: Settings, bundleId: string, patch: { access?: ComputerUseAccess | null; grant?: "always" | null; name?: string }): Settings {
+export function setComputerUseApp(settings: Settings, bundleId: string, patch: { access?: ComputerUseAccess | null; grant?: "always" | null; name?: string }, opts: { defaultAccess?: ComputerUseAccess } = {}): Settings {
   const apps = { ...(settings.computerUse?.apps ?? {}) } as Record<string, unknown>;
   const existing = Object.hasOwn(apps, bundleId) ? apps[bundleId] : undefined;
   const row: Record<string, unknown> = existing !== null && typeof existing === "object" && !Array.isArray(existing) ? { ...(existing as Record<string, unknown>) } : {};
-  if (patch.access === null || patch.access === "full") delete row.access;
+  if (patch.access === null || patch.access === (opts.defaultAccess ?? "full")) delete row.access;
   else if (patch.access !== undefined) row.access = patch.access;
   if (patch.grant === null) delete row.grant;
   else if (patch.grant !== undefined) row.grant = patch.grant;
