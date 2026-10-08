@@ -54,6 +54,7 @@ struct SettingsComputerUseSection: View {
                 enableGroup(status)
                 helperGroup(status)
                 behaviorGroup(status)
+                if model.dockSwitchesSpaces { desktopSwitchingGroup }
                 allowAllAppsGroup
                 exceptionsGroup
                 if !model.alwaysAllowed.isEmpty {
@@ -73,6 +74,8 @@ struct SettingsComputerUseSection: View {
             }
         }
         .task { await model.load() }
+        .onAppear { model.refreshDockSetting() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refreshDockSetting() }
         .onDisappear { model.stopWatching() }
         .sheet(isPresented: $isAddingException) {
             ComputerUseAddExceptionSheet(model: model, isPresented: $isAddingException)
@@ -118,6 +121,17 @@ struct SettingsComputerUseSection: View {
                         description: settingsComputerUsePrivateEventPathDescription) {
                 SettingsToggle(isOn: toggle(status.privateEventPath) { value in await model.setPrivateEventPath(value) })
                     .disabled(model.isSavingSettings)
+            }
+        }
+    }
+
+    /// A hint, shown only while macOS's "switch to a Space with open windows for the application" is on: an app that
+    /// brings itself forward can move the user to another desktop. The button opens Desktop & Dock; Winter never
+    /// changes the setting itself.
+    private var desktopSwitchingGroup: some View {
+        SettingsGroup {
+            SettingsRow(DockSpaceSwitching.hintTitle, description: DockSpaceSwitching.hint) {
+                SettingsButton(DockSpaceSwitching.openButtonTitle) { DockSpaceSwitching.openSettings() }
             }
         }
     }
