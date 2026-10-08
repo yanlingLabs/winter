@@ -96,4 +96,17 @@ final class SafetyMathTests: XCTestCase {
         }
         XCTAssertEqual(checked, [.leftMouseDown, .leftMouseUp, .leftMouseDown, .leftMouseUp])
     }
+
+    /// The permission request's registration step is time-boxed: a hung system call never holds the reply.
+    /// (The request itself is never called in tests — it would register the test runner with TCC.)
+    func testPermissionRegistrationIsBounded() async {
+        let start = Date()
+        let finished = await CUPermissionsProbe.bounded(seconds: 0.1) {
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+        }
+        XCTAssertFalse(finished)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+        let quick = await CUPermissionsProbe.bounded(seconds: 5) {}
+        XCTAssertTrue(quick)
+    }
 }

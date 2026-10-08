@@ -76,7 +76,7 @@ public final class CUCore: @unchecked Sendable {
     }
 
     public func permissionsRequest(_ p: PermissionsRequestParams) async throws -> PermissionsRequestResult {
-        await MainActor.run { CUPermissionsProbe.request(p.kind) }
+        await CUPermissionsProbe.request(p.kind)
         return PermissionsRequestResult(opened: true)
     }
 
