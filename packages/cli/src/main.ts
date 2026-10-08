@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runAutomationWorker, AUTOMATION_WORKER_ARG, runRuntimeWorkflowWorker, RUNTIME_WORKFLOW_WORKER_ARG, runRuntimeStateProbe, runRuntimesProbe, keychainUnlocked, processStartSecondsViaSysctl, runEmbeddedProbe, runDevKeychainAdopt, DEV_KEYCHAIN_ADOPT_ARG, resolveWinterProfile, splitTag, sdkLocalMcpServers } from "@yanlinglabs/winter-core";
+import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runAutomationWorker, AUTOMATION_WORKER_ARG, processSatisfiesRequirement, runRuntimeWorkflowWorker, RUNTIME_WORKFLOW_WORKER_ARG, runRuntimeStateProbe, runRuntimesProbe, keychainUnlocked, processStartSecondsViaSysctl, runEmbeddedProbe, runDevKeychainAdopt, DEV_KEYCHAIN_ADOPT_ARG, resolveWinterProfile, splitTag, sdkLocalMcpServers } from "@yanlinglabs/winter-core";
 import type { CredentialRow, SecretStore, Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
@@ -1463,6 +1463,10 @@ if (import.meta.main) {
   // WS-27: also the credential migration lock's libSystem `sysctl` ffi (its own start time) — the release
   // gate must run every ffi the daemon boots through.
   if (process.argv[2] === "__keychain-ffi-probe") {
+    // ComputerV2 (2026-10-08): the helper's SecCode check (Security.framework + libSystem `dlsym`) — run on this
+    // process's own pid so a hardened-runtime kill of that ffi stops the release here, not at a user's first
+    // ComputerV2 call. Its answer is not the point (nothing prompts, nothing is read).
+    processSatisfiesRequirement(process.pid, "anchor apple generic");
     const unlocked = keychainUnlocked(null);
     const started = processStartSecondsViaSysctl(process.pid);
     if (started === undefined) {
