@@ -91,25 +91,31 @@ export function stampAll(v: string): string[] {
     put(path, JSON.stringify(pkg, null, 2) + "\n");
   }
 
-  // 3. apple: project.yml is the XcodeGen source of truth; Support/Info.plist is the
-  //    git-tracked generated mirror that builds actually read (INFOPLIST_FILE) until the
-  //    next `xcodegen generate`. Stamp BOTH so a sync never needs xcodegen installed.
+  // 3. apple: project.yml is the XcodeGen source of truth; the Info.plists are the
+  //    git-tracked generated mirrors that builds actually read (INFOPLIST_FILE) until the
+  //    next `xcodegen generate`. Stamp ALL of them so a sync never needs xcodegen installed.
+  //    project.yml carries the version once per versioned target (Winter.app, and the Winter
+  //    Computer Use helper, which reports it as `helperVersion`), so every occurrence is stamped.
   const yml = join(ROOT, "apple", "Winter", "project.yml");
-  put(
-    yml,
-    readFileSync(yml, "utf8")
-      .replace(/CFBundleShortVersionString: "[^"]*"/, `CFBundleShortVersionString: "${v}"`)
-      .replace(/CFBundleVersion: "[^"]*"/, `CFBundleVersion: "${v}"`),
-  );
-  const plist = join(ROOT, "apple", "Winter", "Support", "Info.plist");
-  put(
-    plist,
-    readFileSync(plist, "utf8")
-      .replace(
-        /(<key>CFBundleShortVersionString<\/key>\s*<string>)[^<]*(<\/string>)/,
-        `$1${v}$2`,
-      )
-      .replace(/(<key>CFBundleVersion<\/key>\s*<string>)[^<]*(<\/string>)/, `$1${v}$2`),
-  );
+  put(yml, stampProjectYml(readFileSync(yml, "utf8"), v));
+  for (const plist of [
+    join(ROOT, "apple", "Winter", "Support", "Info.plist"),
+    join(ROOT, "apple", "WinterComputerUse", "Support", "Info.plist"),
+  ]) {
+    put(plist, stampInfoPlist(readFileSync(plist, "utf8"), v));
+  }
   return files;
+}
+
+/** Every `CFBundleShortVersionString:` / `CFBundleVersion:` in project.yml, not just the first. */
+export function stampProjectYml(yml: string, v: string): string {
+  return yml
+    .replace(/CFBundleShortVersionString: "[^"]*"/g, `CFBundleShortVersionString: "${v}"`)
+    .replace(/CFBundleVersion: "[^"]*"/g, `CFBundleVersion: "${v}"`);
+}
+
+export function stampInfoPlist(plist: string, v: string): string {
+  return plist
+    .replace(/(<key>CFBundleShortVersionString<\/key>\s*<string>)[^<]*(<\/string>)/, `$1${v}$2`)
+    .replace(/(<key>CFBundleVersion<\/key>\s*<string>)[^<]*(<\/string>)/, `$1${v}$2`);
 }

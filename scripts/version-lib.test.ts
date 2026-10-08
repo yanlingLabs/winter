@@ -1,10 +1,10 @@
 // Winter Phase 9c (P9c-2): the new `#.###.#` version scheme. Pure logic only — no shell-outs, no
 // real releases — mirrors release-lib.test.ts's own posture for the rest of the release pipeline.
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FORMAT, nextVersion, readCanonical, semverTwin } from "./version-lib";
+import { FORMAT, nextVersion, readCanonical, ROOT, semverTwin, stampInfoPlist, stampProjectYml } from "./version-lib";
 
 const temps: string[] = [];
 afterEach(() => {
@@ -85,5 +85,25 @@ describe("nextVersion", () => {
   });
   test("a non-canonical current version throws before considering the mode", () => {
     expect(() => nextVersion("0.2.014", "--patch")).toThrow(/#\.###\.#/);
+  });
+});
+
+describe("stamping the apple sources", () => {
+  test("project.yml: EVERY versioned target is stamped (Winter.app and the Winter Computer Use helper), not just the first", () => {
+    const yml = readFileSync(join(ROOT, "apple", "Winter", "project.yml"), "utf8");
+    const count = (text: string, re: RegExp) => [...text.matchAll(re)].length;
+    expect(count(yml, /CFBundleShortVersionString: "[^"]*"/g)).toBe(2);
+    const stamped = stampProjectYml(yml, "9.999.9");
+    expect(count(stamped, /CFBundleShortVersionString: "9\.999\.9"/g)).toBe(2);
+    expect(count(stamped, /CFBundleVersion: "9\.999\.9"/g)).toBe(2);
+    expect(stamped.replaceAll("9.999.9", readCanonical())).toBe(yml);
+  });
+
+  test("the helper's generated Info.plist is a stamped source, and today carries the canonical version", () => {
+    const plist = readFileSync(join(ROOT, "apple", "WinterComputerUse", "Support", "Info.plist"), "utf8");
+    expect(plist).toMatch(new RegExp(`<key>CFBundleShortVersionString</key>\\s*<string>${readCanonical().replaceAll(".", "\\.")}</string>`));
+    const stamped = stampInfoPlist(plist, "9.999.9");
+    expect(stamped).toMatch(/<key>CFBundleShortVersionString<\/key>\s*<string>9\.999\.9<\/string>/);
+    expect(stamped).toMatch(/<key>CFBundleVersion<\/key>\s*<string>9\.999\.9<\/string>/);
   });
 });

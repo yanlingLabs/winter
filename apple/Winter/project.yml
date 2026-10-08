@@ -18,6 +18,10 @@ packages:
     path: ../WinterKit
   WinterProtocol:
     path: ../WinterProtocol
+  # ComputerV2: the Winter Computer Use helper's shell (and, through it, the automation engine and the
+  # mirror/cursor/Esc packages). Only the WinterComputerUse target links it; Winter.app never does.
+  WinterComputerUse:
+    path: ../WinterComputerUse
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.6.0"
@@ -77,6 +81,11 @@ targets:
       # helpers' full .app bundles below) that the "Embed WinterOfficeHelper" postCompileScript
       # copies by hand; xcodegen's automatic embedding machinery is not involved either way.
       - target: WinterOfficeHelper
+        embed: false
+      # ComputerV2: build order only. The helper is a whole .app that the Release-only "Embed Winter
+      # Computer Use" postCompileScript below copies into Contents/Helpers and re-signs; xcodegen's own
+      # embedding is not involved.
+      - target: WinterComputerUse
         embed: false
       # panel-cef Task 6a: the app now LINKS CEF's C++/C-API translation layer, which Task 4 built
       # for the helper targets alone. `Sources/CEF/WinterCEF.mm` calls CefInitialize /
@@ -656,6 +665,15 @@ targets:
         script: |
           set -euo pipefail
           "${SRCROOT}/../../scripts/embed-runtimes.sh"
+      # ComputerV2: Winter Computer Use, the signed helper app that holds its own Accessibility and Screen
+      # Recording grants, at Contents/Helpers/Winter Computer Use.app. Release only, like the two embeds
+      # above; the body (copy, re-sign with the STATED designated requirement TCC keys the grants on, check)
+      # is scripts/embed-computer-helper.sh, tested standalone by scripts/embed-computer-helper.test.ts.
+      - name: Embed Winter Computer Use
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          "${SRCROOT}/../../scripts/embed-computer-helper.sh"
     info:
       path: Support/Info.plist
       properties:
@@ -950,6 +968,76 @@ targets:
         CODE_SIGN_STYLE: Manual
         SWIFT_VERSION: "5.9"
         MACOSX_DEPLOYMENT_TARGET: "26.0"
+  # ComputerV2 — "Winter Computer Use", the helper app behind the ComputerV2 tool. An LSUIElement agent app
+  # (no Dock icon, no menu) that holds its OWN Accessibility and Screen Recording grants, so it must be a
+  # real .app launched through LaunchServices (`open -g -j`), never a child of winter-core or Winter.app —
+  # TCC checks a child's responsible process, which would be the parent. Everything but `App/main.swift`
+  # lives in the WinterComputerUse package (`swift test` there); it never links WinterKit.
+  #
+  # Identity by configuration, like the Winter target: Release = dist (`Winter Computer Use`,
+  # com.winter.computeruse, serves ~/.winter, embedded in Winter.app by "Embed Winter Computer Use");
+  # Debug = dev (`Winter Computer Use Dev`, com.winter.computeruse.dev, serves ~/.winter-dev), which
+  # `bun run dev:helper` builds (giving the bundle id on its command line — see the Debug config), signs
+  # with the stated designated requirement and places in dist/dev/. The helper reads its home from its own
+  # bundle id. No entitlements in v1 (release.ts pins exactly none).
+  WinterComputerUse:
+    type: application
+    platform: macOS
+    sources:
+      - path: ../WinterComputerUse/App
+      - path: Support/AppIcon.icns
+      - path: Support/AppIconDev.icns
+    dependencies:
+      - package: WinterComputerUse
+        product: WinterComputerUseShell
+    info:
+      path: ../WinterComputerUse/Support/Info.plist
+      properties:
+        CFBundleName: "$(WINTER_CU_APP_NAME)"
+        CFBundleDisplayName: "$(WINTER_CU_APP_NAME)"
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        CFBundleIconFile: "$(WINTER_CU_APP_ICON)"
+        # Stamped with the Winter target's by scripts/version-lib.ts (every occurrence in this file, plus
+        # the generated Support/Info.plist) — the helper reports it as `helperVersion`.
+        CFBundleShortVersionString: "0.124.0"
+        CFBundleVersion: "0.124.0"
+        LSUIElement: true
+        LSMinimumSystemVersion: "26.0"
+        NSScreenCaptureUsageDescription: "Winter Computer Use captures the windows Winter works in, and the screen when Winter is asked to look at it."
+    settings:
+      base:
+        PRODUCT_NAME: "$(WINTER_CU_APP_NAME)"
+        PRODUCT_BUNDLE_IDENTIFIER: com.winter.computeruse
+        WINTER_CU_APP_NAME: Winter Computer Use
+        WINTER_CU_APP_ICON: AppIcon
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        ENABLE_HARDENED_RUNTIME: YES
+        # One Mach-O, in Debug too: Xcode's preview "debug dylib" split would put the code in a
+        # `….debug.dylib` beside a stub executable, which the dev helper's own re-sign (one bundle signature,
+        # hardened runtime, library validation) has no business carrying.
+        ENABLE_DEBUG_DYLIB: NO
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+      configs:
+        Debug:
+          # NOT com.winter.computeruse.dev: Xcode registers every app it builds with LaunchServices, and a
+          # Debug Winter build compiles this target too, so each DerivedData would hold a second registered
+          # com.winter.computeruse.dev — signed by Xcode, with a requirement TCC does not know — for
+          # `open -b` to pick. The dev helper's identity is given only on `bun run dev:helper`'s command line
+          # (PRODUCT_BUNDLE_IDENTIFIER=com.winter.computeruse.dev); this build of it refuses to start.
+          PRODUCT_BUNDLE_IDENTIFIER: com.winter.computeruse.xcode-debug
+          WINTER_CU_APP_NAME: Winter Computer Use Dev
+          WINTER_CU_APP_ICON: AppIconDev
+        Release:
+          # The same privacy set as the Winter and WinterHelper targets (compiler-recorded paths, linker OSO
+          # stabs, AST-path stabs): the release identity scan reads every byte of the helper too.
+          OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
   # panel-cef Task 4 — CEF's own generated C++/C-API translation layer ("libcef_dll_wrapper" in
   # CEF's own CMakeLists.txt, vendored verbatim alongside include/ and Release/ by fetch-cef.ts).
   # CefExecuteProcess / CefScopedLibraryLoader / CefScopedSandboxContext — what the five helper
@@ -1220,6 +1308,7 @@ schemes:
         Winter: all
         WinterHelper: all
         WinterOfficeHelper: all
+        WinterComputerUse: all
         # F7 (T2 review, "if trivial"): [test], not `all` — the fixture is test-only infrastructure
         # (Tests/OfficeHelperFixtureSources/, never embedded, never touched by any postCompileScript),
         # so it belongs in the same scheme-action scope as WinterAppTests itself immediately below,
@@ -1236,3 +1325,9 @@ schemes:
         WinterAppTests: [test]
     test:
       targets: [WinterAppTests]
+  # The helper alone — what `bun run dev:helper` and `bun run verify:computer-helper` build, so neither
+  # pays for CEF, LibreOffice or the app.
+  WinterComputerUse:
+    build:
+      targets:
+        WinterComputerUse: all
