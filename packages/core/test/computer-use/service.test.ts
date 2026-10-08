@@ -458,6 +458,29 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     expect(r2.isError).toBe(false);
   }, 30_000);
 
+  macOnly("the live gate's Finder run: find shows disabled, screen.windows shows off screen, metrics keep the helper's code", async () => {
+    const w = world();
+    w.fake.handlers["target.find"] = () => ({ elements: [{ ref: 334, role: "menu item", name: "Move to Trash", states: ["disabled"] }] });
+    w.fake.handlers["screen.windows"] = () => ({ windows: [
+      { app: "Safari", bundleId: "com.apple.Safari", pid: 7, windowId: 84426, title: "OpenRouter", frame: [0, 33, 1512, 949], onScreen: false },
+    ] });
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("unsupported", "“Move to Trash” is disabled right now"); };
+    const r = await w.run([
+      "const finder = await apps.open('Notes')",
+      "const items = await finder.find({ role: 'menu item' })",
+      "print(JSON.stringify(items[0].states))",
+      "const wins = await screen.windows()",
+      "print(String(wins[0].onScreen))",
+      "try { await finder.click(334) } catch (e) { print(e.name) }",
+    ].join("\n"));
+    expect(text(r)).toContain('[334] menu item "Move to Trash" (disabled)');
+    expect(text(r)).toContain('["disabled"]');
+    expect(text(r)).toContain('Safari — "OpenRouter" [0, 33, 1512, 949] (off screen)');
+    expect(text(r)).toContain("false");
+    const lines = readFileSync(w.telemetry.path, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines.find((l) => l.primitive === "click")).toMatchObject({ error: "Error", errorCode: "unsupported" });
+  }, 30_000);
+
   macOnly("busy is retried once; twice is a typed HelperUnavailable", async () => {
     const w = world();
     let n = 0;
@@ -536,7 +559,7 @@ describe("ComputerV2: the record it leaves", () => {
     const lines = readFileSync(w.telemetry.path, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
     expect(lines.map((l) => l.primitive)).toEqual(["apps.open", "type", "state"]);
     for (const l of lines) {
-      expect(Object.keys(l).sort().every((k) => ["ts", "sessionId", "callId", "primitive", "ms", "helperMs", "rung", "settleMs", "settleExit", "imageBytes", "error"].includes(k))).toBe(true);
+      expect(Object.keys(l).sort().every((k) => ["ts", "sessionId", "callId", "primitive", "ms", "helperMs", "rung", "settleMs", "settleExit", "imageBytes", "error", "errorCode"].includes(k))).toBe(true);
     }
     expect(readFileSync(w.telemetry.path, "utf8")).not.toContain(secret);
     expect(w.audits).toHaveLength(1);
