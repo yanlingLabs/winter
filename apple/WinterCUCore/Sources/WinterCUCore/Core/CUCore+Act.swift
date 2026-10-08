@@ -215,6 +215,7 @@ extension CUCore {
             var announced = false
             if count == 1, flags.isEmpty {
                 let axAction: String? = button == .left && info.actions.contains(kAXPressAction) ? kAXPressAction
+                    : button == .left && info.actions.contains(kAXPickAction) ? kAXPickAction
                     : button == .right && info.actions.contains(kAXShowMenuAction) ? kAXShowMenuAction : nil
                 if let axAction {
                     cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
@@ -232,8 +233,11 @@ extension CUCore {
                     }
                 }
             }
-            guard let center = info.center else {
+            guard info.center != nil else {
                 throw CUError.unsupported("[\(ref)] has no position on screen — try action() or a screenshot point")
+            }
+            guard let center = clickablePoint(e, info, t) else {
+                throw CUError.unsupported("[\(ref)] is outside the window and could not be scrolled into view — scroll to it first")
             }
             return try pointerClick(p, t, at: center, button: button, count: count, flags: flags, token, announced: announced,
                                     element: e, axTried: announced)
@@ -281,7 +285,10 @@ extension CUCore {
         switch (button, count) {
         case (.right, _): return actions.contains(kAXShowMenuAction) ? .ax(kAXShowMenuAction) : .axUnlisted(kAXShowMenuAction)
         case (.left, let n) where n >= 2: return actions.contains("AXOpen") ? .ax("AXOpen") : .events
-        default: return actions.contains(kAXPressAction) ? .ax(kAXPressAction) : .axUnlisted(kAXPressAction)
+        default:
+            if actions.contains(kAXPressAction) { return .ax(kAXPressAction) }
+            if actions.contains(kAXPickAction) { return .ax(kAXPickAction) }
+            return .axUnlisted(kAXPressAction)
         }
     }
 
@@ -387,6 +394,21 @@ extension CUCore {
     private func waitOnScreen(_ t: CUTarget, ms: Double) {
         let deadline = clock.nowMs() + ms
         while sys.window(id: t.windowID)?.onScreen != true, clock.nowMs() < deadline { usleep(30_000) }
+    }
+
+    /// Where a pointer click on `e` goes: its centre, or — when that lies outside the window (scrolled out
+    /// of view) — its centre after `AXScrollToVisible`; nil when it stays outside (ChatGPT's
+    /// `cannotClickOffscreenElement`). An event aimed outside the window would land on something else.
+    func clickablePoint(_ e: AXUIElement, _ info: ElementInfo, _ t: CUTarget) -> CGPoint? {
+        guard let c = info.center else { return nil }
+        guard let window = sys.window(id: t.windowID)?.frame, !window.contains(c) else { return c }
+        guard (try? ax.perform(e, "AXScrollToVisible")) != nil else { return nil }
+        let deadline = clock.nowMs() + 300
+        repeat {
+            if let moved = ElementInfo(e, ax).center, window.contains(moved) { return moved }
+            usleep(30_000)
+        } while clock.nowMs() < deadline
+        return nil
     }
 
     /// Roles that take a click: the hit test climbs from the deepest element at the point to the first of these
@@ -829,15 +851,14 @@ extension CUCore {
             let info = ElementInfo(e, ax)
             announceTarget(t, info, pressing: false)
             try token.check()
-            if let area = scrollArea(from: e) {
-                do {
-                    if try axScroll(area: area, direction: a.direction, pages: pages) {
-                        cursor(t, "scroll", at: info.center, text: a.direction.rawValue)
-                        return ActOutcome(rung: .accessibility)
-                    }
-                } catch let error where Self.deliveryUncertain(error) {
-                    throw busyAfterSend(t)
+            do {
+                if let how = try axScroll(area: scrollArea(from: e), element: e, direction: a.direction, pages: pages) {
+                    cursor(t, "scroll", at: info.center, text: a.direction.rawValue)
+                    CULog.act.notice("scroll in \(t.appName, privacy: .public): AX \(how, privacy: .public)")
+                    return ActOutcome(rung: .accessibility, detail: Self.scrollDetail(how, elsewhere: isOffThisDesktop(t) ? t.appName : nil))
                 }
+            } catch let error where Self.deliveryUncertain(error) {
+                throw busyAfterSend(t)
             }
             guard let c = info.center else { throw CUError.unsupported("[\(ref)] has no position on screen") }
             point = c
@@ -874,16 +895,14 @@ extension CUCore {
                                  deltaX: Double, deltaY: Double,
                                  _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         let area = e.flatMap { scrollArea(from: $0) } ?? largestScrollArea(in: t)
-        if let area {
-            do {
-                if try axScroll(area: area, direction: direction, pages: pages) {
-                    cursor(t, "scroll", at: point, text: direction.rawValue)
-                    CULog.act.notice("scroll in \(t.appName, privacy: .public) (another desktop): AX scroll bar")
-                    return ActOutcome(rung: .accessibility, detail: "\(t.appName)'s window is on another desktop, so its scroll bar was moved over accessibility")
-                }
-            } catch let error where Self.deliveryUncertain(error) {
-                throw busyAfterSend(t)
+        do {
+            if let how = try axScroll(area: area, element: e, direction: direction, pages: pages) {
+                cursor(t, "scroll", at: point, text: direction.rawValue)
+                CULog.act.notice("scroll in \(t.appName, privacy: .public) (another desktop): AX \(how, privacy: .public)")
+                return ActOutcome(rung: .accessibility, detail: Self.scrollDetail(how, elsewhere: t.appName))
             }
+        } catch let error where Self.deliveryUncertain(error) {
+            throw busyAfterSend(t)
         }
         // The wheel, addressed to the window (a last attempt: ChatGPT sends it on screen only). What moved
         // tells whether it landed.
@@ -964,32 +983,88 @@ extension CUCore {
         return nil
     }
 
-    /// Rung 1 scrolling: move the scroll bar's value by `pages` viewports. False when the bar can't be set;
-    /// throws `busy` when the write may have happened.
-    func axScroll(area: AXUIElement, direction: CUScrollDirection, pages: Double) throws -> Bool {
+    /// Rung 1 scrolling, every AX way there is, in order; the name of the one that worked, or nil:
+    /// 1. the scroll bar's value, moved by `pages` viewports — when it is settable AND reads back moved;
+    /// 2. the scroll bar's page buttons (subroles AXIncrementPage / AXDecrementPage) pressed once per page,
+    ///    as ChatGPT's helper scrolls (`scrollUsingScrollBar`);
+    /// 3. the element's or the scroll area's own page action, when listed (`AXScrollDownByPage` …).
+    /// Throws `busy` when a write or press may have happened.
+    func axScroll(area: AXUIElement?, element: AXUIElement?, direction: CUScrollDirection, pages: Double) throws -> String? {
         let vertical = direction == .up || direction == .down
-        guard let bar = ax.element(area, vertical ? kAXVerticalScrollBarAttribute : kAXHorizontalScrollBarAttribute),
-              ax.isSettable(bar, kAXValueAttribute),
+        let forward = direction == .down || direction == .right
+        let presses = max(1, Int(pages.rounded(.up)))
+        let bar = area.flatMap { ax.element($0, vertical ? kAXVerticalScrollBarAttribute : kAXHorizontalScrollBarAttribute) }
+        if let area, let bar {
+            switch try scrollBarValue(area: area, bar: bar, vertical: vertical, forward: forward, pages: pages) {
+            case .moved: return "scroll bar value"
+            case .nothingToScroll: return "nothing left to scroll"
+            case .unmoved: break
+            }
+            let subrole = forward ? "AXIncrementPage" : "AXDecrementPage"
+            if let button = ax.elements(bar, kAXChildrenAttribute).first(where: { ax.string($0, kAXSubroleAttribute) == subrole }),
+               try pressTimes(button, kAXPressAction, presses) {
+                return "the scroll bar's page button ×\(presses)"
+            }
+        }
+        let action = "AXScroll" + (direction == .down ? "Down" : direction == .up ? "Up" : direction == .left ? "Left" : "Right") + "ByPage"
+        for e in [element, area].compactMap({ $0 }) where ax.actions(e).contains(action) {
+            if try pressTimes(e, action, presses) { return "\(action) ×\(presses)" }
+        }
+        return nil
+    }
+
+    enum ScrollBarResult { case moved, nothingToScroll, unmoved }
+
+    /// The act's detail for an AX scroll (`elsewhere`: the app, when its window is on another desktop).
+    static func scrollDetail(_ how: String, elsewhere app: String?) -> String? {
+        let prefix = app.map { "\($0)'s window is on another desktop, so " } ?? ""
+        switch how {
+        case "nothing left to scroll": return "there was nothing left to scroll that way"
+        case "scroll bar value": return app == nil ? nil : prefix + "its scroll bar was moved over accessibility"
+        default: return prefix + "it was scrolled with \(how) over accessibility"
+        }
+    }
+
+    /// The scroll bar's value moved by `pages` viewports, and read back to prove it moved.
+    private func scrollBarValue(area: AXUIElement, bar: AXUIElement, vertical: Bool, forward: Bool,
+                                pages: Double) throws -> ScrollBarResult {
+        guard ax.isSettable(bar, kAXValueAttribute),
               let raw = ax.attribute(bar, kAXValueAttribute), let value = (raw as? NSNumber)?.doubleValue,
-              let viewport = ax.frame(area)
-        else { return false }
-        let content = ax.elements(area, kAXChildrenAttribute).first { ax.string($0, kAXRoleAttribute) != kAXScrollBarRole }
-            .flatMap { ax.frame($0) }
-        guard let content else { return false }
+              let viewport = ax.frame(area),
+              let content = ax.elements(area, kAXChildrenAttribute).first(where: { ax.string($0, kAXRoleAttribute) != kAXScrollBarRole })
+                .flatMap({ ax.frame($0) })
+        else { return .unmoved }
         let view = vertical ? viewport.height : viewport.width
         let total = vertical ? content.height : content.width
-        guard total > view + 1 else { return true }  // nothing to scroll: done
+        guard total > view + 1 else { return .nothingToScroll }
         let step = pages * 0.9 * view / (total - view)
-        let sign: Double = (direction == .down || direction == .right) ? 1 : -1
-        let next = min(1, max(0, value + sign * step))
+        let next = min(1, max(0, value + (forward ? step : -step)))
+        if next == value { return .nothingToScroll }
         do {
             try ax.set(bar, kAXValueAttribute, NSNumber(value: next))
-            return true
         } catch let error where Self.deliveryUncertain(error) {
             throw error
         } catch {
-            return false
+            return .unmoved
         }
+        // Some apps accept the write and ignore it: only a value that changed counts.
+        let after = ax.attribute(bar, kAXValueAttribute).flatMap { ($0 as? NSNumber)?.doubleValue }
+        return after.map { abs($0 - value) > 0.000_1 } == true ? .moved : .unmoved
+    }
+
+    /// `action` on `e`, `times` times; false when the first is refused.
+    private func pressTimes(_ e: AXUIElement, _ action: String, _ times: Int) throws -> Bool {
+        for i in 0..<times {
+            do {
+                try ax.perform(e, action)
+            } catch let error where Self.deliveryUncertain(error) {
+                throw error
+            } catch {
+                if i == 0 { return false }
+                return true
+            }
+        }
+        return true
     }
 
     private func drag(_ a: CUDragAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {

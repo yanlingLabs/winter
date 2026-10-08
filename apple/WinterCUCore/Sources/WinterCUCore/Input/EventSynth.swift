@@ -78,6 +78,8 @@ struct CUEventSynth {
                               clickGroup: Int64?) {
         guard route != .hid else { return }
         e.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid))
+        // Mouse subtype 3, as ChatGPT's helper and cua-driver stamp their synthesized mouse events.
+        if e.type != .scrollWheel { e.setIntegerValueField(.mouseEventSubtype, value: 3) }
         if windowID != 0 {
             e.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))
             e.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowID))
