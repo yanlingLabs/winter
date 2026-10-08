@@ -29,7 +29,7 @@ const TEXT_ACCUMULATION_CAP = RESULT_TEXT_CAP + 4_096;
  *  restart) — shown OUTSIDE the DATA-ONLY fence; anything the script could have written goes inside it. */
 export interface ScriptError { name: string; message: string; line?: number; trusted?: boolean }
 
-type Item = { kind: "text"; text: string } | { kind: "image"; data: string; mimeType: string };
+type Item = { kind: "text"; text: string } | { kind: "image"; data: string; mimeType: string } | { kind: "daemon"; text: string };
 
 export class ResultBuilder {
   private readonly items: Item[] = [];
@@ -46,6 +46,13 @@ export class ResultBuilder {
 
   /** A daemon notice, shown BEFORE the script's output and outside the fence (e.g. a restarted runtime). */
   notice(text: string): void { this.notices.push(text); }
+
+  /** A daemon line IN PLACE among the script's output — never fenced, never merged with the text around it (what a
+   *  bind had to do to reach a window, printed just before its state). Short by construction; not counted
+   *  against the text cap. */
+  daemonLine(text: string): void {
+    if (text.length > 0) this.items.push({ kind: "daemon", text });
+  }
 
   text(text: string, opts: { screen?: boolean } = {}): void {
     if (opts.screen === true) this.screen = true;
@@ -99,6 +106,7 @@ export class ResultBuilder {
     for (const n of this.notices) content.push({ type: "text", text: `${n}\n` });
     for (const item of items) {
       if (item.kind === "image") { content.push({ type: "image", data: item.data, mimeType: item.mimeType }); continue; }
+      if (item.kind === "daemon") { content.push({ type: "text", text: `${item.text}\n` }); continue; }
       if (item.text.length === 0) continue;
       content.push({ type: "text", text: this.screen ? `<screen-data id="${tag}">\n${item.text}\n</screen-data id="${tag}">\n` : `${item.text}\n` });
     }

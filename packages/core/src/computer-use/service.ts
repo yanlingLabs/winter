@@ -24,7 +24,7 @@ import { ACT_PRIMITIVES, newRunGrants, type AppRef, type ComputerPolicy, type Ru
 import {
   HelperRpcError, HelperUnavailableError, WINTER_OWN_BUNDLE_IDS,
   type ActAction, type ActResult, type AppAtResult, type AppsListResult, type FindResult, type HelperNotification,
-  type ScreenWindowsResult, type ScreenshotResult, type SnapshotResult, type TargetBindResult, type TargetWindowsResult,
+  type ScreenWindowsResult, type ScreenshotResult, type SnapshotResult, type TargetBindResult, type TargetUseWindowResult, type TargetWindowsResult,
   type WaitForResult, type WaitIdleResult,
 } from "./protocol";
 import type { RecentApps } from "./recent-apps";
@@ -415,8 +415,11 @@ export class ComputerV2Service {
       case "useWindow": {
         const w = args.window;
         if (typeof w !== "string" && typeof w !== "number") throw bad("useWindow() takes a window title or id");
-        await this.helperCall(ctx, "target.useWindow", { targetId, window: w }, metric);
+        const res = await this.helperCall<TargetUseWindowResult>(ctx, "target.useWindow", { targetId, window: w }, metric);
         this.diffBases.clearTarget(ctx.sessionId, targetId); // a different window: the next state() is full
+        ctx.state.lastTargetShot.delete(targetId);
+        const detail = helperDetail(res?.detail);
+        if (detail !== undefined) ctx.builder.daemonLine(detail);
         return undefined;
       }
       case "waitFor": return await this.waitFor(ctx, t, args, metric);
@@ -543,6 +546,8 @@ export class ComputerV2Service {
     const res = await this.helperCall<TargetBindResult>(ctx, "target.bind", {
       // A path binds that exact bundle (its identity was read above); everything else binds by bundle id.
       sessionId: ctx.sessionId, app: known.path ?? known.bundleId, ...(req.window === undefined ? {} : { window: req.window }), mirror: computerUseMirrorFrom(settings),
+      // May the bind reach a window on another Space or in full screen through private APIs (and move it here)?
+      privatePath: computerUsePrivateEventPathFrom(settings),
     }, metric, undefined, { afterEnd: true });
     const app: AppRef = { bundleId: res.app.bundleId, name: res.app.name };
     const info: TargetInfo = { targetId: res.targetId, bundleId: app.bundleId, name: app.name, pid: res.app.pid };
@@ -568,6 +573,10 @@ export class ComputerV2Service {
     this.live(ctx);
     metric.settleMs = snap.waitedMs;
     metric.settleExit = snap.settled ? "quiet" : "cap";
+    // What the bind had to do to reach a window (another Space, a new window): the first line of its state,
+    // outside the fence — the helper's fixed wording, not screen text.
+    const detail = helperDetail(res.detail);
+    if (detail !== undefined) ctx.builder.daemonLine(detail);
     ctx.builder.text(snap.text, { screen: true });
     this.diffBases.set(ctx.sessionId, info.targetId, snap.snapshotId);
     return { targetId: info.targetId, name: app.name, bundleId: app.bundleId };
@@ -842,13 +851,20 @@ export class ComputerV2Service {
         // what to do next; the target stays bound (the window may come back) but its diff base is reset.
         case "window_elsewhere":
         case "no_window": {
-          if (t !== undefined) this.diffBases.clearTarget(ctx.sessionId, t.targetId);
+          if (t !== undefined) { this.diffBases.clearTarget(ctx.sessionId, t.targetId); ctx.state.lastTargetShot.delete(t.targetId); }
+          // The helper opened a NEW window on this desktop and switched the target to it: the action did not run,
+          // and the refs and screenshots belong to the new window now (reset above).
+          if (err.code === "window_elsewhere" && data.newWindowId !== undefined) {
+            return { kind: "NoWindow", message: `${name}'s window is on another Space or in full screen, so a new window was opened on this desktop and the target now uses it — the action did not run; call state() and retry` };
+          }
           const elsewhere = err.code === "window_elsewhere";
-          const said = err.message.replace(/\s+/g, " ").trim().slice(0, 300) || (elsewhere ? "the window is on another Space or in full screen" : "the app has no open window");
-          const next = elsewhere
-            ? "ask the user to bring it to this desktop (or out of full screen), then try again"
-            : "ask the user to open one, or try again once it is open";
-          return { kind: "NoWindow", message: `${t === undefined ? "" : `${name}: `}${said} — ${next}`, untrusted: true };
+          const said = err.message.replace(/\s+/g, " ").trim().slice(0, 400) || (elsewhere ? "the window is on another Space or in full screen" : "the app has no open window");
+          // The helper's own sentence is kept; it names the app and often says what to do — add only what is missing.
+          const prefix = t === undefined || said.includes(name) ? "" : `${name}: `;
+          const next = said.includes(" — ") ? "" : elsewhere
+            ? " — ask the user to bring it to this desktop (or out of full screen), then try again"
+            : " — ask the user to open one, or try again once it is open";
+          return { kind: "NoWindow", message: `${prefix}${said}${next}`, untrusted: true };
         }
         case "needs_foreground": return { kind: "NeedsForeground", message: `${name} needs the foreground for that — try an element ref, or ask the user` };
         case "not_allowed": return { kind: "NotAllowed", message: typeof data.reason === "string" ? `not allowed: ${data.reason}` : `not allowed in ${name}` };
@@ -987,6 +1003,13 @@ const ERROR_MESSAGE_CAP = 4_096;
  * an object with any `name`, of any size — review I6), the message is capped, the line a positive integer. It is
  * TRUSTED (shown outside the fence) only when its message is one the daemon itself sent in this call.
  */
+/** A bind's or useWindow's `detail` from the helper, as one short line (or nothing). */
+function helperDetail(detail: unknown): string | undefined {
+  if (typeof detail !== "string") return undefined;
+  const line = detail.replace(/\s+/g, " ").trim().slice(0, 300);
+  return line.length === 0 ? undefined : line;
+}
+
 export function normaliseScriptError(e: { name?: unknown; message?: unknown; line?: unknown }, daemonSentences: ReadonlySet<string>): ScriptError {
   const name = typeof e.name === "string" && KNOWN_ERROR_NAMES.has(e.name) ? e.name : "Error";
   const raw = typeof e.message === "string" ? e.message : String(e.message ?? "");
