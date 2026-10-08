@@ -68,6 +68,36 @@ final class FloorsTests: XCTestCase {
         }
     }
 
+    func testAgentConfigIsAProtectedSaveDestination() {
+        let home = "/Users/u"
+        for p in ["~/.winter", "~/.winter/settings.json", "~/.winter/sdk/settings.json", "~/.winter/sdk/.winter.json",
+                  "~/.winter/run/core.sock", "~/.winter/runtimes/bin/winter", "/Users/u/.winter-dev/sdk/settings.json",
+                  "~/.winter-dev/anything/at/all.txt", "~/.claude", "~/.claude/settings.json", "~/.claude.json",
+                  "/Users/u/code/app/.winter/settings.json", "/Users/u/code/app/.winter/settings.local.json",
+                  "/Users/u/code/app/.winter/mcp.json", ".claude.json", ".winter.json", "~/Documents/../.winter/x"] {
+            XCTAssertTrue(CUFloors.isProtectedSavePath(p, home: home), p)
+        }
+        for p in ["~/winter/notes.md", "~/Documents/settings.json", "/Users/u/code/app/mcp.json", "~/claude.txt",
+                  "~/.winterize.txt"] {
+            XCTAssertFalse(CUFloors.isProtectedSavePath(p, home: home), p)
+        }
+    }
+
+    func testSaveDestinationsFromAPanelsFolderChain() {
+        let home = "/Users/u"
+        // Navigated into ~/.winter/sdk: the pop-up shows "sdk", its menu the chain up to the volume.
+        XCTAssertTrue(CUFloors.isProtectedSaveDestination(fileName: "settings.json",
+                                                          folderChain: ["sdk", ".winter", "u", "Users", "Macintosh HD"], home: home))
+        XCTAssertTrue(CUFloors.isProtectedSaveDestination(fileName: "notes.txt", folderChain: [".claude", "u"], home: home))
+        XCTAssertTrue(CUFloors.isProtectedSaveDestination(fileName: "mcp.json", folderChain: [".winter", "app", "code"], home: home))
+        XCTAssertTrue(CUFloors.isProtectedSaveDestination(fileName: ".claude.json", folderChain: ["u", "Users"], home: home))
+        XCTAssertTrue(CUFloors.isProtectedSaveDestination(fileName: "config.fish", folderChain: ["fish", ".config", "u"], home: home))
+        XCTAssertTrue(CUFloors.isProtectedSaveDestination(fileName: "~/.winter/settings.json", folderChain: ["Documents"], home: home),
+                      "a typed path wins over the shown folder")
+        XCTAssertFalse(CUFloors.isProtectedSaveDestination(fileName: "settings.json", folderChain: ["Documents", "u", "Users"], home: home))
+        XCTAssertFalse(CUFloors.isProtectedSaveDestination(fileName: "Report.pdf", folderChain: [], home: home))
+    }
+
     func testTypedSavePaths() {
         XCTAssertTrue(CUFloors.typedSavePathIsProtected(".zshrc", home: "/Users/u"))
         XCTAssertTrue(CUFloors.typedSavePathIsProtected("go to ~/.ssh/authorized_keys now", home: "/Users/u"))
