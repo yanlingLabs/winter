@@ -229,6 +229,27 @@ describe("sessionHooksFor — bash safety reviewer", () => {
     expect(called).toBe(false);
   });
 
+  test("a plain `open` of an app or an http(s) page skips the reviewer; anything else, or a dangerous-floor host, is reviewed", async () => {
+    const seen: string[] = [];
+    const reviewer = { review: async (input: { command: string }) => { seen.push(input.command); return { verdict: "unsafe", reason: "network side effect" }; } } as unknown as BashReviewer;
+    const group = groupFor(sessionHooksFor({ ...baseDeps, reviewer, policy: () => "auto", dangerousDomainsAdded: () => ["evil.example"] }).winter?.PreToolUse, "Bash");
+    const run = (command: string, extra: Record<string, unknown> = {}) =>
+      group.hooks[0]!(preInput({ tool_name: "Bash", tool_input: { command, description: "Open ChatGPT in Safari", ...extra }, tool_use_id: "t1" }), "t1", { signal: abortSignal() });
+    for (const c of ["open -a Safari 'https://chatgpt.com'", "open -a Safari https://x.com", "open https://a.b", 'open -a "Google Chrome"', "open -b com.apple.Safari https://x"]) {
+      expect(await run(c)).toEqual({});
+    }
+    expect(seen).toEqual([]);
+    const denied = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "network side effect" } };
+    for (const c of ["open ./x.sh", "open -a Terminal x.command", "open file:///etc", "open 'myapp://x'", "open https://x; rm -rf ~", "open $(cat f)", "open --args x", "open -e foo.txt",
+      "open https://pastebin.com/x", "open -a Safari https://www.evil.example/login"]) {
+      expect(await run(c)).toEqual(denied);
+    }
+    expect(seen).toHaveLength(10);
+    // A sandbox ESCAPE is never pre-allowed: it is reviewed (and only a safe verdict clears it).
+    expect(await run("open -a Safari https://x.com", { dangerouslyDisableSandbox: true })).toEqual(denied);
+    expect(seen).toHaveLength(11);
+  });
+
   test("an 'unsafe' verdict denies with the reviewer's own reason, under auto", async () => {
     const { winter } = sessionHooksFor({ ...baseDeps, reviewer: fakeReviewer("unsafe", "deletes the whole disk"), policy: () => "auto" });
     const group = groupFor(winter?.PreToolUse, "Bash");
