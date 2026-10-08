@@ -30,7 +30,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WINTER_TEAM_ID } from "../packages/core/src/auth/app-token-acl";
-import { checkSignedHelper, HELPER, helperBuildArgs, helperExecutable, helperRequirement, helperSignArgs, builtHelperPath, LSREGISTER, pidsRunning, usesStubEngine, type HelperFlavor } from "./computer-helper-lib";
+import { checkSignedHelper, HELPER, helperBuildArgs, helperExecutable, helperRequirement, helperSignArgs, builtHelperPath, LSREGISTER, pidsRunning, type HelperFlavor } from "./computer-helper-lib";
 import { resolveDevSigningIdentity } from "./dev-daemon-lib";
 import { readCanonical } from "./version-lib";
 
@@ -155,9 +155,6 @@ function main(): void {
   }
   if (failure !== undefined) die(failure);
 
-  if (usesStubEngine(readFileSync(helperExecutable(DEV_HELPER_APP, "dev")))) {
-    console.error("dev:helper: NOTE — built on the STUB automation engine (apple/WinterComputerUse/Stubs): it answers every automation call `unsupported`");
-  }
   if (register) {
     const registered = run(LSREGISTER, ["-f", DEV_HELPER_APP]);
     if (registered.status !== 0) die(`lsregister -f failed: ${registered.stderr.trim()}`);

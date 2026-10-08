@@ -114,7 +114,7 @@ import {
   keychainFfiProbeOk,
 } from "./release-lib";
 import { fetchAnt, parseAntPin } from "./fetch-ant";
-import { checkSignedHelper, HELPER, HELPER_EMBED_RELATIVE, helperExecutable, helperRequirement, LSREGISTER, usesStubEngine } from "./computer-helper-lib";
+import { checkSignedHelper, HELPER, HELPER_EMBED_RELATIVE, helperExecutable, helperRequirement, LSREGISTER } from "./computer-helper-lib";
 import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 import { buildWinter } from "./build-winter";
@@ -845,10 +845,6 @@ assertSigned(computerHelperApp, "Winter Computer Use");
     infoPlist: plist.ok ? (JSON.parse(plist.stdout) as Record<string, unknown>) : {},
     executable: readFileSync(helperExecutable(computerHelperApp, "dist")),
   });
-  // Until the real engine merged, the helper built on a stand-in that answers every call `unsupported`.
-  if (usesStubEngine(readFileSync(helperExecutable(computerHelperApp, "dist")))) {
-    failures.push("it was built on the STUB automation engine (apple/WinterComputerUse/Stubs) — point Package.swift at ../WinterCUCore and ../WinterCUPresentation");
-  }
   const stated = helperRequirement(HELPER.dist.identifier, TEAM_ID);
   const satisfied = probe(`codesign --verify --strict -R='${stated}' "${computerHelperApp}" 2>&1`);
   if (!satisfied.ok) failures.push(`the signature does not satisfy its own stated requirement: ${satisfied.stdout.trim()}`);

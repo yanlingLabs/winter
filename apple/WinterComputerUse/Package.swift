@@ -9,15 +9,8 @@ import PackageDescription
 // is only `App/main.swift` on top of the `WinterComputerUseShell` library, so everything here is tested
 // with `swift test`, and the helper never links WinterKit.
 //
-// The engine and the presentation layer are sibling packages (`apple/WinterCUCore`,
-// `apple/WinterCUPresentation`), built in their own lanes. Until they merge, this package builds against the
-// stand-ins in `Stubs/` (same module names, the pinned API, nothing behind them).
-//
-// MERGE (one commit, after both packages are in the tree): replace the two `Stubs/…` paths below with
-// "../WinterCUCore" and "../WinterCUPresentation", and delete `Stubs/`. Nothing else changes. (Not detected
-// automatically: SwiftPM and Xcode cache a manifest's evaluation, so a checkout that once resolved the stubs
-// would keep them after the real packages appear — measured.) A helper built on the stub engine says so:
-// release.ts refuses to ship one, dev:helper and verify:computer-helper print a warning.
+// The engine and the presentation layer are sibling packages, `apple/WinterCUCore` and
+// `apple/WinterCUPresentation`.
 let package = Package(
     name: "WinterComputerUse",
     platforms: [.macOS("26.0")],
@@ -25,8 +18,8 @@ let package = Package(
         .library(name: "WinterComputerUseShell", targets: ["WinterComputerUseShell"]),
     ],
     dependencies: [
-        .package(path: "Stubs/WinterCUCore"),
-        .package(path: "Stubs/WinterCUPresentation"),
+        .package(path: "../WinterCUCore"),
+        .package(path: "../WinterCUPresentation"),
     ],
     targets: [
         .target(
