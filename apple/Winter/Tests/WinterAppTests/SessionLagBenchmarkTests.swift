@@ -202,6 +202,48 @@ final class SessionLagBenchmarkTests: XCTestCase {
         XCTAssertLessThan(inPlace, copying * 1.2, "in place is never meaningfully slower")
     }
 
+    /// SwiftUI runs `==` on every transcript row input it re-evaluates (`AGDispatchEquatable` → `Exchange.==`,
+    /// the frames a hung Debug Winter Dev sat in). Before: the derived deep comparison of every item of
+    /// the exchange. After: a stamp compare, falling back to the fields for only the item that changed.
+    func testComparingTheExchangeCostsTheChangeNotTheTranscript() {
+        let (events, source) = session()
+        let model = foldBatched(events, perFlush: 16).model
+        let a = model.state.exchanges[0]
+        XCTAssertGreaterThan(a.activity.count, 100)
+
+        func deep(_ x: Exchange, _ y: Exchange) -> Bool {
+            x.prompt == y.prompt && x.promptEnvelope == y.promptEnvelope && x.replies == y.replies && x.aborted == y.aborted
+                && x.activity.count == y.activity.count
+                && zip(x.activity, y.activity).allSatisfy { ActivityItem.contentEquals($0, $1) }
+        }
+        let rounds = 400
+
+        // 1. The same snapshot twice — every unchanged row of a render.
+        let sameBefore = time { for _ in 0..<rounds { _ = deep(a, a) } } / Double(rounds)
+        let sameAfter = time { for _ in 0..<rounds { _ = (a == a) } } / Double(rounds)
+
+        // 2. One item changed — the row that just took an event.
+        var changed = a
+        changed.activity[changed.activity.count - 1].scriptCode = "await n.state()"
+        let oneBefore = time { for _ in 0..<rounds { _ = deep(a, changed) } } / Double(rounds)
+        let oneAfter = time { for _ in 0..<rounds { _ = (a == changed) } } / Double(rounds)
+
+        // 3. The same content built twice, apart (a replay against a live fold): both walk the content.
+        let rebuilt = foldBatched(events, perFlush: 16).model.state.exchanges[0]
+        let apartBefore = time { for _ in 0..<rounds { _ = deep(a, rebuilt) } } / Double(rounds)
+        let apartAfter = time { for _ in 0..<rounds { _ = (a == rebuilt) } } / Double(rounds)
+
+        print("BENCH [\(source)] Exchange == over \(a.activity.count) items (µs per compare, before → after)")
+        print(String(format: "BENCH   unchanged snapshot: %.1f → %.2f   one item changed: %.1f → %.1f   rebuilt apart: %.1f → %.1f",
+                     sameBefore * 1000, sameAfter * 1000, oneBefore * 1000, oneAfter * 1000, apartBefore * 1000, apartAfter * 1000))
+
+        XCTAssertTrue(a == a)
+        XCTAssertFalse(a == changed)
+        XCTAssertTrue(a == rebuilt, "equal content, different stamps: still equal")
+        XCTAssertLessThan(sameAfter * 4, sameBefore, "an unchanged exchange compares much faster than a walk")
+        XCTAssertLessThan(oneAfter, oneBefore * 1.5, "a changed one is never meaningfully slower")
+    }
+
     func testOneTranscriptPassOverTheFinalSessionAndTheClocksItNeeds() {
         let (events, source) = session()
         let model = foldBatched(events, perFlush: 16).model
@@ -234,7 +276,10 @@ final class SessionLagBenchmarkTests: XCTestCase {
 
         XCTAssertEqual(clocksAfter, 0, "no finished pill keeps a clock")
         XCTAssertGreaterThan(clocksBefore, 0)
-        XCTAssertLessThanOrEqual(after, before * 1.2, "the cheaper failure line never costs more")
+        // The failure line now also removes the model-facing wrapper and prefers the script's error line
+        // (the old one showed the wrapper's preamble); it reads only the two ends of a result and must stay
+        // in the same league as the walk it replaced.
+        XCTAssertLessThanOrEqual(after, before * 2, "the failure line stays cheap")
     }
 }
 

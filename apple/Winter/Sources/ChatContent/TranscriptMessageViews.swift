@@ -1350,22 +1350,17 @@ func toolRunFailureSummary(_ entries: [ToolRunEntry]) -> String? {
     guard let (name, failed) = entries.lazy.flatMap({ entry in entry.calls.map { (entry.name, $0) } }).first(where: { $0.1.isError }),
           let raw = failed.output
     else { return nil }
-    // Only the head of the output is read: the first line is in it, and this runs for every collapsed
-    // failed run on every render — over a result of up to 64 KiB that was a split, a trim and a
-    // String per LINE, thousands of allocations, to keep one.
-    let head = String(raw.prefix(failureSummaryScanCharacters))
-    let output = toolOutputMayCarryImages(name) ? toolOutputSplittingImages(head).text : head
-    guard let line = output.split(separator: "\n").lazy
-              .map({ $0.trimmingCharacters(in: .whitespaces) })
-              .first(where: { !$0.isEmpty })
+    // The line is picked from the two ENDS of the result, with the model-facing DATA-ONLY wrapper off
+    // (`ScreenDataWrapper`): the script's own error line if it printed one, else its first printed line,
+    // else the state header. This runs for every collapsed failed run on every render, over a result of
+    // up to 64 KiB — it never splits or trims the middle of one.
+    guard let line = ScreenDataWrapper.previewLine(of: raw, isError: true,
+                                                   dropImagePlaceholders: toolOutputMayCarryImages(name))
     else { return nil }
     return line.count > maxFailureSummaryCharacters
         ? String(line.prefix(maxFailureSummaryCharacters)) + "…"
         : line
 }
-
-/// How much of a failed call's output `toolRunFailureSummary` reads to find its first line.
-let failureSummaryScanCharacters = 4_000
 
 /// The words an expanded call draws in place of an output block when it has none.
 ///
@@ -1494,9 +1489,10 @@ func toolRunExpansion(_ entries: [ToolRunEntry],
             var preview: ToolOutputPreview?
             var imageCount = 0
             if let output = call.output {
-                var text = output
+                // The model-facing DATA-ONLY wrapper is for the model; the person reads what is inside it.
+                var text = ScreenDataWrapper.stripForDisplay(output)
                 if toolOutputMayCarryImages(entry.name) {
-                    let split = toolOutputSplittingImages(output)
+                    let split = toolOutputSplittingImages(text)
                     text = split.text
                     imageCount = split.imageCount
                 }
