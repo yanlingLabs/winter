@@ -188,11 +188,13 @@ public enum WindowRelative {
     /// How often the bound windows of watched sessions are checked for being on screen. A window on another
     /// Space or display that is off every screen (or minimized) gets no frames from a live stream: its view is
     /// KEPT (the agent still drives it, and Winter.app still shows it), the live capture pauses, and one-shot
-    /// snapshots are tried instead — every second while it is being worked in, every 5 s otherwise, every 30 s
-    /// after three in a row came back empty. With none, the last frame stays.
+    /// snapshots are taken instead — twice a second while it is being worked in, once a second otherwise (the
+    /// window server's image of a window on another Space is current for an app that keeps drawing there:
+    /// measured live, a working full-screen Terminal changed in every 2 s capture), every 30 s after three in a
+    /// row came back empty. With none, the last frame stays; an unchanged one is not sent again.
     public static let visibilityPollInterval: TimeInterval = 1
-    public static let offScreenSnapshotActive: TimeInterval = 1
-    public static let offScreenSnapshotIdle: TimeInterval = 5
+    public static let offScreenSnapshotActive: TimeInterval = 0.5
+    public static let offScreenSnapshotIdle: TimeInterval = 1
     public static let offScreenSnapshotBackoff: TimeInterval = 30
     public static let offScreenSnapshotFailuresBeforeBackoff = 3
 
@@ -206,6 +208,8 @@ public enum WindowRelative {
 
     private struct SnapshotState {
         var nextAt: TimeInterval = 0
+        /// When the one in flight (or the last one) was asked for: the cadence counts from there.
+        var startedAt: TimeInterval = 0
         var failures = 0
         var inFlight = false
         var loggedEmpty = false
@@ -239,6 +243,8 @@ public enum WindowRelative {
     private var offScreen: Set<String> = []
     private var snapshots: [String: SnapshotState] = [:]
     private var visibilityTimer: IdleCancellable?
+    /// The next off-screen snapshot due (its own timer: the cadence is finer than the visibility poll).
+    private var snapshotTimer: (cancellable: IdleCancellable, due: TimeInterval)?
 
     public init(capture: FrameCaptureFactory, geometry: WindowGeometry, snapshotter: WindowSnapshotter, clock: ViewClock) {
         self.capture = capture
@@ -406,7 +412,10 @@ public enum WindowRelative {
         if !wasActive {
             // Waking up: is the window where a live capture can see it? (Off screen, a snapshot is due now.)
             updateVisibility(targetId)
-            if offScreen.contains(targetId) { snapshots[targetId, default: SnapshotState()].nextAt = clock.now }
+            if offScreen.contains(targetId) {
+                snapshots[targetId, default: SnapshotState()].nextAt = clock.now
+                scheduleSnapshots()
+            }
         }
         active[targetId]?.cancel()
         active[targetId] = clock.schedule(after: Self.idleAfter) { [weak self] in
@@ -430,7 +439,7 @@ public enum WindowRelative {
                 continue
             }
             let fps = active[id] != nil ? wanted : min(wanted, Self.idleFps)
-            // Off every screen a live stream delivers nothing: no stream; snapshots (in `visibilityTick`) instead.
+            // Off every screen a live stream delivers nothing: no stream; snapshots (`takeDueSnapshots`) instead.
             if offScreen.contains(id) {
                 stopCapture(id, reason: "the window is off screen")
                 continue
@@ -449,6 +458,7 @@ public enum WindowRelative {
         }
         for id in captures.keys where targets[id] == nil { stopCapture(id, reason: "no target") }
         scheduleVisibilityPoll()
+        scheduleSnapshots()
     }
 
     private func stopCapture(_ targetId: String, reason: String) {
@@ -498,34 +508,62 @@ public enum WindowRelative {
     }
 
     private func visibilityTick() {
-        let ids = watched
         var changed = false
-        for id in ids where updateVisibility(id) { changed = true }
+        for id in watched where updateVisibility(id) { changed = true }
         if changed { refreshCaptures() }
+        takeDueSnapshots()
+        scheduleVisibilityPoll()
+    }
+
+    /// Asks for every off-screen snapshot that is due, then arms the timer for the next one.
+    private func takeDueSnapshots() {
         let now = clock.now
-        for id in ids where offScreen.contains(id) {
+        for id in watched where offScreen.contains(id) {
             guard let target = targets[id], var state = snapshots[id], !state.inFlight, now >= state.nextAt else { continue }
             let width = subscribers(of: target.sessionId).map(\.subscription).filter(\.frames).map(\.maxWidth).min() ?? Self.defaultMaxWidth
             state.inFlight = true
+            state.startedAt = now
             snapshots[id] = state
             snapshotter.snapshot(windowID: CGWindowID(target.windowId), maxWidth: width,
                                  privatePath: target.privatePath) { [weak self] frame in
                 self?.snapshotDone(targetId: id, windowId: target.windowId, frame: frame)
             }
         }
-        scheduleVisibilityPoll()
+        scheduleSnapshots()
+    }
+
+    /// Arms one timer for the earliest snapshot due among watched off-screen targets (none in flight, none due:
+    /// no timer). A timer already armed for that time or earlier is kept.
+    private func scheduleSnapshots() {
+        let due = watched.filter { offScreen.contains($0) }
+            .compactMap { id in snapshots[id].flatMap { $0.inFlight ? nil : $0.nextAt } }.min()
+        guard let due else {
+            snapshotTimer?.cancellable.cancel()
+            snapshotTimer = nil
+            return
+        }
+        if let armed = snapshotTimer, armed.due <= due { return }
+        snapshotTimer?.cancellable.cancel()
+        let cancellable = clock.schedule(after: max(0, due - clock.now)) { [weak self] in
+            guard let self else { return }
+            self.snapshotTimer = nil
+            self.takeDueSnapshots()
+        }
+        snapshotTimer = (cancellable, due)
     }
 
     private func snapshotDone(targetId: String, windowId: UInt32, frame: ViewFrame?) {
         guard var state = snapshots[targetId], targets[targetId]?.windowId == windowId else { return }
         state.inFlight = false
         let now = clock.now
+        let cadence = active[targetId] != nil ? Self.offScreenSnapshotActive : Self.offScreenSnapshotIdle
         if let frame {
             state.failures = 0
             state.loggedEmpty = false
-            state.nextAt = now + (active[targetId] != nil ? Self.offScreenSnapshotActive : Self.offScreenSnapshotIdle)
+            state.nextAt = max(now, state.startedAt + cadence)
             snapshots[targetId] = state
             if offScreen.contains(targetId) { publish(frame, targetId: targetId) }
+            scheduleSnapshots()
             return
         }
         state.failures += 1
@@ -533,9 +571,10 @@ public enum WindowRelative {
             state.loggedEmpty = true
             log("view: no snapshot of \(targetId)'s off-screen window — the last frame stays up")
         }
-        state.nextAt = now + (state.failures >= Self.offScreenSnapshotFailuresBeforeBackoff ? Self.offScreenSnapshotBackoff
-            : active[targetId] != nil ? Self.offScreenSnapshotActive : Self.offScreenSnapshotIdle)
+        state.nextAt = state.failures >= Self.offScreenSnapshotFailuresBeforeBackoff ? now + Self.offScreenSnapshotBackoff
+            : max(now, state.startedAt + cadence)
         snapshots[targetId] = state
+        scheduleSnapshots()
     }
 
     /// One frame: dropped when its pixels are the ones last sent (a restarted stream's first frame, a window that

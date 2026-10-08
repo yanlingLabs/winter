@@ -14,7 +14,7 @@ import WinterCUCore
 }
 
 /// With the private path on, the window server's own image of the window first: SkyLight's
-/// `SLSHWCaptureWindowListInRect`, its last drawn content wherever it is (ChatGPT takes its off-screen stills
+/// `SLSHWCaptureWindowListInRect`, its content wherever it is (current for an app that keeps drawing; ChatGPT takes its off-screen stills
 /// the same way; its live streams have no such fallback, and neither do ours). Then `SCScreenshotManager` with a
 /// desktop-independent single-window filter, the engine's public capture. Neither moves, raises or focuses
 /// anything — a passive mirror must never. An image that comes back empty (all transparent or all black)

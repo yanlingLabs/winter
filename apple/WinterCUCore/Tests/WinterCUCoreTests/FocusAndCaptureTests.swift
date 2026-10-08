@@ -218,8 +218,8 @@ final class FocusAndCaptureTests: XCTestCase {
         XCTAssertEqual([r.width, r.height], [800, 533], "fitted to the budget like any capture")
         XCTAssertEqual(r.mime, "image/jpeg")
         XCTAssertNotNil(Data(base64Encoded: r.imageBase64).flatMap { CGImageSourceCreateWithData($0 as CFData, nil) })
-        XCTAssertEqual(r.detail, "Code's window is on another desktop (another Space or full screen), so this is its last drawn "
-            + "content — it may be a little out of date")
+        XCTAssertEqual(r.detail, "captured Code's window on another desktop (another Space or full screen) — an app that stops "
+            + "drawing while hidden may show slightly older content")
         XCTAssertTrue(sys.moved.isEmpty, "never moved here for a picture")
     }
 
@@ -288,7 +288,7 @@ final class FocusAndCaptureTests: XCTestCase {
         let rects = privateCapture(solid(1200, 800))
         let r = try await core.targetScreenshot(shotParams())
         XCTAssertEqual(rects().count, 1)
-        XCTAssertTrue(r.detail?.contains("is on another desktop") ?? false, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("captured Code's window on another desktop") ?? false, r.detail ?? "")
     }
 
     func testAMinimizedWindowTriesTheWindowServerThenScreenCaptureKit() async throws {
@@ -299,7 +299,7 @@ final class FocusAndCaptureTests: XCTestCase {
         _ = privateCapture(solid(1200, 800))
         let fromServer = try await core.targetScreenshot(shotParams())
         XCTAssertEqual(streamCalls, 0)
-        XCTAssertTrue(fromServer.detail?.contains("Code's window is not on screen (minimized or hidden)") ?? false,
+        XCTAssertTrue(fromServer.detail?.contains("captured Code's window while it is not on screen (minimized or hidden)") ?? false,
                       fromServer.detail ?? "")
         _ = privateCapture(solid(1200, 800, alpha: 0))
         let fromStream = try await core.targetScreenshot(shotParams())

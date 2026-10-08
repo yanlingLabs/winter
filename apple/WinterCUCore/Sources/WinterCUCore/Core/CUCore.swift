@@ -577,9 +577,9 @@ public final class CUCore: @unchecked Sendable {
         return skyLight.captureWithSkyLight(windowIDs: [id], rect: globalRect).first
     }
 
-    /// The window server's image of the bound window (its last drawn content) for a window that is not on
-    /// screen, cropped to `region` and fitted to the budget like a ScreenCaptureKit capture. Nil when there is
-    /// none, or it is blank (a window macOS has not drawn).
+    /// The window server's image of the bound window when it is not on screen (current for an app that keeps
+    /// drawing there), cropped to `region` and fitted to the budget like a ScreenCaptureKit capture. Nil when
+    /// there is none, or it is blank (a window macOS has not drawn).
     func offScreenShot(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget) async throws -> CUCapturedImage? {
         guard let frame = sys.window(id: t.windowID)?.frame else { throw CUError.targetLost("the window is gone") }
         let area = try CUCapturer.windowArea(region: region, windowSize: frame.size)
@@ -597,8 +597,8 @@ public final class CUCore: @unchecked Sendable {
     /// What an image from `offScreenShot` is.
     func offScreenNote(_ t: CUTarget) async throws -> String {
         let elsewhere = try await queues.run(t.pid) { [self] in isOffThisDesktop(t) }
-        let place = elsewhere ? "is on another desktop (another Space or full screen)" : "is not on screen (minimized or hidden)"
-        return "\(t.appName)'s window \(place), so this is its last drawn content — it may be a little out of date"
+        let place = elsewhere ? "on another desktop (another Space or full screen)" : "while it is not on screen (minimized or hidden)"
+        return "captured \(t.appName)'s window \(place) — an app that stops drawing while hidden may show slightly older content"
     }
 
     // MARK: - waits

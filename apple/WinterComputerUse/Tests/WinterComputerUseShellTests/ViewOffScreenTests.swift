@@ -75,26 +75,47 @@ final class ViewOffScreenTests: XCTestCase {
 
     // MARK: Snapshots while off screen
 
-    func testSnapshotsComeEverySecondWhileWorkedInAndEveryFiveSecondsOtherwise() {
+    /// Advances in quarter seconds, answering every snapshot asked for with `answer` at once; the requests made.
+    private func run(_ rig: Rig, for seconds: Double, answer: ViewFrame?) -> [TimeInterval] {
+        var asked: [TimeInterval] = []
+        for _ in 0..<Int(seconds * 4) {
+            rig.clock.advance(by: 0.25)
+            if !rig.snapshotter.requests.isEmpty {
+                asked.append(rig.clock.now)
+                rig.snapshotter.answer(answer)
+            }
+        }
+        return asked
+    }
+
+    func testSnapshotsComeTwiceASecondWhileWorkedInAndOnceASecondOtherwise() {
         let rig = Rig()
         rig.viewHub.bound(target())
         watched(rig)
         rig.geometry.onScreen[77] = false
-        rig.clock.advance(by: 1) // detected; first snapshot due at once
+        rig.clock.advance(by: 1) // detected; the first snapshot is due at once
         XCTAssertEqual(rig.snapshotter.requests.count, 1)
         rig.snapshotter.answer(frame(1))
-        rig.clock.advance(by: 1) // active (bound 2 s ago): 1 s cadence
-        XCTAssertEqual(rig.snapshotter.requests.count, 1)
-        rig.snapshotter.answer(frame(2))
-        rig.clock.advance(by: 2) // idle now (3 s since the bind)
-        rig.snapshotter.answer(frame(3))
-        let before = rig.sink.frames[1]?.count ?? 0
-        rig.clock.advance(by: 4)
-        XCTAssertTrue(rig.snapshotter.requests.isEmpty, "idle: 5 s cadence")
+        // Active until 3 s after the bind: every half second.
+        XCTAssertEqual(run(rig, for: 1.75, answer: frame(2)), [1.5, 2.0, 2.5])
+        // Idle from then: every second.
+        let idle = run(rig, for: 5, answer: frame(3))
+        XCTAssertEqual(idle.count, 5, "\(idle)")
+        XCTAssertEqual(zip(idle.dropFirst(), idle).map { $0 - $1 }, [1, 1, 1, 1])
+        XCTAssertEqual(rig.sink.frames[1]?.count, 3, "an unchanged snapshot is not sent again")
+    }
+
+    func testASlowSnapshotIsFollowedByTheNextOneAtOnceNotAFullIntervalLater() {
+        let rig = Rig()
+        rig.viewHub.bound(target())
+        watched(rig)
+        rig.geometry.onScreen[77] = false
         rig.clock.advance(by: 1)
         XCTAssertEqual(rig.snapshotter.requests.count, 1)
-        rig.snapshotter.answer(frame(4))
-        XCTAssertEqual(rig.sink.frames[1]?.count, before + 1)
+        rig.clock.advance(by: 0.75) // the capture took 0.75 s, past the 0.5 s cadence
+        rig.snapshotter.answer(frame(1))
+        rig.clock.advance(by: 0.01)
+        XCTAssertEqual(rig.snapshotter.requests.count, 1, "due since 1.5 s: asked for at once")
     }
 
     func testRepeatedEmptySnapshotsBackOffToThirtySeconds() {
@@ -103,15 +124,11 @@ final class ViewOffScreenTests: XCTestCase {
         watched(rig)
         rig.clock.advance(by: 3) // idle
         rig.geometry.onScreen[77] = false
-        var asked = 0
-        for _ in 0..<60 {
-            rig.clock.advance(by: 1)
-            asked += rig.snapshotter.requests.count
-            rig.snapshotter.answer(nil)
-        }
-        // first at once, then 5 s, 5 s, then every 30 s
-        XCTAssertLessThanOrEqual(asked, 5, "not one SCShareableContent sweep a second for a window macOS will not render")
-        XCTAssertGreaterThanOrEqual(asked, 3)
+        rig.clock.advance(by: 1)
+        rig.snapshotter.answer(nil)
+        let asked = run(rig, for: 60, answer: nil)
+        // first at once (4 s), then 5 s, 6 s, then every 30 s
+        XCTAssertEqual(asked, [5, 6, 36], "not a capture a second for a window macOS will not render")
     }
 
     func testAnActionOnAnOffScreenWindowAsksForASnapshotAtOnce() {
@@ -121,12 +138,13 @@ final class ViewOffScreenTests: XCTestCase {
         rig.clock.advance(by: 3)
         rig.geometry.onScreen[77] = false
         rig.clock.advance(by: 1)
-        rig.snapshotter.answer(frame(1))
-        rig.clock.advance(by: 1) // next due in 5 s (idle)
-        XCTAssertTrue(rig.snapshotter.requests.isEmpty)
+        rig.snapshotter.answer(nil)
+        XCTAssertEqual(run(rig, for: 5, answer: nil), [5, 6]) // backing off to 30 s now
         act(rig)
-        rig.clock.advance(by: 1)
+        rig.clock.advance(by: 0.25)
         XCTAssertEqual(rig.snapshotter.requests.count, 1, "the agent is working there: show what it does")
+        rig.snapshotter.answer(frame(1))
+        XCTAssertEqual(run(rig, for: 1, answer: frame(2)), [9.75, 10.25], "and twice a second while it does")
     }
 
     // MARK: Back on screen

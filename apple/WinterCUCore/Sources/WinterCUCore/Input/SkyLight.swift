@@ -269,7 +269,9 @@ public struct CUSkyLight: @unchecked Sendable {
     public static let captureIgnoreGlobalClipShape: UInt32 = 0x800
 
     /// The window server's own image of each window, wherever it is: on another Space, in full screen
-    /// elsewhere, minimized — its last drawn content. ChatGPT's stills take a window that is not on screen
+    /// elsewhere, minimized — current for an app that keeps drawing there (measured live: a working full-screen
+    /// Terminal on another Space changed in every capture), older for one that stops drawing while hidden
+    /// (App Nap, some browsers). ChatGPT's stills take a window that is not on screen
     /// this way (`SLSHWCaptureWindowListInRect`, options 0x800, the first image); AltTab's thumbnails too.
     /// Needs Screen Recording. Moves, raises and focuses nothing.
     ///
