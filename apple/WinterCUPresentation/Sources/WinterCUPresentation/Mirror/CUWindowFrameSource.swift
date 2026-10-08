@@ -41,8 +41,9 @@ public enum CUWindowFrameSourceError: Error, Equatable {
     static let sizeCheckInterval: TimeInterval = 0.5
 
     private let windowID: CGWindowID
-    private let maxFps: Int
-    private let maxWidth: Int
+    private var maxFps: Int
+    private var maxWidth: Int
+    private var encoder: FrameEncoder?
     private var onFrame: (@MainActor (CUEncodedFrame) -> Void)?
     private var onError: (@MainActor (Error) -> Void)?
     private var stream: WindowStream<EncodedImage>?
@@ -73,13 +74,13 @@ public enum CUWindowFrameSourceError: Error, Equatable {
     public func start() {
         guard stream == nil else { return }
         let encoder = FrameEncoder(maxFps: maxFps, quality: Self.jpegQuality)
-        let maxWidth = self.maxWidth
+        self.encoder = encoder
         let stream = WindowStream<EncodedImage>(
             windowID: windowID, framesPerSecond: maxFps,
-            sizing: { frame in
+            sizing: { [weak self] frame in
                 // The screen's scale comes from AppKit; nothing here asks the window server.
                 CaptureSizing.pixelSize(windowSize: frame.size, scale: AppKitScreens.backingScale(for: frame),
-                                        maxWidth: maxWidth)
+                                        maxWidth: self?.maxWidth ?? 720)
             },
             process: { pixelBuffer in encoder.encode(pixelBuffer) }
         )
@@ -89,9 +90,32 @@ public enum CUWindowFrameSourceError: Error, Equatable {
         stream.start()
     }
 
+    /// A new rate or width for the running capture, applied in place (`SCStream.updateConfiguration`): no restart,
+    /// so no gap and no blank first frame. The helper's idle throttle moves a window between its full rate and
+    /// 1 fps this way on every burst of agent actions.
+    public func update(maxFps: Int, maxWidth: Int) {
+        let fps = max(1, maxFps), width = max(16, maxWidth)
+        if fps != self.maxFps {
+            self.maxFps = fps
+            encoder?.setMaxFps(fps)
+            stream?.setFramesPerSecond(fps)
+        }
+        if width != self.maxWidth {
+            self.maxWidth = width
+            if let stream, Self.hasSize(stream.windowSize) {
+                let frame = CGRect(origin: .zero, size: stream.windowSize)
+                stream.resize(pixelSize: CaptureSizing.pixelSize(windowSize: stream.windowSize,
+                                                                 scale: AppKitScreens.backingScale(for: frame), maxWidth: width))
+            }
+        }
+    }
+
+    nonisolated static func hasSize(_ size: CGSize) -> Bool { size.width >= 1 && size.height >= 1 }
+
     public func stop() {
         stream?.stop()
         stream = nil
+        encoder = nil
         onFrame = nil
         onError = nil
     }
@@ -154,21 +178,56 @@ struct EncodedImage: Sendable {
     let height: Int
 }
 
-/// Throttles and encodes on the capture queue. Touched only there (the stream calls it one frame at a time).
+/// Throttles and encodes on the capture queue (the stream calls it one frame at a time); its rate can be changed
+/// from the main actor, under the lock.
 final class FrameEncoder: @unchecked Sendable {
     private var throttle: FrameThrottle
     private let quality: CGFloat
+    private let lock = NSLock()
 
     init(maxFps: Int, quality: CGFloat) {
         throttle = FrameThrottle(maxFps: maxFps)
         self.quality = quality
     }
 
+    func setMaxFps(_ fps: Int) {
+        lock.withLock { throttle.setMaxFps(fps) }
+    }
+
     func encode(_ pixelBuffer: CVPixelBuffer) -> EncodedImage? {
-        guard throttle.shouldEmit(at: ProcessInfo.processInfo.systemUptime) else { return nil }
+        // A frame of nothing (fully transparent, or pure black everywhere — what a stream can hand over while a
+        // window is being re-rendered) never replaces a real picture, and does not use up the rate either.
+        guard !Self.isBlank(pixelBuffer) else { return nil }
+        let due = lock.withLock { throttle.shouldEmit(at: ProcessInfo.processInfo.systemUptime) }
+        guard due else { return nil }
         var image: CGImage?
         guard VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &image) == noErr, let image,
               let jpeg = JPEGCodec.encode(image, quality: quality) else { return nil }
         return EncodedImage(jpeg: jpeg, width: image.width, height: image.height)
+    }
+
+    /// An 8×8 sample of a 32BGRA buffer: every sample transparent, or every sample exactly black. A real window has
+    /// an opaque, non-black pixel somewhere on that grid (a title bar, a control, text).
+    static func isBlank(_ pixelBuffer: CVPixelBuffer) -> Bool {
+        guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA else { return false }
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return true }
+        let width = CVPixelBufferGetWidth(pixelBuffer), height = CVPixelBufferGetHeight(pixelBuffer)
+        let rowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        guard width > 0, height > 0 else { return true }
+        let bytes = base.assumingMemoryBound(to: UInt8.self)
+        var allTransparent = true, allBlack = true
+        for gy in 0..<8 {
+            let y = min(height - 1, (gy * 2 + 1) * height / 16)
+            for gx in 0..<8 {
+                let x = min(width - 1, (gx * 2 + 1) * width / 16)
+                let p = bytes + y * rowBytes + x * 4 // B, G, R, A
+                if p[3] != 0 { allTransparent = false }
+                if p[0] != 0 || p[1] != 0 || p[2] != 0 { allBlack = false }
+                if !allTransparent && !allBlack { return false }
+            }
+        }
+        return true
     }
 }
