@@ -124,7 +124,7 @@ import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
-import { DEFAULT_PROVIDER, pinsFor, addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
+import { DEFAULT_PROVIDER, pinsFor, addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, computerUseLegacyComputerFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
 import { addMcpServerInScope, mcpServerInScope, McpRenameRefusal, removeMcpServerForgettingPermissions, renameMcpServerCarryingSettings, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../runtime-sdk/run-home-input";
@@ -2921,7 +2921,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // Minor 5e: `computerUseEnabledFrom`/`lspEnabledFrom` (settings.ts) — the ONE reader for
           // each gate, rather than a third hand-spelled copy of what daemon.ts's boot registration
           // and `settings-apply.ts`'s hot-toggle closures already decide.
-          const enabled = key === "computer" ? (settings ? computerUseEnabledFrom(settings) : true)
+          // ComputerV2 (2026-10-08): exactly one of `computer`/`computer_v2` is live when computer use is on —
+          // `computerUse.legacyComputer` picks the old one (`capabilities/index.ts`'s build rule).
+          const cuOn = settings ? computerUseEnabledFrom(settings) : true;
+          const legacy = computerUseLegacyComputerFrom(settings);
+          const enabled = key === "computer" ? cuOn && legacy
+            : key === "computer_v2" ? cuOn && !legacy
             : key === "lsp" ? (settings ? lspEnabledFrom(settings) : true)
             : true;
           return { key, enabled, tools };

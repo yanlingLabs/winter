@@ -1046,7 +1046,7 @@ export const CapabilityToolInfoSchema = z.object({
 });
 
 export const CapabilityServerInfoSchema = z.object({
-  key: z.enum(["sessions", "computer", "browser", "office", "research", "web", "lsp", "external"]),
+  key: z.enum(["sessions", "computer", "computer_v2", "browser", "office", "research", "web", "lsp", "external"]),
   /** Whether this server's underlying feature is live RIGHT NOW — the settings gate that applies,
    *  when one exists (`computer`: `settings.computerUse.enabled === true`; `lsp`: `settings.lsp.enabled
    *  !== false` — the server is always built, but its tool refuses when the manager is torn down).

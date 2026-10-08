@@ -68,6 +68,9 @@ export {
   type ModelTag,
 } from "./runtime-sdk/model-tag";
 export { runWorkflowSubprocess } from "./workflows/subprocess-entry";
+// ComputerV2 (2026-10-08): the per-session sandboxed automation worker, reached by the CLI's positional
+// `__automation-worker` route — the same static-barrel shape (a dynamic import does not resolve in $bunfs).
+export { runAutomationWorker, AUTOMATION_WORKER_ARG } from "./computer-use/worker/entry";
 // WS-23: the RUNTIME's workflow worker (an embedded chat/dispatch session's Workflow tool), reached by
 // the CLI's positional `__runtime-workflow-worker` route — the same static-barrel shape as above.
 export { runRuntimeWorkflowWorker } from "./runtime-sdk/runtime-workflow-worker-entry";

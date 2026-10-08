@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeWorkflowWorker, RUNTIME_WORKFLOW_WORKER_ARG, runRuntimeStateProbe, runRuntimesProbe, keychainUnlocked, processStartSecondsViaSysctl, runEmbeddedProbe, runDevKeychainAdopt, DEV_KEYCHAIN_ADOPT_ARG, resolveWinterProfile, splitTag, sdkLocalMcpServers } from "@yanlinglabs/winter-core";
+import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runAutomationWorker, AUTOMATION_WORKER_ARG, runRuntimeWorkflowWorker, RUNTIME_WORKFLOW_WORKER_ARG, runRuntimeStateProbe, runRuntimesProbe, keychainUnlocked, processStartSecondsViaSysctl, runEmbeddedProbe, runDevKeychainAdopt, DEV_KEYCHAIN_ADOPT_ARG, resolveWinterProfile, splitTag, sdkLocalMcpServers } from "@yanlinglabs/winter-core";
 import type { CredentialRow, SecretStore, Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
@@ -1429,6 +1429,14 @@ if (import.meta.main) {
   if (process.argv.includes("__workflow-worker")) {
     runWorkflowSubprocess();
     await new Promise(() => {});   // entry drives itself to process.exit(); block everything below
+  }
+  // ComputerV2 (2026-10-08): the per-session AUTOMATION worker (COMPILED path) — the daemon self-spawns
+  // `<winter-core> __automation-worker` inside the workflow seatbelt; THIS process is the sandboxed worker,
+  // and it refuses (exit 77) before reading input outside a sandbox that denies it the Keychain. POSITIONAL,
+  // like the probes below, so `winter -p "__automation-worker"` stays a prompt.
+  if (process.argv[2] === AUTOMATION_WORKER_ARG) {
+    runAutomationWorker();
+    await new Promise(() => {});   // the worker exits when the daemon closes its stdin
   }
 
   // Compiled-artifact probe (P8b-18): proves runtime-state.db is created/migrated INSIDE the
