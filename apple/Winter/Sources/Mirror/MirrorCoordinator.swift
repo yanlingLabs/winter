@@ -75,19 +75,23 @@ struct MirrorTargetTracker: Equatable {
 
 /// One session's mirror: its targets, whether the mirror is up, and the sink it feeds.
 ///
-/// The mirror is UP while a target is bound and the session's turn is running — it comes down on
-/// `view.released` of the last target and at the turn's end. A frame or a cursor for anything but the
-/// shown target, or arriving while the mirror is down, is dropped.
+/// The mirror is UP while a target is bound — between turns too (user, 2026-10-08: "it should show at all
+/// times"). It comes down on `view.released` of the last target, or when the helper connection is lost
+/// and the subscription starts over. A frame or a cursor for anything but the shown target, or arriving
+/// while the mirror is down, is dropped.
 @MainActor
 final class MirrorSessionState: ObservableObject {
     let sessionId: String
     let sink: any MirrorSink
     private(set) var tracker = MirrorTargetTracker()
-    private(set) var turnRunning = false
-    /// The target on show (the most recent bound), whether or not the turn is running.
+    /// The target on show: the most recent bound.
     @Published private(set) var shownTarget: HelperTarget?
-    /// Whether the mirror is up: a target is bound and the turn runs.
+    /// Whether the mirror is up: a target is bound.
     @Published private(set) var isVisible = false
+    /// When this session's mirror last came up or changed target — the larger, the more recent. A window
+    /// that shows several sessions' mirrors (a Dispatch session and its children) shows the largest.
+    private(set) var recency = 0
+    private static var recencyCounter = 0
     private var shownOnSink: String?
 
     init(sessionId: String, sink: any MirrorSink) {
@@ -101,12 +105,6 @@ final class MirrorSessionState: ObservableObject {
     func bound(_ target: HelperTarget) { tracker.bound(target); refresh() }
     func released(_ targetId: String) { if tracker.released(targetId) { refresh() } }
     func reset() { tracker.reset(); refresh() }
-
-    func setTurnRunning(_ running: Bool) {
-        guard running != turnRunning else { return }
-        turnRunning = running
-        refresh()
-    }
 
     func frame(_ frame: HelperFrame) {
         guard isVisible, tracker.accepts(targetId: frame.targetId) else { return }
@@ -128,11 +126,13 @@ final class MirrorSessionState: ObservableObject {
     private func refresh() {
         let target = tracker.shown
         if shownTarget != target { shownTarget = target }
-        let visible = target != nil && turnRunning
+        let visible = target != nil
         if visible, let target {
             if shownOnSink != target.targetId {
                 sink.show(appName: target.appName, windowSize: target.windowSize)
                 shownOnSink = target.targetId
+                Self.recencyCounter += 1
+                recency = Self.recencyCounter
             }
         } else if shownOnSink != nil {
             sink.clear()
@@ -220,18 +220,15 @@ final class MirrorCoordinator: ObservableObject {
         MirrorRules.subscriptions(eligible: windows.values.filter { eligibleWindowIds.contains($0.id) })
     }
 
-    /// Whether the session's turn runs, as the window showing it knows. The mirror comes down when it stops.
-    func setTurnRunning(sessionId: String, running: Bool) {
-        state(for: sessionId).setTurnRunning(running)
-    }
-
     /// A session's mirror state, made on first ask so a panel can watch it before anything is subscribed.
     func state(for sessionId: String) -> MirrorSessionState {
         if let existing = states[sessionId] { return existing }
         let created = MirrorSessionState(sessionId: sessionId, sink: makeSink(sessionId))
         states[sessionId] = created
-        // The mirror coming up or down is what turns frames on and off (`wantsFrames`).
-        visibilityWatches[sessionId] = created.$isVisible.dropFirst().removeDuplicates().sink { [weak self] _ in
+        // The mirror coming up, going down or changing target is what moves frames (`wantsFrames`) — and
+        // what a window must re-read to know which session's mirror to show.
+        visibilityWatches[sessionId] = created.$shownTarget.map { $0?.targetId }.dropFirst().removeDuplicates().sink { [weak self] _ in
+            self?.objectWillChange.send()
             self?.scheduleSync()
         }
         return created
@@ -343,17 +340,35 @@ final class MirrorCoordinator: ObservableObject {
         return false
     }
 
-    /// Whether `sessionId` should be sent frames: a target is bound, its turn is running (the mirror is up)
-    /// and at least one window that shows the mirror for it is on screen.
+    /// Whether `sessionId` should be sent frames: some eligible window that is on screen shows its mirror,
+    /// or — when none of that window's sessions has a target yet — would show it the moment one binds.
+    /// A target bound and a window up is all it takes: between turns too, since the helper slows an
+    /// unchanging picture down on its own, and asking in advance means the first frame of a newly bound
+    /// target does not wait on a re-subscribe round trip.
     func wantsFrames(_ sessionId: String) -> Bool {
-        guard let state = states[sessionId], state.isVisible else { return false }
-        return windows.values.contains { eligibleWindowIds.contains($0.id) && $0.sessionId == sessionId && $0.isVisible }
+        windows.values.contains { window in
+            guard eligibleWindowIds.contains(window.id), window.isVisible else { return false }
+            if let shown = shownSession(forWindow: window.id) { return shown == sessionId }
+            return window.sessionId == sessionId
+        }
+    }
+
+    /// The session whose mirror a window shows: among its own session and the ones it shows the work of,
+    /// the one with a bound target that came up most recently. Nil when none has a target.
+    func shownSession(forWindow windowId: String) -> String? {
+        guard let window = windows[windowId], eligibleWindowIds.contains(windowId) else { return nil }
+        var best: (id: String, recency: Int)?
+        for id in window.allSessionIds {
+            guard let state = states[id], state.isVisible else { continue }
+            if best == nil || state.recency > best!.recency { best = (id, state.recency) }
+        }
+        return best?.id
     }
 
     /// Drops the state of a session no window shows any more, so a long-lived app does not keep one per
     /// session it ever opened.
     private func purgeUnusedStates() {
-        let shown = Set(windows.values.compactMap(\.sessionId))
+        let shown = Set(windows.values.flatMap(\.allSessionIds))
         for sessionId in states.keys where !shown.contains(sessionId) && !applied.contains(sessionId) {
             states[sessionId]?.reset()
             states.removeValue(forKey: sessionId)
