@@ -2,12 +2,12 @@
 // the helper enforces only its hard floors, and those are enforced here as well, so a bug in one does not open
 // them. Rulings R16/R17/R19, spec §13, spine §5:
 //
-//   policy                 bind (apps.open, screen.appAt)                   act (click, type, key, …)
-//   plan                   the per-APP card (then observe only)             NotAllowed
-//   ask / accept-edits /   the per-APP card                                 the same card, if the app holds no
-//   auto                   (once / this session / always; deny = refuse)    grant for this call
-//   bypass                 no card                                          no card
-//   dont-ask               only an "Always allow" app (no card)             only an "Always allow" app
+//   policy                 bind (apps.open, screen.appAt)                   act (click, type, key, …)       rung 4
+//   plan                   the per-APP card (then observe only)             NotAllowed                     refused
+//   ask / accept-edits /   the per-APP card                                 the same card, if the app      its own card
+//   auto                   (once / this session / always; deny = refuse)    holds no grant for this call   (attended only)
+//   bypass                 no card                                          no card                        no card
+//   dont-ask               only an "Always allow" app (no card)             only an "Always allow" app     refused
 //
 // (the controller's rulings after the daemon review: per-app consent covers BINDING, not only acting.) Observing
 // an app this call may already use (state, find, screenshot, waits) needs no second card. And, under EVERY
@@ -26,11 +26,13 @@
 // its coordinator, bounded like every relayed card (`dispatchChildCardTimeoutMs`). A Dispatch COORDINATOR raises
 // these cards too — an exception to "Dispatch never prompts", like a connector's card.
 //
-// RUNG 4 (the foreground: the user's real pointer) ALWAYS needs its own card — "Winter needs to bring <App> to
-// the front and use your mouse for a moment" — under every policy that can card, `bypass` included; `dont-ask`
-// (which never cards) and `plan` (which never acts) refuse it, and so does a session nobody is watching from
-// the Mac (`attended`: a Mac or terminal harness on the session itself — never the phone, never the Dispatch
-// pill alone).
+// RUNG 4 (the foreground: the user's real pointer) needs its own card under `ask`/`accept-edits`/`auto` —
+// "Winter needs to bring <App> to the front and use your mouse for a moment" — and a session nobody is watching
+// from the Mac (`attended`: a Mac or terminal harness on the session itself — never the phone, never the Dispatch
+// pill alone) is refused it. `bypass` shows NO computer-use prompt at all (the user ruling at the live gate,
+// reversing the earlier controller ruling): rung 4 is allowed at once, attended or not. `dont-ask` (which never
+// cards) and `plan` (which never acts) refuse it. The app restrictions, the default exceptions and the floors
+// still hold under `bypass` — they are checked before any action reaches rung 4.
 import { randomBytes } from "node:crypto";
 import type { ApprovalOption, NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -346,9 +348,10 @@ export class ComputerPolicy {
    */
   async allowForeground(run: RunGrants, app: AppRef, signal?: AbortSignal): Promise<boolean> {
     const facts = this.deps.session(run.sessionId);
-    // Taking the user's real pointer ALWAYS needs explicit consent — a card under every policy that can card,
-    // `bypass` included (the controller's ruling). `dont-ask` never cards and `plan` never acts.
+    // `dont-ask` never cards and `plan` never acts; chat has no computer use.
     if (facts.policy === "dont-ask" || facts.policy === "plan" || facts.policy === "chat" || facts.mode === "chat") return false;
+    // `bypass` shows no computer-use prompt at all (the user ruling): the pointer is taken at once, attended or not.
+    if (facts.policy === "bypass") return true;
     if (!this.deps.attended(run.sessionId)) return false;
     const res = await this.card(run, foregroundCardSummary(app), FOREGROUND_CARD_OPTIONS, signal);
     return res.approved;

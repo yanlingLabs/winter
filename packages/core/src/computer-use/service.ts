@@ -729,7 +729,7 @@ export class ComputerV2Service {
     }
   }
 
-  /** One action, through the input ladder; rung 4 (the foreground) only after the user agreed. */
+  /** One action, through the input ladder; rung 4 (the foreground) only after the user agreed — or at once under `bypass`. */
   private async act(ctx: RunCtx, t: TargetInfo, primitive: string, action: ActAction, metric: PrimitiveMetric): Promise<undefined> {
     const settings = this.deps.settings();
     const params = {
@@ -819,10 +819,11 @@ export class ComputerV2Service {
    */
   private toWire(ctx: RunCtx, err: unknown, msg: CallMessage): { kind: string; message: string; trusted: boolean } {
     const w = this.toWireInner(ctx, err, msg);
-    return { ...w, trusted: w.kind !== "WaitTimeout" && w.kind !== "Error" };
+    return { kind: w.kind, message: w.message, trusted: w.untrusted !== true && w.kind !== "WaitTimeout" && w.kind !== "Error" };
   }
 
-  private toWireInner(ctx: RunCtx, err: unknown, msg: CallMessage): { kind: string; message: string } {
+  /** `untrusted`: the message carries the helper's own words (which may name a window), so it stays in the fence. */
+  private toWireInner(ctx: RunCtx, err: unknown, msg: CallMessage): { kind: string; message: string; untrusted?: true } {
     if (isAutomationFailure(err)) return { kind: err.kind, message: err.message };
     if (err instanceof TypeError) return { kind: "TypeError", message: err.message };
     if (err instanceof HelperUnavailableError) {
@@ -837,6 +838,18 @@ export class ComputerV2Service {
         case "target_lost":
           if (t !== undefined) { t.lost = typeof data.reason === "string" ? data.reason : "app_quit"; this.diffBases.clearTarget(ctx.sessionId, t.targetId); }
           return { kind: "TargetLost", message: `${name} is gone (the app quit or its window closed) — bind it again with apps.open()` };
+        // The app is still running — never worded as "the app quit". The helper's own message is kept (capped), with
+        // what to do next; the target stays bound (the window may come back) but its diff base is reset.
+        case "window_elsewhere":
+        case "no_window": {
+          if (t !== undefined) this.diffBases.clearTarget(ctx.sessionId, t.targetId);
+          const elsewhere = err.code === "window_elsewhere";
+          const said = err.message.replace(/\s+/g, " ").trim().slice(0, 300) || (elsewhere ? "the window is on another Space or in full screen" : "the app has no open window");
+          const next = elsewhere
+            ? "ask the user to bring it to this desktop (or out of full screen), then try again"
+            : "ask the user to open one, or try again once it is open";
+          return { kind: "NoWindow", message: `${t === undefined ? "" : `${name}: `}${said} — ${next}`, untrusted: true };
+        }
         case "needs_foreground": return { kind: "NeedsForeground", message: `${name} needs the foreground for that — try an element ref, or ask the user` };
         case "not_allowed": return { kind: "NotAllowed", message: typeof data.reason === "string" ? `not allowed: ${data.reason}` : `not allowed in ${name}` };
         case "refused": return { kind: "Refused", message: refusedWords(typeof data.reason === "string" ? data.reason : "", name) };

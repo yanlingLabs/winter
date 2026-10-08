@@ -329,15 +329,22 @@ describe("rung 4 — the foreground", () => {
     expect(await setup({ policy: "dont-ask" }).policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(false);
   });
 
-  test("bypass too: taking the real pointer ALWAYS needs the card (the ruling), and someone must be watching", async () => {
-    const watched = setup({ policy: "bypass", answer: (c, b, sid) => b.resolve(sid, c, true, "orb") });
-    expect(await watched.policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(true);
-    expect(cards(watched.events)).toHaveLength(1);
-    const declined = setup({ policy: "bypass", answer: (c, b, sid) => b.resolve(sid, c, false, "orb") });
-    expect(await declined.policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(false);
-    const unattended = setup({ policy: "bypass", attended: false });
-    expect(await unattended.policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(false);
-    expect(cards(unattended.events)).toHaveLength(0);
+  test("bypass: no foreground card at all (the user ruling) — allowed at once, attended or not", async () => {
+    for (const attended of [true, false]) {
+      const { policy, events } = setup({ policy: "bypass", attended });
+      expect(await policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(true);
+      expect(cards(events)).toHaveLength(0);
+    }
+  });
+
+  test("ask, accept-edits and auto keep the foreground card; plan and chat refuse it", async () => {
+    for (const p of ["ask", "accept-edits", "auto"] as const) {
+      const { policy, events } = setup({ policy: p, answer: (c, b, sid) => b.resolve(sid, c, true, "orb") });
+      expect(await policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(true);
+      expect(cards(events)).toHaveLength(1);
+    }
+    expect(await setup({ policy: "plan" }).policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(false);
+    expect(await setup({ policy: "bypass", facts: { mode: "chat" } }).policy.allowForeground(newRunGrants("s1"), NOTES)).toBe(false);
   });
 
   test("persistentlyAllowed: bypass, Always allow and Allow for this session outlive the call; Allow once does not", async () => {
