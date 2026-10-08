@@ -80,6 +80,13 @@ public struct CUError: Error, Codable, Sendable, Equatable, CustomStringConverti
                        message: "\(app)'s window is on another Space or in full screen and \(why) — ask the user to bring it to this desktop, or retry with foreground consent")
     }
 
+    /// A window screenshot failed with the window on another Space or in full screen, and it could not be
+    /// moved here.
+    public static func screenshotElsewhere(_ app: String) -> CUError {
+        CUError(code: "window_elsewhere",
+                message: "can't take a screenshot of \(app)'s window while it is on another desktop (another Space or full screen), and it could not be moved here — state() and find() still work there; ask the user to bring it to this desktop")
+    }
+
     /// A pointer action's window was on another Space or in full screen and could not be moved here, so a new
     /// window was opened on this desktop and the target switched to it; the action itself did not run.
     public static func windowReplaced(_ app: String, newWindow: UInt32) -> CUError {
@@ -132,4 +139,6 @@ public enum CUFloorReason: String, Codable, Sendable {
     case privacyPane = "privacy_pane"
     case winterItself = "winter_itself"
     case savePath = "save_path"
+    /// Typing with the focus unreadable while the window holds a password or payment field.
+    case focusUnknown = "focus_unknown"
 }

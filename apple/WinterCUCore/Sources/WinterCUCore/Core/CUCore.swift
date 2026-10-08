@@ -347,13 +347,42 @@ public final class CUCore: @unchecked Sendable {
         if let b = t.bundleId, CUFloors.systemSettingsBundleIds.contains(b) {
             try await queues.run(t.pid) { [self] in try floorCheckPrivacy(t) }
         }
-        let img = try await capturer.captureWindow(windowID: t.windowID, region: region, budget: p.budget)
+        var detail: String?
+        let img: CUCapturedImage
+        do {
+            img = try await captureWindow(t.windowID, region, p.budget)
+        } catch let e as CUError where !["permission_missing", "cancelled", "invalid_params"].contains(e.code) {
+            // ScreenCaptureKit may refuse a window on another Space or in full screen ("Failed to start
+            // stream"): bring it to this desktop the way pointer actions do, then capture again.
+            let moved = try await queues.run(t.pid) { [self] () -> String?? in
+                guard isOffThisDesktop(t) else { return .none }
+                return .some(moveToThisDesktop(t))
+            }
+            guard let moved else { throw e }
+            guard let note = moved else { throw CUError.screenshotElsewhere(t.appName) }
+            try await clock.sleep(ms: 100)
+            do {
+                img = try await captureWindow(t.windowID, region, p.budget)
+            } catch let again as CUError where !["permission_missing", "cancelled", "invalid_params"].contains(again.code) {
+                throw CUError.screenshotElsewhere(t.appName)
+            }
+            detail = note
+        }
         let shot = try await queues.run(t.pid) {
             t.registerShot(anchor: .window(windowID: t.windowID, regionOrigin: img.pointsRect.origin),
                            imageWidth: img.width, imageHeight: img.height, points: img.pointsRect.size)
         }
         return TargetScreenshotResult(imageBase64: img.jpeg.base64EncodedString(), mime: "image/jpeg", width: img.width,
-                                      height: img.height, shotId: shot.id, settled: settled, waitedMs: waited)
+                                      height: img.height, shotId: shot.id, settled: settled, waitedMs: waited,
+                                      detail: detail)
+    }
+
+    /// Window capture; replaceable by tests (nothing there may touch ScreenCaptureKit).
+    var windowCaptureOverride: ((UInt32, CGRect?, CUImageBudget) async throws -> CUCapturedImage)?
+
+    func captureWindow(_ id: UInt32, _ region: CGRect?, _ budget: CUImageBudget) async throws -> CUCapturedImage {
+        if let o = windowCaptureOverride { return try await o(id, region, budget) }
+        return try await capturer.captureWindow(windowID: id, region: region, budget: budget)
     }
 
     // MARK: - waits
@@ -633,14 +662,8 @@ public final class CUCore: @unchecked Sendable {
     /// action does not run, since its refs and screenshot belong to the old window; else `window_elsewhere`.
     /// A minimized or hidden window (still listed by AX) is left as before. Returns a note when it moved one.
     func bringToThisDesktop(_ p: TargetActParams, _ t: CUTarget) throws -> String? {
-        guard let w = sys.window(id: t.windowID), !w.onScreen else { return nil }
-        let server = sys.windows(pid: t.pid)
-        if CUAXWindows.list(pid: t.pid, ax: ax, server: server).contains(where: { $0.id == t.windowID }) { return nil }
-        if p.privatePath, t.privatePath, sys.moveWindowToActiveSpace(t.windowID) {
-            let deadline = clock.nowMs() + 1000
-            while sys.window(id: t.windowID)?.onScreen != true, clock.nowMs() < deadline { usleep(30_000) }
-            return "moved \(t.appName)'s window to this desktop from another Space"
-        }
+        guard isOffThisDesktop(t) else { return nil }
+        if p.privatePath, let note = moveToThisDesktop(t) { return note }
         let fx = windowEffects(pid: t.pid, appName: t.appName, chromium: t.isChromium, privatePath: p.privatePath)
         let before = Set(fx.axWindows().map(\.id))
         if fx.openNewWindow(), let fresh = fx.wait({ fx.axWindows().first { !before.contains($0.id) } }) {
@@ -653,6 +676,22 @@ public final class CUCore: @unchecked Sendable {
             throw CUError.windowReplaced(t.appName, newWindow: fresh.id)
         }
         throw CUError.windowElsewhere(t.appName, pointer: true)
+    }
+
+    /// The bound window is on another Space or in full screen: the window server has it off screen and AX
+    /// does not list it. (A minimized window or a hidden app's is listed, so it does not count.)
+    func isOffThisDesktop(_ t: CUTarget) -> Bool {
+        guard let w = sys.window(id: t.windowID), !w.onScreen else { return false }
+        return !CUAXWindows.list(pid: t.pid, ax: ax, server: sys.windows(pid: t.pid)).contains { $0.id == t.windowID }
+    }
+
+    /// Moves the bound window to this desktop (SkyLight, the bind's private path) and waits up to 1 s for it
+    /// to show. A note of what was done, or nil when it could not be moved.
+    func moveToThisDesktop(_ t: CUTarget) -> String? {
+        guard t.privatePath, sys.moveWindowToActiveSpace(t.windowID) else { return nil }
+        let deadline = clock.nowMs() + 1000
+        while sys.window(id: t.windowID)?.onScreen != true, clock.nowMs() < deadline { usleep(30_000) }
+        return "moved \(t.appName)'s window to this desktop from another Space"
     }
 
     struct Observation {
@@ -684,13 +723,41 @@ public final class CUCore: @unchecked Sendable {
         guard !result.roots.isEmpty else {
             throw CUError.busy("\(t.appName) did not answer — it may be busy; retry")
         }
+        let hidden = Self.hiddenActions(t.refusedActions)
+        let roots = hidden.isEmpty ? result.roots : result.roots.map { Self.removing(hidden, from: $0) }
         var focusedRef: Int?
         if let f = AX.element(app, kAXFocusedUIElementAttribute), let r = t.refs.existingRef(for: AXIdentity(element: f)),
-           result.roots.contains(where: { $0.find(ref: r) != nil }) {
+           roots.contains(where: { $0.find(ref: r) != nil }) {
             focusedRef = r
         }
         let title = AX.string(win, kAXTitleAttribute) ?? t.windowTitle
-        return Observation(roots: result.roots, focusedRef: focusedRef, title: title)
+        return Observation(roots: roots, focusedRef: focusedRef, title: title)
+    }
+
+    /// Actions the app listed but refused and `action()` has no pointer equivalent for: state stops listing
+    /// them for that role, so every name state shows is one `action()` can perform.
+    static func hiddenActions(_ refused: [String: Set<String>]) -> [String: Set<String>] {
+        refused.compactMapValues { names in
+            let left = names.filter { pointerEquivalent($0) == nil }
+            return left.isEmpty ? nil : left
+        }
+    }
+
+    static func removing(_ hidden: [String: Set<String>], from n: CUNode) -> CUNode {
+        var out = n
+        if let h = hidden[n.role] { out.actions.removeAll { h.contains($0) } }
+        out.children = n.children.map { removing(hidden, from: $0) }
+        return out
+    }
+
+    /// What `action(name)` does when the app lists the AX action but refuses to perform it.
+    static func pointerEquivalent(_ action: String) -> (button: CUMouseButton, count: Int, verb: String)? {
+        switch action {
+        case kAXPressAction: return (.left, 1, "clicked")
+        case "AXOpen": return (.left, 2, "double-clicked")
+        case kAXShowMenuAction: return (.right, 1, "right-clicked")
+        default: return nil
+        }
     }
 
     /// The live element behind a ref, or `stale_ref`.

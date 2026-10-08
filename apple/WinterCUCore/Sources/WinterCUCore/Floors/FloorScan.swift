@@ -143,13 +143,65 @@ enum CUFloorScan {
         return chains.contains { CUFloors.isProtectedSaveDestination(fileName: name, folderChain: $0) }
     }
 
+    /// What a scan of a window found: whether it holds a password or payment field, whether the scan saw
+    /// the whole tree, and the elements that say they have keyboard focus (`AXFocused`).
+    struct SensitiveScan {
+        var sensitive: Bool
+        var complete: Bool
+        var focused: [AXUIElement]
+
+        /// Typing blind is safe only when the whole window was seen and nothing in it is sensitive.
+        var clear: Bool { complete && !sensitive }
+    }
+
+    static let sensitiveScanMaxElements = 5000
+    static let sensitiveScanBudgetMs: Double = 1000
+    static let sensitiveScanAttributes: [String] = [
+        kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute,
+        kAXPlaceholderValueAttribute, kAXIdentifierAttribute, "AXDOMIdentifier", kAXFocusedAttribute,
+        kAXChildrenAttribute,
+    ]
+
+    /// Walks `roots` (the bound window, and the app's focused window when it is another) for a password or
+    /// payment field, bounded in elements and wall time. Used only when the focus can't be read.
+    static func sensitiveScan(roots: [AXUIElement], ax: CUAXBackend, maxElements: Int = sensitiveScanMaxElements,
+                              budgetMs: Double = sensitiveScanBudgetMs) -> SensitiveScan {
+        let deadline = Deadline(ms: budgetMs)
+        var queue = roots
+        var head = 0
+        var seen = 0
+        var focused: [AXUIElement] = []
+        while head < queue.count {
+            if seen >= maxElements || deadline.passed { return SensitiveScan(sensitive: false, complete: false, focused: focused) }
+            let e = queue[head]
+            head += 1
+            seen += 1
+            let a = ax.copyMultiple(e, sensitiveScanAttributes) ?? [:]
+            let role = a[kAXRoleAttribute].flatMap(AX.stringValue) ?? ""
+            let texts = [kAXTitleAttribute, kAXDescriptionAttribute, kAXPlaceholderValueAttribute, kAXIdentifierAttribute,
+                         "AXDOMIdentifier"].map { a[$0].flatMap(AX.stringValue) }
+            if CUFloors.isSensitiveField(role: role, subrole: a[kAXSubroleAttribute].flatMap(AX.stringValue), texts: texts) {
+                return SensitiveScan(sensitive: true, complete: false, focused: focused)
+            }
+            if a[kAXFocusedAttribute].flatMap(AX.boolValue) == true { focused.append(e) }
+            if let v = a[kAXChildrenAttribute], CFGetTypeID(v) == CFArrayGetTypeID() {
+                queue += (v as! [AnyObject]).compactMap {
+                    CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil
+                }
+            }
+        }
+        return SensitiveScan(sensitive: false, complete: true, focused: focused)
+    }
+
     static let savePathRefusal = CUError.refused(
         .savePath, "a save panel points at a protected location (a shell startup file, ~/.ssh, LaunchAgents, or Winter's or Claude's settings) — ask the user to finish or cancel it")
 
-    /// Typing `text` into `e`: refused when `e` is in a save panel and the text names a protected path.
-    static func checkTypedIntoSavePanel(_ e: AXUIElement, text: String, ax: CUAXBackend) throws {
+    /// Typing `text` into `e`: refused when `e` is in a save panel and the text names a protected path. With
+    /// the focus unknown (`e` nil), any open save panel of the app counts.
+    static func checkTypedIntoSavePanel(_ e: AXUIElement?, text: String, pid: pid_t, ax: CUAXBackend) throws {
         // The text test is free; the panel walk only runs for text that names a protected path.
-        guard CUFloors.typedSavePathIsProtected(text), savePanel(containing: e, ax: ax) != nil else { return }
-        throw savePathRefusal
+        guard CUFloors.typedSavePathIsProtected(text) else { return }
+        let inPanel = e.map { savePanel(containing: $0, ax: ax) != nil } ?? !openSavePanels(pid: pid, ax: ax).isEmpty
+        if inPanel { throw savePathRefusal }
     }
 }

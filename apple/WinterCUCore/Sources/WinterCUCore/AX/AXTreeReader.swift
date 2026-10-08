@@ -20,7 +20,7 @@ struct AXTreeReader {
         kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute,
         kAXEnabledAttribute, kAXFocusedAttribute, kAXSelectedAttribute, kAXExpandedAttribute, "AXDisclosing",
         kAXChildrenAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXIdentifierAttribute,
-        kAXPlaceholderValueAttribute,
+        kAXPlaceholderValueAttribute, "AXDOMIdentifier",
     ]
 
     /// Roles whose `AXValue` the state shows (or turns into checked/unchecked).
@@ -59,7 +59,12 @@ struct AXTreeReader {
             guard let attrs = AX.copyMultiple(e, Self.batch) else { return nil }
             let role = attrs[kAXRoleAttribute].flatMap(AX.stringValue) ?? "AXUnknown"
             let subrole = attrs[kAXSubroleAttribute].flatMap(AX.stringValue)
-            let secure = CUFloors.isSecureField(role: role, subrole: subrole)
+            let payment = CUFloors.isPaymentField(role: role, texts: [
+                attrs[kAXTitleAttribute].flatMap(AX.stringValue), attrs[kAXDescriptionAttribute].flatMap(AX.stringValue),
+                attrs[kAXPlaceholderValueAttribute].flatMap(AX.stringValue), attrs[kAXIdentifierAttribute].flatMap(AX.stringValue),
+                attrs["AXDOMIdentifier"].flatMap(AX.stringValue),
+            ])
+            let secure = payment || CUFloors.isSecureField(role: role, subrole: subrole)
             var name = nonEmpty(attrs[kAXTitleAttribute].flatMap(AX.stringValue))
                 ?? nonEmpty(attrs[kAXDescriptionAttribute].flatMap(AX.stringValue))
             var value: String?
@@ -101,7 +106,7 @@ struct AXTreeReader {
             let ref = cache.ref(for: AXIdentity(element: e))
             var n = CUNode(ref: ref, role: role, subrole: subrole, name: name, value: value, states: states,
                            actions: Self.actionRoles.contains(role) ? AX.actions(e) : [], frame: frame,
-                           identifier: nonEmpty(attrs[kAXIdentifierAttribute].flatMap(AX.stringValue)))
+                           identifier: nonEmpty(attrs[kAXIdentifierAttribute].flatMap(AX.stringValue)), payment: payment)
             if Self.collectionRoles.contains(role) {
                 n.itemCount = AX.count(e, kAXRowsAttribute) ?? childElements.count
             }
