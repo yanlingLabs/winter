@@ -2,12 +2,43 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bashLooksSafe, BashReviewer, ReviewerNoRunnableModel, REVIEW_INSTRUCTION, UNSANDBOXED_REVIEW_INSTRUCTION, FS_REVIEW_INSTRUCTION, EXTERNAL_REVIEW_INSTRUCTION } from "../../src/agent/reviewer";
+import { bashLooksSafe, plainOpenUrls, BashReviewer, ReviewerNoRunnableModel, REVIEW_INSTRUCTION, UNSANDBOXED_REVIEW_INSTRUCTION, FS_REVIEW_INSTRUCTION, EXTERNAL_REVIEW_INSTRUCTION } from "../../src/agent/reviewer";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import type { ProviderEvent } from "../../src/providers/types";
 import { internalRoleEffortFor } from "../../src/providers/manager";
 import { RoleHealthRegistry } from "../../src/providers/role-health";
 import { Settings } from "../../src/settings";
+
+describe("plainOpenUrls — the plain-open pre-check (opening an app or an http(s) page skips the reviewer)", () => {
+  test("pre-allowed: -a app name / installed .app path, -b bundle id, -g/-j/-n/-F, http(s) URLs, a bare open -a", () => {
+    expect(plainOpenUrls("open -a Safari https://x.com")).toEqual(["https://x.com"]);
+    expect(plainOpenUrls("open https://a.b")).toEqual(["https://a.b"]);
+    expect(plainOpenUrls('open -a "Google Chrome"')).toEqual([]);
+    expect(plainOpenUrls("open -b com.apple.Safari https://x")).toEqual(["https://x"]);
+    expect(plainOpenUrls("open -a Safari 'https://chatgpt.com'")).toEqual(["https://chatgpt.com"]);
+    expect(plainOpenUrls('open "https://x.com/?a=1&b=2"')).toEqual(["https://x.com/?a=1&b=2"]);
+    expect(plainOpenUrls("open -g -j -n -F -a Safari http://x.com")).toEqual(["http://x.com"]);
+    expect(plainOpenUrls("open -a /Applications/Safari.app https://x")).toEqual(["https://x"]);
+    expect(plainOpenUrls("/usr/bin/open -a /System/Applications/Notes.app")).toEqual([]);
+  });
+
+  test("NOT pre-allowed: files, other schemes, chaining, substitution, other flags, prefixes, app paths outside the installed locations", () => {
+    for (const c of [
+      "open ./x.sh", "open -a Terminal x.command", "open file:///etc", "open 'myapp://x'", "open https://x; rm -rf ~",
+      "open $(cat f)", "open `cat f`", "open --args x", "open -a Safari https://x --args -x", "open -e foo.txt", "open -t foo.txt",
+      "open -f", "open -u https://x", "open -R https://x", "open -gj https://x", "open https://x && rm -rf ~", "open https://x | sh",
+      "open https://x > /tmp/f", 'open "https://x/$HOME"', "open https://x?a=1", "open ~", "open *", "sudo open https://x",
+      "X=1 open https://x", "open", "open -a", "open -a -e", "open -a Safari -b com.apple.Safari", "open -b ../x",
+      "open -a ./evil.app", "open -a /tmp/evil.app", "open -a /Applications/../tmp/x.app", "open -a /Applications/Foo.app/../../tmp/x.app",
+      "open http://", "open 'https://x\nrm -rf ~'", "open 'https://x", "xdg-open https://x", "open\nrm -rf ~",
+    ]) expect({ c, r: plainOpenUrls(c) }).toEqual({ c, r: undefined });
+  });
+
+  test("REVIEW_INSTRUCTION says opening an app or a page in the user's browser is ordinary, not by itself unsafe", () => {
+    expect(REVIEW_INSTRUCTION).toContain("Opening an app, or a web page in the user's own browser");
+    expect(REVIEW_INSTRUCTION).toContain("is not, by itself, unsafe");
+  });
+});
 
 describe("bashLooksSafe", () => {
   test("read-only argv0, no metachars → bypass", () => {

@@ -55,7 +55,7 @@ import type {
 } from "@yanlinglabs/winter-agent-sdk";
 import type { FileDiffSummary } from "@yanlinglabs/winter-protocol";
 import { SHIPPED_DANGEROUS_DOMAINS, dangerousHostMatch, dangerousUrlMatch, normalizeDangerousDomain } from "../agent/dangerous-domains";
-import { BashReviewer, ReviewerNoRunnableModel, bashLooksSafe } from "../agent/reviewer";
+import { BashReviewer, ReviewerNoRunnableModel, bashLooksSafe, plainOpenUrls } from "../agent/reviewer";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { AUTO_DIAG_TOOL_NAMES, autoDiagnosticsSuffix } from "../agent/lsp/auto-diagnostics";
 import type { LspManager } from "../agent/lsp/manager";
@@ -1338,6 +1338,17 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
     // record) a review on it.
     if (escape && escapeFloorHit(command, deps.home, hookCwd(input)) !== undefined) return allow();
     if (!escape && bashLooksSafe(command, deps.reviewerAllow?.() ?? [])) return allow();
+    // 2026-10-08 (the live gate): opening an app, or an http(s) page in the user's own browser, is an ordinary
+    // user-facing action a model reviewer misreads as a network side effect — and in Dispatch its `unsafe` is a
+    // hard deny. A PLAIN `open` (`plainOpenUrls`: `-a`/`-b`/`-g`/`-j`/`-n`/`-F` and http(s) URLs only, nothing
+    // chained or expanded) skips the review — unless a URL's host is on the live dangerous-domain floor.
+    if (!escape) {
+      const urls = plainOpenUrls(command);
+      if (urls !== undefined) {
+        const floor = effectiveDangerousDomains(deps);
+        if (urls.every((u) => dangerousUrlMatch(u, floor) === null)) return allow();
+      }
+    }
     try {
       // C3 round 3: for an escape the reviewer also sees the session's cwd (what "outside the project"
       // means) and the call's own `description` as the JUSTIFICATION — DATA, never instructions, under
