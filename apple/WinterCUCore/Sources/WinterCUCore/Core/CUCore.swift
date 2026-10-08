@@ -252,6 +252,54 @@ public final class CUCore: @unchecked Sendable {
             })
     }
 
+    /// How long an unconfirmed paste leaves Winter's text on the clipboard before the user's comes back.
+    var pasteRestoreDelayMs: Double = 1500
+
+    /// An unconfirmed paste's restore, still pending.
+    struct PendingRestore {
+        var saved: [[String: Data]]
+        var ours: Int
+        var work: DispatchWorkItem
+        var pasteboard: CUPasteboardIO
+    }
+    private var pendingRestore: PendingRestore?
+    private let pendingRestoreLock = NSLock()
+
+    /// Takes (and cancels) a pending restore, for a new paste to carry on with.
+    func takePendingRestore() -> PendingRestore? {
+        pendingRestoreLock.withLock {
+            let p = pendingRestore
+            p?.work.cancel()
+            pendingRestore = nil
+            return p
+        }
+    }
+
+    /// The user's clipboard comes back after `pasteRestoreDelayMs` — unless someone copied meanwhile (theirs
+    /// wins) or another paste took the restore over.
+    func scheduleRestore(_ pb: CUPasteboardIO, saved: [[String: Data]], ours: Int) {
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let mine: Bool = self.pendingRestoreLock.withLock {
+                guard let p = self.pendingRestore, p.ours == ours else { return false }
+                self.pendingRestore = nil
+                return true
+            }
+            if mine, pb.changeCount == ours { _ = pb.write(saved) }
+        }
+        pendingRestoreLock.withLock { pendingRestore = PendingRestore(saved: saved, ours: ours, work: work, pasteboard: pb) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + pasteRestoreDelayMs / 1000, execute: work)
+    }
+
+    /// Restores a pending clipboard now (the turn or the session ended).
+    func flushPendingRestore() {
+        guard let p = takePendingRestore() else { return }
+        if p.pasteboard.changeCount == p.ours { _ = p.pasteboard.write(p.saved) }
+    }
+
+    /// Whether `keepFrontmost` also checks once more after the act (off in tests, which check synchronously).
+    var keepFrontmostLater = true
+
     /// The window's tree for the off-desktop hit test; replaceable by tests (the live reader walks real AX).
     var treeReadOverride: ((CUTarget) -> [CUNode])?
 
@@ -389,7 +437,8 @@ public final class CUCore: @unchecked Sendable {
             let obs = try observe(t, within: p.within)
             let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note)
             let snap = CUSnapshot(id: t.nextSnapshotId(), scope: p.within, header: header, roots: obs.roots, formatter: formatter)
-            var text = formatter.full(header: header, roots: obs.roots)
+            // A whole-window, non-full state folds what is out of view first; `within` and `full` don't.
+            var text = formatter.full(header: header, roots: obs.roots, viewportFirst: p.within == nil && p.full != true)
             var isDiff = false
             var ratio = 1.0
             if let since = p.since, p.full != true, let old = t.snapshot(since), old.scope == p.within {
@@ -640,10 +689,12 @@ public final class CUCore: @unchecked Sendable {
     }
 
     public func turnEnded(_ p: TurnEndedParams) async throws -> TurnEndedResult {
-        TurnEndedResult()
+        flushPendingRestore()
+        return TurnEndedResult()
     }
 
     public func sessionEnded(_ p: SessionEndedParams) async throws -> SessionEndedResult {
+        flushPendingRestore()
         let ids: [String] = {
             lock.lock(); defer { lock.unlock() }
             return targets.values.filter { $0.sessionId == p.sessionId }.map(\.id)
@@ -848,6 +899,23 @@ public final class CUCore: @unchecked Sendable {
         return "moved \(t.appName)'s window to this desktop from another Space"
     }
 
+    /// The app's open menus: menus that are children of the application element (where AppKit puts context
+    /// and pop-up menus), and menus held by a separate small window of the app (some apps host one there).
+    static func openMenus(app: AXUIElement, boundWindow: AXUIElement, ax: CUAXBackend) -> [AXUIElement] {
+        var menus: [AXUIElement] = []
+        for child in ax.elements(app, kAXChildrenAttribute) {
+            switch ax.string(child, kAXRoleAttribute) {
+            case kAXMenuRole?:
+                menus.append(child)
+            case kAXWindowRole? where !CFEqual(child, boundWindow):
+                menus += ax.elements(child, kAXChildrenAttribute).filter { ax.string($0, kAXRoleAttribute) == kAXMenuRole }
+            default:
+                break
+            }
+        }
+        return menus
+    }
+
     struct Observation {
         var roots: [CUNode]
         var focusedRef: Int?
@@ -863,8 +931,9 @@ public final class CUCore: @unchecked Sendable {
         if let within {
             rootElements = [try element(within, in: t)]
         } else {
-            rootElements = [win]
-            rootElements += AX.elements(app, kAXChildrenAttribute).filter { AX.string($0, kAXRoleAttribute) == kAXMenuRole }
+            // An open menu FIRST: a context menu (AXShowMenu, a right click) or an open pop-up lives under the
+            // application, not in the window's tree, and it is what the next act is about.
+            rootElements = Self.openMenus(app: app, boundWindow: win, ax: ax) + [win]
         }
         // Only a complete read of the whole window may age refs out: a `within` read, a capped `waitFor` read
         // or a walk cut short by its budget sees part of the tree, and must not make the rest look gone.

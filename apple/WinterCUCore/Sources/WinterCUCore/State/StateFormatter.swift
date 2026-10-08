@@ -105,53 +105,92 @@ public struct CUStateFormatter: Sendable {
 
     // MARK: full tree
 
-    public func full(header h: CUStateHeader, roots: [CUNode]) -> String {
+    /// `viewportFirst` (a non-full, whole-window state): when the tree must fold, what lies OUTSIDE the visible
+    /// viewport — outside the window, or outside the visible rect of the scroll area it sits in — is folded
+    /// first, one `… n more out of view` line per parent, so the on-screen links, buttons, headings and
+    /// fields of a big web page survive. Only then are large subtrees collapsed.
+    public func full(header h: CUStateHeader, roots: [CUNode], viewportFirst: Bool = false) -> String {
         var lines = [header(h)]
-        lines.append(contentsOf: body(roots: roots, focusedRef: h.focusedRef))
+        lines.append(contentsOf: body(roots: roots, focusedRef: h.focusedRef, viewportFirst: viewportFirst))
         return lines.joined(separator: "\n")
     }
 
+    static func outOfViewMarker(count: Int, ref: Int) -> String {
+        "… \(count) more out of view — scroll, or state({within:\(ref)})"
+    }
+
     /// The indented lines of `roots`, folded to `lineCap`.
-    public func body(roots: [CUNode], focusedRef: Int?) -> [String] {
-        // Flatten into an indexable list with parent links and depths.
-        struct Item { var node: CUNode; var parent: Int?; var depth: Int; var visibleDescendants: Int }
+    public func body(roots: [CUNode], focusedRef: Int?, viewportFirst: Bool = false) -> [String] {
+        // Flatten into an indexable list with parent links and depths, and whether each element lies outside
+        // the visible rect it is clipped to (the window at the top, narrowed by every scroll area below it).
+        struct Item { var node: CUNode; var parent: Int?; var depth: Int; var visibleDescendants: Int; var outOfView: Bool }
         var items: [Item] = []
-        func add(_ n: CUNode, parent: Int?, depth: Int) {
+        func add(_ n: CUNode, parent: Int?, depth: Int, clip: CGRect?) {
             let idx = items.count
-            items.append(Item(node: n, parent: parent, depth: depth, visibleDescendants: 0))
-            for c in n.children { add(c, parent: idx, depth: depth + 1) }
+            let framed = n.frame.flatMap { $0.width > 0 && $0.height > 0 ? $0 : nil }
+            let out = parent != nil && clip != nil && framed != nil && !framed!.intersects(clip!)
+            items.append(Item(node: n, parent: parent, depth: depth, visibleDescendants: 0, outOfView: out))
+            var childClip = clip
+            if let f = framed {
+                if parent == nil { childClip = f } else if n.role == "AXScrollArea" { childClip = clip.map { $0.intersection(f) } ?? f }
+            }
+            for c in n.children { add(c, parent: idx, depth: depth + 1, clip: childClip) }
         }
-        for r in roots { add(r, parent: nil, depth: 0) }
+        for r in roots { add(r, parent: nil, depth: 0, clip: nil) }
         // Descendant counts, bottom-up (children always follow their parent in `items`).
         for i in stride(from: items.count - 1, through: 0, by: -1) {
             if let p = items[i].parent { items[p].visibleDescendants += 1 + items[i].visibleDescendants }
         }
-        // The focus path is collapsed last.
+        // The focus path is collapsed last, and never folded away as out of view.
         var focusPath = Set<Int>()
         if let f = focusedRef, var i = items.firstIndex(where: { $0.node.ref == f }) {
+            focusPath.insert(i)
             while let p = items[i].parent { focusPath.insert(p); i = p }
+        }
+        // The topmost out-of-view elements (their parent is in view).
+        var elidable = Set<Int>()
+        for i in items.indices where items[i].outOfView && !focusPath.contains(i) {
+            if let p = items[i].parent, !items[p].outOfView || focusPath.contains(p) { elidable.insert(i) }
         }
 
         var collapsed = Set<Int>()
-        // hidden[i]: some ancestor of i is collapsed. Parents precede children, so one forward pass works.
+        var eliding = false
+        // hidden[i]: some ancestor of i is collapsed or i is folded out of view. Parents precede children, so
+        // one forward pass works. `shown[i]`: i's descendants still shown.
         var hidden = [Bool](repeating: false, count: items.count)
+        var shown = [Int](repeating: 0, count: items.count)
+        var summaries = Set<Int>()
         func recount() -> Int {
-            var shown = 0
+            var lines = 0
+            summaries.removeAll()
             for i in items.indices {
                 if let p = items[i].parent { hidden[i] = hidden[p] || collapsed.contains(p) } else { hidden[i] = false }
-                if !hidden[i] { shown += 1 }
+                if eliding, elidable.contains(i), !hidden[i] {
+                    hidden[i] = true
+                    if let p = items[i].parent { summaries.insert(p) }
+                }
+                if !hidden[i] { lines += 1 }
             }
-            return shown
+            for i in items.indices { shown[i] = 0 }
+            for i in stride(from: items.count - 1, through: 0, by: -1) where !hidden[i] {
+                if let p = items[i].parent { shown[p] += 1 + shown[i] }
+            }
+            return lines + summaries.count
         }
         var total = recount()
+        if viewportFirst, total > lineCap, !elidable.isEmpty {
+            eliding = true
+            total = recount()
+        }
         while total > lineCap {
             // Largest subtree first; the focus path only when nothing else is left; roots last of all.
             var best: Int?
+            func size(_ i: Int) -> Int { eliding ? shown[i] : items[i].visibleDescendants }
             for pass in 0..<3 {
-                for i in items.indices where items[i].visibleDescendants > 0 && !collapsed.contains(i) && !hidden[i] {
+                for i in items.indices where size(i) > 0 && !collapsed.contains(i) && !hidden[i] {
                     if pass < 2, items[i].parent == nil { continue }
                     if pass == 0, focusPath.contains(i) { continue }
-                    if best == nil || items[i].visibleDescendants > items[best!].visibleDescendants { best = i }
+                    if best == nil || size(i) > size(best!) { best = i }
                 }
                 if best != nil { break }
             }
@@ -160,8 +199,22 @@ public struct CUStateFormatter: Sendable {
             total = recount()
         }
 
+        // Elements folded out of view, per parent (the parent's line is followed by one marker line).
+        var outOfViewCount: [Int: Int] = [:]
+        if eliding {
+            for i in elidable { if let p = items[i].parent, summaries.contains(p) { outOfViewCount[p, default: 0] += 1 + items[i].node.descendantCount } }
+        }
+        var marked = Set<Int>()
         var out: [String] = []
-        for i in items.indices where !hidden[i] {
+        for i in items.indices {
+            if hidden[i] {
+                if eliding, elidable.contains(i), let p = items[i].parent, summaries.contains(p), !marked.contains(p) {
+                    marked.insert(p)
+                    out.append(String(repeating: "  ", count: items[i].depth)
+                               + Self.outOfViewMarker(count: outOfViewCount[p] ?? 0, ref: items[p].node.ref))
+                }
+                continue
+            }
             let n = items[i].node
             var text = String(repeating: "  ", count: items[i].depth) + line(n)
             if collapsed.contains(i) {

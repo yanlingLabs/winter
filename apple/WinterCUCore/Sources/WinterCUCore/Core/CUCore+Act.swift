@@ -645,6 +645,8 @@ extension CUCore {
             return try pasteText(text, format: .text, p, t, token, g)
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
+        let keyed = focusBoundWindow(p, t, front: false)
+        defer { keyed?() }
         let synth = self.synth(p)
         let chars = Array(text)
         var next = 0
@@ -662,13 +664,22 @@ extension CUCore {
     }
 
     /// Polls for evidence that an edit landed: the value changed, or a value-change notification arrived.
-    func waitForEdit(_ t: CUTarget, _ e: AXUIElement?, before: String?, since: Double, capMs: Double) -> Bool {
+    func waitForEdit(_ t: CUTarget, _ e: AXUIElement?, before: String?, selectionBefore: String? = nil, since: Double,
+                     capMs: Double) -> Bool {
         let ax = self.ax, monitor = self.monitor, clock = self.clock
-        return CUEditEvidence(readValue: { e.flatMap { ax.string($0, kAXValueAttribute) } },
-                              lastValueChangeMs: { monitor.lastValueChangeMs(pid: t.pid) },
-                              nowMs: { clock.nowMs() },
-                              sleepMs: { usleep(useconds_t($0 * 1000)) })
-            .wait(before: before, since: since, capMs: capMs)
+        var evidence = CUEditEvidence(readValue: { e.flatMap { ax.string($0, kAXValueAttribute) } },
+                                      lastValueChangeMs: { monitor.lastValueChangeMs(pid: t.pid) },
+                                      nowMs: { clock.nowMs() },
+                                      sleepMs: { usleep(useconds_t($0 * 1000)) })
+        evidence.readSelection = { e.flatMap { Self.selectionText(ax, $0) } }
+        return evidence.wait(before: before, selectionBefore: selectionBefore, since: since, capMs: capMs)
+    }
+
+    /// An element's selected range as text ("12+0"), when it has one.
+    static func selectionText(_ ax: CUAXBackend, _ e: AXUIElement) -> String? {
+        guard let v = ax.attribute(e, kAXSelectedTextRangeAttribute), CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
+        var r = CFRange()
+        return AXValueGetValue(v as! AXValue, .cfRange, &r) ? "\(r.location)+\(r.length)" : nil
     }
 
     private func pasteText(_ text: String, format: CUPasteFormat, _ p: TargetActParams, _ t: CUTarget,
@@ -676,17 +687,30 @@ extension CUCore {
         try token.check()
         let focus = try requireTypableFocus(t, g)
         let before = focus.flatMap { ax.string($0, kAXValueAttribute) }
+        let selectionBefore = focus.flatMap { Self.selectionText(ax, $0) }
+        // Confirmable only where the focused element shows its value or selection. A web or canvas editor
+        // (Google Docs) shows neither: waiting 1.5 s for evidence that never comes was pure delay.
+        let confirmable = before != nil || selectionBefore != nil
         var sent: ActOutcome?
         var since = clock.nowMs()
-        let seq = CUPasteSequence(
-            pasteboard: pasteboard(),
+        let pb = pasteboard()
+        var seq = CUPasteSequence(
+            pasteboard: pb,
             sendPaste: {
                 since = self.clock.nowMs()
                 sent = try self.sendChord(CUKeyChord(key: .character("v"), modifiers: [.command]), p, t, token, g)
             },
             // Restore only once the paste visibly happened (or 1.5 s passed): an app that reads the
             // clipboard late must not get the user's own contents instead.
-            waitForEvidence: { self.waitForEdit(t, focus, before: before, since: since, capMs: 1500) })
+            waitForEvidence: {
+                self.waitForEdit(t, focus, before: before, selectionBefore: selectionBefore, since: since, capMs: 1500)
+            })
+        // An earlier unconfirmed paste's restore still pending: its saved clipboard is the user's (what is on the
+        // clipboard now is Winter's text), unless the user copied something since.
+        if let pending = takePendingRestore(), pb.changeCount == pending.ours { seq.pendingSaved = pending.saved }
+        if !confirmable {
+            seq.deferRestore = { [self] saved, ours in scheduleRestore(pb, saved: saved, ours: ours) }
+        }
         let result = try seq.run(items: CUPasteSequence.items(text: text, format: format),
                                  plain: CUPasteSequence.plain(text: text, format: format))
         var o = sent ?? ActOutcome(rung: .processEvents)
@@ -695,6 +719,9 @@ extension CUCore {
             o.detail = [o.detail, "the clipboard changed meanwhile, so it was not restored"].compactMap { $0 }.joined(separator: "; ")
         case .restored(let evidence) where !evidence:
             o.detail = [o.detail, "the paste was not confirmed within 1.5 s"].compactMap { $0 }.joined(separator: "; ")
+        case .deferred:
+            o.detail = [o.detail, "the paste was sent; \(t.appName) doesn't show its text to accessibility here, so it can't be confirmed — check the state; the clipboard is restored once \(t.appName) has had time to read it"]
+                .compactMap { $0 }.joined(separator: "; ")
         default: break
         }
         return o
@@ -724,6 +751,10 @@ extension CUCore {
         // Characters (and cmd+V) are text input: never into a password or payment field (C1).
         if textual { e = try requireTypableFocus(t, g) ?? e }
         cursor(t, "key", at: e.flatMap { ElementInfo($0, ax).center }, text: a.combo)
+        // Keys go to the app's key window: make it the bound one first (and, for a shortcut, let the app's menus
+        // validate against it).
+        let keyed = focusBoundWindow(p, t, front: chord.modifiers.contains(.command) || chord.modifiers.contains(.control))
+        defer { keyed?() }
         // Resolve the route once (the menu lookup walks the menu bar), then press it `repeat` times.
         let plan = try chordPlan(chord, p, t, g)
         var out = ActOutcome(rung: .accessibility)
@@ -787,7 +818,9 @@ extension CUCore {
     /// One chord, start to finish.
     func sendChord(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token,
                    _ g: TypingFocus = TypingFocus()) throws -> ActOutcome {
-        try execute(try chordPlan(chord, p, t, g), p, t, token)
+        let keyed = focusBoundWindow(p, t, front: true)
+        defer { keyed?() }
+        return try execute(try chordPlan(chord, p, t, g), p, t, token)
     }
 
     /// A menu-bar item whose key equivalent is `key` with `modifiers` (command implied). The walk is bounded
@@ -1200,23 +1233,95 @@ extension CUCore {
         return [AXError.actionUnsupported.rawValue, AXError.notImplemented.rawValue].contains(Int32(n))
     }
 
+    /// A menu-bar command. The menu is resolved (and its items validated) with the bound window made key in
+    /// the background, so commands that need a selection in the active window — Finder's File › Move to Trash —
+    /// are enabled for the bound window. If one stays disabled, the foreground rung is asked for
+    /// (`needs_foreground`): with the user's consent the app comes forward for the command and the front is
+    /// given back after.
     private func menu(_ a: CUMenuAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+        // A menu command has no on-screen point in the background: a caption only, no press.
+        cursor(t, "caption", text: Self.caption("Choosing", a.path.joined(separator: " › ")))
+        try token.check()
+        if p.allowForeground {
+            return try inForeground(t) {
+                do {
+                    try pressMenu(try resolveMenu(a, p, t), t)
+                } catch let e as CUError where e.data?["disabled"] != nil {
+                    throw CUError.unsupported("\(e.message), even with \(t.appName) in front — nothing it applies to is selected (check state())")
+                }
+                return ActOutcome(rung: .foreground, detail: "\(t.appName) was brought forward for the command, and the front given back after")
+            }
+        }
+        aimMenuCommands(at: t)
+        let keyed = focusBoundWindow(p, t, front: true)
+        defer { keyed?() }
+        let item: CUAXMenuNode
+        do {
+            item = try resolveMenu(a, p, t)
+        } catch let e as CUError where e.data?["disabled"] != nil {
+            guard keyed != nil || sys.frontmostPid() != t.pid else { throw e }
+            CULog.act.notice("menu in \(t.appName, privacy: .public): still disabled in the background — asking for the foreground")
+            throw CUError(code: "needs_foreground",
+                          message: "\(e.message) — it stays disabled while \(t.appName) is in the background\(keyed != nil ? ", even with its window made key" : ""): the command needs \(t.appName) in front")
+        }
+        try pressMenu(item, t)
+        return ActOutcome(rung: .accessibility,
+                          detail: keyed != nil ? "\(t.appName)'s window was made key in the background for the command" : nil)
+    }
+
+    private func resolveMenu(_ a: CUMenuAction, _ p: TargetActParams, _ t: CUTarget) throws -> CUAXMenuNode {
         let item = try CUMenuWalker.resolve(a.path, in: try CUAXMenuNode.menuBar(pid: t.pid, ax: ax))
         let attrs = ax.copyMultiple(item.element, [kAXMenuItemCmdCharAttribute, kAXMenuItemCmdModifiersAttribute]) ?? [:]
         if CUPasteMenu.isPasteItem(title: item.menuTitle, cmdChar: attrs[kAXMenuItemCmdCharAttribute].flatMap(AX.stringValue),
                                    cmdModifiers: attrs[kAXMenuItemCmdModifiersAttribute].flatMap { ($0 as? NSNumber)?.intValue }) {
             try requirePasteSafe(p, t)
         }
-        // A menu command has no on-screen point in the background: a caption only, no press.
-        cursor(t, "caption", text: Self.caption("Choosing", a.path.joined(separator: " › ")))
-        try token.check()
-        aimMenuCommands(at: t)
+        return item
+    }
+
+    private func pressMenu(_ item: CUAXMenuNode, _ t: CUTarget) throws {
         do {
             try ax.perform(item.element, kAXPressAction)
         } catch let error where Self.deliveryUncertain(error) {
             throw busyAfterSend(t)
         }
-        return ActOutcome(rung: .accessibility)
+    }
+
+    /// While the app is in the background (the private path on), makes the BOUND window key in it without
+    /// raising it or activating the app (yabai's focus-without-raise: a defocus record to the front process, a
+    /// focus record to the target); `front`: also makes the app WindowServer-front with no window brought
+    /// forward (`kCPSNoWindows`, cua-driver's menu-shortcut activation), which menu validation and key
+    /// equivalents need. Returns the undo: the front and the user's key window handed back, then ChatGPT's
+    /// safety net — if the target activated itself, the user's app is re-activated 50 ms later.
+    func focusBoundWindow(_ p: TargetActParams, _ t: CUTarget, front: Bool) -> (() -> Void)? {
+        guard p.privatePath, skyLight.canFocusWithoutRaise, let user = sys.frontmostPid(), user != t.pid else { return nil }
+        let userWindow = ax.element(ax.application(user), kAXFocusedWindowAttribute).flatMap { ax.windowID($0) }
+        guard skyLight.focusWithoutRaise(pid: t.pid, windowID: t.windowID) else { return nil }
+        let previousFront = front ? skyLight.frontNoWindows(pid: t.pid, windowID: t.windowID) : nil
+        CULog.act.notice("\(t.appName, privacy: .public): window \(t.windowID, privacy: .public) made key without raising\(previousFront != nil ? " (front, no windows)" : "", privacy: .public)")
+        return { [self] in
+            if let previousFront { skyLight.restoreFront(previousFront) }
+            if let userWindow {
+                skyLight.restoreFocus(previousPid: user, previousWindowID: userWindow, targetPid: t.pid, targetWindowID: t.windowID)
+            }
+            keepFrontmost(user, over: t)
+        }
+    }
+
+    /// The user's app stays frontmost: if the target activated itself, it is re-activated after 50 ms (now,
+    /// and once more a little later for an activation that lands after the act).
+    func keepFrontmost(_ user: pid_t, over t: CUTarget) {
+        let sys = self.sys
+        let reactivate = { (when: String) in
+            guard sys.frontmostPid() == t.pid, user != t.pid else { return }
+            CULog.act.notice("\(t.appName, privacy: .public) took the front \(when, privacy: .public) — giving it back to the user's app")
+            _ = sys.activate(pid: user)
+        }
+        if sys.frontmostPid() == t.pid {
+            usleep(50_000)
+            reactivate("during the act")
+        }
+        if keepFrontmostLater { DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { reactivate("after the act") } }
     }
 
     /// Controls a press means something to; a disabled one of these does nothing, so it is refused rather than
