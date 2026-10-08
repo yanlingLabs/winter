@@ -148,7 +148,9 @@ public enum HelperPaths {
 /// transport in tests).
 public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
     public nonisolated let events: AsyncStream<HelperViewEvent>
-    private let eventsCont: AsyncStream<HelperViewEvent>.Continuation
+    /// Where events wait for the consumer. Frames coalesce here: a consumer that is behind sees the
+    /// newest frame of a target, never a queue of stale ones.
+    private let mailbox = HelperEventMailbox()
 
     private let home: String
     private let socketPath: String
@@ -159,6 +161,10 @@ public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
     private var transport: WinterTransport?
     private var pump: Task<Void, Never>?
     private let decoder = LineDecoder(maxLine: 16 * 1024 * 1024)
+    /// Frame lines received / decoded (JSON-parsed and base64-decoded) — a frame that a newer one in the same
+    /// read superseded is received and never decoded. Read by the benchmark.
+    public private(set) var framesReceived = 0
+    public private(set) var framesDecoded = 0
     private var nextId = 1
     private var pending: [Int: CheckedContinuation<JSONValue, Error>] = [:]
     private var deliberate = false
@@ -167,9 +173,8 @@ public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
                 socketExists: @escaping @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
                 makeTransport: @escaping @Sendable (String) -> WinterTransport = { UnixSocketTransport(path: $0) },
                 requestTimeout: Duration = .seconds(5)) {
-        var c: AsyncStream<HelperViewEvent>.Continuation!
-        events = AsyncStream { c = $0 }
-        eventsCont = c
+        let box = mailbox
+        events = AsyncStream<HelperViewEvent>(unfolding: { await box.next() })
         self.home = home
         self.socketPath = HelperPaths.socketPath(home: home)
         self.socketExists = socketExists
@@ -269,31 +274,97 @@ public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
     private func handle(_ event: TransportEvent) {
         switch event {
         case .data(let chunk):
-            guard let lines = try? decoder.push(chunk) else {
+            guard let lines = try? decoder.pushData(chunk) else {
                 transport?.close() // an oversized line: a broken or hostile peer
                 return
             }
-            for line in lines { route(line) }
+            let superseded = Self.supersededFrameLines(lines)
+            for (index, line) in lines.enumerated() {
+                if superseded.contains(index) { framesReceived += 1; continue }
+                route(line)
+            }
         case .closed:
             failAllPending(HelperClientError.notConnected)
             transport = nil
-            if !deliberate { eventsCont.yield(.connectionLost) }
+            if !deliberate { mailbox.push(.connectionLost) }
         }
     }
 
-    private func route(_ line: String) {
-        guard let value = try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8)) else { return }
-        if let id = value["id"]?.intValue {
+    /// Parsed with Foundation's `JSONSerialization`. (Measured against the generic `Codable` tree on an 80 KB
+    /// frame line — one big string and a few small values — the two cost about the same, ~0.1 ms; the
+    /// time that mattered was in the line splitter, not here. This runs on the client actor, never the
+    /// main actor, and a frame a newer one supersedes is not parsed at all.)
+    private func route(_ line: Data) {
+        guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
+        if let id = (object["id"] as? NSNumber)?.intValue {
             guard let cont = pending.removeValue(forKey: id) else { return }
-            if let error = value["error"] {
-                cont.resume(throwing: Self.error(from: error))
+            if let error = object["error"] {
+                cont.resume(throwing: Self.error(from: Self.jsonValue(error)))
             } else {
-                cont.resume(returning: value["result"] ?? .object([:]))
+                cont.resume(returning: object["result"].map(Self.jsonValue) ?? .object([:]))
             }
             return
         }
-        guard let method = value["method"]?.stringValue, let params = value["params"] else { return }
-        if let event = Self.event(method: method, params: params) { eventsCont.yield(event) }
+        guard let method = object["method"] as? String, let params = object["params"] as? [String: Any] else { return }
+        if method == "view.frame" { framesReceived += 1 }
+        if let event = Self.event(method: method, params: params) {
+            if case .frame = event { framesDecoded += 1 }
+            mailbox.push(event)
+        }
+    }
+
+    // MARK: - Superseded frames
+
+    /// The indexes of frame lines in one read that a LATER frame line for the same session and target
+    /// replaces. A consumer that is behind would only ever see the newest, so the older are never even
+    /// parsed. Found with `memmem` on the raw bytes — no JSON is read to decide.
+    static func supersededFrameLines(_ lines: [Data]) -> Set<Int> {
+        guard lines.count > 1 else { return [] }
+        var seen: Set<String> = []
+        var superseded: Set<Int> = []
+        for index in lines.indices.reversed() {
+            guard let key = frameKey(lines[index]) else { continue }
+            if !seen.insert(key).inserted { superseded.insert(index) }
+        }
+        return superseded
+    }
+
+    /// `"<sessionId>|<targetId>"` of a `view.frame` line, or nil for any other line.
+    static func frameKey(_ line: Data) -> String? {
+        line.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> String? in
+            guard let base = raw.baseAddress, find(base, raw.count, "\"view.frame\"") != nil,
+                  let session = stringValue(after: "\"sessionId\":\"", in: base, count: raw.count),
+                  let target = stringValue(after: "\"targetId\":\"", in: base, count: raw.count) else { return nil }
+            return session + "|" + target
+        }
+    }
+
+    private static func find(_ base: UnsafeRawPointer, _ count: Int, _ needle: String) -> UnsafeRawPointer? {
+        needle.withCString { cstring in
+            let length = strlen(cstring)
+            return memmem(base, count, cstring, length).map { UnsafeRawPointer($0) }
+        }
+    }
+
+    private static func stringValue(after needle: String, in base: UnsafeRawPointer, count: Int) -> String? {
+        guard let hit = find(base, count, needle) else { return nil }
+        let start = hit + needle.utf8.count
+        let remaining = count - (start - base)
+        guard remaining > 0, let quote = memchr(start, 0x22, remaining) else { return nil }
+        return String(decoding: UnsafeRawBufferPointer(start: start, count: UnsafeRawPointer(quote) - start), as: UTF8.self)
+    }
+
+    // MARK: - JSONSerialization → JSONValue (responses only; they are small)
+
+    static func jsonValue(_ any: Any) -> JSONValue {
+        switch any {
+        case let number as NSNumber:
+            return CFGetTypeID(number) == CFBooleanGetTypeID() ? .bool(number.boolValue) : .number(number.doubleValue)
+        case let string as String: return .string(string)
+        case let array as [Any]: return .array(array.map(jsonValue))
+        case let object as [String: Any]: return .object(object.mapValues(jsonValue))
+        default: return .null
+        }
     }
 
     // MARK: - Decoding (pure)
@@ -309,40 +380,105 @@ public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
     }
 
     static func target(from v: JSONValue) -> HelperTarget? {
-        guard let targetId = v["targetId"]?.stringValue, let size = sizeValue(v["windowSize"]) else { return nil }
+        guard let targetId = v["targetId"]?.stringValue, let size = sizeValue(json: v["windowSize"]) else { return nil }
         return HelperTarget(targetId: targetId, pid: v["pid"]?.intValue ?? 0, windowId: v["windowId"]?.intValue ?? 0,
                             appName: v["appName"]?.stringValue ?? "", bundleId: v["bundleId"]?.stringValue ?? "", windowSize: size)
     }
 
-    static func event(method: String, params p: JSONValue) -> HelperViewEvent? {
-        guard let sessionId = p["sessionId"]?.stringValue else { return nil }
+    static func event(method: String, params p: [String: Any]) -> HelperViewEvent? {
+        guard let sessionId = p["sessionId"] as? String else { return nil }
+        func int(_ key: String) -> Int? { (p[key] as? NSNumber)?.intValue }
         switch method {
         case "view.bound":
-            return target(from: p).map { .bound(sessionId: sessionId, target: $0) }
+            guard let targetId = p["targetId"] as? String, let size = sizeValue(p["windowSize"]) else { return nil }
+            return .bound(sessionId: sessionId, target: HelperTarget(
+                targetId: targetId, pid: int("pid") ?? 0, windowId: int("windowId") ?? 0,
+                appName: p["appName"] as? String ?? "", bundleId: p["bundleId"] as? String ?? "", windowSize: size))
         case "view.released":
-            return p["targetId"]?.stringValue.map { .released(sessionId: sessionId, targetId: $0) }
+            return (p["targetId"] as? String).map { .released(sessionId: sessionId, targetId: $0) }
         case "view.frame":
-            guard let targetId = p["targetId"]?.stringValue, let b64 = p["jpeg"]?.stringValue,
+            guard let targetId = p["targetId"] as? String, let b64 = p["jpeg"] as? String,
                   let jpeg = Data(base64Encoded: b64), let size = sizeValue(p["windowSize"]) else { return nil }
-            return .frame(HelperFrame(sessionId: sessionId, targetId: targetId, seq: p["seq"]?.intValue ?? 0, jpeg: jpeg,
-                                      width: p["width"]?.intValue ?? 0, height: p["height"]?.intValue ?? 0, windowSize: size))
+            return .frame(HelperFrame(sessionId: sessionId, targetId: targetId, seq: int("seq") ?? 0, jpeg: jpeg,
+                                      width: int("width") ?? 0, height: int("height") ?? 0, windowSize: size))
         case "view.cursor":
-            guard let targetId = p["targetId"]?.stringValue, let kind = p["kind"]?.stringValue, let point = pointValue(p["point"]) else { return nil }
+            guard let targetId = p["targetId"] as? String, let kind = p["kind"] as? String, let point = pointValue(p["point"]) else { return nil }
             return .cursor(HelperCursor(sessionId: sessionId, targetId: targetId, kind: kind, point: point,
-                                        dragTo: pointValue(p["dragTo"]), frame: rectValue(p["frame"]), text: p["text"]?.stringValue,
-                                        count: p["count"]?.intValue, button: p["button"]?.stringValue))
+                                        dragTo: pointValue(p["dragTo"]), frame: rectValue(p["frame"]), text: p["text"] as? String,
+                                        count: int("count"), button: p["button"] as? String))
         default:
             return nil
         }
     }
 
-    private static func numbers(_ v: JSONValue?, count: Int) -> [Double]? {
-        guard let items = v?.arrayValue, items.count == count else { return nil }
-        let values = items.compactMap { item -> Double? in if case .number(let n) = item { return n }; return nil }
+    private static func numbers(_ v: Any?, count: Int) -> [Double]? {
+        guard let items = v as? [Any], items.count == count else { return nil }
+        let values = items.compactMap { ($0 as? NSNumber).map { $0.doubleValue } }
         return values.count == count ? values : nil
     }
 
-    static func sizeValue(_ v: JSONValue?) -> CGSize? { numbers(v, count: 2).map { CGSize(width: $0[0], height: $0[1]) } }
-    static func pointValue(_ v: JSONValue?) -> CGPoint? { numbers(v, count: 2).map { CGPoint(x: $0[0], y: $0[1]) } }
-    static func rectValue(_ v: JSONValue?) -> CGRect? { numbers(v, count: 4).map { CGRect(x: $0[0], y: $0[1], width: $0[2], height: $0[3]) } }
+    /// A `[w, h]` out of a decoded JSON response.
+    static func sizeValue(json v: JSONValue?) -> CGSize? {
+        guard let items = v?.arrayValue, items.count == 2,
+              case .number(let w) = items[0], case .number(let h) = items[1] else { return nil }
+        return CGSize(width: w, height: h)
+    }
+
+    static func sizeValue(_ v: Any?) -> CGSize? { numbers(v, count: 2).map { CGSize(width: $0[0], height: $0[1]) } }
+    static func pointValue(_ v: Any?) -> CGPoint? { numbers(v, count: 2).map { CGPoint(x: $0[0], y: $0[1]) } }
+    static func rectValue(_ v: Any?) -> CGRect? { numbers(v, count: 4).map { CGRect(x: $0[0], y: $0[1], width: $0[2], height: $0[3]) } }
+}
+
+/// Holds the helper's notifications until the consumer takes them, one at a time. A frame replaces an
+/// older, not-yet-taken frame of the same session and target — the consumer is behind or busy, and the
+/// newest picture is the only one worth drawing. Every other event keeps its place.
+final class HelperEventMailbox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var queue: [HelperViewEvent] = []
+    private var waiter: CheckedContinuation<HelperViewEvent?, Never>?
+
+    func push(_ event: HelperViewEvent) {
+        lock.lock()
+        if let waiter {
+            self.waiter = nil
+            lock.unlock()
+            waiter.resume(returning: event)
+            return
+        }
+        if case .frame(let new) = event,
+           let index = queue.lastIndex(where: { if case .frame(let old) = $0 { return old.sessionId == new.sessionId && old.targetId == new.targetId }; return false }) {
+            queue[index] = event
+        } else {
+            queue.append(event)
+        }
+        lock.unlock()
+    }
+
+    func next() async -> HelperViewEvent? {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<HelperViewEvent?, Never>) in
+                lock.lock()
+                if !queue.isEmpty {
+                    let event = queue.removeFirst()
+                    lock.unlock()
+                    continuation.resume(returning: event)
+                } else if Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume(returning: nil)
+                } else {
+                    waiter = continuation
+                    lock.unlock()
+                }
+            }
+        } onCancel: {
+            lock.lock()
+            let cancelled = waiter
+            waiter = nil
+            lock.unlock()
+            cancelled?.resume(returning: nil)
+        }
+    }
+
+    /// Events waiting for the consumer (tests).
+    var pendingCount: Int { lock.lock(); defer { lock.unlock() }; return queue.count }
 }

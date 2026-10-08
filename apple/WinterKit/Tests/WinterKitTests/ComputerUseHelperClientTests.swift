@@ -257,3 +257,123 @@ private final class OpenedFlag: @unchecked Sendable {
     var value: Bool { lock.lock(); defer { lock.unlock() }; return _value }
     func set() { lock.lock(); _value = true; lock.unlock() }
 }
+
+// MARK: - A consumer that is behind
+
+extension ComputerUseHelperClientTests {
+    private func frameLine(_ seq: Int, target: String = "t1", session: String = "s_1", padding: Int = 2_000) -> String {
+        let jpeg = Data(repeating: UInt8(seq % 250), count: padding).base64EncodedString()
+        return #"{"jsonrpc":"2.0","method":"view.frame","params":{"sessionId":"\#(session)","targetId":"\#(target)","seq":\#(seq),"jpeg":"\#(jpeg)","width":720,"height":540,"windowSize":[800,600]}}"#
+    }
+
+    private func connectedClient() async throws -> (LiveComputerUseHelperClient, ScriptedTransport) {
+        let t = ScriptedTransport()
+        let c = LiveComputerUseHelperClient(home: "/h", socketExists: { _ in true }, makeTransport: { _ in t })
+        async let connected: Void = c.connect()
+        let hello = try await waitForSent(t, count: 1)[0]
+        t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{}}"#)
+        try await connected
+        return (c, t)
+    }
+
+    private func settle(_ c: LiveComputerUseHelperClient, received: Int) async {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, await c.framesReceived < received { try? await Task.sleep(nanoseconds: 5_000_000) }
+    }
+
+    /// Two hundred frames arrive while nobody is reading: the consumer finds ONE — the newest.
+    func testAConsumerThatIsBehindFindsOnlyTheNewestFrame() async throws {
+        let (c, t) = try await connectedClient()
+        for seq in 1...200 { t.feed(frameLine(seq)) }
+        await settle(c, received: 200)
+        var it = c.events.makeAsyncIterator()
+        guard case .frame(let frame) = await it.next() else { return XCTFail("a frame") }
+        XCTAssertEqual(frame.seq, 200, "the newest, not the oldest")
+        t.feed(#"{"jsonrpc":"2.0","method":"view.released","params":{"sessionId":"s_1","targetId":"t1"}}"#)
+        guard case .released = await it.next() else { return XCTFail("the next thing is the release, not 199 stale frames") }
+    }
+
+    /// Frames of different targets do not replace each other.
+    func testEachTargetsNewestFrameIsKept() async throws {
+        let (c, t) = try await connectedClient()
+        for seq in 1...5 { t.feed(frameLine(seq, target: "a")); t.feed(frameLine(100 + seq, target: "b")) }
+        await settle(c, received: 10)
+        var it = c.events.makeAsyncIterator()
+        var seen: [String: Int] = [:]
+        for _ in 0..<2 {
+            guard case .frame(let f) = await it.next() else { return XCTFail("frame") }
+            seen[f.targetId] = f.seq
+        }
+        XCTAssertEqual(seen, ["a": 5, "b": 105])
+    }
+
+    /// In ONE read, a frame a later frame replaces is never even parsed — and the events between survive in order.
+    func testASupersededFrameInOneReadIsNeverDecoded() async throws {
+        let (c, t) = try await connectedClient()
+        let lines = [
+            #"{"jsonrpc":"2.0","method":"view.bound","params":{"sessionId":"s_1","targetId":"t1","pid":1,"windowId":2,"appName":"Notes","bundleId":"x","windowSize":[800,600]}}"#,
+            frameLine(1), frameLine(2),
+            #"{"jsonrpc":"2.0","method":"view.cursor","params":{"sessionId":"s_1","targetId":"t1","kind":"move","point":[1,2]}}"#,
+            frameLine(3), frameLine(4),
+        ]
+        t.feed(lines.joined(separator: "\n"))
+        await settle(c, received: 4)
+        let decoded = await c.framesDecoded
+        XCTAssertEqual(decoded, 1, "four frames received, one decoded")
+        var it = c.events.makeAsyncIterator()
+        guard case .bound = await it.next() else { return XCTFail("bound first") }
+        guard case .cursor = await it.next() else { return XCTFail("then the cursor") }
+        guard case .frame(let f) = await it.next() else { return XCTFail("then the newest frame") }
+        XCTAssertEqual(f.seq, 4)
+    }
+
+    func testTheKeyOfAFrameLineIsReadFromTheRawBytes() {
+        let key = LiveComputerUseHelperClient.frameKey(Data(frameLine(9, target: "tx", session: "sx").utf8))
+        XCTAssertEqual(key, "sx|tx")
+        XCTAssertNil(LiveComputerUseHelperClient.frameKey(Data(#"{"method":"view.cursor","params":{"sessionId":"s","targetId":"t"}}"#.utf8)))
+        XCTAssertNil(LiveComputerUseHelperClient.frameKey(Data("garbage".utf8)))
+        XCTAssertEqual(LiveComputerUseHelperClient.supersededFrameLines([Data(frameLine(1).utf8)]), [])
+    }
+
+    func testTheMailboxCancelsCleanly() async {
+        let mailbox = HelperEventMailbox()
+        let task = Task { await mailbox.next() }
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        task.cancel()
+        let result = await task.value
+        XCTAssertNil(result, "a cancelled reader is released, not left waiting")
+        mailbox.push(.connectionLost)
+        XCTAssertEqual(mailbox.pendingCount, 1)
+    }
+
+    /// Numbers for the idle-CPU report: a hundred 80 KB frames through the client in random 1-16 KB reads
+    /// with nobody consuming — how long the client takes, how many frames it parsed, how many wait for the
+    /// consumer (one).
+    func testBenchHundredEightyKilobyteFramesWithNoConsumer() async throws {
+        let (c, t) = try await connectedClient()
+        let lines = (1...100).map { frameLine($0, padding: 60 * 1024) } // ~80 KB of base64 each
+        let data = Data((lines.joined(separator: "\n") + "\n").utf8)
+        var pieces: [Data] = []
+        var index = 0
+        var seed: UInt64 = 11
+        while index < data.count {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            let size = 1024 + Int(seed >> 33) % (15 * 1024)
+            let end = min(index + size, data.count)
+            pieces.append(data[index..<end])
+            index = end
+        }
+        let started = DispatchTime.now().uptimeNanoseconds
+        for piece in pieces { t.feedRaw(piece) }
+        await settle(c, received: 100)
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+        let received = await c.framesReceived, decoded = await c.framesDecoded
+        var it = c.events.makeAsyncIterator()
+        guard case .frame(let newest) = await it.next() else { return XCTFail("a frame") }
+        print(String(format: "BENCH client: %d frames x ~80 KB (%d KB) in %d reads: %.0f ms; parsed %d; the consumer finds 1 (seq %d)",
+                     received, data.count / 1024, pieces.count, ms, decoded, newest.seq))
+        XCTAssertEqual(received, 100)
+        XCTAssertEqual(newest.seq, 100)
+        XCTAssertLessThanOrEqual(decoded, 100)
+    }
+}

@@ -347,6 +347,92 @@ final class MirrorTests: XCTestCase {
         await expect({ r.coordinator.applied == ["s1"] })
     }
 
+    // MARK: - Frames only while the mirror is visible
+
+    private func upAndRunning(_ r: Rig, session: String = "s1", windowVisible: Bool = true) async {
+        r.client.setTargets([.fake("t1")], for: session)
+        r.coordinator.setWindow(MirrorWindow(id: "shell", kind: .shell, sessionId: session, width: 900, isVisible: windowVisible))
+        await expect({ r.coordinator.applied == [session] })
+    }
+
+    func testAnIdleSessionIsSubscribedWithoutFrames() async {
+        let r = rig()
+        await upAndRunning(r)
+        XCTAssertEqual(r.client.frameFlags(for: "s1"), [false], "a target is bound but no turn runs: bound and cursor only")
+        XCTAssertFalse(r.coordinator.isReceivingFrames(sessionId: "s1"))
+    }
+
+    func testFramesStartWhenATurnRunsWithATargetAndStopWhenItEnds() async {
+        let r = rig()
+        await upAndRunning(r)
+        r.coordinator.setTurnRunning(sessionId: "s1", running: true)
+        await expect({ r.coordinator.isReceivingFrames(sessionId: "s1") })
+        XCTAssertEqual(r.client.frameFlags(for: "s1"), [false, true])
+        XCTAssertEqual(r.client.count("connect"), 1, "a flag change is a re-subscribe, not a reconnect")
+
+        r.coordinator.setTurnRunning(sessionId: "s1", running: false)
+        await expect({ !r.coordinator.isReceivingFrames(sessionId: "s1") })
+        XCTAssertEqual(r.client.frameFlags(for: "s1"), [false, true, false])
+    }
+
+    func testNoTargetMeansNoFramesEvenWhileTheTurnRuns() async {
+        let r = rig()
+        r.coordinator.setWindow(window(.shell, session: "s1", id: "shell"))
+        await expect({ r.coordinator.applied == ["s1"] })
+        r.coordinator.setTurnRunning(sessionId: "s1", running: true)
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertEqual(r.client.frameFlags(for: "s1"), [false], "nothing to look at yet")
+
+        r.client.push(.bound(sessionId: "s1", target: .fake("t1")))
+        await expect({ r.coordinator.isReceivingFrames(sessionId: "s1") })
+        r.client.push(.released(sessionId: "s1", targetId: "t1"))
+        await expect({ !r.coordinator.isReceivingFrames(sessionId: "s1") })
+        XCTAssertEqual(r.client.frameFlags(for: "s1"), [false, true, false])
+    }
+
+    func testAHiddenWindowGetsNoFramesAndAnExposedOneDoes() async {
+        let r = rig()
+        await upAndRunning(r, windowVisible: false)
+        r.coordinator.setTurnRunning(sessionId: "s1", running: true)
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertFalse(r.coordinator.isReceivingFrames(sessionId: "s1"), "minimized, ordered out or covered: no frames")
+
+        r.coordinator.setWindow(MirrorWindow(id: "shell", kind: .shell, sessionId: "s1", width: 900, isVisible: true))
+        await expect({ r.coordinator.isReceivingFrames(sessionId: "s1") })
+        r.coordinator.setWindow(MirrorWindow(id: "shell", kind: .shell, sessionId: "s1", width: 900, isVisible: false))
+        await expect({ !r.coordinator.isReceivingFrames(sessionId: "s1") })
+        XCTAssertEqual(r.client.count("connect"), 1)
+    }
+
+    func testOneVisibleWindowAmongSeveralIsEnough() async {
+        let r = rig()
+        await upAndRunning(r, windowVisible: false)
+        r.coordinator.setWindow(MirrorWindow(id: "det", kind: .detached, sessionId: "s1", width: 900, isVisible: true))
+        r.coordinator.setTurnRunning(sessionId: "s1", running: true)
+        await expect({ r.coordinator.isReceivingFrames(sessionId: "s1") })
+        // A narrow detached window is not eligible, so its visibility counts for nothing.
+        r.coordinator.setWindow(MirrorWindow(id: "det", kind: .detached, sessionId: "s1", width: 400, isVisible: true))
+        await expect({ !r.coordinator.isReceivingFrames(sessionId: "s1") })
+    }
+
+    func testFramesThatArriveWhileTheMirrorIsDownAreDropped() async {
+        let r = rig()
+        await upAndRunning(r)
+        r.client.push(.frame(.fake("s1", "t1", bytes: 9)))
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertEqual(r.sinks.byId["s1"]?.log ?? [], [], "no turn: nothing reaches the mirror")
+    }
+
+    func testAReconnectAsksForFramesOnlyWhereTheMirrorIsUp() async {
+        let r = rig()
+        await upAndRunning(r)
+        r.coordinator.setTurnRunning(sessionId: "s1", running: true)
+        await expect({ r.coordinator.isReceivingFrames(sessionId: "s1") })
+        r.client.push(.connectionLost)
+        await expect({ r.client.count("connect") == 2 && r.coordinator.applied == ["s1"] })
+        XCTAssertEqual(r.client.frameFlags(for: "s1").suffix(1), [true], "the mirror is up again (the targets were re-seeded), so frames resume")
+    }
+
     // MARK: - Events through the coordinator
 
     func testEventsReachTheRightSessionsMirror() async {
