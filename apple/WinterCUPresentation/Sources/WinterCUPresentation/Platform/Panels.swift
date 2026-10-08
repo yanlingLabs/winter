@@ -152,6 +152,12 @@ final class FlippedLayerView: NSView {
         if panel.frame != appKit { panel.setFrame(appKit, display: false) }
         let scale = AppKitScreens.backingScale(for: frame)
         caption.contentsScale = scale
+        // The stream follows both the size and the backing scale (a window dragged to a 1× display).
+        let pixels = CGSize(width: (contentSize.width * scale).rounded(), height: (contentSize.height * scale).rounded())
+        if pixels != pixelSize {
+            pixelSize = pixels
+            stream?.resize(pixelSize: pixels)
+        }
         guard contentSize != self.contentSize else { return }
         self.contentSize = contentSize
         CATransaction.begin()
@@ -163,11 +169,6 @@ final class FlippedLayerView: NSView {
         caption.frame = CGRect(x: pad + 6, y: imageRect.maxY + 4, width: contentSize.width - 12,
                                height: tuning.mirrorCaptionHeight - 6)
         CATransaction.commit()
-        let pixels = CGSize(width: (contentSize.width * scale).rounded(), height: (contentSize.height * scale).rounded())
-        if pixels != pixelSize {
-            pixelSize = pixels
-            stream?.resize(pixelSize: pixels)
-        }
     }
 
     func setShown(_ shown: Bool) {
