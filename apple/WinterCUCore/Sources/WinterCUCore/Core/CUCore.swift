@@ -429,11 +429,25 @@ public final class CUCore: @unchecked Sendable {
     public func screenAppAt(_ p: ScreenAppAtParams) async throws -> ScreenAppAtResult {
         guard let pixel = try cuPoint(p.point) else { throw CUError.invalidParams("point is required") }
         let point = try screenPoint(shotId: p.shotId, pixel: pixel)
-        guard let w = CUWindowServer.topWindow(at: point) else {
-            throw CUError.invalidParams("no app window at that point")
-        }
+        let sys = self.sys
+        let w = try Self.appAt(point: point, stack: sys.windowStack(), ownPid: getpid(), bundleId: { sys.bundleId(pid: $0) })
         let app = NSRunningApplication(processIdentifier: w.pid)
         return ScreenAppAtResult(app: app?.localizedName ?? w.ownerName, bundleId: app?.bundleIdentifier ?? "", windowId: w.id)
+    }
+
+    /// `screen.appAt`'s pick: the front-most normal window at `point`. Whole-screen images now show Winter's
+    /// own windows, so a point on one — the window itself, or a Winter panel floating above another app — is
+    /// refused like binding Winter. The helper's own windows are click-through and skipped. Pure.
+    static func appAt(point: CGPoint, stack: [CUWindowServerWindow], ownPid: pid_t,
+                      bundleId: (pid_t) -> String?) throws -> CUWindowServerWindow {
+        let refusal = CUError.refused(.winterItself, "that point is on a Winter window — Winter can't control itself")
+        if let top = CUHitTest.topWindow(at: point, stack: stack, ownPid: ownPid),
+           CUFloors.isWinterItself(bundleId: bundleId(top.pid), pid: top.pid, ownPid: ownPid) { throw refusal }
+        guard let w = stack.first(where: { $0.layer == 0 && $0.pid != ownPid && $0.alpha > 0 && $0.frame.contains(point) }) else {
+            throw CUError.invalidParams("no app window at that point")
+        }
+        if CUFloors.isWinterItself(bundleId: bundleId(w.pid), pid: w.pid, ownPid: ownPid) { throw refusal }
+        return w
     }
 
     /// A shot's pixel → global screen point. Screen shots map directly; a target's window shot adds the

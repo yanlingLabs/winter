@@ -56,14 +56,19 @@ public enum CUFloors {
         return isWinterBundle(b)
     }
 
-    /// Whether a whole-screen image leaves this app out: Winter and all its helpers, the auth agents, and
-    /// the caller's list.
+    /// The computer-use helper itself (its mirrors and cursor overlay), dist and dev.
+    public static let helperBundleIds: Set<String> = ["com.winter.computeruse", "com.winter.computeruse.dev"]
+
+    /// Whether a whole-screen image leaves this app out: the helper's own windows, the auth agents, and the
+    /// caller's list. Winter's own app windows are NOT left out (user ruling 2026-10-08): a whole-screen image
+    /// is for seeing the screen; controlling an app needs a bind, and binding Winter stays refused.
     public static func excludedFromScreenshots(_ bundleId: String, extra: Set<String>) -> Bool {
-        isWinterBundle(bundleId) || authBundleIds.contains(bundleId) || extra.contains(bundleId)
+        helperBundleIds.contains(bundleId) || authBundleIds.contains(bundleId) || extra.contains(bundleId)
     }
 
-    /// Bundle ids every whole-screen image leaves out besides the `com.winter.` prefix.
-    public static var alwaysExcludedFromScreenshots: Set<String> { winterBundleIds.union(authBundleIds) }
+    /// Bundle ids every whole-screen image leaves out (the helper and the auth agents), besides the
+    /// helper's own `Bundle.main` / pid and the caller's list.
+    public static var alwaysExcludedFromScreenshots: Set<String> { helperBundleIds.union(authBundleIds) }
 
     // MARK: privacy panes
 

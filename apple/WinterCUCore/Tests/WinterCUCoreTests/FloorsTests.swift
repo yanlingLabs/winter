@@ -34,9 +34,16 @@ final class FloorsTests: XCTestCase {
         XCTAssertTrue(CUFloors.isWinterItself(bundleId: "com.apple.Notes", pid: 42, ownPid: 42), "the helper's own pid")
         XCTAssertFalse(CUFloors.isWinterItself(bundleId: "com.apple.Notes", pid: 42, ownPid: 1))
         XCTAssertFalse(CUFloors.isWinterItself(bundleId: nil, pid: 42, ownPid: 1))
+        // Whole-screen images: always without the helper and the auth agents, but WITH Winter's own windows.
         XCTAssertTrue(CUFloors.alwaysExcludedFromScreenshots.contains("com.winter.computeruse"))
         XCTAssertTrue(CUFloors.alwaysExcludedFromScreenshots.contains("com.winter.computeruse.dev"))
-        XCTAssertTrue(CUFloors.excludedFromScreenshots("com.winter.app.cefhelper.gpu", extra: []))
+        XCTAssertTrue(CUFloors.excludedFromScreenshots("com.winter.computeruse", extra: []))
+        XCTAssertTrue(CUFloors.excludedFromScreenshots("com.winter.computeruse.dev", extra: []))
+        for id in ["com.winter.app", "com.winter.app.dev", "com.winter.app.cefhelper.gpu", "com.winter.office-helper"] {
+            XCTAssertFalse(CUFloors.excludedFromScreenshots(id, extra: []), "Winter's own windows are visible: \(id)")
+            XCTAssertFalse(CUFloors.alwaysExcludedFromScreenshots.contains(id), id)
+        }
+        XCTAssertTrue(CUFloors.excludedFromScreenshots("com.winter.app", extra: ["com.winter.app"]), "unless the daemon asks")
         XCTAssertTrue(CUFloors.excludedFromScreenshots("com.apple.SecurityAgent", extra: []))
         XCTAssertTrue(CUFloors.excludedFromScreenshots("com.1password.1password", extra: ["com.1password.1password"]))
         XCTAssertFalse(CUFloors.excludedFromScreenshots("com.apple.Notes", extra: []))
