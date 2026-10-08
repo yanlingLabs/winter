@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 80, "expected 80 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 82, "expected 82 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -95,6 +95,39 @@ final class RoundTripTests: XCTestCase {
         XCTAssertNil(without.runtimeKind)
         XCTAssertNil(without.providerId)
         XCTAssertNil(without.modelRef)
+    }
+
+    /// The reviewing pill (2026-10-08): the TRANSIENT `tool_review_progress` variant — its own case, not
+    /// the persisted `tool_review` record's. `started` carries no verdict; `ended` carries one, and a
+    /// subagent's call arrives with the subagent's thread id.
+    func testToolReviewProgressDecodesBothPhases() throws {
+        func load(_ name: String) throws -> SessionEvent {
+            guard let url = Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Fixtures") else {
+                XCTFail("missing \(name).json fixture")
+                throw CocoaError(.fileNoSuchFile)
+            }
+            return try JSONDecoder().decode(SessionEvent.self, from: Data(contentsOf: url))
+        }
+        guard case .toolReviewProgress(let started) = try load("tool_review_progress") else { return XCTFail("wrong case") }
+        XCTAssertEqual(started.callId, "toolu_01")
+        XCTAssertEqual(started.phase, "started")
+        XCTAssertEqual(started.threadId, "main")
+        XCTAssertNil(started.verdict)
+
+        guard case .toolReviewProgress(let ended) = try load("tool_review_progress_ended") else { return XCTFail("wrong case") }
+        XCTAssertEqual(ended.callId, "toolu_02")
+        XCTAssertEqual(ended.phase, "ended")
+        XCTAssertEqual(ended.verdict, "escalated")
+        XCTAssertEqual(ended.threadId, "toolu_agent_7")
+
+        // Distinct from the persisted record, and transient where that one is not.
+        XCTAssertTrue(SessionEvent.toolReviewProgress(started).isTransient)
+        XCTAssertFalse(SessionEvent.toolReview(.init(seq: 1, sessionId: "s", ts: 0, threadId: "main", toolName: "bash",
+                                                     verdict: "safe", reason: "", summary: "")).isTransient)
+
+        let reencoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(SessionEvent.toolReviewProgress(ended))) as? [String: Any]
+        XCTAssertEqual(reencoded?["type"] as? String, "tool_review_progress")
+        XCTAssertEqual(reencoded?["verdict"] as? String, "escalated")
     }
 
     /// Phase 5e T1 (reviewer maturity — the WinterKit-trap task): the NEW `tool_review` variant

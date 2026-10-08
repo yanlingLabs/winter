@@ -363,6 +363,10 @@ final class FieldStateAdapter: ObservableObject {
     /// which is exactly when this has to be true.
     var turnRunning: Bool { session.state.turnRunning }
 
+    /// The tool calls the bash safety reviewer is judging right now — the pill-themed window tints
+    /// their pills (`OrbSessionState.reviewingCallIds`).
+    var reviewingCallIds: Set<String> { session.state.reviewingCallIds }
+
     /// LIVE-GATE G4: CC-parity pinned todo widget — `WindowSurfaceView.windowContent` renders a
     /// compact "what's left" list below the transcript whenever ANY task isn't done yet, mirroring
     /// Claude Code's own pinned-todo panel. Empty (hides the whole section) once every task is

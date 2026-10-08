@@ -550,6 +550,12 @@ struct OrbSessionState: Equatable {
     /// turn the queued text was riding on ends — absorbed (`turnCompleted`) or died
     /// (`agentError`) — since a queued steer never survives past the turn it was queued for.
     var queuedSteers: [String] = []
+    /// The tool calls the bash safety reviewer is judging right now (`tool_review_progress`: `started`
+    /// adds a `callId`, `ended` removes it). Transient state — never replayed — so it is also cleared
+    /// when the call's result arrives, when the turn ends or errors, and when the connection drops: a
+    /// pill must never stay amber because an `ended` was lost. The pill-themed window tints those calls'
+    /// pills (`PillToolRunHeader.isReviewing`).
+    var reviewingCallIds: Set<String> = []
     /// The exchange the running main turn belongs to — stamped by a turn-opening `turn_started` — so an
     /// `aborted` terminal marks THAT exchange, not whichever opened last: a message held behind a turn
     /// that has already replied opens its own exchange while the turn runs, and the daemon closes a turn
@@ -810,7 +816,11 @@ enum SessionReducer {
                s.exchanges[e].activity[i].toolCallId == v.callId {
                 s.exchanges[e].activity[i].scriptCode = code
             }
+        case .toolReviewProgress(let v):
+            // Any thread: a subagent's call is reviewed too, and the callId is unique to the call.
+            foldToolReviewProgress(&s, callId: v.callId, phase: v.phase)
         case .toolResult(let v) where v.threadId == mainThread:
+            s.reviewingCallIds.remove(v.callId) // a call that has a result is past its review
             // The status flip must not be contingent on whether the fold below finds an item to
             // land on — but since 2026-10-02 the runtime runs read-only calls CONCURRENTLY and
             // reports each as it finishes, so a result no longer means the round is over: the status
@@ -941,6 +951,7 @@ enum SessionReducer {
             s.runningTurnExchange = nil
             s.compactionStartedAt = nil // whatever compaction the turn ran is over with it
             s.subagents = [] // 2e-ii prune: children always complete before the main turn does
+            s.reviewingCallIds = [] // an `ended` that never came must not leave a pill amber
         case .turnCompleted(let v):
             // CHILD turn window closed — bank the active span. Status stays "working" (alive)
             // until thread_completed; a next child turn would reopen a span.
@@ -987,6 +998,7 @@ enum SessionReducer {
                 s.exchanges[last].appendReply("⚠︎ \(v.message)")
             }
             s.subagents = [] // defensive prune — an errored main turn must not strand a live block
+            s.reviewingCallIds = []
         case .taskUpdated(let v): // any thread — tasks are session-wide
             // T3 review fix wave 1: `status: "deleted"` is a TERMINAL removal, not an upsert —
             // packages/protocol's TaskSchema now has this value (events.ts), and
@@ -1190,6 +1202,17 @@ enum SessionReducer {
     /// round), or appends a new one to the open exchange through `appendActivity` (its adjacent-dupe
     /// collapse cannot fire — no item has this `blockId` — and its cap applies). An item the cap evicted
     /// simply reappears at the end with its record — the same miss semantics as a tool result.
+    /// The fold of one `tool_review_progress`: `started` marks the call as being reviewed, `ended` clears
+    /// it, anything else is ignored. An `ended` for a call that never `started` therefore leaves nothing
+    /// behind. Pure and internal so the tests drive it without building an event.
+    static func foldToolReviewProgress(_ state: inout OrbSessionState, callId: String, phase: String) {
+        switch phase {
+        case "started": state.reviewingCallIds.insert(callId)
+        case "ended": state.reviewingCallIds.remove(callId)
+        default: break
+        }
+    }
+
     private static func foldThinking(_ state: inout OrbSessionState, blockId: String,
                                      _ fold: (ThinkingItem?) -> ThinkingItem) {
         for e in state.exchanges.indices.reversed().prefix(toolResultFoldSearchDepth) {
@@ -1585,6 +1608,7 @@ enum SessionReducer {
         switch conn {
         case .disconnected, .reconnecting:
             s.status = .disconnected
+            s.reviewingCallIds = [] // transients are not replayed: an `ended` sent while away is gone
         case .connected:
             s.status = s.pendingInteractions.isEmpty
                 ? (s.turnRunning ? .thinking : .idle)

@@ -1,0 +1,10 @@
+{
+  "type": "tool_review_progress",
+  "sessionId": "s_1",
+  "threadId": "toolu_agent_7",
+  "seq": 39,
+  "ts": 1700000000031,
+  "callId": "toolu_02",
+  "phase": "ended",
+  "verdict": "escalated"
+}
