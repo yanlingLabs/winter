@@ -1,7 +1,8 @@
 /**
  * ComputerV2 — the compiled-artifact gate for the Winter Computer Use helper: `bun run verify:computer-helper`.
  * Never under `bun test` (it builds and runs real signed binaries). Needs no TCC grant, shows no UI, never
- * touches `~/.winter*` or LaunchServices' launch path: every helper it runs is its own child, on a temp home.
+ * touches `~/.winter*`, and launches nothing through LaunchServices: every helper it runs is its own child, on
+ * a temp home (the test flavor's LaunchServices record, which running it creates, is removed at the end).
  *
  *  1. The dev helper `bun run dev:helper` left in `dist/dev/` is what TCC and the daemon need: Winter's team,
  *     identifier com.winter.computeruse.dev, the hardened runtime, EXACTLY the stated designated requirement,
@@ -24,7 +25,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WINTER_TEAM_ID } from "../packages/core/src/auth/app-token-acl";
-import { HELPER, HELPER_SOCKET_NAME, helperExecutable, helperRequirement } from "./computer-helper-lib";
+import { HELPER, HELPER_SOCKET_NAME, helperExecutable, helperRequirement, LSREGISTER } from "./computer-helper-lib";
 import { buildHelper, DEV_HELPER_APP, inspectHelper, run, signHelper, signingIdentity } from "./dev-helper";
 import { readCanonical } from "./version-lib";
 
@@ -256,6 +257,8 @@ async function main(): Promise<void> {
   } finally {
     for (const l of launched) await stop(l);
     for (const h of homes) rmSync(h, { recursive: true, force: true });
+    // Running an app's binary registers it with LaunchServices; the test flavor must leave no record behind.
+    run(LSREGISTER, ["-u", join(VERIFY_DIR, `${HELPER.test.name}.app`)]);
     rmSync(VERIFY_DIR, { recursive: true, force: true });
   }
 }
