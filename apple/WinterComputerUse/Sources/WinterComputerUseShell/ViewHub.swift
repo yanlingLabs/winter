@@ -70,6 +70,23 @@ public final class LiveWindowGeometry: WindowGeometry {
     }
 }
 
+/// The hub's clock: what time it is, and a way to be called back. Injected so the idle throttle is tested
+/// without waiting.
+@MainActor public protocol ViewClock: AnyObject {
+    var now: TimeInterval { get }
+    func schedule(after seconds: TimeInterval, _ fire: @escaping @MainActor () -> Void) -> IdleCancellable
+}
+
+/// The real clock: system uptime and the main queue.
+@MainActor public final class LiveViewClock: ViewClock {
+    private let scheduler = MainQueueIdleScheduler()
+    public init() {}
+    public var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
+    public func schedule(after seconds: TimeInterval, _ fire: @escaping @MainActor () -> Void) -> IdleCancellable {
+        scheduler.schedule(after: seconds, fire)
+    }
+}
+
 /// A bound target as Winter.app sees it.
 public struct ViewTarget: Equatable, Sendable {
     public var sessionId: String
@@ -153,6 +170,14 @@ public enum WindowRelative {
     /// Bounds on what a subscriber may ask for (not pinned): at most 30 fps, a frame 64…2560 px wide.
     public static let fpsRange = 1...30
     public static let widthRange = 64...2560
+    /// A target with no engine action for this long is captured at `idleFps` until its next action: a window
+    /// nobody is working in does not need 10 encoded frames a second (measured: the helper sat at ~76% CPU
+    /// streaming an idle window).
+    public static let idleAfter: TimeInterval = 3
+    public static let idleFps = 1
+    /// How long a window's on-screen origin (for window-relative cursor points) is trusted before it is asked for
+    /// again: the window server's answer costs real time on the main thread, and cursor events come in bursts.
+    public static let originTTL: TimeInterval = 0.5
 
     private struct Capture {
         let handle: FrameCapture
@@ -164,6 +189,7 @@ public enum WindowRelative {
 
     private let capture: FrameCaptureFactory
     private let geometry: WindowGeometry
+    private let clock: ViewClock
     /// An event line for one connection.
     public var sendEvent: (Int, Data) -> Void = { _, _ in }
     /// A frame line for one connection, coalesced per `key` (target) by the server: a slow reader gets the
@@ -176,11 +202,21 @@ public enum WindowRelative {
     private var captures: [String: Capture] = [:]
     private var seqs: [String: Int] = [:]
     private var generation = 0
+    /// Targets that had an engine action in the last `idleAfter` seconds, with the timer that ends it.
+    private var active: [String: IdleCancellable] = [:]
+    /// Per target: the digest of the last frame sent (an identical one is not sent again) and its line (what a
+    /// new frames subscriber gets at once, since an unchanged window sends no new frame).
+    private var lastFrame: [String: (digest: Int, line: Data)] = [:]
+    private var origins: [UInt32: (origin: CGPoint, at: TimeInterval)] = [:]
 
-    public init(capture: FrameCaptureFactory, geometry: WindowGeometry) {
+    public init(capture: FrameCaptureFactory, geometry: WindowGeometry, clock: ViewClock) {
         self.capture = capture
         self.geometry = geometry
+        self.clock = clock
     }
+
+    /// Whether a target is captured at full rate (an engine action within `idleAfter`).
+    public func isActive(_ targetId: String) -> Bool { active[targetId] != nil }
 
     /// What is being captured now: target → (window, fps, width). For tests and logs.
     public var capturing: [String: (windowId: UInt32, maxFps: Int, maxWidth: Int)] {
@@ -194,9 +230,15 @@ public enum WindowRelative {
     public func subscribe(connection: Int, _ p: ViewSubscribeParams) -> [ViewTarget] {
         let fps = min(max(p.maxFps ?? Self.defaultMaxFps, Self.fpsRange.lowerBound), Self.fpsRange.upperBound)
         let width = min(max(p.maxWidth ?? Self.defaultMaxWidth, Self.widthRange.lowerBound), Self.widthRange.upperBound)
+        let previous = subscriptions[connection]?[p.sessionId]
         subscriptions[connection, default: [:]][p.sessionId] = ViewSubscription(frames: p.frames, maxFps: fps, maxWidth: width)
         refreshCaptures()
-        return targets.values.filter { $0.sessionId == p.sessionId }.sorted { $0.targetId < $1.targetId }
+        let bound = targets.values.filter { $0.sessionId == p.sessionId }.sorted { $0.targetId < $1.targetId }
+        // A window that is not changing sends no new frame: a new frames subscriber gets the last one at once.
+        if p.frames, previous?.frames != true {
+            for target in bound { if let last = lastFrame[target.targetId] { sendFrame(connection, target.targetId, last.line) } }
+        }
+        return bound
     }
 
     public func unsubscribe(connection: Int, sessionId: String) {
@@ -221,7 +263,11 @@ public enum WindowRelative {
     public func bound(_ target: ViewTarget) {
         let previous = targets[target.targetId]
         targets[target.targetId] = target
-        if previous?.windowId != target.windowId { stopCapture(target.targetId) }
+        if previous?.windowId != target.windowId {
+            stopCapture(target.targetId)
+            lastFrame.removeValue(forKey: target.targetId)
+        }
+        markActive(target.targetId) // a bind is the first action on its window
         emit(sessionId: target.sessionId, method: "view.bound",
              params: target.wire.merging(["sessionId": .string(target.sessionId)]) { a, _ in a })
         refreshCaptures()
@@ -241,6 +287,8 @@ public enum WindowRelative {
         guard let target = targets.removeValue(forKey: targetId) else { return }
         stopCapture(targetId)
         seqs.removeValue(forKey: targetId)
+        lastFrame.removeValue(forKey: targetId)
+        active.removeValue(forKey: targetId)?.cancel()
         emit(sessionId: target.sessionId, method: "view.released",
              params: ["sessionId": .string(target.sessionId), "targetId": .string(targetId)])
     }
@@ -264,10 +312,12 @@ public enum WindowRelative {
     /// Winter.app maps them with the same table the on-screen cursor uses).
     public func cursor(sessionId: String, pid: pid_t, windowId: CGWindowID, point: CGPoint, kind: String, dragTo: CGPoint?,
                        frame: CGRect?, text: String?, count: Int?, button: String?) {
+        let ids = matching(sessionId: sessionId, pid: pid, windowId: windowId)
+        for id in ids { markActive(id) } // every engine action wakes its window's capture
         guard !subscribers(of: sessionId).isEmpty else { return }
-        for id in matching(sessionId: sessionId, pid: pid, windowId: windowId) {
+        for id in ids {
             guard let target = targets[id] else { continue }
-            let origin = geometry.frame(of: windowId)?.origin ?? target.windowFrame.origin
+            let origin = windowOrigin(target)
             func pair(_ p: CGPoint) -> JSONValue { .array([.number(Double(p.x)), .number(Double(p.y))]) }
             let at = WindowRelative.point(point, origin: origin)
             var params: [String: JSONValue] = [
@@ -285,17 +335,43 @@ public enum WindowRelative {
         }
     }
 
+    /// Where the window is now (cached for `originTTL`), else where it was bound.
+    private func windowOrigin(_ target: ViewTarget) -> CGPoint {
+        let now = clock.now
+        if let cached = origins[target.windowId], now - cached.at < Self.originTTL { return cached.origin }
+        let origin = geometry.frame(of: CGWindowID(target.windowId))?.origin ?? target.windowFrame.origin
+        origins[target.windowId] = (origin, now)
+        return origin
+    }
+
+    // MARK: Activity (the idle throttle)
+
+    /// An engine action on a target: full rate now, and for `idleAfter` seconds after the last one.
+    private func markActive(_ targetId: String) {
+        guard targets[targetId] != nil else { return }
+        let wasActive = active[targetId] != nil
+        active[targetId]?.cancel()
+        active[targetId] = clock.schedule(after: Self.idleAfter) { [weak self] in
+            guard let self else { return }
+            self.active.removeValue(forKey: targetId)
+            self.refreshCaptures()
+        }
+        if !wasActive { refreshCaptures() }
+    }
+
     // MARK: Frames
 
     /// Captures run exactly for the bound targets with `mirror` whose session has a `frames:true` subscriber, at
-    /// the lowest `maxFps` and `maxWidth` those subscribers asked for; a change restarts, anything else stops.
+    /// the lowest `maxFps` and `maxWidth` those subscribers asked for — or `idleFps` while the target has had no
+    /// action for `idleAfter` seconds; a change restarts, anything else stops.
     private func refreshCaptures() {
         for (id, target) in targets {
             let wanting = subscribers(of: target.sessionId).map(\.subscription).filter(\.frames)
-            guard target.mirror, let fps = wanting.map(\.maxFps).min(), let width = wanting.map(\.maxWidth).min() else {
+            guard target.mirror, let wanted = wanting.map(\.maxFps).min(), let width = wanting.map(\.maxWidth).min() else {
                 stopCapture(id)
                 continue
             }
+            let fps = active[id] != nil ? wanted : min(wanted, Self.idleFps)
             if let running = captures[id], running.windowId == target.windowId, running.maxFps == fps, running.maxWidth == width { continue }
             stopCapture(id)
             generation += 1
@@ -314,19 +390,54 @@ public enum WindowRelative {
         captures.removeValue(forKey: targetId)?.handle.stop()
     }
 
+    /// One frame: dropped when its pixels are the ones last sent (a restarted stream's first frame, a window that
+    /// redrew the same thing), otherwise encoded into ONE line that every frames subscriber is sent.
     private func deliver(_ frame: ViewFrame, targetId: String, generation: Int) {
         guard captures[targetId]?.generation == generation, let target = targets[targetId] else { return }
+        let digest = Self.digest(frame)
+        if lastFrame[targetId]?.digest == digest { return }
         let seq = (seqs[targetId] ?? 0) + 1
         seqs[targetId] = seq
-        let params: JSONValue = .object([
-            "sessionId": .string(target.sessionId), "targetId": .string(targetId), "seq": .number(Double(seq)),
-            "jpeg": .string(frame.jpeg.base64EncodedString()), "width": .number(Double(frame.width)), "height": .number(Double(frame.height)),
-            "windowSize": .array([.number(Double(frame.windowSize.width)), .number(Double(frame.windowSize.height))]),
-        ])
-        guard let line = RPCOutbound.notification(method: "view.frame", params: AnyEncodable(params)) else { return }
+        guard let line = Self.frameLine(sessionId: target.sessionId, targetId: targetId, seq: seq, frame: frame) else { return }
+        lastFrame[targetId] = (digest, line)
         for (connection, subscription) in subscribers(of: target.sessionId) where subscription.frames {
             sendFrame(connection, targetId, line)
         }
+    }
+
+    /// A cheap fingerprint of a frame: its size and its encoded bytes (the encoder is deterministic, so the same
+    /// pixels give the same bytes).
+    static func digest(_ frame: ViewFrame) -> Int {
+        var hasher = Hasher()
+        hasher.combine(frame.width)
+        hasher.combine(frame.height)
+        frame.jpeg.withUnsafeBytes { hasher.combine(bytes: $0) }
+        return hasher.finalize()
+    }
+
+    /// The `view.frame` line, built by hand around the base64 payload: JSONEncoder would scan ~100 KB of base64 for
+    /// characters to escape on every frame (measured as the shell's own hot spot), and base64 has none.
+    public static func frameLine(sessionId: String, targetId: String, seq: Int, frame: ViewFrame) -> Data? {
+        struct Head: Encodable {
+            let sessionId: String
+            let targetId: String
+            let seq: Int
+            let width: Int
+            let height: Int
+            let windowSize: [Double]
+        }
+        guard var head = try? JSONEncoder().encode(Head(sessionId: sessionId, targetId: targetId, seq: seq, width: frame.width,
+                                                         height: frame.height,
+                                                         windowSize: [Double(frame.windowSize.width), Double(frame.windowSize.height)])),
+              head.last == UInt8(ascii: "}") else { return nil }
+        head.removeLast()
+        var line = Data("{\"jsonrpc\":\"2.0\",\"method\":\"view.frame\",\"params\":".utf8)
+        line.reserveCapacity(line.count + head.count + frame.jpeg.count * 4 / 3 + 32)
+        line.append(head)
+        line.append(contentsOf: Array(",\"jpeg\":\"".utf8))
+        line.append(frame.jpeg.base64EncodedData())
+        line.append(contentsOf: Array("\"}}\n".utf8))
+        return line
     }
 
     /// A capture that failed stays stopped until the subscriptions or the target change (no retry loop).
