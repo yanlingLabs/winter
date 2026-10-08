@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import ImageIO
 import XCTest
 @testable import WinterCUCore
 
@@ -86,22 +87,54 @@ final class LiveTests: XCTestCase {
         }
     }
 
-    func testWholeScreenExcludesTheHelper() async throws {
+    /// The whole-screen image must not contain the helper's own windows. The test process plays the helper:
+    /// it shows a small magenta window, captures the screen, and checks the pixels where that window sits
+    /// show something else (the exclusion is by pid and by bundle id).
+    @MainActor func testWholeScreenImageLeavesOutTheHelpersOwnWindows() async throws {
         try requireScreenRecording()
+        let frame = NSRect(x: 40, y: 40, width: 160, height: 120)  // AppKit coordinates, bottom-left of the main screen
+        let window = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.backgroundColor = NSColor(srgbRed: 1, green: 0, blue: 1, alpha: 1)
+        window.level = .floating
+        window.isReleasedWhenClosed = false
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
         let r = try await core.screenScreenshot(ScreenScreenshotParams(
-            display: nil, excludeBundleIds: [], budget: CUImageBudget(maxLongEdge: 1280, quality: 0.7)))
-        XCTAssertLessThanOrEqual(max(r.width, r.height), 1280)
-        let mid = try await core.screenAppAt(ScreenAppAtParams(shotId: r.shotId, point: [Double(r.width) / 2, Double(r.height) / 2]))
-        XCTAssertFalse(CUFloors.winterBundleIds.contains(mid.bundleId))
+            display: .index(0), excludeBundleIds: [], budget: CUImageBudget(maxLongEdge: 4000, quality: 0.95)))
+        let data = try XCTUnwrap(Data(base64Encoded: r.imageBase64))
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        // The window's centre in global top-left points, then in image pixels.
+        let main = CGDisplayBounds(CGMainDisplayID())
+        let center = CGPoint(x: frame.midX, y: main.height - frame.midY)
+        let px = Int(center.x / main.width * Double(r.width)), py = Int(center.y / main.height * Double(r.height))
+        let rgb = try XCTUnwrap(Self.pixel(image, px, py))
+        let magenta = rgb.0 > 230 && rgb.1 < 30 && rgb.2 > 230
+        XCTAssertFalse(magenta, "the helper's own window showed up in the whole-screen image")
     }
 
-    func testFloorsRefuseWinterAndAuthAgents() async throws {
+    private static func pixel(_ image: CGImage, _ x: Int, _ y: Int) -> (Int, Int, Int)? {
+        guard x >= 0, y >= 0, x < image.width, y < image.height else { return nil }
+        var buf = [UInt8](repeating: 0, count: 4)
+        guard let ctx = CGContext(data: &buf, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.draw(image, in: CGRect(x: -x, y: y - image.height + 1, width: image.width, height: image.height))
+        return (Int(buf[0]), Int(buf[1]), Int(buf[2]))
+    }
+
+    /// The login window is always running; binding it must be refused by the auth-dialog floor — not merely
+    /// fail to resolve.
+    func testBindingAnAuthAgentIsRefused() async throws {
         try requireAccessibility()
         do {
-            _ = try await core.targetBind(TargetBindParams(sessionId: "live", app: "com.apple.keychainaccess", mirror: false))
-            XCTFail("Keychain Access must be refused")
+            _ = try await core.targetBind(TargetBindParams(sessionId: "live", app: "com.apple.loginwindow", mirror: false))
+            XCTFail("the login window must be refused")
         } catch let e as CUError {
-            XCTAssertTrue(e.code == "refused" || e.code == "invalid_params", e.description)
+            XCTAssertEqual(e.code, "refused", e.description)
+            XCTAssertEqual(e.data?["reason"], .string("auth_dialog"))
         }
     }
 }

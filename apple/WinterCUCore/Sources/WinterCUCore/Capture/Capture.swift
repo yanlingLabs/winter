@@ -55,12 +55,17 @@ actor CUCapturer {
         await acquire()
         defer { release() }
         guard CGPreflightScreenCaptureAccess() else { throw CUError.permissionMissing(.screenRecording) }
+        // The size the image maps onto must be the window's size NOW: a cached SCWindow can be up to 2 s old
+        // and a resized window would be letterboxed inside its stale frame, skewing every point click.
+        guard let current = CUWindowServer.window(id: windowID)?.frame else { throw CUError.targetLost("the window is gone") }
         var scWindow = try await content().windows.first { $0.windowID == windowID }
-        if scWindow == nil { scWindow = try await content(fresh: true).windows.first { $0.windowID == windowID } }
+        if scWindow == nil || !Self.sameFrame(scWindow!.frame, current) {
+            scWindow = try await content(fresh: true).windows.first { $0.windowID == windowID }
+        }
         guard let window = scWindow else { throw CUError.targetLost("the window is gone") }
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let scale = Double(filter.pointPixelScale)
-        let windowSize = window.frame.size
+        let windowSize = current.size
         var area = CGRect(origin: .zero, size: windowSize)
         if let region {
             area = region.intersection(CGRect(origin: .zero, size: windowSize))
@@ -84,29 +89,24 @@ actor CUCapturer {
 
     // MARK: whole screen
 
-    func captureScreen(display: CUDisplaySelector?, excludeBundleIds: [String], budget: CUImageBudget) async throws -> CUCapturedImage {
+    func captureScreen(display: CUDisplaySelector?, displayId: UInt32?, excludeBundleIds: [String],
+                       budget: CUImageBudget) async throws -> CUCapturedImage {
         await acquire()
         defer { release() }
         guard CGPreflightScreenCaptureAccess() else { throw CUError.permissionMissing(.screenRecording) }
         let content = try await content(fresh: true)
         let displays = Self.orderedDisplays(content.displays)
-        let chosen: [SCDisplay]
-        switch display {
-        case nil: chosen = Array(displays.prefix(1))
-        case .all?: chosen = displays
-        case .number(let n)?:
-            if let d = displays.first(where: { $0.displayID == n }) { chosen = [d] }
-            else if Int(n) < displays.count { chosen = [displays[Int(n)]] }
-            else { throw CUError.invalidParams("no display \(n) — there are \(displays.count)") }
-        }
+        let chosen = try Self.choose(displays.map(\.displayID), display: display, displayId: displayId)
+            .compactMap { id in displays.first { $0.displayID == id } }
         guard !chosen.isEmpty else { throw CUError.unsupported("no display to capture") }
 
-        // The helper (by bundle id and by pid), Winter, the auth agents, and the caller's exclusions.
-        var excludedIds = CUFloors.alwaysExcludedFromScreenshots.union(excludeBundleIds)
-        if let own = Bundle.main.bundleIdentifier { excludedIds.insert(own) }
+        // The helper (by bundle id and by pid), everything under com.winter., the auth agents, and the
+        // caller's exclusions.
+        var extra = Set(excludeBundleIds)
+        if let own = Bundle.main.bundleIdentifier { extra.insert(own) }
         let ownPid = getpid()
         let excludedApps = content.applications.filter {
-            excludedIds.contains($0.bundleIdentifier) || $0.processID == ownPid
+            CUFloors.excludedFromScreenshots($0.bundleIdentifier, extra: extra) || $0.processID == ownPid
         }
 
         // Global frames (points, top-left origin) and their union.
@@ -149,6 +149,30 @@ actor CUCapturer {
         }
         let encoded = try encode(image, width: w, height: h, quality: budget.quality)
         return CUCapturedImage(jpeg: encoded.data, width: encoded.width, height: encoded.height, pointsRect: union)
+    }
+
+    static func sameFrame(_ a: CGRect, _ b: CGRect) -> Bool {
+        abs(a.minX - b.minX) < 0.5 && abs(a.minY - b.minY) < 0.5 && abs(a.width - b.width) < 0.5
+            && abs(a.height - b.height) < 0.5
+    }
+
+    /// Which displays to capture (pure): `displayId` when given, else an index (0 = main), else all, else the
+    /// main display. `ordered` has the main display first.
+    static func choose(_ ordered: [CGDirectDisplayID], display: CUDisplaySelector?, displayId: UInt32?) throws
+        -> [CGDirectDisplayID] {
+        if let id = displayId {
+            guard ordered.contains(id) else { throw CUError.invalidParams("no display with id \(id)") }
+            return [id]
+        }
+        switch display {
+        case nil: return Array(ordered.prefix(1))
+        case .all?: return ordered
+        case .index(let n)?:
+            guard n >= 0, n < ordered.count else {
+                throw CUError.invalidParams("no display \(n) — there are \(ordered.count) (0 is the main one)")
+            }
+            return [ordered[n]]
+        }
     }
 
     static func orderedDisplays(_ displays: [SCDisplay]) -> [SCDisplay] {

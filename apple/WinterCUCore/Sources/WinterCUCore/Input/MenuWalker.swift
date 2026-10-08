@@ -49,23 +49,39 @@ enum CUMenuWalker {
 /// The live menu bar over AX: `AXMenuBar` → `AXMenuBarItem` → `AXMenu` → `AXMenuItem` → (`AXMenu` → …).
 struct CUAXMenuNode: CUMenuNode {
     let element: AXUIElement
+    let ax: CUAXBackend
 
-    var menuTitle: String { AX.string(element, kAXTitleAttribute) ?? "" }
-    var menuEnabled: Bool { AX.bool(element, kAXEnabledAttribute) ?? true }
+    var menuTitle: String { ax.string(element, kAXTitleAttribute) ?? "" }
+    var menuEnabled: Bool { ax.bool(element, kAXEnabledAttribute) ?? true }
     var menuChildren: [CUAXMenuNode] {
         // An item's children are its submenu (one AXMenu); the submenu's children are the items.
-        AX.elements(element, kAXChildrenAttribute).flatMap { child -> [CUAXMenuNode] in
-            if AX.string(child, kAXRoleAttribute) == kAXMenuRole {
-                return AX.elements(child, kAXChildrenAttribute).map(CUAXMenuNode.init)
+        ax.elements(element, kAXChildrenAttribute).flatMap { child -> [CUAXMenuNode] in
+            if ax.string(child, kAXRoleAttribute) == kAXMenuRole {
+                return ax.elements(child, kAXChildrenAttribute).map { CUAXMenuNode(element: $0, ax: ax) }
             }
-            return [CUAXMenuNode(element: child)]
+            return [CUAXMenuNode(element: child, ax: ax)]
         }
     }
 
-    static func menuBar(pid: pid_t) throws -> [CUAXMenuNode] {
-        guard let bar = AX.element(AX.app(pid), kAXMenuBarAttribute) else {
+    static func menuBar(pid: pid_t, ax: CUAXBackend) throws -> [CUAXMenuNode] {
+        guard let bar = ax.element(ax.application(pid), kAXMenuBarAttribute) else {
             throw CUError.unsupported("this app exposes no menu bar")
         }
-        return AX.elements(bar, kAXChildrenAttribute).map(CUAXMenuNode.init)
+        return ax.elements(bar, kAXChildrenAttribute).map { CUAXMenuNode(element: $0, ax: ax) }
+    }
+}
+
+/// Paste, however it is reached: a menu item titled Paste… or carrying the cmd+V key equivalent.
+enum CUPasteMenu {
+    static func isPasteTitle(_ title: String) -> Bool {
+        let t = CUMenuWalker.normalize(title)
+        return t == "paste" || t.hasPrefix("paste ") || t.hasPrefix("paste…") || t.hasPrefix("paste and")
+    }
+
+    /// `cmdChar` / `cmdModifiers` are the item's AXMenuItemCmdChar / AXMenuItemCmdModifiers (0 = cmd only).
+    static func isPasteItem(title: String?, cmdChar: String?, cmdModifiers: Int?) -> Bool {
+        if let title, isPasteTitle(title) { return true }
+        if let c = cmdChar, c.uppercased() == "V", (cmdModifiers ?? 0) & 8 == 0 { return true }  // 8 = no command key
+        return false
     }
 }

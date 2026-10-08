@@ -394,11 +394,16 @@ public struct TargetWaitForResult: Codable, Sendable, Equatable {
 // MARK: - whole screen
 
 public struct ScreenScreenshotParams: Codable, Sendable, Equatable {
+    /// An index into the active displays (0 = main), or "all".
     public var display: CUDisplaySelector?
+    /// A specific CGDirectDisplayID; wins over `display` when both are given.
+    public var displayId: UInt32?
     public var excludeBundleIds: [String]
     public var budget: CUImageBudget
-    public init(display: CUDisplaySelector? = nil, excludeBundleIds: [String], budget: CUImageBudget) {
+    public init(display: CUDisplaySelector? = nil, displayId: UInt32? = nil, excludeBundleIds: [String],
+                budget: CUImageBudget) {
         self.display = display
+        self.displayId = displayId
         self.excludeBundleIds = excludeBundleIds
         self.budget = budget
     }

@@ -11,7 +11,8 @@ import Foundation
 ///   render as a collapsed marker the model can open with `state({within})`.
 /// - Unnamed single-child wrapper groups are folded into their child to keep the state short.
 struct AXTreeReader {
-    var maxNodes = 2500
+    static let defaultMaxNodes = 2500
+    var maxNodes = AXTreeReader.defaultMaxNodes
     var maxDepth = 40
     var timeBudgetMs: Double = 2500
 
@@ -32,6 +33,13 @@ struct AXTreeReader {
     static let checkRoles: Set<String> = ["AXCheckBox", "AXRadioButton", "AXSwitch", "AXToggle"]
     static let collectionRoles: Set<String> = ["AXList", "AXTable", "AXOutline", "AXBrowser", "AXGrid"]
     static let wrapperRoles: Set<String> = ["AXGroup", "AXSplitGroup", "AXLayoutArea", "AXUnknown", "AXScrollArea"]
+    /// Roles whose action names are worth a round trip (custom actions, `show menu`, increment…). Others skip
+    /// it: one extra IPC per element adds up on large trees, and their actions are almost always the defaults.
+    static let actionRoles: Set<String> = [
+        "AXButton", "AXMenuButton", "AXPopUpButton", "AXCheckBox", "AXRadioButton", "AXRow", "AXCell", "AXLink",
+        "AXTextField", "AXTextArea", "AXComboBox", "AXSlider", "AXIncrementor", "AXDisclosureTriangle", "AXMenuItem",
+        "AXMenuBarItem", "AXImage", "AXColorWell", "AXDateField", "AXSearchField", "AXDockItem",
+    ]
 
     struct Result {
         var roots: [CUNode]
@@ -92,7 +100,7 @@ struct AXTreeReader {
             }()
             let ref = cache.ref(for: AXIdentity(element: e))
             var n = CUNode(ref: ref, role: role, subrole: subrole, name: name, value: value, states: states,
-                           actions: AX.actions(e), frame: frame,
+                           actions: Self.actionRoles.contains(role) ? AX.actions(e) : [], frame: frame,
                            identifier: nonEmpty(attrs[kAXIdentifierAttribute].flatMap(AX.stringValue)))
             if Self.collectionRoles.contains(role) {
                 n.itemCount = AX.count(e, kAXRowsAttribute) ?? childElements.count

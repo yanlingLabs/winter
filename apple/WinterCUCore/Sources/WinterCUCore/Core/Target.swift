@@ -24,7 +24,7 @@ final class CUTarget: @unchecked Sendable {
     }
 
     /// Element identity → ref. Pid-queue only.
-    let refs = CURefCache<AXIdentity>()
+    private(set) var refs = CURefCache<AXIdentity>()
     // Guarded by `lock`: the snapshot ring, the shot ring, the action clock.
     private var _snapshots: [CUSnapshot] = []
     private var snapshotSeq = 0
@@ -54,6 +54,13 @@ final class CUTarget: @unchecked Sendable {
         self.mirror = mirror
         self._windowID = windowID
         self._windowTitle = windowTitle
+    }
+
+    /// The bound window changed: refs and the diff base of the old window go (pid queue). New refs continue
+    /// above the old ones, so a number is still never reused.
+    func resetForNewWindow() {
+        refs = CURefCache<AXIdentity>(firstRef: refs.highestRef + 1)
+        lock.withLock { _snapshots.removeAll() }
     }
 
     func nextSnapshotId() -> String {

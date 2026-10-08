@@ -107,14 +107,22 @@ public struct CUSkyLight: @unchecked Sendable {
     }
 
     /// The `SLSEventRecord *` inside a `CGEvent` (after the CF runtime header and a 32-bit field). Probed at
-    /// the offsets known across releases; nil when none holds a pointer.
+    /// the offsets known across releases, and only accepted when the word is a live malloc'd block — so a
+    /// macOS layout change makes the envelope go missing (the event is still posted) instead of handing a
+    /// garbage pointer to the runtime.
     private func eventRecord(_ event: CGEvent) -> UnsafeMutableRawPointer? {
         let base = Unmanaged.passUnretained(event).toOpaque()
         for offset in [24, 32, 16] {
-            let p = base.load(fromByteOffset: offset, as: UnsafeMutableRawPointer?.self)
-            if let p { return p }
+            guard let p = base.load(fromByteOffset: offset, as: UnsafeMutableRawPointer?.self) else { continue }
+            if Self.isHeapBlock(p) { return p }
         }
         return nil
+    }
+
+    /// Whether `p` points at the start of a block some malloc zone owns.
+    static func isHeapBlock(_ p: UnsafeRawPointer) -> Bool {
+        guard Int(bitPattern: p) & 0x7 == 0 else { return false }  // malloc blocks are 16-byte aligned
+        return malloc_zone_from_ptr(p) != nil
     }
 
     // MARK: focus without raise
