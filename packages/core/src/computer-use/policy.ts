@@ -12,9 +12,12 @@
 // (the controller's rulings after the daemon review: per-app consent covers BINDING, not only acting.) Observing
 // an app this call may already use (state, find, screenshot, waits) needs no second card. And, under EVERY
 // policy (bypass included): the floors (Winter never controls itself; the system's authentication dialogs, the
-// login window and Keychain Access are refused) and the user's per-app setting — `deny` (never bound), `view`
-// (observe only), `click` (click, scroll and AX actions only), `full`. A known password manager with no setting
-// reads as `deny` (spine §5 — the helper does not enforce this; the daemon does).
+// login window and Keychain Access are refused) and the app's EFFECTIVE access — `deny` (never bound), `view`
+// (observe only), `click` (click, scroll and AX actions only), `full`. Effective access is the user ruling's
+// "master switch plus exceptions" (`effectiveAppAccess`): the user's own exception for the app; else, if they
+// REMOVED its built-in default, the master switch; else the built-in default exception (`DEFAULT_APP_EXCEPTIONS`:
+// password managers `deny`, terminals and System Settings `click`); else the master switch
+// (`computerUse.allowAllApps`, default on: `full`; off: `deny`). The helper enforces none of this; the daemon does.
 //
 // The card is DAEMON-RAISED mid-script, not a `canUseTool` card: `buildLeasePolicy`'s wait-before-emit shape
 // with a `cu_<hex>` call id, `toolName: "ComputerV2"`, a summary that names the BUNDLE ID (a look-alike app
@@ -35,7 +38,7 @@ import type { ApprovalBroker } from "../agent/approvals";
 import { dispatchChildCardTimeoutMs } from "../runtime-sdk/approval-bridge";
 import { NO_PARK_TIMEOUT_MS } from "../runtime-sdk/bridge-common";
 import type { SessionMode } from "../runtime-sdk/create";
-import { computerUseAppsFrom, type ComputerUseAccess, type Settings } from "../settings";
+import { computerUseAllowAllAppsFrom, computerUseAppsFrom, type ComputerUseAccess, type ComputerUseAppSetting, type Settings } from "../settings";
 import { AutomationFailure } from "./errors";
 import { WINTER_OWN_BUNDLE_IDS } from "./protocol";
 
@@ -52,8 +55,8 @@ export const AUTH_DIALOG_BUNDLE_IDS: ReadonlySet<string> = new Set([
   "com.apple.coreservices.uiagent", "com.apple.authorizationhost",
 ]);
 
-/** Password managers (spine §5, after the Swift review): `access: "deny"` until the user sets an access for one
- *  in `computerUse.apps` (spec §13.3 — the helper does not enforce this; the daemon does). Bundle id → name. */
+/** Password managers (spine §5, after the Swift review): a built-in `deny` exception (spec §13.3 — the helper does
+ *  not enforce this; the daemon does). Bundle id → name. */
 export const PASSWORD_MANAGERS: Readonly<Record<string, string>> = {
   "com.1password.1password": "1Password",
   "com.agilebits.onepassword7": "1Password 7",
@@ -67,6 +70,60 @@ export const PASSWORD_MANAGERS: Readonly<Record<string, string>> = {
   "com.apple.Passwords": "Passwords",
 };
 export const PASSWORD_MANAGER_BUNDLE_IDS: ReadonlySet<string> = new Set(Object.keys(PASSWORD_MANAGERS));
+
+/** Terminals: a built-in `click` exception — a script may click and scroll in one but never type a command into
+ *  it. Bundle id → name. */
+export const TERMINALS: Readonly<Record<string, string>> = {
+  "com.apple.Terminal": "Terminal",
+  "com.googlecode.iterm2": "iTerm",
+  "dev.warp.Warp-Stable": "Warp",
+  "com.mitchellh.ghostty": "Ghostty",
+  "net.kovidgoyal.kitty": "kitty",
+  "org.alacritty": "Alacritty",
+  "com.github.wez.wezterm": "WezTerm",
+};
+
+/**
+ * The BUILT-IN per-app exceptions (the user ruling at the live gate): they apply whatever the master switch says,
+ * until the user changes one (`computerUse.apps.<id>.access`) or removes it (`computerUse.apps.<id>.removed`).
+ * Password managers `deny`, terminals and System Settings `click`. Bundle id → its default access and name.
+ */
+export const DEFAULT_APP_EXCEPTIONS: Readonly<Record<string, { access: ComputerUseAccess; name: string }>> = Object.freeze({
+  ...Object.fromEntries(Object.entries(PASSWORD_MANAGERS).map(([id, name]) => [id, { access: "deny" as const, name }])),
+  ...Object.fromEntries(Object.entries(TERMINALS).map(([id, name]) => [id, { access: "click" as const, name }])),
+  "com.apple.systempreferences": { access: "click", name: "System Settings" },
+});
+
+/** The built-in default exception for an app, if it has one (own keys only — a bundle id is user input). */
+export function defaultAppException(bundleId: string): { access: ComputerUseAccess; name: string } | undefined {
+  return Object.hasOwn(DEFAULT_APP_EXCEPTIONS, bundleId) ? DEFAULT_APP_EXCEPTIONS[bundleId] : undefined;
+}
+
+/** The user's own row for an app (own keys only), normalized by `computerUseAppsFrom`. */
+export function appSettingFor(settings: Settings | null | undefined, bundleId: string): ComputerUseAppSetting | undefined {
+  const apps = computerUseAppsFrom(settings);
+  return Object.hasOwn(apps, bundleId) ? apps[bundleId] : undefined;
+}
+
+/** Where an app's effective access comes from: the user's exception, a built-in default exception, or the master
+ *  switch (`computerUse.allowAllApps`). */
+export type AccessSource = "user" | "default" | "switch";
+
+/**
+ * The app's EFFECTIVE access (the user ruling): the user row's access, if set; else, if the row has `removed: true`,
+ * the global default; else the built-in default exception, if one exists; else the global default — `full` when
+ * `computerUse.allowAllApps` is on (the default), `deny` when it is off. The ONE decision the policy, the
+ * whole-screen exclusion and `computerUse.apps.list` share.
+ */
+export function effectiveAppAccess(settings: Settings | null | undefined, bundleId: string): { access: ComputerUseAccess; source: AccessSource } {
+  const row = appSettingFor(settings, bundleId);
+  if (row?.access !== undefined) return { access: row.access, source: "user" };
+  const global: ComputerUseAccess = computerUseAllowAllAppsFrom(settings) ? "full" : "deny";
+  if (row?.removed === true) return { access: global, source: "switch" };
+  const builtIn = defaultAppException(bundleId);
+  if (builtIn !== undefined) return { access: builtIn.access, source: "default" };
+  return { access: global, source: "switch" };
+}
 
 export const APP_CARD_OPTIONS: readonly ApprovalOption[] = [
   { id: "once", label: "Allow once" },
@@ -132,15 +189,13 @@ export class ComputerPolicy {
 
   constructor(private readonly deps: ComputerPolicyDeps) {}
 
-  /** The user's restriction for an app: their setting, else `deny` for a password manager, else `full`. */
+  /** The app's effective access (`effectiveAppAccess`, read live). */
   accessFor(bundleId: string): ComputerUseAccess {
-    const row = computerUseAppsFrom(this.deps.settings())[bundleId];
-    if (row?.access !== undefined) return row.access;
-    return PASSWORD_MANAGER_BUNDLE_IDS.has(bundleId) ? "deny" : "full";
+    return effectiveAppAccess(this.deps.settings(), bundleId).access;
   }
 
   hasAlwaysGrant(bundleId: string): boolean {
-    return computerUseAppsFrom(this.deps.settings())[bundleId]?.grant === "always";
+    return appSettingFor(this.deps.settings(), bundleId)?.grant === "always";
   }
 
   hasSessionGrant(sessionId: string, bundleId: string): boolean {
@@ -156,12 +211,30 @@ export class ComputerPolicy {
     for (const grants of this.sessionGrants.values()) grants.delete(bundleId);
   }
 
-  /** The bundle ids a whole-screen shot must black out: Winter's own apps and every `deny` app. */
-  excludedFromScreen(): string[] {
-    const out = new Set<string>(WINTER_OWN_BUNDLE_IDS);
-    for (const [id, row] of Object.entries(computerUseAppsFrom(this.deps.settings()))) if (row.access === "deny") out.add(id);
-    for (const id of PASSWORD_MANAGER_BUNDLE_IDS) if (this.accessFor(id) === "deny") out.add(id);
+  /** Must the app stay off a whole-screen read (a shot, `screen.windows`)? The floors, and every app whose
+   *  effective access is `deny`. */
+  hiddenFromScreen(bundleId: string): boolean {
+    return WINTER_OWN_BUNDLE_IDS.includes(bundleId) || AUTH_DIALOG_BUNDLE_IDS.has(bundleId) || this.accessFor(bundleId) === "deny";
+  }
+
+  /**
+   * The bundle ids a whole-screen shot must black out: the floors (Winter's own apps, the system's authentication
+   * surfaces) and every app whose effective access is `deny` — the user's rows, the built-in defaults and, since
+   * an app with no row is `deny` while the master switch is OFF, every RUNNING app (`running`, from the helper's
+   * `apps.list`) without an allowing exception. With the switch on, an app with no row is `full`, so `running`
+   * adds nothing and the caller need not ask the helper for it.
+   */
+  excludedFromScreen(running: readonly string[] = []): string[] {
+    const settings = this.deps.settings();
+    const out = new Set<string>([...WINTER_OWN_BUNDLE_IDS, ...AUTH_DIALOG_BUNDLE_IDS]);
+    const candidates = new Set<string>([...Object.keys(computerUseAppsFrom(settings)), ...Object.keys(DEFAULT_APP_EXCEPTIONS), ...running]);
+    for (const id of candidates) if (effectiveAppAccess(settings, id).access === "deny") out.add(id);
     return [...out];
+  }
+
+  /** Is the master switch on (an app with no exception is usable)? */
+  allowAllApps(): boolean {
+    return computerUseAllowAllAppsFrom(this.deps.settings());
   }
 
   /** The floors — the same under every policy and every setting. Throws `Refused`. */
@@ -180,9 +253,11 @@ export class ComputerPolicy {
    */
   async authorize(run: RunGrants, app: AppRef, purpose: { kind: "bind" } | { kind: "act"; primitive: string } | { kind: "observe" }, signal?: AbortSignal): Promise<void> {
     this.checkFloors(app);
-    const access = this.accessFor(app.bundleId);
+    const { access, source } = effectiveAppAccess(this.deps.settings(), app.bundleId);
     if (access === "deny") {
-      throw new AutomationFailure("NotAllowed", `${app.name} is set to Don't allow in Settings → Computer Use — ask the user if you need it`);
+      throw new AutomationFailure("NotAllowed", source === "switch"
+        ? `${app.name} is not allowed: "Allow all apps" is off in Settings → Computer Use and ${app.name} is not one of its exceptions — ask the user if you need it`
+        : `${app.name} is set to Don't allow in Settings → Computer Use — ask the user if you need it`);
     }
     const facts = this.deps.session(run.sessionId);
     if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");

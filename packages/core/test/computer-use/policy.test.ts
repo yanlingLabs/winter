@@ -5,16 +5,16 @@ import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { AutomationFailure } from "../../src/computer-use/errors";
-import { APP_CARD_OPTIONS, ComputerPolicy, newRunGrants, type SessionFacts } from "../../src/computer-use/policy";
+import { APP_CARD_OPTIONS, ComputerPolicy, DEFAULT_APP_EXCEPTIONS, effectiveAppAccess, newRunGrants, type SessionFacts } from "../../src/computer-use/policy";
 import type { Settings } from "../../src/settings";
 import { DISPATCH_CHILD_APPROVAL_TIMEOUT_MS } from "../../src/runtime-sdk/approval-bridge";
 
 const NOTES = { bundleId: "com.apple.Notes", name: "Notes" };
 
-function setup(opts: { policy?: SessionApprovalPolicy; facts?: Partial<SessionFacts>; apps?: Record<string, unknown>; attended?: boolean; answer?: (callId: string, broker: ApprovalBroker, sessionId: string) => void } = {}) {
+function setup(opts: { policy?: SessionApprovalPolicy; facts?: Partial<SessionFacts>; apps?: Record<string, unknown>; allowAllApps?: boolean; attended?: boolean; answer?: (callId: string, broker: ApprovalBroker, sessionId: string) => void } = {}) {
   const approvals = new ApprovalBroker();
   const events: NewSessionEvent[] = [];
-  let settings: Settings = { computerUse: { apps: opts.apps ?? {} } } as unknown as Settings;
+  let settings: Settings = { computerUse: { apps: opts.apps ?? {}, ...(opts.allowAllApps === undefined ? {} : { allowAllApps: opts.allowAllApps }) } } as unknown as Settings;
   const saved: Array<[string, string]> = [];
   const facts: SessionFacts = { policy: opts.policy ?? "ask", mode: "code", ...opts.facts };
   const policy = new ComputerPolicy({
@@ -223,6 +223,92 @@ describe("the user's restrictions and the floors — under every policy, bypass 
     expect(policy.hasSessionGrant("s1", NOTES.bundleId)).toBe(true);
     policy.forgetGrant(NOTES.bundleId);
     expect(policy.hasSessionGrant("s1", NOTES.bundleId)).toBe(false);
+  });
+});
+
+describe("the master switch and its exceptions (allowAllApps)", () => {
+  const cu = (computerUse: Record<string, unknown>) => ({ computerUse } as unknown as Settings);
+
+  test("effective access: the user's access; else removed → the switch; else the built-in default; else the switch", () => {
+    for (const on of [true, false]) {
+      const global = on ? "full" : "deny";
+      const s = (apps: Record<string, unknown>) => cu({ allowAllApps: on, apps });
+      // No row: an ordinary app follows the switch; a built-in default keeps its exception.
+      expect(effectiveAppAccess(s({}), "com.apple.Notes")).toEqual({ access: global, source: "switch" });
+      expect(effectiveAppAccess(s({}), "com.1password.1password")).toEqual({ access: "deny", source: "default" });
+      expect(effectiveAppAccess(s({}), "com.apple.Terminal")).toEqual({ access: "click", source: "default" });
+      expect(effectiveAppAccess(s({}), "com.apple.systempreferences")).toEqual({ access: "click", source: "default" });
+      // The user's own access wins over both.
+      expect(effectiveAppAccess(s({ "com.apple.Notes": { access: "view" } }), "com.apple.Notes")).toEqual({ access: "view", source: "user" });
+      expect(effectiveAppAccess(s({ "com.apple.Terminal": { access: "full" } }), "com.apple.Terminal")).toEqual({ access: "full", source: "user" });
+      // A removed default: the switch decides.
+      expect(effectiveAppAccess(s({ "com.apple.Terminal": { removed: true } }), "com.apple.Terminal")).toEqual({ access: global, source: "switch" });
+      // A row only for its grant does not change the access.
+      expect(effectiveAppAccess(s({ "com.apple.Notes": { grant: "always" } }), "com.apple.Notes").access).toBe(global);
+      expect(effectiveAppAccess(s({ "com.apple.Terminal": { grant: "always" } }), "com.apple.Terminal").access).toBe("click");
+    }
+    // The switch defaults ON; a bundle id shaped like a prototype key is an ordinary app.
+    expect(effectiveAppAccess(null, "com.apple.Notes").access).toBe("full");
+    expect(effectiveAppAccess(cu({ allowAllApps: false }), "constructor").access).toBe("deny");
+    expect(effectiveAppAccess(null, "toString").access).toBe("full");
+  });
+
+  test("the built-in table: password managers deny, seven terminals and System Settings click", () => {
+    const click = Object.entries(DEFAULT_APP_EXCEPTIONS).filter(([, v]) => v.access === "click").map(([id]) => id).sort();
+    expect(click).toEqual(["com.apple.Terminal", "com.apple.systempreferences", "com.github.wez.wezterm", "com.googlecode.iterm2", "com.mitchellh.ghostty", "dev.warp.Warp-Stable", "net.kovidgoyal.kitty", "org.alacritty"].sort());
+    expect(Object.values(DEFAULT_APP_EXCEPTIONS).every((v) => v.access === "deny" || v.access === "click")).toBe(true);
+    expect(DEFAULT_APP_EXCEPTIONS["com.apple.Passwords"]).toEqual({ access: "deny", name: "Passwords" });
+  });
+
+  test("switch OFF: an app with no exception is refused under every policy (bypass too), naming the switch; an allowing exception binds", async () => {
+    const { policy } = setup({ policy: "bypass", allowAllApps: false, apps: { "com.apple.TextEdit": { access: "full" } } });
+    const msg = await failsWith(policy.authorize(newRunGrants("s1"), NOTES, { kind: "bind" }), "NotAllowed");
+    expect(msg).toContain("\"Allow all apps\" is off");
+    await failsWith(policy.authorize(newRunGrants("s1"), NOTES, { kind: "observe" }), "NotAllowed");
+    await policy.authorize(newRunGrants("s1"), { bundleId: "com.apple.TextEdit", name: "TextEdit" }, { kind: "bind" });
+    // A terminal keeps its click-only default: clicks pass, typing does not.
+    const term = { bundleId: "com.apple.Terminal", name: "Terminal" };
+    await policy.authorize(newRunGrants("s1"), term, { kind: "act", primitive: "click" });
+    expect(await failsWith(policy.authorize(newRunGrants("s1"), term, { kind: "act", primitive: "type" }), "NotAllowed")).toContain("click only");
+  });
+
+  test("an explicit deny still names the user's setting, not the switch", async () => {
+    const { policy } = setup({ policy: "bypass", apps: { "com.apple.Notes": { access: "deny" } } });
+    expect(await failsWith(policy.authorize(newRunGrants("s1"), NOTES, { kind: "bind" }), "NotAllowed")).toBe("Notes is set to Don't allow in Settings → Computer Use — ask the user if you need it");
+  });
+
+  test("switch ON: a terminal is click only by default and System Settings too; a removed default is full again", async () => {
+    const { policy, setSettings } = setup({ policy: "bypass" });
+    const term = { bundleId: "com.googlecode.iterm2", name: "iTerm" };
+    await failsWith(policy.authorize(newRunGrants("s1"), term, { kind: "act", primitive: "key" }), "NotAllowed");
+    await failsWith(policy.authorize(newRunGrants("s1"), { bundleId: "com.apple.systempreferences", name: "System Settings" }, { kind: "act", primitive: "setValue" }), "NotAllowed");
+    setSettings(cu({ apps: { "com.googlecode.iterm2": { removed: true } } }));
+    await policy.authorize(newRunGrants("s1"), term, { kind: "act", primitive: "key" });
+  });
+
+  test("the cap is checked BEFORE the grant: an Always-allow grant never lifts a switch-off deny", async () => {
+    const { policy, events } = setup({ policy: "ask", allowAllApps: false, apps: { "com.apple.Notes": { grant: "always" } } });
+    await failsWith(policy.authorize(newRunGrants("s1"), NOTES, { kind: "bind" }), "NotAllowed");
+    expect(cards(events)).toHaveLength(0);
+  });
+
+  test("whole-screen exclusion with the switch OFF: every running app without an allowing exception, plus the floors", () => {
+    const { policy } = setup({ allowAllApps: false, apps: { "com.apple.Notes": { access: "view" }, "com.apple.Terminal": { removed: true } } });
+    const ex = policy.excludedFromScreen(["com.apple.Notes", "com.apple.Safari", "com.apple.Terminal", "com.googlecode.iterm2", "com.apple.finder"]);
+    expect(ex).toContain("com.apple.Safari");
+    expect(ex).toContain("com.apple.finder");
+    expect(ex).toContain("com.apple.Terminal"); // its default removed: the switch (off) decides
+    expect(ex).not.toContain("com.apple.Notes");
+    expect(ex).not.toContain("com.googlecode.iterm2"); // click by default
+    expect(ex).toContain("com.winter.app");
+    expect(ex).toContain("com.apple.SecurityAgent");
+    expect(ex).toContain("com.1password.1password");
+    expect(policy.hiddenFromScreen("com.apple.Safari")).toBe(true);
+    expect(policy.hiddenFromScreen("com.apple.Notes")).toBe(false);
+    // Switch ON: a running app with no row is not excluded.
+    const on = setup({ apps: { "com.apple.Notes": { access: "view" } } }).policy;
+    expect(on.excludedFromScreen(["com.apple.Safari"])).not.toContain("com.apple.Safari");
+    expect(on.hiddenFromScreen("com.apple.keychainaccess")).toBe(true);
   });
 });
 
