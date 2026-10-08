@@ -1,11 +1,11 @@
-// PORTED with `src/agent/bash-read-only.ts` from Winter's own agent SDK (yanlingLabs/winter-agent-sdk,
+// PORTED with `src/runtime-sdk/bash-read-only.ts` from Winter's own agent SDK (yanlingLabs/winter-agent-sdk,
 // packages/runtime/src/permissions/bash-read-only.test.ts, v0.0.53), verbatim but for the import path: the
 // SDK's own cases pin that the daemon's copy of the classifier reads every command as the runtime does.
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type BashReadOnlyContext, containsVulnerableUncPath, isBashCommandReadOnly, isCurrentDirectoryBareGitRepo } from "../../src/agent/bash-read-only";
+import { type BashReadOnlyContext, containsVulnerableUncPath, isBashCommandReadOnly, isCurrentDirectoryBareGitRepo } from "../../src/runtime-sdk/bash-read-only";
 
 const temps: string[] = [];
 function tempDir(): string {

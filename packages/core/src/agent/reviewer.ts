@@ -1,7 +1,7 @@
 import type { Provider, TurnInputItem } from "../providers/types";
 import { isInternalRefusal, requireInternalWiring, type InternalCallSource } from "../providers/internal-router";
 import { shellSegments, shellWords } from "../runtime-sdk/shell-words";
-import { isBashCommandReadOnly } from "./bash-read-only";
+import { isBashCommandReadOnly } from "../runtime-sdk/bash-read-only";
 
 /**
  * 2026-09-19 (review): the reviewer has NO RUNNABLE MODEL — structurally, not transiently.
@@ -53,7 +53,7 @@ export interface BashSafetyContext {
 
 /**
  * True if a SANDBOXED bash command needs no reviewer call (the caller never asks this of an escape):
- *  - the runtime's own READ-ONLY classifier accepts it (`bash-read-only.ts`, ported from the agent SDK —
+ *  - the runtime's own READ-ONLY classifier accepts it (`runtime-sdk/bash-read-only.ts`, ported from the agent SDK —
  *    claude's rule, the one that decides which Bash calls run concurrently): read-only programs by their flag
  *    tables, read-only git subcommands, `find` without `-exec`/`-delete`/`-ok`, `sed -n`, pipes and `&&`/`;`
  *    chains made only of such commands; never a write (a redirect other than to /dev/null, `tee`, an in-place

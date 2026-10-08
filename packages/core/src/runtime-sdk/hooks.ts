@@ -1303,7 +1303,7 @@ function escapeFloorHook(deps: SessionHooksDeps): HookCallback {
 
 /** `PreToolUse`, matched on `"Bash"` — the reviewer is the auto-policy GATE (see this file's own
  *  header and `deps.policy`'s doc comment). `bashLooksSafe` bypasses the review call entirely for a
- *  sandboxed command the runtime's read-only classifier accepts (`agent/bash-read-only.ts`, ported from
+ *  sandboxed command the runtime's read-only classifier accepts (`runtime-sdk/bash-read-only.ts`, ported from
  *  the agent SDK; never one naming a well-known secret store) or an allow-listed entry, and
  *  `plainOpenUrls` for a plain `open` of an app or an http(s) page. A DEFINITE `unsafe` VERDICT still denies, with the
  *  reviewer's own reason. A reviewer that THROWS (timeout, malformed verdict, aborted — i.e. no

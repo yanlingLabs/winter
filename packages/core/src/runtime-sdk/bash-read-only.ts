@@ -4,7 +4,7 @@
 // verbatim). The runtime classifies a Bash command as read-only to run it concurrently (agent SDK 0.0.40+,
 // claude's rule) but does not export the classifier, so the daemon carries this copy: the bash safety
 // reviewer's hook (`runtime-sdk/hooks.ts`) skips the review for a SANDBOXED command it accepts. Keep it in
-// step with the SDK — a fix there belongs here too; `test/agent/bash-read-only.test.ts` is the SDK's own
+// step with the SDK — a fix there belongs here too; `test/runtime-sdk/bash-read-only.test.ts` is the SDK's own
 // test file, ported with it.
 //
 // ---- the SDK module's own header ----
