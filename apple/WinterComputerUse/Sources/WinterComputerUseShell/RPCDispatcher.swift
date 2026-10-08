@@ -79,7 +79,7 @@ public final class RPCDispatcher: @unchecked Sendable {
         engine("target.windows") { try await $0.targetWindows($1 as TargetWindowsParams) }
         engine("target.release") { [viewHub] (core: CoreService, p: TargetReleaseParams) in
             let r = try await core.targetRelease(p)
-            await viewHub.release(targetId: p.targetId)
+            await viewHub.release(targetId: p.targetId, reason: "target.release from the daemon")
             return r
         }
         engine("target.snapshot") { try await $0.targetSnapshot($1 as TargetSnapshotParams) }
