@@ -1,0 +1,130 @@
+import AppKit
+import ApplicationServices
+import CoreGraphics
+import Foundation
+
+/// The AX calls the action path, the floors and the menu walk make. Injectable, so every safety gate in
+/// `targetAct` can be driven by a fake element tree in tests; the live one forwards to `AX`.
+protocol CUAXBackend: AnyObject {
+    func isTrusted() -> Bool
+    func application(_ pid: pid_t) -> AXUIElement
+    func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef?
+    func copyMultiple(_ e: AXUIElement, _ names: [String]) -> [String: CFTypeRef]?
+    func actions(_ e: AXUIElement) -> [String]
+    func isSettable(_ e: AXUIElement, _ name: String) -> Bool
+    func set(_ e: AXUIElement, _ name: String, _ value: CFTypeRef) throws
+    func perform(_ e: AXUIElement, _ action: String) throws
+    func isAlive(_ e: AXUIElement) -> Bool
+    func windowID(_ e: AXUIElement) -> CGWindowID?
+}
+
+extension CUAXBackend {
+    func string(_ e: AXUIElement, _ name: String) -> String? { attribute(e, name).flatMap(AX.stringValue) }
+    func bool(_ e: AXUIElement, _ name: String) -> Bool? { attribute(e, name).flatMap(AX.boolValue) }
+
+    func element(_ e: AXUIElement, _ name: String) -> AXUIElement? {
+        guard let v = attribute(e, name), CFGetTypeID(v) == AXUIElementGetTypeID() else { return nil }
+        return (v as! AXUIElement)
+    }
+
+    func elements(_ e: AXUIElement, _ name: String) -> [AXUIElement] {
+        guard let v = attribute(e, name), CFGetTypeID(v) == CFArrayGetTypeID() else { return [] }
+        return (v as! [AnyObject]).compactMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil }
+    }
+
+    func frame(_ e: AXUIElement) -> CGRect? {
+        guard let p = attribute(e, kAXPositionAttribute).flatMap(AX.pointValue),
+              let s = attribute(e, kAXSizeAttribute).flatMap(AX.sizeValue) else { return nil }
+        return CGRect(origin: p, size: s)
+    }
+
+    func focusedElement(pid: pid_t) -> AXUIElement? {
+        element(application(pid), kAXFocusedUIElementAttribute)
+    }
+}
+
+final class CULiveAX: CUAXBackend {
+    func isTrusted() -> Bool { AXIsProcessTrusted() }
+    func application(_ pid: pid_t) -> AXUIElement { AX.app(pid) }
+    func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef? { AX.attribute(e, name) }
+    func copyMultiple(_ e: AXUIElement, _ names: [String]) -> [String: CFTypeRef]? { AX.copyMultiple(e, names) }
+    func actions(_ e: AXUIElement) -> [String] { AX.actions(e) }
+    func isSettable(_ e: AXUIElement, _ name: String) -> Bool { AX.isSettable(e, name) }
+    func set(_ e: AXUIElement, _ name: String, _ value: CFTypeRef) throws { try AX.set(e, name, value) }
+    func perform(_ e: AXUIElement, _ action: String) throws { try AX.perform(e, action) }
+    func isAlive(_ e: AXUIElement) -> Bool { AX.isAlive(e) }
+    func windowID(_ e: AXUIElement) -> CGWindowID? { AX.windowID(e) }
+}
+
+/// Process and window-server facts (and the few global effects of rung 4), injectable for tests.
+protocol CUSystemBackend: AnyObject {
+    func appRunning(_ pid: pid_t) -> Bool
+    func bundleId(pid: pid_t) -> String?
+    func processName(pid: pid_t) -> String?
+    func window(id: UInt32) -> CUWindowServerWindow?
+    /// On-screen windows of every layer, front to back.
+    func windowStack() -> [CUWindowServerWindow]
+    func frontmostPid() -> pid_t?
+    func activate(pid: pid_t) -> Bool
+    func cursorLocation() -> CGPoint?
+    func warpCursor(to: CGPoint)
+}
+
+final class CULiveSystem: CUSystemBackend {
+    func appRunning(_ pid: pid_t) -> Bool {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
+        return !app.isTerminated
+    }
+    func bundleId(pid: pid_t) -> String? { NSRunningApplication(processIdentifier: pid)?.bundleIdentifier }
+    func processName(pid: pid_t) -> String? {
+        let app = NSRunningApplication(processIdentifier: pid)
+        return app?.executableURL?.lastPathComponent ?? app?.localizedName
+    }
+    func window(id: UInt32) -> CUWindowServerWindow? { CUWindowServer.window(id: id) }
+    func windowStack() -> [CUWindowServerWindow] { CUWindowServer.windows(onScreenOnly: true, includeOtherLayers: true) }
+    func frontmostPid() -> pid_t? { NSWorkspace.shared.frontmostApplication?.processIdentifier }
+    func activate(pid: pid_t) -> Bool {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
+        return DispatchQueue.main.sync { app.activate() }
+    }
+    func cursorLocation() -> CGPoint? { CGEvent(source: nil)?.location }
+    func warpCursor(to p: CGPoint) {
+        CGWarpMouseCursorPosition(p)
+        CGAssociateMouseAndMouseCursorPosition(1)
+    }
+}
+
+/// The rung-4 hit test (spec §8): before every foreground press, drag step and release, the window under
+/// the point must belong to the target. The helper's own windows (mirror, cursor overlay) are click-through
+/// and skipped; invisible and zero-size windows are skipped. Pure.
+enum CUHitTest {
+    struct Covered: Error, Equatable {
+        var pid: pid_t
+        var owner: String
+    }
+
+    /// The front-most window that would receive a click at `point`.
+    static func topWindow(at point: CGPoint, stack: [CUWindowServerWindow], ownPid: pid_t) -> CUWindowServerWindow? {
+        stack.first { w in
+            w.pid != ownPid && w.alpha > 0 && w.frame.width > 0 && w.frame.height > 0 && w.frame.contains(point)
+        }
+    }
+
+    /// Throws the refusal for a point the target does not own.
+    static func check(point: CGPoint, targetPid: pid_t, appName: String, stack: [CUWindowServerWindow], ownPid: pid_t,
+                      bundleId: (pid_t) -> String?, processName: (pid_t) -> String?) throws {
+        guard let top = topWindow(at: point, stack: stack, ownPid: ownPid) else {
+            throw CUError.unsupported("nothing of \(appName) is on screen at that point")
+        }
+        guard top.pid != targetPid else { return }
+        let b = bundleId(top.pid)
+        if CUFloors.isAuthOrSystemDialog(bundleId: b, processName: processName(top.pid) ?? top.ownerName) {
+            throw CUError.refused(.authDialog, "a system dialog covers that point — ask the user to handle it")
+        }
+        if let b, CUFloors.isWinterBundle(b) {
+            throw CUError.refused(.winterItself, "a Winter window covers that point")
+        }
+        let owner = top.ownerName.isEmpty ? "another window" : "“\(top.ownerName)”"
+        throw CUError.unsupported("\(owner) covers that point in front of \(appName) — use a ref or ask the user to move it")
+    }
+}

@@ -40,17 +40,29 @@ public enum CUFloors {
 
     // MARK: Winter itself
 
+    /// The ones known today; anything under `com.winter.` counts (helpers, CEF helpers, office helper…).
     public static let winterBundleIds: Set<String> = [
         "com.winter.app", "com.winter.app.dev", "com.winter.computeruse", "com.winter.computeruse.dev",
     ]
+    public static let winterBundlePrefix = "com.winter."
+
+    public static func isWinterBundle(_ bundleId: String) -> Bool {
+        bundleId.lowercased().hasPrefix(winterBundlePrefix)
+    }
 
     public static func isWinterItself(bundleId: String?, pid: pid_t, ownPid: pid_t = getpid()) -> Bool {
         if pid == ownPid { return true }
         guard let b = bundleId else { return false }
-        return winterBundleIds.contains(b)
+        return isWinterBundle(b)
     }
 
-    /// Bundle ids every whole-screen image leaves out (Winter, the helper, the auth agents).
+    /// Whether a whole-screen image leaves this app out: Winter and all its helpers, the auth agents, and
+    /// the caller's list.
+    public static func excludedFromScreenshots(_ bundleId: String, extra: Set<String>) -> Bool {
+        isWinterBundle(bundleId) || authBundleIds.contains(bundleId) || extra.contains(bundleId)
+    }
+
+    /// Bundle ids every whole-screen image leaves out besides the `com.winter.` prefix.
     public static var alwaysExcludedFromScreenshots: Set<String> { winterBundleIds.union(authBundleIds) }
 
     // MARK: privacy panes

@@ -125,9 +125,9 @@ final class InputTests: XCTestCase {
         return s
     }
 
-    func testPublicClickIsDownUpPairsWithClickStates() {
+    func testPublicClickIsDownUpPairsWithClickStates() throws {
         let r = Recorder()
-        let used = synth(r).click(pid: 9, windowID: 77, at: CGPoint(x: 100, y: 200), button: .left, count: 2, flags: [],
+        let used = try synth(r).click(pid: 9, windowFor: { _ in 77 }, at: CGPoint(x: 100, y: 200), button: .left, count: 2, flags: [],
                                   route: .publicPid)
         XCTAssertEqual(used, .publicPid)
         XCTAssertEqual(r.entries.map(\.type), [.leftMouseDown, .leftMouseUp, .leftMouseDown, .leftMouseUp])
@@ -135,9 +135,9 @@ final class InputTests: XCTestCase {
         XCTAssertTrue(r.entries.allSatisfy { $0.location == CGPoint(x: 100, y: 200) && $0.targetPid == 9 && $0.window == 77 })
     }
 
-    func testSkyLightClickPrimesChromium() {
+    func testSkyLightClickPrimesChromium() throws {
         let r = Recorder()
-        let used = synth(r).click(pid: 9, windowID: 77, at: CGPoint(x: 100, y: 200), button: .left, count: 1, flags: [],
+        let used = try synth(r).click(pid: 9, windowFor: { _ in 77 }, at: CGPoint(x: 100, y: 200), button: .left, count: 1, flags: [],
                                   route: .skyLight)
         XCTAssertEqual(used, .skyLight)
         XCTAssertEqual(r.entries.map(\.type), [.mouseMoved, .leftMouseDown, .leftMouseUp, .leftMouseDown, .leftMouseUp])
@@ -145,30 +145,30 @@ final class InputTests: XCTestCase {
         XCTAssertEqual(r.entries[3].location, CGPoint(x: 100, y: 200))
     }
 
-    func testSkyLightDegradesWithoutThePrimer() {
+    func testSkyLightDegradesWithoutThePrimer() throws {
         let r = Recorder()
         r.degradeSkyLight = true
-        let used = synth(r).click(pid: 9, windowID: 77, at: .zero, button: .left, count: 1, flags: [], route: .skyLight)
+        let used = try synth(r).click(pid: 9, windowFor: { _ in 77 }, at: .zero, button: .left, count: 1, flags: [], route: .skyLight)
         XCTAssertEqual(used, .publicPid)
         XCTAssertFalse(r.entries.contains { $0.location == CGPoint(x: -1, y: -1) }, "no primer on the public route")
     }
 
-    func testRightAndMiddleButtons() {
+    func testRightAndMiddleButtons() throws {
         let r = Recorder()
-        synth(r).click(pid: 1, windowID: 0, at: .zero, button: .right, count: 1, flags: [.maskCommand], route: .publicPid)
-        synth(r).click(pid: 1, windowID: 0, at: .zero, button: .middle, count: 1, flags: [], route: .publicPid)
+        try synth(r).click(pid: 1, windowFor: { _ in 0 }, at: .zero, button: .right, count: 1, flags: [.maskCommand], route: .publicPid)
+        try synth(r).click(pid: 1, windowFor: { _ in 0 }, at: .zero, button: .middle, count: 1, flags: [], route: .publicPid)
         XCTAssertEqual(r.entries.map(\.type), [.rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp])
     }
 
-    func testDragAndScrollSequences() {
+    func testDragAndScrollSequences() throws {
         let r = Recorder()
-        synth(r).drag(pid: 1, windowID: 3, from: CGPoint(x: 0, y: 0), to: CGPoint(x: 100, y: 0), route: .publicPid, steps: 4)
+        try synth(r).drag(pid: 1, windowFor: { _ in 3 }, from: CGPoint(x: 0, y: 0), to: CGPoint(x: 100, y: 0), route: .publicPid, steps: 4)
         XCTAssertEqual(r.entries.first?.type, .mouseMoved)
         XCTAssertEqual(r.entries[1].type, .leftMouseDown)
         XCTAssertEqual(r.entries.filter { $0.type == .leftMouseDragged }.map(\.location.x), [25, 50, 75, 100])
         XCTAssertEqual(r.entries.last?.type, .leftMouseUp)
         let s = Recorder()
-        synth(s).scroll(pid: 1, windowID: 3, at: CGPoint(x: 5, y: 5), deltaX: 0, deltaY: -600, route: .publicPid)
+        try synth(s).scroll(pid: 1, windowFor: { _ in 3 }, at: CGPoint(x: 5, y: 5), deltaX: 0, deltaY: -600, route: .publicPid)
         XCTAssertEqual(s.entries.count, 5, "600 px in wheel-sized chunks")
         XCTAssertTrue(s.entries.allSatisfy { $0.type == .scrollWheel && $0.location == CGPoint(x: 5, y: 5) })
     }

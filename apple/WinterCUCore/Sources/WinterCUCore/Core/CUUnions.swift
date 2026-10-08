@@ -77,22 +77,23 @@ public enum CURefOrText: Codable, Sendable, Equatable {
     }
 }
 
-/// `display?: number | "all"` — an index into the active displays (0 = main), a CGDirectDisplayID, or all.
+/// `display?: number | "all"` — an index into the active displays (0 = the main one), or all of them.
+/// A specific CGDirectDisplayID goes in `displayId` instead.
 public enum CUDisplaySelector: Codable, Sendable, Equatable {
-    case number(UInt32)
+    case index(Int)
     case all
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.singleValueContainer()
-        if let n = try? c.decode(UInt32.self) { self = .number(n); return }
+        if let n = try? c.decode(Int.self) { self = .index(n); return }
         if let s = try? c.decode(String.self), s == "all" { self = .all; return }
-        throw DecodingError.dataCorruptedError(in: c, debugDescription: "display must be a number or \"all\"")
+        throw DecodingError.dataCorruptedError(in: c, debugDescription: "display must be an index or \"all\"")
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.singleValueContainer()
         switch self {
-        case .number(let n): try c.encode(n)
+        case .index(let n): try c.encode(n)
         case .all: try c.encode("all")
         }
     }

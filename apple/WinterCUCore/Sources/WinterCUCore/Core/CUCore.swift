@@ -17,6 +17,12 @@ public final class CUCore: @unchecked Sendable {
     let clock: CUClock
     let skyLight: CUSkyLight
     let poster: CUEventPoster
+    /// AX calls of the action path and the floors; injectable so the gates are testable with fakes.
+    let ax: CUAXBackend
+    /// Process and window-server facts and rung 4's global effects; injectable likewise.
+    let sys: CUSystemBackend
+    /// The clipboard `paste` saves and restores.
+    let pasteboard: () -> CUPasteboardIO
     let queues = CUPidQueues()
     let cancels = CUCancellation()
     let monitor: CUAXActivityMonitor
@@ -42,11 +48,15 @@ public final class CUCore: @unchecked Sendable {
     }
 
     init(events: (any CUCoreEvents)?, clock: CUClock, skyLight: CUSkyLight, poster: CUEventPoster? = nil,
-         startMonitors: Bool) {
+         ax: CUAXBackend = CULiveAX(), sys: CUSystemBackend = CULiveSystem(),
+         pasteboard: @escaping () -> CUPasteboardIO = { CUSystemPasteboard() }, startMonitors: Bool) {
         self.events = events
         self.clock = clock
         self.skyLight = skyLight
         self.poster = poster ?? CULiveEventPoster(skyLight: skyLight)
+        self.ax = ax
+        self.sys = sys
+        self.pasteboard = pasteboard
         self.monitor = CUAXActivityMonitor(clock: clock)
         AX.configureProcessTimeout()
         monitor.onDestroyed = { [weak self] pid in self?.windowMaybeClosed(pid: pid) }
@@ -129,7 +139,8 @@ public final class CUCore: @unchecked Sendable {
         }
         let chosen = try CUAXWindows.choose(windows, selector: p.window)
         if let b = app.bundleIdentifier, CUFloors.systemSettingsBundleIds.contains(b) {
-            let isPrivacy = try await queues.run(pid) { CUFloorScan.isPrivacyPane(bundleId: b, window: chosen.element) }
+            let ax = self.ax
+            let isPrivacy = try await queues.run(pid) { CUFloorScan.isPrivacyPane(bundleId: b, window: chosen.element, ax: ax) }
             if isPrivacy { throw CUError.refused(.privacyPane, "the Privacy & Security settings are off limits — ask the user") }
         }
 
@@ -154,7 +165,14 @@ public final class CUCore: @unchecked Sendable {
         let windows = try await queues.run(t.pid) { CUAXWindows.list(pid: t.pid) }
         let chosen = try CUAXWindows.choose(windows, selector: p.window)
         let old = t.windowID
-        t.setWindow(id: chosen.id, title: chosen.title)
+        if old != chosen.id {
+            // Refs and the diff base belong to the old window: start over (numbers still never repeat).
+            try await queues.run(t.pid) { [self] in
+                t.setWindow(id: chosen.id, title: chosen.title)
+                t.resetForNewWindow()
+                windowElementsLock.withLock { windowElements[t.id] = chosen.element }
+            }
+        }
         if old != chosen.id {
             emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: old) }
             emit { $0.targetBound(sessionId: t.sessionId, pid: t.pid, windowID: chosen.id, appName: t.appName, mirror: t.mirror) }
@@ -287,6 +305,8 @@ public final class CUCore: @unchecked Sendable {
         while true {
             try token.check()
             let (met, seen) = try await queues.run(t.pid) { [self] () -> (Bool, String) in
+                try token.check()
+                try floorCheckPrivacy(t)
                 let obs = try observe(t, within: nil, maxNodes: 1500)
                 let o = CUWaitEvaluator.Observation(roots: obs.roots, windowTitle: obs.title, focusedRef: obs.focusedRef)
                 return (CUWaitEvaluator.met(c, o), CUWaitEvaluator.seen(o))
@@ -310,7 +330,8 @@ public final class CUCore: @unchecked Sendable {
     // MARK: - whole screen
 
     public func screenScreenshot(_ p: ScreenScreenshotParams) async throws -> ScreenScreenshotResult {
-        let img = try await capturer.captureScreen(display: p.display, excludeBundleIds: p.excludeBundleIds, budget: p.budget)
+        let img = try await capturer.captureScreen(display: p.display, displayId: p.displayId,
+                                                   excludeBundleIds: p.excludeBundleIds, budget: p.budget)
         let shot: CUShotSpace = {
             lock.lock(); defer { lock.unlock() }
             screenShotSeq += 1
@@ -396,7 +417,7 @@ public final class CUCore: @unchecked Sendable {
     }
 
     func requireAccessibility() throws {
-        guard AXIsProcessTrusted() else { throw CUError.permissionMissing(.accessibility) }
+        guard ax.isTrusted() else { throw CUError.permissionMissing(.accessibility) }
     }
 
     func target(_ id: String) throws -> CUTarget {
@@ -428,12 +449,11 @@ public final class CUCore: @unchecked Sendable {
 
     /// The target's app and window still exist; otherwise it is dropped, `targetLost` fires and this throws.
     func ensureAlive(_ t: CUTarget) throws {
-        let app = NSRunningApplication(processIdentifier: t.pid)
-        if app == nil || app?.isTerminated == true {
+        if !sys.appRunning(t.pid) {
             lose(t, reason: "app_quit")
             throw CUError.targetLost("\(t.appName) quit — bind it again")
         }
-        if CUWindowServer.window(id: t.windowID) == nil {
+        if sys.window(id: t.windowID) == nil {
             lose(t, reason: "window_closed")
             throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window")
         }
@@ -473,7 +493,7 @@ public final class CUCore: @unchecked Sendable {
     func floorCheckPrivacy(_ t: CUTarget) throws {
         guard let b = t.bundleId, CUFloors.systemSettingsBundleIds.contains(b) else { return }
         let win = try windowElement(t)
-        if CUFloorScan.isPrivacyPane(bundleId: b, window: win) {
+        if CUFloorScan.isPrivacyPane(bundleId: b, window: win, ax: ax) {
             throw CUError.refused(.privacyPane, "the Privacy & Security settings are off limits — ask the user")
         }
     }
@@ -489,11 +509,11 @@ public final class CUCore: @unchecked Sendable {
         windowElementsLock.lock()
         let cached = windowElements[t.id]
         windowElementsLock.unlock()
-        if let c = cached, AX.isAlive(c), AX.windowID(c).map({ $0 == wid }) ?? true { return c }
+        if let c = cached, ax.isAlive(c), ax.windowID(c).map({ $0 == wid }) ?? true { return c }
         // Without the grant AX lists nothing — that must never read as "the window closed".
         try requireAccessibility()
         guard let w = CUAXWindows.list(pid: t.pid).first(where: { $0.id == wid }) else {
-            guard let server = CUWindowServer.window(id: wid) else {
+            guard let server = sys.window(id: wid) else {
                 lose(t, reason: "window_closed")
                 throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window")
             }
@@ -517,7 +537,7 @@ public final class CUCore: @unchecked Sendable {
     }
 
     /// Reads the bound window (plus open app menus), or the subtree at `within`.
-    func observe(_ t: CUTarget, within: Int?, maxNodes: Int = 2500) throws -> Observation {
+    func observe(_ t: CUTarget, within: Int?, maxNodes: Int = AXTreeReader.defaultMaxNodes) throws -> Observation {
         CUUserInputGuard.waitForQuiet()
         let win = try windowElement(t)
         let app = AX.app(t.pid)
@@ -528,11 +548,14 @@ public final class CUCore: @unchecked Sendable {
             rootElements = [win]
             rootElements += AX.elements(app, kAXChildrenAttribute).filter { AX.string($0, kAXRoleAttribute) == kAXMenuRole }
         }
-        t.refs.beginGeneration()
+        // Only a complete read of the whole window may age refs out: a `within` read, a capped `waitFor` read
+        // or a walk cut short by its budget sees part of the tree, and must not make the rest look gone.
+        let full = within == nil && maxNodes >= AXTreeReader.defaultMaxNodes
+        if full { t.refs.beginGeneration() }
         var reader = AXTreeReader()
         reader.maxNodes = maxNodes
         let result = reader.read(roots: rootElements, cache: t.refs, now: clock.nowMs)
-        t.refs.prune()
+        if full, !result.truncated { t.refs.prune() }
         guard !result.roots.isEmpty else {
             throw CUError.busy("\(t.appName) did not answer — it may be busy; retry")
         }
@@ -548,11 +571,17 @@ public final class CUCore: @unchecked Sendable {
     /// The live element behind a ref, or `stale_ref`.
     func element(_ ref: Int, in t: CUTarget) throws -> AXUIElement {
         guard let key = t.refs.key(for: ref) else { throw CUError.staleRef(ref) }
-        guard AX.isAlive(key.element) else {
+        guard ax.isAlive(key.element) else {
             t.refs.forget(ref)
             throw CUError.staleRef(ref)
         }
         return key.element
+    }
+
+    /// Registers a target directly (tests drive `targetAct` against fakes with this).
+    func registerForTesting(_ t: CUTarget, windowElement: AXUIElement?) {
+        lock.withLock { targets[t.id] = t }
+        if let w = windowElement { windowElementsLock.withLock { windowElements[t.id] = w } }
     }
 
     // MARK: monitors

@@ -80,18 +80,27 @@ struct CUEventSynth {
         }
     }
 
+    /// Runs before every pointer event is posted: cancellation, and on rung 4 the hit test. Throwing stops
+    /// the sequence there.
+    typealias PointerCheck = (_ type: CGEventType, _ at: CGPoint) throws -> Void
+
     /// A click at `point` (screen points). For SkyLight, a mouse move and an off-screen primer click come
-    /// first: Chromium only honours user-activation-gated clicks after a trusted gesture.
+    /// first: Chromium only honours user-activation-gated clicks after a trusted gesture. Flags are always
+    /// set, empty included, so modifiers the user is holding never leak into the click. `windowFor` names the
+    /// window each event is routed to (the target pid's front-most window under that point).
     @discardableResult
-    func click(pid: pid_t, windowID: UInt32, at point: CGPoint, button: CUMouseButton, count: Int,
-               flags: CGEventFlags, route: CURoute) -> CURoute {
+    func click(pid: pid_t, windowFor: (CGPoint) -> UInt32, at point: CGPoint, button: CUMouseButton, count: Int,
+               flags: CGEventFlags, route: CURoute, check: PointerCheck = { _, _ in }) throws -> CURoute {
         let t = mouseTypes(button)
         let src = source(route)
         let group = Int64(DispatchTime.now().uptimeNanoseconds & 0x7fff_ffff)
+        let wid = windowFor(point)
         var used = route
         if route == .skyLight {
             if let move = CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) {
-                stampRouting(move, pid: pid, windowID: windowID, location: point, route: route, clickGroup: group)
+                try check(.mouseMoved, point)
+                move.flags = flags
+                stampRouting(move, pid: pid, windowID: wid, location: point, route: route, clickGroup: group)
                 used = poster.post(move, pid: pid, route: route, authenticate: false)
                 sleep(15)
             }
@@ -101,7 +110,8 @@ struct CUEventSynth {
                     guard let e = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: off, mouseButton: .left)
                     else { continue }
                     e.setIntegerValueField(.mouseEventClickState, value: 1)
-                    stampRouting(e, pid: pid, windowID: windowID, location: off, route: route, clickGroup: group)
+                    e.flags = []
+                    stampRouting(e, pid: pid, windowID: wid, location: off, route: route, clickGroup: group)
                     poster.post(e, pid: pid, route: route, authenticate: false)
                     sleep(type == .leftMouseDown ? 1 : 100)
                 }
@@ -112,9 +122,10 @@ struct CUEventSynth {
             for type in [t.down, t.up] {
                 guard let e = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: point, mouseButton: t.cg)
                 else { continue }
+                try check(type, point)
                 e.setIntegerValueField(.mouseEventClickState, value: Int64(i))
-                if !flags.isEmpty { e.flags = flags }
-                stampRouting(e, pid: pid, windowID: windowID, location: point, route: route, clickGroup: group)
+                e.flags = flags
+                stampRouting(e, pid: pid, windowID: wid, location: point, route: route, clickGroup: group)
                 used = poster.post(e, pid: pid, route: route, authenticate: false)
                 sleep(type == t.down ? 8 : (i < n ? 60 : 0))
             }
@@ -124,9 +135,10 @@ struct CUEventSynth {
 
     /// Scroll-wheel events at `point`, `deltaY`/`deltaX` in points (positive = content moves down/right).
     @discardableResult
-    func scroll(pid: pid_t, windowID: UInt32, at point: CGPoint, deltaX: Double, deltaY: Double,
-                route: CURoute) -> CURoute {
+    func scroll(pid: pid_t, windowFor: (CGPoint) -> UInt32, at point: CGPoint, deltaX: Double, deltaY: Double,
+                route: CURoute, check: PointerCheck = { _, _ in }) throws -> CURoute {
         let src = source(route)
+        let wid = windowFor(point)
         // Deliver in a few chunks, like a real wheel, so apps that animate per event follow along.
         let steps = max(1, min(12, Int((max(abs(deltaX), abs(deltaY)) / 120).rounded(.up))))
         var used = route
@@ -135,17 +147,21 @@ struct CUEventSynth {
                                   wheel1: Int32((deltaY / Double(steps)).rounded()),
                                   wheel2: Int32((deltaX / Double(steps)).rounded()), wheel3: 0)
             else { continue }
+            try check(.scrollWheel, point)
             e.location = point
-            stampRouting(e, pid: pid, windowID: windowID, location: point, route: route, clickGroup: nil)
+            e.flags = []
+            stampRouting(e, pid: pid, windowID: wid, location: point, route: route, clickGroup: nil)
             used = poster.post(e, pid: pid, route: route, authenticate: false)
             sleep(16)
         }
         return used
     }
 
-    /// Press at `from`, move in steps, release at `to`.
+    /// Press at `from`, move in steps, release at `to`. Each event is checked before it is posted; a check
+    /// that throws after the press still releases the button, so nothing is left held down.
     @discardableResult
-    func drag(pid: pid_t, windowID: UInt32, from: CGPoint, to: CGPoint, route: CURoute, steps: Int = 12) -> CURoute {
+    func drag(pid: pid_t, windowFor: (CGPoint) -> UInt32, from: CGPoint, to: CGPoint, route: CURoute, steps: Int = 12,
+              check: PointerCheck = { _, _ in }) throws -> CURoute {
         let src = source(route)
         let group = Int64(DispatchTime.now().uptimeNanoseconds & 0x7fff_ffff)
         var used = route
@@ -153,16 +169,30 @@ struct CUEventSynth {
             guard let e = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: p, mouseButton: .left)
             else { return }
             e.setIntegerValueField(.mouseEventClickState, value: 1)
-            stampRouting(e, pid: pid, windowID: windowID, location: p, route: route, clickGroup: group)
+            e.flags = []
+            stampRouting(e, pid: pid, windowID: windowFor(p), location: p, route: route, clickGroup: group)
             used = poster.post(e, pid: pid, route: route, authenticate: false)
             sleep(wait)
         }
+        try check(.mouseMoved, from)
         send(.mouseMoved, from, wait: 15)
+        try check(.leftMouseDown, from)
         send(.leftMouseDown, from, wait: 50)
         let n = max(2, steps)
-        for i in 1...n {
-            let f = Double(i) / Double(n)
-            send(.leftMouseDragged, CGPoint(x: from.x + (to.x - from.x) * f, y: from.y + (to.y - from.y) * f), wait: 16)
+        var last = from
+        do {
+            for i in 1...n {
+                let f = Double(i) / Double(n)
+                let p = CGPoint(x: from.x + (to.x - from.x) * f, y: from.y + (to.y - from.y) * f)
+                try check(.leftMouseDragged, p)
+                send(.leftMouseDragged, p, wait: 16)
+                last = p
+            }
+            try check(.leftMouseUp, to)
+        } catch {
+            // Never leave the button down: release where the drag stopped, then report why.
+            send(.leftMouseUp, last, wait: 0)
+            throw error
         }
         send(.leftMouseUp, to, wait: 0)
         return used

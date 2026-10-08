@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import XCTest
 @testable import WinterCUCore
 
@@ -28,9 +29,12 @@ final class PasteAndQueueTests: XCTestCase {
     func testPasteRestoresTheUsersClipboard() throws {
         let pb = FakePasteboard(userClip)
         var pasted: String?
-        let seq = CUPasteSequence(pasteboard: pb, sendPaste: { pasted = pb.readString() }, sleep: { _ in })
+        var waited = false
+        let seq = CUPasteSequence(pasteboard: pb, sendPaste: { pasted = pb.readString() },
+                                  waitForEvidence: { waited = true; return true })
         let r = try seq.run(items: CUPasteSequence.items(text: "hello", format: .text), plain: "hello")
-        XCTAssertEqual(r, .restored)
+        XCTAssertEqual(r, .restored(evidence: true))
+        XCTAssertTrue(waited, "the restore waits for evidence of the paste")
         XCTAssertEqual(pasted, "hello", "the target saw our text")
         XCTAssertEqual(pb.readString(), "user's own", "and the user's clipboard came back")
         XCTAssertEqual(pb.log, ["save", "write", "write"])
@@ -38,9 +42,10 @@ final class PasteAndQueueTests: XCTestCase {
 
     func testAClipboardChangedMeanwhileIsLeftAlone() throws {
         let pb = FakePasteboard(userClip)
-        let seq = CUPasteSequence(pasteboard: pb, sendPaste: {}, sleep: { _ in
+        let seq = CUPasteSequence(pasteboard: pb, sendPaste: {}, waitForEvidence: {
             pb.items = [[NSPasteboard.PasteboardType.string.rawValue: Data("copied meanwhile".utf8)]]
             pb.changeCount += 1
+            return true
         })
         XCTAssertEqual(try seq.run(items: CUPasteSequence.items(text: "x", format: .text), plain: "x"), .leftAlone)
         XCTAssertEqual(pb.readString(), "copied meanwhile")
@@ -50,14 +55,14 @@ final class PasteAndQueueTests: XCTestCase {
         let pb = FakePasteboard(userClip)
         pb.failWrites = true
         var sent = false
-        let seq = CUPasteSequence(pasteboard: pb, sendPaste: { sent = true }, sleep: { _ in })
+        let seq = CUPasteSequence(pasteboard: pb, sendPaste: { sent = true }, waitForEvidence: { true })
         XCTAssertThrowsError(try seq.run(items: CUPasteSequence.items(text: "x", format: .text), plain: "x"))
         XCTAssertFalse(sent)
     }
 
     func testAFailedPasteStillRestores() {
         let pb = FakePasteboard(userClip)
-        let seq = CUPasteSequence(pasteboard: pb, sendPaste: { throw CUError.cancelled }, sleep: { _ in })
+        let seq = CUPasteSequence(pasteboard: pb, sendPaste: { throw CUError.cancelled }, waitForEvidence: { true })
         XCTAssertThrowsError(try seq.run(items: CUPasteSequence.items(text: "x", format: .text), plain: "x"))
         XCTAssertEqual(pb.readString(), "user's own")
     }
@@ -72,6 +77,54 @@ final class PasteAndQueueTests: XCTestCase {
         XCTAssertEqual(CUPasteSequence.plainFromHTML("x<br/>y"), "x\ny")
     }
 
+    func testUnconfirmedPasteStillRestoresButSaysSo() throws {
+        let pb = FakePasteboard(userClip)
+        let seq = CUPasteSequence(pasteboard: pb, sendPaste: {}, waitForEvidence: { false })
+        XCTAssertEqual(try seq.run(items: CUPasteSequence.items(text: "x", format: .text), plain: "x"), .restored(evidence: false))
+        XCTAssertEqual(pb.readString(), "user's own")
+    }
+
+    func testWintersClipboardItemsAreMarkedTransientAndConcealed() throws {
+        let pb = FakePasteboard(userClip)
+        var during: [String: Data]?
+        let seq = CUPasteSequence(pasteboard: pb, sendPaste: { during = pb.items.first }, waitForEvidence: { true })
+        _ = try seq.run(items: CUPasteSequence.items(text: "x", format: .text), plain: "x")
+        XCTAssertNotNil(during?[CUPasteboardMarkers.transient])
+        XCTAssertNotNil(during?[CUPasteboardMarkers.concealed])
+        XCTAssertNil(pb.items.first?[CUPasteboardMarkers.transient], "the user's restored clipboard is not marked")
+    }
+
+    func testPromisedFlavorFlag() {
+        XCTAssertTrue(CUSystemPasteboard.isPromised(PasteboardFlavorFlags(rawValue: 1 << 9)))
+        XCTAssertTrue(CUSystemPasteboard.isPromised(PasteboardFlavorFlags(rawValue: (1 << 9) | 1)))
+        XCTAssertFalse(CUSystemPasteboard.isPromised(PasteboardFlavorFlags(rawValue: 1)))
+    }
+
+    func testEditEvidence() {
+        var now = 0.0
+        var value = "a"
+        var notified: Double?
+        let ev = CUEditEvidence(readValue: { value }, lastValueChangeMs: { notified }, nowMs: { now }, sleepMs: { ms in
+            now += ms
+            if now >= 100 { value = "ab" }
+        })
+        XCTAssertTrue(ev.wait(before: "a", since: 0, capMs: 1500))
+        XCTAssertGreaterThanOrEqual(now, 100)
+        // No change at all: gives up at the cap.
+        now = 0; value = "a"
+        let still = CUEditEvidence(readValue: { "a" }, lastValueChangeMs: { nil }, nowMs: { now }, sleepMs: { now += $0 })
+        XCTAssertFalse(still.wait(before: "a", since: 0, capMs: 150))
+        XCTAssertGreaterThanOrEqual(now, 150)
+        // A value-change notification after the write counts once things are quiet.
+        now = 0; notified = 20
+        let noted = CUEditEvidence(readValue: { "a" }, lastValueChangeMs: { notified }, nowMs: { now }, sleepMs: { now += $0 })
+        XCTAssertTrue(noted.wait(before: "a", since: 10, capMs: 1500))
+        XCTAssertLessThan(now, 200)
+        // One from before the write does not.
+        now = 0; notified = 5
+        XCTAssertFalse(noted.wait(before: "a", since: 10, capMs: 100))
+    }
+
     // MARK: queues
 
     func testQueueRunsWorkAndRefusesWhenOverloaded() async throws {
@@ -81,8 +134,18 @@ final class PasteAndQueueTests: XCTestCase {
         let gate = DispatchSemaphore(value: 0)
         let a = Task { try await queues.run(5) { gate.wait(); return 1 } }
         let b = Task { try await queues.run(5) { 2 } }
-        // Wait until both are pending.
-        for _ in 0..<200 where queues.pendingCount(5) < 2 { try await Task.sleep(nanoseconds: 5_000_000) }
+        // Wait until both are pending (generously: the machine may be busy). Without that the third call
+        // would be accepted and queue behind the gate, so give up cleanly instead of deadlocking.
+        var waited = 0
+        while queues.pendingCount(5) < 2, waited < 2000 {
+            try await Task.sleep(nanoseconds: 5_000_000)
+            waited += 1
+        }
+        guard queues.pendingCount(5) == 2 else {
+            gate.signal()
+            XCTFail("the two queued calls never became pending")
+            return
+        }
         do {
             _ = try await queues.run(5) { 3 }
             XCTFail("expected busy")

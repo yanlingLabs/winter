@@ -1,29 +1,81 @@
 import AppKit
+import ApplicationServices
 import Foundation
 
 /// The user's clipboard as `paste` sees it: saved, replaced, verified, then restored (spec §8, §13.3).
 protocol CUPasteboardIO: AnyObject {
     var changeCount: Int { get }
-    /// Every item with every type it carries.
+    /// Every item with the types it already carries (see `CUSystemPasteboard.save`).
     func save() -> [[String: Data]]
     /// Replaces the contents; returns the new change count.
     func write(_ items: [[String: Data]]) -> Int
     func readString() -> String?
 }
 
+/// Markers clipboard managers honour (nspasteboard.org): Winter's own contents are short-lived and may be
+/// sensitive, so they are never recorded or shown in a clipboard history.
+enum CUPasteboardMarkers {
+    static let transient = "org.nspasteboard.TransientType"
+    static let concealed = "org.nspasteboard.ConcealedType"
+
+    static func marked(_ items: [[String: Data]]) -> [[String: Data]] {
+        items.map { item in
+            var i = item
+            i[transient] = Data()
+            i[concealed] = Data()
+            return i
+        }
+    }
+}
+
 final class CUSystemPasteboard: CUPasteboardIO {
+    /// A saved type larger than this is left out of the restore (and logged), rather than held in memory.
+    static let maxSavedTypeBytes = 16 * 1024 * 1024
+
     private let pb: NSPasteboard
     init(_ pb: NSPasteboard = .general) { self.pb = pb }
 
     var changeCount: Int { pb.changeCount }
 
+    /// Saves what the clipboard already holds, through the Pasteboard Manager so each type's flags can be
+    /// read first: a *promised* type (one the source app would render on demand — often a large image) is
+    /// skipped instead of forcing that app to render it. Huge types are skipped too.
     func save() -> [[String: Data]] {
-        (pb.pasteboardItems ?? []).map { item in
-            var out: [String: Data] = [:]
-            for t in item.types { if let d = item.data(forType: t) { out[t.rawValue] = d } }
-            return out
+        var ref: Pasteboard?
+        guard PasteboardCreate(kPasteboardClipboard as CFString, &ref) == noErr, let carbon = ref else { return [] }
+        PasteboardSynchronize(carbon)
+        var count = 0
+        guard PasteboardGetItemCount(carbon, &count) == noErr, count > 0 else { return [] }
+        var out: [[String: Data]] = []
+        var skipped: [String] = []
+        for index in 1...count {
+            var itemID: PasteboardItemID?
+            guard PasteboardGetItemIdentifier(carbon, index, &itemID) == noErr, let item = itemID else { continue }
+            var flavors: CFArray?
+            guard PasteboardCopyItemFlavors(carbon, item, &flavors) == noErr, let types = flavors as? [String] else { continue }
+            var saved: [String: Data] = [:]
+            for type in types {
+                var flags = PasteboardFlavorFlags()
+                guard PasteboardGetItemFlavorFlags(carbon, item, type as CFString, &flags) == noErr else { continue }
+                if Self.isPromised(flags) { skipped.append("\(type) (promised)"); continue }
+                var data: CFData?
+                guard PasteboardCopyItemFlavorData(carbon, item, type as CFString, &data) == noErr, let d = data as Data? else {
+                    continue
+                }
+                if d.count > Self.maxSavedTypeBytes { skipped.append("\(type) (\(d.count) bytes)"); continue }
+                saved[type] = d
+            }
+            if !saved.isEmpty { out.append(saved) }
         }
+        if !skipped.isEmpty {
+            NSLog("WinterCUCore: clipboard save skipped %d type(s) it would have had to render or that were too large: %@",
+                  skipped.count, skipped.joined(separator: ", "))
+        }
+        return out
     }
+
+    /// `kPasteboardFlavorPromised` (1 << 9, HIServices/Pasteboard.h).
+    static func isPromised(_ flags: PasteboardFlavorFlags) -> Bool { flags.rawValue & (1 << 9) != 0 }
 
     func write(_ items: [[String: Data]]) -> Int {
         pb.clearContents()
@@ -39,21 +91,26 @@ final class CUSystemPasteboard: CUPasteboardIO {
     func readString() -> String? { pb.string(forType: .string) }
 }
 
-/// The clipboard dance around one paste, with the key press and the waits injected so the ordering is
-/// testable: save → write → verify → paste → wait → restore (only if nobody else wrote meanwhile).
+/// The clipboard dance around one paste, with the key press and the evidence wait injected so the ordering
+/// is testable: save → write (marked transient) → verify → paste → wait for evidence → restore (only if
+/// nobody else wrote meanwhile).
 struct CUPasteSequence {
     let pasteboard: CUPasteboardIO
-    /// Sends cmd+v to the target.
+    /// Sends the paste to the target.
     let sendPaste: () throws -> Void
-    let sleep: (Double) -> Void
-    /// How long the target gets to read the clipboard before it is restored.
-    var readWindowMs: Double = 250
+    /// Waits until the target has visibly taken the paste (its value changed, or it went quiet after a
+    /// value-change notification), at most ~1.5 s. Returns whether evidence was seen.
+    let waitForEvidence: () -> Bool
 
-    enum Outcome: Equatable { case restored, leftAlone }
+    enum Outcome: Equatable {
+        /// The user's clipboard is back. `evidence`: the paste was observed before restoring.
+        case restored(evidence: Bool)
+        case leftAlone
+    }
 
     func run(items: [[String: Data]], plain: String) throws -> Outcome {
         let saved = pasteboard.save()
-        let ours = pasteboard.write(items)
+        let ours = pasteboard.write(CUPasteboardMarkers.marked(items))
         // Verify the write took before pasting, so a stale clipboard is never pasted into the target.
         guard pasteboard.changeCount == ours, pasteboard.readString() == plain else {
             _ = pasteboard.write(saved)
@@ -65,11 +122,11 @@ struct CUPasteSequence {
             _ = pasteboard.write(saved)
             throw error
         }
-        sleep(readWindowMs)
+        let evidence = waitForEvidence()
         // If the user (or the target) copied something meanwhile, theirs wins.
         guard pasteboard.changeCount == ours else { return .leftAlone }
         _ = pasteboard.write(saved)
-        return .restored
+        return .restored(evidence: evidence)
     }
 
     /// Pasteboard items for `text` in the requested format. Markdown and HTML also carry a plain string, so
@@ -112,5 +169,25 @@ struct CUPasteSequence {
         let ns = NSAttributedString(attributed)
         return try? ns.data(from: NSRange(location: 0, length: ns.length),
                             documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
+    }
+}
+
+/// Polls for evidence that an edit landed (spec I6/I9): the element's value differs from `before`, or a
+/// value-change notification from the pid arrived after `since`. Pure apart from the injected readers.
+struct CUEditEvidence {
+    var readValue: () -> String?
+    var lastValueChangeMs: () -> Double?
+    var nowMs: () -> Double
+    var sleepMs: (Double) -> Void
+
+    /// Waits up to `capMs`. A notification counts once the app has been quiet on it for `quietMs`.
+    func wait(before: String?, since: Double, capMs: Double, pollMs: Double = 25, quietMs: Double = 60) -> Bool {
+        let start = nowMs()
+        while true {
+            if let v = readValue(), v != before { return true }
+            if let n = lastValueChangeMs(), n > since, nowMs() - n >= quietMs { return true }
+            if nowMs() - start >= capMs { return false }
+            sleepMs(pollMs)
+        }
     }
 }

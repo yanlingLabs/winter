@@ -26,11 +26,20 @@ final class FloorsTests: XCTestCase {
         for id in ["com.winter.app", "com.winter.app.dev", "com.winter.computeruse", "com.winter.computeruse.dev"] {
             XCTAssertTrue(CUFloors.isWinterItself(bundleId: id, pid: 999, ownPid: 1), id)
         }
+        for id in ["com.winter.helper", "com.winter.helper.dev", "com.winter.office-helper", "com.winter.app.cefhelper.renderer",
+                   "COM.WINTER.App"] {
+            XCTAssertTrue(CUFloors.isWinterItself(bundleId: id, pid: 999, ownPid: 1), "every com.winter. bundle: \(id)")
+        }
+        XCTAssertFalse(CUFloors.isWinterItself(bundleId: "com.winterbourne.app", pid: 999, ownPid: 1))
         XCTAssertTrue(CUFloors.isWinterItself(bundleId: "com.apple.Notes", pid: 42, ownPid: 42), "the helper's own pid")
         XCTAssertFalse(CUFloors.isWinterItself(bundleId: "com.apple.Notes", pid: 42, ownPid: 1))
         XCTAssertFalse(CUFloors.isWinterItself(bundleId: nil, pid: 42, ownPid: 1))
         XCTAssertTrue(CUFloors.alwaysExcludedFromScreenshots.contains("com.winter.computeruse"))
         XCTAssertTrue(CUFloors.alwaysExcludedFromScreenshots.contains("com.winter.computeruse.dev"))
+        XCTAssertTrue(CUFloors.excludedFromScreenshots("com.winter.app.cefhelper.gpu", extra: []))
+        XCTAssertTrue(CUFloors.excludedFromScreenshots("com.apple.SecurityAgent", extra: []))
+        XCTAssertTrue(CUFloors.excludedFromScreenshots("com.1password.1password", extra: ["com.1password.1password"]))
+        XCTAssertFalse(CUFloors.excludedFromScreenshots("com.apple.Notes", extra: []))
     }
 
     func testPrivacyPanes() {

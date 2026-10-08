@@ -61,7 +61,7 @@ final class WireCodingTests: XCTestCase {
                                   #"{"display":"all","excludeBundleIds":[],"budget":{"maxLongEdge":1280,"quality":0.8}}"#).display, .all)
         XCTAssertEqual(try decode(ScreenScreenshotParams.self,
                                   #"{"display":1,"excludeBundleIds":["a"],"budget":{"maxLongEdge":1568,"tile":28,"maxTiles":1568,"quality":0.8}}"#).display,
-                       .number(1))
+                       .index(1))
         XCTAssertEqual(try json(["w": CUWindowSelector.id(5)])["w"] as? Int, 5)
         XCTAssertEqual(try json(["w": CUWindowSelector.title("A")])["w"] as? String, "A")
         XCTAssertEqual(try json(["d": CUDisplaySelector.all])["d"] as? String, "all")

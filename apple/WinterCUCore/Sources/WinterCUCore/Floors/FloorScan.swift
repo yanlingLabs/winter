@@ -1,19 +1,31 @@
 import ApplicationServices
 import Foundation
 
-/// The live inputs to the floor classifiers: small, bounded AX scans run on the target's pid queue.
+/// The live inputs to the floor classifiers: small AX scans, bounded in elements AND wall time, run on the
+/// target's pid queue through the injectable AX backend.
 enum CUFloorScan {
+    /// Wall-time budget of one scan. A scan that runs out answers with what it saw.
+    static let budgetMs: Double = 150
+
+    struct Deadline {
+        let end: Double
+        init(ms: Double = CUFloorScan.budgetMs) { end = Self.now() + ms }
+        var passed: Bool { Self.now() >= end }
+        static func now() -> Double { Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000 }
+    }
+
     /// Window title, selected rows' names and AX identifiers of a System Settings window (≤ 400 elements).
-    static func privacySignals(window: AXUIElement) -> (texts: [String], identifiers: [String]) {
+    static func privacySignals(window: AXUIElement, ax: CUAXBackend) -> (texts: [String], identifiers: [String]) {
         var texts: [String] = []
         var ids: [String] = []
-        if let t = AX.string(window, kAXTitleAttribute) { texts.append(t) }
+        if let t = ax.string(window, kAXTitleAttribute) { texts.append(t) }
         var queue: [(AXUIElement, Int)] = [(window, 0)]
         var seen = 0
-        while !queue.isEmpty, seen < 400 {
+        let deadline = Deadline()
+        while !queue.isEmpty, seen < 400, !deadline.passed {
             let (e, depth) = queue.removeFirst()
             seen += 1
-            guard let a = AX.copyMultiple(e, [kAXIdentifierAttribute, kAXSelectedAttribute, kAXTitleAttribute,
+            guard let a = ax.copyMultiple(e, [kAXIdentifierAttribute, kAXSelectedAttribute, kAXTitleAttribute,
                                               kAXDescriptionAttribute, kAXChildrenAttribute]) else { continue }
             if let id = a[kAXIdentifierAttribute].flatMap(AX.stringValue) { ids.append(id) }
             if a[kAXSelectedAttribute].flatMap(AX.boolValue) == true {
@@ -21,8 +33,8 @@ enum CUFloorScan {
                     if let s = a[k].flatMap(AX.stringValue) { texts.append(s) }
                 }
                 // A selected sidebar row usually names its pane in a static-text child.
-                for c in AX.elements(e, kAXChildrenAttribute).prefix(4) {
-                    if let s = AX.string(c, kAXValueAttribute) ?? AX.string(c, kAXTitleAttribute) { texts.append(s) }
+                for c in ax.elements(e, kAXChildrenAttribute).prefix(4) {
+                    if let s = ax.string(c, kAXValueAttribute) ?? ax.string(c, kAXTitleAttribute) { texts.append(s) }
                 }
             }
             if depth < 10, let kids = a[kAXChildrenAttribute], CFGetTypeID(kids) == CFArrayGetTypeID() {
@@ -34,9 +46,9 @@ enum CUFloorScan {
         return (texts, ids)
     }
 
-    static func isPrivacyPane(bundleId: String?, window: AXUIElement) -> Bool {
+    static func isPrivacyPane(bundleId: String?, window: AXUIElement, ax: CUAXBackend) -> Bool {
         guard let b = bundleId, CUFloors.systemSettingsBundleIds.contains(b) else { return false }
-        let s = privacySignals(window: window)
+        let s = privacySignals(window: window, ax: ax)
         return CUFloors.isPrivacyPane(bundleId: b, texts: s.texts, identifiers: s.identifiers)
     }
 
@@ -44,68 +56,86 @@ enum CUFloorScan {
     static let saveNameFieldIdentifiers: Set<String> = ["saveAsNameTextField"]
     /// Folders a save panel's location pop-up must not point at.
     static let protectedFolderNames: Set<String> = [".ssh", "LaunchAgents", "LaunchDaemons"]
-
     /// Panel subroles a save panel shows up as when it is its own window rather than a sheet.
     static let panelSubroles: Set<String> = [kAXDialogSubrole, kAXSystemDialogSubrole, kAXFloatingWindowSubrole]
 
     /// The save panel `e` sits in, if any: the nearest sheet (or dialog-like window) ancestor holding a
     /// filename field. An ordinary document window stops the walk without a scan, so this stays cheap.
-    static func savePanel(containing e: AXUIElement) -> AXUIElement? {
+    static func savePanel(containing e: AXUIElement, ax: CUAXBackend) -> AXUIElement? {
         var cur: AXUIElement? = e
         for _ in 0..<14 {
             guard let c = cur else { return nil }
-            let role = AX.string(c, kAXRoleAttribute)
+            let role = ax.string(c, kAXRoleAttribute)
             // A sheet without a filename field may sit on a save panel ("Go to folder"): keep walking.
-            if role == kAXSheetRole, filenameField(in: c) != nil { return c }
+            if role == kAXSheetRole, filenameField(in: c, ax: ax) != nil { return c }
             if role == kAXWindowRole {
-                guard let sub = AX.string(c, kAXSubroleAttribute), panelSubroles.contains(sub) else { return nil }
-                return filenameField(in: c) != nil ? c : nil
+                guard let sub = ax.string(c, kAXSubroleAttribute), panelSubroles.contains(sub) else { return nil }
+                return filenameField(in: c, ax: ax) != nil ? c : nil
             }
-            cur = AX.element(c, kAXParentAttribute)
+            cur = ax.element(c, kAXParentAttribute)
         }
         return nil
     }
 
-    static func filenameField(in panel: AXUIElement) -> AXUIElement? {
+    /// Every save panel the app has open: dialog-like windows and the sheets on any window.
+    static func openSavePanels(pid: pid_t, ax: CUAXBackend) -> [AXUIElement] {
+        let deadline = Deadline()
+        var out: [AXUIElement] = []
+        for w in ax.elements(ax.application(pid), kAXWindowsAttribute) {
+            if deadline.passed { break }
+            if let sub = ax.string(w, kAXSubroleAttribute), panelSubroles.contains(sub), filenameField(in: w, ax: ax) != nil {
+                out.append(w)
+                continue
+            }
+            for c in ax.elements(w, kAXChildrenAttribute) where ax.string(c, kAXRoleAttribute) == kAXSheetRole {
+                if filenameField(in: c, ax: ax) != nil { out.append(c) }
+            }
+        }
+        return out
+    }
+
+    static func filenameField(in panel: AXUIElement, ax: CUAXBackend) -> AXUIElement? {
         var queue: [(AXUIElement, Int)] = [(panel, 0)]
         var seen = 0
-        while !queue.isEmpty, seen < 300 {
+        let deadline = Deadline()
+        while !queue.isEmpty, seen < 300, !deadline.passed {
             let (e, depth) = queue.removeFirst()
             seen += 1
-            if let id = AX.string(e, kAXIdentifierAttribute), saveNameFieldIdentifiers.contains(id) { return e }
-            if depth < 8 { queue.append(contentsOf: AX.elements(e, kAXChildrenAttribute).map { ($0, depth + 1) }) }
+            if let id = ax.string(e, kAXIdentifierAttribute), saveNameFieldIdentifiers.contains(id) { return e }
+            if depth < 8 { queue.append(contentsOf: ax.elements(e, kAXChildrenAttribute).map { ($0, depth + 1) }) }
         }
         return nil
     }
 
     /// Location pop-up values of a panel (the folder it will save into, by display name).
-    static func locationNames(in panel: AXUIElement) -> [String] {
+    static func locationNames(in panel: AXUIElement, ax: CUAXBackend) -> [String] {
         var out: [String] = []
         var queue: [(AXUIElement, Int)] = [(panel, 0)]
         var seen = 0
-        while !queue.isEmpty, seen < 300 {
+        let deadline = Deadline()
+        while !queue.isEmpty, seen < 300, !deadline.passed {
             let (e, depth) = queue.removeFirst()
             seen += 1
-            if AX.string(e, kAXRoleAttribute) == kAXPopUpButtonRole, let v = AX.string(e, kAXValueAttribute) { out.append(v) }
-            if depth < 8 { queue.append(contentsOf: AX.elements(e, kAXChildrenAttribute).map { ($0, depth + 1) }) }
+            if ax.string(e, kAXRoleAttribute) == kAXPopUpButtonRole, let v = ax.string(e, kAXValueAttribute) { out.append(v) }
+            if depth < 8 { queue.append(contentsOf: ax.elements(e, kAXChildrenAttribute).map { ($0, depth + 1) }) }
         }
         return out
     }
 
-    /// Typing `text` into `e`: refused when `e` is in a save panel and the text names a protected path.
-    static func checkTypedIntoSavePanel(_ e: AXUIElement, text: String) throws {
-        // The text test is free; the panel walk only runs for text that names a protected path.
-        guard CUFloors.typedSavePathIsProtected(text), savePanel(containing: e) != nil else { return }
-        throw CUError.refused(.savePath, "saving to that location is not allowed — ask the user to do it")
+    /// Whether a panel currently points at a protected destination (file name or folder).
+    static func panelIsProtected(_ panel: AXUIElement, ax: CUAXBackend) -> Bool {
+        let name = filenameField(in: panel, ax: ax).flatMap { ax.string($0, kAXValueAttribute) } ?? ""
+        let folders = locationNames(in: panel, ax: ax)
+        return CUFloors.typedSavePathIsProtected(name) || folders.contains(where: protectedFolderNames.contains)
     }
 
-    /// Pressing a button in a save panel: refused when the file name or the folder is protected.
-    static func checkPressInSavePanel(_ e: AXUIElement) throws {
-        guard let panel = savePanel(containing: e) else { return }
-        let name = filenameField(in: panel).flatMap { AX.string($0, kAXValueAttribute) } ?? ""
-        let folders = locationNames(in: panel)
-        if CUFloors.typedSavePathIsProtected(name) || folders.contains(where: protectedFolderNames.contains) {
-            throw CUError.refused(.savePath, "saving to that location is not allowed — ask the user to do it")
-        }
+    static let savePathRefusal = CUError.refused(
+        .savePath, "a save panel points at a protected location (a shell startup file, ~/.ssh or LaunchAgents) — ask the user to finish or cancel it")
+
+    /// Typing `text` into `e`: refused when `e` is in a save panel and the text names a protected path.
+    static func checkTypedIntoSavePanel(_ e: AXUIElement, text: String, ax: CUAXBackend) throws {
+        // The text test is free; the panel walk only runs for text that names a protected path.
+        guard CUFloors.typedSavePathIsProtected(text), savePanel(containing: e, ax: ax) != nil else { return }
+        throw savePathRefusal
     }
 }
