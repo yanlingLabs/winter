@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import WinterKit
 import SwiftUI
 
@@ -64,6 +65,26 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// in its own completion. Nothing else retains a sheet controller, so without this it would be
     /// deallocated the instant `newSession()` returned, taking its Start/Cancel callbacks with it.
     private var dirPickerSheet: WorkingDirPickerSheetController?
+
+    // MARK: - The live mirror (spine §11b)
+
+    /// The pinned session, as it changes (a repin in place). Feeds the mirror binder.
+    private let mirrorSessionChanged = PassthroughSubject<String, Never>()
+    private var mirrorBinder: MirrorWindowBinder?
+    private var mirrorWatch: AnyCancellable?
+
+    /// Shows the computer-use mirror inside this window — only while it is wide enough
+    /// (`MirrorRules.detachedMinWidth`) and its session is using the computer — as a child panel at the
+    /// top-left over the traffic lights. Nothing is watched while the window is closed.
+    func attachMirror(_ coordinator: MirrorCoordinator) {
+        guard mirrorBinder == nil, !didClose else { return }
+        let binder = MirrorWindowBinder(coordinator: coordinator, kind: .detached, window: window, sessionId: sessionId.isEmpty ? nil : sessionId)
+        mirrorBinder = binder
+        let sessions = mirrorSessionChanged.prepend(sessionId)
+        let running = session.$state.map(\.turnRunning).removeDuplicates()
+        mirrorWatch = Publishers.CombineLatest(sessions, running)
+            .sink { [weak binder] sessionId, turnRunning in binder?.update(sessionId: sessionId.isEmpty ? nil : sessionId, turnRunning: turnRunning) }
+    }
 
     /// Test-only read-through — lets tests assert on the constructed window's frame/styleMask
     /// without exposing `window` itself past this seam (same convention as
@@ -432,6 +453,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     func selectSession(_ sessionId: String) {
         guard sessionId != self.sessionId else { return }
         self.sessionId = sessionId
+        mirrorSessionChanged.send(sessionId)
         adapter.isChatSession = Self.isChatSession(sessionId, in: directory.rows)
         // mac-chat-parity T4: and a different POLICY — re-derived off this window's own directory,
         // never carried across the switch (`seedSessionPolicy` resets to "unknown" for an arriving
@@ -690,6 +712,9 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         feedTask?.cancel()
         feedTask = nil
         feed.stop()
+        mirrorWatch = nil
+        mirrorBinder?.close()
+        mirrorBinder = nil
         if let escMonitor {
             NSEvent.removeMonitor(escMonitor)
             self.escMonitor = nil
