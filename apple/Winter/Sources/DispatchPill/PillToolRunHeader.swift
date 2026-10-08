@@ -277,9 +277,9 @@ struct PillReviewGlow: ViewModifier {
                                              style: expanded ? .continuous : .circular)
                 Group {
                     if chrome.pulses {
-                        TimelineView(.animation) { timeline in
-                            glow(shape, level: pillReviewPulseLevel(at: timeline.date.timeIntervalSinceReferenceDate))
-                        }
+                        // A Core Animation breath (render server): no per-frame SwiftUI work in the transcript.
+                        PillReviewBreath(cornerRadius: expanded ? PillMorphChrome.expandedCornerRadius : PillToolRunHeader.height / 2,
+                                         continuous: expanded)
                     } else {
                         glow(shape, level: 0.7)
                     }
@@ -640,5 +640,95 @@ struct PillFlowLayout: Layout {
             }
             y += rowHeight + lineSpacing
         }
+    }
+}
+
+// MARK: - The review glow, on the render server
+
+/// The amber wash and rim breathing about every `pillReviewPulsePeriod`: a layer whose fill and border colour
+/// animate between the glow's weakest and strongest, forever, on Core Animation. Never takes a click.
+private struct PillReviewBreath: NSViewRepresentable {
+    let cornerRadius: CGFloat
+    let continuous: Bool
+
+    func makeNSView(context: Context) -> PillReviewBreathView {
+        let view = PillReviewBreathView()
+        view.configure(cornerRadius: cornerRadius, continuous: continuous)
+        return view
+    }
+
+    func updateNSView(_ view: PillReviewBreathView, context: Context) {
+        view.configure(cornerRadius: cornerRadius, continuous: continuous)
+    }
+}
+
+final class PillReviewBreathView: NSView {
+    static let animationKey = "breath"
+    private let glowLayer = CALayer()
+    private var cornerRadius: CGFloat = 0
+    private var continuous = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.addSublayer(glowLayer)
+        glowLayer.borderWidth = 1.5
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func configure(cornerRadius: CGFloat, continuous: Bool) {
+        guard cornerRadius != self.cornerRadius || continuous != self.continuous else { return }
+        self.cornerRadius = cornerRadius
+        self.continuous = continuous
+        needsLayout = true
+    }
+
+    /// The wash and the rim at glow strength `level` (0…1) — the numbers the SwiftUI glow drew.
+    static func colors(level: Double) -> (fill: CGColor, rim: CGColor) {
+        let amber = NSColor(pillReviewAmber)
+        return (amber.withAlphaComponent(0.08 + 0.14 * level).cgColor, amber.withAlphaComponent(0.35 + 0.45 * level).cgColor)
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        glowLayer.frame = bounds
+        glowLayer.cornerRadius = cornerRadius
+        glowLayer.cornerCurve = continuous ? .continuous : .circular
+        let dim = Self.colors(level: 0), bright = Self.colors(level: 1)
+        glowLayer.backgroundColor = Self.colors(level: 0.5).fill
+        glowLayer.borderColor = Self.colors(level: 0.5).rim
+        CATransaction.commit()
+        guard window != nil else { return }
+        if glowLayer.animation(forKey: Self.animationKey) == nil {
+            glowLayer.add(Self.breath(dim: dim, bright: bright), forKey: Self.animationKey)
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        glowLayer.removeAnimation(forKey: Self.animationKey) // dropped on leaving a window anyway; re-added in layout
+        needsLayout = true
+    }
+
+    static func breath(dim: (fill: CGColor, rim: CGColor), bright: (fill: CGColor, rim: CGColor)) -> CAAnimationGroup {
+        func animation(_ keyPath: String, _ from: CGColor, _ to: CGColor) -> CABasicAnimation {
+            let a = CABasicAnimation(keyPath: keyPath)
+            a.fromValue = from
+            a.toValue = to
+            a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            return a
+        }
+        let group = CAAnimationGroup()
+        group.animations = [animation("backgroundColor", dim.fill, bright.fill), animation("borderColor", dim.rim, bright.rim)]
+        group.duration = pillReviewPulsePeriod / 2
+        group.autoreverses = true
+        group.repeatCount = .infinity
+        group.isRemovedOnCompletion = false
+        return group
     }
 }

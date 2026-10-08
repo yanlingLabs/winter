@@ -319,3 +319,53 @@ final class WinterClientTests: XCTestCase {
         }
     }
 }
+
+
+final class EventTrafficTests: XCTestCase {
+    private final class Clock: @unchecked Sendable { var t: TimeInterval = 10 }
+
+    func testBacklogIsWhatWasYieldedMinusWhatWasTaken() {
+        let clock = Clock()
+        let traffic = EventTraffic(clock: { clock.t })
+        XCTAssertEqual(traffic.backlog, 0)
+        XCTAssertEqual(traffic.oldestAge, 0)
+        for _ in 0..<5 { traffic.noteYielded(); clock.t += 1 }
+        XCTAssertEqual(traffic.backlog, 5)
+        XCTAssertEqual(traffic.oldestAge, 5, accuracy: 0.001, "the first has waited since t=10")
+        traffic.noteConsumed(); traffic.noteConsumed()
+        XCTAssertEqual(traffic.backlog, 3)
+        XCTAssertEqual(traffic.oldestAge, 3, accuracy: 0.001, "and now the third is the oldest")
+        for _ in 0..<10 { traffic.noteConsumed() }
+        XCTAssertEqual(traffic.backlog, 0, "taking more than was yielded never goes negative")
+        XCTAssertEqual(traffic.oldestAge, 0)
+    }
+
+    func testAConsumerThatNeverCountsOffCannotGrowItWithoutBound() {
+        let traffic = EventTraffic(clock: { 1 })
+        for _ in 0..<200_000 { traffic.noteYielded() }
+        XCTAssertLessThanOrEqual(traffic.storedCount, EventTraffic.cap, "bounded however many events nobody counts off")
+        XCTAssertGreaterThan(traffic.backlog, EventTraffic.cap / 2, "and still a useful floor")
+        for _ in 0..<(EventTraffic.cap * 2) { traffic.noteConsumed() }
+        XCTAssertEqual(traffic.backlog, 0)
+    }
+
+    func testAClientCountsEveryEventItPutsOnItsStream() async throws {
+        let t = ScriptedTransport()
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "test")
+        async let connected: Void = client.connect()
+        let hello = try await waitForSent(t, count: 1)[0]
+        t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true}}"#)
+        try await connected
+        XCTAssertEqual(client.traffic.backlog, 0)
+        for n in 1...3 {
+            t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_created","seq":\#(n),"sessionId":"s_\#(n)","ts":5,"scope":"global"}}"#)
+        }
+        var waited = 0
+        while client.traffic.backlog < 3, waited < 100 { try await Task.sleep(nanoseconds: 20_000_000); waited += 1 }
+        XCTAssertEqual(client.traffic.backlog, 3, "three events on the stream, none taken")
+        var iterator = client.events.makeAsyncIterator()
+        _ = await iterator.next()
+        client.traffic.noteConsumed()
+        XCTAssertEqual(client.traffic.backlog, 2)
+    }
+}

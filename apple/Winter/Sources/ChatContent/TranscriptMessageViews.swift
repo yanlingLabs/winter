@@ -255,7 +255,7 @@ struct RuledUserMessageText: View {
         .background(alignment: .top) {
             message
                 .hidden()
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { fullHeight = $0 }
+                .onMeasuredHeight { fullHeight = $0 }
         }
     }
 
@@ -769,19 +769,13 @@ struct TranscriptThinkingRow: View {
 }
 
 /// A slow opacity breath while a quiet thinking line is live — the line-style stand-in for the pill's
-/// shimmer (which paints white, a pill-only treatment).
+/// shimmer (which paints white, a pill-only treatment). On the render server (`OpacityBreath`), never a
+/// display-rate ticker inside a lazy row.
 private struct ThinkingPulse: ViewModifier {
     let active: Bool
 
     func body(content: Content) -> some View {
-        if active {
-            TimelineView(.animation) { timeline in
-                let t = timeline.date.timeIntervalSinceReferenceDate
-                content.opacity(0.55 + 0.45 * (0.5 + 0.5 * cos(t * .pi)))
-            }
-        } else {
-            content
-        }
+        content.modifier(OpacityBreath(active: active, low: 0.55, high: 1, halfPeriod: 1))
     }
 }
 

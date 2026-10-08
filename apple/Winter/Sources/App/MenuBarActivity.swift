@@ -26,6 +26,13 @@ import WinterProtocol
 enum MenuBarActivity: Equatable {
     case idle, thinking, working
 
+    /// The activity a session's CURRENT state implies — what the per-event derivation converges on, and what a
+    /// folded replay (whose events were never shown to it one by one) is reconciled to.
+    static func derived(from state: OrbSessionState) -> MenuBarActivity {
+        guard state.turnRunning else { return .idle }
+        return SessionReducer.outstandingToolName(state) != nil ? .working : .thinking
+    }
+
     /// `toolsOutstanding`: a call of the running turn still has no result — concurrent read-only
     /// calls report one by one (2026-10-02), so one call's result no longer ends the working state.
     static func next(after current: MenuBarActivity, event: SessionEvent, toolsOutstanding: Bool = false) -> MenuBarActivity {

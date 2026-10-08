@@ -281,6 +281,153 @@ final class SessionLagBenchmarkTests: XCTestCase {
         // in the same league as the walk it replaced.
         XCTAssertLessThanOrEqual(after, before * 2, "the failure line stays cheap")
     }
+
+    // MARK: - A long history, a backlog burst, and then nothing
+
+    /// The persisted events of the session (what a replay carries): no streamed chunks.
+    private func persisted(_ events: [SessionEvent]) -> [SessionEvent] { events.filter { !$0.isTransient && !$0.isStreamedChunk } }
+
+    /// The orb feed used to take a session's whole history event by event; now it holds it and folds it once. The
+    /// same events, both ways: publishes, wall-clock, and that they end in the same state.
+    func testFoldingAHeldReplayOnceBeatsFoldingItEventByEvent() {
+        let (all, source) = session()
+        let events = persisted(all)
+        let eachModel = SessionModel(notifier: Silent())
+        var eachPublishes = 0
+        let eachWatch = eachModel.$state.dropFirst().sink { _ in eachPublishes += 1 }
+        let each = time { for e in events { eachModel.apply(e) } }
+        let onceModel = SessionModel(notifier: Silent())
+        var oncePublishes = 0
+        let onceWatch = onceModel.$state.dropFirst().sink { _ in oncePublishes += 1 }
+        let once = time { onceModel.apply(replay: events) }
+        print(String(format: "BENCH [%@] replay of %d persisted events: event by event %.1f ms, %d publishes; held and folded once %.1f ms, %d publish",
+                     source, events.count, each, eachPublishes, once, oncePublishes))
+        XCTAssertEqual(oncePublishes, 1)
+        XCTAssertGreaterThan(eachPublishes, 100)
+        XCTAssertEqual(onceModel.state.exchanges.count, eachModel.state.exchanges.count)
+        XCTAssertEqual(onceModel.state.completedTurns, eachModel.state.completedTurns)
+        XCTAssertLessThan(once, each, "one fold is never slower than a copy per event")
+        withExtendedLifetime((eachWatch, onceWatch)) {}
+    }
+
+    /// How far behind can a long session fall when a burst piles up? The same 150 turns (750 events) applied to a
+    /// 1,000-exchange session one event at a time — a copy of the transcript's array and a publish each — and as
+    /// one batch (`apply(replay:)`, which is what a live batch would be). Printed for the record; asserted only as a ratio.
+    func testABurstOnAThousandExchangeSessionOneAtATimeAndAsABatch() {
+        func turns(_ range: ClosedRange<Int>) -> [SessionEvent] {
+            range.flatMap { n -> [SessionEvent] in
+                [ReplayBufferTests.event(["type": "user_message", "seq": n * 10 + 1, "ts": 1, "threadId": "main", "text": "do \(n)", "clientName": "orb"], session: sid),
+                 ReplayBufferTests.event(["type": "turn_started", "seq": n * 10 + 2, "ts": 2, "threadId": "main"], session: sid),
+                 ReplayBufferTests.event(["type": "tool_call", "seq": n * 10 + 3, "ts": 3, "threadId": "main", "callId": "c\(n)", "name": "bash", "argsJson": #"{"command":"ls"}"#], session: sid),
+                 ReplayBufferTests.event(["type": "tool_result", "seq": n * 10 + 4, "ts": 4, "threadId": "main", "callId": "c\(n)", "output": "ok", "isError": false], session: sid),
+                 ReplayBufferTests.event(["type": "turn_completed", "seq": n * 10 + 5, "ts": 5, "threadId": "main", "stopReason": "end_turn", "inputTokens": 1, "outputTokens": 1], session: sid)]
+            }
+        }
+        let history = turns(1...1_000)
+        let burst = turns(1_001...1_150)
+        func longModel() -> SessionModel {
+            let model = SessionModel(notifier: Silent())
+            model.apply(replay: history)
+            return model
+        }
+        let oneAtATime = longModel()
+        var singlePublishes = 0
+        let w1 = oneAtATime.$state.dropFirst().sink { _ in singlePublishes += 1 }
+        let single = time { for e in burst { oneAtATime.apply(e) } }
+        let batched = longModel()
+        var batchPublishes = 0
+        let w2 = batched.$state.dropFirst().sink { _ in batchPublishes += 1 }
+        let batch = time { batched.apply(replay: burst) }
+        print(String(format: "BENCH a %d-event burst on a %d-exchange session: one at a time %.0f ms (%d publishes), as one batch %.1f ms (%d publish)",
+                     burst.count, oneAtATime.state.exchanges.count - 150, single, singlePublishes, batch, batchPublishes))
+        XCTAssertEqual(oneAtATime.state.exchanges.count, batched.state.exchanges.count)
+        XCTAssertEqual(batchPublishes, 1)
+        XCTAssertLessThan(batch, single, "a batch is never slower than a copy per event")
+        withExtendedLifetime((w1, w2)) {}
+    }
+
+    /// Counts the main run loop's trips to sleep: a thread with nothing left to do makes almost none.
+    private final class RunLoopTrips {
+        private(set) var count = 0
+        private var observer: CFRunLoopObserver?
+        init() {
+            observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, true, 0) { [unowned self] _, _ in self.count += 1 }
+            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+        }
+        deinit { if let observer { CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, .commonModes) } }
+    }
+
+    private func wire(_ event: SessionEvent) -> String {
+        let data = try! JSONEncoder().encode(event)
+        return #"{"jsonrpc":"2.0","method":"event","params":\#(String(decoding: data, as: UTF8.self))}"#
+    }
+
+    /// A long transcript on a pinned feed, a burst of live events that piles up behind the main thread, and then
+    /// silence. The backlog drains to zero, and once it has NOTHING keeps working: no publish, no event waiting, no
+    /// chunk held, and the main run loop goes to sleep and stays there.
+    func testALongSessionTakesABacklogBurstAndThenSettlesToZeroWork() async throws {
+        // The test host is never perfectly quiet (other suites leave tickers behind), so the run loop's trips are
+        // measured against this process's own baseline before anything of the feed exists.
+        let baselineTrips = RunLoopTrips()
+        try await Task.sleep(nanoseconds: 500_000_000)
+        let baseline = baselineTrips.count
+        let (all, source) = session()
+        var history = persisted(all)
+        // The session's last turn is over (the synthetic one is cut mid-turn), so a burst of new turns starts clean.
+        history.append(ReplayBufferTests.event(["type": "turn_completed", "seq": (history.map(\.seq).max() ?? 0) + 1, "ts": 9, "threadId": "main", "stopReason": "end_turn", "inputTokens": 1, "outputTokens": 1], session: sid))
+        let t = AppScriptedTransport()
+        let model = SessionModel(notifier: Silent())
+        let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "bench", mode: .pinned(sessionId: sid), session: model)
+        let startTask = Task { await feed.start() }
+        defer { startTask.cancel(); feed.stop() }
+
+        await waitUntil { t.sent.count >= 1 }
+        t.feed(#"{"jsonrpc":"2.0","id":\#(lineJSON(t.sent[0])["id"] as! Int),"result":{"ok":true}}"#)
+        await waitUntil { t.sent.count >= 2 }
+        let attachId = lineJSON(t.sent[1])["id"] as! Int
+        for e in history { t.feed(wire(e)) }
+        let ceiling = history.map(\.seq).max() ?? 0
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachId),"result":{"ok":true,"lastSeq":\#(ceiling)}}"#)
+        await waitUntil(10) { !model.isLoadingHistory && model.state.exchanges.count > 0 }
+        XCTAssertFalse(model.isLoadingHistory)
+        let exchangesBefore = model.state.exchanges.count
+
+        // The burst: 150 more turns' worth of live events, all handed over at once.
+        var seq = ceiling + 1
+        var burst: [SessionEvent] = []
+        for n in 0..<150 {
+            burst.append(ReplayBufferTests.event(["type": "user_message", "seq": seq, "ts": 1, "threadId": "main", "text": "burst \(n)", "clientName": "orb"], session: sid)); seq += 1
+            burst.append(ReplayBufferTests.event(["type": "turn_started", "seq": seq, "ts": 2, "threadId": "main"], session: sid)); seq += 1
+            burst.append(ReplayBufferTests.event(["type": "tool_call", "seq": seq, "ts": 3, "threadId": "main", "callId": "burst_\(n)", "name": "bash", "argsJson": #"{"command":"ls"}"#], session: sid)); seq += 1
+            for k in 0..<10 {
+                burst.append(.assistantDelta(.init(seq: seq, sessionId: sid, ts: 3, threadId: "main", delta: "chunk \(k) "))); 
+            }
+            burst.append(ReplayBufferTests.event(["type": "tool_result", "seq": seq, "ts": 4, "threadId": "main", "callId": "burst_\(n)", "output": "ok", "isError": false], session: sid)); seq += 1
+            burst.append(ReplayBufferTests.event(["type": "turn_completed", "seq": seq, "ts": 5, "threadId": "main", "stopReason": "end_turn", "inputTokens": 1, "outputTokens": 1], session: sid)); seq += 1
+        }
+        var publishes = 0
+        let watch = model.$state.dropFirst().sink { _ in publishes += 1 }
+        let started = DispatchTime.now().uptimeNanoseconds
+        for e in burst { t.feed(wire(e)) }
+        await waitUntil(20) { model.state.exchanges.count >= exchangesBefore + 150 && !model.state.turnRunning }
+        let drainedMs = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+        XCTAssertEqual(model.state.exchanges.count, exchangesBefore + 150, "the whole burst was folded")
+        print(String(format: "BENCH [%@] a %d-event live burst on a %d-exchange session: drained in %.0f ms with %d publishes",
+                     source, burst.count, exchangesBefore, drainedMs, publishes))
+
+        // …and then nothing at all.
+        await waitUntil(5) { feed.diagnostics.backlog == 0 }
+        XCTAssertEqual(feed.diagnostics.backlog, 0, "no event on the stream, no chunk held")
+        try await Task.sleep(nanoseconds: 300_000_000) // let the last timers go
+        let settled = publishes
+        let trips = RunLoopTrips()
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(publishes, settled, "once idle, nothing publishes")
+        XCTAssertEqual(feed.diagnostics.backlog, 0)
+        XCTAssertLessThanOrEqual(trips.count, baseline + max(baseline / 2, 8),
+                                 "and the feed adds no ticking to the main run loop: \(trips.count) trips in half a second against a baseline of \(baseline)")
+        withExtendedLifetime(watch) {}
+    }
 }
 
 private final class Silent: NotificationPosting {

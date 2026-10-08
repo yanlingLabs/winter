@@ -827,7 +827,9 @@ final class DispatchPillController: ObservableObject {
     func accessoryLayoutChanged(frame: CGRect) {
         accessoryFrame = frame
         let size = frame.size
-        guard size != accessorySize else { return }
+        // A fraction of a point of rounding is not a new layout: resizing the canvas for it would re-measure the
+        // accessories, which could round the other way.
+        guard sizeChanged(size, from: accessorySize) else { return }
         accessorySize = size
         reconcileCanvas()
         updateMouseGate()

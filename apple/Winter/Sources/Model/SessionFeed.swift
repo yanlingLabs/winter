@@ -73,6 +73,23 @@ final class SessionFeed {
         self.mode = mode
         self.session = session
         if case .pinned = mode { session.isLoadingHistory = true }
+        FeedRegistry.shared.register(self)
+    }
+
+    // MARK: - What a hang report names
+
+    /// The session this feed shows right now, for a feed that follows focus (`.pinned` knows its own).
+    var focusedSessionIdProvider: (() -> String?)?
+    /// Events held outside this feed that are still waiting to be folded (the owner's own queues).
+    var extraBacklog: (() -> Int)?
+
+    /// What this feed is doing, read from the main thread: the session, whether its turn is live per the client's
+    /// reducer, and how much is waiting — events on the stream, streamed chunks, a held replay, the owner's queues.
+    var diagnostics: FeedDiagnostics {
+        FeedDiagnostics(sessionId: pinnedSessionId ?? focusedSessionIdProvider?(),
+                        turnLive: session.state.turnRunning,
+                        backlog: client.traffic.backlog + chunks.count + (replayBuffer?.count ?? 0) + (extraBacklog?() ?? 0),
+                        oldestEventAge: client.traffic.oldestAge)
     }
 
     /// Task 3: the fixed session id in `.pinned` mode; `nil` in `.followFocus` mode (which has no
@@ -124,6 +141,7 @@ final class SessionFeed {
         pumpTask = Task { [weak self] in
             guard let self else { return }
             for await ev in self.client.events {
+                self.client.traffic.noteConsumed()
                 await self.handle(ev)
                 if Task.isCancelled { return }
             }
