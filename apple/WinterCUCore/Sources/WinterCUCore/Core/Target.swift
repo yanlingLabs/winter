@@ -42,6 +42,20 @@ final class CUTarget: @unchecked Sendable {
         set { lock.lock(); _lastActionMs = newValue; lock.unlock() }
     }
 
+    /// The app's real windows when this target last looked (bind, then each state), to name new ones.
+    var knownWindows: Set<UInt32> {
+        get { lock.lock(); defer { lock.unlock() }; return _knownWindows }
+        set { lock.lock(); _knownWindows = newValue; lock.unlock() }
+    }
+    private var _knownWindows: Set<UInt32> = []
+
+    /// The last full read of the window and when it was taken, reused by `find` while nothing has changed.
+    var lastFullRead: (roots: [CUNode], atMs: Double)? {
+        get { lock.lock(); defer { lock.unlock() }; return _lastFullRead }
+        set { lock.lock(); _lastFullRead = newValue; lock.unlock() }
+    }
+    private var _lastFullRead: (roots: [CUNode], atMs: Double)?
+
     /// Where the agent cursor was last sent (screen points): the place for cursor events that have none of
     /// their own (waits, refusals, captions, done).
     var cursorPoint: CGPoint? {
@@ -82,7 +96,7 @@ final class CUTarget: @unchecked Sendable {
     func resetForNewWindow() {
         refs = CURefCache<AXIdentity>(firstRef: refs.highestRef + 1)
         lastTargeted = nil
-        lock.withLock { _snapshots.removeAll() }
+        lock.withLock { _snapshots.removeAll(); _lastFullRead = nil }
     }
 
     func nextSnapshotId() -> String {

@@ -135,9 +135,15 @@ final class FakeSystem: CUSystemBackend {
     func appRunning(_ pid: pid_t) -> Bool { running.contains(pid) }
     func bundleId(pid: pid_t) -> String? { bundles[pid] }
     func processName(pid: pid_t) -> String? { names[pid] }
-    func window(id: UInt32) -> CUWindowServerWindow? { windows[id] }
+    /// Window ids the window server misses on the next lookup only (a window changing Space).
+    var missOnce: Set<UInt32> = []
+    func window(id: UInt32) -> CUWindowServerWindow? {
+        if missOnce.contains(id) { return nil }
+        return windows[id]
+    }
     func windows(pid: pid_t) -> [CUWindowServerWindow] {
-        windows.values.filter { $0.pid == pid && $0.layer == 0 }.sorted { $0.id < $1.id }
+        defer { missOnce.removeAll() }
+        return windows.values.filter { $0.pid == pid && $0.layer == 0 && !missOnce.contains($0.id) }.sorted { $0.id < $1.id }
     }
     /// Whether a SkyLight move "works"; on success the window comes on screen and `onMove` runs.
     var moveSucceeds = false

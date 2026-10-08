@@ -209,6 +209,7 @@ extension CUCore {
             guard a.point == nil else { throw CUError.invalidParams("click takes a ref or a point, not both") }
             let e = try element(ref, in: t)
             let info = ElementInfo(e, ax)
+            try requireEnabled(info, ref: ref, t)
             try pasteMenuGuard(e, info, p, t)
             t.noteTargeted(e, at: clock.nowMs())
             announceTarget(t, info, pressing: button == .left)
@@ -768,6 +769,7 @@ extension CUCore {
     func execute(_ plan: ChordPlan, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         switch plan {
         case .menuItem(let element, let title):
+            aimMenuCommands(at: t)
             do {
                 try ax.perform(element, kAXPressAction)
             } catch let error where Self.deliveryUncertain(error) {
@@ -1153,6 +1155,7 @@ extension CUCore {
     private func axAction(_ a: CUAXAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         let e = try element(a.ref, in: t)
         let info = ElementInfo(e, ax)
+        try requireEnabled(info, ref: a.ref, t)
         guard let name = CURoleWords.resolveAction(a.name, among: info.actions) else {
             let have = info.actions.map(CURoleWords.actionWords).joined(separator: ", ")
             throw CUError.invalidParams("[\(a.ref)] has no action “\(a.name)” — it has: \(have.isEmpty ? "none" : have)")
@@ -1207,12 +1210,39 @@ extension CUCore {
         // A menu command has no on-screen point in the background: a caption only, no press.
         cursor(t, "caption", text: Self.caption("Choosing", a.path.joined(separator: " › ")))
         try token.check()
+        aimMenuCommands(at: t)
         do {
             try ax.perform(item.element, kAXPressAction)
         } catch let error where Self.deliveryUncertain(error) {
             throw busyAfterSend(t)
         }
         return ActOutcome(rung: .accessibility)
+    }
+
+    /// Controls a press means something to; a disabled one of these does nothing, so it is refused rather than
+    /// pressed "successfully" (a live run pressed Finder's disabled "Move to Trash" three times to no effect).
+    /// Containers are exempt: apps mark whole groups disabled (Finder's icon-view groups) around live items.
+    static let pressableRoles: Set<String> = [
+        "AXButton", "AXMenuItem", "AXMenuBarItem", "AXMenuButton", "AXPopUpButton", "AXCheckBox", "AXRadioButton",
+        "AXLink", "AXDisclosureTriangle", "AXIncrementor", "AXSwitch", "AXToggle", "AXTab", "AXComboBox",
+    ]
+
+    func requireEnabled(_ info: ElementInfo, ref: Int, _ t: CUTarget) throws {
+        guard info.enabled == false, let role = info.role, Self.pressableRoles.contains(role) else { return }
+        let name = (info.labels.first ?? nil).flatMap { $0.isEmpty ? nil : " \u{201C}\($0.prefix(60))\u{201D}" } ?? ""
+        let why = role == "AXMenuItem" || role == "AXMenuBarItem"
+            ? " — \(t.appName) enables menu commands for its active window and what is selected in it; while it is in the background the command may not apply to the bound window"
+            : " — it does nothing until \(t.appName) enables it"
+        throw CUError.unsupported("[\(ref)]\(name) is disabled right now\(why)")
+    }
+
+    /// Menu commands (the menu bar, or a shortcut that is a menu item) act on the app's main/key window, which
+    /// need not be the bound one when the app is in the background: Finder's Go › Downloads opened a NEW window
+    /// instead of moving the bound one. Making the bound window the app's main window first points them at it.
+    func aimMenuCommands(at t: CUTarget) {
+        if let w = try? windowElement(t), ax.bool(w, kAXMainAttribute) != true {
+            try? ax.set(w, kAXMainAttribute, kCFBooleanTrue)
+        }
     }
 
     // MARK: rungs 2–4
@@ -1378,10 +1408,13 @@ struct ElementInfo {
 
     /// The field's label, description, placeholder and identifiers (for the payment-field floor).
     var labels: [String?]
+    /// `AXEnabled`; nil when the element doesn't say.
+    var enabled: Bool?
 
     static let attributes: [String] = [
         kAXRoleAttribute, kAXSubroleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXTitleAttribute,
         kAXDescriptionAttribute, kAXPlaceholderValueAttribute, kAXIdentifierAttribute, "AXDOMIdentifier",
+        kAXEnabledAttribute,
     ]
 
     init(_ e: AXUIElement, _ ax: CUAXBackend) {
@@ -1393,6 +1426,7 @@ struct ElementInfo {
         }
         labels = [kAXTitleAttribute, kAXDescriptionAttribute, kAXPlaceholderValueAttribute, kAXIdentifierAttribute,
                   "AXDOMIdentifier"].map { a[$0].flatMap(AX.stringValue) }
+        enabled = a[kAXEnabledAttribute].flatMap(AX.boolValue)
         actions = ax.actions(e)
     }
 

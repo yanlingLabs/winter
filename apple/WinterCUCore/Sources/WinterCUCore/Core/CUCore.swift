@@ -211,6 +211,7 @@ public final class CUCore: @unchecked Sendable {
         }()
         // The element is cached now: a window on another Space is not in the AX list to find it again.
         windowElementsLock.withLock { windowElements[target.id] = chosen.element }
+        target.knownWindows = Set(CUBindWait.realWindows(serverNow).map(\.id)).union([chosen.id])
         emit { $0.targetBound(sessionId: p.sessionId, pid: pid, windowID: chosen.id, appName: appName, mirror: p.mirror) }
         return TargetBindResult(targetId: target.id,
                                 app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid),
@@ -348,7 +349,7 @@ public final class CUCore: @unchecked Sendable {
         }
         // Windows on other Spaces or in full screen are listed too (AX alone would leave them out).
         let ids = Set(listed.map(\.id))
-        let elsewhere = server.filter { $0.layer == 0 && !ids.contains($0.id) }
+        let elsewhere = server.filter { CUWindowServer.isRealWindow($0) && !ids.contains($0.id) }
         return TargetWindowsResult(windows: listed.map { CUTargetWindow(id: $0.id, title: $0.title, focused: $0.focused) }
             + elsewhere.map { CUTargetWindow(id: $0.id, title: $0.title, focused: false) })
     }
@@ -400,6 +401,10 @@ public final class CUCore: @unchecked Sendable {
                                     formatter: formatter)
                 }
             }
+            // A menu command or a click may open a window the target is not bound to (Finder's Go › Downloads
+            // opens one when its own window is not the active one): say so, or the model watches the wrong one.
+            let opened = newWindows(t)
+            if !opened.isEmpty { text += "\n" + opened.joined(separator: "\n") }
             t.store(snap)
             return TargetSnapshotResult(snapshotId: snap.id, text: text, isDiff: isDiff, changedRatio: ratio,
                                         settled: settled, waitedMs: waited)
@@ -413,8 +418,33 @@ public final class CUCore: @unchecked Sendable {
         let formatter = self.formatter
         return try await queues.run(t.pid) { [self] in
             try floorCheckPrivacy(t)
-            let obs = try observe(t, within: nil)
-            return TargetFindResult(elements: CUFinder.find(p.query, in: obs.roots, formatter: formatter))
+            let roots = try freshRead(t) ?? observe(t, within: nil).roots
+            return TargetFindResult(elements: CUFinder.find(p.query, in: roots, formatter: formatter))
+        }
+    }
+
+    /// How long a full read may answer `find` again (a page's tree takes 0.5–2.5 s to walk; scripts run several
+    /// finds in a row).
+    static let findReuseMs: Double = 1500
+
+    /// The last full read, while it still describes the window: young, and no act and no AX notification
+    /// from the app since. Nil otherwise.
+    func freshRead(_ t: CUTarget) -> [CUNode]? {
+        guard let last = t.lastFullRead, clock.nowMs() - last.atMs <= Self.findReuseMs,
+              (t.lastActionMs ?? 0) <= last.atMs, (monitor.lastNotificationMs(pid: t.pid) ?? 0) <= last.atMs
+        else { return nil }
+        return last.roots
+    }
+
+    /// Notes for the app's real windows that appeared since the target last looked; remembers the current set.
+    func newWindows(_ t: CUTarget) -> [String] {
+        let now = CUBindWait.realWindows(sys.windows(pid: t.pid))
+        let known = t.knownWindows
+        t.knownWindows = Set(now.map(\.id))
+        guard !known.isEmpty else { return [] }
+        return now.filter { !known.contains($0.id) && $0.id != t.windowID }.prefix(3).map { w in
+            let title = w.title.isEmpty ? "" : " \u{201C}\(w.title.prefix(80))\u{201D}"
+            return "new \(t.appName) window\(title) (\(w.id)) — this state is still the bound window; useWindow(\(w.id)) to work in it"
         }
     }
 
@@ -696,10 +726,25 @@ public final class CUCore: @unchecked Sendable {
             lose(t, reason: "app_quit")
             throw CUError.targetLost("\(t.appName) quit — bind it again")
         }
-        if sys.window(id: t.windowID) == nil {
+        if windowGone(t) {
             lose(t, reason: "window_closed")
             throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window")
         }
+    }
+
+    /// The window is gone for good: not in the window server by id, nor in the app's list, twice 150 ms apart.
+    /// One lookup can miss a window that is changing Space (a live run lost Safari's target while the user
+    /// switched desktops, and the rebind found the very same window).
+    func windowGone(_ t: CUTarget) -> Bool { liveServerWindow(t) == nil }
+
+    /// The bound window's window-server record, looked up the same patient way.
+    func liveServerWindow(_ t: CUTarget) -> CUWindowServerWindow? {
+        let id = t.windowID
+        for attempt in 0..<2 {
+            if let w = sys.window(id: id) ?? sys.windows(pid: t.pid).first(where: { $0.id == id }) { return w }
+            if attempt == 0 { usleep(150_000) }
+        }
+        return nil
     }
 
     func lose(_ t: CUTarget, reason: String) {
@@ -717,7 +762,7 @@ public final class CUCore: @unchecked Sendable {
         lastDestroyCheck[pid] = now
         let affected = targets.values.filter { $0.pid == pid }
         lock.unlock()
-        for t in affected where CUWindowServer.window(id: t.windowID) == nil {
+        for t in affected where windowGone(t) {
             lose(t, reason: "window_closed")
         }
     }
@@ -757,7 +802,7 @@ public final class CUCore: @unchecked Sendable {
         // Without the grant AX lists nothing — that must never read as "the window closed".
         try requireAccessibility()
         guard let w = CUAXWindows.list(pid: t.pid, ax: ax, server: sys.windows(pid: t.pid)).first(where: { $0.id == wid }) else {
-            guard let server = sys.window(id: wid) else {
+            guard let server = liveServerWindow(t) else {
                 lose(t, reason: "window_closed")
                 throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window")
             }
@@ -827,6 +872,7 @@ public final class CUCore: @unchecked Sendable {
         if full { t.refs.beginGeneration() }
         var reader = AXTreeReader()
         reader.maxNodes = maxNodes
+        let readAt = clock.nowMs()
         let result = reader.read(roots: rootElements, cache: t.refs, now: clock.nowMs)
         if full, !result.truncated { t.refs.prune() }
         guard !result.roots.isEmpty else {
@@ -834,6 +880,7 @@ public final class CUCore: @unchecked Sendable {
         }
         let hidden = Self.hiddenActions(t.refusedActions)
         let roots = hidden.isEmpty ? result.roots : result.roots.map { Self.removing(hidden, from: $0) }
+        if full { t.lastFullRead = (roots, readAt) }
         var focusedRef: Int?
         if let f = AX.element(app, kAXFocusedUIElementAttribute), let r = t.refs.existingRef(for: AXIdentity(element: f)),
            roots.contains(where: { $0.find(ref: r) != nil }) {

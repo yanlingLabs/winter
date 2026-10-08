@@ -169,8 +169,9 @@ enum AX {
     /// The `AXWindow`s of `pid` with the wanted window ids, found by remote token in ONE walk of the app's
     /// element ids (several off-Space windows cost one probe, not one each). Only an element that is an
     /// `AXWindow` AND reports a wanted window id counts, so a hit is as strong as an `AXWindows` match.
+    /// `stopAtFirst`: one window is enough (a bind takes any of the candidates).
     static func windowsByRemoteToken(pid: pid_t, wanted: Set<CGWindowID>, maxID: UInt64 = remoteProbeMaxID,
-                                     deadlineMs: Double = remoteProbeDeadlineMs) -> RemoteProbe {
+                                     deadlineMs: Double = remoteProbeDeadlineMs, stopAtFirst: Bool = false) -> RemoteProbe {
         var r = RemoteProbe()
         guard let create = createWithRemoteToken else { r.stoppedBy = "a missing SPI"; return r }
         guard !wanted.isEmpty else { r.stoppedBy = "nothing to find"; return r }
@@ -199,9 +200,10 @@ enum AX {
             AXUIElementSetMessagingTimeout(element, 0)  // back to the process-wide timeout
             r.found[wid] = element
             if r.found.count == wanted.count { r.stoppedBy = "finding them all"; break }
+            if stopAtFirst { r.stoppedBy = "finding one"; break }
         }
         r.elapsedMs = elapsed()
-        if r.found.count < wanted.count {
+        if r.found.isEmpty || (!stopAtFirst && r.found.count < wanted.count) {
             let missing = wanted.subtracting(r.found.keys).sorted().map(String.init).joined(separator: ",")
             CULog.bind.notice("remote-token probe for pid \(pid, privacy: .public) missed window(s) \(missing, privacy: .public): probed \(r.probed, privacy: .public) ids up to \(r.lastID, privacy: .public) in \(Int(r.elapsedMs), privacy: .public) ms, stopped by \(r.stoppedBy, privacy: .public)")
         }
