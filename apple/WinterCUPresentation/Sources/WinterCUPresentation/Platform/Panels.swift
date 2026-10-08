@@ -47,7 +47,7 @@ final class FlippedLayerView: NSView {
 @MainActor final class AppKitCursorOverlay: CursorOverlaySurface {
     private let panel: PassivePanel
     private let view: FlippedLayerView
-    private let cursor: AgentCursorLayer
+    private let cursor = CursorRig()
     private var shown = false
 
     init(target: CUWindowRef) {
@@ -56,12 +56,16 @@ final class FlippedLayerView: NSView {
         panel.hasShadow = false
         view = FlippedLayerView(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
         panel.contentView = view
-        cursor = AgentCursorLayer(parent: view.canvas, scale: 1.1)
+        view.canvas.addSublayer(cursor.root)
     }
 
     func place(windowFrame: CGRect, aboveWindow windowID: CGWindowID, reorder: Bool) {
         let frame = AppKitScreens.appKitFrame(windowFrame)
-        if panel.frame != frame { panel.setFrame(frame, display: false) }
+        if panel.frame != frame {
+            panel.setFrame(frame, display: false)
+            cursor.root.frame = CGRect(origin: .zero, size: frame.size)
+            cursor.contentsScale = AppKitScreens.backingScale(for: windowFrame)
+        }
         if shown, reorder { panel.order(.above, relativeTo: Int(windowID)) }
         pendingWindow = windowID
     }
@@ -74,17 +78,18 @@ final class FlippedLayerView: NSView {
         if shown {
             panel.order(.above, relativeTo: Int(pendingWindow))
         } else {
-            cursor.reset()
+            cursor.apply(.hidden)
             panel.orderOut(nil)
         }
     }
 
-    func moveCursor(to point: CGPoint, kind: CUCursorKind, dragTo: CGPoint?) {
-        cursor.show(at: point, kind: kind, dragTo: dragTo)
+    func apply(cursor frame: CursorFrame, style: CursorStyle) {
+        cursor.style = style
+        cursor.apply(frame)
     }
 
     func close() {
-        cursor.reset()
+        cursor.apply(.hidden)
         panel.orderOut(nil)
         panel.close()
     }
@@ -100,8 +105,9 @@ final class FlippedLayerView: NSView {
     private let view: FlippedLayerView
     private let image = CALayer()
     private let caption = CATextLayer()
-    private let cursor: AgentCursorLayer
+    private let cursor: CursorRig
     private let cursorPlane = CALayer()
+    private var cursorWindowSize: CGSize = .zero
     private var stream: MirrorStream?
     private var shown = false
     private var contentSize: CGSize = .zero
@@ -136,7 +142,8 @@ final class FlippedLayerView: NSView {
         // The cursor plane matches the image's letterboxed content rect, so fractions map straight onto it.
         cursorPlane.masksToBounds = true
         canvas.addSublayer(cursorPlane)
-        cursor = AgentCursorLayer(parent: cursorPlane, scale: 0.7)
+        cursor = CursorRig(mapping: CursorRig.Mapping(sizeScale: CUCursorGallery.mirrorScale, showsCaption: false))
+        cursorPlane.addSublayer(cursor.root)
 
         caption.fontSize = 11
         caption.font = NSFont.systemFont(ofSize: 11, weight: .medium)
@@ -191,7 +198,7 @@ final class FlippedLayerView: NSView {
             }, completionHandler: { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self, !self.shown else { return }
-                    self.cursor.reset()
+                    self.cursor.apply(.hidden)
                     self.panel.orderOut(nil)
                 }
             })
@@ -202,11 +209,20 @@ final class FlippedLayerView: NSView {
         if shown { panel.orderFrontRegardless() }
     }
 
-    func showCursor(atFraction fraction: CGPoint, kind: CUCursorKind, dragToFraction: CGPoint?) {
-        let rect = MirrorLayout.aspectFit(aspect: imageAspect, in: CGRect(origin: .zero, size: cursorPlane.bounds.size))
-        let point = MirrorLayout.point(atFraction: fraction, in: rect)
-        let drag = dragToFraction.map { MirrorLayout.point(atFraction: $0, in: rect) }
-        cursor.show(at: point, kind: kind, dragTo: drag)
+    func apply(cursor frame: CursorFrame, style: CursorStyle, windowSize: CGSize) {
+        if windowSize != cursorWindowSize || cursor.root.bounds.size != cursorPlane.bounds.size {
+            cursorWindowSize = windowSize
+            cursor.root.frame = CGRect(origin: .zero, size: cursorPlane.bounds.size)
+            // Window-local points → the live image's letterboxed rect inside the mirror.
+            let rect = MirrorLayout.aspectFit(aspect: imageAspect, in: CGRect(origin: .zero, size: cursorPlane.bounds.size))
+            let k = windowSize.width > 0 ? rect.width / windowSize.width : 1
+            var mapping = cursor.mapping
+            mapping.point = { CGPoint(x: rect.minX + $0.x * k, y: rect.minY + $0.y * k) }
+            cursor.mapping = mapping
+        }
+        cursor.style = style
+        cursor.contentsScale = caption.contentsScale
+        cursor.apply(frame)
     }
 
     func close() {

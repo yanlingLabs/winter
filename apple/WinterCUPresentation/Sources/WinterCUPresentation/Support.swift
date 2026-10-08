@@ -24,8 +24,8 @@ struct PresentationTuning: Sendable {
     var maxMirrors = 2
     /// A mirror fades this long after the last action on its target.
     var idleFade: TimeInterval = 30
-    /// The overlay cursor fades this long after its last action.
-    var cursorIdleHide: TimeInterval = 4
+    /// The overlay cursor rests (breathing) this long after its last action, then fades: the same 30 s as the mirror.
+    var cursorIdleHide: TimeInterval = 30
     /// Mirror stream rate (the ruling allows 10–15).
     var framesPerSecond: Int = 12
     /// How often windows are re-read to follow them, and timers are checked.

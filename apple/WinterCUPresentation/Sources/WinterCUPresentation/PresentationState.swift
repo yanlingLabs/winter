@@ -16,7 +16,8 @@ struct TargetKey: Hashable, Sendable {
 ///   on that target (the next turn working on it) brings it back.
 /// - At most `maxMirrors` are on screen: the wanted, unfaded ones with the most recent activity. Showing a mirror and
 ///   acting on a target both count as activity.
-/// - The overlay cursor of a target shows from its last action until `cursorIdleHide` passes or the turn ends.
+/// - The cursor of a target shows from its last action (resting, breathing) until `cursorIdleHide` passes or the turn
+///   ends; the controller then plays its fade.
 struct PresentationState {
     struct Entry: Equatable {
         var wantsMirror = false
