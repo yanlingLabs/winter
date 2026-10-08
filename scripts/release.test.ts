@@ -205,3 +205,48 @@ describe("A2: winter-core and winter are signed with their bun entitlements, and
     expect(source).toContain('{ path: embeddedAntPath, label: "ant (embedded runtime)", expect: [] }');
   });
 });
+
+// ComputerV2: Winter Computer Use, the helper app with its own TCC grants, is embedded, signed and checked like
+// every other component Winter signs — plus the facts TCC and the daemon key on (scripts/computer-helper-lib.ts).
+describe("ComputerV2: release.ts signs, verifies and scans the Winter Computer Use helper", () => {
+  const REPO_ROOT = join(import.meta.dir, "..");
+  const projectYml = readFileSync(join(REPO_ROOT, "apple", "Winter", "project.yml"), "utf8");
+  const embedScript = readFileSync(join(REPO_ROOT, "scripts", "embed-computer-helper.sh"), "utf8");
+
+  test("project.yml embeds it through embed-computer-helper.sh, Release only, after the WinterComputerUse target builds", () => {
+    expect(projectYml).toContain('"${SRCROOT}/../../scripts/embed-computer-helper.sh"');
+    expect(projectYml).toMatch(/- target: WinterComputerUse\n\s+embed: false/);
+    expect(embedScript).toMatch(/if \[ "\$\{CONFIGURATION:-\}" != "Release" \]; then/);
+  });
+
+  test("the embed re-signs with the hardened runtime, a timestamp, the stable identifier, the STATED requirement — and no entitlements", () => {
+    const sign = embedScript.split("\n").findIndex((l) => l.startsWith("codesign --force"));
+    const line = `${embedScript.split("\n")[sign]} ${embedScript.split("\n")[sign + 1]}`;
+    expect(line).toContain('--identifier "${IDENTIFIER}"');
+    expect(line).toContain("--options runtime");
+    expect(line).toContain("--timestamp");
+    expect(line).toContain('"-r=designated => ${REQUIREMENT}"');
+    expect(line).not.toContain("--entitlements");
+    expect(embedScript).toContain('REQUIREMENT="identifier \\"${IDENTIFIER}\\" and anchor apple generic and certificate leaf[subject.OU] = \\"${TEAM}\\""');
+  });
+
+  test("release.ts asserts its team + timestamp, runs checkSignedHelper on it, and checks the stated requirement is satisfied", () => {
+    expect(source).toMatch(/import \{[^}]*checkSignedHelper[^}]*\} from "\.\/computer-helper-lib"/);
+    expect(source).toContain("const computerHelperApp = join(app, HELPER_EMBED_RELATIVE);");
+    expect(source).toContain('assertSigned(computerHelperApp, "Winter Computer Use");');
+    expect(source).toContain('checkSignedHelper("dist", TEAM_ID, version, {');
+    expect(source).toMatch(/codesign --verify --strict -R='\$\{stated\}' "\$\{computerHelperApp\}"/);
+  });
+
+  test("HARDENING_PINS enrolls it with exactly no cs.* entitlement", () => {
+    expect(source).toContain('{ path: computerHelperApp, label: "Winter Computer Use", expect: [] }');
+  });
+
+  test("the identity scan covers it whole: release.ts refuses any exclusion reaching into Contents/Helpers", () => {
+    expect(source).toContain('scan.excluded.some((p) => p.slice(app.length + 1).startsWith("Contents/Helpers"))');
+  });
+
+  test("the standalone Release build product is dropped from LaunchServices", () => {
+    expect(source).toMatch(/probe\(`"\$\{LSREGISTER\}" -u "\$\{join\(dd, "Build", "Products", "Release", `\$\{HELPER\.dist\.name\}\.app`\)\}"`\);/);
+  });
+});
