@@ -192,6 +192,30 @@ final class ComputerUseHelperClientTests: XCTestCase {
         XCTAssertEqual([rs, rt], ["s_1", "t1"])
     }
 
+    /// A window on another Space or display: the helper may report its size as zero or not at all. That is
+    /// still a bound target and a frame, never a dropped notification.
+    func testAWindowSizeThatReadsZeroOrIsMissingIsStillATargetAndAFrame() async throws {
+        let t = ScriptedTransport()
+        let c = client(t)
+        try await connect(c, t)
+        var it = c.events.makeAsyncIterator()
+
+        t.feed(#"{"jsonrpc":"2.0","method":"view.bound","params":{"sessionId":"s_1","targetId":"t1","pid":501,"windowId":79,"appName":"Notes","bundleId":"x","windowSize":[0,0]}}"#)
+        guard case .bound(_, let zero) = await it.next() else { return XCTFail("a zero size must still bind") }
+        XCTAssertEqual(zero.windowSize, .zero)
+
+        t.feed(#"{"jsonrpc":"2.0","method":"view.bound","params":{"sessionId":"s_1","targetId":"t2","pid":502,"windowId":80,"appName":"Mail","bundleId":"y"}}"#)
+        guard case .bound(_, let missing) = await it.next() else { return XCTFail("a missing size must still bind") }
+        XCTAssertEqual(missing.appName, "Mail")
+        XCTAssertEqual(missing.windowSize, .zero)
+
+        let jpeg = Data([0xFF, 0xD8, 0xFF, 0xD9])
+        t.feed(#"{"jsonrpc":"2.0","method":"view.frame","params":{"sessionId":"s_1","targetId":"t1","seq":3,"jpeg":"\#(jpeg.base64EncodedString())","width":720,"height":540,"windowSize":null}}"#)
+        guard case .frame(let frame) = await it.next() else { return XCTFail("a frame with no size must still arrive") }
+        XCTAssertEqual(frame.seq, 3)
+        XCTAssertEqual(frame.windowSize, .zero)
+    }
+
     func testMalformedAndUnknownNotificationsAreIgnored() async throws {
         let t = ScriptedTransport()
         let c = client(t)

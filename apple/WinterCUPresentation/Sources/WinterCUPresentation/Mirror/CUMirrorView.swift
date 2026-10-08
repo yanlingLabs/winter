@@ -37,13 +37,7 @@ public struct CUMirrorView: View {
             }
             .aspectRatio(aspect, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            Text(model.appName ?? "")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Color.white.opacity(contrast == .increased ? 0.9 : 0.62))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity)
-                .frame(height: 20)
+            caption
         }
         .padding(.horizontal, 3)
         .padding(.top, 3)
@@ -51,7 +45,38 @@ public struct CUMirrorView: View {
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
             .strokeBorder(Color.white.opacity(contrast == .increased ? 0.4 : 0.14), lineWidth: 1))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("Live view of \(model.appName ?? "the app")"))
+        .accessibilityLabel(Text(accessibilityLabel))
+    }
+
+    /// The app's name, and a small "+N" when the session has other targets bound beside it.
+    private var caption: some View {
+        HStack(spacing: 5) {
+            Text(model.appName ?? "")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color.white.opacity(contrast == .increased ? 0.9 : 0.62))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if model.otherTargets > 0 {
+                Text("+\(model.otherTargets)")
+                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Color.white.opacity(contrast == .increased ? 0.95 : 0.78))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.white.opacity(contrast == .increased ? 0.28 : 0.16)))
+                    .fixedSize()
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 20)
+    }
+
+    private var accessibilityLabel: String {
+        let name = model.appName ?? "the app"
+        switch model.otherTargets {
+        case 0: return "Live view of \(name)"
+        case 1: return "Live view of \(name), and 1 other app"
+        default: return "Live view of \(name), and \(model.otherTargets) other apps"
+        }
     }
 
     /// The window's shape (or the frame's, or 16:10 before either is known).
