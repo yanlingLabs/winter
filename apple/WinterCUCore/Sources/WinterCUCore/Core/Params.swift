@@ -98,11 +98,15 @@ public struct TargetBindParams: Codable, Sendable, Equatable {
     public var app: String
     public var window: CUWindowSelector?
     public var mirror: Bool
-    public init(sessionId: String, app: String, window: CUWindowSelector? = nil, mirror: Bool) {
+    /// The `computerUse.privateEventPath` setting (absent → true, its default): may the bind reach a window
+    /// on another Space or in full screen through private APIs (and move it here when needed)?
+    public var privatePath: Bool?
+    public init(sessionId: String, app: String, window: CUWindowSelector? = nil, mirror: Bool, privatePath: Bool? = nil) {
         self.sessionId = sessionId
         self.app = app
         self.window = window
         self.mirror = mirror
+        self.privatePath = privatePath
     }
 }
 public struct CUBoundApp: Codable, Sendable, Equatable {
@@ -129,10 +133,14 @@ public struct TargetBindResult: Codable, Sendable, Equatable {
     public var targetId: String
     public var app: CUBoundApp
     public var window: CUWindowInfo
-    public init(targetId: String, app: CUBoundApp, window: CUWindowInfo) {
+    /// What the bind had to do to get a usable window (bound one on another Space in place, moved one here,
+    /// opened a new one), for the model; absent when it simply bound a window on this desktop.
+    public var detail: String?
+    public init(targetId: String, app: CUBoundApp, window: CUWindowInfo, detail: String? = nil) {
         self.targetId = targetId
         self.app = app
         self.window = window
+        self.detail = detail
     }
 }
 
@@ -146,8 +154,10 @@ public struct TargetUseWindowParams: Codable, Sendable, Equatable {
 }
 public struct TargetUseWindowResult: Codable, Sendable, Equatable {
     public var window: CUWindowInfo
-    public init(window: CUWindowInfo) {
+    public var detail: String?
+    public init(window: CUWindowInfo, detail: String? = nil) {
         self.window = window
+        self.detail = detail
     }
 }
 

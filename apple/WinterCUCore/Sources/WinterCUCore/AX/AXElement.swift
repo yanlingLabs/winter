@@ -125,6 +125,49 @@ enum AX {
         return f(window, &id) == .success && id != 0 ? id : nil
     }
 
+    // MARK: windows on other Spaces
+
+    private typealias CreateWithRemoteToken = @convention(c) (CFData) -> Unmanaged<AXUIElement>?
+    /// `_AXUIElementCreateWithRemoteToken` (HIServices SPI): materialises an element from its 20-byte remote
+    /// token. `kAXWindowsAttribute` leaves out windows on other Spaces and in full screen; enumerating the
+    /// app's element ids through this reaches them where they are (the cua-driver / alt-tab-macos approach).
+    private static let createWithRemoteToken: CreateWithRemoteToken? = {
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementCreateWithRemoteToken") else { return nil }
+        return unsafeBitCast(sym, to: CreateWithRemoteToken.self)
+    }()
+
+    static var remoteTokensAvailable: Bool { createWithRemoteToken != nil }
+
+    /// The 20-byte remote token of element `elementID` of `pid`: pid, 4 zero bytes, `'coco'`, the id.
+    static func remoteToken(pid: pid_t, elementID: UInt64) -> Data {
+        var bytes = [UInt8](repeating: 0, count: 20)
+        withUnsafeBytes(of: pid) { for (i, b) in $0.enumerated() { bytes[i] = b } }
+        withUnsafeBytes(of: Int32(0x636f_636f)) { for (i, b) in $0.enumerated() { bytes[8 + i] = b } }
+        withUnsafeBytes(of: elementID) { for (i, b) in $0.enumerated() { bytes[12 + i] = b } }
+        return Data(bytes)
+    }
+
+    static let remoteProbeMaxID: UInt64 = 2000
+    static let remoteProbeDeadlineMs: Double = 300
+
+    /// The `AXWindow` of `pid` whose window id is `windowID`, found by remote token; nil when the SPI is
+    /// missing, nothing matches, or the 300 ms budget runs out. Only an element that is an `AXWindow` AND
+    /// reports that exact window id is returned, so it is as strong as an `AXWindows` match.
+    static func windowByRemoteToken(pid: pid_t, windowID wanted: CGWindowID) -> AXUIElement? {
+        guard let create = createWithRemoteToken else { return nil }
+        let start = DispatchTime.now().uptimeNanoseconds
+        for id in 0..<remoteProbeMaxID {
+            if Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000 > remoteProbeDeadlineMs { return nil }
+            guard let element = create(remoteToken(pid: pid, elementID: id) as CFData)?.takeRetainedValue() else { continue }
+            AXUIElementSetMessagingTimeout(element, 0.05)
+            if string(element, kAXRoleAttribute) == kAXWindowRole, windowID(element) == wanted {
+                AXUIElementSetMessagingTimeout(element, 0)  // back to the process-wide timeout
+                return element
+            }
+        }
+        return nil
+    }
+
     // MARK: value conversion
 
     static func stringValue(_ v: CFTypeRef) -> String? {

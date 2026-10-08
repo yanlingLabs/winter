@@ -13,6 +13,12 @@ extension CUCore {
     struct ActOutcome {
         var rung: CUInputLadder.Rung
         var detail: String?
+
+        /// Puts `note` (what was done to reach the window) in front of the rung's own detail.
+        func noting(_ note: String?) -> ActOutcome {
+            guard let note else { return self }
+            return ActOutcome(rung: rung, detail: [note, detail].compactMap { $0 }.joined(separator: "; "))
+        }
     }
 
     public func targetAct(_ p: TargetActParams) async throws -> TargetActResult {
@@ -162,13 +168,14 @@ extension CUCore {
     private func pointerClick(_ p: TargetActParams, _ t: CUTarget, at pt: CGPoint, button: CUMouseButton, count: Int,
                               flags: CGEventFlags, _ token: CUCancellation.Token) throws -> ActOutcome {
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
+        let moved = try bringToThisDesktop(p, t)
         emitAction(p, t, pt, "press")
         let synth = self.synth
         let windowFor = self.windowFor(t)
         return try runEvents(p, t, d, focus: true, token) { route, check in
             try synth.click(pid: t.pid, windowFor: windowFor, at: pt, button: button, count: count, flags: flags,
                             route: route, check: check)
-        }
+        }.noting(moved)
     }
 
     /// A screenshot pixel of this target (`shotId`, else its latest shot) → global screen points.
@@ -508,12 +515,13 @@ extension CUCore {
         let dy = a.direction == .down ? -amount : a.direction == .up ? amount : 0
         let dx = a.direction == .right ? -amount : a.direction == .left ? amount : 0
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
+        let moved = try bringToThisDesktop(p, t)
         emitAction(p, t, point, "scroll")
         let synth = self.synth
         let windowFor = self.windowFor(t)
         return try runEvents(p, t, d, focus: false, token) { route, check in
             try synth.scroll(pid: t.pid, windowFor: windowFor, at: point, deltaX: dx, deltaY: dy, route: route, check: check)
-        }
+        }.noting(moved)
     }
 
     /// The element itself when it is a scroll area, else its nearest scroll-area ancestor.
@@ -570,12 +578,13 @@ extension CUCore {
         let from = try point(a.from, "from")
         let to = try point(a.to, "to")
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
+        let moved = try bringToThisDesktop(p, t)
         emit { $0.actionAt(sessionId: p.sessionId, pid: t.pid, windowID: t.windowID, point: from, kind: "drag", dragTo: to) }
         let synth = self.synth
         let windowFor = self.windowFor(t)
         return try runEvents(p, t, d, focus: true, token) { route, check in
             try synth.drag(pid: t.pid, windowFor: windowFor, from: from, to: to, route: route, check: check)
-        }
+        }.noting(moved)
     }
 
     // MARK: select, action, menu

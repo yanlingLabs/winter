@@ -12,6 +12,8 @@ final class CUTarget: @unchecked Sendable {
     let appName: String
     let isChromium: Bool
     let mirror: Bool
+    /// The bind's private-path choice: may observation reach the window on another Space by remote token?
+    let privatePath: Bool
 
     private let lock = NSLock()
     private var _windowID: UInt32
@@ -44,7 +46,8 @@ final class CUTarget: @unchecked Sendable {
     static let keptShots = 8
 
     init(id: String, sessionId: String, pid: pid_t, bundleId: String?, appName: String, isChromium: Bool,
-         mirror: Bool, windowID: UInt32, windowTitle: String) {
+         mirror: Bool, windowID: UInt32, windowTitle: String, privatePath: Bool = true) {
+        self.privatePath = privatePath
         self.id = id
         self.sessionId = sessionId
         self.pid = pid
