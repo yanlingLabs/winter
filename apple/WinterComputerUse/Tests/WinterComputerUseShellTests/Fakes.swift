@@ -178,7 +178,9 @@ struct FakeAuthenticator: PeerAuthenticator {
 
     func advance(by seconds: TimeInterval) {
         now += seconds
-        let due = entries.filter { !$0.cancelled && $0.due <= now }
+        // In time order (as a real clock fires them), schedule order among equals.
+        let due = entries.enumerated().filter { !$0.element.cancelled && $0.element.due <= now }
+            .sorted { ($0.element.due, $0.offset) < ($1.element.due, $1.offset) }.map(\.element)
         entries.removeAll { $0.cancelled || $0.due <= now }
         due.forEach { $0.fire() }
     }
@@ -188,14 +190,21 @@ struct FakeAuthenticator: PeerAuthenticator {
 @MainActor final class FakeCaptureFactory: FrameCaptureFactory {
     final class Running: FrameCapture {
         let windowID: CGWindowID
-        let maxFps: Int
-        let maxWidth: Int
+        var maxFps: Int
+        var maxWidth: Int
         let onFrame: @MainActor (ViewFrame) -> Void
         let onError: @MainActor (Error) -> Void
         var stopped = false
+        /// In-place updates, in order (rate, width).
+        var updates: [(maxFps: Int, maxWidth: Int)] = []
         init(windowID: CGWindowID, maxFps: Int, maxWidth: Int, onFrame: @escaping @MainActor (ViewFrame) -> Void,
              onError: @escaping @MainActor (Error) -> Void) {
             self.windowID = windowID; self.maxFps = maxFps; self.maxWidth = maxWidth; self.onFrame = onFrame; self.onError = onError
+        }
+        func update(maxFps: Int, maxWidth: Int) {
+            updates.append((maxFps, maxWidth))
+            self.maxFps = maxFps
+            self.maxWidth = maxWidth
         }
         func stop() { stopped = true }
     }

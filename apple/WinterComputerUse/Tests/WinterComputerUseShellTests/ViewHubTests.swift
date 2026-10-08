@@ -47,8 +47,9 @@ final class ViewHubTests: XCTestCase {
         XCTAssertEqual(rig.capture.live.count, 1)
         XCTAssertEqual(rig.capture.live.first.map { [$0.maxFps, $0.maxWidth] }, [5, 1000])
         rig.viewHub.unsubscribe(connection: 2, sessionId: "s_1")
-        XCTAssertEqual(rig.capture.live.first.map { [$0.maxFps, $0.maxWidth] }, [15, 1000], "restarted at the remaining subscriber's rate")
-        XCTAssertEqual(rig.capture.started.count, 3, "started, restarted lower, restarted back — a frames:false subscriber never restarts it")
+        XCTAssertEqual(rig.capture.live.first.map { [$0.maxFps, $0.maxWidth] }, [15, 1000], "updated to the remaining subscriber's rate")
+        XCTAssertEqual(rig.capture.started.count, 1, "one stream: lowered and raised in place — never restarted")
+        XCTAssertEqual(rig.capture.started.first.map { $0.updates.map(\.maxFps) }, [5, 15], "a frames:false subscriber has no say")
     }
 
     func testOutOfRangeRequestsAreClamped() {
@@ -63,11 +64,14 @@ final class ViewHubTests: XCTestCase {
         rig.viewHub.bound(notes())
         _ = subscribe(rig, 1, frames: true)
         rig.viewHub.unsubscribe(connection: 1, sessionId: "s_1")
+        XCTAssertEqual(rig.capture.live.count, 1, "kept for the stop grace")
+        rig.clock.advance(by: ViewHub.stopGrace)
         XCTAssertTrue(rig.capture.live.isEmpty)
 
         _ = subscribe(rig, 1, frames: true)
         XCTAssertEqual(rig.capture.live.count, 1)
         rig.viewHub.connectionClosed(1)
+        rig.clock.advance(by: ViewHub.stopGrace)
         XCTAssertTrue(rig.capture.live.isEmpty, "the app went away")
 
         _ = subscribe(rig, 2, frames: true)
@@ -160,9 +164,10 @@ final class ViewHubTests: XCTestCase {
         rig.viewHub.bound(notes())
         _ = subscribe(rig, 1, frames: true, fps: 10)
         let first = rig.capture.live[0]
-        _ = subscribe(rig, 1, frames: true, fps: 5) // restart
+        rig.viewHub.windowChanged(targetId: "t1", windowId: 78, windowFrame: CGRect(x: 0, y: 0, width: 400, height: 300)) // a new stream
         first.onFrame(ViewFrame(jpeg: Data([1]), width: 1, height: 1, windowSize: .zero))
         XCTAssertNil(rig.sink.frames[1])
+        XCTAssertEqual(rig.viewHub.captureStats.restarts, 1)
     }
 
     func testSessionEndedReleasesEveryTargetOfTheSession() {

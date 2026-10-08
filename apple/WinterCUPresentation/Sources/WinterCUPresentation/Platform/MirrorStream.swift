@@ -43,7 +43,7 @@ enum WindowStreamFailure: Equatable {
     private(set) var windowSize: CGSize = .zero
 
     private let windowID: CGWindowID
-    private let framesPerSecond: Int
+    private(set) var framesPerSecond: Int
     private let process: Process
     /// The window's frame (points, top-left) → the capture's pixel size. When nil, `start(pixelSize:)`'s size is used.
     private let sizing: (@MainActor (CGRect) -> CGSize)?
@@ -72,6 +72,17 @@ enum WindowStreamFailure: Equatable {
         if let windowSize { self.windowSize = windowSize }
         guard pixelSize != self.pixelSize else { return }
         self.pixelSize = pixelSize
+        guard let stream else { return }
+        let config = configuration()
+        Task { try? await stream.updateConfiguration(config) }
+    }
+
+    /// A new frame rate for the running stream, through `updateConfiguration` — the stream is not restarted (a
+    /// restart gaps the frames, and its first one can come back blank). Kept for the next open when none runs.
+    func setFramesPerSecond(_ fps: Int) {
+        let fps = max(1, fps)
+        guard fps != framesPerSecond else { return }
+        framesPerSecond = fps
         guard let stream else { return }
         let config = configuration()
         Task { try? await stream.updateConfiguration(config) }

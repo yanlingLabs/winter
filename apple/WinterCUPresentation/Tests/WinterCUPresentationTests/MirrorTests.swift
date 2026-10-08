@@ -60,6 +60,10 @@ import XCTest
         let attributes = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]] as CFDictionary
         XCTAssertEqual(CVPixelBufferCreate(nil, 64, 40, kCVPixelFormatType_32BGRA, attributes, &buffer), kCVReturnSuccess)
         let pixels = try XCTUnwrap(buffer)
+        // A real picture (a fresh buffer is all zeros: transparent, which the encoder drops as blank).
+        CVPixelBufferLockBaseAddress(pixels, [])
+        memset(CVPixelBufferGetBaseAddress(pixels), 0xC0, CVPixelBufferGetDataSize(pixels))
+        CVPixelBufferUnlockBaseAddress(pixels, [])
         let encoder = FrameEncoder(maxFps: 10, quality: 0.7)
         let first = try XCTUnwrap(encoder.encode(pixels))
         XCTAssertEqual(first.width, 64)

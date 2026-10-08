@@ -405,8 +405,9 @@ final class ServerHandshakeTests: XCTestCase {
         } // Winter.app goes away
         try? await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertFalse(rig.core.methods().contains("session.ended"), "the app's close ends nothing")
+        await MainActor.run { rig.clock.advance(by: ViewHub.stopGrace) }
         let capturing = await rig.viewHub.capturing
-        XCTAssertTrue(capturing.isEmpty, "its frame subscription went with it")
+        XCTAssertTrue(capturing.isEmpty, "its frame subscription went with it (after the stop grace)")
         daemon = nil
         let ended = await eventually { rig.core.methods().contains("session.ended") }
         XCTAssertTrue(ended, "the daemon's close does end it")

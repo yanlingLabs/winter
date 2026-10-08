@@ -25,10 +25,14 @@ enum CaptureSizing {
 /// Lets a frame through at most every `1 / maxFps` seconds. A frame arriving a little early (within 10% of the
 /// interval) still passes, so a source running exactly at `maxFps` is not halved by jitter.
 struct FrameThrottle: Equatable {
-    let minInterval: TimeInterval
+    var minInterval: TimeInterval
     private(set) var lastEmit: TimeInterval = -.infinity
 
     init(maxFps: Int) {
+        minInterval = 1 / Double(max(1, maxFps))
+    }
+
+    mutating func setMaxFps(_ maxFps: Int) {
         minInterval = 1 / Double(max(1, maxFps))
     }
 

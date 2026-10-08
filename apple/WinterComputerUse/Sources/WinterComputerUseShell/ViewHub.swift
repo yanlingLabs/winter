@@ -26,6 +26,9 @@ public struct ViewFrame: Sendable, Equatable {
 
 /// A running window capture.
 @MainActor public protocol FrameCapture: AnyObject {
+    /// A new rate or width applied to the running capture in place — never a restart (a restart gaps the frames and
+    /// its first one can be blank).
+    func update(maxFps: Int, maxWidth: Int)
     func stop()
 }
 
@@ -40,6 +43,7 @@ public struct ViewFrame: Sendable, Equatable {
     private final class Running: FrameCapture {
         let source: CUWindowFrameSource
         init(_ source: CUWindowFrameSource) { self.source = source }
+        func update(maxFps: Int, maxWidth: Int) { source.update(maxFps: maxFps, maxWidth: maxWidth) }
         func stop() { source.stop() }
     }
 
@@ -201,10 +205,16 @@ public enum WindowRelative {
     private struct Capture {
         let handle: FrameCapture
         let windowId: UInt32
-        let maxFps: Int
-        let maxWidth: Int
+        var maxFps: Int
+        var maxWidth: Int
         let generation: Int
     }
+
+    /// How long a capture nobody watches any more is kept before it stops: a subscription that goes away and comes
+    /// back (a window re-laid out, a reconnect) reuses the running stream instead of stopping and starting one.
+    public static let stopGrace: TimeInterval = 5
+    /// How often, while anything is captured, one line counts the stream starts, restarts and in-place updates.
+    public static let statsInterval: TimeInterval = 60
 
     private struct SnapshotState {
         var nextAt: TimeInterval = 0
@@ -235,6 +245,11 @@ public enum WindowRelative {
     private var generation = 0
     /// Targets that had an engine action in the last `idleAfter` seconds, with the timer that ends it.
     private var active: [String: IdleCancellable] = [:]
+    /// When each target last had an engine action (or a bind): the idle drop waits `idleAfter` from it.
+    private var lastActionAt: [String: TimeInterval] = [:]
+    private var pendingStops: [String: IdleCancellable] = [:]
+    private var stats = (starts: 0, restarts: 0, updates: 0)
+    private var statsTimer: IdleCancellable?
     /// Per target: the digest of the last frame sent (an identical one is not sent again) and its line (what a
     /// new frames subscriber gets at once, since an unchanged window sends no new frame).
     private var lastFrame: [String: (digest: Int, line: Data)] = [:]
@@ -255,6 +270,9 @@ public enum WindowRelative {
 
     /// Whether a target's window is known to be off every screen (its live capture paused, its view kept).
     public func isOffScreen(_ targetId: String) -> Bool { offScreen.contains(targetId) }
+
+    /// Stream starts, restarts (another window) and in-place updates since the last stats line. For tests.
+    public var captureStats: (starts: Int, restarts: Int, updates: Int) { stats }
 
     /// Whether a target is captured at full rate (an engine action within `idleAfter`).
     public func isActive(_ targetId: String) -> Bool { active[targetId] != nil }
@@ -311,10 +329,25 @@ public enum WindowRelative {
         if !Self.hasSize(target.windowFrame.size), let real = geometry.frame(of: CGWindowID(target.windowId)), Self.hasSize(real.size) {
             target.windowFrame = real
         }
+        // The same target on the same window again — every script re-binds the app it works in. Nothing is
+        // re-announced (a `view.bound` per call made the mirror flash): the facts are refreshed where they stand, a
+        // new size travels in place on the next `view.frame` (Winter.app resizes the shown mirror from it), and the
+        // bind counts as an action.
+        if let known = targets[target.targetId], known.windowId == target.windowId, known.sessionId == target.sessionId {
+            var kept = target
+            if !Self.hasSize(target.windowFrame.size) { kept.windowFrame = known.windowFrame }
+            targets[target.targetId] = kept
+            if kept.windowFrame.size != known.windowFrame.size {
+                log("view: \(target.targetId) re-bound — window resized to \(Int(kept.windowFrame.width))×\(Int(kept.windowFrame.height)) (in place)")
+            }
+            markActive(target.targetId)
+            refreshCaptures()
+            return
+        }
         let previous = targets[target.targetId]
         targets[target.targetId] = target
         if previous?.windowId != target.windowId {
-            stopCapture(target.targetId, reason: "the target's window changed")
+            // (A running capture of the old window is restarted on the new one by `refreshCaptures`.)
             lastFrame.removeValue(forKey: target.targetId)
             offScreen.remove(target.targetId)
             snapshots.removeValue(forKey: target.targetId)
@@ -348,6 +381,8 @@ public enum WindowRelative {
         active.removeValue(forKey: targetId)?.cancel()
         offScreen.remove(targetId)
         snapshots.removeValue(forKey: targetId)
+        lastActionAt.removeValue(forKey: targetId)
+        pendingStops.removeValue(forKey: targetId)?.cancel()
         emit(sessionId: target.sessionId, method: "view.released",
              params: ["sessionId": .string(target.sessionId), "targetId": .string(targetId)])
     }
@@ -417,6 +452,7 @@ public enum WindowRelative {
                 scheduleSnapshots()
             }
         }
+        lastActionAt[targetId] = clock.now
         active[targetId]?.cancel()
         active[targetId] = clock.schedule(after: Self.idleAfter) { [weak self] in
             guard let self else { return }
@@ -434,18 +470,38 @@ public enum WindowRelative {
     private func refreshCaptures() {
         for (id, target) in targets {
             let wanting = subscribers(of: target.sessionId).map(\.subscription).filter(\.frames)
-            guard target.mirror, let wanted = wanting.map(\.maxFps).min(), let width = wanting.map(\.maxWidth).min() else {
-                stopCapture(id, reason: target.mirror ? "no frames subscriber" : "the bind said mirror false")
+            guard target.mirror else {
+                stopCapture(id, reason: "the bind said mirror false")
                 continue
             }
-            let fps = active[id] != nil ? wanted : min(wanted, Self.idleFps)
+            guard let wanted = wanting.map(\.maxFps).min(), let width = wanting.map(\.maxWidth).min() else {
+                stopLater(id) // nobody watches: kept a moment, in case a subscription comes straight back
+                continue
+            }
+            pendingStops.removeValue(forKey: id)?.cancel()
+            // Hysteresis: full rate from an action until `idleAfter` without one, then the idle rate — never down
+            // sooner, whatever asked for the refresh.
+            let quietFor = clock.now - (lastActionAt[id] ?? -.infinity)
+            let fps = active[id] != nil || quietFor < Self.idleAfter ? wanted : min(wanted, Self.idleFps)
             // Off every screen a live stream delivers nothing: no stream; snapshots (`takeDueSnapshots`) instead.
             if offScreen.contains(id) {
                 stopCapture(id, reason: "the window is off screen")
                 continue
             }
-            if let running = captures[id], running.windowId == target.windowId, running.maxFps == fps, running.maxWidth == width { continue }
-            stopCapture(id, reason: "restarting at \(fps) fps, \(width) px")
+            if var running = captures[id], running.windowId == target.windowId {
+                // A healthy stream is never restarted: a new rate or width is applied in place.
+                if running.maxFps != fps || running.maxWidth != width {
+                    running.handle.update(maxFps: fps, maxWidth: width)
+                    running.maxFps = fps
+                    running.maxWidth = width
+                    captures[id] = running
+                    stats.updates += 1
+                }
+                continue
+            }
+            let restart = captures[id] != nil
+            stopCapture(id, reason: "its target moved to window \(target.windowId)")
+            if restart { stats.restarts += 1 } else { stats.starts += 1 }
             generation += 1
             let current = generation
             log("view: capture of \(id) (\(target.appName) window \(target.windowId)) started at \(fps) fps, \(width) px")
@@ -457,14 +513,40 @@ public enum WindowRelative {
             captures[id] = Capture(handle: handle, windowId: target.windowId, maxFps: fps, maxWidth: width, generation: current)
         }
         for id in captures.keys where targets[id] == nil { stopCapture(id, reason: "no target") }
+        scheduleStats()
         scheduleVisibilityPoll()
         scheduleSnapshots()
     }
 
     private func stopCapture(_ targetId: String, reason: String) {
+        pendingStops.removeValue(forKey: targetId)?.cancel()
         guard let running = captures.removeValue(forKey: targetId) else { return }
         running.handle.stop()
         log("view: capture of \(targetId) stopped — \(reason)")
+    }
+
+    /// Stops a capture nobody watches after `stopGrace`, unless a frames subscription comes back first.
+    private func stopLater(_ targetId: String) {
+        guard captures[targetId] != nil, pendingStops[targetId] == nil else { return }
+        pendingStops[targetId] = clock.schedule(after: Self.stopGrace) { [weak self] in
+            guard let self else { return }
+            self.pendingStops.removeValue(forKey: targetId)
+            self.stopCapture(targetId, reason: "no frames subscriber for \(Int(Self.stopGrace)) s")
+        }
+    }
+
+    /// One `.notice` line a minute while anything is captured: how often streams started, restarted (another
+    /// window) and were updated in place — the numbers a live gate checks for flapping.
+    private func scheduleStats() {
+        guard statsTimer == nil, !captures.isEmpty else { return }
+        statsTimer = clock.schedule(after: Self.statsInterval) { [weak self] in
+            guard let self else { return }
+            self.statsTimer = nil
+            self.log("view: in the last \(Int(Self.statsInterval)) s — \(self.stats.starts) stream start(s), \(self.stats.restarts) restart(s), "
+                + "\(self.stats.updates) in-place update(s); \(self.captures.count) capturing now")
+            self.stats = (0, 0, 0)
+            self.scheduleStats()
+        }
     }
 
     /// The targets a frames subscriber is watching (a capture or snapshots are wanted for them).

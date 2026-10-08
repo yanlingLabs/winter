@@ -34,7 +34,7 @@ final class ViewThrottleTests: XCTestCase {
         rig.clock.advance(by: 0.1)
         XCTAssertEqual(fps(rig), 1, "3 s with no action")
         XCTAssertFalse(rig.viewHub.isActive("t1"))
-        XCTAssertEqual(rig.capture.live.count, 1, "one capture, restarted slower")
+        XCTAssertEqual(rig.capture.live.count, 1, "one capture, slowed in place")
     }
 
     func testTheNextActionRestoresTheFullRateAndEachActionExtendsIt() {
@@ -93,7 +93,7 @@ final class ViewThrottleTests: XCTestCase {
         rig.viewHub.bound(notes())
         _ = rig.viewHub.subscribe(connection: 1, ViewSubscribeParams(sessionId: "s_1", frames: true))
         rig.capture.live[0].onFrame(frame(1))
-        rig.clock.advance(by: 3) // throttled: a new capture
+        rig.clock.advance(by: 3) // throttled (in place)
         rig.capture.live[0].onFrame(frame(1))
         XCTAssertEqual(rig.sink.frames[1]?.count, 1)
     }
