@@ -45,8 +45,8 @@ enum WindowStreamFailure: Equatable {
     private let windowID: CGWindowID
     private let framesPerSecond: Int
     private let process: Process
-    /// Window points → the capture's pixel size. When nil, `start(pixelSize:)`'s size is used as given.
-    private let sizing: (@MainActor (CGSize) -> CGSize)?
+    /// The window's frame (points, top-left) → the capture's pixel size. When nil, `start(pixelSize:)`'s size is used.
+    private let sizing: (@MainActor (CGRect) -> CGSize)?
     private var stream: SCStream?
     private var output: FrameOutput?
     private var stopped = false
@@ -55,7 +55,7 @@ enum WindowStreamFailure: Equatable {
     /// Bumped on every open, so callbacks from a stream we already replaced are ignored.
     private var generation = 0
 
-    init(windowID: CGWindowID, framesPerSecond: Int, sizing: (@MainActor (CGSize) -> CGSize)? = nil,
+    init(windowID: CGWindowID, framesPerSecond: Int, sizing: (@MainActor (CGRect) -> CGSize)? = nil,
          process: @escaping Process) {
         self.windowID = windowID
         self.framesPerSecond = max(1, framesPerSecond)
@@ -98,7 +98,7 @@ enum WindowStreamFailure: Equatable {
                 return
             }
             windowSize = window.frame.size
-            if let sizing { pixelSize = sizing(window.frame.size) }
+            if let sizing { pixelSize = sizing(window.frame) }
             let filter = SCContentFilter(desktopIndependentWindow: window)
             let process = self.process
             let output = FrameOutput { [weak self] pixelBuffer in

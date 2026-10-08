@@ -3,12 +3,13 @@ import CoreGraphics
 // The seams between the controller's decisions and what AppKit draws. The real implementations live in Platform/;
 // tests use recording fakes, so no window is ever created by a unit test.
 
-/// Window and screen geometry, read fresh on every call.
+/// Window and screen geometry. Reads must be cheap: the real source answers from a cache a background queue keeps
+/// fresh (`WindowTracker`), never by listing windows on the main thread.
 @MainActor protocol CUWindowSource: AnyObject {
     func snapshot(of windowID: CGWindowID) -> WindowSnapshot?
     func screens() -> [ScreenInfo]
-    /// Every on-screen window, front to back.
-    func windowsFrontToBack() -> [StackWindow]
+    /// The on-screen windows above `windowID`, front to back, as last fetched; nil before the first fetch.
+    func windowsAbove(_ windowID: CGWindowID) -> [StackWindow]?
 }
 
 /// One entry of the on-screen window list.
@@ -20,21 +21,19 @@ struct StackWindow: Equatable, Sendable {
     /// Top-left global points.
     var bounds: CGRect
     var alpha: CGFloat = 1
+    var isOnScreen = true
 }
 
-/// Whether the cursor would be seen at its point: true when the target is the frontmost ordinary window there.
+/// Whether the cursor would be seen at its point: true unless an ordinary window ABOVE the target covers the point.
 /// The overlay floats above every app, so this is what keeps "windows covering the target also cover its cursor".
 enum CursorOcclusion {
-    static func isVisible(at point: CGPoint, target: CGWindowID, in stack: [StackWindow], ownPID: pid_t) -> Bool {
-        for window in stack {
+    /// - Parameter above: the on-screen windows above the target (only those can cover it).
+    static func isVisible(at point: CGPoint, above: [StackWindow], ownPID: pid_t) -> Bool {
+        !above.contains { window in
             // The helper's own panels (mirrors, overlays), the menu bar, the Dock, menus and other floating levels
             // never decide it, and neither does a see-through window.
-            if window.pid == ownPID || window.layer != 0 || window.alpha < 0.05 { continue }
-            guard window.bounds.contains(point) else { continue }
-            return window.id == target
+            window.pid != ownPID && window.layer == 0 && window.alpha >= 0.05 && window.bounds.contains(point)
         }
-        // Nothing ordinary at the point (or no list): don't hide a hint the user may need.
-        return true
     }
 }
 

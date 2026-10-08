@@ -6,11 +6,12 @@ import XCTest
 @MainActor final class PresentationControllerTests: XCTestCase {
     final class FakeWindows: CUWindowSource {
         var windows: [CGWindowID: WindowSnapshot] = [:]
-        var stack: [StackWindow] = []
-        var stackReads = 0
-        func windowsFrontToBack() -> [StackWindow] {
-            stackReads += 1
-            return stack
+        /// What lies above each window; nil = not fetched yet.
+        var above: [CGWindowID: [StackWindow]] = [:]
+        var aboveReads = 0
+        func windowsAbove(_ windowID: CGWindowID) -> [StackWindow]? {
+            aboveReads += 1
+            return above[windowID]
         }
         var screenList = [ScreenInfo(frame: CGRect(x: 0, y: 0, width: 1512, height: 982),
                                      visibleFrame: CGRect(x: 0, y: 25, width: 1512, height: 897))]
@@ -383,25 +384,24 @@ import XCTest
     func testTheCursorFadesWhileAnotherWindowCoversItsPoint() {
         let target = CGRect(x: 100, y: 100, width: 800, height: 400)
         addWindow(1, target)
-        let targetEntry = StackWindow(id: 1, pid: 500, layer: 0, bounds: target)
         let cover = StackWindow(id: 9, pid: 600, layer: 0, bounds: CGRect(x: 250, y: 150, width: 200, height: 150))
-        windows.stack = [cover, targetEntry]
+        windows.above[1] = [cover]
         controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 200), kind: .press)
         let o = try! XCTUnwrap(surfaces.overlay(1))
         XCTAssertEqual(o.occluded.last, true, "the point (300, 200) is under another app's window")
         // The other window moves away: the next look shows the cursor again.
-        windows.stack = [targetEntry]
+        windows.above[1] = []
         clock.now += 0.15
         ticker.fire()
         XCTAssertEqual(o.occluded.last, false)
         // Looks are throttled between actions…
-        let reads = windows.stackReads
+        let reads = windows.aboveReads
         clock.now += 0.02
         ticker.fire()
-        XCTAssertEqual(windows.stackReads, reads)
-        // …but every action looks at once.
+        XCTAssertEqual(windows.aboveReads, reads)
+        // …but every action looks at once (at the cache).
         controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 700, y: 300), kind: .move)
-        XCTAssertEqual(windows.stackReads, reads + 1)
+        XCTAssertEqual(windows.aboveReads, reads + 1)
     }
 
     func testForegroundTakesOverTheLook() {
