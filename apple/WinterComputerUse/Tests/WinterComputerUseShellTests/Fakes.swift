@@ -214,8 +214,14 @@ struct FakeAuthenticator: PeerAuthenticator {
 /// Where each window is now; nil → the hub falls back to the bind-time frame.
 final class FakeGeometry: WindowGeometry {
     var frames: [CGWindowID: CGRect] = [:]
-    func frame(of windowID: CGWindowID) -> CGRect? { frames[windowID] }
+    var calls = 0
+    func frame(of windowID: CGWindowID) -> CGRect? {
+        calls += 1
+        return frames[windowID]
+    }
 }
+
+extension FakeIdleScheduler: ViewClock {}
 
 /// What the hub sent, per connection: event lines and frame lines (decoded).
 @MainActor final class ViewSink {
@@ -231,6 +237,7 @@ final class FakeGeometry: WindowGeometry {
     let tap = FakeEscapeTap()
     let capture = FakeCaptureFactory()
     let geometry = FakeGeometry()
+    let clock = FakeIdleScheduler()
     let viewHub: ViewHub
     let sink = ViewSink()
     let coordinator: HelperCoordinator
@@ -239,7 +246,7 @@ final class FakeGeometry: WindowGeometry {
     var notifications: [HelperNotification] = []
 
     init() {
-        viewHub = ViewHub(capture: capture, geometry: geometry)
+        viewHub = ViewHub(capture: capture, geometry: geometry, clock: clock)
         coordinator = HelperCoordinator(presentation: presentation, escapeTap: tap, viewHub: viewHub)
         dispatcher = RPCDispatcher(core: core, coordinator: coordinator, viewHub: viewHub, inFlight: inFlight)
         coordinator.notify = { [weak self] in self?.notifications.append($0) }

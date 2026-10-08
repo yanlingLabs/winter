@@ -140,8 +140,10 @@ final class ViewHubTests: XCTestCase {
         rig.viewHub.bound(notes())
         let capture = rig.capture.live[0]
         let frame = ViewFrame(jpeg: Data([0xFF, 0xD8, 0xFF]), width: 720, height: 540, windowSize: CGSize(width: 800, height: 600))
+        var changed = frame
+        changed.jpeg = Data([0xFF, 0xD8, 0xFE])
         capture.onFrame(frame)
-        capture.onFrame(frame)
+        capture.onFrame(changed)
         XCTAssertNil(rig.sink.frames[1], "frames:false hears no frames")
         XCTAssertEqual(rig.sink.frames[2]?.count, 2)
         XCTAssertEqual(rig.sink.frames[2]?.first,
@@ -149,7 +151,7 @@ final class ViewHubTests: XCTestCase {
         XCTAssertEqual(rig.sink.frames[2]?.last?["params"]?["seq"], .number(2))
 
         rig.viewHub.release(targetId: "t1")
-        capture.onFrame(frame) // a late frame from the stopped capture
+        capture.onFrame(ViewFrame(jpeg: Data([1, 2, 3]), width: 1, height: 1, windowSize: .zero)) // a late frame from the stopped capture
         XCTAssertEqual(rig.sink.frames[2]?.count, 2, "nothing after the release")
     }
 
@@ -193,6 +195,7 @@ final class ViewHubTests: XCTestCase {
         rig.viewHub.cursor(sessionId: "s_1", pid: 123, windowId: 77, point: CGPoint(x: 150, y: 70), kind: "target", dragTo: nil,
                            frame: CGRect(x: 140, y: 60, width: 30, height: 20), text: nil, count: nil, button: nil)
         rig.geometry.frames[77] = CGRect(x: 300, y: 200, width: 800, height: 600) // the user moved the window
+        rig.clock.advance(by: ViewHub.originTTL) // (the origin is re-read at most every half second)
         rig.viewHub.cursor(sessionId: "s_1", pid: 123, windowId: 77, point: CGPoint(x: 310, y: 210), kind: "drag",
                            dragTo: CGPoint(x: 400, y: 260), frame: nil, text: nil, count: nil, button: nil)
         rig.viewHub.cursor(sessionId: "s_1", pid: 123, windowId: 77, point: CGPoint(x: 310, y: 210), kind: "key", dragTo: nil,

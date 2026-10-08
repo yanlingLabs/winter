@@ -53,7 +53,7 @@ import WinterCUPresentation
         }
 
         let (presentation, escapeTap) = WinterCUPresentationFactory.make()
-        let viewHub = ViewHub(capture: LiveFrameCaptureFactory(), geometry: LiveWindowGeometry())
+        let viewHub = ViewHub(capture: LiveFrameCaptureFactory(), geometry: LiveWindowGeometry(), clock: LiveViewClock())
         let coordinator = HelperCoordinator(presentation: presentation, escapeTap: escapeTap, viewHub: viewHub)
         let core = CUCore(events: coordinator)
         let inFlight = InFlightRegistry()
