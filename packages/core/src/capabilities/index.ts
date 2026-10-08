@@ -11,6 +11,7 @@ export type { CapabilitySession, CapabilityServerSpec } from "./server";
 export { capabilityServer } from "./server";
 export { sessionsCapability, type SessionsCapabilityDeps } from "./sessions";
 export { computerCapability, type ComputerCapabilityDeps } from "./computer";
+export { computerV2Capability, computerV2ToolDefs, visionFor, type ComputerV2CapabilityDeps } from "./computer-v2";
 export { browserCapability, type BrowserCapabilityDeps } from "./browser";
 export { officeCapability, type OfficeCapabilityDeps } from "./office";
 export { lspCapability, type LspCapabilityDeps } from "./lsp";
@@ -20,6 +21,7 @@ import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-s
 import { CORE_BRAND } from "../runtime-sdk/brand";
 import { browserCapability, type BrowserCapabilityDeps } from "./browser";
 import { computerCapability, type ComputerCapabilityDeps } from "./computer";
+import { computerV2Capability, type ComputerV2CapabilityDeps } from "./computer-v2";
 import { officeCapability, type OfficeCapabilityDeps } from "./office";
 import type { CapabilitySession } from "./server";
 import { sessionsCapability, type SessionsCapabilityDeps } from "./sessions";
@@ -53,6 +55,14 @@ export interface CapabilityDeps {
    * call fails safe with the tool's own "computer use is not available in this session".)
    */
   computerUseEnabled(): boolean;
+  /**
+   * ComputerV2 (2026-10-08): the script-based computer tool's deps. Built INSTEAD of the old `computer` server
+   * whenever computer use is on — the old one only when `legacyComputer()` answers true (the A/B switch,
+   * `settings.computerUse.legacyComputer`, read LIVE like `computerUseEnabled`). Absent: the server is still built,
+   * and its tool answers that ComputerV2 is not available (the key set depends on the settings alone).
+   */
+  computerV2?: ComputerV2CapabilityDeps;
+  legacyComputer?(): boolean;
 }
 
 /**
@@ -93,9 +103,13 @@ export function buildCapabilitiesFor(
   deps: CapabilityDeps,
 ): CapabilityServerRecord {
   const servers: McpSdkServerConfigWithInstance[] = [sessionsCapability(session, deps.sessions)];
-  // `computer` is the ONLY conditional server, and the condition is now LIVE — see
-  // `computerUseEnabled` above.
-  if (deps.computerUseEnabled()) servers.push(computerCapability(session, deps.computer));
+  // The computer server is the ONLY conditional one, and the condition is LIVE — see `computerUseEnabled`
+  // above. ComputerV2 (2026-10-08): exactly ONE of `computer`/`computer_v2` is built, never both — `computer_v2`
+  // unless `computerUse.legacyComputer` picks the old tool for an A/B.
+  if (deps.computerUseEnabled()) {
+    if (deps.legacyComputer?.() === true) servers.push(computerCapability(session, deps.computer));
+    else servers.push(computerV2Capability(session, deps.computerV2 ?? {}));
+  }
   servers.push(browserCapability(session, deps.browser));
   servers.push(officeCapability(session, deps.office));
   servers.push(lspCapability(session, deps.lsp));

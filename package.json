@@ -16,6 +16,7 @@
     "build:winter": "bun run scripts/build-winter.ts",
     "runtimes:stage": "bun run scripts/stage-runtimes.ts",
     "verify:workflow": "bun run scripts/verify-workflow-compiled.ts",
+    "verify:automation-worker": "bun run scripts/verify-automation-worker-compiled.ts",
     "verify:runtime-state": "bun run scripts/verify-runtime-state-compiled.ts",
     "verify:runtimes": "bun run scripts/verify-runtimes-compiled.ts",
     "verify:embedded": "bun run scripts/verify-embedded-compiled.ts",

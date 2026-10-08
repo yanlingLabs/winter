@@ -18,7 +18,7 @@
 // time by Winter's own style loader.
 import type { ContextAssembler } from "../agent/context";
 import { chatSystemPrompt } from "../agent/chat-prompt";
-import { dispatchSystemPrompt } from "../agent/dispatch-prompt";
+import { dispatchSystemPrompt, type DispatchComputerTool } from "../agent/dispatch-prompt";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { clientEffortEligible, isClientEffort } from "../settings";
 
@@ -47,12 +47,14 @@ export interface WinterSystemPromptInput {
    */
   exaKeyPresent?: boolean;
   /**
-   * Did this incarnation's capability record build the `computer` server? (2026-10-07.) Dispatch's base
-   * prompt names `Computer` only when it did, so the prompt and the tool list cannot disagree when computer
-   * use is off. ABSENT reads as built (computer use is on by default). Chat never has Computer and its prompt
-   * never names it; code mode keeps the runtime's own prompt.
+   * WHICH computer tool this incarnation's capability record built (2026-10-07; ComputerV2 2026-10-08):
+   * `"ComputerV2"` for the `computer_v2` server, `"Computer"` for the legacy `computer` one (the
+   * `computerUse.legacyComputer` A/B), `false` for neither (computer use off). Dispatch's base prompt names
+   * exactly that tool, so the prompt and the tool list cannot disagree. ABSENT reads as `"ComputerV2"` (computer
+   * use is on by default; `true`, the pre-ComputerV2 boolean, reads the same). Chat never has a computer tool and its prompt never names one; code mode keeps the
+   * runtime's own prompt.
    */
-  computerOffered?: boolean;
+  computerOffered?: DispatchComputerTool | boolean;
   /** WS-21: the incarnation runs on a router-built run folder — see `ContextAssembler.assemble`'s own
    *  `runHomeApplied` for exactly what stops being composed here. Absent/false: byte-identical. */
   runHomeApplied?: boolean;

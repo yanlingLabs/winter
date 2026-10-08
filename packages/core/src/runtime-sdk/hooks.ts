@@ -1232,6 +1232,49 @@ function connectorPermissionHook(deps: SessionHooksDeps): HookCallback {
   };
 }
 
+/** ComputerV2 (2026-10-08): the plain name and the MCP spelling of the script tool. */
+export const COMPUTER_V2_TOOL = "ComputerV2";
+const COMPUTER_V2_MCP_NAME = "mcp__winter__computer_v2__script";
+
+/**
+ * ComputerV2's EXPLICIT allow — every code/dispatch policy, `plan` and `dont-ask` included (R16: no card per
+ * script). The policy is per APP and enforced inside the call (`computer-use/policy.ts`: plan observes only,
+ * dont-ask acts only on an "Always allow" app, the per-app card, the user's restrictions); this hook only
+ * makes sure the call REACHES it. Without it a `dont-ask` child denies the unresolved MCP call without ever
+ * calling `canUseTool` ("dontAsk mode denies unmatched actions"), and `plan` routes it to a prompt. An explicit
+ * allow ranks below every deny and ask in the hook reducer, so a user's deny rule on `ComputerV2` still wins.
+ * The MCP spelling counts only when this incarnation built the `computer_v2` server; chat never has it.
+ */
+function computerV2AllowHook(deps: SessionHooksDeps): HookCallback {
+  return async (input) => {
+    if (deps.mode === "chat") return allow();
+    const name = (input as PreToolUseHookInput).tool_name;
+    let liveKeys: ReadonlySet<string> | undefined;
+    try { liveKeys = deps.capabilityKeys?.(); } catch { liveKeys = new Set(); }
+    if (liveKeys !== undefined && !liveKeys.has("computer_v2")) return allow();
+    if (name !== COMPUTER_V2_TOOL && name !== COMPUTER_V2_MCP_NAME) return allow();
+    return allowExplicitly("ComputerV2's policy is per app and is applied inside the call (Settings → Computer Use).");
+  };
+}
+
+/**
+ * `ToolSearch` under `dont-ask` (found with ComputerV2, 2026-10-08). Every MCP tool and several built-ins start
+ * DEFERRED and load only through `ToolSearch` — but a `dontAsk` child denies an unresolved call without ever
+ * calling `canUseTool` ("dontAsk mode denies unmatched actions"), and `ToolSearch` is not in the runtime's own
+ * silent-allow set, so in a `dont-ask` session NO deferred tool could be loaded at all (Browser, CronList, every
+ * MCP tool, ComputerV2). Winter's gate has always classified `ToolSearch` READ_ONLY — allowed under every policy —
+ * so this states that to the child, under `dont-ask` only (every other policy reaches `canUseTool`, whose gate
+ * answer is the same allow); the `WEB_BUILTIN_ALLOW_RULES` precedent, as a hook so dispatch is covered too. It
+ * only loads schemas; whatever a loaded tool then does is decided on its own call.
+ */
+function toolSearchDontAskHook(deps: SessionHooksDeps): HookCallback {
+  return async (input) => {
+    if (deps.mode === "chat" || deps.policy?.() !== "dont-ask") return allow();
+    if ((input as PreToolUseHookInput).tool_name !== "ToolSearch") return allow();
+    return allowExplicitly("ToolSearch only loads deferred tools' schemas; Winter allows it under every policy.");
+  };
+}
+
 const bashEscapeInput = (input: unknown): { command: string; escape: boolean; description?: string } => {
   const ti = (input as PreToolUseHookInput).tool_input as { command?: unknown; dangerouslyDisableSandbox?: unknown; description?: unknown } | null | undefined;
   return {
@@ -1772,6 +1815,10 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   if (deps.home) preToolUse.push({ failClosed: true, hooks: [failClosed("path fence", pathFenceHook(deps))] });
   // WS-26: the connector-permission floor — every mode, every policy; see `connectorPermissionHook`.
   if (deps.connectors) preToolUse.push({ failClosed: true, hooks: [failClosed("connector-permission floor", connectorPermissionHook(deps))] });
+  // ComputerV2: the call itself is allowed under every policy; its policy is per app, inside the call.
+  preToolUse.push({ matcher: `${COMPUTER_V2_TOOL}|${COMPUTER_V2_MCP_NAME}`, hooks: [computerV2AllowHook(deps)] });
+  // ToolSearch under dont-ask: without it no deferred tool can be loaded in such a session (see the hook).
+  preToolUse.push({ matcher: "ToolSearch", hooks: [toolSearchDontAskHook(deps)] });
   if (deps.home) {
     for (const tool of Object.keys(DIFF_TOOL_FILE_PATH_ARG)) {
       preToolUse.push({ matcher: tool, hooks: [fileDiffPreToolUseHook(deps, pending)] });

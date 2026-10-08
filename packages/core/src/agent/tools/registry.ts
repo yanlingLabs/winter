@@ -112,14 +112,27 @@ export interface ToolContext {
  *  ONLY — untouched. Absent for every tool that returns a plain string (the overwhelming
  *  majority, unchanged). The engine (engine.ts's per-call dispatch loop) spreads it onto the
  *  emitted `tool_result` event when present. */
-export interface ToolOutcome { output: string; isError: boolean; fileDiff?: FileDiffSummary }
+export interface ToolOutcome { output: string; isError: boolean; fileDiff?: FileDiffSummary; content?: ToolContentItem[] }
+
+/** ComputerV2 (2026-10-08): one ORDERED content item of a capability tool's result — text and images
+ *  interleaved in the order the tool produced them (`capabilities/server.ts` hands them over as MCP content
+ *  as-is). Only a tool that builds and caps its own result sets `content` (`computer-use/result.ts`). */
+export type ToolContentItem = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 
 /** What `ToolDefinition.run` may return in place of a plain string — the diff-tabs
  *  structured-return channel. `output` is still the only model-visible text (and the only field
  *  MAX_OUTPUT truncation ever touches); `fileDiff`, when set, threads straight onto the returned
  *  `ToolOutcome` and from there onto the `tool_result` event (engine.ts). No built-in tool sets
  *  it yet — Task 6 is the first producer. */
-export type ToolRunResult = string | { output: string; fileDiff?: FileDiffSummary };
+export type ToolRunResult = string | {
+  output: string;
+  fileDiff?: FileDiffSummary;
+  /** ComputerV2: the ordered result the tool built (and capped) itself. `output` stays its text summary. */
+  content?: ToolContentItem[];
+  /** The tool's own verdict that this result is a failure (a script that threw) — without throwing, so its
+   *  ordered `content` still reaches the model. */
+  isError?: boolean;
+};
 
 /** The three session modes a tool's `modes`/`deferred` fields (and every `isDeferred`-adjacent
  *  registry method below) resolve against. One alias so a fourth mode, were one ever added, is a
@@ -439,7 +452,11 @@ export class ToolRegistry {
       const structured = typeof raw === "string" ? { output: raw } : raw;
       let out = String(structured.output);
       if (out.length > MAX_OUTPUT) out = out.slice(0, MAX_OUTPUT) + `\n[truncated at ${MAX_OUTPUT} bytes]`;
-      return { output: out, isError: false, ...(structured.fileDiff ? { fileDiff: structured.fileDiff } : {}) };
+      return {
+        output: out, isError: structured.isError === true,
+        ...(structured.fileDiff ? { fileDiff: structured.fileDiff } : {}),
+        ...(structured.content ? { content: structured.content } : {}),
+      };
     } catch (err) {
       return { output: err instanceof Error ? err.message : String(err), isError: true };
     }

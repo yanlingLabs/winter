@@ -36,8 +36,13 @@ function deps(): CapabilityDeps {
   };
 }
 
+/** ComputerV2 (2026-10-08): `computer` and `computer_v2` are never built together (`computerUse.legacyComputer`
+ *  picks one), so "every server" is the union of the two builds — every key and every name stays covered. */
 function serversFor(mode: SessionMode): CapabilityServerRecord {
-  return buildCapabilitiesFor({ ...SESSION, mode }, deps());
+  return {
+    ...buildCapabilitiesFor({ ...SESSION, mode }, deps()),
+    ...buildCapabilitiesFor({ ...SESSION, mode }, { ...deps(), legacyComputer: () => true }),
+  };
 }
 
 function toolsOf(record: CapabilityServerRecord, key: string): string[] {
@@ -54,6 +59,23 @@ function expectedToolsOf(key: string, mode: SessionMode): string[] {
     .map(([name]) => name.slice(`mcp__winter__${key}__`.length))
     .sort();
 }
+
+describe("ComputerV2 (2026-10-08): exactly one computer server", () => {
+  test("computer_v2 by default; the old computer with legacyComputer; neither with computer use off", () => {
+    const keys = (d: CapabilityDeps) => Object.keys(buildCapabilitiesFor(SESSION, d)).filter((k) => k.startsWith("winter__computer"));
+    expect(keys(deps())).toEqual(["winter__computer_v2"]);
+    expect(keys({ ...deps(), legacyComputer: () => false })).toEqual(["winter__computer_v2"]);
+    expect(keys({ ...deps(), legacyComputer: () => true })).toEqual(["winter__computer"]);
+    expect(keys({ ...deps(), computerUseEnabled: () => false })).toEqual([]);
+  });
+
+  test("computer_v2 serves `script` in code and dispatch, nothing in chat", () => {
+    const build = (mode: SessionMode) => buildCapabilitiesFor({ ...SESSION, mode }, deps());
+    expect(toolsOf(build("code"), "computer_v2")).toEqual(["script"]);
+    expect(toolsOf(build("dispatch"), "computer_v2")).toEqual(["script"]);
+    expect(toolsOf(build("chat"), "computer_v2")).toEqual([]);
+  });
+});
 
 describe("P8b-37: what each server ADVERTISES follows the session's mode", () => {
   test("a chat session's `sessions` server lists nothing — manage_session is unreachable", () => {

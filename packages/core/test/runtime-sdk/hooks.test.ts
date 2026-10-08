@@ -920,7 +920,9 @@ describe("sessionHooksFor — the floor's wiring, ordering and both legs", () =>
       }).winter?.PreToolUse ?? [];
       // "Bash" twice: the reviewer, then the escape floor (C3 round 3), which runs under every policy;
       // then (WS-21 §7.1/§7.2) the unmatched path fence, which answers deny/ask and never transforms
-      expect(matchers.map((m) => m.matcher)).toEqual([undefined, "Bash", "Bash", undefined, "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Search"]);
+      // (ComputerV2, 2026-10-08) its explicit allow and ToolSearch's under dont-ask, after the fences and before
+      // the diff observers.
+      expect(matchers.map((m) => m.matcher)).toEqual([undefined, "Bash", "Bash", undefined, "ComputerV2|mcp__winter__computer_v2__script", "ToolSearch", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Search"]);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

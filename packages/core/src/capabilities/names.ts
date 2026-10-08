@@ -66,7 +66,7 @@ export type { SessionMode };
  *  The protocol's `CapabilityServerInfoSchema.key` enum (`packages/protocol/src/methods.ts`) still
  *  lists `"web"`. Deliberately not narrowed: it constrains what `capabilities.list` may EMIT, a wider
  *  enum is valid for a result, and narrowing it is an RPC-schema change with a Swift mirror behind it. */
-export const CAPABILITY_SERVER_KEYS = ["sessions", "computer", "browser", "office", "lsp", "external"] as const;
+export const CAPABILITY_SERVER_KEYS = ["sessions", "computer", "computer_v2", "browser", "office", "lsp", "external"] as const;
 export type CapabilityServerKey = (typeof CAPABILITY_SERVER_KEYS)[number];
 
 /**
@@ -192,6 +192,11 @@ export const WINTER_CAPABILITY_TOOLS = {
   // `computer` — `modes: ["code","dispatch"]`, deferred in both. Its PRESENCE additionally follows the
   // LIVE `settings.computerUse.enabled`, read when the session's servers are built (`index.ts`).
   "mcp__winter__computer__computer": { modes: ["code", "dispatch"], plainName: "Computer", lane: "computer" },
+  // `computer_v2` (ComputerV2, 2026-10-08) — the script-based computer tool: `modes: ["code","dispatch"]`,
+  // deferred in both, built INSTEAD of `computer` (never beside it — `computerUse.legacyComputer` picks the
+  // old one for an A/B). CONCURRENCY-SAFE WITH NO LANE: the daemon owns the per-target locks
+  // (`computer-use/locks.ts`), so two sessions on two apps run at once and two on one app wait in the daemon.
+  "mcp__winter__computer_v2__script": { modes: ["code", "dispatch"], plainName: "ComputerV2", concurrent: true },
   // `browser` — the only capability tool eligible in all three modes, deferred in all three. Chat sees a
   // READ-ONLY verb set, enforced INSIDE the capability (`browser.ts`'s `argsByMode`, resolved from the
   // caller's mode), because a construction-time capability set cannot express a per-ACTION subset and a

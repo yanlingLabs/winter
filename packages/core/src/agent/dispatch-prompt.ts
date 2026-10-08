@@ -20,29 +20,37 @@
  * `exaKeyPresent` ABSENT reads as PRESENT — the convention `ToolExposure` and `toolsFor` keep, so every
  * door agrees by default rather than by coincidence.
  *
- * `computerOffered` is the same rule for `Computer` (2026-10-07): the tool exists only when computer use
- * is on (`computerUseEnabledFrom`), and the caller passes whether THIS incarnation's capability record
- * actually built it (`session-driver.ts`, `capabilityKeys.has("computer")`), so the prompt cannot name a
- * Computer the session was not given — a Dispatch on a home with computer use off searched for it,
- * found nothing, and told the user its own tooling was broken. ABSENT reads as OFFERED (computer use is
- * on by default).
+ * `computerOffered` is the same rule for the computer tool (2026-10-07; ComputerV2 2026-10-08): a computer tool
+ * exists only when computer use is on (`computerUseEnabledFrom`), and it is `ComputerV2` (the script-based tool)
+ * unless `computerUse.legacyComputer` builds the old `Computer` instead. The caller passes WHICH one THIS
+ * incarnation's capability record actually built (`session-driver.ts`, from `capabilityKeys`), so the prompt
+ * can never name a computer tool the session was not given — a Dispatch on a home with computer use off
+ * searched for it, found nothing, and told the user its own tooling was broken. ABSENT reads as `ComputerV2`
+ * (computer use is on by default); `true` (the pre-ComputerV2 boolean) reads the same.
  */
-export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean; computerOffered?: boolean } = {}): string {
+export type DispatchComputerTool = "ComputerV2" | "Computer";
+
+export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean; computerOffered?: boolean | DispatchComputerTool } = {}): string {
   const search = opts.exaKeyPresent !== false ? "Search" : "WebSearch";
-  const computer = opts.computerOffered !== false;
+  const computerTool: DispatchComputerTool | undefined = opts.computerOffered === false ? undefined
+    : opts.computerOffered === "Computer" ? "Computer" : "ComputerV2";
+  const computer = computerTool !== undefined;
   return [
     "You are Winter in Dispatch mode: the user's ambient coordinator on this Mac. You plan, delegate, monitor, and report — you are NOT a coding session.",
     "",
     "# Routing doctrine",
-    `Always use the narrowest capable tool, in this order: answer directly < ${search} < Read < Bash < ${computer ? "Computer < " : ""}SpawnSession.`,
+    `Always use the narrowest capable tool, in this order: answer directly < ${search} < Read < Bash < ${computer ? `${computerTool} < ` : ""}SpawnSession.`,
     opts.exaKeyPresent !== false
       ? "Search takes a real question and comes back with a written answer and its sources; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up."
       : "WebSearch finds pages; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up. (Winter's Search tool — one call, a written answer with sources — needs an Exa key: `winter login --exa-key`.)",
     "Anything that CHANGES FILES routes to SpawnSession — no exceptions. You have no write or edit tools; do not try to write files via Bash either.",
     "Bash is for inspection and glue: git status, listing or searching files, running a script or build the user asked about — never file mutation.",
     computer
-      ? "Some tools are loaded on demand: Computer, Browser and CronList (and any MCP server's tools) are not in your tool list until you load them with ToolSearch — `select:Computer` loads Computer by name."
+      ? `Some tools are loaded on demand: ${computerTool}, Browser and CronList (and any MCP server's tools) are not in your tool list until you load them with ToolSearch — \`select:${computerTool}\` loads ${computerTool} by name.`
       : "Some tools are loaded on demand: Browser and CronList (and any MCP server's tools) are not in your tool list until you load them with ToolSearch — `select:Browser` loads Browser by name.",
+    ...(computerTool === "ComputerV2"
+      ? ["ComputerV2 runs a short JavaScript script against this Mac's apps (bind an app, act, wait, read the state) in one call; the user approves each app once. Use it to look at or work in an app yourself; anything that changes files still goes to SpawnSession."]
+      : []),
     ...(computer
       ? []
       : ["Computer use is turned off, so you cannot see the screen or use the keyboard and pointer. If the user asks for that, tell them they can turn it on in Settings → Computer Use (`computerUse.enabled` in settings.json); it takes effect the next time this session starts."]),
