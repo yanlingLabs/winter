@@ -2,7 +2,9 @@ import CoreGraphics
 import Foundation
 
 /// The `CUPresentation` the helper uses. It keeps `PresentationState`, reads window geometry on a short timer while
-/// anything is on screen, and tells the surfaces where to be. All AppKit work is behind `CUSurfaceFactory`.
+/// anything is on screen, and tells the surfaces where to be. Each target's agent cursor is a `CursorTimeline` in the
+/// window's local space; a display-rate driver samples it and hands the frame to the overlay and the mirror alike.
+/// All AppKit work is behind `CUSurfaceFactory`.
 @MainActor final class PresentationController: CUPresentation {
     private var state: PresentationState
     private let tuning: PresentationTuning
@@ -10,6 +12,14 @@ import Foundation
     private let surfaces: CUSurfaceFactory
     private let clock: CUClock
     private let ticker: CUTicker
+    private let frames: CUFrameDriver
+    private let accessibility: CUAccessibilitySource
+
+    /// Each target's cursor, in its window's local space.
+    private var cursors: [TargetKey: CursorTimeline] = [:]
+    /// The last known frame of each target's window, for mapping points and sizing the mirror's cursor.
+    private var windowFrames: [TargetKey: CGRect] = [:]
+    private var driverNeed: CursorAnimationNeed = .none
 
     /// Mirror panels that exist (shown, or hidden but still wanted so they can come back quickly).
     private var mirrors: [TargetKey: MirrorSurface] = [:]
@@ -21,11 +31,13 @@ import Foundation
     private var lastReorder: [TargetKey: TimeInterval] = [:]
 
     init(windows: CUWindowSource, surfaces: CUSurfaceFactory, clock: CUClock, ticker: CUTicker,
-         tuning: PresentationTuning = .standard) {
+         frames: CUFrameDriver, accessibility: CUAccessibilitySource, tuning: PresentationTuning = .standard) {
         self.windows = windows
         self.surfaces = surfaces
         self.clock = clock
         self.ticker = ticker
+        self.frames = frames
+        self.accessibility = accessibility
         self.tuning = tuning
         self.state = PresentationState(tuning: tuning)
     }
@@ -53,22 +65,21 @@ import Foundation
 
     func cursor(sessionId: String, target: CUWindowRef, point: CGPoint, kind: CUCursorKind) {
         let key = TargetKey(sessionId: sessionId, target: target)
-        let frame = windows.snapshot(of: target.windowID)?.frame
-        let fraction = frame.map { MirrorLayout.fraction(of: point, in: $0) }
-        state.noteCursor(key, fraction: fraction, now: clock.now)
+        let now = clock.now
+        guard let frame = windows.snapshot(of: target.windowID)?.frame ?? windowFrames[key] else {
+            // Nowhere to put it yet; the event still counts as activity on the target.
+            if kind != .done { state.noteCursor(key, fraction: nil, now: now) }
+            refresh()
+            return
+        }
+        windowFrames[key] = frame
+        let local = { (p: CGPoint) in CGPoint(x: p.x - frame.minX, y: p.y - frame.minY) }
+        var timeline = cursors[key] ?? CursorTimeline()
+        timeline.options.reduceMotion = accessibility.reduceMotion
+        timeline.receive(kind.mapped(local), at: local(point), now: now)
+        cursors[key] = timeline
+        if kind != .done { state.noteCursor(key, fraction: MirrorLayout.fraction(of: point, in: frame), now: now) }
         refresh()
-
-        var dragTo: CGPoint?
-        if case .drag(let to) = kind { dragTo = to }
-        if let fraction, shownMirrors.contains(key), let mirror = mirrors[key] {
-            let dragFraction = frame.flatMap { f in dragTo.map { MirrorLayout.fraction(of: $0, in: f) } }
-            mirror.showCursor(atFraction: fraction, kind: kind, dragToFraction: dragFraction)
-        }
-        if let frame, shownOverlays.contains(key), let overlay = overlays[key] {
-            let local = CGPoint(x: point.x - frame.minX, y: point.y - frame.minY)
-            let localDrag = dragTo.map { CGPoint(x: $0.x - frame.minX, y: $0.y - frame.minY) }
-            overlay.moveCursor(to: local, kind: kind, dragTo: localDrag)
-        }
     }
 
     func turnEnded(sessionId: String) {
@@ -79,7 +90,9 @@ import Foundation
     func sessionEnded(sessionId: String) {
         for key in state.sessionEnded(sessionId: sessionId) { discard(key) }
         // Surfaces of the session that had no entry left (already pruned) go too.
-        for key in Array(mirrors.keys) + Array(overlays.keys) where key.sessionId == sessionId { discard(key) }
+        for key in Array(mirrors.keys) + Array(overlays.keys) + Array(cursors.keys) where key.sessionId == sessionId {
+            discard(key)
+        }
         refresh()
     }
 
@@ -134,10 +147,24 @@ import Foundation
             mirrorOrder = wanted
         }
 
-        // Overlay cursors: only over a window that is showing.
+        // Cursors whose time is up (turn end, 30 s idle) play their fade; faded ones are dropped.
         let active = Set(state.activeCursors(now: now))
-        for key in active {
-            guard case .visible(let frame) = presence(of: key) else {
+        for (key, timeline) in cursors {
+            if !active.contains(key), !timeline.isFadingOrHidden {
+                var t = timeline
+                t.receive(.done, at: t.restPosition ?? .zero, now: now)
+                cursors[key] = t
+            } else if !active.contains(key), timeline.isHidden(at: now) {
+                cursors[key] = nil
+            }
+        }
+
+        // Overlay cursors: only over a window that is showing, while the cursor is not hidden.
+        let live = Set(cursors.filter { !$0.value.isHidden(at: now) }.keys)
+        for key in live {
+            let p = presence(of: key)
+            if let f = p.frame { windowFrames[key] = f }
+            guard case .visible(let frame) = p else {
                 if shownOverlays.remove(key) != nil { overlays[key]?.setShown(false) }
                 continue
             }
@@ -148,21 +175,53 @@ import Foundation
             overlay.place(windowFrame: frame, aboveWindow: key.target.windowID, reorder: reorder || !shownOverlays.contains(key))
             if shownOverlays.insert(key).inserted { overlay.setShown(true) }
         }
-        for key in shownOverlays where !active.contains(key) {
+        for key in shownOverlays where !live.contains(key) {
             overlays[key]?.setShown(false)
             shownOverlays.remove(key)
         }
-        for (key, overlay) in overlays where state.entries[key] == nil {
+        for (key, overlay) in overlays where state.entries[key] == nil && cursors[key] == nil {
             overlay.close()
             overlays[key] = nil
             lastReorder[key] = nil
         }
+        pushCursorFrames(now: now)
 
         let busy = !shownMirrors.isEmpty || !shownOverlays.isEmpty || state.hasPendingTimers
         if busy, !ticker.isRunning {
             ticker.start(interval: tuning.trackingInterval) { [weak self] in self?.refresh() }
         } else if !busy, ticker.isRunning {
             ticker.stop()
+        }
+    }
+
+    /// Hands every cursor's current frame to its overlay and mirror, and runs the frame driver at the rate the
+    /// cursors need (or stops it).
+    private func pushCursorFrames(now: TimeInterval) {
+        let style = CursorStyle(increaseContrast: accessibility.increaseContrast)
+        var need = CursorAnimationNeed.none
+        for (key, timeline) in cursors {
+            let frame = timeline.frame(at: now)
+            if shownOverlays.contains(key) { overlays[key]?.apply(cursor: frame, style: style) }
+            if shownMirrors.contains(key), let size = windowFrames[key]?.size {
+                mirrors[key]?.apply(cursor: frame, style: style, windowSize: size)
+            }
+            need = max(need, timeline.animationNeed(at: now))
+        }
+        if need == .none {
+            if frames.isRunning { frames.stop() }
+        } else if !frames.isRunning || need != driverNeed {
+            frames.start(need) { [weak self] in self?.animationTick() }
+        }
+        driverNeed = need
+    }
+
+    /// One display frame: draw, and tidy up once a cursor has faded out.
+    private func animationTick() {
+        let now = clock.now
+        if cursors.contains(where: { $0.value.isHidden(at: now) && shownOverlays.contains($0.key) }) {
+            refresh()
+        } else {
+            pushCursorFrames(now: now)
         }
     }
 
@@ -173,10 +232,24 @@ import Foundation
         shownOverlays.remove(key)
         lastReorder[key] = nil
         mirrorOrder.removeAll { $0 == key }
+        cursors[key] = nil
+        windowFrames[key] = nil
     }
 
     // MARK: - Test hooks
 
     var debugShownMirrors: [TargetKey] { mirrorOrder.filter { shownMirrors.contains($0) } }
     var debugShownOverlays: Set<TargetKey> { shownOverlays }
+    func debugCursorFrame(_ key: TargetKey) -> CursorFrame? { cursors[key]?.frame(at: clock.now) }
+}
+
+extension CUCursorKind {
+    /// The same kind with its positional payloads moved by `f` (screen → window-local).
+    func mapped(_ f: (CGPoint) -> CGPoint) -> CUCursorKind {
+        switch self {
+        case .drag(let to): return .drag(to: f(to))
+        case .target(let rect): return .target(frame: CGRect(origin: f(rect.origin), size: rect.size))
+        default: return self
+        }
+    }
 }

@@ -97,17 +97,17 @@ final class PresentationStateTests: XCTestCase {
         XCTAssertEqual(s.visibleMirrors(), [key("s", 1)])
     }
 
-    func testCursorShowsForFourSecondsAfterItsLastActionAndHidesAtTurnEnd() {
+    func testCursorRestsForThirtySecondsAfterItsLastActionAndEndsAtTurnEnd() {
         var s = PresentationState()
         s.noteCursor(key("s", 1), fraction: nil, now: 10)
-        XCTAssertEqual(s.activeCursors(now: 13.9), [key("s", 1)])
-        s.tick(now: 14)
-        XCTAssertEqual(s.activeCursors(now: 14), [])
-        XCTAssertNil(s.entries[key("s", 1)], "a cursor-only entry is dropped once its cursor hides")
+        XCTAssertEqual(s.activeCursors(now: 39.9), [key("s", 1)])
+        s.tick(now: 40)
+        XCTAssertEqual(s.activeCursors(now: 40), [])
+        XCTAssertNil(s.entries[key("s", 1)], "a cursor-only entry is dropped once its time is up")
 
-        s.noteCursor(key("s", 2), fraction: nil, now: 20)
+        s.noteCursor(key("s", 2), fraction: nil, now: 50)
         s.turnEnded(sessionId: "s")
-        XCTAssertEqual(s.activeCursors(now: 20.5), [])
+        XCTAssertEqual(s.activeCursors(now: 50.5), [])
     }
 
     func testSessionEndForgetsEverythingOfThatSession() {

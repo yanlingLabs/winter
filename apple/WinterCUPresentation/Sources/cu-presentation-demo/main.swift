@@ -8,10 +8,16 @@ import WinterCUPresentation
 //
 //   cu-presentation-demo --list                 windows you can pick (id, app, frame)
 //   cu-presentation-demo --window <id> [--seconds 30] [--no-mirror] [--no-esc]
+//   cu-presentation-demo --render-gallery <dir> [--no-gifs]
+//                                               every cursor state rendered OFFSCREEN to PNG/GIF files: no window,
+//                                               no overlay, no capture, no event tap
 //
-// Needs Screen Recording (the mirror) and Accessibility (the Esc tap) for the terminal running it.
+// --window needs Screen Recording (the mirror) and Accessibility (the Esc tap) for the terminal running it.
+// --render-gallery needs nothing.
 
 struct Options {
+    var galleryDir: String?
+    var gifs = true
     var list = false
     var windowID: CGWindowID?
     var seconds: TimeInterval = 30
@@ -25,6 +31,11 @@ func parse(_ args: [String]) -> Options? {
     while i < args.count {
         switch args[i] {
         case "--list": o.list = true
+        case "--render-gallery":
+            i += 1
+            guard i < args.count else { return nil }
+            o.galleryDir = args[i]
+        case "--no-gifs": o.gifs = false
         case "--window":
             i += 1
             guard i < args.count, let id = UInt32(args[i]) else { return nil }
@@ -57,9 +68,23 @@ func describe(_ info: [String: Any]) -> (id: CGWindowID, pid: pid_t, app: String
 }
 
 let usage = "usage: cu-presentation-demo --list | --window <id> [--seconds N] [--no-mirror] [--no-esc]"
+    + " | --render-gallery <dir> [--no-gifs]"
 guard let options = parse(Array(CommandLine.arguments.dropFirst())) else {
     FileHandle.standardError.write((usage + "\n").data(using: .utf8)!)
     exit(2)
+}
+
+if let dir = options.galleryDir {
+    do {
+        let output = try MainActor.assumeIsolated {
+            try CUCursorGallery.render(to: URL(fileURLWithPath: dir, isDirectory: true), gifs: options.gifs)
+        }
+        print("\(output.stills.count) stills, \(output.gifs.count) GIFs, contact sheet: \(output.contactSheet.path)")
+        exit(0)
+    } catch {
+        FileHandle.standardError.write("render failed: \(error)\n".data(using: .utf8)!)
+        exit(1)
+    }
 }
 
 if options.list || options.windowID == nil {

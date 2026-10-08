@@ -18,7 +18,8 @@ import XCTest
         var shown = false
         var shownHistory: [Bool] = []
         var fronts = 0
-        var cursors: [(CGPoint, CUCursorKind, CGPoint?)] = []
+        var cursors: [CursorFrame] = []
+        var cursorWindowSize: CGSize?
         var closed = false
         var lastAspect: CGFloat?
         weak var log: Log?
@@ -40,8 +41,9 @@ import XCTest
             fronts += 1
             log?.fronts.append(target.windowID)
         }
-        func showCursor(atFraction fraction: CGPoint, kind: CUCursorKind, dragToFraction: CGPoint?) {
-            cursors.append((fraction, kind, dragToFraction))
+        func apply(cursor frame: CursorFrame, style: CursorStyle, windowSize: CGSize) {
+            cursors.append(frame)
+            cursorWindowSize = windowSize
         }
         func close() { closed = true }
     }
@@ -50,7 +52,8 @@ import XCTest
         var placed: [CGRect] = []
         var reorders = 0
         var shown = false
-        var moves: [(CGPoint, CUCursorKind, CGPoint?)] = []
+        var frames: [CursorFrame] = []
+        var lastStyle: CursorStyle?
         var closed = false
 
         func place(windowFrame: CGRect, aboveWindow windowID: CGWindowID, reorder: Bool) {
@@ -58,7 +61,10 @@ import XCTest
             if reorder { reorders += 1 }
         }
         func setShown(_ shown: Bool) { self.shown = shown }
-        func moveCursor(to point: CGPoint, kind: CUCursorKind, dragTo: CGPoint?) { moves.append((point, kind, dragTo)) }
+        func apply(cursor frame: CursorFrame, style: CursorStyle) {
+            frames.append(frame)
+            lastStyle = style
+        }
         func close() { closed = true }
     }
 
@@ -85,6 +91,26 @@ import XCTest
 
     final class FakeClock: CUClock { var now: TimeInterval = 1000 }
 
+    final class FakeDriver: CUFrameDriver {
+        var tick: (@MainActor () -> Void)?
+        var need: CursorAnimationNeed = .none
+        var isRunning: Bool { tick != nil }
+        func start(_ need: CursorAnimationNeed, _ tick: @escaping @MainActor () -> Void) {
+            self.need = need
+            self.tick = tick
+        }
+        func stop() {
+            tick = nil
+            need = .none
+        }
+        func fire() { tick?() }
+    }
+
+    final class FakeAccessibility: CUAccessibilitySource {
+        var reduceMotion = false
+        var increaseContrast = false
+    }
+
     final class FakeTicker: CUTicker {
         var tick: (@MainActor () -> Void)?
         var isRunning: Bool { tick != nil }
@@ -101,6 +127,8 @@ import XCTest
     var surfaces: FakeSurfaces!
     var clock: FakeClock!
     var ticker: FakeTicker!
+    var driver: FakeDriver!
+    var accessibility: FakeAccessibility!
     var controller: PresentationController!
 
     override func setUp() async throws {
@@ -109,7 +137,10 @@ import XCTest
             surfaces = FakeSurfaces()
             clock = FakeClock()
             ticker = FakeTicker()
-            controller = PresentationController(windows: windows, surfaces: surfaces, clock: clock, ticker: ticker)
+            driver = FakeDriver()
+            accessibility = FakeAccessibility()
+            controller = PresentationController(windows: windows, surfaces: surfaces, clock: clock, ticker: ticker,
+                                                frames: driver, accessibility: accessibility)
         }
     }
 
@@ -180,10 +211,16 @@ import XCTest
         clock.now += 29
         ticker.fire()
         XCTAssertEqual(surfaces.mirror(1)?.shown, true)
+        XCTAssertEqual(surfaces.overlay(1)?.shown, true, "the cursor rests, breathing, until the 30 s are up")
         clock.now += 1
         ticker.fire()
         XCTAssertEqual(surfaces.mirror(1)?.shown, false)
+        XCTAssertEqual(surfaces.overlay(1)?.shown, true, "the cursor's own fade is still playing")
+        clock.now += 0.5
+        driver.fire()
+        XCTAssertEqual(surfaces.overlay(1)?.shown, false)
         XCTAssertFalse(ticker.isRunning, "nothing left to watch")
+        XCTAssertFalse(driver.isRunning)
     }
 
     func testHideMirrorClosesIt() {
@@ -204,7 +241,7 @@ import XCTest
         XCTAssertEqual(surfaces.mirror(1)?.cursors.count, 0)
         let o = try! XCTUnwrap(surfaces.overlay(1))
         XCTAssertTrue(o.shown)
-        XCTAssertEqual(o.moves.last?.0, CGPoint(x: 100, y: 100), "window-local point")
+        XCTAssertEqual(o.frames.last?.tip, CGPoint(x: 100, y: 100), "window-local point")
         controller.mirrorsEnabled = true
         XCTAssertEqual(surfaces.mirror(1)?.shown, true)
     }
@@ -217,8 +254,10 @@ import XCTest
         XCTAssertFalse(ticker.isRunning, "stops at once, not 30 s later")
         controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 250), kind: .press)
         XCTAssertTrue(ticker.isRunning, "the overlay cursor still follows its window")
-        clock.now += 4
+        clock.now += 30
         ticker.fire()
+        clock.now += 0.5
+        driver.fire()
         XCTAssertFalse(ticker.isRunning)
         // Back on after the mirror's 30 s idle: it stays faded until the next action.
         clock.now += 30
@@ -239,12 +278,21 @@ import XCTest
         let o = try! XCTUnwrap(surfaces.overlay(1))
         XCTAssertTrue(o.shown)
         XCTAssertEqual(o.placed.last, CGRect(x: 100, y: 100, width: 800, height: 400))
-        XCTAssertEqual(o.moves.last?.0, CGPoint(x: 200, y: 100))
-        XCTAssertEqual(o.moves.last?.2, CGPoint(x: 400, y: 300))
+        XCTAssertEqual(o.frames.last?.tip, CGPoint(x: 200, y: 100), "screen points become window-local")
+        XCTAssertEqual(o.frames.last?.path?.to, CGPoint(x: 400, y: 300), "and so does the drag's end")
         let m = try! XCTUnwrap(surfaces.mirror(1))
-        XCTAssertEqual(m.cursors.last?.0, CGPoint(x: 0.25, y: 0.25))
-        XCTAssertEqual(m.cursors.last?.1, .drag(to: CGPoint(x: 500, y: 400)))
-        XCTAssertEqual(m.cursors.last?.2, CGPoint(x: 0.5, y: 0.75))
+        XCTAssertEqual(m.cursors.last, o.frames.last, "one cursor, drawn in both places")
+        XCTAssertEqual(m.cursorWindowSize, CGSize(width: 800, height: 400))
+        XCTAssertEqual(driver.need, .full)
+    }
+
+    func testTargetFramesAreMappedIntoTheWindow() {
+        addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400))
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 200),
+                          kind: .target(frame: CGRect(x: 260, y: 180, width: 80, height: 40)))
+        clock.now += 0.3
+        driver.fire()
+        XCTAssertEqual(surfaces.overlay(1)?.frames.last?.reticle?.rect, CGRect(x: 160, y: 80, width: 80, height: 40))
     }
 
     func testNoOverlayWhileTheWindowIsNotVisibleButTheMirrorStillShowsTheCursor() {
@@ -252,7 +300,7 @@ import XCTest
         controller.showMirror(sessionId: "s", target: ref(1))
         controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 500, y: 300), kind: .press)
         XCTAssertNil(surfaces.overlay(1))
-        XCTAssertEqual(surfaces.mirror(1)?.cursors.last?.0, CGPoint(x: 0.5, y: 0.5))
+        XCTAssertEqual(surfaces.mirror(1)?.cursors.last?.tip, CGPoint(x: 400, y: 200))
 
         // The window comes back on screen: the overlay appears at the next tick.
         addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400))
@@ -264,7 +312,7 @@ import XCTest
         XCTAssertEqual(surfaces.overlay(1)?.shown, false)
     }
 
-    func testTheOverlayFollowsTheWindowAndHidesAfterFourIdleSeconds() {
+    func testTheOverlayFollowsTheWindowAndFadesAfterThirtyIdleSeconds() {
         addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400))
         controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 200), kind: .move)
         XCTAssertNil(surfaces.mirror(1), "a cursor never opens a mirror by itself")
@@ -273,11 +321,67 @@ import XCTest
         ticker.fire()
         let o = try! XCTUnwrap(surfaces.overlay(1))
         XCTAssertEqual(o.placed.last, CGRect(x: 160, y: 120, width: 800, height: 400))
-        clock.now += 3
+        clock.now += 29
         ticker.fire()
+        XCTAssertTrue(o.shown, "fading, not gone")
+        clock.now += 0.2
+        driver.fire()
+        let fading = try! XCTUnwrap(o.frames.last)
+        XCTAssertLessThan(fading.opacity, 1)
+        XCTAssertGreaterThan(fading.opacity, 0)
+        clock.now += 0.3
+        driver.fire()
         XCTAssertFalse(o.shown)
-        XCTAssertTrue(o.closed, "a cursor-only target is dropped once its cursor hides")
+        XCTAssertTrue(o.closed, "a cursor-only target is dropped once its cursor is gone")
         XCTAssertFalse(ticker.isRunning)
+        XCTAssertFalse(driver.isRunning)
+    }
+
+    func testTurnEndFadesTheCursorGracefully() {
+        addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400))
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 200), kind: .press)
+        controller.turnEnded(sessionId: "s")
+        XCTAssertEqual(surfaces.overlay(1)?.shown, true, "the fade plays after the press it follows")
+        clock.now += 0.7
+        driver.fire()
+        XCTAssertEqual(surfaces.overlay(1)?.shown, false)
+    }
+
+    func testReduceMotionAndIncreaseContrastReachTheCursor() {
+        accessibility.reduceMotion = true
+        accessibility.increaseContrast = true
+        addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400))
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 150, y: 150), kind: .move)
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 700, y: 400), kind: .move)
+        let o = try! XCTUnwrap(surfaces.overlay(1))
+        XCTAssertEqual(o.frames.last?.tip, CGPoint(x: 600, y: 300), "no travel: it is already there")
+        XCTAssertEqual(o.lastStyle?.increaseContrast, true)
+        clock.now += 1
+        driver.fire()
+        XCTAssertFalse(driver.isRunning, "a still cursor under Reduce Motion needs no frames (no breathing)")
+    }
+
+    func testTheDriverSlowsToBreathingAtRest() {
+        addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400))
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 150, y: 150), kind: .move)
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 700, y: 400), kind: .press)
+        XCTAssertEqual(driver.need, .full)
+        clock.now += 2
+        driver.fire()
+        XCTAssertEqual(driver.need, .low)
+        XCTAssertTrue(driver.isRunning)
+    }
+
+    func testForegroundTakesOverTheLook() {
+        addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400))
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 200), kind: .move)
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 200), kind: .foreground(true))
+        clock.now += 0.3
+        driver.fire()
+        let f = try! XCTUnwrap(surfaces.overlay(1)?.frames.last)
+        XCTAssertEqual(f.bodyOpacity, 0, "the real pointer is there: no second arrow")
+        XCTAssertNotNil(f.foreground)
+        XCTAssertEqual(f.caption?.text, "Using your mouse")
     }
 
     func testOverlayIsReorderedAboveItsWindowAtMostTwiceASecond() {

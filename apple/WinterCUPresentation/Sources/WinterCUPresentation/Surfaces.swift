@@ -18,8 +18,9 @@ import CoreGraphics
     func setShown(_ shown: Bool)
     /// Put this mirror above the other mirrors.
     func bringToFront()
-    /// Draw the agent cursor inside the mirror at `fraction` of the window (0…1 from the top-left).
-    func showCursor(atFraction fraction: CGPoint, kind: CUCursorKind, dragToFraction: CGPoint?)
+    /// Draw the agent cursor inside the mirror. `frame` is in the window's local space; `windowSize` lets the mirror
+    /// map it into its live image.
+    func apply(cursor frame: CursorFrame, style: CursorStyle, windowSize: CGSize)
     /// Tear down for good (session ended, or the mirror is no longer wanted).
     func close()
 }
@@ -29,9 +30,22 @@ import CoreGraphics
     /// Cover `windowFrame` (top-left global points), ordered just above window `windowID`.
     func place(windowFrame: CGRect, aboveWindow windowID: CGWindowID, reorder: Bool)
     func setShown(_ shown: Bool)
-    /// Glide the cursor to `point` (window-local, top-left origin) and show the action.
-    func moveCursor(to point: CGPoint, kind: CUCursorKind, dragTo: CGPoint?)
+    /// Draw the cursor as `frame` says (window-local, top-left origin).
+    func apply(cursor frame: CursorFrame, style: CursorStyle)
     func close()
+}
+
+/// Calls back once per display frame while the cursor animates, at a rate matched to what it needs.
+@MainActor protocol CUFrameDriver: AnyObject {
+    var isRunning: Bool { get }
+    func start(_ need: CursorAnimationNeed, _ tick: @escaping @MainActor () -> Void)
+    func stop()
+}
+
+/// The system's accessibility display preferences, read fresh on every use.
+@MainActor protocol CUAccessibilitySource: AnyObject {
+    var reduceMotion: Bool { get }
+    var increaseContrast: Bool { get }
 }
 
 @MainActor protocol CUSurfaceFactory {
