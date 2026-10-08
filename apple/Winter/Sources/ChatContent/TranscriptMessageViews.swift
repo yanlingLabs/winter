@@ -1282,6 +1282,51 @@ func toolOutputPreview(_ output: String?,
     return ToolOutputPreview(text: shown, elision: parts.isEmpty ? nil : "… " + parts.joined(separator: "; "))
 }
 
+// MARK: - Image placeholders in a result
+
+/// What the runtime writes into a result's text for each image it carried. The images themselves are not
+/// in the session log, so the text is all a row has: this token, once per image, usually run together
+/// ("[image][image]") or on a line of its own.
+let toolOutputImagePlaceholder = "[image]"
+
+/// Tools whose output is text the user's world printed (a shell, a search, a listing, an edit's
+/// confirmation) and never carries an image, so a literal "[image]" in it is content, not a placeholder.
+let toolNamesWithoutImageResults: Set<String> = [
+    "bash", "bash_output", "grep", "glob", "ls", "edit", "write", "notebook_edit",
+]
+
+/// PURE: whether `name`'s result can carry image placeholders — every tool but the text-only ones above
+/// (ComputerV2, the old Computer and Browser, Read of an image file, …).
+func toolOutputMayCarryImages(_ name: String) -> Bool {
+    !toolNamesWithoutImageResults.contains(name)
+}
+
+/// PURE: a result's text with its image placeholders taken out, and how many there were.
+///
+/// A line that held nothing but placeholders disappears entirely (no blank line left behind), and a line
+/// that held text beside one keeps the text with its edges trimmed. Text with no placeholder is returned
+/// byte for byte. A result that was only placeholders comes back as `("", n)` — the caller draws just the
+/// chip, not an empty block.
+func toolOutputSplittingImages(_ output: String) -> (text: String, imageCount: Int) {
+    guard output.contains(toolOutputImagePlaceholder) else { return (output, 0) }
+    var count = 0
+    var rebuilt: [String] = []
+    for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
+        let found = line.components(separatedBy: toolOutputImagePlaceholder).count - 1
+        guard found > 0 else { rebuilt.append(String(line)); continue }
+        count += found
+        let remainder = line.replacingOccurrences(of: toolOutputImagePlaceholder, with: "")
+            .trimmingCharacters(in: .whitespaces)
+        if !remainder.isEmpty { rebuilt.append(remainder) }
+    }
+    return (rebuilt.joined(separator: "\n"), count)
+}
+
+/// PURE: the chip under a result that carried images — "Screenshot" for one, "N images" for several.
+func toolImageChipText(_ count: Int) -> String {
+    count == 1 ? "Screenshot" : "\(count) images"
+}
+
 /// The one line a COLLAPSED run shows when something in it failed: the first non-blank line of the
 /// first failed call's output, which is where every tool puts its error.
 ///
@@ -1290,8 +1335,11 @@ func toolOutputPreview(_ output: String?,
 /// complaint this whole task fixes; a failure with nothing to say (blank or absent output) draws
 /// nothing at all rather than an empty line.
 func toolRunFailureSummary(_ entries: [ToolRunEntry]) -> String? {
-    guard let failed = entries.flatMap(\.calls).first(where: \.isError), let output = failed.output,
-          let line = output.split(separator: "\n")
+    guard let (name, failed) = entries.lazy.flatMap({ entry in entry.calls.map { (entry.name, $0) } }).first(where: { $0.1.isError }),
+          let raw = failed.output
+    else { return nil }
+    let output = toolOutputMayCarryImages(name) ? toolOutputSplittingImages(raw).text : raw
+    guard let line = output.split(separator: "\n")
               .map({ $0.trimmingCharacters(in: .whitespaces) })
               .first(where: { !$0.isEmpty })
     else { return nil }
@@ -1394,6 +1442,9 @@ struct ToolRunCallLine: Equatable {
     let fileDiff: FileDiffRef?
     /// A ComputerV2 call's script, drawn in monospace above its result. `nil` for every other tool.
     var scriptCode: String? = nil
+    /// How many images the result carried (its `[image]` placeholders, which `output` no longer shows):
+    /// drawn as a chip under the text, or alone when the result was only images.
+    var imageCount: Int = 0
 }
 
 /// Everything an expanded run draws: one line per call, plus a note when the block budget bit.
@@ -1422,9 +1473,19 @@ func toolRunExpansion(_ entries: [ToolRunEntry],
             // that would then be discarded. That is the difference between the constant bounding
             // DRAWING and bounding the work as well, which is what its doc claims.
             var preview: ToolOutputPreview?
-            if call.output != nil {
-                if blocksDrawn < maxOutputBlocks {
-                    preview = toolOutputPreview(call.output)
+            var imageCount = 0
+            if let output = call.output {
+                var text = output
+                if toolOutputMayCarryImages(entry.name) {
+                    let split = toolOutputSplittingImages(output)
+                    text = split.text
+                    imageCount = split.imageCount
+                }
+                // A result that was only images has no text block at all — the chip speaks for it.
+                if imageCount > 0 && text.isEmpty {
+                    preview = nil
+                } else if blocksDrawn < maxOutputBlocks {
+                    preview = toolOutputPreview(text)
                     blocksDrawn += 1
                 } else {
                     blocksWithheld += 1
@@ -1439,7 +1500,8 @@ func toolRunExpansion(_ entries: [ToolRunEntry],
                 // is the only door to its diff — withholding one would remove an affordance rather
                 // than defer some drawing.
                 fileDiff: call.fileDiff,
-                scriptCode: call.scriptCode
+                scriptCode: call.scriptCode,
+                imageCount: imageCount
             ))
         }
     }
@@ -1538,6 +1600,26 @@ struct TranscriptDiffChip: View {
         .padding(.vertical, 3)
         .background(Capsule().fill(isHovering ? Theme.rowHover : Theme.controlSurface))
         .animation(.easeOut(duration: 0.14), value: isHovering)
+    }
+}
+
+/// The chip under a result that carried images — a camera glyph and "Screenshot" (or "N images"), in the
+/// diff chip's capsule. The images are not in the session log, so it states a fact and offers no door.
+struct TranscriptImageChip: View {
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "camera")
+            Text(toolImageChipText(count))
+        }
+        .font(Typography.caption())
+        .foregroundStyle(Theme.textMuted)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(Theme.controlSurface))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(toolImageChipText(count))
     }
 }
 
@@ -1809,8 +1891,13 @@ struct TranscriptToolGroupRow: View {
 
                     if let output = line.output {
                         outputBlock(output)
-                    } else if let placeholder = toolCallOutputPlaceholder(line.status) {
+                    } else if line.imageCount == 0, let placeholder = toolCallOutputPlaceholder(line.status) {
                         placeholderBlock(placeholder)
+                    }
+
+                    if line.imageCount > 0 {
+                        TranscriptImageChip(count: line.imageCount)
+                            .padding(.leading, 16)
                     }
                 }
             }
