@@ -28,26 +28,62 @@ extension CUCore {
         let token = cancels.begin(p.callId)
         defer { cancels.end(p.callId) }
         try token.check()
-        try Self.checkAccess(p.action, access: p.access, appName: t.appName)
+        do {
+            try Self.checkAccess(p.action, access: p.access, appName: t.appName)
+        } catch {
+            cursor(t, "refused")
+            throw error
+        }
         if case .key(let k) = p.action, (try? CUKeyChord.parse(k.combo))?.isEscape == true {
             await MainActor.run { [weak self] in self?.events?.willSendEscape() }
         }
         let outcome = try await queues.run(t.pid) { [self] () -> ActOutcome in
-            // A cancel that arrived while this act waited behind others stops it here.
-            try token.check()
-            try floorCheckPrivacy(t)
-            try saveFloorBeforeAct(p, t)
             do {
-                let o = try perform(p, on: t, token: token)
-                t.lastActionMs = clock.nowMs()
-                return o
-            } catch let e as CUError where e.code == "stale_element" {
-                if let ref = Self.primaryRef(p.action) { t.refs.forget(ref); throw CUError.staleRef(ref) }
-                // The target is still bound; only the element moved under the action.
-                throw CUError.busy("the \(t.appName) UI changed under the action — call state() and retry")
+                // A cancel that arrived while this act waited behind others stops it here.
+                try token.check()
+                try floorCheckPrivacy(t)
+                try saveFloorBeforeAct(p, t)
+                do {
+                    let o = try perform(p, on: t, token: token)
+                    t.lastActionMs = clock.nowMs()
+                    return o
+                } catch let e as CUError where e.code == "stale_element" {
+                    if let ref = Self.primaryRef(p.action) { t.refs.forget(ref); throw CUError.staleRef(ref) }
+                    // The target is still bound; only the element moved under the action.
+                    throw CUError.busy("the \(t.appName) UI changed under the action — call state() and retry")
+                }
+            } catch {
+                // A refusal or a failure: a gentle "no" where the act was aimed. Not for a cancel (the user
+                // or the script stopped it) or a target that is gone (its cursor goes with it).
+                if Self.showsRefusal(error) { cursor(t, "refused", at: attemptPoint(p.action, t)) }
+                throw error
             }
         }
         return TargetActResult(rung: outcome.rung.rawValue, detail: outcome.detail)
+    }
+
+    static func showsRefusal(_ error: Error) -> Bool {
+        guard let e = error as? CUError else { return true }
+        return e.code != "cancelled" && e.code != "target_lost"
+    }
+
+    /// Where a failed act was aimed: its element's centre, else its point, else the cursor's last place.
+    func attemptPoint(_ a: CUAction, _ t: CUTarget) -> CGPoint? {
+        if let ref = Self.primaryRef(a), let key = t.refs.key(for: ref), let c = ElementInfo(key.element, ax).center {
+            return c
+        }
+        let pixel: (point: [Double]?, shot: String?)? = {
+            switch a {
+            case .click(let x): return (x.point, x.shotId)
+            case .scroll(let x): return (x.point, x.shotId)
+            case .drag(let x): return (x.from.point, x.shotId)
+            default: return nil
+            }
+        }()
+        if let pixel, let px = try? cuPoint(pixel.point), let pt = try? screenPoint(for: t, shotId: pixel.shot, pixel: px) {
+            return pt
+        }
+        return nil
     }
 
     /// The user's click-only restriction (R17): clicks, scrolls and AX actions only. Pure.
@@ -138,11 +174,14 @@ extension CUCore {
             let info = ElementInfo(e, ax)
             try pasteMenuGuard(e, info, p, t)
             t.noteTargeted(e, at: clock.nowMs())
+            announceTarget(t, info, pressing: button == .left)
+            var announced = false
             if count == 1, flags.isEmpty {
                 let axAction: String? = button == .left && info.actions.contains(kAXPressAction) ? kAXPressAction
                     : button == .right && info.actions.contains(kAXShowMenuAction) ? kAXShowMenuAction : nil
                 if let axAction {
-                    emitAction(p, t, info.center, "press")
+                    cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
+                    announced = true
                     try token.check()
                     do {
                         try ax.perform(e, axAction)
@@ -159,21 +198,22 @@ extension CUCore {
             guard let center = info.center else {
                 throw CUError.unsupported("[\(ref)] has no position on screen — try action() or a screenshot point")
             }
-            return try pointerClick(p, t, at: center, button: button, count: count, flags: flags, token)
+            return try pointerClick(p, t, at: center, button: button, count: count, flags: flags, token, announced: announced)
         }
         guard let px = try cuPoint(a.point) else { throw CUError.invalidParams("click needs a ref or a point") }
         let pt = try screenPoint(for: t, shotId: a.shotId, pixel: px)
         return try pointerClick(p, t, at: pt, button: button, count: count, flags: flags, token)
     }
 
+    /// `announced`: the cursor already showed this press (an AX attempt that fell back to events).
     private func pointerClick(_ p: TargetActParams, _ t: CUTarget, at pt: CGPoint, button: CUMouseButton, count: Int,
-                              flags: CGEventFlags, _ token: CUCancellation.Token) throws -> ActOutcome {
+                              flags: CGEventFlags, _ token: CUCancellation.Token, announced: Bool = false) throws -> ActOutcome {
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
         let moved = try bringToThisDesktop(p, t)
-        emitAction(p, t, pt, "press")
         let synth = self.synth
         let windowFor = self.windowFor(t)
-        return try runEvents(p, t, d, focus: true, token) { route, check in
+        let event = announced ? nil : CursorEvent(kind: "press", point: pt, count: count, button: button.rawValue)
+        return try runEvents(p, t, d, focus: true, token, cursor: event) { route, check in
             try synth.click(pid: t.pid, windowFor: windowFor, at: pt, button: button, count: count, flags: flags,
                             route: route, check: check)
         }.noting(moved)
@@ -277,7 +317,8 @@ extension CUCore {
         if info.secure { throw secureRefusal() }
         try CUFloorScan.checkTypedIntoSavePanel(e, text: a.value, pid: t.pid, ax: ax)
         t.noteTargeted(e, at: clock.nowMs())
-        emitAction(p, t, info.center, "type")
+        announceTarget(t, info, pressing: false)
+        cursor(t, "type", at: info.center)
         try token.check()
         if ax.isSettable(e, kAXValueAttribute) {
             do {
@@ -302,13 +343,13 @@ extension CUCore {
 
     private func type(_ a: CUTypeAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         let (e, g) = try textTarget(into: a.into, t, text: a.text)
-        emitAction(p, t, e.flatMap { ElementInfo($0, ax).center }, "type")
+        cursor(t, "type", at: e.flatMap { ElementInfo($0, ax).center })
         return try typeText(a.text, into: e, p, t, token, g)
     }
 
     private func paste(_ a: CUPasteAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         let (e, g) = try textTarget(into: a.into, t, text: a.text)
-        emitAction(p, t, e.flatMap { ElementInfo($0, ax).center }, "type")
+        cursor(t, "type", at: e.flatMap { ElementInfo($0, ax).center })
         return try pasteText(a.text, format: a.format ?? .text, p, t, token, g)
     }
 
@@ -319,7 +360,9 @@ extension CUCore {
         let e: AXUIElement?
         if let into {
             let el = try element(into, in: t)
-            if ElementInfo(el, ax).secure { throw secureRefusal() }
+            let info = ElementInfo(el, ax)
+            if info.secure { throw secureRefusal() }
+            announceTarget(t, info, pressing: false)
             try? ax.set(el, kAXFocusedAttribute, kCFBooleanTrue)
             t.noteTargeted(el, at: clock.nowMs())
             g.explicit = el
@@ -426,7 +469,9 @@ extension CUCore {
         let g = TypingFocus()
         if let into = a.into {
             let el = try element(into, in: t)
-            if Self.producesText(chord), ElementInfo(el, ax).secure { throw secureRefusal() }
+            let info = ElementInfo(el, ax)
+            if Self.producesText(chord), info.secure { throw secureRefusal() }
+            announceTarget(t, info, pressing: false)
             try? ax.set(el, kAXFocusedAttribute, kCFBooleanTrue)
             t.noteTargeted(el, at: clock.nowMs())
             g.explicit = el
@@ -437,7 +482,7 @@ extension CUCore {
         let textual = Self.producesText(chord)
         // Characters (and cmd+V) are text input: never into a password or payment field (C1).
         if textual { e = try requireTypableFocus(t, g) ?? e }
-        emitAction(p, t, e.flatMap { ElementInfo($0, ax).center }, "type")
+        cursor(t, "key", at: e.flatMap { ElementInfo($0, ax).center }, text: a.combo)
         // Resolve the route once (the menu lookup walks the menu bar), then press it `repeat` times.
         let plan = try chordPlan(chord, p, t, g)
         var out = ActOutcome(rung: .accessibility)
@@ -564,11 +609,12 @@ extension CUCore {
         if let ref = a.ref {
             let e = try element(ref, in: t)
             let info = ElementInfo(e, ax)
+            announceTarget(t, info, pressing: false)
             try token.check()
             if let area = scrollArea(from: e) {
                 do {
                     if try axScroll(area: area, direction: a.direction, pages: pages) {
-                        emitAction(p, t, info.center, "scroll")
+                        cursor(t, "scroll", at: info.center, text: a.direction.rawValue)
                         return ActOutcome(rung: .accessibility)
                     }
                 } catch let error where Self.deliveryUncertain(error) {
@@ -590,10 +636,10 @@ extension CUCore {
         let dx = a.direction == .right ? -amount : a.direction == .left ? amount : 0
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
         let moved = try bringToThisDesktop(p, t)
-        emitAction(p, t, point, "scroll")
         let synth = self.synth
         let windowFor = self.windowFor(t)
-        return try runEvents(p, t, d, focus: false, token) { route, check in
+        let event = CursorEvent(kind: "scroll", point: point, text: a.direction.rawValue)
+        return try runEvents(p, t, d, focus: false, token, cursor: event) { route, check in
             try synth.scroll(pid: t.pid, windowFor: windowFor, at: point, deltaX: dx, deltaY: dy, route: route, check: check)
         }.noting(moved)
     }
@@ -638,12 +684,15 @@ extension CUCore {
     }
 
     private func drag(_ a: CUDragAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+        var fromInfo: ElementInfo?
         func point(_ end: CUDragEnd, _ what: String) throws -> CGPoint {
             if let ref = end.ref {
                 guard end.point == nil else { throw CUError.invalidParams("drag \(what) takes a ref or a point, not both") }
-                guard let c = ElementInfo(try element(ref, in: t), ax).center else {
+                let info = ElementInfo(try element(ref, in: t), ax)
+                guard let c = info.center else {
                     throw CUError.unsupported("[\(ref)] has no position on screen")
                 }
+                if what == "from" { fromInfo = info }
                 return c
             }
             guard let px = try cuPoint(end.point, "drag \(what)") else { throw CUError.invalidParams("drag \(what) needs a ref or a point") }
@@ -653,10 +702,11 @@ extension CUCore {
         let to = try point(a.to, "to")
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
         let moved = try bringToThisDesktop(p, t)
-        emit { $0.actionAt(sessionId: p.sessionId, pid: t.pid, windowID: t.windowID, point: from, kind: "drag", dragTo: to) }
+        if let fromInfo { announceTarget(t, fromInfo, pressing: false) }
         let synth = self.synth
         let windowFor = self.windowFor(t)
-        return try runEvents(p, t, d, focus: true, token) { route, check in
+        let event = CursorEvent(kind: "drag", point: from, dragTo: to)
+        return try runEvents(p, t, d, focus: true, token, cursor: event) { route, check in
             try synth.drag(pid: t.pid, windowFor: windowFor, from: from, to: to, route: route, check: check)
         }.noting(moved)
     }
@@ -673,6 +723,8 @@ extension CUCore {
         }
         guard ax.isSettable(e, kAXSelectedTextRangeAttribute), let r = AX.makeRange(location: range.location, length: range.length)
         else { throw CUError.unsupported("[\(a.ref)] does not support selecting text") }
+        announceTarget(t, info, pressing: false)
+        cursor(t, "press", at: info.center, count: 1, button: "left")
         try token.check()
         try? ax.set(e, kAXFocusedAttribute, kCFBooleanTrue)
         do {
@@ -680,7 +732,6 @@ extension CUCore {
         } catch let error where Self.deliveryUncertain(error) {
             throw busyAfterSend(t)
         }
-        emitAction(p, t, info.center, "type")
         return ActOutcome(rung: .accessibility)
     }
 
@@ -719,10 +770,14 @@ extension CUCore {
         try pasteMenuGuard(e, info, p, t)
         let role = info.role ?? ""
         let words = CURoleWords.actionWords(name)
+        let button = name == kAXShowMenuAction ? "right" : "left"
+        announceTarget(t, info, pressing: Self.pressLike.contains(name))
+        var shown: (count: Int, button: String)?
         // An app may list an action it then refuses (Finder lists AXOpen on its icons): once refused, the
         // action's pointer equivalent is used straight away, and one without an equivalent leaves state.
         if t.refusedActions[role]?.contains(name) != true {
-            emitAction(p, t, info.center, "press")
+            cursor(t, "press", at: info.center, count: 1, button: button)
+            shown = (1, button)
             try token.check()
             do {
                 try ax.perform(e, name)
@@ -740,7 +795,8 @@ extension CUCore {
             throw CUError.unsupported("\(t.appName) refused “\(words)” for [\(a.ref)], and it has no position on screen to \(pointer.verb == "double-clicked" ? "double-click" : "click")")
         }
         t.noteTargeted(e, at: clock.nowMs())
-        return try pointerClick(p, t, at: center, button: pointer.button, count: pointer.count, flags: [], token)
+        let same = shown.map { $0.count == pointer.count && $0.button == pointer.button.rawValue } ?? false
+        return try pointerClick(p, t, at: center, button: pointer.button, count: pointer.count, flags: [], token, announced: same)
             .noting("\(t.appName) refused “\(words)” over accessibility, so [\(a.ref)] was \(pointer.verb) instead")
     }
 
@@ -757,6 +813,8 @@ extension CUCore {
                                    cmdModifiers: attrs[kAXMenuItemCmdModifiersAttribute].flatMap { ($0 as? NSNumber)?.intValue }) {
             try requirePasteSafe(p, t)
         }
+        // A menu command has no on-screen point in the background: a caption only, no press.
+        cursor(t, "caption", text: Self.caption("Choosing", a.path.joined(separator: " › ")))
         try token.check()
         do {
             try ax.perform(item.element, kAXPressAction)
@@ -777,8 +835,10 @@ extension CUCore {
 
     /// Runs `body` on the decided route, with the focus handling each rung needs. `body` gets the route and
     /// the per-event check: cancellation always, plus the hit test on rung 4.
+    /// `cursor`: the act's own cursor event, sent just before its input — after "foreground on" on rung 4, so
+    /// the arrow gives way to the real pointer first.
     func runEvents(_ p: TargetActParams, _ t: CUTarget, _ d: CUInputLadder.Decision, focus: Bool,
-                   _ token: CUCancellation.Token,
+                   _ token: CUCancellation.Token, cursor event: CursorEvent? = nil,
                    _ body: (CURoute, CUEventSynth.PointerCheck) throws -> CURoute) throws -> ActOutcome {
         try token.check()
         switch d.rung {
@@ -787,11 +847,15 @@ extension CUCore {
                 try token.check()
                 try hitTest(point, t)
             }
+            cursor(t, "foreground", at: sys.cursorLocation(), text: "on", remember: false)
+            defer { cursor(t, "foreground", at: sys.cursorLocation(), text: "off", remember: false) }
+            send(event, t)
             return try inForeground(t) {
                 _ = try body(.hid, check)
                 return ActOutcome(rung: .foreground, detail: d.detail)
             }
         case .privatePath:
+            send(event, t)
             CUUserInputGuard.waitForQuiet()
             let restore = focus ? focusWithoutRaise(t) : nil
             defer { restore?() }
@@ -802,6 +866,7 @@ extension CUCore {
             }
             return ActOutcome(rung: .privatePath, detail: d.detail)
         case .accessibility, .processEvents:
+            send(event, t)
             if focus { syntheticFocus(t) }
             _ = try body(.publicPid) { _, _ in try token.check() }
             return ActOutcome(rung: .processEvents, detail: d.detail)
@@ -857,10 +922,55 @@ extension CUCore {
 
     // MARK: helpers
 
-    func emitAction(_ p: TargetActParams, _ t: CUTarget, _ point: CGPoint?, _ kind: String) {
-        guard let point else { return }
-        let (session, pid, wid) = (p.sessionId, t.pid, t.windowID)
-        emit { $0.actionAt(sessionId: session, pid: pid, windowID: wid, point: point, kind: kind, dragTo: nil) }
+    /// An act's own cursor event, held until its input is about to go out.
+    struct CursorEvent {
+        var kind: String
+        var point: CGPoint
+        var dragTo: CGPoint? = nil
+        var text: String? = nil
+        var count: Int? = nil
+        var button: String? = nil
+    }
+
+    func send(_ e: CursorEvent?, _ t: CUTarget) {
+        guard let e else { return }
+        cursor(t, e.kind, at: e.point, dragTo: e.dragTo, text: e.text, count: e.count, button: e.button)
+    }
+
+    /// Just before an act on a ref: a caption first when the act is a consequential press ("Clicking “Send”"),
+    /// then the reticle on the element's frame.
+    func announceTarget(_ t: CUTarget, _ info: ElementInfo, pressing: Bool) {
+        if pressing, let label = Self.consequentialLabel(info) {
+            cursor(t, "caption", at: info.center, text: Self.caption("Clicking", "“\(label)”"))
+        }
+        guard let frame = info.frame, frame.width > 0 || frame.height > 0 else { return }
+        cursor(t, "target", at: info.center ?? CGPoint(x: frame.midX, y: frame.midY), frame: frame)
+    }
+
+    /// AX actions that read as a click.
+    static let pressLike: Set<String> = [kAXPressAction, "AXOpen", kAXConfirmAction, "AXPick"]
+
+    /// Words that make a press worth a caption (DESIGN-cursor.md, Captions).
+    static let consequentialWords: Set<String> = ["send", "delete", "save", "submit", "buy", "pay", "publish", "post"]
+
+    /// The element's own label (title, else description) when it names a consequential action.
+    static func consequentialLabel(_ info: ElementInfo) -> String? {
+        let label = (info.labels.first ?? nil).flatMap { $0.isEmpty ? nil : $0 } ?? (info.labels.dropFirst().first ?? nil)
+        guard let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty else { return nil }
+        let words = label.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            .split { !$0.isLetter }.map(String.init)
+        return words.contains(where: consequentialWords.contains) ? label : nil
+    }
+
+    /// "Clicking “Save”": at most 40 characters, the object cut with an ellipsis.
+    static func caption(_ verb: String, _ object: String) -> String {
+        let full = "\(verb) \(object)"
+        guard full.count > 40 else { return full }
+        let room = max(1, 40 - verb.count - 2)
+        let quoted = object.hasPrefix("“") && object.hasSuffix("”")
+        let inner = quoted ? String(object.dropFirst().dropLast()) : object
+        let cut = String(inner.prefix(max(1, room - (quoted ? 2 : 0)))) + "…"
+        return "\(verb) \(quoted ? "“\(cut)”" : cut)"
     }
 
     func secureRefusal() -> CUError {

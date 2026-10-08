@@ -160,19 +160,64 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(rig.presentation.calls, [.show("s_1", notes), .sessionEnded("s_1")])
     }
 
-    func testActionsBecomeCursorMovesWithTheirKind() {
+    private func act(_ rig: Rig, _ kind: String, at p: CGPoint, dragTo: CGPoint? = nil, frame: CGRect? = nil, text: String? = nil,
+                     count: Int? = nil, button: String? = nil) {
+        rig.coordinator.actionAt(sessionId: "s_1", pid: 10, windowID: 20, point: p, kind: kind, dragTo: dragTo, frame: frame,
+                                 text: text, count: count, button: button)
+    }
+
+    func testThePinnedKindsStillMapAsBefore() {
         let rig = Rig()
         rig.coordinator.targetBound(sessionId: "s_1", pid: 10, windowID: 20, appName: "Notes", mirror: true)
         let p = CGPoint(x: 5, y: 6), q = CGPoint(x: 50, y: 60)
-        for kind in ["move", "press", "type", "scroll"] {
-            rig.coordinator.actionAt(sessionId: "s_1", pid: 10, windowID: 20, point: p, kind: kind, dragTo: nil)
-        }
-        rig.coordinator.actionAt(sessionId: "s_1", pid: 10, windowID: 20, point: p, kind: "drag", dragTo: q)
-        rig.coordinator.actionAt(sessionId: "s_1", pid: 10, windowID: 20, point: p, kind: "drag", dragTo: nil)
+        for kind in ["move", "press", "type", "scroll"] { act(rig, kind, at: p) }
+        act(rig, "drag", at: p, dragTo: q)
         XCTAssertEqual(Array(rig.presentation.calls.dropFirst()), [
             .cursor("s_1", notes, p, .move), .cursor("s_1", notes, p, .press), .cursor("s_1", notes, p, .type),
-            .cursor("s_1", notes, p, .scroll), .cursor("s_1", notes, p, .drag(to: q)), .cursor("s_1", notes, p, .drag(to: p)),
+            .cursor("s_1", notes, p, .scroll), .cursor("s_1", notes, p, .drag(to: q)),
         ])
+    }
+
+    func testEveryCursorStateTheEngineSendsReachesThePresentation() {
+        let rig = Rig()
+        rig.coordinator.targetBound(sessionId: "s_1", pid: 10, windowID: 20, appName: "Notes", mirror: false)
+        let p = CGPoint(x: 5, y: 6), frame = CGRect(x: 1, y: 2, width: 30, height: 10)
+        act(rig, "target", at: p, frame: frame)
+        act(rig, "press", at: p, count: 1, button: "left")
+        act(rig, "press", at: p, count: 2, button: "left")
+        act(rig, "press", at: p, count: 1, button: "right")
+        act(rig, "type", at: p)
+        act(rig, "key", at: p, text: "cmd+s")
+        act(rig, "scroll", at: p, text: "down")
+        act(rig, "waitBegin", at: p, text: "Saved")
+        act(rig, "waitBegin", at: p)
+        act(rig, "waitEnd", at: p)
+        act(rig, "refused", at: p)
+        act(rig, "foreground", at: p, text: "on")
+        act(rig, "foreground", at: p, text: "off")
+        act(rig, "caption", at: p, text: "Clicking “Save”")
+        act(rig, "caption", at: p)
+        act(rig, "done", at: p)
+        XCTAssertEqual(rig.presentation.calls, [
+            .cursor("s_1", notes, p, .target(frame: frame)), .cursor("s_1", notes, p, .press),
+            .cursor("s_1", notes, p, .doubleClick), .cursor("s_1", notes, p, .rightClick), .cursor("s_1", notes, p, .type),
+            .cursor("s_1", notes, p, .key(combo: "cmd+s")), .cursor("s_1", notes, p, .scrollToward(.down)),
+            .cursor("s_1", notes, p, .wait(.begin(label: "Saved"))), .cursor("s_1", notes, p, .wait(.begin(label: nil))),
+            .cursor("s_1", notes, p, .wait(.end)), .cursor("s_1", notes, p, .refused),
+            .cursor("s_1", notes, p, .foreground(true)), .cursor("s_1", notes, p, .foreground(false)),
+            .cursor("s_1", notes, p, .caption("Clicking “Save”")), .cursor("s_1", notes, p, .caption(nil)),
+            .cursor("s_1", notes, p, .done),
+        ])
+    }
+
+    func testAnUnknownKindOrAMissingPayloadIsDropped() {
+        let rig = Rig()
+        let p = CGPoint(x: 5, y: 6)
+        act(rig, "teleport", at: p)
+        act(rig, "target", at: p)          // no frame
+        act(rig, "key", at: p)             // no combo
+        act(rig, "drag", at: p)            // no end
+        XCTAssertEqual(rig.presentation.calls, [], "nothing guessed")
     }
 
     func testEscNamesEverySessionWithAnActiveScript() {
