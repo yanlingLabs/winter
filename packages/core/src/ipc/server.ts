@@ -3371,7 +3371,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             }
             default: {
               const p = parseParams(ComputerUseSetSettingsParams, params);
-              control.setSettings({ ...(p.enabled === undefined ? {} : { enabled: p.enabled }), ...(p.mirror === undefined ? {} : { mirror: p.mirror }), ...(p.privateEventPath === undefined ? {} : { privateEventPath: p.privateEventPath }) });
+              control.setSettings({
+                ...(p.enabled === undefined ? {} : { enabled: p.enabled }), ...(p.allowAllApps === undefined ? {} : { allowAllApps: p.allowAllApps }),
+                ...(p.mirror === undefined ? {} : { mirror: p.mirror }), ...(p.privateEventPath === undefined ? {} : { privateEventPath: p.privateEventPath }),
+              });
               return { ok: true };
             }
           }

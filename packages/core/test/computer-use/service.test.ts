@@ -25,6 +25,8 @@ interface WorldOpts {
   policy?: SessionApprovalPolicy;
   facts?: Partial<SessionFacts>;
   apps?: Record<string, unknown>;
+  /** `computerUse.allowAllApps` (absent: the default, on). */
+  allowAllApps?: boolean;
   attended?: boolean;
   answer?: (e: Extract<NewSessionEvent, { type: "approval_requested" }>, broker: ApprovalBroker) => void;
 }
@@ -37,7 +39,7 @@ function world(opts: WorldOpts = {}) {
   const fake = new FakeHelper();
   const approvals = new ApprovalBroker();
   const events: NewSessionEvent[] = [];
-  const settings = { computerUse: { apps: opts.apps ?? {} } } as unknown as Settings;
+  const settings = { computerUse: { apps: opts.apps ?? {}, ...(opts.allowAllApps === undefined ? {} : { allowAllApps: opts.allowAllApps }) } } as unknown as Settings;
   const facts: SessionFacts = { policy: opts.policy ?? "bypass", mode: "code", ...opts.facts };
   const audits: Array<Record<string, unknown>> = [];
   const interrupts: string[] = [];
@@ -310,16 +312,34 @@ describe("ComputerV2: screenshots, points and the vision gate", () => {
     expect(w.fake.calls("target.act")[0]).toMatchObject({ action: { kind: "click", point: [5, 5], shotId: "shot1" } });
   }, 30_000);
 
-  macOnly("screen.screenshot blacks out Winter and Don't-allow apps; screen.windows hides them too", async () => {
+  macOnly("screen.screenshot blacks out the floors and Don't-allow apps; screen.windows hides them too", async () => {
     const w = world({ apps: { "com.apple.Notes": { access: "deny" } } });
-    const r = await w.run("await screen.screenshot()\nconst wins = await screen.windows({ emit: false })\nprint(wins.map((x) => x.app).join(','))");
+    w.fake.apps.find((a) => a.bundleId === "com.apple.TextEdit")!.running = true;
+    const r = await w.run("await screen.screenshot()\nconst wins = await screen.windows({ emit: false })\nprint('[' + wins.map((x) => x.app).join(',') + ']')");
     const ex = w.fake.calls("screen.screenshot")[0]!.excludeBundleIds as string[];
     expect(ex).toContain("com.winter.app");
     expect(ex).toContain("com.apple.Notes");
-    // Running in the fake: Notes (Don't allow), Winter (itself), 1Password (a password manager, Don't allow by
-    // default) and Keychain Access — only the last is listed.
-    expect(text(r)).toContain("\nKeychain Access\n");
+    expect(ex).toContain("com.1password.1password"); // a built-in Don't-allow exception
+    expect(ex).toContain("com.apple.keychainaccess"); // a floor
+    expect(ex).not.toContain("com.apple.TextEdit");
+    // The switch is on: the running apps are not asked for (nothing without a row is denied).
+    expect(w.fake.calls("apps.list")).toEqual([]);
+    // Running: Notes (Don't allow), TextEdit, Winter (itself), 1Password (default Don't allow), Keychain Access (a
+    // floor) — only TextEdit is listed.
+    expect(text(r)).toContain("[TextEdit]");
+  }, 30_000);
+
+  macOnly("with Allow all apps OFF, a shot blacks out every RUNNING app without an allowing exception (asked fresh)", async () => {
+    const w = world({ allowAllApps: false, apps: { "com.apple.Notes": { access: "view" } } });
+    w.fake.apps.find((a) => a.bundleId === "com.apple.TextEdit")!.running = true;
+    const r = await w.run("await screen.screenshot()\nconst wins = await screen.windows({ emit: false })\nprint('[' + wins.map((x) => x.app).join(',') + ']')");
+    expect(w.fake.calls("apps.list")).toHaveLength(1);
+    const ex = w.fake.calls("screen.screenshot")[0]!.excludeBundleIds as string[];
+    expect(ex).toContain("com.apple.TextEdit"); // running, no exception → deny
+    expect(ex).toContain("com.winter.app");
     expect(ex).toContain("com.1password.1password");
+    expect(ex).not.toContain("com.apple.Notes"); // an allowing exception (view)
+    expect(text(r)).toContain("[Notes]");
   }, 30_000);
 });
 

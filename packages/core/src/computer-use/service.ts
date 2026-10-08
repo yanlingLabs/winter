@@ -769,7 +769,7 @@ export class ComputerV2Service {
     });
     let res: ScreenshotResult & { bytes: number };
     try {
-      res = await this.shoot(ctx, "screen.screenshot", { ...display, excludeBundleIds: this.deps.policy.excludedFromScreen() }, metric);
+      res = await this.shoot(ctx, "screen.screenshot", { ...display, excludeBundleIds: await this.screenExclusions(ctx, metric) }, metric);
     } finally { release(); }
     ctx.state.lastScreenShot = res.shotId;
     const handle = this.keepImage(ctx, res);
@@ -778,10 +778,22 @@ export class ComputerV2Service {
     return handle;
   }
 
+  /**
+   * The bundle ids a whole-screen shot blacks out (`ComputerPolicy.excludedFromScreen`). With the master switch OFF
+   * every running app without an allowing exception is `deny`, so the helper's `apps.list` is asked FRESH for what
+   * runs now (never the run's cached list — an app launched since must not slip through); a failure fails the shot.
+   */
+  private async screenExclusions(ctx: RunCtx, metric: PrimitiveMetric): Promise<string[]> {
+    if (this.deps.policy.allowAllApps()) return this.deps.policy.excludedFromScreen();
+    const res = await this.helperCall<AppsListResult>(ctx, "apps.list", {}, metric);
+    ctx.appCache = res.apps;
+    return this.deps.policy.excludedFromScreen(res.apps.filter((a) => a.running).map((a) => a.bundleId));
+  }
+
   private async screenWindows(ctx: RunCtx, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<unknown> {
     const res = await this.helperCall<ScreenWindowsResult>(ctx, "screen.windows", {}, metric);
-    const excluded = new Set(this.deps.policy.excludedFromScreen());
-    const windows = res.windows.filter((w) => !excluded.has(w.bundleId)).map((w) => ({ app: w.app, title: w.title, frame: w.frame }));
+    // Every window's own app is weighed (the floors, and its effective access — `deny` under the switch off too).
+    const windows = res.windows.filter((w) => !this.deps.policy.hiddenFromScreen(w.bundleId)).map((w) => ({ app: w.app, title: w.title, frame: w.frame }));
     ctx.builder.markScreenRead();
     if (args.emit !== false) {
       ctx.builder.text(windows.length === 0 ? "(no windows)" : windows.map((w) => `${w.app} — "${w.title}" [${w.frame.join(", ")}]`).join("\n"), { screen: true });

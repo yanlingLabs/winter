@@ -12,12 +12,12 @@ import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
 import { runningTurnOrigin } from "../sessions/turn-origins";
 import {
-  computerUseAppsFrom, computerUseEnabledFrom, computerUseLegacyComputerFrom, computerUseMirrorFrom, computerUsePrivateEventPathFrom,
-  loadSettings, saveSettings, setComputerUseApp, setComputerUseFlags, type ComputerUseAccess, type Settings,
+  computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseLegacyComputerFrom, computerUseMirrorFrom,
+  computerUsePrivateEventPathFrom, loadSettings, saveSettings, setComputerUseApp, setComputerUseFlags, type ComputerUseAccess, type Settings,
 } from "../settings";
 import { DiffBases } from "./diff-base";
 import { HelperClient, type HelperLauncher, type HelperTransport, type HelperVerifier } from "./helper-client";
-import { ComputerPolicy, PASSWORD_MANAGERS, PASSWORD_MANAGER_BUNDLE_IDS } from "./policy";
+import { ComputerPolicy, DEFAULT_APP_EXCEPTIONS, defaultAppException } from "./policy";
 import { HelperRpcError, HelperUnavailableError, type HelperPermissions } from "./protocol";
 import { RecentApps } from "./recent-apps";
 import { ComputerV2Service } from "./service";
@@ -55,16 +55,17 @@ export interface ComputerUseRuntimeDeps {
 
 export interface ComputerUseStatus {
   enabled: boolean;
+  allowAllApps: boolean;
   legacyComputer: boolean;
   mirror: boolean;
   privateEventPath: boolean;
   helper: { installed: boolean; running: boolean; version?: string; permissions?: HelperPermissions };
 }
 
+/** One EXCEPTION to the master switch (`computerUse.apps.list`). `access: null` — the row is listed only for its
+ *  "Always allow" grant; `isDefault` — the access is a built-in default exception the user has not changed. */
 export interface ComputerUseAppRow {
-  bundleId: string; name: string; access: ComputerUseAccess; grant: "always" | null; lastUsedAt?: number;
-  /** A password manager's `deny` is the DEFAULT, not a setting the user made (they can change it). */
-  defaultDeny?: true;
+  bundleId: string; name: string; access: ComputerUseAccess | null; grant: "always" | null; isDefault: boolean; lastUsedAt?: number;
 }
 
 /** A refusal the RPC layer turns into a typed JSON-RPC error. */
@@ -79,8 +80,8 @@ export interface ComputerUseControl {
   status(): Promise<ComputerUseStatus>;
   requestPermission(kind: "accessibility" | "screenRecording"): Promise<void>;
   appsList(): ComputerUseAppRow[];
-  appsSet(p: { bundleId: string; name?: string; access?: ComputerUseAccess; grant?: "always" | null }): void;
-  setSettings(p: { enabled?: boolean; mirror?: boolean; privateEventPath?: boolean }): void;
+  appsSet(p: { bundleId: string; name?: string; access?: ComputerUseAccess | null; grant?: "always" | null }): void;
+  setSettings(p: { enabled?: boolean; mirror?: boolean; privateEventPath?: boolean; allowAllApps?: boolean }): void;
 }
 
 export interface ComputerUseRuntime {
@@ -175,6 +176,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       const helperStatus = await helper.status();
       return {
         enabled: s ? computerUseEnabledFrom(s) : true,
+        allowAllApps: computerUseAllowAllAppsFrom(s),
         legacyComputer: computerUseLegacyComputerFrom(s),
         mirror: computerUseMirrorFrom(s),
         privateEventPath: computerUsePrivateEventPathFrom(s),
@@ -191,38 +193,42 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       }
     },
     appsList() {
-      const rows = new Map<string, ComputerUseAppRow>();
+      // EXCEPTIONS ONLY (the user ruling): the user's rows with an access, the built-in default exceptions they
+      // have not removed, and the rows that exist only for an "Always allow" grant (`access: null`).
       const apps = computerUseAppsFrom(settings());
-      const recent = recentApps.list();
-      const recentById = new Map(recent.map((r) => [r.bundleId, r]));
-      const rowFor = (bundleId: string): ComputerUseAppRow => {
-        const set = apps[bundleId];
+      const recentById = new Map(recentApps.list().map((r) => [r.bundleId, r]));
+      const rows: ComputerUseAppRow[] = [];
+      const row = (bundleId: string, access: ComputerUseAccess | null, isDefault: boolean, grant: "always" | null, storedName?: string): ComputerUseAppRow => {
         const r = recentById.get(bundleId);
-        const defaultDeny = set?.access === undefined && PASSWORD_MANAGER_BUNDLE_IDS.has(bundleId);
         return {
           bundleId,
-          name: set?.name ?? r?.name ?? PASSWORD_MANAGERS[bundleId] ?? bundleId,
-          access: set?.access ?? (defaultDeny ? "deny" : "full"),
-          grant: set?.grant ?? null,
+          name: storedName ?? defaultAppException(bundleId)?.name ?? r?.name ?? bundleId,
+          access, grant, isDefault,
           ...(r === undefined ? {} : { lastUsedAt: r.lastUsedAt }),
-          ...(defaultDeny ? { defaultDeny: true as const } : {}),
         };
       };
-      for (const bundleId of Object.keys(apps)) rows.set(bundleId, rowFor(bundleId));
-      for (const r of recent) if (!rows.has(r.bundleId)) rows.set(r.bundleId, rowFor(r.bundleId));
-      // The password managers are always listed (spine §5): `deny` by default, flagged as the default.
-      for (const bundleId of PASSWORD_MANAGER_BUNDLE_IDS) if (!rows.has(bundleId)) rows.set(bundleId, rowFor(bundleId));
-      return [...rows.values()].sort((a, b) => (b.lastUsedAt ?? 0) - (a.lastUsedAt ?? 0) || a.name.localeCompare(b.name));
+      for (const [bundleId, set] of Object.entries(apps)) {
+        const grant = set.grant ?? null;
+        const builtIn = defaultAppException(bundleId);
+        if (set.access !== undefined) rows.push(row(bundleId, set.access, false, grant, set.name));
+        else if (set.removed !== true && builtIn !== undefined) rows.push(row(bundleId, builtIn.access, true, grant, set.name));
+        else if (grant !== null) rows.push(row(bundleId, null, false, grant, set.name));
+      }
+      for (const [bundleId, builtIn] of Object.entries(DEFAULT_APP_EXCEPTIONS)) {
+        if (!Object.hasOwn(apps, bundleId)) rows.push(row(bundleId, builtIn.access, true, null));
+      }
+      return rows.sort((a, b) => a.name.localeCompare(b.name) || a.bundleId.localeCompare(b.bundleId));
     },
     appsSet(p) {
       if (!BUNDLE_ID.test(p.bundleId)) throw new ComputerUseControlError("invalid_params", "bundleId is not a bundle identifier");
-      // A password manager's default is `deny`, so `full` must be STORED to mean anything (review I5).
-      const defaultAccess: ComputerUseAccess = PASSWORD_MANAGER_BUNDLE_IDS.has(p.bundleId) ? "deny" : "full";
+      // `access: null` removes the exception: a built-in default's removal is STORED (`removed: true`), or the
+      // default would come straight back.
+      const hasDefault = defaultAppException(p.bundleId) !== undefined;
       writeSettings((s) => setComputerUseApp(s, p.bundleId, {
         ...(p.access === undefined ? {} : { access: p.access }),
         ...(p.grant === undefined ? {} : { grant: p.grant }),
         ...(p.name === undefined ? {} : { name: p.name }),
-      }, { defaultAccess }));
+      }, { hasDefault }));
       // A revoked "Always allow" must not survive as this daemon's in-memory session grant from its card.
       if (p.grant === null) policy.forgetGrant(p.bundleId);
     },

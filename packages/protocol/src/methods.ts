@@ -424,6 +424,9 @@ export const ComputerUseStatusParams = z.object({});
 export const ComputerUsePermissionsSchema = z.object({ accessibility: z.boolean(), screenRecording: z.boolean() });
 export const ComputerUseStatusResult = z.object({
   enabled: z.boolean(),
+  /** The master switch (`computerUse.allowAllApps`, default true): every app is usable unless an exception says
+   *  otherwise; off, only the apps with an allowing exception are. */
+  allowAllApps: z.boolean(),
   legacyComputer: z.boolean(),
   mirror: z.boolean(),
   privateEventPath: z.boolean(),
@@ -439,30 +442,34 @@ export const ComputerUseStatusResult = z.object({
 export const ComputerUseRequestPermissionParams = z.object({ kind: z.enum(["accessibility", "screenRecording"]) });
 export const ComputerUseRequestPermissionResult = z.object({ ok: z.literal(true) });
 export const ComputerUseAccessSchema = z.enum(["full", "click", "view", "deny"]);
-/** Every app with a setting, plus the apps ComputerV2 used recently (`lastUsedAt`, epoch MILLISECONDS), plus the
- *  known password managers — `access: "deny"` by default, with `defaultDeny: true` while the user has set nothing. */
+/** The EXCEPTIONS to the master switch, and nothing else: the user's own per-app accesses, the built-in default
+ *  exceptions they have not removed (password managers `deny`; terminals and System Settings `click` —
+ *  `isDefault: true` while the user has not changed the access), and the apps listed only for an "Always allow"
+ *  grant (`access: null`). `lastUsedAt` (epoch MILLISECONDS) when ComputerV2 used the app recently. */
 export const ComputerUseAppsListParams = z.object({});
 export const ComputerUseAppRowSchema = z.object({
   bundleId: z.string().min(1),
   name: z.string().min(1),
-  access: ComputerUseAccessSchema,
+  access: ComputerUseAccessSchema.nullable(),
   grant: z.literal("always").nullable(),
+  isDefault: z.boolean(),
   lastUsedAt: z.number().int().optional(),
-  defaultDeny: z.literal(true).optional(),
 });
 export const ComputerUseAppsListResult = z.object({ apps: z.array(ComputerUseAppRowSchema) });
-/** One app's row: an absent field is left as it is; `grant: null` removes "Always allow" ("Remove always-allow").
- *  A row is never deleted. */
+/** One app's exception: an absent field is left as it is. `access: null` removes the exception (a built-in
+ *  default's removal is remembered, so the master switch decides the app again); setting an access on a removed
+ *  default restores an exception. `grant: null` removes "Always allow". A row left with nothing is deleted. */
 export const ComputerUseAppsSetParams = z.object({
   bundleId: z.string().min(1).max(255),
   name: z.string().min(1).max(200).optional(),
-  access: ComputerUseAccessSchema.optional(),
+  access: ComputerUseAccessSchema.nullable().optional(),
   grant: z.literal("always").nullable().optional(),
 });
 export const ComputerUseAppsSetResult = z.object({ ok: z.literal(true) });
-/** The app's three toggles: each key present is written to `settings.json`, each absent one untouched; hot. */
+/** The app's toggles: each key present is written to `settings.json`, each absent one untouched; hot. */
 export const ComputerUseSetSettingsParams = z.object({
   enabled: z.boolean().optional(),
+  allowAllApps: z.boolean().optional(),
   mirror: z.boolean().optional(),
   privateEventPath: z.boolean().optional(),
 });
