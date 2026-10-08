@@ -205,7 +205,7 @@ enum CUWindowResolver {
 
     static func whereItIsDetail(_ appName: String, newWindow: Bool = false) -> String {
         let which = newWindow ? "the new \(appName) window, which opened on another Space or in full screen" : "\(appName)'s window"
-        return "step 0 (where it is): bound \(which) where it is; pointer actions will try to move it to this desktop"
+        return "step 0 (where it is): bound \(which) where it is; clicks on elements, scrolls, typing and keys work there, dragging needs it on this desktop"
     }
 
     private static func reach(_ candidates: [CUWindowServerWindow], appName: String, privatePath: Bool,

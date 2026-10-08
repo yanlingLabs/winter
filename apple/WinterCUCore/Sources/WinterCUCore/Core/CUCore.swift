@@ -143,7 +143,7 @@ public final class CUCore: @unchecked Sendable {
         // Idempotent: this session already has this app bound and the window is still there — the same target,
         // with no re-resolution, no new window and no move. Only a lost target is resolved again.
         if !launched, let existing = reusableTarget(sessionId: p.sessionId, pid: pid, selector: p.window) {
-            CULog.bind.info("bind \(appName, privacy: .public): reused \(existing.id, privacy: .public) (window \(existing.windowID, privacy: .public))")
+            CULog.bind.notice("bind \(appName, privacy: .public): reused \(existing.id, privacy: .public) (window \(existing.windowID, privacy: .public))")
             return TargetBindResult(targetId: existing.id,
                                     app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid),
                                     window: CUWindowInfo(id: existing.windowID, title: existing.windowTitle,
@@ -162,7 +162,7 @@ public final class CUCore: @unchecked Sendable {
                 }
             },
             reopen: { [reopenApp] in
-                CULog.bind.info("bind \(appName, privacy: .public): no window on any Space — asking the app to reopen one")
+                CULog.bind.notice("bind \(appName, privacy: .public): no window on any Space — asking the app to reopen one")
                 await reopenApp(app)
             },
             sleep: { [clock] in try await clock.sleep(ms: $0) },
@@ -178,10 +178,10 @@ public final class CUCore: @unchecked Sendable {
                                                            sessionId: p.sessionId, appKey: appKey))
             }
         } catch let e as CUError {
-            CULog.bind.info("bind \(appName, privacy: .public) failed: \(e.code, privacy: .public) (\(axNow.count, privacy: .public) window(s) on this desktop, \(serverNow.filter { $0.layer == 0 }.count, privacy: .public) in the window server)")
+            CULog.bind.notice("bind \(appName, privacy: .public) failed: \(e.code, privacy: .public) (\(axNow.count, privacy: .public) window(s) on this desktop, \(serverNow.filter { $0.layer == 0 }.count, privacy: .public) in the window server)")
             throw e
         }
-        CULog.bind.info("bind \(appName, privacy: .public): \(outcome.step.rawValue, privacy: .public) (window \(outcome.window.id, privacy: .public))")
+        CULog.bind.notice("bind \(appName, privacy: .public): \(outcome.step.rawValue, privacy: .public) (window \(outcome.window.id, privacy: .public))")
         let chosen = outcome.window
         if let b = app.bundleIdentifier, CUFloors.systemSettingsBundleIds.contains(b) {
             let isPrivacy = try await queues.run(pid) { CUFloorScan.isPrivacyPane(bundleId: b, window: chosen.element, ax: ax) }
@@ -221,10 +221,10 @@ public final class CUCore: @unchecked Sendable {
                 // Once per session and app, whatever happens to the window: one that opens on the app's own
                 // Space instead of this one must not be followed by another, and another, on every bind.
                 guard claimNewWindow(sessionId: sessionId, appKey: appKey) else {
-                    CULog.bind.info("\(appName, privacy: .public): a new window was already asked for in this session — not again")
+                    CULog.bind.notice("\(appName, privacy: .public): a new window was already asked for in this session — not again")
                     return false
                 }
-                CULog.bind.info("\(appName, privacy: .public): asking for a new window (step b)")
+                CULog.bind.notice("\(appName, privacy: .public): asking for a new window (step b)")
                 return openNewWindow(pid: pid, chromium: chromium, privatePath: privatePath)
             },
             axWindows: { CUAXWindows.list(pid: pid, ax: ax, server: sys.windows(pid: pid)) },
@@ -238,6 +238,9 @@ public final class CUCore: @unchecked Sendable {
                 return probe()
             })
     }
+
+    /// The window's tree for the off-desktop hit test; replaceable by tests (the live reader walks real AX).
+    var treeReadOverride: ((CUTarget) -> [CUNode])?
 
     /// How long a moved or newly opened window may take to appear in the AX list (shortened by tests).
     var windowWaitMs: Double = 3000
@@ -770,29 +773,6 @@ public final class CUCore: @unchecked Sendable {
         if let e = ax.remoteWindows(pid: pid, windowIDs: [windowID])[windowID] { return e }
         windowElementsLock.withLock { remoteMisses[key] = now }
         return nil
-    }
-
-    /// Pointer events need the bound window on this desktop. A window AX does not list and the window server
-    /// shows off screen is on another Space or in full screen (bound where it is, by remote token): (a) move
-    /// it here (SkyLight, `privatePath`); else (b) open a new window here and switch the target to it — the
-    /// action does not run, since its refs and screenshot belong to the old window; else `window_elsewhere`.
-    /// A minimized or hidden window (still listed by AX) is left as before. Returns a note when it moved one.
-    func bringToThisDesktop(_ p: TargetActParams, _ t: CUTarget) throws -> String? {
-        guard isOffThisDesktop(t) else { return nil }
-        if p.privatePath, let note = moveToThisDesktop(t) { return note }
-        let fx = windowEffects(pid: t.pid, appName: t.appName, chromium: t.isChromium, privatePath: p.privatePath,
-                               sessionId: t.sessionId, appKey: t.bundleId ?? "pid:\(t.pid)")
-        let before = Set(fx.axWindows().map(\.id))
-        if fx.openNewWindow(), let fresh = fx.wait({ fx.axWindows().first { !before.contains($0.id) } }) {
-            let old = t.windowID
-            t.setWindow(id: fresh.id, title: fresh.title)
-            t.resetForNewWindow()
-            windowElementsLock.withLock { windowElements[t.id] = fresh.element }
-            emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: old) }
-            emit { $0.targetBound(sessionId: t.sessionId, pid: t.pid, windowID: fresh.id, appName: t.appName, mirror: t.mirror) }
-            throw CUError.windowReplaced(t.appName, newWindow: fresh.id)
-        }
-        throw CUError.windowElsewhere(t.appName, pointer: true)
     }
 
     /// The bound window is on another Space or in full screen: the window server has it off screen and AX
