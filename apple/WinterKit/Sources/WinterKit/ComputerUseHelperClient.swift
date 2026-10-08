@@ -380,7 +380,9 @@ public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
     }
 
     static func target(from v: JSONValue) -> HelperTarget? {
-        guard let targetId = v["targetId"]?.stringValue, let size = sizeValue(json: v["windowSize"]) else { return nil }
+        guard let targetId = v["targetId"]?.stringValue else { return nil }
+        // A window on another Space or display may report no size at all: still a target, of size zero.
+        let size = sizeValue(json: v["windowSize"]) ?? .zero
         return HelperTarget(targetId: targetId, pid: v["pid"]?.intValue ?? 0, windowId: v["windowId"]?.intValue ?? 0,
                             appName: v["appName"]?.stringValue ?? "", bundleId: v["bundleId"]?.stringValue ?? "", windowSize: size)
     }
@@ -390,7 +392,8 @@ public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
         func int(_ key: String) -> Int? { (p[key] as? NSNumber)?.intValue }
         switch method {
         case "view.bound":
-            guard let targetId = p["targetId"] as? String, let size = sizeValue(p["windowSize"]) else { return nil }
+            guard let targetId = p["targetId"] as? String else { return nil }
+            let size = sizeValue(p["windowSize"]) ?? .zero
             return .bound(sessionId: sessionId, target: HelperTarget(
                 targetId: targetId, pid: int("pid") ?? 0, windowId: int("windowId") ?? 0,
                 appName: p["appName"] as? String ?? "", bundleId: p["bundleId"] as? String ?? "", windowSize: size))
@@ -398,9 +401,10 @@ public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
             return (p["targetId"] as? String).map { .released(sessionId: sessionId, targetId: $0) }
         case "view.frame":
             guard let targetId = p["targetId"] as? String, let b64 = p["jpeg"] as? String,
-                  let jpeg = Data(base64Encoded: b64), let size = sizeValue(p["windowSize"]) else { return nil }
+                  let jpeg = Data(base64Encoded: b64) else { return nil }
             return .frame(HelperFrame(sessionId: sessionId, targetId: targetId, seq: int("seq") ?? 0, jpeg: jpeg,
-                                      width: int("width") ?? 0, height: int("height") ?? 0, windowSize: size))
+                                      width: int("width") ?? 0, height: int("height") ?? 0,
+                                      windowSize: sizeValue(p["windowSize"]) ?? .zero))
         case "view.cursor":
             guard let targetId = p["targetId"] as? String, let kind = p["kind"] as? String, let point = pointValue(p["point"]) else { return nil }
             return .cursor(HelperCursor(sessionId: sessionId, targetId: targetId, kind: kind, point: point,

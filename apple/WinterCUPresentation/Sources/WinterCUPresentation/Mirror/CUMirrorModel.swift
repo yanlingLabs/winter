@@ -9,6 +9,8 @@ import Foundation
     @Published public private(set) var appName: String?
     /// The window's size in points.
     @Published public private(set) var windowSize: CGSize = .zero
+    /// How many OTHER targets the session has bound beside this one; the caption shows "+N" when it is not zero.
+    @Published public private(set) var otherTargets = 0
     /// The latest decoded frame; nil until the first one (the view shows a calm placeholder).
     @Published private(set) var image: CGImage?
     /// The latest frame's size in pixels.
@@ -56,6 +58,12 @@ import Foundation
         if windowSize.width > 0, windowSize.height > 0 { self.windowSize = windowSize }
     }
 
+    /// The session has `count` other targets bound beside the one on show (the caption's "+N").
+    public func setOtherTargets(_ count: Int) {
+        let count = max(count, 0)
+        if otherTargets != count { otherTargets = count }
+    }
+
     /// A new frame (`view.frame`). An undecodable frame is skipped; the last good one stays.
     public func apply(frame jpeg: Data, width: Int, height: Int, windowSize: CGSize) {
         guard let decoded = JPEGCodec.decode(jpeg) else {
@@ -94,6 +102,7 @@ import Foundation
         if appName != nil { PresentationLog.notice("in-app mirror cleared (\(appName ?? "?"))") }
         appName = nil
         windowSize = .zero
+        otherTargets = 0
         image = nil
         imageSize = nil
         timeline = CursorTimeline(options: .init(reduceMotion: reduceMotion))

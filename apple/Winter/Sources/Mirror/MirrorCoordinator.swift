@@ -26,6 +26,8 @@ protocol MirrorSink: AnyObject {
     func show(appName: String, windowSize: CGSize)
     func apply(frame jpeg: Data, width: Int, height: Int, windowSize: CGSize)
     func applyCursor(kind: String, point: CGPoint, dragTo: CGPoint?, frame: CGRect?, text: String?, count: Int?, button: String?)
+    /// How many other targets the session has bound beside the one on show — the caption's "+1".
+    func setOtherTargets(_ count: Int)
     func clear()
 }
 
@@ -33,7 +35,12 @@ extension CUMirrorModel: MirrorSink {}
 
 // MARK: - Targets
 
-/// A session's bound targets in the order they became bound; the one SHOWN is the most recent.
+/// A session's bound targets, least recently active first; the one SHOWN is the last.
+///
+/// A target becomes the most recent when it is bound and again whenever the agent acts in it (a
+/// `view.cursor` event that is not a rest or a fade), so the mirror follows the app the agent is
+/// working in and stays on it until another bound target gets an action. When the shown target is
+/// released the one active before it takes over.
 ///
 /// The spine does not pin the order of `view.subscribe`'s `targets`; it is read as oldest first, so the
 /// last is the most recent — the same order `view.bound` notifications arrive in.
@@ -42,10 +49,20 @@ struct MirrorTargetTracker: Equatable {
 
     var shown: HelperTarget? { targets.last }
 
+    /// The cursor kinds that mean the agent is NOT acting in the target: it rests, or the cursor fades.
+    static func isActivity(kind: String) -> Bool { kind != "idle" && kind != "done" }
+
+    func contains(_ targetId: String) -> Bool { targets.contains { $0.targetId == targetId } }
+
     mutating func seed(_ seeded: [HelperTarget]) { targets = seeded }
 
-    /// A target bound (again): it becomes the most recent.
+    /// A target bound (again): it becomes the most recent. A size that reads zero (the window is on
+    /// another Space or display) keeps the last real one.
     mutating func bound(_ target: HelperTarget) {
+        var target = target
+        if let previous = targets.first(where: { $0.targetId == target.targetId }), !Self.isUsable(target.windowSize) {
+            target = target.with(windowSize: previous.windowSize)
+        }
         targets.removeAll { $0.targetId == target.targetId }
         targets.append(target)
     }
@@ -58,17 +75,30 @@ struct MirrorTargetTracker: Equatable {
         return targets.count != before
     }
 
-    /// The shown target's window changed size (a frame said so).
-    mutating func resizeShown(_ size: CGSize) {
-        guard let last = targets.last, last.windowSize != size else { return }
-        targets[targets.count - 1] = HelperTarget(targetId: last.targetId, pid: last.pid, windowId: last.windowId,
-                                                  appName: last.appName, bundleId: last.bundleId, windowSize: size)
+    /// The agent acted in `targetId`: it becomes the shown one. Returns whether the shown target changed
+    /// (false for a target that is not bound, or already on show).
+    mutating func activity(in targetId: String) -> Bool {
+        guard shown?.targetId != targetId, let index = targets.firstIndex(where: { $0.targetId == targetId }) else { return false }
+        targets.append(targets.remove(at: index))
+        return true
+    }
+
+    /// A target's window changed size (a frame said so). A size that reads zero changes nothing.
+    mutating func resize(_ targetId: String, to size: CGSize) {
+        guard Self.isUsable(size), let index = targets.firstIndex(where: { $0.targetId == targetId }),
+              targets[index].windowSize != size else { return }
+        targets[index] = targets[index].with(windowSize: size)
     }
 
     mutating func reset() { targets = [] }
 
-    /// Frames and cursors for a target that is not the shown one are dropped.
-    func accepts(targetId: String) -> Bool { shown?.targetId == targetId }
+    static func isUsable(_ size: CGSize) -> Bool { size.width > 0 && size.height > 0 }
+}
+
+extension HelperTarget {
+    func with(windowSize: CGSize) -> HelperTarget {
+        HelperTarget(targetId: targetId, pid: pid, windowId: windowId, appName: appName, bundleId: bundleId, windowSize: windowSize)
+    }
 }
 
 // MARK: - One session
@@ -77,22 +107,31 @@ struct MirrorTargetTracker: Equatable {
 ///
 /// The mirror is UP while a target is bound — between turns too (user, 2026-10-08: "it should show at all
 /// times"). It comes down on `view.released` of the last target, or when the helper connection is lost
-/// and the subscription starts over. A frame or a cursor for anything but the shown target, or arriving
-/// while the mirror is down, is dropped.
+/// and the subscription starts over — never because frames stop or a window reads size zero (the target
+/// is on another Space or display): the last picture stays. With several targets bound it shows the one
+/// the agent last acted in (`MirrorTargetTracker`), and the caption says how many others there are.
 @MainActor
 final class MirrorSessionState: ObservableObject {
     let sessionId: String
     let sink: any MirrorSink
     private(set) var tracker = MirrorTargetTracker()
-    /// The target on show: the most recent bound.
+    /// The target on show: the one the agent last acted in.
     @Published private(set) var shownTarget: HelperTarget?
     /// Whether the mirror is up: a target is bound.
     @Published private(set) var isVisible = false
-    /// When this session's mirror last came up or changed target — the larger, the more recent. A window
-    /// that shows several sessions' mirrors (a Dispatch session and its children) shows the largest.
-    private(set) var recency = 0
+    /// How many other targets are bound beside the one on show.
+    @Published private(set) var otherTargets = 0
+    /// When this session's mirror last came up, changed target or saw the agent act — the larger, the more
+    /// recent. A window that shows several sessions' mirrors (a Dispatch session and its children) shows the
+    /// largest.
+    @Published private(set) var recency = 0
     private static var recencyCounter = 0
+    /// The newest frame of every bound target, kept undecoded so a target that takes over can show its own
+    /// picture at once instead of the previous app's.
+    private var lastFrames: [String: HelperFrame] = [:]
     private var shownOnSink: String?
+    private var sizeOnSink: CGSize = .zero
+    private var othersOnSink = 0
 
     init(sessionId: String, sink: any MirrorSink) {
         self.sessionId = sessionId
@@ -103,41 +142,74 @@ final class MirrorSessionState: ObservableObject {
 
     func seed(_ targets: [HelperTarget]) { tracker.seed(targets); refresh() }
     func bound(_ target: HelperTarget) { tracker.bound(target); refresh() }
-    func released(_ targetId: String) { if tracker.released(targetId) { refresh() } }
+    func released(_ targetId: String) { if tracker.released(targetId) { lastFrames.removeValue(forKey: targetId); refresh() } }
     func reset() { tracker.reset(); refresh() }
 
     func frame(_ frame: HelperFrame) {
-        guard isVisible, tracker.accepts(targetId: frame.targetId) else { return }
-        if tracker.shown?.windowSize != frame.windowSize {
-            tracker.resizeShown(frame.windowSize)
-            shownTarget = tracker.shown
+        guard tracker.contains(frame.targetId) else { return }
+        // Kept for every bound target; only the shown one reaches the sink.
+        lastFrames[frame.targetId] = frame
+        tracker.resize(frame.targetId, to: frame.windowSize)
+        if tracker.shown?.targetId == frame.targetId {
+            if shownTarget != tracker.shown { shownTarget = tracker.shown }
+            if let size = tracker.shown?.windowSize { sizeOnSink = size }
+            sink.apply(frame: frame.jpeg, width: frame.width, height: frame.height, windowSize: frame.windowSize)
         }
-        sink.apply(frame: frame.jpeg, width: frame.width, height: frame.height, windowSize: frame.windowSize)
     }
 
     func cursor(_ cursor: HelperCursor) {
-        guard isVisible, tracker.accepts(targetId: cursor.targetId) else { return }
+        guard tracker.contains(cursor.targetId) else { return }
+        if MirrorTargetTracker.isActivity(kind: cursor.kind) {
+            // The agent is working in this app: it is the one to watch, and this session the one a window
+            // that shows several should watch.
+            if tracker.activity(in: cursor.targetId) { refresh() }
+            if recency != Self.recencyCounter { markRecent() }
+        }
+        guard tracker.shown?.targetId == cursor.targetId else { return }
         sink.applyCursor(kind: cursor.kind, point: cursor.point, dragTo: cursor.dragTo, frame: cursor.frame,
                          text: cursor.text, count: cursor.count, button: cursor.button)
     }
 
+    private func markRecent() {
+        Self.recencyCounter += 1
+        recency = Self.recencyCounter
+    }
+
     /// Recomputes what is shown and tells the sink on every change: `show` when the mirror comes up or
-    /// another target takes over, `clear` when it goes down.
+    /// another target takes over (after a `clear`, so the previous app's picture and cursor do not linger,
+    /// then the new target's newest frame if one is known), `clear` when it goes down.
     private func refresh() {
         let target = tracker.shown
         if shownTarget != target { shownTarget = target }
-        let visible = target != nil
-        if visible, let target {
+        let others = max(tracker.targets.count - 1, 0)
+        if otherTargets != others { otherTargets = others }
+        let known = Set(tracker.targets.map(\.targetId))
+        lastFrames = lastFrames.filter { known.contains($0.key) }
+        if let target {
             if shownOnSink != target.targetId {
+                if shownOnSink != nil { sink.clear(); othersOnSink = 0 }
                 sink.show(appName: target.appName, windowSize: target.windowSize)
                 shownOnSink = target.targetId
-                Self.recencyCounter += 1
-                recency = Self.recencyCounter
+                sizeOnSink = target.windowSize
+                markRecent()
+                if let frame = lastFrames[target.targetId] {
+                    sink.apply(frame: frame.jpeg, width: frame.width, height: frame.height, windowSize: frame.windowSize)
+                }
+            } else if MirrorTargetTracker.isUsable(target.windowSize), target.windowSize != sizeOnSink {
+                sink.show(appName: target.appName, windowSize: target.windowSize)
+                sizeOnSink = target.windowSize
+            }
+            if othersOnSink != others {
+                sink.setOtherTargets(others)
+                othersOnSink = others
             }
         } else if shownOnSink != nil {
             sink.clear()
             shownOnSink = nil
+            sizeOnSink = .zero
+            othersOnSink = 0
         }
+        let visible = target != nil
         if isVisible != visible { isVisible = visible }
     }
 }
@@ -225,12 +297,15 @@ final class MirrorCoordinator: ObservableObject {
         if let existing = states[sessionId] { return existing }
         let created = MirrorSessionState(sessionId: sessionId, sink: makeSink(sessionId))
         states[sessionId] = created
-        // The mirror coming up, going down or changing target is what moves frames (`wantsFrames`) — and
-        // what a window must re-read to know which session's mirror to show.
-        visibilityWatches[sessionId] = created.$shownTarget.map { $0?.targetId }.dropFirst().removeDuplicates().sink { [weak self] _ in
-            self?.objectWillChange.send()
-            self?.scheduleSync()
-        }
+        // The mirror coming up, going down, changing target or seeing the agent act is what moves frames
+        // (`wantsFrames`) — and what a window must re-read to know which session's mirror to show.
+        visibilityWatches[sessionId] = Publishers.CombineLatest(created.$shownTarget.map { $0?.targetId }, created.$recency)
+            .dropFirst()
+            .removeDuplicates { $0 == $1 }
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+                self?.scheduleSync()
+            }
         return created
     }
 
