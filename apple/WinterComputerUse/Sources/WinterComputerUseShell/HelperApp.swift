@@ -11,6 +11,7 @@ import WinterCUPresentation
     private var coordinator: HelperCoordinator?
     private var core: CUCore?
     private var idleTimer: IdleQuitTimer?
+    private var terminationSource: DispatchSourceSignal?
     private var log = HelperLog(subsystem: Bundle.main.bundleIdentifier ?? "com.winter.computeruse")
 
     public init(testHooks: HelperTestHooks?) {
@@ -21,6 +22,12 @@ import WinterCUPresentation
     public func applicationDidFinishLaunching(_ notification: Notification) {
         // A daemon that drops its connection mid-write must not take the helper down with SIGPIPE.
         signal(SIGPIPE, SIG_IGN)
+        // SIGTERM (a logout, `kill`) quits the way the idle timer does, so the socket file goes with it.
+        signal(SIGTERM, SIG_IGN)
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        term.setEventHandler { MainActor.assumeIsolated { NSApp.terminate(nil) } }
+        term.resume()
+        terminationSource = term
         let bundle = Bundle.main
         let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
         let identity: HelperIdentity
