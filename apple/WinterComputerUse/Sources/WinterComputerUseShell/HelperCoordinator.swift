@@ -176,7 +176,7 @@ public enum HelperNotification: Equatable, Sendable {
     }
 
     public func targetLost(targetId: String, reason: String) {
-        viewHub.release(targetId: targetId)
+        viewHub.release(targetId: targetId, reason: "lost (\(reason))")
         notify(.targetLost(targetId: targetId, reason: reason))
     }
 

@@ -53,7 +53,8 @@ import WinterCUPresentation
         }
 
         let (presentation, escapeTap) = WinterCUPresentationFactory.make()
-        let viewHub = ViewHub(capture: LiveFrameCaptureFactory(), geometry: LiveWindowGeometry(), clock: LiveViewClock())
+        let viewHub = ViewHub(capture: LiveFrameCaptureFactory(), geometry: LiveWindowGeometry(), snapshotter: LiveWindowSnapshotter(),
+                              clock: LiveViewClock())
         let coordinator = HelperCoordinator(presentation: presentation, escapeTap: escapeTap, viewHub: viewHub)
         let core = CUCore(events: coordinator)
         let inFlight = InFlightRegistry()
@@ -64,7 +65,7 @@ import WinterCUPresentation
         coordinator.notify = { [weak server] notification in server?.broadcast(notification) }
         viewHub.sendEvent = { [weak server] connection, line in server?.sendEvent(to: connection, line) }
         viewHub.sendFrame = { [weak server] connection, key, line in server?.sendFrame(to: connection, key: key, line) }
-        viewHub.log = { [log] in log.info($0) }
+        viewHub.log = { [log] in log.notice($0) } // persisted: the view lifecycle is what a live gate needs to read back
 
         do {
             try server.start()

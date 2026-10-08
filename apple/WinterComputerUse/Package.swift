@@ -35,6 +35,8 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("Security"),
+                .linkedFramework("ScreenCaptureKit"),
+                .linkedFramework("ImageIO"),
             ]
         ),
         .testTarget(

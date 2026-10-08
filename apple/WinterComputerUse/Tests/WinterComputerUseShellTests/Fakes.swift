@@ -215,9 +215,26 @@ struct FakeAuthenticator: PeerAuthenticator {
 final class FakeGeometry: WindowGeometry {
     var frames: [CGWindowID: CGRect] = [:]
     var calls = 0
+    /// Windows not listed are on screen.
+    var onScreen: [CGWindowID: Bool] = [:]
     func frame(of windowID: CGWindowID) -> CGRect? {
         calls += 1
         return frames[windowID]
+    }
+    func isOnScreen(_ windowID: CGWindowID) -> Bool? { onScreen[windowID] ?? true }
+}
+
+/// One-shot snapshots, answered by the test.
+@MainActor final class FakeSnapshotter: WindowSnapshotter {
+    var requests: [(windowID: CGWindowID, maxWidth: Int, completion: @MainActor (ViewFrame?) -> Void)] = []
+    func snapshot(windowID: CGWindowID, maxWidth: Int, completion: @escaping @MainActor (ViewFrame?) -> Void) {
+        requests.append((windowID, maxWidth, completion))
+    }
+    /// Answers every pending request with `frame`.
+    func answer(_ frame: ViewFrame?) {
+        let pending = requests
+        requests = []
+        pending.forEach { $0.completion(frame) }
     }
 }
 
@@ -238,6 +255,8 @@ extension FakeIdleScheduler: ViewClock {}
     let capture = FakeCaptureFactory()
     let geometry = FakeGeometry()
     let clock = FakeIdleScheduler()
+    let snapshotter = FakeSnapshotter()
+    var logLines: [String] = []
     let viewHub: ViewHub
     let sink = ViewSink()
     let coordinator: HelperCoordinator
@@ -246,7 +265,7 @@ extension FakeIdleScheduler: ViewClock {}
     var notifications: [HelperNotification] = []
 
     init() {
-        viewHub = ViewHub(capture: capture, geometry: geometry, clock: clock)
+        viewHub = ViewHub(capture: capture, geometry: geometry, snapshotter: snapshotter, clock: clock)
         coordinator = HelperCoordinator(presentation: presentation, escapeTap: tap, viewHub: viewHub)
         dispatcher = RPCDispatcher(core: core, coordinator: coordinator, viewHub: viewHub, inFlight: inFlight)
         coordinator.notify = { [weak self] in self?.notifications.append($0) }
@@ -254,6 +273,7 @@ extension FakeIdleScheduler: ViewClock {}
         let decode = { (line: Data) in try! JSONDecoder().decode(JSONValue.self, from: line) }
         viewHub.sendEvent = { connection, line in sink.events[connection, default: []].append(decode(line)) }
         viewHub.sendFrame = { connection, _, line in sink.frames[connection, default: []].append(decode(line)) }
+        viewHub.log = { [weak self] in self?.logLines.append($0) }
     }
 }
 

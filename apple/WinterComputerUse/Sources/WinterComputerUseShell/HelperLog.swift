@@ -28,6 +28,13 @@ public struct HelperLog: Sendable {
         if echo { FileHandle.standardError.write(Data("[computer-use] \(message)\n".utf8)) }
     }
 
+    /// Persisted by unified logging (`info` is not): for lifecycle lines a live run must be able to read back.
+    public func notice(_ message: String) {
+        guard enabled else { return }
+        logger.notice("\(message, privacy: .public)")
+        if echo { FileHandle.standardError.write(Data("[computer-use] \(message)\n".utf8)) }
+    }
+
     public func error(_ message: String) {
         guard enabled else { return }
         logger.error("\(message, privacy: .public)")
