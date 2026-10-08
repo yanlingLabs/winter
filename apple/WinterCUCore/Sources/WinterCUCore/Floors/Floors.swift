@@ -107,20 +107,42 @@ public enum CUFloors {
         shellStartupNames.contains(name.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    /// Whether `path` (absolute, `~`-relative, or a bare file name) names a protected destination:
-    /// a shell startup file, anything under `~/.ssh`, or a LaunchAgents/LaunchDaemons folder.
+    /// Folders whose whole tree a save must never land in: SSH keys, launchd jobs, and the agents' own
+    /// configuration — Winter's homes (`~/.winter`, `~/.winter-dev`, with `sdk/settings.json`,
+    /// `settings.json`, `sdk/.winter.json`, `run/`, `runtimes/`), any project's `.winter/` (its
+    /// `settings*.json` and `mcp.json` grant tools; its rules and skills load into sessions), and `~/.claude`.
+    /// A save there could grant an always-allowed app more power.
+    public static let protectedFolderNames: Set<String> = [
+        ".ssh", "LaunchAgents", "LaunchDaemons", ".winter", ".winter-dev", ".claude",
+    ]
+
+    /// File names protected wherever they are saved: agent config files that grant tools.
+    public static let protectedConfigNames: Set<String> = [".claude.json", ".winter.json"]
+
+    /// Whether `path` (absolute, `~`-relative, or a bare file name) names a protected destination: a shell
+    /// startup file, an agent config file, or anything inside a protected folder (see `protectedFolderNames`).
     public static func isProtectedSavePath(_ path: String, home: String = NSHomeDirectory()) -> Bool {
         var p = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !p.isEmpty else { return false }
         if p == "~" { p = home } else if p.hasPrefix("~/") { p = home + String(p.dropFirst(1)) }
         let standardized = (p as NSString).standardizingPath
         let components = (standardized as NSString).pathComponents.filter { $0 != "/" }
-        if let last = components.last, isShellStartupName(last) { return true }
-        if components.contains(".ssh") { return true }
-        if components.contains("LaunchAgents") || components.contains("LaunchDaemons") { return true }
+        if let last = components.last, isShellStartupName(last) || protectedConfigNames.contains(last) { return true }
+        if components.contains(where: protectedFolderNames.contains) { return true }
         // A fish config lives at ~/.config/fish/config.fish; any fish conf.d is startup code too.
         if standardized.contains("/.config/fish/") { return true }
         return false
+    }
+
+    /// A save panel's destination: `fileName` (as typed in its name field) into the folder whose chain of
+    /// display names, current folder first, is `folderChain` (as far as the panel shows it). Pure.
+    public static func isProtectedSaveDestination(fileName: String, folderChain: [String],
+                                                  home: String = NSHomeDirectory()) -> Bool {
+        if typedSavePathIsProtected(fileName, home: home) { return true }
+        if folderChain.contains(where: protectedFolderNames.contains) { return true }
+        // Rebuilt as a path (outermost folder first) for the subtree rules, e.g. ".config/fish".
+        let rebuilt = (folderChain.reversed() + [fileName]).joined(separator: "/")
+        return isProtectedSavePath(rebuilt, home: home)
     }
 
     /// Paths mentioned in text typed into a save panel: the whole text, plus every whitespace-free token

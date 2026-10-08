@@ -54,8 +54,6 @@ enum CUFloorScan {
 
     /// The `NSSavePanel` filename field's identifier.
     static let saveNameFieldIdentifiers: Set<String> = ["saveAsNameTextField"]
-    /// Folders a save panel's location pop-up must not point at.
-    static let protectedFolderNames: Set<String> = [".ssh", "LaunchAgents", "LaunchDaemons"]
     /// Panel subroles a save panel shows up as when it is its own window rather than a sheet.
     static let panelSubroles: Set<String> = [kAXDialogSubrole, kAXSystemDialogSubrole, kAXFloatingWindowSubrole]
 
@@ -107,30 +105,46 @@ enum CUFloorScan {
         return nil
     }
 
-    /// Location pop-up values of a panel (the folder it will save into, by display name).
-    static func locationNames(in panel: AXUIElement, ax: CUAXBackend) -> [String] {
-        var out: [String] = []
+    /// The folder the panel will save into, as a chain of display names, current folder first: the location
+    /// pop-up's value, then the path items at the top of its menu (the menu lists the current folder and its
+    /// ancestors first, then a separator, then favourites and recent places — only the part before the
+    /// first separator is the path).
+    static func locationChains(in panel: AXUIElement, ax: CUAXBackend) -> [[String]] {
+        var out: [[String]] = []
         var queue: [(AXUIElement, Int)] = [(panel, 0)]
         var seen = 0
         let deadline = Deadline()
         while !queue.isEmpty, seen < 300, !deadline.passed {
             let (e, depth) = queue.removeFirst()
             seen += 1
-            if ax.string(e, kAXRoleAttribute) == kAXPopUpButtonRole, let v = ax.string(e, kAXValueAttribute) { out.append(v) }
+            if ax.string(e, kAXRoleAttribute) == kAXPopUpButtonRole {
+                var chain: [String] = []
+                if let v = ax.string(e, kAXValueAttribute) { chain.append(v) }
+                let menuItems = ax.elements(e, kAXChildrenAttribute)
+                    .filter { ax.string($0, kAXRoleAttribute) == kAXMenuRole }
+                    .flatMap { ax.elements($0, kAXChildrenAttribute) }
+                for item in menuItems {
+                    guard let title = ax.string(item, kAXTitleAttribute), !title.isEmpty else { break }
+                    if chain.last != title { chain.append(title) }
+                }
+                if !chain.isEmpty { out.append(chain) }
+                continue
+            }
             if depth < 8 { queue.append(contentsOf: ax.elements(e, kAXChildrenAttribute).map { ($0, depth + 1) }) }
         }
         return out
     }
 
-    /// Whether a panel currently points at a protected destination (file name or folder).
+    /// Whether a panel currently points at a protected destination (file name, folder, or folder chain).
     static func panelIsProtected(_ panel: AXUIElement, ax: CUAXBackend) -> Bool {
         let name = filenameField(in: panel, ax: ax).flatMap { ax.string($0, kAXValueAttribute) } ?? ""
-        let folders = locationNames(in: panel, ax: ax)
-        return CUFloors.typedSavePathIsProtected(name) || folders.contains(where: protectedFolderNames.contains)
+        let chains = locationChains(in: panel, ax: ax)
+        if chains.isEmpty { return CUFloors.isProtectedSaveDestination(fileName: name, folderChain: []) }
+        return chains.contains { CUFloors.isProtectedSaveDestination(fileName: name, folderChain: $0) }
     }
 
     static let savePathRefusal = CUError.refused(
-        .savePath, "a save panel points at a protected location (a shell startup file, ~/.ssh or LaunchAgents) — ask the user to finish or cancel it")
+        .savePath, "a save panel points at a protected location (a shell startup file, ~/.ssh, LaunchAgents, or Winter's or Claude's settings) — ask the user to finish or cancel it")
 
     /// Typing `text` into `e`: refused when `e` is in a save panel and the text names a protected path.
     static func checkTypedIntoSavePanel(_ e: AXUIElement, text: String, ax: CUAXBackend) throws {

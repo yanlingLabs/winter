@@ -170,8 +170,22 @@ final class ActGateTests: XCTestCase {
 
     // MARK: save panels (I4)
 
-    private func openSaveSheet(name: String, folder: String = "Documents") -> (sheet: AXUIElement, name: AXUIElement, save: AXUIElement) {
+    /// A save sheet. `chain` is the location pop-up menu's path items (current folder first), then a
+    /// separator, then `recent` places.
+    private func openSaveSheet(name: String, folder: String = "Documents", chain: [String] = [], recent: [String] = [])
+        -> (sheet: AXUIElement, name: AXUIElement, save: AXUIElement) {
         let sheet = fakeElement(50_010), nameField = fakeElement(50_011), save = fakeElement(50_012), where_ = fakeElement(50_013)
+        if !chain.isEmpty || !recent.isEmpty {
+            let menu = fakeElement(50_030)
+            var items: [AXUIElement] = []
+            for (i, title) in (chain + [""] + recent).enumerated() {
+                let item = fakeElement(50_031 + Int32(i))
+                ax.add(item, role: kAXMenuItemRole, title: title)
+                items.append(item)
+            }
+            ax.add(menu, role: kAXMenuRole, extra: [kAXChildrenAttribute: items])
+            ax.put(where_, [kAXChildrenAttribute: [menu]])
+        }
         ax.put(window, [kAXChildrenAttribute: [field, secure, button, sheet]])
         ax.add(sheet, role: kAXSheetRole, extra: [kAXChildrenAttribute: [nameField, where_, save]])
         ax.add(nameField, role: kAXTextFieldRole, frame: CGRect(x: 300, y: 130, width: 200, height: 22),
@@ -180,6 +194,8 @@ final class ActGateTests: XCTestCase {
         ax.add(where_, role: kAXPopUpButtonRole, extra: [kAXValueAttribute: folder])
         ax.add(save, role: kAXButtonRole, title: "Save", frame: CGRect(x: 600, y: 300, width: 60, height: 22))
         ax.setActions(save, [kAXPressAction])
+        for child in [nameField, where_, save] { ax.put(child, [kAXParentAttribute: sheet]) }
+        ax.put(sheet, [kAXParentAttribute: window])
         return (sheet, nameField, save)
     }
 
@@ -204,6 +220,41 @@ final class ActGateTests: XCTestCase {
         world()
         let panel = openSaveSheet(name: "id_ed25519", folder: ".ssh")
         await expect("refused", reason: "save_path") { try await self.act(.click(CUClickAction(ref: self.ref(panel.save)))) }
+    }
+
+    func testWintersAndClaudesConfigAreProtectedSaveLocations() async throws {
+        // Navigated into ~/.winter/sdk: only the menu's path items reveal it.
+        world()
+        let sdk = openSaveSheet(name: "settings.json", folder: "sdk", chain: ["sdk", ".winter", "u", "Users", "Macintosh HD"])
+        await expect("refused", reason: "save_path") { try await self.act(.click(CUClickAction(ref: self.ref(sdk.save)))) }
+        // Straight into ~/.claude, or ~/.claude.json by name.
+        world()
+        let claude = openSaveSheet(name: "anything.txt", folder: ".claude")
+        await expect("refused", reason: "save_path") { try await self.act(.click(CUClickAction(ref: self.ref(claude.save)))) }
+        world()
+        let json = openSaveSheet(name: ".claude.json", folder: "u")
+        await expect("refused", reason: "save_path") { try await self.act(.click(CUClickAction(ref: self.ref(json.save)))) }
+        // A project's .winter/mcp.json.
+        world()
+        let project = openSaveSheet(name: "mcp.json", folder: ".winter", chain: [".winter", "app", "code"])
+        await expect("refused", reason: "save_path") { try await self.act(.click(CUClickAction(ref: self.ref(project.save)))) }
+        // Typing Winter's settings path into the name field.
+        world()
+        let typed = openSaveSheet(name: "Report.pdf")
+        await expect("refused", reason: "save_path") {
+            try await self.act(.setValue(CUSetValueAction(ref: self.ref(typed.name), value: "~/.winter/sdk/settings.json")))
+        }
+        XCTAssertTrue(ax.performed.isEmpty)
+        XCTAssertTrue(ax.written.isEmpty)
+    }
+
+    func testRecentPlacesAfterTheSeparatorAreNotTheDestination() async throws {
+        world()
+        // ~/.winter only appears among recent places below the separator; the destination is Documents.
+        let panel = openSaveSheet(name: "Report.pdf", folder: "Documents", chain: ["Documents", "u", "Users"],
+                                  recent: [".winter", ".claude"])
+        let r = try await act(.click(CUClickAction(ref: ref(panel.save))))
+        XCTAssertEqual(r.rung, 1)
     }
 
     func testAnOrdinarySavePanelIsFine() async throws {
