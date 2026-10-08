@@ -8,7 +8,7 @@
 // the script ran. The model's code cannot forge a closing marker (it never learns the tag) and cannot strip the
 // fence (the daemon adds it after the script is done). Text the script printed itself is fenced too — it may be
 // screen text the code read and re-printed.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { MAX_OUTPUT } from "../agent/tools/registry";
 
 export type ResultContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
@@ -37,6 +37,8 @@ export class ResultBuilder {
   private screen = false;
   private images = 0;
   private droppedImages = 0;
+  /** The images already in this result, by a hash of their bytes: the same image is never sent twice. */
+  private readonly imageHashes = new Set<string>();
   private kept = 0;
   private overflow = false;
 
@@ -68,8 +70,13 @@ export class ResultBuilder {
     else this.items.push({ kind: "text", text: kept });
   }
 
+  /** An image item, in place. One IDENTICAL to an image already in this call's result is dropped — e.g.
+   *  `show(await screen.screenshot())`, whose screenshot already showed itself (the live gate). */
   image(data: string, mimeType: string): void {
     this.screen = true;
+    const hash = createHash("sha256").update(mimeType).update("\0").update(data).digest("hex");
+    if (this.imageHashes.has(hash)) return;
+    this.imageHashes.add(hash);
     if (this.images >= RESULT_IMAGE_CAP) { this.droppedImages++; return; }
     this.images++;
     this.items.push({ kind: "image", data, mimeType });

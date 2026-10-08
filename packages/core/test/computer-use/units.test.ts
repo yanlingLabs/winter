@@ -160,6 +160,23 @@ describe("the result builder", () => {
     expect(only.build({ tag: "t" }).content).toEqual([{ type: "text", text: "moved Notes's window to this desktop\n" }]);
   });
 
+  test("an image identical to one already in the result is dropped — never sent twice, never counted against the cap", () => {
+    const b = new ResultBuilder();
+    b.image("AAAA", "image/jpeg");
+    b.text("between");
+    b.image("AAAA", "image/jpeg"); // show() of the screenshot that already showed itself
+    b.image("BBBB", "image/jpeg");
+    b.image("AAAA", "image/png"); // other bytes on the wire: kept
+    const r = b.build();
+    expect(r.content.filter((c) => c.type === "image").map((c) => (c as { data: string; mimeType: string }).data + "/" + (c as { mimeType: string }).mimeType)).toEqual(["AAAA/image/jpeg", "BBBB/image/jpeg", "AAAA/image/png"]);
+    // Duplicates take no slot: six distinct images still all fit after a duplicate.
+    const c = new ResultBuilder();
+    for (let i = 0; i < RESULT_IMAGE_CAP; i++) { c.image(`IMG${i}`, "image/jpeg"); c.image(`IMG${i}`, "image/jpeg"); }
+    const rc = c.build();
+    expect(rc.content.filter((x) => x.type === "image")).toHaveLength(RESULT_IMAGE_CAP);
+    expect(rc.content.map((x) => (x.type === "text" ? x.text : "")).join("")).not.toContain("omitted");
+  });
+
   test("an empty result still says something", () => {
     expect(new ResultBuilder().build().content).toEqual([{ type: "text", text: "(the script printed nothing)\n" }]);
   });
@@ -203,6 +220,15 @@ describe("the tool description", () => {
     }
     expect(v).not.toContain("browsers");
     expect(v).not.toContain("interface Tab");
+  });
+
+  test("the Output notes say state()/screenshot()/binds already show their result, with an emit:false example", () => {
+    const v = computerV2Description({ vision: true });
+    expect(v).toContain("`state()`, `screenshot()` and the bind calls already show their result — calling `print()`/`show()` on them shows it twice. Use `show()` only for an image you read with `{ emit: false }`");
+    expect(v).toContain("const shot = await notes.screenshot({ emit: false }); if (changed) show(shot)");
+    const nv = computerV2Description({ vision: false });
+    expect(nv).toContain("`state()` and the bind calls already show their result — calling `print()` on them shows it twice.");
+    expect(nv).toContain("const s = await notes.state({ emit: false })");
   });
 
   test("the input schema is the spec's", () => {

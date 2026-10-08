@@ -18,6 +18,9 @@ export function computerV2Description(input: ComputerV2DescriptionInput): string
     "Run JavaScript (TypeScript syntax is fine) to see and control apps on this Mac. The runtime persists between calls: variables and bound apps survive. One call can do many steps — bind, act, wait, read — and only what you observe or print comes back.",
     "",
     "- Binding (`apps.open`) prints the app's state. `state()` prints only what changed since you last saw it; pass `{ full: true }` for everything.",
+    v
+      ? "- `state()`, `screenshot()` and the bind calls already show their result — calling `print()`/`show()` on them shows it twice. Use `show()` only for an image you read with `{ emit: false }`: `const shot = await notes.screenshot({ emit: false }); if (changed) show(shot)`."
+      : "- `state()` and the bind calls already show their result — calling `print()` on them shows it twice. Read with `{ emit: false }` when you only want the value: `const s = await notes.state({ emit: false })`.",
     v ? "- Prefer element refs (the `[n]` numbers in state) over coordinates." : "- Act on element refs: the `[n]` numbers in state.",
     "- After acting, observe before deciding again — usually by ending the script with `await app.state()`.",
     "- Don't sleep blindly. Use `waitFor(...)` for what you expect, or `waitForIdle()`. `state()` waits briefly on its own after an action.",

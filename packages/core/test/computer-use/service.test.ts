@@ -318,6 +318,15 @@ describe("ComputerV2: screenshots, points and the vision gate", () => {
     expect(typeof w.fake.calls("target.screenshot")[0]!.callId).toBe("string");
   }, 30_000);
 
+  macOnly("show(await screen.screenshot()) sends the image ONCE (the live gate): one capture, one image item", async () => {
+    const w = world();
+    const r = await w.run("show(await screen.screenshot())\nconst notes = await apps.open('Notes')\nshow(await notes.screenshot())");
+    expect(r.isError).toBe(false);
+    expect(w.fake.calls("screen.screenshot")).toHaveLength(1);
+    expect(w.fake.calls("target.screenshot")).toHaveLength(1);
+    expect(r.content.filter((c) => c.type === "image")).toHaveLength(2);
+  }, 30_000);
+
   macOnly("without vision: screenshot, show and Points are NotAllowed", async () => {
     const w = world();
     const r = await w.run("const notes = await apps.open('Notes')\ntry { await notes.screenshot() } catch (e) { print('shot', e.name, e.message) }\ntry { await notes.click([10, 10]) } catch (e) { print('point', e.name) }", { vision: false });
