@@ -39,6 +39,16 @@ final class EscapeTapLogicTests: XCTestCase {
         XCTAssertEqual(l.decide(down(), now: 1), .swallowAndFire)
     }
 
+    func testANewPressFiresEvenWhenTheLastKeyUpWasMissed() {
+        var l = armed()
+        XCTAssertEqual(l.decide(down(), now: 0), .swallowAndFire)
+        // The key-up never reached the tap (a tap timeout in between). The next real press must still stop the script.
+        XCTAssertEqual(l.decide(down(), now: 3), .swallowAndFire)
+        XCTAssertEqual(l.decide(down(autorepeat: true), now: 3.5), .swallow, "only autorepeats are silent")
+        XCTAssertEqual(l.decide(up(), now: 3.6), .swallow)
+        XCTAssertEqual(l.decide(up(), now: 3.7), .pass)
+    }
+
     func testOtherKeysAndChordsPass() {
         var l = armed()
         XCTAssertEqual(l.decide(down(key: 36), now: 0), .pass) // Return
@@ -117,7 +127,7 @@ final class EscapeTapLogicTests: XCTestCase {
     func testATapThatCannotBeCreatedIsANoOpThatLogsOnceAndRetriesLater() {
         let installer = FakeInstaller()
         var logs: [String] = []
-        let tap = EscapeTap(installer: installer, clock: FakeClock(), ownPID: 1) { logs.append($0) }
+        let tap = EscapeTap(installer: installer, clock: FakeClock(), ownPID: 1, log: { logs.append($0) })
         tap.setArmed(true)
         tap.setArmed(true)
         tap.setArmed(false)
@@ -136,7 +146,7 @@ final class EscapeTapLogicTests: XCTestCase {
     func testArmedTapSwallowsAndReportsDisarmedTapIsSwitchedOff() {
         let installer = FakeInstaller()
         installer.succeed = true
-        let tap = EscapeTap(installer: installer, clock: FakeClock(), ownPID: 1) { _ in }
+        let tap = EscapeTap(installer: installer, clock: FakeClock(), ownPID: 1, log: { _ in })
         let fired = expectation(description: "onEscape")
         tap.onEscape = { fired.fulfill() }
         tap.setArmed(true)
@@ -150,12 +160,21 @@ final class EscapeTapLogicTests: XCTestCase {
         XCTAssertEqual(installer.attempts, 1, "the tap is created once and reused")
     }
 
+    func testSecureEventInputIsReadableThroughTheProtocol() {
+        var secure = false
+        let tap: CUEscapeTap = EscapeTap(installer: FakeInstaller(), clock: FakeClock(), ownPID: 1,
+                                         secureInputProbe: { secure }, log: { _ in })
+        XCTAssertFalse(tap.isSecureEventInputEnabled)
+        secure = true
+        XCTAssertTrue(tap.isSecureEventInputEnabled, "read fresh on every access")
+    }
+
     func testExpectSyntheticEscapeUsesTheClock() {
         let installer = FakeInstaller()
         installer.succeed = true
         let clock = FakeClock()
         clock.now = 50
-        let tap = EscapeTap(installer: installer, clock: clock, ownPID: 1) { _ in }
+        let tap = EscapeTap(installer: installer, clock: clock, ownPID: 1, log: { _ in })
         var fires = 0
         tap.onEscape = { fires += 1 }
         tap.setArmed(true)

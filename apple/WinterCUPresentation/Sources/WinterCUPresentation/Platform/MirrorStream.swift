@@ -7,6 +7,10 @@ import ScreenCaptureKit
 /// A live ScreenCaptureKit stream of one window, using a desktop-independent window filter so it keeps working while the
 /// window is covered. Frames arrive as IOSurfaces on the main thread. Needs the Screen Recording grant; without it the
 /// stream reports a failure and the mirror shows its caption only.
+///
+/// When the system stops a running stream (`didStopWithError`: the display slept, the capture service restarted), it is
+/// reopened with a bounded backoff for as long as the stream has not been `stop()`ped, i.e. while its mirror is still
+/// meant to show. A first open that fails (no grant, window gone) is reported, not retried.
 @MainActor final class MirrorStream {
     var onFrame: ((IOSurfaceRef) -> Void)?
     var onFailure: ((String) -> Void)?
@@ -17,6 +21,9 @@ import ScreenCaptureKit
     private var output: FrameOutput?
     private var stopped = false
     private var pixelSize: CGSize = .zero
+    private var backoff = RestartBackoff()
+    /// Bumped on every open, so callbacks from a stream we already replaced are ignored.
+    private var generation = 0
 
     init(windowID: CGWindowID, framesPerSecond: Int) {
         self.windowID = windowID
@@ -25,7 +32,7 @@ import ScreenCaptureKit
 
     func start(pixelSize: CGSize) {
         self.pixelSize = pixelSize
-        Task { @MainActor [weak self] in await self?.open() }
+        Task { @MainActor [weak self] in await self?.open(retrying: false) }
     }
 
     func resize(pixelSize: CGSize) {
@@ -46,7 +53,9 @@ import ScreenCaptureKit
         Task { try? await stream.stopCapture() }
     }
 
-    private func open() async {
+    private func open(retrying: Bool) async {
+        generation += 1
+        let gen = generation
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
             guard !stopped else { return }
@@ -56,13 +65,13 @@ import ScreenCaptureKit
             }
             let filter = SCContentFilter(desktopIndependentWindow: window)
             let output = FrameOutput { [weak self] surface in
-                // Hop to the main thread; drop frames that arrive after stop().
+                // Hop to the main thread; drop frames that arrive after stop() or from a replaced stream.
                 DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self?.onFrame?(surface) }
+                    MainActor.assumeIsolated { self?.frameArrived(surface, generation: gen) }
                 }
             } onStop: { [weak self] in
                 DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self?.onFailure?("stream stopped") }
+                    MainActor.assumeIsolated { self?.streamStopped(generation: gen) }
                 }
             }
             let stream = SCStream(filter: filter, configuration: configuration(), delegate: output)
@@ -77,7 +86,39 @@ import ScreenCaptureKit
         } catch {
             guard !stopped else { return }
             PresentationLog.notice("mirror stream for window \(windowID) failed: \(error.localizedDescription)")
-            onFailure?(Self.describe(error))
+            if retrying {
+                scheduleRestart()
+            } else {
+                onFailure?(Self.describe(error))
+            }
+        }
+    }
+
+    private func frameArrived(_ surface: IOSurfaceRef, generation gen: Int) {
+        guard !stopped, gen == generation else { return }
+        backoff.reset()
+        onFrame?(surface)
+    }
+
+    /// The system stopped the running stream: reopen it after the next backoff delay, while still wanted.
+    private func streamStopped(generation gen: Int) {
+        guard !stopped, gen == generation else { return }
+        stream = nil
+        output = nil
+        scheduleRestart()
+    }
+
+    private func scheduleRestart() {
+        guard let delay = backoff.nextDelay() else {
+            PresentationLog.notice("mirror stream for window \(windowID) gave up after repeated stops")
+            onFailure?("no live view")
+            return
+        }
+        onFailure?("reconnecting")
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self, !self.stopped else { return }
+            await self.open(retrying: true)
         }
     }
 

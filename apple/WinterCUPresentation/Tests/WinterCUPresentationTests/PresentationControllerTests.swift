@@ -209,6 +209,26 @@ import XCTest
         XCTAssertEqual(surfaces.mirror(1)?.shown, true)
     }
 
+    func testWithMirrorsDisabledTheTickerRunsOnlyWhileACursorNeedsIt() {
+        addWindow(1, CGRect(x: 200, y: 150, width: 800, height: 500))
+        controller.showMirror(sessionId: "s", target: ref(1))
+        XCTAssertTrue(ticker.isRunning)
+        controller.mirrorsEnabled = false
+        XCTAssertFalse(ticker.isRunning, "stops at once, not 30 s later")
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 250), kind: .press)
+        XCTAssertTrue(ticker.isRunning, "the overlay cursor still follows its window")
+        clock.now += 4
+        ticker.fire()
+        XCTAssertFalse(ticker.isRunning)
+        // Back on after the mirror's 30 s idle: it stays faded until the next action.
+        clock.now += 30
+        controller.mirrorsEnabled = true
+        XCTAssertEqual(surfaces.mirror(1)?.shown, false)
+        XCTAssertFalse(ticker.isRunning)
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 250), kind: .move)
+        XCTAssertEqual(surfaces.mirror(1)?.shown, true)
+    }
+
     // MARK: - Cursor
 
     func testCursorDrawsInTheOverlayAndTheMirror() {
