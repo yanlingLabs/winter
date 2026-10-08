@@ -1,10 +1,12 @@
 import { chmodSync, realpathSync, statSync } from "node:fs";
+import { ComputerUseControlError, type ComputerUseControl } from "../computer-use/wiring";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
   HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
+  ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams,
   SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
   SessionHistoryParams,
@@ -374,6 +376,11 @@ export interface IpcServerOptions {
    * watcher still applies the same file right after; this only closes that window.
    */
   onConnectorPermissionsSaved?: (next: Settings) => void;
+  /**
+   * ComputerV2 (2026-10-08): Settings → Computer Use's control surface (`computer-use/wiring.ts`) behind the
+   * LOCAL-ONLY `computerUse.*` RPCs. Absent (a bare test server): those methods answer INTERNAL.
+   */
+  computerUse?: ComputerUseControl;
   /**
    * WS-26 (review r1, minor 4): the SAME live connector-permission facts the hook and the bridge decide
    * on (the daemon's in-memory table, the scope-aware read-only answers), so `mcp.tools` reports what is
@@ -3330,6 +3337,52 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const pending = opts.elicitations?.urlFor(p.sessionId, p.elicitationId);
         if (pending === undefined) throw new RpcFailure(ERR.NOT_FOUND, "this link request is no longer active", { code: ELICITATION_NOT_ACTIVE });
         return { url: pending.url };
+      }
+      // -----------------------------------------------------------------------------------------
+      // ComputerV2 (2026-10-08): Settings → Computer Use. LOCAL role only — outside `REMOTE_ALLOWED_METHODS`
+      // and the plugin list, and the explicit check keeps it so if either list ever widens. Every write is
+      // to `settings.json` and HOT (the computer-use runtime serves it at once; the watcher catches up).
+      // -----------------------------------------------------------------------------------------
+      case METHODS.computerUseStatus:
+      case METHODS.computerUseRequestPermission:
+      case METHODS.computerUseAppsList:
+      case METHODS.computerUseAppsSet:
+      case METHODS.computerUseSetSettings: {
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, `${method} is available to local clients only`);
+        const control = opts.computerUse;
+        if (control === undefined) throw new RpcFailure(ERR.INTERNAL, `${method} is not available on this server`);
+        try {
+          switch (method) {
+            case METHODS.computerUseStatus:
+              parseParams(ComputerUseStatusParams, params);
+              return await control.status();
+            case METHODS.computerUseRequestPermission: {
+              const p = parseParams(ComputerUseRequestPermissionParams, params);
+              await control.requestPermission(p.kind);
+              return { ok: true };
+            }
+            case METHODS.computerUseAppsList:
+              parseParams(ComputerUseAppsListParams, params);
+              return { apps: control.appsList() };
+            case METHODS.computerUseAppsSet: {
+              const p = parseParams(ComputerUseAppsSetParams, params);
+              control.appsSet({ bundleId: p.bundleId, ...(p.name === undefined ? {} : { name: p.name }), ...(p.access === undefined ? {} : { access: p.access }), ...(p.grant === undefined ? {} : { grant: p.grant }) });
+              return { ok: true };
+            }
+            default: {
+              const p = parseParams(ComputerUseSetSettingsParams, params);
+              control.setSettings({ ...(p.enabled === undefined ? {} : { enabled: p.enabled }), ...(p.mirror === undefined ? {} : { mirror: p.mirror }), ...(p.privateEventPath === undefined ? {} : { privateEventPath: p.privateEventPath }) });
+              return { ok: true };
+            }
+          }
+        } catch (err) {
+          if (err instanceof ComputerUseControlError) {
+            if (err.code === "invalid_params") throw new RpcFailure(ERR.INVALID_PARAMS, err.message, { code: err.code });
+            if (err.code === "helper_unavailable") throw new RpcFailure(ERR.RETRY, err.message, { code: err.code, retryable: true });
+            throw new RpcFailure(ERR.INTERNAL, err.message, { code: err.code });
+          }
+          throw err;
+        }
       }
       case METHODS.sessionStageImage: {
         // Code-mode image input (2026-09-29): stage a composer image into the session's temp

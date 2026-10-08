@@ -124,6 +124,11 @@ export class ComputerPolicy {
 
   clearSession(sessionId: string): void { this.sessionGrants.delete(sessionId); }
 
+  /** The user removed an app's "Always allow": no session keeps the grant its card left behind either. */
+  forgetGrant(bundleId: string): void {
+    for (const grants of this.sessionGrants.values()) grants.delete(bundleId);
+  }
+
   /** The bundle ids a whole-screen shot must black out: Winter's own apps and every `deny` app. */
   excludedFromScreen(): string[] {
     const out = new Set<string>(WINTER_OWN_BUNDLE_IDS);

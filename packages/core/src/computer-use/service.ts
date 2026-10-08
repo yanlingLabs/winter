@@ -43,6 +43,8 @@ export const WORKER_IDLE_MS = 30 * 60_000;
 export const SETTLE_CAP_MS = 1_500;
 export const WAIT_FOR_DEFAULT_MS = 10_000;
 const IMAGES_KEPT = 16;
+/** A `busy` helper answer is retried once after this long. */
+export const BUSY_RETRY_MS = 200;
 
 export interface ScriptInput { code: string; timeoutMs?: number; reset?: boolean; title?: string }
 export interface ScriptCall {
@@ -356,7 +358,7 @@ export class ComputerV2Service {
       case "waitForIdle": {
         const quietMs = typeof args.quietMs === "number" ? Math.max(30, Math.floor(args.quietMs)) : 150;
         const timeout = this.clampWait(ctx, typeof args.timeoutMs === "number" ? args.timeoutMs : 3_000);
-        const res = await this.helperCall<WaitIdleResult>(ctx, "target.waitIdle", { targetId, quietMs, timeoutMs: timeout }, metric, timeout + 5_000);
+        const res = await this.helperCall<WaitIdleResult>(ctx, "target.waitIdle", { targetId, quietMs, timeoutMs: timeout, callId: ctx.callId }, metric, timeout + 5_000);
         metric.settleMs = res.waitedMs;
         metric.settleExit = res.settled ? "quiet" : "cap";
         return { settled: res.settled, waitedMs: res.waitedMs };
@@ -391,8 +393,26 @@ export class ComputerV2Service {
 
   private async helperCall<T>(ctx: RunCtx, method: string, params: Record<string, unknown>, metric: PrimitiveMetric, timeoutMs?: number): Promise<T> {
     const t0 = this.now();
+    const once = (): Promise<T> => this.deps.helper.request<T>(method, params, { signal: ctx.abort.signal, callId: ctx.callId, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
     try {
-      const res = await this.deps.helper.request<T>(method, params, { signal: ctx.abort.signal, callId: ctx.callId, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+      let res: T;
+      try {
+        res = await once();
+      } catch (err) {
+        // `busy` (retryable): the helper's queue was full, or the app did not answer accessibility in time.
+        // One retry after ~200 ms; a second `busy` is the typed failure (spine §2.1, after L1b).
+        if (!(err instanceof HelperRpcError) || err.code !== "busy") throw err;
+        if (!(await abortableSleep(BUSY_RETRY_MS, ctx.abort.signal))) throw new AutomationFailure("Cancelled", ctx.cancelled ?? "the call was cancelled");
+        try {
+          res = await once();
+        } catch (again) {
+          if (again instanceof HelperRpcError && again.code === "busy") {
+            const t = typeof params.targetId === "string" ? ctx.state.targets.get(params.targetId) : undefined;
+            throw new AutomationFailure("HelperUnavailable", `${t?.name ?? "The app"} did not answer in time (it may be busy) — try again in a moment`, true);
+          }
+          throw again;
+        }
+      }
       // The helper arms its Esc tap while any session has a script running (spine §2.1 `script.active`).
       if (!ctx.scriptActiveTold) {
         ctx.scriptActiveTold = true;
@@ -445,7 +465,7 @@ export class ComputerV2Service {
     }
     ctx.apps.add(app.name);
     this.deps.recentApps?.note(app.bundleId, app.name);
-    const snap = await this.helperCall<SnapshotResult>(ctx, "target.snapshot", { targetId: info.targetId, full: true, settle: { maxMs: SETTLE_CAP_MS } }, metric);
+    const snap = await this.helperCall<SnapshotResult>(ctx, "target.snapshot", { targetId: info.targetId, full: true, settle: { maxMs: SETTLE_CAP_MS }, callId: ctx.callId }, metric);
     metric.settleMs = snap.waitedMs;
     metric.settleExit = snap.settled ? "quiet" : "cap";
     ctx.builder.text(snap.text, { screen: true });
@@ -459,7 +479,7 @@ export class ComputerV2Service {
     const since = full || within !== undefined ? undefined : this.diffBases.get(ctx.sessionId, t.targetId);
     const settle = args.settle !== false && ctx.acted.has(t.targetId) ? { maxMs: SETTLE_CAP_MS } : undefined;
     const snap = await this.helperCall<SnapshotResult>(ctx, "target.snapshot", {
-      targetId: t.targetId, ...(since === undefined ? {} : { since }), ...(full ? { full: true } : {}),
+      targetId: t.targetId, callId: ctx.callId, ...(since === undefined ? {} : { since }), ...(full ? { full: true } : {}),
       ...(within === undefined ? {} : { within }), ...(settle === undefined ? {} : { settle }),
     }, metric);
     if (settle !== undefined) { metric.settleMs = snap.waitedMs; metric.settleExit = snap.settled ? "quiet" : "cap"; }
@@ -518,7 +538,7 @@ export class ComputerV2Service {
     this.requireVision(ctx);
     const region = Array.isArray(args.region) && args.region.length === 4 && args.region.every((n) => typeof n === "number") ? args.region : undefined;
     const settle = args.settle !== false && ctx.acted.has(t.targetId) ? { maxMs: SETTLE_CAP_MS } : undefined;
-    const res = await this.shoot(ctx, "target.screenshot", { targetId: t.targetId, ...(region === undefined ? {} : { region }), ...(settle === undefined ? {} : { settle }) }, metric);
+    const res = await this.shoot(ctx, "target.screenshot", { targetId: t.targetId, callId: ctx.callId, ...(region === undefined ? {} : { region }), ...(settle === undefined ? {} : { settle }) }, metric);
     ctx.state.lastTargetShot.set(t.targetId, res.shotId);
     const handle = this.keepImage(ctx, res);
     if (args.emit !== false) ctx.builder.image(res.imageBase64, res.mime ?? "image/jpeg");
@@ -537,7 +557,7 @@ export class ComputerV2Service {
     if (typeof o.title === "string") cond.title = o.title;
     if (Object.keys(cond).length === 0) throw bad("waitFor() needs one of text, ref, gone or title");
     const timeout = this.clampWait(ctx, typeof args.timeoutMs === "number" ? args.timeoutMs : WAIT_FOR_DEFAULT_MS);
-    const res = await this.helperCall<WaitForResult>(ctx, "target.waitFor", { targetId: t.targetId, cond, timeoutMs: timeout }, metric, timeout + 5_000);
+    const res = await this.helperCall<WaitForResult>(ctx, "target.waitFor", { targetId: t.targetId, cond, timeoutMs: timeout, callId: ctx.callId }, metric, timeout + 5_000);
     return { waitedMs: res.waitedMs };
   }
 
@@ -802,6 +822,16 @@ export class ComputerV2Service {
 
 function failure(name: string, message: string): ScriptResult {
   return new ResultBuilder().build({ error: { name, message } });
+}
+
+/** Sleep `ms` unless `signal` aborts first; `false` when it did. */
+function abortableSleep(ms: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(true); }, ms);
+    const onAbort = (): void => { clearTimeout(timer); resolve(false); };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 async function waitUnlessAborted(p: Promise<void>, signal: AbortSignal | undefined): Promise<boolean> {

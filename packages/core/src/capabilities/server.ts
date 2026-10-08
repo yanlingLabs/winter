@@ -47,7 +47,7 @@
 // session" is a compile error rather than a runtime branch.
 import type { McpSdkServerConfigWithInstance, WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import type { ComputerUseService } from "../agent/computer-use";
-import { ToolRegistry, type ToolContext, type ToolDefinition } from "../agent/tools/registry";
+import { ToolRegistry, type ToolContentItem, type ToolContext, type ToolDefinition } from "../agent/tools/registry";
 import { WINTER_CAPABILITY_TOOLS, capabilityServerName, capabilityToolName, type CapabilityToolFacts, type SessionMode } from "./names";
 
 /**
@@ -83,6 +83,9 @@ export interface CapabilitySession {
   /** `ModelInfo.supportsVision` for the turn's model. `false` makes `computer` refuse a screenshot
    *  with today's message; unset means unknown and is not a block. */
   visionCapable?: boolean;
+  /** ComputerV2 (2026-10-08): the incarnation's model tag — `ComputerV2`'s description (vision or not) and
+   *  its screenshot budget are decided from it. Absent: unknown (vision assumed, the smallest budget). */
+  model?: string;
   /**
    * Also told about every image a call stages (tests observe it here). The image itself no longer needs
    * it: since 2026-10-07 each call collects what it stages (`ctx.attachImage`) and returns it as an MCP
@@ -170,10 +173,27 @@ export function mcpImageItem(dataUrl: string): { type: "image"; data: string; mi
   return m === null ? undefined : { type: "image", data: m[2]!, mimeType: m[1]!.toLowerCase() };
 }
 
-/** The text result plus every image the call staged, as MCP `image` items after it (2026-10-07). */
+/** The text result plus every image the call staged, as MCP `image` items after it (2026-10-07) — `Computer`
+ *  and `Browser`. A special case of `orderedResult`: all text first, then the images. */
 function resultWithImages(text: string, isError: boolean, images: readonly string[]): { content: unknown[]; isError: boolean } {
   const items = images.map(mcpImageItem).filter((i): i is NonNullable<typeof i> => i !== undefined);
-  return { content: [{ type: "text", text }, ...items], isError };
+  return orderedResult([{ type: "text", text }, ...items], isError);
+}
+
+/**
+ * ComputerV2 (2026-10-08): the ORDERED content a tool built itself (`ToolOutcome.content`) — text and images
+ * interleaved in the order they were produced, as the spec's result builder requires (`computer-use/result.ts`
+ * applies the caps and the DATA-ONLY fence before it gets here). An image item that is not base64 image data
+ * is dropped rather than forwarded; an empty list still answers with one text item.
+ */
+export function orderedResult(items: readonly ToolContentItem[], isError: boolean): { content: unknown[]; isError: boolean } {
+  const content: unknown[] = [];
+  for (const item of items) {
+    if (item.type === "text") content.push({ type: "text", text: item.text });
+    else if (/^image\/[a-z0-9.+-]+$/i.test(item.mimeType) && /^[A-Za-z0-9+/=]*$/.test(item.data)) content.push({ type: "image", data: item.data, mimeType: item.mimeType.toLowerCase() });
+  }
+  if (content.length === 0) content.push({ type: "text", text: "" });
+  return { content, isError };
 }
 
 /**
@@ -285,6 +305,7 @@ export function capabilityServer(
         // produces one (`diff-report.ts` serves edit/write, which are class (a) and retire), and if
         // one ever does, the diff belongs on the projector's `tool_result` (Task 11), not in this
         // return value.
+        if (outcome.content !== undefined) return orderedResult(outcome.content, outcome.isError);
         return staged.length > 0 ? resultWithImages(outcome.output, outcome.isError, staged) : textResult(outcome.output, outcome.isError);
       } catch (err) {
         // `execute` already converts a tool throw; this catches the pathological rest (a def whose
