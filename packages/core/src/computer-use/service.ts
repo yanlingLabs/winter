@@ -650,6 +650,10 @@ export class ComputerV2Service {
     const res = await this.shoot(ctx, "target.screenshot", { targetId: t.targetId, callId: ctx.callId, ...(region === undefined ? {} : { region }), ...(settle === undefined ? {} : { settle }) }, metric);
     ctx.state.lastTargetShot.set(t.targetId, res.shotId);
     const handle = this.keepImage(ctx, res);
+    // What the capture had to do ("moved the window here to capture it") — a real change on screen, so it is
+    // said even for an `emit: false` read: an unfenced daemon line, like a bind's.
+    const detail = helperDetail(res.detail);
+    if (detail !== undefined) ctx.builder.daemonLine(detail);
     if (args.emit !== false) ctx.builder.image(res.imageBase64, res.mime ?? "image/jpeg");
     else ctx.builder.markScreenRead();
     return handle;
@@ -887,6 +891,13 @@ export class ComputerV2Service {
           return { kind: "PermissionMissing", message: `Winter Computer Use needs the ${which} permission — ask the user to grant it in Settings → Computer Use` };
         }
         case "busy": return { kind: "HelperUnavailable", message: "Winter Computer Use is busy — try again in a moment" };
+        case "unsupported": {
+          // `data.axError` (the raw Accessibility error) is for the log, not the model: the helper's sentence says
+          // what could not be done.
+          if (data.axError !== undefined) this.deps.log?.(`computer-use: ${msg.primitive} unsupported in ${name} (AX error ${String(data.axError).slice(0, 40)})`);
+          const said = err.message.replace(/\s+/g, " ").trim().slice(0, 400);
+          return { kind: "Error", message: said.length > 0 ? said : `${name} does not support ${msg.primitive}` };
+        }
         case "invalid_params": return { kind: "TypeError", message: err.message };
         default: return { kind: "Error", message: `${err.code}: ${err.message}` };
       }

@@ -45,6 +45,7 @@ function world(opts: WorldOpts = {}) {
   const facts: SessionFacts = { policy: opts.policy ?? "bypass", mode: "code", ...opts.facts };
   const audits: Array<Record<string, unknown>> = [];
   const interrupts: string[] = [];
+  const logs: string[] = [];
   let svc!: ComputerV2Service;
   const helper = new HelperClient({
     home, profile: "dev", launchAllowed: true,
@@ -68,7 +69,7 @@ function world(opts: WorldOpts = {}) {
   const telemetry = new AutomationTelemetry(home);
   svc = new ComputerV2Service({
     helper, policy, settings: () => settings, telemetry, recentApps: new RecentApps(home),
-    audit: (l) => audits.push(l), interrupt: (sid) => interrupts.push(sid),
+    audit: (l) => audits.push(l), interrupt: (sid) => interrupts.push(sid), log: (l) => logs.push(l),
   });
   services.push(svc);
   const run = (code: string, o: { sessionId?: string; vision?: boolean; timeoutMs?: number; reset?: boolean; signal?: AbortSignal; model?: string } = {}): Promise<ScriptResult> =>
@@ -76,7 +77,7 @@ function world(opts: WorldOpts = {}) {
       { sessionId: o.sessionId ?? "s1", vision: o.vision ?? true, model: o.model ?? "anthropic/claude-opus-5-5", ...(o.signal === undefined ? {} : { signal: o.signal }) },
       { code, ...(o.timeoutMs === undefined ? {} : { timeoutMs: o.timeoutMs }), ...(o.reset === undefined ? {} : { reset: o.reset }) },
     );
-  return { home, fake, approvals, events, svc, run, audits, interrupts, telemetry, facts };
+  return { home, fake, approvals, events, svc, run, audits, interrupts, telemetry, facts, logs };
 }
 
 const text = (r: ScriptResult): string => r.content.map((c) => (c.type === "text" ? c.text : "[image]")).join("");
@@ -410,6 +411,26 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     expect(text(r3)).not.toContain("opened a new");
   }, 30_000);
 
+  macOnly("a target screenshot's detail is an unfenced daemon line, even for an emit:false read", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')");
+    w.fake.handlers["target.screenshot"] = () => ({ imageBase64: Buffer.from("jpeg-x").toString("base64"), mime: "image/jpeg", width: 10, height: 10, shotId: "shotX", detail: "moved the window here to capture it" });
+    const r = await w.run("await notes.screenshot()");
+    expect(r.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toContain("moved the window here to capture it\n");
+    const r2 = await w.run("const quiet = await notes.screenshot({ emit: false })");
+    expect(r2.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toEqual(["moved the window here to capture it\n"]);
+  }, 30_000);
+
+  macOnly("unsupported: the helper's sentence reaches the script; data.axError only the log", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')");
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("unsupported", "Notes' editor does not expose a settable value", { axError: -25205 }); };
+    const r = await w.run("try { await notes.setValue(14, 'x') } catch (e) { print(e.name, e.message) }");
+    expect(text(r)).toContain("Error Notes' editor does not expose a settable value");
+    expect(text(r)).not.toContain("25205");
+    expect(w.logs.some((l) => l.includes("AX error -25205"))).toBe(true);
+  }, 30_000);
+
   macOnly("window_elsewhere with newWindowId: NoWindow says a new window was opened — call state() and retry; the diff base resets", async () => {
     const w = world();
     await w.run("const notes = await apps.open('Notes')");
@@ -475,6 +496,12 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     const r = await w.run("const notes = await apps.open('Notes')\ntry { await notes.type('hello') } catch (e) { print(e.name, e.message) }");
     expect(text(r)).toContain(`Refused ${said}`);
     expect(text(r)).not.toContain("that is a password or payment field");
+    // focus_unknown (the core lane's new reason) keeps the helper's sentence too.
+    const focus = "can't tell which field has focus in Notes — pass `into` or click a text field first";
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("refused", focus, { reason: "focus_unknown" }); };
+    const r1 = await w.run("try { await notes.type('hello') } catch (e) { print(e.name, e.message) }");
+    expect(text(r1)).toContain(`Refused ${focus}`);
+    expect(text(r1)).not.toContain("refused that action");
     // focus_unknown with no message of its own gets its own words.
     w.fake.handlers["target.act"] = () => { throw new FakeHelperError("refused", "", { reason: "focus_unknown" }); };
     const r2 = await w.run("try { await notes.type('hello') } catch (e) { print(e.name, e.message) }");
