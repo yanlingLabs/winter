@@ -405,6 +405,10 @@ extension SessionEvent {
 /// difference — the backlog a slow consumer has built up — and how long the oldest has waited can be read from
 /// any thread. (An `AsyncStream` does not say how many elements it is holding.)
 public final class EventTraffic: @unchecked Sendable {
+    /// Past this many timestamps held, the older half is dropped: a client whose events nobody counts off (the
+    /// Gateway's, the phone's) must not grow this forever. A diagnostic, so `backlog` then reads as a floor.
+    static let cap = 65_536
+
     private let lock = NSLock()
     private var times: [TimeInterval] = []
     private var head = 0
@@ -415,6 +419,10 @@ public final class EventTraffic: @unchecked Sendable {
     func noteYielded() {
         lock.lock(); defer { lock.unlock() }
         times.append(clock())
+        if times.count - head > Self.cap {
+            times.removeFirst(times.count - Self.cap / 2)
+            head = 0
+        }
     }
 
     /// The consumer took one event off the stream.
@@ -426,7 +434,7 @@ public final class EventTraffic: @unchecked Sendable {
         else if head > 4096 { times.removeFirst(head); head = 0 }
     }
 
-    /// Events on the stream not yet taken.
+    /// Events on the stream not yet taken (a floor, once `cap` has been passed).
     public var backlog: Int { lock.lock(); defer { lock.unlock() }; return times.count - head }
 
     /// How long the oldest event not yet taken has been waiting, in seconds (0 when none is).
@@ -435,4 +443,7 @@ public final class EventTraffic: @unchecked Sendable {
         guard head < times.count else { return 0 }
         return max(clock() - times[head], 0)
     }
+
+    /// Timestamps held (tests: bounded however many events nobody counts off).
+    var storedCount: Int { lock.lock(); defer { lock.unlock() }; return times.count }
 }

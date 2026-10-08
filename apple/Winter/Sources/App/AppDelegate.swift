@@ -288,7 +288,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Which kind of window is frontmost, for a hang report.
     func frontmostWindowKind() -> String {
-        guard let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.orderedWindows.first(where: \.isVisible) else { return "none" }
+        // The fallback skips the mirror's child panel (child windows order above their parent, so it would answer
+        // "mirror" for a shell window with no key window).
+        let fallback = NSApp.orderedWindows.first { $0.isVisible && !($0 is MirrorChildPanel) }
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow ?? fallback else { return "none" }
         if window.delegate is AppWindowController { return "shell" }
         if window.delegate is DetachedWindowController { return "detached" }
         if window is MirrorChildPanel { return "mirror" }

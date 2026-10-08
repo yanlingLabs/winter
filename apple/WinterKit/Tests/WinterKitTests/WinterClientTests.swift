@@ -340,6 +340,15 @@ final class EventTrafficTests: XCTestCase {
         XCTAssertEqual(traffic.oldestAge, 0)
     }
 
+    func testAConsumerThatNeverCountsOffCannotGrowItWithoutBound() {
+        let traffic = EventTraffic(clock: { 1 })
+        for _ in 0..<200_000 { traffic.noteYielded() }
+        XCTAssertLessThanOrEqual(traffic.storedCount, EventTraffic.cap, "bounded however many events nobody counts off")
+        XCTAssertGreaterThan(traffic.backlog, EventTraffic.cap / 2, "and still a useful floor")
+        for _ in 0..<(EventTraffic.cap * 2) { traffic.noteConsumed() }
+        XCTAssertEqual(traffic.backlog, 0)
+    }
+
     func testAClientCountsEveryEventItPutsOnItsStream() async throws {
         let t = ScriptedTransport()
         let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "test")

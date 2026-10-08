@@ -41,8 +41,9 @@ final class HangWatchdogTests: XCTestCase {
         let dog = make(clock, lines, pings)
         for _ in 0..<200 {
             dog.tick()      // sends a ping
-            clock.t += 0.25
-            pings.answer()  // the main thread answers within the beat
+            clock.t += 0.01
+            pings.answer()  // the main thread answers at once
+            clock.t += 0.24
         }
         XCTAssertTrue(lines.items.isEmpty)
         XCTAssertEqual(dog.lastContext, context, "and each answer refreshed what the report would say")
@@ -75,6 +76,29 @@ final class HangWatchdogTests: XCTestCase {
         // …and the next stall is its own line.
         dog.tick(); clock.t += 2.5; dog.tick()
         XCTAssertEqual(lines.faults.count, 2)
+    }
+
+    /// A livelocked main thread answers every ping — a beat late. That never trips the stall line, so it has its own:
+    /// one notice per episode, after enough late answers in a row.
+    func testAMainThreadThatAnswersEveryPingLateIsOneSluggishNoticeNotAStall() {
+        let clock = Clock(), lines = Lines(), pings = Pings()
+        let dog = make(clock, lines, pings)
+        for _ in 0..<(HangWatchdog.sluggishAfter - 1) {
+            dog.tick(); clock.t += 0.3; pings.answer()
+        }
+        XCTAssertTrue(lines.items.isEmpty, "not yet")
+        dog.tick(); clock.t += 0.3; pings.answer()
+        XCTAssertEqual(lines.items.count, 1)
+        XCTAssertFalse(lines.items[0].fault, "a notice: nothing was blocked")
+        XCTAssertTrue(lines.items[0].line.contains("main thread sluggish"), lines.items[0].line)
+        XCTAssertTrue(lines.items[0].line.contains("frontmostWindow=shell"), lines.items[0].line)
+        for _ in 0..<20 { dog.tick(); clock.t += 0.3; pings.answer() }
+        XCTAssertEqual(lines.items.count, 1, "one per episode")
+        XCTAssertTrue(lines.faults.isEmpty)
+
+        dog.tick(); clock.t += 0.01; pings.answer() // an answer on time ends the episode
+        for _ in 0..<HangWatchdog.sluggishAfter { dog.tick(); clock.t += 0.3; pings.answer() }
+        XCTAssertEqual(lines.items.count, 2, "and the next episode is its own line")
     }
 
     func testOnlyTheMainThreadsAnswerGathersTheContext() {

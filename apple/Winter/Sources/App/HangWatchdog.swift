@@ -36,6 +36,11 @@ struct HangContext: Equatable, Sendable {
 final class HangWatchdog: @unchecked Sendable {
     static let pingInterval: TimeInterval = 0.25
     static let stallThreshold: TimeInterval = 2
+    /// A main thread that is not blocked but livelocked — cycling through work so that every ping is answered a
+    /// beat late — never trips the stall line. An answer slower than this is "late"…
+    static let lateThreshold: TimeInterval = 0.15
+    /// …and this many late answers in a row (about two seconds of it) is one sluggishness notice.
+    static let sluggishAfter = 8
 
     private let lock = NSLock()
     private let now: @Sendable () -> TimeInterval
@@ -47,6 +52,8 @@ final class HangWatchdog: @unchecked Sendable {
     private var pingSentAt: TimeInterval = 0
     private var context = HangContext()
     private var reported = false
+    private var lateAnswers = 0
+    private var sluggishReported = false
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "com.winter.app.hang-watchdog", qos: .utility)
     private static let logger = Logger(subsystem: "com.winter.app", category: "hang")
@@ -112,14 +119,27 @@ final class HangWatchdog: @unchecked Sendable {
         let t = now()
         lock.lock()
         let wasReported = reported
-        let stalled = t - pingSentAt
+        let latency = t - pingSentAt
         pingOutstanding = false
         reported = false
         context = fresh
+        var sluggish: String?
+        if latency > Self.lateThreshold {
+            lateAnswers += 1
+            if lateAnswers >= Self.sluggishAfter, !sluggishReported {
+                sluggishReported = true
+                sluggish = "main thread sluggish: the last \(lateAnswers) answers were late (latest \(Self.seconds(latency)) s); "
+                    + Self.describe(context: fresh)
+            }
+        } else {
+            lateAnswers = 0
+            sluggishReported = false
+        }
         lock.unlock()
         if wasReported {
-            report("main thread answering again after \(Self.seconds(stalled)) s; " + Self.describe(context: fresh), false)
+            report("main thread answering again after \(Self.seconds(latency)) s; " + Self.describe(context: fresh), false)
         }
+        if let sluggish { report(sluggish, false) }
     }
 
     /// The last context the main thread gave (tests).
