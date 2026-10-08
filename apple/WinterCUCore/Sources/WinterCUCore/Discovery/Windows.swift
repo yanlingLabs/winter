@@ -18,9 +18,10 @@ struct CUWindowServerWindow: Sendable, Equatable {
 
 enum CUWindowServer {
     /// Every normal (layer 0) window, front to back. `onScreenOnly` skips minimized and other-Space windows.
-    static func windows(onScreenOnly: Bool = false, includeOtherLayers: Bool = false) -> [CUWindowServerWindow] {
-        let options: CGWindowListOption = onScreenOnly
-            ? [.optionOnScreenOnly, .excludeDesktopElements] : [.optionAll, .excludeDesktopElements]
+    static func windows(onScreenOnly: Bool = false, includeOtherLayers: Bool = false,
+                        excludeDesktop: Bool = true) -> [CUWindowServerWindow] {
+        var options: CGWindowListOption = onScreenOnly ? [.optionOnScreenOnly] : [.optionAll]
+        if excludeDesktop { options.insert(.excludeDesktopElements) }
         guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return [] }
         return raw.compactMap { d -> CUWindowServerWindow? in
             guard let id = (d[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
@@ -145,24 +146,38 @@ enum CUAXWindows {
 /// 0. use it where it is: its AX element by remote token (private, `privatePath`) — state, find, screenshots,
 ///    AX actions and text work there with no move;
 /// a. move it to this desktop (SkyLight, `privatePath`), then wait for AX to list it;
-/// b. open a new window (File → New Window / ⌘N) and bind that — only when no specific window was asked for;
+/// b. open a new window (File → New Window / ⌘N) and bind that — only when no specific window was asked for,
+///    and at most once per session and app (`openNewWindow` answers false after that). A new window that
+///    opens on the app's own Space instead of this one is reached where it is (0), never replaced by another;
 /// otherwise `window_elsewhere`. An app with no window at all gets (b), then `no_window`.
 enum CUWindowResolver {
+    /// Which step reached the window (logged, and named in the bind's detail).
+    enum Step: String {
+        case onThisDesktop = "on this desktop"
+        case whereItIs = "step 0, where it is"
+        case moved = "step a, moved here"
+        case newWindow = "step b, a new window"
+    }
+
     struct Outcome {
         var window: CUAXWindow
         var detail: String?
+        var step: Step = .onThisDesktop
     }
 
     struct Effects {
-        /// AX element of an off-Space window by remote token.
-        var remote: (UInt32) -> AXUIElement?
+        /// AX elements of off-Space windows by remote token, by window id (one walk for all of them).
+        var remote: ([UInt32]) -> [UInt32: AXUIElement]
         /// Builds the window record for a remote element (title/frame from AX, else from the server).
         var describe: (AXUIElement, CUWindowServerWindow) -> CUAXWindow
         var moveToActiveSpace: (UInt32) -> Bool
-        /// Asks the app for a new window; true when the request was sent.
+        /// Asks the app for a new window; true when the request was sent. False once this session already
+        /// asked this app for one (never twice).
         var openNewWindow: () -> Bool
         /// The AX windows now.
         var axWindows: () -> [CUAXWindow]
+        /// The app's window-server windows now.
+        var serverWindows: () -> [CUWindowServerWindow]
         /// Polls `probe` until it answers or a few seconds pass.
         var wait: (() -> CUAXWindow?) -> CUAXWindow?
     }
@@ -188,28 +203,93 @@ enum CUWindowResolver {
         return try reach(offSpace, appName: appName, privatePath: privatePath, allowNewWindow: true, fx)
     }
 
+    static func whereItIsDetail(_ appName: String, newWindow: Bool = false) -> String {
+        let which = newWindow ? "the new \(appName) window, which opened on another Space or in full screen" : "\(appName)'s window"
+        return "step 0 (where it is): bound \(which) where it is; pointer actions will try to move it to this desktop"
+    }
+
     private static func reach(_ candidates: [CUWindowServerWindow], appName: String, privatePath: Bool,
                               allowNewWindow: Bool, _ fx: Effects) throws -> Outcome {
-        if privatePath {
-            for s in candidates {
-                if let element = fx.remote(s.id) {
-                    return Outcome(window: fx.describe(element, s),
-                                   detail: "bound \(appName)'s window where it is (another Space or full screen); pointer actions will move it to this desktop")
-                }
+        if privatePath, !candidates.isEmpty {
+            let found = fx.remote(candidates.map(\.id))
+            if let s = candidates.first(where: { found[$0.id] != nil }), let element = found[s.id] {
+                return Outcome(window: fx.describe(element, s), detail: whereItIsDetail(appName), step: .whereItIs)
             }
             for s in candidates where fx.moveToActiveSpace(s.id) {
                 if let w = fx.wait({ fx.axWindows().first { $0.id == s.id } }) {
-                    return Outcome(window: w, detail: "moved \(appName)'s window to this desktop from another Space")
+                    return Outcome(window: w, detail: "step a (moved): moved \(appName)'s window to this desktop from another Space",
+                                   step: .moved)
                 }
             }
         }
         if allowNewWindow {
-            let before = Set(fx.axWindows().map(\.id))
-            if fx.openNewWindow(), let w = fx.wait({ fx.axWindows().first { !before.contains($0.id) } }) {
-                let why = candidates.isEmpty ? "" : "; the existing one is on another Space or in full screen"
-                return Outcome(window: w, detail: "opened a new \(appName) window\(why)")
+            let beforeAX = Set(fx.axWindows().map(\.id))
+            let beforeServer = Set(fx.serverWindows().map(\.id)).union(candidates.map(\.id))
+            if fx.openNewWindow() {
+                if let w = fx.wait({ fx.axWindows().first { !beforeAX.contains($0.id) } }) {
+                    let why = candidates.isEmpty ? "" : "; the existing one is on another Space or in full screen"
+                    return Outcome(window: w, detail: "step b (new window): opened a new \(appName) window\(why)", step: .newWindow)
+                }
+                // It opened on the app's own Space, not this one: reach it there; never open another.
+                let fresh = fx.serverWindows().filter { $0.layer == 0 && !beforeServer.contains($0.id) }
+                if privatePath, !fresh.isEmpty {
+                    let found = fx.remote(fresh.map(\.id))
+                    if let s = fresh.first(where: { found[$0.id] != nil }), let element = found[s.id] {
+                        return Outcome(window: fx.describe(element, s), detail: whereItIsDetail(appName, newWindow: true),
+                                       step: .whereItIs)
+                    }
+                }
+                if fresh.isEmpty, candidates.isEmpty { throw CUError.noWindow(appName) }
+                throw CUError.windowElsewhere(appName)
             }
         }
         throw candidates.isEmpty ? CUError.noWindow(appName) : CUError.windowElsewhere(appName)
+    }
+}
+
+/// The window wait at the start of a bind (every effect injected). A just-launched app needs a moment, and AX
+/// can lag a window already on screen, so it polls. The app is asked to reopen (most apps then open a window)
+/// ONLY when the window server shows it no normal window anywhere — on no Space, minimized or not. A reopen
+/// sent to an app whose windows are merely elsewhere makes it open a new one on every bind (a live run left
+/// Safari with twelve); with windows elsewhere the bind goes straight to the resolver, which reaches them.
+enum CUBindWait {
+    /// A window smaller than this is not one the user would call a window (helpers, offscreen stubs).
+    static let minimumSide: CGFloat = 40
+
+    struct Effects {
+        /// The AX windows (this desktop) and the window-server windows (every Space) of the app.
+        var read: () async throws -> ([CUAXWindow], [CUWindowServerWindow])
+        var reopen: () async -> Void
+        var sleep: (Double) async throws -> Void
+        var now: () -> Double
+    }
+
+    struct Found {
+        var ax: [CUAXWindow]
+        var server: [CUWindowServerWindow]
+        var reopened: Bool
+    }
+
+    /// The app's real windows anywhere: layer 0, a reasonable size, on screen or not.
+    static func realWindows(_ server: [CUWindowServerWindow]) -> [CUWindowServerWindow] {
+        server.filter { $0.layer == 0 && $0.frame.width >= minimumSide && $0.frame.height >= minimumSide }
+    }
+
+    static func run(launched: Bool, deadlineMs: Double, _ fx: Effects) async throws -> Found {
+        var (ax, server) = try await fx.read()
+        let end = fx.now() + deadlineMs
+        var reopened = false
+        while ax.isEmpty, fx.now() < end {
+            let real = realWindows(server)
+            // Every real window is off screen: another Space, full screen or minimized — nothing to wait for.
+            if !real.isEmpty, real.allSatisfy({ !$0.onScreen }) { break }
+            if real.isEmpty, !launched, !reopened {
+                reopened = true
+                await fx.reopen()
+            }
+            try await fx.sleep(100)
+            (ax, server) = try await fx.read()
+        }
+        return Found(ax: ax, server: server, reopened: reopened)
     }
 }

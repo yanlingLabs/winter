@@ -31,13 +31,17 @@ final class OffSpaceWindowTests: XCTestCase {
         var moveWorks = false
         var newWindowWorks = false
         var listed: [CUAXWindow] = []
+        var server: [CUWindowServerWindow] = []
         var onMove: ((UInt32) -> Void)?
         var onNewWindow: (() -> Void)?
         private(set) var tried: [String] = []
 
         func effects() -> CUWindowResolver.Effects {
             CUWindowResolver.Effects(
-                remote: { [self] id in tried.append("remote:\(id)"); return remote[id] },
+                remote: { [self] ids in
+                    tried.append("remote:" + ids.map(String.init).joined(separator: ","))
+                    return remote.filter { ids.contains($0.key) }
+                },
                 describe: { element, s in
                     CUAXWindow(element: element, id: s.id, title: s.title, frame: s.frame, focused: false, main: false)
                 },
@@ -52,6 +56,7 @@ final class OffSpaceWindowTests: XCTestCase {
                     return newWindowWorks
                 },
                 axWindows: { [self] in listed },
+                serverWindows: { [self] in server },
                 wait: { probe in probe() })
         }
     }
@@ -80,7 +85,8 @@ final class OffSpaceWindowTests: XCTestCase {
         XCTAssertEqual(out.window.id, 9)
         XCTAssertTrue(CFEqual(out.window.element, offWindow))
         XCTAssertEqual(w.tried, ["remote:9"], "nothing is moved and no window is opened")
-        XCTAssertTrue(out.detail?.contains("where it is") == true, out.detail ?? "")
+        XCTAssertTrue(out.detail?.hasPrefix("step 0 (where it is): ") == true, out.detail ?? "")
+        XCTAssertEqual(out.step, .whereItIs)
     }
 
     func testWithoutTheRemoteElementTheWindowIsMovedHere() throws {
@@ -90,7 +96,8 @@ final class OffSpaceWindowTests: XCTestCase {
         let out = try resolve(w, server: [serverWindow(9)])
         XCTAssertEqual(out.window.id, 9)
         XCTAssertEqual(w.tried, ["remote:9", "move:9"])
-        XCTAssertTrue(out.detail?.contains("moved Safari's window to this desktop") == true, out.detail ?? "")
+        XCTAssertEqual(out.detail, "step a (moved): moved Safari's window to this desktop from another Space")
+        XCTAssertEqual(out.step, .moved)
     }
 
     func testThenANewWindowIsOpened() throws {
@@ -100,7 +107,8 @@ final class OffSpaceWindowTests: XCTestCase {
         let out = try resolve(w, server: [serverWindow(9)])
         XCTAssertEqual(out.window.id, 12)
         XCTAssertEqual(w.tried, ["remote:9", "move:9", "new"])
-        XCTAssertEqual(out.detail, "opened a new Safari window; the existing one is on another Space or in full screen")
+        XCTAssertEqual(out.detail, "step b (new window): opened a new Safari window; the existing one is on another Space or in full screen")
+        XCTAssertEqual(out.step, .newWindow)
     }
 
     func testWhenNothingReachesItTheErrorIsWindowElsewhere() {
@@ -130,7 +138,7 @@ final class OffSpaceWindowTests: XCTestCase {
         opens.onNewWindow = { [unowned self] in opens.listed = [axWindow(freshWindow, 12)] }
         let out = try resolve(opens, server: [])
         XCTAssertEqual(out.window.id, 12)
-        XCTAssertEqual(out.detail, "opened a new Safari window")
+        XCTAssertEqual(out.detail, "step b (new window): opened a new Safari window")
     }
 
     func testOnlyNormalLayerWindowsCount() {
