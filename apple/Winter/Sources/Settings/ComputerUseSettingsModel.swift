@@ -119,14 +119,27 @@ final class ComputerUseSettingsModel: ObservableObject {
     init(client: (any ComputerUseClient)?,
          enumerator: (any InstalledAppEnumerating)? = nil,
          permissionPollNanoseconds: UInt64 = 1_500_000_000,
-         permissionPollLimit: Int = 80) {
+         permissionPollLimit: Int = 80,
+         dockSetting: @escaping () -> Bool = { DockSpaceSwitching.read() }) {
         self.client = client
         self.enumerator = enumerator
+        self.dockSetting = dockSetting
+        dockSwitchesSpaces = dockSetting()
         self.permissionPollNanoseconds = permissionPollNanoseconds
         self.permissionPollLimit = permissionPollLimit
     }
 
     var isWired: Bool { client != nil }
+
+    /// macOS's "switch to a Space with open windows for the application" is ON (`DockSpaceSwitching`): read, never
+    /// written; re-read when the page appears and when the app becomes active (the user may have just changed it).
+    @Published private(set) var dockSwitchesSpaces: Bool
+    private let dockSetting: () -> Bool
+
+    func refreshDockSetting() {
+        let now = dockSetting()
+        if now != dockSwitchesSpaces { dockSwitchesSpaces = now }
+    }
 
     func permissionState(_ kind: ComputerUsePermissionKind) -> PermissionState {
         guard let permissions = status?.helper.permissions else { return .unknown }
