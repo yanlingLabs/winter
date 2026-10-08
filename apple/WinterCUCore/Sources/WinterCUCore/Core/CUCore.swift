@@ -29,7 +29,19 @@ public final class CUCore: @unchecked Sendable {
     let capturer = CUCapturer()
     let formatter = CUStateFormatter()
     var settler: CUSettler { CUSettler(clock: clock, source: CULiveActivity(monitor: monitor)) }
-    var synth: CUEventSynth { CUEventSynth(poster: poster, skyLight: skyLight) }
+    var synth: CUEventSynth {
+        var s = CUEventSynth(poster: poster, skyLight: skyLight)
+        let sys = self.sys
+        s.windowOrigin = { sys.window(id: $0)?.frame.origin }
+        return s
+    }
+
+    /// The synth for one act: the window SPIs only while the private event path is on.
+    func synth(_ p: TargetActParams) -> CUEventSynth {
+        var s = synth
+        s.windowSPI = p.privatePath
+        return s
+    }
 
     private let lock = NSLock()
     private var targets: [String: CUTarget] = [:]

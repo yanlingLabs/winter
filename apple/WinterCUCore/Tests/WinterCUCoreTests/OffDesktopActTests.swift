@@ -67,7 +67,8 @@ final class OffDesktopActTests: XCTestCase {
         sys.moveSucceeds = true  // even a working move is never used
 
         poster = RecordingPoster()
-        core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: poster, ax: ax, sys: sys,
+        // The two window setters (recorded), so events can be addressed to the off-screen window.
+        core = CUCore(events: nil, clock: CUSystemClock(), skyLight: recordingSkyLight(), poster: poster, ax: ax, sys: sys,
                       pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
         target = CUTarget(id: "t1", sessionId: "s", pid: pid, bundleId: "com.apple.Safari", appName: "Safari",
                           isChromium: false, mirror: false, windowID: 77, windowTitle: "Docs")
@@ -128,50 +129,93 @@ final class OffDesktopActTests: XCTestCase {
 
     // MARK: clicks
 
-    func testAClickAtAPointPressesTheElementThereOverAX() async throws {
+    private var downs: [RecordingPoster.Entry] {
+        poster.entries.filter { [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains($0.type) }
+    }
+
+    func testAnElementThatListsPressIsPressedOverAX() async throws {
         world()
         let s = shot()
         let r = try await act(.click(CUClickAction(point: [30, 55], shotId: s)))  // (130,155): the link's text
         XCTAssertEqual(r.rung, 1)
-        XCTAssertEqual(ax.performed, ["\(token(link)):AXPress"], "the text climbs to its link")
-        XCTAssertTrue(r.detail?.contains("on another desktop, so it was pressed over accessibility") ?? false, r.detail ?? "")
+        XCTAssertEqual(ax.performed, ["\(token(link)):AXPress"], "the text climbs to its link, which lists press")
+        XCTAssertTrue(r.detail?.contains("on another desktop, so the element was sent press over accessibility") ?? false, r.detail ?? "")
         XCTAssertEqual(mouseEvents, 0)
         XCTAssertTrue(sys.moved.isEmpty)
     }
 
-    func testRightAndDoubleClicksElsewhereUseShowMenuAndOpen() async throws {
+    func testListedShowMenuAndOpenGoOverAXTheRestAsWindowTargetedEvents() async throws {
         world()
         let s = shot()
-        try await act(.click(CUClickAction(point: [30, 55], shotId: s, button: .right)))
-        try await act(.click(CUClickAction(point: [230, 230], shotId: s, count: 2)))   // the icon: AXOpen
-        try await act(.click(CUClickAction(point: [30, 55], shotId: s, count: 2)))     // the link: press twice
-        XCTAssertEqual(ax.performed, ["\(token(link)):AXShowMenu", "\(token(icon)):AXOpen",
-                                      "\(token(link)):AXPress", "\(token(link)):AXPress"])
-        XCTAssertEqual(mouseEvents, 0)
+        try await act(.click(CUClickAction(point: [30, 55], shotId: s, button: .right)))  // link: lists show menu
+        try await act(.click(CUClickAction(point: [230, 230], shotId: s, count: 2)))      // icon: lists open
+        XCTAssertEqual(ax.performed, ["\(token(link)):AXShowMenu", "\(token(icon)):AXOpen"])
+        XCTAssertTrue(poster.entries.isEmpty)
+        // The link lists no open: a double click is two window-targeted clicks at the point.
+        let r = try await act(.click(CUClickAction(point: [30, 55], shotId: s, count: 2)))
+        XCTAssertEqual(ax.performed.count, 2, "no blind AX action")
+        XCTAssertEqual(downs.map(\.type), [.leftMouseDown, .leftMouseDown])
+        XCTAssertEqual(r.rung, 2)
     }
 
-    func testARefClickWhoseElementRefusesClimbsToTheOneThatTakesIt() async throws {
+    func testAnElementThatListsNoPressIsPressedUnlistedThenAncestorsThenEvents() async throws {
         world()
+        try await act(.click(CUClickAction(ref: ref(linkText))))  // static text: lists nothing
+        XCTAssertEqual(ax.performed, ["\(token(linkText)):AXPress"], "AX first: press, unlisted")
         ax.refuses = ["\(token(linkText)):AXPress"]
         try await act(.click(CUClickAction(ref: ref(linkText))))
-        XCTAssertEqual(ax.performed, ["\(token(linkText)):AXPress", "\(token(link)):AXPress"])
-        // A text field that takes no press is focused instead.
-        ax.refuses = ["\(token(field)):AXPress"]
-        let r = try await act(.click(CUClickAction(ref: ref(field))))
-        XCTAssertTrue(r.detail?.contains("it was focused over accessibility") ?? false, r.detail ?? "")
-        XCTAssertTrue(ax.written.contains("\(token(field)):AXFocused"))
-        XCTAssertEqual(mouseEvents, 0)
+        XCTAssertEqual(ax.performed.suffix(2), ["\(token(linkText)):AXPress", "\(token(link)):AXPress"], "then the link that lists it")
+        XCTAssertTrue(poster.entries.isEmpty)
+        // Both refuse: window-targeted events at its centre, the last attempt.
+        ax.refuses = ["\(token(linkText)):AXPress", "\(token(link)):AXPress"]
+        let r = try await act(.click(CUClickAction(ref: ref(linkText))))
+        XCTAssertEqual(downs.count, 1)
+        let down = try XCTUnwrap(downs.first)
+        XCTAssertEqual(down.location, CGPoint(x: 150, y: 160), "the element's centre")
+        XCTAssertEqual(down.window, 77)
+        XCTAssertEqual(down.window2, 77)
+        XCTAssertEqual(r.detail, "Safari's window is on another desktop: the click was sent to that window as window-targeted pid events; whether it landed can't be confirmed there — check the state")
     }
 
-    func testACanvasClickElsewhereIsRefusedWithoutOpeningAnything() async throws {
+    func testAListedPressTheAppRefusesFallsBackToEvents() async throws {
+        world()
+        ax.refuses = ["\(token(link)):AXPress"]
+        try await act(.click(CUClickAction(ref: ref(link))))
+        XCTAssertEqual(ax.performed, ["\(token(link)):AXPress"])
+        XCTAssertEqual(downs.count, 1, "then one window-targeted click")
+    }
+
+    func testCanvasModifiedAndMiddleClicksElsewhereAreWindowTargetedEvents() async throws {
         world()
         let s = shot()
-        let e = await expect("window_elsewhere") { try await self.act(.click(CUClickAction(point: [500, 400], shotId: s))) }
-        XCTAssertTrue(e?.message.contains("a click where no accessibility element is (a canvas) needs it on this desktop") ?? false,
-                      e?.message ?? "")
-        XCTAssertTrue(ax.performed.isEmpty)
-        XCTAssertTrue(poster.entries.isEmpty, "no events and no ⌘N")
+        let canvasClick = try await act(.click(CUClickAction(point: [500, 400], shotId: s)))
+        try await act(.click(CUClickAction(point: [30, 55], shotId: s, modifiers: ["cmd"])))
+        try await act(.click(CUClickAction(point: [30, 55], shotId: s, button: .middle)))
+        XCTAssertTrue(ax.performed.isEmpty, "a modified click is never turned into a plain press")
+        XCTAssertEqual(downs.map(\.type), [.leftMouseDown, .leftMouseDown, .otherMouseDown])
+        XCTAssertEqual(downs.map(\.location), [CGPoint(x: 600, y: 500), CGPoint(x: 130, y: 155), CGPoint(x: 130, y: 155)])
+        XCTAssertTrue(downs[1].flags.contains(.maskCommand))
+        XCTAssertTrue(downs.allSatisfy { $0.window == 77 && $0.window2 == 77 && $0.route == .publicPid })
+        XCTAssertTrue(canvasClick.detail?.contains("can't be confirmed") ?? false, "never claims it landed")
         XCTAssertTrue(sys.moved.isEmpty)
+        XCTAssertTrue(sys.activated.isEmpty, "nothing brought forward")
+    }
+
+    func testWithThePrivatePathOffAnOffscreenWindowGetsNoEvents() async throws {
+        world()
+        let s = shot()
+        let e = await expect("window_elsewhere") {
+            try await self.core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+                                                           action: .click(CUClickAction(point: [500, 400], shotId: s)),
+                                                           access: .full, allowForeground: false, privatePath: false))
+        }
+        XCTAssertTrue(e?.message.contains("the click can't be sent there with the private event path off") ?? false, e?.message ?? "")
+        // A scroll still works: Page Down to the app, no wheel.
+        _ = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c2",
+                                                    action: .scroll(CUScrollAction(point: [400, 300], shotId: s, direction: .down)),
+                                                    access: .full, allowForeground: false, privatePath: false))
+        XCTAssertEqual(poster.keyDowns.map(\.keycode), [121])
+        XCTAssertFalse(poster.entries.contains { $0.type == .scrollWheel })
     }
 
     // MARK: scrolls
@@ -184,21 +228,28 @@ final class OffDesktopActTests: XCTestCase {
         XCTAssertTrue(poster.entries.isEmpty)
     }
 
-    func testAScrollElsewhereWithoutABarSendsPageKeysToTheApp() async throws {
+    func testWithoutABarTheWheelGoesFirstAndPageKeysOnlyWhenNothingMoved() async throws {
         world()
         let s = shot()
+        // The page moves when a wheel event arrives.
+        poster.onPost = { [unowned self] e in
+            guard e.type == .scrollWheel else { return }
+            var scrolled = CGPoint(x: 100, y: -500)
+            ax.put(webArea, [kAXPositionAttribute: AXValueCreate(.cgPoint, &scrolled)!])
+        }
+        let moved = try await act(.scroll(CUScrollAction(point: [400, 300], shotId: s, direction: .down, pages: 1)))
+        XCTAssertTrue(poster.entries.contains { $0.type == .scrollWheel && $0.route == .publicPid })
+        XCTAssertTrue(poster.keyDowns.isEmpty, "the wheel moved the page: no Page Down")
+        XCTAssertTrue(moved.detail?.contains("its content moved") ?? false, moved.detail ?? "")
+        // Now the wheel moves nothing: Page Down follows, after the page takes the focus.
+        poster.onPost = nil
         try await act(.scroll(CUScrollAction(point: [400, 300], shotId: s, direction: .down, pages: 3)))
         XCTAssertEqual(poster.keyDowns.map(\.keycode), [121, 121, 121], "Page Down ×3")
-        XCTAssertTrue(ax.written.contains("\(token(webArea)):AXFocused"), "the page took the focus first")
-        try await act(.scroll(CUScrollAction(ref: ref(webArea), direction: .up, pages: 1)))
-        XCTAssertEqual(poster.keyDowns.last?.keycode, 116, "Page Up")
-        try await act(.scroll(CUScrollAction(ref: ref(webArea), direction: .left, pages: 1)))
-        XCTAssertEqual(poster.keyDowns.suffix(8).map(\.keycode), Array(repeating: 123, count: 8), "← ×8")
-        XCTAssertEqual(poster.entries.filter { $0.type == .scrollWheel }.count, 0, "never a wheel event")
+        XCTAssertTrue(ax.written.contains("\(token(webArea)):AXFocused"))
         XCTAssertTrue(sys.moved.isEmpty)
     }
 
-    // MARK: keyboard and geometry
+    // MARK: keyboard and drags
 
     func testTypingAndKeysElsewhereGoToThePid() async throws {
         world()
@@ -210,13 +261,58 @@ final class OffDesktopActTests: XCTestCase {
         XCTAssertTrue(sys.moved.isEmpty)
     }
 
-    func testDraggingElsewhereIsTheOneThingRefused() async throws {
+    func testADragElsewhereIsWindowTargetedEvents() async throws {
         world()
-        let e = await expect("window_elsewhere") {
-            try await self.act(.drag(CUDragAction(from: CUDragEnd(ref: self.ref(self.icon)), to: CUDragEnd(ref: self.ref(self.link)))))
+        let r = try await act(.drag(CUDragAction(from: CUDragEnd(ref: ref(icon)), to: CUDragEnd(ref: ref(link)))))
+        XCTAssertEqual(poster.entries.first?.type, .mouseMoved)
+        XCTAssertEqual(poster.entries.last?.type, .leftMouseUp)
+        XCTAssertEqual(poster.entries.last?.location, CGPoint(x: 170, y: 160))
+        XCTAssertTrue(poster.entries.allSatisfy { $0.window == 77 })
+        XCTAssertTrue(r.detail?.contains("the drag was sent to that window") ?? false, r.detail ?? "")
+    }
+
+    // MARK: Stage Manager
+
+    func testAWindowOffStageIsUnminimizedAddedToTheStageAndTheFrontAppRestored() async throws {
+        world()
+        // On this Space (AX lists it) but off stage: minimized, off screen, Stage Manager on.
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [window]])
+        ax.put(window, [kAXMinimizedAttribute: true])
+        ax.makeSettable(window, kAXMinimizedAttribute)
+        ax.setActions(window, ["AXAddToStage", kAXRaiseAction])
+        sys.stageManager = true
+        sys.front = 1
+        ax.onPerform = { [unowned self] what in
+            guard what.hasSuffix(":AXAddToStage") else { return }
+            sys.windows[77]?.onScreen = true
+            sys.front = pid  // adding to the stage brings the app forward
         }
-        XCTAssertTrue(e?.message.contains("dragging needs it on this desktop") ?? false, e?.message ?? "")
-        XCTAssertTrue(poster.entries.isEmpty)
+        sys.stack = [sys.windows[77]!]
+        let s = shot()
+        let r = try await act(.click(CUClickAction(point: [500, 400], shotId: s)))
+        XCTAssertTrue(ax.written.contains("\(token(window)):AXMinimized"))
+        XCTAssertTrue(ax.performed.contains("\(token(window)):AXAddToStage"))
+        XCTAssertEqual(sys.activated.last, 1, "the user's app is back in front")
+        XCTAssertEqual(downs.count, 1)
+        XCTAssertTrue(r.detail?.contains("off stage (Stage Manager), so it was un-minimized and added to the stage") ?? false, r.detail ?? "")
+    }
+
+    // MARK: event construction and route choice (pure)
+
+    func testTheClickRouteListsBeforeEvents() {
+        typealias R = CUCore.ElsewhereClick
+        func route(_ actions: [String]?, _ b: CUMouseButton = .left, _ n: Int = 1, mod: Bool = false) -> R {
+            CUCore.elsewhereClickRoute(button: b, count: n, modified: mod, actions: actions)
+        }
+        XCTAssertEqual(route([kAXPressAction]), .ax(kAXPressAction))
+        XCTAssertEqual(route([]), .axUnlisted(kAXPressAction), "web content that lists no press: AX first, unlisted")
+        XCTAssertEqual(route(nil), .events, "a canvas")
+        XCTAssertEqual(route([kAXPressAction], mod: true), .events)
+        XCTAssertEqual(route([kAXPressAction], .middle), .events)
+        XCTAssertEqual(route([kAXShowMenuAction], .right), .ax(kAXShowMenuAction))
+        XCTAssertEqual(route([kAXPressAction], .right), .axUnlisted(kAXShowMenuAction))
+        XCTAssertEqual(route(["AXOpen", kAXPressAction], .left, 2), .ax("AXOpen"))
+        XCTAssertEqual(route([kAXPressAction], .left, 2), .events)
     }
 
     // MARK: the hit test (pure)

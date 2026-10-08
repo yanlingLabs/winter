@@ -91,8 +91,11 @@ final class FakeAX: CUAXBackend {
     }
     /// "token:action" pairs the app refuses as unsupported (an AX error, like Finder's AXOpen).
     var refuses: Set<String> = []
+    /// Runs after each perform that went through ("token:action"), to change the fake world.
+    var onPerform: ((String) -> Void)?
     func perform(_ e: AXUIElement, _ action: String) throws {
         performed.append("\(token(e)):\(action)")
+        defer { if performError == nil, !refuses.contains("\(token(e)):\(action)") { onPerform?("\(token(e)):\(action)") } }
         if let err = performError { throw err }
         if refuses.contains("\(token(e)):\(action)") {
             throw CUError(code: "unsupported", message: "\(action) is not supported by this element",
@@ -147,6 +150,8 @@ final class FakeSystem: CUSystemBackend {
     func windowStack() -> [CUWindowServerWindow] { stack }
     func frontmostPid() -> pid_t? { front }
     func activate(pid: pid_t) -> Bool { activated.append(pid); front = pid; return true }
+    var stageManager = false
+    func stageManagerEnabled() -> Bool { stageManager }
     func cursorLocation() -> CGPoint? { cursor }
     func warpCursor(to p: CGPoint) { warpedTo.append(p) }
 
@@ -165,6 +170,7 @@ final class RecordingPoster: CUEventPoster, @unchecked Sendable {
         var unicode: String
         var flags: CGEventFlags
         var window: Int64
+        var window2: Int64 = 0
     }
     private let lock = NSLock()
     private(set) var entries: [Entry] = []
@@ -177,7 +183,8 @@ final class RecordingPoster: CUEventPoster, @unchecked Sendable {
         let e = Entry(type: event.type, route: route, location: event.location,
                       keycode: event.getIntegerValueField(.keyboardEventKeycode),
                       unicode: String(utf16CodeUnits: chars, count: length), flags: event.flags,
-                      window: event.getIntegerValueField(.mouseEventWindowUnderMousePointer))
+                      window: event.getIntegerValueField(.mouseEventWindowUnderMousePointer),
+                      window2: event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent))
         lock.withLock { entries.append(e) }
         onPost?(e)
         return route == .skyLight ? .publicPid : route
