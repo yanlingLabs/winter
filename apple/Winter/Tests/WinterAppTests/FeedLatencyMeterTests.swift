@@ -42,7 +42,7 @@ final class FeedLatencyMeterTests: XCTestCase {
         XCTAssertEqual(report.events, 1)
         XCTAssertEqual(report.queue.max, 160, accuracy: 0.001)
         XCTAssertEqual(report.wire.max, 40, accuracy: 0.001, "9,200 − 160 − 9,000")
-        XCTAssertEqual(report.fold.max, 500, accuracy: 0.001)
+        XCTAssertEqual(report.fold.max, 300, accuracy: 0.001, "taken at 9,200, folded at 9,500: its own time, not the running total")
         XCTAssertEqual(report.render.max, 300, accuracy: 0.001)
         XCTAssertEqual(report.endToEnd.max, 800, accuracy: 0.001)
         XCTAssertEqual(report.backlog, 3)

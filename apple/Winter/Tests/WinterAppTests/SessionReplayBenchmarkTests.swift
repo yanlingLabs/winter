@@ -180,6 +180,8 @@ final class ReplayRun {
         var exchanges = 0
         var transcriptItems = 0
         var drainedMs = 0.0
+        /// Scroll-step latency (ms) measured halfway through the replay, while events are still arriving.
+        var scrollUnderLoad: [Double] = []
     }
 
     private let script: [ReplayWire]
@@ -285,7 +287,15 @@ final class ReplayRun {
 
         // The main thread is free for the app's work: wait in small steps.
         let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while !sentCounter.finished, Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        var scrollUnderLoad: [Double] = []
+        while !sentCounter.finished, Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            // Halfway through, with events still arriving, scroll the transcript: the cost of a scroll step while
+            // the feed has work to do (what the user saw), not of an idle transcript.
+            if scrollUnderLoad.isEmpty, sentCounter.count >= items.count / 2, let probe = scrollProbe(steps: 20, draw: false) {
+                scrollUnderLoad = probe.perStepMs
+            }
+        }
         let lastSent = DispatchTime.now().uptimeNanoseconds
         while feed.diagnostics.backlog > 0 || renderPending, Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
         try await Task.sleep(nanoseconds: 300_000_000) // the last commit
@@ -301,6 +311,7 @@ final class ReplayRun {
         result.exchanges = session.state.exchanges.count
         result.transcriptItems = session.state.exchanges.reduce(0) { $0 + $1.activity.count }
         result.drainedMs = drainedMs
+        result.scrollUnderLoad = scrollUnderLoad
         return result
     }
 
@@ -383,6 +394,11 @@ final class SessionReplayBenchmarkTests: XCTestCase {
         let run = ReplayRun(script: script, speed: speed)
         let result = try await run.run(timeoutSeconds: span + 120)
         print(ReplayRun.describe(result, label: "local log ×\(speed)"))
+        if !result.scrollUnderLoad.isEmpty {
+            let sorted = result.scrollUnderLoad.sorted()
+            print(String(format: "REPLAY scroll step while events arrive (layout only): p50 %.1f ms p95 %.1f ms max %.1f ms",
+                         sorted[sorted.count / 2], sorted[Int(Double(sorted.count - 1) * 0.95)], sorted.last!))
+        }
         for draw in [false, true] {
             if let probe = run.scrollProbe(steps: Int(ProcessInfo.processInfo.environment["WINTER_REPLAY_SCROLL_STEPS"] ?? "") ?? 40, draw: draw), !probe.perStepMs.isEmpty {
                 let sorted = probe.perStepMs.sorted()

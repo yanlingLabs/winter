@@ -7,6 +7,10 @@ import os
 ///
 ///     daemon ts ──wire+decode──▶ yielded ──queue──▶ consumed ──fold──▶ folded ──render──▶ committed
 ///
+/// Each leg is its OWN time, not a running total: `wire` is ts → yielded, `queue` is yielded → taken, `fold` is taken →
+/// folded (the reducer, plus a streamed chunk's wait in its queue), `render` is folded → drawn; `lag` (end to end) is
+/// ts → drawn.
+///
 /// While events flow it writes ONE `.notice` per feed every 10 s (`com.winter.app`, category `feed-latency`): events
 /// seen and per second, the p50 / p95 / max of the whole way (daemon → committed), the p95 of each leg, and the backlog.
 /// A lag with no stall in the hang watchdog is either each event costing more main-thread time than arrives
@@ -55,6 +59,8 @@ final class FeedLatencyMeter {
     private var endToEnd: [Double] = []
     private var windowStart: Double?
     private var armed = false
+    /// When the most recent event was taken off the stream; the fold leg counts from there.
+    private var lastConsumed: Double?
 
     init(label: @escaping () -> String, backlog: @escaping () -> Int,
          interval: TimeInterval = FeedLatencyMeter.interval,
@@ -79,6 +85,7 @@ final class FeedLatencyMeter {
     func noteConsumed(_ event: SessionEvent, queueWait: TimeInterval) {
         guard let ts = event.stampMs, ts > 0 else { return }
         let now = wall()
+        lastConsumed = now
         let waited = queueWait * 1000
         queue.append(waited)
         wire.append(max(now - waited - ts, 0))
@@ -90,7 +97,9 @@ final class FeedLatencyMeter {
         let stamps = events.compactMap(\.stampMs).filter { $0 > 0 }
         guard !stamps.isEmpty else { return }
         let folded = wall()
-        for ts in stamps { fold.append(max(folded - ts, 0)) }
+        // The fold leg: from the last event taken off the stream to this fold being done — the reducer's own time for
+        // an event folded at once, plus the chunk queue's wait (up to 80 ms by design) for a streamed chunk.
+        fold.append(max(folded - (lastConsumed ?? folded), 0))
         start(folded)
         afterCommit { [weak self] in
             guard let self else { return }
