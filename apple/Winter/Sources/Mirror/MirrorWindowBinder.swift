@@ -54,6 +54,8 @@ final class MirrorWindowBinder {
     private(set) var sessionId: String?
     private var width: CGFloat
     private var turnRunning = false
+    /// The window is on screen (see `MirrorWindow.isVisible`): last value sent to the coordinator.
+    private var onScreen: Bool
 
     private var panel: MirrorChildPanel?
     private var hosting: NSHostingView<MirrorPanelContent>?
@@ -70,12 +72,21 @@ final class MirrorWindowBinder {
         self.window = window
         self.sessionId = sessionId
         self.width = window.frame.width
+        self.onScreen = Self.isOnScreen(window)
         coordinatorWatch = coordinator.objectWillChange.sink { [weak self] _ in self?.scheduleRefresh() }
         watchState()
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.windowResized() }
         })
+        // Frames are only worth capturing for a window somebody can see: minimized, ordered out or wholly
+        // covered, it is sent none (`MirrorCoordinator.wantsFrames`).
+        for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
+                     NSWindow.didDeminiaturizeNotification, NSWindow.didChangeScreenNotification] {
+            observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.visibilityChanged() }
+            })
+        }
         publish()
     }
 
@@ -104,6 +115,19 @@ final class MirrorWindowBinder {
         hosting = nil
     }
 
+    /// On screen: ordered in, not minimized, and not occluded entirely.
+    static func isOnScreen(_ window: NSWindow) -> Bool {
+        window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
+    }
+
+    private func visibilityChanged() {
+        guard let window else { return }
+        let now = Self.isOnScreen(window)
+        guard now != onScreen else { return }
+        onScreen = now
+        publish()
+    }
+
     private func windowResized() {
         guard let window else { return }
         if window.frame.width != width {
@@ -114,7 +138,7 @@ final class MirrorWindowBinder {
     }
 
     private func publish() {
-        coordinator.setWindow(MirrorWindow(id: windowId, kind: kind, sessionId: sessionId, width: width))
+        coordinator.setWindow(MirrorWindow(id: windowId, kind: kind, sessionId: sessionId, width: width, isVisible: onScreen))
         scheduleRefresh()
     }
 

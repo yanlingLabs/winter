@@ -33,6 +33,9 @@ struct MirrorWindow: Equatable, Sendable {
     let sessionId: String?
     /// The window's width in points.
     let width: CGFloat
+    /// The window is on screen: ordered in, not minimized, not wholly covered. A window that is not
+    /// visible still subscribes (bound and cursor are cheap) but is sent no frames.
+    var isVisible: Bool = true
 }
 
 enum MirrorRules {

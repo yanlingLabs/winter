@@ -22,6 +22,8 @@ final class ScriptedTransport: WinterTransport, SentLineRecording, @unchecked Se
     }
     func close() { cont.finish() }
     func feed(_ line: String) { cont.yield(.data(Data((line + "\n").utf8))) }
+    /// Raw bytes exactly as given — a read that may start or end mid-line.
+    func feedRaw(_ data: Data) { cont.yield(.data(data)) }
     func dropConnection() { cont.yield(.closed(nil)) }
 }
 

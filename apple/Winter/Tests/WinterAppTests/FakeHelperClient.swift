@@ -12,6 +12,7 @@ final class FakeHelperClient: ComputerUseHelperClient, @unchecked Sendable {
     private var _connectScript: [HelperClientError?] = []
     private var _targets: [String: [HelperTarget]] = [:]
     private var _subscribeError: HelperClientError?
+    private var _frameFlags: [String: [Bool]] = [:]
 
     init() {
         var c: AsyncStream<HelperViewEvent>.Continuation!
@@ -22,6 +23,8 @@ final class FakeHelperClient: ComputerUseHelperClient, @unchecked Sendable {
     /// Every call so far, as `connect`, `subscribe:<session>`, `unsubscribe:<session>`, `disconnect`.
     var calls: [String] { lock.withLock { _calls } }
     func count(_ call: String) -> Int { calls.filter { $0 == call }.count }
+    /// The `frames` flag of every `subscribe` for `sessionId`, in order.
+    func frameFlags(for sessionId: String) -> [Bool] { lock.withLock { _frameFlags[sessionId] ?? [] } }
 
     /// What the next `connect()` calls do, in order (`nil` succeeds); once the script runs out, they succeed.
     func scriptConnect(_ results: [HelperClientError?]) { lock.withLock { _connectScript = results } }
@@ -40,7 +43,8 @@ final class FakeHelperClient: ComputerUseHelperClient, @unchecked Sendable {
 
     func subscribe(sessionId: String, frames: Bool, maxFps: Int?, maxWidth: Int?) async throws -> [HelperTarget] {
         let (targets, error): ([HelperTarget], HelperClientError?) = lock.withLock {
-            _calls.append("subscribe:\(sessionId)\(frames ? "" : ":noframes")")
+            _calls.append("subscribe:\(sessionId)")
+            _frameFlags[sessionId, default: []].append(frames)
             return (_targets[sessionId] ?? [], _subscribeError)
         }
         if let error { throw error }

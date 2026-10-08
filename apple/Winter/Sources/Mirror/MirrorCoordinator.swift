@@ -156,8 +156,12 @@ final class MirrorCoordinator: ObservableObject {
     @Published private(set) var eligibleWindowIds: Set<String> = []
     private var states: [String: MirrorSessionState] = [:]
 
-    /// The sessions subscribed on the helper right now.
-    private(set) var applied: Set<String> = []
+    /// The sessions subscribed on the helper right now, and whether each asked for frames.
+    private var appliedFrames: [String: Bool] = [:]
+    var applied: Set<String> { Set(appliedFrames.keys) }
+    /// Whether the session is subscribed WITH frames right now (tests).
+    func isReceivingFrames(sessionId: String) -> Bool { appliedFrames[sessionId] == true }
+    private var visibilityWatches: [String: AnyCancellable] = [:]
     private(set) var isConnected = false
     /// A protocol or home mismatch: retrying cannot fix it, so nothing retries until the wanted set empties.
     private(set) var isBlocked = false
@@ -226,6 +230,10 @@ final class MirrorCoordinator: ObservableObject {
         if let existing = states[sessionId] { return existing }
         let created = MirrorSessionState(sessionId: sessionId, sink: makeSink(sessionId))
         states[sessionId] = created
+        // The mirror coming up or down is what turns frames on and off (`wantsFrames`).
+        visibilityWatches[sessionId] = created.$isVisible.dropFirst().removeDuplicates().sink { [weak self] _ in
+            self?.scheduleSync()
+        }
         return created
     }
 
@@ -239,7 +247,7 @@ final class MirrorCoordinator: ObservableObject {
         case .cursor(let cursor): states[cursor.sessionId]?.cursor(cursor)
         case .connectionLost:
             isConnected = false
-            applied = []
+            appliedFrames = [:]
             states.values.forEach { $0.reset() }
             if !desiredSessions.isEmpty { log("computer-use helper connection lost; will reconnect") }
             scheduleSync()
@@ -267,12 +275,12 @@ final class MirrorCoordinator: ObservableObject {
         if desired.isEmpty {
             isBlocked = false
             failureLogged = false
-            if isConnected || !applied.isEmpty {
+            if isConnected || !appliedFrames.isEmpty {
                 // Say so before leaving: the helper stops capturing at the unsubscribe, not at some later close.
-                for sessionId in applied { try? await client.unsubscribe(sessionId: sessionId) }
+                for sessionId in appliedFrames.keys { try? await client.unsubscribe(sessionId: sessionId) }
                 await client.disconnect()
                 isConnected = false
-                applied = []
+                appliedFrames = [:]
                 states.values.forEach { $0.reset() }
             }
             purgeUnusedStates()
@@ -284,18 +292,25 @@ final class MirrorCoordinator: ObservableObject {
         }
         for sessionId in applied.subtracting(desired) {
             try? await client.unsubscribe(sessionId: sessionId)
-            applied.remove(sessionId)
+            appliedFrames.removeValue(forKey: sessionId)
             states[sessionId]?.reset()
         }
-        for sessionId in desiredSessions.subtracting(applied) {
+        for sessionId in desiredSessions {
+            // Frames only while the mirror is actually up and someone can see it: ten JPEGs a second
+            // cost the helper a capture and this app a decode, and an idle session has nothing to show.
+            // Without frames the subscription still brings bound, released and cursor.
+            let frames = wantsFrames(sessionId)
+            guard appliedFrames[sessionId] != frames else { continue }
             do {
-                let targets = try await client.subscribe(sessionId: sessionId, frames: true, maxFps: nil, maxWidth: nil)
-                applied.insert(sessionId)
-                state(for: sessionId).seed(targets)
+                let targets = try await client.subscribe(sessionId: sessionId, frames: frames, maxFps: nil, maxWidth: nil)
+                let first = appliedFrames[sessionId] == nil
+                appliedFrames[sessionId] = frames
+                // A change of the frames flag re-sends the same bound targets; only the first is news.
+                if first { state(for: sessionId).seed(targets) }
             } catch {
                 // The helper went away mid-call: start over from the connection.
                 isConnected = false
-                applied = []
+                appliedFrames = [:]
                 await client.disconnect()
                 dirty = true
                 return
@@ -328,6 +343,13 @@ final class MirrorCoordinator: ObservableObject {
         return false
     }
 
+    /// Whether `sessionId` should be sent frames: a target is bound, its turn is running (the mirror is up)
+    /// and at least one window that shows the mirror for it is on screen.
+    func wantsFrames(_ sessionId: String) -> Bool {
+        guard let state = states[sessionId], state.isVisible else { return false }
+        return windows.values.contains { eligibleWindowIds.contains($0.id) && $0.sessionId == sessionId && $0.isVisible }
+    }
+
     /// Drops the state of a session no window shows any more, so a long-lived app does not keep one per
     /// session it ever opened.
     private func purgeUnusedStates() {
@@ -335,6 +357,7 @@ final class MirrorCoordinator: ObservableObject {
         for sessionId in states.keys where !shown.contains(sessionId) && !applied.contains(sessionId) {
             states[sessionId]?.reset()
             states.removeValue(forKey: sessionId)
+            visibilityWatches.removeValue(forKey: sessionId)
         }
     }
 }
