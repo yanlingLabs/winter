@@ -47,12 +47,21 @@ export const AUTH_DIALOG_BUNDLE_IDS: ReadonlySet<string> = new Set([
   "com.apple.coreservices.uiagent", "com.apple.authorizationhost",
 ]);
 
-/** Password managers: `deny` until the user sets them otherwise (spec §13.3). */
-export const PASSWORD_MANAGER_BUNDLE_IDS: ReadonlySet<string> = new Set([
-  "com.apple.Passwords", "com.1password.1password", "com.agilebits.onepassword7", "com.agilebits.onepassword-osx",
-  "com.bitwarden.desktop", "com.dashlane.Dashlane", "com.lastpass.LastPass", "com.callpod.keepermacapp",
-  "org.keepassxc.keepassxc", "in.sinew.Enpass-Desktop", "com.nordpass.macos.NordPass", "me.proton.pass.electron",
-]);
+/** Password managers (spine §5, after the Swift review): `access: "deny"` until the user sets an access for one
+ *  in `computerUse.apps` (spec §13.3 — the helper does not enforce this; the daemon does). Bundle id → name. */
+export const PASSWORD_MANAGERS: Readonly<Record<string, string>> = {
+  "com.1password.1password": "1Password",
+  "com.agilebits.onepassword7": "1Password 7",
+  "com.bitwarden.desktop": "Bitwarden",
+  "com.dashlane.dashlanephonefinal": "Dashlane",
+  "com.dashlane.Dashlane": "Dashlane",
+  "com.lastpass.LastPass": "LastPass",
+  "org.keepassxc.keepassxc": "KeePassXC",
+  "me.proton.pass.electron": "Proton Pass",
+  "in.sinew.Enpass-Desktop": "Enpass",
+  "com.apple.Passwords": "Passwords",
+};
+export const PASSWORD_MANAGER_BUNDLE_IDS: ReadonlySet<string> = new Set(Object.keys(PASSWORD_MANAGERS));
 
 export const APP_CARD_OPTIONS: readonly ApprovalOption[] = [
   { id: "once", label: "Allow once" },

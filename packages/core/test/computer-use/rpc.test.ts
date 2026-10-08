@@ -137,6 +137,26 @@ describe("computerUse.* (local-only RPCs)", () => {
     c.close();
   });
 
+  test("the password managers are always listed: deny by default (flagged), the user's own access wins", async () => {
+    const { socketPath, tokens, runtime } = await boot({ computerUse: { apps: { "com.bitwarden.desktop": { access: "full" } } } });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "app");
+    const apps = (await c.request(METHODS.computerUseAppsList, {})).result.apps as Array<Record<string, unknown>>;
+    const byId = new Map(apps.map((a) => [a.bundleId as string, a]));
+    for (const id of ["com.1password.1password", "com.agilebits.onepassword7", "com.dashlane.dashlanephonefinal", "com.dashlane.Dashlane", "com.lastpass.LastPass", "org.keepassxc.keepassxc", "me.proton.pass.electron", "in.sinew.Enpass-Desktop", "com.apple.Passwords"]) {
+      expect(byId.get(id)).toMatchObject({ access: "deny", grant: null, defaultDeny: true });
+    }
+    expect(byId.get("com.1password.1password")!.name).toBe("1Password");
+    // Bitwarden: the user allowed it — their setting, not the default.
+    expect(byId.get("com.bitwarden.desktop")).toMatchObject({ access: "full" });
+    expect(byId.get("com.bitwarden.desktop")!.defaultDeny).toBeUndefined();
+    // Blacked out of whole-screen shots unless the user set otherwise.
+    const ex = runtime.policy.excludedFromScreen();
+    expect(ex).toContain("com.apple.Passwords");
+    expect(ex).not.toContain("com.bitwarden.desktop");
+    c.close();
+  });
+
   test("setSettings writes only the keys it carries; hot", async () => {
     const { socketPath, tokens, settingsPath, runtime } = await boot({ computerUse: { screenshotMaxDim: 900 } });
     const c = await TestClient.connect(socketPath);

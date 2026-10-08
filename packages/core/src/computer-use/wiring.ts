@@ -17,7 +17,7 @@ import {
 } from "../settings";
 import { DiffBases } from "./diff-base";
 import { HelperClient, type HelperLauncher, type HelperTransport, type HelperVerifier } from "./helper-client";
-import { ComputerPolicy, PASSWORD_MANAGER_BUNDLE_IDS } from "./policy";
+import { ComputerPolicy, PASSWORD_MANAGERS, PASSWORD_MANAGER_BUNDLE_IDS } from "./policy";
 import { HelperRpcError, HelperUnavailableError, type HelperPermissions } from "./protocol";
 import { RecentApps } from "./recent-apps";
 import { ComputerV2Service } from "./service";
@@ -61,7 +61,11 @@ export interface ComputerUseStatus {
   helper: { installed: boolean; running: boolean; version?: string; permissions?: HelperPermissions };
 }
 
-export interface ComputerUseAppRow { bundleId: string; name: string; access: ComputerUseAccess; grant: "always" | null; lastUsedAt?: number }
+export interface ComputerUseAppRow {
+  bundleId: string; name: string; access: ComputerUseAccess; grant: "always" | null; lastUsedAt?: number;
+  /** A password manager's `deny` is the DEFAULT, not a setting the user made (they can change it). */
+  defaultDeny?: true;
+}
 
 /** A refusal the RPC layer turns into a typed JSON-RPC error. */
 export class ComputerUseControlError extends Error {
@@ -192,16 +196,20 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       const rowFor = (bundleId: string): ComputerUseAppRow => {
         const set = apps[bundleId];
         const r = recentById.get(bundleId);
+        const defaultDeny = set?.access === undefined && PASSWORD_MANAGER_BUNDLE_IDS.has(bundleId);
         return {
           bundleId,
-          name: set?.name ?? r?.name ?? bundleId,
-          access: set?.access ?? (PASSWORD_MANAGER_BUNDLE_IDS.has(bundleId) ? "deny" : "full"),
+          name: set?.name ?? r?.name ?? PASSWORD_MANAGERS[bundleId] ?? bundleId,
+          access: set?.access ?? (defaultDeny ? "deny" : "full"),
           grant: set?.grant ?? null,
           ...(r === undefined ? {} : { lastUsedAt: r.lastUsedAt }),
+          ...(defaultDeny ? { defaultDeny: true as const } : {}),
         };
       };
       for (const bundleId of Object.keys(apps)) rows.set(bundleId, rowFor(bundleId));
       for (const r of recent) if (!rows.has(r.bundleId)) rows.set(r.bundleId, rowFor(r.bundleId));
+      // The password managers are always listed (spine §5): `deny` by default, flagged as the default.
+      for (const bundleId of PASSWORD_MANAGER_BUNDLE_IDS) if (!rows.has(bundleId)) rows.set(bundleId, rowFor(bundleId));
       return [...rows.values()].sort((a, b) => (b.lastUsedAt ?? 0) - (a.lastUsedAt ?? 0) || a.name.localeCompare(b.name));
     },
     appsSet(p) {

@@ -667,7 +667,9 @@ export class ComputerV2Service {
 
   private async screenScreenshot(ctx: RunCtx, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<ImageHandle> {
     this.requireVision(ctx);
-    const display = args.display === "all" || (typeof args.display === "number" && Number.isInteger(args.display)) ? { display: args.display } : {};
+    // `display` is an INDEX (0 = the main display) or "all" (spine §2.1, after the Swift review); the helper's
+    // `displayId` (a CGDirectDisplayID) is not part of the script API.
+    const display = args.display === "all" || (typeof args.display === "number" && Number.isInteger(args.display) && args.display >= 0) ? { display: args.display } : {};
     // Whole-screen shots and rung-4 input take turns on the one foreground (spec §14).
     const release = await this.locks.acquire(FOREGROUND_LOCK_KEY, { runId: ctx.runId, sessionId: ctx.sessionId }, {
       waitMs: Math.min(LOCK_WAIT_MS, Math.max(500, ctx.timer.left() - 500)), signal: ctx.abort.signal, label: "The screen",

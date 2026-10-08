@@ -439,7 +439,8 @@ export const ComputerUseStatusResult = z.object({
 export const ComputerUseRequestPermissionParams = z.object({ kind: z.enum(["accessibility", "screenRecording"]) });
 export const ComputerUseRequestPermissionResult = z.object({ ok: z.literal(true) });
 export const ComputerUseAccessSchema = z.enum(["full", "click", "view", "deny"]);
-/** Every app with a setting, plus the apps ComputerV2 used recently (`lastUsedAt`, epoch MILLISECONDS). */
+/** Every app with a setting, plus the apps ComputerV2 used recently (`lastUsedAt`, epoch MILLISECONDS), plus the
+ *  known password managers — `access: "deny"` by default, with `defaultDeny: true` while the user has set nothing. */
 export const ComputerUseAppsListParams = z.object({});
 export const ComputerUseAppRowSchema = z.object({
   bundleId: z.string().min(1),
@@ -447,6 +448,7 @@ export const ComputerUseAppRowSchema = z.object({
   access: ComputerUseAccessSchema,
   grant: z.literal("always").nullable(),
   lastUsedAt: z.number().int().optional(),
+  defaultDeny: z.literal(true).optional(),
 });
 export const ComputerUseAppsListResult = z.object({ apps: z.array(ComputerUseAppRowSchema) });
 /** One app's row: an absent field is left as it is; `grant: null` removes "Always allow" ("Remove always-allow").

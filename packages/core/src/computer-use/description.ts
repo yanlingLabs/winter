@@ -58,7 +58,7 @@ export function computerV2Description(input: ComputerV2DescriptionInput): string
     "  open(app: string, o?: { window?: string | number }): Promise<App>;  // name or bundle id; launches in background; prints state",
     "};",
     "declare const screen: {                          // look only — bind an app to act",
-    ...(v ? ["  screenshot(o?: Quiet & { display?: number | \"all\" }): Promise<Image>;"] : []),
+    ...(v ? ["  screenshot(o?: Quiet & { display?: number | \"all\" }): Promise<Image>;   // display: an index, 0 = the main display"] : []),
     "  windows(o?: Quiet): Promise<{ app: string; title: string; frame: [x: number, y: number, w: number, h: number] }[]>;",
     ...(v ? ["  appAt(x: number, y: number): Promise<App>;     // the app under a point of the latest screen.screenshot()"] : []),
     "};",
