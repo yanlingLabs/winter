@@ -285,49 +285,31 @@ final class OffSpaceWindowTests: XCTestCase {
         }
     }
 
-    func testPointerInputMovesTheWindowHereFirst() async throws {
+    func testAClickOnAnElementElsewhereIsAnAXPressNeverAMove() async throws {
         world(cached: true)
         sys.moveSucceeds = true
         let r = try await act(.click(CUClickAction(ref: ref(plain))))
-        XCTAssertEqual(sys.moved, [77])
-        XCTAssertEqual(poster.entries.map(\.type), [.leftMouseDown, .leftMouseUp])
-        XCTAssertTrue(r.detail?.contains("moved Safari's window to this desktop") == true, r.detail ?? "")
-    }
-
-    func testPointerInputOpensANewWindowWhenTheMoveFails() async throws {
-        world(cached: true)
-        let app = ax.application(pid)
-        // ⌘N (no menu bar in the fake, so the key fallback) brings up window 88 on this desktop.
-        poster.onPost = { [unowned self] e in
-            if e.type == .keyDown {
-                ax.put(app, [kAXWindowsAttribute: [freshWindow]])
-                sys.windows[88] = FakeSystem.window(88, pid: pid, CGRect(x: 0, y: 0, width: 800, height: 600), owner: "Safari")
-            }
-        }
-        let e = await expect("window_elsewhere") { try await self.act(.click(CUClickAction(ref: self.ref(self.plain)))) }
-        XCTAssertEqual(e?.data?["newWindowId"], .int(88))
-        XCTAssertTrue(e?.message.contains("the action did not run") == true)
-        XCTAssertEqual(target.windowID, 88, "the target switched to the new window")
-        XCTAssertFalse(poster.entries.contains { $0.type == .leftMouseDown }, "the click was not sent")
-        XCTAssertEqual(poster.keyDowns.first?.flags.contains(.maskCommand), true)
-    }
-
-    func testPointerInputFailsWithWindowElsewhereWhenNothingWorks() async throws {
-        world(cached: true)
-        let e = await expect("window_elsewhere") { try await self.act(.click(CUClickAction(ref: self.ref(self.plain)))) }
-        XCTAssertTrue(e?.message.contains("pointer and coordinate actions need it on this desktop") == true, e?.message ?? "")
-        XCTAssertEqual(sys.moved, [77])
-        XCTAssertFalse(poster.entries.contains { $0.type == .leftMouseDown })
+        XCTAssertEqual(r.rung, 1)
+        XCTAssertEqual(ax.performed, ["60004:AXPress"], "pressed though it lists no press (web content often doesn't)")
+        XCTAssertTrue(sys.moved.isEmpty, "never moved")
+        XCTAssertTrue(poster.entries.isEmpty, "no pointer events, no new window")
         XCTAssertEqual(target.windowID, 77)
     }
 
-    func testThePrivatePathOffNeverMovesTheWindow() async throws {
+    func testOnlyGeometricInputElsewhereIsRefused() async throws {
         world(cached: true)
         sys.moveSucceeds = true
-        _ = await expect("window_elsewhere") {
-            try await self.act(.click(CUClickAction(ref: self.ref(self.plain))), privatePath: false)
+        let drag = await expect("window_elsewhere") {
+            try await self.act(.drag(CUDragAction(from: CUDragEnd(ref: self.ref(self.button)), to: CUDragEnd(ref: self.ref(self.plain)))))
         }
+        XCTAssertTrue(drag?.message.contains("dragging needs it on this desktop") == true, drag?.message ?? "")
+        let modified = await expect("window_elsewhere") {
+            try await self.act(.click(CUClickAction(ref: self.ref(self.plain), modifiers: ["cmd"])))
+        }
+        XCTAssertTrue(modified?.message.contains("a click with modifier keys") == true, modified?.message ?? "")
         XCTAssertTrue(sys.moved.isEmpty)
+        XCTAssertTrue(poster.entries.isEmpty, "no events and no ⌘N: windows are never opened for these")
+        XCTAssertEqual(target.windowID, 77)
     }
 
     func testTheWindowListIncludesWindowsOnOtherSpaces() async throws {

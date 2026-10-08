@@ -203,7 +203,7 @@ enum AX {
         r.elapsedMs = elapsed()
         if r.found.count < wanted.count {
             let missing = wanted.subtracting(r.found.keys).sorted().map(String.init).joined(separator: ",")
-            CULog.bind.info("remote-token probe for pid \(pid, privacy: .public) missed window(s) \(missing, privacy: .public): probed \(r.probed, privacy: .public) ids up to \(r.lastID, privacy: .public) in \(Int(r.elapsedMs), privacy: .public) ms, stopped by \(r.stoppedBy, privacy: .public)")
+            CULog.bind.notice("remote-token probe for pid \(pid, privacy: .public) missed window(s) \(missing, privacy: .public): probed \(r.probed, privacy: .public) ids up to \(r.lastID, privacy: .public) in \(Int(r.elapsedMs), privacy: .public) ms, stopped by \(r.stoppedBy, privacy: .public)")
         }
         return r
     }

@@ -89,9 +89,15 @@ final class FakeAX: CUAXBackend {
         if let err = setError { throw err }
         attrs[AXIdentity(element: e), default: [:]][name] = value
     }
+    /// "token:action" pairs the app refuses as unsupported (an AX error, like Finder's AXOpen).
+    var refuses: Set<String> = []
     func perform(_ e: AXUIElement, _ action: String) throws {
         performed.append("\(token(e)):\(action)")
         if let err = performError { throw err }
+        if refuses.contains("\(token(e)):\(action)") {
+            throw CUError(code: "unsupported", message: "\(action) is not supported by this element",
+                          data: ["axError": .int(Int(AXError.actionUnsupported.rawValue))])
+        }
     }
     func isAlive(_ e: AXUIElement) -> Bool { !dead.contains(AXIdentity(element: e)) }
     func windowID(_ e: AXUIElement) -> CGWindowID? { windowIDs[AXIdentity(element: e)] }

@@ -32,6 +32,7 @@ extension CUCore {
             try Self.checkAccess(p.action, access: p.access, appName: t.appName)
         } catch {
             cursor(t, "refused")
+            logAct(p, t, failed: error)
             throw error
         }
         if case .key(let k) = p.action, (try? CUKeyChord.parse(k.combo))?.isEscape == true {
@@ -56,10 +57,46 @@ extension CUCore {
                 // A refusal or a failure: a gentle "no" where the act was aimed. Not for a cancel (the user
                 // or the script stopped it) or a target that is gone (its cursor goes with it).
                 if Self.showsRefusal(error) { cursor(t, "refused", at: attemptPoint(p.action, t)) }
+                logAct(p, t, failed: error)
                 throw error
             }
         }
+        CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): \(Self.routeName(outcome.rung), privacy: .public)\(outcome.detail.map { " — " + $0 } ?? "", privacy: .public)")
         return TargetActResult(rung: outcome.rung.rawValue, detail: outcome.detail)
+    }
+
+    static func actionName(_ a: CUAction) -> String {
+        switch a {
+        case .click: return "click"
+        case .setValue: return "setValue"
+        case .type: return "type"
+        case .paste: return "paste"
+        case .key: return "key"
+        case .scroll: return "scroll"
+        case .drag: return "drag"
+        case .select: return "select"
+        case .action: return "action"
+        case .menu: return "menu"
+        }
+    }
+
+    static func routeName(_ r: CUInputLadder.Rung) -> String {
+        switch r {
+        case .accessibility: return "AX"
+        case .processEvents: return "pid events"
+        case .privatePath: return "private path (SkyLight pid events)"
+        case .foreground: return "foreground (the real pointer)"
+        }
+    }
+
+    /// A failed act, by code (and floor reason). The message is left out where it may echo the script's own
+    /// text (`invalid_params` quotes what it searched for).
+    func logAct(_ p: TargetActParams, _ t: CUTarget, failed error: Error) {
+        let e = error as? CUError
+        let code = e?.code ?? "error"
+        let reason: String = { if case .string(let r)? = e?.data?["reason"] { return " (\(r))" }; return "" }()
+        let message = code == "invalid_params" ? "" : " — " + String((e?.message ?? "\(error)").prefix(240))
+        CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public) failed: \(code, privacy: .public)\(reason, privacy: .public)\(message, privacy: .public)")
     }
 
     static func showsRefusal(_ error: Error) -> Bool {
@@ -198,25 +235,150 @@ extension CUCore {
             guard let center = info.center else {
                 throw CUError.unsupported("[\(ref)] has no position on screen — try action() or a screenshot point")
             }
-            return try pointerClick(p, t, at: center, button: button, count: count, flags: flags, token, announced: announced)
+            return try pointerClick(p, t, at: center, button: button, count: count, flags: flags, token, announced: announced,
+                                    element: e)
         }
         guard let px = try cuPoint(a.point) else { throw CUError.invalidParams("click needs a ref or a point") }
         let pt = try screenPoint(for: t, shotId: a.shotId, pixel: px)
         return try pointerClick(p, t, at: pt, button: button, count: count, flags: flags, token)
     }
 
-    /// `announced`: the cursor already showed this press (an AX attempt that fell back to events).
+    /// `announced`: the cursor already showed this press (an AX attempt that fell back to events). `element`:
+    /// the element the click is for, when a ref named it.
+    ///
+    /// On another desktop (another Space, full screen) a click needs no pointer: the element under the point —
+    /// the deepest one in the window's AX tree whose frame holds it — is pressed over accessibility (right →
+    /// show menu, double → open or press twice). Only a click with modifier keys, or where no element takes a
+    /// click (a canvas), needs the window here.
     private func pointerClick(_ p: TargetActParams, _ t: CUTarget, at pt: CGPoint, button: CUMouseButton, count: Int,
-                              flags: CGEventFlags, _ token: CUCancellation.Token, announced: Bool = false) throws -> ActOutcome {
+                              flags: CGEventFlags, _ token: CUCancellation.Token, announced: Bool = false,
+                              element: AXUIElement? = nil) throws -> ActOutcome {
+        if isOffThisDesktop(t) {
+            guard flags.isEmpty else { throw geometricElsewhere(t, "a click with modifier keys") }
+            guard button != .middle else { throw geometricElsewhere(t, "a middle click") }
+            guard let target = element ?? elementAt(pt, in: t) else {
+                throw geometricElsewhere(t, "a click where no accessibility element is (a canvas)")
+            }
+            if !announced { cursor(t, "press", at: pt, count: count, button: button.rawValue) }
+            try token.check()
+            guard let done = try axClick(target, button: button, count: count, t) else {
+                throw geometricElsewhere(t, "a click on an element that takes no click over accessibility")
+            }
+            return ActOutcome(rung: .accessibility, detail: "\(t.appName)'s window is on another desktop, so it was \(done) over accessibility")
+        }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
-        let moved = try bringToThisDesktop(p, t)
         let synth = self.synth
         let windowFor = self.windowFor(t)
         let event = announced ? nil : CursorEvent(kind: "press", point: pt, count: count, button: button.rawValue)
         return try runEvents(p, t, d, focus: true, token, cursor: event) { route, check in
             try synth.click(pid: t.pid, windowFor: windowFor, at: pt, button: button, count: count, flags: flags,
                             route: route, check: check)
-        }.noting(moved)
+        }
+    }
+
+    /// Roles that take a click: the hit test climbs from the deepest element at the point to the first of these
+    /// (or anything listing press / open / show menu).
+    static let clickableRoles: Set<String> = [
+        "AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXMenuItem", "AXMenuButton", "AXPopUpButton", "AXCell",
+        "AXRow", "AXTab", "AXDisclosureTriangle", "AXTextField", "AXTextArea", "AXComboBox", "AXSearchField",
+        "AXImage", "AXSwitch", "AXToggle", "AXIncrementor", "AXSlider", "AXColorWell", "AXDateField",
+    ]
+    static let textInputRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
+
+    /// The element a click at `point` (screen points) lands on, from a fresh read of the bound window's AX tree
+    /// (a cached state may be stale after a scroll): the deepest element whose frame holds the point, climbing to
+    /// the nearest one that takes a click. Pure over the tree; nil when nothing there does.
+    static func clickTarget(at point: CGPoint, in roots: [CUNode]) -> CUNode? {
+        func path(_ n: CUNode) -> [CUNode]? {
+            guard let f = n.frame, f.width > 0, f.height > 0, f.contains(point) else {
+                // A node without geometry (a group) may still hold children that have it.
+                if n.frame == nil || n.frame?.isEmpty == true {
+                    for c in n.children.reversed() { if let sub = path(c) { return [n] + sub } }
+                }
+                return nil
+            }
+            for c in n.children.reversed() { if let sub = path(c) { return [n] + sub } }  // last drawn is on top
+            return [n]
+        }
+        for r in roots.reversed() {
+            guard let chain = path(r) else { continue }
+            return chain.reversed().first { n in
+                !n.states.contains(.disabled) && (clickableRoles.contains(n.role)
+                    || n.actions.contains(kAXPressAction) || n.actions.contains("AXOpen") || n.actions.contains(kAXShowMenuAction))
+            }
+        }
+        return nil
+    }
+
+    /// `clickTarget` over a fresh, bounded read of the bound window (refs are kept: nothing ages out).
+    func elementAt(_ point: CGPoint, in t: CUTarget) -> AXUIElement? {
+        let roots: [CUNode]
+        if let read = treeReadOverride {
+            roots = read(t)
+        } else {
+            guard let win = try? windowElement(t) else { return nil }
+            var reader = AXTreeReader()
+            reader.timeBudgetMs = 1500
+            roots = reader.read(roots: [win], cache: t.refs, now: clock.nowMs).roots
+        }
+        guard let node = Self.clickTarget(at: point, in: roots), let key = t.refs.key(for: node.ref) else { return nil }
+        return key.element
+    }
+
+    /// A click done over accessibility on `e` (or the nearest ancestor that takes it): right → show menu;
+    /// double → open, else press twice; left → press, even when not listed (web content often leaves it out),
+    /// and a text input that takes no press is focused instead. Returns what was done, or nil.
+    func axClick(_ e: AXUIElement, button: CUMouseButton, count: Int, _ t: CUTarget) throws -> String? {
+        func attempt(_ el: AXUIElement, _ action: String) throws -> Bool {
+            do {
+                try ax.perform(el, action)
+                return true
+            } catch let error where Self.deliveryUncertain(error) {
+                throw busyAfterSend(t)
+            } catch let err as CUError where err.code == "stale_element" || err.code == "permission_missing" {
+                throw err
+            } catch {
+                return false
+            }
+        }
+        // The element, then up to four ancestors that list the action.
+        func chain(_ action: String, includeSelfUnlisted: Bool) -> [AXUIElement] {
+            var out: [AXUIElement] = []
+            var cur: AXUIElement? = e
+            for depth in 0..<5 {
+                guard let c = cur else { break }
+                if ax.actions(c).contains(action) || (depth == 0 && includeSelfUnlisted) { out.append(c) }
+                cur = ax.element(c, kAXParentAttribute)
+            }
+            return out
+        }
+        switch (button, count) {
+        case (.right, _):
+            for el in chain(kAXShowMenuAction, includeSelfUnlisted: true) where try attempt(el, kAXShowMenuAction) {
+                return "right-clicked (show menu)"
+            }
+            return nil
+        case (.left, let n) where n >= 2:
+            for el in chain("AXOpen", includeSelfUnlisted: false) where try attempt(el, "AXOpen") { return "opened (AXOpen)" }
+            for el in chain(kAXPressAction, includeSelfUnlisted: true) where try attempt(el, kAXPressAction) {
+                for _ in 1..<n { _ = try attempt(el, kAXPressAction) }
+                return "pressed \(n) times"
+            }
+            return nil
+        default:
+            for el in chain(kAXPressAction, includeSelfUnlisted: true) where try attempt(el, kAXPressAction) { return "pressed" }
+            if let role = ax.string(e, kAXRoleAttribute), Self.textInputRoles.contains(role), ax.isSettable(e, kAXFocusedAttribute) {
+                try? ax.set(e, kAXFocusedAttribute, kCFBooleanTrue)
+                t.noteTargeted(e, at: clock.nowMs())
+                return "focused"
+            }
+            return nil
+        }
+    }
+
+    func geometricElsewhere(_ t: CUTarget, _ what: String) -> CUError {
+        CULog.act.notice("\(t.appName, privacy: .public): refused off-desktop — \(what, privacy: .public) needs the window on this desktop")
+        return CUError.geometricElsewhere(t.appName, what)
     }
 
     /// A screenshot pixel of this target (`shotId`, else its latest shot) → global screen points.
@@ -629,19 +791,83 @@ extension CUCore {
             point = try screenPoint(for: t, shotId: a.shotId, pixel: px)
             viewport = sys.window(id: t.windowID)?.frame.size ?? CGSize(width: 400, height: 400)
         }
+        if isOffThisDesktop(t) {
+            let at = try a.ref.map { try element($0, in: t) } ?? elementAt(point, in: t)
+            return try scrollElsewhere(at: at, point: point, a.direction, pages: pages, p, t, token)
+        }
         let vertical = a.direction == .up || a.direction == .down
         let amount = (vertical ? viewport.height : viewport.width) * 0.9 * pages
         // Wheel deltas: positive moves the content down/right, i.e. scrolls up/left.
         let dy = a.direction == .down ? -amount : a.direction == .up ? amount : 0
         let dx = a.direction == .right ? -amount : a.direction == .left ? amount : 0
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
-        let moved = try bringToThisDesktop(p, t)
         let synth = self.synth
         let windowFor = self.windowFor(t)
         let event = CursorEvent(kind: "scroll", point: point, text: a.direction.rawValue)
         return try runEvents(p, t, d, focus: false, token, cursor: event) { route, check in
             try synth.scroll(pid: t.pid, windowFor: windowFor, at: point, deltaX: dx, deltaY: dy, route: route, check: check)
-        }.noting(moved)
+        }
+    }
+
+    /// Scrolling a window on another desktop, with no pointer: the scroll bar's value (AX), else Page Down/Up
+    /// (arrows sideways) sent to the app's pid, after focusing the scroll area so the keys reach it. The keyboard
+    /// needs no geometry.
+    private func scrollElsewhere(at e: AXUIElement?, point: CGPoint, _ direction: CUScrollDirection, pages: Double,
+                                 _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+        let area = e.flatMap { scrollArea(from: $0) } ?? largestScrollArea(in: t)
+        if let area {
+            do {
+                if try axScroll(area: area, direction: direction, pages: pages) {
+                    cursor(t, "scroll", at: point, text: direction.rawValue)
+                    return ActOutcome(rung: .accessibility, detail: "\(t.appName)'s window is on another desktop, so its scroll bar was moved over accessibility")
+                }
+            } catch let error where Self.deliveryUncertain(error) {
+                throw busyAfterSend(t)
+            }
+            // Keys go to the focused element: make it the scrolled content, not a search field.
+            let content = ax.elements(area, kAXChildrenAttribute).first { ax.string($0, kAXRoleAttribute) != kAXScrollBarRole }
+            for target in [content, area].compactMap({ $0 }) where ax.isSettable(target, kAXFocusedAttribute) {
+                try? ax.set(target, kAXFocusedAttribute, kCFBooleanTrue)
+                break
+            }
+        }
+        let vertical = direction == .up || direction == .down
+        let key: CUNamedKey = direction == .down ? .pageDown : direction == .up ? .pageUp : direction == .left ? .left : .right
+        let presses = vertical ? max(1, Int(pages.rounded(.up))) : max(1, Int((pages * 8).rounded(.up)))
+        let code = CUKeyCodes.code(for: key)
+        let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
+        let synth = self.synth
+        let event = CursorEvent(kind: "scroll", point: point, text: direction.rawValue)
+        let o = try runEvents(p, t, d, focus: true, token, cursor: event) { route, _ in
+            var used = route
+            for _ in 0..<presses {
+                try token.check()
+                used = synth.key(pid: t.pid, code: code, flags: [], route: route)
+            }
+            return used
+        }
+        let what = vertical ? "\(presses)× \(direction == .down ? "Page Down" : "Page Up")" : "\(presses)× \(direction == .left ? "←" : "→")"
+        return o.noting("\(t.appName)'s window is on another desktop, so it was scrolled with \(what) sent to the app")
+    }
+
+    /// The window's largest scroll area (the page in a browser), for a scroll with no element under it.
+    func largestScrollArea(in t: CUTarget) -> AXUIElement? {
+        guard let win = try? windowElement(t) else { return nil }
+        var queue = [win]
+        var best: (AXUIElement, CGFloat)?
+        var seen = 0
+        let deadline = CUFloorScan.Deadline(ms: 300)
+        while !queue.isEmpty, seen < 800, !deadline.passed {
+            let e = queue.removeFirst()
+            seen += 1
+            if ax.string(e, kAXRoleAttribute) == kAXScrollAreaRole, let f = ax.frame(e) {
+                let size = f.width * f.height
+                if size > (best?.1 ?? 0) { best = (e, size) }
+                continue  // a page's own inner scrollers are not the page
+            }
+            queue += ax.elements(e, kAXChildrenAttribute)
+        }
+        return best?.0
     }
 
     /// The element itself when it is a scroll area, else its nearest scroll-area ancestor.
@@ -700,15 +926,16 @@ extension CUCore {
         }
         let from = try point(a.from, "from")
         let to = try point(a.to, "to")
+        // A drag is geometry: it needs real pointer events on screen, so the window here.
+        if isOffThisDesktop(t) { throw geometricElsewhere(t, "dragging") }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
-        let moved = try bringToThisDesktop(p, t)
         if let fromInfo { announceTarget(t, fromInfo, pressing: false) }
         let synth = self.synth
         let windowFor = self.windowFor(t)
         let event = CursorEvent(kind: "drag", point: from, dragTo: to)
         return try runEvents(p, t, d, focus: true, token, cursor: event) { route, check in
             try synth.drag(pid: t.pid, windowFor: windowFor, from: from, to: to, route: route, check: check)
-        }.noting(moved)
+        }
     }
 
     // MARK: select, action, menu

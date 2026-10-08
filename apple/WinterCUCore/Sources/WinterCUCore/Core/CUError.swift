@@ -71,13 +71,17 @@ public struct CUError: Error, Codable, Sendable, Equatable, CustomStringConverti
         CUError(code: "no_window", message: "\(app) has no open window")
     }
 
-    /// The window exists but is on another Space or in full screen, and could not be reached there
-    /// (`pointer`: the action needs it on this desktop).
-    public static func windowElsewhere(_ app: String, pointer: Bool = false) -> CUError {
-        let why = pointer ? "pointer and coordinate actions need it on this desktop, and it could not be moved here"
-                          : "it could not be reached there"
-        return CUError(code: "window_elsewhere",
-                       message: "\(app)'s window is on another Space or in full screen and \(why) — ask the user to bring it to this desktop, or retry with foreground consent")
+    /// The window exists but is on another Space or in full screen, and could not be reached there.
+    public static func windowElsewhere(_ app: String) -> CUError {
+        CUError(code: "window_elsewhere",
+                message: "\(app)'s window is on another Space or in full screen and could not be reached there — ask the user to bring it to this desktop")
+    }
+
+    /// Geometric input (`what`: dragging, a canvas click, a modified click) on a window on another desktop.
+    /// Clicks on elements, scrolls, typing and keys work there; this needs real pointer events on screen.
+    public static func geometricElsewhere(_ app: String, _ what: String) -> CUError {
+        CUError(code: "window_elsewhere",
+                message: "\(app)'s window is on another desktop (another Space or full screen), and \(what) needs it on this desktop — click elements by ref, scroll, type and use keys instead, or ask the user to bring the window here")
     }
 
     /// A window screenshot failed with the window on another Space or in full screen, and it could not be
@@ -85,14 +89,6 @@ public struct CUError: Error, Codable, Sendable, Equatable, CustomStringConverti
     public static func screenshotElsewhere(_ app: String) -> CUError {
         CUError(code: "window_elsewhere",
                 message: "can't take a screenshot of \(app)'s window while it is on another desktop (another Space or full screen), and it could not be moved here — state() and find() still work there; ask the user to bring it to this desktop")
-    }
-
-    /// A pointer action's window was on another Space or in full screen and could not be moved here, so a new
-    /// window was opened on this desktop and the target switched to it; the action itself did not run.
-    public static func windowReplaced(_ app: String, newWindow: UInt32) -> CUError {
-        CUError(code: "window_elsewhere",
-                message: "\(app)'s window is on another Space or in full screen and could not be moved here, so a new \(app) window was opened on this desktop and the target now uses it — the action did not run; refs and screenshots were reset, so call state() and retry",
-                data: ["newWindowId": .int(Int(newWindow))])
     }
 
     public static func staleRef(_ ref: Int) -> CUError {
