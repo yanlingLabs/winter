@@ -161,8 +161,9 @@ function modesFor(serverKey: string, def: ToolDefinition): readonly SessionMode[
 }
 
 /** `{ content: [{ type: "text", text }], isError }` — the registry's `ToolOutcome` → MCP mapping,
- *  in one place. `isError` is always present (the SDK forwards it only when defined, and an
- *  omitted flag on a failure reads as success on the far side). */
+ *  in one place. `isError` is always present: the runtime records the result's `is_error` exactly when it is
+ *  `true` (measured at agent SDK 0.0.53 — it is not dropped), and an omitted flag on a failure reads as
+ *  success on the far side. */
 function textResult(text: string, isError: boolean): { content: unknown[]; isError: boolean } {
   return { content: [{ type: "text", text }], isError };
 }

@@ -108,7 +108,8 @@ export class FakeHelper {
       case "screen.windows": return { windows: this.apps.filter((a) => a.running).map((a, i) => ({ app: a.name, bundleId: a.bundleId, pid: a.pid, windowId: 100 + i, title: `${a.name} window`, frame: [0, 0, 800, 600], onScreen: true })) };
       case "target.bind": {
         const want = String(params.app);
-        const app = this.apps.find((a) => a.bundleId === want || a.name === want);
+        // By bundle id, name, or an .app PATH (the daemon binds a path it resolved itself).
+        const app = this.apps.find((a) => a.bundleId === want || a.name === want || want.endsWith(`/${a.name}.app`));
         if (app === undefined) throw new FakeHelperError("invalid_params", `no app ${want}`);
         const targetId = `t${this.nextTarget++}`;
         this.targets.set(targetId, app);

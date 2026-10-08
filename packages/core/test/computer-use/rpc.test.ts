@@ -157,6 +157,28 @@ describe("computerUse.* (local-only RPCs)", () => {
     c.close();
   });
 
+  test("a password manager can be set to Full through apps.set — stored explicitly, so it no longer reads as the default deny (review I5)", async () => {
+    const { socketPath, tokens, settingsPath, runtime } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "app");
+    const pm = "com.1password.1password";
+    expect(runtime.policy.accessFor(pm)).toBe("deny");
+    expect((await c.request(METHODS.computerUseAppsSet, { bundleId: pm, access: "full" })).result).toEqual({ ok: true });
+    expect(computerUseAppsFrom(loadSettings(settingsPath))[pm]).toEqual({ access: "full" });
+    expect(runtime.policy.accessFor(pm)).toBe("full");
+    const row = (await c.request(METHODS.computerUseAppsList, {})).result.apps.find((a: any) => a.bundleId === pm);
+    expect(row).toMatchObject({ access: "full" });
+    expect(row.defaultDeny).toBeUndefined();
+    // Back to Don't allow: that IS the default for a password manager, so the explicit value goes again.
+    await c.request(METHODS.computerUseAppsSet, { bundleId: pm, access: "deny" });
+    expect(computerUseAppsFrom(loadSettings(settingsPath))[pm]).toEqual({});
+    expect(runtime.policy.accessFor(pm)).toBe("deny");
+    // An ordinary app's Full is its default and is not stored.
+    await c.request(METHODS.computerUseAppsSet, { bundleId: "com.apple.Notes", access: "full" });
+    expect(computerUseAppsFrom(loadSettings(settingsPath))["com.apple.Notes"]).toEqual({});
+    c.close();
+  });
+
   test("setSettings writes only the keys it carries; hot", async () => {
     const { socketPath, tokens, settingsPath, runtime } = await boot({ computerUse: { screenshotMaxDim: 900 } });
     const c = await TestClient.connect(socketPath);

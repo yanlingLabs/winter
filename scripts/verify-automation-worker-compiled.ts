@@ -9,7 +9,9 @@
  * freshly compiled `dist/winter-core`:
  *
  *   1. `bun run --filter '@yanlinglabs/winter-cli' compile:core` → dist/winter-core (gitignored).
- *   2. A ROUND TRIP under `buildWorkflowSeatbeltProfile(dist/winter-core)` — the profile the daemon uses —
+ *   2. A ROUND TRIP under `buildAutomationSeatbeltProfile(dist/winter-core)` — the worker's own READ-ALLOWLIST
+ *      profile the daemon uses, with its minimal environment and `/` as cwd — and inside it the containment:
+ *      a read of the user's home and of `/etc/passwd` denied, the environment empty —
  *      speaking the bridge by hand: `ready`, a run whose `apps.list()` call is answered here, a TypeScript
  *      annotation, a top-level declaration read back by a SECOND run (persistence), a typed error class caught
  *      by `instanceof`, and a clean exit when stdin closes.
@@ -22,7 +24,9 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildWorkflowSeatbeltProfile, sandboxAvailable } from "../packages/core/src/workflows/sandbox";
+import { homedir } from "node:os";
+import { sandboxAvailable } from "../packages/core/src/workflows/sandbox";
+import { AUTOMATION_WORKER_ENV, buildAutomationSeatbeltProfile } from "../packages/core/src/computer-use/sandbox";
 import type { HostToWorker, WorkerToHost } from "../packages/core/src/computer-use/worker/bridge";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -37,7 +41,7 @@ function fail(message: string): never {
 }
 
 async function roundTrip(profile: string): Promise<Array<[string, boolean]>> {
-  const child = spawn("/usr/bin/sandbox-exec", ["-p", profile, DIST_BINARY, ARG], { stdio: ["pipe", "pipe", "pipe"], detached: true });
+  const child = spawn("/usr/bin/sandbox-exec", ["-p", profile, DIST_BINARY, ARG], { stdio: ["pipe", "pipe", "pipe"], detached: true, cwd: "/", env: { ...AUTOMATION_WORKER_ENV } });
   const messages: WorkerToHost[] = [];
   let stderr = "";
   let buf = "";
@@ -81,15 +85,23 @@ async function roundTrip(profile: string): Promise<Array<[string, boolean]>> {
   await waitFor(() => doneOf("r1") !== undefined, "run r1 done");
   send({ op: "run", runId: "r2", code: "print('kept', count)\ntry { await apps.open('x') } catch (e) { print('typed', e instanceof StaleRef) }" });
   await waitFor(() => doneOf("r2") !== undefined, "run r2 done");
+  const contain = [
+    "const p = (0, Function)('return process')(); const fs = await import('node:fs')",
+    "print('env', Object.keys(p.env).length)",
+    `for (const f of [${JSON.stringify(homedir())}, '/etc/passwd']) { try { fs.readdirSync(f); print('READ', f) } catch (e) { try { fs.readFileSync(f); print('READ', f) } catch (e2) { print('denied', e2.code) } } }`,
+  ].join("\n");
+  send({ op: "run", runId: "r3", code: contain });
+  await waitFor(() => doneOf("r3") !== undefined, "run r3 done");
   child.stdin!.end();
   const code = await Promise.race([exited, new Promise<number | null>((r) => setTimeout(() => r(-1), TIMEOUT_MS))]);
   if (stderr.trim()) log(`[stderr]\n${stderr.trim()}`);
   return [
-    ["the compiled worker booted under the workflow seatbelt (ready)", messages.some((m) => m.op === "ready")],
+    ["the compiled worker booted under its own read-allowlist seatbelt (ready)", messages.some((m) => m.op === "ready")],
     ["run 1 answered over the bridge and stripped TypeScript", doneOf("r1")?.error === undefined && printsOf("r1")[0] === "apps 1 Notes"],
     ["the worker withholds fetch, Bun and process from scripts", printsOf("r1")[1] === "undefined undefined undefined"],
     ["run 2 read run 1's top-level declaration (persistent runtime)", printsOf("r2")[0] === "kept 1"],
     ["a typed error crossed the bridge as its class (instanceof StaleRef)", printsOf("r2")[1] === "typed true" && doneOf("r2")?.error === undefined],
+    ["inside the profile the environment is empty and the user's home and /etc/passwd are unreadable", printsOf("r3")[0] === "env 0" && printsOf("r3").slice(1).every((t) => t.startsWith("denied")) && printsOf("r3").length === 3],
     ["the worker exited 0 when its stdin closed", code === 0],
   ];
 }
@@ -104,16 +116,16 @@ async function main(): Promise<void> {
   if (compile.stderr?.trim()) log(`[stderr]\n${compile.stderr.trim()}`);
   if (compile.status !== 0 || !existsSync(DIST_BINARY)) fail(`compile:core failed (exit ${compile.status ?? compile.signal})`);
 
-  const profile = buildWorkflowSeatbeltProfile(DIST_BINARY);
-  log("\n--- Step 2: round trip under the workflow seatbelt ---");
+  const profile = buildAutomationSeatbeltProfile({ selfExecPath: DIST_BINARY });
+  log("\n--- Step 2: round trip under the automation worker's own seatbelt ---");
   const checks = await roundTrip(profile);
 
   log("\n--- Step 3: the Keychain-sandbox guard ---");
   const runLine = `${JSON.stringify({ op: "run", runId: "nope", code: "print('must-not-run')" })}\n`;
   const legs: Array<[string, string | null]> = [
     ["no sandbox", null],
-    ["the workflow profile + com.apple.SecurityServer allowed", `${profile}(allow mach-lookup (global-name "com.apple.SecurityServer"))\n`],
-    ["the workflow profile + com.apple.securityd.xpc allowed", `${profile}(allow mach-lookup (global-name "com.apple.securityd.xpc"))\n`],
+    ["the worker's profile + com.apple.SecurityServer allowed", `${profile}(allow mach-lookup (global-name "com.apple.SecurityServer"))\n`],
+    ["the worker's profile + com.apple.securityd.xpc allowed", `${profile}(allow mach-lookup (global-name "com.apple.securityd.xpc"))\n`],
   ];
   for (const [leg, sandbox] of legs) {
     const argv = sandbox === null ? [DIST_BINARY, ARG] : ["/usr/bin/sandbox-exec", "-p", sandbox, DIST_BINARY, ARG];
