@@ -66,14 +66,7 @@ actor CUCapturer {
         guard let window = scWindow else { throw CUError.targetLost("the window is gone") }
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let scale = Double(filter.pointPixelScale)
-        let windowSize = current.size
-        var area = CGRect(origin: .zero, size: windowSize)
-        if let region {
-            area = region.intersection(CGRect(origin: .zero, size: windowSize))
-            guard !area.isNull, area.width >= 1, area.height >= 1 else {
-                throw CUError.invalidParams("region is outside the window (\(Int(windowSize.width))×\(Int(windowSize.height)) points)")
-            }
-        }
+        let area = try Self.windowArea(region: region, windowSize: current.size)
         let source = CGSize(width: area.width * scale, height: area.height * scale)
         let (w, h) = CUCaptureBudget.targetSize(source: source, budget: budget)
         let config = SCStreamConfiguration()
@@ -203,6 +196,10 @@ actor CUCapturer {
     }
 
     private func encode(_ image: CGImage, width: Int, height: Int, quality: Double) throws -> (data: Data, width: Int, height: Int) {
+        try Self.encode(image, width: width, height: height, quality: quality)
+    }
+
+    static func encode(_ image: CGImage, width: Int, height: Int, quality: Double) throws -> (data: Data, width: Int, height: Int) {
         let result = CUCaptureBudget.encodeWithinCap(width: width, height: height, quality: quality) { w, h, q in
             let img = (w == image.width && h == image.height) ? image : Self.scaled(image, w, h)
             return img.flatMap { Self.jpeg($0, quality: q) }
@@ -211,15 +208,27 @@ actor CUCapturer {
         return result
     }
 
-    static func scaled(_ image: CGImage, _ w: Int, _ h: Int) -> CGImage? {
-        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
-        else { return nil }
-        ctx.interpolationQuality = .high
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        return ctx.makeImage()
+    /// The part of the window a capture covers, in window points: all of it, or `region` clipped to it.
+    static func windowArea(region: CGRect?, windowSize: CGSize) throws -> CGRect {
+        let whole = CGRect(origin: .zero, size: windowSize)
+        guard let region else { return whole }
+        let area = region.intersection(whole)
+        guard !area.isNull, area.width >= 1, area.height >= 1 else {
+            throw CUError.invalidParams("region is outside the window (\(Int(windowSize.width))×\(Int(windowSize.height)) points)")
+        }
+        return area
     }
+
+    /// An image of `pointsRect` (window points) taken some other way — SkyLight's capture of a window that is
+    /// not on screen — sized and encoded exactly as `captureWindow` sizes and encodes its own: the budget's
+    /// long edge and tiles from the image's pixels, then JPEG within the byte cap.
+    static func encodeWindowImage(_ image: CGImage, pointsRect: CGRect, budget: CUImageBudget) throws -> CUCapturedImage {
+        let (w, h) = CUCaptureBudget.targetSize(source: CGSize(width: image.width, height: image.height), budget: budget)
+        let encoded = try encode(image, width: w, height: h, quality: budget.quality)
+        return CUCapturedImage(jpeg: encoded.data, width: encoded.width, height: encoded.height, pointsRect: pointsRect)
+    }
+
+    static func scaled(_ image: CGImage, _ w: Int, _ h: Int) -> CGImage? { CUImageTools.scaled(image, width: w, height: h) }
 
     static func jpeg(_ image: CGImage, quality: Double) -> Data? {
         let data = NSMutableData()
@@ -227,5 +236,37 @@ actor CUCapturer {
         CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { return nil }
         return data as Data
+    }
+}
+
+/// Small image helpers the helper's mirror shares with the engine's screenshots.
+public enum CUImageTools {
+    /// Drawn down to 8×8: nothing but transparent or (near-)black pixels is an image of nothing — what a
+    /// capture of a window macOS has not drawn comes back as.
+    public static func isBlank(_ image: CGImage) -> Bool {
+        var pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
+        let drawn = pixels.withUnsafeMutableBytes { raw -> Bool in
+            guard let context = CGContext(data: raw.baseAddress, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 32,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.interpolationQuality = .low
+            context.draw(image, in: CGRect(x: 0, y: 0, width: 8, height: 8))
+            return true
+        }
+        guard drawn else { return true }
+        return stride(from: 0, to: pixels.count, by: 4).allSatisfy { i in
+            pixels[i + 3] == 0 || (pixels[i] < 4 && pixels[i + 1] < 4 && pixels[i + 2] < 4)
+        }
+    }
+
+    /// `image` redrawn at `width`×`height` pixels (sRGB, opaque, high-quality interpolation).
+    public static func scaled(_ image: CGImage, width: Int, height: Int) -> CGImage? {
+        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return ctx.makeImage()
     }
 }

@@ -97,7 +97,7 @@ export interface FindResult { elements: Array<{ ref: number; role: string; name?
 export interface ScreenshotBudget { maxLongEdge: number; tile?: number; maxTiles?: number; quality: number }
 export interface ScreenshotResult {
   imageBase64: string; mime: "image/jpeg"; width: number; height: number; shotId: string; settled?: boolean; waitedMs?: number;
-  /** `target.screenshot`: what the capture had to do, e.g. "moved the window here to capture it". */
+  /** `target.screenshot`: what the image is when it is not a live capture, e.g. a window on another desktop's last drawn content. */
   detail?: string;
 }
 export interface ActResult { rung: 1 | 2 | 3 | 4; detail?: string }

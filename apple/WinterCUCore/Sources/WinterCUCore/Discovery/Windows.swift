@@ -16,6 +16,33 @@ struct CUWindowServerWindow: Sendable, Equatable {
     var alpha: Double
 }
 
+/// One window's window-server description, by id.
+public enum CUWindowLookup {
+    /// `.optionIncludingWindow` first (one window, cheap). That call leaves out some windows that exist: a
+    /// full-screen window on another Space came back empty there while the full `.optionAll` listing had it,
+    /// on screen false. So an empty answer is checked against the full listing before it reads as gone.
+    public static func description(of id: CGWindowID) -> [String: Any]? {
+        func matches(_ d: [String: Any]) -> Bool { (d[kCGWindowNumber as String] as? NSNumber)?.uint32Value == id }
+        if let one = (CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]])?.first(where: matches) {
+            return one
+        }
+        return (CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]])?.first(where: matches)
+    }
+
+    /// The window's frame in global screen points (top-left origin), or nil when it is gone.
+    public static func frame(of id: CGWindowID) -> CGRect? {
+        guard let bounds = description(of: id)?[kCGWindowBounds as String] as? NSDictionary else { return nil }
+        return CGRect(dictionaryRepresentation: bounds as CFDictionary)
+    }
+
+    /// Whether the window server has the window on screen (false: another Space, full screen elsewhere,
+    /// minimized or hidden), or nil when it is gone.
+    public static func isOnScreen(_ id: CGWindowID) -> Bool? {
+        guard let d = description(of: id) else { return nil }
+        return (d[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false
+    }
+}
+
 enum CUWindowServer {
     /// Every normal (layer 0) window, front to back. `onScreenOnly` skips minimized and other-Space windows.
     static func windows(onScreenOnly: Bool = false, includeOtherLayers: Bool = false,
@@ -42,8 +69,7 @@ enum CUWindowServer {
     }
 
     static func window(id: UInt32) -> CUWindowServerWindow? {
-        guard let raw = CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]],
-              let d = raw.first,
+        guard let d = CUWindowLookup.description(of: id),
               let pid = (d[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
               let boundsDict = d[kCGWindowBounds as String] as? NSDictionary,
               let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary)

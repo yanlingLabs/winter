@@ -652,8 +652,9 @@ export class ComputerV2Service {
     const res = await this.shoot(ctx, "target.screenshot", { targetId: t.targetId, callId: ctx.callId, ...(region === undefined ? {} : { region }), ...(settle === undefined ? {} : { settle }) }, metric);
     ctx.state.lastTargetShot.set(t.targetId, res.shotId);
     const handle = this.keepImage(ctx, res);
-    // What the capture had to do ("moved the window here to capture it") — a real change on screen, so it is
-    // said even for an `emit: false` read: an unfenced daemon line, like a bind's.
+    // What the image is when it is not a live capture ("…'s window is on another desktop …, so this is its last
+    // drawn content — it may be a little out of date") — said even for an `emit: false` read, since it bears on
+    // what the agent concludes from the image: an unfenced daemon line, like a bind's.
     const detail = helperDetail(res.detail);
     if (detail !== undefined) ctx.builder.daemonLine(detail);
     if (args.emit !== false) ctx.builder.image(res.imageBase64, res.mime ?? "image/jpeg");

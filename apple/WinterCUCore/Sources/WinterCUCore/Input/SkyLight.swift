@@ -27,6 +27,8 @@ public struct CUSkyLight: @unchecked Sendable {
     typealias CopySpacesForWindows = @convention(c) (UInt32, Int32, CFArray) -> Unmanaged<CFArray>?
     typealias WindowsSpaces = @convention(c) (UInt32, CFArray, CFArray) -> Void
     typealias SpaceType = @convention(c) (UInt32, UInt64) -> Int32
+    typealias CaptureInRect = @convention(c) (UInt32, UnsafeMutablePointer<UInt32>, Int32, UInt32, CGRect) -> Unmanaged<CFArray>?
+    typealias CaptureList = @convention(c) (UInt32, UnsafeMutablePointer<UInt32>, Int32, UInt32) -> Unmanaged<CFArray>?
 
     var postToPidFn: PostToPid?
     var setIntFieldFn: SetIntField?
@@ -43,6 +45,8 @@ public struct CUSkyLight: @unchecked Sendable {
     var addToSpacesFn: WindowsSpaces?
     var removeFromSpacesFn: WindowsSpaces?
     var spaceTypeFn: SpaceType?
+    var captureInRectFn: CaptureInRect?
+    var captureListFn: CaptureList?
 
     /// `SLEventPostToPid` resolved: rung 3 is possible.
     public var isAvailable: Bool { postToPidFn != nil }
@@ -52,6 +56,9 @@ public struct CUSkyLight: @unchecked Sendable {
     public var canFocusWithoutRaise: Bool {
         postEventRecordToFn != nil && getFrontProcessFn != nil && getProcessForPIDFn != nil
     }
+
+    /// A window can be captured wherever it is (`SLSHWCaptureWindowListInRect`, or the list call).
+    public var canCaptureWindows: Bool { mainConnectionFn != nil && (captureInRectFn != nil || captureListFn != nil) }
 
     /// Resolves every symbol through `lookup` (a `dlsym` stand-in, injectable for tests).
     public static func resolve(lookup: (String) -> UnsafeMutableRawPointer?) -> CUSkyLight {
@@ -78,6 +85,9 @@ public struct CUSkyLight: @unchecked Sendable {
         s.removeFromSpacesFn = fn("SLSRemoveWindowsFromSpaces", WindowsSpaces.self)
             ?? fn("CGSRemoveWindowsFromSpaces", WindowsSpaces.self)
         s.spaceTypeFn = fn("SLSSpaceGetType", SpaceType.self) ?? fn("CGSSpaceGetType", SpaceType.self)
+        s.captureInRectFn = fn("SLSHWCaptureWindowListInRect", CaptureInRect.self)
+            ?? fn("CGSHWCaptureWindowListInRect", CaptureInRect.self)
+        s.captureListFn = fn("SLSHWCaptureWindowList", CaptureList.self) ?? fn("CGSHWCaptureWindowList", CaptureList.self)
         return s
     }
 
@@ -249,5 +259,57 @@ public struct CUSkyLight: @unchecked Sendable {
         guard spaces(ofWindow: id, connection: cid).contains(active) else { return false }
         removeFromSpacesFn(cid, windows, before.map { NSNumber(value: $0) } as CFArray)
         return true
+    }
+
+    // MARK: window capture
+
+    /// `kCGSCaptureIgnoreGlobalClipShape` (0x800): the window's own content, not clipped to what is visible on
+    /// screen. The only option ChatGPT's off-screen capture passes; the image comes back at the display's
+    /// backing scale (two pixels per point on a Retina display).
+    public static let captureIgnoreGlobalClipShape: UInt32 = 0x800
+
+    /// The window server's own image of each window, wherever it is: on another Space, in full screen
+    /// elsewhere, minimized — its last drawn content. ChatGPT's stills take a window that is not on screen
+    /// this way (`SLSHWCaptureWindowListInRect`, options 0x800, the first image); AltTab's thumbnails too.
+    /// Needs Screen Recording. Moves, raises and focuses nothing.
+    ///
+    /// `rect` is in GLOBAL screen points (top-left origin), like a window's frame: pass the frame for the
+    /// whole window, or part of it for a region; the image is exactly that rect. nil is the whole window as
+    /// the window server clips it, which cuts off any part beyond a display's edge. Without the InRect
+    /// symbol, the list call's whole-window image is cropped to `rect` when that image is exactly the
+    /// window's frame (`frameOf`), and left out otherwise: an image clipped at a display edge cannot be
+    /// mapped onto the window. Empty when a symbol is missing or the window server returns nothing.
+    public func captureWithSkyLight(windowIDs: [UInt32], rect: CGRect? = nil,
+                                    frameOf: (UInt32) -> CGRect? = { CUWindowLookup.frame(of: $0) }) -> [CGImage] {
+        guard let mainConnectionFn, !windowIDs.isEmpty else { return [] }
+        let options = Self.captureIgnoreGlobalClipShape
+        let cid = mainConnectionFn()
+        var ids = windowIDs
+        let count = Int32(ids.count)
+        if let captureInRectFn {
+            let array = ids.withUnsafeMutableBufferPointer { captureInRectFn(cid, $0.baseAddress!, count, options, rect ?? .null) }
+            return (array?.takeRetainedValue() as? [CGImage]) ?? []
+        }
+        guard let captureListFn else { return [] }
+        let array = ids.withUnsafeMutableBufferPointer { captureListFn(cid, $0.baseAddress!, count, options) }
+        let images = (array?.takeRetainedValue() as? [CGImage]) ?? []
+        guard let rect else { return images }
+        return zip(windowIDs, images).compactMap { id, image in
+            frameOf(id).flatMap { Self.crop(wholeWindow: image, frame: $0, to: rect) }
+        }
+    }
+
+    /// The part of a whole-window image under `rect` (global points), or nil when the image is not the
+    /// window's whole frame at one scale (clipped at a display edge) or `rect` misses the window.
+    static func crop(wholeWindow image: CGImage, frame: CGRect, to rect: CGRect) -> CGImage? {
+        guard frame.width >= 1, frame.height >= 1 else { return nil }
+        let scale = Double(image.width) / frame.width
+        guard scale > 0, abs(Double(image.height) - frame.height * scale) <= max(1, scale) else { return nil }
+        let local = rect.intersection(frame).offsetBy(dx: -frame.minX, dy: -frame.minY)
+        guard !local.isNull, local.width >= 1, local.height >= 1 else { return nil }
+        if local.size == frame.size { return image }
+        let pixels = CGRect(x: local.minX * scale, y: local.minY * scale, width: local.width * scale,
+                            height: local.height * scale).integral
+        return image.cropping(to: pixels)
     }
 }

@@ -518,25 +518,37 @@ public final class CUCore: @unchecked Sendable {
             try await queues.run(t.pid) { [self] in try floorCheckPrivacy(t) }
         }
         var detail: String?
-        let img: CUCapturedImage
-        do {
-            img = try await captureWindow(t.windowID, region, p.budget)
-        } catch let e as CUError where !["permission_missing", "cancelled", "invalid_params"].contains(e.code) {
-            // ScreenCaptureKit may refuse a window on another Space or in full screen ("Failed to start
-            // stream"): bring it to this desktop the way pointer actions do, then capture again.
-            let moved = try await queues.run(t.pid) { [self] () -> String?? in
-                guard isOffThisDesktop(t) else { return .none }
-                return .some(moveToThisDesktop(t))
-            }
-            guard let moved else { throw e }
-            guard let note = moved else { throw CUError.screenshotElsewhere(t.appName) }
-            try await clock.sleep(ms: 100)
-            do {
-                img = try await captureWindow(t.windowID, region, p.budget)
-            } catch let again as CUError where !["permission_missing", "cancelled", "invalid_params"].contains(again.code) {
+        var taken: CUCapturedImage?
+        var privateTried = false
+        // Not on screen (another Space, full screen elsewhere, minimized, hidden): ScreenCaptureKit refuses such
+        // a window or returns nothing, so the private path goes straight to the window server's own image of it
+        // (ChatGPT's dispatch: off screen → SkyLight). Nothing is moved, raised or focused.
+        if t.privatePath, sys.window(id: t.windowID)?.onScreen == false {
+            privateTried = true
+            if let shot = try await offScreenShot(t, region, p.budget) {
+                taken = shot
+                detail = try await offScreenNote(t)
+            } else if try await queues.run(t.pid, { [self] in isOffThisDesktop(t) }) {
                 throw CUError.screenshotElsewhere(t.appName)
             }
-            detail = note
+            // Minimized or hidden with nothing from the window server: ScreenCaptureKit may still have it.
+        }
+        let img: CUCapturedImage
+        if let taken {
+            img = taken
+        } else {
+            do {
+                img = try await captureWindow(t.windowID, region, p.budget)
+            } catch let e as CUError where !["permission_missing", "cancelled", "invalid_params"].contains(e.code) {
+                // ScreenCaptureKit refuses a window on another Space or in full screen ("Failed to start stream").
+                // Never moved here for a picture (that needs Dock injection): the window server's image or nothing.
+                guard try await queues.run(t.pid, { [self] in isOffThisDesktop(t) }) else { throw e }
+                guard t.privatePath, !privateTried, let shot = try await offScreenShot(t, region, p.budget) else {
+                    throw CUError.screenshotElsewhere(t.appName)
+                }
+                img = shot
+                detail = try await offScreenNote(t)
+            }
         }
         let shot = try await queues.run(t.pid) {
             t.registerShot(anchor: .window(windowID: t.windowID, regionOrigin: img.pointsRect.origin),
@@ -553,6 +565,40 @@ public final class CUCore: @unchecked Sendable {
     func captureWindow(_ id: UInt32, _ region: CGRect?, _ budget: CUImageBudget) async throws -> CUCapturedImage {
         if let o = windowCaptureOverride { return try await o(id, region, budget) }
         return try await capturer.captureWindow(windowID: id, region: region, budget: budget)
+    }
+
+    /// SkyLight's capture of a window in a global rect (points); replaceable by tests (nothing there may touch
+    /// the window server's capture).
+    var privateCaptureOverride: ((UInt32, CGRect) -> CGImage?)?
+
+    func privateWindowImage(_ id: UInt32, globalRect: CGRect) throws -> CGImage? {
+        if let o = privateCaptureOverride { return o(id, globalRect) }
+        guard CGPreflightScreenCaptureAccess() else { throw CUError.permissionMissing(.screenRecording) }
+        return skyLight.captureWithSkyLight(windowIDs: [id], rect: globalRect).first
+    }
+
+    /// The window server's image of the bound window (its last drawn content) for a window that is not on
+    /// screen, cropped to `region` and fitted to the budget like a ScreenCaptureKit capture. Nil when there is
+    /// none, or it is blank (a window macOS has not drawn).
+    func offScreenShot(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget) async throws -> CUCapturedImage? {
+        guard let frame = sys.window(id: t.windowID)?.frame else { throw CUError.targetLost("the window is gone") }
+        let area = try CUCapturer.windowArea(region: region, windowSize: frame.size)
+        guard let image = try privateWindowImage(t.windowID, globalRect: area.offsetBy(dx: frame.minX, dy: frame.minY)) else {
+            CULog.act.notice("screenshot: no window-server image of \(t.appName, privacy: .public)'s window \(t.windowID, privacy: .public)")
+            return nil
+        }
+        guard !CUImageTools.isBlank(image) else {
+            CULog.act.notice("screenshot: the window-server image of \(t.appName, privacy: .public)'s window \(t.windowID, privacy: .public) is blank")
+            return nil
+        }
+        return try CUCapturer.encodeWindowImage(image, pointsRect: area, budget: budget)
+    }
+
+    /// What an image from `offScreenShot` is.
+    func offScreenNote(_ t: CUTarget) async throws -> String {
+        let elsewhere = try await queues.run(t.pid) { [self] in isOffThisDesktop(t) }
+        let place = elsewhere ? "is on another desktop (another Space or full screen)" : "is not on screen (minimized or hidden)"
+        return "\(t.appName)'s window \(place), so this is its last drawn content — it may be a little out of date"
     }
 
     // MARK: - waits
@@ -888,15 +934,6 @@ public final class CUCore: @unchecked Sendable {
     func isOffThisDesktop(_ t: CUTarget) -> Bool {
         guard let w = sys.window(id: t.windowID), !w.onScreen else { return false }
         return !CUAXWindows.list(pid: t.pid, ax: ax, server: sys.windows(pid: t.pid)).contains { $0.id == t.windowID }
-    }
-
-    /// Moves the bound window to this desktop (SkyLight, the bind's private path) and waits up to 1 s for it
-    /// to show. A note of what was done, or nil when it could not be moved.
-    func moveToThisDesktop(_ t: CUTarget) -> String? {
-        guard t.privatePath, sys.moveWindowToActiveSpace(t.windowID) else { return nil }
-        let deadline = clock.nowMs() + 1000
-        while sys.window(id: t.windowID)?.onScreen != true, clock.nowMs() < deadline { usleep(30_000) }
-        return "moved \(t.appName)'s window to this desktop from another Space"
     }
 
     /// The app's open menus: menus that are children of the application element (where AppKit puts context

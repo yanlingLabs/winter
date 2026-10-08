@@ -68,7 +68,7 @@ public final class RPCDispatcher: @unchecked Sendable {
             let r = try await core.targetBind(p)
             await viewHub.bound(ViewTarget(sessionId: p.sessionId, targetId: r.targetId, pid: r.app.pid, windowId: r.window.id,
                                            appName: r.app.name, bundleId: r.app.bundleId, windowFrame: ViewTarget.rect(r.window.frame),
-                                           mirror: p.mirror))
+                                           mirror: p.mirror, privatePath: p.privatePath ?? true))
             return r
         }
         engine("target.useWindow") { [viewHub] (core: CoreService, p: TargetUseWindowParams) in

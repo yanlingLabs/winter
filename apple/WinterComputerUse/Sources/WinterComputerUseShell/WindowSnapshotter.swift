@@ -3,31 +3,83 @@ import Foundation
 import ImageIO
 @preconcurrency import ScreenCaptureKit
 import UniformTypeIdentifiers
+import WinterCUCore
 
-/// One-shot pictures of a window the live stream cannot see (off every screen: another Space or display, or
-/// minimized). Injected so the off-screen rules are tested without ScreenCaptureKit.
+/// One-shot pictures of a window the live stream cannot see (off every screen: another Space or display, in
+/// full screen elsewhere, or minimized). Injected so the off-screen rules are tested without capturing.
 @MainActor public protocol WindowSnapshotter: AnyObject {
     /// Calls back on the main actor with a frame, or nil when none could be taken (or it came back blank).
-    func snapshot(windowID: CGWindowID, maxWidth: Int, completion: @escaping @MainActor (ViewFrame?) -> Void)
+    /// `privatePath`: the bind's `computerUse.privateEventPath` — may the window server's own image be used?
+    func snapshot(windowID: CGWindowID, maxWidth: Int, privatePath: Bool, completion: @escaping @MainActor (ViewFrame?) -> Void)
 }
 
-/// `SCScreenshotManager` with a desktop-independent single-window filter — the same capture the engine's own
-/// screenshots use, without its last resort (moving the window to this desktop), which a passive mirror must
-/// never do. Whether macOS renders a window that is on another Space varies; an image that comes back empty
-/// (all transparent or all black) counts as none, so it never replaces the last good frame.
+/// With the private path on, the window server's own image of the window first: SkyLight's
+/// `SLSHWCaptureWindowListInRect`, its last drawn content wherever it is (ChatGPT takes its off-screen stills
+/// the same way; its live streams have no such fallback, and neither do ours). Then `SCScreenshotManager` with a
+/// desktop-independent single-window filter, the engine's public capture. Neither moves, raises or focuses
+/// anything — a passive mirror must never. An image that comes back empty (all transparent or all black)
+/// counts as none, so it never replaces the last good frame.
 @MainActor public final class LiveWindowSnapshotter: WindowSnapshotter {
     public static let jpegQuality: CGFloat = 0.7
 
-    public init() {}
+    /// SkyLight's image of a window in a global rect (points), or nil.
+    public typealias PrivateCapture = @Sendable (CGWindowID, CGRect) -> CGImage?
+    /// The window's frame in global points, or nil when it is gone.
+    public typealias FrameLookup = @Sendable (CGWindowID) -> CGRect?
+    /// The public (ScreenCaptureKit) still, sized to a max width.
+    public typealias PublicCapture = @Sendable (CGWindowID, Int) async -> ViewFrame?
 
-    public func snapshot(windowID: CGWindowID, maxWidth: Int, completion: @escaping @MainActor (ViewFrame?) -> Void) {
+    private let privateCapture: PrivateCapture
+    private let frameOf: FrameLookup
+    private let publicCapture: PublicCapture
+
+    public convenience init() {
+        self.init(privateCapture: { id, rect in
+                      guard CGPreflightScreenCaptureAccess() else { return nil }
+                      return CUSkyLight.system.captureWithSkyLight(windowIDs: [id], rect: rect).first
+                  },
+                  frameOf: { CUWindowLookup.frame(of: $0) },
+                  publicCapture: { id, width in await LiveWindowSnapshotter.screenCaptureKit(windowID: id, maxWidth: width) })
+    }
+
+    /// The captures, injectable for tests.
+    public init(privateCapture: @escaping PrivateCapture, frameOf: @escaping FrameLookup, publicCapture: @escaping PublicCapture) {
+        self.privateCapture = privateCapture
+        self.frameOf = frameOf
+        self.publicCapture = publicCapture
+    }
+
+    public func snapshot(windowID: CGWindowID, maxWidth: Int, privatePath: Bool, completion: @escaping @MainActor (ViewFrame?) -> Void) {
+        let privateCapture = self.privateCapture, frameOf = self.frameOf, publicCapture = self.publicCapture
         Task.detached(priority: .utility) {
-            let frame = await Self.take(windowID: windowID, maxWidth: maxWidth)
+            let frame = await Self.take(windowID: windowID, maxWidth: maxWidth, privatePath: privatePath,
+                                        privateCapture: privateCapture, frameOf: frameOf, publicCapture: publicCapture)
             await MainActor.run { completion(frame) }
         }
     }
 
-    nonisolated private static func take(windowID: CGWindowID, maxWidth: Int) async -> ViewFrame? {
+    /// The window server's image when the private path allows it and it has content, else the public still.
+    nonisolated static func take(windowID: CGWindowID, maxWidth: Int, privatePath: Bool, privateCapture: PrivateCapture,
+                                 frameOf: FrameLookup, publicCapture: PublicCapture) async -> ViewFrame? {
+        if privatePath, let frame = frameOf(windowID), frame.width >= 2, frame.height >= 2,
+           let image = privateCapture(windowID, frame), let still = still(image, windowSize: frame.size, maxWidth: maxWidth) {
+            return still
+        }
+        return await publicCapture(windowID, maxWidth)
+    }
+
+    /// A captured image as a mirror frame: drawn down to `maxWidth` pixels at most, JPEG. Nil when blank.
+    nonisolated static func still(_ image: CGImage, windowSize: CGSize, maxWidth: Int) -> ViewFrame? {
+        guard !isBlank(image) else { return nil }
+        let factor = min(1, Double(max(2, maxWidth)) / Double(image.width))
+        let width = max(2, Int((Double(image.width) * factor).rounded()))
+        let height = max(2, Int((Double(image.height) * factor).rounded()))
+        let sized = width == image.width && height == image.height ? image : CUImageTools.scaled(image, width: width, height: height)
+        guard let sized, let jpeg = encode(sized) else { return nil }
+        return ViewFrame(jpeg: jpeg, width: sized.width, height: sized.height, windowSize: windowSize)
+    }
+
+    nonisolated static func screenCaptureKit(windowID: CGWindowID, maxWidth: Int) async -> ViewFrame? {
         guard CGPreflightScreenCaptureAccess(),
               let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false),
               let window = content.windows.first(where: { $0.windowID == windowID }),
@@ -47,21 +99,7 @@ import UniformTypeIdentifiers
     }
 
     /// Drawn down to 8×8: nothing but transparent or black pixels is an image of nothing.
-    nonisolated static func isBlank(_ image: CGImage) -> Bool {
-        var pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
-        let drawn = pixels.withUnsafeMutableBytes { raw -> Bool in
-            guard let context = CGContext(data: raw.baseAddress, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 32,
-                                          space: CGColorSpaceCreateDeviceRGB(),
-                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-            context.interpolationQuality = .low
-            context.draw(image, in: CGRect(x: 0, y: 0, width: 8, height: 8))
-            return true
-        }
-        guard drawn else { return true }
-        return stride(from: 0, to: pixels.count, by: 4).allSatisfy { i in
-            pixels[i + 3] == 0 || (pixels[i] < 4 && pixels[i + 1] < 4 && pixels[i + 2] < 4)
-        }
-    }
+    nonisolated static func isBlank(_ image: CGImage) -> Bool { CUImageTools.isBlank(image) }
 
     nonisolated private static func encode(_ image: CGImage) -> Data? {
         let data = NSMutableData()
