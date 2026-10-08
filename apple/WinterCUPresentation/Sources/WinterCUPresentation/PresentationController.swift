@@ -208,19 +208,20 @@ import Foundation
     }
 
     /// The overlay floats above every app, so a covered target would show its cursor on top of the covering window.
-    /// Read the window list (at most every `occlusionInterval`, and at once after an action) and fade the cursor out
-    /// where the target is not the frontmost ordinary window at the cursor's point.
+    /// Look at the windows above the target (a cached list, refreshed off the main thread at most every 150 ms; read
+    /// here at most every `occlusionInterval`, and at once after an action) and fade the cursor out where one of them
+    /// covers the cursor's point.
     private func updateOcclusion(now: TimeInterval) {
         guard !shownOverlays.isEmpty else { return }
         let firstLook = shownOverlays.contains { occluded[$0] == nil }
         guard firstLook || now - lastOcclusionCheck >= tuning.occlusionInterval else { return }
         lastOcclusionCheck = now
-        let stack = windows.windowsFrontToBack()
         for key in shownOverlays {
-            guard let timeline = cursors[key], let frame = windowFrames[key] else { continue }
+            guard let timeline = cursors[key], let frame = windowFrames[key],
+                  let above = windows.windowsAbove(key.target.windowID) else { continue }
             let tip = timeline.frame(at: now).tip
             let point = CGPoint(x: frame.minX + tip.x, y: frame.minY + tip.y)
-            let covered = !CursorOcclusion.isVisible(at: point, target: key.target.windowID, in: stack, ownPID: ownPID)
+            let covered = !CursorOcclusion.isVisible(at: point, above: above, ownPID: ownPID)
             if occluded[key] != covered {
                 occluded[key] = covered
                 overlays[key]?.setOccluded(covered)

@@ -1,37 +1,25 @@
 import AppKit
 import CoreGraphics
 
-/// Window geometry from the window server, screens from AppKit (flipped to top-left points). Reading a window's bounds
-/// and on-screen flag needs no permission; only its title would.
+/// Window geometry from the window server, through `WindowTracker`'s background-refreshed cache; screens from AppKit
+/// (flipped to top-left points). Reading a window's bounds and on-screen flag needs no permission.
 @MainActor final class SystemWindowSource: CUWindowSource {
+    private let tracker: WindowTracker
+
+    init(tracker: WindowTracker = WindowTracker()) {
+        self.tracker = tracker
+    }
+
     func snapshot(of windowID: CGWindowID) -> WindowSnapshot? {
-        guard let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
-              let info = list.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID }),
-              let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
-              let frame = CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
-        else { return nil }
-        // The key is absent, not false, for a window that is off screen.
-        let onScreen = (info[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false
-        return WindowSnapshot(frame: frame, isOnScreen: onScreen)
+        tracker.snapshot(of: windowID)
+    }
+
+    func windowsAbove(_ windowID: CGWindowID) -> [StackWindow]? {
+        tracker.windowsAbove(windowID)
     }
 
     func screens() -> [ScreenInfo] {
         AppKitScreens.all()
-    }
-
-    func windowsFrontToBack() -> [StackWindow] {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-                as? [[String: Any]] else { return [] }
-        return list.compactMap { info in
-            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
-                  let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-                  let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
-                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
-            else { return nil }
-            let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
-            let alpha = CGFloat((info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1)
-            return StackWindow(id: id, pid: pid, layer: layer, bounds: bounds, alpha: alpha)
-        }
     }
 }
 

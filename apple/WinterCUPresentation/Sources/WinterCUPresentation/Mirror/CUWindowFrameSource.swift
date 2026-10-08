@@ -48,9 +48,21 @@ public enum CUWindowFrameSourceError: Error, Equatable {
     private var stream: WindowStream<EncodedImage>?
     private var seq = 0
     private var lastSizeCheck: TimeInterval = 0
+    private var sizeProbeInFlight = false
+    private let server: WindowServer
+    /// The size probe runs here, never on the main thread.
+    private let probeQueue = DispatchQueue(label: "com.winter.computeruse.frame-source-size", qos: .utility)
 
-    public init(windowID: CGWindowID, maxFps: Int, maxWidth: Int,
-                onFrame: @escaping @MainActor (CUEncodedFrame) -> Void, onError: @escaping @MainActor (Error) -> Void) {
+    public convenience init(windowID: CGWindowID, maxFps: Int, maxWidth: Int,
+                            onFrame: @escaping @MainActor (CUEncodedFrame) -> Void,
+                            onError: @escaping @MainActor (Error) -> Void) {
+        self.init(windowID: windowID, maxFps: maxFps, maxWidth: maxWidth, server: SystemWindowServer(),
+                  onFrame: onFrame, onError: onError)
+    }
+
+    init(windowID: CGWindowID, maxFps: Int, maxWidth: Int, server: WindowServer,
+         onFrame: @escaping @MainActor (CUEncodedFrame) -> Void, onError: @escaping @MainActor (Error) -> Void) {
+        self.server = server
         self.windowID = windowID
         self.maxFps = max(1, maxFps)
         self.maxWidth = max(16, maxWidth)
@@ -62,11 +74,11 @@ public enum CUWindowFrameSourceError: Error, Equatable {
         guard stream == nil else { return }
         let encoder = FrameEncoder(maxFps: maxFps, quality: Self.jpegQuality)
         let maxWidth = self.maxWidth
-        let windowID = self.windowID
         let stream = WindowStream<EncodedImage>(
             windowID: windowID, framesPerSecond: maxFps,
-            sizing: { size in
-                CaptureSizing.pixelSize(windowSize: size, scale: WindowGeometryProbe.backingScale(windowID: windowID),
+            sizing: { frame in
+                // The screen's scale comes from AppKit; nothing here asks the window server.
+                CaptureSizing.pixelSize(windowSize: frame.size, scale: AppKitScreens.backingScale(for: frame),
                                         maxWidth: maxWidth)
             },
             process: { pixelBuffer in encoder.encode(pixelBuffer) }
@@ -92,17 +104,35 @@ public enum CUWindowFrameSourceError: Error, Equatable {
                                 windowSize: stream.windowSize, seq: seq))
     }
 
-    /// Re-reads the window's size now and then; a new shape gets a new capture size (the old one would letterbox).
+    /// Re-reads the window's frame now and then — ONE window's description, on a background queue — and gives a new
+    /// shape a new capture size (the old one would letterbox).
     private func followWindowSize(_ stream: WindowStream<EncodedImage>) {
         let now = ProcessInfo.processInfo.systemUptime
-        guard now - lastSizeCheck >= Self.sizeCheckInterval else { return }
+        guard now - lastSizeCheck >= Self.sizeCheckInterval, !sizeProbeInFlight else { return }
         lastSizeCheck = now
-        guard let size = WindowGeometryProbe.size(windowID: windowID) else { return }
-        let old = stream.windowSize
-        guard abs(size.width - old.width) > 1 || abs(size.height - old.height) > 1 else { return }
-        let pixels = CaptureSizing.pixelSize(windowSize: size, scale: WindowGeometryProbe.backingScale(windowID: windowID),
+        sizeProbeInFlight = true
+        let server = self.server
+        let id = windowID
+        probeQueue.async { [weak self] in
+            let frame = server.describe([id]).first?.bounds
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.sizeProbed(frame) }
+            }
+        }
+    }
+
+    private func sizeProbed(_ frame: CGRect?) {
+        sizeProbeInFlight = false
+        guard let stream, let frame,
+              Self.shapeChanged(from: stream.windowSize, to: frame.size) else { return }
+        let pixels = CaptureSizing.pixelSize(windowSize: frame.size, scale: AppKitScreens.backingScale(for: frame),
                                              maxWidth: maxWidth)
-        stream.resize(pixelSize: pixels, windowSize: size)
+        stream.resize(pixelSize: pixels, windowSize: frame.size)
+    }
+
+    /// More than a point of change on either side.
+    nonisolated static func shapeChanged(from old: CGSize, to new: CGSize) -> Bool {
+        abs(new.width - old.width) > 1 || abs(new.height - old.height) > 1
     }
 
     private func fail(_ failure: WindowStreamFailure) {
@@ -140,25 +170,5 @@ final class FrameEncoder: @unchecked Sendable {
         guard VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &image) == noErr, let image,
               let jpeg = JPEGCodec.encode(image, quality: quality) else { return nil }
         return EncodedImage(jpeg: jpeg, width: image.width, height: image.height)
-    }
-}
-
-/// The window's current size and its screen's scale, from the window server (no permission needed).
-@MainActor enum WindowGeometryProbe {
-    static func size(windowID: CGWindowID) -> CGSize? {
-        guard let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
-              let info = list.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID }),
-              let dict = info[kCGWindowBounds as String] as? NSDictionary,
-              let bounds = CGRect(dictionaryRepresentation: dict as CFDictionary)
-        else { return nil }
-        return bounds.size
-    }
-
-    static func backingScale(windowID: CGWindowID) -> CGFloat {
-        guard let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
-              let info = list.first, let dict = info[kCGWindowBounds as String] as? NSDictionary,
-              let bounds = CGRect(dictionaryRepresentation: dict as CFDictionary)
-        else { return NSScreen.main?.backingScaleFactor ?? 2 }
-        return AppKitScreens.backingScale(for: bounds)
     }
 }
