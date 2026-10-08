@@ -417,11 +417,11 @@ describe("ComputerV2: the helper's errors and notifications", () => {
   macOnly("a target screenshot's detail is an unfenced daemon line, even for an emit:false read", async () => {
     const w = world();
     await w.run("const notes = await apps.open('Notes')");
-    w.fake.handlers["target.screenshot"] = () => ({ imageBase64: Buffer.from("jpeg-x").toString("base64"), mime: "image/jpeg", width: 10, height: 10, shotId: "shotX", detail: "moved the window here to capture it" });
+    w.fake.handlers["target.screenshot"] = () => ({ imageBase64: Buffer.from("jpeg-x").toString("base64"), mime: "image/jpeg", width: 10, height: 10, shotId: "shotX", detail: "Notes's window is on another desktop (another Space or full screen), so this is its last drawn content — it may be a little out of date" });
     const r = await w.run("await notes.screenshot()");
-    expect(r.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toContain("moved the window here to capture it\n");
+    expect(r.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toContain("Notes's window is on another desktop (another Space or full screen), so this is its last drawn content — it may be a little out of date\n");
     const r2 = await w.run("const quiet = await notes.screenshot({ emit: false })");
-    expect(r2.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toEqual(["moved the window here to capture it\n"]);
+    expect(r2.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toEqual(["Notes's window is on another desktop (another Space or full screen), so this is its last drawn content — it may be a little out of date\n"]);
   }, 30_000);
 
   macOnly("unsupported: the helper's sentence reaches the script; data.axError only the log", async () => {

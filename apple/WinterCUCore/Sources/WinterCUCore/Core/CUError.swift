@@ -89,7 +89,7 @@ public struct CUError: Error, Codable, Sendable, Equatable, CustomStringConverti
     /// moved here.
     public static func screenshotElsewhere(_ app: String) -> CUError {
         CUError(code: "window_elsewhere",
-                message: "can't take a screenshot of \(app)'s window while it is on another desktop (another Space or full screen), and it could not be moved here — state() and find() still work there; ask the user to bring it to this desktop")
+                message: "can't take a screenshot of \(app)'s window while it is on another desktop (another Space or full screen): macOS gave no image of it there — state() and find() still work there; ask the user to bring it to this desktop")
     }
 
     public static func staleRef(_ ref: Int) -> CUError {

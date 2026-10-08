@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import WinterCUCore
 import WinterCUPresentation
 
 // The in-window mirror's stream (the ComputerV2 contract's "mirror moves INTO Winter.app" section): the helper
@@ -65,19 +66,11 @@ public protocol WindowGeometry: AnyObject {
 public final class LiveWindowGeometry: WindowGeometry {
     public init() {}
 
-    private func info(_ windowID: CGWindowID) -> [String: Any]? {
-        (CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]])?.first
-    }
+    // The engine's lookup: a full-screen window on another Space is missing from the one-window query, and
+    // would read as gone (never snapshotted) without its fallback to the full listing.
+    public func frame(of windowID: CGWindowID) -> CGRect? { CUWindowLookup.frame(of: windowID) }
 
-    public func frame(of windowID: CGWindowID) -> CGRect? {
-        guard let bounds = info(windowID)?[kCGWindowBounds as String] as? NSDictionary else { return nil }
-        return CGRect(dictionaryRepresentation: bounds as CFDictionary)
-    }
-
-    public func isOnScreen(_ windowID: CGWindowID) -> Bool? {
-        guard let info = info(windowID) else { return nil }
-        return (info[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false
-    }
+    public func isOnScreen(_ windowID: CGWindowID) -> Bool? { CUWindowLookup.isOnScreen(windowID) }
 }
 
 /// The hub's clock: what time it is, and a way to be called back. Injected so the idle throttle is tested
@@ -110,9 +103,12 @@ public struct ViewTarget: Equatable, Sendable {
     public var windowFrame: CGRect
     /// The bind's `mirror` flag (the daemon passes `computerUse.mirror`): false → never any frames.
     public var mirror: Bool
+    /// The bind's `privatePath` (`computerUse.privateEventPath`, absent → on): off-screen stills may come from the
+    /// window server's own image of the window.
+    public var privatePath: Bool
 
     public init(sessionId: String, targetId: String, pid: Int32, windowId: UInt32, appName: String, bundleId: String,
-                windowFrame: CGRect, mirror: Bool) {
+                windowFrame: CGRect, mirror: Bool, privatePath: Bool = true) {
         self.sessionId = sessionId
         self.targetId = targetId
         self.pid = pid
@@ -121,6 +117,7 @@ public struct ViewTarget: Equatable, Sendable {
         self.bundleId = bundleId
         self.windowFrame = windowFrame
         self.mirror = mirror
+        self.privatePath = privatePath
     }
 
     /// `[x, y, w, h]` from the engine's results; anything else is an empty rect.
@@ -511,7 +508,8 @@ public enum WindowRelative {
             let width = subscribers(of: target.sessionId).map(\.subscription).filter(\.frames).map(\.maxWidth).min() ?? Self.defaultMaxWidth
             state.inFlight = true
             snapshots[id] = state
-            snapshotter.snapshot(windowID: CGWindowID(target.windowId), maxWidth: width) { [weak self] frame in
+            snapshotter.snapshot(windowID: CGWindowID(target.windowId), maxWidth: width,
+                                 privatePath: target.privatePath) { [weak self] frame in
                 self?.snapshotDone(targetId: id, windowId: target.windowId, frame: frame)
             }
         }

@@ -226,9 +226,9 @@ final class FakeGeometry: WindowGeometry {
 
 /// One-shot snapshots, answered by the test.
 @MainActor final class FakeSnapshotter: WindowSnapshotter {
-    var requests: [(windowID: CGWindowID, maxWidth: Int, completion: @MainActor (ViewFrame?) -> Void)] = []
-    func snapshot(windowID: CGWindowID, maxWidth: Int, completion: @escaping @MainActor (ViewFrame?) -> Void) {
-        requests.append((windowID, maxWidth, completion))
+    var requests: [(windowID: CGWindowID, maxWidth: Int, privatePath: Bool, completion: @MainActor (ViewFrame?) -> Void)] = []
+    func snapshot(windowID: CGWindowID, maxWidth: Int, privatePath: Bool, completion: @escaping @MainActor (ViewFrame?) -> Void) {
+        requests.append((windowID, maxWidth, privatePath, completion))
     }
     /// Answers every pending request with `frame`.
     func answer(_ frame: ViewFrame?) {
