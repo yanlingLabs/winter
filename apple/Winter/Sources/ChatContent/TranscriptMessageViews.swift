@@ -1350,8 +1350,12 @@ func toolRunFailureSummary(_ entries: [ToolRunEntry]) -> String? {
     guard let (name, failed) = entries.lazy.flatMap({ entry in entry.calls.map { (entry.name, $0) } }).first(where: { $0.1.isError }),
           let raw = failed.output
     else { return nil }
-    let output = toolOutputMayCarryImages(name) ? toolOutputSplittingImages(raw).text : raw
-    guard let line = output.split(separator: "\n")
+    // Only the head of the output is read: the first line is in it, and this runs for every collapsed
+    // failed run on every render — over a result of up to 64 KiB that was a split, a trim and a
+    // String per LINE, thousands of allocations, to keep one.
+    let head = String(raw.prefix(failureSummaryScanCharacters))
+    let output = toolOutputMayCarryImages(name) ? toolOutputSplittingImages(head).text : head
+    guard let line = output.split(separator: "\n").lazy
               .map({ $0.trimmingCharacters(in: .whitespaces) })
               .first(where: { !$0.isEmpty })
     else { return nil }
@@ -1359,6 +1363,9 @@ func toolRunFailureSummary(_ entries: [ToolRunEntry]) -> String? {
         ? String(line.prefix(maxFailureSummaryCharacters)) + "…"
         : line
 }
+
+/// How much of a failed call's output `toolRunFailureSummary` reads to find its first line.
+let failureSummaryScanCharacters = 4_000
 
 /// The words an expanded call draws in place of an output block when it has none.
 ///

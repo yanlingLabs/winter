@@ -556,6 +556,11 @@ struct OrbSessionState: Equatable {
     /// pill must never stay amber because an `ended` was lost. The pill-themed window tints those calls'
     /// pills (`PillToolRunHeader.isReviewing`).
     var reviewingCallIds: Set<String> = []
+    /// How many main-thread turns have ENDED (`turn_completed` or `agent_error`, whatever the reason —
+    /// an Esc'd turn included). A counter rather than a flag so a client can tell "the turn I asked to
+    /// stop has ended" from "a new turn started right behind it", which `turnRunning` alone cannot say
+    /// when both land in one fold (`FieldStateAdapter.isStopping`).
+    var completedTurns = 0
     /// The exchange the running main turn belongs to — stamped by a turn-opening `turn_started` — so an
     /// `aborted` terminal marks THAT exchange, not whichever opened last: a message held behind a turn
     /// that has already replied opens its own exchange while the turn runs, and the daemon closes a turn
@@ -731,6 +736,15 @@ enum SessionReducer {
 
     static func reduce(_ state: OrbSessionState, _ event: SessionEvent) -> OrbSessionState {
         var s = state
+        reduceInPlace(&s, event)
+        return s
+    }
+
+    /// The same fold, applied to `s` where it lies. A caller folding a RUN of events (a replay, a
+    /// frame's worth of chunks) holds one state and passes it here, so the arrays inside it are mutated
+    /// in place; through `reduce` every event copied the exchanges and the open exchange's activity
+    /// (up to 200 items) because the caller still held the old value — per event, for thousands of events.
+    static func reduceInPlace(_ s: inout OrbSessionState, _ event: SessionEvent) {
         switch event {
         case .harnessAttached(let v): // gate-feedback-1 FIX A — see `attachedClients`'s doc.
             s.attachedClients.append(v.clientName)
@@ -935,6 +949,7 @@ enum SessionReducer {
             }
         case .turnCompleted(let v) where v.threadId == mainThread:
             s.turnRunning = false
+            s.completedTurns += 1
             endOutstandingInteractions(&s) // clears pendingInteractions, freezing each as `.ended`
             s.streamingText = ""
             s.status = .idle
@@ -987,6 +1002,7 @@ enum SessionReducer {
             appendActivity(.notice(text: line), to: &s)
         case .agentError(let v) where v.threadId == mainThread:
             s.turnRunning = false
+            s.completedTurns += 1
             s.compactionStartedAt = nil
             endOutstandingInteractions(&s) // clears pendingInteractions, freezing each as `.ended`
             s.streamingText = ""
@@ -1118,7 +1134,6 @@ enum SessionReducer {
             break // messages/deltas/bg/checkpoint + child-thread events don't move state (harness
                   // attach/detach ARE now handled above — gate-feedback-1 FIX A)
         }
-        return s
     }
 
     /// Appends a new pending interaction and re-derives `status`'s count — 2d-iii task 1. Replay
@@ -1711,7 +1726,7 @@ final class SessionModel: ObservableObject {
         var next = state
         for event in events {
             liveThinking.fold(event)
-            next = SessionReducer.reduce(next, event)
+            SessionReducer.reduceInPlace(&next, event)
         }
         state = next
     }
@@ -1728,7 +1743,7 @@ final class SessionModel: ObservableObject {
         for event in events {
             let wasRunning = next.turnRunning
             liveThinking.fold(event)
-            next = SessionReducer.reduce(next, event)
+            SessionReducer.reduceInPlace(&next, event)
             if case .turnStarted(let v) = event, v.threadId == "main", !wasRunning { next.workingVerb = WorkingVerbs.forTurn(prompt: next.runningTurnPrompt) }
         }
         state = next
