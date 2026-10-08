@@ -16,6 +16,8 @@ protocol CUAXBackend: AnyObject {
     func perform(_ e: AXUIElement, _ action: String) throws
     func isAlive(_ e: AXUIElement) -> Bool
     func windowID(_ e: AXUIElement) -> CGWindowID?
+    /// The AX element of a window `kAXWindowsAttribute` omits (another Space, full screen); private.
+    func remoteWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement?
 }
 
 extension CUAXBackend {
@@ -54,6 +56,7 @@ final class CULiveAX: CUAXBackend {
     func perform(_ e: AXUIElement, _ action: String) throws { try AX.perform(e, action) }
     func isAlive(_ e: AXUIElement) -> Bool { AX.isAlive(e) }
     func windowID(_ e: AXUIElement) -> CGWindowID? { AX.windowID(e) }
+    func remoteWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement? { AX.windowByRemoteToken(pid: pid, windowID: windowID) }
 }
 
 /// Process and window-server facts (and the few global effects of rung 4), injectable for tests.
@@ -62,8 +65,12 @@ protocol CUSystemBackend: AnyObject {
     func bundleId(pid: pid_t) -> String?
     func processName(pid: pid_t) -> String?
     func window(id: UInt32) -> CUWindowServerWindow?
+    /// The pid's normal (layer 0) windows, on screen or not, front to back.
+    func windows(pid: pid_t) -> [CUWindowServerWindow]
     /// On-screen windows of every layer, front to back.
     func windowStack() -> [CUWindowServerWindow]
+    /// Moves a window to the active Space (SkyLight, private); true only when verified.
+    func moveWindowToActiveSpace(_ id: UInt32) -> Bool
     func frontmostPid() -> pid_t?
     func activate(pid: pid_t) -> Bool
     func cursorLocation() -> CGPoint?
@@ -81,7 +88,11 @@ final class CULiveSystem: CUSystemBackend {
         return app?.executableURL?.lastPathComponent ?? app?.localizedName
     }
     func window(id: UInt32) -> CUWindowServerWindow? { CUWindowServer.window(id: id) }
+    func windows(pid: pid_t) -> [CUWindowServerWindow] {
+        CUWindowServer.windows().filter { $0.pid == pid && $0.frame.width > 1 && $0.frame.height > 1 }
+    }
     func windowStack() -> [CUWindowServerWindow] { CUWindowServer.windows(onScreenOnly: true, includeOtherLayers: true) }
+    func moveWindowToActiveSpace(_ id: UInt32) -> Bool { CUSkyLight.system.moveWindowToActiveSpace(windowID: id) }
     func frontmostPid() -> pid_t? { NSWorkspace.shared.frontmostApplication?.processIdentifier }
     func activate(pid: pid_t) -> Bool {
         guard let app = NSRunningApplication(processIdentifier: pid) else { return false }

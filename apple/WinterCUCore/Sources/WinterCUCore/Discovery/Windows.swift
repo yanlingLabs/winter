@@ -90,18 +90,18 @@ struct CUAXWindow {
 
 enum CUAXWindows {
     /// The app's AX windows with ids: `_AXUIElementGetWindow` when available, else matched to the window
-    /// server's list by frame (and title when both have one).
-    static func list(pid: pid_t) -> [CUAXWindow] {
-        let app = AX.app(pid)
-        let focused = AX.element(app, kAXFocusedWindowAttribute)
-        let main = AX.element(app, kAXMainWindowAttribute)
-        let server = CUWindowServer.windows().filter { $0.pid == pid }
+    /// server's list (`server`, the pid's windows) by frame and title. AX lists only windows on the current
+    /// Space (minimized ones included); others come from `CUWindowResolver`.
+    static func list(pid: pid_t, ax: CUAXBackend, server: [CUWindowServerWindow]) -> [CUAXWindow] {
+        let app = ax.application(pid)
+        let focused = ax.element(app, kAXFocusedWindowAttribute)
+        let main = ax.element(app, kAXMainWindowAttribute)
         var used = Set<UInt32>()
         var out: [CUAXWindow] = []
-        for w in AX.elements(app, kAXWindowsAttribute) {
-            let frame = AX.frame(w) ?? .zero
-            let title = AX.string(w, kAXTitleAttribute) ?? ""
-            var id = AX.windowID(w)
+        for w in ax.elements(app, kAXWindowsAttribute) {
+            let frame = ax.frame(w) ?? .zero
+            let title = ax.string(w, kAXTitleAttribute) ?? ""
+            var id = ax.windowID(w)
             if id == nil {
                 id = server.first { s in
                     !used.contains(s.id) && abs(s.frame.minX - frame.minX) < 2 && abs(s.frame.minY - frame.minY) < 2
@@ -119,7 +119,7 @@ enum CUAXWindows {
     }
 
     /// The requested window, else the main one, else the focused one, else the first.
-    static func choose(_ windows: [CUAXWindow], selector: CUWindowSelector?) throws -> CUAXWindow {
+    static func choose(_ windows: [CUAXWindow], selector: CUWindowSelector?, appName: String = "The app") throws -> CUAXWindow {
         if let selector {
             switch selector {
             case .id(let id):
@@ -134,6 +134,82 @@ enum CUAXWindows {
             }
         }
         if let w = windows.first(where: \.main) ?? windows.first(where: \.focused) ?? windows.first { return w }
-        throw CUError.targetLost("the app has no window")
+        throw CUError.noWindow(appName)
+    }
+}
+
+/// Which window a bind gets when the obvious ones aren't usable (pure; every effect is injected).
+///
+/// AX lists only windows on the current Space. A window the window server has but AX doesn't is on another
+/// Space or in full screen. In order:
+/// 0. use it where it is: its AX element by remote token (private, `privatePath`) — state, find, screenshots,
+///    AX actions and text work there with no move;
+/// a. move it to this desktop (SkyLight, `privatePath`), then wait for AX to list it;
+/// b. open a new window (File → New Window / ⌘N) and bind that — only when no specific window was asked for;
+/// otherwise `window_elsewhere`. An app with no window at all gets (b), then `no_window`.
+enum CUWindowResolver {
+    struct Outcome {
+        var window: CUAXWindow
+        var detail: String?
+    }
+
+    struct Effects {
+        /// AX element of an off-Space window by remote token.
+        var remote: (UInt32) -> AXUIElement?
+        /// Builds the window record for a remote element (title/frame from AX, else from the server).
+        var describe: (AXUIElement, CUWindowServerWindow) -> CUAXWindow
+        var moveToActiveSpace: (UInt32) -> Bool
+        /// Asks the app for a new window; true when the request was sent.
+        var openNewWindow: () -> Bool
+        /// The AX windows now.
+        var axWindows: () -> [CUAXWindow]
+        /// Polls `probe` until it answers or a few seconds pass.
+        var wait: (() -> CUAXWindow?) -> CUAXWindow?
+    }
+
+    static func resolve(appName: String, axWindows: [CUAXWindow], server: [CUWindowServerWindow],
+                        selector: CUWindowSelector?, privatePath: Bool, _ fx: Effects) throws -> Outcome {
+        let listed = Set(axWindows.map(\.id))
+        let offSpace = server.filter { $0.layer == 0 && !listed.contains($0.id) }
+        if let selector {
+            if let w = try? CUAXWindows.choose(axWindows, selector: selector, appName: appName) { return Outcome(window: w) }
+            let match: CUWindowServerWindow? = {
+                switch selector {
+                case .id(let id): return offSpace.first { $0.id == id }
+                case .title(let t):
+                    let want = t.lowercased()
+                    return offSpace.first { $0.title.lowercased() == want } ?? offSpace.first { !$0.title.isEmpty && $0.title.lowercased().contains(want) }
+                }
+            }()
+            guard let match else { return Outcome(window: try CUAXWindows.choose(axWindows, selector: selector, appName: appName)) }
+            return try reach([match], appName: appName, privatePath: privatePath, allowNewWindow: false, fx)
+        }
+        if !axWindows.isEmpty { return Outcome(window: try CUAXWindows.choose(axWindows, selector: nil, appName: appName)) }
+        return try reach(offSpace, appName: appName, privatePath: privatePath, allowNewWindow: true, fx)
+    }
+
+    private static func reach(_ candidates: [CUWindowServerWindow], appName: String, privatePath: Bool,
+                              allowNewWindow: Bool, _ fx: Effects) throws -> Outcome {
+        if privatePath {
+            for s in candidates {
+                if let element = fx.remote(s.id) {
+                    return Outcome(window: fx.describe(element, s),
+                                   detail: "bound \(appName)'s window where it is (another Space or full screen); pointer actions will move it to this desktop")
+                }
+            }
+            for s in candidates where fx.moveToActiveSpace(s.id) {
+                if let w = fx.wait({ fx.axWindows().first { $0.id == s.id } }) {
+                    return Outcome(window: w, detail: "moved \(appName)'s window to this desktop from another Space")
+                }
+            }
+        }
+        if allowNewWindow {
+            let before = Set(fx.axWindows().map(\.id))
+            if fx.openNewWindow(), let w = fx.wait({ fx.axWindows().first { !before.contains($0.id) } }) {
+                let why = candidates.isEmpty ? "" : "; the existing one is on another Space or in full screen"
+                return Outcome(window: w, detail: "opened a new \(appName) window\(why)")
+            }
+        }
+        throw candidates.isEmpty ? CUError.noWindow(appName) : CUError.windowElsewhere(appName)
     }
 }

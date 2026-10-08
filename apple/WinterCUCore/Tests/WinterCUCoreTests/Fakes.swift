@@ -95,6 +95,13 @@ final class FakeAX: CUAXBackend {
     }
     func isAlive(_ e: AXUIElement) -> Bool { !dead.contains(AXIdentity(element: e)) }
     func windowID(_ e: AXUIElement) -> CGWindowID? { windowIDs[AXIdentity(element: e)] }
+    /// Windows reachable only by remote token (another Space, full screen), by window id.
+    var remoteWindows: [CGWindowID: AXUIElement] = [:]
+    private(set) var remoteAsked: [CGWindowID] = []
+    func remoteWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement? {
+        remoteAsked.append(windowID)
+        return remoteWindows[windowID]
+    }
 }
 
 /// The process and window-server world for the same tests.
@@ -114,6 +121,20 @@ final class FakeSystem: CUSystemBackend {
     func bundleId(pid: pid_t) -> String? { bundles[pid] }
     func processName(pid: pid_t) -> String? { names[pid] }
     func window(id: UInt32) -> CUWindowServerWindow? { windows[id] }
+    func windows(pid: pid_t) -> [CUWindowServerWindow] {
+        windows.values.filter { $0.pid == pid && $0.layer == 0 }.sorted { $0.id < $1.id }
+    }
+    /// Whether a SkyLight move "works"; on success the window comes on screen and `onMove` runs.
+    var moveSucceeds = false
+    var onMove: ((UInt32) -> Void)?
+    private(set) var moved: [UInt32] = []
+    func moveWindowToActiveSpace(_ id: UInt32) -> Bool {
+        moved.append(id)
+        guard moveSucceeds else { return false }
+        windows[id]?.onScreen = true
+        onMove?(id)
+        return true
+    }
     func windowStack() -> [CUWindowServerWindow] { stack }
     func frontmostPid() -> pid_t? { front }
     func activate(pid: pid_t) -> Bool { activated.append(pid); front = pid; return true }

@@ -21,6 +21,11 @@ public struct CUSkyLight: @unchecked Sendable {
     typealias GetProcessForPID = @convention(c) (pid_t, UnsafeMutableRawPointer) -> Int32
     typealias SetAuthMessage = @convention(c) (CGEvent, UnsafeMutableRawPointer) -> Void
     typealias AuthFactory = @convention(c) (AnyClass, Selector, UnsafeMutableRawPointer, Int32, UInt32) -> UnsafeMutableRawPointer?
+    typealias MainConnection = @convention(c) () -> UInt32
+    typealias ActiveSpace = @convention(c) (UInt32) -> UInt64
+    typealias CopySpacesForWindows = @convention(c) (UInt32, Int32, CFArray) -> Unmanaged<CFArray>?
+    typealias WindowsSpaces = @convention(c) (UInt32, CFArray, CFArray) -> Void
+    typealias SpaceType = @convention(c) (UInt32, UInt64) -> Int32
 
     var postToPidFn: PostToPid?
     var setIntFieldFn: SetIntField?
@@ -30,6 +35,12 @@ public struct CUSkyLight: @unchecked Sendable {
     var getProcessForPIDFn: GetProcessForPID?
     var setAuthMessageFn: SetAuthMessage?
     var authFactoryFn: AuthFactory?
+    var mainConnectionFn: MainConnection?
+    var activeSpaceFn: ActiveSpace?
+    var copySpacesFn: CopySpacesForWindows?
+    var addToSpacesFn: WindowsSpaces?
+    var removeFromSpacesFn: WindowsSpaces?
+    var spaceTypeFn: SpaceType?
 
     /// `SLEventPostToPid` resolved: rung 3 is possible.
     public var isAvailable: Bool { postToPidFn != nil }
@@ -53,6 +64,14 @@ public struct CUSkyLight: @unchecked Sendable {
         s.getProcessForPIDFn = fn("GetProcessForPID", GetProcessForPID.self)
         s.setAuthMessageFn = fn("SLEventSetAuthenticationMessage", SetAuthMessage.self)
         s.authFactoryFn = fn("objc_msgSend", AuthFactory.self)
+        s.mainConnectionFn = fn("SLSMainConnectionID", MainConnection.self) ?? fn("CGSMainConnectionID", MainConnection.self)
+        s.activeSpaceFn = fn("SLSGetActiveSpace", ActiveSpace.self) ?? fn("CGSGetActiveSpace", ActiveSpace.self)
+        s.copySpacesFn = fn("SLSCopySpacesForWindows", CopySpacesForWindows.self)
+            ?? fn("CGSCopySpacesForWindows", CopySpacesForWindows.self)
+        s.addToSpacesFn = fn("SLSAddWindowsToSpaces", WindowsSpaces.self) ?? fn("CGSAddWindowsToSpaces", WindowsSpaces.self)
+        s.removeFromSpacesFn = fn("SLSRemoveWindowsFromSpaces", WindowsSpaces.self)
+            ?? fn("CGSRemoveWindowsFromSpaces", WindowsSpaces.self)
+        s.spaceTypeFn = fn("SLSSpaceGetType", SpaceType.self) ?? fn("CGSSpaceGetType", SpaceType.self)
         return s
     }
 
@@ -171,5 +190,35 @@ public struct CUSkyLight: @unchecked Sendable {
         let a = target.withUnsafeBytes { psn in defocus.withUnsafeBufferPointer { postEventRecordToFn(psn.baseAddress!, $0.baseAddress!) } }
         let b = prev.withUnsafeBytes { psn in focus.withUnsafeBufferPointer { postEventRecordToFn(psn.baseAddress!, $0.baseAddress!) } }
         return a == 0 && b == 0
+    }
+
+    // MARK: Spaces
+
+    /// Every Space a window is on.
+    func spaces(ofWindow id: UInt32, connection cid: UInt32) -> [UInt64] {
+        guard let copySpacesFn,
+              let arr = copySpacesFn(cid, 0x7, [NSNumber(value: id)] as CFArray)?.takeRetainedValue() as? [NSNumber]
+        else { return [] }
+        return arr.map(\.uint64Value).filter { $0 != 0 }
+    }
+
+    /// Moves a window to the active Space without activating anything: added to the active Space first,
+    /// verified, and only then removed from its old ones, so a refused move changes nothing. Windows in a
+    /// full-screen Space are left alone (they are sized for it). False when any symbol is missing, the
+    /// window server refuses (moving another process's window may need rights a regular app lacks), or the
+    /// window is already there.
+    func moveWindowToActiveSpace(windowID id: UInt32) -> Bool {
+        guard let mainConnectionFn, let activeSpaceFn, let addToSpacesFn, let removeFromSpacesFn else { return false }
+        let cid = mainConnectionFn()
+        let active = activeSpaceFn(cid)
+        guard active != 0 else { return false }
+        let before = spaces(ofWindow: id, connection: cid)
+        guard !before.isEmpty, !before.contains(active) else { return false }
+        if let spaceTypeFn, before.contains(where: { spaceTypeFn(cid, $0) == 1 }) { return false }  // 1 = full screen
+        let windows = [NSNumber(value: id)] as CFArray
+        addToSpacesFn(cid, windows, [NSNumber(value: active)] as CFArray)
+        guard spaces(ofWindow: id, connection: cid).contains(active) else { return false }
+        removeFromSpacesFn(cid, windows, before.map { NSNumber(value: $0) } as CFArray)
+        return true
     }
 }
