@@ -425,13 +425,17 @@ public final class EventTraffic: @unchecked Sendable {
         }
     }
 
-    /// The consumer took one event off the stream.
-    public func noteConsumed() {
+    /// The consumer took one event off the stream. Returns how long that event had been waiting on it, in seconds
+    /// (0 when nothing was counted as waiting).
+    @discardableResult
+    public func noteConsumed() -> TimeInterval {
         lock.lock(); defer { lock.unlock() }
-        guard head < times.count else { return }
+        guard head < times.count else { return 0 }
+        let waited = max(clock() - times[head], 0)
         head += 1
         if head == times.count { times.removeAll(keepingCapacity: true); head = 0 }
         else if head > 4096 { times.removeFirst(head); head = 0 }
+        return waited
     }
 
     /// Events on the stream not yet taken (a floor, once `cap` has been passed).

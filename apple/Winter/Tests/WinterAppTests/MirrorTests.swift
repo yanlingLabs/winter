@@ -411,6 +411,41 @@ final class MirrorTests: XCTestCase {
         withExtendedLifetime(watch) {}
     }
 
+    /// The helper re-announces `view.bound` on every call it makes: for a target already known, with nothing different,
+    /// that is nothing — no call on the sink, no publish, no change of who has the window.
+    func testARepeatBindOfTheSameTargetIsANoOp() {
+        let (state, sink) = state(targets: [.fake("a", app: "Mail"), .fake("b", app: "Notes")])
+        let log = sink.log
+        let recency = state.recency
+        var publishes = 0
+        let watch = state.objectWillChange.sink { publishes += 1 }
+        for _ in 0..<20 {
+            state.bound(.fake("b", app: "Notes"))
+            state.bound(.fake("a", app: "Mail")) // the other one, announced again, is no more a switch
+        }
+        XCTAssertEqual(sink.log, log)
+        XCTAssertEqual(publishes, 0)
+        XCTAssertEqual(state.recency, recency)
+        XCTAssertEqual(state.shownTarget?.targetId, "b")
+        withExtendedLifetime(watch) {}
+    }
+
+    /// A new size for the same target: the mirror resizes where it stands — one `show` with the new size, never a clear
+    /// or a reset (which would put the grey placeholder up) — and a size that reads zero changes nothing.
+    func testASizeChangeIsAnInPlaceResizeWithNoClear() {
+        let (state, sink) = state(targets: [.fake("a", size: CGSize(width: 800, height: 600))])
+        state.frame(.fake("s1", "a", bytes: 5))
+        let before = state.panelSize
+        state.bound(.fake("a", size: CGSize(width: 1000, height: 400)))
+        XCTAssertEqual(sink.log, ["show:Notes:800x600", "frame:5:720x540", "show:Notes:1000x400"])
+        XCTAssertFalse(sink.log.contains("clear"))
+        XCTAssertFalse(sink.log.contains("reset"))
+        XCTAssertNotEqual(state.panelSize, before)
+        state.bound(.fake("a", size: .zero))
+        XCTAssertEqual(sink.log.count, 3, "a size that reads zero is a no-op")
+        XCTAssertEqual(state.shownTarget?.windowSize, CGSize(width: 1000, height: 400))
+    }
+
     func testAFramesNewWindowSizeResizesThePanel() {
         let (state, _) = state(targets: [.fake("a", size: CGSize(width: 800, height: 600))])
         let before = state.panelSize
@@ -915,6 +950,36 @@ final class MirrorTests: XCTestCase {
         XCTAssertEqual(binder.presentCount, presents)
         XCTAssertEqual(r.client.calls.count, calls, "and the helper was asked for nothing")
         withExtendedLifetime((watch, stateWatch, window)) {}
+        binder.close()
+    }
+
+    /// A helper that announces the same target on every call, to the whole chain: nothing publishes, nothing refreshes,
+    /// the panel is not touched and nothing is asked of the helper.
+    func testRepeatedBindsReachNothingBeyondTheState() async {
+        let r = rig()
+        let host = RecordingPanelHost()
+        let window = offscreenWindow()
+        let binder = MirrorWindowBinder(coordinator: r.coordinator, windowId: "shell", kind: .shell, window: window, sessionId: "s1",
+                                        host: host, facts: visibleFacts)
+        r.client.setTargets([.fake("t1", app: "Notes")], for: "s1")
+        await expect({ r.coordinator.shownSession(forWindow: "shell") == "s1" && host.presented.count >= 1 })
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        var coordinatorPublishes = 0
+        let watch = r.coordinator.objectWillChange.sink { coordinatorPublishes += 1 }
+        let refreshes = binder.refreshCount, presents = binder.presentCount, calls = r.client.calls.count
+        let log = r.sinks.byId["s1"]?.log ?? []
+        for _ in 0..<50 { r.client.push(.bound(sessionId: "s1", target: .fake("t1", app: "Notes"))) }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(coordinatorPublishes, 0)
+        XCTAssertEqual(binder.refreshCount, refreshes)
+        XCTAssertEqual(binder.presentCount, presents)
+        XCTAssertEqual(r.client.calls.count, calls)
+        XCTAssertEqual(r.sinks.byId["s1"]?.log ?? [], log, "and the mirror never blinked")
+        // A resize of the same target is the one thing that moves the panel — once, in place.
+        r.client.push(.bound(sessionId: "s1", target: .fake("t1", app: "Notes", size: CGSize(width: 1200, height: 500))))
+        await expect({ host.presented.count == presents + 1 })
+        XCTAssertFalse((r.sinks.byId["s1"]?.log ?? []).contains("clear"))
+        withExtendedLifetime((watch, window)) {}
         binder.close()
     }
 

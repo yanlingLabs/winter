@@ -380,7 +380,10 @@ final class AppModel: ObservableObject {
 
     /// Streamed chunks (a reply's and a reasoning block's) folded in batches, never once each —
     /// `SessionFeed`'s rule and reason (the surfaces showing this session re-render on every fold).
-    private lazy var chunks = StreamedChunkQueue { [weak self] events in self?.session.apply(contentsOf: events) }
+    private lazy var chunks = StreamedChunkQueue { [weak self] events in
+        self?.session.apply(contentsOf: events)
+        self?.feed.latency.noteFolded(events)
+    }
 
     private func flushChunks() { chunks.flush() }
 
@@ -425,6 +428,7 @@ final class AppModel: ObservableObject {
             } else {
                 flushChunks()
                 session.apply(e)
+                feed.latency.noteFolded([e])
             }
         case .connection(let s):
             replay.finish() // what has arrived folds first, so the order of events is kept

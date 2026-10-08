@@ -33,6 +33,10 @@ final class SessionFeed {
     private var mode: Mode
     private let session: SessionModel
     private var pumpTask: Task<Void, Never>?
+    /// Events read off the client's stream and waiting for the main actor (see `start()`).
+    private let relay = EventRelay()
+    private var draining = false
+    private var stopped = false
 
     /// followFocus: AppModel sets this to flip `connectionSummary` to the "retrying" string on
     /// each failed connect attempt (AppModel.swift original :42, verbatim string). Unused in
@@ -68,13 +72,26 @@ final class SessionFeed {
     /// own focus machinery, and nothing there has a panel to coalesce folds for.
     var onPinnedAttach: ((_ sessionId: String, _ ceilingSeq: Int?) -> Void)?
 
-    init(makeTransport: @escaping @Sendable () -> WinterTransport, token: String, clientName: String, mode: Mode, session: SessionModel) {
+    init(makeTransport: @escaping @Sendable () -> WinterTransport, token: String, clientName: String, mode: Mode, session: SessionModel,
+         latencyReportInterval: TimeInterval = FeedLatencyMeter.interval) {
+        self.latencyReportInterval = latencyReportInterval
         client = WinterClient(makeTransport: makeTransport, token: token, clientName: clientName)
         self.mode = mode
         self.session = session
         if case .pinned = mode { session.isLoadingHistory = true }
         FeedRegistry.shared.register(self)
     }
+
+    /// How far behind its daemon this feed is (`FeedLatencyMeter`): one `.notice` per 10 s while events flow.
+    private let latencyReportInterval: TimeInterval
+    private(set) lazy var latency = FeedLatencyMeter(
+        label: { [weak self] in
+            guard let self else { return "feed" }
+            if let id = self.pinnedSessionId { return "window \(id.prefix(10))" }
+            return "orb \(self.focusedSessionIdProvider?()?.prefix(10) ?? "-")"
+        },
+        backlog: { [weak self] in self?.diagnostics.backlog ?? 0 },
+        interval: latencyReportInterval)
 
     // MARK: - What a hang report names
 
@@ -88,7 +105,7 @@ final class SessionFeed {
     var diagnostics: FeedDiagnostics {
         FeedDiagnostics(sessionId: pinnedSessionId ?? focusedSessionIdProvider?(),
                         turnLive: session.state.turnRunning,
-                        backlog: client.traffic.backlog + chunks.count + (replayBuffer?.count ?? 0) + (extraBacklog?() ?? 0),
+                        backlog: client.traffic.backlog + relay.count + chunks.count + (replayBuffer?.count ?? 0) + (extraBacklog?() ?? 0),
                         oldestEventAge: client.traffic.oldestAge)
     }
 
@@ -138,21 +155,50 @@ final class SessionFeed {
         session.markConnected() // M2: connect() success IS the connected signal
         onConnected?()
 
-        pumpTask = Task { [weak self] in
-            guard let self else { return }
-            for await ev in self.client.events {
-                self.client.traffic.noteConsumed()
-                await self.handle(ev)
+        // The stream is read OFF the main actor and handed over in batches. Iterating an `AsyncStream` from a
+        // main-actor task costs a hop per element however full the stream is — measured on a replay of a real
+        // 14-minute session: ~380 events a second with the main thread 84% idle, a backlog 24 s deep, while the
+        // events themselves cost next to nothing to fold. Here the reader never touches the main actor; one hop
+        // takes everything that has arrived, and `drain` folds it in order.
+        let relay = self.relay
+        let client = self.client
+        let reader = Task.detached(priority: .userInitiated) { [weak self] in
+            for await event in client.events {
+                let waited = client.traffic.noteConsumed()
+                let needsDrain = relay.push(.init(event: event, at: ProcessInfo.processInfo.systemUptime, streamWait: waited))
+                if needsDrain { Task { @MainActor [weak self] in await self?.drain() } }
                 if Task.isCancelled { return }
             }
         }
-        await pumpTask?.value
+        pumpTask = reader
+        await reader.value
+        await drain() // whatever the last batch left
+    }
+
+    /// Folds every event the reader has handed over, in order, batch after batch, until none is waiting. One drain
+    /// runs at a time: a second asked for while one is under way is a no-op (the running one takes what arrived).
+    private func drain() async {
+        guard !draining else { return }
+        draining = true
+        defer { draining = false }
+        while !stopped {
+            let batch = relay.take()
+            if batch.isEmpty { return }
+            for entry in batch {
+                if stopped { return }
+                if case .session(let e) = entry.event {
+                    latency.noteConsumed(e, queueWait: entry.streamWait + (ProcessInfo.processInfo.systemUptime - entry.at))
+                }
+                await handle(entry.event)
+            }
+        }
     }
 
     /// Verbatim (AppModel.swift original :63-66): cancel the pump, then a deliberate, detached
     /// close — deliberate closes must not trigger WinterClient's reconnect loop (Task 9).
     func stop() {
         replayDeadline?.cancel()
+        stopped = true
         pumpTask?.cancel()
         Task { await client.close() }
     }
@@ -192,6 +238,7 @@ final class SessionFeed {
                 } else {
                     flushChunks()
                     session.apply(e)
+                    latency.noteFolded([e])
                 }
             }
             // followFocus always supplies onEvent (returns true above) — no fallback needed here.
@@ -273,7 +320,10 @@ final class SessionFeed {
     /// child done while its window was still writing; a window on a 60-call session was minutes behind
     /// a reasoning model, still "working" after the turn had been stopped). Any other event folds the
     /// waiting chunks first, so the session sees every event in order.
-    private lazy var chunks = StreamedChunkQueue { [weak self] events in self?.session.apply(contentsOf: events) }
+    private lazy var chunks = StreamedChunkQueue { [weak self] events in
+        self?.session.apply(contentsOf: events)
+        self?.latency.noteFolded(events)
+    }
 
     private func flushChunks() { chunks.flush() }
 }
@@ -340,4 +390,40 @@ final class StreamedChunkQueue {
         pending.removeAll()
         dueAt = nil
     }
+}
+
+
+/// Events the reader has taken off the client's stream and the main actor has not yet folded. A lock, a buffer and
+/// one flag: `push` says whether the main actor must be asked to drain (none is already on its way), `take` hands
+/// over everything and re-arms.
+final class EventRelay: @unchecked Sendable {
+    struct Entry: @unchecked Sendable {
+        let event: WinterEvent
+        /// When it was handed over (monotonic seconds), and how long it had waited on the client's stream before.
+        let at: TimeInterval
+        let streamWait: TimeInterval
+    }
+
+    private let lock = NSLock()
+    private var entries: [Entry] = []
+    private var drainRequested = false
+
+    /// Adds `entry`; true when the caller must now ask the main actor to drain.
+    func push(_ entry: Entry) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        entries.append(entry)
+        if drainRequested { return false }
+        drainRequested = true
+        return true
+    }
+
+    func take() -> [Entry] {
+        lock.lock(); defer { lock.unlock() }
+        let taken = entries
+        entries = []
+        drainRequested = false
+        return taken
+    }
+
+    var count: Int { lock.lock(); defer { lock.unlock() }; return entries.count }
 }
