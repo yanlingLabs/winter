@@ -118,11 +118,19 @@ describe("the automation runtime", () => {
     expect(Date.now() - t0).toBeLessThan(2_000);
   });
 
-  test("ambient process/Bun/fetch/require are not reachable by name; print formats values", async () => {
+  test("ambient names are SHADOWED only — defense in depth; the sandbox is what makes them useless", async () => {
     const { run } = harness();
-    const r = await run("r1", "print(typeof process, typeof Bun, typeof fetch, typeof require)\nprint({ a: [1, 2] }, 3n, undefined, new Error('boom'))");
+    const r = await run("r1", [
+      "print(typeof process, typeof Bun, typeof fetch, typeof require)",
+      // Review I2: shadowing a NAME stops nothing a script can reach another way. In-process (no sandbox here)
+      // these three succeed; worker-process.test.ts proves that inside the real worker they are useless — an
+      // empty environment, every read outside the allowlist denied, no network, no Keychain.
+      "print(typeof this.process, typeof (0, Function)('return process')(), typeof (await import('node:fs')).readFileSync)",
+      "print({ a: [1, 2] }, 3n, undefined, new Error('boom'))",
+    ].join("\n"));
     expect(r.prints[0]).toBe("undefined undefined undefined undefined");
-    expect(r.prints[1]).toBe('{\n  "a": [\n    1,\n    2\n  ]\n} 3n undefined Error: boom');
+    expect(r.prints[1]).toBe("object object function");
+    expect(r.prints[2]).toBe('{\n  "a": [\n    1,\n    2\n  ]\n} 3n undefined Error: boom');
   });
 
   test("show() takes only an image from screenshot()", async () => {

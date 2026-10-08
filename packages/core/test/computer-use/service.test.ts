@@ -148,14 +148,19 @@ describe("ComputerV2: binding, state and the diff base", () => {
 });
 
 describe("ComputerV2: the policy, through a script", () => {
-  macOnly("ask: the per-app card on first bind; once covers this call only; deny is NotAllowed", async () => {
+  macOnly("ask: the per-app card on first bind; once covers this call only — its targets are released at the end; deny is NotAllowed", async () => {
     const w = world({ policy: "ask", answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb") });
     const r1 = await w.run("const notes = await apps.open('Notes')\nawait notes.click(14)");
     expect(r1.isError).toBe(false);
     expect(cards(w.events)).toHaveLength(1);
-    expect(cards(w.events)[0]).toMatchObject({ toolName: "ComputerV2", summary: "Allow Winter to use Notes?" });
-    // Bound targets persist, but "once" covered that call: acting again cards again.
-    await w.run("await notes.click(14)");
+    expect(cards(w.events)[0]).toMatchObject({ toolName: "ComputerV2", summary: "Allow Winter to use Notes (com.apple.Notes)?" });
+    // "Once" covered that call: the target is released, so the next call can neither act nor LOOK (review I3).
+    expect(w.fake.calls("target.release")).toEqual([{ targetId: "t1" }]);
+    const looked = await w.run("try { await notes.state() } catch (e) { print(e.name, e.message) }");
+    expect(text(looked)).toContain("TargetLost Notes is gone (it was allowed for one call only)");
+    expect(w.fake.calls("target.snapshot")).toHaveLength(1); // the bind's own snapshot only
+    // Binding again asks again.
+    await w.run("const again = await apps.open('Notes')");
     expect(cards(w.events)).toHaveLength(2);
 
     const denied = world({ policy: "ask", answer: (c, b) => b.resolve(c.sessionId, c.callId, false, "orb") });
@@ -171,10 +176,11 @@ describe("ComputerV2: the policy, through a script", () => {
     expect(text(r)).toContain("bound");
   }, 30_000);
 
-  macOnly("dont-ask: binds and looks, but acts only on an Always-allow app", async () => {
+  macOnly("dont-ask: binds ONLY an Always-allow app (the ruling) — nothing else is launched, bound or carded", async () => {
     const w = world({ policy: "dont-ask" });
-    const r = await w.run("const notes = await apps.open('Notes')\ntry { await notes.click(14) } catch (e) { print(e.name) }");
+    const r = await w.run("try { await apps.open('Notes') } catch (e) { print(e.name) }");
     expect(text(r)).toContain("NotAllowed");
+    expect(w.fake.calls("target.bind")).toEqual([]);
     expect(w.fake.calls("target.act")).toEqual([]);
     expect(cards(w.events)).toEqual([]);
     const granted = world({ policy: "dont-ask", apps: { "com.apple.Notes": { grant: "always" } } });
@@ -182,11 +188,12 @@ describe("ComputerV2: the policy, through a script", () => {
     expect(r2.isError).toBe(false);
   }, 30_000);
 
-  macOnly("plan: state works, every action is NotAllowed", async () => {
-    const w = world({ policy: "plan" });
+  macOnly("plan: the per-app card on bind (the ruling), then state works and every action is NotAllowed", async () => {
+    const w = world({ policy: "plan", answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "session") });
     const r = await w.run("const notes = await apps.open('Notes')\nawait notes.state()\nawait notes.type('x')");
     expect(r.isError).toBe(true);
     expect(text(r)).toContain("NotAllowed (line 3): this session is in plan mode");
+    expect(cards(w.events).map((c) => c.summary)).toEqual(["Allow Winter to use Notes (com.apple.Notes)?"]);
   }, 30_000);
 
   macOnly("restrictions and floors under bypass: Don't allow, click only, Winter itself", async () => {
@@ -210,7 +217,7 @@ describe("ComputerV2: the policy, through a script", () => {
     w.fake.handlers["target.act"] = (p) => { if (first && p.allowForeground === false) { first = false; throw new FakeHelperError("needs_foreground", "canvas"); } return { rung: 4 }; };
     const r = await w.run("const notes = await apps.open('Notes')\nawait notes.click(14)");
     expect(r.isError).toBe(false);
-    expect(cards(w.events).map((c) => c.summary)).toEqual(["Allow Winter to use Notes?", "Winter needs to bring Notes to the front and use your mouse for a moment"]);
+    expect(cards(w.events).map((c) => c.summary)).toEqual(["Allow Winter to use Notes (com.apple.Notes)?", "Winter needs to bring Notes (com.apple.Notes) to the front and use your mouse for a moment"]);
     expect(w.fake.calls("target.act").map((a) => a.allowForeground)).toEqual([false, true]);
 
     const lonely = world({ policy: "bypass", attended: false });

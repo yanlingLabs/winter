@@ -25,6 +25,9 @@ export function runAutomationWorker(): void {
   for (const g of ["Bun", "fetch", "XMLHttpRequest", "WebSocket"]) {
     try { (globalThis as Record<string, unknown>)[g] = undefined; } catch { /* non-configurable */ }
   }
+  // Nothing of the environment reaches a script (the daemon spawns the worker with a minimal one already —
+  // `computer-use/sandbox.ts`; this empties what is left, defense in depth: `process` is reachable from a script).
+  for (const k of Object.keys(process.env)) { try { delete process.env[k]; } catch { /* read-only */ } }
   // A script's un-awaited rejection or a throw from its own timer must not take the runtime (and every
   // variable the session built) down with it.
   process.on("unhandledRejection", () => { /* the script's own business */ });

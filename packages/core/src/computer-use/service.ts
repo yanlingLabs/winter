@@ -16,7 +16,8 @@ import { randomBytes } from "node:crypto";
 import { computerUsePrivateEventPathFrom, computerUseMirrorFrom, computerUseScreenshotMaxDimFrom, type Settings } from "../settings";
 import { nextScreenshotQuality, screenshotBudgetFor, SCREENSHOT_BYTE_CAP, SCREENSHOT_QUALITY } from "./budget";
 import { DiffBases } from "./diff-base";
-import { AutomationFailure, isAutomationFailure } from "./errors";
+import { AUTOMATION_ERROR_KINDS, AutomationFailure, isAutomationFailure } from "./errors";
+import { isAppPath, isBundleIdShaped, systemAppResolver, type AppResolver } from "./app-resolve";
 import type { HelperClient } from "./helper-client";
 import { FOREGROUND_LOCK_KEY, LOCK_WAIT_MS, TargetLocks } from "./locks";
 import { ACT_PRIMITIVES, newRunGrants, type AppRef, type ComputerPolicy, type RunGrants } from "./policy";
@@ -27,10 +28,10 @@ import {
   type WaitForResult, type WaitIdleResult,
 } from "./protocol";
 import type { RecentApps } from "./recent-apps";
-import { ResultBuilder, type ResultContent } from "./result";
+import { ResultBuilder, type ResultContent, type ScriptError } from "./result";
 import type { AutomationTelemetry, PrimitiveMetric } from "./telemetry";
 import { AutomationWorker, AutomationWorkerUnavailable, type AutomationWorkerOptions, type CallMessage } from "./worker-host";
-import type { AppHandle, ImageHandle } from "./worker/bridge";
+import { APP_PRIMITIVES, GLOBAL_PRIMITIVES, type AppHandle, type ImageHandle } from "./worker/bridge";
 
 export const SCRIPT_TIMEOUT_DEFAULT_MS = 30_000;
 export const SCRIPT_TIMEOUT_MIN_MS = 1_000;
@@ -73,6 +74,8 @@ export interface ComputerV2ServiceDeps {
   startWorker?(): Promise<AutomationWorker>;
   /** Interrupt a session's running turn, as `session.interrupt` does (the helper's Esc). */
   interrupt?(sessionId: string): void;
+  /** Resolves a path or an unlisted bundle id to a bundle id WITHOUT launching (`app-resolve.ts`). */
+  appResolver?: AppResolver;
   idleMs?: number;
   now?(): number;
   log?(line: string): void;
@@ -92,6 +95,11 @@ interface SessionState {
   lastScreenShot?: string;
   idleTimer?: ReturnType<typeof setTimeout>;
   active?: RunCtx;
+  /** Runs queued or running in this session — the idle timer is armed only at zero, so it never fires mid-run. */
+  pending: number;
+  /** The runtime has read screen content since its last reset or restart: EVERY call's text is fenced until
+   *  then — a value read in one call and printed in a later one stays data (the controller's ruling, review I1). */
+  tainted: boolean;
 }
 
 /** A timer that stops counting while a card waits for a human. */
@@ -143,7 +151,16 @@ interface RunCtx {
   cancelled?: string;
   timedOut: boolean;
   killTimer?: ReturnType<typeof setTimeout>;
-  scriptActiveTold: boolean;
+  /** The helper connection generation `script.active` was told on — a helper relaunched mid-run is told again. */
+  scriptActiveGen?: number;
+  /** The script has ENDED: set before its locks are drained, and checked after every await of a primitive, so a
+   *  primitive still in flight (un-awaited by the script) can never take or keep a lock afterwards (review C1). */
+  ended: boolean;
+  /** Targets this call bound — released at its end when their app was allowed only "once" (review I3). */
+  bound: Set<string>;
+  /** The failure sentences the daemon sent this call — a script error carrying one verbatim is the daemon's own
+   *  words and is shown outside the DATA-ONLY fence. */
+  daemonSentences: Set<string>;
 }
 
 const isRef = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
@@ -171,7 +188,7 @@ export class ComputerV2Service {
   private stateFor(sessionId: string): SessionState {
     let s = this.sessions.get(sessionId);
     if (s === undefined) {
-      s = { hadWorker: false, chain: Promise.resolve(), targets: new Map(), images: new Map(), lastTargetShot: new Map() };
+      s = { hadWorker: false, chain: Promise.resolve(), targets: new Map(), images: new Map(), lastTargetShot: new Map(), pending: 0, tainted: false };
       this.sessions.set(sessionId, s);
     }
     return s;
@@ -184,18 +201,23 @@ export class ComputerV2Service {
     if (typeof input.code !== "string" || input.code.trim().length === 0) return failure("TypeError", "code is empty — pass the script to run");
     const timeoutMs = Math.min(SCRIPT_TIMEOUT_MAX_MS, Math.max(SCRIPT_TIMEOUT_MIN_MS, Math.floor(input.timeoutMs ?? SCRIPT_TIMEOUT_DEFAULT_MS)));
     const state = this.stateFor(call.sessionId);
+    state.pending++;
     if (state.idleTimer !== undefined) { clearTimeout(state.idleTimer); state.idleTimer = undefined; }
-    // One run at a time per session: wait for the previous one (or for this call to be cancelled).
+    // One run at a time per session: wait for the previous one (or for this call to be cancelled). The link the
+    // NEXT run waits on settles only when this run is done AND its predecessor is — so a run cancelled while it
+    // waited never lets the one behind it overlap the one still running (the review's run-queue minor).
     const previous = state.chain;
     let release!: () => void;
-    state.chain = new Promise<void>((r) => { release = r; });
+    const mine = new Promise<void>((r) => { release = r; });
+    state.chain = previous.then(() => mine);
     try {
       const go = await waitUnlessAborted(previous, call.signal);
       if (!go) return failure("Cancelled", "the call was cancelled before its script started");
       return await this.runNow(call, input, state, timeoutMs);
     } finally {
       release();
-      this.armIdle(call.sessionId);
+      state.pending--;
+      if (state.pending === 0) this.armIdle(call.sessionId);
     }
   }
 
@@ -209,6 +231,8 @@ export class ComputerV2Service {
       if (state.hadWorker) builder.notice("The automation runtime restarted; earlier variables and bindings are gone.");
       this.forgetBindings(sessionId, state);
     }
+    // The fence is per SESSION: a runtime that read the screen in an earlier call may print what it read now.
+    if (state.tainted) builder.markScreenRead();
     if (state.worker === undefined || !state.worker.alive) {
       try {
         state.worker = await (this.deps.startWorker?.() ?? AutomationWorker.start({ ...this.deps.worker, log: (l) => this.log(l) }));
@@ -228,17 +252,14 @@ export class ComputerV2Service {
     const ctx: RunCtx = {
       sessionId, runId, callId: `cv2_${randomBytes(6).toString("hex")}`, call, state, worker, builder, grants,
       abort: new AbortController(), timer, locks: new Map(), acted: new Set(), chains: new Map(), primitives: new Map(),
-      apps: new Set(), timedOut: false, scriptActiveTold: false,
+      apps: new Set(), timedOut: false, ended: false, bound: new Set(), daemonSentences: new Set(),
     };
     ctxRef.ctx = ctx;
     state.active = ctx;
     // `script.active` brackets every script run (the helper arms its Esc tap while any session is active):
     // told now when the helper is already connected, else at the run's first helper call — a print-only
     // script never launches the helper just to say so.
-    if (this.deps.helper.connected) {
-      ctx.scriptActiveTold = true;
-      this.deps.helper.tell("script.active", { sessionId, active: true });
-    }
+    if (this.deps.helper.connected) this.tellScriptActive(ctx);
     const onAbort = (): void => this.cancel(ctx, "the turn was interrupted");
     if (call.signal?.aborted) onAbort();
     else call.signal?.addEventListener("abort", onAbort, { once: true });
@@ -256,23 +277,38 @@ export class ComputerV2Service {
     timer.clear();
     call.signal?.removeEventListener("abort", onAbort);
     if (ctx.killTimer !== undefined) clearTimeout(ctx.killTimer);
-    ctx.abort.abort(); // any primitive still in flight belongs to a finished script
+    // ENDED first, then abort, then drain: a primitive still in flight (one the script never awaited) sees
+    // `ended` after its next await and can neither take a lock nor keep one (review C1).
+    ctx.ended = true;
+    ctx.abort.abort();
     for (const releaseLock of ctx.locks.values()) releaseLock();
     ctx.locks.clear();
-    if (ctx.scriptActiveTold) this.deps.helper.tell("script.active", { sessionId, active: false });
+    // "Allow once" covers THIS call: a target bound on it is released now (the controller's ruling, review I3).
+    for (const targetId of ctx.bound) {
+      const t = state.targets.get(targetId);
+      if (t === undefined || t.lost !== undefined || this.deps.policy.persistentlyAllowed(sessionId, t.bundleId)) continue;
+      t.lost = "once";
+      this.diffBases.clearTarget(sessionId, targetId);
+      this.deps.helper.tell("target.release", { targetId });
+    }
+    if (ctx.scriptActiveGen !== undefined) this.deps.helper.tell("script.active", { sessionId, active: false });
     if (state.active === ctx) state.active = undefined;
 
-    let error: { name: string; message: string; line?: number } | undefined;
+    // The taint outlives the call (the fence is per session) — unless the runtime is gone below.
+    if (builder.readScreen) state.tainted = true;
+    let error: ScriptError | undefined;
     let outcomeWord: string;
     if (outcome.kind === "exited") {
       state.worker = undefined;
       this.forgetBindings(sessionId, state);
       error = ctx.cancelled !== undefined
-        ? { name: "Cancelled", message: `${ctx.cancelled}; the script did not stop, so the runtime was restarted (its variables and bindings are gone)` }
-        : { name: "Error", message: outcome.refused ? "the automation runtime refused to run outside its sandbox" : "the automation runtime stopped unexpectedly; its variables and bindings are gone" };
+        ? { name: "Cancelled", message: `${ctx.cancelled}; the script did not stop, so the runtime was restarted (its variables and bindings are gone)`, trusted: true }
+        : { name: "Error", message: outcome.refused ? "the automation runtime refused to run outside its sandbox" : "the automation runtime stopped unexpectedly; its variables and bindings are gone", trusted: true };
       outcomeWord = ctx.timedOut ? "timeout" : ctx.cancelled !== undefined ? "cancelled" : "runtime-stopped";
     } else {
-      error = outcome.error;
+      // The worker is UNTRUSTED (the model's code shares its process): its error name is normalised to a known
+      // kind or `Error` before it reaches the result or the audit line, and its message and line are bounded.
+      error = outcome.error === undefined ? undefined : normaliseScriptError(outcome.error, ctx.daemonSentences);
       if (outcome.note === "declarations-not-kept") builder.notice("This script's top-level declarations could not be kept for later calls.");
       outcomeWord = ctx.timedOut ? "timeout" : ctx.cancelled !== undefined ? "cancelled" : error === undefined ? "ok" : `error:${error.name}`;
     }
@@ -281,6 +317,20 @@ export class ComputerV2Service {
       durationMs: this.now() - started, outcome: outcomeWord,
     });
     return builder.build(error === undefined ? {} : { error });
+  }
+
+  /** `script.active` for this run, on the helper connection that is live now (a relaunched helper is told again). */
+  private tellScriptActive(ctx: RunCtx): void {
+    const gen = this.deps.helper.generation;
+    if (ctx.scriptActiveGen === gen) return;
+    ctx.scriptActiveGen = gen;
+    this.deps.helper.tell("script.active", { sessionId: ctx.sessionId, active: true });
+  }
+
+  /** Throw `Cancelled` when the run has ended or been cancelled — after every await of a primitive (review C1). */
+  private live(ctx: RunCtx): void {
+    if (ctx.ended) throw new AutomationFailure("Cancelled", "the script ended before this call finished");
+    if (ctx.cancelled !== undefined) throw new AutomationFailure("Cancelled", ctx.cancelled);
   }
 
   /** Interrupt or timeout: stop the in-flight primitive and every later one; kill a script that will not stop. */
@@ -293,6 +343,12 @@ export class ComputerV2Service {
   }
 
   private async answer(ctx: RunCtx, msg: CallMessage): Promise<void> {
+    // The worker is UNTRUSTED: a primitive outside the API is refused BEFORE it can reach telemetry or the audit
+    // line under a name the script made up (review I6).
+    if (typeof msg.id !== "number" || !KNOWN_PRIMITIVES.has(msg.primitive)) {
+      if (typeof msg.id === "number") ctx.worker.reply(msg.id, { ok: false, error: { kind: "TypeError", message: "not a ComputerV2 function" } });
+      return;
+    }
     const metric: PrimitiveMetric = { ts: this.now(), sessionId: ctx.sessionId, callId: ctx.callId, primitive: msg.primitive, ms: 0, helperMs: 0 };
     const t0 = this.now();
     try {
@@ -301,7 +357,8 @@ export class ComputerV2Service {
     } catch (err) {
       const wire = this.toWire(ctx, err, msg);
       metric.error = wire.kind;
-      ctx.worker.reply(msg.id, { ok: false, error: wire });
+      if (wire.trusted) ctx.daemonSentences.add(wire.message);
+      ctx.worker.reply(msg.id, { ok: false, error: { kind: wire.kind, message: wire.message } });
     } finally {
       metric.ms = this.now() - t0;
       this.deps.telemetry?.primitive(metric);
@@ -311,7 +368,7 @@ export class ComputerV2Service {
   // ── primitives ─────────────────────────────────────────────────────────────────────────────────
 
   private async dispatch(ctx: RunCtx, msg: CallMessage, metric: PrimitiveMetric): Promise<unknown> {
-    if (ctx.cancelled !== undefined) throw new AutomationFailure("Cancelled", ctx.cancelled);
+    this.live(ctx);
     const args = (msg.args ?? {}) as Record<string, unknown>;
     ctx.primitives.set(msg.primitive, (ctx.primitives.get(msg.primitive) ?? 0) + 1);
     switch (msg.primitive) {
@@ -336,7 +393,7 @@ export class ComputerV2Service {
   }
 
   private async targetPrimitive(ctx: RunCtx, targetId: string, primitive: string, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<unknown> {
-    if (ctx.cancelled !== undefined) throw new AutomationFailure("Cancelled", ctx.cancelled);
+    this.live(ctx);
     const t = this.target(ctx, targetId);
     const app: AppRef = { bundleId: t.bundleId, name: t.name };
     if (ACT_PRIMITIVES.has(primitive)) {
@@ -344,6 +401,7 @@ export class ComputerV2Service {
     } else {
       await this.deps.policy.authorize(ctx.grants, app, { kind: "observe" }, ctx.abort.signal);
     }
+    this.live(ctx);
     await this.ensureLock(ctx, t);
     switch (primitive) {
       case "state": return await this.state(ctx, t, args, metric);
@@ -387,8 +445,11 @@ export class ComputerV2Service {
   private async ensureLock(ctx: RunCtx, t: TargetInfo): Promise<void> {
     const key = `${t.bundleId}:${t.pid}`;
     if (ctx.locks.has(key)) return;
+    this.live(ctx);
     const waitMs = Math.min(LOCK_WAIT_MS, Math.max(500, ctx.timer.left() - 500));
     const release = await this.locks.acquire(key, { runId: ctx.runId, sessionId: ctx.sessionId }, { waitMs, signal: ctx.abort.signal, label: t.name });
+    // Won after the script ended (or was cancelled): give it straight back — nobody else would (review C1).
+    if (ctx.ended || ctx.cancelled !== undefined) { release(); this.live(ctx); }
     if (ctx.locks.has(key)) { release(); return; }
     ctx.locks.set(key, release);
   }
@@ -398,7 +459,7 @@ export class ComputerV2Service {
     return Math.max(0, Math.min(Math.floor(requested), left));
   }
 
-  private async helperCall<T>(ctx: RunCtx, method: string, params: Record<string, unknown>, metric: PrimitiveMetric, timeoutMs?: number): Promise<T> {
+  private async helperCall<T>(ctx: RunCtx, method: string, params: Record<string, unknown>, metric: PrimitiveMetric, timeoutMs?: number, opts: { afterEnd?: boolean } = {}): Promise<T> {
     const t0 = this.now();
     const once = (): Promise<T> => this.deps.helper.request<T>(method, params, { signal: ctx.abort.signal, callId: ctx.callId, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
     try {
@@ -420,11 +481,12 @@ export class ComputerV2Service {
           throw again;
         }
       }
-      // The helper arms its Esc tap while any session has a script running (spine §2.1 `script.active`).
-      if (!ctx.scriptActiveTold) {
-        ctx.scriptActiveTold = true;
-        this.deps.helper.tell("script.active", { sessionId: ctx.sessionId, active: true });
-      }
+      // A late answer belongs to a script that has ended: nothing may build on it (review C1). `bind` takes the
+      // answer anyway (`afterEnd`) so it can release what the helper bound.
+      if (opts.afterEnd !== true) this.live(ctx);
+      // The helper arms its Esc tap while any session has a script running (spine §2.1 `script.active`) — told
+      // again when the helper was relaunched mid-run (a new connection generation).
+      this.tellScriptActive(ctx);
       return res;
     } finally {
       metric.helperMs += this.now() - t0;
@@ -450,29 +512,60 @@ export class ComputerV2Service {
     return apps;
   }
 
+  /**
+   * WHICH app the script named, as a bundle id, BEFORE anything is launched (review C2; the controller's ruling):
+   * a name or bundle id the helper's `apps.list` names; else a PATH, by its `Contents/Info.plist`; else a bundle
+   * id LaunchServices knows. Anything else is refused — never bound to find out what it is.
+   */
+  private async identifyApp(ctx: RunCtx, app: string, metric: PrimitiveMetric): Promise<AppRef & { path?: string }> {
+    const resolver = this.deps.appResolver ?? systemAppResolver;
+    if (isAppPath(app)) {
+      const hit = resolver.fromPath(app);
+      if (hit === undefined) throw new Error(`could not read the bundle identifier of ${app} (its Contents/Info.plist) — pass the app's name or bundle id`);
+      return { bundleId: hit.bundleId, name: hit.name, ...(hit.path === undefined ? {} : { path: hit.path }) };
+    }
+    const listed = await this.resolveApp(ctx, app, metric);
+    this.live(ctx);
+    if (listed !== undefined) return listed;
+    if (isBundleIdShaped(app)) {
+      const hit = resolver.fromBundleId(app);
+      if (hit !== undefined) return { bundleId: hit.bundleId, name: hit.name };
+    }
+    throw new Error(`no app named "${app.slice(0, 120)}" — call apps.list() for the names, or pass a bundle id or an .app path`);
+  }
+
   /** `apps.open` / `screen.appAt`: policy BEFORE the helper launches anything, bind, lock, print the full state. */
   private async bind(ctx: RunCtx, req: { app: string; window?: string | number; known?: AppRef }, metric: PrimitiveMetric): Promise<AppHandle> {
-    const known = req.known ?? await this.resolveApp(ctx, req.app, metric);
-    if (known !== undefined) await this.deps.policy.authorize(ctx.grants, known, { kind: "bind" }, ctx.abort.signal);
+    const known: AppRef & { path?: string } = req.known ?? await this.identifyApp(ctx, req.app, metric);
+    await this.deps.policy.authorize(ctx.grants, known, { kind: "bind" }, ctx.abort.signal);
+    this.live(ctx);
     const settings = this.deps.settings();
     const res = await this.helperCall<TargetBindResult>(ctx, "target.bind", {
-      sessionId: ctx.sessionId, app: known?.bundleId ?? req.app, ...(req.window === undefined ? {} : { window: req.window }), mirror: computerUseMirrorFrom(settings),
-    }, metric);
+      // A path binds that exact bundle (its identity was read above); everything else binds by bundle id.
+      sessionId: ctx.sessionId, app: known.path ?? known.bundleId, ...(req.window === undefined ? {} : { window: req.window }), mirror: computerUseMirrorFrom(settings),
+    }, metric, undefined, { afterEnd: true });
     const app: AppRef = { bundleId: res.app.bundleId, name: res.app.name };
     const info: TargetInfo = { targetId: res.targetId, bundleId: app.bundleId, name: app.name, pid: res.app.pid };
     try {
-      // The helper resolved a name or a path we could not: the policy sees the real bundle id now.
-      if (known === undefined || known.bundleId !== app.bundleId) await this.deps.policy.authorize(ctx.grants, app, { kind: "bind" }, ctx.abort.signal);
+      // Bound after the script ended (the helper answered inside the cancel grace) — release it at once.
+      this.live(ctx);
+      // The helper bound something other than what policy allowed: refuse it rather than re-ask after the fact.
+      if (app.bundleId.toLowerCase() !== known.bundleId.toLowerCase()) {
+        throw new AutomationFailure("Refused", `${req.app.slice(0, 120)} resolved to ${app.bundleId}, not the ${known.bundleId} that was allowed — nothing was kept bound`);
+      }
       ctx.state.targets.set(info.targetId, info);
+      ctx.bound.add(info.targetId);
       await this.ensureLock(ctx, info);
     } catch (err) {
       ctx.state.targets.delete(info.targetId);
+      ctx.bound.delete(info.targetId);
       this.deps.helper.tell("target.release", { targetId: info.targetId });
       throw err;
     }
     ctx.apps.add(app.name);
     this.deps.recentApps?.note(app.bundleId, app.name);
     const snap = await this.helperCall<SnapshotResult>(ctx, "target.snapshot", { targetId: info.targetId, full: true, settle: { maxMs: SETTLE_CAP_MS }, callId: ctx.callId }, metric);
+    this.live(ctx);
     metric.settleMs = snap.waitedMs;
     metric.settleExit = snap.settled ? "quiet" : "cap";
     ctx.builder.text(snap.text, { screen: true });
@@ -707,8 +800,17 @@ export class ComputerV2Service {
 
   // ── errors ─────────────────────────────────────────────────────────────────────────────────────
 
-  /** Any failure → the `{kind, message}` the worker throws as its class, with one actionable sentence. */
-  private toWire(ctx: RunCtx, err: unknown, msg: CallMessage): { kind: string; message: string } {
+  /**
+   * Any failure → the `{kind, message}` the worker throws as its class, with one actionable sentence. `trusted`:
+   * the sentence is the DAEMON's own words with no screen text in it — shown outside the DATA-ONLY fence when it
+   * escapes the script verbatim (a `WaitTimeout`'s `seen` is screen text, so it stays inside).
+   */
+  private toWire(ctx: RunCtx, err: unknown, msg: CallMessage): { kind: string; message: string; trusted: boolean } {
+    const w = this.toWireInner(ctx, err, msg);
+    return { ...w, trusted: w.kind !== "WaitTimeout" && w.kind !== "Error" };
+  }
+
+  private toWireInner(ctx: RunCtx, err: unknown, msg: CallMessage): { kind: string; message: string } {
     if (isAutomationFailure(err)) return { kind: err.kind, message: err.message };
     if (err instanceof TypeError) return { kind: "TypeError", message: err.message };
     if (err instanceof HelperUnavailableError) {
@@ -746,13 +848,15 @@ export class ComputerV2Service {
 
   // ── lifecycle ──────────────────────────────────────────────────────────────────────────────────
 
-  /** Forget the session's bindings and diff bases (a reset, a worker restart): the old handles are gone. */
+  /** Forget the session's bindings and diff bases (a reset, a worker restart): the old handles are gone — and so
+   *  is every value the old runtime read from the screen, so the session's fence taint goes with them. */
   private forgetBindings(sessionId: string, state: SessionState): void {
-    for (const t of state.targets.values()) this.deps.helper.tell("target.release", { targetId: t.targetId });
+    for (const t of state.targets.values()) if (t.lost === undefined) this.deps.helper.tell("target.release", { targetId: t.targetId });
     state.targets.clear();
     state.images.clear();
     state.lastTargetShot.clear();
     state.lastScreenShot = undefined;
+    state.tainted = false;
     this.diffBases.clearSession(sessionId);
   }
 
@@ -766,22 +870,30 @@ export class ComputerV2Service {
     const state = this.sessions.get(sessionId);
     if (state === undefined || this.stopped) return;
     if (state.idleTimer !== undefined) clearTimeout(state.idleTimer);
-    state.idleTimer = setTimeout(() => this.endSession(sessionId), this.deps.idleMs ?? WORKER_IDLE_MS);
+    state.idleTimer = setTimeout(() => {
+      // Never mid-run: a run that started after this timer was armed keeps the session (the review's idle minor).
+      const now = this.sessions.get(sessionId);
+      if (now === undefined || now.pending > 0 || now.active !== undefined) return;
+      this.endSession(sessionId, "idle");
+    }, this.deps.idleMs ?? WORKER_IDLE_MS);
     (state.idleTimer as { unref?: () => void }).unref?.();
   }
 
-  /** The session is gone (deleted — its driver ends for good), its worker idled out, or the daemon stops: end
-   *  its runtime and tell the helper (`session.ended` releases the session's targets and closes its mirrors).
-   *  A child incarnation ending (idle eviction, a credential swap) is NOT this: the worker keeps the session's
-   *  variables and bindings across incarnations, and has its own 30-minute idle. */
-  endSession(sessionId: string): void {
+  /**
+   * End the session's runtime and tell the helper (`session.ended` releases its targets and closes its mirrors):
+   * `deleted` — the session is gone (its driver ends for good); `idle` — its worker idled out (30 minutes);
+   * `stop` — the daemon stops. A child incarnation ending (idle eviction, a credential swap) is NOT this: the worker
+   * keeps the session's variables and bindings across incarnations. "Allow for this session" grants live as long
+   * as the SESSION, so an idle end keeps them (the review's grants minor).
+   */
+  endSession(sessionId: string, reason: "deleted" | "idle" | "stop" = "deleted"): void {
+    if (reason !== "idle") this.deps.policy.clearSession(sessionId);
     const state = this.sessions.get(sessionId);
     if (state === undefined) return;
     if (state.active !== undefined) this.cancel(state.active, "the session ended");
     if (state.idleTimer !== undefined) clearTimeout(state.idleTimer);
     state.worker?.kill();
     this.diffBases.clearSession(sessionId);
-    this.deps.policy.clearSession(sessionId);
     this.deps.helper.tell("session.ended", { sessionId });
     this.sessions.delete(sessionId);
   }
@@ -825,7 +937,7 @@ export class ComputerV2Service {
   /** Daemon stop: no worker outlives it. */
   stop(): void {
     this.stopped = true;
-    for (const sessionId of [...this.sessions.keys()]) this.endSession(sessionId);
+    for (const sessionId of [...this.sessions.keys()]) this.endSession(sessionId, "stop");
   }
 
   /** Tests and diagnostics: the session's live worker pid. */
@@ -833,7 +945,30 @@ export class ComputerV2Service {
 }
 
 function failure(name: string, message: string): ScriptResult {
-  return new ResultBuilder().build({ error: { name, message } });
+  return new ResultBuilder().build({ error: { name, message, trusted: true } });
+}
+
+/** The functions a script may call — anything else from the worker is refused unrecorded (review I6). */
+const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES]);
+
+/** The error names a result (and the audit line) may carry: the ten kinds and JavaScript's own. */
+const KNOWN_ERROR_NAMES: ReadonlySet<string> = new Set<string>([
+  ...AUTOMATION_ERROR_KINDS, "Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError",
+]);
+const ERROR_MESSAGE_CAP = 4_096;
+
+/**
+ * The worker's escaped error, made safe to show and to log: the name is a KNOWN kind or `Error` (a script can throw
+ * an object with any `name`, of any size — review I6), the message is capped, the line a positive integer. It is
+ * TRUSTED (shown outside the fence) only when its message is one the daemon itself sent in this call.
+ */
+export function normaliseScriptError(e: { name?: unknown; message?: unknown; line?: unknown }, daemonSentences: ReadonlySet<string>): ScriptError {
+  const name = typeof e.name === "string" && KNOWN_ERROR_NAMES.has(e.name) ? e.name : "Error";
+  const raw = typeof e.message === "string" ? e.message : String(e.message ?? "");
+  const message = raw.slice(0, ERROR_MESSAGE_CAP);
+  const line = typeof e.line === "number" && Number.isInteger(e.line) && e.line > 0 && e.line < 1_000_000 ? e.line : undefined;
+  const trusted = (AUTOMATION_ERROR_KINDS as readonly string[]).includes(name) && daemonSentences.has(raw);
+  return { name, message, ...(line === undefined ? {} : { line }), trusted };
 }
 
 /** Sleep `ms` unless `signal` aborts first; `false` when it did. */
@@ -861,7 +996,10 @@ function elementLine(e: { ref: number; role: string; name?: string; value?: stri
 }
 
 function lostWords(reason: string): string {
-  return reason === "window_closed" ? "its window closed" : reason === "helper_restart" ? "Winter Computer Use restarted" : "the app quit";
+  return reason === "window_closed" ? "its window closed"
+    : reason === "helper_restart" ? "Winter Computer Use restarted"
+      : reason === "once" ? "it was allowed for one call only"
+        : "the app quit";
 }
 
 function refusedWords(reason: string, name: string): string {

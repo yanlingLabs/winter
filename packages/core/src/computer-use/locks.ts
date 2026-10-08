@@ -28,6 +28,9 @@ export class TargetLocks {
    * `waitMs`, or `Cancelled` when `signal` aborts first.
    */
   acquire(key: string, owner: LockOwner, opts: { waitMs?: number; signal?: AbortSignal; label: string }): Promise<() => void> {
+    // An aborted caller (its script ended or was cancelled) is never GRANTED — not even a free lock: nobody
+    // would ever release it (the daemon review's C1, a lock held forever by a finished run).
+    if (opts.signal?.aborted) return Promise.reject(new AutomationFailure("Cancelled", "the script ended before it could take this app's lock"));
     const current = this.held.get(key);
     if (current === undefined) {
       this.held.set(key, { owner, depth: 1, waiters: [] });

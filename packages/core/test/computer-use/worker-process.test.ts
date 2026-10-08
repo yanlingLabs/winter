@@ -3,6 +3,10 @@
 // The compiled binary's own proof is `bun run verify:automation-worker`.
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
 import { AutomationWorker, defaultAutomationWorkerCommand } from "../../src/computer-use/worker-host";
@@ -42,6 +46,65 @@ describe("the sandboxed automation worker", () => {
       const r = await w.run("r1", `${forge}\nawait sleep(50)\nprint('real')`, { ...noop, onPrint: (t) => prints.push(t) });
       expect(r).toEqual({ kind: "done" });
       expect(prints).toEqual(["real"]);
+    } finally { w.kill(); }
+  }, 30_000);
+
+  // Review I2: name shadowing is defense in depth only — `this.process`, `Function("return process")()` and
+  // `import("node:fs")` ARE reachable from a script. The worker's own profile and environment make them useless.
+  macOnly("ambient process and fs are reachable but useless: no environment, no read of the user's home or the daemon's", async () => {
+    const daemonHome = mkdtempSync(join(tmpdir(), "winter-cu-denied-home-"));
+    writeFileSync(join(daemonHome, "secret.json"), "{}");
+    const prefs = join(homedir(), "Library", "Preferences", ".GlobalPreferences.plist");
+    const w = await AutomationWorker.start({ denyRead: [daemonHome] });
+    try {
+      const prints: string[] = [];
+      const code = [
+        "const p1 = this.process, p2 = (0, Function)('return process')()",
+        "print('reach', typeof p1, typeof p2)",
+        "print('env', JSON.stringify(Object.keys(p2.env)))",
+        "const fs = await import('node:fs')",
+        `for (const f of [${JSON.stringify(join(daemonHome, "secret.json"))}, ${JSON.stringify(existsSync(prefs) ? prefs : join(homedir(), ".zshrc"))}, '/etc/passwd']) { try { fs.readFileSync(f); print('READ', f) } catch (e) { print('denied', e.code) } }`,
+        `try { fs.readdirSync(${JSON.stringify(homedir())}); print('LISTED home') } catch (e) { print('denied', e.code) }`,
+        `try { fs.writeFileSync('/tmp/cu-should-not-exist', 'x'); print('WROTE') } catch (e) { print('denied', e.code) }`,
+      ].join("\n");
+      const r = await w.run("r1", code, { ...noop, onPrint: (t) => prints.push(t) });
+      expect(r).toEqual({ kind: "done" });
+      expect(prints[0]).toBe("reach object object"); // reachable…
+      expect(prints[1]).toBe("env []");             // …but with nothing of the daemon's environment
+      expect(prints.slice(2)).toEqual(["denied EPERM", existsSync(prefs) ? "denied EPERM" : expect.stringMatching(/^denied /), "denied EPERM", "denied EPERM", "denied EPERM"]);
+      expect(prints.join("\n")).not.toMatch(/READ|LISTED|WROTE/);
+    } finally { w.kill(); }
+  }, 30_000);
+
+  macOnly("no network: a connection to a listening local port never arrives", async () => {
+    let accepted = 0;
+    const server = createServer((sock) => { accepted++; sock.destroy(); });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as { port: number }).port;
+    const w = await AutomationWorker.start();
+    try {
+      const prints: string[] = [];
+      const code = `const net = await import('node:net')\nconst out = await new Promise((res) => { const s = net.connect(${port}, '127.0.0.1'); s.on('connect', () => res('connected')); s.on('error', (e) => res('error ' + e.code)); setTimeout(() => res('timeout'), 2000) })\nprint(out)`;
+      expect(await w.run("r1", code, { ...noop, onPrint: (t) => prints.push(t) })).toEqual({ kind: "done" });
+      expect(prints[0]).not.toBe("connected");
+      expect(accepted).toBe(0);
+    } finally { w.kill(); server.close(); }
+  }, 30_000);
+
+  macOnly("no Keychain: the sandbox denies both security daemons to the script itself, and Bun.secrets returns nothing", async () => {
+    const guard = fileURLToPath(new URL("../../src/workflows/sandbox-guard.ts", import.meta.url));
+    const w = await AutomationWorker.start();
+    try {
+      const prints: string[] = [];
+      const code = [
+        `const g = await import(${JSON.stringify(guard)})`,
+        "print(JSON.stringify(g.keychainSandboxState()))",
+        "const b = await import('bun')",
+        "try { const v = await b.secrets.get({ service: 'com.winter.core.test-isolated', name: 'cu-probe' }); print('VALUE', String(v)) } catch (e) { print('secrets failed') }",
+      ].join("\n");
+      expect(await w.run("r1", code, { ...noop, onPrint: (t) => prints.push(t) })).toEqual({ kind: "done" });
+      expect(prints[0]).toBe('{"ok":true}'); // both Keychain mach services denied to THIS process
+      expect(prints[1]).toBe("secrets failed");
     } finally { w.kill(); }
   }, 30_000);
 

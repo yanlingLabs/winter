@@ -6,7 +6,8 @@
 // tests drive a REAL sandboxed worker with a scripted `onCall`.
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { buildWorkflowSeatbeltProfile, sandboxAvailable } from "../workflows/sandbox";
+import { sandboxAvailable } from "../workflows/sandbox";
+import { AUTOMATION_WORKER_ENV, buildAutomationSeatbeltProfile, devSourceRootFor } from "./sandbox";
 import { WORKER_NOT_SANDBOXED_EXIT_CODE } from "../workflows/sandbox-guard";
 import { AUTOMATION_WORKER_ARG } from "./worker/entry";
 import { BRIDGE_MAX_LINE, type HostToWorker, type WorkerToHost } from "./worker/bridge";
@@ -36,6 +37,8 @@ export type WorkerRunOutcome =
 
 export interface AutomationWorkerOptions {
   command?: () => AutomationWorkerCommand;
+  /** Paths the worker may never read, whatever else its profile allows — `<WINTER_HOME>` and the Read fence's set. */
+  denyRead?: readonly string[];
   /** How long to wait for the worker's `ready` line. */
   readyTimeoutMs?: number;
   log?: (line: string) => void;
@@ -66,8 +69,11 @@ export class AutomationWorker {
   static async start(opts: AutomationWorkerOptions = {}): Promise<AutomationWorker> {
     if (!sandboxAvailable()) throw new AutomationWorkerUnavailable("the automation runtime needs the macOS sandbox (sandbox-exec), which this machine does not have");
     const cmd = (opts.command ?? defaultAutomationWorkerCommand)();
-    const profile = buildWorkflowSeatbeltProfile(cmd.file);
-    const child = spawn("/usr/bin/sandbox-exec", ["-p", profile, cmd.file, ...cmd.args], { stdio: ["pipe", "pipe", "pipe"], detached: true });
+    // The worker's OWN profile (a read allowlist — `sandbox.ts`), a minimal environment (nothing of the daemon's)
+    // and `/` as its working directory (the daemon's own cwd may be anywhere, the user's home included).
+    const devRoot = devSourceRootFor();
+    const profile = buildAutomationSeatbeltProfile({ selfExecPath: cmd.file, ...(devRoot === undefined ? {} : { devSourceRoot: devRoot }), ...(opts.denyRead === undefined ? {} : { denyRead: opts.denyRead }) });
+    const child = spawn("/usr/bin/sandbox-exec", ["-p", profile, cmd.file, ...cmd.args], { stdio: ["pipe", "pipe", "pipe"], detached: true, cwd: "/", env: { ...AUTOMATION_WORKER_ENV } });
     const worker = new AutomationWorker(child, opts.log ?? (() => {}));
     let readyResolve!: () => void;
     let readyReject!: (e: Error) => void;
