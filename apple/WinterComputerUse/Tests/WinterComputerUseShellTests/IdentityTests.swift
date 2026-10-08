@@ -89,6 +89,7 @@ final class IdentityTests: XCTestCase {
 
     func testAnUnknownBundleRefusesToStart() {
         XCTAssertThrowsError(try resolve("com.example.impostor"))
+        XCTAssertThrowsError(try resolve("com.winter.computeruse.xcode-debug"), "an Xcode Debug build of the helper never serves a home")
         XCTAssertThrowsError(try resolve(nil))
     }
 

@@ -48,10 +48,11 @@ export function helperExecutable(appPath: string, flavor: HelperFlavor): string 
 }
 
 /**
- * xcodebuild for the dev or test flavor: the WinterComputerUse scheme only (no CEF, no app), Debug (the dev
- * identity), unsigned — the scripts sign it themselves with the stated requirement. The test flavor overrides
- * the bundle id and name and adds the test-hook compilation condition, so it can never be mistaken for, or
- * replace, the dev helper.
+ * xcodebuild for the dev or test flavor: the WinterComputerUse scheme only (no CEF, no app), Debug, unsigned
+ * — the scripts sign it themselves with the stated requirement. The bundle id is always given here: project.yml's
+ * Debug id is a placeholder (`com.winter.computeruse.xcode-debug`) so an ordinary Debug Winter build never
+ * registers a second com.winter.computeruse.dev with LaunchServices. The test flavor also takes its own name and
+ * the test-hook compilation condition, so it can never be mistaken for, or replace, the dev helper.
  */
 export function helperBuildArgs(i: { flavor: "dev" | "test"; derivedDataPath: string }): string[] {
   const args = [
@@ -61,10 +62,10 @@ export function helperBuildArgs(i: { flavor: "dev" | "test"; derivedDataPath: st
     "-destination", "platform=macOS",
     "-derivedDataPath", i.derivedDataPath,
     "CODE_SIGNING_ALLOWED=NO",
+    `PRODUCT_BUNDLE_IDENTIFIER=${HELPER[i.flavor].identifier}`,
   ];
   if (i.flavor === "test") {
     args.push(
-      `PRODUCT_BUNDLE_IDENTIFIER=${HELPER.test.identifier}`,
       `WINTER_CU_APP_NAME=${HELPER.test.name}`,
       `SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG ${HELPER_TEST_BUILD_CONDITION}`,
     );

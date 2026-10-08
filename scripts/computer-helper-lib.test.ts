@@ -39,7 +39,10 @@ describe("the helper's identities", () => {
     expect(swift).toContain(`teamID = "${TEAM}"`);
     const yml = readFileSync(join(REPO_ROOT, "apple", "Winter", "project.yml"), "utf8");
     expect(yml).toContain(`PRODUCT_BUNDLE_IDENTIFIER: ${HELPER.dist.identifier}\n`);
-    expect(yml).toContain(`PRODUCT_BUNDLE_IDENTIFIER: ${HELPER.dev.identifier}\n`);
+    // The dev id comes only from dev:helper's command line; an Xcode Debug build gets a placeholder that
+    // LaunchServices can never hand out for com.winter.computeruse.dev (and that the helper refuses to run as).
+    expect(yml).toContain("PRODUCT_BUNDLE_IDENTIFIER: com.winter.computeruse.xcode-debug\n");
+    expect(yml).not.toContain(`PRODUCT_BUNDLE_IDENTIFIER: ${HELPER.dev.identifier}\n`);
     expect(yml).toContain(`WINTER_CU_APP_NAME: ${HELPER.dist.name}\n`);
     expect(yml).toContain(`WINTER_CU_APP_NAME: ${HELPER.dev.name}\n`);
   });
@@ -57,7 +60,7 @@ describe("the helper's identities", () => {
 describe("building and signing", () => {
   test("dev: the helper scheme, Debug, unsigned; test: plus its own id, name and the test-build condition", () => {
     const dev = helperBuildArgs({ flavor: "dev", derivedDataPath: "/dd" });
-    expect(dev).toEqual(["-project", "Winter.xcodeproj", "-scheme", "WinterComputerUse", "-configuration", "Debug", "-destination", "platform=macOS", "-derivedDataPath", "/dd", "CODE_SIGNING_ALLOWED=NO", "build"]);
+    expect(dev).toEqual(["-project", "Winter.xcodeproj", "-scheme", "WinterComputerUse", "-configuration", "Debug", "-destination", "platform=macOS", "-derivedDataPath", "/dd", "CODE_SIGNING_ALLOWED=NO", "PRODUCT_BUNDLE_IDENTIFIER=com.winter.computeruse.dev", "build"]);
     const test = helperBuildArgs({ flavor: "test", derivedDataPath: "/dd" });
     expect(test).toContain("PRODUCT_BUNDLE_IDENTIFIER=com.winter.computeruse.test");
     expect(test).toContain("WINTER_CU_APP_NAME=Winter Computer Use Test");

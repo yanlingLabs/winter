@@ -37,10 +37,12 @@ bun run verify:workflow              # the sandboxed workflow worker on dist/win
 bun run verify:runtime-state         # the runtime-state spine on the compiled binary
 bun run verify:runtimes              # the Release bundle's embedded runtimes
 bun run verify:embedded              # one EMBEDDED chat turn (a Worker from compile:core's 2nd entrypoint) on dist/winter-core
+bun run verify:computer-helper       # the Winter Computer Use helper: dist/dev's signature + a test build's handshake (temp home)
 
 # Swift
 cd apple/WinterProtocol && swift test  # fixture round-trip (asserts the exact fixture count)
 cd apple/WinterKit && swift test       # daemon client + Gateway
+cd apple/WinterComputerUse && swift test  # the computer-use helper's shell (socket, peer check, dispatch, idle quit)
 cd apple/Winter && xcodegen generate && \
   xcodebuild -project Winter.xcodeproj -scheme Winter -destination 'platform=macOS' build
 
@@ -104,6 +106,7 @@ WINTER_RUNTIME_EXECUTABLE="$PWD/../../dist/winter" WINTER_HOME=~/.winter-dev WIN
 - `packages/plugin-sdk` — what third-party plugins build against. Plugins are separate processes granted narrow, user-consented capabilities; `examples/battery-limiter` is the reference plugin.
 - `apple/WinterProtocol` — Swift mirror of the protocol types; its round-trip test decodes and re-encodes every generated fixture and asserts the exact count.
 - `apple/WinterKit` — the Swift daemon client (`WinterClient`), `WinterSessionKit` (phone-facing), and the `Gateway` that mediates the phone over Iroh.
+- `apple/WinterComputerUse` — **Winter Computer Use**, the signed LSUIElement helper app behind `ComputerV2` that holds its OWN Accessibility and Screen Recording grants (it never links WinterKit). The package is the whole shell (`App/main.swift` is the xcodegen `WinterComputerUse` target on top of it): `<WINTER_HOME>/run/computer-use.sock` (0600, NDJSON JSON-RPC 2.0, `hello` first), a peer check BEFORE any read (`LOCAL_PEERTOKEN` → `SecCodeCopyGuestWithAttributes` → `SecCodeCheckValidity` against the daemon's designated requirement: dist `identifier "winter-core"`, dev `identifier "com.winter.core.dev"`, each + Winter's team OU), dispatch into `apple/WinterCUCore` (the engine) with events onto `apple/WinterCUPresentation` (mirror, cursor, Esc), a session ended when the last connection that used it closes, and a 10-minute idle quit. It reads its home from its bundle id (`com.winter.computeruse` → `~/.winter`, `.dev` → `~/.winter-dev`; `WINTER_CU_HOME` moves only a dev build that is not inside an app). It must be launched through LaunchServices, never spawned (TCC would check the parent's grants). Release embeds it at `Winter.app/Contents/Helpers/Winter Computer Use.app` (`scripts/embed-computer-helper.sh`: hardened runtime, no entitlements, a STATED designated requirement — identifier + team OU — so rebuilds keep the user's grants; release.ts checks all of it); Debug embeds nothing — `bun run dev:helper` builds, signs (the dev-daemon way) and `lsregister`s the dev helper into `dist/dev/` (an Xcode Debug build of the target gets the placeholder id `com.winter.computeruse.xcode-debug` and refuses to run, so LaunchServices never holds a second `.dev`). Test hooks (a fake daemon identity, a short idle quit) compile only under `WINTER_CU_TEST_BUILD`, which only `verify:computer-helper` passes.
 - `apple/WinterChatKit` — the phone's own chat engine.
 - `apple/Winter` — the menu-bar app (xcodegen `project.yml`, no committed pbxproj). Release builds embed `winter-core`, `WinterHelper`, and the `winter` runtime plus `ant` under `Contents/Resources/runtimes/` (`scripts/embed-runtimes.sh`).
 - `scripts/release.ts` + `scripts/release-lib.ts` — the release pipeline; `packaging/winter.rb.tmpl` is the Homebrew cask template it renders.

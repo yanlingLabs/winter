@@ -977,8 +977,9 @@ targets:
   # Identity by configuration, like the Winter target: Release = dist (`Winter Computer Use`,
   # com.winter.computeruse, serves ~/.winter, embedded in Winter.app by "Embed Winter Computer Use");
   # Debug = dev (`Winter Computer Use Dev`, com.winter.computeruse.dev, serves ~/.winter-dev), which
-  # `bun run dev:helper` builds, signs with the stated designated requirement and places in dist/dev/. The
-  # helper reads its home from its own bundle id. No entitlements in v1 (release.ts pins exactly none).
+  # `bun run dev:helper` builds (giving the bundle id on its command line — see the Debug config), signs
+  # with the stated designated requirement and places in dist/dev/. The helper reads its home from its own
+  # bundle id. No entitlements in v1 (release.ts pins exactly none).
   WinterComputerUse:
     type: application
     platform: macOS
@@ -1021,7 +1022,12 @@ targets:
         MACOSX_DEPLOYMENT_TARGET: "26.0"
       configs:
         Debug:
-          PRODUCT_BUNDLE_IDENTIFIER: com.winter.computeruse.dev
+          # NOT com.winter.computeruse.dev: Xcode registers every app it builds with LaunchServices, and a
+          # Debug Winter build compiles this target too, so each DerivedData would hold a second registered
+          # com.winter.computeruse.dev — signed by Xcode, with a requirement TCC does not know — for
+          # `open -b` to pick. The dev helper's identity is given only on `bun run dev:helper`'s command line
+          # (PRODUCT_BUNDLE_IDENTIFIER=com.winter.computeruse.dev); this build of it refuses to start.
+          PRODUCT_BUNDLE_IDENTIFIER: com.winter.computeruse.xcode-debug
           WINTER_CU_APP_NAME: Winter Computer Use Dev
           WINTER_CU_APP_ICON: AppIconDev
         Release:
