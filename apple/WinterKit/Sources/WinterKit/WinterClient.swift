@@ -303,6 +303,7 @@ extension SessionEvent {
         case .shortcutInvoke(let v): return v.seq
         case .tileAction(let v): return v.seq
         case .toolReview(let v): return v.seq
+        case .toolReviewProgress(let v): return v.seq
         case .notificationRequested(let v): return v.seq
         case .hookNotice(let v): return v.seq
         case .elicitationRequested(let v): return v.seq
@@ -367,6 +368,7 @@ extension SessionEvent {
         case .shortcutInvoke(let v): return v.sessionId
         case .tileAction(let v): return v.sessionId
         case .toolReview(let v): return v.sessionId
+        case .toolReviewProgress(let v): return v.sessionId
         case .notificationRequested(let v): return v.sessionId
         case .hookNotice(let v): return v.sessionId
         case .elicitationRequested(let v): return v.sessionId

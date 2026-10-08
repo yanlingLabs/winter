@@ -66,7 +66,19 @@ private struct TranscriptToolRowStyleKey: EnvironmentKey {
     static let defaultValue: TranscriptToolRowStyle = .line
 }
 
+/// The tool calls the bash safety reviewer is judging right now (`OrbSessionState.reviewingCallIds`),
+/// set by `TranscriptView` for the rows beneath it. An environment value rather than one more
+/// parameter down the row chain: only the pill-themed tool pill reads it.
+private struct ReviewingCallIdsKey: EnvironmentKey {
+    static let defaultValue: Set<String> = []
+}
+
 extension EnvironmentValues {
+    var reviewingCallIds: Set<String> {
+        get { self[ReviewingCallIdsKey.self] }
+        set { self[ReviewingCallIdsKey.self] = newValue }
+    }
+
     var transcriptToolRowStyle: TranscriptToolRowStyle {
         get { self[TranscriptToolRowStyleKey.self] }
         set { self[TranscriptToolRowStyleKey.self] = newValue }

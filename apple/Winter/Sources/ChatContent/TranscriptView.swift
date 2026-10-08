@@ -56,6 +56,8 @@ struct TranscriptView: View {
                     }
                 }
         }
+        // The pill-themed tool pills read this to show a call under safety review (`PillToolRunHeader`).
+        .environment(\.reviewingCallIds, adapter.reviewingCallIds)
     }
 
     private var transcriptScroll: some View {

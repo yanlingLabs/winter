@@ -222,6 +222,71 @@ func pillToolLabel(_ entry: ToolRunEntry, turnIsLive: Bool) -> PillToolLabel {
     }
 }
 
+// MARK: - The safety review (pure — `PillReviewTests`)
+
+/// Amber, in the pill's own register (`failureRed` is the same kind of literal beside this): a warm
+/// yellow that reads on the pill's dark ground.
+let pillReviewAmber = Color(red: 1.0, green: 0.78, blue: 0.28)
+
+/// One breath of the review glow, in seconds.
+let pillReviewPulsePeriod: TimeInterval = 1.2
+
+/// PURE: whether any of `entries`' calls is under safety review.
+func pillIsReviewing(_ entries: [ToolRunEntry], reviewing: Set<String>) -> Bool {
+    guard !reviewing.isEmpty else { return false }
+    return entries.contains { entry in entry.calls.contains { $0.callId.map(reviewing.contains) ?? false } }
+}
+
+/// What a pill wears for a review. A failed pill keeps its red (a review that finished before the call
+/// failed is over; the two are never both true in practice, and red outranks amber if they were). With
+/// reduced motion the tint stays and the breathing goes.
+struct PillReviewChrome: Equatable {
+    let tinted: Bool
+    let pulses: Bool
+}
+
+func pillReviewChrome(reviewing: Bool, failed: Bool, reduceMotion: Bool) -> PillReviewChrome {
+    let tinted = reviewing && !failed
+    return PillReviewChrome(tinted: tinted, pulses: tinted && !reduceMotion)
+}
+
+/// PURE: the glow's strength at time `t` — a sine over `pillReviewPulsePeriod`, between 0 and 1.
+func pillReviewPulseLevel(at t: TimeInterval) -> Double {
+    0.5 + 0.5 * sin(2 * .pi * t / pillReviewPulsePeriod)
+}
+
+/// The amber tint over a pill while a call is being reviewed: a wash and a rim in `pillReviewAmber`,
+/// breathing about every 1.2 s (static under reduced motion). Drawn inside the pill's own shape and never
+/// hit-tested, so the pill stays a button.
+struct PillReviewGlow: ViewModifier {
+    let chrome: PillReviewChrome
+    let expanded: Bool
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            if chrome.tinted {
+                let shape = RoundedRectangle(cornerRadius: expanded ? PillMorphChrome.expandedCornerRadius : PillToolRunHeader.height / 2,
+                                             style: expanded ? .continuous : .circular)
+                Group {
+                    if chrome.pulses {
+                        TimelineView(.animation) { timeline in
+                            glow(shape, level: pillReviewPulseLevel(at: timeline.date.timeIntervalSinceReferenceDate))
+                        }
+                    } else {
+                        glow(shape, level: 0.7)
+                    }
+                }
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private func glow(_ shape: RoundedRectangle, level: Double) -> some View {
+        shape.fill(pillReviewAmber.opacity(0.08 + 0.14 * level))
+            .overlay(shape.strokeBorder(pillReviewAmber.opacity(0.35 + 0.45 * level), lineWidth: 1.5))
+    }
+}
+
 // MARK: - The pill
 
 /// One tool's calls in the dispatch pill's own material (user, 2026-10-02): a dark capsule holding
@@ -236,6 +301,11 @@ struct PillToolRunHeader: View {
     let isExpanded: Bool
     let toggle: () -> Void
 
+    /// The bash safety reviewer is judging one of this pill's calls right now: the pill turns amber and
+    /// breathes (`PillReviewGlow`). Read from the environment so no row in between carries it.
+    @Environment(\.reviewingCallIds) private var reviewingCallIds
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     /// Bumped while a favicon is still loading, so the row looks again (the cache is not observable).
     @State private var faviconTick = 0
 
@@ -245,6 +315,7 @@ struct PillToolRunHeader: View {
     static let rotationPeriod: TimeInterval = 0.5
 
     private var entry: ToolRunEntry { entries.first ?? ToolRunEntry(name: "", calls: []) }
+    private var isReviewing: Bool { pillIsReviewing(entries, reviewing: reviewingCallIds) }
     private var status: ToolCallStatus { toolRunStatus(entries, turnIsLive: turnIsLive) }
     private static let failureRed = Color(red: 1.0, green: 0.45, blue: 0.40)
 
@@ -296,6 +367,9 @@ struct PillToolRunHeader: View {
         }
         .fixedSize(horizontal: !open, vertical: true)
         .frame(maxWidth: open ? .infinity : nil, alignment: .leading)
+        .modifier(PillReviewGlow(chrome: pillReviewChrome(reviewing: isReviewing, failed: failed, reduceMotion: reduceMotion),
+                                 expanded: open))
+        .help(isReviewing ? "Safety review…" : "")
         .modifier(PillMorphChrome(expanded: open,
                                   fill: failed ? Self.failureRed.opacity(0.10) : PillMorphChrome.fill,
                                   rim: failed ? Self.failureRed.opacity(0.45)

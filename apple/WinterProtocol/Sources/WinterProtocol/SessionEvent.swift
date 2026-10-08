@@ -41,6 +41,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     case shortcutInvoke(ShortcutInvoke)
     case tileAction(TileAction)
     case toolReview(ToolReview)
+    case toolReviewProgress(ToolReviewProgress)
     case notificationRequested(NotificationRequested)
     case hookNotice(HookNotice)
     case continuityWarning(ContinuityWarning)
@@ -763,6 +764,28 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let summary: String
     }
 
+    /// TRANSIENT (see `transientTypes` at the bottom of this file): the bash safety reviewer is judging
+    /// one tool call — `started` fires before the reviewer's model call, `ended` after it, matched by the
+    /// call's `callId` (the `tool_call.callId`). Broadcast-only, never persisted or replayed. Mirrors TS
+    /// `ToolReviewProgressEvent`; named `tool_review_progress`, NOT `tool_review` (that is the PERSISTED
+    /// verdict record above, which old logs still carry). `phase` is `started` or `ended`; `verdict`
+    /// (`safe` / `unsafe` / `escalated`) rides `ended` only, and is absent when no review could run.
+    /// `threadId` is the thread the call is on — a subagent's call arrives with the subagent's id.
+    public struct ToolReviewProgress: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let callId: String
+        public let phase: String
+        public let verdict: String?
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, callId: String, phase: String,
+                    verdict: String? = nil) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
+            self.callId = callId; self.phase = phase; self.verdict = verdict
+        }
+    }
+
     /// Push-notification track (task-30, the final CC-parity tool item) — emitted once per
     /// `push_notification` tool call. NOT transient (unlike `AssistantDelta`/the lease events
     /// above): persisted and replayed like `ToolReview`/`TaskUpdated`. Delivery is entirely
@@ -1101,6 +1124,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case shortcut_invoke
         case tile_action
         case tool_review
+        case tool_review_progress
         case notification_requested
         case hook_notice
         case continuity_warning
@@ -1166,6 +1190,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case .shortcut_invoke:      self = .shortcutInvoke(try ShortcutInvoke(from: decoder))
         case .tile_action:          self = .tileAction(try TileAction(from: decoder))
         case .tool_review:          self = .toolReview(try ToolReview(from: decoder))
+        case .tool_review_progress: self = .toolReviewProgress(try ToolReviewProgress(from: decoder))
         case .notification_requested: self = .notificationRequested(try NotificationRequested(from: decoder))
         case .hook_notice: self = .hookNotice(try HookNotice(from: decoder))
         case .continuity_warning: self = .continuityWarning(try ContinuityWarning(from: decoder))
@@ -1349,6 +1374,10 @@ public enum SessionEvent: Codable, Equatable, Sendable {
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
             try c.encode(Discriminator.tool_review.rawValue, forKey: .type)
+        case .toolReviewProgress(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.tool_review_progress.rawValue, forKey: .type)
         case .notificationRequested(let v):
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
@@ -1467,6 +1496,8 @@ extension SessionEvent {
         "provider_login_finished",
         // The thinking pill (2026-10-05): a reasoning block's live progress (12 → 13).
         "thinking_delta",
+        // The reviewing pill (2026-10-08): the bash safety reviewer is judging a call (13 → 14).
+        "tool_review_progress",
     ]
 
     /// Case-level mirror of `transientTypes`, for callers holding a DECODED event (`WinterClient`)
@@ -1479,7 +1510,7 @@ extension SessionEvent {
         switch self {
         case .assistantDelta, .providerRetry, .leaseGranted, .leaseLost, .peripheralCallRequested,
              .pluginToolInvoke, .hardwareRequested, .pluginTileUpdated, .sessionActivity,
-             .panelCommand, .providerLoginProgress, .providerLoginFinished, .thinkingDelta:
+             .panelCommand, .providerLoginProgress, .providerLoginFinished, .thinkingDelta, .toolReviewProgress:
             return true
         default:
             return false

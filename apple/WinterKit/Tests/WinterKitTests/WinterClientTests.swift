@@ -176,6 +176,33 @@ final class WinterClientTests: XCTestCase {
         XCTAssertEqual(SessionEvent.toolReview(v).sessionId, "s_1")
     }
 
+    /// The reviewing pill: `tool_review_progress` decodes as a real case, both accessor switches return
+    /// its values, and — being transient — it reaches the stream even at a seq the cursor already passed
+    /// (the daemon stamps a transient with the store's current lastSeq, which is `<=` the cursor).
+    func testToolReviewProgressDecodesAndIsNotDroppedBySeqDedupe() async throws {
+        let t = ScriptedTransport()
+        let client = makeClient(t)
+        async let connected: Void = client.connect()
+        let hello = try await waitForSent(t, count: 1)[0]
+        t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true}}"#)
+        try await connected
+
+        var iter = client.events.makeAsyncIterator()
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"assistant_message","seq":9,"sessionId":"s_1","ts":4,"threadId":"main","text":"hi"}}"#)
+        guard case .session(.assistantMessage) = await iter.next() else { return XCTFail() }
+
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool_review_progress","seq":9,"sessionId":"s_1","ts":5,"threadId":"main","callId":"toolu_01","phase":"started"}}"#)
+        guard case .session(.toolReviewProgress(let started)) = await iter.next() else { return XCTFail("dropped or wrong case") }
+        XCTAssertEqual(started.callId, "toolu_01")
+        XCTAssertEqual(SessionEvent.toolReviewProgress(started).seq, 9)
+        XCTAssertEqual(SessionEvent.toolReviewProgress(started).sessionId, "s_1")
+
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool_review_progress","seq":9,"sessionId":"s_1","ts":6,"threadId":"main","callId":"toolu_01","phase":"ended","verdict":"safe"}}"#)
+        guard case .session(.toolReviewProgress(let ended)) = await iter.next() else { return XCTFail("the second one at the same seq was deduped") }
+        XCTAssertEqual(ended.phase, "ended")
+        XCTAssertEqual(ended.verdict, "safe")
+    }
+
     /// task-30 (push-notification track — another WinterKit-trap task, same shape as
     /// testToolReviewEventDecodesAndAccessorsWork above): the NEW `notification_requested` variant
     /// must decode as a REAL case and both exhaustive accessor switches (`var seq`/`var
