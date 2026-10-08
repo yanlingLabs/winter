@@ -371,6 +371,10 @@ struct ActivityItem: Equatable {
     /// argument when the call arrives — what the pill-themed window's running tool pill says
     /// ("Writing 120 lines to config.ts") before any result exists. `nil` for every other tool.
     var writtenLines: Int? = nil
+    /// A ComputerV2 call's `code` argument (the model's script), capped — what the expanded tool row
+    /// shows in monospace beside the text result. The 100-character `detail` cannot hold a script, so
+    /// it rides here, as `writtenLines` does, set when the call arrives. `nil` for every other tool.
+    var scriptCode: String? = nil
 }
 
 extension ActivityItem {
@@ -800,6 +804,11 @@ enum SessionReducer {
                let e = s.exchanges.indices.last, let i = s.exchanges[e].activity.indices.last,
                s.exchanges[e].activity[i].toolCallId == v.callId {
                 s.exchanges[e].activity[i].writtenLines = lines
+            }
+            if isComputerV2Tool(v.name), let code = computerV2Code(argsJson: v.argsJson),
+               let e = s.exchanges.indices.last, let i = s.exchanges[e].activity.indices.last,
+               s.exchanges[e].activity[i].toolCallId == v.callId {
+                s.exchanges[e].activity[i].scriptCode = code
             }
         case .toolResult(let v) where v.threadId == mainThread:
             // The status flip must not be contingent on whether the fold below finds an item to
@@ -1525,6 +1534,10 @@ enum SessionReducer {
         case "computer", "Computer":
             guard let action = str("action") else { return nil }
             return verbLedToolDetail(action, str("keys"))
+        // ComputerV2 (rule 3 holds: the script and what it typed are never the label — `title` is the
+        // model's own words for the user, and the derived label names only apps and verbs).
+        case "computer_v2", "ComputerV2":
+            return computerV2SpecificLabel(title: str("title"), code: str("code")).flatMap(clipToolDetail)
         case "schedule":
             guard let op = str("op") else { return nil }
             return verbLedToolDetail(op, str("spec") ?? str("id"))
