@@ -132,8 +132,10 @@ final class PasteAndQueueTests: XCTestCase {
         let first = try await queues.run(5) { 41 + 1 }
         XCTAssertEqual(first, 42)
         let gate = DispatchSemaphore(value: 0)
+        // Both wait on the gate: the tasks may start in either order, and one that ran straight through would
+        // never leave two pending.
         let a = Task { try await queues.run(5) { gate.wait(); return 1 } }
-        let b = Task { try await queues.run(5) { 2 } }
+        let b = Task { try await queues.run(5) { gate.wait(); return 2 } }
         // Wait until both are pending (generously: the machine may be busy). Without that the third call
         // would be accepted and queue behind the gate, so give up cleanly instead of deadlocking.
         var waited = 0
@@ -142,7 +144,7 @@ final class PasteAndQueueTests: XCTestCase {
             waited += 1
         }
         guard queues.pendingCount(5) == 2 else {
-            gate.signal()
+            gate.signal(); gate.signal()
             XCTFail("the two queued calls never became pending")
             return
         }
@@ -153,7 +155,7 @@ final class PasteAndQueueTests: XCTestCase {
             XCTAssertEqual(e.code, "busy")
             XCTAssertEqual(e.data?["retryable"], .bool(true))
         }
-        gate.signal()
+        gate.signal(); gate.signal()
         let (ra, rb) = try await (a.value, b.value)
         XCTAssertEqual(ra + rb, 3)
         XCTAssertEqual(queues.pendingCount(5), 0)

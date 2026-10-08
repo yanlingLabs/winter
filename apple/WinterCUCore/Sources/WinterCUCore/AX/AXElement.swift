@@ -225,9 +225,12 @@ enum AX {
             throw CUError(code: "busy", message: "\(what): the app did not answer in time — retry",
                           data: ["retryable": .bool(true)])
         case .attributeUnsupported, .actionUnsupported, .notImplemented, .parameterizedAttributeUnsupported:
-            throw CUError.unsupported("\(what) is not supported by this element")
+            throw CUError(code: "unsupported", message: "\(what) is not supported by this element",
+                          data: ["axError": .int(Int(err.rawValue))])
         case .illegalArgument: throw CUError.invalidParams("\(what): illegal argument")
-        default: throw CUError.unsupported("\(what) failed (AXError \(err.rawValue))")
+        default:
+            throw CUError(code: "unsupported", message: "\(what) failed (AXError \(err.rawValue))",
+                          data: ["axError": .int(Int(err.rawValue))])
         }
     }
 }

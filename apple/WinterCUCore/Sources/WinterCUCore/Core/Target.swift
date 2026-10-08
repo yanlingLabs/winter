@@ -42,6 +42,16 @@ final class CUTarget: @unchecked Sendable {
         set { lock.lock(); _lastActionMs = newValue; lock.unlock() }
     }
 
+    /// The element the script last clicked by ref or aimed text at (`into`), and when — the focus fallback
+    /// for apps that don't report their focused element (Electron). Pid-queue only.
+    private(set) var lastTargeted: (element: AXUIElement, atMs: Double)?
+    func noteTargeted(_ e: AXUIElement, at ms: Double) { lastTargeted = (e, ms) }
+
+    /// Actions an app listed for an element but refused (`AXOpen` on Finder's icons), by role: hidden from
+    /// state when `action()` has no equivalent to fall back on. Pid-queue only.
+    private(set) var refusedActions: [String: Set<String>] = [:]
+    func noteRefused(action: String, role: String) { refusedActions[role, default: []].insert(action) }
+
     static let keptSnapshots = 8
     static let keptShots = 8
 
@@ -63,6 +73,7 @@ final class CUTarget: @unchecked Sendable {
     /// above the old ones, so a number is still never reused.
     func resetForNewWindow() {
         refs = CURefCache<AXIdentity>(firstRef: refs.highestRef + 1)
+        lastTargeted = nil
         lock.withLock { _snapshots.removeAll() }
     }
 

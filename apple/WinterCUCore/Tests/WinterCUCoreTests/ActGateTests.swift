@@ -99,10 +99,12 @@ final class ActGateTests: XCTestCase {
         await expect("refused", reason: "secure_field") { try await self.act(.type(CUTypeAction(text: "x"))) }
         await expect("refused", reason: "secure_field") { try await self.act(.key(CUKeyAction(combo: "a"))) }
         await expect("refused", reason: "secure_field") { try await self.act(.key(CUKeyAction(combo: "cmd+v"))) }
+        // Focus unreported while this window holds a password field: refused as focus_unknown, never worded
+        // as "that is a password field".
         ax.focus(pid: pid, on: nil)
-        await expect("refused", reason: "secure_field") { try await self.act(.type(CUTypeAction(text: "x"))) }
-        await expect("refused", reason: "secure_field") { try await self.act(.paste(CUPasteAction(text: "x"))) }
-        await expect("refused", reason: "secure_field") { try await self.act(.key(CUKeyAction(combo: "shift+a"))) }
+        await expect("refused", reason: "focus_unknown") { try await self.act(.type(CUTypeAction(text: "x"))) }
+        await expect("refused", reason: "focus_unknown") { try await self.act(.paste(CUPasteAction(text: "x"))) }
+        await expect("refused", reason: "focus_unknown") { try await self.act(.key(CUKeyAction(combo: "shift+a"))) }
         XCTAssertTrue(poster.entries.isEmpty, "nothing was typed")
         XCTAssertTrue(pb.log.isEmpty, "the clipboard was never touched")
         // Navigation keys are not text: Tab still works with focus unknown.
@@ -283,7 +285,7 @@ final class ActGateTests: XCTestCase {
         await expect("refused", reason: "secure_field") { try await self.act(.click(CUClickAction(ref: self.ref(self.pasteItem)))) }
         await expect("refused", reason: "secure_field") { try await self.act(.action(CUAXAction(ref: self.ref(self.pasteItem), name: "press"))) }
         ax.focus(pid: pid, on: nil)
-        await expect("refused", reason: "secure_field") { try await self.act(.menu(CUMenuAction(path: ["Edit", "Paste"]))) }
+        await expect("refused", reason: "focus_unknown") { try await self.act(.menu(CUMenuAction(path: ["Edit", "Paste"]))) }
         XCTAssertTrue(ax.performed.isEmpty)
         // Click-only never pastes, even by clicking the menu item.
         ax.focus(pid: pid, on: field)

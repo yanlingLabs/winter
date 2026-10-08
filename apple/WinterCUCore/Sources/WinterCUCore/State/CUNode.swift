@@ -20,13 +20,15 @@ public struct CUNode: Sendable, Equatable {
     /// Screen points, top-left origin; nil when the element reports no geometry.
     public var frame: CGRect?
     public var identifier: String?
+    /// A payment input (card number, security code): treated like a password field.
+    public var payment: Bool
     /// Children the reader saw but did not read (walk budget); rendered as a collapsed marker.
     public var unreadChildren: Int
     public var children: [CUNode]
 
     public init(ref: Int, role: String, subrole: String? = nil, name: String? = nil, value: String? = nil,
                 states: CUStates = [], itemCount: Int? = nil, actions: [String] = [], frame: CGRect? = nil,
-                identifier: String? = nil, unreadChildren: Int = 0, children: [CUNode] = []) {
+                identifier: String? = nil, payment: Bool = false, unreadChildren: Int = 0, children: [CUNode] = []) {
         self.ref = ref
         self.role = role
         self.subrole = subrole
@@ -37,11 +39,12 @@ public struct CUNode: Sendable, Equatable {
         self.actions = actions
         self.frame = frame
         self.identifier = identifier
+        self.payment = payment
         self.unreadChildren = unreadChildren
         self.children = children
     }
 
-    public var isSecure: Bool { CUFloors.isSecureField(role: role, subrole: subrole) }
+    public var isSecure: Bool { payment || CUFloors.isSecureField(role: role, subrole: subrole) }
 
     /// The lowercase role words the model reads (`text area`, `pop up button`).
     public var roleWords: String { CURoleWords.words(role: role, subrole: subrole) }

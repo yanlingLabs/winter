@@ -92,7 +92,7 @@ extension CUCore {
             }
         }()
         if let rename, !CUFloors.typedSavePathIsProtected(rename.text) {
-            let field = try rename.ref.map { try element($0, in: t) } ?? ax.focusedElement(pid: t.pid)
+            let field = try rename.ref.map { try element($0, in: t) } ?? reportedFocus(t)
             if let field, let id = ax.string(field, kAXIdentifierAttribute), CUFloorScan.saveNameFieldIdentifiers.contains(id) {
                 return
             }
@@ -137,6 +137,7 @@ extension CUCore {
             let e = try element(ref, in: t)
             let info = ElementInfo(e, ax)
             try pasteMenuGuard(e, info, p, t)
+            t.noteTargeted(e, at: clock.nowMs())
             if count == 1, flags.isEmpty {
                 let axAction: String? = button == .left && info.actions.contains(kAXPressAction) ? kAXPressAction
                     : button == .right && info.actions.contains(kAXShowMenuAction) ? kAXShowMenuAction : nil
@@ -200,15 +201,73 @@ extension CUCore {
 
     // MARK: text
 
-    /// Where typed text goes must be known and must not be a password field (C1): an unknown focus could be
-    /// one, so it is refused, not skipped.
-    func requireTypableFocus(_ t: CUTarget) throws -> AXUIElement {
-        guard let f = ax.focusedElement(pid: t.pid) else {
-            throw CUError.refused(.secureField,
-                                  "can't tell which field has focus in \(t.appName), so it could be a password field — pass `into` or click a text field first")
+    /// How long an element the script clicked by ref (or aimed at with `into`) stands in for a focus the app
+    /// won't report.
+    static let targetedFocusMs: Double = 60_000
+
+    /// The typing guard of one act (C1), shared by its every check so the window is scanned at most once.
+    final class TypingFocus {
+        /// The window scan, once one was needed.
+        var scan: CUFloorScan.SensitiveScan?
+        /// The field `into` named for this act (already checked not to be sensitive).
+        var explicit: AXUIElement?
+        /// A tab or return was typed since: the named field may no longer have the focus.
+        var focusMayHaveMoved = false
+        init(explicit: AXUIElement? = nil) { self.explicit = explicit }
+    }
+
+    /// The focus the app reports, else the one the bound window reports.
+    func reportedFocus(_ t: CUTarget) -> AXUIElement? {
+        if let f = ax.focusedElement(pid: t.pid) { return f }
+        if let w = try? windowElement(t), let f = ax.element(w, kAXFocusedUIElementAttribute) { return f }
+        return nil
+    }
+
+    /// Where typed text goes, or a refusal (C1). A focus the app or window reports is refused only when it is
+    /// a password or payment field (`secure_field`). An unreported focus (Electron apps often report none) is
+    /// allowed when a scan of the window finds no such field — the text then goes to whatever has the focus,
+    /// best known as the window's one `AXFocused` element or the element the script just clicked or named;
+    /// otherwise it is refused as `focus_unknown`, unless `into` named the field and no tab or return has
+    /// been typed since. Returns nil when the focus is unknown but allowed.
+    @discardableResult
+    func requireTypableFocus(_ t: CUTarget, _ g: TypingFocus = TypingFocus()) throws -> AXUIElement? {
+        if let f = reportedFocus(t) {
+            if ElementInfo(f, ax).secure { throw secureRefusal() }
+            return f
         }
-        if ElementInfo(f, ax).secure { throw secureRefusal() }
-        return f
+        let scan = g.scan ?? sensitiveScan(t)
+        g.scan = scan
+        if scan.clear {
+            if scan.focused.count == 1 { return scan.focused[0] }
+            return g.explicit ?? recentlyTargeted(t)
+        }
+        if let e = g.explicit, !g.focusMayHaveMoved { return e }
+        throw focusUnknownRefusal(t, scan)
+    }
+
+    func recentlyTargeted(_ t: CUTarget) -> AXUIElement? {
+        guard let last = t.lastTargeted, clock.nowMs() - last.atMs <= Self.targetedFocusMs, ax.isAlive(last.element)
+        else { return nil }
+        return last.element
+    }
+
+    /// The bound window, plus the app's focused window when that is another one.
+    func sensitiveScan(_ t: CUTarget) -> CUFloorScan.SensitiveScan {
+        var roots: [AXUIElement] = []
+        if let w = try? windowElement(t) { roots.append(w) }
+        if let f = ax.element(ax.application(t.pid), kAXFocusedWindowAttribute), !roots.contains(where: { CFEqual($0, f) }) {
+            roots.append(f)
+        }
+        guard !roots.isEmpty else { return CUFloorScan.SensitiveScan(sensitive: false, complete: false, focused: []) }
+        return CUFloorScan.sensitiveScan(roots: roots, ax: ax)
+    }
+
+    func focusUnknownRefusal(_ t: CUTarget, _ scan: CUFloorScan.SensitiveScan) -> CUError {
+        let why = scan.sensitive
+            ? "and this window has a secure input (a password or card field), so typing without knowing where it goes is refused"
+            : "and its window is too large to check for secure inputs in time"
+        return CUError.refused(.focusUnknown,
+                               "\(t.appName) doesn't report which field has keyboard focus, \(why) — pass `into` with the ref of the field to type into")
     }
 
     private func setValue(_ a: CUSetValueAction, _ p: TargetActParams, _ t: CUTarget,
@@ -216,7 +275,8 @@ extension CUCore {
         let e = try element(a.ref, in: t)
         let info = ElementInfo(e, ax)
         if info.secure { throw secureRefusal() }
-        try CUFloorScan.checkTypedIntoSavePanel(e, text: a.value, ax: ax)
+        try CUFloorScan.checkTypedIntoSavePanel(e, text: a.value, pid: t.pid, ax: ax)
+        t.noteTargeted(e, at: clock.nowMs())
         emitAction(p, t, info.center, "type")
         try token.check()
         if ax.isSettable(e, kAXValueAttribute) {
@@ -228,50 +288,55 @@ extension CUCore {
             return ActOutcome(rung: .accessibility)
         }
         // Not settable: focus it, select everything, and type over it.
+        let g = TypingFocus(explicit: e)
         try? ax.set(e, kAXFocusedAttribute, kCFBooleanTrue)
         if let len = ax.string(e, kAXValueAttribute)?.utf16.count, ax.isSettable(e, kAXSelectedTextRangeAttribute),
            let r = AX.makeRange(location: 0, length: len) {
             try? ax.set(e, kAXSelectedTextRangeAttribute, r)
         } else {
-            _ = try requireTypableFocus(t)
-            _ = try sendChord(CUKeyChord(key: .character("a"), modifiers: [.command]), p, t, token)
+            try requireTypableFocus(t, g)
+            _ = try sendChord(CUKeyChord(key: .character("a"), modifiers: [.command]), p, t, token, g)
         }
-        return try typeText(a.value, into: e, p, t, token)
+        return try typeText(a.value, into: e, p, t, token, g)
     }
 
     private func type(_ a: CUTypeAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
-        let e = try textTarget(into: a.into, t, text: a.text)
-        emitAction(p, t, ElementInfo(e, ax).center, "type")
-        return try typeText(a.text, into: e, p, t, token)
+        let (e, g) = try textTarget(into: a.into, t, text: a.text)
+        emitAction(p, t, e.flatMap { ElementInfo($0, ax).center }, "type")
+        return try typeText(a.text, into: e, p, t, token, g)
     }
 
     private func paste(_ a: CUPasteAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
-        let e = try textTarget(into: a.into, t, text: a.text)
-        emitAction(p, t, ElementInfo(e, ax).center, "type")
-        return try pasteText(a.text, format: a.format ?? .text, p, t, token)
+        let (e, g) = try textTarget(into: a.into, t, text: a.text)
+        emitAction(p, t, e.flatMap { ElementInfo($0, ax).center }, "type")
+        return try pasteText(a.text, format: a.format ?? .text, p, t, token, g)
     }
 
-    /// The element text goes into: `into` (focused first), else the app's focused element, which must be
-    /// known. Secure-field and save-path floors applied.
-    private func textTarget(into: Int?, _ t: CUTarget, text: String) throws -> AXUIElement {
-        let e: AXUIElement
+    /// The element text goes into: `into` (focused first), else the focus (see `requireTypableFocus`; nil
+    /// when unknown but allowed). Sensitive-field and save-path floors applied.
+    private func textTarget(into: Int?, _ t: CUTarget, text: String) throws -> (AXUIElement?, TypingFocus) {
+        let g = TypingFocus()
+        let e: AXUIElement?
         if let into {
-            e = try element(into, in: t)
-            if ElementInfo(e, ax).secure { throw secureRefusal() }
-            try? ax.set(e, kAXFocusedAttribute, kCFBooleanTrue)
+            let el = try element(into, in: t)
+            if ElementInfo(el, ax).secure { throw secureRefusal() }
+            try? ax.set(el, kAXFocusedAttribute, kCFBooleanTrue)
+            t.noteTargeted(el, at: clock.nowMs())
+            g.explicit = el
+            e = el
         } else {
-            e = try requireTypableFocus(t)
+            e = try requireTypableFocus(t, g)
         }
-        try CUFloorScan.checkTypedIntoSavePanel(e, text: text, ax: ax)
-        return e
+        try CUFloorScan.checkTypedIntoSavePanel(e, text: text, pid: t.pid, ax: ax)
+        return (e, g)
     }
 
     /// AX insert at the selection (confirmed by polling) → paste for long or multi-line text → per-key events.
-    private func typeText(_ text: String, into e: AXUIElement, _ p: TargetActParams, _ t: CUTarget,
-                          _ token: CUCancellation.Token) throws -> ActOutcome {
+    private func typeText(_ text: String, into e: AXUIElement?, _ p: TargetActParams, _ t: CUTarget,
+                          _ token: CUCancellation.Token, _ g: TypingFocus) throws -> ActOutcome {
         guard !text.isEmpty else { return ActOutcome(rung: .accessibility, detail: "nothing to type") }
         try token.check()
-        if ax.isSettable(e, kAXSelectedTextAttribute) {
+        if let e, ax.isSettable(e, kAXSelectedTextAttribute) {
             let before = ax.string(e, kAXValueAttribute)
             let since = clock.nowMs()
             var applied = false
@@ -293,25 +358,29 @@ extension CUCore {
             }
         }
         if text.contains("\n") || text.count > 64 {
-            return try pasteText(text, format: .text, p, t, token)
+            return try pasteText(text, format: .text, p, t, token, g)
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
         let synth = self.synth
+        let chars = Array(text)
+        var next = 0
         return try runEvents(p, t, d, focus: true, token) { [self] route, _ in
             try synth.type(pid: t.pid, text: text, route: route) {
-                // Before EVERY character: not cancelled, still running, and focus still on a known,
-                // non-secure field — a tab or return may just have moved it to a password field.
+                // Before EVERY character: not cancelled, still running, and focus still on a typable,
+                // non-sensitive field — a tab or return may just have moved it to a password field.
                 try token.check()
                 guard sys.appRunning(t.pid) else { throw CUError.targetLost("\(t.appName) quit while typing") }
-                _ = try requireTypableFocus(t)
+                if next > 0, chars[next - 1] == "\t" || chars[next - 1].isNewline { g.focusMayHaveMoved = true }
+                next += 1
+                try requireTypableFocus(t, g)
             }
         }
     }
 
     /// Polls for evidence that an edit landed: the value changed, or a value-change notification arrived.
-    func waitForEdit(_ t: CUTarget, _ e: AXUIElement, before: String?, since: Double, capMs: Double) -> Bool {
+    func waitForEdit(_ t: CUTarget, _ e: AXUIElement?, before: String?, since: Double, capMs: Double) -> Bool {
         let ax = self.ax, monitor = self.monitor, clock = self.clock
-        return CUEditEvidence(readValue: { ax.string(e, kAXValueAttribute) },
+        return CUEditEvidence(readValue: { e.flatMap { ax.string($0, kAXValueAttribute) } },
                               lastValueChangeMs: { monitor.lastValueChangeMs(pid: t.pid) },
                               nowMs: { clock.nowMs() },
                               sleepMs: { usleep(useconds_t($0 * 1000)) })
@@ -319,17 +388,17 @@ extension CUCore {
     }
 
     private func pasteText(_ text: String, format: CUPasteFormat, _ p: TargetActParams, _ t: CUTarget,
-                           _ token: CUCancellation.Token) throws -> ActOutcome {
+                           _ token: CUCancellation.Token, _ g: TypingFocus) throws -> ActOutcome {
         try token.check()
-        let focus = try requireTypableFocus(t)
-        let before = ax.string(focus, kAXValueAttribute)
+        let focus = try requireTypableFocus(t, g)
+        let before = focus.flatMap { ax.string($0, kAXValueAttribute) }
         var sent: ActOutcome?
         var since = clock.nowMs()
         let seq = CUPasteSequence(
             pasteboard: pasteboard(),
             sendPaste: {
                 since = self.clock.nowMs()
-                sent = try self.sendChord(CUKeyChord(key: .character("v"), modifiers: [.command]), p, t, token)
+                sent = try self.sendChord(CUKeyChord(key: .character("v"), modifiers: [.command]), p, t, token, g)
             },
             // Restore only once the paste visibly happened (or 1.5 s passed): an app that reads the
             // clipboard late must not get the user's own contents instead.
@@ -354,23 +423,27 @@ extension CUCore {
         let rep = a.repeat ?? 1
         guard (1...100).contains(rep) else { throw CUError.invalidParams("repeat must be 1–100") }
         var e: AXUIElement?
+        let g = TypingFocus()
         if let into = a.into {
             let el = try element(into, in: t)
+            if Self.producesText(chord), ElementInfo(el, ax).secure { throw secureRefusal() }
             try? ax.set(el, kAXFocusedAttribute, kCFBooleanTrue)
+            t.noteTargeted(el, at: clock.nowMs())
+            g.explicit = el
             e = el
         } else {
-            e = ax.focusedElement(pid: t.pid)
+            e = reportedFocus(t)
         }
         let textual = Self.producesText(chord)
-        // Characters (and cmd+V) are text input: the focus must be known and not secure.
-        if textual { _ = try requireTypableFocus(t) }
+        // Characters (and cmd+V) are text input: never into a password or payment field (C1).
+        if textual { e = try requireTypableFocus(t, g) ?? e }
         emitAction(p, t, e.flatMap { ElementInfo($0, ax).center }, "type")
         // Resolve the route once (the menu lookup walks the menu bar), then press it `repeat` times.
-        let plan = try chordPlan(chord, p, t)
+        let plan = try chordPlan(chord, p, t, g)
         var out = ActOutcome(rung: .accessibility)
         for _ in 0..<rep {
             try token.check()
-            if textual { _ = try requireTypableFocus(t) }
+            if textual { try requireTypableFocus(t, g) }
             out = try execute(plan, p, t, token)
         }
         return out
@@ -388,11 +461,11 @@ extension CUCore {
         case events(code: CGKeyCode, flags: CGEventFlags, decision: CUInputLadder.Decision)
     }
 
-    func chordPlan(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget) throws -> ChordPlan {
+    func chordPlan(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget, _ g: TypingFocus = TypingFocus()) throws -> ChordPlan {
         if chord.modifiers.contains(.command), case .character(let ch) = chord.key,
            let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
             if ch == "v" || CUPasteMenu.isPasteTitle(item.title) {
-                try requirePasteSafe(p, t)
+                try requirePasteSafe(p, t, g)
             }
             return .menuItem(item.element, title: item.title)
         }
@@ -425,8 +498,9 @@ extension CUCore {
     }
 
     /// One chord, start to finish.
-    func sendChord(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
-        try execute(try chordPlan(chord, p, t), p, t, token)
+    func sendChord(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token,
+                   _ g: TypingFocus = TypingFocus()) throws -> ActOutcome {
+        try execute(try chordPlan(chord, p, t, g), p, t, token)
     }
 
     /// A menu-bar item whose key equivalent is `key` with `modifiers` (command implied). The walk is bounded
@@ -462,11 +536,11 @@ extension CUCore {
 
     /// Pasting puts the clipboard into whatever has focus: refused under click-only, and while the focus is
     /// unknown or a password field — however the paste is reached (`menu`, a menu-item ref, cmd+V).
-    func requirePasteSafe(_ p: TargetActParams, _ t: CUTarget) throws {
+    func requirePasteSafe(_ p: TargetActParams, _ t: CUTarget, _ g: TypingFocus = TypingFocus()) throws {
         if p.access == .click {
             throw CUError.notAllowed("click_only", "\(t.appName) is set to click only in Settings — pasting is typing")
         }
-        _ = try requireTypableFocus(t)
+        try requireTypableFocus(t, g)
     }
 
     /// A menu item (open menu, by ref) that pastes.
@@ -643,14 +717,37 @@ extension CUCore {
             throw CUError.invalidParams("[\(a.ref)] has no action “\(a.name)” — it has: \(have.isEmpty ? "none" : have)")
         }
         try pasteMenuGuard(e, info, p, t)
-        emitAction(p, t, info.center, "press")
-        try token.check()
-        do {
-            try ax.perform(e, name)
-        } catch let error where Self.deliveryUncertain(error) {
-            throw busyAfterSend(t)
+        let role = info.role ?? ""
+        let words = CURoleWords.actionWords(name)
+        // An app may list an action it then refuses (Finder lists AXOpen on its icons): once refused, the
+        // action's pointer equivalent is used straight away, and one without an equivalent leaves state.
+        if t.refusedActions[role]?.contains(name) != true {
+            emitAction(p, t, info.center, "press")
+            try token.check()
+            do {
+                try ax.perform(e, name)
+                return ActOutcome(rung: .accessibility)
+            } catch let error where Self.deliveryUncertain(error) {
+                throw busyAfterSend(t)
+            } catch let err as CUError where Self.refusedAction(err) {
+                t.noteRefused(action: name, role: role)
+            }
         }
-        return ActOutcome(rung: .accessibility)
+        guard let pointer = CUCore.pointerEquivalent(name) else {
+            throw CUError.unsupported("\(t.appName) lists “\(words)” for [\(a.ref)] but refuses to perform it — it is no longer listed for this kind of element; try click() or a menu")
+        }
+        guard let center = info.center else {
+            throw CUError.unsupported("\(t.appName) refused “\(words)” for [\(a.ref)], and it has no position on screen to \(pointer.verb == "double-clicked" ? "double-click" : "click")")
+        }
+        t.noteTargeted(e, at: clock.nowMs())
+        return try pointerClick(p, t, at: center, button: pointer.button, count: pointer.count, flags: [], token)
+            .noting("\(t.appName) refused “\(words)” over accessibility, so [\(a.ref)] was \(pointer.verb) instead")
+    }
+
+    /// The app answered that the element does not support the action (not a timeout or a dead element).
+    static func refusedAction(_ e: CUError) -> Bool {
+        guard e.code == "unsupported", case .number(let n)? = e.data?["axError"] else { return false }
+        return [AXError.actionUnsupported.rawValue, AXError.notImplemented.rawValue].contains(Int32(n))
     }
 
     private func menu(_ a: CUMenuAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
@@ -778,17 +875,28 @@ struct ElementInfo {
     var frame: CGRect?
     var actions: [String]
 
+    /// The field's label, description, placeholder and identifiers (for the payment-field floor).
+    var labels: [String?]
+
+    static let attributes: [String] = [
+        kAXRoleAttribute, kAXSubroleAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXTitleAttribute,
+        kAXDescriptionAttribute, kAXPlaceholderValueAttribute, kAXIdentifierAttribute, "AXDOMIdentifier",
+    ]
+
     init(_ e: AXUIElement, _ ax: CUAXBackend) {
-        let a = ax.copyMultiple(e, [kAXRoleAttribute, kAXSubroleAttribute, kAXPositionAttribute, kAXSizeAttribute]) ?? [:]
+        let a = ax.copyMultiple(e, Self.attributes) ?? [:]
         role = a[kAXRoleAttribute].flatMap(AX.stringValue)
         subrole = a[kAXSubroleAttribute].flatMap(AX.stringValue)
         if let p = a[kAXPositionAttribute].flatMap(AX.pointValue), let s = a[kAXSizeAttribute].flatMap(AX.sizeValue) {
             frame = CGRect(origin: p, size: s)
         }
+        labels = [kAXTitleAttribute, kAXDescriptionAttribute, kAXPlaceholderValueAttribute, kAXIdentifierAttribute,
+                  "AXDOMIdentifier"].map { a[$0].flatMap(AX.stringValue) }
         actions = ax.actions(e)
     }
 
-    var secure: Bool { CUFloors.isSecureField(role: role ?? "", subrole: subrole) }
+    /// A password or payment field (never read, never typed into).
+    var secure: Bool { CUFloors.isSensitiveField(role: role ?? "", subrole: subrole, texts: labels) }
     var center: CGPoint? {
         guard let f = frame, f.width > 0 || f.height > 0 else { return nil }
         return CGPoint(x: f.midX, y: f.midY)

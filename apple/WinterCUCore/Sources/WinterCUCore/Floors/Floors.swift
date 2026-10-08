@@ -5,9 +5,42 @@ import Foundation
 public enum CUFloors {
     // MARK: secure fields
 
-    /// `AXSecureTextField` (as a subrole of `AXTextField`, or as a role some apps report).
+    /// `AXSecureTextField` (as a subrole of `AXTextField`, or as a role some apps report). Web password
+    /// inputs reach AX the same way (WebKit and Chromium give them that subrole).
     public static func isSecureField(role: String, subrole: String?) -> Bool {
         role == "AXSecureTextField" || subrole == "AXSecureTextField"
+    }
+
+    /// A password or a payment input: never read, never typed into (design §13.3).
+    public static func isSensitiveField(role: String, subrole: String?, texts: [String?]) -> Bool {
+        isSecureField(role: role, subrole: subrole) || isPaymentField(role: role, texts: texts)
+    }
+
+    // MARK: payment fields
+
+    static let paymentRoles: Set<String> = ["AXTextField", "AXComboBox"]
+    /// Compact (letters and digits only) spellings of a card number / security code / expiry field, from
+    /// labels, placeholders and the HTML `autocomplete`-style ids pages give them (`cc-number`, `cc-csc`).
+    static let paymentCompact: [String] = [
+        "cardnumber", "ccnumber", "creditcard", "debitcard", "cardverification", "cardsecuritycode", "cardcode",
+        "cccsc", "ccexp", "cccvc", "cccvv", "kartennummer", "kreditkarte", "numerodecarte", "cartebancaire",
+        "numerodetarjeta", "numerodicarta", "kaartnummer", "numerodocartao",
+    ]
+    /// Whole words that alone mean a card's security code.
+    static let paymentTokens: Set<String> = ["cvv", "cvc", "cvv2", "cvc2", "csc", "cvn", "ccv"]
+
+    /// A card-number, security-code or card-expiry text input, matched on the field's own label,
+    /// description, placeholder and identifiers (`texts`). Pure.
+    public static func isPaymentField(role: String, texts: [String?]) -> Bool {
+        guard paymentRoles.contains(role) else { return false }
+        for raw in texts.compactMap({ $0 }) where !raw.isEmpty {
+            let folded = raw.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            let compact = String(folded.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(Character.init))
+            if paymentCompact.contains(where: { compact.contains($0) }) { return true }
+            let tokens = folded.split { !$0.isLetter && !$0.isNumber }.map(String.init)
+            if tokens.contains(where: { paymentTokens.contains($0) }) { return true }
+        }
+        return false
     }
 
     // MARK: auth and system dialogs
