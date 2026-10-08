@@ -36,8 +36,8 @@ import QuartzCore
     private var ringLayers: [(under: CAShapeLayer, over: CAShapeLayer)] = []
     private let haloFill = CAShapeLayer(), haloUnder = CAShapeLayer(), haloOver = CAShapeLayer()
     private let arrowGroup = CALayer()
-    /// The halo: the arrow's outline stroked wide three times at falling opacity — a soft glow that renders the same
-    /// on screen and offscreen (layer shadows do not survive `render(in:)`).
+    /// The halo: the arrow's outline stroked wide three times at falling opacity — a soft glow drawn from plain
+    /// strokes, so it renders the same on screen and offscreen (layer shadows are not relied on for it).
     private let glowRings = [CAShapeLayer(), CAShapeLayer(), CAShapeLayer()]
     private static let glowWidths: [CGFloat] = [4, 8, 13]
     private static let glowAlphas: [CGFloat] = [0.42, 0.2, 0.08]
