@@ -18,7 +18,7 @@ extension WinterClient {
         defer { reconnecting = false }
         var attempt = 1
         while !deliberatelyClosed {
-            eventsCont.yield(.connection(.reconnecting(attempt: attempt)))
+            emit(.connection(.reconnecting(attempt: attempt)))
             let backoff = min(0.5 * pow(2.0, Double(attempt - 1)), 10.0)
             try? await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
             // Task 9 review fix 2: a close() landing during the backoff sleep must abort the
@@ -50,7 +50,7 @@ extension WinterClient {
                 // AMENDMENT 1: connect() itself no longer yields .connected (removed in Task 7 —
                 // AsyncStream pre-iterator buffering made it the first value every iterator saw).
                 // This loop is the sole source of the .connected transition on (re)connect success.
-                eventsCont.yield(.connection(.connected))
+                emit(.connection(.connected))
                 return
             } catch {
                 // M1: the attempt's fresh transport must not leak while we retry on another.

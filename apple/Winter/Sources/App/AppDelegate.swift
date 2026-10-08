@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// now, replacing the orb's quick-dispatch field. Bound to the same dispatch session the orb
     /// follows (`AppModel.session`), through its own adapter.
     private(set) var pillController: DispatchPillController?
+    /// The background watchdog for a stalled main thread (never constructed under unit tests).
+    private var hangWatchdog: HangWatchdog?
     /// The pill's own preferences (Settings → Dispatch: how long a put-away pill keeps its draft).
     /// ONE instance, handed to both the pill and the settings page (`DashboardWiring`), so a change
     /// on the page reaches the pill at once. Constructing it only READS `UserDefaults`.
@@ -271,6 +273,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// that host, without booting the rest of the app shell.
     func setAppWindowForTesting(_ controller: AppWindowController) {
         appWindow = controller
+    }
+
+    // MARK: - Hang watchdog
+
+    private func startHangWatchdog() {
+        guard hangWatchdog == nil else { return }
+        let watchdog = HangWatchdog(gather: { [weak self] in
+            HangContext.gather(frontmostWindow: { self?.frontmostWindowKind() ?? "none" })
+        })
+        hangWatchdog = watchdog
+        watchdog.start()
+    }
+
+    /// Which kind of window is frontmost, for a hang report.
+    func frontmostWindowKind() -> String {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.orderedWindows.first(where: \.isVisible) else { return "none" }
+        if window.delegate is AppWindowController { return "shell" }
+        if window.delegate is DetachedWindowController { return "detached" }
+        if window is MirrorChildPanel { return "mirror" }
+        let name = String(describing: type(of: window))
+        return name.localizedCaseInsensitiveContains("pill") ? "pill" : name
     }
 
     /// Registers a freshly spawned detached window and wires its one-shot `onClosed` to remove it
@@ -1105,6 +1128,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // declarations + `import Sparkle` stay in both configs) so a dev build never starts an
         // updater against the production feed — matching the dev/dist identity split. The existing
         // `!isRunningUnitTests` gate stays too (no updater from the xctest host).
+        // A stalled main thread explains itself in the unified log (`HangWatchdog`) — Debug and Release alike.
+        if !Self.isRunningUnitTests { startHangWatchdog() }
         if !Self.isRunningUnitTests {
             #if !DEBUG
             // Sparkle T4: live `activeTurns` wiring — `appModel` doesn't exist yet at this point in

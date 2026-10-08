@@ -582,7 +582,7 @@ struct WindowContentView<Accessory: View>: View {
                 .transition(.move(edge: .leading))
             }
         }
-        .onGeometryChange(for: CGFloat.self, of: { $0.size.width }, action: { newWidth in
+        .onMeasuredWidth(perform: { newWidth in
             measuredWidth = newWidth
             // Width growth makes an open overlay obsolete: once a side FITS INLINE it renders inline
             // (its `expanded` flag drives that — set true when the overlay was tap-opened), so drop
@@ -1316,7 +1316,7 @@ struct ComposerClusterPlacement<Cluster: View>: ViewModifier {
     func body(content: Content) -> some View {
         if floats {
             content.overlay(alignment: .bottom) {
-                cluster.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+                cluster.onMeasuredHeight { height = $0 }
             }
         } else {
             content.safeAreaInset(edge: .bottom, spacing: 10) { cluster }

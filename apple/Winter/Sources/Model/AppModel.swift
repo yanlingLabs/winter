@@ -109,6 +109,9 @@ final class AppModel: ObservableObject {
             await self?.handle(ev)
             return true // AppModel's handle() fully owns event application in followFocus mode.
         }
+        replay.onFinish = { [weak self] events in self?.foldReplay(events) }
+        feed.focusedSessionIdProvider = { [weak self] in self?.focusedSessionId }
+        feed.extraBacklog = { [weak self] in (self?.chunks.count ?? 0) + (self?.replay.count ?? 0) }
     }
 
     /// Production wiring: harness token from the Keychain, profile-resolved unix socket (devfix
@@ -381,6 +384,22 @@ final class AppModel: ObservableObject {
 
     private func flushChunks() { chunks.flush() }
 
+    /// The focused session's replayed history, held while it arrives and folded ONCE (`ReplayBuffer`'s doc: the
+    /// orb feed used to fold a long Dispatch history one event, one copy and one publish at a time).
+    let replay = ReplayBuffer()
+
+    /// Folds a finished replay with one publish, then lets the menu bar's activity reconverge on the session's
+    /// true state (it is derived per live event, and the replay's events were not shown to it one by one).
+    private func foldReplay(_ events: [SessionEvent]) {
+        OrbDebug.log("orb feed \(focusedSessionId ?? "-"): replay folded — \(events.count) events")
+        session.apply(replay: events)
+        let next = MenuBarActivity.derived(from: session.state)
+        if next != menuBarActivity {
+            menuBarActivity = next
+            onActivityChange?(next)
+        }
+    }
+
     private func handle(_ ev: WinterEvent) async {
         switch ev {
         case .session(let e):
@@ -400,6 +419,7 @@ final class AppModel: ObservableObject {
                 }
             }
             guard e.sessionId == focusedSessionId else { return }
+            if replay.hold(e) { return } // history in flight: folded once when it is complete
             if e.isStreamedChunk {
                 chunks.append(e)
             } else {
@@ -407,6 +427,7 @@ final class AppModel: ObservableObject {
                 session.apply(e)
             }
         case .connection(let s):
+            replay.finish() // what has arrived folds first, so the order of events is kept
             flushChunks()
             session.apply(connection: s)
             connectionSummary = summaryLine()
@@ -514,10 +535,14 @@ final class AppModel: ObservableObject {
         chunks.removeAll() // the old session's — never folded into the next one
         session.reset()
         focusedSessionId = sessionId
-        // Full replay from 0 rebuilds tasks/pending state through the reducer.
+        // Full replay from 0 rebuilds tasks/pending state through the reducer — held, and folded once.
+        // Holding starts BEFORE the attach: the replay can arrive while the attach is still awaited.
+        replay.begin()
         do {
-            _ = try await client.attach(sessionId: sessionId, fromSeq: 0)
+            let ceiling = try await client.attach(sessionId: sessionId, fromSeq: 0)
+            replay.arm(ceiling: ceiling)
         } catch {
+            replay.finish()
             // Target vanished or transport hiccuped: reconcile with WinterKit's ground truth
             // (attach() rolled its state back), then fall back to the newest surviving session.
             focusedSessionId = await client.attachedSession
@@ -533,9 +558,13 @@ final class AppModel: ObservableObject {
                let newest = sessions.filter({ $0.mode == "dispatch" }).max(by: { $0.createdAt < $1.createdAt }),
                newest.sessionId != sessionId {
                 chunks.removeAll() // the old session's — never folded into the next one
-        session.reset()
+                session.reset()
                 focusedSessionId = newest.sessionId
-                if (try? await client.attach(sessionId: newest.sessionId, fromSeq: 0)) == nil {
+                replay.begin()
+                if let ceiling = try? await client.attach(sessionId: newest.sessionId, fromSeq: 0) {
+                    replay.arm(ceiling: ceiling)
+                } else {
+                    replay.finish()
                     focusedSessionId = await client.attachedSession // reconcile again on double failure
                 }
             }

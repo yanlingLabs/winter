@@ -388,7 +388,7 @@ struct PillThinkingText: View {
     }
 
     private var measuredContent: some View {
-        content.onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { measuredHeight = $0 }
+        content.onMeasuredHeight { measuredHeight = $0 }
     }
 
     private var content: some View {

@@ -862,7 +862,7 @@ struct WinterFieldView: View {
             responseContentBody
                 .frame(width: morph.composerWidth, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { newHeight in
+                .onMeasuredHeight { newHeight in
                     OrbDebug.log("response content measured: \(newHeight)")
                     morph.responseHeight = newHeight
                     // Wave-9 gate fix: a changed height can shrink `maxResponseScrollOffset`
