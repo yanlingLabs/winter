@@ -10,6 +10,15 @@ import XCTest
 @MainActor final class MirrorTests: XCTestCase {
     final class FakeClock: CUClock { var now: TimeInterval = 100 }
 
+    final class DecodeLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+        private var main = 0
+        var count: Int { lock.withLock { calls } }
+        var mainThreadCount: Int { lock.withLock { main } }
+        func record(isMain: Bool) { lock.withLock { calls += 1; if isMain { main += 1 } } }
+    }
+
     // MARK: - Frame source maths
 
     func testThrottleLetsThroughAtMostMaxFps() {
@@ -123,6 +132,81 @@ import XCTest
         model.setOtherTargets(1)
         model.clear()
         XCTAssertEqual(model.otherTargets, 0)
+    }
+
+    func testResetPictureDropsTheOldPictureAndCursorButKeepsThePanelUp() throws {
+        let clock = FakeClock()
+        let model = CUMirrorModel(clock: clock)
+        model.show(appName: "Notes", windowSize: CGSize(width: 260, height: 170))
+        model.setOtherTargets(1)
+        let image = try XCTUnwrap(syntheticWindow(appearance: .light, scale: 1))
+        model.apply(frame: try XCTUnwrap(JPEGCodec.encode(image, quality: 0.7)), width: 10, height: 10, windowSize: CGSize(width: 260, height: 170))
+        model.applyCursor(kind: "press", point: CGPoint(x: 50, y: 60), dragTo: nil, frame: nil, text: nil, count: nil, button: nil)
+        XCTAssertNotNil(model.image)
+        model.resetPicture()
+        XCTAssertTrue(model.isActive, "the panel stays up")
+        XCTAssertEqual(model.appName, "Notes")
+        XCTAssertEqual(model.otherTargets, 1)
+        XCTAssertNil(model.image)
+        XCTAssertFalse(model.cursorFrame().visible)
+    }
+
+    func testTheSameAppAndSizeAgainPublishesNothing() {
+        let model = CUMirrorModel(clock: FakeClock())
+        model.show(appName: "Notes", windowSize: CGSize(width: 260, height: 170))
+        var publishes = 0
+        let watch = model.objectWillChange.sink { publishes += 1 }
+        model.show(appName: "Notes", windowSize: CGSize(width: 260, height: 170))
+        model.show(appName: "Notes", windowSize: .zero)
+        model.setOtherTargets(0)
+        XCTAssertEqual(publishes, 0)
+        withExtendedLifetime(watch) {}
+    }
+
+    /// Decoding is off the main thread and newest-first: of a burst, an older frame still waiting is never decoded,
+    /// the picture ends as the last frame, and a picture that was dropped meanwhile is not resurrected.
+    func testFramesAreDecodedOffTheMainThreadNewestFirst() async throws {
+        let image = try XCTUnwrap(syntheticWindow(appearance: .light, scale: 1))
+        let jpeg = try XCTUnwrap(JPEGCodec.encode(image, quality: 0.7))
+        let decodes = DecodeLog()
+        let model = CUMirrorModel(clock: FakeClock(), decode: { data in
+            decodes.record(isMain: Thread.isMainThread)
+            Thread.sleep(forTimeInterval: 0.05) // a slow decode, so the burst piles up behind it
+            return JPEGCodec.decode(data)
+        }, decodeInline: false)
+        model.show(appName: "Notes", windowSize: CGSize(width: 260, height: 170))
+        for i in 1...20 {
+            model.apply(frame: jpeg, width: 100 + i, height: 80, windowSize: CGSize(width: 260, height: 170))
+        }
+        XCTAssertNil(model.image, "apply returns at once: nothing was decoded on this thread")
+        let deadline = Date().addingTimeInterval(5)
+        while model.imageSize?.width != 120, Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(model.imageSize?.width, 120, "the picture ends as the newest frame")
+        XCTAssertLessThanOrEqual(decodes.count, 3, "frames waiting behind a decode are skipped, not decoded: \(decodes.count)")
+        XCTAssertEqual(decodes.mainThreadCount, 0)
+
+        // A frame that finishes decoding after the picture was reset is dropped.
+        model.apply(frame: jpeg, width: 77, height: 80, windowSize: CGSize(width: 260, height: 170))
+        model.resetPicture()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNil(model.image)
+    }
+
+    func testARestingCursorStopsBeingRedrawnAfterAFewSecondsAndTheNextEventWakesIt() {
+        let clock = FakeClock()
+        let model = CUMirrorModel(clock: clock)
+        model.show(appName: "Notes", windowSize: CGSize(width: 260, height: 170))
+        model.applyCursor(kind: "press", point: CGPoint(x: 50, y: 60), dragTo: nil, frame: nil, text: nil, count: nil, button: nil)
+        clock.now += 3
+        _ = model.cursorFrame()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertNotEqual(model.cursorNeed, .none, "still breathing a moment after")
+        clock.now += CUMirrorModel.restingCursorStillAfter + 1
+        _ = model.cursorFrame()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(model.cursorNeed, .none, "the timeline pauses; the cursor stays where it was drawn")
+        model.applyCursor(kind: "move", point: CGPoint(x: 80, y: 90), dragTo: nil, frame: nil, text: nil, count: nil, button: nil)
+        XCTAssertNotEqual(model.cursorNeed, .none, "and the next event starts it again")
     }
 
     func testCursorEventsUseTheCoreKindsInWindowSpace() {
