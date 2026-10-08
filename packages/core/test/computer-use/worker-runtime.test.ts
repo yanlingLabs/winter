@@ -80,8 +80,8 @@ describe("the automation runtime", () => {
 
   test("every error class is a global", async () => {
     const { run } = harness();
-    const r = await run("r1", "print([StaleRef, TargetLost, TargetBusy, WaitTimeout, NotAllowed, Refused, NeedsForeground, HelperUnavailable, PermissionMissing, Cancelled].map((c) => c.name).join(','))");
-    expect(r.prints).toEqual(["StaleRef,TargetLost,TargetBusy,WaitTimeout,NotAllowed,Refused,NeedsForeground,HelperUnavailable,PermissionMissing,Cancelled"]);
+    const r = await run("r1", "print([StaleRef, TargetLost, NoWindow, TargetBusy, WaitTimeout, NotAllowed, Refused, NeedsForeground, HelperUnavailable, PermissionMissing, Cancelled].map((c) => c.name).join(','))");
+    expect(r.prints).toEqual(["StaleRef,TargetLost,NoWindow,TargetBusy,WaitTimeout,NotAllowed,Refused,NeedsForeground,HelperUnavailable,PermissionMissing,Cancelled"]);
   });
 
   test("an escaping error is placed on its script line — a throw, and a failed API call", async () => {

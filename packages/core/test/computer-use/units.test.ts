@@ -126,6 +126,23 @@ describe("the result builder", () => {
     expect(text).toContain("WaitTimeout: nothing matched");
   });
 
+  test("the fence preamble comes only with a fenced block: a tainted failed call with only the daemon's own line has none", () => {
+    const b = new ResultBuilder();
+    b.markScreenRead();
+    const r = b.build({ error: { name: "TargetLost", message: "Notes is gone (the app quit or its window closed) — bind it again with apps.open()", trusted: true }, tag: "t" });
+    expect(r.content).toEqual([{ type: "text", text: "TargetLost: Notes is gone (the app quit or its window closed) — bind it again with apps.open()\n" }]);
+    // An UNtrusted error is fenced, so the preamble comes with it.
+    const u = new ResultBuilder();
+    u.markScreenRead();
+    const ru = u.build({ error: { name: "WaitTimeout", message: "seen: Save" }, tag: "t" });
+    expect((ru.content[0] as { text: string }).text).toContain("came from the screen");
+    expect((ru.content[1] as { text: string }).text).toBe('<screen-data id="t">\nWaitTimeout: seen: Save\n</screen-data id="t">\n');
+    // Images only: nothing is fenced, so no preamble either.
+    const i = new ResultBuilder();
+    i.image("AAAA", "image/jpeg");
+    expect(i.build({ tag: "t" }).content).toEqual([{ type: "image", data: "AAAA", mimeType: "image/jpeg" }]);
+  });
+
   test("an empty result still says something", () => {
     expect(new ResultBuilder().build().content).toEqual([{ type: "text", text: "(the script printed nothing)\n" }]);
   });

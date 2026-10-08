@@ -222,10 +222,29 @@ describe("ComputerV2: the policy, through a script", () => {
     expect(cards(w.events).map((c) => c.summary)).toEqual(["Allow Winter to use Notes (com.apple.Notes)?", "Winter needs to bring Notes (com.apple.Notes) to the front and use your mouse for a moment"]);
     expect(w.fake.calls("target.act").map((a) => a.allowForeground)).toEqual([false, true]);
 
-    const lonely = world({ policy: "bypass", attended: false });
+    const lonely = world({ policy: "ask", attended: false, answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "session") });
     lonely.fake.handlers["target.act"] = () => { throw new FakeHelperError("needs_foreground", "canvas"); };
     const r2 = await lonely.run("const notes = await apps.open('Notes')\ntry { await notes.click(14) } catch (e) { print(e.name) }");
     expect(text(r2)).toContain("NeedsForeground");
+    expect(cards(lonely.events).map((c) => c.summary)).toEqual(["Allow Winter to use Notes (com.apple.Notes)?"]);
+  }, 30_000);
+
+  macOnly("bypass: NO computer-use prompt at all — needs_foreground is retried at once with allowForeground, attended or not", async () => {
+    for (const attended of [false, true]) {
+      const w = world({ policy: "bypass", attended });
+      let first = true;
+      w.fake.handlers["target.act"] = (p) => { if (first && p.allowForeground === false) { first = false; throw new FakeHelperError("needs_foreground", "canvas"); } return { rung: 4 }; };
+      const r = await w.run("const notes = await apps.open('Notes')\nawait notes.click(14)");
+      expect(r.isError).toBe(false);
+      expect(cards(w.events)).toEqual([]);
+      expect(w.fake.calls("target.act").map((a) => a.allowForeground)).toEqual([false, true]);
+    }
+    // The restrictions still hold under bypass: a view-only app never reaches the foreground retry.
+    const viewOnly = world({ policy: "bypass", apps: { "com.apple.Notes": { access: "view" } } });
+    const r = await viewOnly.run("const notes = await apps.open('Notes')\ntry { await notes.click(14) } catch (e) { print(e.name) }");
+    expect(text(r)).toContain("NotAllowed");
+    expect(viewOnly.fake.calls("target.act")).toEqual([]);
+    expect(cards(viewOnly.events)).toEqual([]);
   }, 30_000);
 });
 
@@ -344,6 +363,21 @@ describe("ComputerV2: screenshots, points and the vision gate", () => {
 });
 
 describe("ComputerV2: the helper's errors and notifications", () => {
+  macOnly("window_elsewhere and no_window are NoWindow, keep the helper's message, never say the app quit", async () => {
+    const w = world();
+    let code = "window_elsewhere";
+    w.fake.handlers["target.find"] = () => { throw new FakeHelperError(code, code === "window_elsewhere" ? "the window is on another Space / full screen" : "the app has no open window"); };
+    const r = await w.run("const notes = await apps.open('Notes')\ntry { await notes.find({ role: 'button' }) } catch (e) { print(e instanceof NoWindow, e instanceof TargetLost, e.message) }");
+    expect(text(r)).toContain("true false Notes: the window is on another Space / full screen — ask the user to bring it to this desktop");
+    expect(text(r)).not.toContain("quit");
+    code = "no_window";
+    const r2 = await w.run("try { await notes.find({ role: 'button' }) } catch (e) { print(e.name, e.message) }\nawait notes.state()");
+    expect(text(r2)).toContain("NoWindow Notes: the app has no open window — ask the user to open one");
+    expect(text(r2)).not.toContain("quit");
+    // The target stays bound (the window may come back): the next call reaches the helper again.
+    expect(r2.isError).toBe(false);
+  }, 30_000);
+
   macOnly("busy is retried once; twice is a typed HelperUnavailable", async () => {
     const w = world();
     let n = 0;

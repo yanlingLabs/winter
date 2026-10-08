@@ -8,6 +8,7 @@
 export const AUTOMATION_ERROR_KINDS = [
   "StaleRef",
   "TargetLost",
+  "NoWindow",
   "TargetBusy",
   "WaitTimeout",
   "NotAllowed",

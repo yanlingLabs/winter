@@ -56,7 +56,9 @@ export interface HelperPermissions { accessibility: boolean; screenRecording: bo
 /** `error.data.code` values (spine §2.3). */
 export type HelperErrorCode =
   | "protocol_mismatch" | "home_mismatch" | "permission_missing" | "target_lost" | "stale_ref" | "needs_foreground"
-  | "not_allowed" | "refused" | "wait_timeout" | "cancelled" | "invalid_params" | "unsupported" | "busy";
+  | "not_allowed" | "refused" | "wait_timeout" | "cancelled" | "invalid_params" | "unsupported" | "busy"
+  // The app runs, but its window is on another Space / in full screen, or it has no open window (→ `NoWindow`).
+  | "window_elsewhere" | "no_window";
 
 /** A helper's JSON-RPC error, by its `data.code`. */
 export class HelperRpcError extends Error {
