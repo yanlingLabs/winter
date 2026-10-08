@@ -101,15 +101,24 @@ struct CUPasteSequence {
     /// Waits until the target has visibly taken the paste (its value changed, or it went quiet after a
     /// value-change notification), at most ~1.5 s. Returns whether evidence was seen.
     let waitForEvidence: () -> Bool
+    /// The user's clipboard as an earlier paste saved it, while that paste's restore is still pending: reused,
+    /// so Winter's own text on the clipboard is never saved as the user's.
+    var pendingSaved: [[String: Data]]? = nil
+    /// Set when the paste can't be confirmed (a web or canvas editor with no readable value or selection): the
+    /// sequence returns right after the paste and hands `(saved, ours)` here to restore once the target has
+    /// had time to read the clipboard.
+    var deferRestore: (([[String: Data]], Int) -> Void)? = nil
 
     enum Outcome: Equatable {
         /// The user's clipboard is back. `evidence`: the paste was observed before restoring.
         case restored(evidence: Bool)
         case leftAlone
+        /// Not confirmable: the restore is scheduled.
+        case deferred
     }
 
     func run(items: [[String: Data]], plain: String) throws -> Outcome {
-        let saved = pasteboard.save()
+        let saved = pendingSaved ?? pasteboard.save()
         let ours = pasteboard.write(CUPasteboardMarkers.marked(items))
         // Verify the write took before pasting, so a stale clipboard is never pasted into the target.
         guard pasteboard.changeCount == ours, pasteboard.readString() == plain else {
@@ -121,6 +130,10 @@ struct CUPasteSequence {
         } catch {
             _ = pasteboard.write(saved)
             throw error
+        }
+        if let deferRestore {
+            deferRestore(saved, ours)
+            return .deferred
         }
         let evidence = waitForEvidence()
         // If the user (or the target) copied something meanwhile, theirs wins.
@@ -180,11 +193,16 @@ struct CUEditEvidence {
     var nowMs: () -> Double
     var sleepMs: (Double) -> Void
 
+    /// The selected range, as text, when the element has one (a paste moves the caret).
+    var readSelection: () -> String? = { nil }
+
     /// Waits up to `capMs`. A notification counts once the app has been quiet on it for `quietMs`.
-    func wait(before: String?, since: Double, capMs: Double, pollMs: Double = 25, quietMs: Double = 60) -> Bool {
+    func wait(before: String?, selectionBefore: String? = nil, since: Double, capMs: Double, pollMs: Double = 25,
+              quietMs: Double = 60) -> Bool {
         let start = nowMs()
         while true {
             if let v = readValue(), v != before { return true }
+            if let s = readSelection(), let b = selectionBefore, s != b { return true }
             if let n = lastValueChangeMs(), n > since, nowMs() - n >= quietMs { return true }
             if nowMs() - start >= capMs { return false }
             sleepMs(pollMs)

@@ -19,6 +19,7 @@ public struct CUSkyLight: @unchecked Sendable {
     typealias PostEventRecordTo = @convention(c) (UnsafeRawPointer, UnsafePointer<UInt8>) -> Int32
     typealias GetFrontProcess = @convention(c) (UnsafeMutableRawPointer) -> Int32
     typealias GetProcessForPID = @convention(c) (pid_t, UnsafeMutableRawPointer) -> Int32
+    typealias SetFrontProcess = @convention(c) (UnsafeRawPointer, UInt32, UInt32) -> Int32
     typealias SetAuthMessage = @convention(c) (CGEvent, UnsafeMutableRawPointer) -> Void
     typealias AuthFactory = @convention(c) (AnyClass, Selector, UnsafeMutableRawPointer, Int32, UInt32) -> UnsafeMutableRawPointer?
     typealias MainConnection = @convention(c) () -> UInt32
@@ -33,6 +34,7 @@ public struct CUSkyLight: @unchecked Sendable {
     var postEventRecordToFn: PostEventRecordTo?
     var getFrontProcessFn: GetFrontProcess?
     var getProcessForPIDFn: GetProcessForPID?
+    var setFrontProcessFn: SetFrontProcess?
     var setAuthMessageFn: SetAuthMessage?
     var authFactoryFn: AuthFactory?
     var mainConnectionFn: MainConnection?
@@ -64,6 +66,8 @@ public struct CUSkyLight: @unchecked Sendable {
         s.postEventRecordToFn = fn("SLPSPostEventRecordTo", PostEventRecordTo.self)
         s.getFrontProcessFn = fn("_SLPSGetFrontProcess", GetFrontProcess.self)
         s.getProcessForPIDFn = fn("GetProcessForPID", GetProcessForPID.self)
+        s.setFrontProcessFn = fn("SLPSSetFrontProcessWithOptions", SetFrontProcess.self)
+            ?? fn("_SLPSSetFrontProcessWithOptions", SetFrontProcess.self)
         s.setAuthMessageFn = fn("SLEventSetAuthenticationMessage", SetAuthMessage.self)
         s.authFactoryFn = fn("objc_msgSend", AuthFactory.self)
         s.mainConnectionFn = fn("SLSMainConnectionID", MainConnection.self) ?? fn("CGSMainConnectionID", MainConnection.self)
@@ -175,6 +179,29 @@ public struct CUSkyLight: @unchecked Sendable {
         let a = front.withUnsafeBytes { psn in defocus.withUnsafeBufferPointer { postEventRecordToFn(psn.baseAddress!, $0.baseAddress!) } }
         let b = target.withUnsafeBytes { psn in focus.withUnsafeBufferPointer { postEventRecordToFn(psn.baseAddress!, $0.baseAddress!) } }
         return a == 0 && b == 0
+    }
+
+    /// `kCPSNoWindows`: make a process front without bringing any of its windows forward.
+    static let cpsNoWindows: UInt32 = 0x400
+
+    /// Makes `pid` WindowServer-front for its `windowID` WITHOUT bringing any window forward (cua-driver's
+    /// menu-shortcut activation): AppKit then validates and dispatches menu commands against that window.
+    /// Returns the previous front process's PSN to hand back with `restoreFront`, or nil when not done.
+    func frontNoWindows(pid: pid_t, windowID: UInt32) -> [UInt8]? {
+        guard let setFrontProcessFn, let getFrontProcessFn, let getProcessForPIDFn else { return nil }
+        var previous = [UInt8](repeating: 0, count: 8)
+        var target = [UInt8](repeating: 0, count: 8)
+        guard previous.withUnsafeMutableBytes({ getFrontProcessFn($0.baseAddress!) }) == 0,
+              target.withUnsafeMutableBytes({ getProcessForPIDFn(pid, $0.baseAddress!) }) == 0,
+              target.withUnsafeBytes({ setFrontProcessFn($0.baseAddress!, windowID, Self.cpsNoWindows) }) == 0
+        else { return nil }
+        return previous
+    }
+
+    /// Hands the front back to the process `frontNoWindows` took it from (no window raised).
+    func restoreFront(_ psn: [UInt8]) {
+        guard let setFrontProcessFn, psn.count == 8 else { return }
+        _ = psn.withUnsafeBytes { setFrontProcessFn($0.baseAddress!, 0, Self.cpsNoWindows) }
     }
 
     /// Undoes `focusWithoutRaise`: the target window loses key focus and the user's previous key window
