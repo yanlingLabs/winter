@@ -18,6 +18,21 @@ import CoreGraphics
     func screens() -> [ScreenInfo] {
         AppKitScreens.all()
     }
+
+    func windowsFrontToBack() -> [StackWindow] {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] else { return [] }
+        return list.compactMap { info in
+            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                  let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
+            else { return nil }
+            let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+            let alpha = CGFloat((info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1)
+            return StackWindow(id: id, pid: pid, layer: layer, bounds: bounds, alpha: alpha)
+        }
+    }
 }
 
 /// AppKit's screens in top-left global points, the main (menu-bar) screen first.

@@ -20,6 +20,10 @@ import Foundation
     /// The last known frame of each target's window, for mapping points and sizing the mirror's cursor.
     private var windowFrames: [TargetKey: CGRect] = [:]
     private var driverNeed: CursorAnimationNeed = .none
+    /// Whether each overlay's cursor is currently covered by another window.
+    private var occluded: [TargetKey: Bool] = [:]
+    private var lastOcclusionCheck: TimeInterval = -.infinity
+    private let ownPID: pid_t
 
     /// Mirror panels that exist (shown, or hidden but still wanted so they can come back quickly).
     private var mirrors: [TargetKey: MirrorSurface] = [:]
@@ -31,7 +35,9 @@ import Foundation
     private var lastReorder: [TargetKey: TimeInterval] = [:]
 
     init(windows: CUWindowSource, surfaces: CUSurfaceFactory, clock: CUClock, ticker: CUTicker,
-         frames: CUFrameDriver, accessibility: CUAccessibilitySource, tuning: PresentationTuning = .standard) {
+         frames: CUFrameDriver, accessibility: CUAccessibilitySource, ownPID: pid_t = getpid(),
+         tuning: PresentationTuning = .standard) {
+        self.ownPID = ownPID
         self.windows = windows
         self.surfaces = surfaces
         self.clock = clock
@@ -79,6 +85,7 @@ import Foundation
         timeline.receive(kind.mapped(local), at: local(point), now: now)
         cursors[key] = timeline
         if kind != .done { state.noteCursor(key, fraction: MirrorLayout.fraction(of: point, in: frame), now: now) }
+        lastOcclusionCheck = -.infinity // the cursor moved: look again now
         refresh()
     }
 
@@ -165,7 +172,10 @@ import Foundation
             let p = presence(of: key)
             if let f = p.frame { windowFrames[key] = f }
             guard case .visible(let frame) = p else {
-                if shownOverlays.remove(key) != nil { overlays[key]?.setShown(false) }
+                if shownOverlays.remove(key) != nil {
+                    overlays[key]?.setShown(false)
+                    occluded[key] = nil
+                }
                 continue
             }
             let overlay = overlays[key] ?? surfaces.makeOverlay(target: key.target)
@@ -178,12 +188,15 @@ import Foundation
         for key in shownOverlays where !live.contains(key) {
             overlays[key]?.setShown(false)
             shownOverlays.remove(key)
+            occluded[key] = nil
         }
         for (key, overlay) in overlays where state.entries[key] == nil && cursors[key] == nil {
             overlay.close()
             overlays[key] = nil
             lastReorder[key] = nil
+            occluded[key] = nil
         }
+        updateOcclusion(now: now)
         pushCursorFrames(now: now)
 
         let busy = !shownMirrors.isEmpty || !shownOverlays.isEmpty || state.hasPendingTimers
@@ -191,6 +204,27 @@ import Foundation
             ticker.start(interval: tuning.trackingInterval) { [weak self] in self?.refresh() }
         } else if !busy, ticker.isRunning {
             ticker.stop()
+        }
+    }
+
+    /// The overlay floats above every app, so a covered target would show its cursor on top of the covering window.
+    /// Read the window list (at most every `occlusionInterval`, and at once after an action) and fade the cursor out
+    /// where the target is not the frontmost ordinary window at the cursor's point.
+    private func updateOcclusion(now: TimeInterval) {
+        guard !shownOverlays.isEmpty else { return }
+        let firstLook = shownOverlays.contains { occluded[$0] == nil }
+        guard firstLook || now - lastOcclusionCheck >= tuning.occlusionInterval else { return }
+        lastOcclusionCheck = now
+        let stack = windows.windowsFrontToBack()
+        for key in shownOverlays {
+            guard let timeline = cursors[key], let frame = windowFrames[key] else { continue }
+            let tip = timeline.frame(at: now).tip
+            let point = CGPoint(x: frame.minX + tip.x, y: frame.minY + tip.y)
+            let covered = !CursorOcclusion.isVisible(at: point, target: key.target.windowID, in: stack, ownPID: ownPID)
+            if occluded[key] != covered {
+                occluded[key] = covered
+                overlays[key]?.setOccluded(covered)
+            }
         }
     }
 
@@ -234,6 +268,7 @@ import Foundation
         mirrorOrder.removeAll { $0 == key }
         cursors[key] = nil
         windowFrames[key] = nil
+        occluded[key] = nil
     }
 
     // MARK: - Test hooks
