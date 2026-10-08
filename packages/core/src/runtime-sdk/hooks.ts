@@ -1302,9 +1302,10 @@ function escapeFloorHook(deps: SessionHooksDeps): HookCallback {
 // ── 2. Bash safety reviewer ─────────────────────────────────────────────────────────────────────
 
 /** `PreToolUse`, matched on `"Bash"` — the reviewer is the auto-policy GATE (see this file's own
- *  header and `deps.policy`'s doc comment). `bashLooksSafe` bypasses the review call entirely for
- *  an obviously-safe command (no shell metacharacters, read-only argv0, or an allow-listed entry) —
- *  identical to the retired engine's own bypass. A DEFINITE `unsafe` VERDICT still denies, with the
+ *  header and `deps.policy`'s doc comment). `bashLooksSafe` bypasses the review call entirely for a
+ *  sandboxed command the runtime's read-only classifier accepts (`agent/bash-read-only.ts`, ported from
+ *  the agent SDK; never one naming a well-known secret store) or an allow-listed entry, and
+ *  `plainOpenUrls` for a plain `open` of an app or an http(s) page. A DEFINITE `unsafe` VERDICT still denies, with the
  *  reviewer's own reason. A reviewer that THROWS (timeout, malformed verdict, aborted — i.e. no
  *  verdict was ever reached, not a verdict of "unsafe") is a different case (review r1 Minor): it
  *  escalates with `permissionDecision: "ask"` — `PreToolUseHookSpecificOutput.permissionDecision`
@@ -1337,7 +1338,14 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
     // §2a's floor denies this one on its own, whatever the order the hooks run in; never spend (or
     // record) a review on it.
     if (escape && escapeFloorHit(command, deps.home, hookCwd(input)) !== undefined) return allow();
-    if (!escape && bashLooksSafe(command, deps.reviewerAllow?.() ?? [])) return allow();
+    if (!escape) {
+      // The runtime's own read-only classifier (or the user's reviewer allow list) — sandboxed calls only: a
+      // read-only `cat` is harmless inside the sandbox and reads `~/.ssh` outside it.
+      const originalCwd = deps.roots[0];
+      const cwd = hookCwd(input) ?? originalCwd;
+      const ctx = cwd === undefined ? undefined : { cwd, originalCwd: originalCwd ?? cwd };
+      if (bashLooksSafe(command, deps.reviewerAllow?.() ?? [], ctx)) return allow();
+    }
     // 2026-10-08 (the live gate): opening an app, or an http(s) page in the user's own browser, is an ordinary
     // user-facing action a model reviewer misreads as a network side effect — and in Dispatch its `unsafe` is a
     // hard deny. A PLAIN `open` (`plainOpenUrls`: `-a`/`-b`/`-g`/`-j`/`-n`/`-F` and http(s) URLs only, nothing

@@ -229,6 +229,22 @@ describe("sessionHooksFor — bash safety reviewer", () => {
     expect(called).toBe(false);
   });
 
+  test("the read-only classifier skips the reviewer for a sandboxed read-only command; a writer, a secret read or an escape is reviewed", async () => {
+    const seen: string[] = [];
+    const reviewer = { review: async (input: { command: string }) => { seen.push(input.command); return { verdict: "safe", reason: "" }; } } as unknown as BashReviewer;
+    const group = groupFor(sessionHooksFor({ ...baseDeps, reviewer, policy: () => "auto", reviewerAllow: () => ["npm test"] }).winter?.PreToolUse, "Bash");
+    const run = (command: string, extra: Record<string, unknown> = {}) =>
+      group.hooks[0]!(preInput({ tool_name: "Bash", tool_input: { command, ...extra }, tool_use_id: "t1", cwd: "/tmp" }), "t1", { signal: abortSignal() });
+    for (const c of ["git status", "git log | head", "find . -name x", "sed -n 1p f", "ls && pwd", "npm test"]) expect(await run(c)).toEqual({});
+    expect(seen).toEqual([]);
+    for (const c of ["git push", "git branch -D x", "find . -delete", "sed -i s/a/b/ f", "cat x > y", "ls && rm x", "echo $(id)", "cat ~/.ssh/id_rsa"]) await run(c);
+    expect(seen).toEqual(["git push", "git branch -D x", "find . -delete", "sed -i s/a/b/ f", "cat x > y", "ls && rm x", "echo $(id)", "cat ~/.ssh/id_rsa"]);
+    // An escape is never pre-allowed, read-only or allow-listed alike.
+    await run("git status", { dangerouslyDisableSandbox: true });
+    await run("npm test", { dangerouslyDisableSandbox: true });
+    expect(seen.slice(-2)).toEqual(["git status", "npm test"]);
+  });
+
   test("a plain `open` of an app or an http(s) page skips the reviewer; anything else, or a dangerous-floor host, is reviewed", async () => {
     const seen: string[] = [];
     const reviewer = { review: async (input: { command: string }) => { seen.push(input.command); return { verdict: "unsafe", reason: "network side effect" }; } } as unknown as BashReviewer;
