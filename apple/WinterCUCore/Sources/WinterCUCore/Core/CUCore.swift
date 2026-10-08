@@ -377,10 +377,14 @@ public final class CUCore: @unchecked Sendable {
 
     // MARK: - shared plumbing
 
+    /// Main-queue dispatch, not a `Task` per event: the main queue is FIFO, so `targetReleased` then
+    /// `targetBound` (or a burst of `actionAt`) reach the presentation layer in the order they happened.
     func emit(_ body: @escaping @MainActor (any CUCoreEvents) -> Void) {
-        Task { @MainActor [weak self] in
-            guard let e = self?.events else { return }
-            body(e)
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let e = self?.events else { return }
+                body(e)
+            }
         }
     }
 
