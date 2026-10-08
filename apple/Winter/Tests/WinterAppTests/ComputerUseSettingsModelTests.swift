@@ -13,13 +13,19 @@ import WinterKit
 final class ComputerUseSettingsModelTests: XCTestCase {
     private typealias Fake = FakeComputerUseClient
 
-    private func notes(access: ComputerUseAppAccess = .full, grant: ComputerUseGrant? = nil,
-                       lastUsedAt: Double? = nil) -> ComputerUseApp {
-        ComputerUseApp(bundleId: "com.apple.Notes", name: "Notes", access: access, grant: grant, lastUsedAt: lastUsedAt)
+    private func notes(access: ComputerUseAppAccess? = .full, grant: ComputerUseGrant? = nil,
+                       isDefault: Bool = false, lastUsedAt: Double? = nil) -> ComputerUseApp {
+        ComputerUseApp(bundleId: "com.apple.Notes", name: "Notes", access: access, grant: grant,
+                       isDefault: isDefault, lastUsedAt: lastUsedAt)
     }
 
-    private func loaded(_ client: Fake) async -> ComputerUseSettingsModel {
-        let model = ComputerUseSettingsModel(client: client, permissionPollNanoseconds: 1_000, permissionPollLimit: 5)
+    private let onePassword = ComputerUseApp(bundleId: "com.1password.1password", name: "1Password", access: .deny,
+                                             grant: nil, isDefault: true)
+    private let textEdit = ComputerUseApp(bundleId: "com.apple.TextEdit", name: "TextEdit", access: nil, grant: .always)
+
+    private func loaded(_ client: Fake, enumerator: (any InstalledAppEnumerating)? = nil) async -> ComputerUseSettingsModel {
+        let model = ComputerUseSettingsModel(client: client, enumerator: enumerator,
+                                             permissionPollNanoseconds: 1_000, permissionPollLimit: 5)
         await model.load()
         return model
     }
@@ -190,21 +196,97 @@ final class ComputerUseSettingsModelTests: XCTestCase {
         XCTAssertEqual(client.statusCallCount, 1, "a refused ask starts no watch")
     }
 
-    // MARK: - Apps
+    // MARK: - Allow all apps
 
-    func testChangingAnAppsAccessWritesThatAppAndKeepsItsGrant() async {
+    func testTheMasterSwitchDefaultsOnWritesOnlyItsKeyAndReadsTheDaemonBack() async {
         let client = Fake()
-        client.listAppsResults = [.success([notes(grant: .always)])]
+        client.statusResults = [.success(Fake.status()), .success(Fake.status(allowAllApps: false))]
+        let model = await loaded(client)
+        XCTAssertTrue(model.allowAllApps)
+
+        await model.setAllowAllApps(false)
+        XCTAssertEqual(client.setSettingsCalls, [ComputerUseSettingsPatch(allowAllApps: false)])
+        XCTAssertFalse(model.allowAllApps)
+        XCTAssertEqual(model.status?.allowAllApps, false)
+        XCTAssertNil(model.actionError)
+    }
+
+    func testAnUnreadSwitchReadsAsOnAndARefusedWritePutsItBack() async {
+        XCTAssertTrue(ComputerUseSettingsModel(client: nil).allowAllApps, "on is the default before the daemon answers")
+
+        let client = Fake()
+        client.setSettingsResult = .failure(Fake.SimpleError())
+        let model = await loaded(client)
+        await model.setAllowAllApps(false)
+        XCTAssertTrue(model.allowAllApps)
+        XCTAssertEqual(model.actionError, "couldn't change Allow all apps — boom")
+    }
+
+    func testTheCaptionFollowsTheSwitch() {
+        XCTAssertEqual(computerUseAllowAllAppsCaption(true), "Computer Use may act in any app, except the ones below.")
+        XCTAssertEqual(computerUseAllowAllAppsCaption(false), "Computer Use may only use the apps below.")
+    }
+
+    // MARK: - Exceptions
+
+    func testExceptionsAreTheRowsWithALevelAndAlwaysAllowedAreTheRowsWithAGrant() async {
+        let client = Fake()
+        client.listAppsResults = [.success([textEdit, notes(access: .click, grant: .always), onePassword])]
+        let model = await loaded(client)
+        XCTAssertEqual(model.exceptions.map(\.name), ["1Password", "Notes"], "by name; a grant-only row is not an exception")
+        XCTAssertEqual(model.alwaysAllowed.map(\.name), ["Notes", "TextEdit"])
+        XCTAssertTrue(model.exceptions[0].isDefault, "the daemon's own default is tagged")
+        XCTAssertFalse(model.exceptions[1].isDefault)
+    }
+
+    /// Each row resolves its bundle id to an app on disk; one that does not resolve is not installed and
+    /// has no icon path, which is what draws the generic icon and the dimmed row.
+    func testARowWhoseAppIsNotInstalledHasNoIconPathAndIsNotInstalled() async {
+        let client = Fake()
+        client.listAppsResults = [.success([notes(access: .click), onePassword])]
+        let enumerator = FakeInstalledAppEnumerator(apps: [], paths: ["com.apple.Notes": "/System/Applications/Notes.app"])
+        let model = await loaded(client, enumerator: enumerator)
+
+        let notesRow = model.exceptions[1]
+        XCTAssertEqual(model.iconPath(for: notesRow), "/System/Applications/Notes.app")
+        XCTAssertTrue(model.isInstalled(notesRow))
+        let passwordRow = model.exceptions[0]
+        XCTAssertNil(model.iconPath(for: passwordRow))
+        XCTAssertFalse(model.isInstalled(passwordRow))
+        XCTAssertEqual(enumerator.pathLookups.sorted(), ["com.1password.1password", "com.apple.Notes"])
+        XCTAssertFalse(enumerator.anyCallWasOnTheMainThread, "paths are resolved off the main thread")
+    }
+
+    func testWithoutAnEnumeratorNothingIsInstalled() async {
+        let client = Fake()
+        client.listAppsResults = [.success([notes(access: .click)])]
+        let model = await loaded(client)
+        XCTAssertFalse(model.isInstalled(model.exceptions[0]))
+    }
+
+    func testChangingALevelWritesThatAppWithItsNameAndKeepsItsGrantAndDefaultTag() async {
+        let client = Fake()
+        client.listAppsResults = [.success([onePassword])]
         let model = await loaded(client)
 
-        await model.setAccess(.click, for: notes(grant: .always))
+        await model.setAccess(.view, for: onePassword)
         XCTAssertEqual(client.setAppCalls.count, 1)
-        XCTAssertEqual(client.setAppCalls[0].bundleId, "com.apple.Notes")
-        XCTAssertEqual(client.setAppCalls[0].name, "Notes")
-        XCTAssertEqual(client.setAppCalls[0].access, .click)
-        XCTAssertEqual(client.setAppCalls[0].grant, .leave, "a level change does not touch the saved answer")
-        XCTAssertEqual(model.apps, [notes(access: .click, grant: .always)])
-        XCTAssertTrue(model.pendingApps.isEmpty)
+        XCTAssertEqual(client.setAppCalls[0].bundleId, "com.1password.1password")
+        XCTAssertEqual(client.setAppCalls[0].name, "1Password")
+        XCTAssertEqual(client.setAppCalls[0].access, .set(.view))
+        XCTAssertEqual(client.setAppCalls[0].grant, .leave)
+        XCTAssertEqual(model.apps.first?.access, .view)
+        XCTAssertEqual(model.apps.first?.isDefault, true, "a default row can be changed and stays tagged")
+    }
+
+    /// Allow is a level like the others: setting an exception back to it sends `full`.
+    func testSettingBackToAllowSendsFull() async {
+        let client = Fake()
+        client.listAppsResults = [.success([notes(access: .click)])]
+        let model = await loaded(client)
+        await model.setAccess(.full, for: notes(access: .click))
+        XCTAssertEqual(client.setAppCalls.map(\.access), [.set(.full)])
+        XCTAssertEqual(model.apps, [notes(access: .full)])
     }
 
     func testPickingTheCurrentLevelWritesNothing() async {
@@ -215,7 +297,7 @@ final class ComputerUseSettingsModelTests: XCTestCase {
         XCTAssertTrue(client.setAppCalls.isEmpty)
     }
 
-    func testARefusedAccessChangePutsTheRowBack() async {
+    func testARefusedLevelChangePutsTheRowBack() async {
         let client = Fake()
         client.listAppsResults = [.success([notes(access: .full)])]
         client.setAppResult = .failure(Fake.SimpleError())
@@ -225,20 +307,159 @@ final class ComputerUseSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.actionError, "couldn't change Notes — boom")
     }
 
-    func testRemoveAlwaysAllowClearsOnlyTheGrant() async {
+    func testRemovingAnExceptionSendsAccessNullAndDropsTheRow() async {
+        let client = Fake()
+        client.listAppsResults = [.success([notes(access: .click), onePassword])]
+        let model = await loaded(client)
+
+        await model.removeException(notes(access: .click))
+        XCTAssertEqual(client.setAppCalls.count, 1)
+        XCTAssertEqual(client.setAppCalls[0].bundleId, "com.apple.Notes")
+        XCTAssertNil(client.setAppCalls[0].name)
+        XCTAssertEqual(client.setAppCalls[0].access, .remove)
+        XCTAssertEqual(client.setAppCalls[0].grant, .leave)
+        XCTAssertEqual(model.apps, [onePassword])
+
+        // A default row can be removed too.
+        await model.removeException(onePassword)
+        XCTAssertEqual(client.setAppCalls.last?.bundleId, "com.1password.1password")
+        XCTAssertTrue(model.apps.isEmpty)
+    }
+
+    /// An app that is an exception AND holds an always-grant stays in the grants list when the exception
+    /// goes.
+    func testRemovingAnExceptionKeepsAGrantOnlyRow() async {
         let client = Fake()
         client.listAppsResults = [.success([notes(access: .click, grant: .always)])]
+        let model = await loaded(client)
+        await model.removeException(notes(access: .click, grant: .always))
+        XCTAssertEqual(model.apps, [notes(access: nil, grant: .always)])
+        XCTAssertTrue(model.exceptions.isEmpty)
+        XCTAssertEqual(model.alwaysAllowed.map(\.name), ["Notes"])
+    }
+
+    func testARefusedRemovalOrAGrantOnlyRowChangesNothing() async {
+        let client = Fake()
+        client.listAppsResults = [.success([notes(access: .click), textEdit])]
+        client.setAppResult = .failure(Fake.SimpleError())
+        let model = await loaded(client)
+
+        await model.removeException(notes(access: .click))
+        XCTAssertEqual(Set(model.apps.map(\.bundleId)), ["com.apple.Notes", "com.apple.TextEdit"], "the row is back")
+        XCTAssertEqual(model.actionError, "couldn't remove the exception for Notes — boom")
+
+        client.setAppResult = .success(())
+        let calls = client.setAppCalls.count
+        await model.removeException(textEdit)
+        XCTAssertEqual(client.setAppCalls.count, calls, "a grant-only row has no exception to remove")
+    }
+
+    // MARK: - The add sheet
+
+    private func installed(_ name: String, _ id: String) -> InstalledApp {
+        InstalledApp(bundleId: id, name: name, path: "/Applications/\(name).app")
+    }
+
+    func testTheSheetScansOnceOffTheMainThreadAndExcludesExistingExceptions() async {
+        let client = Fake()
+        client.listAppsResults = [.success([notes(access: .click)])]
+        let enumerator = FakeInstalledAppEnumerator(apps: [
+            installed("Safari", "com.apple.Safari"), installed("Notes", "com.apple.Notes"),
+            installed("Calendar", "com.apple.iCal"), installed("calculator", "com.apple.calculator"),
+        ])
+        let model = await loaded(client, enumerator: enumerator)
+        XCTAssertEqual(enumerator.scanCount, 0, "loading the page does not scan the disk")
+
+        await model.loadInstalledApps()
+        await model.loadInstalledApps()
+        XCTAssertEqual(enumerator.scanCount, 1, "cached for the page's lifetime")
+        XCTAssertFalse(enumerator.anyCallWasOnTheMainThread)
+        XCTAssertEqual(model.addableApps(query: "").map(\.name), ["calculator", "Calendar", "Safari"],
+                       "by name, case-insensitively, without the existing exception")
+    }
+
+    func testTheSheetSearchMatchesNameOrBundleId() async {
+        let enumerator = FakeInstalledAppEnumerator(apps: [
+            installed("Safari", "com.apple.Safari"), installed("Notes", "com.apple.Notes"),
+            installed("Slack", "com.tinyspeck.slackmacgap"),
+        ])
+        let model = await loaded(Fake(), enumerator: enumerator)
+        await model.loadInstalledApps()
+        XCTAssertEqual(model.addableApps(query: "saf").map(\.name), ["Safari"])
+        XCTAssertEqual(model.addableApps(query: "  SLACK ").map(\.name), ["Slack"])
+        XCTAssertEqual(model.addableApps(query: "tinyspeck").map(\.name), ["Slack"], "the bundle id matches too")
+        XCTAssertEqual(model.addableApps(query: "com.apple").map(\.name), ["Notes", "Safari"])
+        XCTAssertTrue(model.addableApps(query: "zzz").isEmpty)
+    }
+
+    func testAddableAppsIsPureDedupesAndIgnoresDiacritics() {
+        let apps = [installed("Résumé", "a.resume"), installed("Resume Again", "b.resume"),
+                    installed("Résumé", "a.resume"), installed("Zed", "z")]
+        XCTAssertEqual(computerUseAddableApps(installed: apps, exceptionIds: [], query: "resume").map(\.bundleId),
+                       ["a.resume", "b.resume"])
+        XCTAssertEqual(computerUseAddableApps(installed: apps, exceptionIds: ["a.resume"], query: "").map(\.bundleId),
+                       ["b.resume", "z"])
+        XCTAssertEqual(computerUseAddableApps(installed: [], exceptionIds: [], query: "x"), [])
+    }
+
+    func testAddingAnAppMakesItAClickOnlyException() async {
+        let client = Fake()
+        let enumerator = FakeInstalledAppEnumerator(apps: [installed("Safari", "com.apple.Safari")])
+        let model = await loaded(client, enumerator: enumerator)
+        await model.loadInstalledApps()
+
+        let added = await model.addException(installed("Safari", "com.apple.Safari"))
+        XCTAssertTrue(added)
+        XCTAssertEqual(client.setAppCalls.count, 1)
+        XCTAssertEqual(client.setAppCalls[0].bundleId, "com.apple.Safari")
+        XCTAssertEqual(client.setAppCalls[0].name, "Safari")
+        XCTAssertEqual(client.setAppCalls[0].access, .set(.click))
+        XCTAssertEqual(client.setAppCalls[0].grant, .leave)
+        XCTAssertEqual(model.exceptions.map(\.bundleId), ["com.apple.Safari"])
+        XCTAssertEqual(model.exceptions.first?.access, .click)
+        XCTAssertEqual(model.iconPath(for: model.exceptions[0]), "/Applications/Safari.app", "its icon is known at once")
+        XCTAssertTrue(model.addableApps(query: "").isEmpty, "an exception is no longer offered")
+    }
+
+    func testAddingAnAppThatHoldsAGrantKeepsTheGrant() async {
+        let client = Fake()
+        client.listAppsResults = [.success([textEdit])]
+        let model = await loaded(client)
+        await model.addException(installed("TextEdit", "com.apple.TextEdit"))
+        XCTAssertEqual(model.apps, [ComputerUseApp(bundleId: "com.apple.TextEdit", name: "TextEdit", access: .click, grant: .always)])
+    }
+
+    func testARefusedAddLeavesTheListAndSaysSo() async {
+        let client = Fake()
+        client.setAppResult = .failure(Fake.SimpleError())
+        let model = await loaded(client)
+        let added = await model.addException(installed("Safari", "com.apple.Safari"))
+        XCTAssertFalse(added)
+        XCTAssertTrue(model.apps.isEmpty)
+        XCTAssertEqual(model.actionError, "couldn't add Safari — boom")
+    }
+
+    // MARK: - Always allowed in sessions
+
+    func testRemovingAnAlwaysAllowSendsGrantNullAndKeepsAnExceptionsLevel() async {
+        let client = Fake()
+        client.listAppsResults = [.success([notes(access: .click, grant: .always), textEdit])]
         let model = await loaded(client)
 
         await model.removeAlwaysAllow(for: notes(access: .click, grant: .always))
         XCTAssertEqual(client.setAppCalls.count, 1)
         XCTAssertEqual(client.setAppCalls[0].bundleId, "com.apple.Notes")
-        XCTAssertNil(client.setAppCalls[0].access, "the level is not resent")
+        XCTAssertNil(client.setAppCalls[0].name)
+        XCTAssertEqual(client.setAppCalls[0].access, .leave, "the level is not touched")
         XCTAssertEqual(client.setAppCalls[0].grant, .clear)
-        XCTAssertEqual(model.apps, [notes(access: .click, grant: nil)], "the app keeps its level")
+        XCTAssertEqual(model.apps.first { $0.bundleId == "com.apple.Notes" }, notes(access: .click, grant: nil))
+
+        await model.removeAlwaysAllow(for: textEdit)
+        XCTAssertNil(model.apps.first { $0.bundleId == "com.apple.TextEdit" }, "a grant-only row goes with its grant")
+        XCTAssertTrue(model.alwaysAllowed.isEmpty, "so the subsection hides")
     }
 
-    func testRemoveAlwaysAllowIsNothingForAnAppWithoutOneAndRestoresOnRefusal() async {
+    func testRemovingAnAlwaysAllowIsNothingForAnAppWithoutOneAndRestoresOnRefusal() async {
         let client = Fake()
         client.listAppsResults = [.success([notes(grant: .always)])]
         let model = await loaded(client)
@@ -252,11 +473,53 @@ final class ComputerUseSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.actionError, "couldn't remove always-allow for Notes — boom")
     }
 
+    // MARK: - The disk enumerator
+
+    /// The real enumerator against a temp tree (never the real /Applications): `.app` bundles in a root
+    /// and one level of subfolders, nothing deeper, the first of a repeated id, no app without an id, and
+    /// not Winter itself.
+    func testTheFileEnumeratorFindsAppsOneLevelDeep() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("cu-enum-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let a = root.appendingPathComponent("A"), b = root.appendingPathComponent("B")
+
+        func makeApp(_ dir: URL, _ file: String, id: String?, displayName: String? = nil, name: String? = nil) throws {
+            let contents = dir.appendingPathComponent(file).appendingPathComponent("Contents")
+            try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+            var plist: [String: Any] = [:]
+            if let id { plist["CFBundleIdentifier"] = id }
+            if let displayName { plist["CFBundleDisplayName"] = displayName }
+            if let name { plist["CFBundleName"] = name }
+            try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+                .write(to: contents.appendingPathComponent("Info.plist"))
+        }
+        try makeApp(a, "Foo.app", id: "com.x.foo", displayName: "Foo Display", name: "Foo")
+        try makeApp(a.appendingPathComponent("Utilities"), "Term.app", id: "com.x.term", name: "Term Name")
+        try makeApp(a.appendingPathComponent("Utilities/Deep"), "TooDeep.app", id: "com.x.deep")
+        try makeApp(a, "NoId.app", id: nil)
+        try makeApp(a, "Winter.app", id: "com.winter.app")
+        try makeApp(a, "Plain.app", id: "com.x.plain")
+        try makeApp(b, "Foo.app", id: "com.x.foo", displayName: "Foo From B")
+        try makeApp(b, "Bar.app", id: "com.x.bar")
+        try Data().write(to: a.appendingPathComponent("readme.txt"))
+
+        let found = FileInstalledAppEnumerator(roots: [a, b, root.appendingPathComponent("Missing")]).installedApps()
+        let byId = Dictionary(uniqueKeysWithValues: found.map { ($0.bundleId, $0) })
+        XCTAssertEqual(Set(byId.keys), ["com.x.foo", "com.x.term", "com.x.plain", "com.x.bar"])
+        XCTAssertEqual(byId["com.x.foo"]?.name, "Foo Display", "the first root wins a repeated id; the display name wins")
+        XCTAssertEqual(byId["com.x.term"]?.name, "Term Name", "falls back to CFBundleName")
+        XCTAssertEqual(byId["com.x.plain"]?.name, "Plain", "and then to the file name")
+        // /var is a symlink to /private/var on macOS; the bundle may report either spelling.
+        XCTAssertEqual(byId["com.x.foo"].map { URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path },
+                       a.appendingPathComponent("Foo.app").resolvingSymlinksInPath().path)
+    }
+
     // MARK: - The words
 
-    func testAccessWordsAreTheDaemonsFourLevels() {
+    func testAccessWordsAreAllowClickViewDontAllow() {
         XCTAssertEqual(ComputerUseAppAccess.allCases.map(computerUseAccessTitle),
-                       ["Full", "Click only", "View only", "Don't allow"])
+                       ["Allow", "Click only", "View only", "Don't allow"])
+        XCTAssertEqual(ComputerUseAppAccess.full.rawValue, "full", "Allow is still `full` on the wire")
         XCTAssertEqual(Set(ComputerUseAppAccess.allCases.map(computerUseAccessHelp)).count, 4)
     }
 
@@ -267,24 +530,6 @@ final class ComputerUseSettingsModelTests: XCTestCase {
         XCTAssertEqual(computerUseHelperSummary(ComputerUseHelperStatus(installed: true, running: true, version: "0.1.0")),
                        "Running — version 0.1.0")
         XCTAssertEqual(computerUseHelperSummary(ComputerUseHelperStatus(installed: true, running: true)), "Running")
-    }
-
-    func testAppsAreOrderedByRecentUseThenName() {
-        let apps = [
-            ComputerUseApp(bundleId: "b", name: "Zed", access: .full, lastUsedAt: nil),
-            ComputerUseApp(bundleId: "c", name: "Mail", access: .full, lastUsedAt: 100),
-            ComputerUseApp(bundleId: "a", name: "Alpha", access: .full, lastUsedAt: nil),
-            ComputerUseApp(bundleId: "d", name: "Notes", access: .full, lastUsedAt: 200),
-        ]
-        XCTAssertEqual(computerUseSortedApps(apps).map(\.name), ["Notes", "Mail", "Alpha", "Zed"])
-        XCTAssertEqual(computerUseSortedApps([]), [])
-    }
-
-    func testLastUsedText() {
-        let now = Date(timeIntervalSince1970: 1_760_000_000)
-        let app = ComputerUseApp(bundleId: "a", name: "A", access: .full, lastUsedAt: (1_760_000_000 - 3 * 3600) * 1000)
-        XCTAssertEqual(computerUseLastUsedText(app, now: now), "Used 3 hours ago")
-        XCTAssertNil(computerUseLastUsedText(ComputerUseApp(bundleId: "a", name: "A", access: .full), now: now))
     }
 
     // MARK: - Where the page sits
@@ -304,5 +549,9 @@ final class ComputerUseSettingsModelTests: XCTestCase {
             XCTAssertFalse(copy.contains("`"), copy)
         }
         XCTAssertTrue(settingsComputerUseEnableDescription.contains("Chat never"), "ComputerV2 is code and dispatch only")
+        XCTAssertEqual(settingsComputerUseAppsFootnote,
+                       "Exceptions set the most Computer Use can do in an app, under every approval policy (Bypass included). "
+                       + "When a session first uses an app, you approve it once, for the session, or always — within that limit. "
+                       + "Don't allow also keeps the app out of whole-screen screenshots.")
     }
 }

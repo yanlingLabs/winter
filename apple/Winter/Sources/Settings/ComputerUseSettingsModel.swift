@@ -12,7 +12,7 @@ import WinterKit
 /// PURE: an access level as the picker words it.
 func computerUseAccessTitle(_ access: ComputerUseAppAccess) -> String {
     switch access {
-    case .full: return "Full"
+    case .full: return "Allow"
     case .click: return "Click only"
     case .view: return "View only"
     case .deny: return "Don't allow"
@@ -22,11 +22,17 @@ func computerUseAccessTitle(_ access: ComputerUseAppAccess) -> String {
 /// PURE: what an access level lets the agent do, for the menu's help text.
 func computerUseAccessHelp(_ access: ComputerUseAppAccess) -> String {
     switch access {
-    case .full: return "Winter can look at the app and use it."
+    case .full: return "Winter can look at the app and use it, once you approve it in a session."
     case .click: return "Winter can look, click and scroll, but not type, press keys, paste or drag."
     case .view: return "Winter can look at the app but not act in it."
     case .deny: return "Winter never opens or sees the app, and it is blacked out of whole-screen screenshots."
     }
+}
+
+/// PURE: the sentence under the master switch, for its state.
+func computerUseAllowAllAppsCaption(_ allowAll: Bool) -> String {
+    allowAll ? "Computer Use may act in any app, except the ones below."
+             : "Computer Use may only use the apps below."
 }
 
 /// PURE: the permission's name on the page.
@@ -54,29 +60,6 @@ func computerUseHelperSummary(_ helper: ComputerUseHelperStatus) -> String {
     return "Running"
 }
 
-/// PURE: the Apps list's order — apps used most recently first, then the rest by name. A list that
-/// reshuffled on every use would move the row under the pointer, so only `lastUsedAt` and the name decide.
-func computerUseSortedApps(_ apps: [ComputerUseApp]) -> [ComputerUseApp] {
-    apps.sorted { lhs, rhs in
-        switch (lhs.lastUsedAt, rhs.lastUsedAt) {
-        case let (l?, r?) where l != r: return l > r
-        case (_?, nil): return true
-        case (nil, _?): return false
-        default:
-            let order = lhs.name.localizedCaseInsensitiveCompare(rhs.name)
-            return order == .orderedSame ? lhs.bundleId < rhs.bundleId : order == .orderedAscending
-        }
-    }
-}
-
-/// PURE: "Used 3 hours ago" for an app row, or nil when the daemon has never seen it used.
-func computerUseLastUsedText(_ app: ComputerUseApp, now: Date = Date()) -> String? {
-    guard let date = app.lastUsedDate else { return nil }
-    let formatter = RelativeDateTimeFormatter()
-    formatter.unitsStyle = .full
-    return "Used " + formatter.localizedString(for: date, relativeTo: now)
-}
-
 /// PURE: why a write failed, in the page's one-line voice. A daemon that has no such method (an older
 /// build, or one that predates the proposed settings write) is said so plainly rather than as a fault.
 func computerUseWriteFailureText(_ what: String, _ error: Error) -> String {
@@ -97,7 +80,15 @@ final class ComputerUseSettingsModel: ObservableObject {
     }
 
     @Published private(set) var status: ComputerUseStatus?
+    /// The daemon's rows (`computerUse.apps.list`): the exceptions, plus any app that holds an
+    /// always-grant (a row with no access is there only for that).
     @Published private(set) var apps: [ComputerUseApp] = []
+    /// Where each row's app lives on disk, by bundle id. A row with no entry is not installed (it is
+    /// dimmed and wears the generic icon).
+    @Published private(set) var appPaths: [String: String] = [:]
+    /// Every installed app, scanned the first time the add sheet opens and kept for the page's lifetime.
+    @Published private(set) var installedApps: [InstalledApp] = []
+    @Published private(set) var isScanningInstalled = false
     @Published private(set) var isLoading = false
     /// False until the first load has answered, so the page can say "Loading…" instead of an empty list.
     @Published private(set) var hasLoaded = false
@@ -112,19 +103,25 @@ final class ComputerUseSettingsModel: ObservableObject {
     @Published private(set) var requestingPermission: ComputerUsePermissionKind?
 
     private let client: (any ComputerUseClient)?
+    private let enumerator: (any InstalledAppEnumerating)?
+    private var hasScannedInstalled = false
     private let permissionPollNanoseconds: UInt64
     private let permissionPollLimit: Int
     private var permissionWatch: Task<Void, Never>?
 
     /// - Parameters:
     ///   - client: nil when the app runs without daemon wiring; the page then says so and does nothing.
+    ///   - enumerator: where installed apps come from. nil finds none, so every row reads as not installed
+    ///     — what a test that does not care about the disk gets; nothing here scans it by default.
     ///   - permissionPollNanoseconds/permissionPollLimit: after Grant, macOS decides in its own window, so
     ///     the page asks the daemon for the status on this cadence, for at most this many asks, until both
     ///     permissions read granted. Injectable so a test does not wait.
     init(client: (any ComputerUseClient)?,
+         enumerator: (any InstalledAppEnumerating)? = nil,
          permissionPollNanoseconds: UInt64 = 1_500_000_000,
          permissionPollLimit: Int = 80) {
         self.client = client
+        self.enumerator = enumerator
         self.permissionPollNanoseconds = permissionPollNanoseconds
         self.permissionPollLimit = permissionPollLimit
     }
@@ -143,7 +140,24 @@ final class ComputerUseSettingsModel: ObservableObject {
         ComputerUsePermissionKind.allCases.allSatisfy { permissionState($0) == .granted }
     }
 
-    var sortedApps: [ComputerUseApp] { computerUseSortedApps(apps) }
+    /// The exceptions: rows that carry an access level, by name.
+    var exceptions: [ComputerUseApp] { computerUseSortedByName(apps.filter { $0.access != nil }) }
+
+    /// The apps holding an always-grant, by name.
+    var alwaysAllowed: [ComputerUseApp] { computerUseSortedByName(apps.filter { $0.grant != nil }) }
+
+    /// Whether the master switch is on. The daemon's default, and so this page's until it answers.
+    var allowAllApps: Bool { status?.allowAllApps ?? true }
+
+    /// The `.app` path to draw a row's icon from; nil draws the generic icon.
+    func iconPath(for app: ComputerUseApp) -> String? { appPaths[app.bundleId] }
+
+    func isInstalled(_ app: ComputerUseApp) -> Bool { appPaths[app.bundleId] != nil }
+
+    /// What the add sheet lists for `query`: installed apps that are not already exceptions.
+    func addableApps(query: String) -> [InstalledApp] {
+        computerUseAddableApps(installed: installedApps, exceptionIds: Set(exceptions.map(\.bundleId)), query: query)
+    }
 
     // MARK: - Reading
 
@@ -166,6 +180,26 @@ final class ComputerUseSettingsModel: ObservableObject {
         } catch {
             appsError = "couldn't load the app list — try Refresh"
         }
+        await resolvePaths()
+    }
+
+    /// Resolves each row's bundle id to the app on disk, off the main thread.
+    private func resolvePaths() async {
+        guard let enumerator else { return }
+        let ids = apps.map(\.bundleId)
+        let resolved = await Task.detached(priority: .utility) {
+            ids.compactMap { id in enumerator.appPath(forBundleId: id).map { (id, $0) } }
+        }.value
+        appPaths = Dictionary(resolved, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Scans the installed apps for the add sheet, off the main thread, the first time only.
+    func loadInstalledApps() async {
+        guard let enumerator, !hasScannedInstalled, !isScanningInstalled else { return }
+        isScanningInstalled = true
+        defer { isScanningInstalled = false }
+        installedApps = await Task.detached(priority: .utility) { enumerator.installedApps() }.value
+        hasScannedInstalled = true
     }
 
     /// Status alone, quietly: a failure keeps what is already shown.
@@ -184,6 +218,7 @@ final class ComputerUseSettingsModel: ObservableObject {
     func setPrivateEventPath(_ value: Bool) async {
         await write(ComputerUseSettingsPatch(privateEventPath: value), what: "change background clicks")
     }
+    func setAllowAllApps(_ value: Bool) async { await write(ComputerUseSettingsPatch(allowAllApps: value), what: "change Allow all apps") }
 
     private func write(_ patch: ComputerUseSettingsPatch, what: String) async {
         guard let client, let before = status, !isSavingSettings, !patch.isEmpty else { return }
@@ -244,41 +279,98 @@ final class ComputerUseSettingsModel: ObservableObject {
 
     // MARK: - Apps
 
+    /// Sets an exception's level (`apps.set {bundleId, name, access}`). Allow — the default level — is
+    /// sent as `full` like any other, so a row can be set back to it.
     func setAccess(_ access: ComputerUseAppAccess, for app: ComputerUseApp) async {
-        guard let client, !pendingApps.contains(app.bundleId), app.access != access else { return }
+        guard let client, !pendingApps.contains(app.bundleId), access != app.access else { return }
         pendingApps.insert(app.bundleId)
         defer { pendingApps.remove(app.bundleId) }
-        replaceRow(ComputerUseApp(bundleId: app.bundleId, name: app.name, access: access,
-                                  grant: app.grant, lastUsedAt: app.lastUsedAt))
+        let before = apps
+        upsertRow(ComputerUseApp(bundleId: app.bundleId, name: app.name, access: access, grant: app.grant,
+                                 isDefault: app.isDefault, lastUsedAt: app.lastUsedAt))
         do {
-            try await client.setApp(bundleId: app.bundleId, name: app.name, access: access, grant: .leave)
+            try await client.setApp(bundleId: app.bundleId, name: app.name, access: .set(access), grant: .leave)
             actionError = nil
         } catch {
-            replaceRow(app)
+            apps = before
             actionError = computerUseWriteFailureText("change \(app.name)", error)
         }
     }
 
-    /// "Remove always-allow": the app keeps its access level; only the saved answer to the per-app card
-    /// goes, so the next session that binds it is asked again.
+    /// The (×) button: removes the exception (`apps.set {bundleId, access: null}`). An app that also holds
+    /// an always-grant keeps a grant-only row; any other row goes.
+    func removeException(_ app: ComputerUseApp) async {
+        guard let client, app.access != nil, !pendingApps.contains(app.bundleId) else { return }
+        pendingApps.insert(app.bundleId)
+        defer { pendingApps.remove(app.bundleId) }
+        let before = apps
+        if app.grant != nil {
+            upsertRow(ComputerUseApp(bundleId: app.bundleId, name: app.name, access: nil, grant: app.grant,
+                                     isDefault: false, lastUsedAt: app.lastUsedAt))
+        } else {
+            apps.removeAll { $0.bundleId == app.bundleId }
+        }
+        do {
+            try await client.setApp(bundleId: app.bundleId, name: nil, access: .remove, grant: .leave)
+            actionError = nil
+        } catch {
+            apps = before
+            actionError = computerUseWriteFailureText("remove the exception for \(app.name)", error)
+        }
+    }
+
+    /// The add sheet's pick: an exception at Click only (`apps.set {bundleId, name, access: "click"}`),
+    /// which the user then changes in its row. True when the daemon took it, so the sheet can close.
+    @discardableResult
+    func addException(_ app: InstalledApp) async -> Bool {
+        guard let client, !pendingApps.contains(app.bundleId) else { return false }
+        pendingApps.insert(app.bundleId)
+        defer { pendingApps.remove(app.bundleId) }
+        let before = apps
+        let existing = apps.first { $0.bundleId == app.bundleId }
+        upsertRow(ComputerUseApp(bundleId: app.bundleId, name: app.name, access: .click, grant: existing?.grant,
+                                 isDefault: false, lastUsedAt: existing?.lastUsedAt))
+        do {
+            try await client.setApp(bundleId: app.bundleId, name: app.name, access: .set(.click), grant: .leave)
+            appPaths[app.bundleId] = app.path
+            actionError = nil
+            return true
+        } catch {
+            apps = before
+            actionError = computerUseWriteFailureText("add \(app.name)", error)
+            return false
+        }
+    }
+
+    /// "Remove" under Always allowed in sessions: only the saved answer to the per-app card goes
+    /// (`apps.set {bundleId, grant: null}`), so the next session that binds the app is asked again. An
+    /// app that is also an exception keeps its level; a grant-only row goes.
     func removeAlwaysAllow(for app: ComputerUseApp) async {
         guard let client, app.grant != nil, !pendingApps.contains(app.bundleId) else { return }
         pendingApps.insert(app.bundleId)
         defer { pendingApps.remove(app.bundleId) }
-        replaceRow(ComputerUseApp(bundleId: app.bundleId, name: app.name, access: app.access,
-                                  grant: nil, lastUsedAt: app.lastUsedAt))
+        let before = apps
+        if app.access != nil {
+            upsertRow(ComputerUseApp(bundleId: app.bundleId, name: app.name, access: app.access, grant: nil,
+                                     isDefault: app.isDefault, lastUsedAt: app.lastUsedAt))
+        } else {
+            apps.removeAll { $0.bundleId == app.bundleId }
+        }
         do {
-            try await client.setApp(bundleId: app.bundleId, name: nil, access: nil, grant: .clear)
+            try await client.setApp(bundleId: app.bundleId, name: nil, access: .leave, grant: .clear)
             actionError = nil
         } catch {
-            replaceRow(app)
+            apps = before
             actionError = computerUseWriteFailureText("remove always-allow for \(app.name)", error)
         }
     }
 
-    /// Swaps in `row` for the row with its bundle id.
-    private func replaceRow(_ row: ComputerUseApp) {
-        guard let index = apps.firstIndex(where: { $0.bundleId == row.bundleId }) else { return }
-        apps[index] = row
+    /// Puts `row` in place of the row with its bundle id, or adds it when the daemon has none yet.
+    private func upsertRow(_ row: ComputerUseApp) {
+        if let index = apps.firstIndex(where: { $0.bundleId == row.bundleId }) {
+            apps[index] = row
+        } else {
+            apps.append(row)
+        }
     }
 }
