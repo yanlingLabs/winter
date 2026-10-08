@@ -871,6 +871,8 @@ struct ToolCallRecord: Equatable {
     var siteIcons: [SiteIconRef] = []
     /// A `write` call's line count (`ActivityItem.writtenLines`), for the pill-themed tool pill.
     var writtenLines: Int? = nil
+    /// A ComputerV2 call's script (`ActivityItem.scriptCode`) — the expanded row's monospace block.
+    var scriptCode: String? = nil
 }
 
 /// Stable identity for one `.toolRun` group's EXPANSION state.
@@ -1007,7 +1009,7 @@ func groupActivity(_ items: [ActivityItem]) -> [ActivityGroup] {
         case .tool(let name, let detail, let callId, let output, let isError, let fileDiff, let siteIcons):
             let record = ToolCallRecord(callId: callId, detail: detail, output: output,
                                         isError: isError, fileDiff: fileDiff, siteIcons: siteIcons,
-                                        writtenLines: item.writtenLines)
+                                        writtenLines: item.writtenLines, scriptCode: item.scriptCode)
             if case .toolRun(var entries) = groups.last {
                 if let last = entries.last, last.name == name {
                     entries[entries.count - 1] = ToolRunEntry(name: name, calls: last.calls + [record])
@@ -1081,7 +1083,7 @@ func toolGroupFragment(name: String, count: Int) -> String {
         return count == 1 ? "fetched a page" : "fetched \(count) pages"
     case "web_search", "WebSearch", "Search":
         return count == 1 ? "searched the web" : "searched the web \(count) times"
-    case "computer", "Computer":
+    case "computer", "Computer", "computer_v2", "ComputerV2":
         return count == 1 ? "used the computer" : "used the computer \(count) times"
     case "lsp":
         return count == 1 ? "checked the code" : "checked the code \(count) times"
@@ -1102,6 +1104,17 @@ func toolGroupFragment(name: String, count: Int) -> String {
     }
 }
 
+/// PURE: one entry's fragment in a run's sentence. Counts for every tool, except that a lone ComputerV2
+/// call says what it did — its title or derived label ("Notes · click, paste, state"), which is the
+/// whole point of the tool's optional `title` (R10). Several calls in a row count like any other tool:
+/// expanding the row lists each one's label.
+func toolRunFragment(_ entry: ToolRunEntry) -> String {
+    if isComputerV2Tool(entry.name), entry.count == 1, let detail = entry.calls[0].detail, !detail.isEmpty {
+        return detail
+    }
+    return toolGroupFragment(name: entry.name, count: entry.count)
+}
+
 /// Capitalized single-fragment label — delegates to `toolGroupFragment`, capitalizing the first
 /// letter. Kept for direct callers wanting one tool's label standalone; `toolRunSentence` also
 /// collapses to exactly this output when a run has only one entry (r1 parity: a single-tool run
@@ -1120,7 +1133,7 @@ private func capitalizingFirstLetter(_ s: String) -> String {
 /// first fragment capitalized, every subsequent fragment lowercase. A single-entry run collapses
 /// to exactly `toolGroupLabel`'s output.
 func toolRunSentence(_ entries: [ToolRunEntry]) -> String {
-    let fragments = entries.map { toolGroupFragment(name: $0.name, count: $0.count) }
+    let fragments = entries.map(toolRunFragment)
     guard let first = fragments.first else { return "" }
     return ([capitalizingFirstLetter(first)] + fragments.dropFirst()).joined(separator: ", ")
 }
@@ -1379,6 +1392,8 @@ struct ToolRunCallLine: Equatable {
     /// collapsed one does, which is what keeps every diff reachable past
     /// `maxCollapsedDiffChips`.
     let fileDiff: FileDiffRef?
+    /// A ComputerV2 call's script, drawn in monospace above its result. `nil` for every other tool.
+    var scriptCode: String? = nil
 }
 
 /// Everything an expanded run draws: one line per call, plus a note when the block budget bit.
@@ -1423,7 +1438,8 @@ func toolRunExpansion(_ entries: [ToolRunEntry],
                 // Unbudgeted, deliberately: a chip is one short row, not a monospaced block, and it
                 // is the only door to its diff — withholding one would remove an affordance rather
                 // than defer some drawing.
-                fileDiff: call.fileDiff
+                fileDiff: call.fileDiff,
+                scriptCode: call.scriptCode
             ))
         }
     }
@@ -1648,7 +1664,7 @@ struct ToolRunCallDetailText: View {
                 ToolRowFilePathButton(path: detail, onOpen: onOpenFile)
             }
         } else {
-            Text(line.detail.map { "\(line.name) \($0)" } ?? line.name)
+            Text(toolCallLineText(name: line.name, detail: line.detail))
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
@@ -1786,6 +1802,11 @@ struct TranscriptToolGroupRow: View {
                             .padding(.leading, 16)
                     }
 
+                    // ComputerV2: the script the call ran, above what it printed.
+                    if let code = line.scriptCode {
+                        scriptBlock(code)
+                    }
+
                     if let output = line.output {
                         outputBlock(output)
                     } else if let placeholder = toolCallOutputPlaceholder(line.status) {
@@ -1837,6 +1858,19 @@ struct TranscriptToolGroupRow: View {
                     .font(Typography.tiny())
                     .foregroundStyle(Theme.textMuted)
             }
+        }
+    }
+
+    /// A ComputerV2 call's script: the same chrome as the output block, in the muted ink so the result
+    /// below it stays the louder of the two. Selectable, so it can be copied.
+    private func scriptBlock(_ code: String) -> some View {
+        blockChrome {
+            Text(code)
+                .font(Typography.captionMono())
+                .foregroundStyle(Theme.textSecondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

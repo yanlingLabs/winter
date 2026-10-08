@@ -253,6 +253,47 @@ final class PendingCardsTests: XCTestCase {
         XCTAssertEqual(approvalAdditionalOptions(nil), [], "no options at all is the pre-T6 card, byte-identical")
     }
 
+    // MARK: - ComputerV2's per-app card (options once / session / always)
+
+    /// The per-app card's options exactly as the spine pins them — `{id, label}` with no `rule` or
+    /// `scope` keys at all, which the tolerant decode must accept.
+    private var perAppCardOptions: [SessionEvent.ApprovalOption] {
+        options(#"""
+        [{"id":"once","label":"Allow once"},
+         {"id":"session","label":"Allow for this session"},
+         {"id":"always","label":"Always allow"}]
+        """#)
+    }
+
+    /// `session` and `always` ride the quiet row and answer with their own ids; `once` is the card's
+    /// primary button, not a second "Allow once" under it.
+    func testThePerAppCardOffersSessionAndAlwaysBeneathAPrimaryOnce() {
+        XCTAssertEqual(approvalAdditionalOptions(perAppCardOptions).map(\.id), ["session", "always"])
+        XCTAssertEqual(approvalAdditionalOptions(perAppCardOptions).map(\.label), ["Allow for this session", "Always allow"],
+                       "labels render verbatim from the daemon")
+    }
+
+    func testThePerAppCardsPrimaryButtonsReadAllowOnceAndDontAllow() {
+        XCTAssertEqual(approvalPrimaryChoice(perAppCardOptions),
+                       ApprovalPrimaryChoice(approveLabel: "Allow once", denyLabel: "Don't allow"))
+        // The daemon's own words win, and a missing label still reads sensibly.
+        XCTAssertEqual(approvalPrimaryChoice(options(#"[{"id":"once","label":"Allow this once"}]"#)).approveLabel, "Allow this once")
+        XCTAssertEqual(approvalPrimaryChoice(options(#"[{"id":"once","label":""}]"#)).approveLabel, "Allow once")
+    }
+
+    /// Every other card keeps "Approve" and "Deny" — including the `allow_once` cards, whose id is a
+    /// different one on purpose.
+    func testEveryOtherCardKeepsApproveAndDeny() {
+        let unchanged = ApprovalPrimaryChoice(approveLabel: "Approve", denyLabel: "Deny")
+        XCTAssertEqual(approvalPrimaryChoice(nil), unchanged)
+        XCTAssertEqual(approvalPrimaryChoice([]), unchanged)
+        XCTAssertEqual(approvalPrimaryChoice(options(#"""
+        [{"id":"allow_once","label":"Allow once","rule":null,"scope":null},
+         {"id":"allow_project","label":"Allow Bash(ls:*) in this project","rule":"Bash(ls:*)","scope":"project"},
+         {"id":"deny","label":"Deny","rule":null,"scope":null}]
+        """#)), unchanged)
+    }
+
     // MARK: - panel-shell T10b: PendingCardDraft — the hoisted, externally-owned per-card answer
     //
     // Mirrors `FieldStateAdapter.composerDraft`'s precedent: `PendingQuestionBody`/

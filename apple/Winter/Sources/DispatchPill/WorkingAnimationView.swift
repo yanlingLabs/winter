@@ -472,7 +472,7 @@ func workingToolSymbol(for rawName: String) -> String {
         guard parts.count >= 3, parts[1] == "winter" else { return "shippingbox" }
         switch parts[2] {
         case "browser": return "safari"
-        case "computer": return "cursorarrow.rays"
+        case "computer", "computer_v2": return "cursorarrow.rays"
         case "office": return "doc.text"
         case "sessions": return "person.2.fill"
         case "research": return "magnifyingglass"
@@ -490,7 +490,8 @@ func workingToolSymbol(for rawName: String) -> String {
     // one, or a search's own puff reads as one of its sites (the user's mix-up, 2026-10-02).
     case "websearch", "web_search", "search": return "magnifyingglass"
     case "browser": return "safari"
-    case "computer": return "cursorarrow.rays"
+    // `computerv2` is the plain name the model calls ComputerV2 by, lowercased.
+    case "computer", "computer_v2", "computerv2": return "cursorarrow.rays"
     case "lsp": return "chevron.left.forwardslash.chevron.right"
     case "task_create", "task_update", "task_list", "todowrite": return "checklist"
     case "spawn_agent", "task", "agent": return "person.2.fill"

@@ -876,6 +876,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             mcpOAuthClient: LiveMcpAuthClient(client: client),
             // WS-26: the connector permissions, over the same connection.
             mcpPermissionsClient: LiveMcpPermissionsClient(client: client),
+            // ComputerV2: Settings → Computer Use, over the same connection.
+            computerUseClient: LiveComputerUseClient(client: client),
             // 2026-09-18: the Updates panel reads this presenter directly. Handed over even in
             // Debug (where it will report `.unavailable`) so the panel never has a nil case to
             // invent copy for.

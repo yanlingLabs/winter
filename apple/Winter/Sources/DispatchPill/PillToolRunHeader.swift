@@ -29,7 +29,7 @@ private func pillActivityItems(_ entries: [ToolRunEntry]) -> [ActivityItem] {
 
 /// The kinds of tool the pill has words for. Anything else reads "Using <tool>" → "Used <tool>".
 enum PillToolKind: Equatable {
-    case search, fetch, shell, write, edit, read, grep, glob, list, other(String)
+    case search, fetch, shell, write, edit, read, grep, glob, list, computer, other(String)
 
     init(toolName: String) {
         switch toolName.lowercased() {
@@ -42,6 +42,9 @@ enum PillToolKind: Equatable {
         case "grep": self = .grep
         case "glob": self = .glob
         case "ls": self = .list
+        // ComputerV2 — the host name and the plain name, lowercased. The old `computer` tool stays on
+        // the generic sentence: it has no title and no script to say anything with.
+        case "computer_v2", "computerv2": self = .computer
         default: self = .other(toolName)
         }
     }
@@ -193,6 +196,22 @@ func pillToolLabel(_ entry: ToolRunEntry, turnIsLive: Bool) -> PillToolLabel {
         if running { return PillToolLabel(lead: "Listing ", count: n, noun: .directory) }
         if allFailed { return PillToolLabel(lead: "Couldn't list \(n == 1 ? "the directory" : "\(n) directories")") }
         return PillToolLabel(lead: "Listed ", count: n, noun: .directory, tail: failedTail)
+
+    case .computer:
+        // A lone call says what it is doing — its title or derived label (R10); several in a row count,
+        // and a live set takes turns through its calls' labels, as a page read takes turns through hosts.
+        func label(_ call: ToolCallRecord, running: Bool) -> String { computerV2CallLabel(detail: call.detail, running: running) }
+        if running {
+            let names = (liveCalls.isEmpty ? calls : liveCalls).map { label($0, running: true) }
+            return names.count == 1 ? PillToolLabel(lead: names[0])
+                : PillToolLabel(lead: "", rotation: names.map { PillRotatingName(text: $0, disc: nil) })
+        }
+        if allFailed {
+            return n == 1 ? PillToolLabel(lead: label(calls[0], running: false) + " — failed")
+                          : PillToolLabel(lead: "\(n) computer actions failed")
+        }
+        return n == 1 ? PillToolLabel(lead: label(calls[0], running: false))
+                      : PillToolLabel(lead: "Used the computer \(n) times", tail: failedTail)
 
     case .other:
         let fragment = toolGroupFragment(name: entry.name, count: n)
