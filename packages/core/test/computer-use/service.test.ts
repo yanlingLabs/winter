@@ -342,21 +342,21 @@ describe("ComputerV2: screenshots, points and the vision gate", () => {
     expect(w.fake.calls("target.act")[0]).toMatchObject({ action: { kind: "click", point: [5, 5], shotId: "shot1" } });
   }, 30_000);
 
-  macOnly("screen.screenshot blacks out the floors and Don't-allow apps; screen.windows hides them too", async () => {
+  macOnly("screen.screenshot blacks out the auth surfaces and Don't-allow apps — not Winter; screen.windows hides the same", async () => {
     const w = world({ apps: { "com.apple.Notes": { access: "deny" } } });
     w.fake.apps.find((a) => a.bundleId === "com.apple.TextEdit")!.running = true;
     const r = await w.run("await screen.screenshot()\nconst wins = await screen.windows({ emit: false })\nprint('[' + wins.map((x) => x.app).join(',') + ']')");
     const ex = w.fake.calls("screen.screenshot")[0]!.excludeBundleIds as string[];
-    expect(ex).toContain("com.winter.app");
+    expect(ex).not.toContain("com.winter.app"); // the user ruling: Winter's windows are shown (binding it stays refused)
     expect(ex).toContain("com.apple.Notes");
     expect(ex).toContain("com.1password.1password"); // a built-in Don't-allow exception
     expect(ex).toContain("com.apple.keychainaccess"); // a floor
     expect(ex).not.toContain("com.apple.TextEdit");
     // The switch is on: the running apps are not asked for (nothing without a row is denied).
     expect(w.fake.calls("apps.list")).toEqual([]);
-    // Running: Notes (Don't allow), TextEdit, Winter (itself), 1Password (default Don't allow), Keychain Access (a
-    // floor) — only TextEdit is listed.
-    expect(text(r)).toContain("[TextEdit]");
+    // Running: Notes (Don't allow), TextEdit, Winter (shown), 1Password (default Don't allow), Keychain Access (an
+    // auth surface) — TextEdit and Winter are listed.
+    expect(text(r)).toContain("[TextEdit,Winter]");
   }, 30_000);
 
   macOnly("with Allow all apps OFF, a shot blacks out every RUNNING app without an allowing exception (asked fresh)", async () => {
@@ -366,10 +366,10 @@ describe("ComputerV2: screenshots, points and the vision gate", () => {
     expect(w.fake.calls("apps.list")).toHaveLength(1);
     const ex = w.fake.calls("screen.screenshot")[0]!.excludeBundleIds as string[];
     expect(ex).toContain("com.apple.TextEdit"); // running, no exception → deny
-    expect(ex).toContain("com.winter.app");
+    expect(ex).not.toContain("com.winter.app"); // running, no exception — but Winter is always shown
     expect(ex).toContain("com.1password.1password");
     expect(ex).not.toContain("com.apple.Notes"); // an allowing exception (view)
-    expect(text(r)).toContain("[Notes]");
+    expect(text(r)).toContain("[Notes,Winter]");
   }, 30_000);
 });
 

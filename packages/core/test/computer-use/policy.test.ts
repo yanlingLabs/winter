@@ -209,12 +209,16 @@ describe("the user's restrictions and the floors — under every policy, bypass 
     await failsWith(policy.authorize(newRunGrants("s1"), { bundleId: "com.apple.keychainaccess", name: "Keychain Access" }, { kind: "observe" }), "Refused");
   });
 
-  test("whole-screen shots black out Winter and every Don't-allow app", () => {
-    const { policy } = setup({ apps: { "com.apple.Notes": { access: "deny" } } });
-    const ex = policy.excludedFromScreen();
+  test("whole-screen shots black out every Don't-allow app and the auth surfaces — never Winter's own windows (the ruling)", () => {
+    const { policy } = setup({ apps: { "com.apple.Notes": { access: "deny" }, "com.winter.app": { access: "deny" } } });
+    const ex = policy.excludedFromScreen(["com.winter.app.dev", "com.winter.computeruse"]);
     expect(ex).toContain("com.apple.Notes");
-    expect(ex).toContain("com.winter.app");
     expect(ex).toContain("com.1password.1password");
+    expect(ex).toContain("com.apple.SecurityAgent");
+    for (const id of ["com.winter.app", "com.winter.app.dev", "com.winter.computeruse", "com.winter.computeruse.dev"]) {
+      expect(ex).not.toContain(id);
+      expect(policy.hiddenFromScreen(id)).toBe(false);
+    }
   });
 
   test("removing Always allow forgets the session grant its card left too", async () => {
@@ -300,7 +304,7 @@ describe("the master switch and its exceptions (allowAllApps)", () => {
     expect(ex).toContain("com.apple.Terminal"); // its default removed: the switch (off) decides
     expect(ex).not.toContain("com.apple.Notes");
     expect(ex).not.toContain("com.googlecode.iterm2"); // click by default
-    expect(ex).toContain("com.winter.app");
+    expect(policy.excludedFromScreen(["com.winter.app"])).not.toContain("com.winter.app"); // shown even with the switch off
     expect(ex).toContain("com.apple.SecurityAgent");
     expect(ex).toContain("com.1password.1password");
     expect(policy.hiddenFromScreen("com.apple.Safari")).toBe(true);

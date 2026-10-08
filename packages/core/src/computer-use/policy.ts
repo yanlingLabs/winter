@@ -213,24 +213,27 @@ export class ComputerPolicy {
     for (const grants of this.sessionGrants.values()) grants.delete(bundleId);
   }
 
-  /** Must the app stay off a whole-screen read (a shot, `screen.windows`)? The floors, and every app whose
-   *  effective access is `deny`. */
+  /** Must the app stay off a whole-screen read (a shot, `screen.windows`)? The system's authentication surfaces,
+   *  and every app whose effective access is `deny` — never Winter's own windows (the user ruling: a whole-screen
+   *  read is only for seeing; acting needs a bind, and binding Winter stays refused by `checkFloors`). */
   hiddenFromScreen(bundleId: string): boolean {
-    return WINTER_OWN_BUNDLE_IDS.includes(bundleId) || AUTH_DIALOG_BUNDLE_IDS.has(bundleId) || this.accessFor(bundleId) === "deny";
+    if (WINTER_OWN_BUNDLE_IDS.includes(bundleId)) return false;
+    return AUTH_DIALOG_BUNDLE_IDS.has(bundleId) || this.accessFor(bundleId) === "deny";
   }
 
   /**
-   * The bundle ids a whole-screen shot must black out: the floors (Winter's own apps, the system's authentication
-   * surfaces) and every app whose effective access is `deny` — the user's rows, the built-in defaults and, since
-   * an app with no row is `deny` while the master switch is OFF, every RUNNING app (`running`, from the helper's
-   * `apps.list`) without an allowing exception. With the switch on, an app with no row is `full`, so `running`
-   * adds nothing and the caller need not ask the helper for it.
+   * The bundle ids a whole-screen shot must black out: the system's authentication surfaces and every app whose
+   * effective access is `deny` — the user's rows, the built-in defaults and, since an app with no row is `deny`
+   * while the master switch is OFF, every RUNNING app (`running`, from the helper's `apps.list`) without an
+   * allowing exception. With the switch on, an app with no row is `full`, so `running` adds nothing and the caller
+   * need not ask the helper for it. Winter's own apps are NEVER on it (the user ruling: they are shown, not
+   * controlled — binding them is refused).
    */
   excludedFromScreen(running: readonly string[] = []): string[] {
     const settings = this.deps.settings();
-    const out = new Set<string>([...WINTER_OWN_BUNDLE_IDS, ...AUTH_DIALOG_BUNDLE_IDS]);
+    const out = new Set<string>(AUTH_DIALOG_BUNDLE_IDS);
     const candidates = new Set<string>([...Object.keys(computerUseAppsFrom(settings)), ...Object.keys(DEFAULT_APP_EXCEPTIONS), ...running]);
-    for (const id of candidates) if (effectiveAppAccess(settings, id).access === "deny") out.add(id);
+    for (const id of candidates) if (!WINTER_OWN_BUNDLE_IDS.includes(id) && effectiveAppAccess(settings, id).access === "deny") out.add(id);
     return [...out];
   }
 

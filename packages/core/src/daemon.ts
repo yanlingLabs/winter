@@ -16,6 +16,7 @@ import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
 import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
+import { CallThreads } from "./sessions/call-threads";
 import { reapEmptySessions } from "./sessions/reaper";
 import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
@@ -1841,6 +1842,9 @@ export async function startDaemon(opts: {
   // the scope-aware read-only answers (`agent/mcp/connector-source.ts` has the rules: which listing, the
   // background kick, and why nothing on a call path ever spawns a server).
   const connectorPermissions = daemonConnectorSource({ home: winterHome, trust: trustStore, settings: () => settings, manager: () => mcp });
+  // The reviewing pill (2026-10-08): which thread each live tool call is on, for the reviewer's transient.
+  const callThreads = new CallThreads();
+  hub.addObserver((event) => callThreads.observe(event));
   const hooksFor = (session: CapabilitySession) =>
     sessionHooksFor({
       sessionId: session.sessionId,
@@ -1851,6 +1855,13 @@ export async function startDaemon(opts: {
       ...(bashReviewer === undefined ? {} : { reviewer: bashReviewer }),
       reviewerEnabled: () => settings?.reviewer?.enabled,
       reviewerAllow: () => settings?.reviewer?.allow,
+      // The reviewing pill: a TRANSIENT on the call's own thread — broadcast, never persisted.
+      reviewProgress: (e) => {
+        hub.broadcastTransient(session.sessionId, {
+          type: "tool_review_progress", sessionId: session.sessionId, threadId: callThreads.threadOf(session.sessionId, e.callId),
+          callId: e.callId, phase: e.phase, ...(e.verdict === undefined ? {} : { verdict: e.verdict }),
+        });
+      },
       policy: () => { try { return store.meta(session.sessionId).approvalPolicy; } catch { return undefined; } },
       lsp: () => lspManager ?? undefined,
       autoDiagnosticsEnabled: () => winterLspAutoDiagnosticsEnabled(session.cwd),
