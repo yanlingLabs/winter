@@ -2,11 +2,10 @@ import WinterCUCore
 
 /// The automation engine as the dispatcher sees it: exactly `CUCore`'s pinned methods, one per helper RPC
 /// method that the engine answers (method `a.bName` → `aBName(_: ABNameParams) → ABNameResult`). `CUCore`
-/// conforms below; tests drive the dispatcher with a fake.
-///
-/// `status` and `permissions.request` are not here: the shell answers them itself (it owns the grants and the
-/// onboarding), as it does `hello` and `script.active`.
+/// conforms below; tests drive the dispatcher with a fake. `hello` and `script.active` are the shell's alone.
 public protocol CoreService: AnyObject {
+    func status(_ params: StatusParams) async throws -> StatusResult
+    func permissionsRequest(_ params: PermissionsRequestParams) async throws -> PermissionsRequestResult
     func appsList(_ params: AppsListParams) async throws -> AppsListResult
     func screenWindows(_ params: ScreenWindowsParams) async throws -> ScreenWindowsResult
     func targetBind(_ params: TargetBindParams) async throws -> TargetBindResult

@@ -55,6 +55,7 @@ final class ServerHandshakeTests: XCTestCase {
         let reply = try XCTUnwrap(client.hello(home: home))
         XCTAssertEqual(reply["result"], .object(["protocol": .number(1), "helperVersion": .string("9.876.5"), "pid": .number(Double(getpid()))]))
 
+        rig.core.results["status"] = json(#"{"helperVersion":"9.876.5","permissions":{"accessibility":false,"screenRecording":false}}"#)
         client.send(id: 2, method: "status")
         XCTAssertEqual(client.response(id: 2)?["result"]?["helperVersion"], .string("9.876.5"))
 
@@ -172,6 +173,19 @@ final class ServerHandshakeTests: XCTestCase {
         let stopped = await eventually { rig.core.cancelledCalls.value == 1 }
         XCTAssertTrue(stopped, "the blocked engine call saw its cancellation")
         XCTAssertNil(client.readLine(timeout: 0.3), "no late second answer for the cancelled call")
+    }
+
+    func testAWaitCarryingACallIdIsCancellableToo() async throws {
+        let rig = await Rig()
+        rig.core.blocking = ["target.waitFor"]
+        try await start(rig)
+        let client = try LineClient(path: socketPath)
+        XCTAssertNotNil(client.hello(home: home)?["result"])
+        client.send(id: 2, method: "target.waitFor", params: #"{"targetId":"t1","cond":{"text":"Saved"},"timeoutMs":10000,"callId":"c9"}"#)
+        _ = await eventually { rig.core.methods().contains("target.waitFor") }
+        XCTAssertEqual(rig.core.calls.first { $0.method == "target.waitFor" }?.params["callId"], .string("c9"), "the callId reaches the engine")
+        client.send(id: 3, method: "cancel", params: #"{"callId":"c9"}"#)
+        XCTAssertEqual(client.response(id: 2)?["error"]?["data"]?["code"], .string("cancelled"))
     }
 
     func testTooManyRequestsInFlightAreBusyAndRetryable() async throws {

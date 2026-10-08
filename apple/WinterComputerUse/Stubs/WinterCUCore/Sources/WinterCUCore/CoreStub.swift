@@ -1,11 +1,13 @@
+import ApplicationServices
 import CoreGraphics
 import Foundation
 
-// STUB of the core API the helper shell calls (ComputerV2 phase-1 contract §3b). Every params/result
-// struct's stored property names are the JSON keys of the helper RPC (§2.1), so the shell decodes a
-// request's `params` straight into them and encodes the result straight back. `CUCore` answers every
-// automation call `unsupported`; the lifecycle calls (`cancel`, `turnEnded`, `sessionEnded`) succeed and
-// do nothing. Deleted at merge.
+// STUB of the core API the helper shell calls (ComputerV2 phase-1 contract §3b), with the real package's
+// names (typealiases to `CUEmpty`, the optional `callId` on waits, `status`/`permissionsRequest`). Every
+// params/result struct's stored property names are the JSON keys of the helper RPC (§2.1), so the shell
+// decodes a request's `params` straight into them and encodes the result straight back. `CUCore` answers
+// `status` from the non-prompting checks, every automation call and `permissionsRequest` `unsupported`; the
+// lifecycle calls succeed and do nothing. Deleted at merge.
 
 // MARK: - JSON and errors
 
@@ -162,15 +164,32 @@ public struct CUSettle: Codable, Sendable, Equatable {
     public var maxMs: Int
 }
 
+// MARK: - Status and permissions
+
+public struct CUEmpty: Codable, Sendable, Equatable { public init() {} }
+
+public enum CUPermissionKind: String, Codable, Sendable { case accessibility, screenRecording }
+
+public struct CUPermissions: Codable, Sendable, Equatable {
+    public var accessibility: Bool
+    public var screenRecording: Bool
+}
+
+public typealias StatusParams = CUEmpty
+public struct StatusResult: Codable, Sendable { public var helperVersion: String; public var permissions: CUPermissions }
+
+public struct PermissionsRequestParams: Codable, Sendable { public var kind: CUPermissionKind }
+public struct PermissionsRequestResult: Codable, Sendable { public var opened: Bool }
+
 // MARK: - Discovery
 
-public struct AppsListParams: Codable, Sendable {}
+public typealias AppsListParams = CUEmpty
 public struct AppsListResult: Codable, Sendable {
     public struct App: Codable, Sendable { public var name: String; public var bundleId: String; public var running: Bool; public var pid: Int? }
     public var apps: [App]
 }
 
-public struct ScreenWindowsParams: Codable, Sendable {}
+public typealias ScreenWindowsParams = CUEmpty
 public struct ScreenWindowsResult: Codable, Sendable {
     public struct Window: Codable, Sendable {
         public var app: String; public var bundleId: String; public var pid: Int; public var windowId: Int
@@ -206,7 +225,7 @@ public struct TargetWindowsResult: Codable, Sendable {
 }
 
 public struct TargetReleaseParams: Codable, Sendable { public var targetId: String }
-public struct TargetReleaseResult: Codable, Sendable {}
+public typealias TargetReleaseResult = CUEmpty
 
 // MARK: - Observation
 
@@ -216,6 +235,8 @@ public struct TargetSnapshotParams: Codable, Sendable {
     public var full: Bool?
     public var within: Int?
     public var settle: CUSettle?
+    /// Optional, beyond the pinned §2.1 shape (the real engine's extension): lets `cancel {callId}` reach a wait.
+    public var callId: String?
 }
 public struct TargetSnapshotResult: Codable, Sendable {
     public var snapshotId: String
@@ -237,6 +258,7 @@ public struct TargetScreenshotParams: Codable, Sendable {
     public var region: [Double]?
     public var budget: CUBudget
     public var settle: CUSettle?
+    public var callId: String?
 }
 public struct TargetScreenshotResult: Codable, Sendable {
     public var imageBase64: String
@@ -335,7 +357,7 @@ public struct TargetActResult: Codable, Sendable { public var rung: Int; public 
 
 // MARK: - Waits
 
-public struct TargetWaitIdleParams: Codable, Sendable { public var targetId: String; public var quietMs: Int; public var timeoutMs: Int }
+public struct TargetWaitIdleParams: Codable, Sendable { public var targetId: String; public var quietMs: Int; public var timeoutMs: Int; public var callId: String? }
 public struct TargetWaitIdleResult: Codable, Sendable { public var settled: Bool; public var waitedMs: Int }
 
 public struct TargetWaitForParams: Codable, Sendable {
@@ -343,6 +365,7 @@ public struct TargetWaitForParams: Codable, Sendable {
     public var targetId: String
     public var cond: Condition
     public var timeoutMs: Int
+    public var callId: String?
 }
 public struct TargetWaitForResult: Codable, Sendable { public var met: Bool; public var waitedMs: Int }
 
@@ -367,22 +390,32 @@ public struct ScreenAppAtResult: Codable, Sendable { public var app: String; pub
 // MARK: - Lifecycle
 
 public struct CancelParams: Codable, Sendable { public var callId: String }
-public struct CancelResult: Codable, Sendable {}
+public typealias CancelResult = CUEmpty
 
 public struct TurnEndedParams: Codable, Sendable { public var sessionId: String }
-public struct TurnEndedResult: Codable, Sendable {}
+public typealias TurnEndedResult = CUEmpty
 
 public struct SessionEndedParams: Codable, Sendable { public var sessionId: String }
-public struct SessionEndedResult: Codable, Sendable {}
+public typealias SessionEndedResult = CUEmpty
 
 // MARK: - The engine
 
 public final class CUCore {
-    private weak var events: CUCoreEvents?
+    public weak var events: (any CUCoreEvents)?
 
-    public init(events: CUCoreEvents) {
+    public init(events: (any CUCoreEvents)?) {
         self.events = events
     }
+
+    /// Reads the grants without prompting, like the real engine.
+    public func status(_ params: StatusParams = StatusParams()) async throws -> StatusResult {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0-dev"
+        return StatusResult(helperVersion: version,
+                            permissions: CUPermissions(accessibility: AXIsProcessTrusted(), screenRecording: CGPreflightScreenCaptureAccess()))
+    }
+
+    /// A stub never raises a system prompt or opens System Settings.
+    public func permissionsRequest(_ params: PermissionsRequestParams) async throws -> PermissionsRequestResult { throw notYet("permissions.request") }
 
     private func notYet(_ method: String) -> CUError {
         CUError(code: "unsupported", message: "\(method) is not available in this build (the automation engine is a stub)")
@@ -402,7 +435,7 @@ public final class CUCore {
     public func targetWaitFor(_ params: TargetWaitForParams) async throws -> TargetWaitForResult { throw notYet("target.waitFor") }
     public func screenScreenshot(_ params: ScreenScreenshotParams) async throws -> ScreenScreenshotResult { throw notYet("screen.screenshot") }
     public func screenAppAt(_ params: ScreenAppAtParams) async throws -> ScreenAppAtResult { throw notYet("screen.appAt") }
-    public func cancel(_ params: CancelParams) async throws -> CancelResult { CancelResult() }
-    public func turnEnded(_ params: TurnEndedParams) async throws -> TurnEndedResult { TurnEndedResult() }
-    public func sessionEnded(_ params: SessionEndedParams) async throws -> SessionEndedResult { SessionEndedResult() }
+    public func cancel(_ params: CancelParams) async throws -> CancelResult { CUEmpty() }
+    public func turnEnded(_ params: TurnEndedParams) async throws -> TurnEndedResult { CUEmpty() }
+    public func sessionEnded(_ params: SessionEndedParams) async throws -> SessionEndedResult { CUEmpty() }
 }

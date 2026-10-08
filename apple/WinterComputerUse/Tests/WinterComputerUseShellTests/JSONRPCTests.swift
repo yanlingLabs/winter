@@ -58,7 +58,7 @@ final class JSONRPCTests: XCTestCase {
 
     func testTheNotificationsShapes() {
         XCTAssertEqual(HelperNotification.targetLost(targetId: "t1", reason: "app_quit").params, json(#"{"targetId":"t1","reason":"app_quit"}"#))
-        XCTAssertEqual(HelperNotification.permissionsChanged(HelperPermissions(accessibility: true, screenRecording: false)).params,
+        XCTAssertEqual(HelperNotification.permissionsChanged(accessibility: true, screenRecording: false).params,
                        json(#"{"permissions":{"accessibility":true,"screenRecording":false}}"#))
     }
 

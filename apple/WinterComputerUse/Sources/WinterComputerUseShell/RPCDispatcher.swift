@@ -2,25 +2,19 @@ import Foundation
 import WinterCUCore
 
 /// Routes every method after `hello`. Engine methods decode `params` straight into the engine's own
-/// `<Name>Params` and encode its `<Name>Result` straight back; the shell answers `status`,
-/// `permissions.request` and `script.active` itself, and forwards `turn.ended` / `session.ended` / `cancel`
-/// to both the engine and its own state.
+/// `<Name>Params` and encode its `<Name>Result` straight back; the shell answers `script.active` itself, and
+/// forwards `turn.ended` / `session.ended` / `cancel` to both the engine and its own state.
 public final class RPCDispatcher: @unchecked Sendable {
     public typealias Handler = (JSONValue?) async throws -> AnyEncodable
 
     private let core: CoreService
     private let coordinator: HelperCoordinator
-    private let permissions: PermissionSystem
-    private let helperVersion: String
     private let inFlight: InFlightRegistry
     private var routes: [String: Handler] = [:]
 
-    public init(core: CoreService, coordinator: HelperCoordinator, permissions: PermissionSystem,
-                helperVersion: String, inFlight: InFlightRegistry) {
+    public init(core: CoreService, coordinator: HelperCoordinator, inFlight: InFlightRegistry) {
         self.core = core
         self.coordinator = coordinator
-        self.permissions = permissions
-        self.helperVersion = helperVersion
         self.inFlight = inFlight
         buildRoutes()
     }
@@ -46,6 +40,10 @@ public final class RPCDispatcher: @unchecked Sendable {
     }
 
     private func buildRoutes() {
+        // The engine owns the grants too: `status` reads them (never prompting) with the helper's version, and
+        // `permissions.request` raises the system prompt or opens the Privacy pane.
+        engine("status") { try await $0.status($1 as StatusParams) }
+        engine("permissions.request") { try await $0.permissionsRequest($1 as PermissionsRequestParams) }
         engine("apps.list") { try await $0.appsList($1 as AppsListParams) }
         engine("screen.windows") { try await $0.screenWindows($1 as ScreenWindowsParams) }
         engine("target.bind") { try await $0.targetBind($1 as TargetBindParams) }
@@ -61,16 +59,6 @@ public final class RPCDispatcher: @unchecked Sendable {
         engine("screen.screenshot") { try await $0.screenScreenshot($1 as ScreenScreenshotParams) }
         engine("screen.appAt") { try await $0.screenAppAt($1 as ScreenAppAtParams) }
 
-        routes["status"] = { [permissions, coordinator, helperVersion] _ in
-            let now = permissions.current()
-            await coordinator.observePermissions(now)
-            return AnyEncodable(HelperStatusResult(helperVersion: helperVersion, permissions: now))
-        }
-        routes["permissions.request"] = { [permissions] params in
-            let request = try RPCDispatcher.decode(HelperPermissionsRequest.self, params)
-            await permissions.request(request.kind)
-            return AnyEncodable(HelperPermissionsRequestResult(opened: true))
-        }
         routes["script.active"] = { [coordinator] params in
             let p = try RPCDispatcher.decode(ScriptActiveParams.self, params)
             await coordinator.setScriptActive(sessionId: p.sessionId, active: p.active)

@@ -52,13 +52,11 @@ import WinterCUPresentation
             fail("cannot start: \(error)")
         }
 
-        let permissions = LivePermissionSystem()
         let (presentation, escapeTap) = WinterCUPresentationFactory.make()
-        let coordinator = HelperCoordinator(presentation: presentation, escapeTap: escapeTap, permissions: permissions)
+        let coordinator = HelperCoordinator(presentation: presentation, escapeTap: escapeTap)
         let core = CUCore(events: coordinator)
         let inFlight = InFlightRegistry()
-        let dispatcher = RPCDispatcher(core: core, coordinator: coordinator, permissions: permissions,
-                                       helperVersion: version, inFlight: inFlight)
+        let dispatcher = RPCDispatcher(core: core, coordinator: coordinator, inFlight: inFlight)
         let server = HelperServer(
             configuration: .init(socketPath: identity.socketPath, home: identity.home, helperVersion: version),
             authenticator: authenticator, dispatcher: dispatcher, coordinator: coordinator, inFlight: inFlight, log: log)

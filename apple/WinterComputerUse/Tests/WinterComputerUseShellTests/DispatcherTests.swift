@@ -25,7 +25,7 @@ final class DispatcherTests: XCTestCase {
 
     func testTheDispatcherAnswersExactlyTheHelperRPCMethodsBesidesHello() async {
         let rig = await Rig()
-        let expected = Set(engineSamples.map(\.method) + ["status", "permissions.request", "script.active"])
+        let expected = Set(engineSamples.map(\.method) + ["script.active"])
         XCTAssertEqual(Set(rig.dispatcher.methods), expected)
     }
 
@@ -80,25 +80,23 @@ final class DispatcherTests: XCTestCase {
         }
     }
 
-    func testStatusIsTheShellsOwnAnswer() async throws {
-        let rig = await Rig(helperVersion: "0.124.0")
-        rig.permissions.now = HelperPermissions(accessibility: true, screenRecording: false)
+    func testStatusWithNoParamsReachesTheEngine() async throws {
+        let rig = await Rig()
+        rig.core.results["status"] = json(#"{"helperVersion":"0.124.0","permissions":{"accessibility":true,"screenRecording":false}}"#)
         let result = try encode(try await rig.dispatcher.handle(method: "status", params: nil))
         XCTAssertEqual(result, json(#"{"helperVersion":"0.124.0","permissions":{"accessibility":true,"screenRecording":false}}"#))
-        XCTAssertTrue(rig.core.calls.isEmpty)
+        XCTAssertEqual(rig.core.methods(), ["status"])
     }
 
-    func testPermissionsRequestAsksTheGrantSystemAndAnswersOpened() async throws {
+    func testAPermissionKindOutsideTheTwoIsInvalidParams() async {
         let rig = await Rig()
-        let result = try encode(try await rig.dispatcher.handle(method: "permissions.request", params: json(#"{"kind":"screenRecording"}"#)))
-        XCTAssertEqual(result, json(#"{"opened":true}"#))
-        XCTAssertEqual(rig.permissions.requested, [.screenRecording])
         do {
             _ = try await rig.dispatcher.handle(method: "permissions.request", params: json(#"{"kind":"camera"}"#))
             XCTFail("expected an error")
         } catch {
             XCTAssertEqual(RPCError.from(error).code, "invalid_params")
         }
+        XCTAssertTrue(rig.core.calls.isEmpty)
     }
 
     func testScriptActiveArmsTheEscTapWhileAnySessionRunsAScript() async throws {

@@ -89,11 +89,25 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(rig.presentation.calls, [.show("s_1", notes)])
     }
 
-    func testReleaseHidesTheMirrorByTheBoundWindow() {
+    func testReleaseHidesTheMirrorByTheBoundWindowExactlyOnce() {
         let rig = Rig()
         rig.coordinator.targetBound(sessionId: "s_1", pid: 10, windowID: 20, appName: "Notes", mirror: true)
+        rig.coordinator.targetBound(sessionId: "s_1", pid: 11, windowID: 21, appName: "Mail", mirror: false)
+        // A lost target: the engine reports targetLost and targetReleased; a repeat release changes nothing.
+        rig.coordinator.targetLost(targetId: "t1", reason: "app_quit")
         rig.coordinator.targetReleased(sessionId: "s_1", pid: 10, windowID: 20)
-        XCTAssertEqual(rig.presentation.calls, [.show("s_1", notes), .hide("s_1", notes)])
+        rig.coordinator.targetReleased(sessionId: "s_1", pid: 10, windowID: 20)
+        rig.coordinator.targetReleased(sessionId: "s_1", pid: 11, windowID: 21)
+        XCTAssertEqual(rig.presentation.calls, [.show("s_1", notes), .hide("s_1", notes)], "one hide, and none for a target never mirrored")
+        XCTAssertEqual(rig.notifications, [.targetLost(targetId: "t1", reason: "app_quit")])
+    }
+
+    func testTheEnginesReleasesAfterSessionEndedHideNothingTwice() {
+        let rig = Rig()
+        rig.coordinator.targetBound(sessionId: "s_1", pid: 10, windowID: 20, appName: "Notes", mirror: true)
+        rig.coordinator.sessionEnded(sessionId: "s_1")
+        rig.coordinator.targetReleased(sessionId: "s_1", pid: 10, windowID: 20)
+        XCTAssertEqual(rig.presentation.calls, [.show("s_1", notes), .sessionEnded("s_1")])
     }
 
     func testActionsBecomeCursorMovesWithTheirKind() {
@@ -134,14 +148,13 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(rig.notifications, [.targetLost(targetId: "t1", reason: "window_closed")])
     }
 
-    func testPermissionChangesAreReportedOncePerChange() {
+    func testTheEnginesPermissionChangesReachTheDaemonOncePerChange() {
         let rig = Rig()
-        rig.coordinator.connectionOpened(1) // takes the baseline
-        rig.coordinator.permissionsChanged(accessibility: false, screenRecording: false)
-        XCTAssertEqual(rig.notifications, [], "no change from the baseline")
         rig.coordinator.permissionsChanged(accessibility: true, screenRecording: false)
-        rig.coordinator.observePermissions(HelperPermissions(accessibility: true, screenRecording: false))
-        XCTAssertEqual(rig.notifications, [.permissionsChanged(HelperPermissions(accessibility: true, screenRecording: false))])
+        rig.coordinator.permissionsChanged(accessibility: true, screenRecording: false)
+        rig.coordinator.permissionsChanged(accessibility: true, screenRecording: true)
+        XCTAssertEqual(rig.notifications, [.permissionsChanged(accessibility: true, screenRecording: false),
+                                           .permissionsChanged(accessibility: true, screenRecording: true)])
     }
 
     func testTurnEndedOnlyFadesThatSessionsMirrors() {

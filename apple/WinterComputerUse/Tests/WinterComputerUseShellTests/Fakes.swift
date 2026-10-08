@@ -28,6 +28,8 @@ func jsonContains(_ superset: JSONValue, _ subset: JSONValue) -> Bool {
 
 /// One sample per engine method, in the helper RPC's own JSON shapes.
 let engineSamples: [(method: String, params: String, result: String)] = [
+    ("status", "{}", #"{"helperVersion":"0.124.0","permissions":{"accessibility":true,"screenRecording":false}}"#),
+    ("permissions.request", #"{"kind":"screenRecording"}"#, #"{"opened":true}"#),
     ("apps.list", "{}", #"{"apps":[{"name":"Notes","bundleId":"com.apple.Notes","running":true,"pid":123}]}"#),
     ("screen.windows", "{}", #"{"windows":[{"app":"Notes","bundleId":"com.apple.Notes","pid":123,"windowId":77,"title":"Groceries","frame":[0,25,800,600],"onScreen":true}]}"#),
     ("target.bind", #"{"sessionId":"s_1","app":"Notes","window":"Groceries","mirror":true}"#,
@@ -42,7 +44,7 @@ let engineSamples: [(method: String, params: String, result: String)] = [
      #"{"imageBase64":"/9j/AA==","mime":"image/jpeg","width":100,"height":100,"shotId":"shot-1","settled":true,"waitedMs":12}"#),
     ("target.act", #"{"targetId":"t1","sessionId":"s_1","callId":"c1","action":{"kind":"click","ref":3,"button":"left","count":1},"access":"full","allowForeground":false,"privatePath":true}"#,
      #"{"rung":1}"#),
-    ("target.waitIdle", #"{"targetId":"t1","quietMs":150,"timeoutMs":3000}"#, #"{"settled":true,"waitedMs":150}"#),
+    ("target.waitIdle", #"{"targetId":"t1","quietMs":150,"timeoutMs":3000,"callId":"c2"}"#, #"{"settled":true,"waitedMs":150}"#),
     ("target.waitFor", #"{"targetId":"t1","cond":{"text":"Saved","gone":"Saving…"},"timeoutMs":10000}"#, #"{"met":true,"waitedMs":420}"#),
     ("screen.screenshot", #"{"display":"all","excludeBundleIds":["com.winter.app"],"budget":{"maxLongEdge":1440,"quality":0.8}}"#,
      #"{"imageBase64":"/9j/AA==","mime":"image/jpeg","width":1440,"height":900,"shotId":"shot-2"}"#),
@@ -88,6 +90,8 @@ final class FakeCore: CoreService, @unchecked Sendable {
         return try result.decode(R.self)
     }
 
+    func status(_ params: StatusParams) async throws -> StatusResult { try await answer("status", params) }
+    func permissionsRequest(_ params: PermissionsRequestParams) async throws -> PermissionsRequestResult { try await answer("permissions.request", params) }
     func appsList(_ params: AppsListParams) async throws -> AppsListResult { try await answer("apps.list", params) }
     func screenWindows(_ params: ScreenWindowsParams) async throws -> ScreenWindowsResult { try await answer("screen.windows", params) }
     func targetBind(_ params: TargetBindParams) async throws -> TargetBindResult { try await answer("target.bind", params) }
@@ -142,25 +146,6 @@ final class Counter: @unchecked Sendable {
     func expectSyntheticEscape(for window: TimeInterval) { syntheticWindows.append(window) }
 }
 
-final class FakePermissions: PermissionSystem, @unchecked Sendable {
-    private let lock = NSLock()
-    private var _now = HelperPermissions(accessibility: false, screenRecording: false)
-    private var _requested: [PermissionKind] = []
-
-    var now: HelperPermissions {
-        get { lock.lock(); defer { lock.unlock() }; return _now }
-        set { lock.lock(); _now = newValue; lock.unlock() }
-    }
-
-    var requested: [PermissionKind] { lock.lock(); defer { lock.unlock() }; return _requested }
-
-    func current() -> HelperPermissions { now }
-
-    @MainActor func request(_ kind: PermissionKind) {
-        lock.lock(); _requested.append(kind); lock.unlock()
-    }
-}
-
 struct FakeAuthenticator: PeerAuthenticator {
     let decision: PeerAuthDecision
     func authorize(socket fd: Int32) -> PeerAuthDecision { decision }
@@ -200,15 +185,14 @@ struct FakeAuthenticator: PeerAuthenticator {
     let core = FakeCore()
     let presentation = FakePresentation()
     let tap = FakeEscapeTap()
-    let permissions = FakePermissions()
     let coordinator: HelperCoordinator
     let inFlight = InFlightRegistry()
     let dispatcher: RPCDispatcher
     var notifications: [HelperNotification] = []
 
-    init(helperVersion: String = "9.876.5") {
-        coordinator = HelperCoordinator(presentation: presentation, escapeTap: tap, permissions: permissions, permissionPollInterval: 0)
-        dispatcher = RPCDispatcher(core: core, coordinator: coordinator, permissions: permissions, helperVersion: helperVersion, inFlight: inFlight)
+    init() {
+        coordinator = HelperCoordinator(presentation: presentation, escapeTap: tap)
+        dispatcher = RPCDispatcher(core: core, coordinator: coordinator, inFlight: inFlight)
         coordinator.notify = { [weak self] in self?.notifications.append($0) }
     }
 }

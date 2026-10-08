@@ -8,7 +8,7 @@ public enum HelperNotification: Equatable, Sendable {
     /// The user pressed Esc while scripts ran; the daemon interrupts those sessions' turns.
     case escPressed(sessionIds: [String])
     case targetLost(targetId: String, reason: String)
-    case permissionsChanged(HelperPermissions)
+    case permissionsChanged(accessibility: Bool, screenRecording: Bool)
 
     public var method: String {
         switch self {
@@ -24,16 +24,15 @@ public enum HelperNotification: Equatable, Sendable {
             return .object(["sessionIds": .array(ids.map(JSONValue.string))])
         case .targetLost(let targetId, let reason):
             return .object(["targetId": .string(targetId), "reason": .string(reason)])
-        case .permissionsChanged(let p):
-            return .object(["permissions": .object(["accessibility": .bool(p.accessibility), "screenRecording": .bool(p.screenRecording)])])
+        case .permissionsChanged(let accessibility, let screenRecording):
+            return .object(["permissions": .object(["accessibility": .bool(accessibility), "screenRecording": .bool(screenRecording)])])
         }
     }
 }
 
 /// The helper's main-actor state: which sessions are running scripts (the Esc tap's arming), which targets
-/// are bound (idle accounting and the mirrors), how many daemon connections are open, and the last
-/// permissions the daemon was told. It is the engine's `CUCoreEvents` receiver, and maps those events onto
-/// the presentation layer and onto notifications.
+/// are bound (idle accounting and the mirrors) and how many daemon connections are open. It is the engine's
+/// `CUCoreEvents` receiver, and maps those events onto the presentation layer and onto notifications.
 @MainActor public final class HelperCoordinator: CUCoreEvents {
     /// How long a synthetic Escape from the helper's own key action may pass the armed tap.
     public static let syntheticEscapeWindow: TimeInterval = 0.5
@@ -46,7 +45,6 @@ public enum HelperNotification: Equatable, Sendable {
 
     private let presentation: CUPresentation
     private let escapeTap: CUEscapeTap
-    private let permissions: PermissionSystem
     private var idleTimer: IdleQuitTimer?
     /// Where notifications go (the server's broadcast). Called on the main actor.
     public var notify: (HelperNotification) -> Void = { _ in }
@@ -55,16 +53,11 @@ public enum HelperNotification: Equatable, Sendable {
     public private(set) var activeScripts: Set<String> = []
     private var armed = false
     private var bound: [BoundTarget: (appName: String, mirror: Bool)] = [:]
-    private var lastPermissions: HelperPermissions?
-    private var permissionPoll: Timer?
-    private let permissionPollInterval: TimeInterval
+    private var lastPermissions: (accessibility: Bool, screenRecording: Bool)?
 
-    public init(presentation: CUPresentation, escapeTap: CUEscapeTap, permissions: PermissionSystem,
-                permissionPollInterval: TimeInterval = 2) {
+    public init(presentation: CUPresentation, escapeTap: CUEscapeTap) {
         self.presentation = presentation
         self.escapeTap = escapeTap
-        self.permissions = permissions
-        self.permissionPollInterval = permissionPollInterval
         // Mirrors are asked for per bind (`target.bind`'s `mirror`, which the daemon derives from
         // `computerUse.mirror`), so the global switch stays on.
         presentation.mirrorsEnabled = true
@@ -86,14 +79,11 @@ public enum HelperNotification: Equatable, Sendable {
 
     public func connectionOpened(_ id: Int) {
         openConnections.insert(id)
-        if lastPermissions == nil { lastPermissions = permissions.current() }
-        startPermissionPoll()
         refreshIdle()
     }
 
     public func connectionClosed(_ id: Int) {
         openConnections.remove(id)
-        if openConnections.isEmpty { stopPermissionPoll() }
         refreshIdle()
     }
 
@@ -131,32 +121,6 @@ public enum HelperNotification: Equatable, Sendable {
         escapeTap.setArmed(shouldArm)
     }
 
-    // MARK: Permissions
-
-    /// A permission reading (a poll, a `status`, or the engine's event): tells the daemon only on a change.
-    public func observePermissions(_ now: HelperPermissions) {
-        defer { lastPermissions = now }
-        guard let last = lastPermissions, last != now else { return }
-        notify(.permissionsChanged(now))
-    }
-
-    private func startPermissionPoll() {
-        guard permissionPoll == nil, permissionPollInterval > 0 else { return }
-        let timer = Timer(timeInterval: permissionPollInterval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.observePermissions(self.permissions.current())
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        permissionPoll = timer
-    }
-
-    private func stopPermissionPoll() {
-        permissionPoll?.invalidate()
-        permissionPoll = nil
-    }
-
     // MARK: Idle
 
     private func refreshIdle() {
@@ -173,10 +137,15 @@ public enum HelperNotification: Equatable, Sendable {
         refreshIdle()
     }
 
+    /// A release, a lost target (the engine reports both `targetReleased` and `targetLost`) or the engine's half
+    /// of `session.ended`: the mirror is hidden once, for a target still known to have one — never again for a
+    /// repeat, and not for a session whose mirrors `sessionEnded` already closed.
     public func targetReleased(sessionId: String, pid: pid_t, windowID: CGWindowID) {
         let key = BoundTarget(sessionId: sessionId, pid: pid, windowID: windowID)
-        let record = bound.removeValue(forKey: key)
-        presentation.hideMirror(sessionId: sessionId, target: CUWindowRef(pid: pid, windowID: windowID, appName: record?.appName ?? ""))
+        guard let record = bound.removeValue(forKey: key) else { return }
+        if record.mirror {
+            presentation.hideMirror(sessionId: sessionId, target: CUWindowRef(pid: pid, windowID: windowID, appName: record.appName))
+        }
         refreshIdle()
     }
 
@@ -197,8 +166,11 @@ public enum HelperNotification: Equatable, Sendable {
         notify(.targetLost(targetId: targetId, reason: reason))
     }
 
+    /// The engine watches the grants; the daemon hears each change once.
     public func permissionsChanged(accessibility: Bool, screenRecording: Bool) {
-        observePermissions(HelperPermissions(accessibility: accessibility, screenRecording: screenRecording))
+        if let last = lastPermissions, last.accessibility == accessibility, last.screenRecording == screenRecording { return }
+        lastPermissions = (accessibility, screenRecording)
+        notify(.permissionsChanged(accessibility: accessibility, screenRecording: screenRecording))
     }
 
     public func willSendEscape() {

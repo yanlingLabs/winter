@@ -1,4 +1,5 @@
 // swift-tools-version:5.9
+import Foundation
 import PackageDescription
 
 // Winter Computer Use — the signed helper app that holds its own Accessibility and Screen Recording grants
@@ -9,8 +10,19 @@ import PackageDescription
 // is only `App/main.swift` on top of the `WinterComputerUseShell` library, so everything here is tested
 // with `swift test`, and the helper never links WinterKit.
 //
-// MERGE: the two dependencies below are this lane's stubs (`Stubs/`). When the real packages land, point
-// them at `../WinterCUCore` and `../WinterCUPresentation` and delete `Stubs/`; nothing else changes.
+// The engine and the presentation layer are sibling packages (`apple/WinterCUCore`,
+// `apple/WinterCUPresentation`), built in their own lanes. Until a checkout has them, this package builds
+// against the stand-ins in `Stubs/` (same module names, the pinned API, nothing behind it); once a sibling
+// exists it is used, so a merged tree builds the real helper with no edit here. Delete `Stubs/` and this
+// fallback once both have merged.
+func sibling(_ name: String) -> Package.Dependency {
+    let real = URL(fileURLWithPath: Context.packageDirectory).deletingLastPathComponent().appendingPathComponent(name)
+    if FileManager.default.fileExists(atPath: real.appendingPathComponent("Package.swift").path) {
+        return .package(path: "../\(name)")
+    }
+    return .package(path: "Stubs/\(name)")
+}
+
 let package = Package(
     name: "WinterComputerUse",
     platforms: [.macOS("26.0")],
@@ -18,8 +30,8 @@ let package = Package(
         .library(name: "WinterComputerUseShell", targets: ["WinterComputerUseShell"]),
     ],
     dependencies: [
-        .package(path: "Stubs/WinterCUCore"),
-        .package(path: "Stubs/WinterCUPresentation"),
+        sibling("WinterCUCore"),
+        sibling("WinterCUPresentation"),
     ],
     targets: [
         .target(
