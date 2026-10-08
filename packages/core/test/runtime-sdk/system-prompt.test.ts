@@ -298,3 +298,12 @@ describe("dispatch's base prompt follows which computer tool was built", () => {
     expect(at("code", false)).toBe(at("code", true));
   });
 });
+
+describe("dispatch's base prompt — a session the user stopped stays stopped (the live gate)", () => {
+  test("the rule, and the two report sentences it keys on", () => {
+    const text = dispatchSystemPrompt();
+    expect(text).toContain("If the user stopped a session, it stays stopped — don't resume or re-delegate it unless the user asks.");
+    expect(text).toContain("\"Stopped by the user.\"");
+    expect(text).toContain("\"Stopped by you (TaskStop).\"");
+  });
+});

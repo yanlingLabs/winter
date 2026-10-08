@@ -66,9 +66,11 @@
 //     on the coordinator's log too.
 //
 // Stopping a child is the session's own interrupt — `session.interrupt` (the Mac's stop button on a
-// child pill) and Dispatch's `TaskStop` with the child's `s_…` id (`agent/session-messaging.ts`'s
-// `stop`) both reach the child's driver; the interrupted turn settles and is reported here like any
-// other. (`manage_session stop` was the third door until ManageSession left Dispatch, 2026-10-02.)
+// child pill or window, a terminal's Esc) and Dispatch's `TaskStop` with the child's `s_…` id
+// (`agent/session-messaging.ts`'s `stop`) both reach the child's driver; the interrupted turn settles and
+// is reported here like any other. Each door says WHO stopped it first (`noteStop`), so the report does:
+// "Stopped by the user." (a coordinator must not resume or re-delegate it — the live gate) or "Stopped by
+// you (TaskStop)." (`manage_session stop` was the third door until ManageSession left Dispatch, 2026-10-02.)
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { DISPATCH_WAKE_CLIENT_NAME, type SessionEvent } from "@yanlinglabs/winter-protocol";
@@ -197,6 +199,10 @@ interface ChildState {
    *  retry from a transient failure; already sanitized and bounded by `projector/errors.ts`. */
   lastError?: string;
   aborted?: boolean;
+  /** Main-thread tool calls since `lastAssistant` — the report says how stale "its last message" is. */
+  callsSinceAssistant?: number;
+  /** Who stopped the followed turn, if a stop door said so (`noteStop`). */
+  stoppedBy?: StopSource;
   /** The coordinator has been sent the wake carrying this child's terminal status. */
   reported: boolean;
   /** Call ids whose card was mirrored and has not been resolved on the coordinator's log yet. */
@@ -204,6 +210,9 @@ interface ChildState {
   /** Tracked only to relay an unfollowed turn's cards (ruling 4): reports no status and wakes no one. */
   relayOnly?: boolean;
 }
+
+/** Who stopped a child's turn: the user (a window's or a terminal's stop, Esc), or a session's `TaskStop`. */
+export type StopSource = { kind: "user" } | { kind: "session"; sessionId: string };
 
 /** One queued wake entry. */
 interface WakeEntry {
@@ -406,6 +415,16 @@ export class DispatchChildren {
     return hit;
   }
 
+  /**
+   * A stop door is about to interrupt `sessionId`'s running turn: remember who, so the report of that turn says
+   * it (`reportTurnEnd`). Called BEFORE the interrupt, so it is in place when the aborted terminal lands; only a
+   * followed turn of a tracked child keeps it, and it goes with the turn's report (or the next turn's start).
+   */
+  noteStop(sessionId: string, by: StopSource): void {
+    const c = this.children.get(sessionId);
+    if (c !== undefined && c.turnOpen) c.stoppedBy = by;
+  }
+
   /** Every session's driver calls this when its turn queue goes idle (or its child ends). */
   onTurnSettled(sessionId: string): void {
     // Its driver is idle: no main turn is open any more, whether or not the log closed the last one (a
@@ -513,11 +532,15 @@ export class DispatchChildren {
         c.relayOnly = false;
         c.turnOpen = true;
         c.lastAssistant = undefined; c.sawError = false; c.aborted = false; c.lastError = undefined;
+        c.callsSinceAssistant = 0; c.stoppedBy = undefined;
         if (c.status !== "running") { c.status = "running"; c.reported = false; this.update(e.sessionId, "running"); }
         return;
       }
       case "assistant_message":
-        if (main && c.turnOpen) c.lastAssistant = e.text;
+        if (main && c.turnOpen) { c.lastAssistant = e.text; c.callsSinceAssistant = 0; }
+        return;
+      case "tool_call":
+        if (main && c.turnOpen) c.callsSinceAssistant = (c.callsSinceAssistant ?? 0) + 1;
         return;
       case "agent_error":
         if (main && c.turnOpen) { c.sawError = true; c.lastError = e.message; }
@@ -592,16 +615,26 @@ export class DispatchChildren {
     const status: ChildStatus = c.sawError ? "error" : "completed";
     const last = c.lastAssistant?.trim() ? c.lastAssistant.trim() : undefined;
     const failure = c.lastError?.trim() ? c.lastError.trim() : undefined;
+    // "Its last message" is the turn's LAST main-thread assistant text — which can be old: a turn that only
+    // worked through tools after it says how many calls came since, so it never reads as the latest word.
+    const since = c.callsSinceAssistant ?? 0;
+    const lastClause = last === undefined ? ""
+      : since > 0 ? ` Its last message, ${since} tool call${since === 1 ? "" : "s"} before it stopped: ${last}` : ` Its last message: ${last}`;
+    const stopped = c.stoppedBy === undefined ? "Stopped before it finished."
+      : c.stoppedBy.kind === "user" ? "Stopped by the user."
+        : c.stoppedBy.sessionId === c.dispatchId ? "Stopped by you (TaskStop)."
+          : `Stopped by session ${c.stoppedBy.sessionId} (TaskStop).`;
     const summary = c.aborted
-      ? `Stopped before it finished.${last ? ` Its last message: ${last}` : ""}`
+      ? `${stopped}${lastClause}`
       : status === "error" && failure !== undefined
-        ? `It ended with an error: ${failure}${last ? `\nIts last message: ${last}` : ""}`
+        ? `It ended with an error: ${failure}${lastClause === "" ? "" : `\n${lastClause.trim()}`}`
         : last;
     const cut = summary === undefined ? undefined : summary.slice(0, CHILD_RESULT_SUMMARY_MAX);
     c.status = status;
     c.turnOpen = false;
     c.reported = false;
     c.lastAssistant = undefined; c.sawError = false; c.aborted = false; c.lastError = undefined;
+    c.callsSinceAssistant = 0; c.stoppedBy = undefined;
     this.update(childId, status, cut);
     this.notifyUnattended(c, status === "error" ? "hit an error" : "finished");
     const queue = this.wakes.get(c.dispatchId) ?? [];

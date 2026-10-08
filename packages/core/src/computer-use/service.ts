@@ -650,6 +650,10 @@ export class ComputerV2Service {
     const res = await this.shoot(ctx, "target.screenshot", { targetId: t.targetId, callId: ctx.callId, ...(region === undefined ? {} : { region }), ...(settle === undefined ? {} : { settle }) }, metric);
     ctx.state.lastTargetShot.set(t.targetId, res.shotId);
     const handle = this.keepImage(ctx, res);
+    // What the capture had to do ("moved the window here to capture it") — a real change on screen, so it is
+    // said even for an `emit: false` read: an unfenced daemon line, like a bind's.
+    const detail = helperDetail(res.detail);
+    if (detail !== undefined) ctx.builder.daemonLine(detail);
     if (args.emit !== false) ctx.builder.image(res.imageBase64, res.mime ?? "image/jpeg");
     else ctx.builder.markScreenRead();
     return handle;
@@ -868,7 +872,14 @@ export class ComputerV2Service {
         }
         case "needs_foreground": return { kind: "NeedsForeground", message: `${name} needs the foreground for that — try an element ref, or ask the user` };
         case "not_allowed": return { kind: "NotAllowed", message: typeof data.reason === "string" ? `not allowed: ${data.reason}` : `not allowed in ${name}` };
-        case "refused": return { kind: "Refused", message: refusedWords(typeof data.reason === "string" ? data.reason : "", name) };
+        case "refused": {
+          // The helper's own sentence is KEPT — it says what it actually saw (the live gate: VS Code's "can't tell
+          // which field has focus…" must not become a canned "that is a password field"). It may name screen
+          // content, so it stays inside the fence. The canned words are only a fallback for a bare refusal.
+          const said = err.message.replace(/\s+/g, " ").trim().slice(0, 400);
+          if (said.length > 0) return { kind: "Refused", message: said, untrusted: true };
+          return { kind: "Refused", message: refusedWords(typeof data.reason === "string" ? data.reason : "", name) };
+        }
         case "wait_timeout": {
           ctx.builder.markScreenRead();
           const seen = typeof data.seen === "string" && data.seen.length > 0 ? ` — seen: ${data.seen.slice(0, 2_000)}` : "";
@@ -880,6 +891,13 @@ export class ComputerV2Service {
           return { kind: "PermissionMissing", message: `Winter Computer Use needs the ${which} permission — ask the user to grant it in Settings → Computer Use` };
         }
         case "busy": return { kind: "HelperUnavailable", message: "Winter Computer Use is busy — try again in a moment" };
+        case "unsupported": {
+          // `data.axError` (the raw Accessibility error) is for the log, not the model: the helper's sentence says
+          // what could not be done.
+          if (data.axError !== undefined) this.deps.log?.(`computer-use: ${msg.primitive} unsupported in ${name} (AX error ${String(data.axError).slice(0, 40)})`);
+          const said = err.message.replace(/\s+/g, " ").trim().slice(0, 400);
+          return { kind: "Error", message: said.length > 0 ? said : `${name} does not support ${msg.primitive}` };
+        }
         case "invalid_params": return { kind: "TypeError", message: err.message };
         default: return { kind: "Error", message: `${err.code}: ${err.message}` };
       }
@@ -949,8 +967,12 @@ export class ComputerV2Service {
     switch (n.method) {
       case "escPressed":
         for (const sessionId of n.params?.sessionIds ?? []) {
+          // Only a session running a script NOW: the helper's view of "active" can lag the daemon's (a script
+          // that just ended, a late notification), and an Esc must never stop a turn that started after it —
+          // e.g. a message the coordinator sent once the user's earlier stop had settled.
           const active = this.sessions.get(sessionId)?.active;
-          if (active !== undefined) this.cancel(active, "the user pressed Esc");
+          if (active === undefined) continue;
+          this.cancel(active, "the user pressed Esc");
           try { this.deps.interrupt?.(sessionId); } catch { /* best effort */ }
         }
         return;
@@ -1053,6 +1075,7 @@ function lostWords(reason: string): string {
 function refusedWords(reason: string, name: string): string {
   switch (reason) {
     case "secure_field": return "that is a password or payment field — Winter never reads or types into one; ask the user to fill it in";
+    case "focus_unknown": return `can't tell which field has focus in ${name}, so it could be a password field — pass \`into\` or click a text field first`;
     case "auth_dialog": return "that is a system authentication dialog — ask the user to handle it";
     case "privacy_pane": return "System Settings' Privacy & Security panes are off limits — ask the user to change them";
     case "winter_itself": return "Winter never controls itself";

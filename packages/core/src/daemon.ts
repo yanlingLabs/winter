@@ -1235,7 +1235,8 @@ export async function startDaemon(opts: {
     hub,
     store,
     audit: (line) => audit.append(line),
-    interrupt: (sid) => { void winterDrivers.get(sid)?.interrupt(); },
+    // ComputerV2's Esc (the helper's `escPressed`) is the user's stop: a Dispatch child's report says so.
+    interrupt: (sid) => { dispatchChildren?.noteStop(sid, { kind: "user" }); void winterDrivers.get(sid)?.interrupt(); },
     launchAllowed: opts.secrets === undefined && process.platform === "darwin" && isDefaultWinterHome(home, profile),
     ...(opts.computerUse === undefined ? {} : { inject: opts.computerUse }),
     log: (line) => console.error(line),
@@ -2906,6 +2907,8 @@ export async function startDaemon(opts: {
     onConnectorPermissionsSaved: (next) => { connectorPermissions.noteWritten(next); },
     // ComputerV2 (2026-10-08): Settings → Computer Use's local-only RPCs.
     computerUse: computerUseRuntime.control,
+    // A client's `session.interrupt` is the user's stop (the Mac's stop button, a terminal's Esc, the phone).
+    onUserInterrupt: (sid) => dispatchChildren?.noteStop(sid, { kind: "user" }),
     connectorPermissions,
     // WS-25: the sign-in doors use the daemon's ONE MCP OAuth store (see `oauthStoreForThisDaemon`) — handed
     // over explicitly, so the server never derives a Keychain store of its own for a test daemon.

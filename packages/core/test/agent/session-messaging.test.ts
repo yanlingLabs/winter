@@ -502,6 +502,20 @@ describe("TaskStop on a session (host_session_stop)", () => {
   });
 });
 
+describe("TaskStop names its caller to Dispatch's report", () => {
+  test("the stopper is noted BEFORE the interrupt, as the calling session", async () => {
+    const t = setup();
+    const from = t.code();
+    const busy = t.code();
+    t.driverFor(busy).turnRunning = true;
+    const notes: Array<{ id: string; by: unknown; interruptsSoFar: number }> = [];
+    const realNote = t.dc.noteStop.bind(t.dc);
+    t.dc.noteStop = (id, by) => { notes.push({ id, by, interruptsSoFar: t.driverFor(busy).interrupts }); realNote(id, by); };
+    expect(await t.messaging.stop(from, { id: busy })).toEqual({ status: "stopped" });
+    expect(notes).toEqual([{ id: busy, by: { kind: "session", sessionId: from }, interruptsSoFar: 0 }]);
+  });
+});
+
 describe("TaskStop: the queue, cancellation and shutdown", () => {
   test("a stop clears the messages queued behind the stopped turn (user ruling 2026-10-04) and says so", async () => {
     const t = setup();

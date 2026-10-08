@@ -467,6 +467,58 @@ describe("the completion wake", () => {
     expect(ups.find((e) => e.childSessionId === b && e.status !== "running")).toMatchObject({ status: "completed", resultSummary: "Stopped before it finished. Its last message: halfway" });
   });
 
+  test("a stopped turn says WHO stopped it (the live gate): the user, the coordinator's TaskStop, another session", async () => {
+    const t = setup();
+    const a = await t.spawnOne({ title: "A" });
+    const b = await t.spawnOne({ title: "B" });
+    const c = await t.spawnOne({ title: "C" });
+    const d = await t.spawnOne({ title: "D" });
+    t.dc.noteStop(a, { kind: "user" });
+    t.finish(a, { text: "halfway", aborted: true });
+    t.dc.noteStop(b, { kind: "session", sessionId: t.dispatchId });
+    t.finish(b, { aborted: true });
+    t.dc.noteStop(c, { kind: "session", sessionId: "s_peer0000001" });
+    t.finish(c, { aborted: true });
+    t.finish(d, { aborted: true });   // nobody said: the old sentence
+    const report = (id: string) => t.childUpdates().find((e) => e.childSessionId === id && e.status !== "running");
+    expect(report(a)).toMatchObject({ status: "completed", resultSummary: "Stopped by the user. Its last message: halfway" });
+    expect(report(b)).toMatchObject({ status: "completed", resultSummary: "Stopped by you (TaskStop)." });
+    expect(report(c)).toMatchObject({ status: "completed", resultSummary: "Stopped by session s_peer0000001 (TaskStop)." });
+    expect(report(d)).toMatchObject({ status: "completed", resultSummary: "Stopped before it finished." });
+  });
+
+  test("a stop note does not outlive its turn: the next turn ending normally, or aborted for another reason, is reported as such", async () => {
+    const t = setup();
+    const a = await t.spawnOne({ title: "A" });
+    t.dc.noteStop(a, { kind: "user" });
+    t.finish(a, { text: "all done" });   // the stop found nothing to abort: a normal end
+    expect(t.childUpdates().filter((e) => e.childSessionId === a && e.status !== "running").at(-1)).toMatchObject({ resultSummary: "all done" });
+    // Dispatch follows it up; that turn is aborted by something else — no stale "by the user".
+    const undo = t.dc.expectFollowUp(a, t.dispatchId, "next step");
+    void undo;
+    t.hub.append(a, { type: "user_message", sessionId: a, threadId: "main", text: "next step", clientName: "messaging" });
+    t.hub.append(a, { type: "turn_started", sessionId: a, threadId: "main" });
+    t.finish(a, { aborted: true });
+    expect(t.childUpdates().filter((e) => e.childSessionId === a && e.status !== "running").at(-1)).toMatchObject({ resultSummary: "Stopped before it finished." });
+  });
+
+  test("\"its last message\" is the turn's LAST assistant text, and says how many tool calls came after it", async () => {
+    const t = setup();
+    const a = await t.spawnOne({ title: "A" });
+    const call = (n: number) => t.hub.append(a, { type: "tool_call", sessionId: a, threadId: "main", callId: `c${n}`, name: "Bash", argsJson: "{}" });
+    t.hub.append(a, { type: "assistant_message", sessionId: a, threadId: "main", text: "first words" });
+    call(1);
+    t.hub.append(a, { type: "assistant_message", sessionId: a, threadId: "main", text: "the latest words" });
+    call(2); call(3);
+    // a subagent's call is not the main thread's
+    t.hub.append(a, { type: "tool_call", sessionId: a, threadId: "toolu_agent", callId: "c9", name: "Read", argsJson: "{}" });
+    t.dc.noteStop(a, { kind: "user" });
+    t.finish(a, { aborted: true });
+    const report = t.childUpdates().find((e) => e.childSessionId === a && e.status !== "running")!;
+    expect(report.resultSummary).toBe("Stopped by the user. Its last message, 2 tool calls before it stopped: the latest words");
+    expect(report.resultSummary).not.toContain("first words");
+  });
+
   test("agent SDK 0.0.49: an error turn's report carries the classed reason, so Dispatch can tell a refusal from a transient failure", async () => {
     const t = setup();
     const child = await t.spawnOne({ title: "Kid" });

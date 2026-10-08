@@ -45,6 +45,7 @@ function world(opts: WorldOpts = {}) {
   const facts: SessionFacts = { policy: opts.policy ?? "bypass", mode: "code", ...opts.facts };
   const audits: Array<Record<string, unknown>> = [];
   const interrupts: string[] = [];
+  const logs: string[] = [];
   let svc!: ComputerV2Service;
   const helper = new HelperClient({
     home, profile: "dev", launchAllowed: true,
@@ -68,7 +69,7 @@ function world(opts: WorldOpts = {}) {
   const telemetry = new AutomationTelemetry(home);
   svc = new ComputerV2Service({
     helper, policy, settings: () => settings, telemetry, recentApps: new RecentApps(home),
-    audit: (l) => audits.push(l), interrupt: (sid) => interrupts.push(sid),
+    audit: (l) => audits.push(l), interrupt: (sid) => interrupts.push(sid), log: (l) => logs.push(l),
   });
   services.push(svc);
   const run = (code: string, o: { sessionId?: string; vision?: boolean; timeoutMs?: number; reset?: boolean; signal?: AbortSignal; model?: string } = {}): Promise<ScriptResult> =>
@@ -76,7 +77,7 @@ function world(opts: WorldOpts = {}) {
       { sessionId: o.sessionId ?? "s1", vision: o.vision ?? true, model: o.model ?? "anthropic/claude-opus-5-5", ...(o.signal === undefined ? {} : { signal: o.signal }) },
       { code, ...(o.timeoutMs === undefined ? {} : { timeoutMs: o.timeoutMs }), ...(o.reset === undefined ? {} : { reset: o.reset }) },
     );
-  return { home, fake, approvals, events, svc, run, audits, interrupts, telemetry, facts };
+  return { home, fake, approvals, events, svc, run, audits, interrupts, telemetry, facts, logs };
 }
 
 const text = (r: ScriptResult): string => r.content.map((c) => (c.type === "text" ? c.text : "[image]")).join("");
@@ -304,6 +305,14 @@ describe("ComputerV2: locks, timeouts and cancellation", () => {
     expect(w.interrupts).toEqual(["s1"]);
     expect(text(r)).toContain("the user pressed Esc");
   }, 30_000);
+
+  macOnly("an Esc naming a session with NO script running interrupts nothing (a late notification never stops a newer turn)", async () => {
+    const w = world();
+    await w.run("await apps.list({ emit: false })");   // opens the connection; the script has ended
+    w.fake.notify("escPressed", { sessionIds: ["s1", "s_other"] });
+    await Bun.sleep(100);
+    expect(w.interrupts).toEqual([]);
+  }, 30_000);
 });
 
 describe("ComputerV2: screenshots, points and the vision gate", () => {
@@ -402,6 +411,26 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     expect(text(r3)).not.toContain("opened a new");
   }, 30_000);
 
+  macOnly("a target screenshot's detail is an unfenced daemon line, even for an emit:false read", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')");
+    w.fake.handlers["target.screenshot"] = () => ({ imageBase64: Buffer.from("jpeg-x").toString("base64"), mime: "image/jpeg", width: 10, height: 10, shotId: "shotX", detail: "moved the window here to capture it" });
+    const r = await w.run("await notes.screenshot()");
+    expect(r.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toContain("moved the window here to capture it\n");
+    const r2 = await w.run("const quiet = await notes.screenshot({ emit: false })");
+    expect(r2.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toEqual(["moved the window here to capture it\n"]);
+  }, 30_000);
+
+  macOnly("unsupported: the helper's sentence reaches the script; data.axError only the log", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')");
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("unsupported", "Notes' editor does not expose a settable value", { axError: -25205 }); };
+    const r = await w.run("try { await notes.setValue(14, 'x') } catch (e) { print(e.name, e.message) }");
+    expect(text(r)).toContain("Error Notes' editor does not expose a settable value");
+    expect(text(r)).not.toContain("25205");
+    expect(w.logs.some((l) => l.includes("AX error -25205"))).toBe(true);
+  }, 30_000);
+
   macOnly("window_elsewhere with newWindowId: NoWindow says a new window was opened — call state() and retry; the diff base resets", async () => {
     const w = world();
     await w.run("const notes = await apps.open('Notes')");
@@ -446,7 +475,7 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     w.fake.handlers["target.act"] = (p) => {
       const kind = (p.action as { kind: string }).kind;
       if (kind === "click") throw new FakeHelperError("stale_ref", "gone", { ref: 12 });
-      if (kind === "type") throw new FakeHelperError("refused", "secure", { reason: "secure_field" });
+      if (kind === "type") throw new FakeHelperError("refused", "", { reason: "secure_field" });
       throw new FakeHelperError("permission_missing", "no", { permission: "accessibility" });
     };
     const r = await w.run([
@@ -456,8 +485,27 @@ describe("ComputerV2: the helper's errors and notifications", () => {
       "try { await notes.key('cmd+s') } catch (e) { print(e.name, e.message) }",
     ].join("\n"));
     expect(text(r)).toContain("StaleRef [12] is gone — call state()");
-    expect(text(r)).toContain("Refused that is a password or payment field");
+    expect(text(r)).toContain("Refused that is a password or payment field");   // a bare refusal: the fallback words
     expect(text(r)).toContain("PermissionMissing Winter Computer Use needs the Accessibility permission");
+  }, 30_000);
+
+  macOnly("a refusal keeps the HELPER's own sentence — never a canned one for its reason code (the live gate)", async () => {
+    const w = world();
+    const said = "can't tell which field has focus in Code, so it could be a password field — pass `into` or click a text field first";
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("refused", said, { reason: "secure_field" }); };
+    const r = await w.run("const notes = await apps.open('Notes')\ntry { await notes.type('hello') } catch (e) { print(e.name, e.message) }");
+    expect(text(r)).toContain(`Refused ${said}`);
+    expect(text(r)).not.toContain("that is a password or payment field");
+    // focus_unknown (the core lane's new reason) keeps the helper's sentence too.
+    const focus = "can't tell which field has focus in Notes — pass `into` or click a text field first";
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("refused", focus, { reason: "focus_unknown" }); };
+    const r1 = await w.run("try { await notes.type('hello') } catch (e) { print(e.name, e.message) }");
+    expect(text(r1)).toContain(`Refused ${focus}`);
+    expect(text(r1)).not.toContain("refused that action");
+    // focus_unknown with no message of its own gets its own words.
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("refused", "", { reason: "focus_unknown" }); };
+    const r2 = await w.run("try { await notes.type('hello') } catch (e) { print(e.name, e.message) }");
+    expect(text(r2)).toContain("Refused can't tell which field has focus in Notes, so it could be a password field — pass `into` or click a text field first");
   }, 30_000);
 
   macOnly("targetLost and the helper quitting: TargetLost next use; HelperUnavailable mid-call; the next call relaunches", async () => {

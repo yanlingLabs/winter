@@ -95,7 +95,11 @@ export interface TargetUseWindowResult { window: { id: number; title: string; fr
 export interface SnapshotResult { snapshotId: string; text: string; isDiff: boolean; changedRatio: number; settled: boolean; waitedMs: number }
 export interface FindResult { elements: Array<{ ref: number; role: string; name?: string; value?: string }> }
 export interface ScreenshotBudget { maxLongEdge: number; tile?: number; maxTiles?: number; quality: number }
-export interface ScreenshotResult { imageBase64: string; mime: "image/jpeg"; width: number; height: number; shotId: string; settled?: boolean; waitedMs?: number }
+export interface ScreenshotResult {
+  imageBase64: string; mime: "image/jpeg"; width: number; height: number; shotId: string; settled?: boolean; waitedMs?: number;
+  /** `target.screenshot`: what the capture had to do, e.g. "moved the window here to capture it". */
+  detail?: string;
+}
 export interface ActResult { rung: 1 | 2 | 3 | 4; detail?: string }
 export interface WaitIdleResult { settled: boolean; waitedMs: number }
 export interface WaitForResult { met: true; waitedMs: number }
