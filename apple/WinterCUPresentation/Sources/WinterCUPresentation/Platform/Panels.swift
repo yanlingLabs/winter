@@ -15,8 +15,8 @@ final class PassivePanel: NSPanel {
         isReleasedWhenClosed = false
         isMovable = false
         ignoresMouseEvents = role.ignoresMouseEvents
-        // Above ordinary windows (the mirror, so it shows a covered window's live content), or at the normal level so it
-        // can be ordered just above one target window (the cursor overlay).
+        // Above ordinary windows, so an accessory app's panel shows over the app the user is in. (Ordering relative to
+        // another app's window does not hold; the overlay hides its cursor when the target is covered instead.)
         level = role.floatsAboveWindows ? .floating : .normal
         animationBehavior = .none
         // Keep the helper's own drawings out of other apps' captures, so they never land in a model's screenshot.
@@ -45,42 +45,64 @@ final class FlippedLayerView: NSView {
 
 /// The click-through overlay that carries the agent cursor above one target window.
 @MainActor final class AppKitCursorOverlay: CursorOverlaySurface {
+    private let target: CUWindowRef
     private let panel: PassivePanel
     private let view: FlippedLayerView
     private let cursor = CursorRig()
+    /// Fades the whole cursor when another window covers its point.
+    private let occlusion = CALayer()
     private var shown = false
+    private var occluded = false
 
     init(target: CUWindowRef) {
-        // Normal level, ordered just above the target: windows covering the target also cover its cursor.
+        self.target = target
+        // Floating, click-through, on every Space; covered targets hide the cursor through `setOccluded`.
         panel = PassivePanel(contentRect: CGRect(x: 0, y: 0, width: 10, height: 10), role: .cursorOverlay)
         panel.hasShadow = false
         view = FlippedLayerView(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
         panel.contentView = view
-        view.canvas.addSublayer(cursor.root)
+        occlusion.anchorPoint = .zero
+        view.canvas.addSublayer(occlusion)
+        occlusion.addSublayer(cursor.root)
     }
 
     func place(windowFrame: CGRect, aboveWindow windowID: CGWindowID, reorder: Bool) {
         let frame = AppKitScreens.appKitFrame(windowFrame)
         if panel.frame != frame {
             panel.setFrame(frame, display: false)
-            cursor.root.frame = CGRect(origin: .zero, size: frame.size)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            occlusion.frame = CGRect(origin: .zero, size: frame.size)
+            cursor.root.frame = occlusion.bounds
+            CATransaction.commit()
             cursor.contentsScale = AppKitScreens.backingScale(for: windowFrame)
         }
-        if shown, reorder { panel.order(.above, relativeTo: Int(windowID)) }
-        pendingWindow = windowID
+        if shown, reorder { panel.orderFrontRegardless() }
     }
-
-    private var pendingWindow: CGWindowID = 0
 
     func setShown(_ shown: Bool) {
         guard shown != self.shown else { return }
         self.shown = shown
         if shown {
-            panel.order(.above, relativeTo: Int(pendingWindow))
+            panel.orderFrontRegardless()
+            PresentationLog.notice("cursor overlay shown: \(target.appName) window \(target.windowID) at \(panel.frame)"
+                + " level \(panel.level.rawValue) visible \(panel.isVisible)")
         } else {
             cursor.apply(.hidden)
             panel.orderOut(nil)
+            PresentationLog.notice("cursor overlay hidden: \(target.appName) window \(target.windowID)")
         }
+    }
+
+    func setOccluded(_ occluded: Bool) {
+        guard occluded != self.occluded else { return }
+        self.occluded = occluded
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.18)
+        occlusion.opacity = occluded ? 0 : 1
+        CATransaction.commit()
+        PresentationLog.notice("cursor overlay \(occluded ? "covered by another window" : "uncovered"): "
+            + "\(target.appName) window \(target.windowID)")
     }
 
     func apply(cursor frame: CursorFrame, style: CursorStyle) {
@@ -92,6 +114,7 @@ final class FlippedLayerView: NSView {
         cursor.apply(.hidden)
         panel.orderOut(nil)
         panel.close()
+        PresentationLog.notice("cursor overlay closed: \(target.appName) window \(target.windowID)")
     }
 }
 
@@ -184,7 +207,11 @@ final class FlippedLayerView: NSView {
         guard shown != self.shown else { return }
         self.shown = shown
         if shown {
+            // An accessory (LSUIElement) helper is never the active app: orderFrontRegardless shows a floating,
+            // non-activating panel without activating it, and nothing here waits on activation.
             panel.orderFrontRegardless()
+            PresentationLog.notice("mirror shown: \(target.appName) window \(target.windowID) at \(panel.frame)"
+                + " level \(panel.level.rawValue) visible \(panel.isVisible)")
             startStream()
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.25
@@ -192,6 +219,7 @@ final class FlippedLayerView: NSView {
             }
         } else {
             stopStream()
+            PresentationLog.notice("mirror hidden: \(target.appName) window \(target.windowID)")
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.4
                 panel.animator().alphaValue = 0
@@ -228,6 +256,7 @@ final class FlippedLayerView: NSView {
     func close() {
         shown = false
         stopStream()
+        PresentationLog.notice("mirror closed: \(target.appName) window \(target.windowID)")
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.3
             panel.animator().alphaValue = 0

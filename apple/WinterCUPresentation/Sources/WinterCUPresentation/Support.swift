@@ -30,8 +30,10 @@ struct PresentationTuning: Sendable {
     var framesPerSecond: Int = 12
     /// How often windows are re-read to follow them, and timers are checked.
     var trackingInterval: TimeInterval = 1.0 / 20
-    /// The overlay is re-ordered above its target window at most this often (the target can come to the front).
+    /// The overlay is re-asserted in front at most this often.
     var overlayReorderInterval: TimeInterval = 0.5
+    /// How often the window list is read to tell whether another window covers the cursor.
+    var occlusionInterval: TimeInterval = 0.1
     /// A window must show at least this many square points on some screen to count as on-screen.
     var minVisibleArea: CGFloat = 400
     /// `expectSyntheticEscape(for:)` is clamped to this, so a caller can never switch the stop key off for long.
@@ -48,8 +50,9 @@ enum PanelRole: CaseIterable {
     case mirror, cursorOverlay
 
     var ignoresMouseEvents: Bool { true }
-    /// The mirror floats above ordinary windows so it shows a covered window; the overlay sits just above its target.
-    var floatsAboveWindows: Bool { self == .mirror }
+    /// Both float above ordinary windows: ordering a panel relative to ANOTHER app's window does not hold, so the
+    /// overlay floats too, and hides its cursor when another window covers the cursor's point (`CursorOcclusion`).
+    var floatsAboveWindows: Bool { true }
 }
 
 /// Delays between attempts to reopen a mirror stream that the system stopped: doubling from `first`, capped at `max`,

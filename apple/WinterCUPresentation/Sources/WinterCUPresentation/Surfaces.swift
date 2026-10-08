@@ -7,6 +7,35 @@ import CoreGraphics
 @MainActor protocol CUWindowSource: AnyObject {
     func snapshot(of windowID: CGWindowID) -> WindowSnapshot?
     func screens() -> [ScreenInfo]
+    /// Every on-screen window, front to back.
+    func windowsFrontToBack() -> [StackWindow]
+}
+
+/// One entry of the on-screen window list.
+struct StackWindow: Equatable, Sendable {
+    var id: CGWindowID
+    var pid: pid_t
+    /// The window server's layer: 0 for ordinary app windows.
+    var layer: Int
+    /// Top-left global points.
+    var bounds: CGRect
+    var alpha: CGFloat = 1
+}
+
+/// Whether the cursor would be seen at its point: true when the target is the frontmost ordinary window there.
+/// The overlay floats above every app, so this is what keeps "windows covering the target also cover its cursor".
+enum CursorOcclusion {
+    static func isVisible(at point: CGPoint, target: CGWindowID, in stack: [StackWindow], ownPID: pid_t) -> Bool {
+        for window in stack {
+            // The helper's own panels (mirrors, overlays), the menu bar, the Dock, menus and other floating levels
+            // never decide it, and neither does a see-through window.
+            if window.pid == ownPID || window.layer != 0 || window.alpha < 0.05 { continue }
+            guard window.bounds.contains(point) else { continue }
+            return window.id == target
+        }
+        // Nothing ordinary at the point (or no list): don't hide a hint the user may need.
+        return true
+    }
 }
 
 /// One mirror on screen. Frames are top-left global points.
@@ -27,9 +56,11 @@ import CoreGraphics
 
 /// The click-through overlay above one target window that carries the agent cursor.
 @MainActor protocol CursorOverlaySurface: AnyObject {
-    /// Cover `windowFrame` (top-left global points), ordered just above window `windowID`.
+    /// Cover `windowFrame` (top-left global points), the overlay of window `windowID`; `reorder` re-asserts it in front.
     func place(windowFrame: CGRect, aboveWindow windowID: CGWindowID, reorder: Bool)
     func setShown(_ shown: Bool)
+    /// Another window covers the cursor's point: fade the cursor out, and back in when it is seen again.
+    func setOccluded(_ occluded: Bool)
     /// Draw the cursor as `frame` says (window-local, top-left origin).
     func apply(cursor frame: CursorFrame, style: CursorStyle)
     func close()

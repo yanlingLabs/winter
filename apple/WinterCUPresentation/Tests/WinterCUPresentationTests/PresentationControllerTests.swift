@@ -6,6 +6,12 @@ import XCTest
 @MainActor final class PresentationControllerTests: XCTestCase {
     final class FakeWindows: CUWindowSource {
         var windows: [CGWindowID: WindowSnapshot] = [:]
+        var stack: [StackWindow] = []
+        var stackReads = 0
+        func windowsFrontToBack() -> [StackWindow] {
+            stackReads += 1
+            return stack
+        }
         var screenList = [ScreenInfo(frame: CGRect(x: 0, y: 0, width: 1512, height: 982),
                                      visibleFrame: CGRect(x: 0, y: 25, width: 1512, height: 897))]
         func snapshot(of windowID: CGWindowID) -> WindowSnapshot? { windows[windowID] }
@@ -54,6 +60,7 @@ import XCTest
         var shown = false
         var frames: [CursorFrame] = []
         var lastStyle: CursorStyle?
+        var occluded: [Bool] = []
         var closed = false
 
         func place(windowFrame: CGRect, aboveWindow windowID: CGWindowID, reorder: Bool) {
@@ -61,6 +68,7 @@ import XCTest
             if reorder { reorders += 1 }
         }
         func setShown(_ shown: Bool) { self.shown = shown }
+        func setOccluded(_ occluded: Bool) { self.occluded.append(occluded) }
         func apply(cursor frame: CursorFrame, style: CursorStyle) {
             frames.append(frame)
             lastStyle = style
@@ -140,7 +148,7 @@ import XCTest
             driver = FakeDriver()
             accessibility = FakeAccessibility()
             controller = PresentationController(windows: windows, surfaces: surfaces, clock: clock, ticker: ticker,
-                                                frames: driver, accessibility: accessibility)
+                                                frames: driver, accessibility: accessibility, ownPID: 4242)
         }
     }
 
@@ -370,6 +378,30 @@ import XCTest
         driver.fire()
         XCTAssertEqual(driver.need, .low)
         XCTAssertTrue(driver.isRunning)
+    }
+
+    func testTheCursorFadesWhileAnotherWindowCoversItsPoint() {
+        let target = CGRect(x: 100, y: 100, width: 800, height: 400)
+        addWindow(1, target)
+        let targetEntry = StackWindow(id: 1, pid: 500, layer: 0, bounds: target)
+        let cover = StackWindow(id: 9, pid: 600, layer: 0, bounds: CGRect(x: 250, y: 150, width: 200, height: 150))
+        windows.stack = [cover, targetEntry]
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 200), kind: .press)
+        let o = try! XCTUnwrap(surfaces.overlay(1))
+        XCTAssertEqual(o.occluded.last, true, "the point (300, 200) is under another app's window")
+        // The other window moves away: the next look shows the cursor again.
+        windows.stack = [targetEntry]
+        clock.now += 0.15
+        ticker.fire()
+        XCTAssertEqual(o.occluded.last, false)
+        // Looks are throttled between actions…
+        let reads = windows.stackReads
+        clock.now += 0.02
+        ticker.fire()
+        XCTAssertEqual(windows.stackReads, reads)
+        // …but every action looks at once.
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 700, y: 300), kind: .move)
+        XCTAssertEqual(windows.stackReads, reads + 1)
     }
 
     func testForegroundTakesOverTheLook() {
