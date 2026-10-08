@@ -256,4 +256,33 @@ const bin = winterExecutableForTests();
     // Browser, ComputerV2, CronList, the three office tools, LSP — and the two standing twins.
     expect(search.total_deferred_tools).toBe(9);
   }, 60_000);
+
+  // ComputerV2 (2026-10-08): no card per script — the call itself must REACH the daemon under every
+  // code/dispatch policy, `dont-ask` (whose child denies an unresolved MCP call without asking) and `plan`
+  // included; the per-app policy runs inside it. Proven on the real runtime: the explicit PreToolUse allow →
+  // the MCP call → the registry's ordered content → the service → a real sandboxed worker → the projector. A
+  // print-only script touches no helper.
+  for (const policy of ["dont-ask", "plan", "ask"] as const) {
+    test(`ComputerV2 RUNS under ${policy} — no card for the script itself`, async () => {
+      const { sessionId } = await d.client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", cwd: d.home, model: "winter-test/calls", approvalPolicy: policy });
+      const s = await surfaceOf(d, sessionId, [
+        `CALL ToolSearch {"query":"select:ComputerV2"}`,
+        `CALL ComputerV2 {"code":"const n: number = 6 * 7\\nprint('answer', n)"}`,
+      ].join("\n"));
+      const [loaded, ran] = s.results;
+      // Under dont-ask the load itself used to be denied (ToolSearch is not in the runtime's silent set) —
+      // `hooks.ts`'s `toolSearchDontAskHook` states Winter's READ_ONLY verdict to the child.
+      expect(loaded).toMatchObject({ name: "ToolSearch", isError: false });
+      expect(loaded!.content).not.toContain("Denied");
+      expect(ran).toMatchObject({ name: "ComputerV2", isError: false });
+      expect(ran!.content).toContain("answer 42");
+      const log = d.daemon.sessions.read(sessionId);
+      const call = log.find((e) => e.type === "tool_call" && (e as { name: string }).name === "computer_v2");
+      expect(call).toBeDefined();
+      const result = log.find((e) => e.type === "tool_result" && (e as { callId: string }).callId === (call as { callId: string }).callId) as { output: string; isError: boolean };
+      expect(result.isError).toBe(false);
+      expect(result.output).toContain("answer 42");
+      expect(log.filter((e) => e.type === "approval_requested")).toEqual([]);
+    }, 60_000);
+  }
 });

@@ -1357,7 +1357,9 @@ export async function startDaemon(opts: {
     // Minor 5e (fix wave): `computerUseEnabledFrom` (settings.ts) — the ONE reader this gate shares
     // with the boot registration below, `settings-apply.ts`'s `cuEnabled`, and `ipc/server.ts`'s
     // `capabilities.list` handler.
-    computerUseEnabled: () => (settings ? computerUseEnabledFrom(settings) : true),
+    // ComputerV2 (2026-10-08): read through the computer-use runtime's overlay, so a `computerUse.setSettings`
+    // write reaches the next session even inside the settings watcher's debounce.
+    computerUseEnabled: () => { const s = computerUseRuntime.settings(); return s ? computerUseEnabledFrom(s) : true; },
     // ComputerV2 (2026-10-08): built INSTEAD of `computer` unless `computerUse.legacyComputer` (read live)
     // picks the old tool for an A/B.
     computerV2: { service: computerUseRuntime.service },
