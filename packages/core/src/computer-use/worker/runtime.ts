@@ -137,6 +137,8 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     useWindow(w: unknown) { return call("useWindow", tid(this), { window: w }).then(nothing); }
     waitFor(cond: unknown, o?: unknown) { return call("waitFor", tid(this), { cond, ...opts(o) }); }
     waitForIdle(o?: unknown) { return call("waitForIdle", tid(this), opts(o)); }
+    applescript(source: unknown, o?: unknown) { return call("applescript", tid(this), { source, ...opts(o) }); }
+    scriptingDictionary(o?: unknown) { return call("scriptingDictionary", tid(this), opts(o)); }
     toString(): string { return `[App ${(this as unknown as { name: string }).name}]`; }
   }
   const toApp = (v: unknown): App => new App(v as AppHandle);

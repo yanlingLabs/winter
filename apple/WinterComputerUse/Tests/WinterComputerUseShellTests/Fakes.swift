@@ -50,6 +50,9 @@ let engineSamples: [(method: String, params: String, result: String)] = [
      #"{"rung":1}"#),
     ("target.waitIdle", #"{"targetId":"t1","quietMs":150,"timeoutMs":3000,"callId":"c2"}"#, #"{"settled":true,"waitedMs":150}"#),
     ("target.waitFor", #"{"targetId":"t1","cond":{"text":"Saved","gone":"Saving…"},"timeoutMs":10000}"#, #"{"met":true,"waitedMs":420}"#),
+    ("target.applescript", #"{"targetId":"t1","source":"tell application \"Notes\" to get name","timeoutMs":10000,"callId":"c1"}"#,
+     #"{"result":"Notes"}"#),
+    ("target.scriptingDictionary", #"{"targetId":"t1","search":"note"}"#, #"{"scriptable":true,"text":"Notes — scripting dictionary","truncated":false}"#),
     ("screen.screenshot", #"{"display":"all","excludeBundleIds":["com.winter.app"],"budget":{"maxLongEdge":1440,"quality":0.8}}"#,
      #"{"imageBase64":"/9j/AA==","mime":"image/jpeg","width":1440,"height":900,"shotId":"shot-2"}"#),
     ("screen.appAt", #"{"shotId":"shot-2","point":[100,200]}"#, #"{"app":"Notes","bundleId":"com.apple.Notes","windowId":77}"#),
@@ -108,6 +111,10 @@ final class FakeCore: CoreService, @unchecked Sendable {
     func targetAct(_ params: TargetActParams) async throws -> TargetActResult { try await answer("target.act", params) }
     func targetWaitIdle(_ params: TargetWaitIdleParams) async throws -> TargetWaitIdleResult { try await answer("target.waitIdle", params) }
     func targetWaitFor(_ params: TargetWaitForParams) async throws -> TargetWaitForResult { try await answer("target.waitFor", params) }
+    func targetAppleScript(_ params: TargetAppleScriptParams) async throws -> TargetAppleScriptResult { try await answer("target.applescript", params) }
+    func targetScriptingDictionary(_ params: TargetScriptingDictionaryParams) async throws -> TargetScriptingDictionaryResult {
+        try await answer("target.scriptingDictionary", params)
+    }
     func screenScreenshot(_ params: ScreenScreenshotParams) async throws -> ScreenScreenshotResult { try await answer("screen.screenshot", params) }
     func screenAppAt(_ params: ScreenAppAtParams) async throws -> ScreenAppAtResult { try await answer("screen.appAt", params) }
     func cancel(_ params: CancelParams) async throws -> CancelResult { try await answer("cancel", params) }

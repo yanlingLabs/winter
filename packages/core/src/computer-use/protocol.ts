@@ -101,6 +101,10 @@ export interface ScreenshotResult {
   detail?: string;
 }
 export interface ActResult { rung: 1 | 2 | 3 | 4; detail?: string }
+/** `target.applescript`: the script's result as AppleScript displays it (null: none). */
+export interface AppleScriptResult { result: string | null; detail?: string }
+/** `target.scriptingDictionary`: the bound app's sdef, summarised (`scriptable: false` for an app without one). */
+export interface ScriptingDictionaryResult { scriptable: boolean; text?: string; truncated?: boolean }
 export interface WaitIdleResult { settled: boolean; waitedMs: number }
 export interface WaitForResult { met: true; waitedMs: number }
 export interface AppAtResult { app: string; bundleId: string; windowId: number }

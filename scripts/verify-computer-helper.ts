@@ -6,7 +6,7 @@
  *
  *  1. The dev helper `bun run dev:helper` left in `dist/dev/` is what TCC and the daemon need: Winter's team,
  *     identifier com.winter.computeruse.dev, the hardened runtime, EXACTLY the stated designated requirement,
- *     no entitlements, an LSUIElement Info.plist at this VERSION, and no test hooks compiled in.
+ *     the Apple Events entitlement only, an LSUIElement Info.plist at this VERSION, and no test hooks compiled in.
  *  2. That very binary, run against a temp home (WINTER_CU_HOME), creates `run/computer-use.sock` 0600 in a
  *     0700 `run/` — and closes a connection from this script (bun: signed, but not the dev daemon) with no
  *     response at all, hello or not. The real peer check, no bypass.
@@ -166,7 +166,7 @@ async function main(): Promise<void> {
       check(false, "the dev helper exists", "run `bun run dev:helper` first");
     } else {
       const failures = inspectHelper(DEV_HELPER_APP, "dev");
-      check(failures.length === 0, `signed for TCC: team ${WINTER_TEAM_ID}, ${HELPER.dev.identifier}, hardened runtime, the stated designated requirement, no entitlements, LSUIElement, version ${version}, no test hooks`, failures.join("; "));
+      check(failures.length === 0, `signed for TCC: team ${WINTER_TEAM_ID}, ${HELPER.dev.identifier}, hardened runtime, the stated designated requirement, the Apple Events entitlement only, LSUIElement, version ${version}, no test hooks`, failures.join("; "));
 
       // ── 2. that binary refuses a peer that is not the dev daemon ──────────────────────────────────────
       console.error("verify:computer-helper: 2. the dev binary's real peer check, on a temp home");

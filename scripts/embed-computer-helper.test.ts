@@ -62,7 +62,7 @@ describe("embed-computer-helper.sh (the 'Embed Winter Computer Use' postCompileS
     expect(existsSync(join(dir, "Winter.app", HELPER_EMBED_RELATIVE))).toBe(false);
   });
 
-  test("Release: copies the helper into Contents/Helpers and signs it with the stated requirement, the hardened runtime and no entitlements", () => {
+  test("Release: copies the helper into Contents/Helpers and signs it with the stated requirement, the hardened runtime and the Apple Events entitlement only", () => {
     const dir = builtProducts(HELPER.dist.identifier);
     const r = embed(dir);
     if (r.status !== 0) throw new Error(`exit ${r.status}:\n${r.stderr}\n${r.stdout}`);
@@ -74,7 +74,7 @@ describe("embed-computer-helper.sh (the 'Embed Winter Computer Use' postCompileS
     expect(dvv).toMatch(/^Identifier=com\.winter\.computeruse$/m);
     expect(dvv).toMatch(/^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*runtime/m);
     const ents = spawnSync("codesign", ["-d", "--entitlements", "-", "--xml", dest], { encoding: "utf8" }).stdout;
-    expect(ents).not.toContain("<key>");
+    expect([...ents.matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1])).toEqual(["com.apple.security.automation.apple-events"]);
     expect(r.stdout).toContain("Winter Computer Use embedded at Contents/Helpers");
   });
 

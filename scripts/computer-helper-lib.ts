@@ -19,6 +19,11 @@ export type HelperFlavor = keyof typeof HELPER;
 /** Where the dist helper sits inside Winter.app. */
 export const HELPER_EMBED_RELATIVE = join("Contents", "Helpers", `${HELPER.dist.name}.app`);
 
+/** The helper's ONE entitlement: sending Apple Events, for `applescript()` (the hardened runtime refuses them
+ *  without it). Every signing site passes this file and every check expects exactly this key. */
+export const HELPER_ENTITLEMENT = "com.apple.security.automation.apple-events";
+export const HELPER_ENTITLEMENTS_FILE = join(import.meta.dir, "..", "apple", "WinterComputerUse", "Support", "WinterComputerUse.entitlements");
+
 /** `<WINTER_HOME>/run/<this>`. */
 export const HELPER_SOCKET_NAME = "computer-use.sock";
 
@@ -79,12 +84,13 @@ export function builtHelperPath(derivedDataPath: string, flavor: "dev" | "test")
   return join(derivedDataPath, "Build", "Products", "Debug", `${HELPER[flavor].name}.app`);
 }
 
-/** `codesign` for a dev or test bundle: hardened runtime, no entitlements, the stable identifier and the stated
- *  requirement; no secure timestamp (a local build, offline-friendly — the dev daemon's posture). */
+/** `codesign` for a dev or test bundle: hardened runtime, exactly the Apple Events entitlement, the stable
+ *  identifier and the stated requirement; no secure timestamp (a local build, offline-friendly — the dev daemon's
+ *  posture). */
 export function helperSignArgs(i: { identityHash: string; flavor: HelperFlavor; teamId: string; appPath: string }): string[] {
   const id = HELPER[i.flavor].identifier;
   return ["--force", "--sign", i.identityHash, "--identifier", id, "--options", "runtime", "--timestamp=none",
-    `-r=designated => ${helperRequirement(id, i.teamId)}`, i.appPath];
+    "--entitlements", HELPER_ENTITLEMENTS_FILE, `-r=designated => ${helperRequirement(id, i.teamId)}`, i.appPath];
 }
 
 export interface SignedHelperFacts {
@@ -102,8 +108,9 @@ export interface SignedHelperFacts {
 
 /**
  * Everything a signed helper bundle must be, as failure lines (empty = good): the flavor's bundle id and
- * identifier, Winter's team, the hardened runtime, EXACTLY the stated designated requirement, no entitlements
- * of any kind, an LSUIElement Info.plist at `version`, and test hooks compiled in only for the test flavor.
+ * identifier, Winter's team, the hardened runtime, EXACTLY the stated designated requirement, exactly one
+ * entitlement (Apple Events, set to true), an LSUIElement Info.plist at `version` that says why it sends Apple
+ * Events, and test hooks compiled in only for the test flavor.
  */
 export function checkSignedHelper(flavor: HelperFlavor, teamId: string, version: string, facts: SignedHelperFacts): string[] {
   const want = HELPER[flavor];
@@ -116,7 +123,14 @@ export function checkSignedHelper(flavor: HelperFlavor, teamId: string, version:
   const stated = helperRequirement(want.identifier, teamId);
   if (recorded !== stated) failures.push(`designated requirement is ${recorded ?? "none"}, expected the stated ${stated}`);
   const entitlementKeys = [...facts.entitlementsXml.matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1]);
-  if (entitlementKeys.length > 0) failures.push(`carries entitlements (${entitlementKeys.join(", ")}); it must carry none`);
+  const extra = entitlementKeys.filter((k) => k !== HELPER_ENTITLEMENT);
+  if (extra.length > 0) failures.push(`carries entitlements beyond ${HELPER_ENTITLEMENT} (${extra.join(", ")}); it must carry only that one`);
+  if (!new RegExp(`<key>${HELPER_ENTITLEMENT.replace(/\./g, "\\.")}</key>\\s*<true\\s*/>`).test(facts.entitlementsXml)) {
+    failures.push(`does not carry ${HELPER_ENTITLEMENT} = true (applescript() needs it under the hardened runtime)`);
+  }
+  if (typeof facts.infoPlist.NSAppleEventsUsageDescription !== "string" || facts.infoPlist.NSAppleEventsUsageDescription.length === 0) {
+    failures.push("Info.plist has no NSAppleEventsUsageDescription (macOS would refuse Apple Events without asking)");
+  }
   const plist = facts.infoPlist;
   if (plist.CFBundleIdentifier !== want.identifier) failures.push(`Info.plist CFBundleIdentifier is ${String(plist.CFBundleIdentifier)}, expected ${want.identifier}`);
   if (plist.CFBundleName !== want.name) failures.push(`Info.plist CFBundleName is ${String(plist.CFBundleName)}, expected ${want.name}`);

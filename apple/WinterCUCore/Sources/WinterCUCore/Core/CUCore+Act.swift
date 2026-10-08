@@ -1255,6 +1255,8 @@ extension CUCore {
                 throw CUError(code: "needs_foreground",
                               message: "“\(title)” stays disabled while \(t.appName) is in the background\(keyed != nil ? ", even with its window made key" : ""), and it was asked for again after the UI routes: the command needs \(t.appName) in front")
             }
+            // A known AppleScript equivalent, when the user already lets Winter control the app.
+            if let done = menuThroughAppleScript(a.path, title: title, t) { return done }
             t.disabledMenuCommands.insert(key)
             CULog.act.notice("menu in \(t.appName, privacy: .public): disabled in the background — pointing at the UI routes")
             throw CUError(code: "unsupported", message: backgroundMenuRoutes(title: title, path: a.path, t),
@@ -1276,13 +1278,19 @@ extension CUCore {
         let combo = Self.shortcutCombo(char: attrs[kAXMenuItemCmdCharAttribute].flatMap(AX.stringValue),
                                        virtualKey: attrs[kAXMenuItemCmdVirtualKeyAttribute].flatMap { ($0 as? NSNumber)?.intValue },
                                        modifiers: attrs[kAXMenuItemCmdModifiersAttribute].flatMap { ($0 as? NSNumber)?.intValue })
-        let shortcut = combo.map { "its shortcut, key(\"\($0)\") — keys reach the bound window in the background" }
-            ?? "its keyboard shortcut with key(), if it has one — keys reach the bound window in the background"
-        return "“\(title)” is disabled while \(t.appName) is in the background: its menu bar checks commands against "
-            + "\(t.appName)'s active window, not the bound one. Use a route that checks the item itself: its context menu "
-            + "(action(ref, \"showMenu\") on the selected item — the menu opens at the top of state() — then click its "
-            + "“\(title)”), the window's toolbar or Action menu, or \(shortcut). Only if those are disabled too, call menu() "
-            + "again to ask for \(t.appName) in front"
+        let shortcut = combo.map { "its shortcut key(\"\($0)\")" } ?? "its shortcut with key()"
+        let script = knownMenuScript(path, t) != nil || appIsScriptable(t)
+            ? ", or app.applescript() (macOS asks the user once to let Winter control \(t.appName))" : ""
+        return "“\(title)” is disabled while \(t.appName) is in the background (its menu bar checks its active window). "
+            + "Use a route that checks the item itself: its context menu (action(ref, \"showMenu\") on the selected item, "
+            + "then click “\(title)” in the menu state() lists first), the window's toolbar or Action menu, \(shortcut)\(script). "
+            + "Only if those are disabled too, call menu() again to ask for \(t.appName) in front"
+    }
+
+    /// The app has a scripting dictionary (read from its bundle, cached).
+    func appIsScriptable(_ t: CUTarget) -> Bool {
+        if let o = scriptingDictionaryOverride { return o(t) != nil }
+        return NSRunningApplication(processIdentifier: t.pid)?.bundleURL.flatMap { CUScriptingDictionary.model(appURL: $0) } != nil
     }
 
     /// A menu item's key equivalent as a `key()` combo (`AXMenuItemCmdModifiers`: 1 shift, 2 option, 4 control,

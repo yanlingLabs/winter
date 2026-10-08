@@ -327,6 +327,10 @@ public final class CUCore: @unchecked Sendable {
     var userViewSettleMs: Double = 60
     var stepSettleMs: Double = 20
     var userViewLateCheck = true
+    /// AppleScript, replaceable by tests (nothing there may run a script or ask macOS about Automation).
+    var appleScriptOverride: ((String, CUTarget) throws -> String?)?
+    var automationPermissionOverride: ((pid_t) -> OSStatus)?
+    var scriptingDictionaryOverride: ((CUTarget) -> CUScriptingDictionary.Model?)?
     /// Background steps that once moved the user's view: never used again while the helper runs.
     let retiredStepsLock = NSLock()
     var retiredSteps: Set<CUBackgroundStep> = []

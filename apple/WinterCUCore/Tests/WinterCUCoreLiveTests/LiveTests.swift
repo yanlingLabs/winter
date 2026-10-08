@@ -118,6 +118,35 @@ final class LiveTests: XCTestCase {
         _ = try await core.targetSnapshot(TargetSnapshotParams(targetId: bound.targetId))
     }
 
+    /// AppleScript for real, on Finder (always running): a read of the desktop's items comes back; a shell
+    /// through Finder, another app and `activate` are refused before they leave the process. The first run may
+    /// raise macOS's Automation question for the process running the tests.
+    func testAppleScriptReadsFinderAndRefusesTheDoors() async throws {
+        try requireAccessibility()
+        let bound = try await core.targetBind(TargetBindParams(sessionId: "live-as", app: "Finder", mirror: false, privatePath: true))
+        defer { Task { _ = try? await core.targetRelease(TargetReleaseParams(targetId: bound.targetId)) } }
+        let read = try await core.targetAppleScript(TargetAppleScriptParams(
+            targetId: bound.targetId, source: "tell application \"Finder\" to get name of every item of desktop", timeoutMs: 70_000))
+        XCTAssertNotNil(read.result)
+        for (source, said) in [
+            ("tell application \"Finder\" to do shell script \"echo pwned > /tmp/winter-cu-live\"", "`do shell script` runs a shell"),
+            ("do shell script \"id\"", "`do shell script` runs a shell"),
+            ("tell application \"Finder\" to activate", "`activate` would bring the app in front"),
+            ("tell application \"System Events\" to keystroke \"a\"", "only the bound app, Finder, may be scripted"),
+        ] {
+            do {
+                _ = try await core.targetAppleScript(TargetAppleScriptParams(targetId: bound.targetId, source: source))
+                XCTFail("ran: \(source)")
+            } catch let e as CUError {
+                XCTAssertEqual(e.code, "refused", e.message)
+                XCTAssertTrue(e.message.contains(said), e.message)
+            }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: "/tmp/winter-cu-live"))
+        let dictionary = try await core.targetScriptingDictionary(TargetScriptingDictionaryParams(targetId: bound.targetId, search: "trash"))
+        XCTAssertTrue(dictionary.scriptable)
+    }
+
     func testStaleRefAfterRelease() async throws {
         try requireAccessibility()
         let bound = try await core.targetBind(TargetBindParams(sessionId: "live", app: "TextEdit", mirror: false))

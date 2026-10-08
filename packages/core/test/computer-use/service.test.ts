@@ -254,6 +254,48 @@ describe("ComputerV2: the policy, through a script", () => {
   }, 30_000);
 });
 
+describe("ComputerV2: AppleScript, an extra door beside the UI", () => {
+  macOnly("applescript() is an act: full access runs it with its result fenced; click only and view only refuse it; scriptingDictionary() only looks", async () => {
+    const w = world();
+    w.fake.handlers["target.applescript"] = () => ({ result: "Notes window", detail: "macOS asked the user to let Winter Computer Use control Notes" });
+    w.fake.handlers["target.scriptingDictionary"] = () => ({ scriptable: true, text: "Notes — scripting dictionary\n- note — a note" });
+    const r = await w.run("const notes = await apps.open('Notes')\nconst out = await notes.applescript('tell application \"Notes\" to get name of window 1')\nprint(out.result)\nawait notes.scriptingDictionary({ search: 'note' })");
+    expect(r.isError).toBe(false);
+    const call = w.fake.calls("target.applescript")[0]!;
+    expect(call).toMatchObject({ source: 'tell application "Notes" to get name of window 1' });
+    expect(typeof call.timeoutMs).toBe("number");
+    expect(typeof call.callId).toBe("string");
+    expect(text(r)).toContain("macOS asked the user to let Winter Computer Use control Notes\n");
+    expect(text(r)).toContain('<screen-data id="');
+    expect(text(r)).toContain("Notes window");
+    expect(text(r)).toContain("- note — a note");
+    expect(w.fake.calls("target.scriptingDictionary")[0]).toMatchObject({ search: "note" });
+
+    for (const access of ["click", "view"] as const) {
+      const limited = world({ apps: { "com.apple.Notes": { access } } });
+      limited.fake.handlers["target.scriptingDictionary"] = () => ({ scriptable: false });
+      const lr = await limited.run("const notes = await apps.open('Notes')\ntry { await notes.applescript('tell application \"Notes\" to get name') } catch (e) { print(e.name, e.message) }\nconst d = await notes.scriptingDictionary()\nprint('scriptable', d.scriptable)");
+      expect(text(lr)).toContain(access === "click" ? "NotAllowed Notes is set to click only" : "NotAllowed Notes is set to view only");
+      expect(text(lr)).toContain("scriptable false");
+      expect(limited.fake.calls("target.applescript")).toEqual([]);
+    }
+  }, 30_000);
+
+  macOnly("plan mode refuses applescript(); the helper's refusals keep their sentence", async () => {
+    const plan = world({ policy: "plan", answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "session") });
+    const pr = await plan.run("const notes = await apps.open('Notes')\ntry { await notes.applescript('tell application \"Notes\" to get name') } catch (e) { print(e.name) }");
+    expect(text(pr)).toContain("NotAllowed");
+    expect(plan.fake.calls("target.applescript")).toEqual([]);
+
+    const w = world();
+    w.fake.handlers["target.applescript"] = () => { throw new FakeHelperError("refused", "the AppleScript was stopped: `do shell script` runs a shell (syso/exec)", { reason: "applescript" }); };
+    const r = await w.run("const notes = await apps.open('Notes')\ntry { await notes.applescript('do shell script \"id\"') } catch (e) { print(e.name, e.message) }");
+    expect(text(r)).toContain("Refused the AppleScript was stopped: `do shell script` runs a shell (syso/exec)");
+    const bad = await w.run("try { await notes.applescript('') } catch (e) { print(e.name) }");
+    expect(text(bad)).toContain("TypeError");
+  }, 30_000);
+});
+
 describe("ComputerV2: locks, timeouts and cancellation", () => {
   macOnly("two sessions on one app: the second waits, then TargetBusy names the holder", async () => {
     const w = world();
