@@ -6,6 +6,7 @@ import type { CredentialRow, SecretStore, Settings } from "@yanlinglabs/winter-c
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
 import { policySwitchNotes } from "./tui/policy-switch-notes";
+import { toolHeadFor } from "./tui/format";
 import { WinterClient } from "./client";
 import { checkCodeSession, filterCodeSessions, sessionModeMarker, sessionRuntimeMarker } from "./session-mode";
 import { applyEvent, isStalled, type WatchdogState } from "./watchdog";
@@ -757,7 +758,9 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     }
     else if (e.type === "tool_call") {
       toolNameByCallId.set(e.callId, e.name);
-      emit(`${DIM}⚙ ${e.name} ${e.argsJson.slice(0, 120)}${RESET}\n`);
+      // ComputerV2 (2026-10-08): its label (title, or apps + verbs from the code) — never the raw script.
+      const head = toolHeadFor(e.name, e.argsJson);
+      emit(`${DIM}⚙ ${head.name} ${head.name === e.name ? e.argsJson.slice(0, 120) : head.head}${RESET}\n`);
     }
     else if (e.type === "tool_result") {
       const name = toolNameByCallId.get(e.callId);

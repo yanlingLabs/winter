@@ -8,6 +8,7 @@
  *  Pure — no ANSI, no I/O. */
 
 import { formatTokens } from "./task-display";
+import { COMPUTER_V2_HOST_NAME, computerV2Label } from "./tui/format";
 
 export function subagentGlyph(status: string): string {
   if (status === "working") return "●";
@@ -63,6 +64,8 @@ export function extractToolDetail(name: string, argsJson: string): string | unde
   };
 
   switch (name) {
+    case COMPUTER_V2_HOST_NAME:
+      return computerV2Label(argsJson);
     case "bash": {
       const command = str("command");
       if (command === undefined) return undefined;

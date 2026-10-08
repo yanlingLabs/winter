@@ -16,6 +16,8 @@ export type ResultContent = { type: "text"; text: string } | { type: "image"; da
 /** Text per call: the registry's own tool-output cap (64 KiB). */
 export const RESULT_TEXT_CAP = MAX_OUTPUT;
 export const RESULT_IMAGE_CAP = 6;
+/** The escaped error's message, at most (it is appended after the text cap and never dropped). */
+const ERROR_TEXT_CAP = 4_096;
 
 type Item = { kind: "text"; text: string } | { kind: "image"; data: string; mimeType: string };
 
@@ -51,13 +53,9 @@ export class ResultBuilder {
   /** The MCP content list. `error` is the escaped throw, rendered last. */
   build(opts: { error?: { name: string; message: string; line?: number }; tag?: string } = {}): { content: ResultContent[]; isError: boolean } {
     const items: Item[] = this.items.map((i) => ({ ...i }));
-    if (this.droppedImages > 0) this.pushText(items, `[${this.droppedImages} more image${this.droppedImages === 1 ? "" : "s"} omitted: a ComputerV2 call returns at most ${RESULT_IMAGE_CAP}]`);
-    if (opts.error !== undefined) {
-      const where = opts.error.line === undefined ? "" : ` (line ${opts.error.line})`;
-      this.pushText(items, `${opts.error.name}${where}: ${opts.error.message}`);
-    }
-    // The text cap, over every text item in order: the item that crosses it is cut with a marker, later text
-    // items are dropped (their images stay — they are capped separately).
+    // The text cap, over the SCRIPT's text items in order: the item that crosses it is cut with a marker, later
+    // text items are dropped (their images stay — they are capped separately). The daemon's own lines below —
+    // the omitted-images note and the escaped error — are appended AFTER the cap, so they always survive it.
     let budget = RESULT_TEXT_CAP;
     let cut = false;
     for (const item of items) {
@@ -68,6 +66,11 @@ export class ResultBuilder {
         cut = true;
       }
       budget -= item.text.length;
+    }
+    if (this.droppedImages > 0) this.pushText(items, `[${this.droppedImages} more image${this.droppedImages === 1 ? "" : "s"} omitted: a ComputerV2 call returns at most ${RESULT_IMAGE_CAP}]`);
+    if (opts.error !== undefined) {
+      const where = opts.error.line === undefined ? "" : ` (line ${opts.error.line})`;
+      this.pushText(items, `${opts.error.name}${where}: ${opts.error.message.slice(0, ERROR_TEXT_CAP)}`);
     }
     const content: ResultContent[] = [];
     const tag = opts.tag ?? randomBytes(6).toString("hex");
