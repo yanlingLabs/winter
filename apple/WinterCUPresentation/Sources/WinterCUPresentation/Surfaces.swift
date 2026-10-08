@@ -22,18 +22,53 @@ struct StackWindow: Equatable, Sendable {
     var bounds: CGRect
     var alpha: CGFloat = 1
     var isOnScreen = true
+    /// The owning app's name (needs no permission), for the logs.
+    var ownerName: String?
 }
 
-/// Whether the cursor would be seen at its point: true unless an ordinary window ABOVE the target covers the point.
-/// The overlay floats above every app, so this is what keeps "windows covering the target also cover its cursor".
+/// Whether the cursor would be seen at its point: true unless a window above the target covers the point. The overlay
+/// floats above every app, so this is what keeps "windows covering the target also cover its cursor".
 enum CursorOcclusion {
-    /// - Parameter above: the on-screen windows above the target (only those can cover it).
-    static func isVisible(at point: CGPoint, above: [StackWindow], ownPID: pid_t) -> Bool {
-        !above.contains { window in
-            // The helper's own panels (mirrors, overlays), the menu bar, the Dock, menus and other floating levels
-            // never decide it, and neither does a see-through window.
-            window.pid != ownPID && window.layer == 0 && window.alpha >= 0.05 && window.bounds.contains(point)
+    /// The window that hides the point, if any.
+    ///
+    /// Never counted: the helper's own panels (overlay, mirror); the menu bar, the Dock, menus, palettes and every other
+    /// non-zero level; see-through windows; and the target app's ATTACHMENTS — the parts an app draws as separate windows
+    /// over its main one (a tab bar or toolbar strip, a status bar, a sheet, a popover; `isAttachment`). The agent acts
+    /// on exactly those parts, and they never hide the target from the user. Another window of the same app (a second
+    /// browser window in front) does count: the target is not visible there.
+    ///
+    /// - Parameters:
+    ///   - above: the on-screen windows above the target, front to back (only those can cover it).
+    ///   - targetFrame: the target window's frame (top-left global points).
+    static func coveringWindow(at point: CGPoint, above: [StackWindow], ownPID: pid_t, targetPID: pid_t,
+                               targetFrame: CGRect) -> StackWindow? {
+        above.first { window in
+            guard window.pid != ownPID, window.layer == 0, window.alpha >= 0.05,
+                  window.bounds.width > 1, window.bounds.height > 1, window.bounds.contains(point) else { return false }
+            if window.pid == targetPID, isAttachment(window.bounds, of: targetFrame) { return false }
+            return true
         }
+    }
+
+    static func isVisible(at point: CGPoint, above: [StackWindow], ownPID: pid_t, targetPID: pid_t,
+                          targetFrame: CGRect) -> Bool {
+        coveringWindow(at: point, above: above, ownPID: ownPID, targetPID: targetPID, targetFrame: targetFrame) == nil
+    }
+
+    /// How far outside the target an attachment may reach (a tab strip above the content, a popover's overhang).
+    static let attachmentMargin: CGFloat = 48
+    /// A same-app window thinner than this on either side is a strip (tab bar, status bar), never a window of its own.
+    static let stripThickness: CGFloat = 120
+
+    /// Whether a window of the target's own app is part of the target rather than a window in front of it: a strip
+    /// (thinner than `stripThickness` on a side), or one lying within the target's frame (give or take
+    /// `attachmentMargin`) while smaller than it (a sheet, a popover).
+    static func isAttachment(_ bounds: CGRect, of target: CGRect) -> Bool {
+        if min(bounds.width, bounds.height) < stripThickness { return true }
+        guard !target.isEmpty else { return false }
+        let inside = target.insetBy(dx: -attachmentMargin, dy: -attachmentMargin).contains(bounds)
+        let smaller = bounds.width * bounds.height < target.width * target.height * 0.9
+        return inside && smaller
     }
 }
 

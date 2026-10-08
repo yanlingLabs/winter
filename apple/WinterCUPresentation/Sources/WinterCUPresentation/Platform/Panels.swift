@@ -25,6 +25,19 @@ final class PassivePanel: NSPanel {
     }
 }
 
+extension PassivePanel {
+    /// What the logs need to tell "ordered in but not drawn" apart from "really on screen": AppKit's flags, the app's
+    /// hidden state and the window server's own on-screen flag for this panel.
+    var diagnostics: String {
+        let server = windowNumber > 0
+            ? SystemWindowServer().describe([CGWindowID(windowNumber)]).first.map { "\($0.isOnScreen)" } ?? "absent"
+            : "no window yet"
+        return "level \(level.rawValue) visible \(isVisible) occlusionVisible \(occlusionState.contains(.visible)) "
+            + "appHidden \(NSApplication.shared.isHidden) windowNumber \(windowNumber) serverOnScreen \(server) "
+            + "screen \(screen?.localizedName ?? "none")"
+    }
+}
+
 /// A view whose content lives in one geometry-flipped layer, so everything inside uses top-left coordinates like the
 /// rest of the package.
 final class FlippedLayerView: NSView {
@@ -85,8 +98,16 @@ final class FlippedLayerView: NSView {
         self.shown = shown
         if shown {
             panel.orderFrontRegardless()
-            PresentationLog.notice("cursor overlay shown: \(target.appName) window \(target.windowID) at \(panel.frame)"
-                + " level \(panel.level.rawValue) visible \(panel.isVisible)")
+            PresentationLog.notice("cursor overlay shown: \(target.appName) window \(target.windowID) at \(panel.frame) "
+                + panel.diagnostics)
+            // Whether the window server really has it on screen, a moment later (AppKit's own flags can lag).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.shown else { return }
+                    PresentationLog.notice("cursor overlay check: \(self.target.appName) window \(self.target.windowID): "
+                        + self.panel.diagnostics)
+                }
+            }
         } else {
             cursor.apply(.hidden)
             panel.orderOut(nil)

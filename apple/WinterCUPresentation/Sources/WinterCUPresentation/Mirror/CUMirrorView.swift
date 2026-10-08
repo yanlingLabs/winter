@@ -26,8 +26,14 @@ public struct CUMirrorView: View {
     private var panel: some View {
         VStack(spacing: 0) {
             TimelineView(.animation(minimumInterval: model.cursorNeed == .low ? 1.0 / 20 : 1.0 / 60,
-                                    paused: model.cursorNeed == .none)) { _ in
-                Canvas { context, size in draw(&context, size: size) }
+                                    paused: model.cursorNeed == .none)) { timeline in
+                // The canvas depends on the tick's date, so every tick redraws it (the cursor is sampled from the
+                // model's own clock).
+                let tick = timeline.date
+                Canvas { context, size in
+                    _ = tick
+                    draw(&context, size: size)
+                }
             }
             .aspectRatio(aspect, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))

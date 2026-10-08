@@ -23,6 +23,9 @@ import Foundation
     let rig: CursorRig
     private var rigGeometry: (CGRect, CGSize)?
     private var needCheckPending = false
+    /// What has been logged for the current target (first frame, first cursor), so each is logged once.
+    private var loggedFrame = false
+    private var loggedCursor = false
 
     /// Reduce Motion, from the view's environment.
     var reduceMotion = false {
@@ -44,13 +47,25 @@ import Foundation
 
     /// A target was bound: show its mirror (a placeholder until the first frame).
     public func show(appName: String, windowSize: CGSize) {
+        if self.appName != appName {
+            PresentationLog.notice("in-app mirror shown for \(appName), window \(windowSize)")
+            loggedFrame = false
+            loggedCursor = false
+        }
         self.appName = appName
         if windowSize.width > 0, windowSize.height > 0 { self.windowSize = windowSize }
     }
 
     /// A new frame (`view.frame`). An undecodable frame is skipped; the last good one stays.
     public func apply(frame jpeg: Data, width: Int, height: Int, windowSize: CGSize) {
-        guard let decoded = JPEGCodec.decode(jpeg) else { return }
+        guard let decoded = JPEGCodec.decode(jpeg) else {
+            PresentationLog.notice("in-app mirror: a frame could not be decoded (\(jpeg.count) bytes)")
+            return
+        }
+        if !loggedFrame {
+            loggedFrame = true
+            PresentationLog.notice("in-app mirror for \(appName ?? "?"): first frame \(decoded.width)×\(decoded.height)")
+        }
         image = decoded
         imageSize = CGSize(width: width > 0 ? width : decoded.width, height: height > 0 ? height : decoded.height)
         if windowSize.width > 0, windowSize.height > 0, windowSize != self.windowSize { self.windowSize = windowSize }
@@ -61,13 +76,22 @@ import Foundation
     public func applyCursor(kind: String, point: CGPoint, dragTo: CGPoint?, frame: CGRect?, text: String?,
                             count: Int?, button: String?) {
         guard let cursorKind = CUCursorKind(core: kind, dragTo: dragTo, frame: frame, text: text, count: count,
-                                            button: button) else { return }
+                                            button: button) else {
+            PresentationLog.notice("in-app mirror: cursor kind \"\(kind)\" ignored (unknown, or missing its payload)")
+            return
+        }
+        if !loggedCursor {
+            loggedCursor = true
+            PresentationLog.notice("in-app mirror for \(appName ?? "?"): first cursor event \(kind) at \(point) "
+                + "(window \(windowSize))")
+        }
         timeline.receive(cursorKind, at: point, now: clock.now)
         updateNeed()
     }
 
     /// The target was released: nothing to show.
     public func clear() {
+        if appName != nil { PresentationLog.notice("in-app mirror cleared (\(appName ?? "?"))") }
         appName = nil
         windowSize = .zero
         image = nil

@@ -128,6 +128,76 @@ import XCTest
         XCTAssertEqual(model.cursorNeed, .full)
     }
 
+    /// `view.cursor` as Winter.app forwards it (window-relative points, the window's size from `view.bound`): the
+    /// cursor appears, glides between the two points over time (it animates, the view's timeline runs), and is drawn
+    /// where the window point lands in the mirror.
+    func testTheMirrorCursorAnimatesFromRealViewCursorInput() throws {
+        let clock = FakeClock()
+        let model = CUMirrorModel(clock: clock)
+        let window = CGSize(width: 1211, height: 824)
+        model.show(appName: "Safari", windowSize: window)
+        XCTAssertEqual(model.cursorNeed, .none)
+        model.applyCursor(kind: "move", point: CGPoint(x: 100, y: 100), dragTo: nil, frame: nil, text: nil, count: nil,
+                          button: nil)
+        XCTAssertNotEqual(model.cursorNeed, .none, "the view's timeline is unpaused")
+        clock.now += 1
+        let start = model.cursorFrame()
+        XCTAssertTrue(start.visible)
+        XCTAssertEqual(start.tip, CGPoint(x: 100, y: 100))
+        model.applyCursor(kind: "press", point: CGPoint(x: 900, y: 600), dragTo: nil, frame: nil, text: nil, count: 1,
+                          button: "left")
+        XCTAssertEqual(model.cursorNeed, .full)
+        clock.now += 0.1
+        let mid = model.cursorFrame()
+        XCTAssertGreaterThan(mid.tip.x, 100)
+        XCTAssertLessThan(mid.tip.x, 900, "mid-glide: it moves over time, not in one jump")
+        clock.now += 1.5
+        let end = model.cursorFrame()
+        XCTAssertEqual(end.tip, CGPoint(x: 900, y: 600))
+
+        // Drawn into a top-left context (the canvas's), half the window's size: the arrow is at the mapped point.
+        let size = CGSize(width: window.width / 2, height: window.height / 2)
+        let pixels = try renderCursor(model, size: size)
+        let tip = CGPoint(x: 450, y: 300)
+        XCTAssertGreaterThan(pixels.alpha(around: CGPoint(x: tip.x + 3, y: tip.y + 5), radius: 3), 0.5,
+                             "the arrow sits just below-right of its tip")
+        XCTAssertEqual(pixels.alpha(around: CGPoint(x: 60, y: 60), radius: 4), 0, "nothing far from the cursor")
+    }
+
+    /// Opaque-ness of a premultiplied BGRA bitmap rendered in top-left points at 2x.
+    struct Pixels {
+        let data: [UInt8]
+        let width: Int, height: Int, scale: CGFloat
+        func alpha(around p: CGPoint, radius: CGFloat) -> CGFloat {
+            var best: UInt8 = 0
+            let r = Int(radius * scale)
+            let cx = Int(p.x * scale), cy = Int(p.y * scale)
+            for y in max(0, cy - r)...min(height - 1, cy + r) {
+                for x in max(0, cx - r)...min(width - 1, cx + r) {
+                    best = max(best, data[(y * width + x) * 4 + 3])
+                }
+            }
+            return CGFloat(best) / 255
+        }
+    }
+
+    func renderCursor(_ model: CUMirrorModel, size: CGSize) throws -> Pixels {
+        let scale: CGFloat = 2
+        let width = Int(size.width * scale), height = Int(size.height * scale)
+        var data = [UInt8](repeating: 0, count: width * height * 4)
+        try data.withUnsafeMutableBytes { buffer in
+            let ctx = try XCTUnwrap(CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                              bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                                  | CGBitmapInfo.byteOrder32Little.rawValue))
+            // Row 0 of `data` is the top row; top-left points, like SwiftUI's canvas.
+            ctx.translateBy(x: 0, y: CGFloat(height))
+            ctx.scaleBy(x: scale, y: -scale)
+            model.renderCursor(into: ctx, size: size, scale: scale)
+        }
+        return Pixels(data: data, width: width, height: height, scale: scale)
+    }
+
     // MARK: - Offscreen render
 
     func testTheViewRendersOffscreenWithASyntheticFrame() throws {
