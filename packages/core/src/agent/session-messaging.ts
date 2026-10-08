@@ -112,7 +112,11 @@ export interface SessionMessagingDeps {
   };
   /** Dispatch's follow-up hook (`DispatchChildren.expectFollowUp`): called before a coordinator's message
    *  to its OWN child; returns the undo for a send that fails. Absent until the daemon built it. */
-  followUp?: () => { expectFollowUp(childId: string, coordinatorId: string, text: string): () => void } | undefined;
+  followUp?: () => {
+    expectFollowUp(childId: string, coordinatorId: string, text: string): () => void;
+    /** A stop door's note of who stopped a child's turn (`DispatchChildren.noteStop`) — TaskStop says the caller. */
+    noteStop?(sessionId: string, by: { kind: "user" } | { kind: "session"; sessionId: string }): void;
+  } | undefined;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -315,6 +319,8 @@ export class SessionMessaging {
     // pending (agent SDK 0.0.44 `clearQueuedInput`, cleared BEFORE the interrupt, which would keep them) —
     // so the next message the session gets runs straight away, never a stale one first. Said in the
     // answer, so the caller knows. (A message already folded into the stopped turn was read; nothing to drop.)
+    // Said before the interrupt, so a Dispatch child's report names the stopper ("Stopped by you (TaskStop).").
+    try { this.deps.followUp?.()?.noteStop?.(resolved.id, { kind: "session", sessionId: callerSessionId }); } catch { /* the stop goes on */ }
     try {
       const { wasRunning, discarded = 0 } = await driver.interrupt({ discardQueued: true });
       if (!wasRunning) return { status: "not_running" };

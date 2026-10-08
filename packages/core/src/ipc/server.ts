@@ -381,6 +381,9 @@ export interface IpcServerOptions {
    * LOCAL-ONLY `computerUse.*` RPCs. Absent (a bare test server): those methods answer INTERNAL.
    */
   computerUse?: ComputerUseControl;
+  /** `session.interrupt` is about to stop a running turn on a client's behalf — the user's stop
+   *  (`DispatchChildren.noteStop`, so a Dispatch child's report says who stopped it). */
+  onUserInterrupt?: (sessionId: string) => void;
   /**
    * WS-26 (review r1, minor 4): the SAME live connector-permission facts the hook and the bridge decide
    * on (the daemon's in-memory table, the scope-aware read-only answers), so `mcp.tools` reports what is
@@ -2361,7 +2364,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // no child, so the answer is "nothing was running" without spawning one to say so.
         {
           const live = opts.winter?.get(p.sessionId);
-          if (live !== undefined) return { ok: true, ...(await live.interrupt()) };
+          if (live !== undefined) {
+            // A client's stop is the USER's (a Mac window or pill, a terminal, the phone): a Dispatch child's
+            // report says so, and its coordinator leaves it stopped.
+            if (live.turnRunning) { try { opts.onUserInterrupt?.(p.sessionId); } catch { /* the stop goes on */ } }
+            return { ok: true, ...(await live.interrupt()) };
+          }
           if (isRunnableLeg(p.sessionId)) return { ok: true, wasRunning: false };
         }
         if (!opts.engine) return { ok: true, wasRunning: false };

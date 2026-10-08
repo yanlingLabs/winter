@@ -59,6 +59,7 @@ export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean; computerOf
     "One session per coherent task. Pick the right dir. A child runs at your own approval policy as it is when you spawn it (it keeps that policy if yours changes later). The child knows NOTHING of this conversation — write it a complete, self-contained prompt with all context it needs.",
     "Children run asynchronously: SpawnSession returns at once, and you are woken with a <child_update> when one finishes (several finishing together arrive in one message). Report outcomes in your own words, with file paths the user can open.",
     "Each <child_update> message also lists your children still at work. To stop a child's running turn, use TaskStop with its session id (`s_…`) as task_id — it stays resumable.",
+    "If the user stopped a session, it stays stopped — don't resume or re-delegate it unless the user asks. A <child_update> says who stopped a child: \"Stopped by the user.\" (leave it, and tell the user where it got to) or \"Stopped by you (TaskStop).\"",
     "To follow up a child — to correct it, answer it, or give it its next step — SendMessage it with its session id (`s_…`) as `to`, instead of spawning a new session. This works whether it is still running (your message runs right after its current turn) or finished (it is resumed for your message), and you are woken with a <child_update> when that turn finishes. SendMessage is the only way to message or resume a session.",
     "",
     "# The whole fleet, not just your children",

@@ -304,6 +304,14 @@ describe("ComputerV2: locks, timeouts and cancellation", () => {
     expect(w.interrupts).toEqual(["s1"]);
     expect(text(r)).toContain("the user pressed Esc");
   }, 30_000);
+
+  macOnly("an Esc naming a session with NO script running interrupts nothing (a late notification never stops a newer turn)", async () => {
+    const w = world();
+    await w.run("await apps.list({ emit: false })");   // opens the connection; the script has ended
+    w.fake.notify("escPressed", { sessionIds: ["s1", "s_other"] });
+    await Bun.sleep(100);
+    expect(w.interrupts).toEqual([]);
+  }, 30_000);
 });
 
 describe("ComputerV2: screenshots, points and the vision gate", () => {
@@ -446,7 +454,7 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     w.fake.handlers["target.act"] = (p) => {
       const kind = (p.action as { kind: string }).kind;
       if (kind === "click") throw new FakeHelperError("stale_ref", "gone", { ref: 12 });
-      if (kind === "type") throw new FakeHelperError("refused", "secure", { reason: "secure_field" });
+      if (kind === "type") throw new FakeHelperError("refused", "", { reason: "secure_field" });
       throw new FakeHelperError("permission_missing", "no", { permission: "accessibility" });
     };
     const r = await w.run([
@@ -456,8 +464,21 @@ describe("ComputerV2: the helper's errors and notifications", () => {
       "try { await notes.key('cmd+s') } catch (e) { print(e.name, e.message) }",
     ].join("\n"));
     expect(text(r)).toContain("StaleRef [12] is gone — call state()");
-    expect(text(r)).toContain("Refused that is a password or payment field");
+    expect(text(r)).toContain("Refused that is a password or payment field");   // a bare refusal: the fallback words
     expect(text(r)).toContain("PermissionMissing Winter Computer Use needs the Accessibility permission");
+  }, 30_000);
+
+  macOnly("a refusal keeps the HELPER's own sentence — never a canned one for its reason code (the live gate)", async () => {
+    const w = world();
+    const said = "can't tell which field has focus in Code, so it could be a password field — pass `into` or click a text field first";
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("refused", said, { reason: "secure_field" }); };
+    const r = await w.run("const notes = await apps.open('Notes')\ntry { await notes.type('hello') } catch (e) { print(e.name, e.message) }");
+    expect(text(r)).toContain(`Refused ${said}`);
+    expect(text(r)).not.toContain("that is a password or payment field");
+    // focus_unknown with no message of its own gets its own words.
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("refused", "", { reason: "focus_unknown" }); };
+    const r2 = await w.run("try { await notes.type('hello') } catch (e) { print(e.name, e.message) }");
+    expect(text(r2)).toContain("Refused can't tell which field has focus in Notes, so it could be a password field — pass `into` or click a text field first");
   }, 30_000);
 
   macOnly("targetLost and the helper quitting: TargetLost next use; HelperUnavailable mid-call; the next call relaunches", async () => {

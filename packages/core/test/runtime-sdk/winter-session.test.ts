@@ -528,6 +528,28 @@ describe("startWinterSession — one incarnation", () => {
     expect(seen(h, "turn_started")).toHaveLength(3);
   });
 
+  test("the user's stop (a plain interrupt): a message delivered AFTER the stopped turn ended runs normally — nothing aborts it (the live gate)", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    expect(await h.session.interrupt()).toEqual({ wasRunning: true });
+    await h.settled();
+    expect(seen(h, "turn_completed").map((e) => (e as { stopReason?: string }).stopReason)).toEqual(["aborted"]);
+    // Later, Dispatch messages the stopped session (SendMessage's delivery).
+    h.session.deliver("Please continue");
+    await h.settled();
+    expect(h.q().pushed).toEqual(["A", "Please continue"]);
+    expect(h.types().slice(-2)).toEqual(["user_message", "turn_started"]);
+    expect(h.q().interrupts).toBe(1);   // the one stop — nothing interrupts the new turn
+    h.q().emit(result());
+    await h.settled();
+    expect(seen(h, "turn_completed").map((e) => (e as { stopReason?: string }).stopReason)).toEqual(["aborted", "end_turn"]);
+    // A stop pressed again once nothing runs is a no-op on the wire.
+    expect(await h.session.interrupt()).toEqual({ wasRunning: false });
+    expect(h.q().interrupts).toBe(1);
+  });
+
   test("TaskStop (discardQueued, user ruling 2026-10-04): the sends held behind the stopped turn are CLOSED in the log once it ends — never re-pushed on resume — and the next send runs at once", async () => {
     const h = harness();
     await h.session.open();
