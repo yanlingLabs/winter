@@ -47,20 +47,24 @@ import WinterCUPresentation
 
         let authenticator: CodeSigningPeerAuthenticator
         do {
-            authenticator = try CodeSigningPeerAuthenticator(requirement: identity.daemonRequirement)
+            authenticator = try CodeSigningPeerAuthenticator(requirements: [.daemon: identity.daemonRequirement, .app: identity.appRequirement])
         } catch {
             fail("cannot start: \(error)")
         }
 
         let (presentation, escapeTap) = WinterCUPresentationFactory.make()
-        let coordinator = HelperCoordinator(presentation: presentation, escapeTap: escapeTap)
+        let viewHub = ViewHub(capture: LiveFrameCaptureFactory(), geometry: LiveWindowGeometry())
+        let coordinator = HelperCoordinator(presentation: presentation, escapeTap: escapeTap, viewHub: viewHub)
         let core = CUCore(events: coordinator)
         let inFlight = InFlightRegistry()
-        let dispatcher = RPCDispatcher(core: core, coordinator: coordinator, inFlight: inFlight)
+        let dispatcher = RPCDispatcher(core: core, coordinator: coordinator, viewHub: viewHub, inFlight: inFlight)
         let server = HelperServer(
             configuration: .init(socketPath: identity.socketPath, home: identity.home, helperVersion: version),
             authenticator: authenticator, dispatcher: dispatcher, coordinator: coordinator, inFlight: inFlight, log: log)
         coordinator.notify = { [weak server] notification in server?.broadcast(notification) }
+        viewHub.sendEvent = { [weak server] connection, line in server?.sendEvent(to: connection, line) }
+        viewHub.sendFrame = { [weak server] connection, key, line in server?.sendFrame(to: connection, key: key, line) }
+        viewHub.log = { [log] in log.info($0) }
 
         do {
             try server.start()

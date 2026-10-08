@@ -23,12 +23,16 @@ final class ServerHandshakeTests: XCTestCase {
 
     private var socketPath: String { home + "/run/computer-use.sock" }
 
-    private func start(_ rig: Rig, auth: PeerAuthenticator = FakeAuthenticator(decision: .accept(pid: 1)), maxInFlight: Int = 64) async throws {
+    private func start(_ rig: Rig, auth: PeerAuthenticator = FakeAuthenticator(decision: .accept(pid: 1, clients: [.daemon, .app])), maxInFlight: Int = 64) async throws {
         let server = HelperServer(
             configuration: .init(socketPath: socketPath, home: home, helperVersion: "9.876.5",
                                  maxInFlightPerConnection: maxInFlight, socketCheckInterval: 0),
             authenticator: auth, dispatcher: rig.dispatcher, coordinator: rig.coordinator, inFlight: rig.inFlight, log: .silent)
-        await MainActor.run { rig.coordinator.notify = { [weak server] in server?.broadcast($0) } }
+        await MainActor.run {
+            rig.coordinator.notify = { [weak server] in server?.broadcast($0) }
+            rig.viewHub.sendEvent = { [weak server] connection, line in server?.sendEvent(to: connection, line) }
+            rig.viewHub.sendFrame = { [weak server] connection, key, line in server?.sendFrame(to: connection, key: key, line) }
+        }
         try server.start()
         self.server = server
     }
@@ -273,7 +277,7 @@ final class ServerHandshakeTests: XCTestCase {
         XCTAssertNotNil(try LineClient(path: socketPath).hello(home: home)?["result"])
 
         let second = HelperServer(configuration: .init(socketPath: socketPath, home: home, helperVersion: "x", socketCheckInterval: 0),
-                                  authenticator: FakeAuthenticator(decision: .accept(pid: 1)), dispatcher: rig.dispatcher,
+                                  authenticator: FakeAuthenticator(decision: .accept(pid: 1, clients: [.daemon])), dispatcher: rig.dispatcher,
                                   coordinator: rig.coordinator, inFlight: rig.inFlight, log: .silent)
         XCTAssertThrowsError(try second.start()) { error in
             guard case HelperServerError.alreadyRunning = error else { return XCTFail("\(error)") }
@@ -287,6 +291,127 @@ final class ServerHandshakeTests: XCTestCase {
         XCTAssertThrowsError(try LineClient(path: socketPath))
         server?.ensureListening()
         XCTAssertNotNil(try LineClient(path: socketPath).hello(home: home)?["result"])
+    }
+
+    // MARK: Winter.app, the second client
+
+    private func appHello(_ client: LineClient, id: Int = 1) -> JSONValue? {
+        client.send(id: id, method: "hello", params: "{\"protocol\":1,\"client\":\"app\",\"home\":\"\(home)\"}")
+        return client.response(id: id)
+    }
+
+    func testWinterAppMayOnlyReadStatusAndSubscribe() async throws {
+        let rig = await Rig()
+        rig.core.results["status"] = json(#"{"helperVersion":"9.876.5","permissions":{"accessibility":true,"screenRecording":true}}"#)
+        try await start(rig)
+        let app = try LineClient(path: socketPath)
+        XCTAssertEqual(appHello(app)?["result"]?["pid"], .number(Double(getpid())))
+        app.send(id: 2, method: "status")
+        XCTAssertEqual(app.response(id: 2)?["result"]?["helperVersion"], .string("9.876.5"))
+        app.send(id: 3, method: "view.subscribe", params: #"{"sessionId":"s_1","frames":true}"#)
+        XCTAssertEqual(app.response(id: 3)?["result"], json(#"{"targets":[]}"#))
+        for (n, method) in ["apps.list", "target.bind", "target.act", "script.active", "session.ended", "cancel", "permissions.request"].enumerated() {
+            app.send(id: 10 + n, method: method, params: #"{"sessionId":"s_1","callId":"c"}"#)
+            let reply = app.response(id: 10 + n)
+            XCTAssertEqual(reply?["error"]?["data"]?["code"], .string("not_allowed"), method)
+        }
+        app.send(id: 30, method: "view.unsubscribe", params: #"{"sessionId":"s_1"}"#)
+        XCTAssertEqual(app.response(id: 30)?["result"], .object([:]))
+        XCTAssertEqual(rig.core.methods(), ["status"], "nothing but status reached the engine")
+    }
+
+    func testTheDaemonMayNotSubscribeToTheViewStream() async throws {
+        let rig = await Rig()
+        try await start(rig)
+        let daemon = try LineClient(path: socketPath)
+        XCTAssertNotNil(daemon.hello(home: home)?["result"])
+        daemon.send(id: 2, method: "view.subscribe", params: #"{"sessionId":"s_1","frames":true}"#)
+        XCTAssertEqual(daemon.response(id: 2)?["error"]?["data"]?["code"], .string("not_allowed"))
+    }
+
+    func testAClaimedClientTheCodeDoesNotProveIsRefusedAndClosed() async throws {
+        let rig = await Rig()
+        try await start(rig, auth: FakeAuthenticator(decision: .accept(pid: 1, clients: [.app])))
+        let impostor = try LineClient(path: socketPath)
+        let reply = impostor.hello(home: home)
+        XCTAssertEqual(reply?["error"]?["data"], json(#"{"code":"not_allowed","reason":"identity"}"#), "a Winter.app peer cannot say it is the daemon")
+        XCTAssertTrue(impostor.closedWithoutData())
+        server?.stop()
+
+        let other = await Rig()
+        try await start(other, auth: FakeAuthenticator(decision: .accept(pid: 1, clients: [.daemon])))
+        let notApp = try LineClient(path: socketPath)
+        XCTAssertEqual(appHello(notApp)?["error"]?["data"]?["code"], .string("not_allowed"), "nor the daemon that it is Winter.app")
+        XCTAssertTrue(notApp.closedWithoutData())
+        let unknown = try LineClient(path: socketPath)
+        unknown.send(id: 1, method: "hello", params: "{\"protocol\":1,\"client\":\"phone\",\"home\":\"\(home)\"}")
+        XCTAssertEqual(unknown.response(id: 1)?["error"]?["data"]?["code"], .string("protocol_mismatch"))
+    }
+
+    func testTheViewStreamFansOutToTheSessionsSubscribersOnly() async throws {
+        let rig = await Rig()
+        rig.core.results["target.bind"] = json(#"{"targetId":"t1","app":{"name":"Notes","bundleId":"com.apple.Notes","pid":123},"window":{"id":77,"title":"Groceries","frame":[100,50,800,600]}}"#)
+        try await start(rig)
+        let daemon = try LineClient(path: socketPath)
+        XCTAssertNotNil(daemon.hello(home: home)?["result"])
+        let app = try LineClient(path: socketPath)
+        XCTAssertNotNil(appHello(app)?["result"])
+        app.send(id: 2, method: "view.subscribe", params: #"{"sessionId":"s_1","frames":false}"#)
+        XCTAssertNotNil(app.response(id: 2)?["result"])
+        let other = try LineClient(path: socketPath)
+        XCTAssertNotNil(appHello(other)?["result"])
+        other.send(id: 2, method: "view.subscribe", params: #"{"sessionId":"s_2","frames":true}"#)
+        XCTAssertNotNil(other.response(id: 2)?["result"])
+
+        daemon.send(id: 2, method: "target.bind", params: #"{"sessionId":"s_1","app":"Notes","mirror":true}"#)
+        XCTAssertNotNil(daemon.response(id: 2)?["result"])
+        XCTAssertEqual(app.readLine(), json(#"{"jsonrpc":"2.0","method":"view.bound","params":{"sessionId":"s_1","targetId":"t1","pid":123,"windowId":77,"appName":"Notes","bundleId":"com.apple.Notes","windowSize":[800,600]}}"#))
+
+        await MainActor.run {
+            rig.geometry.frames[77] = CGRect(x: 110, y: 60, width: 800, height: 600) // the window moved since the bind
+            rig.coordinator.actionAt(sessionId: "s_1", pid: 123, windowID: 77, point: CGPoint(x: 210, y: 160), kind: "press",
+                                     dragTo: nil, frame: nil, text: nil, count: 1, button: "left")
+        }
+        XCTAssertEqual(app.readLine()?["params"], json(#"{"sessionId":"s_1","targetId":"t1","kind":"press","point":[100,100],"count":1,"button":"left"}"#))
+
+        await MainActor.run { rig.tap.onEscape?() } // no script active: nothing; and never to Winter.app anyway
+        daemon.send(id: 3, method: "script.active", params: #"{"sessionId":"s_1","active":true}"#)
+        XCTAssertNotNil(daemon.response(id: 3))
+        await MainActor.run { rig.tap.onEscape?() }
+        XCTAssertEqual(daemon.readLine()?["method"], .string("escPressed"))
+
+        daemon.send(id: 4, method: "target.release", params: #"{"targetId":"t1"}"#)
+        XCTAssertNotNil(daemon.response(id: 4)?["result"])
+        XCTAssertEqual(app.readLine()?["params"], json(#"{"sessionId":"s_1","targetId":"t1"}"#))
+        XCTAssertNil(app.readLine(timeout: 0.3), "no escPressed, no second release for Winter.app")
+        XCTAssertNil(other.readLine(timeout: 0.3), "a subscriber of another session hears nothing")
+    }
+
+    func testWinterAppNeitherOwnsNorEndsASession() async throws {
+        let rig = await Rig()
+        rig.core.results["target.bind"] = json(engineSamples.first { $0.method == "target.bind" }!.result)
+        try await start(rig)
+        var daemon: LineClient? = try LineClient(path: socketPath)
+        XCTAssertNotNil(daemon?.hello(home: home)?["result"])
+        daemon?.send(id: 2, method: "target.bind", params: #"{"sessionId":"s_1","app":"Notes","mirror":true}"#)
+        XCTAssertNotNil(daemon?.response(id: 2)?["result"])
+        do {
+            let app = try LineClient(path: socketPath)
+            XCTAssertNotNil(appHello(app)?["result"])
+            app.send(id: 2, method: "view.subscribe", params: #"{"sessionId":"s_1","frames":true}"#)
+            XCTAssertEqual(app.response(id: 2)?["result"]?["targets"]?.arrayCount, 1)
+            let open = await rig.coordinator.openConnections
+            XCTAssertEqual(open.count, 1, "Winter.app is not a daemon connection")
+        } // Winter.app goes away
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(rig.core.methods().contains("session.ended"), "the app's close ends nothing")
+        let capturing = await rig.viewHub.capturing
+        XCTAssertTrue(capturing.isEmpty, "its frame subscription went with it")
+        daemon = nil
+        let ended = await eventually { rig.core.methods().contains("session.ended") }
+        XCTAssertTrue(ended, "the daemon's close does end it")
+        let targets = await rig.viewHub.targets
+        XCTAssertTrue(targets.isEmpty)
     }
 
     func testStopRemovesTheSocketFile() async throws {

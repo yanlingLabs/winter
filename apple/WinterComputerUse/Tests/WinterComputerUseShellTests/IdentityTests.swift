@@ -33,6 +33,7 @@ final class IdentityTests: XCTestCase {
         XCTAssertEqual(id.homeSource, "default")
         XCTAssertEqual(id.socketPath, home(".winter") + "/run/computer-use.sock")
         XCTAssertEqual(id.daemonRequirement, #"identifier "winter-core" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ""#)
+        XCTAssertEqual(id.appRequirement, #"identifier "com.winter.app" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ""#)
         XCTAssertEqual(id.idleQuitSeconds, 600)
         // WINTER_CU_HOME is never honoured by the shipped identity, wherever the copy sits.
         XCTAssertEqual(try resolve("com.winter.computeruse", env: ["WINTER_CU_HOME": home("elsewhere")]).home, home(".winter"))
@@ -43,6 +44,7 @@ final class IdentityTests: XCTestCase {
         XCTAssertEqual(id.profile, .dev)
         XCTAssertEqual(id.home, home(".winter-dev"))
         XCTAssertEqual(id.daemonRequirement, #"identifier "com.winter.core.dev" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ""#)
+        XCTAssertEqual(id.appRequirement, #"identifier "com.winter.app.dev" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ""#)
     }
 
     func testWinterCUHomeMovesADevBuildButNotACopyInsideAnApp() throws {
@@ -75,7 +77,11 @@ final class IdentityTests: XCTestCase {
         let id = try resolve("com.winter.computeruse.test", env: ["WINTER_CU_HOME": home("elsewhere")], hooks: hooks)
         XCTAssertEqual(id.profile, .test)
         XCTAssertEqual(id.daemonRequirement, "always")
+        XCTAssertEqual(id.appRequirement, "never", "no fake app identity given: no app client")
         XCTAssertEqual(id.idleQuitSeconds, 3)
+        let withApp = try resolve("com.winter.computeruse.test", env: ["WINTER_CU_HOME": home("elsewhere")],
+                                  hooks: HelperTestHooks(daemonRequirement: "always", idleSeconds: nil, appRequirement: "anchor apple"))
+        XCTAssertEqual(withApp.appRequirement, "anchor apple")
     }
 
     func testTestHooksChangeNothingForTheDevAndDistIdentities() throws {

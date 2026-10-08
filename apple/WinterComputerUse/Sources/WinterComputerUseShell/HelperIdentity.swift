@@ -22,10 +22,13 @@ public struct HelperTestHooks: Sendable, Equatable {
     public var daemonRequirement: String?
     /// A shorter idle quit, so a verification run can watch the helper leave.
     public var idleSeconds: TimeInterval?
+    /// The requirement accepted in place of Winter.app's — a fake app identity (`never` when absent).
+    public var appRequirement: String?
 
-    public init(daemonRequirement: String?, idleSeconds: TimeInterval?) {
+    public init(daemonRequirement: String?, idleSeconds: TimeInterval?, appRequirement: String? = nil) {
         self.daemonRequirement = daemonRequirement
         self.idleSeconds = idleSeconds
+        self.appRequirement = appRequirement
     }
 }
 
@@ -45,6 +48,9 @@ public enum WinterCodeIdentity {
     public static let distDaemonIdentifier = "winter-core"
     /// The signed dev daemon (`bun run dev:daemon`, `scripts/dev-daemon-lib.ts`).
     public static let devDaemonIdentifier = "com.winter.core.dev"
+    /// Winter.app (signed with its bundle id), the second client: it renders the in-window mirror.
+    public static let distAppIdentifier = "com.winter.app"
+    public static let devAppIdentifier = "com.winter.app.dev"
 
     /// A stated designated requirement: the identifier and Winter's team under Apple's anchor — the shape
     /// `scripts/dev-daemon-lib.ts` signs the dev daemon with, which any Winter-team certificate satisfies.
@@ -88,8 +94,10 @@ public struct HelperIdentity: Sendable, Equatable {
     /// Where the home came from: `"default"` or `"WINTER_CU_HOME"`.
     public let homeSource: String
     public let socketPath: String
-    /// The designated requirement a connecting peer must satisfy.
+    /// The designated requirement a connecting daemon must satisfy.
     public let daemonRequirement: String
+    /// The designated requirement a connecting Winter.app must satisfy.
+    public let appRequirement: String
     public let helperVersion: String
     public let idleQuitSeconds: TimeInterval
 
@@ -104,16 +112,19 @@ public struct HelperIdentity: Sendable, Equatable {
         let profile: HelperProfile
         let defaultHome: String?
         let requirement: String
+        let appRequirement: String
         var idleSeconds = defaultIdleQuitSeconds
         switch bundleIdentifier {
         case WinterCodeIdentity.distHelperBundleID:
             profile = .dist
             defaultHome = (userHome as NSString).appendingPathComponent(".winter")
             requirement = WinterCodeIdentity.requirement(identifier: WinterCodeIdentity.distDaemonIdentifier)
+            appRequirement = WinterCodeIdentity.requirement(identifier: WinterCodeIdentity.distAppIdentifier)
         case WinterCodeIdentity.devHelperBundleID:
             profile = .dev
             defaultHome = (userHome as NSString).appendingPathComponent(".winter-dev")
             requirement = WinterCodeIdentity.requirement(identifier: WinterCodeIdentity.devDaemonIdentifier)
+            appRequirement = WinterCodeIdentity.requirement(identifier: WinterCodeIdentity.devAppIdentifier)
         case WinterCodeIdentity.testHelperBundleID:
             // No variable names in these messages: the test hooks' names must not appear in a dev or release
             // binary at all (release.ts scans the shipped helper for them).
@@ -124,6 +135,7 @@ public struct HelperIdentity: Sendable, Equatable {
             profile = .test
             defaultHome = nil
             requirement = fake
+            appRequirement = hooks.appRequirement.flatMap { $0.isEmpty ? nil : $0 } ?? "never"
             if let seconds = hooks.idleSeconds, seconds > 0 { idleSeconds = seconds }
         default:
             throw HelperIdentityError.unknownBundle(bundleIdentifier)
@@ -151,6 +163,7 @@ public struct HelperIdentity: Sendable, Equatable {
             homeSource: source,
             socketPath: ((canonical as NSString).appendingPathComponent("run") as NSString).appendingPathComponent(socketName),
             daemonRequirement: requirement,
+            appRequirement: appRequirement,
             helperVersion: helperVersion,
             idleQuitSeconds: idleSeconds
         )

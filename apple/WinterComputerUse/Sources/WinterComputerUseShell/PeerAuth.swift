@@ -2,10 +2,18 @@ import Darwin
 import Foundation
 import Security
 
+/// Who may connect: the daemon (all automation) and Winter.app (the in-window mirror's view stream). Each is a
+/// designated requirement; a peer is told apart by which ones its code satisfies.
+public enum PeerClientKind: String, Sendable, Hashable, CaseIterable {
+    case daemon
+    case app
+}
+
 /// Whether a connected peer may talk to the helper. Decided before a single byte is read; a rejected peer is
-/// closed with no response at all.
+/// closed with no response at all. An accepted peer carries every client kind its code satisfies, and its
+/// `hello.client` must be one of them.
 public enum PeerAuthDecision: Equatable, Sendable {
-    case accept(pid: pid_t)
+    case accept(pid: pid_t, clients: Set<PeerClientKind>)
     case reject(reason: String)
 }
 
@@ -31,12 +39,17 @@ public struct PeerAuthFailure: Error, Equatable, Sendable {
 }
 
 /// The decision, with both of its OS-facing halves injectable so the rule itself is unit-tested with fakes:
-/// no token → reject; a token whose code does not satisfy the requirement → reject; otherwise accept.
+/// no token → reject; a token whose code satisfies none of the client requirements → reject; otherwise accept
+/// with the set it satisfies (the token is read once; every client kind is checked against it).
 public struct PeerAuthPolicy: PeerAuthenticator {
     public var readToken: @Sendable (Int32) throws -> PeerToken
-    public var checkCode: @Sendable (PeerToken) throws -> Void
+    public var checkCode: @Sendable (PeerToken, PeerClientKind) throws -> Void
+    public var kinds: [PeerClientKind]
 
-    public init(readToken: @escaping @Sendable (Int32) throws -> PeerToken, checkCode: @escaping @Sendable (PeerToken) throws -> Void) {
+    public init(kinds: [PeerClientKind] = PeerClientKind.allCases,
+                readToken: @escaping @Sendable (Int32) throws -> PeerToken,
+                checkCode: @escaping @Sendable (PeerToken, PeerClientKind) throws -> Void) {
+        self.kinds = kinds
         self.readToken = readToken
         self.checkCode = checkCode
     }
@@ -50,34 +63,54 @@ public struct PeerAuthPolicy: PeerAuthenticator {
         } catch {
             return .reject(reason: "could not read the peer's audit token")
         }
-        do {
-            try checkCode(token)
-        } catch let failure as PeerAuthFailure {
-            return .reject(reason: "pid \(token.pid): \(failure.reason)")
-        } catch {
-            return .reject(reason: "pid \(token.pid): its code failed the requirement")
+        var satisfied: Set<PeerClientKind> = []
+        var reasons: [String] = []
+        for kind in kinds {
+            do {
+                try checkCode(token, kind)
+                satisfied.insert(kind)
+            } catch let failure as PeerAuthFailure {
+                reasons.append("\(kind.rawValue): \(failure.reason)")
+            } catch {
+                reasons.append("\(kind.rawValue): its code failed the requirement")
+            }
         }
-        return .accept(pid: token.pid)
+        guard !satisfied.isEmpty else { return .reject(reason: "pid \(token.pid): \(reasons.joined(separator: "; "))") }
+        return .accept(pid: token.pid, clients: satisfied)
     }
 }
 
 /// The real check: `getsockopt(LOCAL_PEERTOKEN)` → `SecCodeCopyGuestWithAttributes(audit token)` →
-/// `SecCodeCheckValidity` against the stated designated requirement of the daemon this helper serves.
+/// `SecCodeCheckValidity` against the stated designated requirement of each client this helper serves: the
+/// daemon of its home, and the Winter.app of its profile.
 public struct CodeSigningPeerAuthenticator: PeerAuthenticator {
     private let policy: PeerAuthPolicy
 
-    /// Throws when `requirement` does not compile — the helper refuses to start rather than run unguarded.
-    public init(requirement text: String) throws {
-        var compiled: SecRequirement?
-        let status = SecRequirementCreateWithString(text as CFString, SecCSFlags(), &compiled)
-        guard status == errSecSuccess, let requirement = compiled else {
-            throw PeerAuthFailure("the designated requirement does not compile (OSStatus \(status))")
+    /// Throws when a requirement does not compile — the helper refuses to start rather than run unguarded.
+    public init(requirements texts: [PeerClientKind: String]) throws {
+        var compiled: [PeerClientKind: RequirementBox] = [:]
+        for (kind, text) in texts {
+            var requirement: SecRequirement?
+            let status = SecRequirementCreateWithString(text as CFString, SecCSFlags(), &requirement)
+            guard status == errSecSuccess, let requirement else {
+                throw PeerAuthFailure("the \(kind.rawValue) designated requirement does not compile (OSStatus \(status))")
+            }
+            compiled[kind] = RequirementBox(requirement)
         }
-        let box = RequirementBox(requirement)
+        let boxes = compiled
         policy = PeerAuthPolicy(
+            kinds: PeerClientKind.allCases.filter { boxes[$0] != nil },
             readToken: { try CodeSigningPeerAuthenticator.peerToken(socket: $0) },
-            checkCode: { token in try CodeSigningPeerAuthenticator.check(token: token, requirement: box.requirement) }
+            checkCode: { token, kind in
+                guard let box = boxes[kind] else { throw PeerAuthFailure("no requirement") }
+                try CodeSigningPeerAuthenticator.check(token: token, requirement: box.requirement)
+            }
         )
+    }
+
+    /// The daemon alone (tests).
+    public init(requirement text: String) throws {
+        try self.init(requirements: [.daemon: text])
     }
 
     public func authorize(socket fd: Int32) -> PeerAuthDecision {
@@ -106,7 +139,7 @@ public struct CodeSigningPeerAuthenticator: PeerAuthenticator {
         }
         let valid = SecCodeCheckValidity(code, SecCSFlags(), requirement)
         guard valid == errSecSuccess else {
-            throw PeerAuthFailure("its code does not satisfy the daemon's designated requirement (OSStatus \(valid))")
+            throw PeerAuthFailure("its code does not satisfy the designated requirement (OSStatus \(valid))")
         }
     }
 }

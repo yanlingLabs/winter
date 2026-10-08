@@ -14,6 +14,10 @@ func json(_ text: String) -> JSONValue {
     try! JSONDecoder().decode(JSONValue.self, from: Data(text.utf8))
 }
 
+extension JSONValue {
+    var arrayCount: Int? { if case .array(let a) = self { return a.count }; return nil }
+}
+
 /// `subset` ⊆ `superset`: every key of every object in `subset` is present with an equal value.
 func jsonContains(_ superset: JSONValue, _ subset: JSONValue) -> Bool {
     switch (superset, subset) {
@@ -128,7 +132,7 @@ final class Counter: @unchecked Sendable {
     }
 
     var calls: [Call] = []
-    var mirrorsEnabled = false
+    var mirrorsEnabled = true
 
     func showMirror(sessionId: String, target: CUWindowRef) { calls.append(.show(sessionId, target)) }
     func hideMirror(sessionId: String, target: CUWindowRef) { calls.append(.hide(sessionId, target)) }
@@ -180,20 +184,69 @@ struct FakeAuthenticator: PeerAuthenticator {
     }
 }
 
+/// Window captures, recorded; a test delivers frames by hand.
+@MainActor final class FakeCaptureFactory: FrameCaptureFactory {
+    final class Running: FrameCapture {
+        let windowID: CGWindowID
+        let maxFps: Int
+        let maxWidth: Int
+        let onFrame: @MainActor (ViewFrame) -> Void
+        let onError: @MainActor (Error) -> Void
+        var stopped = false
+        init(windowID: CGWindowID, maxFps: Int, maxWidth: Int, onFrame: @escaping @MainActor (ViewFrame) -> Void,
+             onError: @escaping @MainActor (Error) -> Void) {
+            self.windowID = windowID; self.maxFps = maxFps; self.maxWidth = maxWidth; self.onFrame = onFrame; self.onError = onError
+        }
+        func stop() { stopped = true }
+    }
+
+    var started: [Running] = []
+    var live: [Running] { started.filter { !$0.stopped } }
+
+    func start(windowID: CGWindowID, maxFps: Int, maxWidth: Int, onFrame: @escaping @MainActor (ViewFrame) -> Void,
+               onError: @escaping @MainActor (Error) -> Void) -> FrameCapture {
+        let running = Running(windowID: windowID, maxFps: maxFps, maxWidth: maxWidth, onFrame: onFrame, onError: onError)
+        started.append(running)
+        return running
+    }
+}
+
+/// Where each window is now; nil → the hub falls back to the bind-time frame.
+final class FakeGeometry: WindowGeometry {
+    var frames: [CGWindowID: CGRect] = [:]
+    func frame(of windowID: CGWindowID) -> CGRect? { frames[windowID] }
+}
+
+/// What the hub sent, per connection: event lines and frame lines (decoded).
+@MainActor final class ViewSink {
+    var events: [Int: [JSONValue]] = [:]
+    var frames: [Int: [JSONValue]] = [:]
+    func methods(_ connection: Int) -> [String] { (events[connection] ?? []).compactMap { $0["method"]?.stringValue } }
+}
+
 /// The shell's pieces wired around fakes, the way `HelperAppDelegate` wires the real ones.
 @MainActor final class Rig {
     let core = FakeCore()
     let presentation = FakePresentation()
     let tap = FakeEscapeTap()
+    let capture = FakeCaptureFactory()
+    let geometry = FakeGeometry()
+    let viewHub: ViewHub
+    let sink = ViewSink()
     let coordinator: HelperCoordinator
     let inFlight = InFlightRegistry()
     let dispatcher: RPCDispatcher
     var notifications: [HelperNotification] = []
 
     init() {
-        coordinator = HelperCoordinator(presentation: presentation, escapeTap: tap)
-        dispatcher = RPCDispatcher(core: core, coordinator: coordinator, inFlight: inFlight)
+        viewHub = ViewHub(capture: capture, geometry: geometry)
+        coordinator = HelperCoordinator(presentation: presentation, escapeTap: tap, viewHub: viewHub)
+        dispatcher = RPCDispatcher(core: core, coordinator: coordinator, viewHub: viewHub, inFlight: inFlight)
         coordinator.notify = { [weak self] in self?.notifications.append($0) }
+        let sink = sink
+        let decode = { (line: Data) in try! JSONDecoder().decode(JSONValue.self, from: line) }
+        viewHub.sendEvent = { connection, line in sink.events[connection, default: []].append(decode(line)) }
+        viewHub.sendFrame = { connection, _, line in sink.frames[connection, default: []].append(decode(line)) }
     }
 }
 
