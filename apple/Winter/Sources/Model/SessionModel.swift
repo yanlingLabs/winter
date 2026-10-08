@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import os
 import WinterProtocol
 import WinterKit
 
@@ -366,15 +367,47 @@ struct ActivityItem: Equatable {
         /// streamed text from `SessionModel.liveThinking` until the persisted block's `text` replaces it.
         case thinking(ThinkingItem)
     }
-    var kind: Kind
+    var kind: Kind { didSet { stamp = ChangeStamp.next() } }
     /// How many lines a `write` call is putting in its file, counted from the call's `content`
     /// argument when the call arrives — what the pill-themed window's running tool pill says
     /// ("Writing 120 lines to config.ts") before any result exists. `nil` for every other tool.
-    var writtenLines: Int? = nil
+    var writtenLines: Int? = nil { didSet { stamp = ChangeStamp.next() } }
     /// A ComputerV2 call's `code` argument (the model's script), capped — what the expanded tool row
     /// shows in monospace beside the text result. The 100-character `detail` cannot hold a script, so
     /// it rides here, as `writtenLines` does, set when the call arrives. `nil` for every other tool.
-    var scriptCode: String? = nil
+    var scriptCode: String? = nil { didSet { stamp = ChangeStamp.next() } }
+
+    /// Names this item's CONTENT as of its last change: fresh at creation, replaced by every mutation
+    /// of a field above, copied with the value. Two items with the same stamp are therefore the same
+    /// content, which is what lets `==` answer without walking up to 64 KiB of result text.
+    private(set) var stamp: UInt64 = ChangeStamp.next()
+
+    init(kind: Kind, writtenLines: Int? = nil, scriptCode: String? = nil) {
+        self.kind = kind
+        self.writtenLines = writtenLines
+        self.scriptCode = scriptCode
+    }
+
+    /// Content equality, with a shortcut: the same stamp is the same content (see `stamp`). SwiftUI
+    /// compares every view input it re-evaluates with the type's `==` — for a transcript row that is the
+    /// whole exchange, so a derived deep `==` made every render cost the size of every result in it (a
+    /// Debug build of Winter Dev hung at 99% CPU inside it). Items that differ in stamp fall back to the
+    /// field-by-field comparison, so independently built equal items still compare equal.
+    static func == (a: ActivityItem, b: ActivityItem) -> Bool {
+        a.stamp == b.stamp || (a.kind == b.kind && a.writtenLines == b.writtenLines && a.scriptCode == b.scriptCode)
+    }
+
+    /// The field-by-field comparison alone (tests: the cost the stamp shortcut avoids).
+    static func contentEquals(_ a: ActivityItem, _ b: ActivityItem) -> Bool {
+        a.kind == b.kind && a.writtenLines == b.writtenLines && a.scriptCode == b.scriptCode
+    }
+}
+
+/// Hands out the stamps `ActivityItem` and `Exchange` use to name a version of their content: a process-wide
+/// counter, so a stamp is never reused and two different contents never share one.
+enum ChangeStamp {
+    private static let counter = OSAllocatedUnfairLock<UInt64>(initialState: 0)
+    static func next() -> UInt64 { counter.withLock { $0 &+= 1; return $0 } }
 }
 
 extension ActivityItem {
@@ -412,27 +445,31 @@ extension ActivityItem {
 /// array), and so a later wave can render prior turns without re-deriving pairing from the flat
 /// event log.
 struct Exchange: Equatable {
-    var prompt: String
+    var prompt: String { didSet { stamp = ChangeStamp.next() } }
     /// Set when this exchange was opened by ANOTHER session's message (`clientName: "messaging"`,
     /// text parsed once by `AgentMessageEnvelope.parse`): `prompt` then holds the message's body, and
     /// the user bubble wears the sender's header (and the summary, when it carried one) instead of
     /// showing the wrapper's XML. `nil` for everything a person typed.
-    var promptEnvelope: AgentMessageEnvelope? = nil
+    var promptEnvelope: AgentMessageEnvelope? = nil { didSet { stamp = ChangeStamp.next() } }
     /// EVERY `assistant_message` this exchange's turn emitted, in arrival order (mac-chat-parity
     /// Task 1). The engine emits one PER ROUND, whenever the round produced text
     /// (`if (textBuf.length > 0)`, `packages/core/src/agent/engine.ts`) — this was a single
     /// `reply` string that each round OVERWROTE, so in any multi-round turn every intermediate
     /// round's prose was silently discarded before it reached the view. The transcript renders one
     /// row per entry, in order.
-    var replies: [String] = []
+    var replies: [String] = [] { didSet { stamp = ChangeStamp.next() } }
     /// What happened while this exchange's turn ran (2d-ii-a task 1) — appended via
     /// `SessionReducer.appendActivity` (main-transcript events only; adjacent dupes collapse;
     /// capped at 200 drop-oldest). Defaulted so existing `Exchange(prompt:reply:)` call
     /// sites and equality-based tests are untouched.
-    var activity: [ActivityItem] = []
+    var activity: [ActivityItem] = [] { didSet { stamp = ChangeStamp.next() } }
     /// True when this exchange's turn ended with `stopReason == "aborted"` (Esc-interrupt) —
     /// the per-exchange sibling of the state-level `lastTurnAborted` flash flag.
-    var aborted: Bool = false
+    var aborted: Bool = false { didSet { stamp = ChangeStamp.next() } }
+
+    /// Names this exchange's CONTENT as of its last change — see `ActivityItem.stamp`; every field that
+    /// `==` compares replaces it when it changes.
+    private(set) var stamp: UInt64 = ChangeStamp.next()
 
     // MARK: Where each reply fell among the activity (user, 2026-10-02)
     //
@@ -469,8 +506,14 @@ struct Exchange: Equatable {
     /// Equality is the CONTENT — prompt, replies, activity, aborted. The ordering record above is
     /// derived from the same events and changes only when they do, so it never decides whether two
     /// exchanges differ (an `Exchange(prompt:reply:activity:)` a test builds has no arrival order).
+    ///
+    /// **The same stamp answers at once** — the exchange is the same content, and SwiftUI asks this of every
+    /// transcript row on every render (`ActivityItem.==` has the reason). A different stamp compares the
+    /// fields, and `activity` then compares item by item, each by ITS stamp: only the item that changed
+    /// is walked.
     static func == (a: Exchange, b: Exchange) -> Bool {
-        a.prompt == b.prompt && a.promptEnvelope == b.promptEnvelope && a.replies == b.replies && a.activity == b.activity && a.aborted == b.aborted
+        a.stamp == b.stamp
+            || (a.prompt == b.prompt && a.promptEnvelope == b.promptEnvelope && a.replies == b.replies && a.activity == b.activity && a.aborted == b.aborted)
     }
 
     /// The LAST assistant message of this exchange, or `""` when none has arrived yet. This is
