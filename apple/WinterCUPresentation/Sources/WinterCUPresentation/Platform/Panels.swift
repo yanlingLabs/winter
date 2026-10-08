@@ -118,6 +118,10 @@ final class FlippedLayerView: NSView {
     }
 }
 
+/// DEPRECATED (user ruling 2026-10-08): the mirror moved INTO Winter.app (`CUMirrorView`, fed by the helper's
+/// `CUWindowFrameSource`). The helper no longer calls `showMirror`, so this floating panel is never shown; it stays
+/// only until the shell's last caller is gone.
+///
 /// The live mirror: a small black panel with a faint white rim, the window's live image, the agent cursor drawn over
 /// it, and the app's name underneath. Click-through: it sits over the target's top-left corner, and a foreground click
 /// there must reach the target.
@@ -287,8 +291,8 @@ final class FlippedLayerView: NSView {
             CATransaction.commit()
             self.setStreamState(nil)
         }
-        stream.onFailure = { [weak self] reason in
-            self?.setStreamState(reason)
+        stream.onFailure = { [weak self] failure in
+            self?.setStreamState(failure.caption)
         }
         self.stream = stream
         stream.start(pixelSize: pixelSize == .zero ? CGSize(width: 720, height: 450) : pixelSize)

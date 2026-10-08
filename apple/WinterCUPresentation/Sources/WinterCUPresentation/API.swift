@@ -18,6 +18,9 @@ public struct CUWindowRef: Sendable, Hashable {
 }
 
 @MainActor public protocol CUPresentation: AnyObject {
+    /// DEPRECATED (user ruling 2026-10-08): the mirror now lives inside Winter.app (`CUMirrorView` + `CUWindowFrameSource`);
+    /// the helper no longer calls this. Kept so callers keep compiling.
+    ///
     /// A target was bound with mirror:true → show (or re-show) its mirror at the window's top-left corner, over the traffic
     /// lights; follow the window as it moves; dock to the nearest screen corner when it is minimized/off-Space/off-screen.
     /// At most 2 mirrors on screen (most recent on top); live window stream 10–15 fps ~360 px wide (ScreenCaptureKit,
