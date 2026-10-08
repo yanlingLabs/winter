@@ -2,7 +2,7 @@
 // session. Lazily opened on the first call that needs it:
 //
 //   1. connect to `<home>/run/computer-use.sock`; when nothing answers, LAUNCH the helper through
-//      LaunchServices BY PATH (`open -g -j -a <app>` — never a child of the daemon, or TCC would check the
+//      LaunchServices BY PATH (`open -g -a <app>` — never a child of the daemon, or TCC would check the
 //      daemon's grants; `protocol.ts`'s `helperAppPathFor`) and retry for up to 5 s;
 //   2. `hello {protocol: 1, client: "daemon", home}` → `{protocol, helperVersion, pid}`;
 //   3. VERIFY the helper: `pid`'s running code against the helper's designated requirement
@@ -104,13 +104,14 @@ export const unixSocketTransport: HelperTransport = {
   }),
 };
 
-/** The real launcher: LaunchServices BY PATH, in the background (`-g`) and hidden (`-j`). */
+/** The real launcher: LaunchServices BY PATH, in the background (`-g`). Never hidden (`-j`): a hidden app's windows
+ *  are never drawn, and the helper's agent cursor is one. */
 export const launchServicesLauncher: HelperLauncher = {
   installed: (appPath) => {
     try { return existsSync(join(appPath, "Contents", "Info.plist")); } catch { return false; }
   },
   launch: (appPath) => new Promise((resolve, reject) => {
-    const child = spawn("/usr/bin/open", ["-g", "-j", "-a", appPath], { stdio: "ignore" });
+    const child = spawn("/usr/bin/open", ["-g", "-a", appPath], { stdio: "ignore" });
     child.on("error", reject);
     child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`open exited ${code}`))));
   }),

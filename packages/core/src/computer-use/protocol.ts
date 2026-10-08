@@ -20,7 +20,7 @@ export function helperAppNameFor(profile: WinterProfile): string {
 }
 
 /**
- * WHERE the helper app is, so the daemon can launch it BY PATH (`open -g -j -a <path>` — spine, after L1a): a
+ * WHERE the helper app is, so the daemon can launch it BY PATH (`open -g -a <path>` — spine, after L1a): a
  * bundle-id launch can resolve to any registered copy, a path cannot.
  *   - dist: `Winter.app/Contents/Helpers/Winter Computer Use.app` — `winter-core` lives in `Contents/MacOS`;
  *   - dev: `<repo>/dist/dev/Winter Computer Use Dev.app`, beside the signed dev daemon `dist/dev/winter-core`

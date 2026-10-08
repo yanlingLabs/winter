@@ -26,6 +26,15 @@ final class PassivePanel: NSPanel {
 }
 
 extension PassivePanel {
+    /// `orderFrontRegardless`, but first un-hides the helper (without activating it) when it is hidden: the daemon
+    /// used to launch it with `open -j`, and a hidden app's windows are never drawn, whatever their level.
+    func orderFrontShowingApp() {
+        if NSApp.isHidden {
+            NSApp.unhideWithoutActivation()
+            PresentationLog.notice("helper was hidden; un-hid it without activating so its panels draw")
+        }
+        orderFrontRegardless()
+    }
     /// What the logs need to tell "ordered in but not drawn" apart from "really on screen": AppKit's flags, the app's
     /// hidden state and the window server's own on-screen flag for this panel.
     var diagnostics: String {
@@ -90,14 +99,14 @@ final class FlippedLayerView: NSView {
             CATransaction.commit()
             cursor.contentsScale = AppKitScreens.backingScale(for: windowFrame)
         }
-        if shown, reorder { panel.orderFrontRegardless() }
+        if shown, reorder { panel.orderFrontShowingApp() }
     }
 
     func setShown(_ shown: Bool) {
         guard shown != self.shown else { return }
         self.shown = shown
         if shown {
-            panel.orderFrontRegardless()
+            panel.orderFrontShowingApp()
             PresentationLog.notice("cursor overlay shown: \(target.appName) window \(target.windowID) at \(panel.frame) "
                 + panel.diagnostics)
             // Whether the window server really has it on screen, a moment later (AppKit's own flags can lag).
@@ -234,7 +243,7 @@ final class FlippedLayerView: NSView {
         if shown {
             // An accessory (LSUIElement) helper is never the active app: orderFrontRegardless shows a floating,
             // non-activating panel without activating it, and nothing here waits on activation.
-            panel.orderFrontRegardless()
+            panel.orderFrontShowingApp()
             PresentationLog.notice("mirror shown: \(target.appName) window \(target.windowID) at \(panel.frame)"
                 + " level \(panel.level.rawValue) visible \(panel.isVisible)")
             startStream()
@@ -259,7 +268,7 @@ final class FlippedLayerView: NSView {
     }
 
     func bringToFront() {
-        if shown { panel.orderFrontRegardless() }
+        if shown { panel.orderFrontShowingApp() }
     }
 
     func apply(cursor frame: CursorFrame, style: CursorStyle, windowSize: CGSize) {

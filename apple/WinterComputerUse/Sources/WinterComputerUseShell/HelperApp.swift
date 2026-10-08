@@ -88,7 +88,7 @@ import WinterCUPresentation
         self.idleTimer = idle
     }
 
-    /// LaunchServices re-opening the running helper (the daemon's `open -g -j`) is a cue to make sure the socket
+    /// LaunchServices re-opening the running helper (the daemon's `open -g`) is a cue to make sure the socket
     /// is still there.
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         server?.ensureListening()
