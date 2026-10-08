@@ -160,16 +160,14 @@ public enum HelperNotification: Equatable, Sendable {
         refreshIdle()
     }
 
-    public func actionAt(sessionId: String, pid: pid_t, windowID: CGWindowID, point: CGPoint, kind: String, dragTo: CGPoint?) {
+    /// The engine's cursor events, mapped by the presentation layer's own table (`CUCursorKind(core:…)`, see
+    /// WinterCUPresentation's DESIGN-cursor.md). A kind it does not know, or one missing its payload (a "target"
+    /// with no frame, a "key" with no combo, a "drag" with no end), is dropped rather than guessed.
+    public func actionAt(sessionId: String, pid: pid_t, windowID: CGWindowID, point: CGPoint, kind: String, dragTo: CGPoint?,
+                         frame: CGRect?, text: String?, count: Int?, button: String?) {
+        guard let cursorKind = CUCursorKind(core: kind, dragTo: dragTo, frame: frame, text: text, count: count, button: button)
+        else { return }
         let appName = bound[BoundTarget(sessionId: sessionId, pid: pid, windowID: windowID)]?.appName ?? ""
-        let cursorKind: CUCursorKind
-        switch kind {
-        case "press": cursorKind = .press
-        case "type": cursorKind = .type
-        case "scroll": cursorKind = .scroll
-        case "drag": cursorKind = .drag(to: dragTo ?? point)
-        default: cursorKind = .move
-        }
         presentation.cursor(sessionId: sessionId, target: CUWindowRef(pid: pid, windowID: windowID, appName: appName), point: point, kind: cursorKind)
     }
 

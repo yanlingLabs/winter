@@ -16,7 +16,8 @@ final class CoreEventsTests: XCTestCase {
         }
         func targetBound(sessionId: String, pid: pid_t, windowID: CGWindowID, appName: String, mirror: Bool) { add("bound \(windowID)") }
         func targetReleased(sessionId: String, pid: pid_t, windowID: CGWindowID) { add("released \(windowID)") }
-        func actionAt(sessionId: String, pid: pid_t, windowID: CGWindowID, point: CGPoint, kind: String, dragTo: CGPoint?) {
+        func actionAt(sessionId: String, pid: pid_t, windowID: CGWindowID, point: CGPoint, kind: String, dragTo: CGPoint?,
+                      frame: CGRect?, text: String?, count: Int?, button: String?) {
             add("\(kind) \(Int(point.x))")
         }
         func targetLost(targetId: String, reason: String) { add("lost \(targetId)") }
@@ -33,7 +34,8 @@ final class CoreEventsTests: XCTestCase {
             core.emit { $0.targetReleased(sessionId: "s", pid: 1, windowID: 1) }
             core.emit { $0.targetBound(sessionId: "s", pid: 1, windowID: 2, appName: "A", mirror: true) }
             for i in 0..<200 {
-                core.emit { $0.actionAt(sessionId: "s", pid: 1, windowID: 2, point: CGPoint(x: i, y: 0), kind: "press", dragTo: nil) }
+                core.emit { $0.actionAt(sessionId: "s", pid: 1, windowID: 2, point: CGPoint(x: i, y: 0), kind: "press", dragTo: nil,
+                                        frame: nil, text: nil, count: nil, button: nil) }
             }
         }
         await fulfillment(of: [done], timeout: 5)

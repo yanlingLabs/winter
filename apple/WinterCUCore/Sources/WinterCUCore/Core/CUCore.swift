@@ -269,6 +269,7 @@ public final class CUCore: @unchecked Sendable {
 
     public func targetRelease(_ p: TargetReleaseParams) async throws -> TargetReleaseResult {
         if let t = remove(p.targetId) {
+            cursor(t, "done")
             emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: t.windowID) }
         }
         return TargetReleaseResult()
@@ -286,6 +287,8 @@ public final class CUCore: @unchecked Sendable {
         var settled = true
         var waited = 0
         if let s = p.settle {
+            cursor(t, "waitBegin")
+            defer { cursor(t, "waitEnd") }
             let o = try await settler.waitIdle(pid: t.pid, quietMs: 150, timeoutMs: Double(max(0, s.maxMs)),
                                                lastActionMs: t.lastActionMs, isCancelled: { token.isCancelled })
             settled = o.settled
@@ -338,6 +341,8 @@ public final class CUCore: @unchecked Sendable {
         var settled = true
         var waited = 0
         if let s = p.settle {
+            cursor(t, "waitBegin")
+            defer { cursor(t, "waitEnd") }
             let o = try await settler.waitIdle(pid: t.pid, quietMs: 150, timeoutMs: Double(max(0, s.maxMs)),
                                                lastActionMs: t.lastActionMs, isCancelled: { token.isCancelled })
             settled = o.settled
@@ -393,6 +398,8 @@ public final class CUCore: @unchecked Sendable {
         let token = cancels.begin(p.callId)
         defer { cancels.end(p.callId) }
         monitor.watch(pid: t.pid)
+        cursor(t, "waitBegin")
+        defer { cursor(t, "waitEnd") }
         let o = try await settler.waitIdle(pid: t.pid, quietMs: Double(max(0, p.quietMs)), timeoutMs: Double(max(0, p.timeoutMs)),
                                            lastActionMs: t.lastActionMs, isCancelled: { token.isCancelled })
         return TargetWaitIdleResult(settled: o.settled, waitedMs: o.waitedMs)
@@ -408,6 +415,8 @@ public final class CUCore: @unchecked Sendable {
         }
         let token = cancels.begin(p.callId)
         defer { cancels.end(p.callId) }
+        cursor(t, "waitBegin", text: Self.waitLabel(c))
+        defer { cursor(t, "waitEnd") }
         let start = clock.nowMs()
         let timeout = Double(max(0, p.timeoutMs))
         var lastSeen = ""
@@ -434,6 +443,17 @@ public final class CUCore: @unchecked Sendable {
                 try await clock.sleep(ms: 20)
             }
         }
+    }
+
+    /// What a `waitFor` waits for, as the cursor's caption names it ("Waiting for “Saved”"); nil for a ref.
+    static func waitLabel(_ c: CUWaitCondition) -> String? {
+        let raw: String? = {
+            if let text = c.text { return text }
+            if let title = c.title { return title }
+            return nil  // `gone` waits for something to leave: "Waiting for “X”" would say the opposite
+        }()
+        guard let s = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty else { return nil }
+        return s.count > 32 ? String(s.prefix(31)) + "…" : s
     }
 
     // MARK: - whole screen
@@ -530,6 +550,19 @@ public final class CUCore: @unchecked Sendable {
                 body(e)
             }
         }
+    }
+
+    /// One agent-cursor event (`CUCoreEvents.actionAt`). Without a `point` it goes to the last place the cursor
+    /// was sent, else the window's centre; with neither it is dropped. `remember: false` keeps the resting
+    /// point (the real pointer's position in the foreground is not where the agent's cursor rests).
+    func cursor(_ t: CUTarget, _ kind: String, at point: CGPoint? = nil, dragTo: CGPoint? = nil, frame: CGRect? = nil,
+                text: String? = nil, count: Int? = nil, button: String? = nil, remember: Bool = true) {
+        guard let at = point ?? t.cursorPoint ?? sys.window(id: t.windowID).map({ CGPoint(x: $0.frame.midX, y: $0.frame.midY) })
+        else { return }
+        if point != nil, remember { t.cursorPoint = at }
+        let (session, pid, wid) = (t.sessionId, t.pid, t.windowID)
+        emit { $0.actionAt(sessionId: session, pid: pid, windowID: wid, point: at, kind: kind, dragTo: dragTo,
+                           frame: frame, text: text, count: count, button: button) }
     }
 
     func logOnce(_ key: String, _ message: String) {

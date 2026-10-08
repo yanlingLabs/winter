@@ -42,6 +42,14 @@ final class CUTarget: @unchecked Sendable {
         set { lock.lock(); _lastActionMs = newValue; lock.unlock() }
     }
 
+    /// Where the agent cursor was last sent (screen points): the place for cursor events that have none of
+    /// their own (waits, refusals, captions, done).
+    var cursorPoint: CGPoint? {
+        get { lock.lock(); defer { lock.unlock() }; return _cursorPoint }
+        set { lock.lock(); _cursorPoint = newValue; lock.unlock() }
+    }
+    private var _cursorPoint: CGPoint?
+
     /// The element the script last clicked by ref or aimed text at (`into`), and when — the focus fallback
     /// for apps that don't report their focused element (Electron). Pid-queue only.
     private(set) var lastTargeted: (element: AXUIElement, atMs: Double)?
