@@ -88,7 +88,10 @@ export interface TargetBindResult {
   targetId: string;
   app: { name: string; bundleId: string; pid: number };
   window: { id: number; title: string; frame: Rect };
+  /** What the bind had to do to reach a usable window (another Space, moved here, a new one opened). */
+  detail?: string;
 }
+export interface TargetUseWindowResult { window: { id: number; title: string; frame: Rect }; detail?: string }
 export interface SnapshotResult { snapshotId: string; text: string; isDiff: boolean; changedRatio: number; settled: boolean; waitedMs: number }
 export interface FindResult { elements: Array<{ ref: number; role: string; name?: string; value?: string }> }
 export interface ScreenshotBudget { maxLongEdge: number; tile?: number; maxTiles?: number; quality: number }
@@ -97,6 +100,7 @@ export interface ActResult { rung: 1 | 2 | 3 | 4; detail?: string }
 export interface WaitIdleResult { settled: boolean; waitedMs: number }
 export interface WaitForResult { met: true; waitedMs: number }
 export interface AppAtResult { app: string; bundleId: string; windowId: number }
+/** The target app's windows — those on other Spaces or in full screen included (unfocused, no separate flag). */
 export interface TargetWindowsResult { windows: Array<{ id: number; title: string; focused: boolean }> }
 
 export type ActAction =

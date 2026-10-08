@@ -27,6 +27,8 @@ interface WorldOpts {
   apps?: Record<string, unknown>;
   /** `computerUse.allowAllApps` (absent: the default, on). */
   allowAllApps?: boolean;
+  /** `computerUse.privateEventPath` (absent: the default, on). */
+  privateEventPath?: boolean;
   attended?: boolean;
   answer?: (e: Extract<NewSessionEvent, { type: "approval_requested" }>, broker: ApprovalBroker) => void;
 }
@@ -39,7 +41,7 @@ function world(opts: WorldOpts = {}) {
   const fake = new FakeHelper();
   const approvals = new ApprovalBroker();
   const events: NewSessionEvent[] = [];
-  const settings = { computerUse: { apps: opts.apps ?? {}, ...(opts.allowAllApps === undefined ? {} : { allowAllApps: opts.allowAllApps }) } } as unknown as Settings;
+  const settings = { computerUse: { apps: opts.apps ?? {}, ...(opts.allowAllApps === undefined ? {} : { allowAllApps: opts.allowAllApps }), ...(opts.privateEventPath === undefined ? {} : { privateEventPath: opts.privateEventPath }) } } as unknown as Settings;
   const facts: SessionFacts = { policy: opts.policy ?? "bypass", mode: "code", ...opts.facts };
   const audits: Array<Record<string, unknown>> = [];
   const interrupts: string[] = [];
@@ -85,7 +87,7 @@ describe("ComputerV2: binding, state and the diff base", () => {
     const w = world();
     const r1 = await w.run("const notes = await apps.open('Notes')");
     expect(r1.isError).toBe(false);
-    expect(w.fake.calls("target.bind")[0]).toMatchObject({ sessionId: "s1", app: "com.apple.Notes", mirror: true });
+    expect(w.fake.calls("target.bind")[0]).toMatchObject({ sessionId: "s1", app: "com.apple.Notes", mirror: true, privatePath: true });
     expect(text(r1)).toContain('<screen-data id="');
     expect(text(r1)).toContain('Notes — window "Notes window"');
     const bound = w.fake.calls("target.snapshot")[0]!;
@@ -363,6 +365,46 @@ describe("ComputerV2: screenshots, points and the vision gate", () => {
 });
 
 describe("ComputerV2: the helper's errors and notifications", () => {
+  macOnly("off-Space: privatePath follows the setting; a bind's or useWindow's detail is a daemon line before the state, outside the fence", async () => {
+    const off = world({ privateEventPath: false });
+    await off.run("const notes = await apps.open('Notes')");
+    expect(off.fake.calls("target.bind")[0]).toMatchObject({ privatePath: false });
+
+    const w = world();
+    const bind = w.fake.handlers;
+    let detail: string | undefined = "opened a new Notes window; the existing one is on another Space";
+    const notesApp = w.fake.apps.find((a) => a.bundleId === "com.apple.Notes")!;
+    bind["target.bind"] = () => {
+      (w.fake as unknown as { targets: Map<string, unknown> }).targets.set("t1", notesApp);
+      return { targetId: "t1", app: { name: "Notes", bundleId: "com.apple.Notes", pid: 501 }, window: { id: 9, title: "Notes window", frame: [0, 0, 800, 600] }, ...(detail === undefined ? {} : { detail }) };
+    };
+    const r = await w.run("const notes = await apps.open('Notes')");
+    const items = r.content.map((c) => (c.type === "text" ? c.text : "[image]"));
+    const at = items.findIndex((t) => t === "opened a new Notes window; the existing one is on another Space\n");
+    expect(at).toBeGreaterThanOrEqual(0);
+    // Its own item, unfenced, right before the fenced state.
+    expect(items[at + 1]).toMatch(/^<screen-data id="[0-9a-f]+">\nNotes — window/);
+    bind["target.useWindow"] = () => ({ window: { id: 10, title: "other", frame: [0, 0, 1, 1] }, detail: "moved Notes's window to this desktop from another Space" });
+    const r2 = await w.run("await notes.useWindow('other')");
+    expect(text(r2)).toContain("moved Notes's window to this desktop from another Space");
+    expect(text(r2)).not.toContain("<screen-data");
+    detail = undefined;
+    const r3 = await w.run("const again = await apps.open('Notes')");
+    expect(text(r3)).not.toContain("opened a new");
+  }, 30_000);
+
+  macOnly("window_elsewhere with newWindowId: NoWindow says a new window was opened — call state() and retry; the diff base resets", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')");
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("window_elsewhere", "Notes's window is on another Space or in full screen and could not be moved here, so a new Notes window was opened on this desktop and the target now uses it — the action did not run; refs and screenshots were reset, so call state() and retry", { newWindowId: 12 }); };
+    const r = await w.run("try { await notes.click(14) } catch (e) { print(e.name, e.message) }\nawait notes.state()");
+    expect(text(r)).toContain("NoWindow Notes's window is on another Space or in full screen, so a new window was opened on this desktop and the target now uses it — the action did not run; call state() and retry");
+    expect(text(r)).not.toContain("quit");
+    // The next state() is FULL: no `since` from the old window's base.
+    const snaps = w.fake.calls("target.snapshot");
+    expect(snaps[snaps.length - 1]!.since).toBeUndefined();
+  }, 30_000);
+
   macOnly("window_elsewhere and no_window are NoWindow, keep the helper's message, never say the app quit", async () => {
     const w = world();
     let code = "window_elsewhere";
