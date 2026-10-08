@@ -150,7 +150,7 @@ final class SessionFeed {
     func repin(to sessionId: String) async {
         guard case .pinned = mode else { return }
         mode = .pinned(sessionId: sessionId)
-        pendingChunks.removeAll() // the old session's — never folded into the new one
+        chunks.removeAll() // the old session's — never folded into the new one
         session.reset()
         // Buffering starts BEFORE the attach: the pump is already running here, so the replay can
         // arrive while the attach is still awaited.
@@ -169,9 +169,8 @@ final class SessionFeed {
                 if replayBuffer != nil {
                     replayBuffer?.append(e)
                     if let ceiling = replayCeiling, !e.isTransient, e.seq >= ceiling { finishReplay() } else { armReplayDeadline() }
-                } else if case .assistantDelta = e {
-                    pendingChunks.append(e)
-                    scheduleChunkFlush()
+                } else if e.isStreamedChunk {
+                    chunks.append(e)
                 } else {
                     flushChunks()
                     session.apply(e)
@@ -245,29 +244,82 @@ final class SessionFeed {
 
     // MARK: - Streamed chunks, a frame at a time
 
-    /// How long streamed chunks wait to be folded together — one display frame.
-    static let chunkFlushInterval: TimeInterval = 1.0 / 60.0
-    private var pendingChunks: [SessionEvent] = []
-    private var chunkFlushScheduled = false
+    /// How long streamed reply chunks wait to be folded together — one display frame.
+    static let chunkFlushInterval: TimeInterval = StreamedChunkQueue.assistantInterval
 
-    /// Streamed text is folded into the session at most once a frame, never once per chunk (user,
-    /// 2026-10-02): every fold re-renders whatever shows the session, and a model sends a chunk every
-    /// few milliseconds — a session window re-rendering per chunk fell further and further behind
-    /// the stream (the dispatch pill showed a child done while its window was still writing). Any
-    /// other event folds the waiting chunks first, so the session sees every event in order.
-    private func scheduleChunkFlush() {
-        guard !chunkFlushScheduled else { return }
-        chunkFlushScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.chunkFlushInterval) { [weak self] in
-            MainActor.assumeIsolated { self?.flushChunks() }
+    /// Streamed text — a reply's chunks AND a reasoning block's (`thinking_delta`) — is folded into the
+    /// session at most once a frame (reply) or every `StreamedChunkQueue.thinkingInterval` (reasoning),
+    /// never once per chunk (user, 2026-10-02; reasoning added 2026-10-08): every fold re-renders
+    /// whatever shows the session, and a model sends a chunk every few milliseconds — a session window
+    /// re-rendering per chunk fell further and further behind the stream (the dispatch pill showed a
+    /// child done while its window was still writing; a window on a 60-call session was minutes behind
+    /// a reasoning model, still "working" after the turn had been stopped). Any other event folds the
+    /// waiting chunks first, so the session sees every event in order.
+    private lazy var chunks = StreamedChunkQueue { [weak self] events in self?.session.apply(contentsOf: events) }
+
+    private func flushChunks() { chunks.flush() }
+}
+
+// MARK: - Coalescing streamed chunks
+
+extension SessionEvent {
+    /// A streamed fragment a model sends every few milliseconds — a reply's chunk or a reasoning
+    /// block's increment. Both are TRANSIENT and both are folded in batches (`StreamedChunkQueue`).
+    var isStreamedChunk: Bool {
+        switch self {
+        case .assistantDelta, .thinkingDelta: return true
+        default: return false
+        }
+    }
+}
+
+/// Holds streamed chunks and folds each batch with ONE publish (`SessionModel.apply(contentsOf:)`): a
+/// reply's chunks at most once a frame, a reasoning block's every 80 ms (a reasoning pill changes less
+/// visibly than a reply, and a session full of tool pills costs more to re-render per fold). Shared by
+/// the detached windows' feed and the orb's, which fold chunks by the same rule for the same reason.
+@MainActor
+final class StreamedChunkQueue {
+    static let assistantInterval: TimeInterval = 1.0 / 60.0
+    static let thinkingInterval: TimeInterval = 0.08
+
+    private var pending: [SessionEvent] = []
+    private var dueAt: DispatchTime?
+    private let foldInto: ([SessionEvent]) -> Void
+
+    init(foldInto: @escaping ([SessionEvent]) -> Void) {
+        self.foldInto = foldInto
+    }
+
+    var count: Int { pending.count }
+
+    static func interval(for event: SessionEvent) -> TimeInterval {
+        if case .thinkingDelta = event { return thinkingInterval }
+        return assistantInterval
+    }
+
+    func append(_ event: SessionEvent) {
+        pending.append(event)
+        let due = DispatchTime.now() + Self.interval(for: event)
+        // A flush is already due no later than this chunk needs: it will take this one too.
+        if let dueAt, dueAt <= due { return }
+        dueAt = due
+        DispatchQueue.main.asyncAfter(deadline: due) { [weak self] in
+            MainActor.assumeIsolated { self?.flush() }
         }
     }
 
-    private func flushChunks() {
-        chunkFlushScheduled = false
-        guard !pendingChunks.isEmpty else { return }
-        let chunks = pendingChunks
-        pendingChunks.removeAll(keepingCapacity: true)
-        session.apply(contentsOf: chunks)
+    /// Folds what is waiting, now. A scheduled flush that fires after this finds nothing and does nothing.
+    func flush() {
+        dueAt = nil
+        guard !pending.isEmpty else { return }
+        let events = pending
+        pending.removeAll(keepingCapacity: true)
+        foldInto(events)
+    }
+
+    /// Drops what is waiting unfolded (the session it belonged to is gone).
+    func removeAll() {
+        pending.removeAll()
+        dueAt = nil
     }
 }

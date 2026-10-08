@@ -145,12 +145,10 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         window.delegate = self
         adapter.onSubmit = { [weak self] text in self?.submit(text) }
         // The pill-themed composer's stop circle — the same interrupt Esc performs.
-        adapter.onInterrupt = { [weak self] in
-            guard let self, self.session.state.turnRunning else { return }
-            let client = self.feed.client
-            let sid = self.sessionId
-            Task { try? await client.interrupt(sessionId: sid) }
-        }
+        adapter.onInterrupt = { [weak self] in self?.stopTurn() }
+        // A stop that nothing confirmed in time: this window is behind the stream, or lost the terminal.
+        // Re-attach so it shows what the daemon says.
+        adapter.onStopStalled = { [weak self] in self?.resyncSession() }
         // Code-mode image input: this window's pinned session's row, read FRESH (`sessionId` flips on
         // an in-place switch) — its mode gates the composer's image intake, its model the attach check.
         adapter.currentSessionRow = { [weak self] in
@@ -588,14 +586,35 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// The one stop: Esc, the composer's stop circle. Asks the daemon to interrupt, and when it answers that
+    /// NOTHING WAS RUNNING while this window still shows a running turn, the window is stale (it is behind
+    /// the stream, or missed the turn's terminal) — so it re-reads the session at once instead of leaving
+    /// "working" on screen for a turn that ended long ago.
+    private func stopTurn() {
+        guard session.state.turnRunning else { return }
+        let client = feed.client
+        let sid = sessionId
+        Task { [weak self] in
+            let wasRunning = (try? await client.interrupt(sessionId: sid)) ?? true
+            if !wasRunning { self?.resyncSession() }
+        }
+    }
+
+    /// Re-attaches this window's pinned session from the start (a fresh replay), which rebuilds its state
+    /// from the daemon's log.
+    private func resyncSession() {
+        adapter.endStop()
+        let sid = sessionId
+        Task { [feed] in await feed.repin(to: sid) }
+    }
+
     private func installEscMonitor() {
         escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.window === self.window else { return event }
             if event.keyCode == 53 { // Esc
                 guard self.session.state.turnRunning else { return event } // idle: pass through — NEVER close on Esc
-                let client = self.feed.client
-                let sid = self.sessionId
-                Task { try? await client.interrupt(sessionId: sid) }
+                self.adapter.beginStop()
+                self.stopTurn()
                 return nil // consumed
             }
             // Task 3 (2d-iii): y/n/digit card routing — AFTER Esc handling above, per the brief's

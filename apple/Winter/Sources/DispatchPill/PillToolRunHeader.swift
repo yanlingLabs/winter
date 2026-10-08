@@ -222,6 +222,14 @@ func pillToolLabel(_ entry: ToolRunEntry, turnIsLive: Bool) -> PillToolLabel {
     }
 }
 
+/// PURE: whether a tool pill needs the half-second clock at all. Only `tick` reads it, and only two
+/// things take turns on it: a label rotating through names (a page read, a file, several live calls) and
+/// a running search cycling through the sites it found. Everything else — every finished pill — is
+/// static, so its body must not be re-run twice a second for the life of the session.
+func pillHeaderNeedsClock(label: PillToolLabel, running: Bool, isSearch: Bool, hasSiteDiscs: Bool) -> Bool {
+    !label.rotation.isEmpty || (running && isSearch && hasSiteDiscs)
+}
+
 // MARK: - The safety review (pure — `PillReviewTests`)
 
 /// Amber, in the pill's own register (`failureRed` is the same kind of literal beside this): a warm
@@ -333,21 +341,18 @@ struct PillToolRunHeader: View {
         let open = inPlace && isExpanded
         VStack(alignment: .leading, spacing: 0) {
             Button(action: toggle) {
-                TimelineView(.periodic(from: .now, by: Self.rotationPeriod)) { timeline in
-                    let tick = Int(timeline.date.timeIntervalSinceReferenceDate / Self.rotationPeriod)
-                    HStack(spacing: 10) {
-                        discStack(discs, label: label, running: running, tick: tick)
-                        labelText(label, tick: tick)
-                            .modifier(BandShimmer(active: running, rest: 0.5, inactive: 0.9, minBand: 60, bandShare: 0.6))
-                        if failed {
-                            Image(systemName: "exclamationmark.circle.fill")
-                                .font(Typography.label(.semibold))
-                                .foregroundStyle(Self.failureRed)
-                                .accessibilityLabel("Failed")
+                // The half-second clock only runs for a pill with something to rotate. A finished
+                // pill — nearly all of a long session's — draws once and then never again: a clock per
+                // pill re-rendered 120 collapsed pills twice a second, forever (the 60-call session's lag).
+                Group {
+                    if pillHeaderNeedsClock(label: label, running: running, isSearch: inPlace,
+                                            hasSiteDiscs: discs.contains { if case .site = $0.kind { return true } else { return false } }) {
+                        TimelineView(.periodic(from: .now, by: Self.rotationPeriod)) { timeline in
+                            headerRow(discs: discs, label: label, running: running, failed: failed, inPlace: inPlace,
+                                      tick: Int(timeline.date.timeIntervalSinceReferenceDate / Self.rotationPeriod))
                         }
-                        PillChevron(isExpanded: isExpanded,
-                                    label: inPlace ? (isExpanded ? "Hide sources" : "Show sources")
-                                                   : (isExpanded ? "Hide calls" : "Show calls"))
+                    } else {
+                        headerRow(discs: discs, label: label, running: running, failed: failed, inPlace: inPlace, tick: 0)
                     }
                 }
                 .padding(.leading, 6)
@@ -376,6 +381,24 @@ struct PillToolRunHeader: View {
                                       : running ? PillMorphChrome.liveRim : PillMorphChrome.restRim))
         .animation(.easeInOut(duration: 0.3), value: status)
         .task(id: discs) { await waitForFavicons(discs) }
+    }
+
+    private func headerRow(discs: [PlumeThrow], label: PillToolLabel, running: Bool, failed: Bool, inPlace: Bool,
+                           tick: Int) -> some View {
+        HStack(spacing: 10) {
+            discStack(discs, label: label, running: running, tick: tick)
+            labelText(label, tick: tick)
+                .modifier(BandShimmer(active: running, rest: 0.5, inactive: 0.9, minBand: 60, bandShare: 0.6))
+            if failed {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(Typography.label(.semibold))
+                    .foregroundStyle(Self.failureRed)
+                    .accessibilityLabel("Failed")
+            }
+            PillChevron(isExpanded: isExpanded,
+                        label: inPlace ? (isExpanded ? "Hide sources" : "Show sources")
+                                       : (isExpanded ? "Hide calls" : "Show calls"))
+        }
     }
 
     @ViewBuilder
