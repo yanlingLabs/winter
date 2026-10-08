@@ -16,7 +16,8 @@
  *     checks the pid `hello` names against the helper's stated requirement (`codesign --verify -R=… <pid>`,
  *     the check the daemon makes over Security.framework) — then `status`, an engine method, an unknown
  *     method, and the three refusals (protocol, home, a first request that is not hello), each answered and
- *     closed. Finally the idle quit: with every connection gone it exits on its own and removes its socket.
+ *     closed. Finally the idle quit: once no script runs and nothing is bound it exits on its own — with the
+ *     daemon's connection still open (that connection is not work) — closing it and removing its socket.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -250,10 +251,14 @@ async function main(): Promise<void> {
       client.close();
     }
 
-    daemon.close();
+    // The daemon stays connected: its one persistent connection must not keep an idle helper alive.
+    const done = await daemon.request(6, "script.active", { sessionId: "s_verify", active: false });
+    check(typeof done === "object" && JSON.stringify(done.result) === "{}", "script.active false → {}", JSON.stringify(done));
     const quit = await Promise.race([helper.exited, sleep(15_000).then(() => "late" as const)]);
-    check(quit === 0, "with no connection and no bound target it quits on its own (idle quit, 3 s in the test build)", `exit: ${String(quit)}; ${helper.stderr.slice(-3).join(" | ")}`);
+    check(quit === 0, "with no running script and nothing bound it quits on its own, the daemon still connected (idle quit, 3 s in the test build)", `exit: ${String(quit)}; ${helper.stderr.slice(-3).join(" | ")}`);
+    check((await daemon.next(3000)) === "eof", "…closing the daemon's connection (the daemon relaunches it on its next call)");
     check(!existsSync(socketPath), "…and removes its socket file");
+    daemon.close();
   } finally {
     for (const l of launched) await stop(l);
     for (const h of homes) rmSync(h, { recursive: true, force: true });

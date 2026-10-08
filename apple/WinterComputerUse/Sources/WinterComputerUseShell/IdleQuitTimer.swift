@@ -10,8 +10,9 @@ public protocol IdleCancellable: AnyObject {
     func schedule(after seconds: TimeInterval, _ fire: @escaping @MainActor () -> Void) -> IdleCancellable
 }
 
-/// The helper quits after `interval` (10 minutes) continuously idle — no connection and no bound target (the
-/// coordinator decides what "busy" means and calls `update`). Becoming busy at any point stops the countdown;
+/// The helper quits after `interval` (10 minutes) continuously idle — no bound target, no mirror and no running
+/// script, whether or not the daemon is connected (the coordinator decides what "busy" means and calls
+/// `update`). Becoming busy at any point stops the countdown;
 /// becoming idle again starts it over from zero. Updates that do not change the state change nothing.
 @MainActor public final class IdleQuitTimer {
     public let interval: TimeInterval

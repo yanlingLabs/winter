@@ -48,23 +48,73 @@ final class IdleQuitTimerTests: XCTestCase {
         XCTAssertEqual(quits, 1)
     }
 
-    func testTheCoordinatorCountsConnectionsAndBoundTargetsAsBusy() {
+    func testAConnectedDaemonAloneDoesNotKeepTheHelperUp() {
         let clock = FakeIdleScheduler()
         let rig = Rig()
         var quits = 0
         rig.coordinator.attach(idleTimer: IdleQuitTimer(interval: 600, scheduler: clock) { quits += 1 })
-        XCTAssertEqual(clock.pendingCount, 1, "a helper nobody connects to still quits")
-
+        XCTAssertEqual(clock.pendingCount, 1, "a helper nobody uses still quits")
         rig.coordinator.connectionOpened(1)
-        XCTAssertEqual(clock.pendingCount, 0)
-        rig.coordinator.targetBound(sessionId: "s_1", pid: 10, windowID: 20, appName: "Notes", mirror: false)
-        rig.coordinator.connectionClosed(1)
-        clock.advance(by: 700)
-        XCTAssertEqual(quits, 0, "a bound target keeps the helper up")
+        XCTAssertEqual(clock.pendingCount, 1, "the daemon's persistent connection is not work")
+        clock.advance(by: 600)
+        XCTAssertEqual(quits, 1, "it quits with the daemon still connected")
+    }
+
+    func testABoundTargetKeepsTheHelperUp() {
+        let clock = FakeIdleScheduler()
+        let rig = Rig()
+        var quits = 0
+        rig.coordinator.attach(idleTimer: IdleQuitTimer(interval: 600, scheduler: clock) { quits += 1 })
+        rig.coordinator.connectionOpened(1)
+        rig.coordinator.targetBound(sessionId: "s_1", pid: 10, windowID: 20, appName: "Notes", mirror: true)
+        clock.advance(by: 3600)
+        XCTAssertEqual(quits, 0, "a bound target (and its mirror) keeps the helper up")
 
         rig.coordinator.targetReleased(sessionId: "s_1", pid: 10, windowID: 20)
+        clock.advance(by: 599)
+        XCTAssertEqual(quits, 0)
+        clock.advance(by: 1)
+        XCTAssertEqual(quits, 1, "ten minutes after the last release")
+    }
+
+    func testARunningScriptKeepsTheHelperUp() {
+        let clock = FakeIdleScheduler()
+        let rig = Rig()
+        var quits = 0
+        rig.coordinator.attach(idleTimer: IdleQuitTimer(interval: 600, scheduler: clock) { quits += 1 })
+        rig.coordinator.setScriptActive(sessionId: "s_1", active: true)
+        clock.advance(by: 3600)
+        XCTAssertEqual(quits, 0, "a script that binds nothing (screen.screenshot, apps.list) still counts")
+        rig.coordinator.setScriptActive(sessionId: "s_1", active: false)
         clock.advance(by: 600)
         XCTAssertEqual(quits, 1)
+    }
+
+    func testAnEndedSessionNoLongerKeepsTheHelperUp() {
+        let clock = FakeIdleScheduler()
+        let rig = Rig()
+        var quits = 0
+        rig.coordinator.attach(idleTimer: IdleQuitTimer(interval: 600, scheduler: clock) { quits += 1 })
+        rig.coordinator.setScriptActive(sessionId: "s_1", active: true)
+        rig.coordinator.targetBound(sessionId: "s_1", pid: 10, windowID: 20, appName: "Notes", mirror: false)
+        rig.coordinator.sessionEnded(sessionId: "s_1")
+        clock.advance(by: 600)
+        XCTAssertEqual(quits, 1)
+    }
+
+    func testAQuitThatFindsWorkInFlightStartsTheCountdownOver() {
+        let clock = FakeIdleScheduler()
+        let rig = Rig()
+        var attempts = 0
+        rig.coordinator.attach(idleTimer: IdleQuitTimer(interval: 600, scheduler: clock) {
+            attempts += 1
+            rig.coordinator.restartIdleCountdown()
+        })
+        clock.advance(by: 600)
+        XCTAssertEqual(attempts, 1)
+        XCTAssertEqual(clock.pendingCount, 1, "a fresh countdown is running")
+        clock.advance(by: 600)
+        XCTAssertEqual(attempts, 2)
     }
 
     func testAnEndedSessionDropsItsBoundTargets() {

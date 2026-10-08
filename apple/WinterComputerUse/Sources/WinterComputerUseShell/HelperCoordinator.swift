@@ -30,9 +30,10 @@ public enum HelperNotification: Equatable, Sendable {
     }
 }
 
-/// The helper's main-actor state: which sessions are running scripts (the Esc tap's arming), which targets
-/// are bound (idle accounting and the mirrors) and how many daemon connections are open. It is the engine's
-/// `CUCoreEvents` receiver, and maps those events onto the presentation layer and onto notifications.
+/// The helper's main-actor state: which sessions are running scripts (the Esc tap's arming, and idle
+/// accounting), which targets are bound (idle accounting and the mirrors) and which daemon connections are
+/// open. It is the engine's `CUCoreEvents` receiver, and maps those events onto the presentation layer and
+/// onto notifications.
 @MainActor public final class HelperCoordinator: CUCoreEvents {
     /// How long a synthetic Escape from the helper's own key action may pass the armed tap.
     public static let syntheticEscapeWindow: TimeInterval = 0.5
@@ -66,14 +67,23 @@ public enum HelperNotification: Equatable, Sendable {
         }
     }
 
-    /// Wires the idle timer and evaluates once, so a helper nobody connects to still quits.
+    /// Wires the idle timer and evaluates once, so a helper nobody uses still quits.
     public func attach(idleTimer: IdleQuitTimer) {
         self.idleTimer = idleTimer
         refreshIdle()
     }
 
     public var boundTargetCount: Int { bound.count }
-    public var isBusy: Bool { !openConnections.isEmpty || !bound.isEmpty }
+    /// What keeps the helper running: a bound target (a mirror exists only for one) or a running script. A
+    /// connected daemon alone does not — it keeps one persistent connection, reads the close as "helper gone"
+    /// and relaunches the helper on its next call.
+    public var isBusy: Bool { !bound.isEmpty || !activeScripts.isEmpty }
+
+    /// Starts the idle countdown over (the quit found work still in flight).
+    public func restartIdleCountdown() {
+        idleTimer?.update(busy: true)
+        refreshIdle()
+    }
 
     // MARK: Connections
 
@@ -92,6 +102,7 @@ public enum HelperNotification: Equatable, Sendable {
     public func setScriptActive(sessionId: String, active: Bool) {
         if active { activeScripts.insert(sessionId) } else { activeScripts.remove(sessionId) }
         refreshArming()
+        refreshIdle()
     }
 
     public func turnEnded(sessionId: String) {

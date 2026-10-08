@@ -183,6 +183,11 @@ public final class InFlightRegistry: @unchecked Sendable {
         lock.lock(); byKey.removeValue(forKey: ObjectIdentifier(request)); lock.unlock()
     }
 
+    public var isEmpty: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return byKey.isEmpty
+    }
+
     func count(connection: Int) -> Int {
         lock.lock(); defer { lock.unlock() }
         return byKey.values.filter { $0.connection == connection }.count

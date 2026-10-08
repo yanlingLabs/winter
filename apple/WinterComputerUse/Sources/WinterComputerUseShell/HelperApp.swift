@@ -67,9 +67,14 @@ import WinterCUPresentation
         } catch {
             fail("cannot listen: \(error)")
         }
-        let idle = IdleQuitTimer(interval: identity.idleQuitSeconds, scheduler: MainQueueIdleScheduler()) { [weak self] in
-            self?.log.info("idle for \(Int(identity.idleQuitSeconds)) s with no connection and no bound target — quitting")
-            NSApp.terminate(nil)
+        let idle = IdleQuitTimer(interval: identity.idleQuitSeconds, scheduler: MainQueueIdleScheduler()) { [weak self, weak coordinator] in
+            // A request outside any script (`status`, `apps.list`) still in flight: not now.
+            guard inFlight.isEmpty else {
+                coordinator?.restartIdleCountdown()
+                return
+            }
+            self?.log.info("idle for \(Int(identity.idleQuitSeconds)) s with no bound target and no running script — quitting")
+            NSApp.terminate(nil) // closes every connection; the daemon relaunches the helper on its next call
         }
         coordinator.attach(idleTimer: idle)
 
