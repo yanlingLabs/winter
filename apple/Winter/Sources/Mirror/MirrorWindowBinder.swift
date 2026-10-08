@@ -52,8 +52,8 @@ final class MirrorWindowBinder {
     private weak var window: NSWindow?
 
     private(set) var sessionId: String?
+    private var relatedSessionIds: [String] = []
     private var width: CGFloat
-    private var turnRunning = false
     /// The window is on screen (see `MirrorWindow.isVisible`): last value sent to the coordinator.
     private var onScreen: Bool
 
@@ -61,7 +61,6 @@ final class MirrorWindowBinder {
     private var hosting: NSHostingView<MirrorPanelContent>?
     private var shownState: MirrorSessionState?
     private var coordinatorWatch: AnyCancellable?
-    private var stateWatch: AnyCancellable?
     private var observers: [NSObjectProtocol] = []
     private var refreshScheduled = false
 
@@ -73,8 +72,8 @@ final class MirrorWindowBinder {
         self.sessionId = sessionId
         self.width = window.frame.width
         self.onScreen = Self.isOnScreen(window)
+        // The coordinator re-publishes whenever any session's mirror comes up, goes down or changes target.
         coordinatorWatch = coordinator.objectWillChange.sink { [weak self] _ in self?.scheduleRefresh() }
-        watchState()
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.windowResized() }
@@ -92,22 +91,20 @@ final class MirrorWindowBinder {
 
     // MARK: What the window tells us
 
-    /// The window shows `sessionId` (nil: none) and that session's turn is or is not running — an
-    /// attach, a hop, a repin, a turn boundary. One call so the pair never disagrees for a moment.
-    func update(sessionId: String?, turnRunning: Bool) {
-        let sessionChanged = sessionId != self.sessionId
+    /// The window shows `sessionId` (nil: none) and the work of `related` — the sessions it started, a
+    /// Dispatch session's children. An attach, a hop, a repin, a child spawned. One call so the pair never
+    /// disagrees for a moment.
+    func update(sessionId: String?, related: [String] = []) {
+        guard sessionId != self.sessionId || related != relatedSessionIds else { return }
         self.sessionId = sessionId
-        self.turnRunning = turnRunning
-        if sessionChanged { watchState() }
-        if let sessionId { coordinator.setTurnRunning(sessionId: sessionId, running: turnRunning) }
-        if sessionChanged { publish() }
+        self.relatedSessionIds = related
+        publish()
     }
 
     /// The window closed (or stopped being a session surface): nothing is watched, no panel remains.
     func close() {
         coordinator.removeWindow(id: windowId)
         coordinatorWatch = nil
-        stateWatch = nil
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers = []
         hidePanel()
@@ -138,17 +135,12 @@ final class MirrorWindowBinder {
     }
 
     private func publish() {
-        coordinator.setWindow(MirrorWindow(id: windowId, kind: kind, sessionId: sessionId, width: width, isVisible: onScreen))
+        coordinator.setWindow(MirrorWindow(id: windowId, kind: kind, sessionId: sessionId, relatedSessionIds: relatedSessionIds,
+                                           width: width, isVisible: onScreen))
         scheduleRefresh()
     }
 
     // MARK: The panel
-
-    private func watchState() {
-        stateWatch = nil
-        guard let sessionId else { return }
-        stateWatch = coordinator.state(for: sessionId).objectWillChange.sink { [weak self] _ in self?.scheduleRefresh() }
-    }
 
     /// Coalesces the changes of one runloop turn into one placement; reads the values AFTER they settle
     /// (`objectWillChange` fires before the change).
@@ -164,16 +156,12 @@ final class MirrorWindowBinder {
     }
 
     private func refresh() {
-        guard let window, let sessionId, coordinator.isEligible(windowId: windowId), window.isVisible else {
+        guard let window, coordinator.isEligible(windowId: windowId), window.isVisible,
+              let shown = coordinator.shownSession(forWindow: windowId) else {
             hidePanel()
             return
         }
-        let state = coordinator.state(for: sessionId)
-        guard state.isVisible else {
-            hidePanel()
-            return
-        }
-        showPanel(for: state, over: window)
+        showPanel(for: coordinator.state(for: shown), over: window)
     }
 
     private func showPanel(for state: MirrorSessionState, over window: NSWindow) {

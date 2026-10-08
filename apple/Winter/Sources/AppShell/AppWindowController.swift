@@ -337,21 +337,24 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     private var mirrorBinder: MirrorWindowBinder?
     private var mirrorWatch: AnyCancellable?
 
-    /// Shows the computer-use mirror inside this window while the session it has attached is using the
-    /// computer: a child panel at the top-left, over the traffic lights (`MirrorWindowBinder`). The
-    /// shell hides — detaching its session — when closed, so "attached" is "open".
+    /// Shows the computer-use mirror inside this window while the session it has attached — or a session
+    /// that one started, a Dispatch child — has an app bound: a child panel at the top-left, over the
+    /// traffic lights (`MirrorWindowBinder`). It needs no other window. The shell hides — detaching its
+    /// session — when closed, so "attached" is "open".
     func attachMirror(_ coordinator: MirrorCoordinator) {
         guard let host, mirrorBinder == nil else { return }
         let binder = MirrorWindowBinder(coordinator: coordinator, kind: .shell, window: window, sessionId: host.attachedSessionId)
         mirrorBinder = binder
-        let running = host.$attachment
-            .map { attachment -> AnyPublisher<Bool, Never> in
-                attachment.map { $0.session.$state.map(\.turnRunning).removeDuplicates().eraseToAnyPublisher() }
-                    ?? Just(false).eraseToAnyPublisher()
+        // A Dispatch session is not the one that uses the computer — its children are, each in a session of
+        // its own — so the window also watches the children its attached session lists.
+        let children = host.$attachment
+            .map { attachment -> AnyPublisher<[String], Never> in
+                attachment.map { $0.session.$state.map { mirrorChildSessionIds(of: $0) }.removeDuplicates().eraseToAnyPublisher() }
+                    ?? Just([]).eraseToAnyPublisher()
             }
             .switchToLatest()
-        mirrorWatch = Publishers.CombineLatest(host.$attachedSessionId, running)
-            .sink { [weak binder] sessionId, turnRunning in binder?.update(sessionId: sessionId, turnRunning: turnRunning) }
+        mirrorWatch = Publishers.CombineLatest(host.$attachedSessionId, children)
+            .sink { [weak binder] sessionId, children in binder?.update(sessionId: sessionId, related: children) }
     }
 
     /// Orders the window out WITHOUT closing it — the shell's "close". Shared by the red traffic

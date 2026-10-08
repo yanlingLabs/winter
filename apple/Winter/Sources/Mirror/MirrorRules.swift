@@ -31,11 +31,23 @@ struct MirrorWindow: Equatable, Sendable {
     let kind: MirrorWindowKind
     /// The session the window is open on; nil when it shows no session.
     let sessionId: String?
+    /// Sessions the window's session started and shows the work of — a Dispatch session's children, which
+    /// are the ones that use the computer. Their mirror shows in this window too (the most recently bound
+    /// target wins), so the main window needs no window of the child's own beside it.
+    var relatedSessionIds: [String] = []
     /// The window's width in points.
     let width: CGFloat
     /// The window is on screen: ordered in, not minimized, not wholly covered. A window that is not
     /// visible still subscribes (bound and cursor are cheap) but is sent no frames.
     var isVisible: Bool = true
+}
+
+extension MirrorWindow {
+    /// The window's session first, then the ones it shows the work of, without repeats.
+    var allSessionIds: [String] {
+        var seen: Set<String> = []
+        return ([sessionId].compactMap { $0 } + relatedSessionIds).filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
 }
 
 enum MirrorRules {
@@ -60,9 +72,10 @@ enum MirrorRules {
         }
     }
 
-    /// The sessions to hold a view subscription for: every session an eligible window is open on.
+    /// The sessions to hold a view subscription for: every session an eligible window is open on, and the
+    /// sessions it shows the work of.
     static func subscriptions(eligible windows: [MirrorWindow]) -> Set<String> {
-        Set(windows.compactMap(\.sessionId))
+        Set(windows.flatMap(\.allSessionIds))
     }
 }
 
@@ -95,4 +108,17 @@ func mirrorPanelSize(windowSize: CGSize) -> CGSize {
 func mirrorPanelFrame(parent: NSRect, size: CGSize) -> NSRect {
     NSRect(x: parent.minX + mirrorPanelInset, y: parent.maxY - mirrorPanelInset - size.height,
            width: size.width, height: size.height)
+}
+
+// MARK: - Sessions a window shows the work of
+
+/// How many of a Dispatch session's children a window watches. The newest ones: an older child that is
+/// done with its app is not what the user is waiting on.
+let mirrorMaxChildSessions = 8
+
+/// PURE: the child sessions of the session a window shows — a Dispatch session's children, in the order
+/// the session listed them, the newest `mirrorMaxChildSessions`. Every child counts, whatever its status: a
+/// finished child may still have an app bound, and the mirror hides only when its target is released.
+func mirrorChildSessionIds(of state: OrbSessionState) -> [String] {
+    Array(state.children.map(\.sessionId).suffix(mirrorMaxChildSessions))
 }

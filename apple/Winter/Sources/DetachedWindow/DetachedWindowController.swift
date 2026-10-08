@@ -81,9 +81,9 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         let binder = MirrorWindowBinder(coordinator: coordinator, kind: .detached, window: window, sessionId: sessionId.isEmpty ? nil : sessionId)
         mirrorBinder = binder
         let sessions = mirrorSessionChanged.prepend(sessionId)
-        let running = session.$state.map(\.turnRunning).removeDuplicates()
-        mirrorWatch = Publishers.CombineLatest(sessions, running)
-            .sink { [weak binder] sessionId, turnRunning in binder?.update(sessionId: sessionId.isEmpty ? nil : sessionId, turnRunning: turnRunning) }
+        let children = session.$state.map { mirrorChildSessionIds(of: $0) }.removeDuplicates()
+        mirrorWatch = Publishers.CombineLatest(sessions, children)
+            .sink { [weak binder] sessionId, children in binder?.update(sessionId: sessionId.isEmpty ? nil : sessionId, related: children) }
     }
 
     /// Test-only read-through — lets tests assert on the constructed window's frame/styleMask
