@@ -45,13 +45,20 @@ enum CUFloorScan {
     /// Folders a save panel's location pop-up must not point at.
     static let protectedFolderNames: Set<String> = [".ssh", "LaunchAgents", "LaunchDaemons"]
 
-    /// The save panel `e` sits in, if any: the nearest sheet/dialog/window ancestor holding a filename field.
+    /// Panel subroles a save panel shows up as when it is its own window rather than a sheet.
+    static let panelSubroles: Set<String> = [kAXDialogSubrole, kAXSystemDialogSubrole, kAXFloatingWindowSubrole]
+
+    /// The save panel `e` sits in, if any: the nearest sheet (or dialog-like window) ancestor holding a
+    /// filename field. An ordinary document window stops the walk without a scan, so this stays cheap.
     static func savePanel(containing e: AXUIElement) -> AXUIElement? {
         var cur: AXUIElement? = e
         for _ in 0..<14 {
             guard let c = cur else { return nil }
             let role = AX.string(c, kAXRoleAttribute)
-            if role == kAXSheetRole || role == kAXWindowRole || AX.string(c, kAXSubroleAttribute) == kAXDialogSubrole {
+            // A sheet without a filename field may sit on a save panel ("Go to folder"): keep walking.
+            if role == kAXSheetRole, filenameField(in: c) != nil { return c }
+            if role == kAXWindowRole {
+                guard let sub = AX.string(c, kAXSubroleAttribute), panelSubroles.contains(sub) else { return nil }
                 return filenameField(in: c) != nil ? c : nil
             }
             cur = AX.element(c, kAXParentAttribute)
@@ -87,10 +94,9 @@ enum CUFloorScan {
 
     /// Typing `text` into `e`: refused when `e` is in a save panel and the text names a protected path.
     static func checkTypedIntoSavePanel(_ e: AXUIElement, text: String) throws {
-        guard savePanel(containing: e) != nil else { return }
-        if CUFloors.typedSavePathIsProtected(text) {
-            throw CUError.refused(.savePath, "saving to that location is not allowed — ask the user to do it")
-        }
+        // The text test is free; the panel walk only runs for text that names a protected path.
+        guard CUFloors.typedSavePathIsProtected(text), savePanel(containing: e) != nil else { return }
+        throw CUError.refused(.savePath, "saving to that location is not allowed — ask the user to do it")
     }
 
     /// Pressing a button in a save panel: refused when the file name or the folder is protected.

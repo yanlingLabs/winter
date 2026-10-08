@@ -257,11 +257,17 @@ extension CUCore {
         }
         // Characters (and pasting) into a secure field are typing; navigation keys are not.
         if let e, ElementInfo(e).secure, Self.producesText(chord) { throw secureRefusal() }
+        // Return in a save panel saves, exactly like its Save button.
+        if let e, chord.key == .named(.returnKey) || chord.key == .named(.keypadEnter) {
+            try CUFloorScan.checkPressInSavePanel(e)
+        }
         emitAction(p, t, e.flatMap { ElementInfo($0).center }, "type")
+        // Resolve the route once (the menu lookup walks the menu bar), then press it `repeat` times.
+        let plan = try chordPlan(chord, p, t)
         var out = ActOutcome(rung: .accessibility)
         for _ in 0..<rep {
             try token.check()
-            out = try sendChord(chord, p, t)
+            out = try execute(plan, p, t)
         }
         return out
     }
@@ -272,12 +278,16 @@ extension CUCore {
         return !c.modifiers.contains(.control)
     }
 
-    /// One chord: a menu item with that key equivalent (rung 1) when there is one, else key events.
-    func sendChord(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget) throws -> ActOutcome {
+    /// How a chord reaches the app: a menu item with that key equivalent (rung 1), else key events.
+    enum ChordPlan {
+        case menuItem(AXUIElement, title: String)
+        case events(code: CGKeyCode, flags: CGEventFlags, decision: CUInputLadder.Decision)
+    }
+
+    func chordPlan(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget) throws -> ChordPlan {
         if chord.modifiers.contains(.command), case .character(let ch) = chord.key,
            let item = Self.menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
-            try AX.perform(item.element, kAXPressAction)
-            return ActOutcome(rung: .accessibility, detail: "used the menu item “\(item.title)”")
+            return .menuItem(item.element, title: item.title)
         }
         let code: CGKeyCode
         switch chord.key {
@@ -286,11 +296,26 @@ extension CUCore {
             guard let c = CUKeyCodes.code(for: ch) else { throw CUError.unsupported("no key for “\(ch)” on this keyboard") }
             code = c
         }
-        let d = try CUInputLadder.decideEvents(context(p, t, atPoint: false))
-        let synth = self.synth
-        return try runEvents(p, t, d, focus: true) { route in
-            synth.key(pid: t.pid, code: code, flags: chord.modifiers.cgFlags, route: route)
+        return .events(code: code, flags: chord.modifiers.cgFlags,
+                       decision: try CUInputLadder.decideEvents(context(p, t, atPoint: false)))
+    }
+
+    func execute(_ plan: ChordPlan, _ p: TargetActParams, _ t: CUTarget) throws -> ActOutcome {
+        switch plan {
+        case .menuItem(let element, let title):
+            try AX.perform(element, kAXPressAction)
+            return ActOutcome(rung: .accessibility, detail: "used the menu item “\(title)”")
+        case .events(let code, let flags, let d):
+            let synth = self.synth
+            return try runEvents(p, t, d, focus: true) { route in
+                synth.key(pid: t.pid, code: code, flags: flags, route: route)
+            }
         }
+    }
+
+    /// One chord, start to finish.
+    func sendChord(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget) throws -> ActOutcome {
+        try execute(try chordPlan(chord, p, t), p, t)
     }
 
     /// A menu-bar item whose key equivalent is `key` with `modifiers` (command implied).

@@ -34,6 +34,7 @@ public final class CUCore: @unchecked Sendable {
     private var permissionTimer: DispatchSourceTimer?
     private var observers: [NSObjectProtocol] = []
     private var logged = Set<String>()
+    private var lastDestroyCheck: [pid_t: Double] = [:]
 
     /// `events` is held weakly (the shell owns both).
     public convenience init(events: (any CUCoreEvents)?) {
@@ -440,8 +441,13 @@ public final class CUCore: @unchecked Sendable {
         emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: t.windowID) }
     }
 
+    /// Called for every destroyed-element notification, so it is debounced to one window-list check per
+    /// pid per 250 ms.
     private func windowMaybeClosed(pid: pid_t) {
+        let now = clock.nowMs()
         lock.lock()
+        if let last = lastDestroyCheck[pid], now - last < 250 { lock.unlock(); return }
+        lastDestroyCheck[pid] = now
         let affected = targets.values.filter { $0.pid == pid }
         lock.unlock()
         for t in affected where CUWindowServer.window(id: t.windowID) == nil {
@@ -480,9 +486,18 @@ public final class CUCore: @unchecked Sendable {
         let cached = windowElements[t.id]
         windowElementsLock.unlock()
         if let c = cached, AX.isAlive(c), AX.windowID(c).map({ $0 == wid }) ?? true { return c }
+        // Without the grant AX lists nothing — that must never read as "the window closed".
+        try requireAccessibility()
         guard let w = CUAXWindows.list(pid: t.pid).first(where: { $0.id == wid }) else {
-            lose(t, reason: "window_closed")
-            throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window")
+            guard let server = CUWindowServer.window(id: wid) else {
+                lose(t, reason: "window_closed")
+                throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window")
+            }
+            // Still there for the window server, but not over AX: another Space, or the app is not answering.
+            if !server.onScreen {
+                throw CUError.unsupported("the \(t.appName) window is on another Space or hidden — accessibility can't reach it there")
+            }
+            throw CUError.busy("\(t.appName) did not list its window over accessibility — retry")
         }
         if w.title != t.windowTitle { t.setWindow(id: wid, title: w.title) }
         windowElementsLock.lock()
