@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import WinterCUPresentation
 
 // The in-window mirror's stream (the ComputerV2 contract's "mirror moves INTO Winter.app" section): the helper
 // keeps the Screen Recording grant and captures the bound window; Winter.app, connected as the second client,
