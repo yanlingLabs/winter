@@ -759,7 +759,10 @@ export class ComputerV2Service {
       if (!(err instanceof HelperRpcError) || err.code !== "needs_foreground") throw err;
       const app: AppRef = { bundleId: t.bundleId, name: t.name };
       if (!(await this.deps.policy.allowForeground(ctx.grants, app, ctx.abort.signal))) {
-        throw new AutomationFailure("NeedsForeground", `${t.name} only accepts this ${primitive} in the foreground, and Winter may not take the pointer now — try an element ref or another action, or ask the user`);
+        throw new AutomationFailure("NeedsForeground", primitive === "menu"
+          // A menu command the app keeps disabled while it is in the background (Finder's Move to Trash).
+          ? `${t.name} only enables that menu command while it is in front, and Winter may not bring it forward now — ask the user to choose it, or to allow foreground use`
+          : `${t.name} only accepts this ${primitive} in the foreground, and Winter may not take the pointer now — try an element ref or another action, or ask the user`);
       }
       const release = await this.locks.acquire(FOREGROUND_LOCK_KEY, { runId: ctx.runId, sessionId: ctx.sessionId }, {
         waitMs: Math.min(LOCK_WAIT_MS, Math.max(500, ctx.timer.left() - 500)), signal: ctx.abort.signal, label: "The screen's foreground",

@@ -230,6 +230,9 @@ describe("ComputerV2: the policy, through a script", () => {
     const r2 = await lonely.run("const notes = await apps.open('Notes')\ntry { await notes.click(14) } catch (e) { print(e.name) }");
     expect(text(r2)).toContain("NeedsForeground");
     expect(cards(lonely.events).map((c) => c.summary)).toEqual(["Allow Winter to use Notes (com.apple.Notes)?"]);
+    // A menu command the app keeps disabled in the background: the same rung, worded for a menu.
+    const r3 = await lonely.run("try { await notes.menu(['File', 'Move to Trash']) } catch (e) { print(e.name, e.message) }");
+    expect(text(r3)).toContain("NeedsForeground Notes only enables that menu command while it is in front");
   }, 30_000);
 
   macOnly("bypass: NO computer-use prompt at all — needs_foreground is retried at once with allowForeground, attended or not", async () => {
