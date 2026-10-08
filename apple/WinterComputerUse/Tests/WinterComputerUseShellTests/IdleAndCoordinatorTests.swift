@@ -131,33 +131,25 @@ final class IdleQuitTimerTests: XCTestCase {
 final class CoordinatorTests: XCTestCase {
     private let notes = CUWindowRef(pid: 10, windowID: 20, appName: "Notes")
 
-    func testMirrorsStayGloballyEnabledAndFollowEachBindsFlag() {
+    func testTheHelperShowsNoFloatingMirrorAtAll() {
         let rig = Rig()
-        XCTAssertTrue(rig.presentation.mirrorsEnabled)
+        XCTAssertFalse(rig.presentation.mirrorsEnabled, "switched off, so a cursor event can never re-show one")
         rig.coordinator.targetBound(sessionId: "s_1", pid: 10, windowID: 20, appName: "Notes", mirror: true)
         rig.coordinator.targetBound(sessionId: "s_1", pid: 11, windowID: 21, appName: "Mail", mirror: false)
-        XCTAssertEqual(rig.presentation.calls, [.show("s_1", notes)])
-    }
-
-    func testReleaseHidesTheMirrorByTheBoundWindowExactlyOnce() {
-        let rig = Rig()
-        rig.coordinator.targetBound(sessionId: "s_1", pid: 10, windowID: 20, appName: "Notes", mirror: true)
-        rig.coordinator.targetBound(sessionId: "s_1", pid: 11, windowID: 21, appName: "Mail", mirror: false)
-        // A lost target: the engine reports targetLost and targetReleased; a repeat release changes nothing.
         rig.coordinator.targetLost(targetId: "t1", reason: "app_quit")
         rig.coordinator.targetReleased(sessionId: "s_1", pid: 10, windowID: 20)
-        rig.coordinator.targetReleased(sessionId: "s_1", pid: 10, windowID: 20)
         rig.coordinator.targetReleased(sessionId: "s_1", pid: 11, windowID: 21)
-        XCTAssertEqual(rig.presentation.calls, [.show("s_1", notes), .hide("s_1", notes)], "one hide, and none for a target never mirrored")
+        XCTAssertEqual(rig.presentation.calls, [], "no showMirror, no hideMirror")
         XCTAssertEqual(rig.notifications, [.targetLost(targetId: "t1", reason: "app_quit")])
+        XCTAssertEqual(rig.coordinator.boundTargetCount, 0)
     }
 
-    func testTheEnginesReleasesAfterSessionEndedHideNothingTwice() {
+    func testSessionEndedStillReachesThePresentation() {
         let rig = Rig()
         rig.coordinator.targetBound(sessionId: "s_1", pid: 10, windowID: 20, appName: "Notes", mirror: true)
         rig.coordinator.sessionEnded(sessionId: "s_1")
         rig.coordinator.targetReleased(sessionId: "s_1", pid: 10, windowID: 20)
-        XCTAssertEqual(rig.presentation.calls, [.show("s_1", notes), .sessionEnded("s_1")])
+        XCTAssertEqual(rig.presentation.calls, [.sessionEnded("s_1")])
     }
 
     private func act(_ rig: Rig, _ kind: String, at p: CGPoint, dragTo: CGPoint? = nil, frame: CGRect? = nil, text: String? = nil,
@@ -172,7 +164,7 @@ final class CoordinatorTests: XCTestCase {
         let p = CGPoint(x: 5, y: 6), q = CGPoint(x: 50, y: 60)
         for kind in ["move", "press", "type", "scroll"] { act(rig, kind, at: p) }
         act(rig, "drag", at: p, dragTo: q)
-        XCTAssertEqual(Array(rig.presentation.calls.dropFirst()), [
+        XCTAssertEqual(rig.presentation.calls, [
             .cursor("s_1", notes, p, .move), .cursor("s_1", notes, p, .press), .cursor("s_1", notes, p, .type),
             .cursor("s_1", notes, p, .scroll), .cursor("s_1", notes, p, .drag(to: q)),
         ])

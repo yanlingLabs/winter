@@ -13,7 +13,7 @@ public enum HelperServerError: Error, CustomStringConvertible {
     }
 }
 
-/// `hello` params. The shell's own method, so its shape lives here.
+/// `hello` params. The shell's own method, so its shape lives here. `client` is "daemon" or "app" (Winter.app).
 public struct HelloParams: Codable, Equatable, Sendable {
     public var `protocol`: Int
     public var client: String
@@ -28,10 +28,17 @@ public struct HelloResult: Codable, Equatable, Sendable {
 
 /// The helper's Unix socket server: `<home>/run/computer-use.sock`, mode 0600, NDJSON JSON-RPC 2.0.
 ///
-/// Per connection, in order: the peer check (before anything is read — a rejected peer is closed with no
-/// response); then the first request must be `hello` (a protocol or home mismatch is answered and the
-/// connection closed); then every request runs in its own task, so a slow call never queues `cancel` behind
-/// it. Answers go out through one serial write queue per connection, in completion order.
+/// Per connection, in order: the peer check (before anything is read — a peer that is neither the daemon nor
+/// Winter.app is closed with no response); then the first request must be `hello`, whose `client` must be one
+/// the peer's code satisfies (a protocol or home mismatch, or a claimed identity it lacks, is answered and the
+/// connection closed); then every request the client may make runs in its own task, so a slow call never
+/// queues `cancel` behind it. Answers go out through one serial write queue per connection, in completion
+/// order.
+///
+/// The two clients: the DAEMON drives everything, owns the sessions it uses (its close ends them) and gets the
+/// `escPressed` / `targetLost` / `permissionsChanged` notifications; WINTER.APP may only say `hello`, read
+/// `status` and subscribe to a session's view stream (`view.*`), owns nothing, and gets only `view.*`
+/// notifications. Neither connection keeps the helper from its idle quit.
 ///
 /// Raw POSIX sockets, one reader thread per connection, like `WinterOfficeHelper`'s server: the helper only
 /// ever has a daemon or two connected.
@@ -228,31 +235,58 @@ public final class HelperServer: @unchecked Sendable {
 
     // MARK: - Notifications
 
-    /// Sends a notification to every connection that has completed `hello`.
+    /// Sends a daemon notification to every daemon connection (never to Winter.app).
     public func broadcast(_ notification: HelperNotification) {
         guard let line = RPCOutbound.notification(method: notification.method, params: AnyEncodable(notification.params)) else { return }
         lock.lock()
-        let ready = connections.values.filter(\.isReady)
+        let daemons = connections.values.filter { $0.isReady && $0.client == .daemon }
         lock.unlock()
-        ready.forEach { $0.send(line) }
+        daemons.forEach { $0.send(line) }
+    }
+
+    /// A `view.*` event line for one Winter.app connection.
+    public func sendEvent(to id: Int, _ line: Data) {
+        appConnection(id)?.send(line)
+    }
+
+    /// A `view.frame` line for one Winter.app connection, coalesced per target: if the previous frame for that
+    /// target has not been written yet, this one replaces it.
+    public func sendFrame(to id: Int, key: String, _ line: Data) {
+        appConnection(id)?.sendLatest(key: key, line)
+    }
+
+    private func appConnection(_ id: Int) -> Connection? {
+        lock.lock(); defer { lock.unlock() }
+        guard let connection = connections[id], connection.isReady, connection.client == .app else { return nil }
+        return connection
+    }
+
+    /// What each client may call after `hello`.
+    public static let appMethods: Set<String> = ["status", "view.subscribe", "view.unsubscribe"]
+
+    public static func permits(_ client: PeerClientKind, _ method: String) -> Bool {
+        switch client {
+        case .app: return appMethods.contains(method)
+        // Frames reach only Winter.app clients: the daemon has no business in the view stream.
+        case .daemon: return !method.hasPrefix("view.")
+        }
     }
 
     // MARK: - One connection
 
     private func serve(fd: Int32, id: Int) {
-        // Authentication comes first: nothing is read from a peer that is not the daemon.
+        // Authentication comes first: nothing is read from a peer that is neither the daemon nor Winter.app.
         let decision = authenticator.authorize(socket: fd)
-        guard case .accept(let pid) = decision else {
+        guard case .accept(let pid, let clients) = decision else {
             if case .reject(let reason) = decision { log.info("connection \(id) refused: \(reason)") }
             close(fd)
             return
         }
-        let connection = Connection(id: id, fd: fd)
+        let connection = Connection(id: id, fd: fd, verified: clients)
         lock.lock()
         connections[id] = connection
         lock.unlock()
-        log.info("connection \(id) from pid \(pid)")
-        DispatchQueue.main.async { [coordinator] in MainActor.assumeIsolated { coordinator.connectionOpened(id) } }
+        log.info("connection \(id) from pid \(pid) (\(clients.map(\.rawValue).sorted().joined(separator: "/")))")
 
         readLoop(connection)
         teardown(connection)
@@ -327,8 +361,14 @@ public final class HelperServer: @unchecked Sendable {
                 data: ["expected": .number(Double(RPCWire.protocolVersion))])))
             return false
         }
-        guard p.client == "daemon" else {
-            connection.send(RPCOutbound.error(id: id, .protocolMismatch("the only client is the daemon")))
+        guard let client = PeerClientKind(rawValue: p.client) else {
+            connection.send(RPCOutbound.error(id: id, .protocolMismatch("the clients are \"daemon\" and \"app\"")))
+            return false
+        }
+        guard connection.verified.contains(client) else {
+            connection.send(RPCOutbound.error(id: id, RPCError(code: "not_allowed",
+                message: "this peer's code is not the \(client == .daemon ? "daemon" : "Winter app") it says it is",
+                data: ["reason": .string("identity")])))
             return false
         }
         guard HelperIdentity.canonicalPath(p.home) == config.home else {
@@ -336,16 +376,25 @@ public final class HelperServer: @unchecked Sendable {
                 message: "this helper serves a different Winter home", data: ["home": .string(config.home)])))
             return false
         }
-        connection.markReady()
+        connection.markReady(as: client)
         connection.send(RPCOutbound.response(id: id, result: AnyEncodable(
             HelloResult(protocol: RPCWire.protocolVersion, helperVersion: config.helperVersion, pid: getpid()))))
-        log.info("connection \(connection.id): hello")
+        if client == .daemon {
+            DispatchQueue.main.async { [coordinator] in MainActor.assumeIsolated { coordinator.connectionOpened(connection.id) } }
+        }
+        log.info("connection \(connection.id): hello (\(client.rawValue))")
         return true
     }
 
     private func dispatch(id: JSONValue, method: String, params: JSONValue?, _ connection: Connection) {
+        guard let client = connection.client, HelperServer.permits(client, method) else {
+            connection.send(RPCOutbound.error(id: id, RPCError(code: "not_allowed",
+                message: "\(method) is not available to this client", data: ["reason": .string("client")])))
+            return
+        }
         // Ownership is recorded here, on the reader thread, so it always precedes this connection's teardown.
-        if let sessionId = params?["sessionId"]?.stringValue, !sessionId.isEmpty {
+        // Only the daemon owns sessions: Winter.app subscribing to one must neither keep it alive nor end it.
+        if client == .daemon, let sessionId = params?["sessionId"]?.stringValue, !sessionId.isEmpty {
             lock.lock()
             sessionOwners[sessionId, default: []].insert(connection.id)
             lock.unlock()
@@ -362,7 +411,8 @@ public final class HelperServer: @unchecked Sendable {
         inFlight.add(request, connection: connection.id)
         let task = Task.detached { [dispatcher, inFlight] in
             do {
-                let result = try await dispatcher.handle(method: method, params: params)
+                let result = try await dispatcher.handle(method: method, params: params,
+                                                         context: RequestContext(connectionID: connection.id, client: client))
                 request.answer(result: result)
             } catch {
                 request.answer(error: RPCError.from(error))
@@ -385,6 +435,11 @@ public final class HelperServer: @unchecked Sendable {
         let pending = inFlight.cancelAll(connection: connection.id)
         log.info("connection \(connection.id) closed (\(pending.count) in flight, \(orphaned.count) session(s) ended)")
         let id = connection.id
+        guard connection.client == .daemon else {
+            // Winter.app (or a peer that never said hello): its subscriptions go, nothing else.
+            DispatchQueue.main.async { [coordinator] in MainActor.assumeIsolated { coordinator.viewHub.connectionClosed(id) } }
+            return
+        }
         Task.detached { [dispatcher, coordinator] in
             // Let cancelled work wind down (bounded), so nothing it binds outlives the session's end below.
             await withTaskGroup(of: Void.self) { group in
@@ -402,28 +457,55 @@ public final class HelperServer: @unchecked Sendable {
     }
 }
 
-/// One accepted, authenticated connection: its fd, its serial write queue, and whether `hello` succeeded.
+/// One accepted, authenticated connection: its fd, its serial write queue, the client kinds its code verified
+/// as, and — once `hello` succeeded — the one it is.
 final class Connection: @unchecked Sendable {
     let id: Int
     let fd: Int32
+    let verified: Set<PeerClientKind>
     private let writeQueue: DispatchQueue
     private let lock = NSLock()
-    private var ready = false
+    private var _client: PeerClientKind?
     private var closed = false
+    private var latest: [String: Data] = [:]
 
-    init(id: Int, fd: Int32) {
+    init(id: Int, fd: Int32, verified: Set<PeerClientKind>) {
         self.id = id
         self.fd = fd
+        self.verified = verified
         writeQueue = DispatchQueue(label: "computer-use.conn.\(id).write")
     }
 
     var isReady: Bool {
         lock.lock(); defer { lock.unlock() }
-        return ready && !closed
+        return _client != nil && !closed
     }
 
-    func markReady() {
-        lock.lock(); ready = true; lock.unlock()
+    var client: PeerClientKind? {
+        lock.lock(); defer { lock.unlock() }
+        return _client
+    }
+
+    func markReady(as client: PeerClientKind) {
+        lock.lock(); _client = client; lock.unlock()
+    }
+
+    /// At most one unwritten line per `key`: a newer one replaces it. A slow reader (a busy Winter.app) gets the
+    /// newest frame instead of a queue that grows with every frame it has not read yet.
+    func sendLatest(key: String, _ line: Data) {
+        lock.lock()
+        let scheduled = latest[key] != nil
+        latest[key] = line
+        lock.unlock()
+        guard !scheduled else { return }
+        writeQueue.async { [self] in
+            lock.lock()
+            let next = latest.removeValue(forKey: key)
+            let isClosed = closed
+            lock.unlock()
+            guard !isClosed, let next else { return }
+            Connection.writeAll(next, fd: fd)
+        }
     }
 
     func send(_ line: Data) {

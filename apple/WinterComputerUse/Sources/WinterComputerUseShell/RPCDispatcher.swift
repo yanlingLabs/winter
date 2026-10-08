@@ -1,20 +1,36 @@
 import Foundation
 import WinterCUCore
 
+/// Who is asking: the connection (Winter.app's view subscriptions are per connection) and its client kind.
+public struct RequestContext: Sendable {
+    public var connectionID: Int
+    public var client: PeerClientKind
+
+    public init(connectionID: Int, client: PeerClientKind) {
+        self.connectionID = connectionID
+        self.client = client
+    }
+
+    public static let daemon = RequestContext(connectionID: 0, client: .daemon)
+}
+
 /// Routes every method after `hello`. Engine methods decode `params` straight into the engine's own
-/// `<Name>Params` and encode its `<Name>Result` straight back; the shell answers `script.active` itself, and
-/// forwards `turn.ended` / `session.ended` / `cancel` to both the engine and its own state.
+/// `<Name>Params` and encode its `<Name>Result` straight back; the shell answers `script.active` and Winter.app's
+/// `view.subscribe` / `view.unsubscribe` itself, and forwards `turn.ended` / `session.ended` / `cancel` to both
+/// the engine and its own state. Which client may call what is the server's gate (`HelperServer.permits`).
 public final class RPCDispatcher: @unchecked Sendable {
-    public typealias Handler = (JSONValue?) async throws -> AnyEncodable
+    public typealias Handler = (JSONValue?, RequestContext) async throws -> AnyEncodable
 
     private let core: CoreService
     private let coordinator: HelperCoordinator
+    private let viewHub: ViewHub
     private let inFlight: InFlightRegistry
     private var routes: [String: Handler] = [:]
 
-    public init(core: CoreService, coordinator: HelperCoordinator, inFlight: InFlightRegistry) {
+    public init(core: CoreService, coordinator: HelperCoordinator, viewHub: ViewHub, inFlight: InFlightRegistry) {
         self.core = core
         self.coordinator = coordinator
+        self.viewHub = viewHub
         self.inFlight = inFlight
         buildRoutes()
     }
@@ -22,9 +38,9 @@ public final class RPCDispatcher: @unchecked Sendable {
     /// Every method this dispatcher answers (`hello` is the connection's own).
     public var methods: [String] { routes.keys.sorted() }
 
-    public func handle(method: String, params: JSONValue?) async throws -> AnyEncodable {
+    public func handle(method: String, params: JSONValue?, context: RequestContext = .daemon) async throws -> AnyEncodable {
         guard let route = routes[method] else { throw RPCError.unsupported("unknown method \(method)") }
-        return try await route(params)
+        return try await route(params, context)
     }
 
     /// `params` (absent = `{}`) decoded as `P`.
@@ -33,7 +49,7 @@ public final class RPCDispatcher: @unchecked Sendable {
     }
 
     private func engine<P: Decodable, R: Encodable>(_ method: String, _ call: @escaping (CoreService, P) async throws -> R) {
-        routes[method] = { [core] params in
+        routes[method] = { [core] params, _ in
             let decoded = try RPCDispatcher.decode(P.self, params)
             return AnyEncodable(try await call(core, decoded))
         }
@@ -46,10 +62,26 @@ public final class RPCDispatcher: @unchecked Sendable {
         engine("permissions.request") { try await $0.permissionsRequest($1 as PermissionsRequestParams) }
         engine("apps.list") { try await $0.appsList($1 as AppsListParams) }
         engine("screen.windows") { try await $0.screenWindows($1 as ScreenWindowsParams) }
-        engine("target.bind") { try await $0.targetBind($1 as TargetBindParams) }
-        engine("target.useWindow") { try await $0.targetUseWindow($1 as TargetUseWindowParams) }
+        // Binding is where Winter.app's view of a session comes from: the result names the target id, bundle id
+        // and window that the engine's `targetBound` event does not.
+        engine("target.bind") { [viewHub] (core: CoreService, p: TargetBindParams) in
+            let r = try await core.targetBind(p)
+            await viewHub.bound(ViewTarget(sessionId: p.sessionId, targetId: r.targetId, pid: r.app.pid, windowId: r.window.id,
+                                           appName: r.app.name, bundleId: r.app.bundleId, windowFrame: ViewTarget.rect(r.window.frame),
+                                           mirror: p.mirror))
+            return r
+        }
+        engine("target.useWindow") { [viewHub] (core: CoreService, p: TargetUseWindowParams) in
+            let r = try await core.targetUseWindow(p)
+            await viewHub.windowChanged(targetId: p.targetId, windowId: r.window.id, windowFrame: ViewTarget.rect(r.window.frame))
+            return r
+        }
         engine("target.windows") { try await $0.targetWindows($1 as TargetWindowsParams) }
-        engine("target.release") { try await $0.targetRelease($1 as TargetReleaseParams) }
+        engine("target.release") { [viewHub] (core: CoreService, p: TargetReleaseParams) in
+            let r = try await core.targetRelease(p)
+            await viewHub.release(targetId: p.targetId)
+            return r
+        }
         engine("target.snapshot") { try await $0.targetSnapshot($1 as TargetSnapshotParams) }
         engine("target.find") { try await $0.targetFind($1 as TargetFindParams) }
         engine("target.screenshot") { try await $0.targetScreenshot($1 as TargetScreenshotParams) }
@@ -59,17 +91,17 @@ public final class RPCDispatcher: @unchecked Sendable {
         engine("screen.screenshot") { try await $0.screenScreenshot($1 as ScreenScreenshotParams) }
         engine("screen.appAt") { try await $0.screenAppAt($1 as ScreenAppAtParams) }
 
-        routes["script.active"] = { [coordinator] params in
+        routes["script.active"] = { [coordinator] params, _ in
             let p = try RPCDispatcher.decode(ScriptActiveParams.self, params)
             await coordinator.setScriptActive(sessionId: p.sessionId, active: p.active)
             return AnyEncodable(EmptyResult())
         }
-        routes["turn.ended"] = { [core, coordinator] params in
+        routes["turn.ended"] = { [core, coordinator] params, _ in
             let p = try RPCDispatcher.decode(TurnEndedParams.self, params)
             await coordinator.turnEnded(sessionId: try RPCDispatcher.sessionId(params))
             return AnyEncodable(try await core.turnEnded(p))
         }
-        routes["session.ended"] = { [core, coordinator] params in
+        routes["session.ended"] = { [core, coordinator] params, _ in
             let p = try RPCDispatcher.decode(SessionEndedParams.self, params)
             let sessionId = try RPCDispatcher.sessionId(params)
             // The shell's half (mirrors closed, Esc disarmed, targets forgotten) happens even if the engine fails.
@@ -83,7 +115,17 @@ public final class RPCDispatcher: @unchecked Sendable {
             await coordinator.sessionEnded(sessionId: sessionId)
             return AnyEncodable(result)
         }
-        routes["cancel"] = { [core, inFlight] params in
+        routes["view.subscribe"] = { [viewHub] params, context in
+            let p = try RPCDispatcher.decode(ViewSubscribeParams.self, params)
+            let targets = await viewHub.subscribe(connection: context.connectionID, p)
+            return AnyEncodable(JSONValue.object(["targets": .array(targets.map { .object($0.wire) })]))
+        }
+        routes["view.unsubscribe"] = { [viewHub] params, context in
+            let p = try RPCDispatcher.decode(ViewUnsubscribeParams.self, params)
+            await viewHub.unsubscribe(connection: context.connectionID, sessionId: p.sessionId)
+            return AnyEncodable(EmptyResult())
+        }
+        routes["cancel"] = { [core, inFlight] params, _ in
             let p = try RPCDispatcher.decode(CancelParams.self, params)
             guard let callId = params?["callId"]?.stringValue else { throw RPCError.invalidParams("params.callId is required") }
             // Stop the shell's own tasks first, then let the engine stop its work, then answer whatever is

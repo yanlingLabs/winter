@@ -16,6 +16,9 @@
  *     checks the pid `hello` names against the helper's stated requirement (`codesign --verify -R=… <pid>`,
  *     the check the daemon makes over Security.framework) — then `status`, an engine method, an unknown
  *     method, and the three refusals (protocol, home, a first request that is not hello), each answered and
+ *     closed; then Winter.app's leg (the same bun, also accepted as a fake Winter.app): hello client:"app",
+ *     status and view.subscribe/unsubscribe allowed, every other method not_allowed, the daemon refused view.*,
+ *     and — on a second test helper whose app requirement bun does not meet — a false client:"app" refused and
  *     closed. Finally the idle quit: once no script runs and nothing is bound it exits on its own — with the
  *     daemon's connection still open (that connection is not work) — closing it and removing its socket.
  */
@@ -208,6 +211,8 @@ async function main(): Promise<void> {
     const helper = launch(helperExecutable(testApp, "test"), {
       WINTER_CU_HOME: home,
       WINTER_CU_TEST_DAEMON_REQUIREMENT: fakeDaemon,
+      // The same bun plays Winter.app too: a peer may claim any client its code satisfies.
+      WINTER_CU_TEST_APP_REQUIREMENT: fakeDaemon,
       WINTER_CU_TEST_IDLE_SECONDS: "3",
     });
     launched.push(helper);
@@ -237,6 +242,24 @@ async function main(): Promise<void> {
     const active = await daemon.request(5, "script.active", { sessionId: "s_verify", active: true });
     check(typeof active === "object" && JSON.stringify(active.result) === "{}", "script.active → {}", JSON.stringify(active));
 
+    // ── 3b. Winter.app as the second client (the in-window mirror's view stream) ──
+    const app = await LineClient.connect(socketPath);
+    const appHello = await app.request(1, "hello", { protocol: 1, client: "app", home });
+    check(typeof appHello === "object" && appHello.result?.pid === helper.child.pid, "Winter.app (fake identity): hello client:\"app\" → {protocol, helperVersion, pid}", JSON.stringify(appHello));
+    const appStatus = await app.request(2, "status");
+    check(typeof appStatus === "object" && appStatus.result?.helperVersion === version, "Winter.app may read status", JSON.stringify(appStatus));
+    const subscribed = await app.request(3, "view.subscribe", { sessionId: "s_verify", frames: true, maxFps: 5, maxWidth: 360 });
+    check(typeof subscribed === "object" && JSON.stringify(subscribed.result) === JSON.stringify({ targets: [] }), "view.subscribe → {targets: []} (nothing bound)", JSON.stringify(subscribed));
+    for (const [n, method] of ["apps.list", "target.bind", "script.active", "session.ended"].entries()) {
+      const refused = await app.request(10 + n, method, { sessionId: "s_verify" });
+      check(typeof refused === "object" && refused.error?.data?.code === "not_allowed", `Winter.app may not call ${method} → not_allowed`, JSON.stringify(refused));
+    }
+    const unsubscribed = await app.request(20, "view.unsubscribe", { sessionId: "s_verify" });
+    check(typeof unsubscribed === "object" && JSON.stringify(unsubscribed.result) === "{}", "view.unsubscribe → {}", JSON.stringify(unsubscribed));
+    const daemonView = await daemon.request(7, "view.subscribe", { sessionId: "s_verify", frames: true });
+    check(typeof daemonView === "object" && daemonView.error?.data?.code === "not_allowed", "the daemon may not subscribe to frames → not_allowed", JSON.stringify(daemonView));
+    app.close();
+
     const refusals: { what: string; first: Record<string, unknown>; code: string }[] = [
       { what: "a protocol mismatch", first: { id: 1, method: "hello", params: { protocol: 2, client: "daemon", home } }, code: "protocol_mismatch" },
       { what: "a home mismatch", first: { id: 1, method: "hello", params: { protocol: 1, client: "daemon", home: realpathSync(tmpdir()) } }, code: "home_mismatch" },
@@ -249,6 +272,27 @@ async function main(): Promise<void> {
       const replied = typeof reply === "object" && reply.error?.data?.code === code;
       check(replied && (await client.next()) === "eof", `${what} → ${code}, then the connection is closed`, JSON.stringify(reply));
       client.close();
+    }
+
+    // A helper whose app requirement this bun does not satisfy: claiming to be Winter.app is refused, closed.
+    {
+      const home2 = tempHome();
+      homes.push(home2);
+      const socket2 = join(home2, "run", HELPER_SOCKET_NAME);
+      const strict = launch(helperExecutable(testApp, "test"), {
+        WINTER_CU_HOME: home2,
+        WINTER_CU_TEST_DAEMON_REQUIREMENT: fakeDaemon,
+        WINTER_CU_TEST_APP_REQUIREMENT: "never",
+      });
+      launched.push(strict);
+      if (check(await waitFor(() => existsSync(socket2), 10_000), "a second test helper (no app identity this bun satisfies) listens")) {
+        const claimant = await LineClient.connect(socket2);
+        const reply = await claimant.request(1, "hello", { protocol: 1, client: "app", home: home2 });
+        check(typeof reply === "object" && reply.error?.data?.code === "not_allowed" && (await claimant.next()) === "eof",
+          "a peer that is not Winter.app saying client:\"app\" → not_allowed, then closed", JSON.stringify(reply));
+        claimant.close();
+      }
+      await stop(strict);
     }
 
     // The daemon stays connected: its one persistent connection must not keep an idle helper alive.

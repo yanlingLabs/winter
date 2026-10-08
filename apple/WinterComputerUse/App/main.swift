@@ -6,12 +6,13 @@ import WinterComputerUseShell
 
 #if WINTER_CU_TEST_BUILD
 // Compiled only into the test helper that `bun run verify:computer-helper` builds (the compilation condition
-// is passed on that one xcodebuild command line, never set in project.yml): the fake daemon identity it
-// accepts, and a short idle quit. A dev or release binary contains neither name (release.ts checks).
+// is passed on that one xcodebuild command line, never set in project.yml): the fake daemon and Winter.app
+// identities it accepts, and a short idle quit. A dev or release binary contains neither name (release.ts checks).
 let environment = ProcessInfo.processInfo.environment
 let testHooks: HelperTestHooks? = HelperTestHooks(
     daemonRequirement: environment["WINTER_CU_TEST_DAEMON_REQUIREMENT"],
-    idleSeconds: environment["WINTER_CU_TEST_IDLE_SECONDS"].flatMap(Double.init)
+    idleSeconds: environment["WINTER_CU_TEST_IDLE_SECONDS"].flatMap(Double.init),
+    appRequirement: environment["WINTER_CU_TEST_APP_REQUIREMENT"]
 )
 #else
 let testHooks: HelperTestHooks? = nil

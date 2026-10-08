@@ -31,9 +31,10 @@ public enum HelperNotification: Equatable, Sendable {
 }
 
 /// The helper's main-actor state: which sessions are running scripts (the Esc tap's arming, and idle
-/// accounting), which targets are bound (idle accounting and the mirrors) and which daemon connections are
-/// open. It is the engine's `CUCoreEvents` receiver, and maps those events onto the presentation layer and
-/// onto notifications.
+/// accounting), which targets are bound (idle accounting, the cursor overlay) and which daemon connections are
+/// open. It is the engine's `CUCoreEvents` receiver, and maps those events onto the on-screen cursor overlay,
+/// onto Winter.app's view stream (`ViewHub`) and onto the daemon's notifications. The helper shows no floating
+/// mirror: the live mirror is drawn inside Winter.app's session window, from the view stream.
 @MainActor public final class HelperCoordinator: CUCoreEvents {
     /// How long a synthetic Escape from the helper's own key action may pass the armed tap.
     public static let syntheticEscapeWindow: TimeInterval = 0.5
@@ -46,6 +47,7 @@ public enum HelperNotification: Equatable, Sendable {
 
     private let presentation: CUPresentation
     private let escapeTap: CUEscapeTap
+    public let viewHub: ViewHub
     private var idleTimer: IdleQuitTimer?
     /// Where notifications go (the server's broadcast). Called on the main actor.
     public var notify: (HelperNotification) -> Void = { _ in }
@@ -56,12 +58,14 @@ public enum HelperNotification: Equatable, Sendable {
     private var bound: [BoundTarget: (appName: String, mirror: Bool)] = [:]
     private var lastPermissions: (accessibility: Bool, screenRecording: Bool)?
 
-    public init(presentation: CUPresentation, escapeTap: CUEscapeTap) {
+    public init(presentation: CUPresentation, escapeTap: CUEscapeTap, viewHub: ViewHub) {
         self.presentation = presentation
         self.escapeTap = escapeTap
-        // Mirrors are asked for per bind (`target.bind`'s `mirror`, which the daemon derives from
-        // `computerUse.mirror`), so the global switch stays on.
-        presentation.mirrorsEnabled = true
+        self.viewHub = viewHub
+        // No floating mirror in the helper any more (the mirror lives in Winter.app's window). Off as well as
+        // never asked for: the presentation layer re-shows a mirror on a cursor event for a target whose mirror
+        // was once requested, and this switch is what guarantees it never does.
+        presentation.mirrorsEnabled = false
         escapeTap.onEscape = { [weak self] in
             MainActor.assumeIsolated { self?.escapePressed() }
         }
@@ -115,6 +119,7 @@ public enum HelperNotification: Equatable, Sendable {
         refreshArming()
         bound = bound.filter { $0.key.sessionId != sessionId }
         presentation.sessionEnded(sessionId: sessionId)
+        viewHub.sessionEnded(sessionId: sessionId)
         refreshIdle()
     }
 
@@ -140,23 +145,20 @@ public enum HelperNotification: Equatable, Sendable {
 
     // MARK: CUCoreEvents
 
+    /// Recorded for the cursor overlay's app name and idle accounting. Winter.app hears of the bind from the
+    /// `target.bind` result (`ViewHub.bound`), which names the target id, bundle id and window size this event
+    /// does not carry.
     public func targetBound(sessionId: String, pid: pid_t, windowID: CGWindowID, appName: String, mirror: Bool) {
         bound[BoundTarget(sessionId: sessionId, pid: pid, windowID: windowID)] = (appName, mirror)
-        if mirror {
-            presentation.showMirror(sessionId: sessionId, target: CUWindowRef(pid: pid, windowID: windowID, appName: appName))
-        }
         refreshIdle()
     }
 
     /// A release, a lost target (the engine reports both `targetReleased` and `targetLost`) or the engine's half
-    /// of `session.ended`: the mirror is hidden once, for a target still known to have one — never again for a
-    /// repeat, and not for a session whose mirrors `sessionEnded` already closed.
+    /// of `session.ended`. Winter.app is told once (`ViewHub.released` ignores a target already gone).
     public func targetReleased(sessionId: String, pid: pid_t, windowID: CGWindowID) {
         let key = BoundTarget(sessionId: sessionId, pid: pid, windowID: windowID)
-        guard let record = bound.removeValue(forKey: key) else { return }
-        if record.mirror {
-            presentation.hideMirror(sessionId: sessionId, target: CUWindowRef(pid: pid, windowID: windowID, appName: record.appName))
-        }
+        viewHub.released(sessionId: sessionId, pid: pid, windowId: windowID)
+        guard bound.removeValue(forKey: key) != nil else { return }
         refreshIdle()
     }
 
@@ -165,6 +167,8 @@ public enum HelperNotification: Equatable, Sendable {
     /// with no frame, a "key" with no combo, a "drag" with no end), is dropped rather than guessed.
     public func actionAt(sessionId: String, pid: pid_t, windowID: CGWindowID, point: CGPoint, kind: String, dragTo: CGPoint?,
                          frame: CGRect?, text: String?, count: Int?, button: String?) {
+        viewHub.cursor(sessionId: sessionId, pid: pid, windowId: windowID, point: point, kind: kind, dragTo: dragTo,
+                       frame: frame, text: text, count: count, button: button)
         guard let cursorKind = CUCursorKind(core: kind, dragTo: dragTo, frame: frame, text: text, count: count, button: button)
         else { return }
         let appName = bound[BoundTarget(sessionId: sessionId, pid: pid, windowID: windowID)]?.appName ?? ""
@@ -172,6 +176,7 @@ public enum HelperNotification: Equatable, Sendable {
     }
 
     public func targetLost(targetId: String, reason: String) {
+        viewHub.release(targetId: targetId)
         notify(.targetLost(targetId: targetId, reason: reason))
     }
 
