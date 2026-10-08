@@ -39,7 +39,7 @@ function setup(opts: { policy?: SessionApprovalPolicy; facts?: Partial<SessionFa
 
 const cards = (events: NewSessionEvent[]) => events.filter((e) => e.type === "approval_requested") as Array<Extract<NewSessionEvent, { type: "approval_requested" }>>;
 
-async function failsWith(p: Promise<unknown>, kind: string): Promise<string> {
+async function failsWith(p: Promise<unknown>, kind: AutomationFailure["kind"]): Promise<string> {
   try { await p; } catch (e) {
     expect(e).toBeInstanceOf(AutomationFailure);
     expect((e as AutomationFailure).kind).toBe(kind);

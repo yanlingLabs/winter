@@ -2,7 +2,8 @@
 // the JSON-RPC method shapes. NDJSON, one JSON-RPC 2.0 object per line; requests from the daemon, three
 // notifications from the helper. The helper is a SEPARATE signed app with its own TCC grants (R5): the daemon
 // never spawns it (TCC would attribute it to the parent) — it is launched through LaunchServices by bundle id.
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { WINTER_TEAM_ID } from "../auth/app-token-acl";
 import type { WinterProfile } from "../profile";
 
@@ -11,6 +12,29 @@ export const HELPER_PROTOCOL = 1;
 /** The helper's bundle id per profile: dist `com.winter.computeruse`, dev `com.winter.computeruse.dev`. */
 export function helperBundleIdFor(profile: WinterProfile): string {
   return profile === "dev" ? "com.winter.computeruse.dev" : "com.winter.computeruse";
+}
+
+/** The helper app's display name per profile (its bundle's file name). */
+export function helperAppNameFor(profile: WinterProfile): string {
+  return profile === "dev" ? "Winter Computer Use Dev.app" : "Winter Computer Use.app";
+}
+
+/**
+ * WHERE the helper app is, so the daemon can launch it BY PATH (`open -g -j -a <path>` — spine, after L1a): a
+ * bundle-id launch can resolve to any registered copy, a path cannot.
+ *   - dist: `Winter.app/Contents/Helpers/Winter Computer Use.app` — `winter-core` lives in `Contents/MacOS`;
+ *   - dev: `<repo>/dist/dev/Winter Computer Use Dev.app`, beside the signed dev daemon `dist/dev/winter-core`
+ *     (built by `bun run dev:helper`); a daemon run from source under `bun` finds the repo from this file.
+ * `$WINTER_COMPUTER_USE_APP` overrides both (a test, an unusual layout). The helper is verified by its code
+ * signature after it answers, so a wrong path can only fail, never impersonate it.
+ */
+export function helperAppPathFor(profile: WinterProfile, env: NodeJS.ProcessEnv = process.env, execPath: string = process.execPath): string {
+  const override = env.WINTER_COMPUTER_USE_APP;
+  if (override !== undefined && override.trim().length > 0) return override;
+  if (profile === "dist") return join(dirname(execPath), "..", "Helpers", helperAppNameFor("dist"));
+  const compiled = typeof Bun !== "undefined" && (Bun.main.startsWith("/$bunfs/") || Bun.main.includes("/$bunfs/"));
+  if (compiled) return join(dirname(execPath), helperAppNameFor("dev"));
+  return fileURLToPath(new URL(`../../../../dist/dev/${helperAppNameFor("dev")}`, import.meta.url));
 }
 
 /** The designated requirement the daemon holds the helper to (identifier + Winter's team), checked on the

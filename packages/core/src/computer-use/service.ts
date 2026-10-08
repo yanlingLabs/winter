@@ -232,6 +232,13 @@ export class ComputerV2Service {
     };
     ctxRef.ctx = ctx;
     state.active = ctx;
+    // `script.active` brackets every script run (the helper arms its Esc tap while any session is active):
+    // told now when the helper is already connected, else at the run's first helper call — a print-only
+    // script never launches the helper just to say so.
+    if (this.deps.helper.connected) {
+      ctx.scriptActiveTold = true;
+      this.deps.helper.tell("script.active", { sessionId, active: true });
+    }
     const onAbort = (): void => this.cancel(ctx, "the turn was interrupted");
     if (call.signal?.aborted) onAbort();
     else call.signal?.addEventListener("abort", onAbort, { once: true });
@@ -761,7 +768,10 @@ export class ComputerV2Service {
     (state.idleTimer as { unref?: () => void }).unref?.();
   }
 
-  /** The session's driver ended, the session is gone, or its worker idled out: end its runtime. */
+  /** The session is gone (deleted — its driver ends for good), its worker idled out, or the daemon stops: end
+   *  its runtime and tell the helper (`session.ended` releases the session's targets and closes its mirrors).
+   *  A child incarnation ending (idle eviction, a credential swap) is NOT this: the worker keeps the session's
+   *  variables and bindings across incarnations, and has its own 30-minute idle. */
   endSession(sessionId: string): void {
     const state = this.sessions.get(sessionId);
     if (state === undefined) return;

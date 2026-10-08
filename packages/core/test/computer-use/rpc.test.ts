@@ -99,7 +99,7 @@ describe("computerUse.* (local-only RPCs)", () => {
     await c.hello(tokens.harness, "app");
     const r = await c.request(METHODS.computerUseRequestPermission, { kind: "screenRecording" });
     expect(r.result).toEqual({ ok: true });
-    expect(fake.launched).toEqual(["com.winter.computeruse.dev"]);
+    expect(fake.launched).toEqual([expect.stringMatching(/dist\/dev\/Winter Computer Use Dev\.app$/)]);
     expect(fake.calls("permissions.request")).toEqual([{ kind: "screenRecording" }]);
     fake.quit();
     fake.installed = false;

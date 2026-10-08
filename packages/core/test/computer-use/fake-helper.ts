@@ -17,6 +17,7 @@ export class FakeHelper {
   verifyOk = true;
   helloProtocol = 1;
   pid = 4242;
+  /** The app PATHS the launcher was asked to open (the daemon launches the helper by path). */
   readonly launched: string[] = [];
   readonly requests: Array<{ method: string; params: Record<string, unknown> }> = [];
   readonly apps: FakeApp[] = [
@@ -42,7 +43,7 @@ export class FakeHelper {
   };
   readonly launcher: HelperLauncher = {
     installed: () => this.installed,
-    launch: async (bundleId) => { this.launched.push(bundleId); this.running = true; },
+    launch: async (appPath) => { this.launched.push(appPath); this.running = true; },
   };
   readonly verifier: HelperVerifier = () => this.verifyOk;
 

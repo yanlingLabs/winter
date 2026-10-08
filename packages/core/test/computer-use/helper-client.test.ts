@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { processSatisfiesRequirement } from "../../src/computer-use/helper-verify";
-import { HelperRpcError, HelperUnavailableError, helperBundleIdFor, helperRequirementFor, helperSocketPath } from "../../src/computer-use/protocol";
+import { HelperRpcError, HelperUnavailableError, helperAppNameFor, helperAppPathFor, helperBundleIdFor, helperRequirementFor, helperSocketPath } from "../../src/computer-use/protocol";
 import type { HelperNotification } from "../../src/computer-use/protocol";
 import { FakeHelper, FakeHelperError } from "./fake-helper";
 
@@ -46,12 +46,19 @@ describe("the helper client", () => {
     expect(c.version).toBe("1.0-test");
   });
 
-  test("not running: launches it by bundle id through the launcher, then connects", async () => {
+  test("the helper app's path: dist inside Winter.app's Helpers, dev beside the dev daemon, an env override", () => {
+    expect(helperAppPathFor("dist", {}, "/Applications/Winter.app/Contents/MacOS/winter-core")).toBe("/Applications/Winter.app/Contents/Helpers/Winter Computer Use.app");
+    expect(helperAppPathFor("dev", {})).toMatch(/\/dist\/dev\/Winter Computer Use Dev\.app$/);
+    expect(helperAppPathFor("dist", { WINTER_COMPUTER_USE_APP: "/tmp/X.app" })).toBe("/tmp/X.app");
+    expect(helperAppNameFor("dev")).toBe("Winter Computer Use Dev.app");
+  });
+
+  test("not running: launches it BY PATH through the launcher, then connects", async () => {
     const fake = new FakeHelper();
     fake.running = false;
     const { c } = client(fake);
     await c.ensure();
-    expect(fake.launched).toEqual(["com.winter.computeruse.dev"]);
+    expect(fake.launched).toEqual([expect.stringMatching(/dist\/dev\/Winter Computer Use Dev\.app$/)]);
   });
 
   test("never launches when launching is not allowed (a test daemon's temp home)", async () => {
@@ -66,7 +73,8 @@ describe("the helper client", () => {
     const fake = new FakeHelper();
     fake.running = false;
     fake.installed = false;
-    await expect(client(fake).c.ensure()).rejects.toThrow("not installed");
+    await expect(client(fake).c.ensure()).rejects.toThrow("bun run dev:helper");
+    await expect(client(fake, { profile: "dist" }).c.ensure()).rejects.toThrow("not installed");
     const slow = new FakeHelper();
     slow.running = false;
     slow.launcher.launch = async () => { /* launched, but it never listens */ };
@@ -96,7 +104,7 @@ describe("the helper client", () => {
   test("a helper error arrives as HelperRpcError with its data.code and data", async () => {
     const fake = new FakeHelper();
     fake.handlers["target.act"] = () => { throw new FakeHelperError("stale_ref", "gone", { ref: 12 }); };
-    const err = await client(fake).c.request("target.act", {}).catch((e) => e);
+    const err = (await client(fake).c.request("target.act", {}).then(() => undefined, (e: unknown) => e)) as HelperRpcError;
     expect(err).toBeInstanceOf(HelperRpcError);
     expect(err.code).toBe("stale_ref");
     expect(err.data.ref).toBe(12);
@@ -120,7 +128,7 @@ describe("the helper client", () => {
     const p = c.request("target.waitFor", {});
     await Bun.sleep(5);
     fake.quit();
-    const err = await p.catch((e) => e);
+    const err = (await p.then(() => undefined, (e: unknown) => e)) as HelperUnavailableError;
     expect(err).toBeInstanceOf(HelperUnavailableError);
     expect(err.retryable).toBe(true);
     expect(disconnects()).toBe(1);

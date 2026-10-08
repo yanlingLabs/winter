@@ -2,8 +2,8 @@
 // session. Lazily opened on the first call that needs it:
 //
 //   1. connect to `<home>/run/computer-use.sock`; when nothing answers, LAUNCH the helper through
-//      LaunchServices (`open -g -j -b <bundleId>` — never a child of the daemon, or TCC would check the
-//      daemon's grants) and retry for up to 5 s;
+//      LaunchServices BY PATH (`open -g -j -a <app>` — never a child of the daemon, or TCC would check the
+//      daemon's grants; `protocol.ts`'s `helperAppPathFor`) and retry for up to 5 s;
 //   2. `hello {protocol: 1, client: "daemon", home}` → `{protocol, helperVersion, pid}`;
 //   3. VERIFY the helper: `pid`'s running code against the helper's designated requirement
 //      (`helper-verify.ts`). A mismatch closes the connection and fails `helper_unavailable`.
@@ -11,17 +11,23 @@
 // Every failure to reach it is the typed `HelperUnavailableError` (retryable): the next call tries again, and
 // a relaunched helper starts with no targets — the service turns that into `TargetLost` on the next use.
 //
+// ONE persistent connection per daemon: the helper releases a session's targets when the last connection that
+// used the session closes, so a connection per call would drop every binding. The helper also idle-quits (10
+// minutes with no targets, mirrors or running scripts), connection or not: a closed connection is "the helper
+// is gone" — `onDisconnect` clears the helper-side state, and the next call relaunches it.
+//
 // The transport, the launcher and the verifier are injectable: tests drive a FAKE helper end to end and never
 // launch an app or touch TCC. In production the client launches nothing unless the daemon runs on its
 // profile's own default home (the helper serves only that home, by its bundle id), so a test daemon on a temp
 // home can never start the real helper.
 import { createConnection } from "node:net";
 import { spawn } from "node:child_process";
-import { applicationPathsForBundleId } from "../auth/keychain-ffi";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { WinterProfile } from "../profile";
 import { processSatisfiesRequirement } from "./helper-verify";
 import {
-  HELPER_MAX_RESPONSE_LINE, HELPER_PROTOCOL, HelperRpcError, HelperUnavailableError, helperBundleIdFor, helperRequirementFor,
+  HELPER_MAX_RESPONSE_LINE, HELPER_PROTOCOL, HelperRpcError, HelperUnavailableError, helperAppPathFor, helperBundleIdFor, helperRequirementFor,
   helperSocketPath, type HelloResult, type HelperNotification, type HelperPermissions, type StatusResult,
 } from "./protocol";
 
@@ -33,8 +39,10 @@ export interface HelperConnection {
 }
 export interface HelperTransport { connect(socketPath: string): Promise<HelperConnection> }
 export interface HelperLauncher {
-  installed(bundleId: string): boolean;
-  launch(bundleId: string): Promise<void>;
+  /** Is the helper app at `appPath`? */
+  installed(appPath: string): boolean;
+  /** Launch the app at `appPath` through LaunchServices. */
+  launch(appPath: string): Promise<void>;
 }
 export type HelperVerifier = (pid: number, requirement: string) => boolean;
 
@@ -46,6 +54,8 @@ export interface HelperClientDeps {
   verifier?: HelperVerifier;
   /** May the client LAUNCH the helper? Production passes "the daemon runs on its profile's default home". */
   launchAllowed: boolean;
+  /** The helper app to launch (default `helperAppPathFor(profile)`). */
+  appPath?: string;
   /** How long to wait for the socket after a launch (spec §3.4: 5 s). */
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
@@ -94,13 +104,13 @@ export const unixSocketTransport: HelperTransport = {
   }),
 };
 
-/** The real launcher: LaunchServices by bundle id, in the background (`-g`) and hidden (`-j`). */
+/** The real launcher: LaunchServices BY PATH, in the background (`-g`) and hidden (`-j`). */
 export const launchServicesLauncher: HelperLauncher = {
-  installed: (bundleId) => {
-    try { return applicationPathsForBundleId(bundleId).length > 0; } catch { return false; }
+  installed: (appPath) => {
+    try { return existsSync(join(appPath, "Contents", "Info.plist")); } catch { return false; }
   },
-  launch: (bundleId) => new Promise((resolve, reject) => {
-    const child = spawn("/usr/bin/open", ["-g", "-j", "-b", bundleId], { stdio: "ignore" });
+  launch: (appPath) => new Promise((resolve, reject) => {
+    const child = spawn("/usr/bin/open", ["-g", "-j", "-a", appPath], { stdio: "ignore" });
     child.on("error", reject);
     child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`open exited ${code}`))));
   }),
@@ -122,12 +132,14 @@ export class HelperClient {
   private readonly launcher: HelperLauncher;
   private readonly verifier: HelperVerifier;
   readonly bundleId: string;
+  readonly appPath: string;
 
   constructor(private readonly deps: HelperClientDeps) {
     this.transport = deps.transport ?? unixSocketTransport;
     this.launcher = deps.launcher ?? launchServicesLauncher;
     this.verifier = deps.verifier ?? processSatisfiesRequirement;
     this.bundleId = helperBundleIdFor(deps.profile);
+    this.appPath = deps.appPath ?? helperAppPathFor(deps.profile);
   }
 
   get connected(): boolean { return this.conn !== undefined; }
@@ -150,10 +162,12 @@ export class HelperClient {
       if (!this.deps.launchAllowed) {
         throw new HelperUnavailableError("Winter Computer Use is not running, and this daemon does not launch it (it serves only the profile's own Winter home)", false);
       }
-      if (!this.launcher.installed(this.bundleId)) {
-        throw new HelperUnavailableError("Winter Computer Use is not installed — reinstall Winter, then try again", false);
+      if (!this.launcher.installed(this.appPath)) {
+        throw new HelperUnavailableError(this.deps.profile === "dev"
+          ? "Winter Computer Use Dev is not built — run `bun run dev:helper`, then try again"
+          : "Winter Computer Use is not installed — reinstall Winter, then try again", false);
       }
-      try { await this.launcher.launch(this.bundleId); } catch (err) {
+      try { await this.launcher.launch(this.appPath); } catch (err) {
         throw new HelperUnavailableError(`Winter Computer Use could not be launched (${err instanceof Error ? err.message : "error"})`);
       }
       const deadline = Date.now() + (this.deps.connectTimeoutMs ?? CONNECT_TIMEOUT_MS);
@@ -299,7 +313,7 @@ export class HelperClient {
   /** What Settings → Computer Use shows. Never launches the helper; asks a connected one for its status. */
   async status(): Promise<HelperStatus> {
     let installed = false;
-    try { installed = this.launcher.installed(this.bundleId); } catch { installed = false; }
+    try { installed = this.launcher.installed(this.appPath); } catch { installed = false; }
     if (this.conn === undefined) {
       // Not connected: connect only if it is already running (no launch).
       const conn = await this.tryConnect(helperSocketPath(this.deps.home));

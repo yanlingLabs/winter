@@ -364,7 +364,7 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     delete w.fake.handlers["apps.list"];
     const r3 = await w.run("const again = await apps.open('Notes')\nprint(again.name)");
     expect(r3.isError).toBe(false);
-    expect(w.fake.launched).toEqual(["com.winter.computeruse.dev"]);
+    expect(w.fake.launched).toEqual([expect.stringMatching(/dist\/dev\/Winter Computer Use Dev\.app$/)]);
   }, 30_000);
 });
 
