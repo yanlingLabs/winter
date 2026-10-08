@@ -829,8 +829,9 @@ for (const name of CEF_HELPERS) {
 // (scripts/embed-computer-helper.sh). Beyond assertSigned's team + timestamp, a release proves what TCC and the
 // daemon key on: the identifier com.winter.computeruse; EXACTLY the stated designated requirement (identifier
 // + team OU — a derived one names the signing certificate's common name, and a change there would silently
-// cost every user their grants); the hardened runtime; no entitlements of any kind (the cs.* half is pinned
-// again in HARDENING_PINS below); an LSUIElement Info.plist at this release's version (the daemon reads it as
+// cost every user their grants); the hardened runtime; exactly one entitlement, Apple Events, for applescript()
+// (no cs.* relaxation — the cs.* family is pinned in HARDENING_PINS below); an LSUIElement Info.plist at this
+// release's version with its Apple Events usage text (the daemon reads the version as
 // `helperVersion`); and no test hooks — they compile only into `verify:computer-helper`'s test flavor, and a
 // release binary containing one would accept a fake daemon. `checkSignedHelper` is the same check
 // `dev:helper` and `verify:computer-helper` run on their bundles.
@@ -849,7 +850,7 @@ assertSigned(computerHelperApp, "Winter Computer Use");
   const satisfied = probe(`codesign --verify --strict -R='${stated}' "${computerHelperApp}" 2>&1`);
   if (!satisfied.ok) failures.push(`the signature does not satisfy its own stated requirement: ${satisfied.stdout.trim()}`);
   if (failures.length > 0) fail(`Winter Computer Use is not signed the way TCC and the daemon need:\n  ${failures.join("\n  ")}`);
-  console.log(`Winter Computer Use verified: ${HELPER.dist.identifier}, designated => ${stated}, hardened runtime, no entitlements, version ${version}, no test hooks.`);
+  console.log(`Winter Computer Use verified: ${HELPER.dist.identifier}, designated => ${stated}, hardened runtime, the Apple Events entitlement only, version ${version}, no test hooks.`);
 }
 // "Start from nothing" pinned where it SHIPS, across every component this repo signs — not just
 // where entitlements are declared. project.yml can hand CODE_SIGN_ENTITLEMENTS to the wrong
@@ -905,8 +906,8 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // deliberately NOT enrolled here — see the team-ID-only probe on libmergedlo.dylib above this
   // array, and that probe's own comment for why.
   { path: join(app, "Contents", "MacOS", "WinterOfficeHelper"), label: "WinterOfficeHelper", expect: [] },
-  // ComputerV2 — Winter Computer Use: no entitlements in v1 (the full "none of any kind" check is above);
-  // Apple Events would be the first, and only with a later phase's AppleScript use.
+  // ComputerV2 — Winter Computer Use: no cs.* relaxation. Its one entitlement is Apple Events (applescript()),
+  // which is not in the cs.* family; checkSignedHelper above pins exactly that one.
   { path: computerHelperApp, label: "Winter Computer Use", expect: [] },
   // Winter Phase 8d (P8d-2) — `winter` is re-signed at embed time under Winter's own team identity
   // (embed-runtimes.sh), same posture as winter-core/WinterHelper above.

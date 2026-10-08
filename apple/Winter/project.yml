@@ -985,7 +985,8 @@ targets:
   # Debug = dev (`Winter Computer Use Dev`, com.winter.computeruse.dev, serves ~/.winter-dev), which
   # `bun run dev:helper` builds (giving the bundle id on its command line — see the Debug config), signs
   # with the stated designated requirement and places in dist/dev/. The helper reads its home from its own
-  # bundle id. No entitlements in v1 (release.ts pins exactly none).
+  # bundle id. Exactly one entitlement, Apple Events (applescript() — Support/WinterComputerUse.entitlements;
+  # checkSignedHelper and embed-computer-helper.sh pin exactly that one).
   WinterComputerUse:
     type: application
     platform: macOS
@@ -1010,9 +1011,11 @@ targets:
         LSUIElement: true
         LSMinimumSystemVersion: "26.0"
         NSScreenCaptureUsageDescription: "Winter Computer Use captures the windows Winter works in, and the screen when Winter is asked to look at it."
+        NSAppleEventsUsageDescription: "Winter Computer Use runs AppleScript in the app Winter is working in, when you let it control that app."
     settings:
       base:
         PRODUCT_NAME: "$(WINTER_CU_APP_NAME)"
+        CODE_SIGN_ENTITLEMENTS: ../WinterComputerUse/Support/WinterComputerUse.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: com.winter.computeruse
         WINTER_CU_APP_NAME: Winter Computer Use
         WINTER_CU_APP_ICON: AppIcon

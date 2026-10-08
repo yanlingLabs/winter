@@ -219,14 +219,17 @@ describe("ComputerV2: release.ts signs, verifies and scans the Winter Computer U
     expect(embedScript).toMatch(/if \[ "\$\{CONFIGURATION:-\}" != "Release" \]; then/);
   });
 
-  test("the embed re-signs with the hardened runtime, a timestamp, the stable identifier, the STATED requirement — and no entitlements", () => {
+  test("the embed re-signs with the hardened runtime, a timestamp, the stable identifier, the STATED requirement — and the Apple Events entitlement only", () => {
     const sign = embedScript.split("\n").findIndex((l) => l.startsWith("codesign --force"));
     const line = `${embedScript.split("\n")[sign]} ${embedScript.split("\n")[sign + 1]}`;
     expect(line).toContain('--identifier "${IDENTIFIER}"');
     expect(line).toContain("--options runtime");
     expect(line).toContain("--timestamp");
     expect(line).toContain('"-r=designated => ${REQUIREMENT}"');
-    expect(line).not.toContain("--entitlements");
+    expect(line).toContain('--entitlements "${ENTITLEMENTS_FILE}"');
+    expect(embedScript).toContain('ENTITLEMENT="com.apple.security.automation.apple-events"');
+    expect(projectYml).toContain("CODE_SIGN_ENTITLEMENTS: ../WinterComputerUse/Support/WinterComputerUse.entitlements");
+    expect(projectYml).toContain("NSAppleEventsUsageDescription:");
     expect(embedScript).toContain('REQUIREMENT="identifier \\"${IDENTIFIER}\\" and anchor apple generic and certificate leaf[subject.OU] = \\"${TEAM}\\""');
   });
 

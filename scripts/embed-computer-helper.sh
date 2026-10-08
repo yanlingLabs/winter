@@ -10,14 +10,16 @@
 #
 # What this does, Release only (a Debug Winter.app embeds no helper; dev uses `bun run dev:helper`):
 #   1. ditto the built helper from BUILT_PRODUCTS_DIR into Contents/Helpers.
-#   2. Re-sign it with the app's identity, the hardened runtime, a secure timestamp, NO entitlements, the
+#   2. Re-sign it with the app's identity, the hardened runtime, a secure timestamp, EXACTLY ONE entitlement
+#      (com.apple.security.automation.apple-events, from apple/WinterComputerUse/Support — applescript() sends
+#      Apple Events, which the hardened runtime refuses without it), the
 #      stable identifier com.winter.computeruse and a STATED designated requirement (identifier + Winter's
 #      team under Apple's anchor). The requirement is what TCC keys the user's grants on, so it must not
 #      change between releases: the one Xcode derives names the signing certificate's common name. It is
 #      stated here rather than through OTHER_CODE_SIGN_FLAGS because release.ts overrides that setting on
 #      its xcodebuild command line for every target.
 #   3. Check the signature took: the recorded requirement is exactly the stated one, the identifier is
-#      right, the hardened runtime flag is set, and there are no entitlements at all.
+#      right, the hardened runtime flag is set, and the entitlements are exactly that one.
 #
 # Env (Xcode's, read like project.yml's other postCompileScripts): BUILT_PRODUCTS_DIR, CONTENTS_FOLDER_PATH,
 # CONFIGURATION, EXPANDED_CODE_SIGN_IDENTITY, DEVELOPMENT_TEAM.
@@ -35,6 +37,8 @@ NAME="Winter Computer Use"
 IDENTIFIER="com.winter.computeruse"
 TEAM="${DEVELOPMENT_TEAM:-37N77U9RSZ}"
 REQUIREMENT="identifier \"${IDENTIFIER}\" and anchor apple generic and certificate leaf[subject.OU] = \"${TEAM}\""
+ENTITLEMENT="com.apple.security.automation.apple-events"
+ENTITLEMENTS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/apple/WinterComputerUse/Support/WinterComputerUse.entitlements"
 SRC="${BUILT_PRODUCTS_DIR}/${NAME}.app"
 DEST_DIR="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Helpers"
 DEST="${DEST_DIR}/${NAME}.app"
@@ -55,7 +59,7 @@ rm -rf "${DEST}"
 ditto "${SRC}" "${DEST}"
 
 codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier "${IDENTIFIER}" --options runtime --timestamp \
-  "-r=designated => ${REQUIREMENT}" "${DEST}"
+  --entitlements "${ENTITLEMENTS_FILE}" "-r=designated => ${REQUIREMENT}" "${DEST}"
 
 RECORDED="$(codesign -d -r- "${DEST}" 2>&1 | sed -n 's/^designated => //p')"
 if [ "${RECORDED}" != "${REQUIREMENT}" ]; then
@@ -76,10 +80,11 @@ if ! echo "${DVV}" | grep -Eq "^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*runtime"
   exit 1
 fi
 ENTS="$(codesign -d --entitlements - --xml "${DEST}" 2>/dev/null || true)"
-if echo "${ENTS}" | grep -q "<key>"; then
-  echo "error: the helper carries entitlements; it must carry none:" >&2
+KEYS="$(echo "${ENTS}" | grep -o "<key>[^<]*</key>" | sort -u | tr -d '\n')"
+if [ "${KEYS}" != "<key>${ENTITLEMENT}</key>" ]; then
+  echo "error: the helper's entitlements must be exactly ${ENTITLEMENT}:" >&2
   echo "${ENTS}" >&2
   exit 1
 fi
 
-echo "Winter Computer Use embedded at Contents/Helpers and signed (Identifier=${IDENTIFIER}, stated designated requirement, hardened runtime, no entitlements)"
+echo "Winter Computer Use embedded at Contents/Helpers and signed (Identifier=${IDENTIFIER}, stated designated requirement, hardened runtime, the Apple Events entitlement only)"

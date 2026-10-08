@@ -18,7 +18,7 @@
  * the real one) and copied to a temp name in `dist/dev/`; `codesign --identifier com.winter.computeruse.dev
  * --options runtime -r=<the stated requirement>` with the team identity (`dev-daemon-lib.ts`'s
  * `resolveDevSigningIdentity`, `WINTER_DEV_SIGN_IDENTITY` overrides); the checks (`checkSignedHelper`: the
- * recorded requirement is the stated one, team, identifier, hardened runtime, no entitlements, LSUIElement,
+ * recorded requirement is the stated one, team, identifier, hardened runtime, the Apple Events entitlement only, LSUIElement,
  * version, no test hooks) and `codesign --verify --deep --strict -R=<requirement>`; then the swap into
  * `dist/dev/Winter Computer Use Dev.app` and `lsregister -f`.
  *

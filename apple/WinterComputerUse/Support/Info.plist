@@ -26,6 +26,8 @@
 	<string>26.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Winter Computer Use runs AppleScript in the app Winter is working in, when you let it control that app.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Winter Computer Use captures the windows Winter works in, and the screen when Winter is asked to look at it.</string>
 </dict>

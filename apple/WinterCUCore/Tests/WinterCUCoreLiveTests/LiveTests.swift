@@ -74,6 +74,79 @@ final class LiveTests: XCTestCase {
         XCTAssertNotNil(Data(base64Encoded: shot.imageBase64))
     }
 
+    /// Every kind of act on a window on ANOTHER desktop leaves the user where they are: the active Space and the
+    /// frontmost app read the same after each, and no act had to put them back. Arrange first: a TextEdit
+    /// document (any text, nothing you mind changing) on another desktop, then run from this one. Skips when
+    /// TextEdit's bound window is on this desktop.
+    func testActsOnAnOffSpaceWindowLeaveTheActiveSpaceAndFrontmostAppAlone() async throws {
+        try requireAccessibility()
+        core.userViewSettleMs = 60
+        core.stepSettleMs = 20
+        let sky = CUSkyLight.system
+        let bound = try await core.targetBind(TargetBindParams(sessionId: "live-view", app: "TextEdit", mirror: false, privatePath: true))
+        defer { Task { _ = try? await core.targetRelease(TargetReleaseParams(targetId: bound.targetId)) } }
+        let t = try core.target(bound.targetId)
+        try XCTSkipUnless(core.isOffThisDesktop(t), "put a TextEdit document window on another desktop first")
+        let areas = try await core.targetFind(TargetFindParams(targetId: bound.targetId, query: .fields(role: "text area", name: nil, text: nil)))
+        let area = try XCTUnwrap(areas.elements.first)
+
+        let acts: [(String, CUAction)] = [
+            ("click", .click(CUClickAction(ref: area.ref))),
+            ("type", .type(CUTypeAction(text: "w", into: area.ref))),
+            ("key", .key(CUKeyAction(combo: "cmd+z"))),
+            ("select", .select(CUSelectAction(ref: area.ref, text: String(area.value?.prefix(1) ?? "w")))),
+            ("scroll", .scroll(CUScrollAction(ref: area.ref, direction: .down))),
+            ("scroll back", .scroll(CUScrollAction(ref: area.ref, direction: .up))),
+            ("menu", .menu(CUMenuAction(path: ["Edit", "Select All"]))),
+            ("context menu", .action(CUAXAction(ref: area.ref, name: "showMenu"))),
+            ("escape", .key(CUKeyAction(combo: "escape"))),
+            ("right click", .click(CUClickAction(ref: area.ref, button: .right))),
+            ("escape again", .key(CUKeyAction(combo: "escape"))),
+        ]
+        for (i, (name, action)) in acts.enumerated() {
+            let space = sky.activeSpace(), front = sky.frontProcessPid()
+            let r = try? await core.targetAct(TargetActParams(targetId: bound.targetId, sessionId: "live-view", callId: "v\(i)",
+                                                              action: action, access: .full, allowForeground: false, privatePath: true))
+            try await Task.sleep(nanoseconds: 500_000_000)  // past the late check
+            XCTAssertEqual(sky.activeSpace(), space, "\(name) switched the desktop")
+            XCTAssertEqual(sky.frontProcessPid(), front, "\(name) changed the frontmost app")
+            for said in ["activated itself", "switched desktops", "frontmost app changed"] {
+                XCTAssertFalse(r?.detail?.contains(said) ?? false, "\(name) had to be put back: \(r?.detail ?? "")")
+            }
+        }
+        _ = try await core.targetScreenshot(TargetScreenshotParams(targetId: bound.targetId, budget: CUImageBudget(maxLongEdge: 800, quality: 0.6)))
+        _ = try await core.targetSnapshot(TargetSnapshotParams(targetId: bound.targetId))
+    }
+
+    /// AppleScript for real, on Finder (always running): a read of the desktop's items comes back; a shell
+    /// through Finder, another app and `activate` are refused before they leave the process. The first run may
+    /// raise macOS's Automation question for the process running the tests.
+    func testAppleScriptReadsFinderAndRefusesTheDoors() async throws {
+        try requireAccessibility()
+        let bound = try await core.targetBind(TargetBindParams(sessionId: "live-as", app: "Finder", mirror: false, privatePath: true))
+        defer { Task { _ = try? await core.targetRelease(TargetReleaseParams(targetId: bound.targetId)) } }
+        let read = try await core.targetAppleScript(TargetAppleScriptParams(
+            targetId: bound.targetId, source: "tell application \"Finder\" to get name of every item of desktop", timeoutMs: 70_000))
+        XCTAssertNotNil(read.result)
+        for (source, said) in [
+            ("tell application \"Finder\" to do shell script \"echo pwned > /tmp/winter-cu-live\"", "`do shell script` runs a shell"),
+            ("do shell script \"id\"", "`do shell script` runs a shell"),
+            ("tell application \"Finder\" to activate", "`activate` would bring the app in front"),
+            ("tell application \"System Events\" to keystroke \"a\"", "only the bound app, Finder, may be scripted"),
+        ] {
+            do {
+                _ = try await core.targetAppleScript(TargetAppleScriptParams(targetId: bound.targetId, source: source))
+                XCTFail("ran: \(source)")
+            } catch let e as CUError {
+                XCTAssertEqual(e.code, "refused", e.message)
+                XCTAssertTrue(e.message.contains(said), e.message)
+            }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: "/tmp/winter-cu-live"))
+        let dictionary = try await core.targetScriptingDictionary(TargetScriptingDictionaryParams(targetId: bound.targetId, search: "trash"))
+        XCTAssertTrue(dictionary.scriptable)
+    }
+
     func testStaleRefAfterRelease() async throws {
         try requireAccessibility()
         let bound = try await core.targetBind(TargetBindParams(sessionId: "live", app: "TextEdit", mirror: false))

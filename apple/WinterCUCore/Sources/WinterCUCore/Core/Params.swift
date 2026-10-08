@@ -482,3 +482,54 @@ public struct SessionEndedParams: Codable, Sendable, Equatable {
     }
 }
 public typealias SessionEndedResult = CUEmpty
+
+// MARK: AppleScript (target.applescript, target.scriptingDictionary)
+
+/// `target.applescript`: a script for the bound app, run in the helper with every Apple Event checked.
+public struct TargetAppleScriptParams: Codable, Sendable, Equatable {
+    public var targetId: String
+    public var source: String
+    /// "applescript" (the default). "javascript" is refused: JXA's Objective-C bridge is past every check.
+    public var language: String?
+    public var timeoutMs: Int?
+    public var callId: String?
+    public init(targetId: String, source: String, language: String? = nil, timeoutMs: Int? = nil, callId: String? = nil) {
+        self.targetId = targetId
+        self.source = source
+        self.language = language
+        self.timeoutMs = timeoutMs
+        self.callId = callId
+    }
+}
+
+public struct TargetAppleScriptResult: Codable, Sendable, Equatable {
+    /// The script's result as AppleScript displays it; nil when it returned nothing.
+    public var result: String?
+    /// What else happened (macOS asked the user for Automation; what moved the user's view and was put back).
+    public var detail: String?
+    public init(result: String?, detail: String? = nil) {
+        self.result = result
+        self.detail = detail
+    }
+}
+
+/// `target.scriptingDictionary`: the bound app's scripting dictionary, summarised.
+public struct TargetScriptingDictionaryParams: Codable, Sendable, Equatable {
+    public var targetId: String
+    public var search: String?
+    public init(targetId: String, search: String? = nil) {
+        self.targetId = targetId
+        self.search = search
+    }
+}
+
+public struct TargetScriptingDictionaryResult: Codable, Sendable, Equatable {
+    public var scriptable: Bool
+    public var text: String?
+    public var truncated: Bool?
+    public init(scriptable: Bool, text: String? = nil, truncated: Bool? = nil) {
+        self.scriptable = scriptable
+        self.text = text
+        self.truncated = truncated
+    }
+}

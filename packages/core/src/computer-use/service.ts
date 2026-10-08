@@ -23,8 +23,8 @@ import { FOREGROUND_LOCK_KEY, LOCK_WAIT_MS, TargetLocks } from "./locks";
 import { ACT_PRIMITIVES, newRunGrants, type AppRef, type ComputerPolicy, type RunGrants } from "./policy";
 import {
   HelperRpcError, HelperUnavailableError, WINTER_OWN_BUNDLE_IDS,
-  type ActAction, type ActResult, type AppAtResult, type AppsListResult, type FindResult, type HelperNotification,
-  type ScreenWindowsResult, type ScreenshotResult, type SnapshotResult, type TargetBindResult, type TargetUseWindowResult, type TargetWindowsResult,
+  type ActAction, type ActResult, type AppAtResult, type AppleScriptResult, type AppsListResult, type FindResult, type HelperNotification,
+  type ScreenWindowsResult, type ScreenshotResult, type ScriptingDictionaryResult, type SnapshotResult, type TargetBindResult, type TargetUseWindowResult, type TargetWindowsResult,
   type WaitForResult, type WaitIdleResult,
 } from "./protocol";
 import type { RecentApps } from "./recent-apps";
@@ -425,6 +425,16 @@ export class ComputerV2Service {
         return undefined;
       }
       case "waitFor": return await this.waitFor(ctx, t, args, metric);
+      case "applescript": return await this.applescript(ctx, t, args, metric);
+      case "scriptingDictionary": {
+        const search = args.search;
+        if (search !== undefined && typeof search !== "string") throw bad("scriptingDictionary() takes { search?: string }");
+        const res = await this.helperCall<ScriptingDictionaryResult>(ctx, "target.scriptingDictionary", { targetId, ...(search === undefined ? {} : { search }) }, metric);
+        // The dictionary is the app's own text: data, inside the fence.
+        ctx.builder.markScreenRead();
+        if (args.emit !== false) ctx.builder.text(res.scriptable ? res.text ?? "" : `${t.name} is not scriptable (it has no scripting dictionary)`, { screen: true });
+        return { scriptable: res.scriptable, ...(res.text === undefined ? {} : { text: res.text }), ...(res.truncated === undefined ? {} : { truncated: res.truncated }) };
+      }
       case "waitForIdle": {
         const quietMs = typeof args.quietMs === "number" ? Math.max(30, Math.floor(args.quietMs)) : 150;
         const timeout = this.clampWait(ctx, typeof args.timeoutMs === "number" ? args.timeoutMs : 3_000);
@@ -660,6 +670,29 @@ export class ComputerV2Service {
     if (args.emit !== false) ctx.builder.image(res.imageBase64, res.mime ?? "image/jpeg");
     else ctx.builder.markScreenRead();
     return handle;
+  }
+
+  /** AppleScript for the bound app, run by the helper with every Apple Event checked (only the bound app; no shell,
+   *  no dialogs, never `activate`). An act: full access only, the per-app card, the floors. Its result is the app's
+   *  data — inside the fence. */
+  private async applescript(ctx: RunCtx, t: TargetInfo, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<unknown> {
+    const source = args.source;
+    if (typeof source !== "string" || source.trim().length === 0) throw bad("applescript() takes the script's source as a string");
+    const language = args.language;
+    if (language !== undefined && language !== "applescript" && language !== "javascript") throw bad('applescript() takes { language: "applescript" | "javascript" }');
+    // The run may wait on macOS's own Automation question the first time: the helper allows a minute more for it,
+    // and the request waits that long too — but never past the script call's own time, so a question the user
+    // answers after the call ended still takes effect for the next script, while this call reports its timeout.
+    const timeoutMs = this.clampWait(ctx, typeof args.timeoutMs === "number" ? args.timeoutMs : 10_000);
+    const res = await this.helperCall<AppleScriptResult>(ctx, "target.applescript",
+      { targetId: t.targetId, source, ...(language === undefined ? {} : { language }), timeoutMs, callId: ctx.callId }, metric,
+      Math.min(timeoutMs + 65_000, Math.max(timeoutMs, ctx.timer.left())));
+    ctx.acted.add(t.targetId);
+    const detail = helperDetail(res.detail);
+    if (detail !== undefined) ctx.builder.daemonLine(detail);
+    ctx.builder.markScreenRead();
+    if (args.emit !== false && res.result !== null && res.result !== undefined) ctx.builder.text(res.result, { screen: true });
+    return { result: res.result ?? null };
   }
 
   private async waitFor(ctx: RunCtx, t: TargetInfo, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<unknown> {
@@ -904,7 +937,7 @@ export class ComputerV2Service {
           // `data.axError` (the raw Accessibility error) is for the log, not the model: the helper's sentence says
           // what could not be done.
           if (data.axError !== undefined) this.deps.log?.(`computer-use: ${msg.primitive} unsupported in ${name} (AX error ${String(data.axError).slice(0, 40)})`);
-          const said = err.message.replace(/\s+/g, " ").trim().slice(0, 400);
+          const said = err.message.replace(/\s+/g, " ").trim().slice(0, 700);
           return { kind: "Error", message: said.length > 0 ? said : `${name} does not support ${msg.primitive}` };
         }
         case "invalid_params": return { kind: "TypeError", message: err.message };

@@ -88,6 +88,8 @@ public final class RPCDispatcher: @unchecked Sendable {
         engine("target.act") { try await $0.targetAct($1 as TargetActParams) }
         engine("target.waitIdle") { try await $0.targetWaitIdle($1 as TargetWaitIdleParams) }
         engine("target.waitFor") { try await $0.targetWaitFor($1 as TargetWaitForParams) }
+        engine("target.applescript") { try await $0.targetAppleScript($1 as TargetAppleScriptParams) }
+        engine("target.scriptingDictionary") { try await $0.targetScriptingDictionary($1 as TargetScriptingDictionaryParams) }
         engine("screen.screenshot") { try await $0.screenScreenshot($1 as ScreenScreenshotParams) }
         engine("screen.appAt") { try await $0.screenAppAt($1 as ScreenAppAtParams) }
 

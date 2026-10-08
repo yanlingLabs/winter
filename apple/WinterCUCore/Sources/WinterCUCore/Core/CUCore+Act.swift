@@ -45,7 +45,7 @@ extension CUCore {
                 try floorCheckPrivacy(t)
                 try saveFloorBeforeAct(p, t)
                 do {
-                    let o = try perform(p, on: t, token: token)
+                    let o = try guardingUserView(p, t) { try perform(p, on: t, token: token) }
                     t.lastActionMs = clock.nowMs()
                     return o
                 } catch let e as CUError where e.code == "stale_element" {
@@ -254,11 +254,10 @@ extension CUCore {
     private func pointerClick(_ p: TargetActParams, _ t: CUTarget, at pt: CGPoint, button: CUMouseButton, count: Int,
                               flags: CGEventFlags, _ token: CUCancellation.Token, announced: Bool = false,
                               element: AXUIElement? = nil, axTried: Bool = false) throws -> ActOutcome {
-        if isOffThisDesktop(t) {
+        if let subject = offScreenSubject(t) {
             return try clickElsewhere(p, t, at: pt, button: button, count: count, flags: flags, token,
-                                      announced: announced, element: element, axTried: axTried)
+                                      announced: announced, element: element, axTried: axTried, subject: subject)
         }
-        let staged = bringOnStage(t)
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
         let synth = self.synth(p)
         let windowFor = self.windowFor(t)
@@ -266,7 +265,18 @@ extension CUCore {
         return try runEvents(p, t, d, focus: true, token, cursor: event) { route, check in
             try synth.click(pid: t.pid, windowFor: windowFor, at: pt, button: button, count: count, flags: flags,
                             route: route, check: check)
-        }.noting(staged)
+        }
+    }
+
+    /// The bound window is not on screen: "X's window is on another desktop" (another Space, full screen) or
+    /// "… is off screen" (minimized, or off stage in Stage Manager) — the subject of the act's words. Pointer
+    /// input there takes the same routes either way: AX first, window-targeted events last. It is never brought
+    /// on screen for an act (un-minimizing or adding it to the stage activates the app and moves the user's
+    /// view); nil when it is on screen.
+    func offScreenSubject(_ t: CUTarget) -> String? {
+        guard sys.window(id: t.windowID)?.onScreen == false else { return nil }
+        return isOffThisDesktop(t) ? "\(t.appName)'s window is on another desktop"
+            : "\(t.appName)'s window is off screen (minimized, or off stage in Stage Manager)"
     }
 
     /// How a click reaches a window on another desktop (another Space or display). AX first, as ChatGPT's
@@ -295,7 +305,7 @@ extension CUCore {
 
     private func clickElsewhere(_ p: TargetActParams, _ t: CUTarget, at pt: CGPoint, button: CUMouseButton, count: Int,
                                 flags: CGEventFlags, _ token: CUCancellation.Token, announced: Bool,
-                                element: AXUIElement?, axTried: Bool) throws -> ActOutcome {
+                                element: AXUIElement?, axTried: Bool, subject: String) throws -> ActOutcome {
         let modified = !flags.isEmpty
         let target = element ?? (modified || button == .middle ? nil : elementAt(pt, in: t))
         let route = axTried ? .events
@@ -314,9 +324,9 @@ extension CUCore {
                 for el in tries {
                     do {
                         try ax.perform(el, action)
-                        CULog.act.notice("click in \(t.appName, privacy: .public) (another desktop): AX \(action, privacy: .public)")
+                        CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): AX \(action, privacy: .public)")
                         return ActOutcome(rung: .accessibility,
-                                          detail: "\(t.appName)'s window is on another desktop, so the element was sent \(CURoleWords.actionWords(action)) over accessibility")
+                                          detail: "\(subject), so the element was sent \(CURoleWords.actionWords(action)) over accessibility")
                     } catch let error where Self.deliveryUncertain(error) {
                         throw busyAfterSend(t)
                     } catch let err as CUError where err.code == "stale_element" || err.code == "permission_missing" {
@@ -327,7 +337,7 @@ extension CUCore {
                 }
             }
         }
-        return try eventsElsewhere(p, t, token, cursor: nil, what: "the click") { synth, route in
+        return try eventsElsewhere(p, t, token, cursor: nil, what: "the click", subject: subject) { synth, route in
             try synth.click(pid: t.pid, windowFor: { _ in t.windowID }, at: pt, button: button, count: count, flags: flags, route: route)
         }
     }
@@ -349,52 +359,21 @@ extension CUCore {
     /// the public route's events). No focus change, no activation, no pointer. Nothing confirms the events
     /// landed on a window that is not on screen, so the outcome says so: the state after the act shows it.
     func eventsElsewhere(_ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token, cursor event: CursorEvent?,
-                         what: String, _ body: (CUEventSynth, CURoute) throws -> CURoute) throws -> ActOutcome {
+                         what: String, subject: String, _ body: (CUEventSynth, CURoute) throws -> CURoute) throws -> ActOutcome {
         // Addressing a window that is not on screen takes its local point (CGEventSetWindowLocation): with the
         // private event path off, or the setter missing, there is nothing to try.
         guard p.privatePath, skyLight.canSetWindowLocation else {
-            CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public) (another desktop): refused — no window-targeted route")
-            throw CUError.windowElsewhere(t.appName, sending: what)
+            CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public) (off screen): refused — no window-targeted route")
+            throw CUError.windowElsewhere(t.appName, sending: what, subject: subject)
         }
         let route: CURoute = t.isChromium && skyLight.isAvailable ? .skyLight : .publicPid
         send(event, t)
         try token.check()
         let used = try body(synth(p), route)
         let routeName = used == .skyLight ? "window-targeted SkyLight pid events" : "window-targeted pid events"
-        CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public) (another desktop): \(routeName, privacy: .public)")
+        CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public) (off screen): \(routeName, privacy: .public)")
         return ActOutcome(rung: used == .skyLight ? .privatePath : .processEvents,
-                          detail: "\(t.appName)'s window is on another desktop: \(what) was sent to that window as \(routeName); whether it landed can't be confirmed there — check the state")
-    }
-
-    /// Stage Manager: a window of another stage set sits off stage on this Space (listed by AX, off screen).
-    /// Pointer events need it on stage, so it is brought there the way ChatGPT's helper does — un-minimized,
-    /// then `AXAddToStage` if still off stage — and the app the user had in front is put back in front.
-    func bringOnStage(_ t: CUTarget) -> String? {
-        guard sys.stageManagerEnabled(), let w = sys.window(id: t.windowID), !w.onScreen,
-              let element = try? windowElement(t) else { return nil }
-        var did: [String] = []
-        if ax.bool(element, kAXMinimizedAttribute) == true {
-            try? ax.set(element, kAXMinimizedAttribute, kCFBooleanFalse)
-            did.append("un-minimized")
-            waitOnScreen(t, ms: 400)
-        }
-        if sys.window(id: t.windowID)?.onScreen != true, ax.actions(element).contains("AXAddToStage") {
-            let previous = sys.frontmostPid()
-            if (try? ax.perform(element, "AXAddToStage")) != nil {
-                did.append("added to the stage")
-                waitOnScreen(t, ms: 600)
-                // Adding to the stage brings the app forward: hand the front back to the user's app.
-                if let prev = previous, prev != t.pid, sys.frontmostPid() == t.pid { _ = sys.activate(pid: prev) }
-            }
-        }
-        guard !did.isEmpty else { return nil }
-        CULog.act.notice("\(t.appName, privacy: .public): Stage Manager — \(did.joined(separator: ", "), privacy: .public)")
-        return "\(t.appName)'s window was off stage (Stage Manager), so it was \(did.joined(separator: " and "))"
-    }
-
-    private func waitOnScreen(_ t: CUTarget, ms: Double) {
-        let deadline = clock.nowMs() + ms
-        while sys.window(id: t.windowID)?.onScreen != true, clock.nowMs() < deadline { usleep(30_000) }
+                          detail: "\(subject): \(what) was sent to that window as \(routeName); whether it landed can't be confirmed there — check the state")
     }
 
     /// Where a pointer click on `e` goes: its centre, or — when that lies outside the window (scrolled out
@@ -645,7 +624,7 @@ extension CUCore {
             return try pasteText(text, format: .text, p, t, token, g)
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
-        let keyed = focusBoundWindow(p, t, front: false)
+        let keyed = focusBoundWindow(p, t)
         defer { keyed?() }
         let synth = self.synth(p)
         let chars = Array(text)
@@ -751,9 +730,8 @@ extension CUCore {
         // Characters (and cmd+V) are text input: never into a password or payment field (C1).
         if textual { e = try requireTypableFocus(t, g) ?? e }
         cursor(t, "key", at: e.flatMap { ElementInfo($0, ax).center }, text: a.combo)
-        // Keys go to the app's key window: make it the bound one first (and, for a shortcut, let the app's menus
-        // validate against it).
-        let keyed = focusBoundWindow(p, t, front: chord.modifiers.contains(.command) || chord.modifiers.contains(.control))
+        // Keys go to the app's key window: make it the bound one first (in the background, never the front).
+        let keyed = focusBoundWindow(p, t)
         defer { keyed?() }
         // Resolve the route once (the menu lookup walks the menu bar), then press it `repeat` times.
         let plan = try chordPlan(chord, p, t, g)
@@ -818,7 +796,7 @@ extension CUCore {
     /// One chord, start to finish.
     func sendChord(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token,
                    _ g: TypingFocus = TypingFocus()) throws -> ActOutcome {
-        let keyed = focusBoundWindow(p, t, front: true)
+        let keyed = focusBoundWindow(p, t)
         defer { keyed?() }
         return try execute(try chordPlan(chord, p, t, g), p, t, token)
     }
@@ -890,7 +868,7 @@ extension CUCore {
                 if let how = try axScroll(area: scrollArea(from: e), element: e, direction: a.direction, pages: pages) {
                     cursor(t, "scroll", at: info.center, text: a.direction.rawValue)
                     CULog.act.notice("scroll in \(t.appName, privacy: .public): AX \(how, privacy: .public)")
-                    return ActOutcome(rung: .accessibility, detail: Self.scrollDetail(how, elsewhere: isOffThisDesktop(t) ? t.appName : nil))
+                    return ActOutcome(rung: .accessibility, detail: Self.scrollDetail(how, elsewhere: offScreenSubject(t)))
                 }
             } catch let error where Self.deliveryUncertain(error) {
                 throw busyAfterSend(t)
@@ -908,18 +886,18 @@ extension CUCore {
         // Wheel deltas: positive moves the content down/right, i.e. scrolls up/left.
         let dy = a.direction == .down ? -amount : a.direction == .up ? amount : 0
         let dx = a.direction == .right ? -amount : a.direction == .left ? amount : 0
-        if isOffThisDesktop(t) {
+        if let subject = offScreenSubject(t) {
             let at = try a.ref.map { try element($0, in: t) } ?? elementAt(point, in: t)
-            return try scrollElsewhere(at: at, point: point, a.direction, pages: pages, deltaX: dx, deltaY: dy, p, t, token)
+            return try scrollElsewhere(at: at, point: point, a.direction, pages: pages, deltaX: dx, deltaY: dy, p, t, token,
+                                       subject: subject)
         }
-        let staged = bringOnStage(t)
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
         let synth = self.synth(p)
         let windowFor = self.windowFor(t)
         let event = CursorEvent(kind: "scroll", point: point, text: a.direction.rawValue)
         return try runEvents(p, t, d, focus: false, token, cursor: event) { route, check in
             try synth.scroll(pid: t.pid, windowFor: windowFor, at: point, deltaX: dx, deltaY: dy, route: route, check: check)
-        }.noting(staged)
+        }
     }
 
     /// Scrolling a window on another desktop, with no pointer: the scroll bar's value (AX); else window-
@@ -928,13 +906,14 @@ extension CUCore {
     /// focusing the scrolled content — the keyboard needs no geometry.
     private func scrollElsewhere(at e: AXUIElement?, point: CGPoint, _ direction: CUScrollDirection, pages: Double,
                                  deltaX: Double, deltaY: Double,
-                                 _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+                                 _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token,
+                                 subject: String) throws -> ActOutcome {
         let area = e.flatMap { scrollArea(from: $0) } ?? largestScrollArea(in: t)
         do {
             if let how = try axScroll(area: area, element: e, direction: direction, pages: pages) {
                 cursor(t, "scroll", at: point, text: direction.rawValue)
-                CULog.act.notice("scroll in \(t.appName, privacy: .public) (another desktop): AX \(how, privacy: .public)")
-                return ActOutcome(rung: .accessibility, detail: Self.scrollDetail(how, elsewhere: t.appName))
+                CULog.act.notice("scroll in \(t.appName, privacy: .public) (off screen): AX \(how, privacy: .public)")
+                return ActOutcome(rung: .accessibility, detail: Self.scrollDetail(how, elsewhere: subject))
             }
         } catch let error where Self.deliveryUncertain(error) {
             throw busyAfterSend(t)
@@ -946,18 +925,18 @@ extension CUCore {
             let probes = [e, content].compactMap { $0 }
             let before = probes.map { ax.frame($0) }
             let event = CursorEvent(kind: "scroll", point: point, text: direction.rawValue)
-            let wheel = try eventsElsewhere(p, t, token, cursor: event, what: "the scroll") { synth, route in
+            let wheel = try eventsElsewhere(p, t, token, cursor: event, what: "the scroll", subject: subject) { synth, route in
                 try synth.scroll(pid: t.pid, windowFor: { _ in t.windowID }, at: point, deltaX: deltaX, deltaY: deltaY, route: route)
             }
             if probes.isEmpty { return wheel }
             let deadline = clock.nowMs() + 300
             while clock.nowMs() < deadline {
                 if probes.map({ ax.frame($0) }) != before {
-                    return ActOutcome(rung: wheel.rung, detail: "\(t.appName)'s window is on another desktop: the scroll was sent to that window as wheel events, and its content moved")
+                    return ActOutcome(rung: wheel.rung, detail: "\(subject): the scroll was sent to that window as wheel events, and its content moved")
                 }
                 usleep(30_000)
             }
-            CULog.act.notice("scroll in \(t.appName, privacy: .public) (another desktop): the wheel moved nothing — Page keys")
+            CULog.act.notice("scroll in \(t.appName, privacy: .public) (off screen): the wheel moved nothing — Page keys")
         }
         if let area {
             // Keys go to the focused element: make it the scrolled content, not a search field.
@@ -984,7 +963,7 @@ extension CUCore {
         }
         let what = vertical ? "\(presses)× \(direction == .down ? "Page Down" : "Page Up")" : "\(presses)× \(direction == .left ? "←" : "→")"
         let why = p.privatePath && skyLight.canSetWindowLocation ? "the wheel moved nothing there" : "wheel events can't be addressed to it"
-        return o.noting("\(t.appName)'s window is on another desktop and \(why), so \(what) was sent to the app")
+        return o.noting("\(subject) and \(why), so \(what) was sent to the app")
     }
 
     /// The window's largest scroll area (the page in a browser), for a scroll with no element under it.
@@ -1050,9 +1029,9 @@ extension CUCore {
 
     enum ScrollBarResult { case moved, nothingToScroll, unmoved }
 
-    /// The act's detail for an AX scroll (`elsewhere`: the app, when its window is on another desktop).
+    /// The act's detail for an AX scroll (`elsewhere`: "X's window is on another desktop", when it is not on screen).
     static func scrollDetail(_ how: String, elsewhere app: String?) -> String? {
-        let prefix = app.map { "\($0)'s window is on another desktop, so " } ?? ""
+        let prefix = app.map { "\($0), so " } ?? ""
         switch how {
         case "nothing left to scroll": return "there was nothing left to scroll that way"
         case "scroll bar value": return app == nil ? nil : prefix + "its scroll bar was moved over accessibility"
@@ -1119,13 +1098,13 @@ extension CUCore {
         }
         let from = try point(a.from, "from")
         let to = try point(a.to, "to")
-        if isOffThisDesktop(t) {
+        if let subject = offScreenSubject(t) {
             if let fromInfo { announceTarget(t, fromInfo, pressing: false) }
-            return try eventsElsewhere(p, t, token, cursor: CursorEvent(kind: "drag", point: from, dragTo: to), what: "the drag") { synth, route in
+            return try eventsElsewhere(p, t, token, cursor: CursorEvent(kind: "drag", point: from, dragTo: to), what: "the drag",
+                                       subject: subject) { synth, route in
                 try synth.drag(pid: t.pid, windowFor: { _ in t.windowID }, from: from, to: to, route: route)
             }
         }
-        let staged = bringOnStage(t)
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
         if let fromInfo { announceTarget(t, fromInfo, pressing: false) }
         let synth = self.synth(p)
@@ -1133,7 +1112,7 @@ extension CUCore {
         let event = CursorEvent(kind: "drag", point: from, dragTo: to)
         return try runEvents(p, t, d, focus: true, token, cursor: event) { route, check in
             try synth.drag(pid: t.pid, windowFor: windowFor, from: from, to: to, route: route, check: check)
-        }.noting(staged)
+        }
     }
 
     // MARK: select, action, menu
@@ -1193,6 +1172,10 @@ extension CUCore {
             let have = info.actions.map(CURoleWords.actionWords).joined(separator: ", ")
             throw CUError.invalidParams("[\(a.ref)] has no action “\(a.name)” — it has: \(have.isEmpty ? "none" : have)")
         }
+        // Raising a window puts it in front of the user's work and can switch them to its desktop: never done.
+        if name == kAXRaiseAction {
+            throw CUError.unsupported("raising a window brings it in front of the user's work and can switch their desktop, so Winter doesn't — the window doesn't need to be in front: act on its elements by ref")
+        }
         try pasteMenuGuard(e, info, p, t)
         let role = info.role ?? ""
         let words = CURoleWords.actionWords(name)
@@ -1233,15 +1216,19 @@ extension CUCore {
         return [AXError.actionUnsupported.rawValue, AXError.notImplemented.rawValue].contains(Int32(n))
     }
 
-    /// A menu-bar command. The menu is resolved (and its items validated) with the bound window made key in
-    /// the background, so commands that need a selection in the active window — Finder's File › Move to Trash —
-    /// are enabled for the bound window. If one stays disabled, the foreground rung is asked for
-    /// (`needs_foreground`): with the user's consent the app comes forward for the command and the front is
-    /// given back after.
+    /// A menu-bar command, through the UI (an AX press of the menu item). The menu bar validates commands
+    /// against the app's ACTIVE window, so while the app is in the background one can be disabled for the bound
+    /// window even with that window made key (Finder's File › Move to Trash). Then the answer names the UI routes
+    /// that validate against the item itself — its context menu, the window's toolbar or Action menu, the
+    /// shortcut after background key focus — and only asking for the same command again asks for the
+    /// foreground (`needs_foreground`: with the user's consent the app comes forward for the command, and the
+    /// front is given back after). The app is never made front in the background: that switches the user to
+    /// the Space its windows are on.
     private func menu(_ a: CUMenuAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         // A menu command has no on-screen point in the background: a caption only, no press.
         cursor(t, "caption", text: Self.caption("Choosing", a.path.joined(separator: " › ")))
         try token.check()
+        let key = a.path.map(CUMenuWalker.normalize).joined(separator: "\u{1F}")
         if p.allowForeground {
             return try inForeground(t) {
                 do {
@@ -1249,24 +1236,88 @@ extension CUCore {
                 } catch let e as CUError where e.data?["disabled"] != nil {
                     throw CUError.unsupported("\(e.message), even with \(t.appName) in front — nothing it applies to is selected (check state())")
                 }
+                t.disabledMenuCommands.remove(key)
                 return ActOutcome(rung: .foreground, detail: "\(t.appName) was brought forward for the command, and the front given back after")
             }
         }
         aimMenuCommands(at: t)
-        let keyed = focusBoundWindow(p, t, front: true)
+        let keyed = focusBoundWindow(p, t)
         defer { keyed?() }
         let item: CUAXMenuNode
         do {
             item = try resolveMenu(a, p, t)
         } catch let e as CUError where e.data?["disabled"] != nil {
-            guard keyed != nil || sys.frontmostPid() != t.pid else { throw e }
-            CULog.act.notice("menu in \(t.appName, privacy: .public): still disabled in the background — asking for the foreground")
-            throw CUError(code: "needs_foreground",
-                          message: "\(e.message) — it stays disabled while \(t.appName) is in the background\(keyed != nil ? ", even with its window made key" : ""): the command needs \(t.appName) in front")
+            // In front already: disabled for what it applies to, not for being in the background.
+            guard sys.frontmostPid() != t.pid else { throw e }
+            let title: String = { if case .string(let s)? = e.data?["disabled"] { return s }; return a.path.last ?? "" }()
+            if t.disabledMenuCommands.contains(key) {
+                CULog.act.notice("menu in \(t.appName, privacy: .public): asked again while disabled in the background — asking for the foreground")
+                throw CUError(code: "needs_foreground",
+                              message: "“\(title)” stays disabled while \(t.appName) is in the background\(keyed != nil ? ", even with its window made key" : ""), and it was asked for again after the UI routes: the command needs \(t.appName) in front")
+            }
+            // A known AppleScript equivalent, when the user already lets Winter control the app.
+            if let done = menuThroughAppleScript(a.path, title: title, t) { return done }
+            t.disabledMenuCommands.insert(key)
+            CULog.act.notice("menu in \(t.appName, privacy: .public): disabled in the background — pointing at the UI routes")
+            throw CUError(code: "unsupported", message: backgroundMenuRoutes(title: title, path: a.path, t),
+                          data: ["disabled": .string(title)])
         }
+        t.disabledMenuCommands.remove(key)
         try pressMenu(item, t)
         return ActOutcome(rung: .accessibility,
                           detail: keyed != nil ? "\(t.appName)'s window was made key in the background for the command" : nil)
+    }
+
+    /// What to do about a menu command disabled in the background: the UI routes that check the item itself,
+    /// then `menu()` again for the foreground.
+    func backgroundMenuRoutes(title: String, path: [String], _ t: CUTarget) -> String {
+        let item = (try? CUAXMenuNode.menuBar(pid: t.pid, ax: ax)).flatMap { try? CUMenuWalker.resolve(path, in: $0, requireEnabled: false) }
+        let attrs = item.flatMap {
+            ax.copyMultiple($0.element, [kAXMenuItemCmdCharAttribute, kAXMenuItemCmdVirtualKeyAttribute, kAXMenuItemCmdModifiersAttribute])
+        } ?? [:]
+        let combo = Self.shortcutCombo(char: attrs[kAXMenuItemCmdCharAttribute].flatMap(AX.stringValue),
+                                       virtualKey: attrs[kAXMenuItemCmdVirtualKeyAttribute].flatMap { ($0 as? NSNumber)?.intValue },
+                                       modifiers: attrs[kAXMenuItemCmdModifiersAttribute].flatMap { ($0 as? NSNumber)?.intValue })
+        let shortcut = combo.map { "its shortcut key(\"\($0)\")" } ?? "its shortcut with key()"
+        let script = knownMenuScript(path, t) != nil || appIsScriptable(t)
+            ? ", or app.applescript() (macOS asks the user once to let Winter control \(t.appName))" : ""
+        return "“\(title)” is disabled while \(t.appName) is in the background (its menu bar checks its active window). "
+            + "Use a route that checks the item itself: its context menu (action(ref, \"showMenu\") on the selected item, "
+            + "then click “\(title)” in the menu state() lists first), the window's toolbar or Action menu, \(shortcut)\(script). "
+            + "Only if those are disabled too, call menu() again to ask for \(t.appName) in front"
+    }
+
+    /// The app has a scripting dictionary (read from its bundle, cached).
+    func appIsScriptable(_ t: CUTarget) -> Bool {
+        if let o = scriptingDictionaryOverride { return o(t) != nil }
+        return NSRunningApplication(processIdentifier: t.pid)?.bundleURL.flatMap { CUScriptingDictionary.model(appURL: $0) } != nil
+    }
+
+    /// A menu item's key equivalent as a `key()` combo (`AXMenuItemCmdModifiers`: 1 shift, 2 option, 4 control,
+    /// 8 no command), or nil when it has none or one `key()` can't name. Pure.
+    static func shortcutCombo(char: String?, virtualKey: Int?, modifiers: Int?) -> String? {
+        let named: [Int: String] = [0x33: "delete", 0x75: "forwarddelete", 0x24: "return", 0x30: "tab", 0x31: "space",
+                                    0x35: "escape", 0x7B: "left", 0x7C: "right", 0x7D: "down", 0x7E: "up",
+                                    0x73: "home", 0x77: "end", 0x74: "pageup", 0x79: "pagedown"]
+        let keyName: String
+        if let c = char, let scalar = c.unicodeScalars.first, c.unicodeScalars.count == 1,
+           scalar.value > 0x20, scalar.value != 0x7F, !(0xF700...0xF8FF).contains(scalar.value) {
+            keyName = c.lowercased()
+        } else if let v = virtualKey, let n = named[v] {
+            keyName = n
+        } else if let c = char, c == "\u{8}" || c == "\u{7F}" {
+            keyName = "delete"
+        } else {
+            return nil
+        }
+        let m = modifiers ?? 0
+        var parts: [String] = []
+        if m & 8 == 0 { parts.append("cmd") }
+        if m & 4 != 0 { parts.append("ctrl") }
+        if m & 2 != 0 { parts.append("option") }
+        if m & 1 != 0 { parts.append("shift") }
+        guard !parts.isEmpty else { return nil }  // a bare key is not a command shortcut
+        return (parts + [keyName]).joined(separator: "+")
     }
 
     private func resolveMenu(_ a: CUMenuAction, _ p: TargetActParams, _ t: CUTarget) throws -> CUAXMenuNode {
@@ -1288,40 +1339,12 @@ extension CUCore {
     }
 
     /// While the app is in the background (the private path on), makes the BOUND window key in it without
-    /// raising it or activating the app (yabai's focus-without-raise: a defocus record to the front process, a
-    /// focus record to the target); `front`: also makes the app WindowServer-front with no window brought
-    /// forward (`kCPSNoWindows`, cua-driver's menu-shortcut activation), which menu validation and key
-    /// equivalents need. Returns the undo: the front and the user's key window handed back, then ChatGPT's
-    /// safety net — if the target activated itself, the user's app is re-activated 50 ms later.
-    func focusBoundWindow(_ p: TargetActParams, _ t: CUTarget, front: Bool) -> (() -> Void)? {
-        guard p.privatePath, skyLight.canFocusWithoutRaise, let user = sys.frontmostPid(), user != t.pid else { return nil }
-        let userWindow = ax.element(ax.application(user), kAXFocusedWindowAttribute).flatMap { ax.windowID($0) }
-        guard skyLight.focusWithoutRaise(pid: t.pid, windowID: t.windowID) else { return nil }
-        let previousFront = front ? skyLight.frontNoWindows(pid: t.pid, windowID: t.windowID) : nil
-        CULog.act.notice("\(t.appName, privacy: .public): window \(t.windowID, privacy: .public) made key without raising\(previousFront != nil ? " (front, no windows)" : "", privacy: .public)")
-        return { [self] in
-            if let previousFront { skyLight.restoreFront(previousFront) }
-            if let userWindow {
-                skyLight.restoreFocus(previousPid: user, previousWindowID: userWindow, targetPid: t.pid, targetWindowID: t.windowID)
-            }
-            keepFrontmost(user, over: t)
-        }
-    }
-
-    /// The user's app stays frontmost: if the target activated itself, it is re-activated after 50 ms (now,
-    /// and once more a little later for an activation that lands after the act).
-    func keepFrontmost(_ user: pid_t, over t: CUTarget) {
-        let sys = self.sys
-        let reactivate = { (when: String) in
-            guard sys.frontmostPid() == t.pid, user != t.pid else { return }
-            CULog.act.notice("\(t.appName, privacy: .public) took the front \(when, privacy: .public) — giving it back to the user's app")
-            _ = sys.activate(pid: user)
-        }
-        if sys.frontmostPid() == t.pid {
-            usleep(50_000)
-            reactivate("during the act")
-        }
-        if keepFrontmostLater { DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { reactivate("after the act") } }
+    /// raising it or activating the app (yabai's focus records, checked every time by the user-view guard).
+    /// Never the front process: making the app front, even with no window brought forward, switches the user
+    /// to the Space its windows are on. Returns the undo (the user's key window handed back).
+    func focusBoundWindow(_ p: TargetActParams, _ t: CUTarget) -> (() -> Void)? {
+        guard p.privatePath else { return nil }
+        return keyWithoutRaise(t)
     }
 
     /// Controls a press means something to; a disabled one of these does nothing, so it is refused rather than
@@ -1344,11 +1367,7 @@ extension CUCore {
     /// Menu commands (the menu bar, or a shortcut that is a menu item) act on the app's main/key window, which
     /// need not be the bound one when the app is in the background: Finder's Go › Downloads opened a NEW window
     /// instead of moving the bound one. Making the bound window the app's main window first points them at it.
-    func aimMenuCommands(at t: CUTarget) {
-        if let w = try? windowElement(t), ax.bool(w, kAXMainAttribute) != true {
-            try? ax.set(w, kAXMainAttribute, kCFBooleanTrue)
-        }
-    }
+    func aimMenuCommands(at t: CUTarget) { makeBoundWindowMain(t) }
 
     // MARK: rungs 2–4
 
@@ -1407,28 +1426,20 @@ extension CUCore {
     }
 
     /// Rung 2's public focus: make the bound window the app's main window (no activation, no raise).
-    private func syntheticFocus(_ t: CUTarget) {
-        if let w = try? windowElement(t), ax.bool(w, kAXMainAttribute) != true {
-            try? ax.set(w, kAXMainAttribute, kCFBooleanTrue)
-        }
-    }
+    private func syntheticFocus(_ t: CUTarget) { makeBoundWindowMain(t) }
 
     /// Rung 3: key focus to the target window without raising it; returns how to hand it back.
     private func focusWithoutRaise(_ t: CUTarget) -> (() -> Void)? {
-        guard skyLight.canFocusWithoutRaise else { return nil }
-        let frontPid = sys.frontmostPid()
-        let frontWid = frontPid.flatMap { ax.element(ax.application($0), kAXFocusedWindowAttribute) }.flatMap { ax.windowID($0) }
-        guard skyLight.focusWithoutRaise(pid: t.pid, windowID: t.windowID) else { return nil }
-        usleep(50_000)
-        guard let fp = frontPid, let fw = frontWid, fp != t.pid else { return nil }
-        let sky = skyLight
-        let (tp, tw) = (t.pid, t.windowID)
-        return { sky.restoreFocus(previousPid: fp, previousWindowID: fw, targetPid: tp, targetWindowID: tw) }
+        let restore = keyWithoutRaise(t)
+        if restore != nil { usleep(50_000) }
+        return restore
     }
 
     /// Rung 4: bring the app forward, act with the real pointer, then put the pointer and the user's app back.
     /// Every press, drag step and release is hit-tested by the caller's check.
     private func inForeground<T>(_ t: CUTarget, _ body: () throws -> T) throws -> T {
+        // The user agreed to this act taking the foreground: the user-view guard leaves it alone.
+        t.consentedForeground = true
         let previous = sys.frontmostPid()
         let cursor = sys.cursorLocation()
         _ = sys.activate(pid: t.pid)
