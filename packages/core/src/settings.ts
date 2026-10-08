@@ -1370,7 +1370,8 @@ export function computerUseAppsFrom(s: Settings | null | undefined): Record<stri
 /**
  * ComputerV2: a pure `Settings -> Settings` transform for ONE app's row (`computerUse.apps.<bundleId>`) —
  * `undefined` for a field leaves it as is, `null` clears it. `access: "full"` is the default and is stored
- * as absent. A row left with nothing but a name is dropped. The caller owes `saveSettings` a call.
+ * as absent. A row is NEVER deleted by this door (spine §6: "Remove always-allow" sends `grant: null` and the
+ * app stays listed) — it is left as `{name}` or `{}`. The caller owes `saveSettings` a call.
  */
 export function setComputerUseApp(settings: Settings, bundleId: string, patch: { access?: ComputerUseAccess | null; grant?: "always" | null; name?: string }): Settings {
   const apps = { ...(settings.computerUse?.apps ?? {}) } as Record<string, unknown>;
@@ -1381,11 +1382,18 @@ export function setComputerUseApp(settings: Settings, bundleId: string, patch: {
   if (patch.grant === null) delete row.grant;
   else if (patch.grant !== undefined) row.grant = patch.grant;
   if (patch.name !== undefined && patch.name.length > 0) row.name = patch.name;
-  const meaningful = Object.keys(row).some((k) => k !== "name");
-  if (meaningful) apps[bundleId] = row;
-  else delete apps[bundleId];
-  const { apps: _previous, ...rest } = settings.computerUse ?? {};
-  return { ...settings, computerUse: Object.keys(apps).length === 0 ? rest : { ...rest, apps } };
+  apps[bundleId] = row;
+  return { ...settings, computerUse: { ...(settings.computerUse ?? {}), apps } };
+}
+
+/** ComputerV2: `computerUse.setSettings`' pure transform — each key present is written, each absent one is left
+ *  untouched (spine §6). The caller owes `saveSettings` a call; every key is read live by its one reader. */
+export function setComputerUseFlags(settings: Settings, patch: { enabled?: boolean; mirror?: boolean; privateEventPath?: boolean }): Settings {
+  const next = { ...(settings.computerUse ?? {}) };
+  if (patch.enabled !== undefined) next.enabled = patch.enabled;
+  if (patch.mirror !== undefined) next.mirror = patch.mirror;
+  if (patch.privateEventPath !== undefined) next.privateEventPath = patch.privateEventPath;
+  return { ...settings, computerUse: next };
 }
 
 /** Minor 5e (fix wave, pre-merge review): LSP integration (Phase 5f) opt-out gate — the ONE place

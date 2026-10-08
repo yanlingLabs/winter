@@ -62,7 +62,9 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
   }
   const makeError = (kind: string, message: string): Error => {
     const cls = (errorClasses as Record<string, (new (m?: string) => AutomationError) | undefined>)[kind];
-    return cls === undefined ? new Error(message) : new cls(message);
+    if (cls !== undefined) return new cls(message);
+    // A bad argument is the script's own bug: a plain `TypeError`, as a built-in would throw.
+    return kind === "TypeError" ? new TypeError(message) : new Error(message);
   };
 
   // ── bridge calls ─────────────────────────────────────────────────────────────────────────────────
