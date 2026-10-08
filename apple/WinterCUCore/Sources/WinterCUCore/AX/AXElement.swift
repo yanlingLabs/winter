@@ -147,25 +147,65 @@ enum AX {
         return Data(bytes)
     }
 
-    static let remoteProbeMaxID: UInt64 = 2000
-    static let remoteProbeDeadlineMs: Double = 300
+    /// The probe's reach. Element ids grow over an app's life, so a window opened late in a long-running app
+    /// (Safari's twelfth window) sits far above the ids of its first ones: the old 2,000-id / 300 ms probe (the
+    /// cua-driver and alt-tab-macos figures) could miss it. The wall clock bounds the walk; the id ceiling
+    /// only stops a probe of an app that answers every id instantly.
+    static let remoteProbeMaxID: UInt64 = 200_000
+    static let remoteProbeDeadlineMs: Double = 1500
+    /// Per-candidate messaging timeout; this many in a row that time out means the app is not answering.
+    static let remoteProbeCandidateTimeout: Float = 0.05
+    static let remoteProbeSilentLimit = 8
 
-    /// The `AXWindow` of `pid` whose window id is `windowID`, found by remote token; nil when the SPI is
-    /// missing, nothing matches, or the 300 ms budget runs out. Only an element that is an `AXWindow` AND
-    /// reports that exact window id is returned, so it is as strong as an `AXWindows` match.
-    static func windowByRemoteToken(pid: pid_t, windowID wanted: CGWindowID) -> AXUIElement? {
-        guard let create = createWithRemoteToken else { return nil }
+    /// What one remote-token walk found and why it stopped (logged on a miss).
+    struct RemoteProbe {
+        var found: [CGWindowID: AXUIElement] = [:]
+        var probed: UInt64 = 0
+        var lastID: UInt64 = 0
+        var elapsedMs: Double = 0
+        var stoppedBy = "the id ceiling"
+    }
+
+    /// The `AXWindow`s of `pid` with the wanted window ids, found by remote token in ONE walk of the app's
+    /// element ids (several off-Space windows cost one probe, not one each). Only an element that is an
+    /// `AXWindow` AND reports a wanted window id counts, so a hit is as strong as an `AXWindows` match.
+    static func windowsByRemoteToken(pid: pid_t, wanted: Set<CGWindowID>, maxID: UInt64 = remoteProbeMaxID,
+                                     deadlineMs: Double = remoteProbeDeadlineMs) -> RemoteProbe {
+        var r = RemoteProbe()
+        guard let create = createWithRemoteToken else { r.stoppedBy = "a missing SPI"; return r }
+        guard !wanted.isEmpty else { r.stoppedBy = "nothing to find"; return r }
         let start = DispatchTime.now().uptimeNanoseconds
-        for id in 0..<remoteProbeMaxID {
-            if Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000 > remoteProbeDeadlineMs { return nil }
-            guard let element = create(remoteToken(pid: pid, elementID: id) as CFData)?.takeRetainedValue() else { continue }
-            AXUIElementSetMessagingTimeout(element, 0.05)
-            if string(element, kAXRoleAttribute) == kAXWindowRole, windowID(element) == wanted {
-                AXUIElementSetMessagingTimeout(element, 0)  // back to the process-wide timeout
-                return element
+        func elapsed() -> Double { Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000 }
+        var silent = 0
+        var id: UInt64 = 0
+        while id < maxID {
+            if elapsed() > deadlineMs { r.stoppedBy = "the \(Int(deadlineMs)) ms deadline"; break }
+            let current = id
+            id += 1
+            guard let element = create(remoteToken(pid: pid, elementID: current) as CFData)?.takeRetainedValue() else { continue }
+            r.probed += 1
+            r.lastID = current
+            AXUIElementSetMessagingTimeout(element, remoteProbeCandidateTimeout)
+            var role: CFTypeRef?
+            let err = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+            if err == .cannotComplete {
+                silent += 1
+                if silent >= remoteProbeSilentLimit { r.stoppedBy = "an app that is not answering"; break }
+                continue
             }
+            silent = 0
+            guard err == .success, (role as? String) == kAXWindowRole, let wid = windowID(element), wanted.contains(wid),
+                  r.found[wid] == nil else { continue }
+            AXUIElementSetMessagingTimeout(element, 0)  // back to the process-wide timeout
+            r.found[wid] = element
+            if r.found.count == wanted.count { r.stoppedBy = "finding them all"; break }
         }
-        return nil
+        r.elapsedMs = elapsed()
+        if r.found.count < wanted.count {
+            let missing = wanted.subtracting(r.found.keys).sorted().map(String.init).joined(separator: ",")
+            CULog.bind.info("remote-token probe for pid \(pid, privacy: .public) missed window(s) \(missing, privacy: .public): probed \(r.probed, privacy: .public) ids up to \(r.lastID, privacy: .public) in \(Int(r.elapsedMs), privacy: .public) ms, stopped by \(r.stoppedBy, privacy: .public)")
+        }
+        return r
     }
 
     // MARK: value conversion

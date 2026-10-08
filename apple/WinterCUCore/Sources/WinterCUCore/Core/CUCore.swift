@@ -104,55 +104,84 @@ public final class CUCore: @unchecked Sendable {
 
     // MARK: - binding
 
-    public func targetBind(_ p: TargetBindParams) async throws -> TargetBindResult {
-        try requireAccessibility()
-        var app: NSRunningApplication
+    /// The app a bind is for: running (or just launched) — what the bind needs of it.
+    struct BindApp {
+        var pid: pid_t
+        var bundleIdentifier: String?
+        var name: String?
+        var executableName: String?
+        var isChromium: Bool
+        var launched: Bool
+        /// The live app (nil in tests): Chromium's accessibility switch and the reopen request need it.
+        var running: NSRunningApplication?
+    }
+
+    /// Finds the app (launching it in the background when installed but not running); replaceable by tests.
+    var resolveBindApp: (String, CUCore) async throws -> BindApp = { query, core in
         var launched = false
-        switch try CUApps.resolve(p.app) {
+        let app: NSRunningApplication
+        switch try CUApps.resolve(query) {
         case .running(let r): app = r
         case .installed(let url, let bundleId, let name):
-            try refuseFloorApp(bundleId: bundleId, pid: 0, name: name)
+            try core.refuseFloorApp(bundleId: bundleId, pid: 0, name: name)
             app = try await CUApps.launchInBackground(url)
             launched = true
         }
-        let appName = app.localizedName ?? app.bundleIdentifier ?? p.app
-        try refuseFloorApp(bundleId: app.bundleIdentifier, pid: app.processIdentifier, name: appName,
-                           processName: app.executableURL?.lastPathComponent)
-        let pid = app.processIdentifier
-        let chromium = CUChromium.isChromiumFamily(app)
+        return BindApp(pid: app.processIdentifier, bundleIdentifier: app.bundleIdentifier, name: app.localizedName,
+                       executableName: app.executableURL?.lastPathComponent, isChromium: CUChromium.isChromiumFamily(app),
+                       launched: launched, running: app)
+    }
+
+    public func targetBind(_ p: TargetBindParams) async throws -> TargetBindResult {
+        try requireAccessibility()
+        let app = try await resolveBindApp(p.app, self)
+        let launched = app.launched
+        let appName = app.name ?? app.bundleIdentifier ?? p.app
+        try refuseFloorApp(bundleId: app.bundleIdentifier, pid: app.pid, name: appName, processName: app.executableName)
+        let pid = app.pid
+        let chromium = app.isChromium
+        // Idempotent: this session already has this app bound and the window is still there — the same target,
+        // with no re-resolution, no new window and no move. Only a lost target is resolved again.
+        if !launched, let existing = reusableTarget(sessionId: p.sessionId, pid: pid, selector: p.window) {
+            CULog.bind.info("bind \(appName, privacy: .public): reused \(existing.id, privacy: .public) (window \(existing.windowID, privacy: .public))")
+            return TargetBindResult(targetId: existing.id,
+                                    app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid),
+                                    window: CUWindowInfo(id: existing.windowID, title: existing.windowTitle,
+                                                         frame: cuFrame(sys.window(id: existing.windowID)?.frame ?? .zero)))
+        }
         monitor.watch(pid: pid)
 
         let privatePath = p.privatePath ?? true
         let ax = self.ax, sys = self.sys
-        // Wait for a window: a just-launched app needs a moment, and AX can lag a window that is already on
-        // screen. Windows the window server shows only OFF screen (another Space, full screen) need no wait —
-        // the resolver reaches them. An app with no window at all is asked to reopen one, once.
-        var (windows, server) = try await queues.run(pid) { () -> ([CUAXWindow], [CUWindowServerWindow]) in
-            if chromium { CUChromium.enableAccessibilityOnce(app) }
-            let server = sys.windows(pid: pid)
-            return (CUAXWindows.list(pid: pid, ax: ax, server: server), server)
-        }
-        let deadline = clock.nowMs() + (launched ? 8000 : 3000)
-        var reopened = launched
-        while windows.isEmpty, clock.nowMs() < deadline {
-            let normal = server.filter { $0.layer == 0 }
-            if !normal.isEmpty, normal.allSatisfy({ !$0.onScreen }) { break }
-            if !reopened, normal.isEmpty, let url = app.bundleURL {
-                reopened = true
-                _ = try? await CUApps.launchInBackground(url, timeoutMs: 2000)
+        if chromium, let running = app.running { try await queues.run(pid) { CUChromium.enableAccessibilityOnce(running) } }
+        let found = try await CUBindWait.run(launched: launched, deadlineMs: launched ? 8000 : 3000, CUBindWait.Effects(
+            read: { [queues] in
+                try await queues.run(pid) {
+                    let server = sys.windows(pid: pid)
+                    return (CUAXWindows.list(pid: pid, ax: ax, server: server), server)
+                }
+            },
+            reopen: { [reopenApp] in
+                CULog.bind.info("bind \(appName, privacy: .public): no window on any Space — asking the app to reopen one")
+                await reopenApp(app)
+            },
+            sleep: { [clock] in try await clock.sleep(ms: $0) },
+            now: { [clock] in clock.nowMs() }))
+        let (axNow, serverNow) = (found.ax, found.server)
+        let appKey = app.bundleIdentifier ?? "pid:\(pid)"
+        let outcome: CUWindowResolver.Outcome
+        do {
+            outcome = try await queues.run(pid) { [self] in
+                try CUWindowResolver.resolve(appName: appName, axWindows: axNow, server: serverNow, selector: p.window,
+                                             privatePath: privatePath,
+                                             windowEffects(pid: pid, appName: appName, chromium: chromium, privatePath: privatePath,
+                                                           sessionId: p.sessionId, appKey: appKey))
             }
-            try await clock.sleep(ms: 100)
-            (windows, server) = try await queues.run(pid) {
-                let server = sys.windows(pid: pid)
-                return (CUAXWindows.list(pid: pid, ax: ax, server: server), server)
-            }
+        } catch let e as CUError {
+            CULog.bind.info("bind \(appName, privacy: .public) failed: \(e.code, privacy: .public) (\(axNow.count, privacy: .public) window(s) on this desktop, \(serverNow.filter { $0.layer == 0 }.count, privacy: .public) in the window server)")
+            throw e
         }
-        let (axNow, serverNow) = (windows, server)
-        let outcome = try await queues.run(pid) { [self] in
-            try CUWindowResolver.resolve(appName: appName, axWindows: axNow, server: serverNow, selector: p.window,
-                                         privatePath: privatePath,
-                                         windowEffects(pid: pid, appName: appName, chromium: chromium, privatePath: privatePath))
-        }
+        CULog.bind.info("bind \(appName, privacy: .public): \(outcome.step.rawValue, privacy: .public) (window \(outcome.window.id, privacy: .public))")
         let chosen = outcome.window
         if let b = app.bundleIdentifier, CUFloors.systemSettingsBundleIds.contains(b) {
             let isPrivacy = try await queues.run(pid) { CUFloorScan.isPrivacyPane(bundleId: b, window: chosen.element, ax: ax) }
@@ -178,17 +207,28 @@ public final class CUCore: @unchecked Sendable {
     }
 
     /// The live effects behind `CUWindowResolver` (run on the pid queue).
-    func windowEffects(pid: pid_t, appName: String, chromium: Bool, privatePath: Bool) -> CUWindowResolver.Effects {
+    func windowEffects(pid: pid_t, appName: String, chromium: Bool, privatePath: Bool, sessionId: String,
+                       appKey: String) -> CUWindowResolver.Effects {
         let ax = self.ax, sys = self.sys
         return CUWindowResolver.Effects(
-            remote: { ax.remoteWindow(pid: pid, windowID: $0) },
+            remote: { ax.remoteWindows(pid: pid, windowIDs: $0) },
             describe: { element, s in
                 CUAXWindow(element: element, id: s.id, title: ax.string(element, kAXTitleAttribute) ?? s.title,
                            frame: ax.frame(element) ?? s.frame, focused: false, main: false)
             },
             moveToActiveSpace: { sys.moveWindowToActiveSpace($0) },
-            openNewWindow: { [self] in openNewWindow(pid: pid, chromium: chromium, privatePath: privatePath) },
+            openNewWindow: { [self] in
+                // Once per session and app, whatever happens to the window: one that opens on the app's own
+                // Space instead of this one must not be followed by another, and another, on every bind.
+                guard claimNewWindow(sessionId: sessionId, appKey: appKey) else {
+                    CULog.bind.info("\(appName, privacy: .public): a new window was already asked for in this session — not again")
+                    return false
+                }
+                CULog.bind.info("\(appName, privacy: .public): asking for a new window (step b)")
+                return openNewWindow(pid: pid, chromium: chromium, privatePath: privatePath)
+            },
             axWindows: { CUAXWindows.list(pid: pid, ax: ax, server: sys.windows(pid: pid)) },
+            serverWindows: { sys.windows(pid: pid) },
             wait: { [clock, windowWaitMs] probe in
                 let deadline = clock.nowMs() + windowWaitMs
                 while clock.nowMs() < deadline {
@@ -201,6 +241,36 @@ public final class CUCore: @unchecked Sendable {
 
     /// How long a moved or newly opened window may take to appear in the AX list (shortened by tests).
     var windowWaitMs: Double = 3000
+
+    /// The reopen request (an app with no window anywhere opens one); replaceable by tests.
+    var reopenApp: (BindApp) async -> Void = { app in
+        if let url = app.running?.bundleURL { _ = try? await CUApps.launchInBackground(url, timeoutMs: 2000) }
+    }
+
+    /// (session, app) pairs that have had their one new window (step b).
+    private var newWindowClaims: Set<String> = []
+
+    /// True the first time a session asks an app for a new window, false ever after.
+    func claimNewWindow(sessionId: String, appKey: String) -> Bool {
+        lock.withLock { newWindowClaims.insert("\(sessionId)\u{1F}\(appKey)").inserted }
+    }
+
+    /// The session's live target for `pid` that a repeated bind returns: its window still exists and, when
+    /// the bind names a window, it is that one. The most recent wins.
+    func reusableTarget(sessionId: String, pid: pid_t, selector: CUWindowSelector?) -> CUTarget? {
+        guard sys.appRunning(pid) else { return nil }
+        let mine: [CUTarget] = lock.withLock { targets.values.filter { $0.sessionId == sessionId && $0.pid == pid } }
+        return mine.sorted { (Int($0.id.dropFirst()) ?? 0) > (Int($1.id.dropFirst()) ?? 0) }.first { t in
+            guard sys.window(id: t.windowID) != nil else { return false }
+            switch selector {
+            case nil: return true
+            case .id(let id)?: return t.windowID == id
+            case .title(let title)?:
+                let want = title.lowercased(), have = t.windowTitle.lowercased()
+                return have == want || (!want.isEmpty && have.contains(want))
+            }
+        }
+    }
 
     /// Asks the app for a new window without activating it: File → New Window (by title or by its ⌘N key
     /// equivalent; the menu bar is reachable with no window on this Space), else ⌘N posted to the pid.
@@ -233,7 +303,8 @@ public final class CUCore: @unchecked Sendable {
             return try CUWindowResolver.resolve(
                 appName: t.appName, axWindows: CUAXWindows.list(pid: t.pid, ax: ax, server: server), server: server,
                 selector: p.window, privatePath: t.privatePath,
-                windowEffects(pid: t.pid, appName: t.appName, chromium: t.isChromium, privatePath: t.privatePath))
+                windowEffects(pid: t.pid, appName: t.appName, chromium: t.isChromium, privatePath: t.privatePath,
+                              sessionId: t.sessionId, appKey: t.bundleId ?? "pid:\(t.pid)"))
         }
         let chosen = outcome.window
         let old = t.windowID
@@ -536,6 +607,7 @@ public final class CUCore: @unchecked Sendable {
             guard let t = remove(id) else { continue }
             emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: t.windowID) }
         }
+        lock.withLock { newWindowClaims = newWindowClaims.filter { !$0.hasPrefix("\(p.sessionId)\u{1F}") } }
         return SessionEndedResult()
     }
 
@@ -657,6 +729,7 @@ public final class CUCore: @unchecked Sendable {
     // MARK: AX observation (pid queue only)
 
     private var windowElements: [String: AXUIElement] = [:]
+    private var remoteMisses: [String: Double] = [:]
     private let windowElementsLock = NSLock()
 
     /// The bound window's AX element, re-resolved when the cached one died or the binding moved.
@@ -675,7 +748,7 @@ public final class CUCore: @unchecked Sendable {
             }
             // Still there for the window server but not in the AX list: another Space or full screen (reached
             // where it is by remote token), or an app that is not answering.
-            if t.privatePath, let remote = ax.remoteWindow(pid: t.pid, windowID: wid) {
+            if t.privatePath, let remote = remoteWindow(pid: t.pid, windowID: wid) {
                 windowElementsLock.withLock { windowElements[t.id] = remote }
                 return remote
             }
@@ -689,6 +762,16 @@ public final class CUCore: @unchecked Sendable {
         return w.element
     }
 
+    /// One window by remote token, not re-probed for 15 s after a miss (a probe walks for up to 1.5 s).
+    func remoteWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement? {
+        let key = "\(pid):\(windowID)"
+        let now = clock.nowMs()
+        if let missed = windowElementsLock.withLock({ remoteMisses[key] }), now - missed < 15_000 { return nil }
+        if let e = ax.remoteWindows(pid: pid, windowIDs: [windowID])[windowID] { return e }
+        windowElementsLock.withLock { remoteMisses[key] = now }
+        return nil
+    }
+
     /// Pointer events need the bound window on this desktop. A window AX does not list and the window server
     /// shows off screen is on another Space or in full screen (bound where it is, by remote token): (a) move
     /// it here (SkyLight, `privatePath`); else (b) open a new window here and switch the target to it — the
@@ -697,7 +780,8 @@ public final class CUCore: @unchecked Sendable {
     func bringToThisDesktop(_ p: TargetActParams, _ t: CUTarget) throws -> String? {
         guard isOffThisDesktop(t) else { return nil }
         if p.privatePath, let note = moveToThisDesktop(t) { return note }
-        let fx = windowEffects(pid: t.pid, appName: t.appName, chromium: t.isChromium, privatePath: p.privatePath)
+        let fx = windowEffects(pid: t.pid, appName: t.appName, chromium: t.isChromium, privatePath: p.privatePath,
+                               sessionId: t.sessionId, appKey: t.bundleId ?? "pid:\(t.pid)")
         let before = Set(fx.axWindows().map(\.id))
         if fx.openNewWindow(), let fresh = fx.wait({ fx.axWindows().first { !before.contains($0.id) } }) {
             let old = t.windowID

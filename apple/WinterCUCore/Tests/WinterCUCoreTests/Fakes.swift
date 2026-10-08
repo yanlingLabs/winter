@@ -98,9 +98,12 @@ final class FakeAX: CUAXBackend {
     /// Windows reachable only by remote token (another Space, full screen), by window id.
     var remoteWindows: [CGWindowID: AXUIElement] = [:]
     private(set) var remoteAsked: [CGWindowID] = []
-    func remoteWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement? {
-        remoteAsked.append(windowID)
-        return remoteWindows[windowID]
+    /// One remote-token walk per call, for all the ids asked.
+    private(set) var remoteWalks = 0
+    func remoteWindows(pid: pid_t, windowIDs: [CGWindowID]) -> [CGWindowID: AXUIElement] {
+        remoteWalks += 1
+        remoteAsked += windowIDs
+        return remoteWindows.filter { windowIDs.contains($0.key) }
     }
 }
 

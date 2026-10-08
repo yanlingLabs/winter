@@ -16,8 +16,9 @@ protocol CUAXBackend: AnyObject {
     func perform(_ e: AXUIElement, _ action: String) throws
     func isAlive(_ e: AXUIElement) -> Bool
     func windowID(_ e: AXUIElement) -> CGWindowID?
-    /// The AX element of a window `kAXWindowsAttribute` omits (another Space, full screen); private.
-    func remoteWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement?
+    /// The AX elements of windows `kAXWindowsAttribute` omits (another Space, full screen), by window id, in
+    /// one remote-token walk; private.
+    func remoteWindows(pid: pid_t, windowIDs: [CGWindowID]) -> [CGWindowID: AXUIElement]
 }
 
 extension CUAXBackend {
@@ -56,7 +57,9 @@ final class CULiveAX: CUAXBackend {
     func perform(_ e: AXUIElement, _ action: String) throws { try AX.perform(e, action) }
     func isAlive(_ e: AXUIElement) -> Bool { AX.isAlive(e) }
     func windowID(_ e: AXUIElement) -> CGWindowID? { AX.windowID(e) }
-    func remoteWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement? { AX.windowByRemoteToken(pid: pid, windowID: windowID) }
+    func remoteWindows(pid: pid_t, windowIDs: [CGWindowID]) -> [CGWindowID: AXUIElement] {
+        AX.windowsByRemoteToken(pid: pid, wanted: Set(windowIDs)).found
+    }
 }
 
 /// Process and window-server facts (and the few global effects of rung 4), injectable for tests.
@@ -89,7 +92,9 @@ final class CULiveSystem: CUSystemBackend {
     }
     func window(id: UInt32) -> CUWindowServerWindow? { CUWindowServer.window(id: id) }
     func windows(pid: pid_t) -> [CUWindowServerWindow] {
-        CUWindowServer.windows().filter { $0.pid == pid && $0.frame.width > 1 && $0.frame.height > 1 }
+        // Every Space, on screen or not; desktop elements are not excluded here (they belong to Finder anyway,
+        // and the flag must not cost an app its windows elsewhere).
+        CUWindowServer.windows(excludeDesktop: false).filter { $0.pid == pid && $0.frame.width > 1 && $0.frame.height > 1 }
     }
     func windowStack() -> [CUWindowServerWindow] { CUWindowServer.windows(onScreenOnly: true, includeOtherLayers: true) }
     func moveWindowToActiveSpace(_ id: UInt32) -> Bool { CUSkyLight.system.moveWindowToActiveSpace(windowID: id) }
