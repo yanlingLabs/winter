@@ -91,6 +91,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (`PairedDevicesWindowController`) — see `openPairedDevices()`, now a plain
     /// `summonAppWindow(navigatingTo: .dashboard(pane: .pairedDevices))`.
     private(set) var appWindow: AppWindowController?
+
+    /// The computer-use mirror inside Winter's own windows (spine §11b): one coordinator for every window,
+    /// holding the one connection to the Winter Computer Use helper. Made on first use; nil under the
+    /// unit-test host, which has no helper and must never open its socket.
+    private(set) lazy var mirrorCoordinator: MirrorCoordinator? = {
+        guard !Self.isRunningUnitTests else { return nil }
+        return MirrorCoordinator(client: LiveComputerUseHelperClient(home: AppProfile.winterHome),
+                                 log: { OrbDebug.log("mirror: \($0)") })
+    }()
     /// browser-runtime T5: the browser lifecycle's assembly point (`BrowserSignals.swift`) —
     /// constructed once, beside the shell's own `ShellSessionHost`, and held for the app's life
     /// because it owns the Combine subscriptions that provoke a re-plan. `nil` until the shell is
@@ -270,6 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 2e-iii — the sidebar's own "open in a new window" spawn).
     func registerDetachedWindow(_ controller: DetachedWindowController) {
         detachedWindows.append(controller)
+        if let mirrorCoordinator { controller.attachMirror(mirrorCoordinator) }
         syncDockPresence() // Lifecycle T3: a real chat window just opened — promote if it's the first
         controller.onClosed = { [weak self] closed in
             self?.detachedWindows.removeAll { $0 === closed }
@@ -655,6 +665,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.browserSignals?.setRenderingActive(active)
         }
         appWindow = controller
+        if let mirrorCoordinator { controller.attachMirror(mirrorCoordinator) }
         controller.summon(navigatingTo: destination)
         reassertMainMenuItems(host: host)
     }

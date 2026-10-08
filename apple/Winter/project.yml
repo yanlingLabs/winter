@@ -19,9 +19,14 @@ packages:
   WinterProtocol:
     path: ../WinterProtocol
   # ComputerV2: the Winter Computer Use helper's shell (and, through it, the automation engine and the
-  # mirror/cursor/Esc packages). Only the WinterComputerUse target links it; Winter.app never does.
+  # mirror/cursor/Esc packages). Only the WinterComputerUse target links the shell.
   WinterComputerUse:
     path: ../WinterComputerUse
+  # ComputerV2 mirror (spine 11b): the live mirror of the controlled app renders INSIDE Winter's windows,
+  # so Winter.app links the presentation package for `CUMirrorModel`/`CUMirrorView` (it captures nothing:
+  # the helper keeps the Screen Recording grant and streams frames over its socket).
+  WinterCUPresentation:
+    path: ../WinterCUPresentation
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.6.0"
@@ -73,6 +78,7 @@ targets:
       - package: WinterKit
         product: WinterSessionKit
       - package: WinterProtocol
+      - package: WinterCUPresentation
       - package: Sparkle
       - target: WinterHelper
         embed: false
