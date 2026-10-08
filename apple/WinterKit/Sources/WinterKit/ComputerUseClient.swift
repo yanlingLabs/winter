@@ -13,8 +13,8 @@ import Foundation
 // own when it carries a word this build does not know — the same "never guess" rule `McpToolsServer`
 // keeps.
 //
-// **`computerUse.setSettings` is PROPOSED, not pinned.** The three booleans the page toggles
-// (`enabled`, `mirror`, `privateEventPath`) have no write door on the wire today: the app writes no
+// **`computerUse.setSettings` is PROPOSED, not pinned.** The booleans the page toggles (`enabled`,
+// `mirror`, `privateEventPath`, `allowAllApps`) have no write door on the wire today: the app writes no
 // `settings.json` key directly (the advisor model's direct write was retired for racing the daemon's
 // watcher), and every other settings write is a purpose-specific RPC. `setSettings` is that RPC for this
 // page — a partial patch, absent keys untouched — and `LiveComputerUseClient` sends it by that name. A
@@ -78,43 +78,77 @@ public struct ComputerUseStatus: Codable, Equatable, Sendable {
     public let legacyComputer: Bool
     public let mirror: Bool
     public let privateEventPath: Bool
+    /// The master switch: Computer Use may act in any app except the exceptions (on, the default), or
+    /// only in the apps the exceptions list names (off). A daemon that predates the key reads as on.
+    public let allowAllApps: Bool
     public let helper: ComputerUseHelperStatus
 
-    public init(enabled: Bool, legacyComputer: Bool, mirror: Bool, privateEventPath: Bool, helper: ComputerUseHelperStatus) {
+    public init(enabled: Bool, legacyComputer: Bool, mirror: Bool, privateEventPath: Bool,
+                allowAllApps: Bool = true, helper: ComputerUseHelperStatus) {
         self.enabled = enabled
         self.legacyComputer = legacyComputer
         self.mirror = mirror
         self.privateEventPath = privateEventPath
+        self.allowAllApps = allowAllApps
         self.helper = helper
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try c.decode(Bool.self, forKey: .enabled)
+        legacyComputer = try c.decode(Bool.self, forKey: .legacyComputer)
+        mirror = try c.decode(Bool.self, forKey: .mirror)
+        privateEventPath = try c.decode(Bool.self, forKey: .privateEventPath)
+        allowAllApps = try c.decodeIfPresent(Bool.self, forKey: .allowAllApps) ?? true
+        helper = try c.decode(ComputerUseHelperStatus.self, forKey: .helper)
     }
 
     /// PURE: this status with `patch`'s keys replaced — what the page shows while a write is in flight.
     public func applying(_ patch: ComputerUseSettingsPatch) -> ComputerUseStatus {
         ComputerUseStatus(enabled: patch.enabled ?? enabled, legacyComputer: legacyComputer,
                           mirror: patch.mirror ?? mirror, privateEventPath: patch.privateEventPath ?? privateEventPath,
-                          helper: helper)
+                          allowAllApps: patch.allowAllApps ?? allowAllApps, helper: helper)
     }
 }
 
-/// One row of `computerUse.apps.list`: every app that has a setting, plus the apps ComputerV2 used
-/// recently (the daemon remembers their name and `lastUsedAt`).
+/// One row of `computerUse.apps.list`. The list is EXCEPTIONS only: an app the user (or the daemon's own
+/// default — a password manager) has given an access level, plus any app holding an always-grant. A
+/// row's `access` is `nil` when it is there only for its grant.
 public struct ComputerUseApp: Codable, Equatable, Identifiable, Sendable {
     public var id: String { bundleId }
     public let bundleId: String
     public let name: String
-    public let access: ComputerUseAppAccess
+    /// The exception's level, or `nil` when the row exists only for its always-grant.
+    public let access: ComputerUseAppAccess?
     /// `"always"` when the user chose "Always allow" on the per-app card; `null` on the wire otherwise.
     public let grant: ComputerUseGrant?
+    /// The daemon put this exception here itself (the default-deny list), rather than the user. It can
+    /// still be changed or removed.
+    public let isDefault: Bool
     /// Epoch time of the app's last use. The unit is not pinned (the protocol's other timestamps are
     /// epoch milliseconds); `lastUsedDate` reads either.
     public let lastUsedAt: Double?
 
-    public init(bundleId: String, name: String, access: ComputerUseAppAccess, grant: ComputerUseGrant? = nil, lastUsedAt: Double? = nil) {
+    public init(bundleId: String, name: String, access: ComputerUseAppAccess?, grant: ComputerUseGrant? = nil,
+                isDefault: Bool = false, lastUsedAt: Double? = nil) {
         self.bundleId = bundleId
         self.name = name
         self.access = access
         self.grant = grant
+        self.isDefault = isDefault
         self.lastUsedAt = lastUsedAt
+    }
+
+    /// Decoded by hand so a daemon that predates `isDefault` still decodes (it reads as false). An
+    /// `access` word this build does not know throws, which drops the row (`LiveComputerUseClient`).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        bundleId = try c.decode(String.self, forKey: .bundleId)
+        name = try c.decode(String.self, forKey: .name)
+        access = try c.decodeIfPresent(ComputerUseAppAccess.self, forKey: .access)
+        grant = try c.decodeIfPresent(ComputerUseGrant.self, forKey: .grant)
+        isDefault = try c.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
+        lastUsedAt = try c.decodeIfPresent(Double.self, forKey: .lastUsedAt)
     }
 
     /// PURE: `lastUsedAt` as a date. A value below 1e11 cannot be epoch milliseconds (that is 1973) and
@@ -125,6 +159,14 @@ public struct ComputerUseApp: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// What `computerUse.apps.set` is told about an app's `access`. Three states because the wire has three:
+/// the key absent (leave it), a level, and `null` (remove the exception).
+public enum ComputerUseAccessWrite: Equatable, Sendable {
+    case leave
+    case set(ComputerUseAppAccess)
+    case remove
+}
+
 /// What `computerUse.apps.set` is told about an app's `grant`. Three states because the wire has three:
 /// the key absent (leave it), `"always"`, and `null` (clear it — "Remove always-allow").
 public enum ComputerUseGrantWrite: Equatable, Sendable {
@@ -133,20 +175,22 @@ public enum ComputerUseGrantWrite: Equatable, Sendable {
     case clear
 }
 
-/// A partial write of the three booleans Settings → Computer Use toggles. Absent keys are untouched.
+/// A partial write of the booleans Settings → Computer Use toggles. Absent keys are untouched.
 /// PROPOSED wire shape — see the header.
 public struct ComputerUseSettingsPatch: Codable, Equatable, Sendable {
     public var enabled: Bool?
     public var mirror: Bool?
     public var privateEventPath: Bool?
+    public var allowAllApps: Bool?
 
-    public init(enabled: Bool? = nil, mirror: Bool? = nil, privateEventPath: Bool? = nil) {
+    public init(enabled: Bool? = nil, mirror: Bool? = nil, privateEventPath: Bool? = nil, allowAllApps: Bool? = nil) {
         self.enabled = enabled
         self.mirror = mirror
         self.privateEventPath = privateEventPath
+        self.allowAllApps = allowAllApps
     }
 
-    public var isEmpty: Bool { enabled == nil && mirror == nil && privateEventPath == nil }
+    public var isEmpty: Bool { enabled == nil && mirror == nil && privateEventPath == nil && allowAllApps == nil }
 }
 
 /// The app's seam onto the computer-use RPCs.
@@ -155,8 +199,9 @@ public protocol ComputerUseClient: Sendable {
     /// Launches the helper if needed and raises the system prompt (or opens the matching Privacy pane).
     func requestPermission(_ kind: ComputerUsePermissionKind) async throws
     func listApps() async throws -> [ComputerUseApp]
-    /// Writes one app's setting. `name` is stored so a not-yet-seen app still has a label in the list.
-    func setApp(bundleId: String, name: String?, access: ComputerUseAppAccess?, grant: ComputerUseGrantWrite) async throws
+    /// Writes one app's exception and/or grant. `name` is stored so a not-yet-seen app still has a label
+    /// in the list; `access: .remove` removes the exception.
+    func setApp(bundleId: String, name: String?, access: ComputerUseAccessWrite, grant: ComputerUseGrantWrite) async throws
     /// PROPOSED (`computerUse.setSettings`) — see the header.
     func setSettings(_ patch: ComputerUseSettingsPatch) async throws
 }
@@ -189,14 +234,18 @@ public final class LiveComputerUseClient: ComputerUseClient, Sendable {
         guard let rows = r["apps"]?.arrayValue else {
             throw RpcError(code: -3, message: "invalid result from server for computerUse.apps.list")
         }
-        // A row naming an access word this build does not know is dropped rather than guessed at.
+        // A row naming an access or grant word this build does not know is dropped rather than guessed at.
         return rows.compactMap { Self.decode(ComputerUseApp.self, from: $0) }
     }
 
-    public func setApp(bundleId: String, name: String?, access: ComputerUseAppAccess?, grant: ComputerUseGrantWrite) async throws {
+    public func setApp(bundleId: String, name: String?, access: ComputerUseAccessWrite, grant: ComputerUseGrantWrite) async throws {
         var params: [String: JSONValue] = ["bundleId": .string(bundleId)]
         if let name { params["name"] = .string(name) }
-        if let access { params["access"] = .string(access.rawValue) }
+        switch access {
+        case .leave: break
+        case .set(let level): params["access"] = .string(level.rawValue)
+        case .remove: params["access"] = .null
+        }
         switch grant {
         case .leave: break
         case .always: params["grant"] = .string(ComputerUseGrant.always.rawValue)
@@ -213,6 +262,7 @@ public final class LiveComputerUseClient: ComputerUseClient, Sendable {
         if let enabled = patch.enabled { params["enabled"] = .bool(enabled) }
         if let mirror = patch.mirror { params["mirror"] = .bool(mirror) }
         if let privateEventPath = patch.privateEventPath { params["privateEventPath"] = .bool(privateEventPath) }
+        if let allowAllApps = patch.allowAllApps { params["allowAllApps"] = .bool(allowAllApps) }
         let r = try await client.request("computerUse.setSettings", params: .object(params))
         guard r["ok"]?.boolValue == true else {
             throw RpcError(code: -3, message: "computerUse.setSettings returned ok:false")

@@ -1,5 +1,6 @@
 import Foundation
 import WinterKit
+@testable import Winter
 
 /// Hand-written `ComputerUseClient` test double — ComputerV2. Scripts every call by hand (no socket or
 /// transport): `ComputerUseSettingsModel` is built around the `ComputerUseClient` PROTOCOL so its tests
@@ -18,10 +19,10 @@ final class FakeComputerUseClient: ComputerUseClient, @unchecked Sendable {
     static let idleHelper = ComputerUseHelperStatus(installed: true, running: false)
 
     static func status(enabled: Bool = true, legacyComputer: Bool = false, mirror: Bool = true,
-                       privateEventPath: Bool = true,
+                       privateEventPath: Bool = true, allowAllApps: Bool = true,
                        helper: ComputerUseHelperStatus = FakeComputerUseClient.idleHelper) -> ComputerUseStatus {
         ComputerUseStatus(enabled: enabled, legacyComputer: legacyComputer, mirror: mirror,
-                          privateEventPath: privateEventPath, helper: helper)
+                          privateEventPath: privateEventPath, allowAllApps: allowAllApps, helper: helper)
     }
 
     static func running(accessibility: Bool, screenRecording: Bool) -> ComputerUseHelperStatus {
@@ -44,7 +45,7 @@ final class FakeComputerUseClient: ComputerUseClient, @unchecked Sendable {
 
     // setApp(bundleId:name:access:grant:)
     var setAppResult: Result<Void, Error> = .success(())
-    private(set) var setAppCalls: [(bundleId: String, name: String?, access: ComputerUseAppAccess?, grant: ComputerUseGrantWrite)] = []
+    private(set) var setAppCalls: [(bundleId: String, name: String?, access: ComputerUseAccessWrite, grant: ComputerUseGrantWrite)] = []
 
     // setSettings(_:)
     var setSettingsResult: Result<Void, Error> = .success(())
@@ -67,7 +68,7 @@ final class FakeComputerUseClient: ComputerUseClient, @unchecked Sendable {
         return try result.get()
     }
 
-    func setApp(bundleId: String, name: String?, access: ComputerUseAppAccess?, grant: ComputerUseGrantWrite) async throws {
+    func setApp(bundleId: String, name: String?, access: ComputerUseAccessWrite, grant: ComputerUseGrantWrite) async throws {
         setAppCalls.append((bundleId, name, access, grant))
         try setAppResult.get()
     }
@@ -75,5 +76,45 @@ final class FakeComputerUseClient: ComputerUseClient, @unchecked Sendable {
     func setSettings(_ patch: ComputerUseSettingsPatch) async throws {
         setSettingsCalls.append(patch)
         try setSettingsResult.get()
+    }
+}
+
+/// Hand-written `InstalledAppEnumerating` test double — nothing scans the disk or asks LaunchServices. It
+/// records how often it was asked and whether any ask came on the main thread, because the model's
+/// promise is that both calls run off it.
+final class FakeInstalledAppEnumerator: InstalledAppEnumerating, @unchecked Sendable {
+    private let apps: [InstalledApp]
+    private let paths: [String: String]
+    private let lock = NSLock()
+    private var _scanCount = 0
+    private var _pathLookups: [String] = []
+    private var _sawMainThread = false
+
+    /// - Parameters:
+    ///   - apps: what the add sheet's scan finds.
+    ///   - paths: the bundle ids that resolve to an app on disk (every other id is "not installed").
+    init(apps: [InstalledApp], paths: [String: String] = [:]) {
+        self.apps = apps
+        self.paths = paths
+    }
+
+    var scanCount: Int { lock.withLock { _scanCount } }
+    var pathLookups: [String] { lock.withLock { _pathLookups } }
+    var anyCallWasOnTheMainThread: Bool { lock.withLock { _sawMainThread } }
+
+    func installedApps() -> [InstalledApp] {
+        lock.withLock {
+            _scanCount += 1
+            if Thread.isMainThread { _sawMainThread = true }
+        }
+        return apps
+    }
+
+    func appPath(forBundleId bundleId: String) -> String? {
+        lock.withLock {
+            _pathLookups.append(bundleId)
+            if Thread.isMainThread { _sawMainThread = true }
+        }
+        return paths[bundleId]
     }
 }
