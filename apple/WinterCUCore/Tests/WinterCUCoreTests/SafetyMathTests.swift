@@ -39,6 +39,29 @@ final class SafetyMathTests: XCTestCase {
         }
     }
 
+    /// Whole-screen images show Winter's windows now; `screen.appAt` onto one is refused like binding Winter.
+    func testAppAtRefusesWinterWindows() throws {
+        let notes = w(1, 10, CGRect(x: 0, y: 0, width: 500, height: 500), owner: "Notes")
+        let winter = w(2, 40, CGRect(x: 0, y: 0, width: 200, height: 200), owner: "Winter")
+        var orb = w(3, 41, CGRect(x: 300, y: 300, width: 60, height: 60), owner: "Winter")
+        orb.layer = 3
+        let mirror = w(4, 99, CGRect(x: 0, y: 0, width: 500, height: 500), owner: "Winter Computer Use")
+        let bundles: [pid_t: String] = [10: "com.apple.Notes", 40: "com.winter.app", 41: "com.winter.app.dev",
+                                        99: "com.winter.computeruse"]
+        func appAt(_ x: Double, _ y: Double) throws -> CUWindowServerWindow {
+            try CUCore.appAt(point: CGPoint(x: x, y: y), stack: [mirror, orb, winter, notes], ownPid: 99,
+                             bundleId: { bundles[$0] })
+        }
+        XCTAssertEqual(try appAt(400, 100).id, 1, "the helper's own mirror is skipped")
+        for (x, y) in [(50.0, 50.0), (320.0, 320.0)] {
+            XCTAssertThrowsError(try appAt(x, y), "a Winter window, or a Winter panel floating over Notes") {
+                XCTAssertEqual(($0 as? CUError)?.code, "refused")
+                XCTAssertEqual(($0 as? CUError)?.data?["reason"], .string("winter_itself"))
+            }
+        }
+        XCTAssertThrowsError(try appAt(900, 900)) { XCTAssertEqual(($0 as? CUError)?.code, "invalid_params") }
+    }
+
     func testDisplayChoice() throws {
         let ordered: [CGDirectDisplayID] = [1, 7, 3]  // main first
         XCTAssertEqual(try CUCapturer.choose(ordered, display: nil, displayId: nil), [1])

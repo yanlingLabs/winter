@@ -18,8 +18,9 @@ struct CUCapturedImage {
 ///
 /// - Windows are captured with a desktop-independent single-window filter: what is on top of the window
 ///   (other apps, the helper's own mirror and cursor overlay) can never appear in the image.
-/// - Whole-screen images exclude the helper itself, Winter, the system auth agents and every app the
-///   daemon names (the user's "Don't allow" apps).
+/// - Whole-screen images exclude the helper itself (its mirrors and cursor overlay), the system auth agents
+///   and every app the daemon names (the user's "Don't allow" apps). Winter's own app windows are shown:
+///   seeing them is fine, controlling them is refused at bind and at `screen.appAt`.
 /// - One capture is in flight at a time: concurrent requests are serialised inside `replayd` with a large
 ///   per-request penalty, so queueing them here is faster.
 /// - Shareable-content lookups are cached for 2 s, since enumerating them dominates a one-shot capture.
@@ -100,8 +101,8 @@ actor CUCapturer {
             .compactMap { id in displays.first { $0.displayID == id } }
         guard !chosen.isEmpty else { throw CUError.unsupported("no display to capture") }
 
-        // The helper (by bundle id and by pid), everything under com.winter., the auth agents, and the
-        // caller's exclusions.
+        // The helper (by bundle id and by pid), the auth agents, and the caller's exclusions. Winter's own app
+        // windows stay in the image: seeing them is fine, controlling them is refused at bind and appAt.
         var extra = Set(excludeBundleIds)
         if let own = Bundle.main.bundleIdentifier { extra.insert(own) }
         let ownPid = getpid()
