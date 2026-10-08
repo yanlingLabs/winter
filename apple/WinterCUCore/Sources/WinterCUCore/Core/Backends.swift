@@ -76,6 +76,8 @@ protocol CUSystemBackend: AnyObject {
     func moveWindowToActiveSpace(_ id: UInt32) -> Bool
     func frontmostPid() -> pid_t?
     func activate(pid: pid_t) -> Bool
+    /// Stage Manager is on (windows of other stage sets sit off stage on this Space).
+    func stageManagerEnabled() -> Bool
     func cursorLocation() -> CGPoint?
     func warpCursor(to: CGPoint)
 }
@@ -102,6 +104,9 @@ final class CULiveSystem: CUSystemBackend {
     func activate(pid: pid_t) -> Bool {
         guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
         return DispatchQueue.main.sync { app.activate() }
+    }
+    func stageManagerEnabled() -> Bool {
+        UserDefaults(suiteName: "com.apple.WindowManager")?.bool(forKey: "GloballyEnabled") ?? false
     }
     func cursorLocation() -> CGPoint? { CGEvent(source: nil)?.location }
     func warpCursor(to p: CGPoint) {

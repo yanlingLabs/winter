@@ -236,7 +236,7 @@ extension CUCore {
                 throw CUError.unsupported("[\(ref)] has no position on screen — try action() or a screenshot point")
             }
             return try pointerClick(p, t, at: center, button: button, count: count, flags: flags, token, announced: announced,
-                                    element: e)
+                                    element: e, axTried: announced)
         }
         guard let px = try cuPoint(a.point) else { throw CUError.invalidParams("click needs a ref or a point") }
         let pt = try screenPoint(for: t, shotId: a.shotId, pixel: px)
@@ -245,35 +245,148 @@ extension CUCore {
 
     /// `announced`: the cursor already showed this press (an AX attempt that fell back to events). `element`:
     /// the element the click is for, when a ref named it.
-    ///
-    /// On another desktop (another Space, full screen) a click needs no pointer: the element under the point —
-    /// the deepest one in the window's AX tree whose frame holds it — is pressed over accessibility (right →
-    /// show menu, double → open or press twice). Only a click with modifier keys, or where no element takes a
-    /// click (a canvas), needs the window here.
+    /// `axTried`: the caller already tried the AX action and the app refused it.
     private func pointerClick(_ p: TargetActParams, _ t: CUTarget, at pt: CGPoint, button: CUMouseButton, count: Int,
                               flags: CGEventFlags, _ token: CUCancellation.Token, announced: Bool = false,
-                              element: AXUIElement? = nil) throws -> ActOutcome {
+                              element: AXUIElement? = nil, axTried: Bool = false) throws -> ActOutcome {
         if isOffThisDesktop(t) {
-            guard flags.isEmpty else { throw geometricElsewhere(t, "a click with modifier keys") }
-            guard button != .middle else { throw geometricElsewhere(t, "a middle click") }
-            guard let target = element ?? elementAt(pt, in: t) else {
-                throw geometricElsewhere(t, "a click where no accessibility element is (a canvas)")
-            }
-            if !announced { cursor(t, "press", at: pt, count: count, button: button.rawValue) }
-            try token.check()
-            guard let done = try axClick(target, button: button, count: count, t) else {
-                throw geometricElsewhere(t, "a click on an element that takes no click over accessibility")
-            }
-            return ActOutcome(rung: .accessibility, detail: "\(t.appName)'s window is on another desktop, so it was \(done) over accessibility")
+            return try clickElsewhere(p, t, at: pt, button: button, count: count, flags: flags, token,
+                                      announced: announced, element: element, axTried: axTried)
         }
+        let staged = bringOnStage(t)
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
-        let synth = self.synth
+        let synth = self.synth(p)
         let windowFor = self.windowFor(t)
         let event = announced ? nil : CursorEvent(kind: "press", point: pt, count: count, button: button.rawValue)
         return try runEvents(p, t, d, focus: true, token, cursor: event) { route, check in
             try synth.click(pid: t.pid, windowFor: windowFor, at: pt, button: button, count: count, flags: flags,
                             route: route, check: check)
+        }.noting(staged)
+    }
+
+    /// How a click reaches a window on another desktop (another Space or display). AX first, as ChatGPT's
+    /// helper can only do there too: a LISTED action (press, show menu, open); else, for a plain left or right
+    /// click on an element, the action unlisted (web content often leaves press out), then the nearest
+    /// ancestor that lists it. Window-targeted pid events are the last attempt — for a canvas (no element),
+    /// modifier and middle clicks, a double click with no open, or an element that refused every AX try.
+    /// ChatGPT sends those events only on screen; off screen they may or may not land. Pure.
+    enum ElsewhereClick: Equatable {
+        case ax(String)
+        case axUnlisted(String)
+        case events
+    }
+
+    static func elsewhereClickRoute(button: CUMouseButton, count: Int, modified: Bool, actions: [String]?) -> ElsewhereClick {
+        guard !modified, button != .middle, let actions else { return .events }
+        switch (button, count) {
+        case (.right, _): return actions.contains(kAXShowMenuAction) ? .ax(kAXShowMenuAction) : .axUnlisted(kAXShowMenuAction)
+        case (.left, let n) where n >= 2: return actions.contains("AXOpen") ? .ax("AXOpen") : .events
+        default: return actions.contains(kAXPressAction) ? .ax(kAXPressAction) : .axUnlisted(kAXPressAction)
         }
+    }
+
+    private func clickElsewhere(_ p: TargetActParams, _ t: CUTarget, at pt: CGPoint, button: CUMouseButton, count: Int,
+                                flags: CGEventFlags, _ token: CUCancellation.Token, announced: Bool,
+                                element: AXUIElement?, axTried: Bool) throws -> ActOutcome {
+        let modified = !flags.isEmpty
+        let target = element ?? (modified || button == .middle ? nil : elementAt(pt, in: t))
+        let route = axTried ? .events
+            : Self.elsewhereClickRoute(button: button, count: count, modified: modified, actions: target.map { ax.actions($0) })
+        if !announced { cursor(t, "press", at: pt, count: count, button: button.rawValue) }
+        try token.check()
+        if let target {
+            let tries: [AXUIElement]
+            let action: String?
+            switch route {
+            case .ax(let a): (tries, action) = ([target], a)
+            case .axUnlisted(let a): (tries, action) = (Self.selfThenListingAncestors(target, a, ax), a)
+            case .events: (tries, action) = ([], nil)
+            }
+            if let action {
+                for el in tries {
+                    do {
+                        try ax.perform(el, action)
+                        CULog.act.notice("click in \(t.appName, privacy: .public) (another desktop): AX \(action, privacy: .public)")
+                        return ActOutcome(rung: .accessibility,
+                                          detail: "\(t.appName)'s window is on another desktop, so the element was sent \(CURoleWords.actionWords(action)) over accessibility")
+                    } catch let error where Self.deliveryUncertain(error) {
+                        throw busyAfterSend(t)
+                    } catch let err as CUError where err.code == "stale_element" || err.code == "permission_missing" {
+                        throw err
+                    } catch {
+                        continue  // refused: the next, then the events below
+                    }
+                }
+            }
+        }
+        return try eventsElsewhere(p, t, token, cursor: nil, what: "the click") { synth, route in
+            try synth.click(pid: t.pid, windowFor: { _ in t.windowID }, at: pt, button: button, count: count, flags: flags, route: route)
+        }
+    }
+
+    /// `e`, then up to four ancestors that list `action`.
+    static func selfThenListingAncestors(_ e: AXUIElement, _ action: String, _ ax: CUAXBackend) -> [AXUIElement] {
+        var out = [e]
+        var cur = ax.element(e, kAXParentAttribute)
+        for _ in 0..<4 {
+            guard let c = cur else { break }
+            if ax.actions(c).contains(action) { out.append(c) }
+            cur = ax.element(c, kAXParentAttribute)
+        }
+        return out
+    }
+
+    /// Input to a window on another desktop as window-targeted pid events (ChatGPT's construction: fields 91
+    /// and 92 and the window-local location; SkyLight's post for Chromium-class apps, whose renderers drop
+    /// the public route's events). No focus change, no activation, no pointer. Nothing confirms the events
+    /// landed on a window that is not on screen, so the outcome says so: the state after the act shows it.
+    func eventsElsewhere(_ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token, cursor event: CursorEvent?,
+                         what: String, _ body: (CUEventSynth, CURoute) throws -> CURoute) throws -> ActOutcome {
+        // Addressing a window that is not on screen takes its local point (CGEventSetWindowLocation): with the
+        // private event path off, or the setter missing, there is nothing to try.
+        guard p.privatePath, skyLight.canSetWindowLocation else {
+            CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public) (another desktop): refused — no window-targeted route")
+            throw CUError.windowElsewhere(t.appName, sending: what)
+        }
+        let route: CURoute = t.isChromium && skyLight.isAvailable ? .skyLight : .publicPid
+        send(event, t)
+        try token.check()
+        let used = try body(synth(p), route)
+        let routeName = used == .skyLight ? "window-targeted SkyLight pid events" : "window-targeted pid events"
+        CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public) (another desktop): \(routeName, privacy: .public)")
+        return ActOutcome(rung: used == .skyLight ? .privatePath : .processEvents,
+                          detail: "\(t.appName)'s window is on another desktop: \(what) was sent to that window as \(routeName); whether it landed can't be confirmed there — check the state")
+    }
+
+    /// Stage Manager: a window of another stage set sits off stage on this Space (listed by AX, off screen).
+    /// Pointer events need it on stage, so it is brought there the way ChatGPT's helper does — un-minimized,
+    /// then `AXAddToStage` if still off stage — and the app the user had in front is put back in front.
+    func bringOnStage(_ t: CUTarget) -> String? {
+        guard sys.stageManagerEnabled(), let w = sys.window(id: t.windowID), !w.onScreen,
+              let element = try? windowElement(t) else { return nil }
+        var did: [String] = []
+        if ax.bool(element, kAXMinimizedAttribute) == true {
+            try? ax.set(element, kAXMinimizedAttribute, kCFBooleanFalse)
+            did.append("un-minimized")
+            waitOnScreen(t, ms: 400)
+        }
+        if sys.window(id: t.windowID)?.onScreen != true, ax.actions(element).contains("AXAddToStage") {
+            let previous = sys.frontmostPid()
+            if (try? ax.perform(element, "AXAddToStage")) != nil {
+                did.append("added to the stage")
+                waitOnScreen(t, ms: 600)
+                // Adding to the stage brings the app forward: hand the front back to the user's app.
+                if let prev = previous, prev != t.pid, sys.frontmostPid() == t.pid { _ = sys.activate(pid: prev) }
+            }
+        }
+        guard !did.isEmpty else { return nil }
+        CULog.act.notice("\(t.appName, privacy: .public): Stage Manager — \(did.joined(separator: ", "), privacy: .public)")
+        return "\(t.appName)'s window was off stage (Stage Manager), so it was \(did.joined(separator: " and "))"
+    }
+
+    private func waitOnScreen(_ t: CUTarget, ms: Double) {
+        let deadline = clock.nowMs() + ms
+        while sys.window(id: t.windowID)?.onScreen != true, clock.nowMs() < deadline { usleep(30_000) }
     }
 
     /// Roles that take a click: the hit test climbs from the deepest element at the point to the first of these
@@ -283,7 +396,6 @@ extension CUCore {
         "AXRow", "AXTab", "AXDisclosureTriangle", "AXTextField", "AXTextArea", "AXComboBox", "AXSearchField",
         "AXImage", "AXSwitch", "AXToggle", "AXIncrementor", "AXSlider", "AXColorWell", "AXDateField",
     ]
-    static let textInputRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
 
     /// The element a click at `point` (screen points) lands on, from a fresh read of the bound window's AX tree
     /// (a cached state may be stale after a scroll): the deepest element whose frame holds the point, climbing to
@@ -323,62 +435,6 @@ extension CUCore {
         }
         guard let node = Self.clickTarget(at: point, in: roots), let key = t.refs.key(for: node.ref) else { return nil }
         return key.element
-    }
-
-    /// A click done over accessibility on `e` (or the nearest ancestor that takes it): right → show menu;
-    /// double → open, else press twice; left → press, even when not listed (web content often leaves it out),
-    /// and a text input that takes no press is focused instead. Returns what was done, or nil.
-    func axClick(_ e: AXUIElement, button: CUMouseButton, count: Int, _ t: CUTarget) throws -> String? {
-        func attempt(_ el: AXUIElement, _ action: String) throws -> Bool {
-            do {
-                try ax.perform(el, action)
-                return true
-            } catch let error where Self.deliveryUncertain(error) {
-                throw busyAfterSend(t)
-            } catch let err as CUError where err.code == "stale_element" || err.code == "permission_missing" {
-                throw err
-            } catch {
-                return false
-            }
-        }
-        // The element, then up to four ancestors that list the action.
-        func chain(_ action: String, includeSelfUnlisted: Bool) -> [AXUIElement] {
-            var out: [AXUIElement] = []
-            var cur: AXUIElement? = e
-            for depth in 0..<5 {
-                guard let c = cur else { break }
-                if ax.actions(c).contains(action) || (depth == 0 && includeSelfUnlisted) { out.append(c) }
-                cur = ax.element(c, kAXParentAttribute)
-            }
-            return out
-        }
-        switch (button, count) {
-        case (.right, _):
-            for el in chain(kAXShowMenuAction, includeSelfUnlisted: true) where try attempt(el, kAXShowMenuAction) {
-                return "right-clicked (show menu)"
-            }
-            return nil
-        case (.left, let n) where n >= 2:
-            for el in chain("AXOpen", includeSelfUnlisted: false) where try attempt(el, "AXOpen") { return "opened (AXOpen)" }
-            for el in chain(kAXPressAction, includeSelfUnlisted: true) where try attempt(el, kAXPressAction) {
-                for _ in 1..<n { _ = try attempt(el, kAXPressAction) }
-                return "pressed \(n) times"
-            }
-            return nil
-        default:
-            for el in chain(kAXPressAction, includeSelfUnlisted: true) where try attempt(el, kAXPressAction) { return "pressed" }
-            if let role = ax.string(e, kAXRoleAttribute), Self.textInputRoles.contains(role), ax.isSettable(e, kAXFocusedAttribute) {
-                try? ax.set(e, kAXFocusedAttribute, kCFBooleanTrue)
-                t.noteTargeted(e, at: clock.nowMs())
-                return "focused"
-            }
-            return nil
-        }
-    }
-
-    func geometricElsewhere(_ t: CUTarget, _ what: String) -> CUError {
-        CULog.act.notice("\(t.appName, privacy: .public): refused off-desktop — \(what, privacy: .public) needs the window on this desktop")
-        return CUError.geometricElsewhere(t.appName, what)
     }
 
     /// A screenshot pixel of this target (`shotId`, else its latest shot) → global screen points.
@@ -566,7 +622,7 @@ extension CUCore {
             return try pasteText(text, format: .text, p, t, token, g)
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
-        let synth = self.synth
+        let synth = self.synth(p)
         let chars = Array(text)
         var next = 0
         return try runEvents(p, t, d, focus: true, token) { [self] route, _ in
@@ -697,7 +753,7 @@ extension CUCore {
             }
             return ActOutcome(rung: .accessibility, detail: "used the menu item “\(title)”")
         case .events(let code, let flags, let d):
-            let synth = self.synth
+            let synth = self.synth(p)
             return try runEvents(p, t, d, focus: true, token) { route, _ in
                 synth.key(pid: t.pid, code: code, flags: flags, route: route)
             }
@@ -791,39 +847,65 @@ extension CUCore {
             point = try screenPoint(for: t, shotId: a.shotId, pixel: px)
             viewport = sys.window(id: t.windowID)?.frame.size ?? CGSize(width: 400, height: 400)
         }
-        if isOffThisDesktop(t) {
-            let at = try a.ref.map { try element($0, in: t) } ?? elementAt(point, in: t)
-            return try scrollElsewhere(at: at, point: point, a.direction, pages: pages, p, t, token)
-        }
         let vertical = a.direction == .up || a.direction == .down
         let amount = (vertical ? viewport.height : viewport.width) * 0.9 * pages
         // Wheel deltas: positive moves the content down/right, i.e. scrolls up/left.
         let dy = a.direction == .down ? -amount : a.direction == .up ? amount : 0
         let dx = a.direction == .right ? -amount : a.direction == .left ? amount : 0
+        if isOffThisDesktop(t) {
+            let at = try a.ref.map { try element($0, in: t) } ?? elementAt(point, in: t)
+            return try scrollElsewhere(at: at, point: point, a.direction, pages: pages, deltaX: dx, deltaY: dy, p, t, token)
+        }
+        let staged = bringOnStage(t)
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
-        let synth = self.synth
+        let synth = self.synth(p)
         let windowFor = self.windowFor(t)
         let event = CursorEvent(kind: "scroll", point: point, text: a.direction.rawValue)
         return try runEvents(p, t, d, focus: false, token, cursor: event) { route, check in
             try synth.scroll(pid: t.pid, windowFor: windowFor, at: point, deltaX: dx, deltaY: dy, route: route, check: check)
-        }
+        }.noting(staged)
     }
 
-    /// Scrolling a window on another desktop, with no pointer: the scroll bar's value (AX), else Page Down/Up
-    /// (arrows sideways) sent to the app's pid, after focusing the scroll area so the keys reach it. The keyboard
-    /// needs no geometry.
+    /// Scrolling a window on another desktop, with no pointer: the scroll bar's value (AX); else window-
+    /// targeted wheel events; and when those visibly moved nothing (the content under the point and the
+    /// scroll area's content kept their frames), Page Down/Up (arrows sideways) sent to the app's pid after
+    /// focusing the scrolled content — the keyboard needs no geometry.
     private func scrollElsewhere(at e: AXUIElement?, point: CGPoint, _ direction: CUScrollDirection, pages: Double,
+                                 deltaX: Double, deltaY: Double,
                                  _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         let area = e.flatMap { scrollArea(from: $0) } ?? largestScrollArea(in: t)
         if let area {
             do {
                 if try axScroll(area: area, direction: direction, pages: pages) {
                     cursor(t, "scroll", at: point, text: direction.rawValue)
+                    CULog.act.notice("scroll in \(t.appName, privacy: .public) (another desktop): AX scroll bar")
                     return ActOutcome(rung: .accessibility, detail: "\(t.appName)'s window is on another desktop, so its scroll bar was moved over accessibility")
                 }
             } catch let error where Self.deliveryUncertain(error) {
                 throw busyAfterSend(t)
             }
+        }
+        // The wheel, addressed to the window (a last attempt: ChatGPT sends it on screen only). What moved
+        // tells whether it landed.
+        if p.privatePath, skyLight.canSetWindowLocation {
+            let content = area.flatMap { a in ax.elements(a, kAXChildrenAttribute).first { ax.string($0, kAXRoleAttribute) != kAXScrollBarRole } }
+            let probes = [e, content].compactMap { $0 }
+            let before = probes.map { ax.frame($0) }
+            let event = CursorEvent(kind: "scroll", point: point, text: direction.rawValue)
+            let wheel = try eventsElsewhere(p, t, token, cursor: event, what: "the scroll") { synth, route in
+                try synth.scroll(pid: t.pid, windowFor: { _ in t.windowID }, at: point, deltaX: deltaX, deltaY: deltaY, route: route)
+            }
+            if probes.isEmpty { return wheel }
+            let deadline = clock.nowMs() + 300
+            while clock.nowMs() < deadline {
+                if probes.map({ ax.frame($0) }) != before {
+                    return ActOutcome(rung: wheel.rung, detail: "\(t.appName)'s window is on another desktop: the scroll was sent to that window as wheel events, and its content moved")
+                }
+                usleep(30_000)
+            }
+            CULog.act.notice("scroll in \(t.appName, privacy: .public) (another desktop): the wheel moved nothing — Page keys")
+        }
+        if let area {
             // Keys go to the focused element: make it the scrolled content, not a search field.
             let content = ax.elements(area, kAXChildrenAttribute).first { ax.string($0, kAXRoleAttribute) != kAXScrollBarRole }
             for target in [content, area].compactMap({ $0 }) where ax.isSettable(target, kAXFocusedAttribute) {
@@ -836,8 +918,8 @@ extension CUCore {
         let presses = vertical ? max(1, Int(pages.rounded(.up))) : max(1, Int((pages * 8).rounded(.up)))
         let code = CUKeyCodes.code(for: key)
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
-        let synth = self.synth
-        let event = CursorEvent(kind: "scroll", point: point, text: direction.rawValue)
+        let synth = self.synth(p)
+        let event = p.privatePath && skyLight.canSetWindowLocation ? nil : CursorEvent(kind: "scroll", point: point, text: direction.rawValue)
         let o = try runEvents(p, t, d, focus: true, token, cursor: event) { route, _ in
             var used = route
             for _ in 0..<presses {
@@ -847,7 +929,8 @@ extension CUCore {
             return used
         }
         let what = vertical ? "\(presses)× \(direction == .down ? "Page Down" : "Page Up")" : "\(presses)× \(direction == .left ? "←" : "→")"
-        return o.noting("\(t.appName)'s window is on another desktop, so it was scrolled with \(what) sent to the app")
+        let why = p.privatePath && skyLight.canSetWindowLocation ? "the wheel moved nothing there" : "wheel events can't be addressed to it"
+        return o.noting("\(t.appName)'s window is on another desktop and \(why), so \(what) was sent to the app")
     }
 
     /// The window's largest scroll area (the page in a browser), for a scroll with no element under it.
@@ -926,16 +1009,21 @@ extension CUCore {
         }
         let from = try point(a.from, "from")
         let to = try point(a.to, "to")
-        // A drag is geometry: it needs real pointer events on screen, so the window here.
-        if isOffThisDesktop(t) { throw geometricElsewhere(t, "dragging") }
+        if isOffThisDesktop(t) {
+            if let fromInfo { announceTarget(t, fromInfo, pressing: false) }
+            return try eventsElsewhere(p, t, token, cursor: CursorEvent(kind: "drag", point: from, dragTo: to), what: "the drag") { synth, route in
+                try synth.drag(pid: t.pid, windowFor: { _ in t.windowID }, from: from, to: to, route: route)
+            }
+        }
+        let staged = bringOnStage(t)
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
         if let fromInfo { announceTarget(t, fromInfo, pressing: false) }
-        let synth = self.synth
+        let synth = self.synth(p)
         let windowFor = self.windowFor(t)
         let event = CursorEvent(kind: "drag", point: from, dragTo: to)
         return try runEvents(p, t, d, focus: true, token, cursor: event) { route, check in
             try synth.drag(pid: t.pid, windowFor: windowFor, from: from, to: to, route: route, check: check)
-        }
+        }.noting(staged)
     }
 
     // MARK: select, action, menu
@@ -1023,7 +1111,8 @@ extension CUCore {
         }
         t.noteTargeted(e, at: clock.nowMs())
         let same = shown.map { $0.count == pointer.count && $0.button == pointer.button.rawValue } ?? false
-        return try pointerClick(p, t, at: center, button: pointer.button, count: pointer.count, flags: [], token, announced: same)
+        return try pointerClick(p, t, at: center, button: pointer.button, count: pointer.count, flags: [], token, announced: same,
+                                element: e, axTried: true)
             .noting("\(t.appName) refused “\(words)” over accessibility, so [\(a.ref)] was \(pointer.verb) instead")
     }
 

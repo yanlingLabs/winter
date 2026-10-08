@@ -77,12 +77,13 @@ public struct CUError: Error, Codable, Sendable, Equatable, CustomStringConverti
                 message: "\(app)'s window is on another Space or in full screen and could not be reached there — ask the user to bring it to this desktop")
     }
 
-    /// Geometric input (`what`: dragging, a canvas click, a modified click) on a window on another desktop.
-    /// Clicks on elements, scrolls, typing and keys work there; this needs real pointer events on screen.
-    public static func geometricElsewhere(_ app: String, _ what: String) -> CUError {
+    /// Pointer input (`what`: the click, the drag) that has no AX equivalent, to a window on another desktop,
+    /// with no way to address events to a window that is off screen (the private event path is off).
+    public static func windowElsewhere(_ app: String, sending what: String) -> CUError {
         CUError(code: "window_elsewhere",
-                message: "\(app)'s window is on another desktop (another Space or full screen), and \(what) needs it on this desktop — click elements by ref, scroll, type and use keys instead, or ask the user to bring the window here")
+                message: "\(app)'s window is on another desktop, and \(what) can't be sent there with the private event path off — click elements by ref, scroll, type and use keys, or ask the user to bring the window here")
     }
+
 
     /// A window screenshot failed with the window on another Space or in full screen, and it could not be
     /// moved here.

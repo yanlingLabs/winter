@@ -44,6 +44,8 @@ public struct CUSkyLight: @unchecked Sendable {
 
     /// `SLEventPostToPid` resolved: rung 3 is possible.
     public var isAvailable: Bool { postToPidFn != nil }
+    /// `CGEventSetWindowLocation` resolved: an event can be addressed to a window by its local point.
+    public var canSetWindowLocation: Bool { setWindowLocationFn != nil }
     /// Focus-without-raise resolved.
     public var canFocusWithoutRaise: Bool {
         postEventRecordToFn != nil && getFrontProcessFn != nil && getProcessForPIDFn != nil

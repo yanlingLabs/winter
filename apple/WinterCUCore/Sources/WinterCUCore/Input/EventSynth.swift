@@ -46,6 +46,11 @@ struct CUEventSynth {
     let poster: CUEventPoster
     let skyLight: CUSkyLight
     var sleep: (Double) -> Void = { ms in usleep(useconds_t(max(0, ms) * 1000)) }
+    /// The bounds origin (top-left, global points) of a window an event is aimed at, for the window-local
+    /// location the public route states.
+    var windowOrigin: (UInt32) -> CGPoint? = { _ in nil }
+    /// Whether the private setters (field 51, the window location) may be used: the private event path setting.
+    var windowSPI = true
 
     /// Raw `CGEventField` numbers the public enum does not name.
     static let windowNumberField: UInt32 = 51
@@ -57,6 +62,18 @@ struct CUEventSynth {
         CGEventSource(stateID: route == .publicPid ? .privateState : .hidSystemState)
     }
 
+    /// A point in screen points → the same point local to a window whose bounds start at `origin` (both
+    /// top-left origin, no flip).
+    static func windowLocal(_ point: CGPoint, origin: CGPoint) -> CGPoint {
+        CGPoint(x: point.x - origin.x, y: point.y - origin.y)
+    }
+
+    /// Window-targeted pid events, as ChatGPT's computer-use helper builds them: the target pid (field 40), the
+    /// window id in fields 91 and 92 (the window under the pointer, and the one that can handle the event)
+    /// and 51 (its window number), and the window location. On the public route that location is LOCAL to
+    /// the window (screen point minus its bounds origin), so the event is addressed to the window and not to
+    /// whatever is on screen at that point — which is how a window on another Space or display can take it.
+    /// SkyLight's route keeps the screen point: WindowServer derives the local one there (cua-driver).
     private func stampRouting(_ e: CGEvent, pid: pid_t, windowID: UInt32, location: CGPoint, route: CURoute,
                               clickGroup: Int64?) {
         guard route != .hid else { return }
@@ -64,11 +81,18 @@ struct CUEventSynth {
         if windowID != 0 {
             e.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))
             e.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowID))
+            if windowSPI || route == .skyLight { skyLight.setField(e, Self.windowNumberField, Int64(windowID)) }
         }
-        if route == .skyLight {
-            if windowID != 0 { skyLight.setField(e, Self.windowNumberField, Int64(windowID)) }
+        switch route {
+        case .skyLight:
             if let g = clickGroup { skyLight.setField(e, Self.clickGroupField, g) }
             skyLight.setWindowLocation(e, location)
+        case .publicPid:
+            if windowSPI, windowID != 0, let origin = windowOrigin(windowID) {
+                skyLight.setWindowLocation(e, Self.windowLocal(location, origin: origin))
+            }
+        case .hid:
+            break
         }
     }
 
