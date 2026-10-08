@@ -108,6 +108,42 @@ final class MirrorTests: XCTestCase {
         XCTAssertNil(tracker.shown)
     }
 
+    func testTheAgentActingInATargetMakesItTheShownOne() {
+        var tracker = MirrorTargetTracker()
+        tracker.seed([.fake("a"), .fake("b"), .fake("c")])
+        XCTAssertEqual(tracker.shown?.targetId, "c")
+        XCTAssertTrue(tracker.activity(in: "a"))
+        XCTAssertEqual(tracker.shown?.targetId, "a")
+        XCTAssertEqual(tracker.targets.map(\.targetId), ["b", "c", "a"], "least recently active first")
+        XCTAssertFalse(tracker.activity(in: "a"), "already on show")
+        XCTAssertFalse(tracker.activity(in: "zzz"), "not a bound target")
+        XCTAssertEqual(tracker.shown?.targetId, "a")
+        XCTAssertTrue(tracker.released("a"))
+        XCTAssertEqual(tracker.shown?.targetId, "c", "the target active before it takes over")
+    }
+
+    func testARestOrAFadeIsNotTheAgentActing() {
+        for kind in ["idle", "done"] { XCTAssertFalse(MirrorTargetTracker.isActivity(kind: kind), kind) }
+        for kind in ["move", "press", "click", "type", "paste", "key", "scroll", "drag", "target", "caption", "waitBegin", "refused"] {
+            XCTAssertTrue(MirrorTargetTracker.isActivity(kind: kind), kind)
+        }
+    }
+
+    func testASizeThatReadsZeroKeepsTheLastRealOne() {
+        var tracker = MirrorTargetTracker()
+        tracker.seed([.fake("a", size: CGSize(width: 800, height: 600))])
+        tracker.resize("a", to: .zero)
+        XCTAssertEqual(tracker.shown?.windowSize, CGSize(width: 800, height: 600))
+        tracker.resize("a", to: CGSize(width: 0, height: 300))
+        XCTAssertEqual(tracker.shown?.windowSize, CGSize(width: 800, height: 600))
+        tracker.bound(.fake("a", size: .zero))
+        XCTAssertEqual(tracker.shown?.windowSize, CGSize(width: 800, height: 600), "bound again from another Space")
+        tracker.resize("a", to: CGSize(width: 400, height: 300))
+        XCTAssertEqual(tracker.shown?.windowSize, CGSize(width: 400, height: 300))
+        tracker.bound(.fake("b", size: .zero))
+        XCTAssertEqual(tracker.shown?.windowSize, .zero, "a target never seen with a size has none to keep")
+    }
+
     // MARK: - One session's model
 
     private func state(targets: [HelperTarget] = []) -> (MirrorSessionState, RecordingSink) {
@@ -125,14 +161,81 @@ final class MirrorTests: XCTestCase {
         XCTAssertEqual(sink.log, ["show:Notes:800x600"])
     }
 
-    func testFramesAndCursorsForTheShownTargetAreAppliedAndOthersDropped() {
+    func testFramesAndCursorsForTheShownTargetAreApplied() {
         let (state, sink) = state(targets: [.fake("old", app: "Mail"), .fake("new", app: "Notes")])
-        XCTAssertEqual(sink.log, ["show:Notes:800x600"], "the last of the seeded targets is the one shown")
+        XCTAssertEqual(sink.log, ["show:Notes:800x600", "others:1"], "the last of the seeded targets is the one shown")
         state.frame(.fake("s1", "new", bytes: 9))
         state.cursor(HelperCursor(sessionId: "s1", targetId: "new", kind: "press", point: CGPoint(x: 5, y: 6)))
-        state.frame(.fake("s1", "old", bytes: 7))
-        state.cursor(HelperCursor(sessionId: "s1", targetId: "old", kind: "move", point: CGPoint(x: 1, y: 1)))
-        XCTAssertEqual(sink.log, ["show:Notes:800x600", "frame:9:720x540", "cursor:press:5,6"])
+        state.cursor(HelperCursor(sessionId: "s1", targetId: "old", kind: "idle", point: CGPoint(x: 1, y: 1)))
+        XCTAssertEqual(sink.log, ["show:Notes:800x600", "others:1", "frame:9:720x540", "cursor:press:5,6"],
+                       "an idle cursor in the other target neither switches nor draws")
+    }
+
+    func testACursorInAnotherBoundTargetSwitchesTheMirrorToIt() {
+        let (state, sink) = state(targets: [.fake("a", app: "Mail"), .fake("b", app: "Notes")])
+        state.frame(.fake("s1", "a", bytes: 7))
+        XCTAssertEqual(sink.log, ["show:Notes:800x600", "others:1"], "a's picture is kept, not drawn")
+        let before = state.recency
+        state.cursor(HelperCursor(sessionId: "s1", targetId: "a", kind: "press", point: CGPoint(x: 5, y: 6)))
+        XCTAssertEqual(state.shownTarget?.targetId, "a")
+        XCTAssertEqual(sink.log.suffix(5), ["clear", "show:Mail:800x600", "frame:7:720x540", "others:1", "cursor:press:5,6"],
+                       "the previous app's picture goes, the new one's own newest frame is up at once, the cursor lands in it")
+        XCTAssertGreaterThan(state.recency, before)
+        XCTAssertTrue(state.isVisible)
+    }
+
+    func testItStaysOnATargetUntilAnotherBoundTargetActs() {
+        let (state, sink) = state(targets: [.fake("a", app: "Mail"), .fake("b", app: "Notes")])
+        state.cursor(HelperCursor(sessionId: "s1", targetId: "a", kind: "move", point: CGPoint(x: 1, y: 1)))
+        XCTAssertEqual(state.shownTarget?.targetId, "a")
+        let count = sink.log.count
+        for kind in ["idle", "done"] {
+            state.cursor(HelperCursor(sessionId: "s1", targetId: "b", kind: kind, point: CGPoint(x: 2, y: 2)))
+        }
+        XCTAssertEqual(state.shownTarget?.targetId, "a", "the other app resting or fading does not take it back")
+        XCTAssertEqual(sink.log.count, count)
+        state.cursor(HelperCursor(sessionId: "s1", targetId: "a", kind: "type", point: CGPoint(x: 3, y: 3)))
+        XCTAssertEqual(state.shownTarget?.targetId, "a")
+        state.cursor(HelperCursor(sessionId: "s1", targetId: "b", kind: "key", point: CGPoint(x: 4, y: 4), text: "cmd+s"))
+        XCTAssertEqual(state.shownTarget?.targetId, "b", "now it is working in b")
+        XCTAssertEqual(sink.log.last, "cursor:key:4,4")
+    }
+
+    func testACursorForATargetThatIsNotBoundChangesNothing() {
+        let (state, sink) = state(targets: [.fake("a")])
+        state.cursor(HelperCursor(sessionId: "s1", targetId: "ghost", kind: "press", point: CGPoint(x: 1, y: 1)))
+        state.frame(.fake("s1", "ghost", bytes: 3))
+        XCTAssertEqual(sink.log, ["show:Notes:800x600"])
+    }
+
+    func testTheNewestFrameOfEachTargetIsTheOneItShowsWhenItTakesOver() {
+        let (state, sink) = state(targets: [.fake("a", app: "Mail"), .fake("b", app: "Notes")])
+        state.frame(.fake("s1", "a", seq: 1, bytes: 5))
+        state.frame(.fake("s1", "a", seq: 2, bytes: 6))
+        state.frame(.fake("s1", "b", seq: 1, bytes: 9))
+        state.cursor(HelperCursor(sessionId: "s1", targetId: "a", kind: "move", point: CGPoint(x: 1, y: 1)))
+        XCTAssertEqual(sink.log.filter { $0.hasPrefix("frame:") }, ["frame:9:720x540", "frame:6:720x540"])
+        state.cursor(HelperCursor(sessionId: "s1", targetId: "b", kind: "move", point: CGPoint(x: 1, y: 1)))
+        XCTAssertEqual(sink.log.filter { $0.hasPrefix("frame:") }.last, "frame:9:720x540", "and back to b's own")
+    }
+
+    func testTheCaptionSaysHowManyOtherTargetsAreBound() {
+        let (state, sink) = state()
+        state.bound(.fake("a", app: "Notes"))
+        XCTAssertEqual(sink.log, ["show:Notes:800x600"], "one target: no badge")
+        XCTAssertEqual(state.otherTargets, 0)
+        state.bound(.fake("b", app: "Mail"))
+        XCTAssertEqual(state.otherTargets, 1)
+        XCTAssertEqual(sink.log.suffix(3), ["clear", "show:Mail:800x600", "others:1"], "the newly bound app is the one on show, with +1")
+        state.bound(.fake("c", app: "Finder"))
+        XCTAssertEqual(state.otherTargets, 2)
+        XCTAssertEqual(sink.log.last, "others:2")
+        state.released("a")
+        XCTAssertEqual(state.otherTargets, 1)
+        XCTAssertEqual(sink.log.last, "others:1", "releasing one that was not on show")
+        state.released("c")
+        XCTAssertEqual(state.otherTargets, 0)
+        XCTAssertEqual(sink.log.suffix(2), ["clear", "show:Mail:800x600"], "c was on show; b, active before it, takes over with no badge left")
     }
 
     func testReleasingTheShownTargetFallsBackThenClears() {
@@ -140,24 +243,61 @@ final class MirrorTests: XCTestCase {
         state.released("b")
         XCTAssertEqual(state.shownTarget?.targetId, "a")
         XCTAssertTrue(state.isVisible)
-        XCTAssertEqual(sink.log, ["show:Notes:800x600", "show:Mail:800x600"], "the previous target takes over")
+        XCTAssertEqual(sink.log, ["show:Notes:800x600", "others:1", "clear", "show:Mail:800x600"], "the previous target takes over, with no badge left")
+        XCTAssertEqual(state.otherTargets, 0)
         state.released("a")
         XCTAssertFalse(state.isVisible)
         XCTAssertEqual(sink.log.last, "clear")
         state.released("a")
-        XCTAssertEqual(sink.log.filter { $0 == "clear" }.count, 1, "releasing nothing changes nothing")
+        XCTAssertEqual(sink.log.filter { $0 == "clear" }.count, 2, "releasing nothing changes nothing")
     }
 
     func testReleasingAnotherTargetLeavesTheShownOne() {
         let (state, sink) = state(targets: [.fake("a"), .fake("b")])
         state.released("a")
         XCTAssertEqual(state.shownTarget?.targetId, "b")
-        XCTAssertEqual(sink.log, ["show:Notes:800x600"])
+        XCTAssertEqual(sink.log, ["show:Notes:800x600", "others:1", "others:0"])
     }
 
+    // MARK: - Frames stopping, or the window reading size zero, never take it down
 
+    func testFramesStoppingLeavesTheLastOneOnScreen() {
+        let (state, sink) = state(targets: [.fake("a")])
+        state.frame(.fake("s1", "a", seq: 1, bytes: 5))
+        state.frame(.fake("s1", "a", seq: 2, bytes: 6))
+        // …the target moves to another Space: no more frames, for as long as it takes.
+        XCTAssertTrue(state.isVisible)
+        XCTAssertNotNil(state.shownTarget)
+        XCTAssertEqual(sink.log, ["show:Notes:800x600", "frame:5:720x540", "frame:6:720x540"], "no clear, nothing replaced")
+    }
 
+    func testAFrameThatReadsSizeZeroKeepsThePanelAndThePicture() {
+        let (state, sink) = state(targets: [.fake("a", size: CGSize(width: 800, height: 600))])
+        let before = state.panelSize
+        state.frame(.fake("s1", "a", bytes: 8, size: .zero))
+        XCTAssertEqual(state.shownTarget?.windowSize, CGSize(width: 800, height: 600))
+        XCTAssertEqual(state.panelSize, before, "the panel does not jump to the default size")
+        XCTAssertTrue(state.isVisible)
+        XCTAssertEqual(sink.log, ["show:Notes:800x600", "frame:8:720x540"])
+    }
 
+    func testATargetBoundAgainWithSizeZeroKeepsTheSizeAndTheMirror() {
+        let (state, sink) = state(targets: [.fake("a", size: CGSize(width: 800, height: 600))])
+        let before = state.panelSize
+        state.bound(.fake("a", size: .zero))
+        XCTAssertTrue(state.isVisible)
+        XCTAssertEqual(state.panelSize, before)
+        XCTAssertEqual(sink.log, ["show:Notes:800x600"], "nothing told the sink to clear or resize")
+    }
+
+    func testATargetWhoseWindowIsOnAnotherSpaceStillShowsFromTheStart() {
+        let (state, sink) = state(targets: [.fake("a", size: .zero)])
+        XCTAssertTrue(state.isVisible)
+        XCTAssertEqual(state.panelSize, CGSize(width: mirrorPanelWidth, height: mirrorPanelMinHeight))
+        XCTAssertEqual(sink.log, ["show:Notes:0x0"])
+        state.frame(.fake("s1", "a", bytes: 4, size: CGSize(width: 640, height: 480)))
+        XCTAssertEqual(state.shownTarget?.windowSize, CGSize(width: 640, height: 480), "its real size arrives with the first frame")
+    }
 
     func testAFramesNewWindowSizeResizesThePanel() {
         let (state, _) = state(targets: [.fake("a", size: CGSize(width: 800, height: 600))])
@@ -503,6 +643,66 @@ final class MirrorTests: XCTestCase {
         await expect({ r.client.count("connect") == 2 && r.coordinator.applied == ["s1"] }, "\(r.client.calls)")
         await expect({ r.coordinator.state(for: "s1").isVisible && r.coordinator.isReceivingFrames(sessionId: "s1") })
         XCTAssertEqual(r.sinks.byId["s1"]?.log, ["show:Notes:800x600", "clear", "show:Notes:800x600"])
+    }
+
+    // MARK: - Following the app the agent works in, through the coordinator
+
+    func testTwoAppsInOneSessionFollowTheAgentsCursorThroughTheCoordinator() async {
+        let r = rig()
+        await mainWindowAlone(r, targets: [.fake("a", app: "Mail"), .fake("b", app: "Notes")])
+        XCTAssertEqual(r.sinks.byId["s1"]?.log, ["show:Notes:800x600", "others:1"])
+        r.client.push(.frame(.fake("s1", "a", bytes: 7)))
+        r.client.push(.frame(.fake("s1", "b", bytes: 9)))
+        r.client.push(.cursor(HelperCursor(sessionId: "s1", targetId: "a", kind: "press", point: CGPoint(x: 5, y: 6))))
+        await expect({ r.sinks.byId["s1"]?.log.last == "cursor:press:5,6" }, "\(r.sinks.byId["s1"]?.log ?? [])")
+        XCTAssertEqual(r.coordinator.state(for: "s1").shownTarget?.targetId, "a")
+        XCTAssertEqual(r.coordinator.shownSession(forWindow: "shell"), "s1")
+        XCTAssertTrue(r.coordinator.isReceivingFrames(sessionId: "s1"), "still one subscription, still asking for frames")
+        XCTAssertEqual(r.client.count("subscribe:s1"), 1)
+        r.client.push(.frame(.fake("s1", "a", seq: 2, bytes: 8)))
+        await expect({ r.sinks.byId["s1"]?.log.last == "frame:8:720x540" })
+    }
+
+    func testFramesStoppingForAWhileLeavesTheMirrorAndTheSubscriptionAlone() async {
+        let r = rig()
+        await mainWindowAlone(r)
+        r.client.push(.frame(.fake("s1", "t1", bytes: 5)))
+        await expect({ r.sinks.byId["s1"]?.log.last == "frame:5:720x540" })
+        // The window goes to another Space: the helper sends nothing for a long moment.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertTrue(r.coordinator.state(for: "s1").isVisible)
+        XCTAssertEqual(r.coordinator.shownSession(forWindow: "shell"), "s1")
+        XCTAssertEqual(r.sinks.byId["s1"]?.log, ["show:Notes:800x600", "frame:5:720x540"], "nothing cleared")
+        XCTAssertTrue(r.coordinator.isReceivingFrames(sessionId: "s1"))
+        XCTAssertEqual(r.client.count("subscribe:s1"), 1)
+        XCTAssertEqual(r.client.count("unsubscribe:s1"), 0)
+        // …and when it is back, the next frame just replaces the old one.
+        r.client.push(.frame(.fake("s1", "t1", seq: 2, bytes: 6, size: .zero)))
+        r.client.push(.frame(.fake("s1", "t1", seq: 3, bytes: 7)))
+        await expect({ r.sinks.byId["s1"]?.log.last == "frame:7:720x540" })
+        XCTAssertEqual(r.coordinator.state(for: "s1").shownTarget?.windowSize, CGSize(width: 800, height: 600))
+    }
+
+    func testADispatchWindowFollowsTheChildWhoseAppTheAgentIsWorkingIn() async {
+        let r = rig()
+        r.coordinator.setWindow(MirrorWindow(id: "shell", kind: .shell, sessionId: "dispatch", relatedSessionIds: ["c1", "c2"], width: 900))
+        await expect({ r.coordinator.applied == ["dispatch", "c1", "c2"] })
+        r.client.push(.bound(sessionId: "c1", target: .fake("a", app: "Mail")))
+        await expect({ r.coordinator.shownSession(forWindow: "shell") == "c1" })
+        r.client.push(.bound(sessionId: "c2", target: .fake("b", app: "Notes")))
+        await expect({ r.coordinator.shownSession(forWindow: "shell") == "c2" })
+
+        r.client.push(.cursor(HelperCursor(sessionId: "c1", targetId: "a", kind: "press", point: CGPoint(x: 1, y: 2))))
+        await expect({ r.coordinator.shownSession(forWindow: "shell") == "c1" }, "c1 is where the work is now")
+        await expect({ r.coordinator.isReceivingFrames(sessionId: "c1") && !r.coordinator.isReceivingFrames(sessionId: "c2") })
+
+        r.client.push(.cursor(HelperCursor(sessionId: "c2", targetId: "b", kind: "idle", point: CGPoint(x: 1, y: 2))))
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertEqual(r.coordinator.shownSession(forWindow: "shell"), "c1", "a rest does not take it back")
+
+        r.client.push(.cursor(HelperCursor(sessionId: "c2", targetId: "b", kind: "type", point: CGPoint(x: 1, y: 2))))
+        await expect({ r.coordinator.shownSession(forWindow: "shell") == "c2" })
+        await expect({ r.coordinator.isReceivingFrames(sessionId: "c2") && !r.coordinator.isReceivingFrames(sessionId: "c1") })
     }
 
     // MARK: - Events through the coordinator

@@ -110,6 +110,21 @@ import XCTest
         XCTAssertFalse(model.cursorFrame().visible)
     }
 
+    func testTheCaptionsOtherTargetCountIsKeptAndClearedWithTheMirror() {
+        let model = CUMirrorModel(clock: FakeClock())
+        XCTAssertEqual(model.otherTargets, 0)
+        model.show(appName: "Notes", windowSize: CGSize(width: 260, height: 170))
+        model.setOtherTargets(2)
+        XCTAssertEqual(model.otherTargets, 2)
+        model.show(appName: "Notes", windowSize: CGSize(width: 300, height: 200))
+        XCTAssertEqual(model.otherTargets, 2, "a resize of the same app does not touch it")
+        model.setOtherTargets(-1)
+        XCTAssertEqual(model.otherTargets, 0, "never negative")
+        model.setOtherTargets(1)
+        model.clear()
+        XCTAssertEqual(model.otherTargets, 0)
+    }
+
     func testCursorEventsUseTheCoreKindsInWindowSpace() {
         let clock = FakeClock()
         let model = CUMirrorModel(clock: clock)

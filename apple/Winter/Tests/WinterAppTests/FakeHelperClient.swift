@@ -64,6 +64,7 @@ final class RecordingSink: MirrorSink {
     func applyCursor(kind: String, point: CGPoint, dragTo: CGPoint?, frame: CGRect?, text: String?, count: Int?, button: String?) {
         log.append("cursor:\(kind):\(Int(point.x)),\(Int(point.y))")
     }
+    func setOtherTargets(_ count: Int) { log.append("others:\(count)") }
     func clear() { log.append("clear") }
 }
 
