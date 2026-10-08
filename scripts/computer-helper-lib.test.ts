@@ -13,6 +13,8 @@ import {
   helperRequirement,
   helperSignArgs,
   pidsRunning,
+  STUB_ENGINE_MARKER,
+  usesStubEngine,
   type SignedHelperFacts,
 } from "./computer-helper-lib";
 
@@ -113,6 +115,13 @@ describe("checkSignedHelper", () => {
     expect(checkSignedHelper("dev", TEAM, "0.124.0", good("dev", { executable: new TextEncoder().encode(`${HELPER_TEST_HOOK_MARKER}IDLE_SECONDS`) })).join()).toContain("contains test hooks");
     expect(checkSignedHelper("test", TEAM, "0.124.0", good("test", { executable: new TextEncoder().encode("clean") })).join()).toContain("no test hooks compiled in");
   });
+});
+
+test("the stub engine is recognisable in a binary — and the stub really carries the marker", () => {
+  expect(usesStubEngine(new TextEncoder().encode(`x is not available in this build (${STUB_ENGINE_MARKER})`))).toBe(true);
+  expect(usesStubEngine(new TextEncoder().encode("a real engine"))).toBe(false);
+  const stub = readFileSync(join(REPO_ROOT, "apple", "WinterComputerUse", "Stubs", "WinterCUCore", "Sources", "WinterCUCore", "CoreStub.swift"), "utf8");
+  expect(stub).toContain(`(${STUB_ENGINE_MARKER})`);
 });
 
 test("pidsRunning: matches the exact executable, never a prefix of another path", () => {

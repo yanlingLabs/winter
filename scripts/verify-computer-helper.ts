@@ -19,13 +19,13 @@
  *     closed. Finally the idle quit: with every connection gone it exits on its own and removes its socket.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WINTER_TEAM_ID } from "../packages/core/src/auth/app-token-acl";
-import { HELPER, HELPER_SOCKET_NAME, helperExecutable, helperRequirement, LSREGISTER } from "./computer-helper-lib";
+import { HELPER, HELPER_SOCKET_NAME, helperExecutable, helperRequirement, LSREGISTER, usesStubEngine } from "./computer-helper-lib";
 import { buildHelper, DEV_HELPER_APP, inspectHelper, run, signHelper, signingIdentity } from "./dev-helper";
 import { readCanonical } from "./version-lib";
 
@@ -162,6 +162,9 @@ async function main(): Promise<void> {
       check(false, "the dev helper exists", "run `bun run dev:helper` first");
     } else {
       const failures = inspectHelper(DEV_HELPER_APP, "dev");
+      if (usesStubEngine(readFileSync(helperExecutable(DEV_HELPER_APP, "dev")))) {
+        console.error("verify:computer-helper: NOTE — the dev helper is built on the STUB automation engine (engine methods answer `unsupported`)");
+      }
       check(failures.length === 0, `signed for TCC: team ${WINTER_TEAM_ID}, ${HELPER.dev.identifier}, hardened runtime, the stated designated requirement, no entitlements, LSUIElement, version ${version}, no test hooks`, failures.join("; "));
 
       // ── 2. that binary refuses a peer that is not the dev daemon ──────────────────────────────────────

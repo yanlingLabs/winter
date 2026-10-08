@@ -1,5 +1,4 @@
 // swift-tools-version:5.9
-import Foundation
 import PackageDescription
 
 // Winter Computer Use — the signed helper app that holds its own Accessibility and Screen Recording grants
@@ -11,18 +10,14 @@ import PackageDescription
 // with `swift test`, and the helper never links WinterKit.
 //
 // The engine and the presentation layer are sibling packages (`apple/WinterCUCore`,
-// `apple/WinterCUPresentation`), built in their own lanes. Until a checkout has them, this package builds
-// against the stand-ins in `Stubs/` (same module names, the pinned API, nothing behind it); once a sibling
-// exists it is used, so a merged tree builds the real helper with no edit here. Delete `Stubs/` and this
-// fallback once both have merged.
-func sibling(_ name: String) -> Package.Dependency {
-    let real = URL(fileURLWithPath: Context.packageDirectory).deletingLastPathComponent().appendingPathComponent(name)
-    if FileManager.default.fileExists(atPath: real.appendingPathComponent("Package.swift").path) {
-        return .package(path: "../\(name)")
-    }
-    return .package(path: "Stubs/\(name)")
-}
-
+// `apple/WinterCUPresentation`), built in their own lanes. Until they merge, this package builds against the
+// stand-ins in `Stubs/` (same module names, the pinned API, nothing behind them).
+//
+// MERGE (one commit, after both packages are in the tree): replace the two `Stubs/…` paths below with
+// "../WinterCUCore" and "../WinterCUPresentation", and delete `Stubs/`. Nothing else changes. (Not detected
+// automatically: SwiftPM and Xcode cache a manifest's evaluation, so a checkout that once resolved the stubs
+// would keep them after the real packages appear — measured.) A helper built on the stub engine says so:
+// release.ts refuses to ship one, dev:helper and verify:computer-helper print a warning.
 let package = Package(
     name: "WinterComputerUse",
     platforms: [.macOS("26.0")],
@@ -30,8 +25,8 @@ let package = Package(
         .library(name: "WinterComputerUseShell", targets: ["WinterComputerUseShell"]),
     ],
     dependencies: [
-        sibling("WinterCUCore"),
-        sibling("WinterCUPresentation"),
+        .package(path: "Stubs/WinterCUCore"),
+        .package(path: "Stubs/WinterCUPresentation"),
     ],
     targets: [
         .target(

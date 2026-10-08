@@ -128,6 +128,14 @@ export function checkSignedHelper(flavor: HelperFlavor, teamId: string, version:
   return failures;
 }
 
+/** Text only the stand-in engine (`apple/WinterComputerUse/Stubs/WinterCUCore`) carries — every automation call
+ *  it answers says it. Until the real engine merges, every helper build has it; a release must never. */
+export const STUB_ENGINE_MARKER = "the automation engine is a stub";
+
+export function usesStubEngine(executable: Uint8Array): boolean {
+  return Buffer.from(executable).includes(STUB_ENGINE_MARKER);
+}
+
 /** The pids in `ps -axo pid=,command=` output whose command runs `executable`. */
 export function pidsRunning(psOutput: string, executable: string): number[] {
   const pids: number[] = [];

@@ -238,6 +238,10 @@ describe("ComputerV2: release.ts signs, verifies and scans the Winter Computer U
     expect(source).toMatch(/codesign --verify --strict -R='\$\{stated\}' "\$\{computerHelperApp\}"/);
   });
 
+  test("a helper built on the stub engine never ships", () => {
+    expect(source).toMatch(/if \(usesStubEngine\(readFileSync\(helperExecutable\(computerHelperApp, "dist"\)\)\)\) \{\s*failures\.push\(/);
+  });
+
   test("HARDENING_PINS enrolls it with exactly no cs.* entitlement", () => {
     expect(source).toContain('{ path: computerHelperApp, label: "Winter Computer Use", expect: [] }');
   });
