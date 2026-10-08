@@ -34,7 +34,7 @@ enum CUMenuWalker {
                 throw CUError.invalidParams("no “\(raw)” in \(where_) — it has: \(have)")
             }
             if !m.menuEnabled {
-                throw CUError.unsupported("“\(m.menuTitle)” is disabled right now")
+                throw CUError.unsupported("“\(m.menuTitle)” is disabled right now — apps enable menu commands for their active window and what is selected in it; while the app is in the background a command may not apply to the bound window")
             }
             found = m
             if depth < path.count - 1 {

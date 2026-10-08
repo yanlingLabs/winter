@@ -73,6 +73,14 @@ enum CUWindowServer {
         return h.finalize()
     }
 
+    /// A window a person would call one: normal layer, visible, at least 100×100 pt. Apps keep untitled
+    /// layer-0 strips and stubs (Safari's and Finder's 1512×33 menu-bar strips, a 64×64 drag window) that are
+    /// never in AX: counted as windows, they were probed by remote token to the deadline, held binds waiting,
+    /// and showed up in windows() as untitled entries.
+    static func isRealWindow(_ w: CUWindowServerWindow) -> Bool {
+        w.layer == 0 && w.alpha > 0 && w.frame.width >= 100 && w.frame.height >= 100
+    }
+
     /// The front-most normal window whose frame contains `point`, skipping the helper's own windows.
     static func topWindow(at point: CGPoint, excludingPid: pid_t = getpid()) -> CUWindowServerWindow? {
         windows(onScreenOnly: true).first { $0.pid != excludingPid && $0.alpha > 0 && $0.frame.contains(point) }
@@ -185,7 +193,7 @@ enum CUWindowResolver {
     static func resolve(appName: String, axWindows: [CUAXWindow], server: [CUWindowServerWindow],
                         selector: CUWindowSelector?, privatePath: Bool, _ fx: Effects) throws -> Outcome {
         let listed = Set(axWindows.map(\.id))
-        let offSpace = server.filter { $0.layer == 0 && !listed.contains($0.id) }
+        let offSpace = server.filter { CUWindowServer.isRealWindow($0) && !listed.contains($0.id) }
         if let selector {
             if let w = try? CUAXWindows.choose(axWindows, selector: selector, appName: appName) { return Outcome(window: w) }
             let match: CUWindowServerWindow? = {
@@ -231,7 +239,7 @@ enum CUWindowResolver {
                     return Outcome(window: w, detail: "step b (new window): opened a new \(appName) window\(why)", step: .newWindow)
                 }
                 // It opened on the app's own Space, not this one: reach it there; never open another.
-                let fresh = fx.serverWindows().filter { $0.layer == 0 && !beforeServer.contains($0.id) }
+                let fresh = fx.serverWindows().filter { CUWindowServer.isRealWindow($0) && !beforeServer.contains($0.id) }
                 if privatePath, !fresh.isEmpty {
                     let found = fx.remote(fresh.map(\.id))
                     if let s = fresh.first(where: { found[$0.id] != nil }), let element = found[s.id] {
@@ -253,8 +261,7 @@ enum CUWindowResolver {
 /// sent to an app whose windows are merely elsewhere makes it open a new one on every bind (a live run left
 /// Safari with twelve); with windows elsewhere the bind goes straight to the resolver, which reaches them.
 enum CUBindWait {
-    /// A window smaller than this is not one the user would call a window (helpers, offscreen stubs).
-    static let minimumSide: CGFloat = 40
+
 
     struct Effects {
         /// The AX windows (this desktop) and the window-server windows (every Space) of the app.
@@ -270,9 +277,9 @@ enum CUBindWait {
         var reopened: Bool
     }
 
-    /// The app's real windows anywhere: layer 0, a reasonable size, on screen or not.
+    /// The app's real windows anywhere (`CUWindowServer.isRealWindow`), on screen or not.
     static func realWindows(_ server: [CUWindowServerWindow]) -> [CUWindowServerWindow] {
-        server.filter { $0.layer == 0 && $0.frame.width >= minimumSide && $0.frame.height >= minimumSide }
+        server.filter(CUWindowServer.isRealWindow)
     }
 
     static func run(launched: Bool, deadlineMs: Double, _ fx: Effects) async throws -> Found {

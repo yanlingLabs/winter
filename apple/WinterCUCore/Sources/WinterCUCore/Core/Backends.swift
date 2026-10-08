@@ -17,7 +17,7 @@ protocol CUAXBackend: AnyObject {
     func isAlive(_ e: AXUIElement) -> Bool
     func windowID(_ e: AXUIElement) -> CGWindowID?
     /// The AX elements of windows `kAXWindowsAttribute` omits (another Space, full screen), by window id, in
-    /// one remote-token walk; private.
+    /// one remote-token walk that may stop at the first it finds; private.
     func remoteWindows(pid: pid_t, windowIDs: [CGWindowID]) -> [CGWindowID: AXUIElement]
 }
 
@@ -58,7 +58,7 @@ final class CULiveAX: CUAXBackend {
     func isAlive(_ e: AXUIElement) -> Bool { AX.isAlive(e) }
     func windowID(_ e: AXUIElement) -> CGWindowID? { AX.windowID(e) }
     func remoteWindows(pid: pid_t, windowIDs: [CGWindowID]) -> [CGWindowID: AXUIElement] {
-        AX.windowsByRemoteToken(pid: pid, wanted: Set(windowIDs)).found
+        AX.windowsByRemoteToken(pid: pid, wanted: Set(windowIDs), stopAtFirst: true).found
     }
 }
 

@@ -19,6 +19,8 @@ export interface PrimitiveMetric {
   imageBytes?: number;
   /** The typed failure, when the primitive failed (`StaleRef`, `TargetBusy`, …). */
   error?: string;
+  /** The helper's error code behind it (`unsupported`, `window_elsewhere`, …), when the helper refused. */
+  errorCode?: string;
 }
 
 export const AUTOMATION_METRICS_MAX_BYTES = 8 * 1024 * 1024;

@@ -22,8 +22,9 @@ public enum CUFinder {
 
     public static func summary(_ n: CUNode, formatter: CUStateFormatter = CUStateFormatter()) -> CUElementSummary {
         let value: String? = n.isSecure ? "<redacted>" : n.value.flatMap { $0.isEmpty || $0 == n.name ? nil : formatter.cut($0) }
+        let words = n.states.words
         return CUElementSummary(ref: n.ref, role: n.roleWords, name: n.name.flatMap { $0.isEmpty ? nil : formatter.cut($0) },
-                                value: value)
+                                value: value, states: words.isEmpty ? nil : words)
     }
 
     public static func matches(_ query: CUFindQuery, _ n: CUNode) -> Bool {

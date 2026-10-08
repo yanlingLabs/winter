@@ -357,6 +357,8 @@ export class ComputerV2Service {
     } catch (err) {
       const wire = this.toWire(ctx, err, msg);
       metric.error = wire.kind;
+      // The helper's own code (`unsupported`, `window_elsewhere`, …): `Error` alone says nothing in the metrics.
+      if (err instanceof HelperRpcError) metric.errorCode = err.code;
       if (wire.trusted) ctx.daemonSentences.add(wire.message);
       ctx.worker.reply(msg.id, { ok: false, error: { kind: wire.kind, message: wire.message } });
     } finally {
@@ -806,10 +808,13 @@ export class ComputerV2Service {
   private async screenWindows(ctx: RunCtx, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<unknown> {
     const res = await this.helperCall<ScreenWindowsResult>(ctx, "screen.windows", {}, metric);
     // Every window's own app is weighed (the floors, and its effective access — `deny` under the switch off too).
-    const windows = res.windows.filter((w) => !this.deps.policy.hiddenFromScreen(w.bundleId)).map((w) => ({ app: w.app, title: w.title, frame: w.frame }));
+    // `onScreen` is kept: without it a window on another Space reads as visible (a live run took Safari's frame
+    // for proof it was on this desktop, while its screenshot said otherwise).
+    const windows = res.windows.filter((w) => !this.deps.policy.hiddenFromScreen(w.bundleId))
+      .map((w) => ({ app: w.app, title: w.title, frame: w.frame, onScreen: w.onScreen }));
     ctx.builder.markScreenRead();
     if (args.emit !== false) {
-      ctx.builder.text(windows.length === 0 ? "(no windows)" : windows.map((w) => `${w.app} — "${w.title}" [${w.frame.join(", ")}]`).join("\n"), { screen: true });
+      ctx.builder.text(windows.length === 0 ? "(no windows)" : windows.map((w) => `${w.app} — "${w.title}" [${w.frame.join(", ")}]${w.onScreen ? "" : " (off screen)"}`).join("\n"), { screen: true });
     }
     return windows;
   }
@@ -1061,8 +1066,9 @@ async function waitUnlessAborted(p: Promise<void>, signal: AbortSignal | undefin
   });
 }
 
-function elementLine(e: { ref: number; role: string; name?: string; value?: string }): string {
-  return `[${e.ref}] ${e.role}${e.name === undefined ? "" : ` "${e.name}"`}${e.value === undefined ? "" : ` value="${e.value.slice(0, 200)}"`}`;
+function elementLine(e: { ref: number; role: string; name?: string; value?: string; states?: string[] }): string {
+  const states = Array.isArray(e.states) && e.states.length > 0 ? ` (${e.states.join(", ")})` : "";
+  return `[${e.ref}] ${e.role}${e.name === undefined ? "" : ` "${e.name}"`}${e.value === undefined ? "" : ` value="${e.value.slice(0, 200)}"`}${states}`;
 }
 
 function lostWords(reason: string): string {

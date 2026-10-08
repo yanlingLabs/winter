@@ -248,11 +248,14 @@ public struct CUElementSummary: Codable, Sendable, Equatable {
     public var role: String
     public var name: String?
     public var value: String?
-    public init(ref: Int, role: String, name: String? = nil, value: String? = nil) {
+    /// The state words state() shows for it (`disabled`, `selected`, `checked`, `focused`, …); absent when none.
+    public var states: [String]?
+    public init(ref: Int, role: String, name: String? = nil, value: String? = nil, states: [String]? = nil) {
         self.ref = ref
         self.role = role
         self.name = name
         self.value = value
+        self.states = states
     }
 }
 public struct TargetFindResult: Codable, Sendable, Equatable {
