@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import WinterKit
 @testable import Winter
@@ -65,7 +66,17 @@ final class RecordingSink: MirrorSink {
         log.append("cursor:\(kind):\(Int(point.x)),\(Int(point.y))")
     }
     func setOtherTargets(_ count: Int) { log.append("others:\(count)") }
+    func resetPicture() { log.append("reset") }
     func clear() { log.append("clear") }
+}
+
+/// A `MirrorPanelHosting` that records what it was asked to put on screen, and touches no window.
+@MainActor
+final class RecordingPanelHost: MirrorPanelHosting {
+    private(set) var presented: [(session: String, frame: NSRect)] = []
+    private(set) var dismissals = 0
+    func present(state: MirrorSessionState, frame: NSRect, over window: NSWindow) { presented.append((state.sessionId, frame)) }
+    func dismiss() { dismissals += 1 }
 }
 
 extension HelperTarget {

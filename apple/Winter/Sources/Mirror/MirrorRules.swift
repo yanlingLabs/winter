@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 
 // -----------------------------------------------------------------------------------------------
@@ -121,4 +122,17 @@ let mirrorMaxChildSessions = 8
 /// finished child may still have an app bound, and the mirror hides only when its target is released.
 func mirrorChildSessionIds(of state: OrbSessionState) -> [String] {
     Array(state.children.map(\.sessionId).suffix(mirrorMaxChildSessions))
+}
+
+extension Publisher where Output == OrbSessionState, Failure == Never {
+    /// The session's children for the mirror, as a stream that does almost nothing per state change: the session's
+    /// state is republished on every streamed chunk, so this only compares the children array (the same buffer, in
+    /// all but the rare change, which is an identity check) and works out the ids when it differs.
+    var mirrorChildren: AnyPublisher<[String], Never> {
+        map(\.children)
+            .removeDuplicates()
+            .map { children in Array(children.map(\.sessionId).suffix(mirrorMaxChildSessions)) }
+            .removeDuplicates()
+            .eraseToAnyPublisher()
+    }
 }

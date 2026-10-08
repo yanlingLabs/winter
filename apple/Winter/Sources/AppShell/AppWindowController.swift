@@ -349,7 +349,7 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         // its own — so the window also watches the children its attached session lists.
         let children = host.$attachment
             .map { attachment -> AnyPublisher<[String], Never> in
-                attachment.map { $0.session.$state.map { mirrorChildSessionIds(of: $0) }.removeDuplicates().eraseToAnyPublisher() }
+                attachment.map { $0.session.$state.mirrorChildren }
                     ?? Just([]).eraseToAnyPublisher()
             }
             .switchToLatest()
