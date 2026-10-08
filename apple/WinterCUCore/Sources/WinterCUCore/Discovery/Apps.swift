@@ -102,6 +102,7 @@ enum CUApps {
     static func launchInBackground(_ url: URL, timeoutMs: Double = 8000) async throws -> NSRunningApplication {
         let config = NSWorkspace.OpenConfiguration()
         config.activates = false
+        config.allowsRunningApplicationSubstitution = true  // a running copy is used, as ChatGPT's helper asks
         config.addsToRecentItems = false
         config.promptsUserIfNeeded = false
         let app: NSRunningApplication

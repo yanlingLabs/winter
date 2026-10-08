@@ -84,9 +84,12 @@ final class FakeAX: CUAXBackend {
     }
     func actions(_ e: AXUIElement) -> [String] { actionNames[AXIdentity(element: e)] ?? [] }
     func isSettable(_ e: AXUIElement, _ name: String) -> Bool { settable.contains("\(token(e)):\(name)") }
+    /// "token:attribute" writes the app accepts and ignores (the value stays what it was).
+    var ignoresWrites: Set<String> = []
     func set(_ e: AXUIElement, _ name: String, _ value: CFTypeRef) throws {
         written.append("\(token(e)):\(name)")
         if let err = setError { throw err }
+        if ignoresWrites.contains("\(token(e)):\(name)") { return }
         attrs[AXIdentity(element: e), default: [:]][name] = value
     }
     /// "token:action" pairs the app refuses as unsupported (an AX error, like Finder's AXOpen).
@@ -171,6 +174,7 @@ final class RecordingPoster: CUEventPoster, @unchecked Sendable {
         var flags: CGEventFlags
         var window: Int64
         var window2: Int64 = 0
+        var subtype: Int64 = 0
     }
     private let lock = NSLock()
     private(set) var entries: [Entry] = []
@@ -184,7 +188,8 @@ final class RecordingPoster: CUEventPoster, @unchecked Sendable {
                       keycode: event.getIntegerValueField(.keyboardEventKeycode),
                       unicode: String(utf16CodeUnits: chars, count: length), flags: event.flags,
                       window: event.getIntegerValueField(.mouseEventWindowUnderMousePointer),
-                      window2: event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent))
+                      window2: event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent),
+                      subtype: event.getIntegerValueField(.mouseEventSubtype))
         lock.withLock { entries.append(e) }
         onPost?(e)
         return route == .skyLight ? .publicPid : route
