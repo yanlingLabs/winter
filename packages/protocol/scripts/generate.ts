@@ -150,6 +150,11 @@ const fixtures: Record<string, unknown> = {
   // field so the Swift round-trip exercises them all.
   thinking_block: { type: "thinking_block", sessionId: "s_1", threadId: "main", seq: 38, ts: 1700000000028, blockId: "rb_1", kind: "summary", title: "Planning the migration", text: "**Planning the migration**\n\nI need to read the schema first.\n\n**Checking the tests**\n\nThe suite pins the count.", truncated: false, provider: "openai", model: "gpt-5.6-terra", durationMs: 4200 },
   thinking_delta: { type: "thinking_delta", sessionId: "s_1", threadId: "main", seq: 38, ts: 1700000000029, blockId: "rb_2", kind: "update", phase: "delta", text: "Reading the schema before changing it.", title: "Reading the schema before changing it." },
+  // The reviewing pill (2026-10-08): the bash reviewer judging a call -- a NEW TRANSIENT SessionEvent variant, full
+  // switch-trap discipline. Two fixtures: `started` (no verdict) and `ended` carrying the optional verdict, so the
+  // Swift round-trip exercises the field present and absent.
+  tool_review_progress: { type: "tool_review_progress", sessionId: "s_1", threadId: "main", seq: 39, ts: 1700000000030, callId: "toolu_01", phase: "started" },
+  tool_review_progress_ended: { type: "tool_review_progress", sessionId: "s_1", threadId: "toolu_agent_7", seq: 39, ts: 1700000000031, callId: "toolu_02", phase: "ended", verdict: "escalated" },
   "child_update": { ...base, threadId: "main", type: "child_update", childSessionId: "s_child000001", status: "completed", title: "Fix login bug", resultSummary: "Fixed the null token check; tests pass." },
   // Dispatch relay (Phase 7): childSessionId is additive/optional on the four existing
   // approval/question shapes — dedicated with-fixtures so Swift round-trips carriers, mirroring

@@ -110,6 +110,10 @@ export interface SessionHooksDeps {
    *  `reviewClassEnabled("bash", …)` cfg getters (default true when absent, same convention). */
   reviewerEnabled?: () => boolean | undefined;
   reviewerAllow?: () => string[] | undefined;
+  /** The reviewing pill (2026-10-08): told `started` right before the reviewer's model call for a tool call and
+   *  `ended` when it returns, on every path (`daemon.ts` broadcasts it as the transient `tool_review_progress`,
+   *  on the call's own thread). Never told about a pre-allowed command. A throw here never touches the verdict. */
+  reviewProgress?: (e: { callId: string; phase: "started" | "ended"; verdict?: "safe" | "unsafe" | "escalated" }) => void;
   /** THIS session's live approval policy. The reviewer is an `auto`-ONLY gate — engine.ts:4547-
    *  4548's rule, carried verbatim: under `ask`/`accept-edits`/`plan`/`dont-ask`/`bypass`/`chat`
    *  the human-card/bridge path is the safety net, and layering a second, silent AI opinion under
@@ -1357,6 +1361,15 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
         if (urls.every((u) => dangerousUrlMatch(u, floor) === null)) return allow();
       }
     }
+    // The reviewing pill: `started` now, exactly one `ended` on whichever path the review leaves by.
+    const callId = toolUseID ?? (typeof (pre as { tool_use_id?: unknown }).tool_use_id === "string" ? (pre as { tool_use_id: string }).tool_use_id : undefined);
+    let reported = false;
+    const progress = (phase: "started" | "ended", verdict?: "safe" | "unsafe" | "escalated"): void => {
+      if (phase === "ended") { if (reported) return; reported = true; }
+      if (callId === undefined || callId.length === 0 || deps.reviewProgress === undefined) return;
+      try { deps.reviewProgress({ callId, phase, ...(verdict === undefined ? {} : { verdict }) }); } catch (err) { logFacadeThrow("the reviewProgress sink", err); }
+    };
+    progress("started");
     try {
       // C3 round 3: for an escape the reviewer also sees the session's cwd (what "outside the project"
       // means) and the call's own `description` as the JUSTIFICATION — DATA, never instructions, under
@@ -1367,6 +1380,7 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
         class: "bash", command,
         ...(escape ? { unsandboxed: true, ...(description !== undefined ? { justification: description } : {}), ...(cwd !== undefined && cwd.length > 0 ? { cwd } : {}) } : {}),
       }, signal); // WS-24: the runner aborts `signal` when it times this callback out; the review aborts its model call with it
+      progress("ended", verdict.verdict === "unsafe" ? "unsafe" : "safe");
       if (verdict.verdict === "unsafe") return deny(verdict.reason || "the safety reviewer judged this command unsafe");
       if (escape) noteReviewerCleared(deps.sessionId, toolUseID ?? (typeof (pre as { tool_use_id?: unknown }).tool_use_id === "string" ? (pre as { tool_use_id: string }).tool_use_id : undefined), command);
       return allow();
@@ -1376,7 +1390,8 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
       // review to be had and there never was one: `allow()`, exactly what this hook's own first line
       // answered when such a home had no `BashReviewer` at all. The reviewer has already logged the
       // state change once; nothing is logged per call here.
-      if (err instanceof ReviewerNoRunnableModel) return allow();
+      if (err instanceof ReviewerNoRunnableModel) { progress("ended"); return allow(); }
+      progress("ended", "escalated");
       // C3 (2026-09-22) — traced in the SDK source, not yet measured on a live child: this `ask`
       // reaches `canUseTool`, where the gate's `auto` allow used to answer it, i.e. silently ran it.
       // For a PLAIN bash call the child keeps this reason and the bridge cards on it

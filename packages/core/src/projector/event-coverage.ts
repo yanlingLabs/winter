@@ -152,6 +152,8 @@ export const SUBAGENT_TRANSCRIPT_INCLUDE = {
   // back as a transcript would be reading another model's private chain of thought.
   thinking_block: false,
   thinking_delta: false,
+  // The reviewing pill (2026-10-08): TRANSIENT live state for the HUMAN — never persisted, so never in a transcript.
+  tool_review_progress: false,
 } satisfies Record<SessionEvent["type"], boolean>;
 
 /**
@@ -304,6 +306,9 @@ export const PROJECTED_EVENT_COVERAGE = {
   worktree_entered: false,
   worktree_exited: false,
   tool_review: false, // `BashReviewer` stays on the provider layer (P8b-10)
+  // The reviewing pill (2026-10-08): a DAEMON producer, not the projector — `runtime-sdk/hooks.ts`'s bash reviewer
+  // hook, broadcast through the hub as a transient (`daemon.ts` resolves the call's thread).
+  tool_review_progress: false,
   // Winter Phase 8c (P8c-11 / Task 2.4): the Winter-leg half of this event's fate is now named —
   // `runtime-sdk/sinks.ts`'s `push_notification` sink, observing the projected `tool_call` for
   // Winter's `PushNotification` (never a projector branch of its own, same reasoning as the
