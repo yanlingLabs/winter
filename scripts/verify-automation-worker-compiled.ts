@@ -129,7 +129,9 @@ async function main(): Promise<void> {
   ];
   for (const [leg, sandbox] of legs) {
     const argv = sandbox === null ? [DIST_BINARY, ARG] : ["/usr/bin/sandbox-exec", "-p", sandbox, DIST_BINARY, ARG];
-    const r = spawnSync(argv[0]!, argv.slice(1), { input: runLine, encoding: "utf8", timeout: TIMEOUT_MS });
+    // The daemon's own spawn shape (cwd `/`, the minimal environment): the profile does not let the worker read
+    // an arbitrary cwd, so a sandboxed leg spawned from here would die before its guard could refuse.
+    const r = spawnSync(argv[0]!, argv.slice(1), { input: runLine, encoding: "utf8", timeout: TIMEOUT_MS, cwd: "/", env: { ...AUTOMATION_WORKER_ENV } });
     log(`  ${leg}: exit=${r.status} stdout=${JSON.stringify((r.stdout ?? "").slice(0, 120))} stderr=${JSON.stringify((r.stderr ?? "").trim().slice(0, 200))}`);
     checks.push([`the worker REFUSES under ${leg} (exit 77, no output)`, r.status === 77 && (r.stdout ?? "") === "" && (r.stderr ?? "").includes("refuses to run")]);
   }
