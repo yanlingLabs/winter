@@ -135,9 +135,10 @@ struct PresentationState {
     }
 
     /// True while something may still change on its own (a mirror waiting to fade, a cursor waiting to hide), so the
-    /// controller keeps its timer running.
+    /// controller keeps its timer running. With mirrors disabled their idle fades need no timer: `tick` applies them
+    /// from `lastActivity` whenever it next runs, so a mirror switched back on after its 30 s is already faded.
     var hasPendingTimers: Bool {
-        entries.values.contains { ($0.wantsMirror && !$0.mirrorFaded) || $0.cursorVisibleUntil != nil }
+        entries.values.contains { (mirrorsEnabled && $0.wantsMirror && !$0.mirrorFaded) || $0.cursorVisibleUntil != nil }
     }
 
     /// Drops entries that no longer want anything (no mirror, no cursor).

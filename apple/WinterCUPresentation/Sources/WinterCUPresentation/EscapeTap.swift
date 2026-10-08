@@ -1,3 +1,4 @@
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 
@@ -26,7 +27,8 @@ enum EscapeDecision: Equatable {
 ///
 /// - Disarmed: everything passes.
 /// - Armed: a bare Escape key-down from the user is swallowed and fires once; its autorepeats and its key-up are
-///   swallowed too, so the app under the user never sees half a press.
+///   swallowed too, so the app under the user never sees half a press. Every NEW press fires again, even when the
+///   previous press's key-up never reached the tap (a tap timeout in between): only autorepeats are silent.
 /// - During an `expectSynthetic` window, and for events this very process posted, Escape passes: the helper's own
 ///   Escape key actions must reach their target.
 struct EscapeTapLogic {
@@ -71,12 +73,8 @@ struct EscapeTapLogic {
         if event.sourcePID != 0 && event.sourcePID == ownPID { return .pass }
         if isInSyntheticWindow(now: now) { return .pass }
         if event.hasModifiers { return .pass }
-        if event.isAutorepeat || holdingSwallowedPress {
-            holdingSwallowedPress = true
-            return .swallow
-        }
         holdingSwallowedPress = true
-        return .swallowAndFire
+        return event.isAutorepeat ? .swallow : .swallowAndFire
     }
 }
 
@@ -103,14 +101,18 @@ struct EscapeTapLogic {
     private let log: (String) -> Void
     private var handle: EscapeTapHandle?
     private var loggedUnavailable = false
+    /// Reads Secure Event Input. Injected for tests.
+    let secureInputProbe: () -> Bool
 
     init(installer: EscapeTapInstaller,
          clock: CUClock,
          ownPID: pid_t = getpid(),
          tuning: PresentationTuning = .standard,
+         secureInputProbe: @escaping () -> Bool = { IsSecureEventInputEnabled() },
          log: @escaping (String) -> Void = PresentationLog.notice) {
         self.installer = installer
         self.clock = clock
+        self.secureInputProbe = secureInputProbe
         self.log = log
         self.logic = EscapeTapLogic(ownPID: ownPID, maxSyntheticWindow: tuning.maxSyntheticEscapeWindow)
     }
@@ -152,5 +154,14 @@ struct EscapeTapLogic {
             DispatchQueue.main.async { [weak self] in self?.onEscape?() }
             return true
         }
+    }
+}
+
+extension CUEscapeTap {
+    /// True while some app holds Secure Event Input (a password field has focus, or a terminal's "Secure Keyboard
+    /// Entry" is on). While it is on, macOS hides keystrokes from every event tap, so Esc can't stop a script. Read it
+    /// fresh; the shell can report it in `status`. Additive: not part of the pinned protocol.
+    public var isSecureEventInputEnabled: Bool {
+        (self as? EscapeTap)?.secureInputProbe() ?? IsSecureEventInputEnabled()
     }
 }

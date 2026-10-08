@@ -1,19 +1,23 @@
 import AppKit
 import QuartzCore
 
-/// A borderless panel that never takes key or main status and never activates the helper.
+/// A borderless panel that never takes key or main status, never activates the helper and, per its role, lets clicks
+/// through to whatever is underneath.
 final class PassivePanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    init(contentRect: CGRect, clickThrough: Bool) {
+    init(contentRect: CGRect, role: PanelRole) {
         super.init(contentRect: contentRect, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         isOpaque = false
         backgroundColor = .clear
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         isMovable = false
-        ignoresMouseEvents = clickThrough
+        ignoresMouseEvents = role.ignoresMouseEvents
+        // Above ordinary windows (the mirror, so it shows a covered window's live content), or at the normal level so it
+        // can be ordered just above one target window (the cursor overlay).
+        level = role.floatsAboveWindows ? .floating : .normal
         animationBehavior = .none
         // Keep the helper's own drawings out of other apps' captures, so they never land in a model's screenshot.
         sharingType = .none
@@ -47,10 +51,9 @@ final class FlippedLayerView: NSView {
     private var shown = false
 
     init(target: CUWindowRef) {
-        panel = PassivePanel(contentRect: CGRect(x: 0, y: 0, width: 10, height: 10), clickThrough: true)
-        panel.hasShadow = false
         // Normal level, ordered just above the target: windows covering the target also cover its cursor.
-        panel.level = .normal
+        panel = PassivePanel(contentRect: CGRect(x: 0, y: 0, width: 10, height: 10), role: .cursorOverlay)
+        panel.hasShadow = false
         view = FlippedLayerView(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
         panel.contentView = view
         cursor = AgentCursorLayer(parent: view.canvas, scale: 1.1)
@@ -88,7 +91,8 @@ final class FlippedLayerView: NSView {
 }
 
 /// The live mirror: a small black panel with a faint white rim, the window's live image, the agent cursor drawn over
-/// it, and the app's name underneath.
+/// it, and the app's name underneath. Click-through: it sits over the target's top-left corner, and a foreground click
+/// there must reach the target.
 @MainActor final class AppKitMirror: MirrorSurface {
     private let target: CUWindowRef
     private let tuning: PresentationTuning
@@ -108,9 +112,7 @@ final class FlippedLayerView: NSView {
     init(target: CUWindowRef, tuning: PresentationTuning) {
         self.target = target
         self.tuning = tuning
-        panel = PassivePanel(contentRect: CGRect(x: 0, y: 0, width: 10, height: 10), clickThrough: false)
-        // Above ordinary windows, so the mirror shows the window's live content even while the window is covered.
-        panel.level = .floating
+        panel = PassivePanel(contentRect: CGRect(x: 0, y: 0, width: 10, height: 10), role: .mirror)
         panel.hasShadow = true
         panel.alphaValue = 0
         view = FlippedLayerView(frame: CGRect(x: 0, y: 0, width: 10, height: 10))

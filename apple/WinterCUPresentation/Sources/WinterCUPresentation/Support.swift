@@ -42,6 +42,41 @@ struct PresentationTuning: Sendable {
     static let standard = PresentationTuning()
 }
 
+/// How each of the helper's panels behaves. Both are click-through: the mirror sits over the target's top-left corner
+/// (its traffic lights), and a foreground click there must reach the target, never the mirror.
+enum PanelRole: CaseIterable {
+    case mirror, cursorOverlay
+
+    var ignoresMouseEvents: Bool { true }
+    /// The mirror floats above ordinary windows so it shows a covered window; the overlay sits just above its target.
+    var floatsAboveWindows: Bool { self == .mirror }
+}
+
+/// Delays between attempts to reopen a mirror stream that the system stopped: doubling from `first`, capped at `max`,
+/// for at most `attempts` tries. A healthy frame resets it.
+struct RestartBackoff: Sendable {
+    var first: TimeInterval = 1
+    var max: TimeInterval = 16
+    var attempts = 6
+    private(set) var used = 0
+
+    init(first: TimeInterval = 1, max: TimeInterval = 16, attempts: Int = 6) {
+        self.first = first
+        self.max = max
+        self.attempts = attempts
+    }
+
+    /// The delay before the next try, or nil when the tries are used up.
+    mutating func nextDelay() -> TimeInterval? {
+        guard used < attempts else { return nil }
+        let delay = Swift.min(first * pow(2, Double(used)), max)
+        used += 1
+        return delay
+    }
+
+    mutating func reset() { used = 0 }
+}
+
 /// Monotonic time in seconds. Injected so timers can be tested without waiting.
 protocol CUClock {
     var now: TimeInterval { get }

@@ -130,6 +130,24 @@ final class PresentationStateTests: XCTestCase {
         XCTAssertTrue(s.hasPendingTimers)
     }
 
+    func testDisabledMirrorsNeedNoTimerAndFadeLazily() {
+        var s = PresentationState()
+        s.showMirror(key("s", 1), now: 0)
+        s.mirrorsEnabled = false
+        XCTAssertFalse(s.hasPendingTimers, "nothing on screen can change on its own")
+        // Switched back on after the 30 s: the next tick fades it before it could show.
+        s.mirrorsEnabled = true
+        s.tick(now: 31)
+        XCTAssertEqual(s.visibleMirrors(), [])
+        // Switched back on in time: it shows.
+        var t = PresentationState()
+        t.showMirror(key("s", 1), now: 0)
+        t.mirrorsEnabled = false
+        t.mirrorsEnabled = true
+        t.tick(now: 10)
+        XCTAssertEqual(t.visibleMirrors(), [key("s", 1)])
+    }
+
     func testCursorFractionIsRemembered() {
         var s = PresentationState()
         s.noteCursor(key("s", 1), fraction: CGPoint(x: 0.2, y: 0.8), now: 0)
