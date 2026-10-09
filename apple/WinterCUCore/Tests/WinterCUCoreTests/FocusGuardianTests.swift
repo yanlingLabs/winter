@@ -74,7 +74,7 @@ final class FocusGuardianTests: XCTestCase {
 
     // MARK: the live restore (window-targeted click → the app activates a second later → restored)
 
-    func testAnAgentActivationRestoresTheUserAndQueuesANote() async throws {
+    func testAWindowTargetedClickThatActivatesTheAppASecondLaterRestoresTheUser() async throws {
         let ax = FakeAX()
         let window = fakeElement(95_501)
         ax.add(window, role: kAXWindowRole, title: "W", frame: CGRect(x: 0, y: 0, width: 400, height: 300))
