@@ -2,6 +2,8 @@ import AppKit
 
 @MainActor
 final class MenuBarController {
+    private var menuTracking: NSObjectProtocol?
+
     private let statusLine: () -> String
     private let toggleOrb: () -> Void
     private let summonField: () -> Void
@@ -270,6 +272,10 @@ final class MenuBarController {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
         let menu = NSMenu()
+        // Fresh whenever the menu is opened — the only time anyone reads the state line or the login-item checkbox.
+        menuTracking = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: menu, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
         stateItem.isEnabled = false
         menu.addItem(stateItem)
         menu.addItem(.separator())
@@ -338,14 +344,14 @@ final class MenuBarController {
 
     func refresh() {
         // Lifecycle T6: never overwrite the "engine stopped — Restart" title/action while failed —
-        // this runs on a 2s Timer (`AppDelegate.boot()`), which would otherwise stomp it right back
-        // to the plain status line on the very next tick.
+        // this runs whenever the menu opens, which would otherwise stomp it right back to the plain
+        // status line.
         if !engineFailed && !engineWaitingForCredentials {
             stateItem.title = statusLine()
         }
         // Lifecycle T4: the checkbox tracks `SMAppService.mainApp`'s live status (e.g. the user
         // can flip it from System Settings > Login Items directly, outside this menu entirely),
-        // so it's re-synced on the SAME periodic cadence as the state line above rather than only
+        // so it's re-synced each time the menu opens, like the state line above, rather than only
         // right after a click.
         loginItemItem.state = loginItemController.isEnabled ? .on : .off
     }

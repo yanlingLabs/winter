@@ -1107,19 +1107,56 @@ final class DispatchPillController: ObservableObject {
     /// only input: a LOCAL monitor sees `mouseMoved` only for a window of ours that asked for it, so
     /// with one of Winter's own windows (a detached session window) under the pill no move ever
     /// arrived, the gate stayed shut, and a click on a child pill fell through to the window beneath —
-    /// the user's "it only lets me open one window". 30Hz is plenty for a pointer and costs a rect test.
+    /// the user's "it only lets me open one window". Winter's own windows now ask for moves
+    /// (`acceptsMouseMovedEvents`), so the monitors cover them; the clock is the safety net.
+    ///
+    /// It runs fast only while the pointer is moving (30 Hz, a rect test per tick) and drops to once a
+    /// second when it has been still: a pill is up all day, and a 30 Hz timer under a still pointer was
+    /// thirty wake-ups a second of an otherwise idle app.
     private var gateTimer: Timer?
     static let gateTickInterval: TimeInterval = 1.0 / 30.0
-    var gateTimerActiveForTesting: Bool { gateTimer != nil }
+    /// The clock's pace once the pointer has been still for `gateStillAfter`.
+    static let gateIdleInterval: TimeInterval = 1.0
+    static let gateStillAfter: TimeInterval = 1.0
+    private var lastGatePoint: CGPoint?
+    private var lastGateMovement = Date.distantPast
+    var gateTimerActiveForTesting: Bool { gateTimer?.isValid == true }
+    /// How long the armed timer waits between ticks (tests).
+    var gateTimerIntervalForTesting: TimeInterval? { gateTimer?.isValid == true ? gateCurrentInterval : nil }
+    private var gateCurrentInterval: TimeInterval = DispatchPillController.gateTickInterval
+
+    /// PURE: how soon the gate clock ticks again, given how long the pointer has been still.
+    static func gatePace(stillFor: TimeInterval) -> TimeInterval {
+        stillFor >= gateStillAfter ? gateIdleInterval : gateTickInterval
+    }
+
+    private func armGateTimer(after interval: TimeInterval) {
+        gateTimer?.invalidate()
+        gateCurrentInterval = interval
+        let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.gateTick() }
+        }
+        timer.tolerance = interval * 0.25 // lets the system coalesce it with its own wake-ups
+        RunLoop.main.add(timer, forMode: .common)
+        gateTimer = timer
+    }
+
+    /// One beat of the gate clock: run the gate, note whether the pointer moved, arm the next beat.
+    func gateTick(now: Date = Date()) {
+        guard gateTimer != nil else { return }
+        let point = mouseLocationOverrideForTesting ?? NSEvent.mouseLocation
+        if point != lastGatePoint { lastGateMovement = now }
+        lastGatePoint = point
+        updateMouseGate()
+        armGateTimer(after: Self.gatePace(stillFor: now.timeIntervalSince(lastGateMovement)))
+    }
 
     private func installMonitors() {
         guard monitors.isEmpty else { return }
         swipeRecognizer.reset()
-        let timer = Timer(timeInterval: Self.gateTickInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.updateMouseGate() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        gateTimer = timer
+        lastGatePoint = nil
+        lastGateMovement = Date()
+        armGateTimer(after: Self.gateTickInterval)
 
         // Esc. A LOCAL monitor sees only this app's events; it acts only on keys bound for this panel.
         if let m = NSEvent.addLocalMonitorForEvents(matching: [.keyDown], handler: { [weak self] event in

@@ -234,20 +234,32 @@ final class PeripheralProvider: ObservableObject {
     private var lastTCCSnapshot: (screenshot: Bool, ax: Bool)?
 
     /// There is no OS notification for "Accessibility/Screen Recording grant changed" — periodic
-    /// preflight is the only way to notice (spec §A4). Mirrors `MenuBarController`'s own 2s refresh
-    /// cadence in `AppDelegate.boot()`. LIVE-GATE ITEM: exercised by hand (grant/revoke in System
-    /// Settings while Winter is running), not unit-tested — a real TCC preflight call is what's
-    /// under test here, not a fake.
-    func startTCCPolling(intervalSeconds: TimeInterval = 2.0) {
+    /// preflight is the only way to notice (spec §A4). Every preflight is a round trip to the TCC daemon, so the
+    /// clock is slow (10 s, with generous tolerance so it shares wake-ups with others) and a grant is picked up
+    /// at once where it matters: when the app becomes active again after the user was in System Settings.
+    /// LIVE-GATE ITEM: exercised by hand (grant/revoke in System Settings while Winter is running), not
+    /// unit-tested — a real TCC preflight call is what's under test here, not a fake.
+    func startTCCPolling(intervalSeconds: TimeInterval = PeripheralProvider.tccPollInterval) {
         stopTCCPolling()
-        tccPollTimer = Timer.scheduledTimer(withTimeInterval: intervalSeconds, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: intervalSeconds, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pollTCC() }
+        }
+        timer.tolerance = intervalSeconds * 0.5
+        RunLoop.main.add(timer, forMode: .common)
+        tccPollTimer = timer
+        tccActivation = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.pollTCC() }
         }
     }
 
+    nonisolated static let tccPollInterval: TimeInterval = 10
+    private var tccActivation: NSObjectProtocol?
+
     func stopTCCPolling() {
         tccPollTimer?.invalidate()
         tccPollTimer = nil
+        if let tccActivation { NotificationCenter.default.removeObserver(tccActivation) }
+        tccActivation = nil
     }
 
     private func pollTCC() {
