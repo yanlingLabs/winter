@@ -708,11 +708,15 @@ extension CUCore {
         var next = 0
         let keyPid = keyboardTarget(t, focused: e)
         let valueBefore = keyPid != t.pid ? e.flatMap { ax.string($0, kAXValueAttribute) } : nil
+        // The keys reach the app only while its window holds the key focus: the focus blip, per burst.
+        let blips = CUKeyBlips(self, p, t, why: "typing")
+        defer { blips.end() }
         let typed = try runEvents(p, t, d, focus: true, token) { [self] route, _ in
             try synth.type(pid: keyPid, text: text, route: route) {
                 // Before EVERY character: not cancelled, still running, and focus still on a typable,
                 // non-sensitive field — a tab or return may just have moved it to a password field.
                 try token.check()
+                blips.before()
                 guard sys.appRunning(t.pid) else { throw CUError.targetLost("\(t.appName) quit while typing", reason: .appQuit) }
                 if next > 0, chars[next - 1] == "\t" || chars[next - 1].isNewline { g.focusMayHaveMoved = true }
                 next += 1
@@ -1341,10 +1345,12 @@ extension CUCore {
         let plan = try chordPlan(chord, p, t, g)
         var out = ActOutcome(rung: .accessibility)
         let keyPid = keyboardTarget(t, focused: e)
+        let blips = CUKeyBlips(self, p, t, why: "keys")
+        defer { blips.end() }
         for _ in 0..<rep {
             try token.check()
             if textual { try requireTypableFocus(t, g) }
-            out = try execute(plan, p, t, token, keyPid: keyPid)
+            out = try execute(plan, p, t, token, keyPid: keyPid, blips: blips)
         }
         return out
     }
@@ -1454,8 +1460,9 @@ extension CUCore {
     }
 
     /// `keyPid`: where key events go (`keyboardTarget`), the app's pid when nil.
+    /// `blips`: the act's keyboard focus blips (one per burst); its own when nil.
     func execute(_ plan: ChordPlan, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token,
-                 keyPid: pid_t? = nil) throws -> ActOutcome {
+                 keyPid: pid_t? = nil, blips: CUKeyBlips? = nil) throws -> ActOutcome {
         switch plan {
         case .menuItem(let element, let title):
             aimMenuCommands(at: t)
@@ -1480,23 +1487,28 @@ extension CUCore {
                 return ActOutcome(rung: .accessibility, detail: "used the menu item “\(title)”, re-validated with \(t.appName)'s window key for a moment (your app kept the front)")
             }
             CULog.act.notice("key in \(t.appName, privacy: .public): “\(title, privacy: .public)” stayed disabled — the chord goes as key events")
-            return try execute(fallback, p, t, token, keyPid: keyPid)
+            return try execute(fallback, p, t, token, keyPid: keyPid, blips: blips)
         case .events(let code, let flags, let d):
             let synth = self.synth(p)
             let pid = keyPid ?? t.pid
+            let keys = blips ?? CUKeyBlips(self, p, t, why: "keys")
+            defer { if blips == nil { keys.end() } }
             return try runEvents(p, t, d, focus: true, token) { route, _ in
-                synth.key(pid: pid, code: code, flags: flags, route: route)
+                keys.before()
+                return synth.key(pid: pid, code: code, flags: flags, route: route)
             }
         case .emulated(let command, let f, let fallback):
-            if let done = try emulate(command, f, p, t, token, keyPid: keyPid ?? t.pid) { return done }
+            if let done = try emulate(command, f, p, t, token, keyPid: keyPid ?? t.pid, blips: blips) { return done }
             CULog.act.notice("key in \(t.appName, privacy: .public): \(command.rawValue, privacy: .public) could not be done over accessibility — sending the keys")
-            return try execute(fallback, p, t, token, keyPid: keyPid)
+            return try execute(fallback, p, t, token, keyPid: keyPid, blips: blips)
         }
     }
 
     /// One editing shortcut over accessibility; nil when that can't be done here (the keys are sent instead).
     private func emulate(_ command: EditCommand, _ f: AXUIElement, _ p: TargetActParams, _ t: CUTarget,
-                         _ token: CUCancellation.Token, keyPid: pid_t) throws -> ActOutcome? {
+                         _ token: CUCancellation.Token, keyPid: pid_t, blips: CUKeyBlips? = nil) throws -> ActOutcome? {
+        let keys = blips ?? CUKeyBlips(self, p, t, why: "keys")
+        defer { if blips == nil { keys.end() } }
         let note = "in the background \(t.appName)'s web view takes no editing shortcut, so"
         switch command {
         case .undo, .redo:
@@ -1545,7 +1557,8 @@ extension CUCore {
             let synth = self.synth(p)
             let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
             _ = try runEvents(p, t, d, focus: true, token) { route, _ in
-                synth.key(pid: keyPid, code: CUKeyCodes.code(for: .delete), flags: [], route: route)
+                keys.before()
+                return synth.key(pid: keyPid, code: CUKeyCodes.code(for: .delete), flags: [], route: route)
             }
             return ActOutcome(rung: .accessibility, detail: "\(note) the selected text was copied (as plain text) and deleted")
         case .paste:
@@ -1554,7 +1567,7 @@ extension CUCore {
             let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
             CULog.act.notice("key in \(t.appName, privacy: .public): paste typed as keys")
             let typed = try runEvents(p, t, d, focus: true, token) { route, _ in
-                try synth.type(pid: keyPid, text: text, route: route) { try token.check() }
+                try synth.type(pid: keyPid, text: text, route: route) { try token.check(); keys.before() }
             }
             return typed.noting("\(note) the clipboard's text was typed in (as plain text)")
         }

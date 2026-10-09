@@ -280,8 +280,8 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         try await act(.key(CUKeyAction(combo: "cmd+t")))
         XCTAssertTrue(ax.performed.isEmpty)
         XCTAssertEqual(poster.keyDowns.last?.keycode, Int64(CUKeyCodes.code(for: "t")!), "the keys, as before")
-        XCTAssertEqual(installer.installed.count, 2, "the blip and its one retry")
-        XCTAssertEqual(installer.removed, 2)
+        XCTAssertEqual(installer.installed.count, 3, "the blip and its one retry, then the keys' own burst")
+        XCTAssertEqual(installer.removed, 3)
     }
 
     func testIfTheTargetActivatesItselfTheUsersAppGetsTheFrontBack() async throws {
@@ -368,15 +368,78 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         XCTAssertEqual(ax.performed, ["\(token(trash)):AXPress"])
     }
 
-    func testTypingKeysAndClicksTakeNoFocusBlip() async throws {
+    func testClicksTakeNoFocusBlip() async throws {
         finder(focusedField: true)
-        try await act(.key(CUKeyAction(combo: "cmd+delete")))
-        XCTAssertEqual(poster.keyDowns.last?.keycode, 51)
-        try await act(.type(CUTypeAction(text: "ab")))
         try await act(.click(CUClickAction(ref: target.refs.ref(for: AXIdentity(element: field)))))
-        XCTAssertTrue(FocusSPI.calls.isEmpty, "never the focus records for keys, typing or clicks")
+        XCTAssertTrue(FocusSPI.calls.isEmpty, "never the focus records for a click")
         XCTAssertTrue(installer.installed.isEmpty)
+    }
+
+    func testTypingIntoAWindowWithoutTheKeyFocusTakesOneBlipWithTheRerouteOn() async throws {
+        finder(focusedField: true)
+        var atFirstKey: (records: [String], tap: Bool)?
+        poster.onPost = { [unowned self] e in
+            if atFirstKey == nil, e.type == .keyDown { atFirstKey = (FocusSPI.calls, installer.isInstalled) }
+        }
+        try await act(.type(CUTypeAction(text: "ab")))
+        XCTAssertEqual(atFirstKey?.records, ["defocus pid 1 window 77", "focus pid 5252 window 77"], "the window made key before the first key")
+        XCTAssertEqual(atFirstKey?.tap, true, "with the reroute on")
+        XCTAssertEqual(poster.keyDowns.map(\.unicode), ["a", "b"])
+        XCTAssertEqual(installer.installed, [pid], "one blip for the burst")
+        XCTAssertEqual(installer.removed, 1)
+        XCTAssertEqual(Array(FocusSPI.calls.suffix(2)), ["defocus pid 5252 window 77", "focus pid 1 window 31"], "handed back")
+        XCTAssertTrue(scheduled.allSatisfy { $0.ms <= 250 }, "the hard deadline")
+        XCTAssertFalse(FocusSPI.calls.contains { $0.hasPrefix("front ") })
         XCTAssertEqual(sys.frontmostPid(), 1)
+        XCTAssertTrue(sys.activated.isEmpty)
+    }
+
+    func testAKeyRepeatedIsOneBurst() async throws {
+        finder(focusedField: true)
+        try await act(.key(CUKeyAction(combo: "cmd+delete", repeat: 5)))
+        XCTAssertEqual(poster.keyDowns.filter { $0.keycode == 51 }.count, 5)
+        XCTAssertEqual(installer.installed.count, 1, "one blip at the start of the burst")
+        XCTAssertEqual(installer.removed, 1)
+    }
+
+    func testALongBurstIsSplitIntoBlipsThatEachEndInTime() async throws {
+        finder(focusedField: true)
+        core.blipBurstMs = 0  // every key spends the burst: a fresh blip before each
+        try await act(.type(CUTypeAction(text: "abc")))
+        XCTAssertEqual(poster.keyDowns.map(\.unicode), ["a", "b", "c"])
+        XCTAssertEqual(installer.installed.count, 3)
+        XCTAssertEqual(installer.removed, 3, "each blip ended before the next began")
+        XCTAssertEqual(FocusSPI.calls.filter { $0 == "focus pid 1 window 31" }.count, 3, "the key focus handed back each time")
+    }
+
+    func testAWindowThatHoldsTheKeyFocusTakesNoBlip() async throws {
+        finder(focusedField: true)
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window])  // key in its app
+        core.keyFocusPidOverride = { [unowned self] in pid }              // and the window server's key focus
+        try await act(.type(CUTypeAction(text: "ab")))
+        try await act(.key(CUKeyAction(combo: "cmd+delete")))
+        XCTAssertTrue(FocusSPI.calls.isEmpty)
+        XCTAssertTrue(installer.installed.isEmpty)
+        XCTAssertEqual(poster.keyDowns.count, 3)
+    }
+
+    func testTheUsersKeysDuringATypingBlipGoToTheirApp() async throws {
+        finder(focusedField: true)
+        var dropped: [Bool] = []
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown, let tap = installer.handler else { return }
+            dropped.append(tap(keyEvent(stamped: false)) == nil)  // the user types while the agent does
+        }
+        try await act(.type(CUTypeAction(text: "ab")))
+        XCTAssertEqual(dropped, [true, true])
+        XCTAssertEqual(posted, [1, 1], "to the user's app, never the target")
+    }
+
+    func testWithThePrivatePathOffTypingTakesNoBlip() async throws {
+        finder(focusedField: true)
+        try await act(.type(CUTypeAction(text: "ab")), privatePath: false)
+        XCTAssertTrue(FocusSPI.calls.isEmpty)
+        XCTAssertTrue(installer.installed.isEmpty)
     }
 
     func testAnAppAlreadyInFrontIsLeftAlone() async throws {
