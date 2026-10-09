@@ -168,13 +168,41 @@ extension CUCore {
         return verdict
     }
 
+    /// One left-mouse-down the listen-only tap saw. A helper-origin click (our stamp) is ignored. A PHYSICAL
+    /// click whose topmost window under the point belongs to a bound target is the user choosing the agent's
+    /// app: the guardian takes that app and its Space as the user's at once (before the 0.4 s heuristic) and
+    /// claims the activation it causes; and, as ChatGPT's helper does, the target is activated so the click
+    /// works normally even though the focus enforcer may have told it it was already active. Returns the pid
+    /// claimed, for the test.
+    @discardableResult
+    func onPhysicalClick(at point: CGPoint, userData: Int64, now: Double) -> pid_t? {
+        guard !CUEventStamp.isOurs(userData) else { return nil }
+        guard guardianLock.withLock({ guardianCore.active }) else { return nil }
+        let own = getpid()
+        guard let hit = sys.windowStack().first(where: { $0.pid != own && $0.alpha > 0 && $0.frame.contains(point) }),
+              boundTargetPids().contains(hit.pid) else { return nil }
+        let space = sys.activeSpace()
+        guardianLock.withLock { guardianCore.userClicked(app: hit.pid, space: space, now: now) }
+        let name = appName(hit.pid)
+        CULog.guardian.notice("the user clicked into \(name, privacy: .public)'s window \(hit.id, privacy: .public): theirs, not a theft")
+        if sys.frontmostPid() != hit.pid {
+            let pid = hit.pid
+            if guardianRestoreSync { _ = sys.activate(pid: pid) } else {
+                DispatchQueue.global(qos: .userInitiated).async { [sys] in _ = sys.activate(pid: pid) }
+            }
+        }
+        return hit.pid
+    }
+
     /// Starts the listen-only type-21 tap on its own run-loop thread. Listen-only (`.listenOnly`) so a mistake
     /// can never drop or alter the user's events — it only observes, releases a theft token and restores.
     /// Best-effort: nil when the tap can't be created (the didActivate guardian still covers the common case).
     func startCPSTap() {
         guard guardianLiveTapEnabled, cpsTapThread == nil else { return }
         let box = Unmanaged.passRetained(CUCPSTapContext(core: self)).toOpaque()
-        let mask: CGEventMask = CGEventMask(1) << CUFocusTaps.processNotificationType
+        // The CPS notifications (key-focus thefts) and every left-mouse-down (the user's own clicks).
+        let mask: CGEventMask = (CGEventMask(1) << CUFocusTaps.processNotificationType)
+            | (CGEventMask(1) << CGEventType.leftMouseDown.rawValue)
         guard let port = CGEvent.tapCreate(tap: .cgAnnotatedSessionEventTap, place: .tailAppendEventTap,
                                            options: .listenOnly, eventsOfInterest: mask, callback: cpsTapCallback, userInfo: box) else {
             Unmanaged<CUCPSTapContext>.fromOpaque(box).release()
@@ -216,6 +244,11 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
         return Unmanaged.passUnretained(event)
     }
     guard let refcon, let core = Unmanaged<CUCPSTapContext>.fromOpaque(refcon).takeUnretainedValue().core else {
+        return Unmanaged.passUnretained(event)
+    }
+    if type == .leftMouseDown {
+        core.onPhysicalClick(at: event.location, userData: event.getIntegerValueField(.eventSourceUserData),
+                             now: core.clock.nowSeconds())
         return Unmanaged.passUnretained(event)
     }
     func f(_ n: UInt32) -> Int64 { event.getIntegerValueField(CGEventField(rawValue: n)!) }
