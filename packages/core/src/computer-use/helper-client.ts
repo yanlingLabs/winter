@@ -135,8 +135,10 @@ export class HelperClient {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private helperVersion: string | undefined;
-  /** The last handshake's protocol mismatch, until a handshake succeeds. */
+  /** The last handshake's protocol mismatch, until a handshake succeeds; and whether that helper still answered on
+   *  the last attempt (an incompatible helper idle-quits like any other — then it is not running). */
   private lastMismatch: HelperProtocolMismatch | undefined;
+  private mismatchedHelperRunning = false;
   private permissionsCache: HelperPermissions | undefined;
   private closedByUs = false;
   private connectionGeneration = 0;
@@ -189,6 +191,7 @@ export class HelperClient {
     const socketPath = helperSocketPath(this.deps.home);
     let conn = await this.tryConnect(socketPath);
     if (conn === undefined) {
+      this.mismatchedHelperRunning = false;
       if (!launch) throw new HelperUnavailableError("Winter Computer Use is not running");
       if (!this.deps.launchAllowed) {
         throw new HelperUnavailableError("Winter Computer Use is not running, and this daemon does not launch it (it serves only the profile's own Winter home)", false);
@@ -256,6 +259,7 @@ export class HelperClient {
       this.log(`computer-use: ${err.message}${helperVersion === undefined ? "" : ` (Winter Computer Use ${helperVersion})`}`);
     }
     this.lastMismatch = err.mismatch;
+    this.mismatchedHelperRunning = true;
     return err;
   }
 
@@ -367,8 +371,8 @@ export class HelperClient {
     // Not connected: connect only if it is already running (no launch), inside the single-flight connect.
     if (this.conn === undefined) await this.connectIfRunning();
     if (this.conn === undefined) {
-      // It answered, in another protocol: running, and unusable until Winter is updated.
-      if (this.lastMismatch !== undefined) return { installed, running: true, protocolMismatch: this.lastMismatch };
+      // It answered, in another protocol: unusable until Winter is updated (running while it still answers).
+      if (this.lastMismatch !== undefined) return { installed, running: this.mismatchedHelperRunning, protocolMismatch: this.lastMismatch };
       return { installed, running: false };
     }
     try {

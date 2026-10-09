@@ -147,6 +147,11 @@ describe("the helper client", () => {
       expect(st.running).toBe(true);
       expect(st.protocolMismatch?.message).toContain("too new for this Winter");
       expect(st.protocolMismatch?.winterProtocol).toBe(HELPER_PROTOCOL);
+      fake.running = false; // the incompatible helper idle-quit: still incompatible, no longer running
+      const quit = await c.status();
+      expect(quit.running).toBe(false);
+      expect(quit.protocolMismatch?.message).toContain("too new for this Winter");
+      fake.running = true;
       fake.helloProtocol = HELPER_PROTOCOL; // Winter was updated (or the helper)
       const ok = await c.status();
       expect(ok.protocolMismatch).toBeUndefined();
