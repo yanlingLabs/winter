@@ -225,12 +225,67 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertTrue(poster.entries.isEmpty)
     }
 
-    func testAFocusWriteThatActivatesTheAppIsPutBackAtOnceAndSaid() async throws {
+    /// A plain native field (not under a web area) in a content-process-free app, built directly under the
+    /// window, so the route choice is tested in isolation from the type pipeline.
+    private func nativeField() -> AXUIElement {
         safari(fieldOwner: pid)
+        sys.bundles[pid] = "com.example.Native"
+        target = CUTarget(id: "t1", sessionId: "s", pid: pid, bundleId: "com.example.Native", appName: "Native",
+                          isChromium: false, mirror: false, windowID: 77, windowTitle: "Docs")
+        core.registerForTesting(target, windowElement: window)
+        let plain = fakeElement(93_080)
+        ax.add(plain, role: kAXTextFieldRole, title: "Plain", frame: CGRect(x: 20, y: 60, width: 200, height: 24))
+        ax.makeSettable(plain, kAXFocusedAttribute)
+        ax.put(window, [kAXChildrenAttribute: [plain]])  // directly under the window, no web area
+        ax.focus(pid: pid, on: nil)
+        return plain
+    }
+
+    func testAnAlreadyFocusedFieldIsLeftAlone() {
+        let f = nativeField()
+        ax.focus(pid: pid, on: f)
+        ax.onSet = { _ in XCTFail("no focus write when already focused") }
+        ax.onPerform = { _ in XCTFail("no press when already focused") }
+        XCTAssertTrue(core.focusField(f, target))
+        XCTAssertFalse(ax.written.contains { $0.hasSuffix(":\(kAXFocusedAttribute)") })
+    }
+
+    func testANativeFieldUsesPressFirstThenTheGuardedWriteRememberedPerApp() {
+        let f = nativeField()  // no press actions → press route fails → the guarded write
         ax.onSet = { [unowned self] what in if what.hasSuffix(":\(kAXFocusedAttribute)") { sys.front = pid } }
-        let r = try await act(.type(CUTypeAction(text: "ab", into: ref(field))))
-        XCTAssertEqual(sys.activated, [1])
-        XCTAssertTrue(r.detail?.contains("Safari activated itself — the user's app was put back") ?? false, r.detail ?? "")
+        sys.windows[77]?.onScreen = false  // no on-screen click either
+        XCTAssertFalse(core.focusField(f, target), "the write activated the app; focus not confirmed")
+        XCTAssertEqual(sys.activated, [1], "the user's app put back at once")
+        XCTAssertTrue(target.takeViewNotes().contains { $0.contains("Native activated itself — the user's app was put back") })
+        XCTAssertTrue(core.appActivatesOnFocusWrite(target), "remembered")
+        // A later native field of the same app skips the write entirely (press route only).
+        let f2 = fakeElement(93_081)
+        ax.add(f2, role: kAXTextFieldRole, title: "Plain2", frame: CGRect(x: 20, y: 90, width: 200, height: 24))
+        ax.put(window, [kAXChildrenAttribute: [f2]])
+        ax.focus(pid: pid, on: nil)
+        ax.onSet = { _ in XCTFail("no AXFocused write for a remembered app") }
+        _ = core.focusField(f2, target)
+    }
+
+    func testAWebFieldIsPressedNotWritten() {
+        safari(fieldOwner: pid)
+        ax.focus(pid: pid, on: nil)
+        ax.setActions(field, [kAXPressAction])
+        ax.onPerform = { [unowned self] what in if what == "\(token(field)):AXPress" { ax.focus(pid: pid, on: field) } }
+        ax.onSet = { _ in XCTFail("no AXFocused write on a web field") }
+        XCTAssertTrue(core.focusField(field, target))
+        XCTAssertTrue(ax.performed.contains("\(token(field)):AXPress"))
+        XCTAssertTrue(sys.activated.isEmpty, "pressing does not activate")
+    }
+
+    func testAWebFieldThatCannotBePressedIsNotWrittenAndSaysSo() {
+        safari(fieldOwner: pid)
+        ax.focus(pid: pid, on: nil)   // not focused, no press actions
+        sys.windows[77]?.onScreen = false  // and no on-screen click
+        ax.onSet = { _ in XCTFail("the write is forbidden for a web field") }
+        XCTAssertFalse(core.focusField(field, target))
+        XCTAssertTrue(target.takeViewNotes().contains { $0.contains("couldn't place focus in Native's field") || $0.contains("couldn't place focus in Safari's field") },
+                      "says focus could not be placed without the write")
     }
 
     func testTextUpToTwoHundredCharactersIsTypedAsKeys() async throws {

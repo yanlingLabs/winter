@@ -237,6 +237,7 @@ public final class CUCore: @unchecked Sendable {
         windowElementsLock.withLock { windowElements[target.id] = chosen.element }
         target.knownWindows = Set(CUBindWait.realWindows(serverNow).map(\.id)).union([chosen.id])
         emit { $0.targetBound(sessionId: p.sessionId, pid: pid, windowID: chosen.id, appName: appName, mirror: p.mirror) }
+        if startGuardian(privatePath: privatePath) { guardianLock.withLock { _ = guardianStartedTargets.insert(target.id) } }
         return TargetBindResult(targetId: target.id,
                                 app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid),
                                 window: CUWindowInfo(id: chosen.id, title: chosen.title, frame: cuFrame(chosen.frame)),
@@ -353,6 +354,28 @@ public final class CUCore: @unchecked Sendable {
     /// Background steps that once moved the user's view: never used again while the helper runs.
     let retiredStepsLock = NSLock()
     var retiredSteps: Set<CUBackgroundStep> = []
+    // The continuous Focus Guardian (CUCore+Guardian): started while any target is bound, stopped when the
+    // last is released (private-path gated).
+    let guardianLock = NSLock()
+    var guardianCore = CUFocusGuardianCore()
+    var guardianRefs = 0
+    var guardianObservers: [NSObjectProtocol] = []
+    var pendingGuardianNotes: [String] = []
+    var guardianStartedTargets: Set<String> = []
+    var lastSyntheticActivationAt: Double = -1
+    /// Seconds since the last physical user input, injectable for tests.
+    var secondsSinceUserInputOverride: (() -> TimeInterval)?
+
+    /// Apps whose `AXFocused` write was seen to activate them (move the user's view): their fields use the
+    /// press route first thereafter, for the helper's lifetime. Keyed by bundle id, else app name.
+    private let focusWriteActivatesLock = NSLock()
+    private var focusWriteActivatesApps: Set<String> = []
+    func appActivatesOnFocusWrite(_ t: CUTarget) -> Bool {
+        focusWriteActivatesLock.withLock { focusWriteActivatesApps.contains(t.bundleId ?? t.appName) }
+    }
+    func rememberFocusWriteActivates(_ t: CUTarget) {
+        focusWriteActivatesLock.withLock { _ = focusWriteActivatesApps.insert(t.bundleId ?? t.appName) }
+    }
 
     /// The window's tree for the off-desktop hit test; replaceable by tests (the live reader walks real AX).
     var treeReadOverride: ((CUTarget) -> [CUNode])?
@@ -878,6 +901,7 @@ public final class CUCore: @unchecked Sendable {
         focusEnforcersLock.lock()
         focusEnforcers.removeValue(forKey: id)?.teardown()
         focusEnforcersLock.unlock()
+        if guardianLock.withLock({ guardianStartedTargets.remove(id) != nil }) { stopGuardian() }
         if let t { unwatchIfUnused(t.pid) }
         return t
     }
