@@ -39,7 +39,13 @@ WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live   # the LIVE ComputerV2 suite (script
                                      # live-test instance (a home in <user temp>/winter-cu-live-*, HelperIdentity.isLiveTestHome)
                                      # — never sign a test tool with a production identifier. --dry-run: builds, self-tests,
                                      # the no-screen plumbing and that identity rule against the dev helper; --real-apps:
-                                     # Safari/TextEdit/Finder/Preview on temp docs. Never run it from an agent.
+                                     # Safari/TextEdit/Finder/Preview on temp docs, plus the generic check on VS Code and
+                                     # Chrome when installed; --apps "<name or bundle id>,…": the generic, app-agnostic
+                                     # focus check on ANY installed app (bind, state, a harmless reversible AX press, a
+                                     # marker typed into an EMPTY field and cleared, right-click+Escape, scroll, screenshot,
+                                     # a coordinate click+wheel when there is no AX tree, off-Space only for an app the run
+                                     # launched; quits only what it launched) — a Unity app: --apps "VRoid Studio". Never
+                                     # run it from an agent.
 bun run check:idle-wakeups           # an isolated idle daemon's CPU wakeups/s, via `top -c d` (fails over 50/s);
                                      # `--pid N` measures a running one read-only. top's IDLEW is the SINCE-LAUNCH
                                      # count unless `-c d` — 3,962 on an 8 h daemon is ~0.14/s, not 3,962/s.

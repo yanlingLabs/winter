@@ -6,6 +6,8 @@
  *   WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live              # the fixture scenarios + perf (~2-3 min of screen)
  *   WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live --real-apps  # + Safari, TextEdit, Finder, Preview (temp docs only)
  *   bun run e2e:cu-live --dry-run                            # builds, self-tests, the no-screen plumbing check
+ *   WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live --apps "VRoid Studio,com.figma.Desktop"   # + the generic focus check
+ *     on ANY installed app (a Unity app: --apps "VRoid Studio"); --real-apps adds VS Code and Chrome when installed
  *   options: --only <text> (scenarios whose name contains it), --yes (no countdown), --keep-temp,
  *            --helper-app <path to "Winter Computer Use Dev.app"> (else $WINTER_COMPUTER_USE_APP, else dist/dev/)
  *
@@ -39,6 +41,7 @@ import {
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, type RealAppsRun } from "./real-apps";
 import { expectedCardSummary, SCENARIOS, scriptOf, type ImageStats, type ProbeEvent, type Scenario } from "./scenarios";
+import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, installedQuery, offSpacePlan, offSpaceSkipReason, onDesktopPlan, parseApps, restorePlan, SCRIPTS, type GenericApp } from "./generic";
 
 // ── thresholds (env overrides) ───────────────────────────────────────────────────────────────────────────────────
 const num = (name: string, fallback: number): number => {
@@ -53,7 +56,7 @@ const LIMITS = {
 const WATCH_AFTER_MS = 3_000;
 const MONITOR_INTERVAL_MS = 20;
 
-interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string }
+interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string }
 
 function parseOptions(argv: string[]): Options {
   const o: Options = { dryRun: false, realApps: false, yes: false, keepTemp: false };
@@ -65,6 +68,7 @@ function parseOptions(argv: string[]): Options {
     else if (a === "--keep-temp") o.keepTemp = true;
     else if (a === "--only") o.only = argv[++i];
     else if (a === "--helper-app") o.helperApp = argv[++i];
+    else if (a === "--apps") o.apps = argv[++i];
     else throw new Error(`unknown option ${a}`);
   }
   return o;
@@ -283,6 +287,13 @@ async function dryRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   selfTest("cu-live-viewprobe self-test", built.viewProbe, ["self-test"]);
   results.push(await plumbingCheck(built));
   results.push(await peerCheck(built, o));
+  // The generic app checks' PLAN (no screen): which apps would run, and what each would do.
+  for (const a of [...parseApps(o.apps), ...(o.realApps ? DEFAULT_GENERIC_APPS.map((d, i) => ({ query: d.query, key: `default${i}` })) : [])]) {
+    const found = sh("mdfind", [installedQuery(a.query)]).stdout.split("\n").find((l) => l.trim().endsWith(".app"));
+    results.push(found === undefined
+      ? { name: `plan: ${a.query}`, group: "plan", status: "skip", ms: 0, checks: [], note: "not installed — the live run skips it" }
+      : { name: `plan: ${a.query}`, group: "plan", status: "pass", ms: 0, checks: [check("installed", true)], note: `${found.trim()} — ${describePlan(a)}` });
+  }
   return results;
 }
 
@@ -391,6 +402,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   let baseline: FocusBaseline | undefined;
   let offspaceMethod = "?";
   let inputWatchFrom = Number.POSITIVE_INFINITY;
+  const runStartedAt = Date.now();
   const abortIfInput = (): void => {
     const hits = monitor === undefined ? [] : hidInputTimes(monitor.items, inputWatchFrom, Date.now());
     if (hits.length > 0) throw new Aborted(`real keyboard/mouse input at ${new Date(hits[0]!).toISOString()} — the run was stopped so nothing acts against you`);
@@ -462,49 +474,87 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     inputWatchFrom = Date.now();
 
     // ── scenarios ──────────────────────────────────────────────────────────────────────────────────────────────
-    const scenarios = [...SCENARIOS, ...(o.realApps ? REAL_APP_SCENARIOS : [])].filter((s) => o.only === undefined || s.name.toLowerCase().includes(o.only.toLowerCase()));
-    for (const s of scenarios) {
+    /** One scenario: its before-commands, the ComputerV2 call, the 3 s watch, then every check. */
+    const runScenario = async (s: Scenario): Promise<{ result: ScenarioResult; facts: Record<string, unknown>; output: string; since: number; end: number }> => {
       const t0 = Date.now();
+      let facts: Record<string, unknown> = {};
+      let output = "";
+      let since = t0;
+      let end = t0;
+      let result: ScenarioResult;
       try {
         abortIfInput();
         for (const c of s.before ?? []) await postCommand(built.tool, f, c.role, c.cmd, c.args ?? {});
-        const since = Date.now();
+        since = Date.now();
         const sid = s.session === "ask" ? askSid : mainSid;
         const timeout = s.timeoutMs ?? 60_000;
-        const turn = await runTurn(client, sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer);
+        const turn = await runTurn(client!, sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer);
         const t1 = Date.now();
         // HID input DURING the action is this scenario's failure (a rung-4 fallback took the real pointer — or it was
         // you); after it, it stops the run.
-        const during = hidInputTimes(monitor.items, since, t1);
+        const during = hidInputTimes(monitor!.items, since, t1);
         inputWatchFrom = t1;
         while (Date.now() < t1 + WATCH_AFTER_MS) { abortIfInput(); await sleep(50); }
+        end = Date.now();
+        output = turn.output;
+        facts = markerFacts(turn.output);
         const state = s.dump === true ? await dumpState(built.tool, f) : undefined;
         const events = fixtureEvents(f);
         const checks = s.verify({
-          output: turn.output, isError: turn.isError, facts: markerFacts(turn.output), events, since,
-          ...(state === undefined ? {} : { state }), probe: probe.items.filter((p) => p.t >= since), metrics: readMetrics(home, since),
+          output: turn.output, isError: turn.isError, facts, events, since,
+          ...(state === undefined ? {} : { state }), probe: probe!.items.filter((p) => p.t >= since), metrics: readMetrics(home, since),
           shots: shotsSince(built.tool, home, since),
         });
         if (s.session === "ask") checks.push(...cardChecks(turn.cards));
         checks.push(check("no keyboard/pointer input during the action (no rung-4 fallback)", during.length === 0, `HID input at +${during.map((t) => t - since).join(", +")} ms`));
-        const focus = focusChecks(monitor.items, since, t1 + WATCH_AFTER_MS, baseline, s.allowExcursionMs);
+        const focus = focusChecks(monitor!.items, since, t1 + WATCH_AFTER_MS, baseline!, s.allowExcursionMs);
         checks.push(...focus.checks);
         // Whether the deliberate self-activation REALLY took (macOS 14+ may refuse it) — else the scenario proves less.
         const steals = events.filter((e) => e.role === "main" && e.ev === "activated" && e.t >= since);
-        const note = s.allowExcursionMs === undefined ? (s.name.startsWith("bind off-Space") ? `off-Space by ${offspaceMethod}` : undefined)
-          : steals.length === 0 ? "no steal attempt was logged"
-            : `steal ${steals.some((e) => e.took === true) ? "TOOK" : "did not take (macOS refused the activation)"}; your app was away ${focus.longestAwayMs} ms`;
-        results.push({ name: s.name, group: s.group, status: statusOf(checks), ms: Date.now() - t0, checks, ...(note === undefined ? {} : { note }) });
+        const note = typeof facts.skipped === "string" ? `skipped: ${facts.skipped}`
+          : s.allowExcursionMs === undefined ? (s.name.startsWith("bind off-Space") ? `off-Space by ${offspaceMethod}` : undefined)
+            : steals.length === 0 ? "no steal attempt was logged"
+              : `steal ${steals.some((e) => e.took === true) ? "TOOK" : "did not take (macOS refused the activation)"}; your app was away ${focus.longestAwayMs} ms`;
+        const status = statusOf(checks) === "pass" && typeof facts.skipped === "string" ? "skip" : statusOf(checks);
+        result = { name: s.name, group: s.group, status, ms: Date.now() - t0, checks, ...(note === undefined ? {} : { note }) };
       } catch (err) {
         if (err instanceof Aborted) throw err;
-        results.push({ name: s.name, group: s.group, status: "fail", ms: Date.now() - t0, checks: [check("ran", false, err instanceof Error ? err.message : String(err))] });
+        end = Date.now();
+        result = { name: s.name, group: s.group, status: "fail", ms: Date.now() - t0, checks: [check("ran", false, err instanceof Error ? err.message : String(err))] };
       }
       // Never carry a stolen focus into the next scenario.
-      if (monitor.items.at(-1)?.frontPid !== baseline.frontPid) {
+      if (monitor!.items.at(-1)?.frontPid !== baseline!.frontPid) {
         await postCommand(built.tool, f, "user", "activate").catch(() => undefined);
         await sleep(500);
       }
+      return { result, facts, output, since, end };
+    };
+
+    const scenarios = [...SCENARIOS, ...(o.realApps ? REAL_APP_SCENARIOS : [])].filter((s) => o.only === undefined || s.name.toLowerCase().includes(o.only.toLowerCase()));
+    for (const s of scenarios) results.push((await runScenario(s)).result);
+
+    // ── any app (`--apps`, and with --real-apps VS Code and Chrome when installed) ─────────────────────────────
+    const genericApps = [...parseApps(o.apps), ...(o.realApps ? DEFAULT_GENERIC_APPS.filter((d) => installed(d.bundleId)).map((d, i) => ({ query: d.query, key: `default${i}` })) : [])];
+    const windows: Array<{ result: ScenarioResult; since: number; end: number }> = [];
+    for (const a of genericApps) {
+      const rows = await runGenericApp(a, runScenario, async (code) => {
+        const turn = await runTurn(client!, mainSid, computerV2Message(`${GENERIC_PRELUDE}\n${code}`, 30_000), 90_000);
+        return { output: turn.output, isError: turn.isError, facts: markerFacts(turn.output) };
+      }, async () => {
+        await postCommand(built.tool, f, "user", "activate");
+        await until("your Space and app back after the full-screen setup", 10_000, () => {
+          const last = monitor!.items.at(-1);
+          return last !== undefined && last.frontPid === baseline!.frontPid && (baseline!.space === null || last.space === baseline!.space);
+        });
+        await sleep(500);
+        inputWatchFrom = Date.now();
+      });
+      for (const r of rows) { results.push(r.result); windows.push(r); }
     }
+    // The route behind each failure: the helper's own act/bind log lines in that action's window, plus the rungs the
+    // daemon's metrics recorded (one `log show` for the whole run).
+    const failed = windows.filter((w) => w.result.status === "fail");
+    if (failed.length > 0) attachRoutes(failed, helperPid!, runStartedAt, home);
 
     // ── performance ────────────────────────────────────────────────────────────────────────────────────────────
     if (o.only === undefined) results.push(...await perf(built, f, helperPid, daemon.pid, probe, monitor, baseline, abortIfInput));
@@ -550,6 +600,102 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     results.push({ name: "cleanup", group: "run", status: statusOf(cleanup), ms: 0, checks: cleanup });
   }
   return results;
+}
+
+// ── any app: the generic focus check ────────────────────────────────────────────────────────────────────────────
+
+type Row = { result: ScenarioResult; since: number; end: number };
+type RunScenario = (s: Scenario) => Promise<Row & { facts: Record<string, unknown>; output: string }>;
+type SetupTurn = (code: string) => Promise<{ output: string; isError: boolean; facts: Record<string, unknown> }>;
+
+/** Is an app with this bundle id installed? (Spotlight's own index — no permission needed.) */
+function installed(query: string): boolean {
+  return sh("mdfind", [installedQuery(query)]).stdout.split("\n").some((l) => l.trim().endsWith(".app"));
+}
+
+/** The pids of a running app by bundle id (LaunchServices' own table — `lsappinfo`, no Apple Event). */
+function appPids(bundleId: string): number[] {
+  const out = sh("lsappinfo", ["info", "-only", "pid", bundleId]).stdout;
+  return [...out.matchAll(/"pid"\s*=\s*(\d+)/g)].map((m) => Number(m[1])).filter((n) => n > 0);
+}
+
+/**
+ * One app, every action its own asserted row: bind on this desktop; the on-desktop plan; off-Space (only for an app
+ * this run launched, through its window's full-screen button — a SETUP turn, not asserted, after which the user is
+ * brought back to their Space); then the app is left as found.
+ */
+async function runGenericApp(a: GenericApp, runScenario: RunScenario, setupTurn: SetupTurn, returnUser: () => Promise<void>): Promise<Row[]> {
+  const rows: Row[] = [];
+  const group = `app ${a.query}`;
+  const skipRow = (label: string, reason: string): Row => ({ result: { name: `${a.query}: ${label}`, group, status: "skip", ms: 0, checks: [], note: reason }, since: 0, end: 0 });
+  const bind = await runScenario(genericScenario(a, "bind on this desktop", "bind"));
+  rows.push(bind);
+  if (bind.facts.installed === false) return rows;
+  const wasRunning = typeof bind.facts.wasRunning === "boolean" ? bind.facts.wasRunning : undefined;
+  const bundleId = typeof bind.facts.bundleId === "string" ? bind.facts.bundleId : undefined;
+  if (bind.facts.bound === true) {
+    const refs = Number(bind.facts.refs ?? 0);
+    for (const step of onDesktopPlan(refs)) rows.push(await runScenario(genericScenario(a, step.label, step.action)));
+    if (refs >= 4) rows.push(skipRow("no accessibility tree: a coordinate click + a wheel scroll", `the app has an accessibility tree (${refs} refs)`));
+    const reason = offSpaceSkipReason(wasRunning);
+    if (reason !== undefined) rows.push(skipRow("off-Space", reason));
+    else {
+      const setup = await setupTurn(SCRIPTS.fullScreen(a));
+      if (typeof setup.facts.skipped === "string") rows.push(skipRow("off-Space", String(setup.facts.skipped)));
+      else if (setup.isError || setup.facts.fullScreen !== true) {
+        rows.push({ result: { name: `${a.query}: off-Space setup (its full-screen button)`, group, status: "fail", ms: 0, checks: [check("full screen", false, setup.output.slice(-200))] }, since: 0, end: 0 });
+        await returnUser().catch(() => undefined);
+      } else {
+        await returnUser();
+        for (const step of offSpacePlan()) rows.push(await runScenario(genericScenario(a, step.label, step.action, true)));
+      }
+    }
+  } else {
+    rows.push(skipRow("the remaining actions", "the bind failed"));
+  }
+  // Leave it as found.
+  const plan = restorePlan(wasRunning, bind.output);
+  const t0 = Date.now();
+  const checks: Check[] = [];
+  if (plan.quit && bundleId !== undefined) {
+    for (const pid of appPids(bundleId)) { try { process.kill(pid, "SIGTERM"); } catch { /* gone */ } }
+    await until(`${a.query} to quit`, 10_000, () => appPids(bundleId).length === 0).catch(() => undefined);
+    checks.push(check("quit the app this run launched", appPids(bundleId).length === 0, `still running: ${appPids(bundleId).join(", ")}`));
+  } else if (plan.closeOpenedWindow) {
+    const closed = await setupTurn(SCRIPTS.closeOpened(a));
+    checks.push(check("closed the window this run opened", closed.facts.closed === true, closed.output.slice(-200)));
+  } else {
+    checks.push(check("nothing to undo: the app was already running and no window was opened", true));
+  }
+  rows.push({ result: { name: `${a.query}: left as found`, group, status: statusOf(checks), ms: Date.now() - t0, checks }, since: 0, end: 0 });
+  return rows;
+}
+
+/** `log show`'s timestamp ("2026-10-09 11:15:17.723456+0100") as epoch ms. */
+export function parseLogTimestamp(ts: string): number {
+  const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d+)?)([+-]\d{2})(\d{2})$/.exec(ts.trim());
+  return m === null ? Number.NaN : Date.parse(`${m[1]}T${m[2]!.slice(0, 12)}${m[3]}:${m[4]}`);
+}
+
+/** The route behind each failed action: the helper's act/bind log lines in its window, and the daemon's rungs. */
+function attachRoutes(failed: Row[], helperPid: number, since: number, home: string): void {
+  const d = new Date(since - 2_000);
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  const start = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const out = sh("log", ["show", "--style", "ndjson", "--start", start, "--predicate", `subsystem == "com.winter.computeruse" AND processIdentifier == ${helperPid}`]).stdout;
+  const lines = out.split("\n").flatMap((l) => {
+    try {
+      const o = JSON.parse(l) as { timestamp?: string; category?: string; eventMessage?: string };
+      return o.timestamp !== undefined && o.eventMessage !== undefined ? [{ t: parseLogTimestamp(o.timestamp), category: o.category ?? "", message: o.eventMessage }] : [];
+    } catch { return []; }
+  });
+  for (const w of failed) {
+    const helper = lines.filter((l) => l.t >= w.since - 200 && l.t <= w.end && (l.category === "act" || l.category === "bind")).slice(0, 3).map((l) => l.message);
+    const rungs = readMetrics(home, w.since).filter((m) => typeof m.ts === "number" && m.ts <= w.end && (m.rung !== undefined || m.error !== undefined))
+      .map((m) => `${String(m.primitive)}${m.rung !== undefined ? ` rung ${String(m.rung)}` : ""}${m.error !== undefined ? ` ${String(m.error)}` : ""}`);
+    const route = [rungs.length > 0 ? `routes: ${rungs.join(", ")}` : "", helper.length > 0 ? `helper: ${helper.join(" | ")}` : ""].filter(Boolean).join(" · ");
+    if (route.length > 0) w.result.note = [w.result.note, route].filter(Boolean).join(" · ");
+  }
 }
 
 function readMetrics(home: string, since: number): Record<string, unknown>[] {
