@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { liveHomeRefusal } from "./daemon-entry";
 import {
-  callLine, computerV2Message, describeViolations, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hidInputTimes, lastValue, pointerMoves, promptAppeared, PROMPT_BUNDLE_IDS, idleGate, parseDuration, parseFrontReading, startPlan, describeStartPlan, type FrontReading, markerFacts, MIXED_TEXT,
+  callLine, computerV2Message, describeViolations, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hidInputTimes, lastValue, pointerMoves, promptAppeared, PROMPT_BUNDLE_IDS, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, parseDuration, parseFrontReading, startPlan, describeStartPlan, type FrontReading, markerFacts, MIXED_TEXT,
   parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type FixtureEvent, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { minimalPdf, REAL_APP_SCENARIOS, REAL_DIR_TOKEN, withRealDir } from "./real-apps";
@@ -65,7 +65,10 @@ describe("the monitor analysis", () => {
   test("the start: an unattended run waits for a minute with no input, up to --max-wait", () => {
     const reading = (o: Partial<FrontReading>): FrontReading => ({ front: "com.apple.Terminal", frontPid: 9, space: 7, spaceType: 0, hidIdleMs: 0, ...o });
     expect(idleGate(reading({ hidIdleMs: 5 }), 0, 1_000, false)).toEqual({ kind: "go" });
-    expect(idleGate(reading({ hidIdleMs: 61_000 }), 0, 10_800_000, true)).toEqual({ kind: "go" });
+    expect(UNATTENDED_IDLE_MS).toBe(180_000);
+    expect(idleGate(reading({ hidIdleMs: 61_000 }), 0, 10_800_000, true).kind).toBe("wait");
+    expect(idleGate(reading({ hidIdleMs: 181_000 }), 0, 10_800_000, true)).toEqual({ kind: "go" });
+    expect(idleGate(reading({ hidIdleMs: 61_000 }), 0, 10_800_000, true, 60_000)).toEqual({ kind: "go" });
     expect(idleGate(reading({ hidIdleMs: 3_000 }), 60_000, 10_800_000, true).kind).toBe("wait");
     expect(idleGate(reading({ hidIdleMs: 3_000 }), 10_797_000, 10_800_000, true)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("never idle") });
     expect(idleGate(reading({ hidIdleMs: null }), 0, 10_800_000, true).kind).toBe("refuse");
@@ -75,6 +78,22 @@ describe("the monitor analysis", () => {
     expect(parseDuration("90")).toBe(90_000);
     expect(parseDuration("1.5h")).toBe(5_400_000);
     expect(parseDuration("soon")).toBeUndefined();
+  });
+
+  test("the countdown: any input postpones (the gate starts over); only an untouched countdown starts the run", () => {
+    const at = (t: number, hidIdleMs: number, mouse: [number, number] = [5, 5]): MonitorSample => ({ t, front: "x", frontPid: 1, space: 3, hidIdleMs, mouse });
+    const quiet = [at(1_000, 200_000), at(11_000, 210_000), at(21_000, 220_000), at(31_000, 230_000)];
+    expect(COUNTDOWN_MS).toBe(30_000);
+    expect(countdownDecision(quiet.slice(0, 2), 1_000, 11_000, 30_000)).toEqual({ kind: "wait", remainingMs: 20_000 });
+    expect(countdownDecision(quiet, 1_000, 31_000, 30_000)).toEqual({ kind: "go" });
+    const typed = [at(1_000, 200_000), at(11_000, 210_000), at(12_000, 40)];
+    expect(countdownDecision(typed, 1_000, 31_000, 30_000)).toEqual({ kind: "postpone", at: 12_000, why: "a key or the trackpad" });
+    const moved = [at(1_000, 200_000), at(5_000, 204_000, [6, 5])];
+    expect(countdownDecision(moved, 1_000, 31_000, 30_000)).toMatchObject({ kind: "postpone", why: "the pointer moved" });
+    // Input BEFORE the banner went up is the idle gate's business, not the countdown's.
+    expect(countdownDecision([at(500, 10), at(1_000, 600), at(31_000, 30_600)], 1_000, 31_000, 30_000)).toEqual({ kind: "go" });
+    expect(bannerOpenArgs("/o/Winter CU Live Result.app", { kind: "countdown", seconds: 30, watchPid: 9 }))
+      .toEqual(["-n", "-g", "-a", "/o/Winter CU Live Result.app", "--args", "--banner", '{"kind":"countdown","seconds":30,"watchPid":9}']);
   });
 
   test("the start plan: a regular desktop stays put; a full-screen start records the app and Space to return to", () => {

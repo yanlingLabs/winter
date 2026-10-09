@@ -45,7 +45,11 @@ WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live   # the LIVE ComputerV2 suite (script
                                      # Fixture bundle ids are never `com.winter.*` (that prefix is refused as Winter itself).
                                      # --report <file.json>: every check in full + failing outputs; --script <file.js>: one
                                      # ad-hoc ComputerV2 script on the fixture, its output printed. --unattended (an
-                                     # approved agent run) waits, every 5 s up to --max-wait (3h), for 60 s with no input.
+                                     # approved agent run) waits, every 5 s up to --max-wait (3h), for --idle-seconds
+                                     # (180) with no input, then shows a --countdown-seconds (30) banner ("… will take
+                                     # over the screen in 30 s — move the mouse or press a key to postpone"); any input
+                                     # postpones and the wait starts over. Every live run shows "Winter test running —
+                                     # don't touch the Mac" (non-activating, sharingType .none: never in a capture).
                                      # From a full-screen app's Space (the user's Claude Code Terminal) a run records that
                                      # app + Space, moves the user to a regular desktop (test.activate of the user's-app
                                      # fixture), and returns them there at the end, an abort too. After the cleanup a small non-activating panel ("Winter CU

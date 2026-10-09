@@ -77,8 +77,10 @@ export function pointerMoves(samples: readonly MonitorSample[], from: number, to
   return out;
 }
 
-/** `--unattended`: how long the Mac must have had no real input before a run may start. */
-export const UNATTENDED_IDLE_MS = 60_000;
+/** `--unattended`: how long the Mac must have had no real input before the countdown (`--idle-seconds`). */
+export const UNATTENDED_IDLE_MS = 180_000;
+/** `--unattended`: the countdown banner's length once the gate passes (`--countdown-seconds`). */
+export const COUNTDOWN_MS = 30_000;
 /** `--unattended`: how often the idle gate looks again. */
 export const UNATTENDED_POLL_MS = 5_000;
 
@@ -108,17 +110,41 @@ export type IdleDecision = { kind: "go" } | { kind: "wait"; reason: string } | {
 
 /**
  * Whether the run may start now. A run someone started by hand goes at once; an unattended one (an approved agent
- * run) waits — polled every `UNATTENDED_POLL_MS` — until the Mac has had `UNATTENDED_IDLE_MS` with no real input, and
- * gives up after `maxWaitMs`.
+ * run) waits — polled every `UNATTENDED_POLL_MS` — until the Mac has had `idleMs` with no real input (then the
+ * countdown banner, `countdownDecision`), and gives up after `maxWaitMs`.
  */
-export function idleGate(reading: FrontReading | undefined, waitedMs: number, maxWaitMs: number, unattended: boolean): IdleDecision {
+export function idleGate(reading: FrontReading | undefined, waitedMs: number, maxWaitMs: number, unattended: boolean, idleMs = UNATTENDED_IDLE_MS): IdleDecision {
   if (!unattended) return { kind: "go" };
   if (reading === undefined || reading.hidIdleMs === null) return { kind: "refuse", reason: "--unattended: no HID idle reading, so it cannot tell whether someone is at the Mac" };
-  if (reading.hidIdleMs >= UNATTENDED_IDLE_MS) return { kind: "go" };
+  if (reading.hidIdleMs >= idleMs) return { kind: "go" };
   if (waitedMs + UNATTENDED_POLL_MS > maxWaitMs) {
-    return { kind: "refuse", reason: `--unattended: waited ${Math.round(waitedMs / 60_000)} min and the Mac was never idle for ${UNATTENDED_IDLE_MS / 1000} s — the run was not started` };
+    return { kind: "refuse", reason: `--unattended: waited ${Math.round(waitedMs / 60_000)} min and the Mac was never idle for ${idleMs / 1000} s and an untouched countdown — the run was not started` };
   }
-  return { kind: "wait", reason: `waiting for ${UNATTENDED_IDLE_MS / 1000} s with no input (last input ${Math.round(reading.hidIdleMs / 1000)} s ago)…` };
+  return { kind: "wait", reason: `waiting for ${idleMs / 1000} s with no input (last input ${Math.round(reading.hidIdleMs / 1000)} s ago)…` };
+}
+
+export type CountdownDecision = { kind: "wait"; remainingMs: number } | { kind: "go" } | { kind: "postpone"; at: number; why: string };
+
+/**
+ * The countdown banner, from the monitor's samples since it went up: ANY input — a key or the trackpad (the HID
+ * idle counter dropped) or the pointer moving — postpones the run (the idle gate starts over); only a countdown
+ * that ran out untouched starts it.
+ */
+export function countdownDecision(samples: readonly MonitorSample[], startedAt: number, now: number, countdownMs: number): CountdownDecision {
+  const hid = hidInputTimes(samples, startedAt, now);
+  const moved = pointerMoves(samples, startedAt, now);
+  if (hid.length > 0 || moved.length > 0) {
+    return { kind: "postpone", at: Math.min(...hid, ...moved), why: hid.length > 0 ? "a key or the trackpad" : "the pointer moved" };
+  }
+  if (now - startedAt >= countdownMs) return { kind: "go" };
+  return { kind: "wait", remainingMs: countdownMs - (now - startedAt) };
+}
+
+/** The run's notices (the result bundle's `--banner` mode): the countdown, then "running" for the whole run. */
+export type BannerSpec = { kind: "countdown"; seconds: number; watchPid: number } | { kind: "running"; watchPid: number };
+
+export function bannerOpenArgs(app: string, banner: BannerSpec): string[] {
+  return ["-n", "-g", "-a", app, "--args", "--banner", JSON.stringify(banner)];
 }
 
 /** Where the user is when the run starts, and where they go back to at its end. */

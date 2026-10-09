@@ -12,6 +12,14 @@ private func fail(_ message: String, code: Int32) -> Never {
     exit(code)
 }
 
+// `--banner <json>`: the run's countdown / running notice (Banner.swift). No log, no role.
+if let index = CommandLine.arguments.firstIndex(of: "--banner") {
+    guard index + 1 < CommandLine.arguments.count, let model = BannerModel.parse(CommandLine.arguments[index + 1]) else {
+        fail("--banner takes one JSON object {kind: countdown|running, seconds, watchPid}", code: 64)
+    }
+    MainActor.assumeIsolated { runBanner(model) }
+}
+
 // `--done <json>`: not a fixture at all — the runner's end-of-run completion window (Done.swift). No log, no role.
 if let index = CommandLine.arguments.firstIndex(of: "--done") {
     guard index + 1 < CommandLine.arguments.count, let model = DoneModel.parse(CommandLine.arguments[index + 1]) else {
