@@ -410,6 +410,20 @@ func runFixtureSelfTest() -> Int32 {
     c.check(DoneModel.parse(#"{"status":"pass","passed":-1,"failed":0,"skipped":0,"durationMs":1,"finishedAt":1,"path":""}"#) == nil, "done: negative count refused")
     c.check(DoneModel.parse("not json") == nil, "done: malformed refused")
 
+    // --- the run's banners (`--banner`; nothing is shown) ------------------------------------------------------
+    let countdown = BannerModel.parse(#"{"kind":"countdown","seconds":30,"watchPid":4242}"#)
+    c.check(countdown != nil, "banner: a countdown parses")
+    if let m = countdown {
+        c.equal(m.text(remaining: 30), "Winter's computer-use test will take over the screen in 30 s — move the mouse or press a key to postpone", "banner: countdown text")
+        c.equal(m.text(remaining: -2), "Winter's computer-use test will take over the screen in 0 s — move the mouse or press a key to postpone", "banner: never below 0 s")
+        c.equal(m.watchPid, 4242, "banner: watches the runner")
+    }
+    let running = BannerModel.parse(#"{"kind":"running","watchPid":7}"#)
+    c.equal(running?.text(remaining: 0), "Winter test running — don't touch the Mac (stops on any input)", "banner: running text")
+    c.check(BannerModel.parse(#"{"kind":"countdown","seconds":0,"watchPid":7}"#) == nil, "banner: a countdown needs seconds")
+    c.check(BannerModel.parse(#"{"kind":"running"}"#) == nil, "banner: a runner pid is required")
+    c.check(BannerModel.parse(#"{"kind":"toast","watchPid":7}"#) == nil, "banner: unknown kind refused")
+
     if c.failures.isEmpty {
         print("SELFTEST OK \(c.passed) checks")
         return 0

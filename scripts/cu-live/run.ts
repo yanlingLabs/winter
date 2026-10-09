@@ -10,8 +10,9 @@
  *     on ANY installed app (a Unity app: --apps "VRoid Studio"); --real-apps adds VS Code and Chrome when installed
  *   options: --only <text> (scenarios whose name contains it; a|b for either), --yes (no countdown), --keep-temp,
  *            --report <file.json> (every check + failing outputs), --script <file.js> (one ad-hoc script),
- *            --unattended (an agent's run: no countdown; waits — every 5 s, up to --max-wait <90s|45m|3h>, default 3h —
- *            until 60 s with no real input). From a full-screen app's Space any run moves the user to a regular desktop
+ *            --unattended (an agent's run: waits — every 5 s, up to --max-wait <90s|45m|3h>, default 3h — for
+ *            --idle-seconds (180) with no real input, then shows a --countdown-seconds (30) banner; any input during it
+ *            postpones the run and the wait starts over). From a full-screen app's Space any run moves the user to a regular desktop
  *            and returns them to that app and Space at the end (an abort too).
  *            --no-done-window (CI: no end-of-run completion window; else it shows after the cleanup, 30 min at most),
  *            --helper-app <path to "Winter Computer Use Dev.app"> (else $WINTER_COMPUTER_USE_APP, else dist/dev/)
@@ -42,7 +43,7 @@ import { resolvePlatformPackageWinter } from "../../packages/core/src/runtime-sd
 import { buildAll, FIXTURE_MAIN, OUT_DIR, REPO_ROOT, type Built } from "./build";
 import { DaemonClient } from "./client";
 import {
-  parseDuration, check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, pointerMoves, promptAppeared, idleGate, parseFrontReading, startPlan, describeStartPlan, UNATTENDED_POLL_MS, type FrontReading, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
+  parseDuration, check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, pointerMoves, promptAppeared, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, type BannerSpec, parseFrontReading, startPlan, describeStartPlan, UNATTENDED_POLL_MS, type FrontReading, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, withRealDir, type RealAppsRun } from "./real-apps";
@@ -62,10 +63,10 @@ const LIMITS = {
 const WATCH_AFTER_MS = 3_000;
 const MONITOR_INTERVAL_MS = 20;
 
-interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string; report?: string; script?: string; unattended: boolean; noDoneWindow: boolean; maxWaitMs: number }
+interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string; report?: string; script?: string; unattended: boolean; noDoneWindow: boolean; maxWaitMs: number; idleMs: number; countdownMs: number }
 
 function parseOptions(argv: string[]): Options {
-  const o: Options = { dryRun: false, realApps: false, yes: false, keepTemp: false, unattended: false, noDoneWindow: false, maxWaitMs: 3 * 3_600_000 };
+  const o: Options = { dryRun: false, realApps: false, yes: false, keepTemp: false, unattended: false, noDoneWindow: false, maxWaitMs: 3 * 3_600_000, idleMs: UNATTENDED_IDLE_MS, countdownMs: COUNTDOWN_MS };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--dry-run") o.dryRun = true;
@@ -78,6 +79,11 @@ function parseOptions(argv: string[]): Options {
     else if (a === "--report") o.report = argv[++i];
     else if (a === "--unattended") { o.unattended = true; o.yes = true; }
     else if (a === "--no-done-window") o.noDoneWindow = true;
+    else if (a === "--idle-seconds" || a === "--countdown-seconds") {
+      const n = Number(argv[++i]);
+      if (!Number.isInteger(n) || n < 1) throw new Error(`${a} takes a whole number of seconds`);
+      if (a === "--idle-seconds") o.idleMs = n * 1000; else o.countdownMs = n * 1000;
+    }
     else if (a === "--max-wait") {
       const ms = parseDuration(argv[++i] ?? "");
       if (ms === undefined) throw new Error("--max-wait takes a duration: 90s, 45m, 3h");
@@ -326,7 +332,7 @@ async function dryRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   const reading = parseFrontReading(sh(built.tool, ["front"]).stdout);
   results.push(reading === undefined
     ? { name: "plan: the start", group: "plan", status: "fail", ms: 0, checks: [check("cu-live-tool front gave a reading", false)] }
-    : { name: "plan: the start", group: "plan", status: "pass", ms: 0, checks: [check("cu-live-tool front gave a reading", true)], note: `${describeStartPlan(startPlan(reading))}; ${o.unattended ? `waits for 60 s with no input (now ${Math.round((reading.hidIdleMs ?? 0) / 1000)} s)` : "starts at once"}` });
+    : { name: "plan: the start", group: "plan", status: "pass", ms: 0, checks: [check("cu-live-tool front gave a reading", true)], note: `${describeStartPlan(startPlan(reading))}; ${o.unattended ? `waits for ${o.idleMs / 1000} s with no input (now ${Math.round((reading.hidIdleMs ?? 0) / 1000)} s), then a ${o.countdownMs / 1000} s countdown banner any input postpones` : "starts at once"}; a "don't touch the Mac" banner for the whole run` });
   // The generic app checks' PLAN (no screen): which apps would run, and what each would do.
   const deps = liveResolveDeps();
   for (const a of [...parseApps(o.apps), ...(o.realApps ? DEFAULT_GENERIC_APPS.map((d, i) => ({ query: d.query, key: `default${i}` })) : [])]) {
@@ -432,19 +438,65 @@ const actionWindows: Array<[number, number]> = [];
 const ACTION_SLACK_MS = 1_500;
 
 /** The `front` reading the run starts from — after the unattended idle wait (every 5 s, up to --max-wait). */
-async function waitToStart(built: Pick<Built, "tool">, o: Options): Promise<FrontReading> {
+async function waitToStart(built: Pick<Built, "tool" | "fixtureDone">, o: Options): Promise<FrontReading> {
   const t0 = Date.now();
   let logged = 0;
   for (;;) {
     const reading = parseFrontReading(sh(built.tool, ["front"]).stdout);
-    const d = idleGate(reading, Date.now() - t0, o.maxWaitMs, o.unattended);
-    if (d.kind === "go") {
-      if (reading === undefined) throw new Error("cu-live-tool front gave no reading");
-      return reading;
-    }
+    const d = idleGate(reading, Date.now() - t0, o.maxWaitMs, o.unattended, o.idleMs);
     if (d.kind === "refuse") throw new Error(d.reason);
-    if (Date.now() - logged >= 60_000) { log(d.reason); logged = Date.now(); }
-    await sleep(UNATTENDED_POLL_MS);
+    if (d.kind === "wait") {
+      if (Date.now() - logged >= 60_000) { log(d.reason); logged = Date.now(); }
+      await sleep(UNATTENDED_POLL_MS);
+      continue;
+    }
+    if (reading === undefined) throw new Error("cu-live-tool front gave no reading");
+    if (!o.unattended) return reading;
+    // Idle long enough: the countdown banner. Any input postpones the run and the gate starts over.
+    if (Date.now() - t0 + o.countdownMs > o.maxWaitMs) throw new Error("--unattended: --max-wait leaves no time for the countdown — the run was not started");
+    log(`no input for ${o.idleMs / 1000} s: a ${o.countdownMs / 1000} s countdown banner is up — any input postpones the run`);
+    const outcome = await countdown(built, o);
+    if (outcome === "go") {
+      const fresh = parseFrontReading(sh(built.tool, ["front"]).stdout);
+      if (fresh === undefined) throw new Error("cu-live-tool front gave no reading");
+      return fresh;
+    }
+    log(`postponed (${outcome.why} during the countdown) — waiting for ${o.idleMs / 1000} s with no input again`);
+    logged = Date.now();
+  }
+}
+
+/** The countdown banner up for `o.countdownMs`, watched by its own monitor: "go" when untouched, else why it was postponed. */
+async function countdown(built: Pick<Built, "tool" | "fixtureDone">, o: Options): Promise<"go" | { why: string }> {
+  const watch = new LineProcess<MonitorSample>(spawn(built.tool, ["monitor", "--interval-ms", "100"], { stdio: ["pipe", "pipe", "pipe"] }), parseMonitorLine);
+  try {
+    await until("the countdown's monitor", 5_000, () => watch.items.length > 0);
+    const startedAt = Date.now();
+    openBanner(built, { kind: "countdown", seconds: Math.round(o.countdownMs / 1000), watchPid: process.pid });
+    for (;;) {
+      await sleep(100);
+      const d = countdownDecision(watch.items, startedAt, Date.now(), o.countdownMs);
+      if (d.kind === "go") return "go";
+      if (d.kind === "postpone") return { why: d.why };
+    }
+  } finally {
+    closeBanners(built);
+    await watch.stop();
+  }
+}
+
+/** Shows a run notice (the result bundle's `--banner` mode), in the background — never activated. */
+function openBanner(built: Pick<Built, "fixtureDone">, banner: BannerSpec): void {
+  const r = sh("open", bannerOpenArgs(built.fixtureDone, banner));
+  if (r.status !== 0) log(`the ${banner.kind} banner did not open: ${r.stderr.trim()}`);
+}
+
+/** Closes every run notice this checkout's result bundle shows (a banner also goes by itself when the runner does). */
+function closeBanners(built: Pick<Built, "fixtureDone">): void {
+  const marker = `${join(built.fixtureDone, "Contents", "MacOS", "WinterCUFixture")} --banner`;
+  for (const line of sh("ps", ["-axo", "pid=,command="]).stdout.split("\n")) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (m !== null && m[2]!.startsWith(marker)) { try { process.kill(Number(m[1]), "SIGTERM"); } catch { /* gone */ } }
   }
 }
 
@@ -514,6 +566,8 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
       await until("earlier fixture processes to exit", 5_000, () => leftovers.every((p) => !processAlive(p))).catch(() => undefined);
       log(`closed ${leftovers.length} fixture process(es) an earlier run left (a completion window included)`);
     }
+    // For the whole run: "Winter test running — don't touch the Mac" (never key, left out of every capture).
+    openBanner(built, { kind: "running", watchPid: process.pid });
     const plan = startPlan(reading);
     if (plan.kind === "refuse") throw new Error(plan.reason);
     log(`start: ${describeStartPlan(plan)}`);
@@ -828,6 +882,7 @@ report({ ok: true });`, 40_000), 100_000);
       const last = monitor.items.at(-1);
       cleanup.push(check("you are back on your Space", last === undefined || baseline.space === null || last.space === baseline.space, `Space ${last?.space}`));
     }
+    closeBanners(built);
     await monitor?.stop();
     if (!o.keepTemp) rmSync(root, { recursive: true, force: true });
     else log(`kept ${root}`);
