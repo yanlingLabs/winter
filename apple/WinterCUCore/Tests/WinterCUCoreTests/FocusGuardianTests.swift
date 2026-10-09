@@ -112,7 +112,7 @@ final class FocusGuardianTests: XCTestCase {
         XCTAssertTrue(sys.activated.isEmpty, "the user's own switch is respected")
         XCTAssertTrue(core.takeGuardianNotes().isEmpty)
     }
-    // MARK: the user's own click into the agent's app (ChatGPT's left-mouse-down observer)
+    // MARK: the user's own click into the agent's app (a listen-only left-mouse-down observer)
 
     func testAClickClaimsTheActivationItCausesWhateverTheTiming() {
         var g = CUFocusGuardianCore()

@@ -305,12 +305,12 @@ extension CUCore {
             : "\(t.appName)'s window is off screen (minimized, or off stage in Stage Manager)"
     }
 
-    /// How a click reaches a window on another desktop (another Space or display). AX first, as ChatGPT's
+    /// How a click reaches a window on another desktop (another Space or display). AX first:
     /// helper can only do there too: a LISTED action (press, show menu, open); else, for a plain left or right
     /// click on an element, the action unlisted (web content often leaves press out), then the nearest
     /// ancestor that lists it. Window-targeted pid events are the last attempt — for a canvas (no element),
     /// modifier and middle clicks, a double click with no open, or an element that refused every AX try.
-    /// ChatGPT sends those events only on screen; off screen they may or may not land. Pure.
+    /// Off screen, window-targeted events may or may not land: nothing confirms them. Pure.
     enum ElsewhereClick: Equatable {
         case ax(String)
         case axUnlisted(String)
@@ -384,7 +384,7 @@ extension CUCore {
         return out
     }
 
-    /// Input to a window on another desktop as window-targeted pid events (ChatGPT's construction: fields 91
+    /// Input to a window on another desktop as window-targeted pid events (fields 91
     /// and 92 and the window-local location; SkyLight's post for Chromium-class apps, whose renderers drop
     /// the public route's events). No focus change, no activation, no pointer. Nothing confirms the events
     /// landed on a window that is not on screen, so the outcome says so: the state after the act shows it.
@@ -404,7 +404,7 @@ extension CUCore {
         try token.check()
         let used = try body(synth(p), route)
         // A first click on an inactive window can be swallowed as "activate the window" and never reach the UI.
-        // If the window was not key before and is key now, resend the click once (ChatGPT's retry).
+        // If the window was not key before and is key now, the first click only made it key: resend it once.
         var resent = false
         if isClick, !wasKey, keyFocusPidForTarget(t) == t.pid {
             CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): the window was not key — it likely took the first click as activation; resending once")
@@ -418,7 +418,7 @@ extension CUCore {
     }
 
     /// Where a pointer click on `e` goes: its centre, or — when that lies outside the window (scrolled out
-    /// of view) — its centre after `AXScrollToVisible`; nil when it stays outside (ChatGPT's
+    /// of view) — its centre after `AXScrollToVisible`; nil when it stays outside (the
     /// `cannotClickOffscreenElement`). An event aimed outside the window would land on something else.
     func clickablePoint(_ e: AXUIElement, _ info: ElementInfo, _ t: CUTarget) -> CGPoint? {
         guard let c = info.center else { return nil }
@@ -865,7 +865,7 @@ extension CUCore {
     }
 
     /// Where key events go: the focused element's OWN process when it isn't the app's — Safari's web content
-    /// lives in a WebContent process (ChatGPT's `outOfProcessTarget`). Keys posted to Safari's UI process for
+    /// lives in a WebContent process (an out-of-process target). Keys posted to Safari's UI process for
     /// a web field made Safari activate itself and pull the user to its desktop; the content process takes
     /// them without that. The app's pid otherwise.
     func keyboardTarget(_ t: CUTarget, focused: AXUIElement?) -> pid_t {
@@ -878,6 +878,41 @@ extension CUCore {
 
     /// Whether the app's focused UI element is `e` now (its own, or its focused window's).
     func isFocused(_ e: AXUIElement, _ t: CUTarget) -> Bool { focusRelation(e, t) == .onIt }
+
+    /// Makes the bound window its app's key window before a menu command is validated: a window-targeted click
+    /// on the element that holds the selection (the one just worked on, else the window's own focused
+    /// element), its selection put back, verified, and once more if the window still isn't key. Also when the
+    /// key window can't be read — the click is what makes it certain.
+    func keyForMenu(_ t: CUTarget) {
+        guard t.accessible, boundWindowIsKeyInApp(t) != true else { return }
+        guard let e = recentlyTargeted(t) ?? (try? windowElement(t)).flatMap({ ax.element($0, kAXFocusedUIElementAttribute) }),
+              let c = ElementInfo(e, ax).center else {
+            CULog.act.notice("menu in \(t.appName, privacy: .public): the bound window is not key and nothing in it to click")
+            return
+        }
+        let selection = ax.attribute(e, kAXSelectedTextRangeAttribute)
+        for attempt in 1...2 {
+            guard windowClick(at: c, t) else { return }
+            if let selection, ax.isSettable(e, kAXSelectedTextRangeAttribute) { try? ax.set(e, kAXSelectedTextRangeAttribute, selection) }
+            let key = boundWindowIsKeyInApp(t)
+            CULog.act.notice("menu in \(t.appName, privacy: .public): clicked the selection's element to make its window key (try \(attempt, privacy: .public)) — key now: \(key.map { $0 ? "yes" : "no" } ?? "unknown", privacy: .public)")
+            if key != false { return }
+        }
+    }
+
+    /// `resolveMenu`, but a command that reads DISABLED is read again for up to `menuSettleMs`: the app
+    /// re-validates its menu after its key window changes, not at once.
+    func resolveMenuSettled(_ a: CUMenuAction, _ p: TargetActParams, _ t: CUTarget) throws -> CUAXMenuNode {
+        let deadline = clock.nowMs() + menuSettleMs
+        while true {
+            do {
+                return try resolveMenu(a, p, t)
+            } catch let e as CUError where e.data?["disabled"] != nil {
+                if clock.nowMs() >= deadline { throw e }
+                usleep(40_000)
+            }
+        }
+    }
 
     /// Keys go to the app's KEY window: with another window key they are lost there (live: WebKit focus was in
     /// the fixture's web field, its Canvas window stayed key, and no key reached the field; an AXMain write did
@@ -1515,7 +1550,7 @@ extension CUCore {
         } catch let error where Self.deliveryUncertain(error) {
             throw busyAfterSend(t)
         }
-        // The wheel, addressed to the window (a last attempt: ChatGPT sends it on screen only). What moved
+        // The wheel, addressed to the window (a last attempt: off screen it may not land). What moved
         // tells whether it landed.
         if p.privatePath, skyLight.canSetWindowLocation {
             let content = area.flatMap { a in ax.elements(a, kAXChildrenAttribute).first { ax.string($0, kAXRoleAttribute) != kAXScrollBarRole } }
@@ -1598,7 +1633,7 @@ extension CUCore {
     /// Rung 1 scrolling, every AX way there is, in order; the name of the one that worked, or nil:
     /// 1. the scroll bar's value, moved by `pages` viewports — when it is settable AND reads back moved;
     /// 2. the scroll bar's page buttons (subroles AXIncrementPage / AXDecrementPage) pressed once per page,
-    ///    as ChatGPT's helper scrolls (`scrollUsingScrollBar`);
+    ///    which needs no event at all;
     /// 3. the element's or the scroll area's own page action, when listed (`AXScrollDownByPage` …).
     /// Throws `busy` when a write or press may have happened.
     func axScroll(area: AXUIElement?, element: AXUIElement?, direction: CUScrollDirection, pages: Double) throws -> String? {
@@ -1720,6 +1755,7 @@ extension CUCore {
         let e = try element(a.ref, in: t)
         let info = ElementInfo(e, ax)
         if info.secure { throw secureRefusal() }
+        t.noteTargeted(e, at: clock.nowMs())  // the element holding the selection a menu command may act on
         guard let value = ax.string(e, kAXValueAttribute) else { throw CUError.unsupported("[\(a.ref)] has no text to select") }
         guard let range = Self.selectionRange(in: value, text: a.text, before: a.before, after: a.after, caret: a.caret) else {
             throw CUError.invalidParams("“\(a.text)” is not in [\(a.ref)]\(a.before != nil || a.after != nil ? " with that context" : "")")
@@ -1901,12 +1937,15 @@ extension CUCore {
         let keyed = focusBoundWindow(p, t)
         defer { keyed?() }
         // The menu bar validates commands against the app's KEY window: when another of its windows is key
-        // (live: the fixture's web window, after typing there), make the bound one key by clicking the element
-        // the script just worked on — its selection put back — so "Uppercase Selection" sees that selection.
-        if boundWindowIsKeyInApp(t) == false, let e = recentlyTargeted(t) { makeWindowKeyForField(e, t) }
+        // (live: the fixture's web window, after typing there), make the bound one key — verified, once more if
+        // needed — so "Uppercase Selection" sees the selection in it.
+        keyForMenu(t)
+        // The app re-validates its menu items (a selection-dependent command's enabled state) only while it
+        // believes it is active: post the synthetic activation, then read the item again for a moment.
+        enforceFocus(p, t)
         let item: CUAXMenuNode
         do {
-            item = try resolveMenu(a, p, t)
+            item = try resolveMenuSettled(a, p, t)
         } catch let e as CUError where e.data?["disabled"] != nil {
             // In front already: disabled for what it applies to, not for being in the background.
             guard sys.frontmostPid() != t.pid else { throw e }

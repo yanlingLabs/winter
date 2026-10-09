@@ -3,9 +3,9 @@ import CoreGraphics
 import Foundation
 
 /// Makes a background app BELIEVE it is active without the window server making it front, so it does not
-/// activate itself and pull the user to its Space when it is typed into. The technique follows a
-/// reverse-engineered behavioural description of a comparable helper's focus guard (no source was copied;
-/// the Swift here is Winter's own). Behind the private-path setting; the user-view guard stays the backstop.
+/// activate itself and pull the user to its Space when it is typed into: a synthetic "application activated"
+/// event (carrying the bound window) makes the target believe it is active, so it doesn't activate itself.
+/// Behind the private-path setting; the user-view guard stays the backstop.
 ///
 /// This file holds the PURE pieces — the synthetic focus state, the activation event's construction, the CPS
 /// constants and field numbers, and the decide-what-to-do-with-an-observed-event predicates — so they are
@@ -95,7 +95,7 @@ public enum CUFocusEvents {
 
 // MARK: CPS fields and the focus-theft guard
 
-/// The CGEvent field numbers this build of the window server uses for focus notifications (Codex's decode).
+/// The CGEvent field numbers the window server uses for focus notifications.
 public enum CUFocusField {
     public static let targetPID: UInt32 = 40
     public static let sourcePID: UInt32 = 41
@@ -137,7 +137,7 @@ public struct CUFocusSuppression: Equatable, Sendable {
     public var suppressedReturn: Bool = false
 }
 
-/// The focus-theft state machine (ChatGPT's SystemState). Pure: the live tap fills `CUFocusNotification`s and
+/// The focus-theft state machine. Pure: the live tap fills `CUFocusNotification`s and
 /// applies the verdicts. Protects the TARGETs it is told about — when another process steals key focus from a
 /// protected target, the theft is recorded, its notification dropped, the thief's token released and the
 /// user's own keys rerouted back to the victim.
@@ -197,7 +197,7 @@ public struct CUFocusGuard: Equatable, Sendable {
 
 // MARK: tap predicates
 
-/// The event taps the enforcer installs, with their raw CG types, as Codex decoded them. Pure data, so the
+/// The event taps the enforcer installs, with their raw CG types. Pure data, so the
 /// live wiring and the tests agree on exactly what is tapped.
 public enum CUFocusTaps {
     /// Target activation notifications (type 13 app-defined, 20, 19) — a tail tap that watches/suppresses them.

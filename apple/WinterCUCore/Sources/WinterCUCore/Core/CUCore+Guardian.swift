@@ -166,7 +166,7 @@ extension CUCore {
     /// One left-mouse-down the listen-only tap saw. A helper-origin click (our stamp) is ignored. A PHYSICAL
     /// click whose topmost window under the point belongs to a bound target is the user choosing the agent's
     /// app: the guardian takes that app and its Space as the user's at once (before the 0.4 s heuristic) and
-    /// claims the activation it causes; and, as ChatGPT's helper does, the target is activated so the click
+    /// claims the activation it causes; and the target is activated so the click
     /// works normally even though the focus enforcer may have told it it was already active. Returns the pid
     /// claimed, for the test.
     @discardableResult

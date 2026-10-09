@@ -86,7 +86,7 @@ final class FocusEnforcerTests: XCTestCase {
 
     // MARK: tap predicates
 
-    func testTheTapMasksMatchChatGPTsArrays() {
+    func testTheTapMasksCoverTheFocusEventTypes() {
         XCTAssertEqual(CUFocusTaps.activationTypes, [13, 20, 19])
         XCTAssertEqual(CUFocusTaps.keyboardTypes, [10, 11, 12])
         XCTAssertEqual(CUFocusTaps.mouseTypes, [1, 2, 6, 3, 4, 7, 25, 26, 27])

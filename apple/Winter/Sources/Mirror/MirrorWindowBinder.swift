@@ -9,7 +9,7 @@ import WinterCUPresentation
 //
 // Why a child panel and not a SwiftUI overlay: the main window's traffic lights are AppKit's, drawn in
 // the titlebar ABOVE the content view, so nothing inside the content can cover them; the user's ruling
-// is that the mirror covers them ("like ChatGPT"). A child window orders above its parent, moves with
+// is that the mirror covers them. A child window orders above its parent, moves with
 // it, hides with it and stays on its Space. The panel takes no mouse events — it is a picture, and the
 // window's buttons under it keep working.
 //

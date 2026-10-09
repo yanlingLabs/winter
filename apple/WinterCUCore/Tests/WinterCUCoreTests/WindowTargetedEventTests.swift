@@ -23,7 +23,7 @@ func recordingSkyLight() -> CUSkyLight {
     }
 }
 
-/// The window-targeted pid event, as ChatGPT's helper builds it: fields 91 and 92 = the window id, field 51 =
+/// The window-targeted pid event: fields 91 and 92 = the window id, field 51 =
 /// its number, and the window-LOCAL location (screen point minus the window's bounds origin) on the public
 /// route; SkyLight's route keeps the screen point.
 final class WindowTargetedEventTests: XCTestCase {
@@ -43,7 +43,7 @@ final class WindowTargetedEventTests: XCTestCase {
                                 flags: [], route: .publicPid)
         XCTAssertEqual(poster.entries.map(\.type), [.leftMouseDown, .leftMouseUp])
         XCTAssertTrue(poster.entries.allSatisfy { $0.window == 77 && $0.window2 == 77 }, "fields 91 and 92")
-        XCTAssertTrue(poster.entries.allSatisfy { $0.subtype == 3 }, "field 7 = 3, as ChatGPT's helper and cua-driver stamp it")
+        XCTAssertTrue(poster.entries.allSatisfy { $0.subtype == 3 }, "field 7 = 3, the synthesized-mouse subtype (as cua-driver stamps it)")
         XCTAssertTrue(poster.entries.allSatisfy { $0.location == CGPoint(x: 130, y: 155) }, "the event's own location stays global")
         XCTAssertEqual(SPIRecord.locations, [CGPoint(x: 30, y: 35), CGPoint(x: 30, y: 35)], "window-local: point − origin")
         XCTAssertEqual(SPIRecord.fields.map(\.field), [51, 51])
