@@ -35,6 +35,9 @@ let engineSamples: [(method: String, params: String, result: String)] = [
     ("status", "{}", #"{"helperVersion":"0.124.0","permissions":{"accessibility":true,"screenRecording":false}}"#),
     ("permissions.request", #"{"kind":"screenRecording"}"#, #"{"opened":true}"#),
     ("apps.list", "{}", #"{"apps":[{"name":"Notes","bundleId":"com.apple.Notes","running":true,"pid":123}]}"#),
+    ("apps.openDocument", #"{"urls":["/tmp/a.pdf"],"sessionId":"s_1","mirror":true}"#,
+     #"{"app":{"name":"Preview","bundleId":"com.apple.Preview","pid":321},"windowID":88}"#),
+    ("apps.defaultOpener", #"{"urls":["/tmp/a.pdf"]}"#, #"{"bundleId":"com.apple.Preview","name":"Preview","path":"/System/Applications/Preview.app"}"#),
     ("screen.windows", "{}", #"{"windows":[{"app":"Notes","bundleId":"com.apple.Notes","pid":123,"windowId":77,"title":"Groceries","frame":[0,25,800,600],"onScreen":true}]}"#),
     ("target.bind", #"{"sessionId":"s_1","app":"Notes","window":"Groceries","mirror":true}"#,
      #"{"targetId":"t1","app":{"name":"Notes","bundleId":"com.apple.Notes","pid":123},"window":{"id":77,"title":"Groceries","frame":[0,25,800,600]}}"#),
@@ -100,6 +103,8 @@ final class FakeCore: CoreService, @unchecked Sendable {
     func status(_ params: StatusParams) async throws -> StatusResult { try await answer("status", params) }
     func permissionsRequest(_ params: PermissionsRequestParams) async throws -> PermissionsRequestResult { try await answer("permissions.request", params) }
     func appsList(_ params: AppsListParams) async throws -> AppsListResult { try await answer("apps.list", params) }
+    func openDocuments(_ params: OpenDocumentsParams) async throws -> OpenDocumentsResult { try await answer("apps.openDocument", params) }
+    func defaultOpener(_ params: DefaultOpenerParams) async throws -> DefaultOpenerResult { try await answer("apps.defaultOpener", params) }
     func screenWindows(_ params: ScreenWindowsParams) async throws -> ScreenWindowsResult { try await answer("screen.windows", params) }
     func targetBind(_ params: TargetBindParams) async throws -> TargetBindResult { try await answer("target.bind", params) }
     func targetUseWindow(_ params: TargetUseWindowParams) async throws -> TargetUseWindowResult { try await answer("target.useWindow", params) }

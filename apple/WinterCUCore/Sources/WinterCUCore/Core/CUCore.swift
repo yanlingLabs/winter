@@ -121,6 +121,72 @@ public final class CUCore: @unchecked Sendable {
         return ScreenWindowsResult(windows: windows)
     }
 
+    /// Which app would open these urls (the `app` override, else the first url's default handler), for the
+    /// opener's per-app card — resolved WITHOUT opening anything. Refuses a protected destination.
+    public func defaultOpener(_ p: DefaultOpenerParams) async throws -> DefaultOpenerResult {
+        let urls = try CUDocumentOpen.resolve(p.urls)
+        if let bad = urls.compactMap({ $0.isFileURL ? $0.path : nil }).first(where: { CUFloors.isProtectedSavePath($0) }) {
+            throw CUError.refused(.privacyPane, "opening \((bad as NSString).lastPathComponent) is off limits — it is a protected location")
+        }
+        let appURL: URL
+        if let a = p.app {
+            switch try CUApps.resolve(a) {
+            case .running(let r): guard let u = r.bundleURL else { throw CUError.invalidParams("no app at \(a)") }; appURL = u
+            case .installed(let u, _, _): appURL = u
+            }
+        } else if let first = urls.first, let def = CUDocumentOpen.defaultApp(for: first) {
+            appURL = def
+        } else {
+            throw CUError.invalidParams("no app opens \(p.urls.first ?? "that")")
+        }
+        guard let b = Bundle(url: appURL), let id = b.bundleIdentifier else { throw CUError.invalidParams("no app at \(appURL.path)") }
+        return DefaultOpenerResult(bundleId: id, name: CUApps.displayName(b, fallback: appURL.deletingPathExtension().lastPathComponent), path: appURL.path)
+    }
+
+    /// Opens file paths / URLs with an app WITHOUT activating it (NSWorkspace.open, activates:false —
+    /// LaunchServices would otherwise bring the opener to the user's front). The opener is `app` when given,
+    /// else the default handler for the first url. Returns the opener (never activated) and, when one appears,
+    /// a new window to bind. Protected destinations are refused (the save-path floors apply to paths too).
+    public func openDocuments(_ p: OpenDocumentsParams) async throws -> OpenDocumentsResult {
+        let urls = try CUDocumentOpen.resolve(p.urls)
+        if let bad = urls.compactMap({ $0.isFileURL ? $0.path : nil }).first(where: { CUFloors.isProtectedSavePath($0) }) {
+            throw CUError.refused(.privacyPane, "opening \((bad as NSString).lastPathComponent) is off limits — it is a protected location")
+        }
+        let appURL: URL
+        if let a = p.app {
+            switch try CUApps.resolve(a) {
+            case .running(let r): guard let u = r.bundleURL else { throw CUError.invalidParams("no app at \(a)") }; appURL = u
+            case .installed(let u, _, _): appURL = u
+            }
+        } else if let first = urls.first, let def = CUDocumentOpen.defaultApp(for: first) {
+            appURL = def
+        } else {
+            throw CUError.invalidParams("no app opens \(p.urls.first ?? "that")")
+        }
+        guard let b = Bundle(url: appURL) else { throw CUError.invalidParams("no app at \(appURL.path)") }
+        try refuseFloorApp(bundleId: b.bundleIdentifier, pid: 0, name: b.bundleIdentifier ?? appURL.lastPathComponent)
+        // The opener's windows before the open (empty if it was not running), so the new one can be told apart.
+        let runningOpener = NSRunningApplication.runningApplications(withBundleIdentifier: b.bundleIdentifier ?? "").first
+        let before: Set<UInt32> = runningOpener.map { r in
+            Set(CUBindWait.realWindows(sys.windows(pid: r.processIdentifier)).map(\.id))
+        } ?? []
+        let app = try await CUDocumentOpen.open(urls, withApp: appURL)
+        // A real window of the opener not seen before the open: the document's. Polled briefly (it is async).
+        let windowID: UInt32? = await {
+            let deadline = clock.nowMs() + windowWaitMs
+            while clock.nowMs() < deadline {
+                let now = CUBindWait.realWindows(sys.windows(pid: app.processIdentifier))
+                if let fresh = now.map(\.id).first(where: { !before.contains($0) }) { return fresh }
+                try? await clock.sleep(ms: 60)
+            }
+            // None new (the app showed the doc in an existing window, or none has appeared): the frontmost.
+            return CUBindWait.realWindows(sys.windows(pid: app.processIdentifier)).map(\.id).first
+        }()
+        let bound = CUBoundApp(name: app.localizedName ?? b.bundleIdentifier ?? appURL.lastPathComponent,
+                               bundleId: app.bundleIdentifier ?? "", pid: app.processIdentifier)
+        return OpenDocumentsResult(app: bound, windowID: windowID)
+    }
+
     // MARK: - binding
 
     /// The app a bind is for: running (or just launched) — what the bind needs of it.
