@@ -310,8 +310,18 @@ final class WebController: NSObject, WKScriptMessageHandler, WKNavigationDelegat
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // The runner waits for this before a web scenario: a page still loading has no fields yet.
+        Fixture.shared.emit("web.didFinish", [("url", .str(webView.url?.lastPathComponent ?? ""))])
         onLoaded?()
         onLoaded = nil
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        Fixture.shared.emit("web.didFail", [("error", .str(error.localizedDescription))])
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        Fixture.shared.emit("web.didFail", [("error", .str(error.localizedDescription))])
     }
 
     // MARK: Messages from the page
