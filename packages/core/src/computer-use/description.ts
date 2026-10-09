@@ -74,7 +74,7 @@ export function computerV2Description(input: ComputerV2DescriptionInput): string
     "declare function sleep(ms: number): Promise<void>;  // max 30000",
     "```",
     "",
-    "Errors are classes you can catch with `instanceof`, each with one sentence on what to do: `StaleRef`, `TargetLost`, `NoWindow` (the app runs but its window is on another Space, in full screen, or not open), `TargetBusy`, `WaitTimeout`, `NotAllowed` (a policy or the user's setting), `Refused` (a safety floor — e.g. password fields), `NeedsForeground`, `HelperUnavailable`, `PermissionMissing`, `Cancelled`.",
+    "Errors are classes you can catch with `instanceof`, each with one sentence on what to do: `StaleRef`, `TargetLost`, `NoWindow` (the app runs but its window is on another Space, in full screen, or not open), `TargetBusy` (the app, or another session, is busy with it — try again shortly), `Uncertain` (the action was sent but not confirmed — it may have happened: check state() before doing it again), `WaitTimeout`, `NotAllowed` (a policy or the user's setting), `Refused` (a safety floor — e.g. password fields), `NeedsForeground`, `HelperUnavailable`, `PermissionMissing`, `Cancelled`.",
     "",
     "The user approves each app once (once, for this session, or always) the first time you bind it. If they decline, don't retry — ask them.",
   ];

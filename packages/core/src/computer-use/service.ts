@@ -494,15 +494,17 @@ export class ComputerV2Service {
         res = await once();
       } catch (err) {
         // `busy` (retryable): the helper's queue was full, or the app did not answer accessibility in time.
-        // One retry after ~200 ms; a second `busy` is the typed failure (spine §2.1, after L1b).
-        if (!(err instanceof HelperRpcError) || err.code !== "busy") throw err;
+        // One retry after ~200 ms; a second `busy` is the typed failure (spine §2.1, after L1b). An UNCERTAIN
+        // busy — the action was sent and may have happened — is never retried: that would do it twice.
+        if (!(err instanceof HelperRpcError) || err.code !== "busy" || err.data.uncertain === true) throw err;
         if (!(await abortableSleep(BUSY_RETRY_MS, ctx.abort.signal))) throw new AutomationFailure("Cancelled", ctx.cancelled ?? "the call was cancelled");
         try {
           res = await once();
         } catch (again) {
-          if (again instanceof HelperRpcError && again.code === "busy") {
+          if (again instanceof HelperRpcError && again.code === "busy" && again.data.uncertain !== true) {
+            // The APP is busy (not the helper, which answered): TargetBusy.
             const t = typeof params.targetId === "string" ? ctx.state.targets.get(params.targetId) : undefined;
-            throw new AutomationFailure("HelperUnavailable", `${t?.name ?? "The app"} did not answer in time (it may be busy) — try again in a moment`, true);
+            throw new AutomationFailure("TargetBusy", `${t?.name ?? "The app"} did not answer in time (it may be busy) — try again in a moment`, true);
           }
           throw again;
         }
@@ -973,7 +975,16 @@ export class ComputerV2Service {
           const which = data.permission === "screenRecording" ? "Screen Recording" : "Accessibility";
           return { kind: "PermissionMissing", message: `Winter Computer Use needs the ${which} permission — ask the user to grant it in Settings → Computer Use` };
         }
-        case "busy": return { kind: "HelperUnavailable", message: "Winter Computer Use is busy — try again in a moment" };
+        case "busy": {
+          // The helper's own sentence is kept (it says what happened and what to do; it may name a control, so it
+          // stays in the fence). An action that was SENT but not confirmed is `Uncertain` — check state(), never
+          // simply retry; any other busy is the app (or the helper's queue for it) not answering: `TargetBusy`.
+          const said = err.message.replace(/\s+/g, " ").trim().slice(0, 400);
+          if (data.uncertain === true) {
+            return { kind: "Uncertain", message: said || `${name} did not confirm that action — it may have happened; check state() before doing it again`, untrusted: true };
+          }
+          return { kind: "TargetBusy", message: said ? `${said}${/try again|retry/i.test(said) ? "" : " — try again in a moment"}` : `${name} is busy — try again in a moment`, untrusted: true };
+        }
         case "unsupported": {
           // `data.axError` (the raw Accessibility error) is for the log, not the model: the helper's sentence says
           // what could not be done.

@@ -598,7 +598,7 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     expect(lines.find((l) => l.primitive === "click")).toMatchObject({ error: "Error", errorCode: "unsupported" });
   }, 30_000);
 
-  macOnly("busy is retried once; twice is a typed HelperUnavailable", async () => {
+  macOnly("busy is retried once; twice is TargetBusy (the app, not the helper)", async () => {
     const w = world();
     let n = 0;
     w.fake.handlers["target.find"] = () => { n++; if (n === 1) throw new FakeHelperError("busy", "queue full", { retryable: true }); return { elements: [{ ref: 3, role: "button", name: "OK" }] }; };
@@ -606,8 +606,20 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     expect(r.isError).toBe(false);
     expect(text(r)).toContain('[3] button "OK"');
     w.fake.handlers["target.find"] = () => { throw new FakeHelperError("busy", "ax timeout"); };
-    const r2 = await w.run("try { await notes.find('OK') } catch (e) { print(e.name, e.message) }");
-    expect(text(r2)).toContain("HelperUnavailable Notes did not answer in time");
+    const r2 = await w.run("try { await notes.find('OK') } catch (e) { print(e.name, e instanceof TargetBusy, e.message) }");
+    expect(text(r2)).toContain("TargetBusy true Notes did not answer in time");
+    expect(text(r2)).not.toContain("HelperUnavailable");
+  }, 30_000);
+
+  macOnly("an UNCERTAIN busy (sent, not confirmed) is never retried and is Uncertain with the helper's sentence", async () => {
+    const w = world();
+    let acts = 0;
+    const said = "Notes answered “press” on [14] with an error (AXError -25200) but may have acted — check state() before retrying";
+    w.fake.handlers["target.act"] = () => { acts++; throw new FakeHelperError("busy", said, { uncertain: true, retryable: false, axError: -25200 }); };
+    const r = await w.run("const notes = await apps.open('Notes')\ntry { await notes.action(14, 'press') } catch (e) { print(e.name, e instanceof Uncertain, e instanceof TargetBusy, e.message) }");
+    expect(acts).toBe(1);   // the action may have happened: sending it again could do it twice
+    expect(text(r)).toContain(`Uncertain true false ${said}`);
+    expect(text(r)).not.toContain("Winter Computer Use is busy");
   }, 30_000);
 
   macOnly("typed helper errors become their classes with one actionable sentence", async () => {

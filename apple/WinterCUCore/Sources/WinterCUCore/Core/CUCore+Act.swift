@@ -216,7 +216,7 @@ extension CUCore {
     static func deliveryUncertain(_ e: Error) -> Bool { (e as? CUError)?.code == "busy" }
 
     func busyAfterSend(_ t: CUTarget) -> CUError {
-        CUError.busy("\(t.appName) did not confirm the action in time — it may still happen; call state() before retrying")
+        CUError.uncertain("\(t.appName) did not confirm the action in time — it may still happen; call state() before retrying")
     }
 
     // MARK: click
@@ -1649,9 +1649,8 @@ extension CUCore {
         }
         guard after != before else {
             CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public): AXError \(code, privacy: .public), and nothing visibly changed")
-            throw CUError(code: "unsupported",
-                          message: "\(t.appName) answered \(what) with an error (AXError \(code)) but may have acted — check state() before retrying",
-                          data: ["axError": .int(code)])
+            throw CUError.uncertain("\(t.appName) answered \(what) with an error (AXError \(code)) but may have acted — check state() before retrying",
+                                    axError: code)
         }
         var changed: [String] = []
         if !after.windows.subtracting(before.windows).isEmpty { changed.append("a new window opened") }

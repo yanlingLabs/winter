@@ -66,7 +66,8 @@ export class HelperRpcError extends Error {
     super(message);
     this.name = "HelperRpcError";
   }
-  get retryable(): boolean { return this.data.retryable === true || this.code === "busy"; }
+  /** An UNCERTAIN busy (the action was sent and may have happened) is never retryable. */
+  get retryable(): boolean { return this.data.uncertain !== true && (this.data.retryable === true || this.code === "busy"); }
 }
 
 /** The helper could not be reached, launched or verified — the typed `helper_unavailable` (retryable). */
