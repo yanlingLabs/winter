@@ -112,6 +112,34 @@ final class FocusGuardianTests: XCTestCase {
         XCTAssertTrue(sys.activated.isEmpty, "the user's own switch is respected")
         XCTAssertTrue(core.takeGuardianNotes().isEmpty)
     }
+    func testACPSKeyFocusTheftOfABoundTargetIsReleasedAndRestored() async throws {
+        let sys = FakeSystem()
+        sys.running = [500, 800]; sys.front = 500; sys.space = 100
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        let t = CUTarget(id: "t1", sessionId: "s", pid: 500, bundleId: "x", appName: "Victim", isChromium: false,
+                         mirror: false, windowID: 7, windowTitle: "")
+        core.registerForTesting(t, windowElement: nil)
+        var released: [Int32] = []
+        core.cpsReleaseOverride = { released.append($0); return true }
+        // 500 holds focus; then 800 steals it (a type-21 keyFocusTaken, no app activation).
+        _ = core.onCPSNotification(recipientPID: 500, subtype: 0, subjectPID: 500, theftID: 0, now: 1)
+        let v = core.onCPSNotification(recipientPID: 800, subtype: CUCPSSubtype.keyFocusTaken, subjectPID: 800, theftID: 0xBEEF, now: 2)
+        XCTAssertEqual(v, .release(theftID: 0xBEEF))
+        XCTAssertEqual(released, [0xBEEF], "the theft is released by its token")
+        // The victim (500) is restored to the front.
+        XCTAssertEqual(sys.activated.last, 500)
+    }
+
+    func testAnUnprotectedCPSTheftIsPassedThrough() {
+        let sys = FakeSystem()
+        sys.running = [1]; sys.front = 1
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        // No bound target: nothing is protected, so a theft passes.
+        let v = core.onCPSNotification(recipientPID: 9, subtype: CUCPSSubtype.keyFocusTaken, subjectPID: 9, theftID: 1, now: 1)
+        XCTAssertEqual(v, .pass)
+    }
 }
 
 private extension CUGuardianVerdict {

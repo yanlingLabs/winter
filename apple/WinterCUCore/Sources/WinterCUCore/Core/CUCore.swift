@@ -75,10 +75,13 @@ public final class CUCore: @unchecked Sendable {
         if startMonitors {
             startMonitoring()
         } else {
-            // A core without monitors is a test's: its fakes answer at once, and its checks are synchronous.
+            // A core without monitors is a test's: its fakes answer at once, its checks are synchronous, and no
+            // live event tap is created.
             userViewSettleMs = 0
             stepSettleMs = 0
             userViewLateCheck = false
+            guardianLiveTapEnabled = false
+            guardianRestoreSync = true
         }
     }
 
@@ -433,6 +436,17 @@ public final class CUCore: @unchecked Sendable {
     var pendingGuardianNotes: [String] = []
     var guardianStartedTargets: Set<String> = []
     var lastSyntheticActivationAt: Double = -1
+    /// The CPS key-focus-theft state machine (fed by the listen-only type-21 tap).
+    var focusTheftGuard = CUFocusGuard()
+    /// The live CPS tap's run-loop thread and port (best-effort; nil when it could not be created).
+    var cpsTapThread: Thread?
+    var cpsTapPort: CFMachPort?
+    /// A test seam for the CPS notification handler (the live tap feeds the real one).
+    var cpsReleaseOverride: ((Int32) -> Bool)?
+    /// Whether the live CPS event tap runs (off in tests — a real tap spins a run-loop thread).
+    var guardianLiveTapEnabled = true
+    /// Whether the guardian's restore runs inline (tests, synchronous) rather than dispatched off-main.
+    var guardianRestoreSync = false
     /// Seconds since the last physical user input, injectable for tests.
     var secondsSinceUserInputOverride: (() -> TimeInterval)?
     /// The window server's key-focus pid, injectable for tests (the swallowed-click retry).
@@ -971,6 +985,9 @@ public final class CUCore: @unchecked Sendable {
         guard let t = targets[id] else { throw CUError.targetLost("unknown target \(id) — bind the app again") }
         return t
     }
+
+    /// The pids of all bound targets (for the Focus Guardian's CPS tap).
+    func boundTargetPids() -> Set<pid_t> { lock.withLock { Set(targets.values.map(\.pid)) } }
 
     private func remove(_ id: String) -> CUTarget? {
         lock.lock()

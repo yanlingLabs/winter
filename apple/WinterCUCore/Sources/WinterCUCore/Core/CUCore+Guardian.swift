@@ -24,6 +24,7 @@ extension CUCore {
         if guardianRefs == 1 {
             guardianCore.begin(view: CUGuardedView(app: sys.frontmostPid(), space: sys.activeSpace()))
             installGuardianObservers()
+            startCPSTap()
         }
         return true
     }
@@ -36,6 +37,7 @@ extension CUCore {
         guardianCore.end()
         for o in guardianObservers { NSWorkspace.shared.notificationCenter.removeObserver(o) }
         guardianObservers.removeAll()
+        stopCPSTap()
     }
 
     /// The consented foreground rung takes the front for one action: exempt that app briefly.
@@ -78,6 +80,17 @@ extension CUCore {
         return types.map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }.min() ?? .greatestFiniteMagnitude
     }
 
+    /// Runs a restore inline in tests (synchronous), else off the main queue so the observer never blocks.
+    private func dispatchRestore(_ restore: CUGuardedView, thief: pid_t, repeatOffender: Bool, cause: String) {
+        if guardianRestoreSync {
+            guardianRestore(restore, thief: thief, repeatOffender: repeatOffender, cause: cause)
+        } else {
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                guardianRestore(restore, thief: thief, repeatOffender: repeatOffender, cause: cause)
+            }
+        }
+    }
+
     func onActivation(pid: pid_t) {
         let now = clock.nowSeconds()
         let userInput = secondsSinceUserInput < CUFocusGuardianCore.userInputWindow
@@ -87,7 +100,7 @@ extension CUCore {
         let verdict = guardianCore.handle(activation, now: now)
         guardianLock.unlock()
         guard case .theft(let restore, let thief, let repeatOffender) = verdict else { return }
-        guardianRestore(restore, thief: thief, repeatOffender: repeatOffender, cause: "\(appName(thief)) came to the front")
+        dispatchRestore(restore, thief: thief, repeatOffender: repeatOffender, cause: "\(appName(thief)) came to the front")
     }
 
     func onSpaceChange() {
@@ -97,11 +110,12 @@ extension CUCore {
         let restore = guardianCore.handleSpaceChange(to: sys.activeSpace(), hadRecentUserInput: userInput, now: now)
         guardianLock.unlock()
         guard let restore else { return }
-        guardianRestore(restore, thief: restore.app ?? 0, repeatOffender: false, cause: "the desktop changed")
+        dispatchRestore(restore, thief: restore.app ?? 0, repeatOffender: false, cause: "the desktop changed")
     }
 
     /// Puts the user back: updates suspended, the user's app re-activated and its window raised, the Space
-    /// returned, within the deadline — then a fault log and a note for the next result.
+    /// returned, within the deadline — then a fault log and a note for the next result. Runs OFF the main
+    /// queue (dispatched by the observers / the CPS tap), so a restore never blocks the UI or event delivery.
     func guardianRestore(_ restore: CUGuardedView, thief: pid_t, repeatOffender: Bool, cause: String) {
         guard let user = restore.app, user != thief else { return }
         let cid = skyLight.disableUpdate()
@@ -121,4 +135,92 @@ extension CUCore {
     private func appName(_ pid: pid_t) -> String {
         NSRunningApplication(processIdentifier: pid)?.localizedName ?? sys.processName(pid: pid) ?? "An app"
     }
+}
+
+// MARK: the listen-only CPS key-focus tap (a steal without an app activation)
+
+extension CUCore {
+    /// One type-21 process-notification the CPS tap saw: feed the theft state machine (protecting the bound
+    /// targets), release a disallowed theft by its token, and restore the victim. Testable; the live tap calls
+    /// it. Returns the verdict for the test.
+    @discardableResult
+    func onCPSNotification(recipientPID: pid_t, subtype: Int64, subjectPID: pid_t, theftID: Int32, now: Double) -> CUFocusGuard.Verdict {
+        let boundPids = boundTargetPids()
+        let verdict: CUFocusGuard.Verdict = guardianLock.withLock {
+            for pid in boundPids { focusTheftGuard.protect(pid) }
+            return focusTheftGuard.handle(CUFocusNotification(recipientPID: recipientPID, subtype: subtype, subjectPID: subjectPID, theftID: theftID))
+        }
+        switch verdict {
+        case .release(let id):
+            _ = cpsReleaseOverride?(id) ?? skyLight.releaseKeyFocus(id: id)
+            fallthrough
+        case .drop:
+            // A protected target lost key focus to a thief without an app activation: put the user back on
+            // the victim. The victim is the bound target; restore its app to the front.
+            let victim = guardianLock.withLock { focusTheftGuard.suppression?.victimPID }
+            if let victim {
+                dispatchRestore(CUGuardedView(app: victim, space: sys.activeSpace()), thief: subjectPID, repeatOffender: false,
+                                cause: "\(appName(subjectPID)) took key focus")
+            }
+        case .pass:
+            break
+        }
+        return verdict
+    }
+
+    /// Starts the listen-only type-21 tap on its own run-loop thread. Listen-only (`.listenOnly`) so a mistake
+    /// can never drop or alter the user's events — it only observes, releases a theft token and restores.
+    /// Best-effort: nil when the tap can't be created (the didActivate guardian still covers the common case).
+    func startCPSTap() {
+        guard guardianLiveTapEnabled, cpsTapThread == nil else { return }
+        let box = Unmanaged.passRetained(CUCPSTapContext(core: self)).toOpaque()
+        let mask: CGEventMask = CGEventMask(1) << CUFocusTaps.processNotificationType
+        guard let port = CGEvent.tapCreate(tap: .cgAnnotatedSessionEventTap, place: .tailAppendEventTap,
+                                           options: .listenOnly, eventsOfInterest: mask, callback: cpsTapCallback, userInfo: box) else {
+            Unmanaged<CUCPSTapContext>.fromOpaque(box).release()
+            return
+        }
+        cpsTapPort = port
+        let thread = Thread {
+            let source = CFMachPortCreateRunLoopSource(nil, port, 0)
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+            CGEvent.tapEnable(tap: port, enable: true)
+            while !Thread.current.isCancelled, CFRunLoopRunInMode(.defaultMode, 0.25, false) != .stopped {}
+        }
+        thread.name = "Winter CPS focus tap"
+        cpsTapThread = thread
+        thread.start()
+    }
+
+    /// Tears down the CPS tap. Called from `stopGuardian`, which already holds `guardianLock`, so it resets
+    /// the theft guard WITHOUT taking the lock again (a re-entrant NSLock would deadlock).
+    func stopCPSTap() {
+        cpsTapThread?.cancel()
+        cpsTapThread = nil
+        if let port = cpsTapPort { CGEvent.tapEnable(tap: port, enable: false); CFMachPortInvalidate(port) }
+        cpsTapPort = nil
+        focusTheftGuard = CUFocusGuard()
+    }
+}
+
+/// The refcon the C tap callback carries (it cannot capture).
+final class CUCPSTapContext {
+    weak var core: CUCore?
+    init(core: CUCore) { self.core = core }
+}
+
+/// The listen-only CPS tap callback: reads the type-21 notification's fields and hands them to the core. It
+/// returns the event unchanged (listen-only ignores the return, but a disabled tap is re-enabled).
+private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        return Unmanaged.passUnretained(event)
+    }
+    guard let refcon, let core = Unmanaged<CUCPSTapContext>.fromOpaque(refcon).takeUnretainedValue().core else {
+        return Unmanaged.passUnretained(event)
+    }
+    func f(_ n: UInt32) -> Int64 { event.getIntegerValueField(CGEventField(rawValue: n)!) }
+    core.onCPSNotification(recipientPID: pid_t(f(CUFocusField.targetPID)), subtype: f(CUFocusField.cpsSubtype),
+                           subjectPID: pid_t(f(CUFocusField.subjectPID)), theftID: Int32(truncatingIfNeeded: f(CUFocusField.theftID)),
+                           now: core.clock.nowSeconds())
+    return Unmanaged.passUnretained(event)
 }
