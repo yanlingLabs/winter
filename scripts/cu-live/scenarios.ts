@@ -63,6 +63,8 @@ export interface Scenario {
    * check allows one excursion no longer than this many ms (and still demands the original app at the end).
    */
   allowExcursionMs?: number;
+  /** The script prelude (default PRELUDE; the generic app checks bring their own, which includes it). */
+  prelude?: string;
   verify(ctx: VerifyContext): Check[];
 }
 
@@ -83,8 +85,8 @@ async function pick(app, name, role) {
 function report(o) { print(${JSON.stringify(MARKER)} + " " + JSON.stringify(o)); }
 `;
 
-export function scriptOf(s: Pick<Scenario, "code">): string {
-  return `${PRELUDE}\n${s.code.trim()}\n`;
+export function scriptOf(s: Pick<Scenario, "code" | "prelude">): string {
+  return `${s.prelude ?? PRELUDE}\n${s.code.trim()}\n`;
 }
 
 const ok = (ctx: VerifyContext): Check => check("the script ran without an error", !ctx.isError, ctx.output.slice(-300));
