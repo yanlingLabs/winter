@@ -4,7 +4,7 @@ import WinterKit
 
 /// The watchdog that explains a stalled main thread: the beat, the one fault line per stall with the context from
 /// before it, the line when the main thread answers, and — end to end, on the real thread and the real main queue —
-/// a main thread actually blocked for longer than the threshold.
+/// a main thread actually blocked for longer than the threshold (the beat is one second, so it takes a few).
 @MainActor
 final class HangWatchdogTests: XCTestCase {
     private final class Clock: @unchecked Sendable {
@@ -119,10 +119,10 @@ final class HangWatchdogTests: XCTestCase {
                                report: { lines.add($0, $1) })
         dog.start()
         defer { dog.stop() }
-        try? await Task.sleep(nanoseconds: 700_000_000) // a few healthy beats
+        try? await Task.sleep(nanoseconds: 2_300_000_000) // a couple of healthy beats
         XCTAssertTrue(lines.faults.isEmpty, "\(lines.items)")
-        Thread.sleep(forTimeInterval: 2.8) // the main thread, stuck
-        try? await Task.sleep(nanoseconds: 600_000_000) // it gets to answer
+        Thread.sleep(forTimeInterval: 4.2) // the main thread, stuck across at least one beat past the 2 s threshold
+        try? await Task.sleep(nanoseconds: 1_500_000_000) // it gets to answer
         XCTAssertEqual(lines.faults.count, 1, "\(lines.items)")
         XCTAssertTrue(lines.faults.first?.contains("frontmostWindow=test") == true)
         XCTAssertTrue(lines.items.contains { !$0.fault && $0.line.contains("answering again") }, "\(lines.items)")

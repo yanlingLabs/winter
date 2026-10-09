@@ -1722,10 +1722,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 mb?.refresh()
             }
         }
-        // Refresh the menu state line periodically (cheap; 2b has no binding plumbing to NSMenu).
-        Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak mb] _ in
-            Task { @MainActor in mb?.refresh() }
-        }
+        // The menu's state line and login-item checkbox are refreshed when the menu is OPENED (`MenuBarController`
+        // observes `NSMenu.didBeginTrackingNotification`), not on a clock: nobody reads them while it is closed, and
+        // reading the login item asks `SMAppService` over XPC every time (a 2 s timer was one of the app's idle wake-ups).
         // DD-T7: dist-only first-launch offer for the `winter` command — late in launch, after the
         // menu exists (`mb.install()` above), gated `!isRunningUnitTests` the same way as every
         // other real-side-effect call in this method (Sparkle's updater construction, the AX

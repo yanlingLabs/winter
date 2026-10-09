@@ -168,6 +168,9 @@ final class AppWindowController: NSObject, NSWindowDelegate {
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
         window.title = "Winter"
+        // The dispatch pill's mouse gate hears the pointer through a local monitor, which sees moves only for a
+        // window that asks for them (`DispatchPillController.installMonitors`).
+        window.acceptsMouseMovedEvents = true
         // chatgpt-ui T3 (spec §4): the seamless top — the titlebar draws NO material and NO title
         // text, so the traffic lights sit inline over the sidebar's own flat background (the
         // custom pane's `windowBackgroundColor` fill, reaching the very top) and content scrolls

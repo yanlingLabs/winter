@@ -1063,6 +1063,32 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertFalse(pill.gateTimerActiveForTesting, "no clock while the pill is away")
     }
 
+    /// A pill is up all day. Its gate clock ran at 30 Hz forever — thirty wake-ups a second of an otherwise idle app.
+    /// It now runs that fast only while the pointer moves, and once a second when it has been still; a move is seen
+    /// at the next beat, and the clock is a safety net beside the mouse-moved monitors.
+    func testTheMouseGateClockSlowsToOncePerSecondWhenThePointerIsStillAndSpeedsUpWhenItMoves() {
+        let pill = makePill()
+        pill.show()
+        XCTAssertEqual(pill.gateTimerIntervalForTesting, DispatchPillController.gateTickInterval, "armed fast when the pill appears")
+        let frame = pill.panelFrameForTesting
+        let t0 = Date()
+        pill.mouseLocationOverrideForTesting = CGPoint(x: frame.minX + 4, y: frame.minY + 4)
+        pill.gateTick(now: t0) // the first look: the pointer has "moved" (nothing was known before)
+        XCTAssertEqual(pill.gateTimerIntervalForTesting, DispatchPillController.gateTickInterval)
+        pill.gateTick(now: t0.addingTimeInterval(0.5))
+        XCTAssertEqual(pill.gateTimerIntervalForTesting, DispatchPillController.gateTickInterval, "still, but not yet for a second")
+        pill.gateTick(now: t0.addingTimeInterval(1.2))
+        XCTAssertEqual(pill.gateTimerIntervalForTesting, DispatchPillController.gateIdleInterval, "still for a second: once a second")
+        pill.gateTick(now: t0.addingTimeInterval(30))
+        XCTAssertEqual(pill.gateTimerIntervalForTesting, DispatchPillController.gateIdleInterval)
+        pill.mouseLocationOverrideForTesting = CGPoint(x: frame.midX, y: frame.minY + DispatchPillMetrics.shadowPad + 20)
+        pill.gateTick(now: t0.addingTimeInterval(31)) // it moved
+        XCTAssertEqual(pill.gateTimerIntervalForTesting, DispatchPillController.gateTickInterval, "and fast again")
+        XCTAssertFalse(pill.panelIgnoresMouseEventsForTesting, "and the gate followed it")
+        pill.hide()
+        XCTAssertNil(pill.gateTimerIntervalForTesting, "no clock while the pill is away")
+    }
+
     /// The user's report: with a session window holding the keyboard, the first click on a child pill
     /// only made the (non-key) pill panel key and the tap was lost — a second click was needed. The
     /// pill's content acts on the first click.

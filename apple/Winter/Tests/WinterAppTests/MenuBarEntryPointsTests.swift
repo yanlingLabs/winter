@@ -58,6 +58,32 @@ final class MenuBarEntryPointsTests: XCTestCase {
         )
     }
 
+    // MARK: - Idle: the menu is refreshed when it OPENS, not on a clock
+
+    /// A login-item service that counts how often its status is asked for (each ask is an XPC round trip to
+    /// `SMAppService`).
+    private final class CountingLoginItemService: LoginItemService {
+        private(set) var reads = 0
+        var isEnabled: Bool { reads += 1; return false }
+        func enable() throws {}
+        func disable() throws {}
+    }
+
+    func testTheLoginItemIsAskedAboutWhenTheMenuOpensAndNeverOnAClock() async throws {
+        let service = CountingLoginItemService()
+        let controller = makeController(loginItemController: LoginItemController(
+            service: service, defaults: UserDefaults(suiteName: "MenuBarEntryPointsTests.\(UUID().uuidString)")!))
+        controller.install()
+        guard let menu = controller.statusItem?.menu else { return XCTFail("no menu") }
+        let before = service.reads
+        try await Task.sleep(nanoseconds: 2_600_000_000) // longer than the 2 s clock it used to run on
+        XCTAssertEqual(service.reads, before, "closed, the menu asks nobody anything")
+        NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: menu)
+        XCTAssertEqual(service.reads, before + 1, "opened, it brings itself up to date once")
+        NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: NSMenu())
+        XCTAssertEqual(service.reads, before + 1, "another menu opening is none of its business")
+    }
+
     // MARK: - Menu shape / order
 
     // MARK: - DD-T7: dist-only CLI installer item

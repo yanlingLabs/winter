@@ -96,6 +96,33 @@ func actionNeededAccelBoost(t: TimeInterval) -> Double {
     sin(t * 5.0) * 80
 }
 
+/// How often an UNREAD reply's liquid is redrawn: 20 fps. The breathing is a slow sine (a 4 s period) on a surface
+/// that moves a few points, and a redraw per display frame (120 Hz on a ProMotion Mac) cost the whole app a render
+/// pass, a GPU job and a dozen thread wake-ups per frame for as long as a reply sat unread — measured: the orb was
+/// the only thing animating in a Winter that was otherwise idle, at ~21,000 wake-ups a second.
+let fluidUnreadTickInterval: TimeInterval = 1.0 / 20.0
+
+/// How long an unread reply's liquid breathes before it comes to rest: the amber fill stays (that IS the signal),
+/// the motion stops, and the tick stops with it. Anything that disturbs the liquid — the cursor near it, a state
+/// change — wakes it for another round.
+let fluidUnreadBreathSeconds: TimeInterval = 12
+
+/// PURE: the `TimelineView`'s minimum interval for a state. `nil` is the display's own rate — a working turn and a
+/// card waiting on the human; an unread reply's breathing is slower (`fluidUnreadTickInterval`).
+func fluidTickInterval(state: FluidState, actionNeeded: Bool) -> TimeInterval? {
+    if actionNeeded { return nil }
+    if case .unread = state { return fluidUnreadTickInterval }
+    return nil
+}
+
+/// PURE: whether an unread reply's liquid has breathed long enough to rest. Never while the human is wanted
+/// (`actionNeeded` pulses until answered), and only for `.unread`.
+func shouldRestUnreadBreath(state: FluidState, breathedFor: TimeInterval, actionNeeded: Bool,
+                            limit: TimeInterval = fluidUnreadBreathSeconds) -> Bool {
+    guard !actionNeeded, case .unread = state else { return false }
+    return breathedFor >= limit
+}
+
 /// Task 3 (fluid orb): the liquid rendered inside the orb bubble — a `Canvas`-drawn fill whose
 /// surface tilts with cursor motion and ripples with excitement (`Orb/FluidSim.swift`, Task 1's
 /// pure physics), tinted `workingTint` while the agent is working and `unreadTint` while a
@@ -155,6 +182,9 @@ struct FluidOrbView: View {
     /// momentarily look, so `shouldPauseFluidTick` gates on this first.
     let isHeld: Bool
 
+    /// How long an unread reply's liquid breathes before it rests (`fluidUnreadBreathSeconds`; a test shortens it).
+    var breathSeconds: TimeInterval = fluidUnreadBreathSeconds
+
     /// Final-review Important-2 (D9 settled-tick freeze): true once the held sim has settled AND
     /// the cursor is calm — while true, `TimelineView` below stops scheduling frames entirely
     /// (`paused:` binding), which is what actually stops the redraw-forever violation (merely
@@ -203,8 +233,12 @@ struct FluidOrbView: View {
     /// rather than a magic frame-rate assumption driving every subsequent tick.
     @State private var lastTick: Date?
 
+    /// When the current stretch of an unread reply's breathing began (`nil` outside `.unread`, and again after the
+    /// liquid rests): `fluidUnreadBreathSeconds` later it comes to rest.
+    @State private var unreadSince: Date?
+
     var body: some View {
-        TimelineView(.animation(minimumInterval: nil, paused: paused)) { timeline in
+        TimelineView(.animation(minimumInterval: fluidTickInterval(state: state, actionNeeded: actionNeeded), paused: paused)) { timeline in
             Canvas { ctx, size in
                 let sim = fluid.sim
                 let r = min(size.width, size.height) / 2
@@ -314,6 +348,8 @@ struct FluidOrbView: View {
         let dt = lastTick.map { now.timeIntervalSince($0) } ?? (1.0 / 60.0)
         lastTick = now
 
+        if case .unread = state { if unreadSince == nil { unreadSince = now } } else { unreadSince = nil }
+
         let target: Double
         var acceleration = fluid.acceleration
         switch state {
@@ -351,6 +387,12 @@ struct FluidOrbView: View {
         let accelMagnitude = hypot(fluid.acceleration.dx, fluid.acceleration.dy)
         if shouldPauseFluidTick(sim: fluid.sim, targetLevel: target, isHeld: isHeld, accelMagnitude: accelMagnitude, actionNeeded: actionNeeded) {
             paused = true
+        } else if let since = unreadSince,
+                  shouldRestUnreadBreath(state: state, breathedFor: now.timeIntervalSince(since), actionNeeded: actionNeeded, limit: breathSeconds) {
+            // An unread reply that has breathed long enough rests: the tick stops (the same `paused` every unpause
+            // path below already clears), and the next stretch starts when something wakes the liquid.
+            paused = true
+            unreadSince = nil
         }
     }
 }
@@ -382,6 +424,8 @@ struct FluidOrbSlot: View {
     /// `.approvalNeeded`, which folds into `OrbStatus` (not `FluidState`) — a turn can be
     /// `.working`/`.unread` independently, so there's no new mount case to add here.
     let actionNeeded: Bool
+    /// See `FluidOrbView.breathSeconds`.
+    var breathSeconds: TimeInterval = fluidUnreadBreathSeconds
 
     var body: some View {
         // `state != .idle`: an active turn or an unread reply — always show. The second clause
@@ -392,7 +436,8 @@ struct FluidOrbSlot: View {
         // tree entirely: no more ticks, no more `@Published` writes, truly quiescent (D9) until
         // the next `.working`/`.unread`.
         if state != .idle || fluid.sim.level > 0.01 {
-            FluidOrbView(fluid: fluid, state: state, isStoppedFlash: isStoppedFlash, actionNeeded: actionNeeded, isHeld: isHeld)
+            FluidOrbView(fluid: fluid, state: state, isStoppedFlash: isStoppedFlash, actionNeeded: actionNeeded, isHeld: isHeld,
+                         breathSeconds: breathSeconds)
         } else {
             EmptyView()
         }

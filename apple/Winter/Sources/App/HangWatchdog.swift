@@ -27,20 +27,20 @@ struct HangContext: Equatable, Sendable {
     }
 }
 
-/// A background watchdog for a stalled main thread (Debug and Release alike). Every 250 ms it asks the main queue
-/// to answer a ping; when one has gone unanswered for 2 s it writes ONE `.fault` line under `com.winter.app` — the
-/// stall's length and `HangContext` — and one line when the main thread answers again. Next time a hang needs no
-/// sampling to be explained.
+/// A background watchdog for a stalled main thread (Debug and Release alike). Every second (with leeway, so the timer
+/// coalesces with others) it asks the main queue to answer a ping; when one has gone unanswered for 2 s it writes ONE
+/// `.fault` line under `com.winter.app` — the stall's length and `HangContext` — and one line when the main thread
+/// answers again. Next time a hang needs no sampling to be explained.
 ///
 /// Nothing here runs on the main thread except the answering block, which reads the context and takes a lock.
 final class HangWatchdog: @unchecked Sendable {
-    static let pingInterval: TimeInterval = 0.25
+    static let pingInterval: TimeInterval = 1
     static let stallThreshold: TimeInterval = 2
     /// A main thread that is not blocked but livelocked — cycling through work so that every ping is answered a
     /// beat late — never trips the stall line. An answer slower than this is "late"…
     static let lateThreshold: TimeInterval = 0.15
-    /// …and this many late answers in a row (about two seconds of it) is one sluggishness notice.
-    static let sluggishAfter = 8
+    /// …and this many late answers in a row (about three seconds of it) is one sluggishness notice.
+    static let sluggishAfter = 3
 
     private let lock = NSLock()
     private let now: @Sendable () -> TimeInterval
@@ -77,7 +77,7 @@ final class HangWatchdog: @unchecked Sendable {
     func start() {
         guard timer == nil else { return }
         let source = DispatchSource.makeTimerSource(queue: queue)
-        source.schedule(deadline: .now() + Self.pingInterval, repeating: Self.pingInterval, leeway: .milliseconds(50))
+        source.schedule(deadline: .now() + Self.pingInterval, repeating: Self.pingInterval, leeway: .milliseconds(250))
         source.setEventHandler { [weak self] in self?.tick() }
         timer = source
         source.resume()
