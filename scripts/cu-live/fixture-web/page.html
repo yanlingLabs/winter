@@ -41,6 +41,7 @@
 </div>
 <div class="row">
   <button id="web-button" type="button">Web Button</button>
+  <div id="closure-button" role="button" tabindex="0" aria-label="Closure Button" class="closure">Closure Button</div>
   <a id="jump" href="#section-20">Jump</a>
 </div>
 <div class="row">
@@ -83,6 +84,19 @@
     var el = e.target;
     setTimeout(function () { if (document.activeElement === el) reportFocus(el); }, 0);
   }, true);
+
+  // --- a widget that acts on a real mouse press (like Google Docs' Closure buttons) ---------------------------
+  // A mousedown then a mouseup on it from a pointer — a simulated click (an accessibility press) carries no
+  // pointer coordinates — presses it; `click` events are ignored. Each press is logged with its count.
+  var closureDown = false;
+  var closurePresses = 0;
+  $("closure-button").addEventListener("mousedown", function (e) {
+    closureDown = e.button === 0 && (e.screenX !== 0 || e.screenY !== 0);
+  });
+  $("closure-button").addEventListener("mouseup", function (e) {
+    if (closureDown && e.button === 0) { closurePresses += 1; post({ type: "closure", count: closurePresses }); }
+    closureDown = false;
+  });
 
   // --- clicks and links --------------------------------------------------------------------------------------
   document.addEventListener("click", function (e) {

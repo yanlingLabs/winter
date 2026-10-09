@@ -158,6 +158,8 @@ class PausableTimer {
 interface RunCtx {
   /** The answers of type/paste calls still in flight (see `runNow`). */
   textInFlight: Set<Promise<void>>;
+  /** The last focus change per target in this run, said once at its end. */
+  focusLines: Map<string, { app: string; line: string }>;
   sessionId: string;
   runId: string;
   callId: string;
@@ -279,6 +281,7 @@ export class ComputerV2Service {
       sessionId, runId, callId: `cv2_${randomBytes(6).toString("hex")}`, call, state, worker, builder, grants,
       abort: new AbortController(), timer, locks: new Map(), acted: new Set(), chains: new Map(), primitives: new Map(),
       apps: new Set(), timedOut: false, ended: false, bound: new Set(), daemonSentences: new Set(), textInFlight: new Set(),
+      focusLines: new Map(),
     };
     ctxRef.ctx = ctx;
     state.active = ctx;
@@ -318,6 +321,10 @@ export class ComputerV2Service {
     }
     timer.clear();
     call.signal?.removeEventListener("abort", onAbort);
+    // The focus lines (the last change per target), once: "focus: now …", named per app when several moved.
+    for (const { app, line } of ctx.focusLines.values()) {
+      builder.text(ctx.focusLines.size === 1 ? `focus: ${line}` : `focus in ${app}: ${line}`, { screen: true });
+    }
     if (ctx.killTimer !== undefined) clearTimeout(ctx.killTimer);
     // ENDED first, then abort, then drain: a primitive still in flight (one the script never awaited) sees
     // `ended` after its next await and can neither take a lock nor keep one (review C1).
@@ -915,6 +922,10 @@ export class ComputerV2Service {
     // Element names come from the screen: inside the fence.
     const line = actLine(primitive, action, res);
     if (line !== undefined) ctx.builder.text(line, { screen: true });
+    // Where the focus went when the act moved it (⌘R into the address bar, a click into another field): the LAST
+    // change per target, said once at the end of the script — twenty acts can't flood the result.
+    const focus = focusLine(res);
+    if (focus !== undefined) ctx.focusLines.set(t.targetId, { app: t.name, line: focus });
     return undefined;
   }
 
@@ -1190,6 +1201,14 @@ const ERROR_MESSAGE_CAP = 4_096;
  * TRUSTED (shown outside the fence) only when its message is one the daemon itself sent in this call.
  */
 /** A bind's or useWindow's `detail` from the helper, as one short line (or nothing). */
+/** `now [226] text field "smart search field"`, or `unknown (the app reports none)`; nothing when the act did not
+ *  move the focus. */
+export function focusLine(res: ActResult): string | undefined {
+  if (typeof res.focusNow === "string" && res.focusNow.trim().length > 0) return `now ${res.focusNow.replace(/\s+/g, " ").trim().slice(0, 200)}`;
+  if (res.focusLost === true) return "unknown (the app reports none)";
+  return undefined;
+}
+
 /** The line an act prints: `typed into [14] text area "Comment"` (and the helper's detail after it) for keyboard
  *  input, the detail alone for any other act; nothing when there is nothing to say. */
 export function actLine(primitive: string, action: ActAction, res: ActResult): string | undefined {
@@ -1266,6 +1285,8 @@ function refusedWords(reason: string, name: string): string {
     case "secure_field": return "that is a password or payment field — Winter never reads or types into one; ask the user to fill it in";
     case "focus_unknown": return `can't tell which field has focus in ${name}, so it could be a password field — pass \`into\` or click a text field first`;
     case "focus_not_placed": return `couldn't put the keyboard focus in that field of ${name}, so nothing was typed — use setValue(ref, text) if it takes a value, or click it first and retry`;
+    case "focus_not_editable": return `the focus in ${name} is not a text field, so nothing was typed — click the field or pass { into }`;
+    case "wrong_field_shape": return `the text does not fit the field that has the focus in ${name} (several lines, or a long text, for a one-line field or the browser's own) — pass { into } for the field you mean`;
     case "auth_dialog": return "that is a system authentication dialog — ask the user to handle it";
     case "privacy_pane": return "System Settings' Privacy & Security panes are off limits — ask the user to change them";
     case "winter_itself": return "Winter never controls itself";

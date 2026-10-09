@@ -13,7 +13,7 @@ import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { ComputerPolicy, type SessionFacts } from "../../src/computer-use/policy";
 import { RecentApps } from "../../src/computer-use/recent-apps";
-import { ComputerV2Service, actLine, targetLostMessage, type ScriptResult } from "../../src/computer-use/service";
+import { ComputerV2Service, actLine, focusLine, targetLostMessage, type ScriptResult } from "../../src/computer-use/service";
 import { AutomationTelemetry } from "../../src/computer-use/telemetry";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
 import type { Settings } from "../../src/settings";
@@ -802,5 +802,28 @@ describe("ComputerV2: where keyboard input went", () => {
     const out = text(r);
     expect(out).toContain('typed into [14] text area "Comment" — typed 5 characters; Notes doesn\'t expose this editor\'s text');
     expect(out.indexOf("typed into")).toBeGreaterThan(out.indexOf("<screen-data"));
+  }, 30_000);
+});
+
+describe("ComputerV2: where the focus went after an act", () => {
+  test("a moved focus is named; a lost one is said; none when it did not move", () => {
+    expect(focusLine({ rung: 1, focusNow: '[226] search field "smart search field"' })).toBe('now [226] search field "smart search field"');
+    expect(focusLine({ rung: 1, focusLost: true })).toBe("unknown (the app reports none)");
+    expect(focusLine({ rung: 1 })).toBeUndefined();
+  });
+
+  macOnly("only the last change per target, once, at the end of the script", async () => {
+    const w = world();
+    let n = 0;
+    w.fake.handlers["target.act"] = () => {
+      n += 1;
+      return n === 1 ? { rung: 2, focusNow: "[9] text field \"Name\"" } : n === 2 ? { rung: 2, focusNow: '[226] search field "smart search field"' } : { rung: 2 };
+    };
+    const r = await w.run("const notes = await apps.open('Notes')\nawait notes.key('tab')\nawait notes.key('cmd+r')\nawait notes.key('end')\nprint('done')");
+    const out = text(r);
+    expect(out).toContain('focus: now [226] search field "smart search field"');
+    expect(out).not.toContain('[9] text field "Name"');
+    expect(out.match(/focus: now/g)?.length).toBe(1);
+    expect(out.indexOf("focus: now")).toBeGreaterThan(out.indexOf("done"));
   }, 30_000);
 });

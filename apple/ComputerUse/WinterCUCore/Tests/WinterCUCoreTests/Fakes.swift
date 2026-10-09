@@ -53,6 +53,9 @@ final class FakeAX: CUAXBackend {
         put(e, v)
     }
 
+    /// Removes an attribute (the element no longer reports it).
+    func drop(_ e: AXUIElement, _ name: String) { attrs[AXIdentity(element: e)]?[name] = nil }
+
     func focus(pid: pid_t, on e: AXUIElement?) {
         let app = application(pid)
         if let e { put(app, [kAXFocusedUIElementAttribute: e]) } else {

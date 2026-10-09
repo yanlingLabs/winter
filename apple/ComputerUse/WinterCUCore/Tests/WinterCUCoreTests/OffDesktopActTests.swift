@@ -129,12 +129,23 @@ final class OffDesktopActTests: XCTestCase {
 
     // MARK: clicks
 
+    /// A press the page takes (the link navigates: the focus moves) — web presses are verified by an effect.
+    private func pressesTakeEffect() {
+        var n: Int32 = 0
+        ax.onPerform = { [unowned self] what in
+            guard what.hasSuffix(":AXPress") else { return }
+            n += 1
+            ax.put(ax.application(pid), [kAXFocusedUIElementAttribute: fakeElement(95_500 + n)])  // a new page's focus
+        }
+    }
+
     private var downs: [RecordingPoster.Entry] {
         poster.entries.filter { [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains($0.type) }
     }
 
     func testAnElementThatListsPressIsPressedOverAX() async throws {
         world()
+        pressesTakeEffect()
         let s = shot()
         let r = try await act(.click(CUClickAction(point: [30, 55], shotId: s)))  // (130,155): the link's text
         XCTAssertEqual(r.rung, 1)
@@ -160,6 +171,7 @@ final class OffDesktopActTests: XCTestCase {
 
     func testAnElementThatListsNoPressIsPressedUnlistedThenAncestorsThenEvents() async throws {
         world()
+        pressesTakeEffect()
         try await act(.click(CUClickAction(ref: ref(linkText))))  // static text: lists nothing
         XCTAssertEqual(ax.performed, ["\(token(linkText)):AXPress"], "AX first: press, unlisted")
         ax.refuses = ["\(token(linkText)):AXPress"]
@@ -420,6 +432,7 @@ final class OffDesktopActTests: XCTestCase {
         ax.setActions(window, ["AXAddToStage", kAXRaiseAction])
         sys.stageManager = true
         sys.front = 1
+        pressesTakeEffect()
         let s = shot()
         let r = try await act(.click(CUClickAction(point: [30, 55], shotId: s)))  // the link's text
         XCTAssertFalse(ax.written.contains("\(token(window)):AXMinimized"), "never un-minimized: that pulls the user's view")

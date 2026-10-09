@@ -85,6 +85,12 @@ final class CUTarget: @unchecked Sendable {
         lastSelection = (e, location, length, value, ms)
     }
 
+    /// The bound window's focus as last read (`CUCore.windowFocus`): the act it was read in, when, and what.
+    /// Pid-queue only.
+    var focusCache: (act: Int, atMs: Double, focus: CUCore.WindowFocus)?
+    /// The focus read after the last act, and when: the next act's "before". Pid-queue only.
+    var focusAfterLastAct: (atMs: Double, focus: CUCore.WindowFocus)?
+
     /// When this target last had a window-targeted click posted to place the focus or make its window key:
     /// the app may handle it after the act's next accessibility write (a late click moves the caret).
     /// Pid-queue only.

@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.2.0` (the contents of [`VERSION`](VERSION))
+Helper version: `1.3.0` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -208,7 +208,7 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 ### 4.5 Actions
 
 `target.act` — `{targetId, sessionId, callId, action, access, allowForeground, privatePath}` →
-`{rung, detail?, input?, inputUnknown?}`.
+`{rung, detail?, input?, inputUnknown?, focusNow?, focusLost?}`.
 
 - `callId` is required (it is what `cancel` names). `access` is `"full"` or `"click"`; with `"click"` only
   `click`, `scroll` and `action` are allowed, anything else is `not_allowed` (`reason: "click_only"`).
@@ -220,6 +220,14 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   (`[14] text area "Comment"`; for a window with no accessibility, `the window (it has no accessibility here)`);
   `inputUnknown: true` instead when the app reported no focused element. A `key` that went to a menu item
   carries neither (its `detail` names the item).
+- For any act: when the bound window's focus moved during it, `focusNow` says where it is now (name and role
+  only — never a value, a secure field included), or `focusLost: true` when it was known before and the app
+  reports none now. The focus is the bound window's own: the app's focused element when it lies in that window
+  (where its keys go), else — for a window that is not its app's key window — the element marked focused in the
+  window's web content.
+- `type` and `paste` with no `into` refuse (`refused`) a focus that is not a text field (`focus_not_editable`),
+  and several lines or more than 200 characters for a single-line field or for a browser's own field outside the
+  page (`wrong_field_shape`); the message names the focus (and the page's editable element).
 - `action` is an object discriminated by `kind`, its fields beside it:
 
 | `kind` | Fields |
@@ -340,7 +348,7 @@ daemon words each one ("Notes quit — open it again with apps.open()", "Notes's
 useWindow to pick another", …) and reads an absent `reason` (an older helper) as `unknown`.
 
 `refused` reasons: `secure_field`, `auth_dialog`, `privacy_pane`, `winter_itself`, `save_path`,
-`focus_unknown`, `focus_not_placed`, `applescript`, `automation_denied`.
+`focus_unknown`, `focus_not_placed`, `focus_not_editable`, `wrong_field_shape`, `applescript`, `automation_denied`.
 
 ## 6. Floors
 
@@ -486,3 +494,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.0.0 | Initial: the methods, errors, notifications and `view.*` stream above. `protocol_mismatch` refusals of `hello` carry `helperVersion` beside `expected` (additive). |
 | 1 | 1.1.0 | `target_lost` errors carry `data.reason` (`app_quit`, `window_closed`, `helper_restart`, `unknown`) and the `targetLost` notification's `reason` takes the same four values (additive: a client that ignores it is unaffected; one that reads it must treat an absent reason as `unknown`). |
 | 1 | 1.2.0 | A type or paste stopped while typing keys carries `data.typed` and `data.total` (on `cancelled`, and on any other error it hit mid-typing, whose message also says it); `target.act` results for `type`, `paste`, `key` and `setValue` carry `input` / `inputUnknown` (§4.5) — additive: a client that ignores them is unaffected. |
+| 1 | 1.3.0 | `target.act` results carry `focusNow` / `focusLost` (§4.5); `refused` gains the reasons `focus_not_editable` and `wrong_field_shape` for `type`/`paste` with no `into` — additive. |

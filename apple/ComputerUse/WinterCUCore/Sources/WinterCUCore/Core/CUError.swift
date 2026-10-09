@@ -164,4 +164,9 @@ public enum CUFloorReason: String, Codable, Sendable {
     /// The named field could not be given the keyboard focus, so nothing was typed (keys would have gone to
     /// whatever had it).
     case focusNotPlaced = "focus_not_placed"
+    /// Text with no `into`, and the focus is not a text field (a menu bar, a button).
+    case focusNotEditable = "focus_not_editable"
+    /// Text with no `into` that does not fit the focused field: several lines (or a long text) for a single-line
+    /// field, or for the browser's own address/search field rather than the page.
+    case wrongFieldShape = "wrong_field_shape"
 }
