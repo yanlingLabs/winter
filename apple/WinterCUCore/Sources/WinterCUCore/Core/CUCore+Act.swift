@@ -505,6 +505,13 @@ extension CUCore {
     /// been typed since. Returns nil when the focus is unknown but allowed.
     @discardableResult
     func requireTypableFocus(_ t: CUTarget, _ g: TypingFocus = TypingFocus()) throws -> AXUIElement? {
+        let f = try typableFocusChecked(t, g)
+        // Capture-only: the app's reported focus may be an element of ANOTHER window — checked (a password
+        // field still refuses), never typed or inserted into.
+        return t.accessible ? f : nil
+    }
+
+    private func typableFocusChecked(_ t: CUTarget, _ g: TypingFocus) throws -> AXUIElement? {
         if let f = reportedFocus(t) {
             if ElementInfo(f, ax).secure { throw secureRefusal() }
             return f
@@ -795,7 +802,7 @@ extension CUCore {
     /// a web field made Safari activate itself and pull the user to its desktop; the content process takes
     /// them without that. The app's pid otherwise.
     func keyboardTarget(_ t: CUTarget, focused: AXUIElement?) -> pid_t {
-        guard let f = focused ?? reportedFocus(t) else { return t.pid }
+        guard t.accessible, let f = focused ?? reportedFocus(t) else { return t.pid }
         var pid: pid_t = 0
         guard AXUIElementGetPid(f, &pid) == .success, pid != t.pid, sys.isContentProcess(pid, of: t.pid) else { return t.pid }
         CULog.act.notice("keys in \(t.appName, privacy: .public): pid events → \(self.sys.processName(pid: pid) ?? "content process", privacy: .public) \(pid, privacy: .public)")
@@ -819,6 +826,9 @@ extension CUCore {
     /// press route first too, for the helper's lifetime. Returns whether focus is on `e` now.
     @discardableResult
     func focusField(_ e: AXUIElement, _ t: CUTarget) -> Bool {
+        // A capture-only window has no element of its own to focus: never a write (its "window" element is the
+        // application's). Keys reach it by the synthetic activation and window-targeted focus records.
+        guard t.accessible else { return false }
         if isFocused(e, t) { return true }
         if pressToFocus(e, t) { return true }
         // The write is forbidden for web content and apps known to activate on it: leave focus, say so.
@@ -951,6 +961,7 @@ extension CUCore {
         let textual = Self.producesText(chord)
         // Characters (and cmd+V) are text input: never into a password or payment field (C1).
         if textual { e = try requireTypableFocus(t, g) ?? e }
+        if !t.accessible { e = nil }  // capture-only: keys go to the window, not to a reported element
         cursor(t, "key", at: e.flatMap { ElementInfo($0, ax).center }, text: a.combo)
         // Keys go to the app's key window: make it the bound one first (in the background, never the front).
         let keyed = focusBoundWindow(p, t)
@@ -987,7 +998,7 @@ extension CUCore {
             // element as KEYS: the app's menu item acts on the app's responder, not the web field (Safari's
             // Select All selected nothing in Google Docs' title, so typing appended).
             let editing = Self.isEditingShortcut(chord) && editableFocus(t, g.explicit ?? reportedFocus(t))
-            if !editing, let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
+            if !editing, t.accessible, let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
                 if CUPasteMenu.isPasteTitle(item.title) { try requirePasteSafe(p, t, g) }
                 return .menuItem(item.element, title: item.title)
             }

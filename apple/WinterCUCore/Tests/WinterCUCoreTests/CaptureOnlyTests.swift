@@ -13,6 +13,9 @@ final class CaptureOnlyTests: XCTestCase {
     var sys: FakeSystem!
     var core: CUCore!
     var target: CUTarget!
+    var poster: RecordingPoster!
+    /// A field in ANOTHER window of the app that the app reports as focused.
+    let otherWindowField = fakeElement(96_602)
 
     private func bind(onScreen: Bool = true) {
         ax = FakeAX()
@@ -24,7 +27,8 @@ final class CaptureOnlyTests: XCTestCase {
         w.title = ""
         w.onScreen = onScreen
         sys.windows[92_123] = w
-        core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: ax, sys: sys,
+        poster = RecordingPoster()
+        core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: poster, ax: ax, sys: sys,
                       pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
         target = CUTarget(id: "t1", sessionId: "s", pid: pid, bundleId: "jp.vroid.studio", appName: "VRoid Studio",
                           isChromium: false, mirror: false, windowID: 92_123, windowTitle: "", accessible: false)
@@ -46,4 +50,48 @@ final class CaptureOnlyTests: XCTestCase {
         XCTAssertTrue(r.elements.isEmpty)
     }
 
+    private func reportFocus(secure: Bool = false) {
+        ax.add(otherWindowField, role: kAXTextFieldRole, subrole: secure ? kAXSecureTextFieldSubrole : nil,
+               frame: CGRect(x: 0, y: 0, width: 200, height: 24))
+        ax.makeSettable(otherWindowField, kAXSelectedTextAttribute)
+        ax.makeSettable(otherWindowField, kAXFocusedAttribute)
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [AXUIElement](), kAXFocusedUIElementAttribute: otherWindowField])
+    }
+
+    private func token(_ e: AXUIElement) -> String { var p: pid_t = 0; AXUIElementGetPid(e, &p); return "\(p)" }
+
+    @discardableResult
+    private func act(_ a: CUAction) async throws -> TargetActResult {
+        try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c", action: a, access: .full,
+                                                 allowForeground: false, privatePath: true))
+    }
+
+    func testTypingIntoACaptureOnlyWindowWritesNoAccessibilityAttributeAndSendsKeys() async throws {
+        bind()
+        reportFocus()
+        try await act(.type(CUTypeAction(text: "hi")))
+        XCTAssertEqual(ax.written, [], "no AXFocused, AXMain or AXSelectedText write — not on the app element, not into another window's field")
+        XCTAssertEqual(poster.keyDowns.count, 2, "the text went as key events to the app")
+        XCTAssertTrue(poster.keyDowns.allSatisfy { $0.pid == pid })
+    }
+
+    func testAKeyIntoACaptureOnlyWindowIsAKeyEventNeverAWrite() async throws {
+        bind()
+        reportFocus()
+        try await act(.key(CUKeyAction(combo: "enter")))
+        XCTAssertEqual(ax.written, [])
+        XCTAssertEqual(poster.keyDowns.count, 1)
+    }
+
+    func testAPasswordFieldTheAppReportsStillRefusesTyping() async throws {
+        bind()
+        reportFocus(secure: true)
+        do {
+            try await act(.type(CUTypeAction(text: "hi")))
+            XCTFail("expected the secure-field floor")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "refused")
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty)
+    }
 }

@@ -174,7 +174,8 @@ extension CUCore {
     /// Makes the bound window the app's main window (menu commands and keys apply to it), checked like any
     /// background step.
     func makeBoundWindowMain(_ t: CUTarget) {
-        guard let w = try? windowElement(t), ax.bool(w, kAXMainAttribute) != true else { return }
+        // Capture-only: the cached "window" is the application element — never written.
+        guard t.accessible, let w = try? windowElement(t), ax.bool(w, kAXMainAttribute) != true else { return }
         _ = backgroundStep(.axMain, t, run: { (try? ax.set(w, kAXMainAttribute, kCFBooleanTrue)) != nil }, undo: {})
     }
 }
