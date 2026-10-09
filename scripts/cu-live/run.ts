@@ -43,7 +43,7 @@ import { resolvePlatformPackageWinter } from "../../packages/core/src/runtime-sd
 import { buildAll, FIXTURE_MAIN, OUT_DIR, REPO_ROOT, type Built } from "./build";
 import { DaemonClient } from "./client";
 import {
-  parseDuration, check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, pointerMoves, promptAppeared, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, type BannerSpec, parseFrontReading, startPlan, describeStartPlan, UNATTENDED_POLL_MS, type FrontReading, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
+  parseDuration, check, computerV2Message, describeViolations, focusViolations, hardwareInputTimes, hardwareIdleMs, markerFacts, pointerMoves, promptAppeared, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, type BannerSpec, parseFrontReading, startPlan, describeStartPlan, UNATTENDED_POLL_MS, type FrontReading, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, withRealDir, type RealAppsRun } from "./real-apps";
@@ -291,24 +291,18 @@ async function runTurn(client: DaemonClient, sessionId: string, text: string, ms
   const from = client.events.length;
   const cards: SessionEvent[] = [];
   const answered = new Set<string>();
-  const span: [number, number] = [Date.now(), Number.POSITIVE_INFINITY];
-  actionWindows.push(span);
-  try {
-    await client.call(METHODS.sessionSend, { sessionId, text });
-    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && (e as { threadId?: string }).threadId === "main", ms, from, () => {
-      for (let i = from; i < client.events.length; i++) {
-        const e = client.events[i]! as SessionEvent & { callId?: string; toolName?: string };
-        if (e.type !== "approval_requested" || e.sessionId !== sessionId || e.callId === undefined || answered.has(e.callId)) continue;
-        answered.add(e.callId);
-        cards.push(e);
-        // Only the per-app card is approved; any other card (a foreground request would hand over the real pointer) is denied.
-        const approved = answer !== undefined && answer !== false && (e as { summary?: string }).summary === expectedCardSummary();
-        void client.call(METHODS.approvalRespond, { sessionId, callId: e.callId, approved, ...(approved ? { optionId: answer } : {}) }).catch(() => {});
-      }
-    });
-  } finally {
-    span[1] = Date.now();
-  }
+  await client.call(METHODS.sessionSend, { sessionId, text });
+  await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && (e as { threadId?: string }).threadId === "main", ms, from, () => {
+    for (let i = from; i < client.events.length; i++) {
+      const e = client.events[i]! as SessionEvent & { callId?: string; toolName?: string };
+      if (e.type !== "approval_requested" || e.sessionId !== sessionId || e.callId === undefined || answered.has(e.callId)) continue;
+      answered.add(e.callId);
+      cards.push(e);
+      // Only the per-app card is approved; any other card (a foreground request would hand over the real pointer) is denied.
+      const approved = answer !== undefined && answer !== false && (e as { summary?: string }).summary === expectedCardSummary();
+      void client.call(METHODS.approvalRespond, { sessionId, callId: e.callId, approved, ...(approved ? { optionId: answer } : {}) }).catch(() => {});
+    }
+  });
   const events = client.events.slice(from).filter((e) => e.sessionId === sessionId);
   const call = events.find((e): e is Extract<SessionEvent, { type: "tool_call" }> => e.type === "tool_call" && /computer_?v2/i.test((e as { name: string }).name));
   const result = call === undefined ? undefined : events.find((e): e is Extract<SessionEvent, { type: "tool_result" }> => e.type === "tool_result" && e.callId === call.callId);
@@ -332,7 +326,7 @@ async function dryRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   const reading = parseFrontReading(sh(built.tool, ["front"]).stdout);
   results.push(reading === undefined
     ? { name: "plan: the start", group: "plan", status: "fail", ms: 0, checks: [check("cu-live-tool front gave a reading", false)] }
-    : { name: "plan: the start", group: "plan", status: "pass", ms: 0, checks: [check("cu-live-tool front gave a reading", true)], note: `${describeStartPlan(startPlan(reading))}; ${o.unattended ? `waits for ${o.idleMs / 1000} s with no input (now ${Math.round((reading.hidIdleMs ?? 0) / 1000)} s), then a ${o.countdownMs / 1000} s countdown banner any input postpones` : "starts at once"}; a "don't touch the Mac" banner for the whole run` });
+    : { name: "plan: the start", group: "plan", status: "pass", ms: 0, checks: [check("cu-live-tool front gave a reading", true)], note: `${describeStartPlan(startPlan(reading))}; ${o.unattended ? `waits for ${o.idleMs / 1000} s with no HARDWARE input (a listen-only tap; synthetic events and HID tickles never count), then a ${o.countdownMs / 1000} s countdown banner any input postpones` : "starts at once"}; a "don't touch the Mac" banner for the whole run` });
   // The generic app checks' PLAN (no screen): which apps would run, and what each would do.
   const deps = liveResolveDeps();
   for (const a of [...parseApps(o.apps), ...(o.realApps ? DEFAULT_GENERIC_APPS.map((d, i) => ({ query: d.query, key: `default${i}` })) : [])]) {
@@ -433,55 +427,58 @@ class Aborted extends Error {
 }
 
 
-/** When ComputerV2 turns ran ([sent, completed]): the helper's own background events land inside these. */
-const actionWindows: Array<[number, number]> = [];
-const ACTION_SLACK_MS = 1_500;
-
 /** The `front` reading the run starts from — after the unattended idle wait (every 5 s, up to --max-wait). */
 async function waitToStart(built: Pick<Built, "tool" | "fixtureDone">, o: Options): Promise<FrontReading> {
-  const t0 = Date.now();
-  let logged = 0;
-  for (;;) {
-    const reading = parseFrontReading(sh(built.tool, ["front"]).stdout);
-    const d = idleGate(reading, Date.now() - t0, o.maxWaitMs, o.unattended, o.idleMs);
-    if (d.kind === "refuse") throw new Error(d.reason);
-    if (d.kind === "wait") {
-      if (Date.now() - logged >= 60_000) { log(d.reason); logged = Date.now(); }
-      await sleep(UNATTENDED_POLL_MS);
-      continue;
+  const front = (): FrontReading => {
+    const r = parseFrontReading(sh(built.tool, ["front"]).stdout);
+    if (r === undefined) throw new Error("cu-live-tool front gave no reading");
+    return r;
+  };
+  if (!o.unattended) return front();
+  // The user's presence is read ONLY from hardware input (the monitor's listen-only tap): a Unity app's HID
+  // tickles reset the HID idle counter with no event at all, and synthetic events never count. The same monitor
+  // watches the countdown.
+  const gate = new LineProcess<MonitorSample>(spawn(built.tool, ["monitor", "--interval-ms", "250"], { stdio: ["pipe", "pipe", "pipe"] }), parseMonitorLine);
+  try {
+    await until("the idle gate's monitor", 5_000, () => gate.items.length > 0);
+    const first = gate.items[0]!;
+    if (first.hw !== undefined && first.hwKeys === false) log("keys are not watched (this terminal has no Input Monitoring access) — the pointer, clicks and scrolls are");
+    const t0 = Date.now();
+    let logged = 0;
+    for (;;) {
+      const d = idleGate(hardwareIdleMs(gate.items, Date.now()), Date.now() - t0, o.maxWaitMs, o.unattended, o.idleMs);
+      if (d.kind === "refuse") throw new Error(d.reason);
+      if (d.kind === "wait") {
+        if (Date.now() - logged >= 60_000) { log(d.reason); logged = Date.now(); }
+        await sleep(UNATTENDED_POLL_MS);
+        continue;
+      }
+      // Idle long enough: the countdown banner. Any input postpones the run and the gate starts over.
+      if (Date.now() - t0 + o.countdownMs > o.maxWaitMs) throw new Error("--unattended: --max-wait leaves no time for the countdown — the run was not started");
+      log(`no hardware input for ${o.idleMs / 1000} s: a ${o.countdownMs / 1000} s countdown banner is up — any input postpones the run`);
+      const outcome = await countdown(built, o, gate);
+      if (outcome === "go") return front();
+      log(`postponed (${outcome.why} during the countdown) — waiting for ${o.idleMs / 1000} s with no input again`);
+      logged = Date.now();
     }
-    if (reading === undefined) throw new Error("cu-live-tool front gave no reading");
-    if (!o.unattended) return reading;
-    // Idle long enough: the countdown banner. Any input postpones the run and the gate starts over.
-    if (Date.now() - t0 + o.countdownMs > o.maxWaitMs) throw new Error("--unattended: --max-wait leaves no time for the countdown — the run was not started");
-    log(`no input for ${o.idleMs / 1000} s: a ${o.countdownMs / 1000} s countdown banner is up — any input postpones the run`);
-    const outcome = await countdown(built, o);
-    if (outcome === "go") {
-      const fresh = parseFrontReading(sh(built.tool, ["front"]).stdout);
-      if (fresh === undefined) throw new Error("cu-live-tool front gave no reading");
-      return fresh;
-    }
-    log(`postponed (${outcome.why} during the countdown) — waiting for ${o.idleMs / 1000} s with no input again`);
-    logged = Date.now();
+  } finally {
+    await gate.stop();
   }
 }
 
-/** The countdown banner up for `o.countdownMs`, watched by its own monitor: "go" when untouched, else why it was postponed. */
-async function countdown(built: Pick<Built, "tool" | "fixtureDone">, o: Options): Promise<"go" | { why: string }> {
-  const watch = new LineProcess<MonitorSample>(spawn(built.tool, ["monitor", "--interval-ms", "100"], { stdio: ["pipe", "pipe", "pipe"] }), parseMonitorLine);
+/** The countdown banner up for `o.countdownMs`, watched through the gate's monitor: "go" when untouched, else why it was postponed. */
+async function countdown(built: Pick<Built, "fixtureDone">, o: Options, gate: LineProcess<MonitorSample>): Promise<"go" | { why: string }> {
+  const startedAt = Date.now();
+  openBanner(built, { kind: "countdown", seconds: Math.round(o.countdownMs / 1000), watchPid: process.pid });
   try {
-    await until("the countdown's monitor", 5_000, () => watch.items.length > 0);
-    const startedAt = Date.now();
-    openBanner(built, { kind: "countdown", seconds: Math.round(o.countdownMs / 1000), watchPid: process.pid });
     for (;;) {
       await sleep(100);
-      const d = countdownDecision(watch.items, startedAt, Date.now(), o.countdownMs);
+      const d = countdownDecision(gate.items, startedAt, Date.now(), o.countdownMs);
       if (d.kind === "go") return "go";
       if (d.kind === "postpone") return { why: d.why };
     }
   } finally {
     closeBanners(built);
-    await watch.stop();
   }
 }
 
@@ -517,6 +514,8 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   let helperPid: number | undefined;
   let client: DaemonClient | undefined;
   let askClient: DaemonClient | undefined;
+  /** What is still to undo for each `--apps`/generic app (quit what the run launched, close what it opened). */
+  const restores = new Map<string, () => Promise<Check[]>>();
   /** Connections of the fresh sessions some scenarios (and their prepare turns) use. */
   const extraClients: DaemonClient[] = [];
   let realApps: RealAppsRun | undefined;
@@ -540,15 +539,15 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     if (monitor === undefined) return;
     abortIfPrompt();
     const now = Date.now();
-    // Real input: the pointer moved, a key or click reached the user's app (in front), or the HID idle counter
-    // dropped while no ComputerV2 turn was working — the helper's SkyLight-routed background events (rung 3)
-    // reset that counter too, so a drop during a turn (or just after it) is the helper, not you.
-    const hid = hidInputTimes(monitor.items, inputWatchFrom, now).filter((t) => !actionWindows.some(([a, b]) => t >= a && t <= b + ACTION_SLACK_MS));
-    const moved = pointerMoves(monitor.items, inputWatchFrom, now);
-    const leaked = fixtureEvents(f).filter((e) => e.role === "user" && (e.ev === "user.key" || e.ev === "user.mouse") && e.t >= inputWatchFrom);
-    const first = [...hid, ...moved, ...leaked.map((e) => e.t)].sort((x, y) => x - y)[0];
+    // Real input is HARDWARE input only (the monitor's listen-only tap: source pid 0) — never the HID idle counter
+    // (a Unity app's tickles, the helper's SkyLight-routed events) and never a synthetic event. Where keys are not
+    // watched (no Input Monitoring access), a key reaching the user's app (in front) stands in for them.
+    const hardware = hardwareInputTimes(monitor.items, inputWatchFrom, now);
+    const keysWatched = monitor.items.at(-1)?.hwKeys === true;
+    const leaked = keysWatched ? [] : fixtureEvents(f).filter((e) => e.role === "user" && e.ev === "user.key" && e.t >= inputWatchFrom);
+    const first = [...hardware, ...leaked.map((e) => e.t)].sort((x, y) => x - y)[0];
     if (first !== undefined) {
-      const what = [hid.length > 0 ? "keyboard/trackpad" : "", moved.length > 0 ? "the pointer moved" : "", leaked.length > 0 ? "your app got input" : ""].filter(Boolean).join(", ");
+      const what = [hardware.length > 0 ? "mouse, trackpad or keyboard" : "", leaked.length > 0 ? "a key reached your app" : ""].filter(Boolean).join(", ");
       throw new Aborted(`real input at ${new Date(first).toISOString()} (${what}) — the run was stopped so nothing acts against you`);
     }
   };
@@ -815,7 +814,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         await activateUser();
         await sleep(500);
         inputWatchFrom = Date.now();
-      });
+      }, restores);
       for (const r of rows) { results.push(r.result); windows.push(r); }
     }
     // The route behind each failure: the helper's own act/bind log lines in that action's window, plus the rungs the
@@ -846,6 +845,15 @@ report({ ok: true });`, 40_000), 100_000);
     const step = async (name: string, fn: () => Promise<void> | void): Promise<void> => {
       try { await fn(); cleanup.push(check(name, true)); } catch (err) { cleanup.push(check(name, false, err instanceof Error ? err.message : String(err))); }
     };
+    // An abort mid-way still leaves every app as found: quit what the run launched (VRoid Studio, Chrome…) and close
+    // what it opened — while the daemon and the helper are still up for a closing turn.
+    for (const [key, restore] of restores) {
+      await step(`left ${key} as found (after the run stopped)`, async () => {
+        const failed = (await restore()).filter((c) => !c.ok);
+        if (failed.length > 0) throw new Error(failed.map((c) => `${c.name}: ${c.detail ?? ""}`).join("; "));
+      });
+    }
+    restores.clear();
     if (realApps !== undefined) await step("closed what the real-apps scenarios opened", () => realApps!.cleanup());
     for (const role of ["main", "user"] as const) {
       const pid = role === "main" ? f.mainPid : f.userPid;
@@ -938,17 +946,41 @@ function appPids(bundleId: string): number[] {
  * this run launched, through its window's full-screen button — a SETUP turn, not asserted, after which the user is
  * brought back to their Space); then the app is left as found.
  */
-async function runGenericApp(a: GenericApp, runScenario: RunScenario, setupTurn: SetupTurn, returnUser: () => Promise<void>): Promise<Row[]> {
+/**
+ * Undo what the run did to one app: quit it when the run launched it, else close a window the run opened (the app
+ * was running with none). The normal end of an app's rows runs it, and so does the cleanup after an abort.
+ */
+async function leaveAsFound(a: GenericApp, bundleId: string | undefined, wasRunning: boolean | undefined, bindOutput: string, setupTurn: SetupTurn): Promise<Check[]> {
+  const plan = restorePlan(wasRunning, bindOutput);
+  if (plan.quit && bundleId !== undefined) {
+    for (const pid of appPids(bundleId)) { try { process.kill(pid, "SIGTERM"); } catch { /* gone */ } }
+    await until(`${a.query} to quit`, 10_000, () => appPids(bundleId).length === 0).catch(() => undefined);
+    return [check("quit the app this run launched", appPids(bundleId).length === 0, `still running: ${appPids(bundleId).join(", ")}`)];
+  }
+  if (plan.closeOpenedWindow) {
+    const closed = await setupTurn(SCRIPTS.closeOpened(a));
+    return [check("closed the window this run opened", closed.facts.closed === true, closed.output.slice(-200))];
+  }
+  return [check("nothing to undo: the app was already running and no window was opened", true)];
+}
+
+async function runGenericApp(a: GenericApp, runScenario: RunScenario, setupTurn: SetupTurn, returnUser: () => Promise<void>,
+  restores: Map<string, () => Promise<Check[]>>): Promise<Row[]> {
   const rows: Row[] = [];
   const group = `app ${a.query}`;
+  // Registered BEFORE the bind (which may launch the app): an abort at any point still quits what the run launched.
+  const runningBefore = a.bundleId !== undefined ? appPids(a.bundleId).length > 0 : undefined;
+  let undo: { bundleId: string | undefined; wasRunning: boolean | undefined; bindOutput: string } = { bundleId: a.bundleId, wasRunning: runningBefore, bindOutput: "" };
+  restores.set(a.query, () => leaveAsFound(a, undo.bundleId, undo.wasRunning, undo.bindOutput, setupTurn));
   const skipRow = (label: string, reason: string): Row => ({ result: { name: `${a.query}: ${label}`, group, status: "skip", ms: 0, checks: [], note: reason }, since: 0, end: 0 });
   // An app the bind LAUNCHES may activate itself as it starts (Chrome does); the guardian puts your app back — the
   // same allowance as the fixture's own self-activation scenarios.
   const bind = await runScenario({ ...genericScenario(a, "bind on this desktop", "bind"), allowExcursionMs: 500 });
   rows.push(bind);
-  if (bind.facts.installed === false) return rows;
+  if (bind.facts.installed === false) { restores.delete(a.query); return rows; }
   const wasRunning = typeof bind.facts.wasRunning === "boolean" ? bind.facts.wasRunning : undefined;
   const bundleId = typeof bind.facts.bundleId === "string" ? bind.facts.bundleId : undefined;
+  undo = { bundleId: bundleId ?? a.bundleId, wasRunning: wasRunning ?? runningBefore, bindOutput: bind.output };
   if (bind.facts.bound === true) {
     const refs = Number(bind.facts.refs ?? 0);
     for (const step of onDesktopPlan(refs)) {
@@ -973,19 +1005,10 @@ async function runGenericApp(a: GenericApp, runScenario: RunScenario, setupTurn:
     rows.push(skipRow("the remaining actions", "the bind failed"));
   }
   // Leave it as found.
-  const plan = restorePlan(wasRunning, bind.output);
   const t0 = Date.now();
-  const checks: Check[] = [];
-  if (plan.quit && bundleId !== undefined) {
-    for (const pid of appPids(bundleId)) { try { process.kill(pid, "SIGTERM"); } catch { /* gone */ } }
-    await until(`${a.query} to quit`, 10_000, () => appPids(bundleId).length === 0).catch(() => undefined);
-    checks.push(check("quit the app this run launched", appPids(bundleId).length === 0, `still running: ${appPids(bundleId).join(", ")}`));
-  } else if (plan.closeOpenedWindow) {
-    const closed = await setupTurn(SCRIPTS.closeOpened(a));
-    checks.push(check("closed the window this run opened", closed.facts.closed === true, closed.output.slice(-200)));
-  } else {
-    checks.push(check("nothing to undo: the app was already running and no window was opened", true));
-  }
+  const restore = restores.get(a.query)!;
+  restores.delete(a.query);
+  const checks = await restore();
   rows.push({ result: { name: `${a.query}: left as found`, group, status: statusOf(checks), ms: Date.now() - t0, checks }, since: 0, end: 0 });
   return rows;
 }

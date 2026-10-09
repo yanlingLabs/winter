@@ -51,10 +51,15 @@ struct Sample: Equatable {
     var mouse: (x: Int, y: Int)? = nil
     /// The active Space's type (SkyLight's `SLSSpaceGetType`: 0 a desktop, 4 a full-screen app's Space) — `front` only.
     var spaceType: Int? = nil
+    /// The user's hardware input (`HardwareInput`, monitor only): events counted since the tap started, the last
+    /// one's time, the tap's start, and whether keys are watched too.
+    var hardware: (count: Int, lastMs: Int?, startedMs: Int, keys: Bool)? = nil
 
     static func == (a: Sample, b: Sample) -> Bool {
         a.t == b.t && a.front == b.front && a.frontPid == b.frontPid && a.space == b.space && a.hidIdleMs == b.hidIdleMs
             && a.mouse?.x == b.mouse?.x && a.mouse?.y == b.mouse?.y && a.spaceType == b.spaceType
+            && a.hardware?.count == b.hardware?.count && a.hardware?.lastMs == b.hardware?.lastMs
+            && a.hardware?.startedMs == b.hardware?.startedMs && a.hardware?.keys == b.hardware?.keys
     }
 
     /// `{"t","front","frontPid","space","hidIdleMs"[,"mouse":[x,y]]}` — the key order the rig's parser and a human both expect.
@@ -62,7 +67,8 @@ struct Sample: Equatable {
         "{\"t\":\(t),\"front\":\(JSONOut.optional(front)),\"frontPid\":\(JSONOut.optional(frontPid)),"
             + "\"space\":\(JSONOut.optional(space)),\"hidIdleMs\":\(JSONOut.optional(hidIdleMs))"
             + (mouse.map { ",\"mouse\":[\($0.x),\($0.y)]" } ?? "")
-            + (spaceType.map { ",\"spaceType\":\($0)" } ?? "") + "}"
+            + (spaceType.map { ",\"spaceType\":\($0)" } ?? "")
+            + (hardware.map { ",\"hw\":\($0.count),\"hwLast\":\(JSONOut.optional($0.lastMs)),\"hwStart\":\($0.startedMs),\"hwKeys\":\($0.keys)" } ?? "") + "}"
     }
 }
 

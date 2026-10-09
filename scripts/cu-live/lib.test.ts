@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { liveHomeRefusal } from "./daemon-entry";
 import {
-  callLine, computerV2Message, describeViolations, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hidInputTimes, lastValue, pointerMoves, promptAppeared, PROMPT_BUNDLE_IDS, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, parseDuration, parseFrontReading, startPlan, describeStartPlan, type FrontReading, markerFacts, MIXED_TEXT,
+  callLine, computerV2Message, describeViolations, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hardwareInputTimes, hardwareIdleMs, lastValue, pointerMoves, promptAppeared, PROMPT_BUNDLE_IDS, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, parseDuration, parseFrontReading, startPlan, describeStartPlan, markerFacts, MIXED_TEXT,
   parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type FixtureEvent, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { minimalPdf, REAL_APP_SCENARIOS, REAL_DIR_TOKEN, withRealDir } from "./real-apps";
@@ -40,13 +40,25 @@ describe("the monitor analysis", () => {
     expect(focusViolations([sample(10, 7, 4)], 0, 50, { ...base, space: null })).toEqual([]);
   });
 
-  test("HID input shows as a drop of the idle counter; steady growth and jitter are not input", () => {
-    const quiet = [sample(0, 7, 3, 1000), sample(20, 7, 3, 1020), sample(40, 7, 3, 1035), sample(60, 7, 3, 1062)];
-    expect(hidInputTimes(quiet, 0, 100)).toEqual([]);
-    const typed = [sample(0, 7, 3, 1000), sample(20, 7, 3, 1020), sample(40, 7, 3, 3), sample(60, 7, 3, 23)];
-    expect(hidInputTimes(typed, 0, 100)).toEqual([40]);
-    expect(hidInputTimes(typed, 50, 100)).toEqual([]);
-    expect(hidInputTimes([sample(0, 7, 3, null), sample(20, 7, 3, 5)], 0, 100)).toEqual([]);
+  test("real input is HARDWARE input only: the tap's count grows; the HID idle counter is never read", () => {
+    const hw = (t: number, count: number, last: number | null, hidIdleMs: number | null = 1000): MonitorSample => ({ ...sample(t, 7, 3, hidIdleMs), hw: count, hwLast: last, hwStart: 0, hwKeys: true });
+    // A Unity app's HID tickles reset the idle counter every few seconds with NO event: never input.
+    const tickled = [hw(0, 0, null, 9_000), hw(20, 0, null, 3), hw(40, 0, null, 23), hw(60, 0, null, 5)];
+    expect(hardwareInputTimes(tickled, 0, 100)).toEqual([]);
+    expect(hardwareIdleMs(tickled, 600_000)).toBe(600_000);
+    // A hardware event: the count grows, its time is the event's.
+    const moved = [hw(0, 0, null), hw(20, 0, null), hw(40, 3, 35), hw(60, 3, 35)];
+    expect(hardwareInputTimes(moved, 0, 100)).toEqual([35]);
+    expect(hardwareInputTimes(moved, 50, 100)).toEqual([]);
+    expect(hardwareIdleMs(moved, 1_035)).toBe(1_000);
+    // Events all before the window are not the window's, even when the sample carrying them is inside it.
+    expect(hardwareInputTimes([hw(0, 0, null), hw(40, 2, 10)], 30, 100)).toEqual([]);
+    // No tap (an older tool, or the window server refused it): no reading at all, never "idle".
+    expect(hardwareInputTimes([sample(0, 7, 3, 9), sample(20, 7, 3, 1)], 0, 100)).toEqual([]);
+    expect(hardwareIdleMs([sample(0, 7, 3, 999_999)], 10)).toBeNull();
+    expect(parseMonitorLine('{"t":5,"front":null,"frontPid":null,"space":null,"hidIdleMs":3,"hw":4,"hwLast":2,"hwStart":1,"hwKeys":false}'))
+      .toMatchObject({ hw: 4, hwLast: 2, hwStart: 1, hwKeys: false });
+    expect(parseMonitorLine('{"t":5,"front":null,"frontPid":null,"space":null,"hidIdleMs":3}')?.hw).toBeUndefined();
   });
 
   test("the completion window's model: status → ✓/!/✕ by rows, counts, and the open arguments", () => {
@@ -62,17 +74,15 @@ describe("the monitor analysis", () => {
     expect(JSON.parse(args[6]!)).toMatchObject({ status: "pass", passed: 2, path: "/r.json" });
   });
 
-  test("the start: an unattended run waits for a minute with no input, up to --max-wait", () => {
-    const reading = (o: Partial<FrontReading>): FrontReading => ({ front: "com.apple.Terminal", frontPid: 9, space: 7, spaceType: 0, hidIdleMs: 0, ...o });
-    expect(idleGate(reading({ hidIdleMs: 5 }), 0, 1_000, false)).toEqual({ kind: "go" });
+  test("the start: an unattended run waits for 3 min with no HARDWARE input, up to --max-wait", () => {
+    expect(idleGate(5, 0, 1_000, false)).toEqual({ kind: "go" });
     expect(UNATTENDED_IDLE_MS).toBe(180_000);
-    expect(idleGate(reading({ hidIdleMs: 61_000 }), 0, 10_800_000, true).kind).toBe("wait");
-    expect(idleGate(reading({ hidIdleMs: 181_000 }), 0, 10_800_000, true)).toEqual({ kind: "go" });
-    expect(idleGate(reading({ hidIdleMs: 61_000 }), 0, 10_800_000, true, 60_000)).toEqual({ kind: "go" });
-    expect(idleGate(reading({ hidIdleMs: 3_000 }), 60_000, 10_800_000, true).kind).toBe("wait");
-    expect(idleGate(reading({ hidIdleMs: 3_000 }), 10_797_000, 10_800_000, true)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("never idle") });
-    expect(idleGate(reading({ hidIdleMs: null }), 0, 10_800_000, true).kind).toBe("refuse");
-    expect(idleGate(undefined, 0, 10_800_000, true).kind).toBe("refuse");
+    expect(idleGate(61_000, 0, 10_800_000, true).kind).toBe("wait");
+    expect(idleGate(181_000, 0, 10_800_000, true)).toEqual({ kind: "go" });
+    expect(idleGate(61_000, 0, 10_800_000, true, 60_000)).toEqual({ kind: "go" });
+    expect(idleGate(3_000, 60_000, 10_800_000, true)).toMatchObject({ kind: "wait", reason: expect.stringContaining("no hardware input") });
+    expect(idleGate(3_000, 10_797_000, 10_800_000, true)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("never idle") });
+    expect(idleGate(null, 0, 10_800_000, true)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("tap did not start") });
     expect(parseDuration("3h")).toBe(10_800_000);
     expect(parseDuration("45m")).toBe(2_700_000);
     expect(parseDuration("90")).toBe(90_000);
@@ -81,24 +91,25 @@ describe("the monitor analysis", () => {
   });
 
   test("the countdown: any input postpones (the gate starts over); only an untouched countdown starts the run", () => {
-    const at = (t: number, hidIdleMs: number, mouse: [number, number] = [5, 5]): MonitorSample => ({ t, front: "x", frontPid: 1, space: 3, hidIdleMs, mouse });
-    const quiet = [at(1_000, 200_000), at(11_000, 210_000), at(21_000, 220_000), at(31_000, 230_000)];
+    // hw: the tap's hardware-event count; the HID idle counter (tickled to ~0 every few seconds) is ignored.
+    const at = (t: number, hw: number, hwLast: number | null, mouse: [number, number] = [5, 5]): MonitorSample => ({ t, front: "x", frontPid: 1, space: 3, hidIdleMs: 2, mouse, hw, hwLast, hwStart: 0, hwKeys: true });
+    const quiet = [at(1_000, 7, 400), at(11_000, 7, 400), at(21_000, 7, 400), at(31_000, 7, 400)];
     expect(COUNTDOWN_MS).toBe(30_000);
     expect(countdownDecision(quiet.slice(0, 2), 1_000, 11_000, 30_000)).toEqual({ kind: "wait", remainingMs: 20_000 });
     expect(countdownDecision(quiet, 1_000, 31_000, 30_000)).toEqual({ kind: "go" });
-    const typed = [at(1_000, 200_000), at(11_000, 210_000), at(12_000, 40)];
-    expect(countdownDecision(typed, 1_000, 31_000, 30_000)).toEqual({ kind: "postpone", at: 12_000, why: "a key or the trackpad" });
-    const moved = [at(1_000, 200_000), at(5_000, 204_000, [6, 5])];
-    expect(countdownDecision(moved, 1_000, 31_000, 30_000)).toMatchObject({ kind: "postpone", why: "the pointer moved" });
+    const touched = [at(1_000, 7, 400), at(11_000, 7, 400), at(12_000, 9, 11_900)];
+    expect(countdownDecision(touched, 1_000, 31_000, 30_000)).toEqual({ kind: "postpone", at: 11_900, why: "input from the mouse, trackpad or keyboard" });
+    // A synthetic pointer warp (a keep-awake app) moves the pointer with no hardware event: it never postpones.
+    expect(countdownDecision([at(1_000, 7, 400), at(5_000, 7, 400, [60, 5]), at(31_000, 7, 400, [60, 5])], 1_000, 31_000, 30_000)).toEqual({ kind: "go" });
     // Input BEFORE the banner went up is the idle gate's business, not the countdown's.
-    expect(countdownDecision([at(500, 10), at(1_000, 600), at(31_000, 30_600)], 1_000, 31_000, 30_000)).toEqual({ kind: "go" });
+    expect(countdownDecision([at(500, 6, 450), at(1_000, 7, 900), at(31_000, 7, 900)], 1_000, 31_000, 30_000)).toEqual({ kind: "go" });
     expect(bannerOpenArgs("/o/Winter CU Live Result.app", { kind: "countdown", seconds: 30, watchPid: 9 }))
       .toEqual(["-n", "-g", "-a", "/o/Winter CU Live Result.app", "--args", "--banner", '{"kind":"countdown","seconds":30,"watchPid":9}']);
   });
 
   test("the start plan: a regular desktop stays put; a full-screen start records the app and Space to return to", () => {
     const line = (o: Record<string, unknown>): string => JSON.stringify({ t: 1, front: "com.apple.Terminal", frontPid: 996, space: 2994, hidIdleMs: 70_000, ...o });
-    expect(parseFrontReading(line({ spaceType: 0 }))).toEqual({ front: "com.apple.Terminal", frontPid: 996, space: 2994, spaceType: 0, hidIdleMs: 70_000 });
+    expect(parseFrontReading(line({ spaceType: 0 }))).toEqual({ front: "com.apple.Terminal", frontPid: 996, space: 2994, spaceType: 0 });
     expect(parseFrontReading("not json")).toBeUndefined();
     const desktop = startPlan(parseFrontReading(line({ space: 1853, spaceType: 0 }))!);
     expect(desktop).toEqual({ kind: "desktop", space: 1853 });
