@@ -703,8 +703,6 @@ extension CUCore {
             return try pasteText(text, format: .text, p, t, token, g)
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
-        let keyed = focusBoundWindow(p, t)
-        defer { keyed?() }
         let synth = self.synth(p)
         let chars = Array(text)
         var next = 0
@@ -884,33 +882,155 @@ extension CUCore {
     /// element), its selection put back, verified, and once more if the window still isn't key. Also when the
     /// key window can't be read — the click is what makes it certain.
     func keyForMenu(_ t: CUTarget) {
-        guard t.accessible, boundWindowIsKeyInApp(t) != true else { return }
-        guard let e = recentlyTargeted(t) ?? (try? windowElement(t)).flatMap({ ax.element($0, kAXFocusedUIElementAttribute) }),
-              let c = ElementInfo(e, ax).center else {
+        guard t.accessible else { return }
+        guard boundWindowIsKeyInApp(t) != true else {
+            CULog.act.notice("menu in \(t.appName, privacy: .public): the bound window is key in its app — no click to make it key")
+            return
+        }
+        guard let e = selectionHolder(t), let c = ElementInfo(e, ax).center else {
             CULog.act.notice("menu in \(t.appName, privacy: .public): the bound window is not key and nothing in it to click")
             return
         }
-        let selection = ax.attribute(e, kAXSelectedTextRangeAttribute)
         for attempt in 1...2 {
-            guard windowClick(at: c, t) else { return }
-            if let selection, ax.isSettable(e, kAXSelectedTextRangeAttribute) { try? ax.set(e, kAXSelectedTextRangeAttribute, selection) }
+            guard clickKeepingSelection(e, at: c, t) else { return }
             let key = boundWindowIsKeyInApp(t)
-            CULog.act.notice("menu in \(t.appName, privacy: .public): clicked the selection's element to make its window key (try \(attempt, privacy: .public)) — key now: \(key.map { $0 ? "yes" : "no" } ?? "unknown", privacy: .public)")
+            CULog.act.notice("menu in \(t.appName, privacy: .public): clicked the selection's element to make its window key (try \(attempt, privacy: .public)) — key now: \(Self.yesNo(key), privacy: .public)")
             if key != false { return }
         }
     }
 
+    /// The element a selection-dependent command acts on: the one just worked on, else the window's focused one.
+    func selectionHolder(_ t: CUTarget) -> AXUIElement? {
+        recentlyTargeted(t) ?? (try? windowElement(t)).flatMap { ax.element($0, kAXFocusedUIElementAttribute) }
+    }
+
+    static func yesNo(_ b: Bool?) -> String { b.map { $0 ? "yes" : "no" } ?? "unknown" }
+
+    /// A window-targeted click on `e` with its text selection kept: the click moves the caret, so the selection
+    /// is put back — after the click has landed (the caret moved, or `selectionHoldMs` passed), since a restore
+    /// the app handles before the click is undone by it — and then held. False when no route reaches the window.
+    func clickKeepingSelection(_ e: AXUIElement, at c: CGPoint, _ t: CUTarget) -> Bool {
+        let range = selectionRange(e)
+        guard windowClick(at: c, t) else { return false }
+        guard let range, ax.isSettable(e, kAXSelectedTextRangeAttribute),
+              let r = AX.makeRange(location: range.location, length: range.length) else { return true }
+        let deadline = clock.nowMs() + selectionHoldMs
+        while clock.nowMs() < deadline, let now = selectionRange(e), now == range { usleep(20_000) }
+        try? ax.set(e, kAXSelectedTextRangeAttribute, r)
+        holdSelection(e, range, t, what: "menu")
+        return true
+    }
+
+    /// An element's selected text range, when it reports one.
+    func selectionRange(_ e: AXUIElement) -> NSRange? {
+        guard let v = ax.attribute(e, kAXSelectedTextRangeAttribute), CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
+        var r = CFRange()
+        return AXValueGetValue(v as! AXValue, .cfRange, &r) ? NSRange(location: r.location, length: r.length) : nil
+    }
+
+    /// A window-targeted click posted for the focus may be handled AFTER the accessibility write that follows
+    /// it (the app takes its events and accessibility requests in its own order) and its mouse-down moves the
+    /// caret: the selection just set is lost, and a selection-dependent menu command then reads disabled. When
+    /// such a click went out in the last 1.5 s, the selection is read for `selectionHoldMs` and set again (at
+    /// most twice) if it moved.
+    func holdSelection(_ e: AXUIElement, _ want: NSRange, _ t: CUTarget, what: String) {
+        guard selectionHoldMs > 0, let clicked = t.lastFocusClickMs, clock.nowMs() - clicked < 1_500,
+              let r = AX.makeRange(location: want.location, length: want.length) else { return }
+        let deadline = clock.nowMs() + selectionHoldMs
+        var resets = 0
+        while clock.nowMs() < deadline {
+            usleep(30_000)
+            guard let now = selectionRange(e), now != want else { continue }
+            guard resets < 2 else { break }
+            resets += 1
+            try? ax.set(e, kAXSelectedTextRangeAttribute, r)
+            CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public): a late click moved the selection to \(now.location, privacy: .public)+\(now.length, privacy: .public) — set it again to \(want.location, privacy: .public)+\(want.length, privacy: .public)")
+        }
+    }
+
+    /// Before a background menu command is validated: the selection `select` set, put back if something (a
+    /// late click) moved it while the text stayed the same. Returns what was found, for the log.
+    func putSelectionBack(_ t: CUTarget) -> String {
+        guard let s = t.lastSelection, clock.nowMs() - s.atMs <= Self.targetedFocusMs, ax.isAlive(s.element) else {
+            return "no selection set by select() in this window"
+        }
+        let want = NSRange(location: s.location, length: s.length)
+        let now = selectionRange(s.element)
+        let nowText = now.map { "\($0.location)+\($0.length)" } ?? "unreadable"
+        if now == want { return "the selection select() set (\(s.location)+\(s.length)) holds" }
+        guard ax.string(s.element, kAXValueAttribute) == s.value, let r = AX.makeRange(location: s.location, length: s.length) else {
+            return "the text changed since select() — the selection is the app's (\(nowText))"
+        }
+        let put = (try? ax.set(s.element, kAXSelectedTextRangeAttribute, r)) != nil
+        return "the selection select() set (\(s.location)+\(s.length)) had moved to \(nowText) — \(put ? "put back" : "putting it back was refused")"
+    }
+
+    /// The synthetic activation before a selection-dependent command is validated, posted whatever the app was
+    /// believed to be (the app re-validates its menu on an activation it handles). Logged either way.
+    func activateForMenu(_ p: TargetActParams, _ t: CUTarget) {
+        guard let enforcer = focusEnforcer(for: t, privatePath: p.privatePath) else {
+            CULog.act.notice("menu in \(t.appName, privacy: .public): no synthetic activation (the private path is off)")
+            return
+        }
+        noteSyntheticActivation()  // the guardian must not read the activation this posts as the user's
+        let posted = enforcer.forceActivation(windowID: t.windowID)
+        CULog.act.notice("menu in \(t.appName, privacy: .public): \(posted ? "posted the synthetic activation before validating (whatever the app was believed to be)" : "no synthetic activation: the app is in front", privacy: .public)")
+    }
+
     /// `resolveMenu`, but a command that reads DISABLED is read again for up to `menuSettleMs`: the app
-    /// re-validates its menu after its key window changes, not at once.
+    /// re-validates its menu after its key window changes, not at once. Each outcome is logged.
     func resolveMenuSettled(_ a: CUMenuAction, _ p: TargetActParams, _ t: CUTarget) throws -> CUAXMenuNode {
-        let deadline = clock.nowMs() + menuSettleMs
+        let start = clock.nowMs()
+        let deadline = start + menuSettleMs
+        let title = a.path.last ?? ""
+        var reads = 0
         while true {
+            reads += 1
             do {
-                return try resolveMenu(a, p, t)
+                let item = try resolveMenu(a, p, t)
+                CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” read enabled (read \(reads, privacy: .public), \(Int(self.clock.nowMs() - start), privacy: .public) ms)")
+                return item
             } catch let e as CUError where e.data?["disabled"] != nil {
-                if clock.nowMs() >= deadline { throw e }
+                if clock.nowMs() >= deadline {
+                    CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” still disabled after \(reads, privacy: .public) reads (\(Int(self.clock.nowMs() - start), privacy: .public) ms)")
+                    throw e
+                }
                 usleep(40_000)
             }
+        }
+    }
+
+    /// A menu command in the background, validated and pressed: the selection checked (put back if something
+    /// moved it), the window made key in its app (a click, when it isn't), the synthetic activation posted
+    /// whatever the app was believed to be, and the item read. Enabled → pressed, no focus blip. Disabled →
+    /// re-validated in the focus blip (at most twice) and pressed there; with no blip possible, read for
+    /// `menuSettleMs` after another activation. Still disabled → the disabled error. Every step logged.
+    /// `blipped`: whether a blip ran.
+    func pressBackgroundMenu(_ a: CUMenuAction, _ p: TargetActParams, _ t: CUTarget, blipped: inout Bool) throws -> String? {
+        let title = a.path.last ?? ""
+        CULog.act.notice("menu in \(t.appName, privacy: .public): validating “\(title, privacy: .public)” in the background — window key in its app: \(Self.yesNo(self.boundWindowIsKeyInApp(t)), privacy: .public); \(self.putSelectionBack(t), privacy: .public)")
+        keyForMenu(t)
+        activateForMenu(p, t)
+        func enabledItem() throws -> CUAXMenuNode? {
+            do { return try resolveMenu(a, p, t) } catch let e as CUError where e.data?["disabled"] != nil { return nil }
+        }
+        if let item = try enabledItem() {
+            CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” reads enabled — no focus blip")
+            return try pressMenu(item, t)
+        }
+        // In front: disabled for what it applies to (the disabled error).
+        guard sys.frontmostPid() != t.pid else { return try pressMenu(try resolveMenu(a, p, t), t) }
+        switch try pressInBlip(p, t, title: title, read: enabledItem, press: { try pressMenu($0, t) }) {
+        case .pressed(let note):
+            blipped = true
+            return note
+        case .stillDisabled:
+            blipped = true
+            return try pressMenu(try resolveMenu(a, p, t), t)  // the disabled error (or enabled at last)
+        case .unavailable:
+            CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” reads disabled and no focus blip is possible — the activation again, read for \(Int(self.menuSettleMs), privacy: .public) ms")
+            activateForMenu(p, t)
+            return try pressMenu(try resolveMenuSettled(a, p, t), t)
         }
     }
 
@@ -952,6 +1072,7 @@ extension CUCore {
         s.windowSPI = t.privatePath
         postSyntheticActivation(t, privatePath: t.privatePath)
         try? s.click(pid: t.pid, windowFor: windowFor(t), at: c, button: .left, count: 1, flags: [], route: route)
+        t.lastFocusClickMs = clock.nowMs()
         return true
     }
 
@@ -1011,7 +1132,7 @@ extension CUCore {
     @discardableResult
     func focusField(_ e: AXUIElement, _ t: CUTarget) -> Bool {
         // A capture-only window has no element of its own to focus: never a write (its "window" element is the
-        // application's). Keys reach it by the synthetic activation and window-targeted focus records.
+        // application's). Keys reach it after the synthetic activation, in the window a point click made key.
         guard t.accessible else { return false }
         if isFocused(e, t) || pressToFocus(e, t) {
             makeWindowKeyForField(e, t)
@@ -1101,6 +1222,7 @@ extension CUCore {
         let wasKey = boundWindowIsKeyInApp(t)
         postSyntheticActivation(t, privatePath: t.privatePath)
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
+        t.lastFocusClickMs = clock.nowMs()
         let clicked = waitFocused(e, t, web: web)
         CULog.act.notice("focus in \(t.appName, privacy: .public): window-targeted click (\(onScreen ? "on this desktop" : "elsewhere", privacy: .public), \(route == .skyLight ? "SkyLight" : "pid", privacy: .public), window was key in its app: \(wasKey.map { $0 ? "yes" : "no" } ?? "unknown", privacy: .public)) → focus \(Self.relationWord(self.focusRelation(e, t)), privacy: .public)")
         if clicked { return true }
@@ -1109,6 +1231,7 @@ extension CUCore {
         if (wasKey != true && boundWindowIsKeyInApp(t) != false) || focusRelation(e, t) == .elsewhere {
             CULog.act.notice("focus in \(t.appName, privacy: .public): the first click only made the window key — clicking the field once more")
             try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
+            t.lastFocusClickMs = clock.nowMs()
             if waitFocused(e, t, web: web) { return true }
         }
         return false
@@ -1214,8 +1337,6 @@ extension CUCore {
         if !t.accessible { e = nil }  // capture-only: keys go to the window, not to a reported element
         cursor(t, "key", at: e.flatMap { ElementInfo($0, ax).center }, text: a.combo)
         // Keys go to the app's key window: make it the bound one first (in the background, never the front).
-        let keyed = focusBoundWindow(p, t)
-        defer { keyed?() }
         // Resolve the route once (the menu lookup walks the menu bar), then press it `repeat` times.
         let plan = try chordPlan(chord, p, t, g)
         var out = ActOutcome(rung: .accessibility)
@@ -1237,6 +1358,9 @@ extension CUCore {
     /// How a chord reaches the app: a menu item with that key equivalent (rung 1), else key events.
     indirect enum ChordPlan {
         case menuItem(AXUIElement, title: String)
+        /// A menu shortcut whose item reads disabled with the app in the background: re-validated in the focus
+        /// blip and pressed there, else the events plan.
+        case blipMenuItem(AXUIElement, title: String, fallback: ChordPlan)
         case events(code: CGKeyCode, flags: CGEventFlags, decision: CUInputLadder.Decision)
         /// An editing shortcut carried out over accessibility in a background web field, with the events plan to
         /// fall back on when that is not possible.
@@ -1287,6 +1411,16 @@ extension CUCore {
                 CULog.act.notice("key in \(t.appName, privacy: .public): the chord goes to its menu item")
                 return .menuItem(item.element, title: item.title)
             }
+            // Its menu item reads disabled with the app in the background: the app has not re-validated it (a
+            // selection-dependent command). Re-validated in the focus blip, else the keys as before.
+            if !editing, t.accessible, p.privatePath, sys.frontmostPid() != t.pid,
+               let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid, includeDisabled: true) {
+                if CUPasteMenu.isPasteTitle(item.title) { try requirePasteSafe(p, t, g) }
+                guard let code = CUKeyCodes.code(for: ch) else { throw CUError.unsupported("no key for “\(ch)” on this keyboard") }
+                CULog.act.notice("key in \(t.appName, privacy: .public): the chord's menu item “\(item.title, privacy: .public)” reads disabled in the background — re-validated in the focus blip")
+                return .blipMenuItem(item.element, title: item.title, fallback: .events(
+                    code: code, flags: chord.modifiers.cgFlags, decision: try CUInputLadder.decideEvents(context(p, t, pointer: false))))
+            }
             CULog.act.notice("key in \(t.appName, privacy: .public): the chord goes as key events (editing shortcut into editable focus: \(editing, privacy: .public))")
         }
         let code: CGKeyCode
@@ -1331,6 +1465,22 @@ extension CUCore {
                 throw busyAfterSend(t)
             }
             return ActOutcome(rung: .accessibility, detail: "used the menu item “\(title)”")
+        case .blipMenuItem(let element, let title, let fallback):
+            aimMenuCommands(at: t)
+            let read: () throws -> AXUIElement? = { [ax] in ax.bool(element, kAXEnabledAttribute) == true ? element : nil }
+            let outcome = try pressInBlip(p, t, title: title, read: read, press: { [self] (e: AXUIElement) throws -> String? in
+                do {
+                    try ax.perform(e, kAXPressAction)
+                } catch let error where Self.deliveryUncertain(error) {
+                    throw busyAfterSend(t)
+                }
+                return nil
+            })
+            if case .pressed = outcome {
+                return ActOutcome(rung: .accessibility, detail: "used the menu item “\(title)”, re-validated with \(t.appName)'s window key for a moment (your app kept the front)")
+            }
+            CULog.act.notice("key in \(t.appName, privacy: .public): “\(title, privacy: .public)” stayed disabled — the chord goes as key events")
+            return try execute(fallback, p, t, token, keyPid: keyPid)
         case .events(let code, let flags, let d):
             let synth = self.synth(p)
             let pid = keyPid ?? t.pid
@@ -1426,8 +1576,6 @@ extension CUCore {
     func sendChord(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token,
                    _ g: TypingFocus = TypingFocus()) throws -> ActOutcome {
         let focused = g.explicit ?? reportedFocus(t)
-        let keyed = focusBoundWindow(p, t)
-        defer { keyed?() }
         return try execute(try chordPlan(chord, p, t, g), p, t, token, keyPid: keyboardTarget(t, focused: focused))
     }
 
@@ -1771,6 +1919,9 @@ extension CUCore {
         } catch let error where Self.deliveryUncertain(error) {
             throw busyAfterSend(t)
         }
+        // What a selection-dependent menu command will act on — checked again before one is validated.
+        t.noteSelection(e, location: range.location, length: range.length, value: value, at: clock.nowMs())
+        holdSelection(e, range, t, what: "select")
         return ActOutcome(rung: .accessibility)
     }
 
@@ -1934,18 +2085,14 @@ extension CUCore {
             }
         }
         aimMenuCommands(at: t)
-        let keyed = focusBoundWindow(p, t)
-        defer { keyed?() }
-        // The menu bar validates commands against the app's KEY window: when another of its windows is key
-        // (live: the fixture's web window, after typing there), make the bound one key — verified, once more if
-        // needed — so "Uppercase Selection" sees the selection in it.
-        keyForMenu(t)
-        // The app re-validates its menu items (a selection-dependent command's enabled state) only while it
-        // believes it is active: post the synthetic activation, then read the item again for a moment.
-        enforceFocus(p, t)
-        let item: CUAXMenuNode
+        // The menu bar validates commands against the app's KEY window (live: the fixture's web window stayed
+        // key after typing there), and in the background re-validates a command only in the focus blip; and the
+        // selection a command acts on can have been moved by a focus click the app handled late. Checked, put
+        // right and logged step by step.
+        var blipped = false
+        let note: String?
         do {
-            item = try resolveMenuSettled(a, p, t)
+            note = try pressBackgroundMenu(a, p, t, blipped: &blipped)
         } catch let e as CUError where e.data?["disabled"] != nil {
             // In front already: disabled for what it applies to, not for being in the background.
             guard sys.frontmostPid() != t.pid else { throw e }
@@ -1953,7 +2100,7 @@ extension CUCore {
             if t.disabledMenuCommands.contains(key) {
                 CULog.act.notice("menu in \(t.appName, privacy: .public): asked again while disabled in the background — asking for the foreground")
                 throw CUError(code: "needs_foreground",
-                              message: "“\(title)” stays disabled while \(t.appName) is in the background\(keyed != nil ? ", even with its window made key" : ""), and it was asked for again after the UI routes: the command needs \(t.appName) in front")
+                              message: "“\(title)” stays disabled while \(t.appName) is in the background\(blipped ? ", even with its window made key" : ""), and it was asked for again after the UI routes: the command needs \(t.appName) in front")
             }
             // A known AppleScript equivalent, when the user already lets Winter control the app.
             if let done = menuThroughAppleScript(a.path, title: title, t) { return done }
@@ -1963,8 +2110,7 @@ extension CUCore {
                           data: ["disabled": .string(title)])
         }
         t.disabledMenuCommands.remove(key)
-        let note = try pressMenu(item, t)
-        let made = keyed != nil ? "\(t.appName)'s window was made key in the background for the command" : nil
+        let made = blipped ? "\(t.appName)'s window was made key for a moment to re-validate the command (your app kept the front)" : nil
         let detail = [made, note].compactMap { $0 }.joined(separator: "; ")
         return ActOutcome(rung: .accessibility, detail: detail.isEmpty ? nil : detail)
     }
@@ -2044,15 +2190,6 @@ extension CUCore {
         }
     }
 
-    /// While the app is in the background (the private path on), makes the BOUND window key in it without
-    /// raising it or activating the app (yabai's focus records, checked every time by the user-view guard).
-    /// Never the front process: making the app front, even with no window brought forward, switches the user
-    /// to the Space its windows are on. Returns the undo (the user's key window handed back).
-    func focusBoundWindow(_ p: TargetActParams, _ t: CUTarget) -> (() -> Void)? {
-        guard p.privatePath else { return nil }
-        return keyWithoutRaise(t)
-    }
-
     /// Controls a press means something to; a disabled one of these does nothing, so it is refused rather than
     /// pressed "successfully" (a live run pressed Finder's disabled "Move to Trash" three times to no effect).
     /// Containers are exempt: apps mark whole groups disabled (Finder's icon-view groups) around live items.
@@ -2108,8 +2245,8 @@ extension CUCore {
         case .privatePath:
             send(event, t)
             CUUserInputGuard.waitForQuiet()
-            let restore = focus ? focusWithoutRaise(t) : nil
-            defer { restore?() }
+            // No focus records here (the user's ruling: the focus blip is for menu validation only, never for
+            // typing, clicks or reads): window-targeted events after the synthetic activation.
             let used = try body(.skyLight) { _, _ in try token.check() }
             if used != .skyLight {
                 logOnce("skylight-fallback", "SkyLight posting unavailable; falling back to public pid events")
@@ -2133,13 +2270,6 @@ extension CUCore {
 
     /// Rung 2's public focus: make the bound window the app's main window (no activation, no raise).
     private func syntheticFocus(_ t: CUTarget) { makeBoundWindowMain(t) }
-
-    /// Rung 3: key focus to the target window without raising it; returns how to hand it back.
-    private func focusWithoutRaise(_ t: CUTarget) -> (() -> Void)? {
-        let restore = keyWithoutRaise(t)
-        if restore != nil { usleep(50_000) }
-        return restore
-    }
 
     /// Rung 4: bring the app forward, act with the real pointer, then put the pointer and the user's app back.
     /// Every press, drag step and release is hit-tested by the caller's check.

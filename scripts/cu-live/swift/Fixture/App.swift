@@ -226,9 +226,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(uppercaseSelection(_:)) {
             guard let notes = form?.notes else { return false }
-            return MenuRules.uppercaseEnabled(selectionLength: notes.selectedRange().length)
+            let enabled = MenuRules.uppercaseEnabled(selectionLength: notes.selectedRange().length)
+            noteValidation(enabled: enabled, selection: notes.selectedRange())
+            return enabled
         }
         return true
+    }
+
+    /// When the app re-validated "Uppercase Selection" (what it saw: the notes selection, whether it believed
+    /// it was active, its key window) — the evidence for a command that read disabled. Only on a change, since
+    /// AppKit validates after every event while active.
+    private var lastValidation: String?
+    private func noteValidation(enabled: Bool, selection: NSRange) {
+        let key = NSApp.keyWindow?.title
+        let sig = "\(enabled)|\(selection.location)|\(selection.length)|\(NSApp.isActive)|\(key ?? "")"
+        guard sig != lastValidation else { return }
+        lastValidation = sig
+        fixture.emit("menu.validate", [("enabled", .bool(enabled)),
+                                       ("selection", .arr([.int(selection.location), .int(selection.length)])),
+                                       ("active", .bool(NSApp.isActive)), ("keyWindow", key.map { JV.str($0) } ?? .null)])
     }
 
     @objc private func uppercaseSelection(_ sender: NSMenuItem) {

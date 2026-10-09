@@ -156,9 +156,13 @@ final class UserViewGuardTests: XCTestCase {
 
     func testFocusRecordsThatMoveTheViewAreUndoneAndNeverUsedAgain() async throws {
         safari()
-        ax.put(newItem, [kAXEnabledAttribute: true])
+        core.keyTapInstaller = FakeKeyTapInstaller()  // the blip's reroute (the focus records never run without it)
+        core.blipSchedule = { _, _ in }
+        ax.put(newItem, [kAXEnabledAttribute: false])  // disabled in the background: the focus blip is tried
         FocusSPI.onFocus = { [unowned self] in
-            if FocusSPI.calls.last == "focus pid \(pid) window 77" { sys.front = pid }  // Safari takes the front on key focus
+            guard FocusSPI.calls.last == "focus pid \(pid) window 77" else { return }
+            sys.front = pid  // Safari takes the front on key focus
+            ax.put(newItem, [kAXEnabledAttribute: true])
         }
         let r = try await act(.menu(CUMenuAction(path: ["File", "New Tab"])))
         XCTAssertEqual(FocusSPI.calls, ["defocus pid 1 window 77", "focus pid \(pid) window 77",
@@ -168,7 +172,8 @@ final class UserViewGuardTests: XCTestCase {
                       r.detail ?? "")
         XCTAssertTrue(ax.performed.contains("\(token(newItem)):AXPress"), "the command still ran, over AX")
         FocusSPI.calls = []
-        try await act(.menu(CUMenuAction(path: ["File", "New Tab"])))
+        ax.put(newItem, [kAXEnabledAttribute: false])
+        _ = try? await act(.menu(CUMenuAction(path: ["File", "New Tab"])))
         XCTAssertTrue(FocusSPI.calls.isEmpty, "retired for the helper's life")
     }
 

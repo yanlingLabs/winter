@@ -48,6 +48,7 @@ UserDefaults.standard.register(defaults: ["NSQuitAlwaysKeepsWindows": false])
 var arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
 for key in ["NSAutomaticQuoteSubstitutionEnabled", "NSAutomaticDashSubstitutionEnabled", "NSAutomaticTextReplacementEnabled",
             "NSAutomaticSpellingCorrectionEnabled", "NSAutomaticCapitalizationEnabled", "NSAutomaticPeriodSubstitutionEnabled",
+            "NSAutomaticInlinePredictionEnabled",
             "WebAutomaticQuoteSubstitutionEnabled", "WebAutomaticDashSubstitutionEnabled", "WebAutomaticTextReplacementEnabled",
             "WebAutomaticSpellingCorrectionEnabled", "WebContinuousSpellCheckingEnabled"] {
     arguments[key] = false

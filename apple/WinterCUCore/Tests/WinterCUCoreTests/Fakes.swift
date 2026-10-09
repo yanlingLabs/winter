@@ -141,7 +141,40 @@ final class FakeFocusEnforcer: CUFocusEnforcing, @unchecked Sendable {
     /// What `enforce` reports (whether it did anything).
     var result = true
     func enforce(windowID: UInt32) -> Bool { enforced.append(windowID); return result }
+    /// The activations posted whatever the target was believed to be (a menu command's validation).
+    private(set) var forced: [UInt32] = []
+    func forceActivation(windowID: UInt32) -> Bool { forced.append(windowID); return true }
     func teardown() { tornDown += 1 }
+}
+
+/// The keyboard reroute's tap, recorded: what was installed on which pid, how often it was removed, and its
+/// handler (to feed it key events while it is installed).
+final class FakeKeyTapInstaller: CUKeyTapInstalling, @unchecked Sendable {
+    private(set) var installed: [pid_t] = []
+    private(set) var removed = 0
+    private(set) var handler: ((CGEvent) -> CGEvent?)?
+    /// No tap can be made.
+    var refuse = false
+    var isInstalled: Bool { installed.count > removed }
+    func installKeyTap(pid: pid_t, handle: @escaping (CGEvent) -> CGEvent?) -> (() -> Void)? {
+        guard !refuse else { return nil }
+        installed.append(pid)
+        handler = handle
+        var done = false
+        return { [unowned self] in
+            guard !done else { return }
+            done = true
+            removed += 1
+            handler = nil
+        }
+    }
+}
+
+/// A key event as the tap would see it: the user's own (no stamp) or the helper's (stamped).
+func keyEvent(down: Bool = true, stamped: Bool) -> CGEvent {
+    let e = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)!
+    if stamped { CUEventStamp.stamp(e) }
+    return e
 }
 
 /// The process and window-server world for the same tests.

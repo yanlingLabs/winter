@@ -272,6 +272,64 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertTrue(ax.performed.contains("\(token(upper)):\(kAXPressAction)"))
     }
 
+    /// A text area holding "make me loud please" with "loud" selected by `select`; "Uppercase Selection" is
+    /// enabled exactly while that selection is 8+4 (the app re-validating on every read).
+    private func selectedLoud() async throws -> AXUIElement {
+        safari(fieldOwner: pid)
+        ax.put(field, [kAXValueAttribute: "make me loud please"])
+        ax.makeSettable(field, kAXSelectedTextRangeAttribute)
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window])  // the bound window is key
+        try await act(.select(CUSelectAction(ref: ref(field), text: "loud")))
+        let upper = uppercaseMenu(enabled: false)
+        ax.onRead = { [unowned self] what in
+            guard what == "\(token(upper)):\(kAXEnabledAttribute)" else { return }
+            ax.put(upper, [kAXEnabledAttribute: core.selectionRange(field) == NSRange(location: 8, length: 4)])
+        }
+        return upper
+    }
+
+    func testABackgroundMenuCommandPutsBackTheSelectionALateClickMoved() async throws {
+        let upper = try await selectedLoud()
+        ax.put(field, [kAXSelectedTextRangeAttribute: AX.makeRange(location: 19, length: 0)!])  // a late focus click
+        try await act(.menu(CUMenuAction(path: ["Fixture", "Uppercase Selection"])))
+        XCTAssertEqual(core.selectionRange(field), NSRange(location: 8, length: 4), "the selection select() set, put back")
+        XCTAssertTrue(ax.performed.contains("\(token(upper)):\(kAXPressAction)"))
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "the window was key: no click")
+    }
+
+    /// No focus blip possible here (no reroute tap in a test core): the activation again and a settled read.
+    func testAMenuCommandDisabledWithNoBlipPossibleIsReadAgainAfterAnotherActivationWithoutAClick() async throws {
+        let upper = try await selectedLoud()
+        let enforcer = FakeFocusEnforcer()
+        core.focusEnforcerFactory = { _ in enforcer }
+        var reads = 0
+        ax.onRead = { [unowned self] what in
+            guard what == "\(token(upper)):\(kAXEnabledAttribute)" else { return }
+            reads += 1
+            ax.put(upper, [kAXEnabledAttribute: reads >= 2])  // re-validated on the second activation
+        }
+        let before = poster.entries.count
+        try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+                                                 action: .menu(CUMenuAction(path: ["Fixture", "Uppercase Selection"])),
+                                                 access: .full, allowForeground: false, privatePath: true))
+        XCTAssertEqual(enforcer.forced, [77, 77], "the activation posted again for the second read")
+        XCTAssertTrue(poster.entries.dropFirst(before).filter { $0.type == .leftMouseDown }.isEmpty, "no click: the window was key")
+        XCTAssertEqual(core.selectionRange(field), NSRange(location: 8, length: 4))
+        XCTAssertTrue(ax.performed.contains("\(token(upper)):\(kAXPressAction)"))
+    }
+
+    func testTheSyntheticActivationIsPostedBeforeAMenuIsValidatedWhateverTheAppIsBelievedToBe() async throws {
+        let upper = try await selectedLoud()
+        let enforcer = FakeFocusEnforcer()
+        enforcer.result = false  // the enforcer believes the app is active already: enforce() posts nothing
+        core.focusEnforcerFactory = { _ in enforcer }
+        try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+                                                 action: .menu(CUMenuAction(path: ["Fixture", "Uppercase Selection"])),
+                                                 access: .full, allowForeground: false, privatePath: true))
+        XCTAssertEqual(enforcer.forced, [77], "posted whatever the cached belief")
+        XCTAssertTrue(ax.performed.contains("\(token(upper)):\(kAXPressAction)"))
+    }
+
     func testAppLevelCommandsStillUseTheMenuWhenFocusIsNotEditable() async throws {
         safari(fieldOwner: pid)
         ax.put(field, [kAXRoleAttribute: kAXButtonRole])  // focus is not an editable element

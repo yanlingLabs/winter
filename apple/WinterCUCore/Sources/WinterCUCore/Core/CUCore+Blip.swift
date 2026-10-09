@@ -1,0 +1,113 @@
+import ApplicationServices
+import CoreGraphics
+import Foundation
+
+/// The focus blip (the user's ruling, 2026-10-09): the focus records (`keyWithoutRaise`) make the bound window
+/// the window server's key window for a moment — the user's app resigns active for about 60 ms while its front
+/// and Space stay as they are — and that is what makes an app in the background re-validate its menu (live: a
+/// selection-dependent command read enabled only on the activation that followed the focus records, never on
+/// a click or a synthetic activation alone). So it is used ONLY to validate a menu command or menu shortcut
+/// that reads disabled in the background, and in its one retry — never for typing, clicks or reads.
+///
+/// It never runs without the keyboard reroute (`CUKeyReroute`): a head keyboard tap on the target, installed
+/// just before the focus records, sends the user's own keys to their app and drops them from the target, and
+/// is removed once the user's app holds the key focus again. The whole blip — focus handed back, the user's
+/// app front again (else the guardian restores it), the tap removed — ends at the latest `blipDeadlineMs`
+/// after it began, on every path.
+final class CUFocusBlip {
+    let begunMs: Double
+    private let lock = NSLock()
+    private var ended = false
+    private let finish: (String) -> Void
+
+    init(begunMs: Double, finish: @escaping (String) -> Void) {
+        self.begunMs = begunMs
+        self.finish = finish
+    }
+
+    /// Ends the blip once (the act, or the deadline — whichever comes first).
+    func end(_ reason: String = "done") {
+        let first = lock.withLock { () -> Bool in
+            defer { ended = true }
+            return !ended
+        }
+        if first { finish(reason) }
+    }
+
+    var isEnded: Bool { lock.withLock { ended } }
+}
+
+extension CUCore {
+    /// Starts a blip for `why`: the reroute tap first, then the focus records. Nil — with the reason logged —
+    /// when it can't run: the private path off, the app already in front, no tap, or the focus records
+    /// unavailable or retired (the user-view guard undid them once).
+    func beginBlip(_ p: TargetActParams, _ t: CUTarget, why: String) -> CUFocusBlip? {
+        let app = t.appName
+        guard p.privatePath, t.accessible, let user = sys.frontmostPid(), user != t.pid else {
+            CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used (private path off, capture-only, or the app is in front)")
+            return nil
+        }
+        let reroute = CUKeyReroute(target: t.pid, victim: user, installer: keyTapInstaller, post: keyReroutePost)
+        let start = clock.nowMs()  // the deadline counts from the tap's install
+        guard reroute.begin() else {
+            CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used — no keyboard reroute tap")
+            return nil
+        }
+        guard let undo = keyWithoutRaise(t) else {
+            reroute.end()
+            CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used — the focus records are unavailable or retired")
+            return nil
+        }
+        let space = sys.activeSpace()
+        let blip = CUFocusBlip(begunMs: start) { [self] reason in
+            undo()  // the user's key window handed back
+            // The user's app must hold the key focus and the front again within `blipFrontWaitMs` (and before the
+            // deadline); the tap stays until then, so a key typed meanwhile still goes to them.
+            let until = min(clock.nowMs() + Self.blipFrontWaitMs, start + Self.blipDeadlineMs)
+            while clock.nowMs() < until, keyFocusPidForTarget(t) == t.pid || sys.frontmostPid() != user { usleep(10_000) }
+            // Not back (the front elsewhere, or the keys still going to the target): the guardian restores the
+            // user's app, which takes its key focus back with it.
+            let front = sys.frontmostPid() == user
+            let keys = keyFocusPidForTarget(t) != t.pid
+            if !front || !keys {
+                guardianRestore(CUGuardedView(app: user, space: space), thief: t.pid, repeatOffender: false,
+                                cause: front ? "the focus blip left the key focus with the target" : "the focus blip did not hand the front back")
+            }
+            let rerouted = reroute.end()
+            CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): ended (\(reason, privacy: .public)) after \(Int(self.clock.nowMs() - start), privacy: .public) ms; \(rerouted, privacy: .public) key event(s) rerouted to the user's app; the user's app back (front and keys): \(front && keys ? "yes" : "no — the guardian restored it", privacy: .public)")
+        }
+        blipSchedule(max(0, Self.blipDeadlineMs - (clock.nowMs() - start))) { [weak blip] in blip?.end("its deadline") }
+        CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): begun, the keyboard reroute on")
+        return blip
+    }
+
+    enum BlipOutcome { case pressed(String?), stillDisabled, unavailable }
+
+    /// A menu command or menu shortcut that reads disabled in the background, validated in the focus blip: the
+    /// synthetic activation posted in it, the item read for `blipReadMs`, and pressed — still inside the blip —
+    /// once it reads enabled. Once more in a fresh blip if not. `read` answers the item while enabled, nil
+    /// while disabled.
+    func pressInBlip<Item>(_ p: TargetActParams, _ t: CUTarget, title: String, read: () throws -> Item?,
+                           press: (Item) throws -> String?) throws -> BlipOutcome {
+        for attempt in 1...2 {
+            guard let blip = beginBlip(p, t, why: "“\(title)” (try \(attempt))") else {
+                return attempt == 1 ? .unavailable : .stillDisabled
+            }
+            defer { blip.end() }
+            activateForMenu(p, t)
+            let until = clock.nowMs() + blipReadMs
+            var reads = 0
+            while true {
+                reads += 1
+                if let item = try read() {
+                    CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” read enabled in the focus blip (try \(attempt, privacy: .public), read \(reads, privacy: .public), \(Int(self.clock.nowMs() - blip.begunMs), privacy: .public) ms)")
+                    return .pressed(try press(item))
+                }
+                if clock.nowMs() >= until || blip.isEnded { break }
+                usleep(20_000)
+            }
+            CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” still disabled in the focus blip (try \(attempt, privacy: .public), \(reads, privacy: .public) reads)")
+        }
+        return .stillDisabled
+    }
+}
