@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.1.0` (the contents of [`VERSION`](VERSION))
+Helper version: `1.2.0` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -208,7 +208,7 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 ### 4.5 Actions
 
 `target.act` — `{targetId, sessionId, callId, action, access, allowForeground, privatePath}` →
-`{rung, detail?}`.
+`{rung, detail?, input?, inputUnknown?}`.
 
 - `callId` is required (it is what `cancel` names). `access` is `"full"` or `"click"`; with `"click"` only
   `click`, `scroll` and `action` are allowed, anything else is `not_allowed` (`reason: "click_only"`).
@@ -216,6 +216,10 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   private event path (needs `privatePath: true`), `4` the foreground and the real pointer (needs
   `allowForeground: true`). `detail` reports what else happened (what moved the user's view and was put back,
   what was opened).
+- For `type`, `paste`, `key` and `setValue`: `input` names the element that received the input
+  (`[14] text area "Comment"`; for a window with no accessibility, `the window (it has no accessibility here)`);
+  `inputUnknown: true` instead when the app reported no focused element. A `key` that went to a menu item
+  carries neither (its `detail` names the item).
 - `action` is an object discriminated by `kind`, its fields beside it:
 
 | `kind` | Fields |
@@ -317,7 +321,7 @@ failure are `unsupported`; a Swift task cancellation is `cancelled`.
 | `no_window` | — | the app runs but has no open window |
 | `refused` | `reason` (§6) | a floor refused it |
 | `wait_timeout` | `seen`, `waitedMs` | `waitFor` ran out |
-| `cancelled` | — | `cancel`, or the connection closed |
+| `cancelled` | `typed?`, `total?` | `cancel`, or the connection closed; a type or paste stopped while typing keys says how many of its characters had gone out (`typed` of `total`): the field is partly filled |
 | `invalid_params` | — | bad params, an unknown shot, an oversize line or result |
 | `unsupported` | `axError?` | unknown method, an element that does not support it, an internal failure |
 | `busy` | `retryable` (default `true`), `uncertain?`, `axError?` | retry, unless `uncertain: true` (then `retryable: false`: it may have happened) |
@@ -481,3 +485,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | --- | --- | --- |
 | 1 | 1.0.0 | Initial: the methods, errors, notifications and `view.*` stream above. `protocol_mismatch` refusals of `hello` carry `helperVersion` beside `expected` (additive). |
 | 1 | 1.1.0 | `target_lost` errors carry `data.reason` (`app_quit`, `window_closed`, `helper_restart`, `unknown`) and the `targetLost` notification's `reason` takes the same four values (additive: a client that ignores it is unaffected; one that reads it must treat an absent reason as `unknown`). |
+| 1 | 1.2.0 | A type or paste stopped while typing keys carries `data.typed` and `data.total` (on `cancelled`, and on any other error it hit mid-typing, whose message also says it); `target.act` results for `type`, `paste`, `key` and `setValue` carry `input` / `inputUnknown` (§4.5) — additive: a client that ignores them is unaffected. |

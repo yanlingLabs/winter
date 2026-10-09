@@ -18,6 +18,10 @@ extension CUCore {
         var pendingOpen: [String]? = nil
         /// What the open stands for in the result ("“File › Open”"), when it came from a menu.
         var openWhat: String? = nil
+        /// For type, paste, key and setValue: the element that received the input (`[14] text area "Comment"`),
+        /// or `inputUnknown` when the app reported no focused element.
+        var input: String? = nil
+        var inputUnknown = false
 
         /// Puts `note` (what was done to reach the window) in front of the rung's own detail.
         func noting(_ note: String?) -> ActOutcome {
@@ -83,7 +87,28 @@ extension CUCore {
         let notes = takeGuardianNotes()
         let detail = (notes + [outcome.detail].compactMap { $0 }).isEmpty ? nil
             : (notes + [outcome.detail].compactMap { $0 }).joined(separator: "; ")
-        return TargetActResult(rung: outcome.rung.rawValue, detail: detail)
+        return TargetActResult(rung: outcome.rung.rawValue, detail: detail, input: outcome.input,
+                               inputUnknown: outcome.inputUnknown ? true : nil)
+    }
+
+    /// The act's outcome, naming the element that received its input (type, paste, key, setValue): the model
+    /// never has to guess where text went. Nil `e`: the app reported no focused element.
+    func receiving(_ e: AXUIElement?, _ t: CUTarget, _ o: ActOutcome) -> ActOutcome {
+        var o = o
+        guard t.accessible else {
+            o.input = "the window (it has no accessibility here)"
+            return o
+        }
+        guard let e else {
+            o.inputUnknown = true
+            return o
+        }
+        let info = ElementInfo(e, ax)
+        let ref = t.refs.ref(for: AXIdentity(element: e))
+        let role = CURoleWords.words(role: info.role ?? "AXUnknown", subrole: info.subrole)
+        let name = info.labels.compactMap { $0 }.first { !$0.isEmpty }.map { $0.count <= 40 ? $0 : String($0.prefix(40)) + "…" }
+        o.input = "[\(ref)] \(role)" + (name.map { " " + formatter.quote($0) } ?? "")
+        return o
     }
 
     static func actionName(_ a: CUAction) -> String {
@@ -514,6 +539,9 @@ extension CUCore {
         var explicit: AXUIElement?
         /// A tab or return was typed since: the named field may no longer have the focus.
         var focusMayHaveMoved = false
+        /// The last reported focus found not sensitive: the per-character check reads the focus again but
+        /// re-inspects only a different element.
+        var checkedClear: AXUIElement?
         init(explicit: AXUIElement? = nil) { self.explicit = explicit }
     }
 
@@ -540,7 +568,9 @@ extension CUCore {
 
     private func typableFocusChecked(_ t: CUTarget, _ g: TypingFocus) throws -> AXUIElement? {
         if let f = reportedFocus(t) {
+            if let c = g.checkedClear, CFEqual(c, f) { return f }
             if ElementInfo(f, ax).secure { throw secureRefusal() }
+            g.checkedClear = f
             return f
         }
         let scan = g.scan ?? sensitiveScan(t)
@@ -613,7 +643,7 @@ extension CUCore {
             } catch let error as CUError where info.role == kAXScrollBarRole && error.code == "invalid_params" {
                 throw CUError.unsupported("\(t.appName)'s scroll bar [\(a.ref)] won't take a value — scroll its area with scroll() instead")
             }
-            return ActOutcome(rung: .accessibility)
+            return receiving(e, t, ActOutcome(rung: .accessibility))
         }
         // Not settable: focus it, select everything, and type over it — never over another field.
         let g = TypingFocus(explicit: e)
@@ -625,21 +655,21 @@ extension CUCore {
             try requireTypableFocus(t, g)
             _ = try sendChord(CUKeyChord(key: .character("a"), modifiers: [.command]), p, t, token, g)
         }
-        return try typeText(a.value, into: e, p, t, token, g)
+        return receiving(e, t, try typeText(a.value, into: e, p, t, token, g))
     }
 
     private func type(_ a: CUTypeAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         enforceFocus(p, t)  // believe-active before any focus write, so the app does not activate itself
         let (e, g) = try textTarget(into: a.into, t, text: a.text)
         cursor(t, "type", at: e.flatMap { ElementInfo($0, ax).center })
-        return try typeText(a.text, into: e, p, t, token, g)
+        return receiving(e, t, try typeText(a.text, into: e, p, t, token, g))
     }
 
     private func paste(_ a: CUPasteAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         enforceFocus(p, t)
         let (e, g) = try textTarget(into: a.into, t, text: a.text)
         cursor(t, "type", at: e.flatMap { ElementInfo($0, ax).center })
-        return try pasteText(a.text, format: a.format ?? .text, p, t, token, g)
+        return receiving(e, t, try pasteText(a.text, format: a.format ?? .text, p, t, token, g))
     }
 
     /// The element text goes into: `into` (focused first), else the focus (see `requireTypableFocus`; nil
@@ -705,23 +735,35 @@ extension CUCore {
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
         let synth = self.synth(p)
         let chars = Array(text)
-        var next = 0
+        var sent = 0
         let keyPid = keyboardTarget(t, focused: e)
-        let valueBefore = keyPid != t.pid ? e.flatMap { ax.string($0, kAXValueAttribute) } : nil
+        let valueBefore = e.flatMap { ax.string($0, kAXValueAttribute) }
         // The keys reach the app only while its window holds the key focus: the focus blip, per burst.
         let blips = CUKeyBlips(self, p, t, why: "typing")
         defer { blips.end() }
-        let typed = try runEvents(p, t, d, focus: true, token) { [self] route, _ in
-            try synth.type(pid: keyPid, text: text, route: route) {
-                // Before EVERY character: not cancelled, still running, and focus still on a typable,
-                // non-sensitive field — a tab or return may just have moved it to a password field.
-                try token.check()
-                blips.before()
-                guard sys.appRunning(t.pid) else { throw CUError.targetLost("\(t.appName) quit while typing", reason: .appQuit) }
-                if next > 0, chars[next - 1] == "\t" || chars[next - 1].isNewline { g.focusMayHaveMoved = true }
-                next += 1
-                try requireTypableFocus(t, g)
+        let started = clock.nowMs()
+        let typed = try typingProgress(chars.count, sent: { sent }, t) {
+            try runEvents(p, t, d, focus: true, token) { [self] route, _ in
+                try synth.type(pid: keyPid, text: text, route: route, between: {
+                    // Before EVERY character: not cancelled, still running, and focus still on a typable,
+                    // non-sensitive field — a tab or return may just have moved it to a password field.
+                    try token.check()
+                    blips.before()
+                    guard sys.appRunning(t.pid) else { throw CUError.targetLost("\(t.appName) quit while typing", reason: .appQuit) }
+                    if sent > 0, chars[sent - 1] == "\t" || chars[sent - 1].isNewline { g.focusMayHaveMoved = true }
+                    try requireTypableFocus(t, g)
+                }, posted: { sent = $0 })
             }
+        }
+        logTypingRate(t, chars: chars.count, since: started, what: "type")
+        // An editor that hides its text (Google Docs' canvas: its input target reads as zero-width filler, and a
+        // window on another Space may not be redrawn, so a screenshot is no proof either): say so, with what the
+        // input target's before/after does show — never leave the model to guess from a stale picture.
+        if let e, valueBefore.map({ !Self.showsText($0) }) ?? true {
+            let after = ax.string(e, kAXValueAttribute)
+            let moved = after != nil && after != valueBefore
+            CULog.act.notice("type in \(t.appName, privacy: .public): the editor hides its text — input target \(moved ? "changed" : "unchanged", privacy: .public)")
+            return typed.noting("typed \(chars.count) characters; \(t.appName) doesn't expose this editor's text to accessibility, so it can't be read back here\(moved ? " (its input target changed, so the keys arrived)" : "") — check with something the app shows, such as its word count, or a screenshot while its window is on screen")
         }
         // Keys to a content process can't be confirmed by the route itself: read the field back when it can be.
         if keyPid != t.pid, let e, valueBefore != nil, waitForInsert(e, text, before: valueBefore, capMs: 400) == .missing {
@@ -1304,10 +1346,10 @@ extension CUCore {
         case .restored(let evidence) where !evidence:
             o.detail = [o.detail, "the paste was not confirmed within 1.5 s"].compactMap { $0 }.joined(separator: "; ")
         case .unconfirmed:
-            o.detail = [o.detail, "the paste was sent but is not in the field yet — unconfirmed; check the state; the clipboard is restored once \(t.appName) has had time to read it"]
+            o.detail = [o.detail, "pasted, unconfirmed: the paste was sent but is not in the field yet — check the state; the clipboard is restored once \(t.appName) has had time to read it"]
                 .compactMap { $0 }.joined(separator: "; ")
         case .deferred:
-            o.detail = [o.detail, "the paste was sent; \(t.appName) doesn't show its text to accessibility here, so it can't be confirmed — check the state; the clipboard is restored once \(t.appName) has had time to read it"]
+            o.detail = [o.detail, "pasted, unconfirmed: \(t.appName) doesn't show its text to accessibility here, so the paste can't be read back — check the state; the clipboard is restored once \(t.appName) has had time to read it"]
                 .compactMap { $0 }.joined(separator: "; ")
         default: break
         }
@@ -1352,7 +1394,11 @@ extension CUCore {
             if textual { try requireTypableFocus(t, g) }
             out = try execute(plan, p, t, token, keyPid: keyPid, blips: blips)
         }
-        return out
+        // A chord that is a menu command went to the app's menu, not to an element (its detail says which item).
+        switch plan {
+        case .menuItem, .blipMenuItem: return out
+        default: return receiving(e, t, out)
+        }
     }
 
     static func producesText(_ c: CUKeyChord) -> Bool {
@@ -1562,15 +1608,108 @@ extension CUCore {
             }
             return ActOutcome(rung: .accessibility, detail: "\(note) the selected text was copied (as plain text) and deleted")
         case .paste:
-            guard let text = pasteboard().readString(), !text.isEmpty else { return nil }
+            return try backgroundWebPaste(f, p, t, token, keyPid: keyPid, keys: keys)
+        }
+    }
+
+    /// ⌘V into a web field of an app in the background; the clipboard already holds the text (the paste sequence
+    /// wrote it and restores it). Neither a key equivalent posted to the app nor its unvalidated Edit item reaches
+    /// a background WebKit view, and typing the text as keys cost ~10 ms a character (live: a 3,000-character
+    /// paste into Google Docs ran out the script's 30 s). So the REAL paste, in the focus blip: Edit › Paste once
+    /// it validates, else ⌘V to the app while its window holds the key focus. Without it: short text is typed;
+    /// longer text takes the foreground the user agreed to, or asks for it.
+    private func backgroundWebPaste(_ f: AXUIElement, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token,
+                                    keyPid: pid_t, keys: CUKeyBlips) throws -> ActOutcome? {
+        guard let text = pasteboard().readString(), !text.isEmpty else { return nil }
+        try token.check()
+        let v = CUKeyCodes.code(for: Character("v")) ?? 9
+        if p.allowForeground {
+            return try inForeground(t) { () -> ActOutcome in
+                self.synth(p).key(pid: t.pid, code: v, flags: .maskCommand, route: .publicPid)
+                return ActOutcome(rung: .foreground, detail: "\(t.appName) was brought forward for the paste, and the front given back after")
+            }
+        }
+        aimMenuCommands(at: t)
+        keyForMenu(t)
+        if let item = menuItem(forKey: "v", modifiers: [.command], pid: t.pid, includeDisabled: true),
+           let how = try pasteInBlip(item, p, t) {
+            return ActOutcome(rung: .accessibility, detail: how)
+        }
+        if text.count <= Self.typeKeysMax {
+            CULog.act.notice("paste in \(t.appName, privacy: .public): the real paste was not possible — typing the \(text.count, privacy: .public) characters as keys")
             let synth = self.synth(p)
             let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
-            CULog.act.notice("key in \(t.appName, privacy: .public): paste typed as keys")
-            let typed = try runEvents(p, t, d, focus: true, token) { route, _ in
-                try synth.type(pid: keyPid, text: text, route: route) { try token.check(); keys.before() }
+            var sent = 0
+            let started = clock.nowMs()
+            let typed = try typingProgress(text.count, sent: { sent }, t) {
+                try runEvents(p, t, d, focus: true, token) { route, _ in
+                    try synth.type(pid: keyPid, text: text, route: route, between: { try token.check(); keys.before() },
+                                   posted: { sent = $0 })
+                }
             }
-            return typed.noting("\(note) the clipboard's text was typed in (as plain text)")
+            logTypingRate(t, chars: text.count, since: started, what: "paste")
+            return typed.noting("in the background \(t.appName)'s web view took no paste, so the clipboard's text was typed in (as plain text)")
         }
+        CULog.act.notice("paste in \(t.appName, privacy: .public): the real paste was not possible and \(text.count, privacy: .public) characters are too many to type — asking for the foreground")
+        throw CUError(code: "needs_foreground",
+                      message: "\(t.appName)'s web page took no paste from the background (its Edit › Paste stayed disabled), and \(text.count) characters are too many to type — the paste needs \(t.appName) in front")
+    }
+
+    /// Edit › Paste in the focus blip (at most twice): pressed once it reads enabled; in the second blip, if it
+    /// still reads disabled, ⌘V to the app while its window holds the key focus (the key equivalent is validated
+    /// as it is handled). The detail for the result, or nil when no blip could run.
+    private func pasteInBlip(_ item: (element: AXUIElement, title: String), _ p: TargetActParams, _ t: CUTarget) throws -> String? {
+        for attempt in 1...2 {
+            guard let blip = beginBlip(p, t, why: "“\(item.title)” (try \(attempt))") else { return nil }
+            defer { blip.end() }
+            activateForMenu(p, t)
+            let until = clock.nowMs() + blipReadMs
+            repeat {
+                if ax.bool(item.element, kAXEnabledAttribute) == true {
+                    CULog.act.notice("paste in \(t.appName, privacy: .public): Edit › \(item.title, privacy: .public) enabled in the focus blip (try \(attempt, privacy: .public)) — pressed")
+                    do {
+                        try ax.perform(item.element, kAXPressAction)
+                    } catch let error where Self.deliveryUncertain(error) {
+                        throw busyAfterSend(t)
+                    }
+                    return "pasted through \(t.appName)'s Edit › \(item.title) with its window key for a moment (your app kept the front)"
+                }
+                if clock.nowMs() >= until || blip.isEnded { break }
+                usleep(20_000)
+            } while true
+            if attempt == 2, !blip.isEnded {
+                CULog.act.notice("paste in \(t.appName, privacy: .public): Edit › \(item.title, privacy: .public) still disabled in the focus blip — ⌘V while its window holds the key focus")
+                synth(p).key(pid: t.pid, code: CUKeyCodes.code(for: Character("v")) ?? 9, flags: .maskCommand,
+                             route: skyLight.isAvailable ? .skyLight : .publicPid)
+                return "pasted with ⌘V while \(t.appName)'s window held the key focus for a moment (your app kept the front)"
+            }
+            CULog.act.notice("paste in \(t.appName, privacy: .public): Edit › \(item.title, privacy: .public) still disabled in the focus blip (try \(attempt, privacy: .public))")
+        }
+        return nil
+    }
+
+    /// Runs a typing loop. An error after some characters went out says how many (`data.typed`, `data.total`,
+    /// and in the message unless it is a cancel, whose words are the daemon's): the field is partly filled.
+    func typingProgress<T>(_ total: Int, sent: () -> Int, _ t: CUTarget, _ body: () throws -> T) throws -> T {
+        do {
+            return try body()
+        } catch var e as CUError {
+            let n = sent()
+            guard n > 0 else { throw e }
+            var data = e.data ?? [:]
+            data["typed"] = .number(Double(n))
+            data["total"] = .number(Double(total))
+            e.data = data
+            if e.code != "cancelled" { e.message += " — \(n) of \(total) characters had been typed before this" }
+            CULog.act.notice("typing in \(t.appName, privacy: .public) stopped (\(e.code, privacy: .public)) after \(n, privacy: .public) of \(total, privacy: .public) characters")
+            throw e
+        }
+    }
+
+    /// The measured typing rate, for calibrating the pace (and the daemon's estimate).
+    func logTypingRate(_ t: CUTarget, chars: Int, since: Double, what: String) {
+        let ms = max(1, clock.nowMs() - since)
+        CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public): \(chars, privacy: .public) characters as keys in \(Int(ms), privacy: .public) ms (\(Int(Double(chars) * 1000 / ms), privacy: .public) chars/s)")
     }
 
     /// The field's selected text: AXSelectedText, else its value cut by the selected range.

@@ -255,16 +255,26 @@ struct CUEventSynth {
     /// At most this many UTF-16 units ride on one key event (CGEvent truncates longer strings).
     static let unicodeChunk = 16
 
-    /// Types `text`, `gapMs` between presses. Each character is ITS OWN KEY — the layout's key code with
+    /// Typing pace: the keys of a batch go back to back (no settle per key — the app takes its event queue in
+    /// order), then a short yield. Return and Tab keep `key()`'s own pauses: a focus move must have been handled
+    /// before the next character's focus check. The real per-key cost (posting plus the caller's checks) is
+    /// logged as characters per second at the end of every typed run.
+    static let keyBatch = 8
+    static let batchYieldMs: Double = 3
+
+    /// Types `text` at the batched pace above. Each character is ITS OWN KEY — the layout's key code with
     /// Shift/Option as needed — carrying the character as its Unicode string, so an editor that reads the key
     /// (Google Docs' canvas) sees the key it expects and one that reads the text gets the exact character.
     /// Only characters no key types (emoji, CJK) go as Unicode alone, a run of them in one event (in chunks of
     /// `unicodeChunk` UTF-16 units), never one carrier key per character. Return and Tab are their keys.
-    /// `between` runs before each character (a run: before its first) and may throw to stop.
+    /// `between` runs before each character (a run: before its first) and may throw to stop. `posted` is told
+    /// how many characters have gone out so far, after each key or run (a cancelled type says how far it got).
     @discardableResult
-    func type(pid: pid_t, text: String, route: CURoute, gapMs: Double = 8, between: () throws -> Void) throws -> CURoute {
+    func type(pid: pid_t, text: String, route: CURoute, between: () throws -> Void,
+              posted: ((Int) -> Void)? = nil) throws -> CURoute {
         let src = source(route)
         var used = route
+        var inBatch = 0
         func post(code: CGKeyCode, flags: CGEventFlags, unicode: String?) {
             for down in [true, false] {
                 guard let e = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: down) else { continue }
@@ -276,7 +286,11 @@ struct CUEventSynth {
                 if route != .hid { e.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid)) }
                 used = poster.post(e, pid: pid, route: route, authenticate: true)
             }
-            sleep(gapMs)
+            inBatch += 1
+            if inBatch >= Self.keyBatch {
+                inBatch = 0
+                sleep(Self.batchYieldMs)
+            }
         }
         let chars = Array(text)
         var i = 0
@@ -286,16 +300,21 @@ struct CUEventSynth {
             if ch == "\n" || ch == "\r" || ch == "\r\n" {
                 used = key(pid: pid, code: CUKeyCodes.code(for: .returnKey), flags: [], route: route)
                 i += 1
+                inBatch = 0
+                posted?(i)
                 continue
             }
             if ch == "\t" {
                 used = key(pid: pid, code: CUKeyCodes.code(for: .tab), flags: [], route: route)
                 i += 1
+                inBatch = 0
+                posted?(i)
                 continue
             }
             if let k = stroke(ch) {
                 post(code: k.code, flags: k.flags, unicode: String(ch))
                 i += 1
+                posted?(i)
                 continue
             }
             // A run of characters no key types: one event per chunk, never splitting a character.
@@ -306,6 +325,7 @@ struct CUEventSynth {
                 i += 1
             }
             post(code: 0, flags: [], unicode: run)
+            posted?(i)
         }
         return used
     }

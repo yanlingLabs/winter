@@ -512,7 +512,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         let start = Date()
         let r = try await act(.paste(CUPasteAction(text: "report text")))
         XCTAssertLessThan(Date().timeIntervalSince(start), 1.0, "no 1.5 s wait for evidence that never comes")
-        XCTAssertTrue(r.detail?.contains("can't be confirmed") ?? false, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("pasted, unconfirmed") ?? false, r.detail ?? "")
         XCTAssertEqual(pb.readString(), "report text", "the target can still read it")
         try await Task.sleep(nanoseconds: 400_000_000)
         XCTAssertEqual(pb.readString(), "user's own", "and the user's clipboard came back")
@@ -535,7 +535,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
             if e.type == .keyDown, e.keycode == 9 { ax.put(field, [kAXValueAttribute: "hello world"]) }
         }
         let r = try await act(.paste(CUPasteAction(text: " world")))
-        XCTAssertFalse(r.detail?.contains("can't be confirmed") ?? false)
+        XCTAssertFalse(r.detail?.contains("pasted, unconfirmed") ?? false)
         XCTAssertEqual(pb.readString(), "user's own", "restored right after the evidence")
     }
 

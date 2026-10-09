@@ -140,7 +140,9 @@ export interface ScreenshotResult {
   /** `target.screenshot`: what the image is when it is not a live capture, e.g. captured from another desktop. */
   detail?: string;
 }
-export interface ActResult { rung: 1 | 2 | 3 | 4; detail?: string }
+/** `input` (type, paste, key, setValue; helper 1.2.0): the element that received the input, e.g. `[14] text area "Comment"`;
+ *  `inputUnknown`: the app reported no focused element. */
+export interface ActResult { rung: 1 | 2 | 3 | 4; detail?: string; input?: string; inputUnknown?: boolean }
 /** `target.applescript`: the script's result as AppleScript displays it (null: none). */
 export interface AppleScriptResult { result: string | null; detail?: string }
 /** `target.scriptingDictionary`: the bound app's sdef, summarised (`scriptable: false` for an app without one). */

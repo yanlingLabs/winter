@@ -645,7 +645,8 @@ public final class CUCore: @unchecked Sendable {
         return try await queues.run(t.pid) { [self] in
             try floorCheckPrivacy(t)
             let obs = try observe(t, within: p.within)
-            let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note)
+            let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note,
+                                       caret: obs.caret, focusUnknown: obs.focusUnknown)
             let snap = CUSnapshot(id: t.nextSnapshotId(), scope: p.within, header: header, roots: obs.roots, formatter: formatter)
             // A whole-window, non-full state folds what is out of view first; `within` and `full` don't.
             var text = formatter.full(header: header, roots: obs.roots, viewportFirst: p.within == nil && p.full != true)
@@ -738,7 +739,7 @@ public final class CUCore: @unchecked Sendable {
             privateTried = true
             if let shot = try await offScreenShot(t, region, p.budget) {
                 taken = shot
-                detail = try await offScreenNote(t)
+                detail = try await offScreenNote(t, shot)
             } else if try await queues.run(t.pid, { [self] in isOffThisDesktop(t) }) {
                 throw CUError.screenshotElsewhere(t.appName)
             }
@@ -760,7 +761,7 @@ public final class CUCore: @unchecked Sendable {
                     throw CUError.screenshotElsewhere(t.appName)
                 }
                 img = shot
-                detail = try await offScreenNote(t)
+                detail = try await offScreenNote(t, shot)
             }
         }
         let shot = try await queues.run(t.pid) {
@@ -807,11 +808,20 @@ public final class CUCore: @unchecked Sendable {
         return try CUCapturer.encodeWindowImage(image, pointsRect: area, budget: budget)
     }
 
-    /// What an image from `offScreenShot` is.
-    func offScreenNote(_ t: CUTarget) async throws -> String {
+    /// What an image from `offScreenShot` is, and how stale it may be: the window is hidden, and an app may not
+    /// redraw it there (live: Safari stopped drawing a Google Docs window on another Space, so its screenshots
+    /// showed none of the text just typed). When the image is the same as the last one of this window although
+    /// input was sent since, it says so, with its age — and always how to check what is really there.
+    func offScreenNote(_ t: CUTarget, _ img: CUCapturedImage) async throws -> String {
         let elsewhere = try await queues.run(t.pid) { [self] in isOffThisDesktop(t) }
-        let place = elsewhere ? "on another desktop (another Space or full screen)" : "while it is not on screen (minimized or hidden)"
-        return "captured \(t.appName)'s window \(place) — an app that stops drawing while hidden may show slightly older content"
+        let now = clock.nowMs()
+        let digest = img.jpeg.hashValue ^ img.jpeg.count
+        let previous = t.noteOffScreenShot(digest: digest, at: now)
+        var note = "captured \(t.appName)'s window \(elsewhere ? "on another desktop (another Space or full screen)" : "while it is not on screen (minimized or hidden)"): it is hidden there, so \(t.appName) may not be redrawing it and this image can be older than what was just done"
+        if let previous, previous.digest == digest, let acted = t.lastActionMs, acted > previous.atMs {
+            note += " — it is unchanged since the screenshot \(Int(((now - previous.atMs) / 1000).rounded())) s ago although input was sent since, so it is likely stale"
+        }
+        return note + "; to see what is really there, read it (state() or find() text, or something the app counts, such as a word count), or take a screenshot once the user shows the window"
     }
 
     // MARK: - waits
@@ -1264,6 +1274,8 @@ public final class CUCore: @unchecked Sendable {
         var roots: [CUNode]
         var focusedRef: Int?
         var title: String
+        var caret: String? = nil
+        var focusUnknown = false
     }
 
     /// Reads the bound window (plus open app menus), or the subtree at `within`.
@@ -1295,12 +1307,16 @@ public final class CUCore: @unchecked Sendable {
         let roots = hidden.isEmpty ? result.roots : result.roots.map { Self.removing(hidden, from: $0) }
         if full { t.lastFullRead = (roots, readAt) }
         var focusedRef: Int?
-        if let f = AX.element(app, kAXFocusedUIElementAttribute), let r = t.refs.existingRef(for: AXIdentity(element: f)),
+        var caret: String?
+        let focused = AX.element(app, kAXFocusedUIElementAttribute) ?? AX.element(win, kAXFocusedUIElementAttribute)
+        if let f = focused, let r = t.refs.existingRef(for: AXIdentity(element: f)),
            roots.contains(where: { $0.find(ref: r) != nil }) {
             focusedRef = r
+            caret = formatter.caretNote(value: ax.string(f, kAXValueAttribute), selection: selectionRange(f),
+                                        secure: ElementInfo(f, ax).secure)
         }
         let title = AX.string(win, kAXTitleAttribute) ?? t.windowTitle
-        return Observation(roots: roots, focusedRef: focusedRef, title: title)
+        return Observation(roots: roots, focusedRef: focusedRef, title: title, caret: caret, focusUnknown: focused == nil)
     }
 
     /// Actions the app listed but refused and `action()` has no pointer equivalent for: state stops listing
