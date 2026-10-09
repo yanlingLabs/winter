@@ -164,8 +164,10 @@ final class KeyboardTargetTests: XCTestCase {
         sys.contentProcesses[content] = pid
         // Safari lists a Select All menu item with cmd+A; it must not be used for a web field.
         let bar = fakeElement(93_050), edit = fakeElement(93_051), menu = fakeElement(93_052), all = fakeElement(93_053)
+        let apple = fakeElement(93_055)
         ax.put(ax.application(pid), [kAXMenuBarAttribute: bar])
-        ax.put(bar, [kAXChildrenAttribute: [edit]])
+        ax.add(apple, role: "AXMenuBarItem", title: "Apple")
+        ax.put(bar, [kAXChildrenAttribute: [apple, edit]])  // the window is not key in Safari: keys, not this item
         ax.add(edit, role: "AXMenuBarItem", title: "Edit", extra: [kAXChildrenAttribute: [menu]])
         ax.add(menu, role: kAXMenuRole, extra: [kAXChildrenAttribute: [all]])
         ax.add(all, role: kAXMenuItemRole, title: "Select All",
@@ -178,6 +180,37 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertEqual(down?.keycode, Int64(kVK_ANSI_A))
         XCTAssertTrue(down?.flags.contains(.maskCommand) ?? false)
         XCTAssertEqual(down?.pid, content, "to the web field's content process")
+    }
+
+    func testEditingShortcutsUseTheMenuItemOnceTheFieldsWindowIsKeyInItsApp() async throws {
+        let plain = nativeField()
+        ax.focus(pid: pid, on: plain)
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window])  // the field's window is key in its app
+        let bar = fakeElement(93_050), edit = fakeElement(93_051), menu = fakeElement(93_052), copy = fakeElement(93_054)
+        let apple = fakeElement(93_055)
+        ax.put(ax.application(pid), [kAXMenuBarAttribute: bar])
+        ax.add(apple, role: "AXMenuBarItem", title: "Apple")
+        ax.put(bar, [kAXChildrenAttribute: [apple, edit]])
+        ax.add(edit, role: "AXMenuBarItem", title: "Edit", extra: [kAXChildrenAttribute: [menu]])
+        ax.add(menu, role: kAXMenuRole, extra: [kAXChildrenAttribute: [copy]])
+        ax.add(copy, role: kAXMenuItemRole, title: "Copy",
+               extra: [kAXMenuItemCmdCharAttribute: "c", kAXMenuItemCmdModifiersAttribute: 0, kAXEnabledAttribute: true])
+        ax.setActions(copy, [kAXPressAction])
+        let r = try await act(.key(CUKeyAction(combo: "cmd+c", into: target.refs.ref(for: AXIdentity(element: plain)))))
+        XCTAssertEqual(r.rung, 1, "the menu item: its action reaches the key window's focused field")
+        XCTAssertTrue(ax.performed.contains("\(token(copy)):\(kAXPressAction)"))
+        XCTAssertTrue(poster.keyDowns.isEmpty)
+    }
+
+    func testAFieldWithDOMFocusWhileTheWindowReportsAnotherControlIsClickedIntoPlace() async throws {
+        safari(fieldOwner: pid)
+        let address = searchHasFocus()  // the window's first responder: another control (Safari's address bar)
+        ax.put(field, [kAXFocusedAttribute: kCFBooleanTrue])  // the page's input holds DOM focus all the same
+        poster.onPost = { [unowned self] e in if e.type == .leftMouseUp { ax.focus(pid: pid, on: field) } }
+        try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+        _ = address
+        XCTAssertEqual(poster.entries.filter { $0.type == .leftMouseDown }.count, 1, "clicked into place, not trusted")
+        XCTAssertEqual(poster.keyDowns.count, 2)
     }
 
     func testAppLevelCommandsStillUseTheMenuWhenFocusIsNotEditable() async throws {
@@ -366,6 +399,49 @@ final class KeyboardTargetTests: XCTestCase {
         try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
         XCTAssertEqual(poster.entries.filter { $0.type == .leftMouseDown }.count, 2)
         XCTAssertEqual(poster.keyDowns.count, 2)
+    }
+
+    func testAFocusedFieldInAWindowThatIsNotKeyInItsAppGetsAClickFirst() async throws {
+        safari(fieldOwner: pid)  // the field already has WebKit focus
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: fakeElement(93_099)])  // another window is key
+        ax.makeSettable(field, kAXSelectedTextRangeAttribute)
+        let r = AX.makeRange(location: 3, length: 2)!
+        ax.put(field, [kAXSelectedTextRangeAttribute: r])
+        poster.onPost = { [unowned self] e in
+            if e.type == .leftMouseUp { ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window]) }  // the click makes it key
+        }
+        try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+        let downs = poster.entries.filter { $0.type == .leftMouseDown }
+        XCTAssertEqual(downs.count, 1, "one click on the field")
+        XCTAssertEqual(downs.first?.window, 77)
+        XCTAssertTrue(ax.written.contains("\(token(field)):\(kAXSelectedTextRangeAttribute)"), "its selection put back")
+        XCTAssertEqual(poster.keyDowns.count, 2)
+    }
+
+    func testWhenTheKeyMakingClickLeavesTheFocusElsewhereNothingIsTyped() async throws {
+        safari(fieldOwner: pid)  // the field has WebKit focus, its window is not key in Safari
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: fakeElement(93_099)])
+        let other = fakeElement(93_098)
+        ax.add(other, role: kAXTextFieldRole, title: "Address", frame: CGRect(x: 400, y: 10, width: 300, height: 24))
+        poster.onPost = { [unowned self] e in
+            // Each click makes the window key, but its first responder (the address bar) keeps the focus.
+            if e.type == .leftMouseUp { ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window]); ax.focus(pid: pid, on: other) }
+        }
+        do {
+            try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+            XCTFail("expected focus_not_placed")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("focus_not_placed"))
+        }
+        XCTAssertEqual(poster.entries.filter { $0.type == .leftMouseDown }.count, 2, "clicked twice")
+        XCTAssertTrue(poster.keyDowns.isEmpty, "not one key into the address bar")
+    }
+
+    func testAWindowAlreadyKeyInItsAppIsLeftAlone() async throws {
+        safari(fieldOwner: pid)
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window])
+        try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "no click")
     }
 
     func testAFocusedDescendantOrTheFieldsOwnFocusedFlagCounts() {

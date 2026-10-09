@@ -200,25 +200,9 @@ final class BindOnceTests: XCTestCase {
         XCTAssertEqual(ax.remoteWalks, 0, "the remembered element, no walk")
     }
 
-    func testANeverVendedWindowIsReachedByABriefVisitToThisSpace() async throws {
+    func testANeverVendedWindowIsCaptureOnly() async throws {
         safari(reachable: false)  // no cheap route, and the walk misses: AppKit never vended it
-        sys.visitPossible = true
-        sys.onVisit = { [unowned self] _ in ax.put(ax.application(pid), [kAXWindowsAttribute: [original]]) }
-        sys.afterVisit = { [unowned self] _ in ax.put(ax.application(pid), [kAXWindowsAttribute: [AXUIElement]()]) }
         let r = try await bind()
-        XCTAssertEqual(sys.visits, [77], "one visit, for that window")
-        XCTAssertEqual(r.window.id, 77)
-        XCTAssertTrue(r.detail?.hasPrefix("step 0 (where it is): ") ?? false, "reached where it is, not capture-only: \(r.detail ?? "")")
-        // Kept: the next reach needs no visit.
-        _ = try await core.targetRelease(TargetReleaseParams(targetId: r.targetId))
-        _ = try await bind()
-        XCTAssertEqual(sys.visits, [77])
-    }
-
-    func testWhenNoVisitIsPossibleTheWindowIsCaptureOnly() async throws {
-        safari(reachable: false)
-        let r = try await bind()
-        XCTAssertTrue(sys.visits.isEmpty)
         XCTAssertTrue(r.detail?.contains("capture only") ?? false, r.detail ?? "")
     }
 
@@ -300,6 +284,10 @@ final class BindOnceTests: XCTestCase {
         let justLaunched = Wait()
         _ = try await CUBindWait.run(launched: true, deadlineMs: 1000, justLaunched.effects())
         XCTAssertEqual(justLaunched.reopens, 0, "an app this bind launched is never reopened")
+
+        let slow = Wait()  // a reopened app gets a launch's time to show its window, not the 1 s asked
+        _ = try await CUBindWait.run(launched: false, deadlineMs: 1000, slow.effects())
+        XCTAssertGreaterThanOrEqual(slow.now, CUBindWait.reopenWaitMs)
     }
 
     func testAWindowOnScreenThatAXHasNotListedYetIsWaitedFor() async throws {

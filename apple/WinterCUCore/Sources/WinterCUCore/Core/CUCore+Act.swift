@@ -230,7 +230,8 @@ extension CUCore {
             guard a.point == nil else { throw CUError.invalidParams("click takes a ref or a point, not both") }
             let e = try element(ref, in: t)
             let info = ElementInfo(e, ax)
-            try requireEnabled(info, ref: ref, t)
+            // A disabled control does nothing when PRESSED; its context menu (a right click) may still open.
+            if button == .left { try requireEnabled(info, ref: ref, t) }
             try pasteMenuGuard(e, info, p, t)
             t.noteTargeted(e, at: clock.nowMs())
             announceTarget(t, info, pressing: button == .left)
@@ -878,11 +879,56 @@ extension CUCore {
     /// Whether the app's focused UI element is `e` now (its own, or its focused window's).
     func isFocused(_ e: AXUIElement, _ t: CUTarget) -> Bool { focusRelation(e, t) == .onIt }
 
+    /// Keys go to the app's KEY window: with another window key they are lost there (live: WebKit focus was in
+    /// the fixture's web field, its Canvas window stayed key, and no key reached the field; an AXMain write did
+    /// not change that). So when the field's window is not its app's key window, it is made key the way a user
+    /// does — a window-targeted click on the field, after the synthetic activation, once more if the first only
+    /// activated — and the field's selection is put back (the click moved the caret).
+    func makeWindowKeyForField(_ e: AXUIElement, _ t: CUTarget) {
+        guard t.accessible, boundWindowIsKeyInApp(t) == false, let c = ElementInfo(e, ax).center else { return }
+        let selection = ax.attribute(e, kAXSelectedTextRangeAttribute)
+        guard windowClick(at: c, t) else { return }
+        // The first click may only have made the window key (then the window's default responder has the focus):
+        // once more, now that it is key.
+        if boundWindowIsKeyInApp(t) != true || focusRelation(e, t) == .elsewhere { _ = windowClick(at: c, t) }
+        if let selection, ax.isSettable(e, kAXSelectedTextRangeAttribute) { try? ax.set(e, kAXSelectedTextRangeAttribute, selection) }
+        // The click must have left the focus in the field; if it moved it, place it again (press or caret).
+        if focusRelation(e, t) != .onIt {
+            let web = isWebContent(e) || keyboardTarget(t, focused: e) != t.pid
+            if ax.actions(e).contains(kAXPressAction) { try? ax.perform(e, kAXPressAction) }
+            if !waitFocused(e, t, web: web), let selection, ax.isSettable(e, kAXSelectedTextRangeAttribute) {
+                try? ax.set(e, kAXSelectedTextRangeAttribute, selection)
+            }
+            CULog.act.notice("keys in \(t.appName, privacy: .public): the click moved the focus; placed again → focus \(Self.relationWord(self.focusRelation(e, t)), privacy: .public)")
+        }
+        let now = boundWindowIsKeyInApp(t)
+        CULog.act.notice("keys in \(t.appName, privacy: .public): the field's window was not key in its app — clicked the field; key now: \(now.map { $0 ? "yes" : "no" } ?? "unknown", privacy: .public)")
+    }
+
+    /// A window-targeted left click at `c` in the bound window — on this desktop, or (private path) on another
+    /// Space — after the synthetic activation. False when no route reaches the window.
+    @discardableResult
+    func windowClick(at c: CGPoint, _ t: CUTarget) -> Bool {
+        let onScreen = sys.window(id: t.windowID)?.onScreen == true
+        let elsewhere = !onScreen && t.privatePath && skyLight.canSetWindowLocation
+        guard onScreen || elsewhere else { return false }
+        let route: CURoute = elsewhere && t.isChromium && skyLight.isAvailable ? .skyLight : .publicPid
+        var s = synth
+        s.windowSPI = t.privatePath
+        postSyntheticActivation(t, privatePath: t.privatePath)
+        try? s.click(pid: t.pid, windowFor: windowFor(t), at: c, button: .left, count: 1, flags: [], route: route)
+        return true
+    }
+
     /// Whether the bound window is its app's key (focused) window, as the app tells accessibility; nil when it
     /// can't be read.
     func boundWindowIsKeyInApp(_ t: CUTarget) -> Bool? {
         guard let w = try? windowElement(t) else { return nil }
-        if let f = ax.element(ax.application(t.pid), kAXFocusedWindowAttribute) { return CFEqual(f, w) }
+        if let f = ax.element(ax.application(t.pid), kAXFocusedWindowAttribute) {
+            // By window id: two element objects for one window need not compare equal.
+            if let id = ax.windowID(f) { return id == t.windowID }
+            return CFEqual(f, w)
+        }
         return ax.bool(w, kAXFocusedAttribute)
     }
 
@@ -896,10 +942,11 @@ extension CUCore {
     /// says it is focused), elsewhere (the app reports another element), or unknown (the app reports none —
     /// Electron apps often don't).
     func focusRelation(_ e: AXUIElement, _ t: CUTarget) -> FocusRelation {
-        if ax.bool(e, kAXFocusedAttribute) == true { return .onIt }
+        // What the app or window REPORTS wins: a web field can hold DOM focus (its own AXFocused reads true)
+        // while the window's first responder is another control (live: Safari's address bar took the keys).
         let reported = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
             ?? (try? windowElement(t)).flatMap { ax.element($0, kAXFocusedUIElementAttribute) }
-        guard var f = reported else { return .unknown }
+        guard var f = reported else { return ax.bool(e, kAXFocusedAttribute) == true ? .onIt : .unknown }
         for _ in 0..<12 {
             if CFEqual(f, e) { return .onIt }
             guard let parent = ax.element(f, kAXParentAttribute) else { break }
@@ -931,8 +978,11 @@ extension CUCore {
         // A capture-only window has no element of its own to focus: never a write (its "window" element is the
         // application's). Keys reach it by the synthetic activation and window-targeted focus records.
         guard t.accessible else { return false }
-        if isFocused(e, t) { return true }
-        if pressToFocus(e, t) { return true }
+        if isFocused(e, t) || pressToFocus(e, t) {
+            makeWindowKeyForField(e, t)
+            // Whatever the click did, keys go nowhere but the field: elsewhere now means not placed.
+            return focusRelation(e, t) != .elsewhere
+        }
         // The write is forbidden for web content and apps known to activate on it: focus is not placed, and
         // the caller refuses rather than typing into whatever has it.
         let web = isWebContent(e) || keyboardTarget(t, focused: e) != t.pid
@@ -1019,8 +1069,9 @@ extension CUCore {
         let clicked = waitFocused(e, t, web: web)
         CULog.act.notice("focus in \(t.appName, privacy: .public): window-targeted click (\(onScreen ? "on this desktop" : "elsewhere", privacy: .public), \(route == .skyLight ? "SkyLight" : "pid", privacy: .public), window was key in its app: \(wasKey.map { $0 ? "yes" : "no" } ?? "unknown", privacy: .public)) → focus \(Self.relationWord(self.focusRelation(e, t)), privacy: .public)")
         if clicked { return true }
-        // The window was not key in its app and the click only made it key: once more.
-        if wasKey != true, boundWindowIsKeyInApp(t) != false {
+        // The click only made the window key, or left the window's default responder (a new Safari window's
+        // address bar) with the focus: once more.
+        if (wasKey != true && boundWindowIsKeyInApp(t) != false) || focusRelation(e, t) == .elsewhere {
             CULog.act.notice("focus in \(t.appName, privacy: .public): the first click only made the window key — clicking the field once more")
             try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
             if waitFocused(e, t, web: web) { return true }
@@ -1149,19 +1200,49 @@ extension CUCore {
     }
 
     /// How a chord reaches the app: a menu item with that key equivalent (rung 1), else key events.
-    enum ChordPlan {
+    indirect enum ChordPlan {
         case menuItem(AXUIElement, title: String)
         case events(code: CGKeyCode, flags: CGEventFlags, decision: CUInputLadder.Decision)
+        /// An editing shortcut carried out over accessibility in a background web field, with the events plan to
+        /// fall back on when that is not possible.
+        case emulated(EditCommand, field: AXUIElement, fallback: ChordPlan)
+    }
+
+    /// ⌘A ⌘C ⌘X ⌘V for a web field in an app that is not in front. Live: neither the key equivalents posted to
+    /// the app nor its Edit menu items (unvalidated in the background) did anything in a WebKit view, while the
+    /// selection, the selected text and plain typing all work there.
+    enum EditCommand: String { case selectAll = "select all", copy, cut, paste }
+
+    static func editCommand(_ chord: CUKeyChord) -> EditCommand? {
+        guard case .character(let raw) = chord.key, chord.modifiers == [.command] else { return nil }
+        switch Character(String(raw).lowercased()) {
+        case "a": return .selectAll
+        case "c": return .copy
+        case "x": return .cut
+        case "v": return .paste
+        default: return nil
+        }
     }
 
     func chordPlan(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget, _ g: TypingFocus = TypingFocus()) throws -> ChordPlan {
         if chord.modifiers.contains(.command), case .character(let ch) = chord.key {
             // A paste however it is sent: never into a password field, never under click only.
             if Character(String(ch).lowercased()) == "v" { try requirePasteSafe(p, t, g) }
+            // ⌘A ⌘C ⌘X ⌘V into a web field of an app that is not in front: over accessibility (see EditCommand) —
+            // neither the key equivalents nor the app's Edit items reach a background WebKit view.
+            if t.accessible, let command = Self.editCommand(chord), sys.frontmostPid() != t.pid,
+               let f = g.explicit ?? reportedFocus(t), isWebContent(f) || keyboardTarget(t, focused: f) != t.pid,
+               editableFocus(t, f) {
+                let code = CUKeyCodes.code(for: ch) ?? 0
+                return .emulated(command, field: f, fallback: .events(
+                    code: code, flags: chord.modifiers.cgFlags, decision: try CUInputLadder.decideEvents(context(p, t, pointer: false))))
+            }
             // An editing shortcut with the focus in an editable element or a content process goes to that
             // element as KEYS: the app's menu item acts on the app's responder, not the web field (Safari's
-            // Select All selected nothing in Google Docs' title, so typing appended).
-            let editing = Self.isEditingShortcut(chord) && editableFocus(t, g.explicit ?? reportedFocus(t))
+            // Select All selected nothing in Google Docs' title, so typing appended) — unless the field's window
+            // is the app's KEY window: then the menu item's action goes down that window's responder chain.
+            let editingShortcut = Self.isEditingShortcut(chord) && editableFocus(t, g.explicit ?? reportedFocus(t))
+            let editing = editingShortcut && boundWindowIsKeyInApp(t) != true
             if !editing, t.accessible, let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
                 if CUPasteMenu.isPasteTitle(item.title) { try requirePasteSafe(p, t, g) }
                 CULog.act.notice("key in \(t.appName, privacy: .public): the chord goes to its menu item")
@@ -1217,7 +1298,59 @@ extension CUCore {
             return try runEvents(p, t, d, focus: true, token) { route, _ in
                 synth.key(pid: pid, code: code, flags: flags, route: route)
             }
+        case .emulated(let command, let f, let fallback):
+            if let done = try emulate(command, f, p, t, token, keyPid: keyPid ?? t.pid) { return done }
+            CULog.act.notice("key in \(t.appName, privacy: .public): \(command.rawValue, privacy: .public) could not be done over accessibility — sending the keys")
+            return try execute(fallback, p, t, token, keyPid: keyPid)
         }
+    }
+
+    /// One editing shortcut over accessibility; nil when that can't be done here (the keys are sent instead).
+    private func emulate(_ command: EditCommand, _ f: AXUIElement, _ p: TargetActParams, _ t: CUTarget,
+                         _ token: CUCancellation.Token, keyPid: pid_t) throws -> ActOutcome? {
+        let note = "in the background \(t.appName)'s web view takes no editing shortcut, so"
+        switch command {
+        case .selectAll:
+            let length = ax.string(f, kAXValueAttribute)?.utf16.count ?? 0
+            guard ax.isSettable(f, kAXSelectedTextRangeAttribute), let r = AX.makeRange(location: 0, length: length),
+                  (try? ax.set(f, kAXSelectedTextRangeAttribute, r)) != nil else { return nil }
+            CULog.act.notice("key in \(t.appName, privacy: .public): select all over accessibility")
+            return ActOutcome(rung: .accessibility, detail: "\(note) everything in the field was selected over accessibility")
+        case .copy, .cut:
+            guard !ElementInfo(f, ax).secure, let text = selectedText(f), !text.isEmpty else { return nil }
+            _ = pasteboard().write([["public.utf8-plain-text": Data(text.utf8)]])
+            CULog.act.notice("key in \(t.appName, privacy: .public): \(command.rawValue, privacy: .public) of the selection over accessibility")
+            guard command == .cut else {
+                return ActOutcome(rung: .accessibility, detail: "\(note) the selected text was copied (as plain text)")
+            }
+            let synth = self.synth(p)
+            let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
+            _ = try runEvents(p, t, d, focus: true, token) { route, _ in
+                synth.key(pid: keyPid, code: CUKeyCodes.code(for: .delete), flags: [], route: route)
+            }
+            return ActOutcome(rung: .accessibility, detail: "\(note) the selected text was copied (as plain text) and deleted")
+        case .paste:
+            guard let text = pasteboard().readString(), !text.isEmpty else { return nil }
+            let synth = self.synth(p)
+            let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
+            CULog.act.notice("key in \(t.appName, privacy: .public): paste typed as keys")
+            let typed = try runEvents(p, t, d, focus: true, token) { route, _ in
+                try synth.type(pid: keyPid, text: text, route: route) { try token.check() }
+            }
+            return typed.noting("\(note) the clipboard's text was typed in (as plain text)")
+        }
+    }
+
+    /// The field's selected text: AXSelectedText, else its value cut by the selected range.
+    func selectedText(_ f: AXUIElement) -> String? {
+        if let s = ax.string(f, kAXSelectedTextAttribute), !s.isEmpty { return s }
+        guard let value = ax.string(f, kAXValueAttribute), let raw = ax.attribute(f, kAXSelectedTextRangeAttribute),
+              CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+        var r = CFRange()
+        guard AXValueGetValue(raw as! AXValue, .cfRange, &r), r.length > 0 else { return nil }
+        let u = Array(value.utf16)
+        guard r.location >= 0, r.location + r.length <= u.count else { return nil }
+        return String(utf16CodeUnits: Array(u[r.location..<(r.location + r.length)]), count: r.length)
     }
 
     /// One chord, start to finish.
@@ -1231,7 +1364,8 @@ extension CUCore {
 
     /// A menu-bar item whose key equivalent is `key` with `modifiers` (command implied). The walk is bounded
     /// in items and time.
-    func menuItem(forKey key: Character, modifiers: CUKeyChord.Modifiers, pid: pid_t) -> (element: AXUIElement, title: String)? {
+    func menuItem(forKey key: Character, modifiers: CUKeyChord.Modifiers, pid: pid_t,
+                  includeDisabled: Bool = false) -> (element: AXUIElement, title: String)? {
         guard let roots = try? CUAXMenuNode.menuBar(pid: pid, ax: ax) else { return nil }
         let want = String(key).uppercased()
         var wantMods = 0
@@ -1249,7 +1383,7 @@ extension CUCore {
                let ch = attrs[kAXMenuItemCmdCharAttribute].flatMap(AX.stringValue), ch.uppercased() == want {
                 let mods = attrs[kAXMenuItemCmdModifiersAttribute].flatMap { ($0 as? NSNumber)?.intValue } ?? 0
                 let enabled = attrs[kAXEnabledAttribute].flatMap(AX.boolValue) ?? true
-                if mods == wantMods, enabled {
+                if mods == wantMods, enabled || includeDisabled {
                     return (n.element, attrs[kAXTitleAttribute].flatMap(AX.stringValue) ?? want)
                 }
             }

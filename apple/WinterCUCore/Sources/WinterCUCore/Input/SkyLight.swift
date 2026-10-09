@@ -254,36 +254,6 @@ public struct CUSkyLight: @unchecked Sendable {
         return arr.map(\.uint64Value).filter { $0 != 0 }
     }
 
-    /// Adds a window to the ACTIVE Space for the length of `body` — never touching the Spaces it is on — then takes
-    /// it off again and checks its Spaces are exactly what they were (restoring them if not). AppKit vends a window
-    /// to accessibility only while it is on the active Space: an app's window on another Space or in full screen
-    /// that no client ever saw has no AX element at all. The caller suspends screen updates around this, so the
-    /// visit is never drawn. nil when a symbol is missing, the window is on no Space, or it already is here.
-    func visitActiveSpace<T>(windowID id: UInt32, _ body: () -> T) -> T? {
-        guard let mainConnectionFn, let activeSpaceFn, let addToSpacesFn, let removeFromSpacesFn else { return nil }
-        let cid = mainConnectionFn()
-        let active = activeSpaceFn(cid)
-        guard active != 0 else { return nil }
-        let before = spaces(ofWindow: id, connection: cid)
-        guard !before.isEmpty, !before.contains(active) else { return nil }
-        let windows = [NSNumber(value: id)] as CFArray
-        let here = [NSNumber(value: active)] as CFArray
-        addToSpacesFn(cid, windows, here)
-        defer {
-            removeFromSpacesFn(cid, windows, here)
-            let after = spaces(ofWindow: id, connection: cid)
-            if Set(after) != Set(before) {
-                let missing = before.filter { !after.contains($0) }
-                let extra = after.filter { !before.contains($0) }
-                if !missing.isEmpty { addToSpacesFn(cid, windows, missing.map { NSNumber(value: $0) } as CFArray) }
-                if !extra.isEmpty { removeFromSpacesFn(cid, windows, extra.map { NSNumber(value: $0) } as CFArray) }
-                CULog.bind.fault("visit: window \(id, privacy: .public)'s Spaces changed during the visit — restored")
-            }
-        }
-        guard spaces(ofWindow: id, connection: cid).contains(active) else { return nil }
-        return body()
-    }
-
     /// Whether a window is on any Space at all (an ordered-out — closed but still allocated — window is on
     /// none); nil when it can't be read.
     public func isOnAnySpace(windowID id: UInt32) -> Bool? {

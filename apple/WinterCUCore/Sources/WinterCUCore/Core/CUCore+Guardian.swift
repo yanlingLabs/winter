@@ -152,17 +152,12 @@ extension CUCore {
         }
         switch verdict {
         case .release(let id):
+            // A bound target's (synthetic) key focus was taken: the theft is released so the target keeps it. The
+            // TARGET is never brought forward — the guardian protects only the user's app and Space (live: a
+            // restore of the "victim" put the agent's fixture in front of the user). If the thief really came to
+            // the front, the activation observer puts the user back.
             _ = cpsReleaseOverride?(id) ?? skyLight.releaseKeyFocus(id: id)
-            fallthrough
-        case .drop:
-            // A protected target lost key focus to a thief without an app activation: put the user back on
-            // the victim. The victim is the bound target; restore its app to the front.
-            let victim = guardianLock.withLock { focusTheftGuard.suppression?.victimPID }
-            if let victim {
-                dispatchRestore(CUGuardedView(app: victim, space: sys.activeSpace()), thief: subjectPID, repeatOffender: false,
-                                cause: "\(appName(subjectPID)) took key focus")
-            }
-        case .pass:
+        case .drop, .pass:
             break
         }
         return verdict

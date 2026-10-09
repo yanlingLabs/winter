@@ -314,13 +314,16 @@ enum CUBindWait {
     }
 
     /// The app's real windows anywhere (`CUWindowServer.isRealWindow`), on screen or not.
+    /// How long a reopened app gets to show its default window.
+    static let reopenWaitMs: Double = 8000
+
     static func realWindows(_ server: [CUWindowServerWindow]) -> [CUWindowServerWindow] {
         server.filter(CUWindowServer.isRealWindow)
     }
 
     static func run(launched: Bool, deadlineMs: Double, _ fx: Effects) async throws -> Found {
         var (ax, server) = try await fx.read()
-        let end = fx.now() + deadlineMs
+        var end = fx.now() + deadlineMs
         var reopened = false
         while ax.isEmpty, fx.now() < end {
             let real = realWindows(server)
@@ -330,6 +333,8 @@ enum CUBindWait {
             if real.isEmpty, !launched, !reopened {
                 reopened = true
                 await fx.reopen()
+                // A reopened app may take as long as a launch to show its window (Chrome took over 3 s).
+                end = max(end, fx.now() + reopenWaitMs)
             }
             try await fx.sleep(100)
             (ax, server) = try await fx.read()

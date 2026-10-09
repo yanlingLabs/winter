@@ -252,6 +252,13 @@ public protocol CUFocusEnforcing: AnyObject {
 /// bound target, reused across actions, torn down on release. Gated by the private-path setting at the call
 /// site. Best-effort: a missing symbol or tap degrades to posting the activation alone, with the user-view
 /// guard still the backstop.
+/// A test core's enforcer: posts nothing (the live one would post events and suspend the real window server's
+/// updates from a unit test).
+final class CUNoopFocusEnforcer: CUFocusEnforcing {
+    func enforce(windowID: UInt32) -> Bool { false }
+    func teardown() {}
+}
+
 public final class CULiveFocusEnforcer: CUFocusEnforcing {
     private let pid: pid_t
     private let skyLight: CUSkyLight

@@ -211,8 +211,7 @@ final class FocusGuardianTests: XCTestCase {
         let v = core.onCPSNotification(recipientPID: 800, subtype: CUCPSSubtype.keyFocusTaken, subjectPID: 800, theftID: 0xBEEF, now: 2)
         XCTAssertEqual(v, .release(theftID: 0xBEEF))
         XCTAssertEqual(released, [0xBEEF], "the theft is released by its token")
-        // The victim (500) is restored to the front.
-        XCTAssertEqual(sys.activated.last, 500)
+        XCTAssertTrue(sys.activated.isEmpty, "the agent's target is never brought in front of the user")
     }
 
     /// A core whose restore retries for real (a short deadline), with a thief that takes the front back

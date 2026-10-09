@@ -85,6 +85,7 @@ public final class CUCore: @unchecked Sendable {
             guardianRestoreSync = true
             focusWaitWebMs = 0
             focusWaitNativeMs = 0
+            focusEnforcerFactory = { _ in CUNoopFocusEnforcer() }
             pressSettleMs = 0
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
         }
@@ -1028,6 +1029,10 @@ public final class CUCore: @unchecked Sendable {
     func windowGone(_ t: CUTarget) -> Bool {
         guard let w = liveServerWindow(t) else { return true }
         guard !w.onScreen, sys.windowOnAnySpace(w.id) == false else { return false }
+        // A window whose element still answers for its id is reachable, whatever its Space reads (live: Chrome's
+        // window, right after going full screen, read as on no Space and was taken for closed).
+        let cached = windowElementsLock.withLock { windowElements[t.id] }
+        if let c = cached, ax.isAlive(c), ax.windowID(c) == w.id { return false }
         return !CUAXWindows.list(pid: t.pid, ax: ax, server: sys.windows(pid: t.pid)).contains { $0.id == w.id }
     }
 
@@ -1133,24 +1138,6 @@ public final class CUCore: @unchecked Sendable {
         if walk, found.isEmpty {
             // The walk takes one window for a bind (stopAtFirst); only when nothing cheaper answered.
             for (id, e) in ax.remoteWindows(pid: pid, windowIDs: Array(wanted)) where wanted.contains(id) { found[id] = e }
-        }
-        if walk, found.isEmpty, let id = ids.first {
-            // Never vended: no live element id exists, so no walk can find it. The window visits this Space for a
-            // moment (screen updates suspended) so AppKit lists it, and its element is kept from then on.
-            let started = clock.nowMs()
-            let visited = sys.visitActiveSpace(id) { [ax] in
-                ax.elements(ax.application(pid), kAXWindowsAttribute).first { ax.windowID($0) == id }
-            }
-            let ms = Int(clock.nowMs() - started)
-            switch visited {
-            case .some(.some(let e)):
-                found[id] = e
-                CULog.bind.notice("reached window \(id, privacy: .public) of pid \(pid, privacy: .public) by a brief visit to this Space (\(ms, privacy: .public) ms)")
-            case .some(.none):
-                CULog.bind.notice("a visit to this Space did not list window \(id, privacy: .public) of pid \(pid, privacy: .public) (\(ms, privacy: .public) ms)")
-            case .none:
-                break
-            }
         }
         if !found.isEmpty { windowElementsLock.withLock { for (id, e) in found { seenWindows[pid, default: [:]][id] = e } } }
         return found
