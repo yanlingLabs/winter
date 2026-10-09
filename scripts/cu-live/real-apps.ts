@@ -131,36 +131,32 @@ await closeOwn(te);`,
   },
   {
     name: "Finder: a temp folder — read its items", group: "real-apps", timeoutMs: 45_000,
-    // A NEW Finder window on this desktop for the temp folder (never one of the user's windows, never a tab in one),
-    // made through Finder's own dictionary (the guarded applescript() of the bound Finder) and closed the same way, by
-    // its id. Finder showing it in a window AX never saw (another Space: capture only), or no new window, is a skip.
+    // The temp folder opened by the helper itself (apps.open of a path: NSWorkspace, never activating Finder) — no
+    // AppleScript: Finder's dictionary needs an Automation grant, and a test must never put a TCC prompt on screen.
+    // Only a window Finder made for it (more Finder windows than before) is closed again, by its own close button;
+    // a window it reused (one of the user's, a tab in it) or one bound capture only is a skip, left as it is.
     code: `
 const folder = ${JSON.stringify(`${REAL_DIR_TOKEN}/${FOLDER}`)};
-let finder = null;
-try { finder = await apps.open("com.apple.finder"); } catch (e) { report({ skipped: "Finder could not be bound to reach its dictionary (" + e.name + ")" }); }
-if (finder) {
-  let id = null, why = "no id came back";
-  try {
-    const r = await finder.applescript('tell application "Finder"\\nset w to make new Finder window to (POSIX file "' + folder + '" as alias)\\nreturn id of w\\nend tell', { emit: false, timeoutMs: 15000 });
-    const n = Number(String(r.result ?? "").replace(/[^0-9]/g, ""));
-    if (n > 0) id = n;
-  } catch (e) { why = e.name + ": " + String(e.message).slice(0, 160); }
-  if (id === null) report({ skipped: "no new Finder window: " + why });
-  else {
-    try {
-      const fd = await apps.open("com.apple.finder", { window: ${JSON.stringify(FOLDER)} });
-      const s = await fd.state({ emit: false, full: true });
-      if (/no accessibility here/i.test(s)) report({ skipped: "Finder showed the folder in a window on another Space (capture only)" });
-      else report({ alpha: s.includes("alpha.txt"), beta: s.includes("beta.txt") });
-    } finally {
-      await finder.applescript('tell application "Finder" to close Finder window id ' + id, { emit: false, timeoutMs: 10000 })
-        .then(() => report({ closed: true }), (e) => report({ closed: e.name }));
-    }
-  }
+const finderWindows = async () => (await screen.windows({ emit: false })).filter((w) => w.app === "Finder");
+const before = (await finderWindows()).length;
+const fd = await apps.open(folder);
+const s = await fd.state({ emit: false, full: true });
+const after = await finderWindows();
+const ours = after.filter((w) => w.title === ${JSON.stringify(FOLDER)});
+if (/no accessibility here/i.test(s)) report({ skipped: "Finder showed the folder in a window accessibility never saw (another Space: capture only) — left as it is" });
+else if (after.length <= before) report({ skipped: "Finder reused a window it already had (yours, or a tab in it) — read, but left as it is", alpha: s.includes("alpha.txt"), beta: s.includes("beta.txt") });
+else {
+  report({ alpha: s.includes("alpha.txt"), beta: s.includes("beta.txt"), onScreen: ours.map((w) => w.onScreen) });
+  // Its close button only, and only when the bound window is the folder's (its header names it) — no sheet
+  // handling here: a Finder window's toolbar may carry a "Delete" button.
+  const header = s.split("\\n")[0] ?? "";
+  const btn = header.includes(${JSON.stringify(FOLDER)}) ? (await fd.find({ role: "close button" }, { emit: false }))[0] : undefined;
+  if (btn) { await fd.action(btn.ref, "press"); report({ closed: "pressed its close button" }); }
+  else report({ closed: false, header });
 }`,
     verify: (ctx) => typeof ctx.facts.skipped === "string" ? [okRun(ctx)] : [okRun(ctx),
       check("Finder lists both temp files", ctx.facts.alpha === true && ctx.facts.beta === true, JSON.stringify(ctx.facts)),
-      check("the new Finder window was closed again", ctx.facts.closed === true, String(ctx.facts.closed))],
+      check("the window Finder made for it was closed again", typeof ctx.facts.closed === "string", String(ctx.facts.closed))],
   },
   {
     name: "Preview: a temp PDF — screenshot", group: "real-apps", timeoutMs: 45_000,
