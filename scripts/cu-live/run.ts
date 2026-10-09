@@ -29,7 +29,7 @@
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { METHODS, type SessionEvent } from "../../packages/protocol/src/index";
 import { resolvePlatformPackageWinter } from "../../packages/core/src/runtime-sdk/executable";
@@ -41,7 +41,7 @@ import {
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, type RealAppsRun } from "./real-apps";
 import { expectedCardSummary, SCENARIOS, scriptOf, type ImageStats, type ProbeEvent, type Scenario } from "./scenarios";
-import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, installedQuery, offSpacePlan, offSpaceSkipReason, onDesktopPlan, parseApps, restorePlan, SCRIPTS, type GenericApp } from "./generic";
+import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, offSpacePlan, offSpaceSkipReason, onDesktopPlan, parseApps, resolveApp, restorePlan, SCRIPTS, type GenericApp, type ResolveDeps } from "./generic";
 
 // ── thresholds (env overrides) ───────────────────────────────────────────────────────────────────────────────────
 const num = (name: string, fallback: number): number => {
@@ -288,11 +288,12 @@ async function dryRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   results.push(await plumbingCheck(built));
   results.push(await peerCheck(built, o));
   // The generic app checks' PLAN (no screen): which apps would run, and what each would do.
+  const deps = liveResolveDeps();
   for (const a of [...parseApps(o.apps), ...(o.realApps ? DEFAULT_GENERIC_APPS.map((d, i) => ({ query: d.query, key: `default${i}` })) : [])]) {
-    const found = sh("mdfind", [installedQuery(a.query)]).stdout.split("\n").find((l) => l.trim().endsWith(".app"));
+    const found = resolveApp(a.query, deps);
     results.push(found === undefined
-      ? { name: `plan: ${a.query}`, group: "plan", status: "skip", ms: 0, checks: [], note: "not installed — the live run skips it" }
-      : { name: `plan: ${a.query}`, group: "plan", status: "pass", ms: 0, checks: [check("installed", true)], note: `${found.trim()} — ${describePlan(a)}` });
+      ? { name: `plan: ${a.query}`, group: "plan", status: "skip", ms: 0, checks: [], note: "not installed (by bundle id, LaunchServices name, or bundle names) — the live run skips it" }
+      : { name: `plan: ${a.query}`, group: "plan", status: "pass", ms: 0, checks: [check("installed", true)], note: `${found.path} (${found.bundleId}, via ${found.via}) — ${describePlan(a)}` });
   }
   return results;
 }
@@ -534,7 +535,14 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     for (const s of scenarios) results.push((await runScenario(s)).result);
 
     // ── any app (`--apps`, and with --real-apps VS Code and Chrome when installed) ─────────────────────────────
-    const genericApps = [...parseApps(o.apps), ...(o.realApps ? DEFAULT_GENERIC_APPS.filter((d) => installed(d.bundleId)).map((d, i) => ({ query: d.query, key: `default${i}` })) : [])];
+    const deps = liveResolveDeps();
+    const wanted = [...parseApps(o.apps), ...(o.realApps ? DEFAULT_GENERIC_APPS.map((d, i) => ({ query: d.query, key: `default${i}`, optional: true })) : [])];
+    const genericApps: GenericApp[] = [];
+    for (const w of wanted) {
+      const found = resolveApp(w.query, deps);
+      if (found !== undefined) genericApps.push({ query: w.query, key: w.key, bundleId: found.bundleId });
+      else if (!("optional" in w)) results.push({ name: `${w.query}: resolve`, group: `app ${w.query}`, status: "skip", ms: 0, checks: [], note: "not installed (by bundle id, LaunchServices name, or bundle names)" });
+    }
     const windows: Array<{ result: ScenarioResult; since: number; end: number }> = [];
     for (const a of genericApps) {
       const rows = await runGenericApp(a, runScenario, async (code) => {
@@ -608,9 +616,34 @@ type Row = { result: ScenarioResult; since: number; end: number };
 type RunScenario = (s: Scenario) => Promise<Row & { facts: Record<string, unknown>; output: string }>;
 type SetupTurn = (code: string) => Promise<{ output: string; isError: boolean; facts: Record<string, unknown> }>;
 
-/** Is an app with this bundle id installed? (Spotlight's own index — no permission needed.) */
-function installed(query: string): boolean {
-  return sh("mdfind", [installedQuery(query)]).stdout.split("\n").some((l) => l.trim().endsWith(".app"));
+/** The real lookups `resolveApp` uses: Spotlight, each bundle's Info.plist (plutil), and the app folders. */
+function liveResolveDeps(): ResolveDeps {
+  const plists = new Map<string, Record<string, unknown> | undefined>();
+  return {
+    mdfind: (query) => sh("mdfind", [query]).stdout.split("\n"),
+    infoPlist: (appPath) => {
+      if (!plists.has(appPath)) {
+        const r = sh("plutil", ["-convert", "json", "-o", "-", join(appPath, "Contents", "Info.plist")]);
+        let v: Record<string, unknown> | undefined;
+        try { v = r.status === 0 ? JSON.parse(r.stdout) as Record<string, unknown> : undefined; } catch { v = undefined; }
+        plists.set(appPath, v);
+      }
+      return plists.get(appPath);
+    },
+    dirs: ["/Applications", join(homedir(), "Applications"), "/System/Applications"],
+    listApps: (dir) => {
+      const out: string[] = [];
+      let entries: string[] = [];
+      try { entries = readdirSync(dir); } catch { return out; }
+      for (const e of entries) {
+        if (e.endsWith(".app")) out.push(join(dir, e));
+        else if (!e.startsWith(".")) {
+          try { for (const sub of readdirSync(join(dir, e))) if (sub.endsWith(".app")) out.push(join(dir, e, sub)); } catch { /* not a folder */ }
+        }
+      }
+      return out;
+    },
+  };
 }
 
 /** The pids of a running app by bundle id (LaunchServices' own table — `lsappinfo`, no Apple Event). */
