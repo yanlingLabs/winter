@@ -25,6 +25,14 @@ final class CUTarget: @unchecked Sendable {
         lock.lock(); _windowID = id; _windowTitle = title; lock.unlock()
     }
 
+    /// False when the window exposes no accessibility and was bound as capture-plus-coordinates. Guarded, so
+    /// `useWindow` to a different window can change it.
+    private var _accessible: Bool = true
+    var accessible: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _accessible }
+        set { lock.lock(); _accessible = newValue; lock.unlock() }
+    }
+
     /// Element identity → ref. Pid-queue only.
     private(set) var refs = CURefCache<AXIdentity>()
     // Guarded by `lock`: the snapshot ring, the shot ring, the action clock.
@@ -109,8 +117,9 @@ final class CUTarget: @unchecked Sendable {
     static let keptShots = 8
 
     init(id: String, sessionId: String, pid: pid_t, bundleId: String?, appName: String, isChromium: Bool,
-         mirror: Bool, windowID: UInt32, windowTitle: String, privatePath: Bool = true) {
+         mirror: Bool, windowID: UInt32, windowTitle: String, privatePath: Bool = true, accessible: Bool = true) {
         self.privatePath = privatePath
+        self._accessible = accessible
         self.id = id
         self.sessionId = sessionId
         self.pid = pid

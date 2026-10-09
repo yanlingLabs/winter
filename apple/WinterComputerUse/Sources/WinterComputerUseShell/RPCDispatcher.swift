@@ -61,6 +61,8 @@ public final class RPCDispatcher: @unchecked Sendable {
         engine("status") { try await $0.status($1 as StatusParams) }
         engine("permissions.request") { try await $0.permissionsRequest($1 as PermissionsRequestParams) }
         engine("apps.list") { try await $0.appsList($1 as AppsListParams) }
+        engine("apps.openDocument") { try await $0.openDocuments($1 as OpenDocumentsParams) }
+        engine("apps.defaultOpener") { try await $0.defaultOpener($1 as DefaultOpenerParams) }
         engine("screen.windows") { try await $0.screenWindows($1 as ScreenWindowsParams) }
         // Binding is where Winter.app's view of a session comes from: the result names the target id, bundle id
         // and window that the engine's `targetBound` event does not.

@@ -29,6 +29,16 @@ export function isAppPath(app: string): boolean {
   return app.startsWith("/") || app.startsWith("~/") || app.startsWith("./") || app.startsWith("../") || app.includes("/");
 }
 
+/** Does `target` name a document to open (a file path that is not an .app, or a URL) rather than an app? */
+export function isDocumentTarget(target: string): boolean {
+  const t = target.trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^(mailto|tel|sms|facetime):/i.test(t)) return true; // a URL scheme
+  if (t.startsWith("/") || t.startsWith("~/") || t.startsWith("./") || t.startsWith("../") || t.includes("/")) {
+    return !/\.app\/?$/i.test(t); // a path, but an .app bundle is an app to bind
+  }
+  return false;
+}
+
 /** Does it look like a reverse-DNS bundle identifier? */
 export function isBundleIdShaped(app: string): boolean {
   return BUNDLE_ID.test(app) && !app.includes(" ");

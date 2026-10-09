@@ -18,6 +18,7 @@ import { AutomationTelemetry } from "../../src/computer-use/telemetry";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
 import type { Settings } from "../../src/settings";
 import { FakeHelper, FakeHelperError } from "./fake-helper";
+import { isDocumentTarget } from "../../src/computer-use/app-resolve";
 
 const macOnly = sandboxAvailable() ? test : test.skip;
 
@@ -152,6 +153,68 @@ describe("ComputerV2: binding, state and the diff base", () => {
     const r = await w.run("print(typeof notes)");
     expect(text(r)).toContain("The automation runtime restarted; earlier variables and bindings are gone.");
     expect(text(r)).toContain("undefined");
+  }, 30_000);
+});
+
+describe("ComputerV2: apps.open opens documents without activating the opener", () => {
+  function openWorld() {
+    const w = world();
+    w.fake.apps.push({ name: "Preview", bundleId: "com.apple.Preview", pid: 506, running: true });
+    w.fake.handlers["apps.defaultOpener"] = (p) => ({ bundleId: "com.apple.Preview", name: "Preview", path: "/System/Applications/Preview.app" });
+    w.fake.handlers["apps.openDocument"] = (p) => ({ app: { name: "Preview", bundleId: "com.apple.Preview", pid: 321 }, windowID: 88 });
+    return w;
+  }
+
+  macOnly("a file path is opened in its default app (background) and that app's document window is bound", async () => {
+    const w = openWorld();
+    const r = await w.run("const doc = await apps.open('/tmp/report.pdf')");
+    expect(r.isError).toBe(false);
+    expect(w.fake.calls("apps.defaultOpener")[0]).toMatchObject({ urls: ["/tmp/report.pdf"] });
+    const open = w.fake.calls("apps.openDocument")[0]!;
+    expect(open).toMatchObject({ urls: ["/tmp/report.pdf"] });
+    expect(open.with).toBeUndefined();
+    expect(w.fake.calls("target.bind")[0]).toMatchObject({ app: "com.apple.Preview", window: 88 });
+    expect(text(r)).toContain("opened report.pdf in Preview (in the background)");
+  }, 30_000);
+
+  macOnly("an explicit opener is sent as `with`, and the opener gets the per-app card", async () => {
+    const w = world({ policy: "ask", answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "session") });
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.apple.TextEdit", name: "TextEdit", path: "/System/Applications/TextEdit.app" });
+    w.fake.handlers["apps.openDocument"] = () => ({ app: { name: "TextEdit", bundleId: "com.apple.TextEdit", pid: 9 }, windowID: 5 });
+    const r = await w.run("await apps.open('/tmp/notes.md', { app: 'TextEdit' })");
+    expect(r.isError).toBe(false);
+    expect(w.fake.calls("apps.defaultOpener")[0]).toMatchObject({ urls: ["/tmp/notes.md"], app: "TextEdit" });
+    expect(w.fake.calls("apps.openDocument")[0]).toMatchObject({ app: "TextEdit" });
+    expect(cards(w.events).map((c) => c.summary)).toContain("Allow Winter to use TextEdit (com.apple.TextEdit)?");
+  }, 30_000);
+
+  macOnly("a URL opens as a document", async () => {
+    const w = openWorld();
+    w.fake.apps.push({ name: "Safari", bundleId: "com.apple.Safari", pid: 507, running: true });
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.apple.Safari", name: "Safari", path: "/Applications/Safari.app" });
+    w.fake.handlers["apps.openDocument"] = () => ({ app: { name: "Safari", bundleId: "com.apple.Safari", pid: 7 }, windowID: 3 });
+    await w.run("await apps.open('https://example.com')");
+    expect(w.fake.calls("apps.openDocument")).toHaveLength(1);
+    expect(w.fake.calls("apps.defaultOpener")[0]).toMatchObject({ urls: ["https://example.com"] });
+  }, 30_000);
+
+  test("isDocumentTarget: files and URLs open, an app name or .app bundle binds", () => {
+    expect(isDocumentTarget("/tmp/report.pdf")).toBe(true);
+    expect(isDocumentTarget("~/Downloads/a.csv")).toBe(true);
+    expect(isDocumentTarget("https://example.com")).toBe(true);
+    expect(isDocumentTarget("mailto:x@y.z")).toBe(true);
+    expect(isDocumentTarget("/Applications/Notes.app")).toBe(false);
+    expect(isDocumentTarget("/Applications/Notes.app/")).toBe(false);
+    expect(isDocumentTarget("Notes")).toBe(false);
+    expect(isDocumentTarget("com.apple.Notes")).toBe(false);
+  });
+
+  macOnly("a protected path is refused before anything opens", async () => {
+    const w = openWorld();
+    w.fake.handlers["apps.defaultOpener"] = () => { throw new FakeHelperError("refused", "opening id_rsa is off limits — it is a protected location", { reason: "privacy_pane" }); };
+    const r = await w.run("try { await apps.open('~/.ssh/id_rsa') } catch (e) { print(e.name, e.message) }");
+    expect(text(r)).toContain("Refused");
+    expect(w.fake.calls("apps.openDocument")).toEqual([]);
   }, 30_000);
 });
 

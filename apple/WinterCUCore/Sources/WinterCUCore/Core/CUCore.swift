@@ -75,10 +75,13 @@ public final class CUCore: @unchecked Sendable {
         if startMonitors {
             startMonitoring()
         } else {
-            // A core without monitors is a test's: its fakes answer at once, and its checks are synchronous.
+            // A core without monitors is a test's: its fakes answer at once, its checks are synchronous, and no
+            // live event tap is created.
             userViewSettleMs = 0
             stepSettleMs = 0
             userViewLateCheck = false
+            guardianLiveTapEnabled = false
+            guardianRestoreSync = true
         }
     }
 
@@ -119,6 +122,73 @@ public final class CUCore: @unchecked Sendable {
                                   frame: cuFrame(w.frame), onScreen: w.onScreen)
         }
         return ScreenWindowsResult(windows: windows)
+    }
+
+    /// Which app would open these urls (the `app` override, else the first url's default handler), for the
+    /// opener's per-app card — resolved WITHOUT opening anything. Refuses a protected destination.
+    public func defaultOpener(_ p: DefaultOpenerParams) async throws -> DefaultOpenerResult {
+        let urls = try CUDocumentOpen.resolve(p.urls)
+        if let bad = urls.compactMap({ $0.isFileURL ? $0.path : nil }).first(where: { CUFloors.isProtectedSavePath($0) }) {
+            throw CUError.refused(.privacyPane, "opening \((bad as NSString).lastPathComponent) is off limits — it is a protected location")
+        }
+        let appURL: URL
+        if let a = p.app {
+            switch try CUApps.resolve(a) {
+            case .running(let r): guard let u = r.bundleURL else { throw CUError.invalidParams("no app at \(a)") }; appURL = u
+            case .installed(let u, _, _): appURL = u
+            }
+        } else if let first = urls.first, let def = CUDocumentOpen.defaultApp(for: first) {
+            appURL = def
+        } else {
+            throw CUError.invalidParams("no app opens \(p.urls.first ?? "that")")
+        }
+        guard let b = Bundle(url: appURL), let id = b.bundleIdentifier else { throw CUError.invalidParams("no app at \(appURL.path)") }
+        return DefaultOpenerResult(bundleId: id, name: CUApps.displayName(b, fallback: appURL.deletingPathExtension().lastPathComponent), path: appURL.path)
+    }
+
+    /// Opens file paths / URLs with an app WITHOUT activating it (NSWorkspace.open, activates:false —
+    /// LaunchServices would otherwise bring the opener to the user's front). The opener is `app` when given,
+    /// else the default handler for the first url. Returns the opener (never activated) and, when one appears,
+    /// a new window to bind. Protected destinations are refused (the save-path floors apply to paths too).
+    public func openDocuments(_ p: OpenDocumentsParams) async throws -> OpenDocumentsResult {
+        if let o = openDocumentsOverride { return try await o(p) }
+        let urls = try CUDocumentOpen.resolve(p.urls)
+        if let bad = urls.compactMap({ $0.isFileURL ? $0.path : nil }).first(where: { CUFloors.isProtectedSavePath($0) }) {
+            throw CUError.refused(.privacyPane, "opening \((bad as NSString).lastPathComponent) is off limits — it is a protected location")
+        }
+        let appURL: URL
+        if let a = p.app {
+            switch try CUApps.resolve(a) {
+            case .running(let r): guard let u = r.bundleURL else { throw CUError.invalidParams("no app at \(a)") }; appURL = u
+            case .installed(let u, _, _): appURL = u
+            }
+        } else if let first = urls.first, let def = CUDocumentOpen.defaultApp(for: first) {
+            appURL = def
+        } else {
+            throw CUError.invalidParams("no app opens \(p.urls.first ?? "that")")
+        }
+        guard let b = Bundle(url: appURL) else { throw CUError.invalidParams("no app at \(appURL.path)") }
+        try refuseFloorApp(bundleId: b.bundleIdentifier, pid: 0, name: b.bundleIdentifier ?? appURL.lastPathComponent)
+        // The opener's windows before the open (empty if it was not running), so the new one can be told apart.
+        let runningOpener = NSRunningApplication.runningApplications(withBundleIdentifier: b.bundleIdentifier ?? "").first
+        let before: Set<UInt32> = runningOpener.map { r in
+            Set(CUBindWait.realWindows(sys.windows(pid: r.processIdentifier)).map(\.id))
+        } ?? []
+        let app = try await CUDocumentOpen.open(urls, withApp: appURL)
+        // A real window of the opener not seen before the open: the document's. Polled briefly (it is async).
+        let windowID: UInt32? = await {
+            let deadline = clock.nowMs() + windowWaitMs
+            while clock.nowMs() < deadline {
+                let now = CUBindWait.realWindows(sys.windows(pid: app.processIdentifier))
+                if let fresh = now.map(\.id).first(where: { !before.contains($0) }) { return fresh }
+                try? await clock.sleep(ms: 60)
+            }
+            // None new (the app showed the doc in an existing window, or none has appeared): the frontmost.
+            return CUBindWait.realWindows(sys.windows(pid: app.processIdentifier)).map(\.id).first
+        }()
+        let bound = CUBoundApp(name: app.localizedName ?? b.bundleIdentifier ?? appURL.lastPathComponent,
+                               bundleId: app.bundleIdentifier ?? "", pid: app.processIdentifier)
+        return OpenDocumentsResult(app: bound, windowID: windowID)
     }
 
     // MARK: - binding
@@ -219,7 +289,7 @@ public final class CUCore: @unchecked Sendable {
         }
         CULog.bind.notice("bind \(appName, privacy: .public): \(outcome.step.rawValue, privacy: .public) (window \(outcome.window.id, privacy: .public))")
         let chosen = outcome.window
-        if let b = app.bundleIdentifier, CUFloors.systemSettingsBundleIds.contains(b) {
+        if !outcome.captureOnly, let b = app.bundleIdentifier, CUFloors.systemSettingsBundleIds.contains(b) {
             let isPrivacy = try await queues.run(pid) { CUFloorScan.isPrivacyPane(bundleId: b, window: chosen.element, ax: ax) }
             if isPrivacy { throw CUError.refused(.privacyPane, "the Privacy & Security settings are off limits — ask the user") }
         }
@@ -229,7 +299,7 @@ public final class CUCore: @unchecked Sendable {
             targetSeq += 1
             let t = CUTarget(id: "t\(targetSeq)", sessionId: p.sessionId, pid: pid, bundleId: app.bundleIdentifier,
                              appName: appName, isChromium: chromium, mirror: p.mirror, windowID: chosen.id,
-                             windowTitle: chosen.title, privatePath: privatePath)
+                             windowTitle: chosen.title, privatePath: privatePath, accessible: !outcome.captureOnly)
             targets[t.id] = t
             return t
         }()
@@ -274,7 +344,8 @@ public final class CUCore: @unchecked Sendable {
                     usleep(50_000)
                 }
                 return probe()
-            })
+            },
+            appElement: AX.app(pid))
     }
 
     /// How long an unconfirmed paste leaves Winter's text on the clipboard before the user's comes back.
@@ -349,6 +420,8 @@ public final class CUCore: @unchecked Sendable {
 
     /// AppleScript, replaceable by tests (nothing there may run a script or ask macOS about Automation).
     var appleScriptOverride: ((String, CUTarget) throws -> String?)?
+    /// Document open, replaceable by tests (nothing there may touch NSWorkspace).
+    var openDocumentsOverride: ((OpenDocumentsParams) async throws -> OpenDocumentsResult)?
     var automationPermissionOverride: ((pid_t) -> OSStatus)?
     var scriptingDictionaryOverride: ((CUTarget) -> CUScriptingDictionary.Model?)?
     /// Background steps that once moved the user's view: never used again while the helper runs.
@@ -363,8 +436,21 @@ public final class CUCore: @unchecked Sendable {
     var pendingGuardianNotes: [String] = []
     var guardianStartedTargets: Set<String> = []
     var lastSyntheticActivationAt: Double = -1
+    /// The CPS key-focus-theft state machine (fed by the listen-only type-21 tap).
+    var focusTheftGuard = CUFocusGuard()
+    /// The live CPS tap's run-loop thread and port (best-effort; nil when it could not be created).
+    var cpsTapThread: Thread?
+    var cpsTapPort: CFMachPort?
+    /// A test seam for the CPS notification handler (the live tap feeds the real one).
+    var cpsReleaseOverride: ((Int32) -> Bool)?
+    /// Whether the live CPS event tap runs (off in tests — a real tap spins a run-loop thread).
+    var guardianLiveTapEnabled = true
+    /// Whether the guardian's restore runs inline (tests, synchronous) rather than dispatched off-main.
+    var guardianRestoreSync = false
     /// Seconds since the last physical user input, injectable for tests.
     var secondsSinceUserInputOverride: (() -> TimeInterval)?
+    /// The window server's key-focus pid, injectable for tests (the swallowed-click retry).
+    var keyFocusPidOverride: (() -> pid_t?)?
 
     /// Apps whose `AXFocused` write was seen to activate them (move the user's view): their fields use the
     /// press route first thereafter, for the helper's lifetime. Keyed by bundle id, else app name.
@@ -467,6 +553,7 @@ public final class CUCore: @unchecked Sendable {
     private func switchWindow(_ t: CUTarget, _ outcome: CUWindowResolver.Outcome) async throws -> TargetUseWindowResult {
         let chosen = outcome.window
         let old = t.windowID
+        t.accessible = !outcome.captureOnly  // the new window may expose no accessibility (or regain it)
         if old != chosen.id {
             // Refs and the diff base belong to the old window: start over (numbers still never repeat).
             try await queues.run(t.pid) { [self] in
@@ -527,6 +614,13 @@ public final class CUCore: @unchecked Sendable {
         }
         try token.check()
         let formatter = self.formatter
+        if !t.accessible {
+            return try await queues.run(t.pid) { [self] in
+                let title = sys.window(id: t.windowID)?.title ?? t.windowTitle
+                let text = "\(t.appName) — window \(title.isEmpty ? "(untitled)" : "\u{201C}\(title)\u{201D}") — no accessibility: this window exposes no elements. Use screenshot() to see it and click at point coordinates; type and keys go to the window."
+                return TargetSnapshotResult(snapshotId: t.nextSnapshotId(), text: text, isDiff: false, changedRatio: 1, settled: settled, waitedMs: waited)
+            }
+        }
         return try await queues.run(t.pid) { [self] in
             try floorCheckPrivacy(t)
             let obs = try observe(t, within: p.within)
@@ -559,6 +653,7 @@ public final class CUCore: @unchecked Sendable {
         try requireAccessibility()
         let t = try target(p.targetId)
         try ensureAlive(t)
+        guard t.accessible else { return TargetFindResult(elements: []) }  // capture-only: no AX tree to search
         let formatter = self.formatter
         return try await queues.run(t.pid) { [self] in
             try floorCheckPrivacy(t)
@@ -890,6 +985,9 @@ public final class CUCore: @unchecked Sendable {
         guard let t = targets[id] else { throw CUError.targetLost("unknown target \(id) — bind the app again") }
         return t
     }
+
+    /// The pids of all bound targets (for the Focus Guardian's CPS tap).
+    func boundTargetPids() -> Set<pid_t> { lock.withLock { Set(targets.values.map(\.pid)) } }
 
     private func remove(_ id: String) -> CUTarget? {
         lock.lock()

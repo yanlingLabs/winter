@@ -7,6 +7,8 @@ public protocol CoreService: AnyObject {
     func status(_ params: StatusParams) async throws -> StatusResult
     func permissionsRequest(_ params: PermissionsRequestParams) async throws -> PermissionsRequestResult
     func appsList(_ params: AppsListParams) async throws -> AppsListResult
+    func openDocuments(_ params: OpenDocumentsParams) async throws -> OpenDocumentsResult
+    func defaultOpener(_ params: DefaultOpenerParams) async throws -> DefaultOpenerResult
     func screenWindows(_ params: ScreenWindowsParams) async throws -> ScreenWindowsResult
     func targetBind(_ params: TargetBindParams) async throws -> TargetBindResult
     func targetUseWindow(_ params: TargetUseWindowParams) async throws -> TargetUseWindowResult

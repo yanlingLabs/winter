@@ -104,14 +104,15 @@ final class BindOnceTests: XCTestCase {
 
     func testTheNewWindowFallbackRunsOncePerSessionAndApp() async throws {
         safari(reachable: false)  // the window is elsewhere, the remote token misses, the move fails
-        await expectCode("window_elsewhere") { _ = try await self.bind() }
+        // The new-window fallback is asked once; then the window is bound capture-only (the server has it).
+        _ = try await self.bind()
         let asked = poster.keyDowns.count
         XCTAssertEqual(asked, 1, "one ⌘N")
-        for _ in 0..<4 { await expectCode("window_elsewhere") { _ = try await self.bind() } }
+        for _ in 0..<4 { _ = try await self.bind() }
         XCTAssertEqual(poster.keyDowns.count, asked, "never a second new window in this session")
         XCTAssertEqual(reopens, 0)
         // A new session may ask once more; ending a session forgets its claim.
-        await expectCode("window_elsewhere") { _ = try await self.bind("s2") }
+        _ = try await self.bind("s2")
         XCTAssertEqual(poster.keyDowns.count, asked + 1)
         _ = try await core.sessionEnded(SessionEndedParams(sessionId: "s"))
         XCTAssertTrue(core.claimNewWindow(sessionId: "s", appKey: "com.apple.Safari"))
@@ -222,7 +223,7 @@ final class BindOnceTests: XCTestCase {
             describe: { e, s in CUAXWindow(element: e, id: s.id, title: s.title, frame: s.frame, focused: false, main: false) },
             moveToActiveSpace: { _ in XCTFail("no move"); return false },
             openNewWindow: { XCTFail("no new window"); return false },
-            axWindows: { [] }, serverWindows: { [] }, wait: { $0() })
+            axWindows: { [] }, serverWindows: { [] }, wait: { $0() }, appElement: fakeElement(60_098))
         let out = try CUWindowResolver.resolve(appName: "Safari", axWindows: [],
                                                server: [server(9, onScreen: false), server(10, onScreen: false), server(11, onScreen: false)],
                                                selector: nil, privatePath: true, fx)

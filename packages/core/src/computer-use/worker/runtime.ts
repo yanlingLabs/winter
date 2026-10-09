@@ -145,7 +145,15 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
 
   const apps = Object.freeze({
     list: (o?: unknown) => call("apps.list", undefined, opts(o)),
-    open: (app: unknown, o?: unknown) => call("apps.open", undefined, { app, ...opts(o) }).then(toApp),
+    open: (app: unknown, o?: unknown) => {
+      const t = opts(o);
+      // `app` is the target (an app name/bundle id, or a file path / URL to open); `{ app }` in the options
+      // is the OPENER for a document, sent as `with` so it never clobbers the target.
+      const extra: Record<string, unknown> = {};
+      if (typeof t.app === "string") extra.with = t.app;
+      if (t.window !== undefined) extra.window = t.window;
+      return call("apps.open", undefined, { app, ...extra }).then(toApp);
+    },
   });
   const screen = Object.freeze({
     screenshot: (o?: unknown) => call("screen.screenshot", undefined, opts(o)).then(toImage),

@@ -17,7 +17,7 @@ import { computerUsePrivateEventPathFrom, computerUseMirrorFrom, computerUseScre
 import { nextScreenshotQuality, screenshotBudgetFor, SCREENSHOT_BYTE_CAP, SCREENSHOT_QUALITY } from "./budget";
 import { DiffBases } from "./diff-base";
 import { AUTOMATION_ERROR_KINDS, AutomationFailure, isAutomationFailure } from "./errors";
-import { isAppPath, isBundleIdShaped, systemAppResolver, type AppResolver } from "./app-resolve";
+import { isAppPath, isBundleIdShaped, isDocumentTarget, systemAppResolver, type AppResolver } from "./app-resolve";
 import type { HelperClient } from "./helper-client";
 import { FOREGROUND_LOCK_KEY, LOCK_WAIT_MS, TargetLocks } from "./locks";
 import { ACT_PRIMITIVES, newRunGrants, type AppRef, type ComputerPolicy, type RunGrants } from "./policy";
@@ -382,10 +382,15 @@ export class ComputerV2Service {
     switch (msg.primitive) {
       case "apps.list": return await this.appsList(ctx, args, metric);
       case "apps.open": {
-        const app = str(args.app)?.trim();
-        if (!app) throw bad("apps.open() takes an app name or bundle id");
+        const target = str(args.app)?.trim();
+        if (!target) throw bad("apps.open() takes an app name or bundle id, or a file path or URL to open");
+        const opener = str((args as Record<string, unknown>).with)?.trim();
+        // A file path or URL (or an explicit opener) opens a document; a name or an .app bundle binds the app.
+        if (opener !== undefined || isDocumentTarget(target)) {
+          return await this.openDocument(ctx, target, opener, metric);
+        }
         const window = typeof args.window === "string" || typeof args.window === "number" ? args.window : undefined;
-        return await this.bind(ctx, { app, ...(window === undefined ? {} : { window }) }, metric);
+        return await this.bind(ctx, { app: target, ...(window === undefined ? {} : { window }) }, metric);
       }
       case "screen.screenshot": return await this.screenScreenshot(ctx, args, metric);
       case "screen.windows": return await this.screenWindows(ctx, args, metric);
@@ -553,6 +558,29 @@ export class ComputerV2Service {
       if (hit !== undefined) return { bundleId: hit.bundleId, name: hit.name };
     }
     throw new Error(`no app named "${app.slice(0, 120)}" — call apps.list() for the names, or pass a bundle id or an .app path`);
+  }
+
+  /** Opens a file path or URL with an app, never activating it (NSWorkspace.open activates:false). The opener
+   *  gets its per-app card and the save-path floors apply to the paths; the opened document's window is bound. */
+  private async openDocument(ctx: RunCtx, target: string, opener: string | undefined, metric: PrimitiveMetric): Promise<AppHandle> {
+    const settings = this.deps.settings();
+    const urls = [target];
+    // Who will open it — for the per-app card — resolved without opening anything.
+    const who = await this.helperCall<{ bundleId: string; name: string; path: string }>(
+      ctx, "apps.defaultOpener", { urls, ...(opener === undefined ? {} : { app: opener }) }, metric);
+    this.live(ctx);
+    const app: AppRef = { bundleId: who.bundleId, name: who.name };
+    await this.deps.policy.authorize(ctx.grants, app, { kind: "bind" }, ctx.abort.signal);
+    this.live(ctx);
+    const res = await this.helperCall<{ app: { name: string; bundleId: string; pid: number }; windowID?: number }>(
+      ctx, "apps.openDocument",
+      { urls, ...(opener === undefined ? {} : { app: opener }), sessionId: ctx.sessionId,
+        mirror: computerUseMirrorFrom(settings), privatePath: computerUsePrivateEventPathFrom(settings) }, metric, undefined, { afterEnd: true });
+    this.live(ctx);
+    ctx.builder.daemonLine(`opened ${target.split("/").pop()} in ${res.app.name} (in the background)`);
+    // Bind the opener's document window; the per-app grant from the card above means bind does not re-ask.
+    return await this.bind(ctx, { app: res.app.bundleId, known: app,
+      ...(res.windowID === undefined ? {} : { window: res.windowID }) }, metric);
   }
 
   /** `apps.open` / `screen.appAt`: policy BEFORE the helper launches anything, bind, lock, print the full state. */

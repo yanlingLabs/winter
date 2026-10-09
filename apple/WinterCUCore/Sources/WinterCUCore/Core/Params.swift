@@ -538,3 +538,44 @@ public struct TargetScriptingDictionaryResult: Codable, Sendable, Equatable {
         self.truncated = truncated
     }
 }
+
+// MARK: apps.open for documents (file paths / URLs)
+
+/// `apps.open` for a file path or URL: open it with `app` (a name, bundle id or path), or the default app.
+public struct OpenDocumentsParams: Codable, Sendable, Equatable {
+    public var urls: [String]
+    public var app: String?
+    public var sessionId: String
+    public var mirror: Bool
+    public var privatePath: Bool?
+    public init(urls: [String], app: String? = nil, sessionId: String, mirror: Bool, privatePath: Bool? = nil) {
+        self.urls = urls
+        self.app = app
+        self.sessionId = sessionId
+        self.mirror = mirror
+        self.privatePath = privatePath
+    }
+}
+
+/// The app that opened the documents (never activated), and the new window to bind when one was found.
+public struct OpenDocumentsResult: Codable, Sendable, Equatable {
+    public var app: CUBoundApp
+    public var windowID: UInt32?
+    public init(app: CUBoundApp, windowID: UInt32? = nil) {
+        self.app = app
+        self.windowID = windowID
+    }
+}
+
+/// `apps.open`: who would open these urls (for the opener's per-app card), without opening anything.
+public struct DefaultOpenerParams: Codable, Sendable, Equatable {
+    public var urls: [String]
+    public var app: String?
+    public init(urls: [String], app: String? = nil) { self.urls = urls; self.app = app }
+}
+public struct DefaultOpenerResult: Codable, Sendable, Equatable {
+    public var bundleId: String
+    public var name: String
+    public var path: String
+    public init(bundleId: String, name: String, path: String) { self.bundleId = bundleId; self.name = name; self.path = path }
+}

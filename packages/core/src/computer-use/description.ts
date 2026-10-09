@@ -62,7 +62,7 @@ export function computerV2Description(input: ComputerV2DescriptionInput): string
     "}",
     "declare const apps: {",
     "  list(o?: Quiet): Promise<{ name: string; bundleId: string; running: boolean }[]>;",
-    "  open(app: string, o?: { window?: string | number }): Promise<App>;  // name, bundle id or .app path; launches in background; prints state",
+    "  open(target: string, o?: { window?: string | number; app?: string }): Promise<App>;  // an app (name/bundle id/.app path) to bind, OR a file path / URL to OPEN — opened in the background in `app` or its default app, and that app is bound. To open a file or URL, always use apps.open — never Finder's Open, a double-click or a menu. Prints state.",
     "};",
     "declare const screen: {                          // look only — bind an app to act",
     ...(v ? ["  screenshot(o?: Quiet & { display?: number | \"all\" }): Promise<Image>;   // display: an index, 0 = the main display"] : []),

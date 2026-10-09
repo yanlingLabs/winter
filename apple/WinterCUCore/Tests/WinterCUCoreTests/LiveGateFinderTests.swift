@@ -80,7 +80,7 @@ final class LiveGateFinderTests: XCTestCase {
             remote: { ids in walked.append(ids); return [:] }, describe: { e, s in
                 CUAXWindow(element: e, id: s.id, title: s.title, frame: s.frame, focused: false, main: false) },
             moveToActiveSpace: { _ in false }, openNewWindow: { false }, axWindows: { [] }, serverWindows: { [] },
-            wait: { $0() })
+            wait: { $0() }, appElement: fakeElement(60_097))
         var off = sys.windows[77]!
         off.onScreen = false
         let server = [off] + (UInt32(70328)...70331).map { sys.windows[$0]! } + [sys.windows[28]!]

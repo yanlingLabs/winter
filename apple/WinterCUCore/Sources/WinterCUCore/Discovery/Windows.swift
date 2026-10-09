@@ -191,12 +191,16 @@ enum CUWindowResolver {
         case whereItIs = "step 0, where it is"
         case moved = "step a, moved here"
         case newWindow = "step b, a new window"
+        case captureOnly = "capture only (no accessibility)"
     }
 
     struct Outcome {
         var window: CUAXWindow
         var detail: String?
         var step: Step = .onThisDesktop
+        /// The window server has it but accessibility cannot reach it: bound as capture-plus-coordinates
+        /// (SkyLight stills for state/screenshots, window-targeted events for input), no AX tree.
+        var captureOnly: Bool = false
     }
 
     struct Effects {
@@ -214,6 +218,17 @@ enum CUWindowResolver {
         var serverWindows: () -> [CUWindowServerWindow]
         /// Polls `probe` until it answers or a few seconds pass.
         var wait: (() -> CUAXWindow?) -> CUAXWindow?
+        /// A placeholder element (the application element) for a capture-only window, which has no AX element.
+        var appElement: AXUIElement
+    }
+
+    /// A capture-only window record: the placeholder element, the server's id/title/frame.
+    static func captureOnlyWindow(_ s: CUWindowServerWindow, appElement: AXUIElement) -> CUAXWindow {
+        CUAXWindow(element: appElement, id: s.id, title: s.title, frame: s.frame, focused: false, main: false)
+    }
+
+    static func captureOnlyDetail(_ appName: String) -> String {
+        "bound \(appName)'s window as capture only — it exposes no accessibility; read it with screenshot() and act by point coordinates (type and keys go to the window)"
     }
 
     static func resolve(appName: String, axWindows: [CUAXWindow], server: [CUWindowServerWindow],
@@ -230,11 +245,34 @@ enum CUWindowResolver {
                     return offSpace.first { $0.title.lowercased() == want } ?? offSpace.first { !$0.title.isEmpty && $0.title.lowercased().contains(want) }
                 }
             }()
-            guard let match else { return Outcome(window: try CUAXWindows.choose(axWindows, selector: selector, appName: appName)) }
+            guard let match else {
+                // Not AX-listed and not an off-Space real window — but the server may still have it (a popup or
+                // a Unity window with an empty AX tree): bind capture-only when we can find it by id/title.
+                if privatePath, let s = captureOnlyMatch(selector, server) {
+                    return Outcome(window: captureOnlyWindow(s, appElement: fx.appElement), detail: captureOnlyDetail(appName),
+                                   step: .captureOnly, captureOnly: true)
+                }
+                return Outcome(window: try CUAXWindows.choose(axWindows, selector: selector, appName: appName))
+            }
+            let reached = try? reach([match], appName: appName, privatePath: privatePath, allowNewWindow: false, fx)
+            if let reached { return reached }
+            if privatePath { return Outcome(window: captureOnlyWindow(match, appElement: fx.appElement), detail: captureOnlyDetail(appName), step: .captureOnly, captureOnly: true) }
             return try reach([match], appName: appName, privatePath: privatePath, allowNewWindow: false, fx)
         }
         if !axWindows.isEmpty { return Outcome(window: try CUAXWindows.choose(axWindows, selector: nil, appName: appName)) }
         return try reach(offSpace, appName: appName, privatePath: privatePath, allowNewWindow: true, fx)
+    }
+
+    /// A server window matching an explicit selector, for a capture-only bind (not limited to isRealWindow —
+    /// a popup or dialog counts). Pure.
+    static func captureOnlyMatch(_ selector: CUWindowSelector, _ server: [CUWindowServerWindow]) -> CUWindowServerWindow? {
+        let real = server.filter { $0.layer == 0 && $0.alpha > 0 && $0.frame.width >= 1 && $0.frame.height >= 1 }
+        switch selector {
+        case .id(let id): return real.first { $0.id == id }
+        case .title(let t):
+            let want = t.lowercased()
+            return real.first { $0.title.lowercased() == want } ?? real.first { !$0.title.isEmpty && $0.title.lowercased().contains(want) }
+        }
     }
 
     static func whereItIsDetail(_ appName: String, newWindow: Bool = false) -> String {
@@ -273,10 +311,14 @@ enum CUWindowResolver {
                                        step: .whereItIs)
                     }
                 }
-                if fresh.isEmpty, candidates.isEmpty { throw CUError.noWindow(appName) }
+                if privatePath, let s = fresh.first ?? candidates.first {
+                    return Outcome(window: captureOnlyWindow(s, appElement: fx.appElement), detail: captureOnlyDetail(appName), step: .captureOnly, captureOnly: true)
+                }
+                if candidates.isEmpty { throw CUError.noWindow(appName) }
                 throw CUError.windowElsewhere(appName)
             }
         }
+        if privatePath, let s = candidates.first { return Outcome(window: captureOnlyWindow(s, appElement: fx.appElement), detail: captureOnlyDetail(appName), step: .captureOnly, captureOnly: true) }
         throw candidates.isEmpty ? CUError.noWindow(appName) : CUError.windowElsewhere(appName)
     }
 }
