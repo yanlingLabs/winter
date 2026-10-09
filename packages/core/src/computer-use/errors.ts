@@ -10,6 +10,8 @@ export const AUTOMATION_ERROR_KINDS = [
   "TargetLost",
   "NoWindow",
   "TargetBusy",
+  /** The action was sent but the app did not confirm it: it may have happened. Never retried automatically. */
+  "Uncertain",
   "WaitTimeout",
   "NotAllowed",
   "Refused",

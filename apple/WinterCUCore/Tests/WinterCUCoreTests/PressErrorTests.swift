@@ -77,7 +77,9 @@ final class PressErrorTests: XCTestCase {
             try await act(.action(CUAXAction(ref: ref(button), name: "press")))
             XCTFail("expected an error")
         } catch let e as CUError {
-            XCTAssertEqual(e.code, "unsupported", "kept as the helper's sentence by the daemon, not a generic busy")
+            XCTAssertEqual(e.code, "busy", "the app did not answer as it should")
+            XCTAssertEqual(e.data?["uncertain"], .bool(true), "marked uncertain: never retried, reported as Uncertain")
+            XCTAssertEqual(e.data?["retryable"], .bool(false))
             XCTAssertTrue(e.message.contains("may have acted — check state() before retrying"), e.message)
         }
         XCTAssertEqual(ax.performed.count, 1)
@@ -100,6 +102,7 @@ final class PressErrorTests: XCTestCase {
             try await act(.click(CUClickAction(ref: ref(button))))
             XCTFail("expected an error")
         } catch let e as CUError {
+            XCTAssertEqual(e.data?["uncertain"], .bool(true))
             XCTAssertTrue(e.message.contains("may have acted"), e.message)
         }
         XCTAssertTrue(poster.entries.isEmpty, "a press that may have acted is never repeated as a click")

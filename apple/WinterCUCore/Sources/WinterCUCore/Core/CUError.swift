@@ -128,6 +128,14 @@ public struct CUError: Error, Codable, Sendable, Equatable, CustomStringConverti
     public static func busy(_ message: String = "the helper is busy with this app — retry") -> CUError {
         CUError(code: "busy", message: message, data: ["retryable": .bool(true)])
     }
+
+    /// The action was SENT but the app did not confirm it: it may have happened. Code `busy` (the app did not
+    /// answer as it should), marked `uncertain` so nothing retries it — the daemon reports it as `Uncertain`.
+    public static func uncertain(_ message: String, axError: Int? = nil) -> CUError {
+        var data: [String: CUJSON] = ["uncertain": .bool(true), "retryable": .bool(false)]
+        if let axError { data["axError"] = .int(axError) }
+        return CUError(code: "busy", message: message, data: data)
+    }
 }
 
 /// The `reason` values of a `refused` floor (§2.4).
