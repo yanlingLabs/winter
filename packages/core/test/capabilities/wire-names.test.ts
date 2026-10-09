@@ -82,8 +82,13 @@ function deps(): CapabilityDeps {
   };
 }
 
+/** ComputerV2 (2026-10-08): `computer` and `computer_v2` are never built together (`computerUse.legacyComputer`
+ *  picks one), so "every server" is the union of the two builds — every key and every name stays covered. */
 function serversFor(mode: CapabilitySession["mode"]): CapabilityServerRecord {
-  return buildCapabilitiesFor({ ...SESSION, mode }, deps());
+  return {
+    ...buildCapabilitiesFor({ ...SESSION, mode }, deps()),
+    ...buildCapabilitiesFor({ ...SESSION, mode }, { ...deps(), legacyComputer: () => true }),
+  };
 }
 
 /**

@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// now, replacing the orb's quick-dispatch field. Bound to the same dispatch session the orb
     /// follows (`AppModel.session`), through its own adapter.
     private(set) var pillController: DispatchPillController?
+    /// The background watchdog for a stalled main thread (never constructed under unit tests).
+    private var hangWatchdog: HangWatchdog?
     /// The pill's own preferences (Settings → Dispatch: how long a put-away pill keeps its draft).
     /// ONE instance, handed to both the pill and the settings page (`DashboardWiring`), so a change
     /// on the page reaches the pill at once. Constructing it only READS `UserDefaults`.
@@ -91,6 +93,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (`PairedDevicesWindowController`) — see `openPairedDevices()`, now a plain
     /// `summonAppWindow(navigatingTo: .dashboard(pane: .pairedDevices))`.
     private(set) var appWindow: AppWindowController?
+
+    /// The computer-use mirror inside Winter's own windows (spine §11b): one coordinator for every window,
+    /// holding the one connection to the Winter Computer Use helper. Made on first use; nil under the
+    /// unit-test host, which has no helper and must never open its socket.
+    private(set) lazy var mirrorCoordinator: MirrorCoordinator? = {
+        guard !Self.isRunningUnitTests else { return nil }
+        return MirrorCoordinator(client: LiveComputerUseHelperClient(home: AppProfile.winterHome),
+                                 log: { OrbDebug.log("mirror: \($0)") })
+    }()
     /// browser-runtime T5: the browser lifecycle's assembly point (`BrowserSignals.swift`) —
     /// constructed once, beside the shell's own `ShellSessionHost`, and held for the app's life
     /// because it owns the Combine subscriptions that provoke a re-plan. `nil` until the shell is
@@ -264,12 +275,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appWindow = controller
     }
 
+    // MARK: - Hang watchdog
+
+    private func startHangWatchdog() {
+        guard hangWatchdog == nil else { return }
+        let watchdog = HangWatchdog(gather: { [weak self] in
+            HangContext.gather(frontmostWindow: { self?.frontmostWindowKind() ?? "none" })
+        })
+        hangWatchdog = watchdog
+        watchdog.start()
+    }
+
+    /// Which kind of window is frontmost, for a hang report.
+    func frontmostWindowKind() -> String {
+        // The fallback skips the mirror's child panel (child windows order above their parent, so it would answer
+        // "mirror" for a shell window with no key window).
+        let fallback = NSApp.orderedWindows.first { $0.isVisible && !($0 is MirrorChildPanel) }
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow ?? fallback else { return "none" }
+        if window.delegate is AppWindowController { return "shell" }
+        if window.delegate is DetachedWindowController { return "detached" }
+        if window is MirrorChildPanel { return "mirror" }
+        let name = String(describing: type(of: window))
+        return name.localizedCaseInsensitiveContains("pill") ? "pill" : name
+    }
+
     /// Registers a freshly spawned detached window and wires its one-shot `onClosed` to remove it
     /// from `detachedWindows` again. Called by `orb.onWindowDetach`'s closure below (Task 4's
     /// detach choreography — yellow on the morph window) and by `spawnDetachedWindow` (Task 5,
     /// 2e-iii — the sidebar's own "open in a new window" spawn).
     func registerDetachedWindow(_ controller: DetachedWindowController) {
         detachedWindows.append(controller)
+        if let mirrorCoordinator { controller.attachMirror(mirrorCoordinator) }
         syncDockPresence() // Lifecycle T3: a real chat window just opened — promote if it's the first
         controller.onClosed = { [weak self] closed in
             self?.detachedWindows.removeAll { $0 === closed }
@@ -655,6 +691,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.browserSignals?.setRenderingActive(active)
         }
         appWindow = controller
+        if let mirrorCoordinator { controller.attachMirror(mirrorCoordinator) }
         controller.summon(navigatingTo: destination)
         reassertMainMenuItems(host: host)
     }
@@ -876,6 +913,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             mcpOAuthClient: LiveMcpAuthClient(client: client),
             // WS-26: the connector permissions, over the same connection.
             mcpPermissionsClient: LiveMcpPermissionsClient(client: client),
+            // ComputerV2: Settings → Computer Use, over the same connection.
+            computerUseClient: LiveComputerUseClient(client: client),
             // 2026-09-18: the Updates panel reads this presenter directly. Handed over even in
             // Debug (where it will report `.unavailable`) so the panel never has a nil case to
             // invent copy for.
@@ -1092,6 +1131,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // declarations + `import Sparkle` stay in both configs) so a dev build never starts an
         // updater against the production feed — matching the dev/dist identity split. The existing
         // `!isRunningUnitTests` gate stays too (no updater from the xctest host).
+        // A stalled main thread explains itself in the unified log (`HangWatchdog`) — Debug and Release alike.
+        if !Self.isRunningUnitTests { startHangWatchdog() }
         if !Self.isRunningUnitTests {
             #if !DEBUG
             // Sparkle T4: live `activeTurns` wiring — `appModel` doesn't exist yet at this point in
@@ -1681,10 +1722,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 mb?.refresh()
             }
         }
-        // Refresh the menu state line periodically (cheap; 2b has no binding plumbing to NSMenu).
-        Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak mb] _ in
-            Task { @MainActor in mb?.refresh() }
-        }
+        // The menu's state line and login-item checkbox are refreshed when the menu is OPENED (`MenuBarController`
+        // observes `NSMenu.didBeginTrackingNotification`), not on a clock: nobody reads them while it is closed, and
+        // reading the login item asks `SMAppService` over XPC every time (a 2 s timer was one of the app's idle wake-ups).
         // DD-T7: dist-only first-launch offer for the `winter` command — late in launch, after the
         // menu exists (`mb.install()` above), gated `!isRunningUnitTests` the same way as every
         // other real-side-effect call in this method (Sparkle's updater construction, the AX

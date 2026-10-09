@@ -29,7 +29,7 @@ private func pillActivityItems(_ entries: [ToolRunEntry]) -> [ActivityItem] {
 
 /// The kinds of tool the pill has words for. Anything else reads "Using <tool>" → "Used <tool>".
 enum PillToolKind: Equatable {
-    case search, fetch, shell, write, edit, read, grep, glob, list, other(String)
+    case search, fetch, shell, write, edit, read, grep, glob, list, computer, other(String)
 
     init(toolName: String) {
         switch toolName.lowercased() {
@@ -42,6 +42,9 @@ enum PillToolKind: Equatable {
         case "grep": self = .grep
         case "glob": self = .glob
         case "ls": self = .list
+        // ComputerV2 — the host name and the plain name, lowercased. The old `computer` tool stays on
+        // the generic sentence: it has no title and no script to say anything with.
+        case "computer_v2", "computerv2": self = .computer
         default: self = .other(toolName)
         }
     }
@@ -194,12 +197,101 @@ func pillToolLabel(_ entry: ToolRunEntry, turnIsLive: Bool) -> PillToolLabel {
         if allFailed { return PillToolLabel(lead: "Couldn't list \(n == 1 ? "the directory" : "\(n) directories")") }
         return PillToolLabel(lead: "Listed ", count: n, noun: .directory, tail: failedTail)
 
+    case .computer:
+        // A lone call says what it is doing — its title or derived label (R10); several in a row count,
+        // and a live set takes turns through its calls' labels, as a page read takes turns through hosts.
+        func label(_ call: ToolCallRecord, running: Bool) -> String { computerV2CallLabel(detail: call.detail, running: running) }
+        if running {
+            let names = (liveCalls.isEmpty ? calls : liveCalls).map { label($0, running: true) }
+            return names.count == 1 ? PillToolLabel(lead: names[0])
+                : PillToolLabel(lead: "", rotation: names.map { PillRotatingName(text: $0, disc: nil) })
+        }
+        if allFailed {
+            return n == 1 ? PillToolLabel(lead: label(calls[0], running: false) + " — failed")
+                          : PillToolLabel(lead: "\(n) computer actions failed")
+        }
+        return n == 1 ? PillToolLabel(lead: label(calls[0], running: false))
+                      : PillToolLabel(lead: "Used the computer \(n) times", tail: failedTail)
+
     case .other:
         let fragment = toolGroupFragment(name: entry.name, count: n)
         let sentence = fragment.prefix(1).uppercased() + fragment.dropFirst()
         if running { return PillToolLabel(lead: "Working · \(sentence)") }
         if allFailed { return PillToolLabel(lead: "\(sentence) — failed") }
         return PillToolLabel(lead: sentence, tail: failedTail)
+    }
+}
+
+/// PURE: whether a tool pill needs the half-second clock at all. Only `tick` reads it, and only two
+/// things take turns on it: a label rotating through names (a page read, a file, several live calls) and
+/// a running search cycling through the sites it found. Everything else — every finished pill — is
+/// static, so its body must not be re-run twice a second for the life of the session.
+func pillHeaderNeedsClock(label: PillToolLabel, running: Bool, isSearch: Bool, hasSiteDiscs: Bool) -> Bool {
+    !label.rotation.isEmpty || (running && isSearch && hasSiteDiscs)
+}
+
+// MARK: - The safety review (pure — `PillReviewTests`)
+
+/// Amber, in the pill's own register (`failureRed` is the same kind of literal beside this): a warm
+/// yellow that reads on the pill's dark ground.
+let pillReviewAmber = Color(red: 1.0, green: 0.78, blue: 0.28)
+
+/// One breath of the review glow, in seconds.
+let pillReviewPulsePeriod: TimeInterval = 1.2
+
+/// PURE: whether any of `entries`' calls is under safety review.
+func pillIsReviewing(_ entries: [ToolRunEntry], reviewing: Set<String>) -> Bool {
+    guard !reviewing.isEmpty else { return false }
+    return entries.contains { entry in entry.calls.contains { $0.callId.map(reviewing.contains) ?? false } }
+}
+
+/// What a pill wears for a review. A failed pill keeps its red (a review that finished before the call
+/// failed is over; the two are never both true in practice, and red outranks amber if they were). With
+/// reduced motion the tint stays and the breathing goes.
+struct PillReviewChrome: Equatable {
+    let tinted: Bool
+    let pulses: Bool
+}
+
+func pillReviewChrome(reviewing: Bool, failed: Bool, reduceMotion: Bool) -> PillReviewChrome {
+    let tinted = reviewing && !failed
+    return PillReviewChrome(tinted: tinted, pulses: tinted && !reduceMotion)
+}
+
+/// PURE: the glow's strength at time `t` — a sine over `pillReviewPulsePeriod`, between 0 and 1.
+func pillReviewPulseLevel(at t: TimeInterval) -> Double {
+    0.5 + 0.5 * sin(2 * .pi * t / pillReviewPulsePeriod)
+}
+
+/// The amber tint over a pill while a call is being reviewed: a wash and a rim in `pillReviewAmber`,
+/// breathing about every 1.2 s (static under reduced motion). Drawn inside the pill's own shape and never
+/// hit-tested, so the pill stays a button.
+struct PillReviewGlow: ViewModifier {
+    let chrome: PillReviewChrome
+    let expanded: Bool
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            if chrome.tinted {
+                let shape = RoundedRectangle(cornerRadius: expanded ? PillMorphChrome.expandedCornerRadius : PillToolRunHeader.height / 2,
+                                             style: expanded ? .continuous : .circular)
+                Group {
+                    if chrome.pulses {
+                        // A Core Animation breath (render server): no per-frame SwiftUI work in the transcript.
+                        PillReviewBreath(cornerRadius: expanded ? PillMorphChrome.expandedCornerRadius : PillToolRunHeader.height / 2,
+                                         continuous: expanded)
+                    } else {
+                        glow(shape, level: 0.7)
+                    }
+                }
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private func glow(_ shape: RoundedRectangle, level: Double) -> some View {
+        shape.fill(pillReviewAmber.opacity(0.08 + 0.14 * level))
+            .overlay(shape.strokeBorder(pillReviewAmber.opacity(0.35 + 0.45 * level), lineWidth: 1.5))
     }
 }
 
@@ -216,6 +308,14 @@ struct PillToolRunHeader: View {
     let turnIsLive: Bool
     let isExpanded: Bool
     let toggle: () -> Void
+    /// What `toggle` opens and closes (the transcript's expansion key). `==` compares it in place of the closure, so a
+    /// pill whose key moved is rebuilt with the new `toggle`.
+    var identity: String = ""
+
+    /// The bash safety reviewer is judging one of this pill's calls right now: the pill turns amber and
+    /// breathes (`PillReviewGlow`). Read from the environment so no row in between carries it.
+    @Environment(\.reviewingCallIds) private var reviewingCallIds
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Bumped while a favicon is still loading, so the row looks again (the cache is not observable).
     @State private var faviconTick = 0
@@ -226,12 +326,13 @@ struct PillToolRunHeader: View {
     static let rotationPeriod: TimeInterval = 0.5
 
     private var entry: ToolRunEntry { entries.first ?? ToolRunEntry(name: "", calls: []) }
+    private var isReviewing: Bool { pillIsReviewing(entries, reviewing: reviewingCallIds) }
     private var status: ToolCallStatus { toolRunStatus(entries, turnIsLive: turnIsLive) }
     private static let failureRed = Color(red: 1.0, green: 0.45, blue: 0.40)
 
     /// A SEARCH pill opens INTO itself (2026-10-06): the capsule morphs into a rounded rectangle
     /// holding the same row, then the queries and one flat pill per website the run found. Every other
-    /// kind keeps its body beneath the pill (`TranscriptExchangeRow.toolPillBody`).
+    /// kind keeps its body beneath the pill (`TranscriptCell.toolPillBody`).
     static func opensInPlace(_ entry: ToolRunEntry) -> Bool { PillToolKind(toolName: entry.name) == .search }
 
     var body: some View {
@@ -243,21 +344,18 @@ struct PillToolRunHeader: View {
         let open = inPlace && isExpanded
         VStack(alignment: .leading, spacing: 0) {
             Button(action: toggle) {
-                TimelineView(.periodic(from: .now, by: Self.rotationPeriod)) { timeline in
-                    let tick = Int(timeline.date.timeIntervalSinceReferenceDate / Self.rotationPeriod)
-                    HStack(spacing: 10) {
-                        discStack(discs, label: label, running: running, tick: tick)
-                        labelText(label, tick: tick)
-                            .modifier(BandShimmer(active: running, rest: 0.5, inactive: 0.9, minBand: 60, bandShare: 0.6))
-                        if failed {
-                            Image(systemName: "exclamationmark.circle.fill")
-                                .font(Typography.label(.semibold))
-                                .foregroundStyle(Self.failureRed)
-                                .accessibilityLabel("Failed")
+                // The half-second clock only runs for a pill with something to rotate. A finished
+                // pill — nearly all of a long session's — draws once and then never again: a clock per
+                // pill re-rendered 120 collapsed pills twice a second, forever (the 60-call session's lag).
+                Group {
+                    if pillHeaderNeedsClock(label: label, running: running, isSearch: inPlace,
+                                            hasSiteDiscs: discs.contains { if case .site = $0.kind { return true } else { return false } }) {
+                        TimelineView(.periodic(from: .now, by: Self.rotationPeriod)) { timeline in
+                            headerRow(discs: discs, label: label, running: running, failed: failed, inPlace: inPlace,
+                                      tick: Int(timeline.date.timeIntervalSinceReferenceDate / Self.rotationPeriod))
                         }
-                        PillChevron(isExpanded: isExpanded,
-                                    label: inPlace ? (isExpanded ? "Hide sources" : "Show sources")
-                                                   : (isExpanded ? "Hide calls" : "Show calls"))
+                    } else {
+                        headerRow(discs: discs, label: label, running: running, failed: failed, inPlace: inPlace, tick: 0)
                     }
                 }
                 .padding(.leading, 6)
@@ -277,12 +375,33 @@ struct PillToolRunHeader: View {
         }
         .fixedSize(horizontal: !open, vertical: true)
         .frame(maxWidth: open ? .infinity : nil, alignment: .leading)
+        .modifier(PillReviewGlow(chrome: pillReviewChrome(reviewing: isReviewing, failed: failed, reduceMotion: reduceMotion),
+                                 expanded: open))
+        .help(isReviewing ? "Safety review…" : "")
         .modifier(PillMorphChrome(expanded: open,
                                   fill: failed ? Self.failureRed.opacity(0.10) : PillMorphChrome.fill,
                                   rim: failed ? Self.failureRed.opacity(0.45)
                                       : running ? PillMorphChrome.liveRim : PillMorphChrome.restRim))
         .animation(.easeInOut(duration: 0.3), value: status)
         .task(id: discs) { await waitForFavicons(discs) }
+    }
+
+    private func headerRow(discs: [PlumeThrow], label: PillToolLabel, running: Bool, failed: Bool, inPlace: Bool,
+                           tick: Int) -> some View {
+        HStack(spacing: 10) {
+            discStack(discs, label: label, running: running, tick: tick)
+            labelText(label, tick: tick)
+                .modifier(BandShimmer(active: running, rest: 0.5, inactive: 0.9, minBand: 60, bandShare: 0.6))
+            if failed {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(Typography.label(.semibold))
+                    .foregroundStyle(Self.failureRed)
+                    .accessibilityLabel("Failed")
+            }
+            PillChevron(isExpanded: isExpanded,
+                        label: inPlace ? (isExpanded ? "Hide sources" : "Show sources")
+                                       : (isExpanded ? "Hide calls" : "Show calls"))
+        }
     }
 
     @ViewBuilder
@@ -350,6 +469,17 @@ struct PillToolRunHeader: View {
             if Task.isCancelled { return }
             faviconTick += 1
         }
+    }
+}
+
+/// A pill is a function of its calls, whether its turn is live, whether it is open and which key it toggles: the
+/// closure is the only input that is new every pass, and it is what made every pill of a long turn (120 of them, each
+/// with a shimmer, a clock and a chrome) evaluate its body on every event. With this and `.equatable()` at the call
+/// site, a fold re-evaluates only the pills whose calls changed. The review glow and the reduce-motion switch are
+/// environment reads inside the body and still reach it.
+extension PillToolRunHeader: Equatable {
+    static func == (a: PillToolRunHeader, b: PillToolRunHeader) -> Bool {
+        a.turnIsLive == b.turnIsLive && a.isExpanded == b.isExpanded && a.identity == b.identity && a.entries == b.entries
     }
 }
 
@@ -524,5 +654,95 @@ struct PillFlowLayout: Layout {
             }
             y += rowHeight + lineSpacing
         }
+    }
+}
+
+// MARK: - The review glow, on the render server
+
+/// The amber wash and rim breathing about every `pillReviewPulsePeriod`: a layer whose fill and border colour
+/// animate between the glow's weakest and strongest, forever, on Core Animation. Never takes a click.
+private struct PillReviewBreath: NSViewRepresentable {
+    let cornerRadius: CGFloat
+    let continuous: Bool
+
+    func makeNSView(context: Context) -> PillReviewBreathView {
+        let view = PillReviewBreathView()
+        view.configure(cornerRadius: cornerRadius, continuous: continuous)
+        return view
+    }
+
+    func updateNSView(_ view: PillReviewBreathView, context: Context) {
+        view.configure(cornerRadius: cornerRadius, continuous: continuous)
+    }
+}
+
+final class PillReviewBreathView: NSView {
+    static let animationKey = "breath"
+    private let glowLayer = CALayer()
+    private var cornerRadius: CGFloat = 0
+    private var continuous = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.addSublayer(glowLayer)
+        glowLayer.borderWidth = 1.5
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func configure(cornerRadius: CGFloat, continuous: Bool) {
+        guard cornerRadius != self.cornerRadius || continuous != self.continuous else { return }
+        self.cornerRadius = cornerRadius
+        self.continuous = continuous
+        needsLayout = true
+    }
+
+    /// The wash and the rim at glow strength `level` (0…1) — the numbers the SwiftUI glow drew.
+    static func colors(level: Double) -> (fill: CGColor, rim: CGColor) {
+        let amber = NSColor(pillReviewAmber)
+        return (amber.withAlphaComponent(0.08 + 0.14 * level).cgColor, amber.withAlphaComponent(0.35 + 0.45 * level).cgColor)
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        glowLayer.frame = bounds
+        glowLayer.cornerRadius = cornerRadius
+        glowLayer.cornerCurve = continuous ? .continuous : .circular
+        let dim = Self.colors(level: 0), bright = Self.colors(level: 1)
+        glowLayer.backgroundColor = Self.colors(level: 0.5).fill
+        glowLayer.borderColor = Self.colors(level: 0.5).rim
+        CATransaction.commit()
+        guard window != nil else { return }
+        if glowLayer.animation(forKey: Self.animationKey) == nil {
+            glowLayer.add(Self.breath(dim: dim, bright: bright), forKey: Self.animationKey)
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        glowLayer.removeAnimation(forKey: Self.animationKey) // dropped on leaving a window anyway; re-added in layout
+        needsLayout = true
+    }
+
+    static func breath(dim: (fill: CGColor, rim: CGColor), bright: (fill: CGColor, rim: CGColor)) -> CAAnimationGroup {
+        func animation(_ keyPath: String, _ from: CGColor, _ to: CGColor) -> CABasicAnimation {
+            let a = CABasicAnimation(keyPath: keyPath)
+            a.fromValue = from
+            a.toValue = to
+            a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            return a
+        }
+        let group = CAAnimationGroup()
+        group.animations = [animation("backgroundColor", dim.fill, bright.fill), animation("borderColor", dim.rim, bright.rim)]
+        group.duration = pillReviewPulsePeriod / 2
+        group.autoreverses = true
+        group.repeatCount = .infinity
+        group.isRemovedOnCompletion = false
+        return group
     }
 }

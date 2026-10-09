@@ -16,7 +16,7 @@ import XCTest
 /// drifting — from the TypeScript side, and from its own case-level twin `isTransient`.
 final class SessionEventTransientTests: XCTestCase {
 
-    /// The canonical nine, as literals. Deliberately NOT read from `transientTypes` — this is the
+    /// The canonical fourteen, as literals. Deliberately NOT read from `transientTypes` — this is the
     /// remote-allowlist parity pattern: each side pins its own copy to the same literal list, so
     /// editing one side alone fails a test instead of silently diverging. The TypeScript half is
     /// `packages/core/test/ipc/remote-live-stream.test.ts`, which pins the identical nine strings.
@@ -25,8 +25,9 @@ final class SessionEventTransientTests: XCTestCase {
     /// `panel_command`); 9 → 11 (Winter Phase 10a O5, P10a-6: `provider_login_progress`,
     /// `provider_login_finished`); 11 → 12 (`provider_retry` — a per-provider retry attempt
     /// projected from the child's system/api_retry frame); 12 → 13 (`thinking_delta` — the thinking
-    /// pill's live progress, 2026-10-05).
-    private static let thirteen: Set<String> = [
+    /// pill's live progress, 2026-10-05); 13 → 14 (`tool_review_progress` — the bash safety reviewer is
+    /// judging a call, 2026-10-08).
+    private static let fourteen: Set<String> = [
         "assistant_delta",
         "provider_retry",
         "lease_granted",
@@ -40,12 +41,22 @@ final class SessionEventTransientTests: XCTestCase {
         "provider_login_progress",
         "provider_login_finished",
         "thinking_delta",
+        "tool_review_progress",
     ]
 
-    func testTransientTypesIsExactlyTheThirteen() {
-        XCTAssertEqual(SessionEvent.transientTypes, Self.thirteen,
+    func testTransientTypesIsExactlyTheFourteen() {
+        XCTAssertEqual(SessionEvent.transientTypes, Self.fourteen,
                        "SessionEvent.transientTypes must stay in lockstep with TRANSIENT_EVENT_TYPES in packages/protocol/src/events.ts")
-        XCTAssertEqual(SessionEvent.transientTypes.count, 13)
+        XCTAssertEqual(SessionEvent.transientTypes.count, 14)
+    }
+
+    /// The reviewing signal is transient and its persisted namesake is not: `tool_review` is a verdict
+    /// RECORD in old session logs, `tool_review_progress` is a live flicker that borrows lastSeq.
+    func testToolReviewProgressIsTransientAndToolReviewIsNot() {
+        XCTAssertTrue(SessionEvent.transientTypes.contains("tool_review_progress"))
+        XCTAssertFalse(SessionEvent.transientTypes.contains("tool_review"))
+        let progress = SessionEvent.toolReviewProgress(.init(seq: 4, sessionId: "s1", ts: 0, threadId: "main", callId: "c1", phase: "started"))
+        XCTAssertTrue(progress.isTransient)
     }
 
     /// `isTransient` (the case switch, used by `WinterClient` on decoded events) and

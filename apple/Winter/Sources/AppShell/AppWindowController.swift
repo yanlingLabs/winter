@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 // MARK: - Window geometry (PURE — table-tested in AppShellTests.swift)
@@ -167,6 +168,9 @@ final class AppWindowController: NSObject, NSWindowDelegate {
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
         window.title = "Winter"
+        // The dispatch pill's mouse gate hears the pointer through a local monitor, which sees moves only for a
+        // window that asks for them (`DispatchPillController.installMonitors`).
+        window.acceptsMouseMovedEvents = true
         // chatgpt-ui T3 (spec §4): the seamless top — the titlebar draws NO material and NO title
         // text, so the traffic lights sit inline over the sidebar's own flat background (the
         // custom pane's `windowBackgroundColor` fill, reaching the very top) and content scrolls
@@ -329,6 +333,31 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         // free and idempotent, so the cheap thing is to do it at every plausible moment.
         positionTrafficLights()
         syncState()
+    }
+
+    // MARK: - The live mirror (spine §11b)
+
+    private var mirrorBinder: MirrorWindowBinder?
+    private var mirrorWatch: AnyCancellable?
+
+    /// Shows the computer-use mirror inside this window while the session it has attached — or a session
+    /// that one started, a Dispatch child — has an app bound: a child panel at the top-left, over the
+    /// traffic lights (`MirrorWindowBinder`). It needs no other window. The shell hides — detaching its
+    /// session — when closed, so "attached" is "open".
+    func attachMirror(_ coordinator: MirrorCoordinator) {
+        guard let host, mirrorBinder == nil else { return }
+        let binder = MirrorWindowBinder(coordinator: coordinator, kind: .shell, window: window, sessionId: host.attachedSessionId)
+        mirrorBinder = binder
+        // A Dispatch session is not the one that uses the computer — its children are, each in a session of
+        // its own — so the window also watches the children its attached session lists.
+        let children = host.$attachment
+            .map { attachment -> AnyPublisher<[String], Never> in
+                attachment.map { $0.session.$state.mirrorChildren }
+                    ?? Just([]).eraseToAnyPublisher()
+            }
+            .switchToLatest()
+        mirrorWatch = Publishers.CombineLatest(host.$attachedSessionId, children)
+            .sink { [weak binder] sessionId, children in binder?.update(sessionId: sessionId, related: children) }
     }
 
     /// Orders the window out WITHOUT closing it — the shell's "close". Shared by the red traffic

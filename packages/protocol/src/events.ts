@@ -614,6 +614,25 @@ export const ToolReviewEvent = ThreadBase.extend({
   summary: z.string(),
 });
 
+/** The bash safety reviewer is judging a tool call (2026-10-08): the Mac shows that call's pill yellow and pulsing
+ *  while it does. `started` right before the reviewer's model call (a sandboxed Bash call, or a sandbox escape's
+ *  unsandboxed review); `ended` when the call returns, on every path — `verdict` is the reviewer's `safe`/`unsafe`,
+ *  or `escalated` when it reached no verdict (error, timeout, abort: the hook asks a human instead); absent when no
+ *  review could run at all (no runnable model — the hook allows, as it always did). `callId` is the session log's
+ *  `tool_call.callId` (the runtime's `tool_use_id`), `threadId` the thread that call is on. A pre-allowed command
+ *  (the read-only classifier, the allow list, a plain `open`) is never reviewed and emits nothing.
+ *
+ *  TRANSIENT: broadcast only, never persisted (`TRANSIENT_EVENT_TYPES`). Named `tool_review_progress`, NOT
+ *  `tool_review`: that name is the retired engine's PERSISTED verdict record below, which old session logs still
+ *  carry and the Swift mirror still decodes — reshaping it would make those lines unparseable (the store drops a
+ *  line it cannot parse when it recovers a log). */
+export const ToolReviewProgressEvent = ThreadBase.extend({
+  type: z.literal("tool_review_progress"),
+  callId: z.string().min(1),
+  phase: z.enum(["started", "ended"]),
+  verdict: z.enum(["safe", "unsafe", "escalated"]).optional(),
+});
+
 /** Push-notification track (task-30, the final CC-parity tool item): emitted by the
  *  `push_notification` tool (core's `agent/tools/push-notification.ts`) once per call — a real
  *  wire event, NOT transient (unlike `assistant_delta`/the lease events above): it's persisted
@@ -1063,6 +1082,7 @@ export const SessionEvent = z.discriminatedUnion("type", [
   ShortcutInvokeEvent,
   TileActionEvent,
   ToolReviewEvent,
+  ToolReviewProgressEvent,
   NotificationRequestedEvent,
   HookNoticeEvent,
   ContinuityWarningEvent,
@@ -1152,6 +1172,12 @@ export const TRANSIENT_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<
   // The thinking pill (2026-10-05): a reasoning block's live progress; its persisted record is
   // `thinking_block` (in `HISTORY_EVENT_TYPES`). 12 → 13.
   "thinking_delta",
+  // The reviewing pill (2026-10-08): the bash safety reviewer is judging a call. 13 → 14. It reaches the remote
+  // stream by the normal rule (`REMOTE_STREAM_EVENT_TYPES` spreads this set): the phone's `WinterSessionClient`
+  // decodes every frame as untyped JSON and its transcript fold `default: break`s on a type it does not know, so a
+  // pinned older kit drops it harmlessly (it reads an unknown transient as persisted, and its seq — the store's
+  // current lastSeq — is never past the cursor, so it is dropped there too).
+  "tool_review_progress",
 ]);
 
 /** Event payload before the store assigns seq/ts (distributes Omit over the union). */

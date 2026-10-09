@@ -22,6 +22,8 @@ final class ScriptedTransport: WinterTransport, SentLineRecording, @unchecked Se
     }
     func close() { cont.finish() }
     func feed(_ line: String) { cont.yield(.data(Data((line + "\n").utf8))) }
+    /// Raw bytes exactly as given — a read that may start or end mid-line.
+    func feedRaw(_ data: Data) { cont.yield(.data(data)) }
     func dropConnection() { cont.yield(.closed(nil)) }
 }
 
@@ -176,6 +178,33 @@ final class WinterClientTests: XCTestCase {
         XCTAssertEqual(SessionEvent.toolReview(v).sessionId, "s_1")
     }
 
+    /// The reviewing pill: `tool_review_progress` decodes as a real case, both accessor switches return
+    /// its values, and — being transient — it reaches the stream even at a seq the cursor already passed
+    /// (the daemon stamps a transient with the store's current lastSeq, which is `<=` the cursor).
+    func testToolReviewProgressDecodesAndIsNotDroppedBySeqDedupe() async throws {
+        let t = ScriptedTransport()
+        let client = makeClient(t)
+        async let connected: Void = client.connect()
+        let hello = try await waitForSent(t, count: 1)[0]
+        t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true}}"#)
+        try await connected
+
+        var iter = client.events.makeAsyncIterator()
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"assistant_message","seq":9,"sessionId":"s_1","ts":4,"threadId":"main","text":"hi"}}"#)
+        guard case .session(.assistantMessage) = await iter.next() else { return XCTFail() }
+
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool_review_progress","seq":9,"sessionId":"s_1","ts":5,"threadId":"main","callId":"toolu_01","phase":"started"}}"#)
+        guard case .session(.toolReviewProgress(let started)) = await iter.next() else { return XCTFail("dropped or wrong case") }
+        XCTAssertEqual(started.callId, "toolu_01")
+        XCTAssertEqual(SessionEvent.toolReviewProgress(started).seq, 9)
+        XCTAssertEqual(SessionEvent.toolReviewProgress(started).sessionId, "s_1")
+
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool_review_progress","seq":9,"sessionId":"s_1","ts":6,"threadId":"main","callId":"toolu_01","phase":"ended","verdict":"safe"}}"#)
+        guard case .session(.toolReviewProgress(let ended)) = await iter.next() else { return XCTFail("the second one at the same seq was deduped") }
+        XCTAssertEqual(ended.phase, "ended")
+        XCTAssertEqual(ended.verdict, "safe")
+    }
+
     /// task-30 (push-notification track — another WinterKit-trap task, same shape as
     /// testToolReviewEventDecodesAndAccessorsWork above): the NEW `notification_requested` variant
     /// must decode as a REAL case and both exhaustive accessor switches (`var seq`/`var
@@ -288,5 +317,55 @@ final class WinterClientTests: XCTestCase {
         } else {
             XCTAssertNil(ev)
         }
+    }
+}
+
+
+final class EventTrafficTests: XCTestCase {
+    private final class Clock: @unchecked Sendable { var t: TimeInterval = 10 }
+
+    func testBacklogIsWhatWasYieldedMinusWhatWasTaken() {
+        let clock = Clock()
+        let traffic = EventTraffic(clock: { clock.t })
+        XCTAssertEqual(traffic.backlog, 0)
+        XCTAssertEqual(traffic.oldestAge, 0)
+        for _ in 0..<5 { traffic.noteYielded(); clock.t += 1 }
+        XCTAssertEqual(traffic.backlog, 5)
+        XCTAssertEqual(traffic.oldestAge, 5, accuracy: 0.001, "the first has waited since t=10")
+        traffic.noteConsumed(); traffic.noteConsumed()
+        XCTAssertEqual(traffic.backlog, 3)
+        XCTAssertEqual(traffic.oldestAge, 3, accuracy: 0.001, "and now the third is the oldest")
+        for _ in 0..<10 { traffic.noteConsumed() }
+        XCTAssertEqual(traffic.backlog, 0, "taking more than was yielded never goes negative")
+        XCTAssertEqual(traffic.oldestAge, 0)
+    }
+
+    func testAConsumerThatNeverCountsOffCannotGrowItWithoutBound() {
+        let traffic = EventTraffic(clock: { 1 })
+        for _ in 0..<200_000 { traffic.noteYielded() }
+        XCTAssertLessThanOrEqual(traffic.storedCount, EventTraffic.cap, "bounded however many events nobody counts off")
+        XCTAssertGreaterThan(traffic.backlog, EventTraffic.cap / 2, "and still a useful floor")
+        for _ in 0..<(EventTraffic.cap * 2) { traffic.noteConsumed() }
+        XCTAssertEqual(traffic.backlog, 0)
+    }
+
+    func testAClientCountsEveryEventItPutsOnItsStream() async throws {
+        let t = ScriptedTransport()
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "test")
+        async let connected: Void = client.connect()
+        let hello = try await waitForSent(t, count: 1)[0]
+        t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true}}"#)
+        try await connected
+        XCTAssertEqual(client.traffic.backlog, 0)
+        for n in 1...3 {
+            t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_created","seq":\#(n),"sessionId":"s_\#(n)","ts":5,"scope":"global"}}"#)
+        }
+        var waited = 0
+        while client.traffic.backlog < 3, waited < 100 { try await Task.sleep(nanoseconds: 20_000_000); waited += 1 }
+        XCTAssertEqual(client.traffic.backlog, 3, "three events on the stream, none taken")
+        var iterator = client.events.makeAsyncIterator()
+        _ = await iterator.next()
+        client.traffic.noteConsumed()
+        XCTAssertEqual(client.traffic.backlog, 2)
     }
 }

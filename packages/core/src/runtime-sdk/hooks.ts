@@ -55,7 +55,7 @@ import type {
 } from "@yanlinglabs/winter-agent-sdk";
 import type { FileDiffSummary } from "@yanlinglabs/winter-protocol";
 import { SHIPPED_DANGEROUS_DOMAINS, dangerousHostMatch, dangerousUrlMatch, normalizeDangerousDomain } from "../agent/dangerous-domains";
-import { BashReviewer, ReviewerNoRunnableModel, bashLooksSafe } from "../agent/reviewer";
+import { BashReviewer, ReviewerNoRunnableModel, bashLooksSafe, plainOpenUrls } from "../agent/reviewer";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { AUTO_DIAG_TOOL_NAMES, autoDiagnosticsSuffix } from "../agent/lsp/auto-diagnostics";
 import type { LspManager } from "../agent/lsp/manager";
@@ -110,6 +110,10 @@ export interface SessionHooksDeps {
    *  `reviewClassEnabled("bash", …)` cfg getters (default true when absent, same convention). */
   reviewerEnabled?: () => boolean | undefined;
   reviewerAllow?: () => string[] | undefined;
+  /** The reviewing pill (2026-10-08): told `started` right before the reviewer's model call for a tool call and
+   *  `ended` when it returns, on every path (`daemon.ts` broadcasts it as the transient `tool_review_progress`,
+   *  on the call's own thread). Never told about a pre-allowed command. A throw here never touches the verdict. */
+  reviewProgress?: (e: { callId: string; phase: "started" | "ended"; verdict?: "safe" | "unsafe" | "escalated" }) => void;
   /** THIS session's live approval policy. The reviewer is an `auto`-ONLY gate — engine.ts:4547-
    *  4548's rule, carried verbatim: under `ask`/`accept-edits`/`plan`/`dont-ask`/`bypass`/`chat`
    *  the human-card/bridge path is the safety net, and layering a second, silent AI opinion under
@@ -1232,6 +1236,49 @@ function connectorPermissionHook(deps: SessionHooksDeps): HookCallback {
   };
 }
 
+/** ComputerV2 (2026-10-08): the plain name and the MCP spelling of the script tool. */
+export const COMPUTER_V2_TOOL = "ComputerV2";
+const COMPUTER_V2_MCP_NAME = "mcp__winter__computer_v2__script";
+
+/**
+ * ComputerV2's EXPLICIT allow — every code/dispatch policy, `plan` and `dont-ask` included (R16: no card per
+ * script). The policy is per APP and enforced inside the call (`computer-use/policy.ts`: plan observes only,
+ * dont-ask acts only on an "Always allow" app, the per-app card, the user's restrictions); this hook only
+ * makes sure the call REACHES it. Without it a `dont-ask` child denies the unresolved MCP call without ever
+ * calling `canUseTool` ("dontAsk mode denies unmatched actions"), and `plan` routes it to a prompt. An explicit
+ * allow ranks below every deny and ask in the hook reducer, so a user's deny rule on `ComputerV2` still wins.
+ * The MCP spelling counts only when this incarnation built the `computer_v2` server; chat never has it.
+ */
+function computerV2AllowHook(deps: SessionHooksDeps): HookCallback {
+  return async (input) => {
+    if (deps.mode === "chat") return allow();
+    const name = (input as PreToolUseHookInput).tool_name;
+    let liveKeys: ReadonlySet<string> | undefined;
+    try { liveKeys = deps.capabilityKeys?.(); } catch { liveKeys = new Set(); }
+    if (liveKeys !== undefined && !liveKeys.has("computer_v2")) return allow();
+    if (name !== COMPUTER_V2_TOOL && name !== COMPUTER_V2_MCP_NAME) return allow();
+    return allowExplicitly("ComputerV2's policy is per app and is applied inside the call (Settings → Computer Use).");
+  };
+}
+
+/**
+ * `ToolSearch` under `dont-ask` (found with ComputerV2, 2026-10-08). Every MCP tool and several built-ins start
+ * DEFERRED and load only through `ToolSearch` — but a `dontAsk` child denies an unresolved call without ever
+ * calling `canUseTool` ("dontAsk mode denies unmatched actions"), and `ToolSearch` is not in the runtime's own
+ * silent-allow set, so in a `dont-ask` session NO deferred tool could be loaded at all (Browser, CronList, every
+ * MCP tool, ComputerV2). Winter's gate has always classified `ToolSearch` READ_ONLY — allowed under every policy —
+ * so this states that to the child, under `dont-ask` only (every other policy reaches `canUseTool`, whose gate
+ * answer is the same allow); the `WEB_BUILTIN_ALLOW_RULES` precedent, as a hook so dispatch is covered too. It
+ * only loads schemas; whatever a loaded tool then does is decided on its own call.
+ */
+function toolSearchDontAskHook(deps: SessionHooksDeps): HookCallback {
+  return async (input) => {
+    if (deps.mode === "chat" || deps.policy?.() !== "dont-ask") return allow();
+    if ((input as PreToolUseHookInput).tool_name !== "ToolSearch") return allow();
+    return allowExplicitly("ToolSearch only loads deferred tools' schemas; Winter allows it under every policy.");
+  };
+}
+
 const bashEscapeInput = (input: unknown): { command: string; escape: boolean; description?: string } => {
   const ti = (input as PreToolUseHookInput).tool_input as { command?: unknown; dangerouslyDisableSandbox?: unknown; description?: unknown } | null | undefined;
   return {
@@ -1259,9 +1306,10 @@ function escapeFloorHook(deps: SessionHooksDeps): HookCallback {
 // ── 2. Bash safety reviewer ─────────────────────────────────────────────────────────────────────
 
 /** `PreToolUse`, matched on `"Bash"` — the reviewer is the auto-policy GATE (see this file's own
- *  header and `deps.policy`'s doc comment). `bashLooksSafe` bypasses the review call entirely for
- *  an obviously-safe command (no shell metacharacters, read-only argv0, or an allow-listed entry) —
- *  identical to the retired engine's own bypass. A DEFINITE `unsafe` VERDICT still denies, with the
+ *  header and `deps.policy`'s doc comment). `bashLooksSafe` bypasses the review call entirely for a
+ *  sandboxed command the runtime's read-only classifier accepts (`runtime-sdk/bash-read-only.ts`, ported from
+ *  the agent SDK; never one naming a well-known secret store) or an allow-listed entry, and
+ *  `plainOpenUrls` for a plain `open` of an app or an http(s) page. A DEFINITE `unsafe` VERDICT still denies, with the
  *  reviewer's own reason. A reviewer that THROWS (timeout, malformed verdict, aborted — i.e. no
  *  verdict was ever reached, not a verdict of "unsafe") is a different case (review r1 Minor): it
  *  escalates with `permissionDecision: "ask"` — `PreToolUseHookSpecificOutput.permissionDecision`
@@ -1294,7 +1342,34 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
     // §2a's floor denies this one on its own, whatever the order the hooks run in; never spend (or
     // record) a review on it.
     if (escape && escapeFloorHit(command, deps.home, hookCwd(input)) !== undefined) return allow();
-    if (!escape && bashLooksSafe(command, deps.reviewerAllow?.() ?? [])) return allow();
+    if (!escape) {
+      // The runtime's own read-only classifier (or the user's reviewer allow list) — sandboxed calls only: a
+      // read-only `cat` is harmless inside the sandbox and reads `~/.ssh` outside it.
+      const originalCwd = deps.roots[0];
+      const cwd = hookCwd(input) ?? originalCwd;
+      const ctx = cwd === undefined ? undefined : { cwd, originalCwd: originalCwd ?? cwd };
+      if (bashLooksSafe(command, deps.reviewerAllow?.() ?? [], ctx)) return allow();
+    }
+    // 2026-10-08 (the live gate): opening an app, or an http(s) page in the user's own browser, is an ordinary
+    // user-facing action a model reviewer misreads as a network side effect — and in Dispatch its `unsafe` is a
+    // hard deny. A PLAIN `open` (`plainOpenUrls`: `-a`/`-b`/`-g`/`-j`/`-n`/`-F` and http(s) URLs only, nothing
+    // chained or expanded) skips the review — unless a URL's host is on the live dangerous-domain floor.
+    if (!escape) {
+      const urls = plainOpenUrls(command);
+      if (urls !== undefined) {
+        const floor = effectiveDangerousDomains(deps);
+        if (urls.every((u) => dangerousUrlMatch(u, floor) === null)) return allow();
+      }
+    }
+    // The reviewing pill: `started` now, exactly one `ended` on whichever path the review leaves by.
+    const callId = toolUseID ?? (typeof (pre as { tool_use_id?: unknown }).tool_use_id === "string" ? (pre as { tool_use_id: string }).tool_use_id : undefined);
+    let reported = false;
+    const progress = (phase: "started" | "ended", verdict?: "safe" | "unsafe" | "escalated"): void => {
+      if (phase === "ended") { if (reported) return; reported = true; }
+      if (callId === undefined || callId.length === 0 || deps.reviewProgress === undefined) return;
+      try { deps.reviewProgress({ callId, phase, ...(verdict === undefined ? {} : { verdict }) }); } catch (err) { logFacadeThrow("the reviewProgress sink", err); }
+    };
+    progress("started");
     try {
       // C3 round 3: for an escape the reviewer also sees the session's cwd (what "outside the project"
       // means) and the call's own `description` as the JUSTIFICATION — DATA, never instructions, under
@@ -1305,6 +1380,7 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
         class: "bash", command,
         ...(escape ? { unsandboxed: true, ...(description !== undefined ? { justification: description } : {}), ...(cwd !== undefined && cwd.length > 0 ? { cwd } : {}) } : {}),
       }, signal); // WS-24: the runner aborts `signal` when it times this callback out; the review aborts its model call with it
+      progress("ended", verdict.verdict === "unsafe" ? "unsafe" : "safe");
       if (verdict.verdict === "unsafe") return deny(verdict.reason || "the safety reviewer judged this command unsafe");
       if (escape) noteReviewerCleared(deps.sessionId, toolUseID ?? (typeof (pre as { tool_use_id?: unknown }).tool_use_id === "string" ? (pre as { tool_use_id: string }).tool_use_id : undefined), command);
       return allow();
@@ -1314,7 +1390,8 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
       // review to be had and there never was one: `allow()`, exactly what this hook's own first line
       // answered when such a home had no `BashReviewer` at all. The reviewer has already logged the
       // state change once; nothing is logged per call here.
-      if (err instanceof ReviewerNoRunnableModel) return allow();
+      if (err instanceof ReviewerNoRunnableModel) { progress("ended"); return allow(); }
+      progress("ended", "escalated");
       // C3 (2026-09-22) — traced in the SDK source, not yet measured on a live child: this `ask`
       // reaches `canUseTool`, where the gate's `auto` allow used to answer it, i.e. silently ran it.
       // For a PLAIN bash call the child keeps this reason and the bridge cards on it
@@ -1772,6 +1849,10 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   if (deps.home) preToolUse.push({ failClosed: true, hooks: [failClosed("path fence", pathFenceHook(deps))] });
   // WS-26: the connector-permission floor — every mode, every policy; see `connectorPermissionHook`.
   if (deps.connectors) preToolUse.push({ failClosed: true, hooks: [failClosed("connector-permission floor", connectorPermissionHook(deps))] });
+  // ComputerV2: the call itself is allowed under every policy; its policy is per app, inside the call.
+  preToolUse.push({ matcher: `${COMPUTER_V2_TOOL}|${COMPUTER_V2_MCP_NAME}`, hooks: [computerV2AllowHook(deps)] });
+  // ToolSearch under dont-ask: without it no deferred tool can be loaded in such a session (see the hook).
+  preToolUse.push({ matcher: "ToolSearch", hooks: [toolSearchDontAskHook(deps)] });
   if (deps.home) {
     for (const tool of Object.keys(DIFF_TOOL_FILE_PATH_ARG)) {
       preToolUse.push({ matcher: tool, hooks: [fileDiffPreToolUseHook(deps, pending)] });

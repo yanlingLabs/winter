@@ -496,6 +496,17 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
     }
   });
 
+  test("ComputerV2: no exclusion touches the Winter Computer Use helper — it is scanned whole", () => {
+    const m = (p: string) => NAME_SCAN_EXCLUSIONS.some((re) => re.test(p));
+    for (const p of [
+      "Contents/Helpers",
+      "Contents/Helpers/Winter Computer Use.app",
+      "Contents/Helpers/Winter Computer Use.app/Contents/MacOS/Winter Computer Use",
+      "Contents/Helpers/Winter Computer Use.app/Contents/Resources/AppIcon.icns",
+      "Contents/Helpers/Winter Computer Use.app/Contents/Info.plist",
+    ]) expect(m(p)).toBe(false);
+  });
+
   test("NAME_SCAN_EXCLUSIONS matches locale dirs only — not the framework, its binary, or CREDITS", () => {
     const fw = "Contents/Frameworks/Chromium Embedded Framework.framework";
     const m = (p: string) => NAME_SCAN_EXCLUSIONS.some((re) => re.test(p));

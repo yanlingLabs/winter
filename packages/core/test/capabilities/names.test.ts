@@ -3,6 +3,7 @@ import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import type { ToolDefinition } from "../../src/agent/tools/registry";
 import { browserToolDefs } from "../../src/agent/tools/browser";
 import { computerToolDefs } from "../../src/agent/tools/computer";
+import { computerV2ToolDefs } from "../../src/capabilities/computer-v2";
 import { docsToolDefs } from "../../src/agent/tools/docs";
 import { listSessionsToolDefs } from "../../src/agent/tools/list-sessions";
 import { sessionSpawnToolDefs } from "../../src/agent/tools/session-spawn";
@@ -40,6 +41,8 @@ const CANONICAL_NAMES = [
   "mcp__winter__sessions__list_sessions",
   // WS-06 §5 `mcp__winter__computer`.
   "mcp__winter__computer__computer",
+  // ComputerV2 (2026-10-08): the script-based computer tool, built instead of `computer`.
+  "mcp__winter__computer_v2__script",
   // WS-06 §5 `mcp__winter__browser`.
   "mcp__winter__browser__browser",
   // WS-06 §5 `mcp__winter__docs` / `sheets` / `slides`, folded onto ONE `office` server (P8b-12).
@@ -83,7 +86,7 @@ describe("capabilityToolName (P8b-12)", () => {
 describe("WINTER_CAPABILITY_TOOLS", () => {
   test("every name matches the P8b-12 shape", () => {
     for (const name of Object.keys(WINTER_CAPABILITY_TOOLS)) {
-      expect(name).toMatch(/^mcp__winter__[a-z]+__[A-Za-z_]+$/);
+      expect(name).toMatch(/^mcp__winter__[a-z][a-z0-9_]*?__[A-Za-z_]+$/);
     }
   });
 
@@ -118,6 +121,7 @@ describe("WINTER_CAPABILITY_TOOLS", () => {
     const defsByKey: Record<string, readonly ToolDefinition[]> = {
       sessions: [...sessionSpawnToolDefs(), ...listSessionsToolDefs({ store: { list: () => [], lastEventTs: () => 0, transcriptPath: () => "" } } as never)],
       computer: computerToolDefs(),
+      computer_v2: computerV2ToolDefs({ sessionId: "s", model: "winter-test/echo" }, {}),
       browser: browserToolDefs({ tabs: () => ({ tabs: [], activeTabId: undefined }) as never, openTab: () => "t", ...panel }),
       office: [
         ...docsToolDefs({ ...panel, dirsOf: () => [] as never }),
@@ -148,8 +152,10 @@ describe("WINTER_CAPABILITY_TOOLS", () => {
     // is read-only — and neither is the other: a spawn is never stated read-only.
     expect(t["mcp__winter__sessions__session_spawn"]).toEqual({ modes: ["dispatch"], plainName: "SpawnSession", eager: true, concurrent: true });
     expect(t["mcp__winter__sessions__list_sessions"]).toEqual({ modes: ["dispatch"], plainName: "ListSessions", eager: true, readOnly: true });
-    // No other capability tool is concurrent or read-only by declaration (Computer/Browser are lanes).
-    expect(Object.entries(t).filter(([, f]) => f.concurrent === true).map(([n]) => n)).toEqual(["mcp__winter__sessions__session_spawn"]);
+    // ComputerV2 (2026-10-08) is concurrency-safe with NO lane (the daemon's per-target locks replace it); no
+    // other capability tool is concurrent or read-only by declaration (Computer/Browser are lanes).
+    expect(Object.entries(t).filter(([, f]) => f.concurrent === true).map(([n]) => n).sort()).toEqual(["mcp__winter__computer_v2__script", "mcp__winter__sessions__session_spawn"]);
+    expect(t["mcp__winter__computer_v2__script"]).toEqual({ modes: ["code", "dispatch"], plainName: "ComputerV2", concurrent: true });
     expect(Object.entries(t).filter(([, f]) => f.readOnly === true).map(([n]) => n)).toEqual(["mcp__winter__sessions__list_sessions"]);
     // ManageSession was removed from Dispatch (user ruling 2026-10-02).
     expect(t["mcp__winter__sessions__manage_session"]).toBeUndefined();

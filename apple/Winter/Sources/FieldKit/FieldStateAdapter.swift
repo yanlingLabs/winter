@@ -349,6 +349,9 @@ final class FieldStateAdapter: ObservableObject {
     /// thinking pill shows until the block's persisted record replaces it. Read only by an OPENED pill.
     func liveThinkingText(_ blockId: String) -> String? { session.liveThinking.text(for: blockId) }
 
+    /// The buffer itself, for the one view that follows a streaming block's words (`PillLiveThinkingText`).
+    var liveThinking: ThinkingLiveText { session.liveThinking }
+
     /// Live partial reply for the window's streaming row — deliberately NOT `visibleResponse`
     /// (that one is exchangeIndex-pinned for the field).
     var liveStreamingText: String? {
@@ -362,6 +365,10 @@ final class FieldStateAdapter: ObservableObject {
     /// Deliberately NOT `liveStreamingText != nil` — that is false for the entire time a tool runs,
     /// which is exactly when this has to be true.
     var turnRunning: Bool { session.state.turnRunning }
+
+    /// The tool calls the bash safety reviewer is judging right now — the pill-themed window tints
+    /// their pills (`OrbSessionState.reviewingCallIds`).
+    var reviewingCallIds: Set<String> { session.state.reviewingCallIds }
 
     /// LIVE-GATE G4: CC-parity pinned todo widget — `WindowSurfaceView.windowContent` renders a
     /// compact "what's left" list below the transcript whenever ANY task isn't done yet, mirroring
@@ -590,7 +597,7 @@ final class FieldStateAdapter: ObservableObject {
     // MARK: - Task 3 (2d-iii): pending-interaction cards — mount + respond wiring
 
     /// The transcript cards' pending set (`TranscriptInteractionCard`, mounted inline by
-    /// `TranscriptExchangeRow` in both windows) — a thin
+    /// `TranscriptCell` in both windows) — a thin
     /// read-through onto the reducer's own ordered (oldest-first) list, same convention as
     /// `pinnedTasks`/`transcript` above.
     var pendingInteractions: [PendingInteraction] { session.state.pendingInteractions }
@@ -967,6 +974,55 @@ final class FieldStateAdapter: ObservableObject {
     /// **`turnRunning` is the single source of truth for whether it is offered**, and it is read at
     /// call time in both places rather than mirrored into a second flag — see that property.
     var onInterrupt: (() -> Void)?
+
+    // MARK: - Stopping (the stop button's visible effect)
+
+    /// `OrbSessionState.completedTurns` at the moment Stop was pressed, or nil when no stop is pending.
+    /// The stop is "pending" until a turn ENDS — the count moves past this — however long the daemon,
+    /// the stream and the fold take to say so: the user must see their press land (`isStopping`).
+    @Published private(set) var stopRequestedAfterTurns: Int?
+
+    /// True from the press of Stop until the turn it stopped has ended (`turn_completed` — aborted or
+    /// not — or `agent_error`), or until the stall watchdog gives up. Derived from the turn COUNT, so a
+    /// new turn that starts in the same fold as the terminal (Dispatch re-sending a stopped child's
+    /// task) does not read as the old one still stopping.
+    var isStopping: Bool {
+        guard let after = stopRequestedAfterTurns else { return false }
+        return session.state.turnRunning && session.state.completedTurns == after
+    }
+
+    /// How long a stop may stay pending before the window assumes its view is stale: the terminal was
+    /// lost, or the window is behind the stream. Instance-level so a test does not wait.
+    var stopStallTimeout: TimeInterval = 8
+
+    /// Called when the watchdog fires — the surface should re-read the session (a fresh attach) so the
+    /// window shows what the daemon says, not what it last folded.
+    var onStopStalled: (() -> Void)?
+    private var stopWatchdog: DispatchWorkItem?
+
+    /// Marks a stop as pending and arms the watchdog. A surface calls this where it sends the interrupt;
+    /// it does nothing when no turn is running (there is nothing to stop and nothing to wait for).
+    func beginStop() {
+        guard session.state.turnRunning else { return }
+        stopRequestedAfterTurns = session.state.completedTurns
+        stopWatchdog?.cancel()
+        let watchdog = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.isStopping else { return }
+                self.stopRequestedAfterTurns = nil
+                self.onStopStalled?()
+            }
+        }
+        stopWatchdog = watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + stopStallTimeout, execute: watchdog)
+    }
+
+    /// Clears a pending stop without waiting for the watchdog (the surface re-read the session).
+    func endStop() {
+        stopWatchdog?.cancel()
+        stopWatchdog = nil
+        stopRequestedAfterTurns = nil
+    }
 
     /// True while a `session.setActivity` RPC is in flight — the affordance's rows disable on it.
     /// A SEPARATE flag from the other four for the same reason those are separate from each other.

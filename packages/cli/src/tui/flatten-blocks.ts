@@ -48,7 +48,7 @@ import { createStreamingMarkdown, renderMarkdown, type Highlighter } from "./mar
 import { pickVerb, TURN_VERBS } from "./spinner-verbs";
 import { formatElapsed, formatTokens } from "../task-display";
 import { groupBlocks } from "./group-blocks";
-import { displayLineBreaks, formatArgsHead, MAX_RESULT_LINES } from "./format";
+import { displayLineBreaks, MAX_RESULT_LINES, toolHeadFor } from "./format";
 
 const ansi = new Chalk({ level: 3 });
 
@@ -121,8 +121,8 @@ export function flattenBlock(block: Block, opts: FlattenOpts): string[] {
     }
 
     case "tool": {
-      const argsHead = formatArgsHead(block.argsJson);
-      const headText = `${ansi.bold(block.name)}${argsHead ? `(${argsHead})` : ""}`;
+      const { name: toolName, head: argsHead } = toolHeadFor(block.name, block.argsJson);
+      const headText = `${ansi.bold(toolName)}${argsHead ? `(${argsHead})` : ""}`;
       const glyphColor = block.isError ? theme.error : theme.success;
       const head = gutterRows(2, `${ansi.hex(glyphColor)("⏺")} `, "  ", headText.split("\n"), columns);
 
@@ -241,8 +241,8 @@ export function makeStreamRenderer(): {
         out.push(...gutterRows(2, `${ansi.hex(theme.text)("⏺")} `, "  ", rendered.split("\n"), columns));
       }
       for (const t of tools) {
-        const argsHead = formatArgsHead(t.argsJson);
-        const headText = `${ansi.bold(t.name)}${argsHead ? `(${argsHead})` : ""}`;
+        const { name: toolName, head: argsHead } = toolHeadFor(t.name, t.argsJson);
+        const headText = `${ansi.bold(toolName)}${argsHead ? `(${argsHead})` : ""}`;
         const dot = dimToolDot ? ansi.dim("⏺") : "⏺";
         out.push(...gutterRows(2, `${dot} `, "  ", headText.split("\n"), columns));
       }

@@ -93,6 +93,8 @@ export const CAPABILITY_TOOL_MODES: Readonly<Record<string, { modes: readonly Se
   "mcp__winter__sessions__session_spawn": { modes: ["dispatch"], plainName: "SpawnSession" },
   "mcp__winter__sessions__list_sessions": { modes: ["dispatch"], plainName: "ListSessions" },
   "mcp__winter__computer__computer": { modes: ["code", "dispatch"], plainName: "Computer" },
+  // ComputerV2 (2026-10-08): code + dispatch, never chat (R14) — built instead of `Computer`.
+  "mcp__winter__computer_v2__script": { modes: ["code", "dispatch"], plainName: "ComputerV2" },
   "mcp__winter__browser__browser": { modes: ["code", "dispatch", "chat"], plainName: "Browser" },
   "mcp__winter__office__docs": { modes: ["code"] },
   "mcp__winter__office__sheets": { modes: ["code"] },

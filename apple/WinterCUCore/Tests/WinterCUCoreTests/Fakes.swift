@@ -1,0 +1,279 @@
+import ApplicationServices
+import CoreGraphics
+import Foundation
+@testable import WinterCUCore
+
+/// A fake element: `AXUIElementCreateApplication(token)` is a local token (no IPC, no permission), unique per
+/// token and CFEqual to itself — exactly what the identity cache keys on.
+func fakeElement(_ token: Int32) -> AXUIElement { AXUIElementCreateApplication(token) }
+
+/// An in-memory AX tree for driving `targetAct`'s gates.
+final class FakeAX: CUAXBackend {
+    var trusted = true
+    private var attrs: [AXIdentity: [String: CFTypeRef]] = [:]
+    private var actionNames: [AXIdentity: [String]] = [:]
+    private var settable: Set<String> = []
+    var dead = Set<AXIdentity>()
+    var windowIDs: [AXIdentity: CGWindowID] = [:]
+    /// Every perform, as "token:action".
+    private(set) var performed: [String] = []
+    /// Every write, as "token:attribute".
+    private(set) var written: [String] = []
+    /// Thrown by the next perform / write when set.
+    var performError: CUError?
+    var setError: CUError?
+
+    private func token(_ e: AXUIElement) -> Int32 {
+        var pid: pid_t = 0
+        AXUIElementGetPid(e, &pid)
+        return pid
+    }
+
+    func put(_ e: AXUIElement, _ values: [String: Any]) {
+        var d = attrs[AXIdentity(element: e)] ?? [:]
+        for (k, v) in values { d[k] = Self.cf(v) }
+        attrs[AXIdentity(element: e)] = d
+    }
+
+    func setActions(_ e: AXUIElement, _ names: [String]) { actionNames[AXIdentity(element: e)] = names }
+    func makeSettable(_ e: AXUIElement, _ attribute: String) { settable.insert("\(token(e)):\(attribute)") }
+
+    /// An element with a role, a frame and optional extras.
+    func add(_ e: AXUIElement, role: String, subrole: String? = nil, title: String? = nil, frame: CGRect? = nil,
+             extra: [String: Any] = [:]) {
+        var v: [String: Any] = [kAXRoleAttribute: role]
+        if let subrole { v[kAXSubroleAttribute] = subrole }
+        if let title { v[kAXTitleAttribute] = title }
+        if let f = frame {
+            var o = f.origin, s = f.size
+            v[kAXPositionAttribute] = AXValueCreate(.cgPoint, &o)!
+            v[kAXSizeAttribute] = AXValueCreate(.cgSize, &s)!
+        }
+        for (k, x) in extra { v[k] = x }
+        put(e, v)
+    }
+
+    func focus(pid: pid_t, on e: AXUIElement?) {
+        let app = application(pid)
+        if let e { put(app, [kAXFocusedUIElementAttribute: e]) } else {
+            attrs[AXIdentity(element: app)]?[kAXFocusedUIElementAttribute] = nil
+        }
+    }
+
+    static func cf(_ v: Any) -> CFTypeRef {
+        switch v {
+        case let s as String: return s as CFString
+        case let b as Bool: return (b ? kCFBooleanTrue : kCFBooleanFalse)!
+        case let n as Int: return NSNumber(value: n)
+        case let n as Double: return NSNumber(value: n)
+        case let a as [AXUIElement]: return a as CFArray
+        default: return v as CFTypeRef
+        }
+    }
+
+    // MARK: CUAXBackend
+
+    func isTrusted() -> Bool { trusted }
+    func application(_ pid: pid_t) -> AXUIElement { fakeElement(pid) }
+    /// Runs before each attribute read ("token:attribute"), to change the fake world as time passes (WebKit
+    /// moving focus a moment after a click).
+    var onRead: ((String) -> Void)?
+    func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
+        onRead?("\(token(e)):\(name)")
+        return attrs[AXIdentity(element: e)]?[name]
+    }
+    func copyMultiple(_ e: AXUIElement, _ names: [String]) -> [String: CFTypeRef]? {
+        let d = attrs[AXIdentity(element: e)] ?? [:]
+        var out: [String: CFTypeRef] = [:]
+        for n in names { if let v = d[n] { out[n] = v } }
+        return out
+    }
+    func actions(_ e: AXUIElement) -> [String] { actionNames[AXIdentity(element: e)] ?? [] }
+    func isSettable(_ e: AXUIElement, _ name: String) -> Bool { settable.contains("\(token(e)):\(name)") }
+    /// "token:attribute" writes the app accepts and ignores (the value stays what it was).
+    var ignoresWrites: Set<String> = []
+    /// Runs after each write that went through ("token:attribute"), to change the fake world.
+    var onSet: ((String) -> Void)?
+    func set(_ e: AXUIElement, _ name: String, _ value: CFTypeRef) throws {
+        written.append("\(token(e)):\(name)")
+        if let err = setError { throw err }
+        if ignoresWrites.contains("\(token(e)):\(name)") { return }
+        attrs[AXIdentity(element: e), default: [:]][name] = value
+        onSet?("\(token(e)):\(name)")
+    }
+    /// "token:action" pairs the app refuses as unsupported (an AX error, like Finder's AXOpen).
+    var refuses: Set<String> = []
+    /// Runs after each perform that went through ("token:action"), to change the fake world.
+    var onPerform: ((String) -> Void)?
+    /// Thrown AFTER the action took effect (onPerform ran): an app that acts and still answers with an error.
+    var performErrorAfterActing: CUError?
+    func perform(_ e: AXUIElement, _ action: String) throws {
+        performed.append("\(token(e)):\(action)")
+        if let err = performErrorAfterActing {
+            onPerform?("\(token(e)):\(action)")
+            throw err
+        }
+        defer { if performError == nil, !refuses.contains("\(token(e)):\(action)") { onPerform?("\(token(e)):\(action)") } }
+        if let err = performError { throw err }
+        if refuses.contains("\(token(e)):\(action)") {
+            throw CUError(code: "unsupported", message: "\(action) is not supported by this element",
+                          data: ["axError": .int(Int(AXError.actionUnsupported.rawValue))])
+        }
+    }
+    func isAlive(_ e: AXUIElement) -> Bool { !dead.contains(AXIdentity(element: e)) }
+    func windowID(_ e: AXUIElement) -> CGWindowID? { windowIDs[AXIdentity(element: e)] }
+    /// Windows reachable only by remote token (another Space, full screen), by window id.
+    var remoteWindows: [CGWindowID: AXUIElement] = [:]
+    private(set) var remoteAsked: [CGWindowID] = []
+    /// One remote-token walk per call, for all the ids asked.
+    private(set) var remoteWalks = 0
+    func remoteWindows(pid: pid_t, windowIDs: [CGWindowID]) -> [CGWindowID: AXUIElement] {
+        remoteWalks += 1
+        remoteAsked += windowIDs
+        return remoteWindows.filter { windowIDs.contains($0.key) }
+    }
+}
+
+/// A focus enforcer that records its calls instead of posting events.
+final class FakeFocusEnforcer: CUFocusEnforcing, @unchecked Sendable {
+    private(set) var enforced: [UInt32] = []
+    private(set) var tornDown = 0
+    /// What `enforce` reports (whether it did anything).
+    var result = true
+    func enforce(windowID: UInt32) -> Bool { enforced.append(windowID); return result }
+    /// The activations posted whatever the target was believed to be (a menu command's validation).
+    private(set) var forced: [UInt32] = []
+    func forceActivation(windowID: UInt32) -> Bool { forced.append(windowID); return true }
+    func teardown() { tornDown += 1 }
+}
+
+/// The keyboard reroute's tap, recorded: what was installed on which pid, how often it was removed, and its
+/// handler (to feed it key events while it is installed).
+final class FakeKeyTapInstaller: CUKeyTapInstalling, @unchecked Sendable {
+    private(set) var installed: [pid_t] = []
+    private(set) var removed = 0
+    private(set) var handler: ((CGEvent) -> CGEvent?)?
+    /// No tap can be made.
+    var refuse = false
+    var isInstalled: Bool { installed.count > removed }
+    func installKeyTap(pid: pid_t, handle: @escaping (CGEvent) -> CGEvent?) -> (() -> Void)? {
+        guard !refuse else { return nil }
+        installed.append(pid)
+        handler = handle
+        var done = false
+        return { [unowned self] in
+            guard !done else { return }
+            done = true
+            removed += 1
+            handler = nil
+        }
+    }
+}
+
+/// A key event as the tap would see it: the user's own (no stamp) or the helper's (stamped).
+func keyEvent(down: Bool = true, stamped: Bool) -> CGEvent {
+    let e = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)!
+    if stamped { CUEventStamp.stamp(e) }
+    return e
+}
+
+/// The process and window-server world for the same tests.
+final class FakeSystem: CUSystemBackend {
+    var running: Set<pid_t> = []
+    var bundles: [pid_t: String] = [:]
+    var names: [pid_t: String] = [:]
+    var windows: [UInt32: CUWindowServerWindow] = [:]
+    /// Front to back.
+    var stack: [CUWindowServerWindow] = []
+    var front: pid_t?
+    private(set) var activated: [pid_t] = []
+    var cursor: CGPoint? = CGPoint(x: 5, y: 5)
+    private(set) var warpedTo: [CGPoint] = []
+
+    func appRunning(_ pid: pid_t) -> Bool { running.contains(pid) }
+    func bundleId(pid: pid_t) -> String? { bundles[pid] }
+    func processName(pid: pid_t) -> String? { names[pid] }
+    /// Window ids the window server misses on the next lookup only (a window changing Space).
+    var missOnce: Set<UInt32> = []
+    func window(id: UInt32) -> CUWindowServerWindow? {
+        if missOnce.contains(id) { return nil }
+        return windows[id]
+    }
+    func windows(pid: pid_t) -> [CUWindowServerWindow] {
+        defer { missOnce.removeAll() }
+        return windows.values.filter { $0.pid == pid && $0.layer == 0 && !missOnce.contains($0.id) }.sorted { $0.id < $1.id }
+    }
+    /// Whether a SkyLight move "works"; on success the window comes on screen and `onMove` runs.
+    var moveSucceeds = false
+    var onMove: ((UInt32) -> Void)?
+    private(set) var moved: [UInt32] = []
+    func moveWindowToActiveSpace(_ id: UInt32) -> Bool {
+        moved.append(id)
+        guard moveSucceeds else { return false }
+        windows[id]?.onScreen = true
+        onMove?(id)
+        return true
+    }
+    func windowStack() -> [CUWindowServerWindow] { stack }
+    func frontmostPid() -> pid_t? { front }
+    /// The active Space (nil: unreadable, as on a Mac whose SkyLight lacks the call).
+    var space: UInt64? = 1
+    func activeSpace() -> UInt64? { space }
+    /// Runs on every activation (after `front` is set): a test moves the Space back as macOS would.
+    var onActivate: ((pid_t) -> Void)?
+    func activate(pid: pid_t) -> Bool { activated.append(pid); front = pid; onActivate?(pid); return true }
+    var stageManager = false
+    func stageManagerEnabled() -> Bool { stageManager }
+    /// Windows on no Space at all (closed but still listed); others answer `onSpace` (nil = unknown).
+    var noSpaceWindows: Set<UInt32> = []
+    var onSpace: Bool? = nil
+    func windowOnAnySpace(_ id: UInt32) -> Bool? { noSpaceWindows.contains(id) ? false : onSpace }
+    /// Content processes (Safari's WebContent), each with the app it serves.
+    var contentProcesses: [pid_t: pid_t] = [:]
+    func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { contentProcesses[pid] == appPid }
+    func cursorLocation() -> CGPoint? { cursor }
+    func warpCursor(to p: CGPoint) { warpedTo.append(p) }
+
+    static func window(_ id: UInt32, pid: pid_t, _ frame: CGRect, owner: String = "App", layer: Int = 0) -> CUWindowServerWindow {
+        CUWindowServerWindow(id: id, pid: pid, ownerName: owner, title: "", frame: frame, layer: layer, onScreen: true, alpha: 1)
+    }
+}
+
+/// Records every posted event; `onPost` lets a test change the fake world as input arrives.
+final class RecordingPoster: CUEventPoster, @unchecked Sendable {
+    struct Entry {
+        var type: CGEventType
+        var route: CURoute
+        var location: CGPoint
+        var keycode: Int64
+        var unicode: String
+        var flags: CGEventFlags
+        var window: Int64
+        var window2: Int64 = 0
+        var subtype: Int64 = 0
+        /// The process it was posted to, and the target-pid field it carries.
+        var pid: pid_t = 0
+        var targetPid: Int64 = 0
+    }
+    private let lock = NSLock()
+    private(set) var entries: [Entry] = []
+    var onPost: ((Entry) -> Void)?
+
+    func post(_ event: CGEvent, pid: pid_t, route: CURoute, authenticate: Bool) -> CURoute {
+        var length = 0
+        var chars = [UniChar](repeating: 0, count: 32)
+        event.keyboardGetUnicodeString(maxStringLength: 32, actualStringLength: &length, unicodeString: &chars)
+        let e = Entry(type: event.type, route: route, location: event.location,
+                      keycode: event.getIntegerValueField(.keyboardEventKeycode),
+                      unicode: String(utf16CodeUnits: chars, count: length), flags: event.flags,
+                      window: event.getIntegerValueField(.mouseEventWindowUnderMousePointer),
+                      window2: event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent),
+                      subtype: event.getIntegerValueField(.mouseEventSubtype), pid: pid,
+                      targetPid: event.getIntegerValueField(.eventTargetUnixProcessID))
+        lock.withLock { entries.append(e) }
+        onPost?(e)
+        return route == .skyLight ? .publicPid : route
+    }
+
+    var keyDowns: [Entry] { lock.withLock { entries.filter { $0.type == .keyDown } } }
+}

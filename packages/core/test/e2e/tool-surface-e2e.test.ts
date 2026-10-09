@@ -128,7 +128,7 @@ const toolSearchResult = (s: Surface, i = 0): { matches: string[]; total_deferre
 
 /** Every name a mode could conceivably be offered — a `select:` over it loads exactly what the mode has. */
 const PROBE = [
-  "Computer", "Browser", "CronList", "SpawnSession", "ListSessions", "ManageSession",
+  "Computer", "ComputerV2", "mcp__winter__computer_v2__script", "Browser", "CronList", "SpawnSession", "ListSessions", "ManageSession",
   "mcp__winter__office__docs", "mcp__winter__office__sheets", "mcp__winter__office__slides", "mcp__winter__lsp__lsp",
   "mcp__winter__computer__computer", "mcp__winter__browser__browser", "mcp__winter__sessions__session_spawn",
   "Edit", "Write", "Agent", "Glob", "Grep", "Monitor", "ListAgents",
@@ -161,7 +161,8 @@ describe("the tool surface (Exa key stored)", () => {
     ]);
     const search = toolSearchResult(s);
     // ManageSession is gone from Dispatch (user ruling 2026-10-02): not offered, not loadable.
-    expect([...search.matches].sort()).toEqual(["Browser", "Computer", "CronList", "ListSessions", "SpawnSession"]);
+    // ComputerV2 (2026-10-08) is built instead of the old Computer, deferred like it.
+    expect([...search.matches].sort()).toEqual(["Browser", "ComputerV2", "CronList", "ListSessions", "SpawnSession"]);
     // The deferred pool: the three the ruling names, plus SendMessage's standing twin (see above).
     expect(search.total_deferred_tools).toBe(4);
     // `ListSessions` runs (a real listing); the OLD spelling — what a resumed coordinator's history may
@@ -179,7 +180,7 @@ describe("the tool surface (Exa key stored)", () => {
     expect(calls.map((c) => c.name)).toContain("list_sessions");
     // The MODEL is told which tools are deferred: the runtime's persisted `deferred_tools_delta` names
     // exactly the three the ruling defers (never the standing server's twin of SendMessage).
-    expect(announcedDeferred(d.daemon, sessionId)).toEqual(["Browser", "Computer", "CronList"]);
+    expect(announcedDeferred(d.daemon, sessionId)).toEqual(["Browser", "ComputerV2", "CronList"]);
     // The incarnation passed the fail-closed init check (nothing outside its allowed list was offered).
     expect(d.daemon.sessions.read(sessionId).filter((e) => e.type === "agent_error")).toEqual([]);
     void SEND_MESSAGE_TWIN;
@@ -249,10 +250,39 @@ const bin = winterExecutableForTests();
     ]);
     const search = toolSearchResult(s);
     expect([...search.matches].sort()).toEqual([
-      "Agent", "Browser", "Computer", "CronList", "Edit", "Glob", "Grep", "ListAgents", "Monitor", "Write",
+      "Agent", "Browser", "ComputerV2", "CronList", "Edit", "Glob", "Grep", "ListAgents", "Monitor", "Write",
       "mcp__winter__lsp__lsp", "mcp__winter__office__docs", "mcp__winter__office__sheets", "mcp__winter__office__slides",
     ]);
-    // Browser, Computer, CronList, the three office tools, LSP — and the two standing twins.
+    // Browser, ComputerV2, CronList, the three office tools, LSP — and the two standing twins.
     expect(search.total_deferred_tools).toBe(9);
   }, 60_000);
+
+  // ComputerV2 (2026-10-08): no card per script — the call itself must REACH the daemon under every
+  // code/dispatch policy, `dont-ask` (whose child denies an unresolved MCP call without asking) and `plan`
+  // included; the per-app policy runs inside it. Proven on the real runtime: the explicit PreToolUse allow →
+  // the MCP call → the registry's ordered content → the service → a real sandboxed worker → the projector. A
+  // print-only script touches no helper.
+  for (const policy of ["dont-ask", "plan", "ask"] as const) {
+    test(`ComputerV2 RUNS under ${policy} — no card for the script itself`, async () => {
+      const { sessionId } = await d.client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", cwd: d.home, model: "winter-test/calls", approvalPolicy: policy });
+      const s = await surfaceOf(d, sessionId, [
+        `CALL ToolSearch {"query":"select:ComputerV2"}`,
+        `CALL ComputerV2 {"code":"const n: number = 6 * 7\\nprint('answer', n)"}`,
+      ].join("\n"));
+      const [loaded, ran] = s.results;
+      // Under dont-ask the load itself used to be denied (ToolSearch is not in the runtime's silent set) —
+      // `hooks.ts`'s `toolSearchDontAskHook` states Winter's READ_ONLY verdict to the child.
+      expect(loaded).toMatchObject({ name: "ToolSearch", isError: false });
+      expect(loaded!.content).not.toContain("Denied");
+      expect(ran).toMatchObject({ name: "ComputerV2", isError: false });
+      expect(ran!.content).toContain("answer 42");
+      const log = d.daemon.sessions.read(sessionId);
+      const call = log.find((e) => e.type === "tool_call" && (e as { name: string }).name === "computer_v2");
+      expect(call).toBeDefined();
+      const result = log.find((e) => e.type === "tool_result" && (e as { callId: string }).callId === (call as { callId: string }).callId) as { output: string; isError: boolean };
+      expect(result.isError).toBe(false);
+      expect(result.output).toContain("answer 42");
+      expect(log.filter((e) => e.type === "approval_requested")).toEqual([]);
+    }, 60_000);
+  }
 });

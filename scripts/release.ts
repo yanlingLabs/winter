@@ -114,6 +114,7 @@ import {
   keychainFfiProbeOk,
 } from "./release-lib";
 import { fetchAnt, parseAntPin } from "./fetch-ant";
+import { checkSignedHelper, HELPER, HELPER_EMBED_RELATIVE, helperExecutable, helperRequirement, LSREGISTER } from "./computer-helper-lib";
 import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 import { buildWinter } from "./build-winter";
@@ -477,6 +478,10 @@ sh(
 const app = join(dd, "Build", "Products", "Release", "Winter.app");
 if (!existsSync(app)) fail(`build did not produce ${app}`);
 console.log(`Built: ${app}`);
+// ComputerV2: Xcode registers every app it builds with LaunchServices, so the standalone Release build of
+// Winter Computer Use (com.winter.computeruse, the shipped identity) would otherwise sit in LaunchServices
+// beside the user's installed one. Only the copy embedded in Winter.app is ever launched; drop this one.
+probe(`"${LSREGISTER}" -u "${join(dd, "Build", "Products", "Release", `${HELPER.dist.name}.app`)}"`);
 
 // ---------------------------------------------------------------------------
 // 3b. Re-sign Sparkle.framework's nested helper binaries (T2 finding, see header comment) —
@@ -818,6 +823,35 @@ const CEF_HELPERS = [
 for (const name of CEF_HELPERS) {
   assertSigned(join(app, "Contents", "Frameworks", `${name}.app`), `CEF helper (${name})`);
 }
+// --- Winter Computer Use (ComputerV2) ---------------------------------------
+// The helper app that holds its OWN Accessibility and Screen Recording grants, embedded at
+// Contents/Helpers/Winter Computer Use.app by project.yml's "Embed Winter Computer Use" phase
+// (scripts/embed-computer-helper.sh). Beyond assertSigned's team + timestamp, a release proves what TCC and the
+// daemon key on: the identifier com.winter.computeruse; EXACTLY the stated designated requirement (identifier
+// + team OU — a derived one names the signing certificate's common name, and a change there would silently
+// cost every user their grants); the hardened runtime; exactly one entitlement, Apple Events, for applescript()
+// (no cs.* relaxation — the cs.* family is pinned in HARDENING_PINS below); an LSUIElement Info.plist at this
+// release's version with its Apple Events usage text (the daemon reads the version as
+// `helperVersion`); and no test hooks — they compile only into `verify:computer-helper`'s test flavor, and a
+// release binary containing one would accept a fake daemon. `checkSignedHelper` is the same check
+// `dev:helper` and `verify:computer-helper` run on their bundles.
+const computerHelperApp = join(app, HELPER_EMBED_RELATIVE);
+assertSigned(computerHelperApp, "Winter Computer Use");
+{
+  const plist = probe(`plutil -convert json -o - "${join(computerHelperApp, "Contents", "Info.plist")}"`);
+  const failures = checkSignedHelper("dist", TEAM_ID, version, {
+    codesignDvv: probe(`codesign -dvv "${computerHelperApp}" 2>&1`).stdout,
+    codesignDr: probe(`codesign -d -r- "${computerHelperApp}" 2>&1`).stdout,
+    entitlementsXml: probe(`codesign -d --entitlements - --xml "${computerHelperApp}" 2>/dev/null`).stdout,
+    infoPlist: plist.ok ? (JSON.parse(plist.stdout) as Record<string, unknown>) : {},
+    executable: readFileSync(helperExecutable(computerHelperApp, "dist")),
+  });
+  const stated = helperRequirement(HELPER.dist.identifier, TEAM_ID);
+  const satisfied = probe(`codesign --verify --strict -R='${stated}' "${computerHelperApp}" 2>&1`);
+  if (!satisfied.ok) failures.push(`the signature does not satisfy its own stated requirement: ${satisfied.stdout.trim()}`);
+  if (failures.length > 0) fail(`Winter Computer Use is not signed the way TCC and the daemon need:\n  ${failures.join("\n  ")}`);
+  console.log(`Winter Computer Use verified: ${HELPER.dist.identifier}, designated => ${stated}, hardened runtime, the Apple Events entitlement only, version ${version}, no test hooks.`);
+}
 // "Start from nothing" pinned where it SHIPS, across every component this repo signs — not just
 // where entitlements are declared. project.yml can hand CODE_SIGN_ENTITLEMENTS to the wrong
 // target, or to four of five, without anything failing to build.
@@ -872,6 +906,9 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // deliberately NOT enrolled here — see the team-ID-only probe on libmergedlo.dylib above this
   // array, and that probe's own comment for why.
   { path: join(app, "Contents", "MacOS", "WinterOfficeHelper"), label: "WinterOfficeHelper", expect: [] },
+  // ComputerV2 — Winter Computer Use: no cs.* relaxation. Its one entitlement is Apple Events (applescript()),
+  // which is not in the cs.* family; checkSignedHelper above pins exactly that one.
+  { path: computerHelperApp, label: "Winter Computer Use", expect: [] },
   // Winter Phase 8d (P8d-2) — `winter` is re-signed at embed time under Winter's own team identity
   // (embed-runtimes.sh), same posture as winter-core/WinterHelper above.
   // A2 (2026-09-22): `winter` is a bun binary too (measured `Bun v1.4.2` in the shipped runtime) —
@@ -913,7 +950,7 @@ for (const pin of HARDENING_PINS) {
 }
 console.log(
   "Signatures verified: codesign --verify --deep --strict PASS; TeamIdentifier + secure timestamp confirmed on " +
-    "app + winter-core + WinterHelper + WinterOfficeHelper + Sparkle.framework + its nested helpers + CEF framework + " +
+    "app + winter-core + WinterHelper + WinterOfficeHelper + Winter Computer Use + Sparkle.framework + its nested helpers + CEF framework + " +
     "its 5 libraries + the 5 CEF helpers + the vendored LibreOffice's libmergedlo.dylib (identity probe only — " +
     `not part of the entitlements roster below); hardened-runtime entitlements pinned across all ${HARDENING_PINS.length} ` +
     `components this ` +
@@ -1380,6 +1417,11 @@ if (scannedFiles + skippedFiles !== totalFiles) {
       `  files under exclusions:     ${skippedFiles}\n` +
       `  (targets + exclusions must equal the whole bundle; see nameScanPlan in release-lib.ts)`,
   );
+}
+// ComputerV2: Winter Computer Use is Winter's own compiled code with its own grants; it is scanned whole,
+// like the app. An exclusion rule that ever reached into Contents/Helpers would hide it — refuse that here.
+if (scan.excluded.some((p) => p.slice(app.length + 1).startsWith("Contents/Helpers"))) {
+  fail("identity scan: an exclusion rule reaches into Contents/Helpers (Winter Computer Use) — the helper must be scanned whole");
 }
 // Reported per RULE, not per path: the shipped exclusion legitimately matches 220 locale
 // directories, and 220 log lines would bury the one number a human should actually check —

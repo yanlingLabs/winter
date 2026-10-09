@@ -314,11 +314,13 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     hub.broadcastTransient(sessionId, { type: "provider_login_finished", sessionId, provider: "anthropic", ok: true });
     // The thinking pill (2026-10-05): a reasoning block's live progress — the phone's pill streams too.
     hub.broadcastTransient(sessionId, { type: "thinking_delta", sessionId, threadId: "main", blockId: "rb_1", kind: "update", phase: "delta", text: "Reading the schema.", title: "Reading the schema." });
+    // The reviewing pill (2026-10-08): the bash reviewer judging a call — by the normal rule (an old phone drops it).
+    hub.broadcastTransient(sessionId, { type: "tool_review_progress", sessionId, threadId: "main", callId: "toolu_1", phase: "ended", verdict: "safe" });
 
     // Keyed to this broadcast's own VALUE, not just its type: since T5 the attach above emits a
     // `session_activity` of its own ("active"), so a type-only wait would already be satisfied
     // before any of the eleven broadcasts had crossed the socket.
-    await waitFor(() => phone.ofType("session_activity").some((e: any) => e.activity === "background"), "the last transient");
+    await waitFor(() => phone.ofType("session_activity").some((e: any) => e.activity === "background") && phone.types().includes("tool_review_progress"), "the last transient");
     for (const t of TRANSIENT_EVENT_TYPES) {
       expect(phone.types()).toContain(t);
     }
@@ -393,7 +395,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
   // The policy itself
   // ---------------------------------------------------------------------------------------------
 
-  test("REMOTE_STREAM_EVENT_TYPES is EXACTLY history's allowlist + the thirteen transients + the three stream-control types", () => {
+  test("REMOTE_STREAM_EVENT_TYPES is EXACTLY history's allowlist + the fourteen transients + the three stream-control types", () => {
     const expected = new Set<string>([
       ...HISTORY_EVENT_TYPES,
       ...TRANSIENT_EVENT_TYPES,
@@ -417,7 +419,10 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // doc comment).
     // 27 → 29 (the thinking pill, 2026-10-05: `thinking_block` via HISTORY_EVENT_TYPES, 12 → 13, and
     // `thinking_delta` via the transients, 12 → 13).
-    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(29);
+    // 29 → 30 (the reviewing pill, 2026-10-08: `tool_review_progress` via the transients, 13 → 14 — the phone's
+    // WinterSessionClient decodes frames as untyped JSON and its fold ignores an unknown type).
+    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(30);
+    expect(REMOTE_STREAM_EVENT_TYPES.has("tool_review_progress")).toBe(true);
     expect(REMOTE_STREAM_EVENT_TYPES.has("thinking_block")).toBe(true);
     expect(REMOTE_STREAM_EVENT_TYPES.has("thinking_delta")).toBe(true);
     // The one exclusion the whole first half of this file is about.
@@ -458,7 +463,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     expect(filterRemoteStreamEvent(raw)).toBeNull();
   });
 
-  test("TRANSIENT_EVENT_TYPES is EXACTLY the thirteen — the Swift mirror pins the same literals", () => {
+  test("TRANSIENT_EVENT_TYPES is EXACTLY the fourteen — the Swift mirror pins the same literals", () => {
     // Parity, remote-allowlist style: neither side imports the other, each pins its own copy to
     // these literal strings, so editing one alone fails here or in
     // `apple/WinterProtocol/.../SessionEventTransientTests.swift` (SessionEvent.transientTypes).
@@ -468,6 +473,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // 9 → 11 (Winter Phase 10a O5, P10a-6: provider_login_progress, provider_login_finished).
     // 11 → 12 (2026-09-17, retry progress: `provider_retry`).
     // 12 → 13 (the thinking pill, 2026-10-05: `thinking_delta`).
+    // 13 → 14 (the reviewing pill, 2026-10-08: `tool_review_progress`).
     expect([...TRANSIENT_EVENT_TYPES].sort()).toEqual([
       "assistant_delta",
       "hardware_requested",
@@ -482,8 +488,9 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
       "provider_retry",
       "session_activity",
       "thinking_delta",
+      "tool_review_progress",
     ]);
-    expect(TRANSIENT_EVENT_TYPES.size).toBe(13);
+    expect(TRANSIENT_EVENT_TYPES.size).toBe(14);
   });
 
   // ---------------------------------------------------------------------------------------------

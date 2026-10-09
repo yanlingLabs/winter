@@ -36,3 +36,31 @@ export function formatArgsHead(argsJson: string): string {
   }
   return truncated ? `${head}…` : head;
 }
+
+/** ComputerV2 (2026-10-08): the tool row's host name (`runtime-sdk/tool-names.ts`'s `ComputerV2` pair). */
+export const COMPUTER_V2_HOST_NAME = "computer_v2";
+
+const COMPUTER_V2_VERBS = /\.(state|find|screenshot|click|setValue|type|paste|key|scroll|drag|select|action|menu|waitFor|waitForIdle|windows|useWindow|appAt)\s*\(/g;
+const APPS_OPEN = /apps\s*\.\s*open\s*\(\s*(["'`])((?:(?!\1)[^\\\n])+)\1/g;
+
+/**
+ * ComputerV2's row label (R10): its `title` when the model gave one; else derived from the code — the app
+ * names it opens (`apps.open("…")`) and the verbs it uses, e.g. "Notes · click, paste, state"; else "Using the
+ * computer". Never the raw code (the row's args head would otherwise be a wall of JavaScript).
+ */
+export function computerV2Label(argsJson: string): string {
+  let args: { title?: unknown; code?: unknown } = {};
+  try { args = JSON.parse(argsJson) as typeof args; } catch { /* a partial stream: fall through */ }
+  if (typeof args.title === "string" && args.title.trim().length > 0) return args.title.trim().slice(0, 80);
+  const code = typeof args.code === "string" ? args.code : "";
+  const apps = [...new Set([...code.matchAll(APPS_OPEN)].map((m) => m[2]!.trim()).filter((n) => n.length > 0))];
+  const verbs = [...new Set([...code.matchAll(COMPUTER_V2_VERBS)].map((m) => m[1]!))];
+  const label = [apps.join(", "), verbs.join(", ")].filter((p) => p.length > 0).join(" · ");
+  return label.length === 0 ? "Using the computer" : label.slice(0, 80);
+}
+
+/** The bold name and the parenthesized head a tool row shows. ComputerV2 shows its label, never its code. */
+export function toolHeadFor(name: string, argsJson: string): { name: string; head: string } {
+  if (name === COMPUTER_V2_HOST_NAME || name === "ComputerV2") return { name: "ComputerV2", head: computerV2Label(argsJson) };
+  return { name, head: formatArgsHead(argsJson) };
+}

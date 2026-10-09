@@ -16,6 +16,7 @@ import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
 import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
+import { CallThreads } from "./sessions/call-threads";
 import { reapEmptySessions } from "./sessions/reaper";
 import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
@@ -23,7 +24,7 @@ import type { ActivityDeriver, SessionSignalsDeriver } from "./sessions/activity
 import { startIpcServer, type InternalSessionCreator, type IpcServer, type IpcServerOptions } from "./ipc/server";
 import { DispatchChildren } from "./agent/dispatch-children";
 import { SessionMessaging } from "./agent/session-messaging";
-import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, retiredRuntimeSettingKeys, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, liveSettingsView, type Settings } from "./settings";
+import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, retiredRuntimeSettingKeys, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, computerUseLegacyComputerFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, liveSettingsView, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -117,6 +118,7 @@ import { planAndApplySwitch } from "./runtime-sdk/handoff";
 import { createSinkCallStore, sinksFor } from "./runtime-sdk/sinks";
 import { sessionHooksFor } from "./runtime-sdk/hooks";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
+import { createComputerUseRuntime, type ComputerUseInjection } from "./computer-use/wiring";
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { makeDaemonRoutineRunner } from "./routines/runner";
 import { makeRoutineScheduler } from "./routines/scheduler";
@@ -400,6 +402,10 @@ export async function startDaemon(opts: {
    *  otherwise runs only on the profile's default home with no injected `secrets`. A test uses it to prove a
    *  held credential migration lock ends the boot before any credential is read. */
   keychainPassForTests?: (home: string) => Promise<KeychainPass | undefined>;
+  /** ComputerV2 (2026-10-08) TEST SEAM: a FAKE helper (transport, launcher, verifier), a scripted worker, the
+   *  idle timeout. Absent: the real helper over `<home>/run/computer-use.sock`, launched only when this daemon
+   *  runs on its profile's own default home with no injected `secrets` — so no test daemon ever starts it. */
+  computerUse?: ComputerUseInjection;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const home = opts.home ?? resolveWinterHome();
@@ -445,7 +451,9 @@ export async function startDaemon(opts: {
     throw new MigrationCRefused("sdk_home_half_migrated", `migration C: a rollback of this home was interrupted (${migrationCManifestPath(home)}) — run \`winter migrate --sdk-home --rollback\` to finish it`);
   }
 
-  const secrets = opts.secrets ?? new KeychainSecretStore();
+  // The service is THIS daemon's home's (`keychainService(profile, home)`): on a custom home a
+  // `WINTER_KEYCHAIN_SERVICE` is honoured, so an experiment or e2e daemon never reads the profile's real items.
+  const secrets = opts.secrets ?? new KeychainSecretStore(Bun.secrets, keychainService(profile, home));
 
   // WS-27: the credential items' access lists (`auth/credential-acl.ts`) — same guards as the app-token
   // slot below: real production boot, the profile's own default home, macOS, never fatal, skipped when the
@@ -1215,6 +1223,28 @@ export async function startDaemon(opts: {
   // line 135, and AuditLog's own constructor is cheap (mkdir is lazy, on first write — see audit.ts).
   const audit = new AuditLog(join(winterHome, "audit.jsonl"));
 
+  // ComputerV2 (2026-10-08): the daemon's computer-use runtime — the helper connection, the per-app policy and
+  // the script service behind the `computer_v2` capability (`computer-use/wiring.ts`). Built unconditionally
+  // (cheap: nothing connects or spawns until a script runs); the capability is built per session only while
+  // computer use is on. `interrupt` reaches `winterDrivers` late (the helper's Esc), as the capability
+  // closures below do.
+  const computerUseRuntime = createComputerUseRuntime({
+    home: winterHome,
+    profile,
+    settings: () => settings,
+    settingsPath: join(winterHome, "settings.json"),
+    approvals: approvalBroker,
+    hub,
+    store,
+    audit: (line) => audit.append(line),
+    // ComputerV2's Esc (the helper's `escPressed`) is the user's stop: a Dispatch child's report says so.
+    interrupt: (sid) => { dispatchChildren?.noteStop(sid, { kind: "user" }); void winterDrivers.get(sid)?.interrupt(); },
+    launchAllowed: opts.secrets === undefined && process.platform === "darwin" && isDefaultWinterHome(home, profile),
+    ...(opts.computerUse === undefined ? {} : { inject: opts.computerUse }),
+    log: (line) => console.error(line),
+  });
+  hub.addObserver((event) => computerUseRuntime.observe(event));
+
   // Peripheral lease v1 (Phase 2f) — HOISTED above the `if (agentProvider)` gate (phase 5 CU): the
   // ComputerUseService (built inside the gate) needs this broker to lease screenshot/ax-read/input-
   // drive in-process, and the `computer` tool is registered inside the gate. Construction only needs
@@ -1331,7 +1361,13 @@ export async function startDaemon(opts: {
     // Minor 5e (fix wave): `computerUseEnabledFrom` (settings.ts) — the ONE reader this gate shares
     // with the boot registration below, `settings-apply.ts`'s `cuEnabled`, and `ipc/server.ts`'s
     // `capabilities.list` handler.
-    computerUseEnabled: () => (settings ? computerUseEnabledFrom(settings) : true),
+    // ComputerV2 (2026-10-08): read through the computer-use runtime's overlay, so a `computerUse.setSettings`
+    // write reaches the next session even inside the settings watcher's debounce.
+    computerUseEnabled: () => { const s = computerUseRuntime.settings(); return s ? computerUseEnabledFrom(s) : true; },
+    // ComputerV2 (2026-10-08): built INSTEAD of `computer` unless `computerUse.legacyComputer` (read live)
+    // picks the old tool for an A/B.
+    computerV2: { service: computerUseRuntime.service },
+    legacyComputer: () => computerUseLegacyComputerFrom(computerUseRuntime.settings()),
     // THE SAME four closures `registerBrowserTool` gets below — `mintPanelTab` and
     // `panelCommands.dispatch` are what emit `panel_tab_opened`/`panel_tab_activated`/
     // `panel_command`, so a capability with its own would open tabs nobody can see and dispatch
@@ -1809,6 +1845,9 @@ export async function startDaemon(opts: {
   // the scope-aware read-only answers (`agent/mcp/connector-source.ts` has the rules: which listing, the
   // background kick, and why nothing on a call path ever spawns a server).
   const connectorPermissions = daemonConnectorSource({ home: winterHome, trust: trustStore, settings: () => settings, manager: () => mcp });
+  // The reviewing pill (2026-10-08): which thread each live tool call is on, for the reviewer's transient.
+  const callThreads = new CallThreads();
+  hub.addObserver((event) => callThreads.observe(event));
   const hooksFor = (session: CapabilitySession) =>
     sessionHooksFor({
       sessionId: session.sessionId,
@@ -1819,6 +1858,13 @@ export async function startDaemon(opts: {
       ...(bashReviewer === undefined ? {} : { reviewer: bashReviewer }),
       reviewerEnabled: () => settings?.reviewer?.enabled,
       reviewerAllow: () => settings?.reviewer?.allow,
+      // The reviewing pill: a TRANSIENT on the call's own thread — broadcast, never persisted.
+      reviewProgress: (e) => {
+        hub.broadcastTransient(session.sessionId, {
+          type: "tool_review_progress", sessionId: session.sessionId, threadId: callThreads.threadOf(session.sessionId, e.callId),
+          callId: e.callId, phase: e.phase, ...(e.verdict === undefined ? {} : { verdict: e.verdict }),
+        });
+      },
       policy: () => { try { return store.meta(session.sessionId).approvalPolicy; } catch { return undefined; } },
       lsp: () => lspManager ?? undefined,
       autoDiagnosticsEnabled: () => winterLspAutoDiagnosticsEnabled(session.cwd),
@@ -2056,6 +2102,8 @@ export async function startDaemon(opts: {
   const onSessionDeleted = (sessionId: string): void => {
     void winterDrivers.evict(sessionId);
     runtime?.onSessionDeleted(sessionId);
+    // ComputerV2: the session's automation worker ends with it, and the helper releases its targets.
+    computerUseRuntime.service.endSession(sessionId);
   };
   /** Task 17: what the engine used to answer, over the driver table + the child roster. */
   const grantDeniedPrefixes = [winterHome];
@@ -2859,6 +2907,10 @@ export async function startDaemon(opts: {
     mcp: mcp ?? undefined,
     // WS-26: a connector-permission write reaches the next decision without waiting on the watcher.
     onConnectorPermissionsSaved: (next) => { connectorPermissions.noteWritten(next); },
+    // ComputerV2 (2026-10-08): Settings → Computer Use's local-only RPCs.
+    computerUse: computerUseRuntime.control,
+    // A client's `session.interrupt` is the user's stop (the Mac's stop button, a terminal's Esc, the phone).
+    onUserInterrupt: (sid) => dispatchChildren?.noteStop(sid, { kind: "user" }),
     connectorPermissions,
     // WS-25: the sign-in doors use the daemon's ONE MCP OAuth store (see `oauthStoreForThisDaemon`) — handed
     // over explicitly, so the server never derives a Keychain store of its own for a test daemon.
@@ -2995,6 +3047,7 @@ export async function startDaemon(opts: {
       winterDrivers.beginShutdown?.();
       dispatchChildren?.beginShutdown();
       sessionMessaging?.beginShutdown(); // no SendMessage resumes a session into a daemon that is going away
+      computerUseRuntime.stop(); // no automation worker outlives the daemon; the helper connection closes
       server.stop(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
       for (const w of sdkWatchers) w.stop();

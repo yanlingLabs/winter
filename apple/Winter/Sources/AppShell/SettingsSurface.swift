@@ -19,7 +19,7 @@ import SwiftUI
 ///
 /// **Most of these are COMING, not built** (`settingsSectionComingCopy`, 2026-09-18). Some are
 /// real capabilities that simply have no settings surface yet (runtimes, sessions, permissions,
-/// appearance, keyboard shortcuts, computer use, browser, archived chats), and their pages say what
+/// appearance, keyboard shortcuts, browser, archived chats), and their pages say what
 /// belongs there and where it is configured today. The rest (profile, personalization,
 /// notifications, voice, import, appshots) are things Winter does not do yet, and their pages say
 /// only that and what the page will hold. None of them is an invented setting.
@@ -260,12 +260,6 @@ func settingsSectionComingCopy(_ section: SettingsSection) -> String? {
     case .archivedChats:
         return "Every archived session in one list. Today they are on the Code page's Archived "
             + "tab, where opening one resumes it. Chats are never archived."
-    case .computerUse:
-        return "Whether Winter may see the screen and use the keyboard and pointer. Today that is "
-            + "computerUse.enabled in settings.json, on unless it is set to false. When it is on, "
-            + "Code and Dispatch sessions get the computer tool; Chat never does. A change applies "
-            + "to the next session that starts; one already running keeps its tool list. "
-            + "computerUse.screenshotMaxDim caps the size of the screenshots it takes."
     case .browser:
         return "The browser is the Chromium that runs in Winter's work panel, and the agent drives "
             + "it through its browser tool. Every mode has that tool: in Chat it can only open, "
@@ -297,8 +291,8 @@ func settingsSectionComingCopy(_ section: SettingsSection) -> String? {
             + "Hyper-Space (⌃⌥⌘Space), is fixed today with no control to change it; plugin "
             + "shortcuts are bound in the library panel's Plugins tab, which is the wrong home "
             + "for them."
-    case .roles, .providers, .quota, .memory, .workflows, .dispatch, .plugins, .trust, .peripheral,
-         .commandLine, .launchAtLogin, .daemonStatus, .support, .feedback, .discord, .donate:
+    case .roles, .providers, .quota, .memory, .workflows, .dispatch, .plugins, .computerUse, .trust,
+         .peripheral, .commandLine, .launchAtLogin, .daemonStatus, .support, .feedback, .discord, .donate:
         return nil
     }
 }
@@ -557,8 +551,12 @@ struct SettingsSectionView: View {
             SettingsDispatchSection(settings: wiring.dispatchPillSettings)
         case .daemonStatus:
             SettingsDaemonStatusSection(fetch: wiring.daemonStatus)
+        case .computerUse:
+            // The helper app, the two macOS permissions it needs, the mirror and the per-app limits —
+            // all of it read from and written through the daemon's four computer-use RPCs.
+            SettingsComputerUseSection(client: wiring.computerUseClient)
         case .profile, .personalization, .notifications, .voice, .appearance, .shortcuts,
-             .importChats, .archivedChats, .runtimes, .sessions, .permissions, .computerUse,
+             .importChats, .archivedChats, .runtimes, .sessions, .permissions,
              .browser, .appshots:
             // Unreachable, for the same reason as `.roles` below: `body(for:)` answers them first.
             SettingsSectionComing(section: section, copy: settingsSectionComingCopy(section) ?? "")

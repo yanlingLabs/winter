@@ -115,11 +115,11 @@ export function threadCompleted(threadId: string, stopReason: ThreadStopReason, 
  *
  *  - `{kind:"done"}` — the child is finished (a foreground spawn, or a spawn that failed before a
  *    child ever ran). `stopReason` is `aborted` for an interrupted call, `error` for any error
- *    spelling (`isErrorResult`) OR an output beginning `Error:` — the Winter engine drops a tool's
- *    returned `isError` on the wire (`winter-agent-sdk` `engine.ts:5965`), and EVERY failure branch
- *    of its Agent executor (`tools/impl/agent.ts`: unknown subagent_type, spawn failed,
- *    isolation:"remote", background setup failed, a non-completed foreground child) returns an
- *    `Error:`-prefixed output, so that prefix is the only failure signal that reaches the daemon.
+ *    spelling (`isErrorResult`) OR an output beginning `Error:`. At agent SDK 0.0.53 a returned `isError`
+ *    reaches the wire as `is_error: true` (an older engine dropped it), and EVERY failure branch of its
+ *    Agent executor (`tools/impl/agent.ts`: unknown subagent_type, spawn failed, isolation:"remote",
+ *    background setup failed, a non-completed foreground child) also returns an `Error:`-prefixed
+ *    output — so the prefix stays a second, independent failure signal.
  *    The prefix test is applied to SPAWN results only (a Grep hit may well start with "Error:").
  *    `stalled` is not derivable here: the stall watchdog is the host's, never a wire fact.
  *  - `{kind:"background"}` — the spawn LAUNCHED a child that is still running

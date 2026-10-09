@@ -2357,6 +2357,62 @@
         },
         "type": {
           "type": "string",
+          "const": "tool_review_progress"
+        },
+        "callId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "started",
+            "ended"
+          ]
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "safe",
+            "unsafe",
+            "escalated"
+          ]
+        }
+      },
+      "required": [
+        "seq",
+        "sessionId",
+        "ts",
+        "threadId",
+        "type",
+        "callId",
+        "phase"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "threadId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
           "const": "notification_requested"
         },
         "title": {

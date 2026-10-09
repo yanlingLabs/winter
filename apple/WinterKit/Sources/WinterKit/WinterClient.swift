@@ -37,6 +37,14 @@ public actor WinterClient {
 
     public nonisolated let events: AsyncStream<WinterEvent>
     nonisolated let eventsCont: AsyncStream<WinterEvent>.Continuation // internal: Task 9's reconnect extension yields states
+    /// How many events the stream holds that its consumer has not taken yet (a hang report's "backlog").
+    public nonisolated let traffic = EventTraffic()
+
+    /// Every event reaches the stream through here, so `traffic` sees each one.
+    nonisolated func emit(_ event: WinterEvent) {
+        traffic.noteYielded()
+        eventsCont.yield(event)
+    }
 
     // Attach/resync state (used by Task 8/9): the session this client is attached to and the
     // last PERSISTED seq it has seen. assistant_delta is exempt (transient; carries lastSeq).
@@ -133,7 +141,7 @@ public actor WinterClient {
             for line in lines { route(parseServerLine(line)) }
         case .closed:
             failAllPending(RpcError(code: -1, message: "connection closed"))
-            eventsCont.yield(.connection(.disconnected))
+            emit(.connection(.disconnected))
             onDisconnected() // Task 9 reconnect hook; no-op until then
         }
     }
@@ -175,7 +183,7 @@ public actor WinterClient {
                         tilesStore.removeValue(forKey: v.pluginId)
                     }
                 }
-                eventsCont.yield(.session(e))
+                emit(.session(e))
                 return
             }
             // The seq dedupe/lastSeq bookkeeping is scoped to the currently attached session
@@ -184,15 +192,15 @@ public actor WinterClient {
             // attached to an older/higher-seq session) as a false "already seen" duplicate.
             // Events for any other session (or when nothing is attached) bypass the gate.
             guard let attached = attachedSessionId, e.sessionId == attached else {
-                eventsCont.yield(.session(e))
+                emit(.session(e))
                 return
             }
             let seq = e.seq
             if seq <= lastSeq { return } // replay overlap after resync — already seen
             lastSeq = seq
-            eventsCont.yield(.session(e))
+            emit(.session(e))
         case .unknownEvent(let raw):
-            eventsCont.yield(.unknown(raw: raw))
+            emit(.unknown(raw: raw))
         case .unrecognized:
             break // non-protocol noise; ignore
         }
@@ -303,6 +311,7 @@ extension SessionEvent {
         case .shortcutInvoke(let v): return v.seq
         case .tileAction(let v): return v.seq
         case .toolReview(let v): return v.seq
+        case .toolReviewProgress(let v): return v.seq
         case .notificationRequested(let v): return v.seq
         case .hookNotice(let v): return v.seq
         case .elicitationRequested(let v): return v.seq
@@ -367,6 +376,7 @@ extension SessionEvent {
         case .shortcutInvoke(let v): return v.sessionId
         case .tileAction(let v): return v.sessionId
         case .toolReview(let v): return v.sessionId
+        case .toolReviewProgress(let v): return v.sessionId
         case .notificationRequested(let v): return v.sessionId
         case .hookNotice(let v): return v.sessionId
         case .elicitationRequested(let v): return v.sessionId
@@ -389,4 +399,55 @@ extension SessionEvent {
         case .providerLoginFinished(let v): return v.sessionId
         }
     }
+}
+
+/// Counts the events a client has put on its stream and the ones its consumer has taken off it, so the
+/// difference — the backlog a slow consumer has built up — and how long the oldest has waited can be read from
+/// any thread. (An `AsyncStream` does not say how many elements it is holding.)
+public final class EventTraffic: @unchecked Sendable {
+    /// Past this many timestamps held, the older half is dropped: a client whose events nobody counts off (the
+    /// Gateway's, the phone's) must not grow this forever. A diagnostic, so `backlog` then reads as a floor.
+    static let cap = 65_536
+
+    private let lock = NSLock()
+    private var times: [TimeInterval] = []
+    private var head = 0
+    private let clock: @Sendable () -> TimeInterval
+
+    public init(clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) { self.clock = clock }
+
+    func noteYielded() {
+        lock.lock(); defer { lock.unlock() }
+        times.append(clock())
+        if times.count - head > Self.cap {
+            times.removeFirst(times.count - Self.cap / 2)
+            head = 0
+        }
+    }
+
+    /// The consumer took one event off the stream. Returns how long that event had been waiting on it, in seconds
+    /// (0 when nothing was counted as waiting).
+    @discardableResult
+    public func noteConsumed() -> TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        guard head < times.count else { return 0 }
+        let waited = max(clock() - times[head], 0)
+        head += 1
+        if head == times.count { times.removeAll(keepingCapacity: true); head = 0 }
+        else if head > 4096 { times.removeFirst(head); head = 0 }
+        return waited
+    }
+
+    /// Events on the stream not yet taken (a floor, once `cap` has been passed).
+    public var backlog: Int { lock.lock(); defer { lock.unlock() }; return times.count - head }
+
+    /// How long the oldest event not yet taken has been waiting, in seconds (0 when none is).
+    public var oldestAge: TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        guard head < times.count else { return 0 }
+        return max(clock() - times[head], 0)
+    }
+
+    /// Timestamps held (tests: bounded however many events nobody counts off).
+    var storedCount: Int { lock.lock(); defer { lock.unlock() }; return times.count }
 }

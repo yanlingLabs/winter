@@ -369,7 +369,7 @@ final class AppShellTests: XCTestCase {
         let coming: [SettingsSection] = [.profile, .personalization, .notifications, .voice,
                                          .appearance, .shortcuts, .importChats, .archivedChats,
                                          .runtimes, .sessions, .permissions,
-                                         .computerUse, .browser, .appshots]
+                                         .browser, .appshots]
         let all = settingsSectionOrder
         for section in coming {
             XCTAssertTrue(all.contains(section), "\(section) is in the sidebar")
@@ -404,8 +404,8 @@ final class AppShellTests: XCTestCase {
     /// Things the briefs for these pages assumed turned out not to exist; the copy must not name
     /// them. `runtimes.official.auth` was removed in WS-20 (the arm is the tag prefix); WS-23 retired
     /// the official runtime, taking `runtimes.claudeExecutable` and `runtimes.handoff.crossRuntime`
-    /// with it; there is no default-approval-policy key, there is no browser on/off key, and
-    /// computer use is OPT-IN.
+    /// with it; there is no default-approval-policy key, and there is no browser on/off key.
+    /// (Computer use left this list when its page was built — `ComputerUseSettingsModelTests`.)
     func testComingCopyNamesOnlyWhatExists() {
         let runtimes = settingsSectionComingCopy(.runtimes) ?? ""
         XCTAssertFalse(runtimes.contains("runtimes.official.auth"))
@@ -419,10 +419,6 @@ final class AppShellTests: XCTestCase {
         let shortcuts = settingsSectionComingCopy(.shortcuts) ?? ""
         XCTAssertTrue(shortcuts.contains("fixed"), "the summon hotkey has no control today")
         XCTAssertTrue(shortcuts.contains("Plugins tab"))
-        let computer = settingsSectionComingCopy(.computerUse) ?? ""
-        XCTAssertTrue(computer.contains("computerUse.enabled"))
-        XCTAssertTrue(computer.contains("off unless"), "computer use is opt-in (=== true)")
-        XCTAssertTrue(computer.contains("Chat never"), "the computer tool is code + dispatch only")
         let browser = settingsSectionComingCopy(.browser) ?? ""
         XCTAssertFalse(browser.contains("browser.enabled"), "there is no browser switch")
         XCTAssertTrue(browser.contains("permissions.dangerousDomains.added"))

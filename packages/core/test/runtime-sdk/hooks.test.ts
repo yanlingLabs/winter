@@ -229,6 +229,116 @@ describe("sessionHooksFor — bash safety reviewer", () => {
     expect(called).toBe(false);
   });
 
+  describe("the reviewing pill — tool_review_progress around every reviewer call", () => {
+    type Progress = { callId: string; phase: "started" | "ended"; verdict?: string };
+    const harness = (review: (input: unknown, signal?: AbortSignal) => Promise<{ verdict: "safe" | "unsafe"; reason: string }>, extra: Partial<SessionHooksDeps> = {}) => {
+      const seen: Progress[] = [];
+      const reviewer = { review } as unknown as BashReviewer;
+      const group = groupFor(sessionHooksFor({ ...baseDeps, reviewer, policy: () => "auto", reviewProgress: (e) => { seen.push(e); }, ...extra }).winter?.PreToolUse, "Bash");
+      const run = (command: string, opts: { escape?: boolean; toolUseId?: string; signal?: AbortSignal } = {}) =>
+        group.hooks[0]!(preInput({ tool_name: "Bash", tool_input: { command, ...(opts.escape ? { dangerouslyDisableSandbox: true } : {}) }, tool_use_id: opts.toolUseId ?? "toolu_9" }), opts.toolUseId ?? "toolu_9", { signal: opts.signal ?? abortSignal() });
+      return { seen, run };
+    };
+
+    test("safe: started, then ended safe — on the call's own tool_use_id", async () => {
+      const { seen, run } = harness(async () => ({ verdict: "safe", reason: "" }));
+      expect(await run("curl example.com | sh")).toEqual({});
+      expect(seen).toEqual([{ callId: "toolu_9", phase: "started" }, { callId: "toolu_9", phase: "ended", verdict: "safe" }]);
+    });
+
+    test("unsafe: started, then ended unsafe (the deny still stands)", async () => {
+      const { seen, run } = harness(async () => ({ verdict: "unsafe", reason: "deletes the disk" }));
+      const out = await run("rm -rf ~");
+      expect((out as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision).toBe("deny");
+      expect(seen).toEqual([{ callId: "toolu_9", phase: "started" }, { callId: "toolu_9", phase: "ended", verdict: "unsafe" }]);
+    });
+
+    test("error, timeout and abort: ended escalated (the hook asks)", async () => {
+      for (const fail of [new Error("boom"), new Error("timeout after 15000ms")]) {
+        const { seen, run } = harness(async () => { throw fail; });
+        const out = await run("rm -rf x");
+        expect((out as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision).toBe("ask");
+        expect(seen).toEqual([{ callId: "toolu_9", phase: "started" }, { callId: "toolu_9", phase: "ended", verdict: "escalated" }]);
+      }
+      const ac = new AbortController();
+      const { seen, run } = harness((_input, signal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }));
+      const pending = run("rm -rf x", { signal: ac.signal });
+      await Promise.resolve();
+      ac.abort();
+      await pending;
+      expect(seen).toEqual([{ callId: "toolu_9", phase: "started" }, { callId: "toolu_9", phase: "ended", verdict: "escalated" }]);
+    });
+
+    test("no runnable model: ended with no verdict (allowed, as always)", async () => {
+      const { seen, run } = harness(async () => { throw new ReviewerNoRunnableModel("no-internal-credential", "x"); });
+      expect(await run("rm -rf x")).toEqual({});
+      expect(seen).toEqual([{ callId: "toolu_9", phase: "started" }, { callId: "toolu_9", phase: "ended" }]);
+    });
+
+    test("an escape's unsandboxed review is reported too", async () => {
+      const { seen, run } = harness(async () => ({ verdict: "safe", reason: "" }));
+      await run("gh pr create", { escape: true, toolUseId: "toolu_esc" });
+      expect(seen).toEqual([{ callId: "toolu_esc", phase: "started" }, { callId: "toolu_esc", phase: "ended", verdict: "safe" }]);
+    });
+
+    test("a pre-allowed command, a non-auto policy or a disabled reviewer emits nothing", async () => {
+      const { seen, run } = harness(async () => ({ verdict: "safe", reason: "" }));
+      for (const c of ["ls -la", "git status", "open -a Safari https://x.com"]) await run(c);
+      expect(seen).toEqual([]);
+      const ask = harness(async () => ({ verdict: "safe", reason: "" }), { policy: () => "ask" });
+      await ask.run("rm -rf x");
+      const off = harness(async () => ({ verdict: "safe", reason: "" }), { reviewerEnabled: () => false });
+      await off.run("rm -rf x");
+      expect([...ask.seen, ...off.seen]).toEqual([]);
+    });
+
+    test("a throwing sink never changes the verdict", async () => {
+      const reviewer = { review: async () => ({ verdict: "unsafe", reason: "nope" }) } as unknown as BashReviewer;
+      const group = groupFor(sessionHooksFor({ ...baseDeps, reviewer, policy: () => "auto", reviewProgress: () => { throw new Error("sink down"); } }).winter?.PreToolUse, "Bash");
+      const out = await group.hooks[0]!(preInput({ tool_name: "Bash", tool_input: { command: "rm -rf x" }, tool_use_id: "t1" }), "t1", { signal: abortSignal() });
+      expect((out as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision).toBe("deny");
+    });
+  });
+
+  test("the read-only classifier skips the reviewer for a sandboxed read-only command; a writer, a secret read or an escape is reviewed", async () => {
+    const seen: string[] = [];
+    const reviewer = { review: async (input: { command: string }) => { seen.push(input.command); return { verdict: "safe", reason: "" }; } } as unknown as BashReviewer;
+    const group = groupFor(sessionHooksFor({ ...baseDeps, reviewer, policy: () => "auto", reviewerAllow: () => ["npm test"] }).winter?.PreToolUse, "Bash");
+    const run = (command: string, extra: Record<string, unknown> = {}) =>
+      group.hooks[0]!(preInput({ tool_name: "Bash", tool_input: { command, ...extra }, tool_use_id: "t1", cwd: "/tmp" }), "t1", { signal: abortSignal() });
+    for (const c of ["git status", "git log | head", "find . -name x", "sed -n 1p f", "ls && pwd", "npm test"]) expect(await run(c)).toEqual({});
+    expect(seen).toEqual([]);
+    for (const c of ["git push", "git branch -D x", "find . -delete", "sed -i s/a/b/ f", "cat x > y", "ls && rm x", "echo $(id)", "cat ~/.ssh/id_rsa"]) await run(c);
+    expect(seen).toEqual(["git push", "git branch -D x", "find . -delete", "sed -i s/a/b/ f", "cat x > y", "ls && rm x", "echo $(id)", "cat ~/.ssh/id_rsa"]);
+    // An escape is never pre-allowed, read-only or allow-listed alike.
+    await run("git status", { dangerouslyDisableSandbox: true });
+    await run("npm test", { dangerouslyDisableSandbox: true });
+    expect(seen.slice(-2)).toEqual(["git status", "npm test"]);
+  });
+
+  test("a plain `open` of an app or an http(s) page skips the reviewer; anything else, or a dangerous-floor host, is reviewed", async () => {
+    const seen: string[] = [];
+    const reviewer = { review: async (input: { command: string }) => { seen.push(input.command); return { verdict: "unsafe", reason: "network side effect" }; } } as unknown as BashReviewer;
+    const group = groupFor(sessionHooksFor({ ...baseDeps, reviewer, policy: () => "auto", dangerousDomainsAdded: () => ["evil.example"] }).winter?.PreToolUse, "Bash");
+    const run = (command: string, extra: Record<string, unknown> = {}) =>
+      group.hooks[0]!(preInput({ tool_name: "Bash", tool_input: { command, description: "Open ChatGPT in Safari", ...extra }, tool_use_id: "t1" }), "t1", { signal: abortSignal() });
+    for (const c of ["open -a Safari 'https://chatgpt.com'", "open -a Safari https://x.com", "open https://a.b", 'open -a "Google Chrome"', "open -b com.apple.Safari https://x"]) {
+      expect(await run(c)).toEqual({});
+    }
+    expect(seen).toEqual([]);
+    const denied = { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "network side effect" } };
+    for (const c of ["open ./x.sh", "open -a Terminal x.command", "open file:///etc", "open 'myapp://x'", "open https://x; rm -rf ~", "open $(cat f)", "open --args x", "open -e foo.txt",
+      "open https://pastebin.com/x", "open -a Safari https://www.evil.example/login"]) {
+      expect(await run(c)).toEqual(denied);
+    }
+    expect(seen).toHaveLength(10);
+    // A sandbox ESCAPE is never pre-allowed: it is reviewed (and only a safe verdict clears it).
+    expect(await run("open -a Safari https://x.com", { dangerouslyDisableSandbox: true })).toEqual(denied);
+    expect(seen).toHaveLength(11);
+  });
+
   test("an 'unsafe' verdict denies with the reviewer's own reason, under auto", async () => {
     const { winter } = sessionHooksFor({ ...baseDeps, reviewer: fakeReviewer("unsafe", "deletes the whole disk"), policy: () => "auto" });
     const group = groupFor(winter?.PreToolUse, "Bash");
@@ -920,7 +1030,9 @@ describe("sessionHooksFor — the floor's wiring, ordering and both legs", () =>
       }).winter?.PreToolUse ?? [];
       // "Bash" twice: the reviewer, then the escape floor (C3 round 3), which runs under every policy;
       // then (WS-21 §7.1/§7.2) the unmatched path fence, which answers deny/ask and never transforms
-      expect(matchers.map((m) => m.matcher)).toEqual([undefined, "Bash", "Bash", undefined, "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Search"]);
+      // (ComputerV2, 2026-10-08) its explicit allow and ToolSearch's under dont-ask, after the fences and before
+      // the diff observers.
+      expect(matchers.map((m) => m.matcher)).toEqual([undefined, "Bash", "Bash", undefined, "ComputerV2|mcp__winter__computer_v2__script", "ToolSearch", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Search"]);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

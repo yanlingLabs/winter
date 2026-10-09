@@ -24,14 +24,25 @@ struct PillChromeComposer: View {
 
     var body: some View {
         let draft = adapter.composerDraft
-        let showsPlume = adapter.turnRunning && draft.isEmpty
+        let stopping = adapter.isStopping
+        // The plume is the "working" picture; once Stop is pressed it gives way to the words "Stopping…",
+        // so the press visibly lands and the window does not look busy while it waits for the turn to end.
+        let showsPlume = adapter.turnRunning && draft.isEmpty && !stopping
         let fieldHeight = min(max(contentHeight, 26), Self.maxFieldHeight)
         let shape = RoundedRectangle(
             cornerRadius: dispatchPillCornerRadius(height: fieldHeight + DispatchPillMetrics.composerVerticalPadding),
             style: .continuous)
         HStack(alignment: .bottom, spacing: DispatchPillMetrics.rowSpacing) {
             ZStack(alignment: .topLeading) {
-                if draft.isEmpty && !showsPlume {
+                if stopping && draft.isEmpty {
+                    Text(pillStoppingLabel)
+                        .font(Typography.composerField())
+                        .foregroundStyle(Color.white.opacity(0.7))
+                        .lineLimit(1)
+                        .padding(.leading, ComposerTextView.textContainerInset.width)
+                        .padding(.top, ComposerTextView.textContainerInset.height)
+                        .allowsHitTesting(false)
+                } else if draft.isEmpty && !showsPlume {
                     Text("Type here")
                         .font(Typography.composerField())
                         .foregroundStyle(Color.white.opacity(0.45))
@@ -55,8 +66,9 @@ struct PillChromeComposer: View {
             PillSendStopButton(
                 isRunning: adapter.turnRunning,
                 canSend: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                isStopping: stopping,
                 onSend: { adapter.onSubmit(adapter.composerDraft) },
-                onStop: { adapter.onInterrupt?() }
+                onStop: { adapter.beginStop(); adapter.onInterrupt?() }
             )
             .padding(.bottom, DispatchPillMetrics.sendBottomInset)
         }

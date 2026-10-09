@@ -18,6 +18,7 @@ const PAIRS: ReadonlyArray<readonly [plain: string, old: string]> = [
   ["ListSessions", capabilityToolName("sessions", "list_sessions")],
   ["ManageSession", capabilityToolName("sessions", "manage_session")],
   ["Computer", capabilityToolName("computer", "computer")],
+  ["ComputerV2", capabilityToolName("computer_v2", "script")],
   ["Browser", capabilityToolName("browser", "browser")],
   // Not a capability tool any more — the agent SDK's built-in — but the daemon's old spelling must
   // still mean the same thing to every reader.

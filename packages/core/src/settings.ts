@@ -509,7 +509,26 @@ export const Settings = z.object({
    *  `peripheral` block above. */
   computerUse: z.object({
     enabled: z.boolean().optional(),
+    // ComputerV2 (2026-10-08): an UPPER BOUND on the per-provider screenshot budget
+    // (`computer-use/budget.ts`); the old `Computer` reads it as before.
     screenshotMaxDim: z.number().int().positive().optional(),
+    /** ComputerV2: the live window mirror the helper shows on bind. Default true (`computerUseMirrorFrom`). */
+    mirror: z.boolean().optional(),
+    /** ComputerV2: the private (SkyLight) event path, rung 3 of the input ladder. Default true
+     *  (`computerUsePrivateEventPathFrom`). */
+    privateEventPath: z.boolean().optional(),
+    /** ComputerV2 A/B: `true` builds the OLD `Computer` tool INSTEAD of `ComputerV2`. Default false
+     *  (`computerUseLegacyComputerFrom`). */
+    legacyComputer: z.boolean().optional(),
+    /** ComputerV2 (user ruling at the live gate): the MASTER SWITCH — every app is usable (`true`, the default) or
+     *  none is, except the per-app exceptions (`computerUseAllowAllAppsFrom`; `computer-use/policy.ts`). */
+    allowAllApps: z.boolean().optional(),
+    /** ComputerV2: per-app EXCEPTIONS to the master switch, keyed by bundle id — `{access?: "full"|"click"|"view"|
+     *  "deny", grant?: "always", name?, removed?: true}` (`removed`: the user took a built-in default exception
+     *  away). LOOSE down to the row (the connector-permissions precedent): a hand-edited
+     *  row that is not an object, or an unknown value, never invalidates the file; `computerUseAppsFrom`
+     *  reads an unknown access as `deny` (fail closed) and an unknown grant as none. */
+    apps: z.record(z.string(), z.unknown()).optional(),
   }).optional(),
   /** web_search backend (4g Task 6). `provider` defaults to "brave" when the block/field is
    *  absent — the literal union is forward-room for other search backends later; today "brave"
@@ -1312,6 +1331,94 @@ export const cleanerEnabledFrom = (s: Settings): boolean => s.cleaner?.enabled !
  *  opt-in (`=== true`) before, and a Winter Dev home with no `computerUse` block then handed Dispatch
  *  a prompt naming a tool it did not have. */
 export const computerUseEnabledFrom = (s: Settings): boolean => s.computerUse?.enabled !== false;
+
+/** ComputerV2 (2026-10-08): the ONE reader of `computerUse.mirror` — default ON (only `false` hides it). */
+export const computerUseMirrorFrom = (s: Settings | null | undefined): boolean => s?.computerUse?.mirror !== false;
+
+/** ComputerV2: the ONE reader of `computerUse.privateEventPath` (rung 3, R6) — default ON. */
+export const computerUsePrivateEventPathFrom = (s: Settings | null | undefined): boolean => s?.computerUse?.privateEventPath !== false;
+
+/** ComputerV2: the ONE reader of `computerUse.legacyComputer` — default OFF. `true` builds the old `Computer`
+ *  capability instead of `ComputerV2` (the A/B switch); the old `Browser` is unaffected either way. */
+export const computerUseLegacyComputerFrom = (s: Settings | null | undefined): boolean => s?.computerUse?.legacyComputer === true;
+
+/** ComputerV2: the ONE reader of `computerUse.allowAllApps`, the master switch — default ON. Off, an app with no
+ *  allowing exception is `deny` (`computer-use/policy.ts`'s `effectiveAccess`). */
+export const computerUseAllowAllAppsFrom = (s: Settings | null | undefined): boolean => s?.computerUse?.allowAllApps !== false;
+
+/** ComputerV2: the ONE reader of `computerUse.screenshotMaxDim` — `undefined` when unset (no extra bound). */
+export const computerUseScreenshotMaxDimFrom = (s: Settings | null | undefined): number | undefined => s?.computerUse?.screenshotMaxDim;
+
+export type ComputerUseAccess = "full" | "click" | "view" | "deny";
+export interface ComputerUseAppSetting { access?: ComputerUseAccess; grant?: "always"; name?: string; removed?: true }
+const COMPUTER_USE_ACCESS: ReadonlySet<string> = new Set(["full", "click", "view", "deny"]);
+
+/**
+ * ComputerV2: the ONE reader of `computerUse.apps` — every row normalized. A row that is not an object is
+ * skipped; an `access` that is not one of the four reads as `deny` (fail closed: an unreadable restriction
+ * must never widen to full); a `grant` other than `"always"` reads as none; `removed` only when `true`. Absent
+ * access is ABSENT here — what the app gets then (a built-in default exception, or the master switch) is
+ * `computer-use/policy.ts`'s `effectiveAppAccess`.
+ */
+export function computerUseAppsFrom(s: Settings | null | undefined): Record<string, ComputerUseAppSetting> {
+  const raw = s?.computerUse?.apps;
+  const out: Record<string, ComputerUseAppSetting> = {};
+  if (raw === undefined || raw === null || typeof raw !== "object") return out;
+  for (const [bundleId, row] of Object.entries(raw)) {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
+    const r = row as Record<string, unknown>;
+    const app: ComputerUseAppSetting = {};
+    if (r.access !== undefined) app.access = typeof r.access === "string" && COMPUTER_USE_ACCESS.has(r.access) ? r.access as ComputerUseAccess : "deny";
+    if (r.grant === "always") app.grant = "always";
+    if (typeof r.name === "string" && r.name.length > 0) app.name = r.name;
+    if (r.removed === true) app.removed = true;
+    out[bundleId] = app;
+  }
+  return out;
+}
+
+/**
+ * ComputerV2: a pure `Settings -> Settings` transform for ONE app's exception (`computerUse.apps.<bundleId>`), the
+ * user ruling's model. `undefined` leaves a field as it is.
+ *   - `access: <value>` is stored EXPLICITLY (it overrides the master switch and any built-in default) and clears a
+ *     `removed` marker.
+ *   - `access: null` removes the exception: for an app with a built-in default (`opts.hasDefault`) it stores
+ *     `removed: true` (the default no longer applies); otherwise it deletes `access`.
+ *   - `grant: null` deletes the always-grant.
+ * A row left with nothing that matters (no access, no grant, no `removed`) is deleted. The caller owes
+ * `saveSettings` a call.
+ */
+export function setComputerUseApp(settings: Settings, bundleId: string, patch: { access?: ComputerUseAccess | null; grant?: "always" | null; name?: string }, opts: { hasDefault?: boolean } = {}): Settings {
+  const apps = { ...(settings.computerUse?.apps ?? {}) } as Record<string, unknown>;
+  const existing = Object.hasOwn(apps, bundleId) ? apps[bundleId] : undefined;
+  const row: Record<string, unknown> = existing !== null && typeof existing === "object" && !Array.isArray(existing) ? { ...(existing as Record<string, unknown>) } : {};
+  if (patch.access === null) {
+    delete row.access;
+    if (opts.hasDefault === true) row.removed = true;
+    else delete row.removed;
+  } else if (patch.access !== undefined) {
+    row.access = patch.access;
+    delete row.removed;
+  }
+  if (patch.grant === null) delete row.grant;
+  else if (patch.grant !== undefined) row.grant = patch.grant;
+  if (patch.name !== undefined && patch.name.length > 0) row.name = patch.name;
+  if (row.access === undefined && row.grant === undefined && row.removed !== true) delete apps[bundleId];
+  else apps[bundleId] = row;
+  const { apps: _previous, ...rest } = settings.computerUse ?? {};
+  return { ...settings, computerUse: Object.keys(apps).length === 0 ? rest : { ...rest, apps } };
+}
+
+/** ComputerV2: `computerUse.setSettings`' pure transform — each key present is written, each absent one is left
+ *  untouched (spine §6). The caller owes `saveSettings` a call; every key is read live by its one reader. */
+export function setComputerUseFlags(settings: Settings, patch: { enabled?: boolean; mirror?: boolean; privateEventPath?: boolean; allowAllApps?: boolean }): Settings {
+  const next = { ...(settings.computerUse ?? {}) };
+  if (patch.enabled !== undefined) next.enabled = patch.enabled;
+  if (patch.allowAllApps !== undefined) next.allowAllApps = patch.allowAllApps;
+  if (patch.mirror !== undefined) next.mirror = patch.mirror;
+  if (patch.privateEventPath !== undefined) next.privateEventPath = patch.privateEventPath;
+  return { ...settings, computerUse: next };
+}
 
 /** Minor 5e (fix wave, pre-merge review): LSP integration (Phase 5f) opt-out gate — the ONE place
  *  `settings.lsp.enabled !== false` is decided, same "one reader" consolidation as

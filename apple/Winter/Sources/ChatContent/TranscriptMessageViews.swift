@@ -66,7 +66,19 @@ private struct TranscriptToolRowStyleKey: EnvironmentKey {
     static let defaultValue: TranscriptToolRowStyle = .line
 }
 
+/// The tool calls the bash safety reviewer is judging right now (`OrbSessionState.reviewingCallIds`),
+/// set by `TranscriptView` for the rows beneath it. An environment value rather than one more
+/// parameter down the row chain: only the pill-themed tool pill reads it.
+private struct ReviewingCallIdsKey: EnvironmentKey {
+    static let defaultValue: Set<String> = []
+}
+
 extension EnvironmentValues {
+    var reviewingCallIds: Set<String> {
+        get { self[ReviewingCallIdsKey.self] }
+        set { self[ReviewingCallIdsKey.self] = newValue }
+    }
+
     var transcriptToolRowStyle: TranscriptToolRowStyle {
         get { self[TranscriptToolRowStyleKey.self] }
         set { self[TranscriptToolRowStyleKey.self] = newValue }
@@ -243,7 +255,7 @@ struct RuledUserMessageText: View {
         .background(alignment: .top) {
             message
                 .hidden()
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { fullHeight = $0 }
+                .onMeasuredHeight { fullHeight = $0 }
         }
     }
 
@@ -700,7 +712,7 @@ private func transcriptCopyForeground(isHovering: Bool, didCopy: Bool) -> Color 
 ///   - `.tool` (LIVE-GATE G3): `groupActivity` always folds tool items into `.toolRun` groups
 ///     rendered by `TranscriptToolGroupRow`, never `.single`. It therefore shows no status and no
 ///     output — everything mac-chat-parity Task 2 added lives on the group row.
-///   - `.interaction` (mac-chat-parity Task 3): `TranscriptExchangeRow` diverts every interaction
+///   - `.interaction` (mac-chat-parity Task 3): `TranscriptCell` diverts every interaction
 ///     item to `TranscriptInteractionCard` before reaching `TranscriptActivityRow`. Its literal `⚠`
 ///     and one-line summary are what an interaction USED to render as, kept correct (and pinned by
 ///     `ActivityRowTests`) rather than deleted.
@@ -757,19 +769,13 @@ struct TranscriptThinkingRow: View {
 }
 
 /// A slow opacity breath while a quiet thinking line is live — the line-style stand-in for the pill's
-/// shimmer (which paints white, a pill-only treatment).
+/// shimmer (which paints white, a pill-only treatment). On the render server (`OpacityBreath`), never a
+/// display-rate ticker inside a lazy row.
 private struct ThinkingPulse: ViewModifier {
     let active: Bool
 
     func body(content: Content) -> some View {
-        if active {
-            TimelineView(.animation) { timeline in
-                let t = timeline.date.timeIntervalSinceReferenceDate
-                content.opacity(0.55 + 0.45 * (0.5 + 0.5 * cos(t * .pi)))
-            }
-        } else {
-            content
-        }
+        content.modifier(OpacityBreath(active: active, low: 0.55, high: 1, halfPeriod: 1))
     }
 }
 
@@ -871,6 +877,8 @@ struct ToolCallRecord: Equatable {
     var siteIcons: [SiteIconRef] = []
     /// A `write` call's line count (`ActivityItem.writtenLines`), for the pill-themed tool pill.
     var writtenLines: Int? = nil
+    /// A ComputerV2 call's script (`ActivityItem.scriptCode`) — the expanded row's monospace block.
+    var scriptCode: String? = nil
 }
 
 /// Stable identity for one `.toolRun` group's EXPANSION state.
@@ -1007,7 +1015,7 @@ func groupActivity(_ items: [ActivityItem]) -> [ActivityGroup] {
         case .tool(let name, let detail, let callId, let output, let isError, let fileDiff, let siteIcons):
             let record = ToolCallRecord(callId: callId, detail: detail, output: output,
                                         isError: isError, fileDiff: fileDiff, siteIcons: siteIcons,
-                                        writtenLines: item.writtenLines)
+                                        writtenLines: item.writtenLines, scriptCode: item.scriptCode)
             if case .toolRun(var entries) = groups.last {
                 if let last = entries.last, last.name == name {
                     entries[entries.count - 1] = ToolRunEntry(name: name, calls: last.calls + [record])
@@ -1081,7 +1089,7 @@ func toolGroupFragment(name: String, count: Int) -> String {
         return count == 1 ? "fetched a page" : "fetched \(count) pages"
     case "web_search", "WebSearch", "Search":
         return count == 1 ? "searched the web" : "searched the web \(count) times"
-    case "computer", "Computer":
+    case "computer", "Computer", "computer_v2", "ComputerV2":
         return count == 1 ? "used the computer" : "used the computer \(count) times"
     case "lsp":
         return count == 1 ? "checked the code" : "checked the code \(count) times"
@@ -1102,6 +1110,17 @@ func toolGroupFragment(name: String, count: Int) -> String {
     }
 }
 
+/// PURE: one entry's fragment in a run's sentence. Counts for every tool, except that a lone ComputerV2
+/// call says what it did — its title or derived label ("Notes · click, paste, state"), which is the
+/// whole point of the tool's optional `title` (R10). Several calls in a row count like any other tool:
+/// expanding the row lists each one's label.
+func toolRunFragment(_ entry: ToolRunEntry) -> String {
+    if isComputerV2Tool(entry.name), entry.count == 1, let detail = entry.calls[0].detail, !detail.isEmpty {
+        return detail
+    }
+    return toolGroupFragment(name: entry.name, count: entry.count)
+}
+
 /// Capitalized single-fragment label — delegates to `toolGroupFragment`, capitalizing the first
 /// letter. Kept for direct callers wanting one tool's label standalone; `toolRunSentence` also
 /// collapses to exactly this output when a run has only one entry (r1 parity: a single-tool run
@@ -1120,7 +1139,7 @@ private func capitalizingFirstLetter(_ s: String) -> String {
 /// first fragment capitalized, every subsequent fragment lowercase. A single-entry run collapses
 /// to exactly `toolGroupLabel`'s output.
 func toolRunSentence(_ entries: [ToolRunEntry]) -> String {
-    let fragments = entries.map { toolGroupFragment(name: $0.name, count: $0.count) }
+    let fragments = entries.map(toolRunFragment)
     guard let first = fragments.first else { return "" }
     return ([capitalizingFirstLetter(first)] + fragments.dropFirst()).joined(separator: ", ")
 }
@@ -1269,6 +1288,51 @@ func toolOutputPreview(_ output: String?,
     return ToolOutputPreview(text: shown, elision: parts.isEmpty ? nil : "… " + parts.joined(separator: "; "))
 }
 
+// MARK: - Image placeholders in a result
+
+/// What the runtime writes into a result's text for each image it carried. The images themselves are not
+/// in the session log, so the text is all a row has: this token, once per image, usually run together
+/// ("[image][image]") or on a line of its own.
+let toolOutputImagePlaceholder = "[image]"
+
+/// Tools whose output is text the user's world printed (a shell, a search, a listing, an edit's
+/// confirmation) and never carries an image, so a literal "[image]" in it is content, not a placeholder.
+let toolNamesWithoutImageResults: Set<String> = [
+    "bash", "bash_output", "grep", "glob", "ls", "edit", "write", "notebook_edit",
+]
+
+/// PURE: whether `name`'s result can carry image placeholders — every tool but the text-only ones above
+/// (ComputerV2, the old Computer and Browser, Read of an image file, …).
+func toolOutputMayCarryImages(_ name: String) -> Bool {
+    !toolNamesWithoutImageResults.contains(name)
+}
+
+/// PURE: a result's text with its image placeholders taken out, and how many there were.
+///
+/// A line that held nothing but placeholders disappears entirely (no blank line left behind), and a line
+/// that held text beside one keeps the text with its edges trimmed. Text with no placeholder is returned
+/// byte for byte. A result that was only placeholders comes back as `("", n)` — the caller draws just the
+/// chip, not an empty block.
+func toolOutputSplittingImages(_ output: String) -> (text: String, imageCount: Int) {
+    guard output.contains(toolOutputImagePlaceholder) else { return (output, 0) }
+    var count = 0
+    var rebuilt: [String] = []
+    for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
+        let found = line.components(separatedBy: toolOutputImagePlaceholder).count - 1
+        guard found > 0 else { rebuilt.append(String(line)); continue }
+        count += found
+        let remainder = line.replacingOccurrences(of: toolOutputImagePlaceholder, with: "")
+            .trimmingCharacters(in: .whitespaces)
+        if !remainder.isEmpty { rebuilt.append(remainder) }
+    }
+    return (rebuilt.joined(separator: "\n"), count)
+}
+
+/// PURE: the chip under a result that carried images — "Screenshot" for one, "N images" for several.
+func toolImageChipText(_ count: Int) -> String {
+    count == 1 ? "Screenshot" : "\(count) images"
+}
+
 /// The one line a COLLAPSED run shows when something in it failed: the first non-blank line of the
 /// first failed call's output, which is where every tool puts its error.
 ///
@@ -1277,10 +1341,15 @@ func toolOutputPreview(_ output: String?,
 /// complaint this whole task fixes; a failure with nothing to say (blank or absent output) draws
 /// nothing at all rather than an empty line.
 func toolRunFailureSummary(_ entries: [ToolRunEntry]) -> String? {
-    guard let failed = entries.flatMap(\.calls).first(where: \.isError), let output = failed.output,
-          let line = output.split(separator: "\n")
-              .map({ $0.trimmingCharacters(in: .whitespaces) })
-              .first(where: { !$0.isEmpty })
+    guard let (name, failed) = entries.lazy.flatMap({ entry in entry.calls.map { (entry.name, $0) } }).first(where: { $0.1.isError }),
+          let raw = failed.output
+    else { return nil }
+    // The line is picked from the two ENDS of the result, with the model-facing DATA-ONLY wrapper off
+    // (`ScreenDataWrapper`): the script's own error line if it printed one, else its first printed line,
+    // else the state header. This runs for every collapsed failed run on every render, over a result of
+    // up to 64 KiB — it never splits or trims the middle of one.
+    guard let line = ScreenDataWrapper.previewLine(of: raw, isError: true,
+                                                   dropImagePlaceholders: toolOutputMayCarryImages(name))
     else { return nil }
     return line.count > maxFailureSummaryCharacters
         ? String(line.prefix(maxFailureSummaryCharacters)) + "…"
@@ -1379,6 +1448,11 @@ struct ToolRunCallLine: Equatable {
     /// collapsed one does, which is what keeps every diff reachable past
     /// `maxCollapsedDiffChips`.
     let fileDiff: FileDiffRef?
+    /// A ComputerV2 call's script, drawn in monospace above its result. `nil` for every other tool.
+    var scriptCode: String? = nil
+    /// How many images the result carried (its `[image]` placeholders, which `output` no longer shows):
+    /// drawn as a chip under the text, or alone when the result was only images.
+    var imageCount: Int = 0
 }
 
 /// Everything an expanded run draws: one line per call, plus a note when the block budget bit.
@@ -1407,9 +1481,20 @@ func toolRunExpansion(_ entries: [ToolRunEntry],
             // that would then be discarded. That is the difference between the constant bounding
             // DRAWING and bounding the work as well, which is what its doc claims.
             var preview: ToolOutputPreview?
-            if call.output != nil {
-                if blocksDrawn < maxOutputBlocks {
-                    preview = toolOutputPreview(call.output)
+            var imageCount = 0
+            if let output = call.output {
+                // The model-facing DATA-ONLY wrapper is for the model; the person reads what is inside it.
+                var text = ScreenDataWrapper.stripForDisplay(output)
+                if toolOutputMayCarryImages(entry.name) {
+                    let split = toolOutputSplittingImages(text)
+                    text = split.text
+                    imageCount = split.imageCount
+                }
+                // A result that was only images has no text block at all — the chip speaks for it.
+                if imageCount > 0 && text.isEmpty {
+                    preview = nil
+                } else if blocksDrawn < maxOutputBlocks {
+                    preview = toolOutputPreview(text)
                     blocksDrawn += 1
                 } else {
                     blocksWithheld += 1
@@ -1423,7 +1508,9 @@ func toolRunExpansion(_ entries: [ToolRunEntry],
                 // Unbudgeted, deliberately: a chip is one short row, not a monospaced block, and it
                 // is the only door to its diff — withholding one would remove an affordance rather
                 // than defer some drawing.
-                fileDiff: call.fileDiff
+                fileDiff: call.fileDiff,
+                scriptCode: call.scriptCode,
+                imageCount: imageCount
             ))
         }
     }
@@ -1522,6 +1609,26 @@ struct TranscriptDiffChip: View {
         .padding(.vertical, 3)
         .background(Capsule().fill(isHovering ? Theme.rowHover : Theme.controlSurface))
         .animation(.easeOut(duration: 0.14), value: isHovering)
+    }
+}
+
+/// The chip under a result that carried images — a camera glyph and "Screenshot" (or "N images"), in the
+/// diff chip's capsule. The images are not in the session log, so it states a fact and offers no door.
+struct TranscriptImageChip: View {
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "camera")
+            Text(toolImageChipText(count))
+        }
+        .font(Typography.caption())
+        .foregroundStyle(Theme.textMuted)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(Theme.controlSurface))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(toolImageChipText(count))
     }
 }
 
@@ -1648,7 +1755,7 @@ struct ToolRunCallDetailText: View {
                 ToolRowFilePathButton(path: detail, onOpen: onOpenFile)
             }
         } else {
-            Text(line.detail.map { "\(line.name) \($0)" } ?? line.name)
+            Text(toolCallLineText(name: line.name, detail: line.detail))
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
@@ -1786,10 +1893,20 @@ struct TranscriptToolGroupRow: View {
                             .padding(.leading, 16)
                     }
 
+                    // ComputerV2: the script the call ran, above what it printed.
+                    if let code = line.scriptCode {
+                        scriptBlock(code)
+                    }
+
                     if let output = line.output {
                         outputBlock(output)
-                    } else if let placeholder = toolCallOutputPlaceholder(line.status) {
+                    } else if line.imageCount == 0, let placeholder = toolCallOutputPlaceholder(line.status) {
                         placeholderBlock(placeholder)
+                    }
+
+                    if line.imageCount > 0 {
+                        TranscriptImageChip(count: line.imageCount)
+                            .padding(.leading, 16)
                     }
                 }
             }
@@ -1837,6 +1954,19 @@ struct TranscriptToolGroupRow: View {
                     .font(Typography.tiny())
                     .foregroundStyle(Theme.textMuted)
             }
+        }
+    }
+
+    /// A ComputerV2 call's script: the same chrome as the output block, in the muted ink so the result
+    /// below it stays the louder of the two. Selectable, so it can be copied.
+    private func scriptBlock(_ code: String) -> some View {
+        blockChrome {
+            Text(code)
+                .font(Typography.captionMono())
+                .foregroundStyle(Theme.textSecondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

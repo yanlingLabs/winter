@@ -343,6 +343,17 @@ const NETWORK = new Set(["web_fetch", "web_search", "Search", "ReadPage", "brows
 // reclassification (e.g. skill_write ALSO added to MUTATING) cannot widen it to allow-under-auto.
 const ALWAYS_ASK = new Set(["skill_write"]);
 
+// ComputerV2 (2026-10-08, rulings R16/R19): `computer_v2` is SELF-GATED. There is no card per script —
+// the unit of approval is the APP, decided INSIDE the call per primitive by the daemon's own policy
+// (`computer-use/policy.ts`: plan observes only, ask/accept-edits/auto card once per app, dont-ask needs an
+// "Always allow" grant, bypass cards nothing, the user's per-app restrictions under every policy). This gate
+// is name-keyed and cannot see a primitive, so the CALL is allowed under every code/dispatch policy, `plan`
+// and `dont-ask` included (a planning session may still look). Chat is never offered the tool (R14) and is
+// denied here too. The runtime reaches this gate only when something forced a prompt — the PreToolUse
+// `computerV2AllowHook` (`runtime-sdk/hooks.ts`) allows the call before its mode stage, which is what keeps a
+// `dont-ask` child (it denies an unresolved MCP call without ever calling `canUseTool`) able to run a script.
+const SELF_GATED = new Set(["computer_v2"]);
+
 // SP-policies: the "edit class" `accept-edits` auto-allows (spec: "edits/writes free"). write/edit
 // ONLY (matches every other edit-specific path in engine.ts — dirGrant, in-project-silent,
 // approvalOptionsFor); notebook_edit rides the generic MUTATING path (niche).
@@ -379,6 +390,7 @@ export function isGateClassified(toolName: string): boolean {
     || MUTATING.has(toolName)
     || NETWORK.has(toolName)
     || ALWAYS_ASK.has(toolName)
+    || SELF_GATED.has(toolName)
     || isExternalToolName(toolName);
 }
 
@@ -418,6 +430,8 @@ export class PermissionGate {
       if (toolName === "enter_plan_mode" || toolName === "exit_plan_mode") return "deny";
       return READ_ONLY.has(toolName) || NETWORK.has(toolName) ? "allow" : "deny";
     }
+    // ComputerV2: allowed under every non-chat policy — its policy is per app, inside the call.
+    if (SELF_GATED.has(toolName)) return "allow";
     // ALWAYS_ASK (skill_write): a card no policy silences — EXCEPT bypass (accepts everything) and
     // plan (mutates nothing). See the set's doc comment.
     if (ALWAYS_ASK.has(toolName)) {

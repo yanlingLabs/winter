@@ -29,6 +29,10 @@ final class PillChromeWindow: NSPanel {
         super.init(contentRect: contentRect,
                    styleMask: [.borderless, .resizable, .closable, .miniaturizable, .nonactivatingPanel],
                    backing: .buffered, defer: false)
+        // The dispatch pill's mouse gate (`DispatchPillController.updateMouseGate`) hears the pointer through a local
+        // monitor, which only sees moves for a window that asks for them: with this window under the pill it must,
+        // or the gate would have to poll for the pointer's arrival.
+        acceptsMouseMovedEvents = true
         isFloatingPanel = false          // an ordinary window's level, not always-on-top
         hidesOnDeactivate = false        // a panel's default would hide it whenever Winter is inactive
         becomesKeyOnlyIfNeeded = false   // a click anywhere in it takes the keyboard

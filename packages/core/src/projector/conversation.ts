@@ -169,9 +169,10 @@ export function toolResultOutput(block: ContentBlock): string {
  * (`winter-agent-sdk/packages/runtime/src/engine.ts` 5558/5569/6020/6033), which this predicate
  * used to miss, recording every thrown tool as a success.
  *
- * NOT covered, because it is not on the wire at all: a tool that RETURNS `{isError: true}` — the
- * engine's success path (`engine.ts:5965`) pushes `{content: raced.value.output}` and drops the
- * flag. `index.ts` compensates for spawn tools only (their failures carry a pinned `Error:` prefix).
+ * A tool that RETURNS `{isError: true}` is covered too: measured at agent SDK 0.0.53, the engine records
+ * such a result with `is_error: true` (its tool-result record sets it whenever the executor said so, and an
+ * in-process MCP call's own `isError` is kept). An older engine's success path dropped the flag, which is
+ * why `index.ts` still also reads a spawn's pinned `Error:` prefix — belt and braces, never the only signal.
  */
 export function isErrorResult(block: ContentBlock): boolean {
   return block.is_error === true || block.denied === true || block.interrupted === true || block.error === true;

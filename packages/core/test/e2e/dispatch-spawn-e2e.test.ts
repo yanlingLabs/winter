@@ -421,7 +421,7 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
   }, 180_000);
 
   test("(7) TaskStop stops a SESSION by its s_ id — from Dispatch (embedded) and from a code session (spawned binary)", async () => {
-    // Dispatch (the embedded topology) stops its own running child: reported "Stopped before it finished".
+    // Dispatch (the embedded topology) stops its own running child: reported "Stopped by you (TaskStop)."
     const res = await h.spawn({ dir: h.work, prompt: "spin", model: "winter-test/hang", title: "Spinner" });
     const child = /spawned session (s_[0-9a-f]+)/.exec(res.content[0]!.text)![1]!;
     await until(() => h.daemon!.winter.get(child)?.turnRunning || undefined, 30_000, "the child's turn");
@@ -436,7 +436,7 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
       expect(JSON.parse(result.output)).toMatchObject({ task_id: child, task_type: "session" });
       const end = await until(() => h.updates().find((u) => u.childSessionId === child && u.status !== "running"), 30_000, "the stopped child's update");
       expect(end.status).toBe("completed");
-      expect(end.resultSummary ?? "").toContain("Stopped before it finished");
+      expect(end.resultSummary ?? "").toContain("Stopped by you (TaskStop).");
     } finally {
       await h.daemon!.winter.get(h.dispatchId)?.end();
       h.daemon!.sessions.setModel(h.dispatchId, "winter-test/echo");
@@ -493,7 +493,7 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     await h.client.call(METHODS.sessionAttach, { sessionId: h.dispatchId, fromSeq: 0 });
   }, 180_000);
 
-  test("(3) stopping a child interrupts its turn, and the stop is reported", async () => {
+  test("(3) stopping a child interrupts its turn, and the stop is reported as the user's", async () => {
     const res = await h.spawn({ dir: h.work, prompt: "wait forever", model: "winter-test/hang", title: "Slow kid" });
     expect(res.isError).toBe(false);
     const child = /spawned session (s_[0-9a-f]+)/.exec(res.content[0]!.text)![1]!;
@@ -502,6 +502,6 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     expect(stopped.wasRunning).toBe(true);
     const end = await until(() => h.updates().find((u) => u.childSessionId === child && u.status !== "running"), 30_000, "the stopped child's update");
     expect(end.status).toBe("completed");
-    expect(end.resultSummary ?? "").toContain("Stopped before it finished");
+    expect(end.resultSummary ?? "").toContain("Stopped by the user.");
   }, 90_000);
 });

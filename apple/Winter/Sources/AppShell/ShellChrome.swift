@@ -65,9 +65,9 @@ struct FadingTitleText: View {
                     .font(font)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
-                    .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { textWidth = $0 }
+                    .onMeasuredWidth { textWidth = $0 }
             }
-            .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { boxWidth = $0 }
+            .onMeasuredWidth { boxWidth = $0 }
             .clipped()
             .mask {
                 if fadingTitleOverflows(textWidth: textWidth, boxWidth: boxWidth) {

@@ -416,6 +416,65 @@ export const ElicitationUrlParams = z.object({
 export const ElicitationUrlResult = z.object({ url: z.string().min(1) });
 export const ELICITATION_NOT_ACTIVE = "elicitation_not_active";
 
+/** ComputerV2 (2026-10-08) — Settings → Computer Use's daemon doors. LOCAL ROLE ONLY: never in
+ *  `REMOTE_ALLOWED_METHODS` (the phone does not configure the Mac's computer use) and refused for any other role.
+ *  `computerUse.status` reports the settings and the helper ("Winter Computer Use") — installed, running, its
+ *  version and its two TCC grants (the daemon never LAUNCHES the helper to answer it). */
+export const ComputerUseStatusParams = z.object({});
+export const ComputerUsePermissionsSchema = z.object({ accessibility: z.boolean(), screenRecording: z.boolean() });
+export const ComputerUseStatusResult = z.object({
+  enabled: z.boolean(),
+  /** The master switch (`computerUse.allowAllApps`, default true): every app is usable unless an exception says
+   *  otherwise; off, only the apps with an allowing exception are. */
+  allowAllApps: z.boolean(),
+  legacyComputer: z.boolean(),
+  mirror: z.boolean(),
+  privateEventPath: z.boolean(),
+  helper: z.object({
+    installed: z.boolean(),
+    running: z.boolean(),
+    version: z.string().optional(),
+    permissions: ComputerUsePermissionsSchema.optional(),
+  }),
+});
+/** Launches the helper if needed and asks IT to raise the system prompt (or open the Privacy pane). Refuses
+ *  `ERR.RETRY` with `data.code: "helper_unavailable"` when the helper cannot be reached. */
+export const ComputerUseRequestPermissionParams = z.object({ kind: z.enum(["accessibility", "screenRecording"]) });
+export const ComputerUseRequestPermissionResult = z.object({ ok: z.literal(true) });
+export const ComputerUseAccessSchema = z.enum(["full", "click", "view", "deny"]);
+/** The EXCEPTIONS to the master switch, and nothing else: the user's own per-app accesses, the built-in default
+ *  exceptions they have not removed (password managers `deny`; terminals and System Settings `click` —
+ *  `isDefault: true` while the user has not changed the access), and the apps listed only for an "Always allow"
+ *  grant (`access: null`). `lastUsedAt` (epoch MILLISECONDS) when ComputerV2 used the app recently. */
+export const ComputerUseAppsListParams = z.object({});
+export const ComputerUseAppRowSchema = z.object({
+  bundleId: z.string().min(1),
+  name: z.string().min(1),
+  access: ComputerUseAccessSchema.nullable(),
+  grant: z.literal("always").nullable(),
+  isDefault: z.boolean(),
+  lastUsedAt: z.number().int().optional(),
+});
+export const ComputerUseAppsListResult = z.object({ apps: z.array(ComputerUseAppRowSchema) });
+/** One app's exception: an absent field is left as it is. `access: null` removes the exception (a built-in
+ *  default's removal is remembered, so the master switch decides the app again); setting an access on a removed
+ *  default restores an exception. `grant: null` removes "Always allow". A row left with nothing is deleted. */
+export const ComputerUseAppsSetParams = z.object({
+  bundleId: z.string().min(1).max(255),
+  name: z.string().min(1).max(200).optional(),
+  access: ComputerUseAccessSchema.nullable().optional(),
+  grant: z.literal("always").nullable().optional(),
+});
+export const ComputerUseAppsSetResult = z.object({ ok: z.literal(true) });
+/** The app's toggles: each key present is written to `settings.json`, each absent one untouched; hot. */
+export const ComputerUseSetSettingsParams = z.object({
+  enabled: z.boolean().optional(),
+  allowAllApps: z.boolean().optional(),
+  mirror: z.boolean().optional(),
+  privateEventPath: z.boolean().optional(),
+});
+export const ComputerUseSetSettingsResult = z.object({ ok: z.literal(true) });
+
 /** Code-mode image input (2026-09-29): a composer image, STAGED into the session's own temp directory
  *  (`sessionTmpDir(sessionId)/images/image_<k>.<ext>`, the daemon picks `k`, created atomically and
  *  never over an existing file, mode 0600); the client names the returned absolute path beside its
@@ -1046,7 +1105,7 @@ export const CapabilityToolInfoSchema = z.object({
 });
 
 export const CapabilityServerInfoSchema = z.object({
-  key: z.enum(["sessions", "computer", "browser", "office", "research", "web", "lsp", "external"]),
+  key: z.enum(["sessions", "computer", "computer_v2", "browser", "office", "research", "web", "lsp", "external"]),
   /** Whether this server's underlying feature is live RIGHT NOW — the settings gate that applies,
    *  when one exists (`computer`: `settings.computerUse.enabled === true`; `lsp`: `settings.lsp.enabled
    *  !== false` — the server is always built, but its tool refuses when the manager is torn down).
@@ -3044,6 +3103,12 @@ export const METHODS = {
   approvalList: "approval.list",
   elicitationRespond: "elicitation.respond",
   elicitationUrl: "elicitation.url",
+  // ComputerV2 (2026-10-08): Settings → Computer Use. LOCAL role only.
+  computerUseStatus: "computerUse.status",
+  computerUseRequestPermission: "computerUse.requestPermission",
+  computerUseAppsList: "computerUse.apps.list",
+  computerUseAppsSet: "computerUse.apps.set",
+  computerUseSetSettings: "computerUse.setSettings",
   sessionStageImage: "session.stageImage",
   sessionAddDir: "session.addDir",
   sessionSetCwd: "session.setCwd",

@@ -232,6 +232,12 @@ struct DashboardWiring {
     /// `mcpOAuthClient`. `nil` keeps the detail page's plain tool list.
     var mcpPermissionsClient: McpPermissionsClient? = nil
 
+    /// ComputerV2 — Settings → Computer Use's door (`computerUse.status`/`requestPermission`/
+    /// `apps.list`/`apps.set`, and the proposed `setSettings` write) behind the `ComputerUseClient`
+    /// protocol (`WinterKit`), for the same fake-based testability as `mcpPermissionsClient`. `nil` —
+    /// an app running without daemon wiring, or a pure-construction test — renders the page saying so.
+    var computerUseClient: (any ComputerUseClient)? = nil
+
     /// 2026-09-18 — the Updates panel's observable. `var` with a `nil` default for the same reason
     /// `mcpList` above is one: this struct is also constructed by pure-construction tests, and a
     /// required field would break every one of them for a panel that treats "no presenter" as a

@@ -33,7 +33,7 @@ import { renderMarkdown, type Highlighter } from "./markdown";
 import { pickVerb, TURN_VERBS } from "./spinner-verbs";
 import { formatElapsed, formatTokens } from "../task-display";
 import { groupBlocks, type DisplayItem } from "./group-blocks";
-import { displayLineBreaks, formatArgsHead, MAX_RESULT_LINES } from "./format";
+import { displayLineBreaks, formatArgsHead, MAX_RESULT_LINES, toolHeadFor } from "./format";
 import { visibleSlice, type ScrollState } from "./scroll-model";
 
 const selectionAnsi = new Chalk({ level: 3 });
@@ -156,7 +156,7 @@ function TranscriptEntry({ block, highlight }: { block: Block; highlight?: Highl
       );
 
     case "tool": {
-      const argsHead = formatArgsHead(block.argsJson);
+      const { name: toolName, head: argsHead } = toolHeadFor(block.name, block.argsJson);
       return (
         <Box flexDirection="column">
           <Box flexDirection="row">
@@ -165,7 +165,7 @@ function TranscriptEntry({ block, highlight }: { block: Block; highlight?: Highl
             </Box>
             <Box flexGrow={1}>
               <Text>
-                <Text bold>{block.name}</Text>
+                <Text bold>{toolName}</Text>
                 {argsHead ? <Text>({argsHead})</Text> : null}
               </Text>
             </Box>

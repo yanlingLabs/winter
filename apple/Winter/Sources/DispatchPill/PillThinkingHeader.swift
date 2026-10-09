@@ -25,9 +25,12 @@ struct PillThinkingHeader: View {
     let item: ThinkingItem
     let turnIsLive: Bool
     var isExpanded: Bool = false
-    /// What the opened pill shows (`thinkingDisplayText`) — passed only while it is open, so a closed
-    /// pill never holds on to a streaming block's text.
+    /// What the opened pill shows once the block is persisted (`thinkingDisplayText`) — passed only while it is open,
+    /// so a closed pill never holds on to a block's text.
     var text: String? = nil
+    /// The live buffer, passed instead of `text` while the OPENED block is still streaming: the pill's text view
+    /// follows it itself (`PillLiveThinkingText`), so the words growing do not rebuild this header or its row.
+    var live: ThinkingLiveText? = nil
     var toggle: () -> Void = {}
 
     /// A long title (an update can run to a sentence or two) is cut with "…" here, so one pill never
@@ -38,7 +41,7 @@ struct PillThinkingHeader: View {
         let running = item.isRunning(turnIsLive: turnIsLive)
         let label = pillThinkingLabel(item, turnIsLive: turnIsLive)
         let expandable = thinkingHasReadableText(item)
-        let open = isExpanded && expandable && text != nil
+        let open = isExpanded && expandable && (text != nil || live != nil)
         VStack(alignment: .leading, spacing: 0) {
             Button(action: toggle) {
                 HStack(spacing: 10) {
@@ -66,18 +69,45 @@ struct PillThinkingHeader: View {
             .accessibilityElement(children: .combine)
             // With nothing to open it is a label, not a button.
             .accessibilityRemoveTraits(expandable ? [] : .isButton)
-            if open, let text {
-                PillThinkingText(text: thinkingBodyText(text, title: item.title), isLive: item.isLive,
-                                 truncated: item.truncated)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 2)
-                    .padding(.bottom, 14)
-                    .transition(.opacity)
+            if open {
+                Group {
+                    if let live {
+                        PillLiveThinkingText(source: live, item: item)
+                    } else if let text {
+                        PillThinkingText(text: thinkingBodyText(text, title: item.title), isLive: item.isLive,
+                                         truncated: item.truncated)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 2)
+                .padding(.bottom, 14)
+                .transition(.opacity)
             }
         }
         .fixedSize(horizontal: !open, vertical: true)
         .frame(maxWidth: open ? .infinity : nil, alignment: .leading)
         .modifier(PillMorphChrome(expanded: open, rim: running ? PillMorphChrome.liveRim : PillMorphChrome.restRim))
         .animation(.easeInOut(duration: 0.3), value: running)
+    }
+}
+
+/// Equal inputs draw the same pill: `toggle` is rebuilt every pass and is not compared (it opens the key its `item`
+/// names). See `PillToolRunHeader`'s `Equatable`.
+extension PillThinkingHeader: Equatable {
+    static func == (a: PillThinkingHeader, b: PillThinkingHeader) -> Bool {
+        a.turnIsLive == b.turnIsLive && a.isExpanded == b.isExpanded && a.text == b.text && a.item == b.item
+            && (a.live != nil) == (b.live != nil)
+    }
+}
+
+/// An opened pill's reasoning while its block still streams: the words come from the live buffer, which this view
+/// observes, so each increment re-renders this text alone — not the transcript, not the pill's row.
+struct PillLiveThinkingText: View {
+    @ObservedObject var source: ThinkingLiveText
+    let item: ThinkingItem
+
+    var body: some View {
+        PillThinkingText(text: thinkingBodyText(source.text(for: item.blockId) ?? "", title: item.title),
+                         isLive: true, truncated: item.truncated)
     }
 }

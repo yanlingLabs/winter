@@ -1,0 +1,102 @@
+// ComputerV2 — the STANDALONE proof of `embed-computer-helper.sh` (the body of project.yml's "Embed Winter
+// Computer Use" postCompileScript), run the way Xcode runs it: BUILT_PRODUCTS_DIR=<mkdtemp>,
+// CONTENTS_FOLDER_PATH=Winter.app/Contents, CONFIGURATION=Release, EXPANDED_CODE_SIGN_IDENTITY=- (ad-hoc: this
+// proves the build phase; release.ts checks the Developer ID team, the timestamp and that the stated
+// requirement is satisfied on the real artifact).
+import { afterEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { HELPER, HELPER_EMBED_RELATIVE, helperRequirement } from "./computer-helper-lib";
+
+const SCRIPT = join(import.meta.dir, "embed-computer-helper.sh");
+const temps: string[] = [];
+afterEach(() => {
+  for (const d of temps.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+/** A built-products dir holding a minimal "Winter Computer Use.app" with `bundleId`. */
+function builtProducts(bundleId: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "embed-cu-"));
+  temps.push(dir);
+  const app = join(dir, `${HELPER.dist.name}.app`, "Contents");
+  mkdirSync(join(app, "MacOS"), { recursive: true });
+  copyFileSync("/usr/bin/true", join(app, "MacOS", HELPER.dist.name));
+  writeFileSync(
+    join(app, "Info.plist"),
+    `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>${HELPER.dist.name}</string>
+<key>CFBundleIdentifier</key><string>${bundleId}</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSUIElement</key><true/>
+</dict></plist>
+`,
+  );
+  return dir;
+}
+
+function embed(dir: string, configuration = "Release") {
+  return spawnSync("bash", [SCRIPT], {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: {
+      ...process.env,
+      CONFIGURATION: configuration,
+      BUILT_PRODUCTS_DIR: dir,
+      CONTENTS_FOLDER_PATH: "Winter.app/Contents",
+      EXPANDED_CODE_SIGN_IDENTITY: "-",
+      DEVELOPMENT_TEAM: "37N77U9RSZ",
+    },
+  });
+}
+
+describe("embed-computer-helper.sh (the 'Embed Winter Computer Use' postCompileScript, standalone)", () => {
+  test("a non-Release build embeds nothing", () => {
+    const dir = builtProducts(HELPER.dist.identifier);
+    const r = embed(dir, "Debug");
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("skip Winter Computer Use embed (non-Release)");
+    expect(existsSync(join(dir, "Winter.app", HELPER_EMBED_RELATIVE))).toBe(false);
+  });
+
+  test("Release: copies the helper into Contents/Helpers and signs it with the stated requirement, the hardened runtime and the Apple Events entitlement only", () => {
+    const dir = builtProducts(HELPER.dist.identifier);
+    const r = embed(dir);
+    if (r.status !== 0) throw new Error(`exit ${r.status}:\n${r.stderr}\n${r.stdout}`);
+    const dest = join(dir, "Winter.app", HELPER_EMBED_RELATIVE);
+    expect(existsSync(join(dest, "Contents", "MacOS", HELPER.dist.name))).toBe(true);
+    const dr = spawnSync("codesign", ["-d", "-r-", dest], { encoding: "utf8" });
+    expect(`${dr.stdout}${dr.stderr}`).toContain(`designated => ${helperRequirement(HELPER.dist.identifier, "37N77U9RSZ")}`);
+    const dvv = spawnSync("codesign", ["-dvv", dest], { encoding: "utf8" }).stderr;
+    expect(dvv).toMatch(/^Identifier=com\.winter\.computeruse$/m);
+    expect(dvv).toMatch(/^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*runtime/m);
+    const ents = spawnSync("codesign", ["-d", "--entitlements", "-", "--xml", dest], { encoding: "utf8" }).stdout;
+    expect([...ents.matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1])).toEqual(["com.apple.security.automation.apple-events"]);
+    expect(r.stdout).toContain("Winter Computer Use embedded at Contents/Helpers");
+  });
+
+  test("a re-embed replaces the old copy rather than merging into it", () => {
+    const dir = builtProducts(HELPER.dist.identifier);
+    expect(embed(dir).status).toBe(0);
+    const stray = join(dir, "Winter.app", HELPER_EMBED_RELATIVE, "Contents", "Resources", "stale.txt");
+    mkdirSync(join(stray, ".."), { recursive: true });
+    writeFileSync(stray, "left over");
+    expect(embed(dir).status).toBe(0);
+    expect(existsSync(stray)).toBe(false);
+  });
+
+  test("refuses a missing build product, and a helper built with any identity but the shipped one", () => {
+    const empty = mkdtempSync(join(tmpdir(), "embed-cu-"));
+    temps.push(empty);
+    const missing = embed(empty);
+    expect(missing.status).not.toBe(0);
+    expect(missing.stderr).toContain("the built helper is not at");
+
+    const dev = embed(builtProducts(HELPER.dev.identifier));
+    expect(dev.status).not.toBe(0);
+    expect(dev.stderr).toContain("a Release Winter.app embeds only the dist helper");
+  });
+});

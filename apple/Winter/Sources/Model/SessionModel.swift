@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import os
 import WinterProtocol
 import WinterKit
 
@@ -366,11 +367,47 @@ struct ActivityItem: Equatable {
         /// streamed text from `SessionModel.liveThinking` until the persisted block's `text` replaces it.
         case thinking(ThinkingItem)
     }
-    var kind: Kind
+    var kind: Kind { didSet { stamp = ChangeStamp.next() } }
     /// How many lines a `write` call is putting in its file, counted from the call's `content`
     /// argument when the call arrives — what the pill-themed window's running tool pill says
     /// ("Writing 120 lines to config.ts") before any result exists. `nil` for every other tool.
-    var writtenLines: Int? = nil
+    var writtenLines: Int? = nil { didSet { stamp = ChangeStamp.next() } }
+    /// A ComputerV2 call's `code` argument (the model's script), capped — what the expanded tool row
+    /// shows in monospace beside the text result. The 100-character `detail` cannot hold a script, so
+    /// it rides here, as `writtenLines` does, set when the call arrives. `nil` for every other tool.
+    var scriptCode: String? = nil { didSet { stamp = ChangeStamp.next() } }
+
+    /// Names this item's CONTENT as of its last change: fresh at creation, replaced by every mutation
+    /// of a field above, copied with the value. Two items with the same stamp are therefore the same
+    /// content, which is what lets `==` answer without walking up to 64 KiB of result text.
+    private(set) var stamp: UInt64 = ChangeStamp.next()
+
+    init(kind: Kind, writtenLines: Int? = nil, scriptCode: String? = nil) {
+        self.kind = kind
+        self.writtenLines = writtenLines
+        self.scriptCode = scriptCode
+    }
+
+    /// Content equality, with a shortcut: the same stamp is the same content (see `stamp`). SwiftUI
+    /// compares every view input it re-evaluates with the type's `==` — for a transcript row that is the
+    /// whole exchange, so a derived deep `==` made every render cost the size of every result in it (a
+    /// Debug build of Winter Dev hung at 99% CPU inside it). Items that differ in stamp fall back to the
+    /// field-by-field comparison, so independently built equal items still compare equal.
+    static func == (a: ActivityItem, b: ActivityItem) -> Bool {
+        a.stamp == b.stamp || (a.kind == b.kind && a.writtenLines == b.writtenLines && a.scriptCode == b.scriptCode)
+    }
+
+    /// The field-by-field comparison alone (tests: the cost the stamp shortcut avoids).
+    static func contentEquals(_ a: ActivityItem, _ b: ActivityItem) -> Bool {
+        a.kind == b.kind && a.writtenLines == b.writtenLines && a.scriptCode == b.scriptCode
+    }
+}
+
+/// Hands out the stamps `ActivityItem` and `Exchange` use to name a version of their content: a process-wide
+/// counter, so a stamp is never reused and two different contents never share one.
+enum ChangeStamp {
+    private static let counter = OSAllocatedUnfairLock<UInt64>(initialState: 0)
+    static func next() -> UInt64 { counter.withLock { $0 &+= 1; return $0 } }
 }
 
 extension ActivityItem {
@@ -408,27 +445,31 @@ extension ActivityItem {
 /// array), and so a later wave can render prior turns without re-deriving pairing from the flat
 /// event log.
 struct Exchange: Equatable {
-    var prompt: String
+    var prompt: String { didSet { stamp = ChangeStamp.next() } }
     /// Set when this exchange was opened by ANOTHER session's message (`clientName: "messaging"`,
     /// text parsed once by `AgentMessageEnvelope.parse`): `prompt` then holds the message's body, and
     /// the user bubble wears the sender's header (and the summary, when it carried one) instead of
     /// showing the wrapper's XML. `nil` for everything a person typed.
-    var promptEnvelope: AgentMessageEnvelope? = nil
+    var promptEnvelope: AgentMessageEnvelope? = nil { didSet { stamp = ChangeStamp.next() } }
     /// EVERY `assistant_message` this exchange's turn emitted, in arrival order (mac-chat-parity
     /// Task 1). The engine emits one PER ROUND, whenever the round produced text
     /// (`if (textBuf.length > 0)`, `packages/core/src/agent/engine.ts`) — this was a single
     /// `reply` string that each round OVERWROTE, so in any multi-round turn every intermediate
     /// round's prose was silently discarded before it reached the view. The transcript renders one
     /// row per entry, in order.
-    var replies: [String] = []
+    var replies: [String] = [] { didSet { stamp = ChangeStamp.next() } }
     /// What happened while this exchange's turn ran (2d-ii-a task 1) — appended via
     /// `SessionReducer.appendActivity` (main-transcript events only; adjacent dupes collapse;
     /// capped at 200 drop-oldest). Defaulted so existing `Exchange(prompt:reply:)` call
     /// sites and equality-based tests are untouched.
-    var activity: [ActivityItem] = []
+    var activity: [ActivityItem] = [] { didSet { stamp = ChangeStamp.next() } }
     /// True when this exchange's turn ended with `stopReason == "aborted"` (Esc-interrupt) —
     /// the per-exchange sibling of the state-level `lastTurnAborted` flash flag.
-    var aborted: Bool = false
+    var aborted: Bool = false { didSet { stamp = ChangeStamp.next() } }
+
+    /// Names this exchange's CONTENT as of its last change — see `ActivityItem.stamp`; every field that
+    /// `==` compares replaces it when it changes.
+    private(set) var stamp: UInt64 = ChangeStamp.next()
 
     // MARK: Where each reply fell among the activity (user, 2026-10-02)
     //
@@ -465,8 +506,28 @@ struct Exchange: Equatable {
     /// Equality is the CONTENT — prompt, replies, activity, aborted. The ordering record above is
     /// derived from the same events and changes only when they do, so it never decides whether two
     /// exchanges differ (an `Exchange(prompt:reply:activity:)` a test builds has no arrival order).
+    ///
+    /// **The same stamp answers at once** — the exchange is the same content, and SwiftUI asks this of every
+    /// transcript row on every render (`ActivityItem.==` has the reason). A different stamp compares the fields
+    /// — and for the LIVE exchange (the only one whose stamp moves, on every streamed event) the comparison must
+    /// end where the difference is: counts and the short fields first, then the activity NEWEST FIRST, each item
+    /// by ITS stamp. A walk from the oldest item copied and compared a few hundred items that had not changed to
+    /// reach the one that had (measured: `Exchange.==` and the copies under it were a fifth of a lagging main
+    /// thread); from the newest it ends on the first one, since an event touches the newest items.
     static func == (a: Exchange, b: Exchange) -> Bool {
-        a.prompt == b.prompt && a.promptEnvelope == b.promptEnvelope && a.replies == b.replies && a.activity == b.activity && a.aborted == b.aborted
+        if a.stamp == b.stamp { return true }
+        guard a.aborted == b.aborted, a.replies.count == b.replies.count, a.activity.count == b.activity.count else { return false }
+        guard a.prompt == b.prompt, a.promptEnvelope == b.promptEnvelope, a.replies == b.replies else { return false }
+        return a.activity.withUnsafeBufferPointer { left in
+            b.activity.withUnsafeBufferPointer { right in
+                var i = left.count - 1
+                while i >= 0 {
+                    if left[i].stamp != right[i].stamp, !ActivityItem.contentEquals(left[i], right[i]) { return false }
+                    i -= 1
+                }
+                return true
+            }
+        }
     }
 
     /// The LAST assistant message of this exchange, or `""` when none has arrived yet. This is
@@ -546,6 +607,17 @@ struct OrbSessionState: Equatable {
     /// turn the queued text was riding on ends — absorbed (`turnCompleted`) or died
     /// (`agentError`) — since a queued steer never survives past the turn it was queued for.
     var queuedSteers: [String] = []
+    /// The tool calls the bash safety reviewer is judging right now (`tool_review_progress`: `started`
+    /// adds a `callId`, `ended` removes it). Transient state — never replayed — so it is also cleared
+    /// when the call's result arrives, when the turn ends or errors, and when the connection drops: a
+    /// pill must never stay amber because an `ended` was lost. The pill-themed window tints those calls'
+    /// pills (`PillToolRunHeader.isReviewing`).
+    var reviewingCallIds: Set<String> = []
+    /// How many main-thread turns have ENDED (`turn_completed` or `agent_error`, whatever the reason —
+    /// an Esc'd turn included). A counter rather than a flag so a client can tell "the turn I asked to
+    /// stop has ended" from "a new turn started right behind it", which `turnRunning` alone cannot say
+    /// when both land in one fold (`FieldStateAdapter.isStopping`).
+    var completedTurns = 0
     /// The exchange the running main turn belongs to — stamped by a turn-opening `turn_started` — so an
     /// `aborted` terminal marks THAT exchange, not whichever opened last: a message held behind a turn
     /// that has already replied opens its own exchange while the turn runs, and the daemon closes a turn
@@ -721,6 +793,15 @@ enum SessionReducer {
 
     static func reduce(_ state: OrbSessionState, _ event: SessionEvent) -> OrbSessionState {
         var s = state
+        reduceInPlace(&s, event)
+        return s
+    }
+
+    /// The same fold, applied to `s` where it lies. A caller folding a RUN of events (a replay, a
+    /// frame's worth of chunks) holds one state and passes it here, so the arrays inside it are mutated
+    /// in place; through `reduce` every event copied the exchanges and the open exchange's activity
+    /// (up to 200 items) because the caller still held the old value — per event, for thousands of events.
+    static func reduceInPlace(_ s: inout OrbSessionState, _ event: SessionEvent) {
         switch event {
         case .harnessAttached(let v): // gate-feedback-1 FIX A — see `attachedClients`'s doc.
             s.attachedClients.append(v.clientName)
@@ -801,7 +882,16 @@ enum SessionReducer {
                s.exchanges[e].activity[i].toolCallId == v.callId {
                 s.exchanges[e].activity[i].writtenLines = lines
             }
+            if isComputerV2Tool(v.name), let code = computerV2Code(argsJson: v.argsJson),
+               let e = s.exchanges.indices.last, let i = s.exchanges[e].activity.indices.last,
+               s.exchanges[e].activity[i].toolCallId == v.callId {
+                s.exchanges[e].activity[i].scriptCode = code
+            }
+        case .toolReviewProgress(let v):
+            // Any thread: a subagent's call is reviewed too, and the callId is unique to the call.
+            foldToolReviewProgress(&s, callId: v.callId, phase: v.phase)
         case .toolResult(let v) where v.threadId == mainThread:
+            s.reviewingCallIds.remove(v.callId) // a call that has a result is past its review
             // The status flip must not be contingent on whether the fold below finds an item to
             // land on — but since 2026-10-02 the runtime runs read-only calls CONCURRENTLY and
             // reports each as it finishes, so a result no longer means the round is over: the status
@@ -916,6 +1006,7 @@ enum SessionReducer {
             }
         case .turnCompleted(let v) where v.threadId == mainThread:
             s.turnRunning = false
+            s.completedTurns += 1
             endOutstandingInteractions(&s) // clears pendingInteractions, freezing each as `.ended`
             s.streamingText = ""
             s.status = .idle
@@ -932,6 +1023,7 @@ enum SessionReducer {
             s.runningTurnExchange = nil
             s.compactionStartedAt = nil // whatever compaction the turn ran is over with it
             s.subagents = [] // 2e-ii prune: children always complete before the main turn does
+            s.reviewingCallIds = [] // an `ended` that never came must not leave a pill amber
         case .turnCompleted(let v):
             // CHILD turn window closed — bank the active span. Status stays "working" (alive)
             // until thread_completed; a next child turn would reopen a span.
@@ -967,6 +1059,7 @@ enum SessionReducer {
             appendActivity(.notice(text: line), to: &s)
         case .agentError(let v) where v.threadId == mainThread:
             s.turnRunning = false
+            s.completedTurns += 1
             s.compactionStartedAt = nil
             endOutstandingInteractions(&s) // clears pendingInteractions, freezing each as `.ended`
             s.streamingText = ""
@@ -978,6 +1071,7 @@ enum SessionReducer {
                 s.exchanges[last].appendReply("⚠︎ \(v.message)")
             }
             s.subagents = [] // defensive prune — an errored main turn must not strand a live block
+            s.reviewingCallIds = []
         case .taskUpdated(let v): // any thread — tasks are session-wide
             // T3 review fix wave 1: `status: "deleted"` is a TERMINAL removal, not an upsert —
             // packages/protocol's TaskSchema now has this value (events.ts), and
@@ -1097,7 +1191,6 @@ enum SessionReducer {
             break // messages/deltas/bg/checkpoint + child-thread events don't move state (harness
                   // attach/detach ARE now handled above — gate-feedback-1 FIX A)
         }
-        return s
     }
 
     /// Appends a new pending interaction and re-derives `status`'s count — 2d-iii task 1. Replay
@@ -1181,6 +1274,41 @@ enum SessionReducer {
     /// round), or appends a new one to the open exchange through `appendActivity` (its adjacent-dupe
     /// collapse cannot fire — no item has this `blockId` — and its cap applies). An item the cap evicted
     /// simply reappears at the end with its record — the same miss semantics as a tool result.
+    /// The fold of one `tool_review_progress`: `started` marks the call as being reviewed, `ended` clears
+    /// it, anything else is ignored. An `ended` for a call that never `started` therefore leaves nothing
+    /// behind. Pure and internal so the tests drive it without building an event.
+    static func foldToolReviewProgress(_ state: inout OrbSessionState, callId: String, phase: String) {
+        switch phase {
+        case "started": state.reviewingCallIds.insert(callId)
+        case "ended": state.reviewingCallIds.remove(callId)
+        default: break
+        }
+    }
+
+    /// Whether folding this `thinking_delta` would change nothing a view draws, so the session need not be
+    /// republished for it. A model streams reasoning in increments every few milliseconds (folded in batches of
+    /// 80 ms, twelve a second), and almost all of them only lengthen a block the pill already shows: its title
+    /// is its title, the pill reads "has text" once (`liveTextLength > 0` is the only thing the app asks of the
+    /// running count, `thinkingHasReadableText`), and an OPEN pill reads its words from the live buffer
+    /// (`ThinkingLiveText`), not from here. Republishing the whole session for each cost a full window update
+    /// that drew the same thing — most of a reasoning model's load on the main thread.
+    ///
+    /// True for a main-thread delta to a block already live with text, with the same kind and no new title; and for
+    /// a child thread's delta, which the reducer ignores. The block's first text, a new or changed title, a changed
+    /// kind and the persisted block are all folded as before.
+    static func thinkingIncrementIsInvisible(_ event: SessionEvent, in state: OrbSessionState) -> Bool {
+        guard case .thinkingDelta(let v) = event else { return false }
+        guard v.threadId == mainThread else { return true }
+        for e in state.exchanges.indices.reversed().prefix(toolResultFoldSearchDepth) {
+            guard let i = state.exchanges[e].activity.lastIndex(where: { $0.thinkingItem?.blockId == v.blockId }),
+                  let item = state.exchanges[e].activity[i].thinkingItem else { continue }
+            guard item.isLive, item.liveTextLength > 0, item.kind == v.kind else { return false }
+            guard let title = v.title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return true }
+            return title == item.title
+        }
+        return false
+    }
+
     private static func foldThinking(_ state: inout OrbSessionState, blockId: String,
                                      _ fold: (ThinkingItem?) -> ThinkingItem) {
         for e in state.exchanges.indices.reversed().prefix(toolResultFoldSearchDepth) {
@@ -1235,7 +1363,7 @@ enum SessionReducer {
     ///    is the only door to responding — the pinned band that used to be a second door is gone.
     ///    Opening an empty-prompt exchange is exactly what the `.assistantMessage` case already does
     ///    for the same "arrived before any user_message" shape, and the transcript renders one
-    ///    correctly (`TranscriptExchangeRow` draws no prompt bubble for an empty prompt).
+    ///    correctly (`TranscriptCell` draws no prompt bubble for an empty prompt).
     /// 2. **It dedupes by callId**, mirroring `appendPending`'s replay guard, so a re-seen
     ///    `approval_requested` during a replay is a no-op rather than a second card. This is a
     ///    stronger guard than `appendActivity`'s adjacent-dupe collapse, which compares whole values:
@@ -1525,6 +1653,10 @@ enum SessionReducer {
         case "computer", "Computer":
             guard let action = str("action") else { return nil }
             return verbLedToolDetail(action, str("keys"))
+        // ComputerV2 (rule 3 holds: the script and what it typed are never the label — `title` is the
+        // model's own words for the user, and the derived label names only apps and verbs).
+        case "computer_v2", "ComputerV2":
+            return computerV2SpecificLabel(title: str("title"), code: str("code")).flatMap(clipToolDetail)
         case "schedule":
             guard let op = str("op") else { return nil }
             return verbLedToolDetail(op, str("spec") ?? str("id"))
@@ -1572,6 +1704,7 @@ enum SessionReducer {
         switch conn {
         case .disconnected, .reconnecting:
             s.status = .disconnected
+            s.reviewingCallIds = [] // transients are not replayed: an `ended` sent while away is gone
         case .connected:
             s.status = s.pendingInteractions.isEmpty
                 ? (s.turnRunning ? .thinking : .idle)
@@ -1672,11 +1805,15 @@ final class SessionModel: ObservableObject {
     func apply(contentsOf events: [SessionEvent]) {
         guard !events.isEmpty else { return }
         var next = state
+        var changed = false
         for event in events {
             liveThinking.fold(event)
-            next = SessionReducer.reduce(next, event)
+            // A reasoning increment that changes nothing a view draws goes to the live text buffer alone.
+            if SessionReducer.thinkingIncrementIsInvisible(event, in: next) { continue }
+            SessionReducer.reduceInPlace(&next, event)
+            changed = true
         }
-        state = next
+        if changed { state = next }
     }
 
     /// Folds a session's REPLAYED history with ONE publish (`SessionFeed`, on attach): applied one
@@ -1691,7 +1828,7 @@ final class SessionModel: ObservableObject {
         for event in events {
             let wasRunning = next.turnRunning
             liveThinking.fold(event)
-            next = SessionReducer.reduce(next, event)
+            SessionReducer.reduceInPlace(&next, event)
             if case .turnStarted(let v) = event, v.threadId == "main", !wasRunning { next.workingVerb = WorkingVerbs.forTurn(prompt: next.runningTurnPrompt) }
         }
         state = next

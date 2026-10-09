@@ -97,6 +97,10 @@ export const RUNTIME_HOST_TOOL_PAIRS: ReadonlyArray<readonly [runtime: string, h
   ["ListSessions", "list_sessions"],
   ["ManageSession", "manage_session"], // retired from Dispatch 2026-10-02; kept so an old transcript's calls still map
   ["Computer", "computer"],
+  // ComputerV2 (2026-10-08): the script-based computer tool. Its host name `computer_v2` is what the
+  // renderers key their tool rows on and what `gate.ts` classifies (`SELF_GATED`: the call itself is
+  // allowed under every code/dispatch policy — the policy is per APP, inside the call).
+  ["ComputerV2", "computer_v2"],
   ["Browser", "browser"],
   // `Search` — Exa answer mode, the agent SDK's built-in since 2026-10-01 (it was the daemon's
   // `mcp__winter__research__Search`, which strips to the same host name): `gate.ts`'s NETWORK class.
@@ -298,6 +302,9 @@ export const WINTER_CAPABILITY_SERVER_KEYS: ReadonlySet<string> = new Set([
   // The SEVENTH key, `lsp` (fix wave, review F7): `mcp__winter__lsp__lsp` strips to `lsp`, which
   // `gate.ts` classifies READ_ONLY — the class the registry-door tool always had.
   "lsp",
+  // ComputerV2 (2026-10-08): `mcp__winter__computer_v2__script` strips to `computer_v2` (a live call only
+  // when this incarnation built the key, like every other).
+  "computer_v2",
 ]);
 
 /**
@@ -312,6 +319,9 @@ export const WINTER_CAPABILITY_SERVER_KEYS: ReadonlySet<string> = new Set([
 export const CAPABILITY_TOOLS_BY_KEY: ReadonlyMap<string, ReadonlySet<string>> = new Map<string, ReadonlySet<string>>([
   ["sessions", new Set(["session_spawn", "list_sessions", "manage_session"])],
   ["computer", new Set(["computer"])],
+  // The server's tool is `script`, but its HOST name is `computer_v2` — the pair table's name for
+  // `ComputerV2` — so the old spelling and the plain name land on one gate class and one renderer row.
+  ["computer_v2", new Set(["script"])],
   ["browser", new Set(["browser"])],
   ["office", new Set(["docs", "sheets", "slides"])],
   ["lsp", new Set(["lsp"])],
@@ -365,10 +375,16 @@ export function hostToolNameFor(winterToolName: string, liveKeys?: ReadonlySet<s
     if (!WINTER_CAPABILITY_SERVER_KEYS.has(key)) return undefined;
     if (liveKeys !== undefined && !liveKeys.has(key)) return undefined;
     const tool = rest.slice(sep + 2);
-    return CAPABILITY_TOOLS_BY_KEY.get(key)?.has(tool) === true ? tool : undefined;
+    if (CAPABILITY_TOOLS_BY_KEY.get(key)?.has(tool) !== true) return undefined;
+    return CAPABILITY_HOST_NAMES.get(`${key}__${tool}`) ?? tool;
   }
   return RUNTIME_TO_HOST.get(winterToolName);
 }
+
+/** The capability tools whose HOST name is not their server-side tool name — `mcp__winter__computer_v2__script`
+ *  is `computer_v2`, the same name `ComputerV2` maps to in the pair table (a bare `script` would be a host
+ *  name nothing classifies or renders). */
+const CAPABILITY_HOST_NAMES: ReadonlyMap<string, string> = new Map([["computer_v2__script", "computer_v2"]]);
 
 /** The inverse: the WINTER (runtime) name for one of the host's tool names, or `undefined`.
  *  Capability tools have no single runtime spelling here (their `mcp__winter__<key>__<tool>` name

@@ -38,11 +38,14 @@ struct CompactPillWorking: View {
 struct PillSendStopButton: View {
     let isRunning: Bool
     let canSend: Bool
+    /// Stop was pressed and the turn has not ended yet: the circle shows a spinner and the button waits.
+    var isStopping: Bool = false
     let onSend: () -> Void
     let onStop: () -> Void
 
     var body: some View {
         let role = composerSendButtonRole(isRunning: isRunning, sendBlockedReason: canSend ? nil : "")
+        let phase = pillStopPhase(isRunning: isRunning, isStopping: isStopping)
         Button {
             switch role {
             case .stop: onStop()
@@ -53,19 +56,43 @@ struct PillSendStopButton: View {
             ZStack {
                 Circle()
                     .fill(Color.white)
-                Image(systemName: pillSendButtonSymbol(role))
-                    .font(Typography.label(.bold))
-                    .foregroundStyle(Color.black)
-                    .contentTransition(.symbolEffect(.replace))
+                if phase == .stopping {
+                    ProgressView()
+                        .controlSize(.small)
+                        .colorScheme(.light)
+                } else {
+                    Image(systemName: pillSendButtonSymbol(role))
+                        .font(Typography.label(.bold))
+                        .foregroundStyle(Color.black)
+                        .contentTransition(.symbolEffect(.replace))
+                }
             }
             .frame(width: DispatchPillMetrics.sendCircleSize, height: DispatchPillMetrics.sendCircleSize)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .help(pillSendButtonLabel(role))
-        .accessibilityLabel(pillSendButtonLabel(role))
+        .disabled(phase == .stopping)
+        .help(phase == .stopping ? pillStoppingLabel : pillSendButtonLabel(role))
+        .accessibilityLabel(phase == .stopping ? pillStoppingLabel : pillSendButtonLabel(role))
     }
 }
+
+/// What the stop button is doing: nothing to stop, ready to stop, or stopped-and-waiting.
+enum PillStopPhase: Equatable {
+    case idle
+    case running
+    case stopping
+}
+
+/// PURE: a pending stop only means something while a turn is running — the moment the turn ends the
+/// button is idle again, whatever the stop flag still says.
+func pillStopPhase(isRunning: Bool, isStopping: Bool) -> PillStopPhase {
+    guard isRunning else { return .idle }
+    return isStopping ? .stopping : .running
+}
+
+/// The words for a stop that has been sent and not yet confirmed.
+let pillStoppingLabel = "Stopping…"
 
 /// PURE: the trailing circle's glyph for its role.
 func pillSendButtonSymbol(_ role: ComposerSendButtonRole) -> String {

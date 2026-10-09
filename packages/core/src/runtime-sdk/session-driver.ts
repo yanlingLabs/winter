@@ -1012,6 +1012,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         tmpDir: deps.tmpDirOf(sessionId),
         outDir: deps.outDirOf(sessionId),
         signal: inc.abort.signal,
+        // ComputerV2 (2026-10-08): the model decides its description (vision or not) and its screenshot budget.
+        model,
         // (`exaKeyPresent` is no longer a capability input: `Search` is the agent SDK's built-in, so
         // the key decides one door only — which of `Search`/`WebSearch` `Options.tools` names, in
         // `buildWinterOptions` below — and the prompt that names it.)
@@ -1038,9 +1040,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // chat's and dispatch's base prompts NAME their search tool, and the prompt must name the one
         // `Options.tools` actually gave this incarnation (`Search` with a key, `WebSearch` without).
         exaKeyPresent: exaPresent,
-        // The same rule for `Computer`, read off the record this incarnation just BUILT (not the setting
-        // again), so a toggle landing between the two reads can never split the prompt from the tool list.
-        computerOffered: capabilityKeys.has("computer"),
+        // The same rule for the computer tool, read off the record this incarnation just BUILT (not the setting
+        // again), so a toggle landing between the two reads can never split the prompt from the tool list —
+        // and the prompt names WHICH one was built (`ComputerV2`, or the legacy `Computer` A/B).
+        computerOffered: capabilityKeys.has("computer_v2") ? "ComputerV2" : capabilityKeys.has("computer") ? "Computer" : false,
         // WS-21 (L3.4): the run folder carries the instructions, the output style and the code memory.
         ...(runHomeApplied ? { runHomeApplied: true } : {}),
       });

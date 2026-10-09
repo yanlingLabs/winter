@@ -4,7 +4,7 @@ import WinterProtocol
 /// Cards for approvals/questions/plans — PURE UI: consumes one `InteractionRecord` (the reducer's
 /// per-exchange record of an ask and, once it lands, its outcome) plus injected response closures.
 ///
-/// Mounted INLINE IN THE TRANSCRIPT (`TranscriptExchangeRow`, `ChatContent/TranscriptView.swift`),
+/// Mounted INLINE IN THE TRANSCRIPT (`TranscriptCell`, `ChatContent/TranscriptView.swift`),
 /// at the point the ask was made, and never removed — mac-chat-parity Task 3. It used to be a
 /// pinned band between the transcript and the composer, deleted the instant the ask resolved, which
 /// left the Mac with no record anywhere in scrollback of anything the user had approved or
@@ -23,7 +23,7 @@ import WinterProtocol
 /// is now Winter's teal. And a card is CHROME: its text stays sans, including a plan's markdown body,
 /// which is why both plan bodies pass `TranscriptAssistantMessage` the `.sans` role explicitly.
 
-/// Everything a transcript-mounted card needs from its surface, bundled so `TranscriptExchangeRow`
+/// Everything a transcript-mounted card needs from its surface, bundled so `TranscriptCell`
 /// keeps taking values and closures rather than the adapter itself — the same "value/closure, not
 /// the object" shape the composer's `draftBinding` already follows, and what keeps the transcript
 /// rows pure functions of their inputs.
@@ -312,7 +312,31 @@ func showsCardTitleRow(_ ask: InteractionRecord.Ask) -> Bool {
 /// are (the primary row, no `optionId` — byte-identical to before). Pure and exported so
 /// `PendingCardsTests` can drive the rule directly, since `PendingApprovalBody` is a private view.
 func approvalAdditionalOptions(_ options: [SessionEvent.ApprovalOption]?) -> [SessionEvent.ApprovalOption] {
-    (options ?? []).filter { $0.id != "allow_once" && $0.id != "deny" }
+    (options ?? []).filter { $0.id != "allow_once" && $0.id != approvalOnceOptionId && $0.id != "deny" }
+}
+
+/// The id of the per-app ComputerV2 card's "allow this one call" option (the card offers `once`,
+/// `session` and `always`; a deny is the plain `approved: false`). It is the primary button of the card,
+/// not a quiet extra — the same place `allow_once` already holds on every other card.
+let approvalOnceOptionId = "once"
+
+/// What the card's two primary buttons SAY. Every card but the per-app ComputerV2 one keeps "Approve" and
+/// "Deny"; that card offers `once`, so its primary button wears that option's own label and the deny
+/// reads "Don't allow" (user ruling R16). What they SEND does not change: the primary button is a plain
+/// approve with no `optionId`, exactly like `allow_once` and like the keyboard's approve
+/// (`dispatchCardKeyAction`), and a plain deny. The card's other two options (`session`, `always`) ride
+/// the quiet row below (`approvalAdditionalOptions`) and answer with their ids.
+struct ApprovalPrimaryChoice: Equatable {
+    let approveLabel: String
+    let denyLabel: String
+}
+
+/// PURE: the primary buttons' words for a card carrying `options`.
+func approvalPrimaryChoice(_ options: [SessionEvent.ApprovalOption]?) -> ApprovalPrimaryChoice {
+    guard let once = (options ?? []).first(where: { $0.id == approvalOnceOptionId }) else {
+        return ApprovalPrimaryChoice(approveLabel: "Approve", denyLabel: "Deny")
+    }
+    return ApprovalPrimaryChoice(approveLabel: once.label.isEmpty ? "Allow once" : once.label, denyLabel: "Don't allow")
 }
 
 /// Phase 5e T5: reviewer text is model-summarized input riding a NEW client-facing surface —
@@ -1060,6 +1084,11 @@ private struct PendingApprovalBody: View {
         approvalAdditionalOptions(options)
     }
 
+    /// The two primary buttons — see `approvalPrimaryChoice`.
+    private var primary: ApprovalPrimaryChoice {
+        approvalPrimaryChoice(options)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(summary)
@@ -1105,10 +1134,10 @@ private struct PendingApprovalBody: View {
                 // afterthought beside it. A decision with two real answers gets two equal targets;
                 // exactly one of them is prominent.
                 HStack(spacing: 8) {
-                    Button("Approve") { onApproval(callId, true, nil, childSessionId) }
+                    Button(primary.approveLabel) { onApproval(callId, true, nil, childSessionId) }
                         .buttonStyle(.borderedProminent)
                         .frame(maxWidth: .infinity)
-                    Button("Deny") { onApproval(callId, false, nil, childSessionId) }
+                    Button(primary.denyLabel) { onApproval(callId, false, nil, childSessionId) }
                         .buttonStyle(.bordered)
                         .frame(maxWidth: .infinity)
                 }

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { keychainService } from "../profile";
+import { keychainService, resolveWinterProfile } from "../profile";
 
 export interface SecretStore {
   get(name: string): Promise<string | null>;
@@ -24,7 +24,20 @@ export interface SecretStore {
 // afterward is inert; `SERVICE` will not re-resolve. This is why a launchd-installed dev daemon
 // MUST have `WINTER_PROFILE` baked into its plist's `EnvironmentVariables` (see
 // `packages/cli/src/launchd.ts` `renderPlist`) rather than relying on any later mutation.
-const SERVICE = keychainService();
+//
+// ISOLATION FIX (2026-10-09): the home an EXPLICIT `WINTER_HOME` names is passed through, so a process run on a
+// custom home honours `WINTER_KEYCHAIN_SERVICE` (`keychainService`'s own rule). Without it this store — the
+// daemon's and the CLI's — always used the profile's REAL service: a hand-started daemon on a temp home probed
+// `com.winter.core[.dev]` and raised one Keychain prompt per item another binary created. No `WINTER_HOME`
+// still means "assert nothing" (the real service), exactly as before.
+export const DEFAULT_SECRET_SERVICE = keychainService(resolveWinterProfile(), explicitWinterHome());
+
+function explicitWinterHome(): string | undefined {
+  const home = process.env.WINTER_HOME;
+  return home !== undefined && home.length > 0 ? home : undefined;
+}
+
+const SERVICE = DEFAULT_SECRET_SERVICE;
 
 /** `app-token-acl.ts`'s `APP_TOKEN_SHADOW_SUFFIX`, spelled here so this module stays free of the FFI. */
 export const MIGRATION_SHADOW_SUFFIX = ".migrating";
