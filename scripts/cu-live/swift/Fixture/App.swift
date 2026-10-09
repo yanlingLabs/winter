@@ -14,6 +14,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var documents: [FixtureWindow] = []
     private var activity: NSObjectProtocol?
     private var launchedLogged = false
+    /// How the Offspace window was taken off the active Space (nil = it is where it was created).
+    private var placement: SpacePlacement?
+    private var signalSources: [DispatchSourceSignal] = []
     private var fullscreenToken = 0
     private var fullscreenWait: (token: Int, expectEntered: Bool, done: (Bool) -> Void)?
 
@@ -49,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // `open -j` launches hidden, and a hidden app's windows are not drawn: show them, without activating.
             NSApp.unhideWithoutActivation()
             registerCommandObserver()
+            installSignalHandlers()
             // "launched" means READY: windows exist, the page has loaded, commands are being heard.
             web.onLoaded = { [weak self] in self?.markLaunched() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
@@ -76,6 +80,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Nothing here is document-based, so there is no "save changes" sheet to wait for.
         .terminateNow
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Cmd-Q and the like: a Space this process created must not outlive it. (The `quit` command already did this
+        // properly, with verification; this is the no-waiting version for every other way out.)
+        if let placement, placement.method != .fullscreen, let controller = offspace, let skyLight = SkyLight.shared {
+            SpaceMover(skyLight: skyLight).restoreNow(window: UInt32(clamping: controller.window.windowNumber), placement: placement)
+            self.placement = nil
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -128,6 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func fullscreenChanged(_ note: Notification, entered: Bool) {
         guard let window = note.object as? NSWindow else { return }
         fixture.emit("fullscreen", [("window", .str(window.title)), ("entered", .bool(entered))])
+        if !entered, placement?.method == .fullscreen { placement = nil }
         if let wait = fullscreenWait, wait.expectEntered == entered {
             fullscreenWait = nil
             wait.done(true)
@@ -301,7 +315,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case "fullscreen":
             enterFullscreen(done)
         case "exitFullscreen":
-            exitFullscreen(done)
+            exitFullscreen(timeout: 5, done)
+        case "offspace":
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                done(await self.placeOffspace())
+            }
+        case "restoreSpace":
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.restoreOffspace(logNone: true, fullscreenTimeout: 5)
+                done(nil)
+            }
         case "openSample":
             if sampleURL() == nil {
                 done("sample.wcufix is missing from the app bundle")
@@ -369,12 +394,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     // MARK: Full screen
 
+    private func ensureOffspace() -> OffspaceController {
+        if let offspace { return offspace }
+        let created = OffspaceController(slot: 3)
+        offspace = created
+        return created
+    }
+
     private func enterFullscreen(_ done: @escaping (String?) -> Void) {
-        let controller = offspace ?? {
-            let created = OffspaceController(slot: 3)
-            offspace = created
-            return created
-        }()
+        let controller = ensureOffspace()
         if controller.isFullScreen {
             done(nil)
             return
@@ -387,32 +415,136 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.window.toggleFullScreen(nil)
     }
 
-    private func exitFullscreen(_ done: @escaping (String?) -> Void) {
+    private func exitFullscreen(timeout: Double, _ done: @escaping (String?) -> Void) {
         guard let controller = offspace, controller.isFullScreen else {
             done(nil)
             return
         }
-        awaitFullscreen(entered: false, timeout: 5) { exited in
-            done(exited ? nil : "the Offspace window did not leave full screen within 5 s")
+        awaitFullscreen(entered: false, timeout: timeout) { exited in
+            done(exited ? nil : "the Offspace window did not leave full screen within \(Int(timeout)) s")
         }
         controller.window.toggleFullScreen(nil)
     }
 
+    // MARK: Off-Space on a regular Space
+
+    private func logOffspace(_ placement: SpacePlacement, failures: [String]) {
+        var fields: [(String, JV)] = [("method", .str(placement.method.rawValue))]
+        if let id = placement.spaceId { fields.append(("spaceId", .int(Int(id)))) }
+        // What the methods that did NOT work reported, so a fallback is explained rather than silent.
+        if !failures.isEmpty { fields.append(("error", .str(failures.joined(separator: "; ")))) }
+        fixture.emit("offspace", fields)
+    }
+
+    /// `offspace`: takes the Offspace window off the active Space — (a) onto another existing desktop, (b) onto a
+    /// Space created for it, (c) full screen — each verified, the first that works wins. (a) and (b) never switch
+    /// the active Space. Logs `offspace {method, spaceId?, error?}` once it is in place; the caller then acks.
+    private func placeOffspace() async -> String? {
+        let controller = ensureOffspace()
+        if placement == nil, controller.isFullScreen {
+            placement = SpacePlacement(method: .fullscreen, spaceId: nil, createdSpace: nil)
+        }
+        if let placement {
+            logOffspace(placement, failures: []) // already in place: idempotent
+            return nil
+        }
+        // Visible, not key, app not activated.
+        controller.window.orderFront(nil)
+        let windowNumber = controller.window.windowNumber
+        var failures: [String] = []
+        if let skyLight = SkyLight.shared, windowNumber > 0 {
+            let result = await SpaceMover(skyLight: skyLight).place(window: UInt32(windowNumber))
+            failures = result.failures
+            if let placed = result.placement {
+                placement = placed
+                logOffspace(placed, failures: failures)
+                return nil
+            }
+        } else {
+            failures.append(SkyLight.shared == nil ? "SkyLight is not available" : "the Offspace window has no window number")
+        }
+        // (c) full screen, as the `fullscreen` command does it: `fullscreen {entered:true}` is logged first.
+        let error: String? = await withCheckedContinuation { continuation in
+            enterFullscreen { continuation.resume(returning: $0) }
+        }
+        if let error {
+            return ([error] + failures).joined(separator: "; ")
+        }
+        let spaceId = SkyLight.shared?.spaces(ofWindow: UInt32(max(windowNumber, 0)))?.first
+        let placed = SpacePlacement(method: .fullscreen, spaceId: spaceId, createdSpace: nil)
+        placement = placed
+        logOffspace(placed, failures: failures)
+        return nil
+    }
+
+    /// `restoreSpace` and the start of `quit`: the window goes back to the active Space (or leaves full screen) and a
+    /// Space this process created is destroyed. Logs `offspace.restored {method, error?}`; `logNone` also logs
+    /// `{method:"none"}` when there was nothing to restore (the explicit command does, `quit` does not).
+    private func restoreOffspace(logNone: Bool, fullscreenTimeout: Double) async {
+        guard let controller = offspace else {
+            if logNone { fixture.emit("offspace.restored", [("method", .str("none"))]) }
+            return
+        }
+        var current = placement
+        if current == nil, controller.isFullScreen { current = SpacePlacement(method: .fullscreen, spaceId: nil, createdSpace: nil) }
+        guard let current else {
+            if logNone { fixture.emit("offspace.restored", [("method", .str("none"))]) }
+            return
+        }
+        var problem: String?
+        switch current.method {
+        case .fullscreen:
+            if controller.isFullScreen {
+                problem = await withCheckedContinuation { continuation in
+                    exitFullscreen(timeout: fullscreenTimeout) { continuation.resume(returning: $0) }
+                }
+            }
+        case .managedSpace, .createdSpace:
+            if let skyLight = SkyLight.shared {
+                problem = await SpaceMover(skyLight: skyLight).restore(window: UInt32(max(controller.window.windowNumber, 0)), placement: current)
+            } else {
+                problem = "SkyLight is not available"
+            }
+        }
+        placement = nil
+        var fields: [(String, JV)] = [("method", .str(current.method.rawValue))]
+        if let problem { fields.append(("error", .str(problem))) }
+        fixture.emit("offspace.restored", fields)
+    }
+
     private func quit(_ done: @escaping (String?) -> Void) {
-        let finish = { [weak self] in
+        Task { @MainActor [weak self] in
+            // Leave full screen / come back from a private Space first: terminating from inside a full-screen Space
+            // can strand it, and a Space this process created must be destroyed.
+            await self?.restoreOffspace(logNone: false, fullscreenTimeout: 3)
             // Ack first: the process is about to go away.
             done(nil)
             NSApp.terminate(nil)
             // Never hang: if terminate is somehow deferred (a modal loop), leave anyway.
             DispatchQueue.global().asyncAfter(deadline: .now() + 2.5) { exit(0) }
-            _ = self
         }
-        // Leave full screen first: terminating from inside a full-screen Space can strand the Space.
-        if let controller = offspace, controller.isFullScreen {
-            awaitFullscreen(entered: false, timeout: 3) { _ in finish() }
-            controller.window.toggleFullScreen(nil)
-        } else {
-            finish()
+    }
+
+    // MARK: Signals
+
+    /// SIGTERM/SIGINT restore the Offspace window's Space before dying (a created Space would otherwise outlive the
+    /// process, invisible). The dispatch sources are on a global queue and arm a hard exit FIRST, so a wedged main
+    /// thread (a tracking loop) can never make the fixture unkillable by TERM. SIGKILL is still SIGKILL.
+    private func installSignalHandlers() {
+        for number in [SIGTERM, SIGINT] {
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
+            source.setEventHandler { [weak self] in
+                DispatchQueue.global().asyncAfter(deadline: .now() + 3) { exit(0) }
+                DispatchQueue.main.async {
+                    Task { @MainActor in
+                        await self?.restoreOffspace(logNone: false, fullscreenTimeout: 2)
+                        exit(0)
+                    }
+                }
+            }
+            source.resume()
+            signalSources.append(source)
         }
     }
 }

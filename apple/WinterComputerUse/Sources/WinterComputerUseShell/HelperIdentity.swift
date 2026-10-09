@@ -51,6 +51,11 @@ public enum WinterCodeIdentity {
     /// Winter.app (signed with its bundle id), the second client: it renders the in-window mirror.
     public static let distAppIdentifier = "com.winter.app"
     public static let devAppIdentifier = "com.winter.app.dev"
+    /// The live ComputerV2 suite's own daemon and mirror probe (`scripts/cu-live`). TEST-ONLY identifiers: a
+    /// binary carrying the dev identifiers above would satisfy the dev Keychain items' access lists and the
+    /// pairing tokens'; these satisfy nothing but a dev helper serving a live-test home (`isLiveTestHome`).
+    public static let liveTestDaemonIdentifier = "com.winter.core.cutest"
+    public static let liveTestAppIdentifier = "com.winter.app.cutest"
 
     /// A stated designated requirement: the identifier and Winter's team under Apple's anchor — the shape
     /// `scripts/dev-daemon-lib.ts` signs the dev daemon with, which any Winter-team certificate satisfies.
@@ -93,6 +98,9 @@ public struct HelperIdentity: Sendable, Equatable {
     public let home: String
     /// Where the home came from: `"default"` or `"WINTER_CU_HOME"`.
     public let homeSource: String
+    /// A dev helper serving the live suite's temp home (`isLiveTestHome`): it accepts the suite's test identities
+    /// INSTEAD of the dev daemon's and Winter Dev's.
+    public let liveTest: Bool
     public let socketPath: String
     /// The designated requirement a connecting daemon must satisfy.
     public let daemonRequirement: String
@@ -105,9 +113,11 @@ public struct HelperIdentity: Sendable, Equatable {
     ///   - bundlePath: the helper's own `.app`, to tell an installed copy (inside Winter.app's
     ///     `Contents/Helpers`) from a dev or test build.
     ///   - userHome: the user's home directory (`~`).
+    ///   - temporaryDirectory: the per-user temp dir (`NSTemporaryDirectory()`), where a live-test home lives.
     public static func resolve(bundleIdentifier: String?, bundlePath: String, environment: [String: String],
                                userHome: String, helperVersion: String,
-                               testHooks: HelperTestHooks?) throws -> HelperIdentity {
+                               testHooks: HelperTestHooks?,
+                               temporaryDirectory: String = NSTemporaryDirectory()) throws -> HelperIdentity {
         let override = environment["WINTER_CU_HOME"].flatMap { $0.isEmpty ? nil : $0 }
         let profile: HelperProfile
         let defaultHome: String?
@@ -156,17 +166,33 @@ public struct HelperIdentity: Sendable, Equatable {
             throw HelperIdentityError.missingHomeOverride
         }
         guard let canonical = canonicalPath(chosen) else { throw HelperIdentityError.homeMissing(chosen) }
+        // The live suite (`bun run e2e:cu-live`): a DEV helper launched for a home inside a `winter-cu-live-` run dir
+        // under the temp dir serves that run's test daemon and probe, and nothing else — the requirement is chosen
+        // here, once, at startup. Every other dev helper keeps demanding the dev daemon and Winter Dev.
+        let liveTest = profile == .dev && source == "WINTER_CU_HOME" && isLiveTestHome(canonical, temporaryDirectory: temporaryDirectory)
         return HelperIdentity(
             profile: profile,
             bundleIdentifier: bundleIdentifier ?? "",
             home: canonical,
             homeSource: source,
+            liveTest: liveTest,
             socketPath: ((canonical as NSString).appendingPathComponent("run") as NSString).appendingPathComponent(socketName),
-            daemonRequirement: requirement,
-            appRequirement: appRequirement,
+            daemonRequirement: liveTest ? WinterCodeIdentity.requirement(identifier: WinterCodeIdentity.liveTestDaemonIdentifier) : requirement,
+            appRequirement: liveTest ? WinterCodeIdentity.requirement(identifier: WinterCodeIdentity.liveTestAppIdentifier) : appRequirement,
             helperVersion: helperVersion,
             idleQuitSeconds: idleSeconds
         )
+    }
+
+    /// `<temp>/winter-cu-live-<anything>/<home…>`: a home INSIDE a live-suite run dir directly under the temp dir
+    /// (canonical paths on both sides). The run dir itself is not a home.
+    public static func isLiveTestHome(_ canonicalHome: String, temporaryDirectory: String) -> Bool {
+        guard let temp = canonicalPath(temporaryDirectory) else { return false }
+        let prefix = temp.hasSuffix("/") ? temp : temp + "/"
+        guard canonicalHome.hasPrefix(prefix) else { return false }
+        let parts = canonicalHome.dropFirst(prefix.count).split(separator: "/")
+        guard parts.count >= 2, let runDir = parts.first else { return false }
+        return runDir.hasPrefix("winter-cu-live-") && runDir.count > "winter-cu-live-".count
     }
 
     /// `…/<Something>.app/Contents/Helpers/<Helper>.app` — the installed shape.

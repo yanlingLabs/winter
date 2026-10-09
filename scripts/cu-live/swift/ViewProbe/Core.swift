@@ -146,6 +146,11 @@ enum ProbeArgs {
 struct LumaStats: Equatable {
     var mean: Double
     var stddev: Double
+    /// Pixels that look like the fixture's sentinel (#FF00FF: `r >= 200 && g <= 70 && b >= 200`). Counted on the
+    /// FULL decoded frame, not the 64x40 grid the luma uses: the probe already decodes every frame, a 480-px-wide
+    /// frame is ~150k pixels (a 2560-px one ~4M, still a few ms), and a 48-pt block blended into a coarse grid
+    /// could not be counted reliably.
+    var sentinelPixels: Int = 0
     /// A window that is blank (or a failed capture, which comes back flat) has next to no spread in luma.
     var blank: Bool { stddev < Luma.blankThreshold }
 }
@@ -155,6 +160,23 @@ enum Luma {
     static let gridWidth = 64
     static let gridHeight = 40
     static let blankThreshold = 2.0
+
+    static func isSentinel(r: UInt8, g: UInt8, b: UInt8) -> Bool { r >= 200 && g <= 70 && b >= 200 }
+
+    /// sRGB RGBA bytes of the image drawn at the given size (a downscale is the averaging).
+    private static func bitmap(of image: CGImage, width: Int, height: Int) -> [UInt8]? {
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+                  let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: width * 4, space: space,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.interpolationQuality = .high
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return drawn ? pixels : nil
+    }
 
     /// Decodes a JPEG and measures it. nil when the bytes are not an image ImageIO can decode.
     static func stats(jpeg: Data) -> LumaStats? {
@@ -169,26 +191,27 @@ enum Luma {
     /// Core Graphics' color-managed conversion is non-linear (sRGB 128 comes out as ~146), which would make
     /// `meanLuma` mean something other than "how bright is this picture in the numbers the encoder holds".
     static func stats(image: CGImage) -> LumaStats? {
+        guard image.width > 0, image.height > 0, let grid = bitmap(of: image, width: gridWidth, height: gridHeight) else { return nil }
         let count = gridWidth * gridHeight
-        var pixels = [UInt8](repeating: 0, count: count * 4)
-        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
-            guard let space = CGColorSpace(name: CGColorSpace.sRGB),
-                  let context = CGContext(data: buffer.baseAddress, width: gridWidth, height: gridHeight, bitsPerComponent: 8,
-                                          bytesPerRow: gridWidth * 4, space: space,
-                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-            context.interpolationQuality = .high
-            context.draw(image, in: CGRect(x: 0, y: 0, width: gridWidth, height: gridHeight))
-            return true
-        }
-        guard drawn else { return nil }
         var lumas = [Double](repeating: 0, count: count)
         for index in 0..<count {
             let base = index * 4
-            lumas[index] = 0.299 * Double(pixels[base]) + 0.587 * Double(pixels[base + 1]) + 0.114 * Double(pixels[base + 2])
+            lumas[index] = 0.299 * Double(grid[base]) + 0.587 * Double(grid[base + 1]) + 0.114 * Double(grid[base + 2])
         }
         let mean = lumas.reduce(0, +) / Double(count)
         let variance = lumas.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(count)
-        return LumaStats(mean: mean, stddev: variance.squareRoot())
+
+        var sentinel = 0
+        if let full = bitmap(of: image, width: image.width, height: image.height) {
+            full.withUnsafeBufferPointer { pixels in
+                var index = 0
+                while index < pixels.count {
+                    if isSentinel(r: pixels[index], g: pixels[index + 1], b: pixels[index + 2]) { sentinel += 1 }
+                    index += 4
+                }
+            }
+        }
+        return LumaStats(mean: mean, stddev: variance.squareRoot(), sentinelPixels: sentinel)
     }
 }
 
@@ -281,10 +304,10 @@ enum ProbeProtocol {
             if let jpeg, let stats = Luma.stats(jpeg: jpeg) {
                 fields += [("meanLuma", .d((stats.mean * 10).rounded() / 10)),
                            ("stddevLuma", .d((stats.stddev * 100).rounded() / 100)),
-                           ("blank", .b(stats.blank))]
+                           ("blank", .b(stats.blank)), ("sentinelPixels", .i(stats.sentinelPixels))]
             } else {
                 // A frame we cannot decode is no picture: report it as blank, and say why.
-                fields += [("meanLuma", .null), ("stddevLuma", .null), ("blank", .b(true)), ("decodeFailed", .b(true))]
+                fields += [("meanLuma", .null), ("stddevLuma", .null), ("blank", .b(true)), ("sentinelPixels", .i(0)), ("decodeFailed", .b(true))]
             }
             return JSONOut.line(t: t, ev: "frame", fields)
         default:

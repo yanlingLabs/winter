@@ -185,7 +185,8 @@ enum CommandDecoder {
     /// probe and clean up either process.
     static func supported(role: String) -> Set<String> {
         switch role {
-        case "main": return ["ping", "steal", "reset", "dump", "fullscreen", "exitFullscreen", "openSample", "quit", "animate"]
+        case "main": return ["ping", "steal", "reset", "dump", "fullscreen", "exitFullscreen", "openSample", "quit", "animate",
+                             "offspace", "restoreSpace"]
         case "user": return ["ping", "activate", "reset", "dump", "quit"]
         default: return []
         }
@@ -353,17 +354,18 @@ enum WindowGrid {
     }
 }
 
-// MARK: - Scroll throttle
+// MARK: - Throttle
 
-/// `web.scroll` is "throttled <= 4/s". Leading + trailing edge: the first scroll goes out at once and the LAST
-/// position of a burst always goes out too (otherwise the final scrollY would never be logged).
-struct ScrollThrottle {
+/// Leading + trailing edge throttle. The first value goes out at once and the LAST value of a burst always goes
+/// out too (otherwise the final position would never be logged). Used for `web.scroll` (<= 4/s) and the notes
+/// `scroller` route (<= 10/s).
+struct Throttle<Value> {
     let minInterval: Double
     private(set) var lastEmit: Double = -.infinity
-    private(set) var pending: Double?
+    private(set) var pending: Value?
 
-    enum Decision: Equatable {
-        case emit(Double)
+    enum Decision {
+        case emit(Value)
         /// Hold this value and call `flush` at (or after) this time.
         case flushAt(Double)
         /// Replaces the held value; a flush is already scheduled.
@@ -372,23 +374,28 @@ struct ScrollThrottle {
 
     init(minInterval: Double = 0.25) { self.minInterval = minInterval }
 
-    mutating func offer(_ y: Double, now: Double) -> Decision {
+    mutating func offer(_ value: Value, now: Double) -> Decision {
         if pending == nil, now - lastEmit >= minInterval {
             lastEmit = now
-            return .emit(y)
+            return .emit(value)
         }
         let alreadyScheduled = pending != nil
-        pending = y
+        pending = value
         return alreadyScheduled ? .absorbed : .flushAt(lastEmit + minInterval)
     }
 
-    mutating func flush(now: Double) -> Double? {
-        guard let y = pending else { return nil }
+    mutating func flush(now: Double) -> Value? {
+        guard let value = pending else { return nil }
         pending = nil
         lastEmit = now
-        return y
+        return value
     }
 }
+
+extension Throttle.Decision: Equatable where Value: Equatable {}
+
+/// `web.scroll`'s throttle (the value is scrollY).
+typealias ScrollThrottle = Throttle<Double>
 
 // MARK: - Canvas animation
 
@@ -408,5 +415,166 @@ enum Animation {
         let phase = (elapsed * speed).truncatingRemainder(dividingBy: period)
         let wrapped = phase < 0 ? phase + period : phase
         return wrapped <= travel ? wrapped : period - wrapped
+    }
+}
+
+// MARK: - Sentinel
+
+/// Every main-role fixture window carries a SENTINEL: a solid #FF00FF (sRGB 255, 0, 255) block, 48x48 pt, at the
+/// top-left of the window's content area inset 8 pt. It is what the live suite looks for in a screenshot or a
+/// mirrored frame to prove the picture is THIS window (a pixel count of exactly-magenta, `r>=200 && g<=70 &&
+/// b>=200`), independent of anything the app under test draws. Nothing may cover it: the other controls are laid
+/// out beside it, it is added last (topmost), and it takes no events. Form and Offspace use an opaque NSView
+/// (`SentinelView`), the canvas draws it last (after the tint and the animation), the web page uses a fixed
+/// `#sentinel` div. Document windows do not carry one.
+enum Sentinel {
+    static let size: CGFloat = 48
+    static let inset: CGFloat = 8
+    static let red = 255, green = 0, blue = 255
+
+    /// In a top-left-origin (flipped) coordinate space — the content area of every window that carries it.
+    static var rect: CGRect { CGRect(x: inset, y: inset, width: size, height: size) }
+
+    /// Exactly (255, 0, 255) in sRGB, and `.copy` so nothing underneath (a translucent tint) can blend into it.
+    static func fill(_ rect: CGRect) {
+        NSColor(srgbRed: 1, green: 0, blue: 1, alpha: 1).setFill()
+        rect.fill(using: .copy)
+    }
+}
+
+// MARK: - Notes scroller route
+
+/// What the `scroller` log line reports.
+struct ScrollerSample: Equatable {
+    var value: Double
+    var byWheel: Bool
+}
+
+enum ScrollerMath {
+    /// The vertical scroller's `doubleValue`: 0 at the top, 1 at the bottom, 0 when everything fits.
+    static func value(offset: Double, contentHeight: Double, viewportHeight: Double) -> Double {
+        let range = contentHeight - viewportHeight
+        guard range > 0 else { return 0 }
+        return min(max(offset / range, 0), 1)
+    }
+
+    /// Logged to 0.001.
+    static func rounded(_ value: Double) -> Double { (value * 1000).rounded() / 1000 }
+}
+
+/// Tells a scroll that came from the wheel from one that came from the scroller (AX increment, a track click,
+/// the keyboard): wheel means a scrollWheel event is being handled, or ended less than 300 ms ago (smooth scrolling
+/// and momentum apply their bounds changes a little after the event itself).
+struct WheelWindow {
+    static let afterWheel = 0.3
+    private var inside = false
+    private var lastEnd: Double?
+
+    mutating func begin() { inside = true }
+
+    mutating func end(now: Double) {
+        inside = false
+        lastEnd = now
+    }
+
+    func isWheel(now: Double) -> Bool {
+        if inside { return true }
+        guard let lastEnd else { return false }
+        return now - lastEnd <= Self.afterWheel
+    }
+}
+
+/// Remembers the last vertical position seen so that a bounds change that moved nothing vertically (a horizontal
+/// or no-op change) logs nothing.
+struct ScrollerReport {
+    private var last: Double?
+
+    mutating func changed(_ value: Double) -> Bool {
+        guard value != last else { return false }
+        last = value
+        return true
+    }
+
+    /// Records a position without reporting it (a programmatic reset).
+    mutating func rebase(_ value: Double) { last = value }
+}
+
+// MARK: - Spaces (pure planning; the SkyLight calls live in Spaces.swift)
+
+struct SpaceInfo: Equatable {
+    let id: UInt64
+    /// 0 = a user desktop, 4 = a full-screen app's Space.
+    let type: Int
+}
+
+struct DisplaySpaces: Equatable {
+    let identifier: String
+    let spaces: [SpaceInfo]
+    /// The Space this display is showing now.
+    let current: UInt64?
+}
+
+enum SpacePlanner {
+    static let userDesktopType = 0
+
+    static func spaceID(_ value: Any?) -> UInt64? {
+        guard let number = value as? NSNumber, number.int64Value > 0 else { return nil }
+        return UInt64(number.int64Value)
+    }
+
+    /// Parses `SLSCopyManagedDisplaySpaces`: one dictionary per display with "Display Identifier", "Spaces" (each
+    /// with "id64" and "type") and "Current Space".
+    static func parse(_ displays: [[String: Any]]) -> [DisplaySpaces] {
+        displays.map { display in
+            let spaces = ((display["Spaces"] as? [[String: Any]]) ?? []).compactMap { space -> SpaceInfo? in
+                guard let id = spaceID(space["id64"] ?? space["ManagedSpaceID"]) else { return nil }
+                return SpaceInfo(id: id, type: (space["type"] as? NSNumber)?.intValue ?? -1)
+            }
+            let current = spaceID((display["Current Space"] as? [String: Any])?["id64"])
+            return DisplaySpaces(identifier: (display["Display Identifier"] as? String) ?? "", spaces: spaces, current: current)
+        }
+    }
+
+    /// Every Space any display is showing right now, plus the active one: where a window is on screen.
+    static func visibleSpaces(_ displays: [DisplaySpaces], active: UInt64?) -> Set<UInt64> {
+        var visible = Set(displays.compactMap(\.current))
+        if let active { visible.insert(active) }
+        return visible
+    }
+
+    /// (a): another existing user desktop on the window's own display that is not showing. The window's display
+    /// is the one that holds a Space the window is on; failing that the one showing the active Space.
+    static func otherDesktop(displays: [DisplaySpaces], windowSpaces: [UInt64], active: UInt64?) -> UInt64? {
+        let own = displays.first { display in display.spaces.contains { windowSpaces.contains($0.id) } }
+            ?? displays.first { $0.current != nil && $0.current == active }
+            ?? displays.first
+        guard let own else { return nil }
+        let showing = visibleSpaces([own], active: active)
+        return own.spaces.first { $0.type == userDesktopType && !showing.contains($0.id) && !windowSpaces.contains($0.id) }?.id
+    }
+
+    /// A window is off screen when it is on at least one Space and none of them is showing. `mustBeOn`, when
+    /// given, is the Space it was just sent to: being nowhere at all is not success.
+    static func isOffScreen(windowSpaces: [UInt64], visible: Set<UInt64>, mustBeOn: UInt64? = nil) -> Bool {
+        guard !windowSpaces.isEmpty, visible.isDisjoint(with: windowSpaces) else { return false }
+        if let mustBeOn { return windowSpaces.contains(mustBeOn) }
+        return true
+    }
+}
+
+/// How the Offspace window was taken off the active Space, as logged in `offspace {method}`.
+enum OffspaceMethod: String {
+    case managedSpace = "managed-space"
+    case createdSpace = "created-space"
+    case fullscreen
+}
+
+// MARK: - Self-activation
+
+enum ActivationOutcome {
+    /// An activation "took" only when macOS agrees on both counts: the app reports active AND the frontmost
+    /// application is this process.
+    static func took(isActive: Bool, frontPid: Int32?, ownPid: Int32) -> Bool {
+        isActive && frontPid == ownPid
     }
 }

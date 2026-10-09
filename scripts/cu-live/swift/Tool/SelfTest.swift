@@ -1,4 +1,6 @@
+import CoreGraphics
 import Foundation
+import ImageIO
 
 // `cu-live-tool self-test`: argument parsing and JSON encoding. Touches no window server.
 
@@ -34,6 +36,10 @@ func runToolSelfTest() -> Int32 {
     check(usageError(["frobnicate"]) != nil, "unknown command rejected")
     check(usageError(["front", "extra"]) != nil, "front with arguments rejected")
 
+    check(parse(["image-stats", "/tmp/shot.png"]) == .imageStats(path: "/tmp/shot.png"), "image-stats <file>")
+    check(usageError(["image-stats"]) != nil, "image-stats needs a file")
+    check(usageError(["image-stats", "a", "b"]) != nil, "image-stats takes one file")
+
     check(parse(["post", "--run", "r1", "--role", "main", "--cmd", "ping"]) == .post(run: "r1", role: "main", cmd: "ping", args: nil, seq: nil), "post minimal")
     check(parse(["post", "--run", "r1", "--role", "user", "--cmd", "steal", "--args", "{\"mode\":\"focus\"}", "--seq", "12"])
           == .post(run: "r1", role: "user", cmd: "steal", args: "{\"mode\":\"focus\"}", seq: "12"), "post with args and seq")
@@ -64,6 +70,82 @@ func runToolSelfTest() -> Int32 {
     check(Sampling.nowMs() > 1_700_000_000_000, "nowMs is epoch milliseconds")
     // IOKit needs no permission and no window server: either a sane number or nil, never negative.
     check((Sampling.hidIdleMs() ?? 0) >= 0, "hidIdleMs is non-negative when present")
+
+    // --- image-stats on synthetic images ---------------------------------------------------------------------
+    func image(width: Int, height: Int, space: CGColorSpace, _ draw: (CGContext) -> Void) -> CGImage? {
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        draw(context)
+        return context.makeImage()
+    }
+    func encode(_ image: CGImage?, type: String) -> Data? {
+        guard let image else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, type as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+        return CGImageDestinationFinalize(destination) ? data as Data : nil
+    }
+    let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+    let magenta = CGColor(colorSpace: srgb, components: [1, 0, 1, 1])!
+    let white = CGColor(colorSpace: srgb, components: [1, 1, 1, 1])!
+    /// A white 400x300 picture, with the sentinel (48x48 at 8,8 from the top-left) when asked.
+    func screenshot(space: CGColorSpace, withSentinel: Bool) -> CGImage? {
+        image(width: 400, height: 300, space: space) { context in
+            context.setFillColor(white)
+            context.fill(CGRect(x: 0, y: 0, width: 400, height: 300))
+            if withSentinel {
+                context.setFillColor(magenta)
+                context.fill(CGRect(x: 8, y: 300 - 8 - 48, width: 48, height: 48)) // CG's origin is bottom-left
+            }
+        }
+    }
+    func report(_ data: Data?) -> ImageReport? {
+        guard let data, case .success(let report) = ImageStats.analyze(data: data) else { return nil }
+        return report
+    }
+
+    let plainWhite = report(encode(screenshot(space: srgb, withSentinel: false), type: "public.png"))
+    check(plainWhite?.width == 400 && plainWhite?.height == 300, "image-stats: size")
+    check(plainWhite?.sentinelPixels == 0, "image-stats: a blank picture has no sentinel pixels")
+    check(plainWhite?.blank == true, "image-stats: a white picture is blank")
+    check((plainWhite?.meanLuma ?? 0) > 250, "image-stats: a white picture is bright")
+    let marked = report(encode(screenshot(space: srgb, withSentinel: true), type: "public.png"))
+    check(marked?.sentinelPixels == 2304, "image-stats: a 48x48 magenta block is 2304 pixels (got \(marked?.sentinelPixels ?? -1))")
+    check(marked?.sentinelFraction == 2304.0 / 120_000.0, "image-stats: sentinelFraction is pixels over w*h")
+    check(marked?.blank == false, "image-stats: a picture with a block is not blank")
+    let markedJPEG = report(encode(screenshot(space: srgb, withSentinel: true), type: "public.jpeg"))
+    check((1800...2304).contains(markedJPEG?.sentinelPixels ?? 0), "image-stats: JPEG fuzz keeps the sentinel countable (got \(markedJPEG?.sentinelPixels ?? -1))")
+    check(report(encode(screenshot(space: srgb, withSentinel: false), type: "public.jpeg"))?.sentinelPixels == 0, "image-stats: a blank JPEG has no sentinel pixels")
+    // A screenshot tagged Display P3 (what screencapture writes on a wide-gamut display): the block is drawn from
+    // the sRGB magenta, so the file holds P3 code values — counting must still see 2304.
+    let p3 = CGColorSpace(name: CGColorSpace.displayP3)!
+    let markedP3 = report(encode(screenshot(space: p3, withSentinel: true), type: "public.png"))
+    check(markedP3?.sentinelPixels == 2304, "image-stats: a Display P3 screenshot is converted before counting (got \(markedP3?.sentinelPixels ?? -1))")
+    let markedDevice = report(encode(screenshot(space: CGColorSpaceCreateDeviceRGB(), withSentinel: true), type: "public.png"))
+    check(markedDevice?.sentinelPixels == 2304, "image-stats: an untagged (device RGB) picture counts too (got \(markedDevice?.sentinelPixels ?? -1))")
+    // Not magenta: pure red, pure blue, and pink with too much green must not count.
+    let notSentinel = image(width: 100, height: 100, space: srgb) { context in
+        context.setFillColor(CGColor(colorSpace: srgb, components: [1, 0, 0, 1])!); context.fill(CGRect(x: 0, y: 0, width: 50, height: 50))
+        context.setFillColor(CGColor(colorSpace: srgb, components: [0, 0, 1, 1])!); context.fill(CGRect(x: 50, y: 0, width: 50, height: 50))
+        context.setFillColor(CGColor(colorSpace: srgb, components: [1, 0.6, 1, 1])!); context.fill(CGRect(x: 0, y: 50, width: 100, height: 50))
+    }
+    check(report(encode(notSentinel, type: "public.png"))?.sentinelPixels == 0, "image-stats: red, blue and pink are not the sentinel")
+    check(ImageStats.isSentinel(r: 200, g: 70, b: 200) && !ImageStats.isSentinel(r: 199, g: 0, b: 255)
+          && !ImageStats.isSentinel(r: 255, g: 71, b: 255) && !ImageStats.isSentinel(r: 255, g: 0, b: 199), "image-stats: the rule's boundaries")
+    if let marked {
+        let parsed = (try? JSONSerialization.jsonObject(with: Data(marked.json.utf8), options: [])) as? [String: Any]
+        check(parsed != nil && Set(parsed!.keys) == ["width", "height", "meanLuma", "stddevLuma", "blank", "sentinelPixels", "sentinelFraction"], "image-stats: the line has exactly the contract's keys")
+        check(parsed?["sentinelPixels"] as? Int == 2304 && parsed?["blank"] as? Bool == false && parsed?["width"] as? Int == 400, "image-stats: the line's values")
+        check(marked.json.hasPrefix("{\"width\":400,\"height\":300,\"meanLuma\":"), "image-stats: the line's key order")
+    } else {
+        check(false, "image-stats: the line has exactly the contract's keys")
+    }
+    if case .failure(let error) = ImageStats.analyze(data: Data("definitely not an image".utf8)) {
+        check(error.message == "not an image ImageIO can decode", "image-stats: undecodable bytes are an error")
+    } else { check(false, "image-stats: undecodable bytes are an error") }
+    if case .failure(let error) = ImageStats.analyze(path: "/nonexistent/cu-live/shot.png") {
+        check(error.message.hasPrefix("cannot read"), "image-stats: a missing file is an error")
+    } else { check(false, "image-stats: a missing file is an error") }
 
     if failures.isEmpty {
         print("SELFTEST OK")

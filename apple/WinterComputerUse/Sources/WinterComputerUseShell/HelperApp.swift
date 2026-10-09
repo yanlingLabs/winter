@@ -43,7 +43,7 @@ import WinterCUPresentation
         } catch {
             fail("cannot start: \(error)")
         }
-        log.info("Winter Computer Use \(version) (\(identity.profile.rawValue)) serving \(identity.home) [\(identity.homeSource)]")
+        log.info("Winter Computer Use \(version) (\(identity.profile.rawValue)) serving \(identity.home) [\(identity.homeSource)]\(identity.liveTest ? " — a live-test instance: it accepts only the live suite's test daemon and probe" : "")")
 
         let authenticator: CodeSigningPeerAuthenticator
         do {

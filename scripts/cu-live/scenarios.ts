@@ -17,7 +17,13 @@ export const FIXTURE_BUNDLE = "com.winter.cu-fixture";
 export const USER_APP_BUNDLE = "com.winter.cu-fixture-user";
 
 /** One event the view probe printed (`cu-live-viewprobe`). */
-export interface ProbeEvent { t: number; ev: string; targetId?: string; appName?: string; blank?: boolean; bytes?: number; stddevLuma?: number }
+export interface ProbeEvent { t: number; ev: string; targetId?: string; appName?: string; blank?: boolean; bytes?: number; stddevLuma?: number; sentinelPixels?: number }
+
+/** `cu-live-tool image-stats` on one screenshot the daemon returned (its own pixels). */
+export interface ImageStats { file: string; width: number; height: number; stddevLuma: number; blank: boolean; sentinelPixels: number; error?: string }
+
+/** The fixture's sentinel: a solid #FF00FF block in every window — a screenshot of the window must contain it. */
+export const SENTINEL_MIN_PIXELS = 200;
 
 export interface VerifyContext {
   output: string;
@@ -32,6 +38,8 @@ export interface VerifyContext {
   probe: readonly ProbeEvent[];
   /** `automation-metrics.jsonl` lines since the scenario started. */
   metrics: readonly Record<string, unknown>[];
+  /** The screenshots the daemon returned since the scenario started, judged by their own pixels. */
+  shots: readonly ImageStats[];
 }
 
 export interface FixtureCommand { role: "main" | "user"; cmd: string; args?: Record<string, unknown> }
@@ -97,16 +105,18 @@ function mirrorChecks(ctx: VerifyContext, app: string): Check[] {
     check("mirror frames arrived for it", frames.length > 0, "no view.frame for the bound target"),
     check("no blank mirror frame (no flash)", blank.length === 0, `${blank.length} of ${frames.length} frames blank`),
     check("no repeat view.bound for one target", repeats.length === 0, `repeated: ${repeats.join(", ")}`),
+    check("the mirror frames show the window's sentinel", frames.some((f) => (f.sentinelPixels ?? 0) > 0), `sentinel pixels ${frames.map((f) => f.sentinelPixels ?? 0).join(",")}`),
   ];
 }
 
-/** The screenshot primitive's encoded size (daemon metrics): a capture with content is never a few KB of black. */
-function screenshotChecks(ctx: VerifyContext, primitive: string): Check[] {
-  const shots = ctx.metrics.filter((m) => m.primitive === primitive && typeof m.imageBytes === "number");
-  const bytes = shots.map((m) => m.imageBytes as number);
+/** The screenshot's OWN pixels (the daemon's test sink): decoded, not blank, and the window's sentinel is in it. */
+function screenshotChecks(ctx: VerifyContext): Check[] {
+  const shots = ctx.shots.filter((s) => s.error === undefined);
+  const describe = shots.map((s) => `${s.width}x${s.height} σ${s.stddevLuma.toFixed(1)} sentinel ${s.sentinelPixels}`).join("; ");
   return [
-    check(`${primitive} produced an image`, shots.length > 0, "no screenshot metric"),
-    check(`${primitive} has content (encoded size)`, bytes.length > 0 && Math.min(...bytes) > 8_000, `bytes ${bytes.join(", ")}`),
+    check("the screenshot was returned and decodes", shots.length > 0, ctx.shots.map((s) => s.error ?? "").join("; ") || "no screenshot written"),
+    check("its pixels are not blank", shots.length > 0 && shots.every((s) => !s.blank), describe),
+    check(`it shows the fixture's sentinel block (≥ ${SENTINEL_MIN_PIXELS} #FF00FF pixels)`, shots.length > 0 && shots.every((s) => s.sentinelPixels >= SENTINEL_MIN_PIXELS), describe),
   ];
 }
 
@@ -318,20 +328,28 @@ report({ ok: true });`,
     verify: (ctx) => [ok(ctx), check("End scrolled the page far down", Number(webState(ctx).scrollY ?? 0) > 400, `scrollY ${String(webState(ctx).scrollY)}`)],
   },
   {
-    name: "scroll by scroll bar (Notes)", group: "scroll",
+    name: "scroll by the scroll bar itself (Notes, not a wheel)", group: "scroll",
     before: [{ role: "main", cmd: "reset" }],
     code: `
 const form = await win("Fixture Form");
 const notes = await pick(form, "Notes", "text");
 await form.setValue(notes.ref, Array.from({ length: 120 }, (_, i) => "line " + (i + 1)).join("\\n"));
-const bars = (await form.find({ role: "scroll bar" }, { emit: false }));
+const bars = await form.find({ role: "scroll bar" }, { emit: false });
 const bar = bars.find((b) => (b.name || "").toLowerCase().includes("vertical")) || bars[0];
 if (!bar) throw new Error("no scroll bar");
-const before = bar.value ?? null;
-await form.scroll(bar.ref, "down", 3);
-const after = (await form.find({ role: "scroll bar" }, { emit: false })).find((b) => b.ref === bar.ref)?.value ?? null;
-report({ before, after });`,
-    verify: (ctx) => [ok(ctx), check("the scroll bar moved", fact(ctx, "after") !== null && fact(ctx, "after") !== fact(ctx, "before"), `${String(fact(ctx, "before"))} → ${String(fact(ctx, "after"))}`)],
+let route = null;
+const tried = [];
+try { await form.setValue(bar.ref, "0.7"); route = "setValue"; } catch (e) { tried.push("setValue: " + e.name); }
+if (route === null) for (const a of ["increment", "page down", "AXIncrement"]) {
+  try { await form.action(bar.ref, a); route = "action " + a; break; } catch (e) { tried.push(a + ": " + e.name); }
+}
+report({ route, tried });`,
+    verify: (ctx) => {
+      const moved = eventsSince(ctx.events, ctx.since, "scroller").filter((e) => e.id === "notes" && e.byWheel === false && Number(e.value) > 0);
+      return [ok(ctx),
+        check("a scroll-bar route was available", fact(ctx, "route") !== null, JSON.stringify(fact(ctx, "tried"))),
+        check("the scroller moved without a wheel event", moved.length > 0, JSON.stringify(eventsSince(ctx.events, ctx.since, "scroller").slice(-3)))];
+    },
   },
   // ── menus ──────────────────────────────────────────────────────────────────────────────────────────────────
   {
@@ -373,7 +391,7 @@ report({ result: r.result, shell, other, scriptable: dict.scriptable });`,
 const canvas = await win("Fixture Canvas");
 const img = await canvas.screenshot({ emit: false });
 report({ w: img.width, h: img.height });`,
-    verify: (ctx) => [ok(ctx), ...screenshotChecks(ctx, "screenshot"), check("a real size", Number(fact(ctx, "w")) > 100 && Number(fact(ctx, "h")) > 100)],
+    verify: (ctx) => [ok(ctx), ...screenshotChecks(ctx), check("a real size", Number(fact(ctx, "w")) > 100 && Number(fact(ctx, "h")) > 100)],
   },
   {
     name: "screenshot off-Space", group: "screenshot",
@@ -381,7 +399,7 @@ report({ w: img.width, h: img.height });`,
 const off = await win("Fixture Offspace");
 const img = await off.screenshot({ emit: false });
 report({ w: img.width, h: img.height });`,
-    verify: (ctx) => [ok(ctx), ...screenshotChecks(ctx, "screenshot"), check("a real size", Number(fact(ctx, "w")) > 100 && Number(fact(ctx, "h")) > 100)],
+    verify: (ctx) => [ok(ctx), ...screenshotChecks(ctx), check("a real size", Number(fact(ctx, "w")) > 100 && Number(fact(ctx, "h")) > 100)],
   },
   // ── the focus guardian ─────────────────────────────────────────────────────────────────────────────────────
   {

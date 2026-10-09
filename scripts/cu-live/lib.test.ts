@@ -135,7 +135,7 @@ describe("the scenarios", () => {
 
   test("every verify returns checks on an empty context, and fails them (nothing passes by default)", () => {
     for (const s of all) {
-      const checks = s.verify({ output: "", isError: true, facts: {}, events: [], since: 0, probe: [], metrics: [] });
+      const checks = s.verify({ output: "", isError: true, facts: {}, events: [], since: 0, probe: [], metrics: [], shots: [] });
       expect(checks.length).toBeGreaterThan(0);
       expect(checks.some((c) => !c.ok)).toBe(true);
     }

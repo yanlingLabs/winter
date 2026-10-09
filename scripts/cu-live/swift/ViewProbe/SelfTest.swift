@@ -175,6 +175,25 @@ func runProbeSelfTest() -> Int32 {
     let notImage = parsed(ProbeProtocol.eventLine(method: "view.frame", params: ["targetId": "t1", "seq": 8, "jpeg": Data("hello".utf8).base64EncodedString()], t: 5))
     check(notImage?["decodeFailed"] as? Bool == true && notImage?["bytes"] as? Int == 5, "valid base64 that is not an image is reported")
 
+    // The sentinel: a 48x48 #FF00FF block 8 px from the top-left of a 480x300 frame.
+    let withSentinel = makeImage(width: 480, height: 300) { context in
+        context.setFillColor(gray(1)); context.fill(CGRect(x: 0, y: 0, width: 480, height: 300))
+        context.setFillColor(CGColor(colorSpace: srgb, components: [1, 0, 1, 1])!)
+        context.fill(CGRect(x: 8, y: 300 - 8 - 48, width: 48, height: 48))
+    }
+    let markedJPEG = jpegData(withSentinel) ?? Data()
+    let markedStats = Luma.stats(jpeg: markedJPEG)
+    check((1800...2304).contains(markedStats?.sentinelPixels ?? 0), "sentinel: a magenta 48x48 block is counted on the full frame (got \(markedStats?.sentinelPixels ?? -1))")
+    check(markedStats?.blank == false, "sentinel: a frame with a block is not blank")
+    check(whiteStats?.sentinelPixels == 0 && blackStats?.sentinelPixels == 0 && strong?.sentinelPixels == 0, "sentinel: white, black and black/white frames have none")
+    check(Luma.isSentinel(r: 255, g: 0, b: 255) && Luma.isSentinel(r: 200, g: 70, b: 200) && !Luma.isSentinel(r: 255, g: 71, b: 255)
+          && !Luma.isSentinel(r: 199, g: 0, b: 255) && !Luma.isSentinel(r: 255, g: 0, b: 199), "sentinel: the rule's boundaries")
+    let markedFrame = parsed(ProbeProtocol.eventLine(method: "view.frame", params: ["targetId": "t1", "seq": 9, "width": 480, "height": 300,
+                                                                                      "jpeg": markedJPEG.base64EncodedString()], t: 11))
+    check((1800...2304).contains((markedFrame?["sentinelPixels"] as? Int) ?? 0), "sentinel: the frame line carries sentinelPixels")
+    check(frame?["sentinelPixels"] as? Int == 0, "sentinel: a blank frame line says 0")
+    check(broken?["sentinelPixels"] as? Int == 0, "sentinel: an undecodable frame line says 0")
+
     let subscribed = parsed(ProbeProtocol.subscribedLine(targets: [["targetId": "t1", "appName": "A/B", "windowSize": [640, 390]]], t: 9))
     check((subscribed?["targets"] as? [[String: Any]])?.first?["appName"] as? String == "A/B" && subscribed?["ev"] as? String == "subscribed", "subscribed line passes targets through")
     check(!ProbeProtocol.subscribedLine(targets: [["x": "a/b"]], t: 1).contains("\\/"), "slashes are not escaped")

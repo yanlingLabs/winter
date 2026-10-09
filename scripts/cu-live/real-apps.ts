@@ -132,8 +132,8 @@ const img = await pv.screenshot({ emit: false });
 await closeOwn(pv);
 report({ w: img.width, h: img.height });`,
     verify: (ctx) => {
-      const bytes = ctx.metrics.filter((m) => m.primitive === "screenshot").map((m) => Number(m.imageBytes));
-      return [okRun(ctx), check("the PDF window was captured with content", bytes.length > 0 && Math.max(...bytes) > 8_000, `bytes ${bytes.join(", ")}`)];
+      const shots = ctx.shots.filter((s) => s.error === undefined);
+      return [okRun(ctx), check("the PDF window was captured, and its pixels are not blank", shots.length > 0 && shots.every((s) => !s.blank), shots.map((s) => `σ${s.stddevLuma.toFixed(1)}`).join(", ") || "no screenshot")];
     },
   },
 ];

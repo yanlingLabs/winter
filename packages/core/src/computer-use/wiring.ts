@@ -33,6 +33,8 @@ export interface ComputerUseInjection {
   worker?: AutomationWorkerOptions;
   startWorker?: () => Promise<AutomationWorker>;
   idleMs?: number;
+  /** The live suite's screenshot sink (`ComputerV2ServiceDeps.screenshotSink`) — never set in production. */
+  screenshotSink?: (shot: { sessionId: string; primitive: string; mime: string; base64: string }) => void;
 }
 
 export interface ComputerUseRuntimeDeps {
@@ -166,6 +168,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     worker: { ...(deps.inject?.worker ?? {}), denyRead: [deps.home, ...(deps.inject?.worker?.denyRead ?? [])] },
     ...(deps.inject?.startWorker === undefined ? {} : { startWorker: deps.inject.startWorker }),
     ...(deps.inject?.idleMs === undefined ? {} : { idleMs: deps.inject.idleMs }),
+    ...(deps.inject?.screenshotSink === undefined ? {} : { screenshotSink: deps.inject.screenshotSink }),
     log,
   });
   const svc = service;
