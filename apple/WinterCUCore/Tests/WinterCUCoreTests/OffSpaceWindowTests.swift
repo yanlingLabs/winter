@@ -13,6 +13,7 @@ final class OffSpaceWindowTests: XCTestCase {
     let freshWindow = fakeElement(60_002)
     let button = fakeElement(60_003)
     let plain = fakeElement(60_004)
+    let appEl = fakeElement(60_099)
 
     // MARK: the resolver (pure)
 
@@ -57,7 +58,8 @@ final class OffSpaceWindowTests: XCTestCase {
                 },
                 axWindows: { [self] in listed },
                 serverWindows: { [self] in server },
-                wait: { probe in probe() })
+                wait: { probe in probe() },
+                appElement: fakeElement(60_099))
         }
     }
 
@@ -111,10 +113,28 @@ final class OffSpaceWindowTests: XCTestCase {
         XCTAssertEqual(out.step, .newWindow)
     }
 
-    func testWhenNothingReachesItTheErrorIsWindowElsewhere() {
+    func testWhenAccessibilityCannotReachItTheWindowIsBoundCaptureOnly() throws {
         let w = World()
-        expectCode("window_elsewhere") { _ = try resolve(w, server: [serverWindow(9)]) }
+        let out = try resolve(w, server: [serverWindow(9)])
         XCTAssertEqual(w.tried, ["remote:9", "move:9", "new"])
+        XCTAssertTrue(out.captureOnly)
+        XCTAssertEqual(out.step, .captureOnly)
+        XCTAssertEqual(out.window.id, 9)
+        XCTAssertTrue(CFEqual(out.window.element, appEl), "the placeholder app element")
+        XCTAssertTrue(out.detail?.contains("capture only") ?? false, out.detail ?? "")
+    }
+
+    func testAnExplicitWindowTheServerHasButAXCannotIsCaptureOnly() throws {
+        let w = World()
+        // A popup smaller than isRealWindow's floor, not in AX and not an off-Space real window.
+        let out = try resolve(w, server: [serverWindow(92_123, title: "", onScreen: true)], selector: .id(92_123))
+        XCTAssertTrue(out.captureOnly)
+        XCTAssertEqual(out.window.id, 92_123)
+    }
+
+    func testPrivatePathOffDoesNotBindCaptureOnly() {
+        let w = World()
+        expectCode("window_elsewhere") { _ = try resolve(w, server: [serverWindow(9)], privatePath: false) }
     }
 
     func testThePrivatePathOffSkipsTheRemoteTokenAndTheMove() throws {
@@ -167,10 +187,11 @@ final class OffSpaceWindowTests: XCTestCase {
         let byTitle = try resolve(w, server: [serverWindow(9, title: "Apple — Start")], selector: .title("apple"))
         XCTAssertEqual(byTitle.window.id, 9)
 
-        // A specific window was asked for: a new window is not that window.
+        // A specific window was asked for and AX can't reach it: bound capture-only, never a new window.
         let stuck = World()
         stuck.newWindowWorks = true
-        expectCode("window_elsewhere") { _ = try resolve(stuck, server: [serverWindow(9)], selector: .id(9)) }
+        let cap = try resolve(stuck, server: [serverWindow(9)], selector: .id(9))
+        XCTAssertTrue(cap.captureOnly)
         XCTAssertFalse(stuck.tried.contains("new"))
 
         // An id nobody has is still a parameter error.

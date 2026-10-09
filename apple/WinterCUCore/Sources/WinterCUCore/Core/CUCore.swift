@@ -285,7 +285,7 @@ public final class CUCore: @unchecked Sendable {
         }
         CULog.bind.notice("bind \(appName, privacy: .public): \(outcome.step.rawValue, privacy: .public) (window \(outcome.window.id, privacy: .public))")
         let chosen = outcome.window
-        if let b = app.bundleIdentifier, CUFloors.systemSettingsBundleIds.contains(b) {
+        if !outcome.captureOnly, let b = app.bundleIdentifier, CUFloors.systemSettingsBundleIds.contains(b) {
             let isPrivacy = try await queues.run(pid) { CUFloorScan.isPrivacyPane(bundleId: b, window: chosen.element, ax: ax) }
             if isPrivacy { throw CUError.refused(.privacyPane, "the Privacy & Security settings are off limits — ask the user") }
         }
@@ -295,7 +295,7 @@ public final class CUCore: @unchecked Sendable {
             targetSeq += 1
             let t = CUTarget(id: "t\(targetSeq)", sessionId: p.sessionId, pid: pid, bundleId: app.bundleIdentifier,
                              appName: appName, isChromium: chromium, mirror: p.mirror, windowID: chosen.id,
-                             windowTitle: chosen.title, privatePath: privatePath)
+                             windowTitle: chosen.title, privatePath: privatePath, accessible: !outcome.captureOnly)
             targets[t.id] = t
             return t
         }()
@@ -340,7 +340,8 @@ public final class CUCore: @unchecked Sendable {
                     usleep(50_000)
                 }
                 return probe()
-            })
+            },
+            appElement: AX.app(pid))
     }
 
     /// How long an unconfirmed paste leaves Winter's text on the clipboard before the user's comes back.
@@ -535,6 +536,7 @@ public final class CUCore: @unchecked Sendable {
     private func switchWindow(_ t: CUTarget, _ outcome: CUWindowResolver.Outcome) async throws -> TargetUseWindowResult {
         let chosen = outcome.window
         let old = t.windowID
+        t.accessible = !outcome.captureOnly  // the new window may expose no accessibility (or regain it)
         if old != chosen.id {
             // Refs and the diff base belong to the old window: start over (numbers still never repeat).
             try await queues.run(t.pid) { [self] in
@@ -595,6 +597,13 @@ public final class CUCore: @unchecked Sendable {
         }
         try token.check()
         let formatter = self.formatter
+        if !t.accessible {
+            return try await queues.run(t.pid) { [self] in
+                let title = sys.window(id: t.windowID)?.title ?? t.windowTitle
+                let text = "\(t.appName) — window \(title.isEmpty ? "(untitled)" : "\u{201C}\(title)\u{201D}") — no accessibility: this window exposes no elements. Use screenshot() to see it and click at point coordinates; type and keys go to the window."
+                return TargetSnapshotResult(snapshotId: t.nextSnapshotId(), text: text, isDiff: false, changedRatio: 1, settled: settled, waitedMs: waited)
+            }
+        }
         return try await queues.run(t.pid) { [self] in
             try floorCheckPrivacy(t)
             let obs = try observe(t, within: p.within)
@@ -627,6 +636,7 @@ public final class CUCore: @unchecked Sendable {
         try requireAccessibility()
         let t = try target(p.targetId)
         try ensureAlive(t)
+        guard t.accessible else { return TargetFindResult(elements: []) }  // capture-only: no AX tree to search
         let formatter = self.formatter
         return try await queues.run(t.pid) { [self] in
             try floorCheckPrivacy(t)
