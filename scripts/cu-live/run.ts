@@ -42,7 +42,7 @@ import { resolvePlatformPackageWinter } from "../../packages/core/src/runtime-sd
 import { buildAll, FIXTURE_MAIN, OUT_DIR, REPO_ROOT, type Built } from "./build";
 import { DaemonClient } from "./client";
 import {
-  parseDuration, check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, pointerMoves, idleGate, parseFrontReading, startPlan, describeStartPlan, UNATTENDED_POLL_MS, type FrontReading, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
+  parseDuration, check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, pointerMoves, promptAppeared, idleGate, parseFrontReading, startPlan, describeStartPlan, UNATTENDED_POLL_MS, type FrontReading, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, withRealDir, type RealAppsRun } from "./real-apps";
@@ -421,7 +421,10 @@ export async function plumbingCheck(built: Pick<Built, "daemon">): Promise<Scena
 
 // ── the live run ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-class Aborted extends Error {}
+/** The run was stopped: real input (`input`), or a permission prompt on the user's screen (`prompt`). */
+class Aborted extends Error {
+  constructor(message: string, readonly reason: "input" | "prompt" = "input") { super(message); }
+}
 
 
 /** When ComputerV2 turns ran ([sent, completed]): the helper's own background events land inside these. */
@@ -473,8 +476,17 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   let returnHome: (() => Promise<string>) | undefined;
   let inputWatchFrom = Number.POSITIVE_INFINITY;
   const runStartedAt = Date.now();
+  /** A permission prompt came to the front since the run started: stop the run (never a row's failure). */
+  const abortIfPrompt = (): void => {
+    if (monitor === undefined) return;
+    const hit = promptAppeared(monitor.items, runStartedAt, Date.now());
+    if (hit !== undefined) {
+      throw new Aborted(`a permission prompt appeared: ${hit.front} came to the front at ${new Date(hit.t).toISOString()} — a test must never raise one; the run was stopped (answer or dismiss it yourself)`, "prompt");
+    }
+  };
   const abortIfInput = (): void => {
     if (monitor === undefined) return;
+    abortIfPrompt();
     const now = Date.now();
     // Real input: the pointer moved, a key or click reached the user's app (in front), or the HID idle counter
     // dropped while no ComputerV2 turn was working — the helper's SkyLight-routed background events (rung 3)
@@ -668,6 +680,8 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         const timeout = s.timeoutMs ?? 60_000;
         const where = s.session === "ask" ? { client: askClient!, sid: askSid } : s.session === "fresh" ? await freshSession() : { client: client!, sid: mainSid };
         const turn = await runTurn(where.client, where.sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer);
+        // A prompt during the action stops the run here, before this row is judged (its failure would be the prompt's).
+        abortIfPrompt();
         const t1 = Date.now();
         // A rung-4 fallback DURING the action is this scenario's failure: the real pointer moved, or keys/clicks
         // reached the user's app (which is in front). Not the HID idle counter: SkyLight's background pid route
@@ -765,7 +779,8 @@ report({ ok: true });`, 40_000), 100_000);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    results.push({ name: err instanceof Aborted ? "ABORTED" : "setup", group: "run", status: "fail", ms: 0, checks: [check(err instanceof Aborted ? "no real input during the run" : "the run's setup", false, message)] });
+    const name = err instanceof Aborted ? (err.reason === "prompt" ? "no permission prompt during the run" : "no real input during the run") : "the run's setup";
+    results.push({ name: err instanceof Aborted ? "ABORTED" : "setup", group: "run", status: "fail", ms: 0, checks: [check(name, false, message)] });
   } finally {
     log("cleaning up…");
     const cleanup: Check[] = [];

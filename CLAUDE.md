@@ -52,7 +52,10 @@ WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live   # the LIVE ComputerV2 suite (script
                                      # Live Result", its own agent bundle: the fixture binary's --done mode, open -g) shows ✓/!/✕, the counts and the report path
                                      # (out/cu-live/last-run.json unless --report) until closed, 30 min at most;
                                      # --no-done-window for CI. A run first closes every WinterCUFixture process an
-                                     # earlier run left (binds resolve the fixture by name; a stray one hijacks them). --dry-run: builds, self-tests,
+                                     # earlier run left (binds resolve the fixture by name; a stray one hijacks them).
+                                     # A test must never raise a TCC prompt (no AppleScript to other apps): if a
+                                     # permission prompt (UserNotificationCenter, SecurityAgent, CoreServicesUIAgent)
+                                     # comes to the front, the run stops — "a permission prompt appeared: …". --dry-run: builds, self-tests,
                                      # the no-screen plumbing and that identity rule against the dev helper; --real-apps:
                                      # Safari/TextEdit/Finder/Preview on temp docs, plus the generic check on VS Code and
                                      # Chrome when installed; --apps "<name or bundle id>,…": the generic, app-agnostic

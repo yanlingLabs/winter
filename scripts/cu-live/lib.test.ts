@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { liveHomeRefusal } from "./daemon-entry";
 import {
-  callLine, computerV2Message, describeViolations, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hidInputTimes, lastValue, pointerMoves, idleGate, parseDuration, parseFrontReading, startPlan, describeStartPlan, type FrontReading, markerFacts, MIXED_TEXT,
+  callLine, computerV2Message, describeViolations, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hidInputTimes, lastValue, pointerMoves, promptAppeared, PROMPT_BUNDLE_IDS, idleGate, parseDuration, parseFrontReading, startPlan, describeStartPlan, type FrontReading, markerFacts, MIXED_TEXT,
   parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type FixtureEvent, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { minimalPdf, REAL_APP_SCENARIOS, REAL_DIR_TOKEN, withRealDir } from "./real-apps";
@@ -90,6 +90,16 @@ describe("the monitor analysis", () => {
     expect(startPlan(parseFrontReading(line({ spaceType: 4, frontPid: null }))!).kind).toBe("refuse");
     // An older tool without spaceType reads as a desktop (the run then behaves as before).
     expect(startPlan(parseFrontReading(line({}))!).kind).toBe("desktop");
+  });
+
+  test("a permission prompt in front (TCC, authorization, Gatekeeper) is found; ordinary apps are not", () => {
+    const at = (t: number, front: string | null): MonitorSample => ({ t, front, frontPid: 1, space: 3, hidIdleMs: 1000 });
+    const samples = [at(0, "dev.cu-live.fixture-user"), at(20, "com.apple.Safari"), at(40, "com.apple.UserNotificationCenter"), at(60, "com.apple.SecurityAgent")];
+    expect(promptAppeared(samples, 0, 100)).toEqual({ t: 40, front: "com.apple.UserNotificationCenter" });
+    expect(promptAppeared(samples, 50, 100)).toEqual({ t: 60, front: "com.apple.SecurityAgent" });
+    expect(promptAppeared(samples, 0, 30)).toBeUndefined();
+    expect(promptAppeared([at(5, null)], 0, 10)).toBeUndefined();
+    expect(PROMPT_BUNDLE_IDS.has("com.apple.coreservices.uiagent")).toBe(true);
   });
 
   test("the real pointer moving is the rung-4 signal; samples without a pointer are skipped", () => {
@@ -203,18 +213,19 @@ describe("the scenarios", () => {
     expect(actOk("sent", [focus, { t: 2, role: "main", ev: "field.change", id: "offspace", value: "off-Space ✓ Typed" }])).toBe(true);
   });
 
-  test("Finder works in a NEW window made through its dictionary, closed by its id; capture only is a skip", () => {
+  test("Finder: the helper opens the folder (no AppleScript, no TCC prompt); reuse or capture only is a skip", () => {
     const finder = REAL_APP_SCENARIOS.find((s) => s.name.startsWith("Finder"))!;
-    expect(finder.code).toContain("make new Finder window to (POSIX file");
-    expect(finder.code).toContain("close Finder window id");
+    expect(finder.code).toContain("await apps.open(folder)");
+    expect(finder.code).not.toContain("applescript");
     expect(finder.code).toContain(REAL_DIR_TOKEN);
+    for (const s of REAL_APP_SCENARIOS) expect(s.code).not.toContain(".applescript(");
     const placed = withRealDir(finder, "/tmp/winter-cu-live-x/cu-live-real");
     expect(placed.code).not.toContain(REAL_DIR_TOKEN);
     expect(placed.code).toContain("/tmp/winter-cu-live-x/cu-live-real/cu-live-folder");
     const verify = (facts: Record<string, unknown>): boolean => finder.verify({ output: "", isError: false, facts, events: [], since: 0, probe: [], metrics: [], shots: [] }).every((c) => c.ok);
-    expect(verify({ skipped: "Finder showed the folder in a window on another Space (capture only)" })).toBe(true);
-    expect(verify({ alpha: true, beta: true, closed: true })).toBe(true);
-    expect(verify({ alpha: true, beta: true, closed: "Refused" })).toBe(false);
+    expect(verify({ skipped: "Finder showed the folder in a window accessibility never saw (another Space: capture only) — left as it is" })).toBe(true);
+    expect(verify({ alpha: true, beta: true, closed: "no sheet" })).toBe(true);
+    expect(verify({ alpha: true, beta: true })).toBe(false);
   });
 
   test("names are unique; every group the suite promises is covered", () => {

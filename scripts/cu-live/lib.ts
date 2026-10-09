@@ -298,3 +298,20 @@ export function doneWindowModel(results: readonly ScenarioResult[], durationMs: 
 export function doneWindowOpenArgs(fixtureApp: string, model: DoneWindowModel): string[] {
   return ["-n", "-g", "-a", fixtureApp, "--args", "--done", JSON.stringify(model)];
 }
+
+// ── a permission prompt on the user's screen ──────────────────────────────────────────────────────────────────
+
+/**
+ * Apps whose coming to the front means macOS put a permission or security prompt in front of the user: TCC's
+ * (Automation, Screen Recording — UserNotificationCenter), an authorization (SecurityAgent), Gatekeeper's
+ * (CoreServicesUIAgent). A test must never raise one; when one shows, the run stops rather than failing rows.
+ */
+export const PROMPT_BUNDLE_IDS: ReadonlySet<string> = new Set([
+  "com.apple.UserNotificationCenter", "com.apple.SecurityAgent", "com.apple.coreservices.uiagent",
+]);
+
+/** The first sample in [from, to] whose frontmost app is a permission prompt's. */
+export function promptAppeared(samples: readonly MonitorSample[], from: number, to: number): { t: number; front: string } | undefined {
+  const hit = samples.find((s) => s.t >= from && s.t <= to && s.front !== null && PROMPT_BUNDLE_IDS.has(s.front));
+  return hit === undefined ? undefined : { t: hit.t, front: hit.front! };
+}
