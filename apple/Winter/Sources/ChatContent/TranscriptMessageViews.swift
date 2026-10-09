@@ -712,7 +712,7 @@ private func transcriptCopyForeground(isHovering: Bool, didCopy: Bool) -> Color 
 ///   - `.tool` (LIVE-GATE G3): `groupActivity` always folds tool items into `.toolRun` groups
 ///     rendered by `TranscriptToolGroupRow`, never `.single`. It therefore shows no status and no
 ///     output — everything mac-chat-parity Task 2 added lives on the group row.
-///   - `.interaction` (mac-chat-parity Task 3): `TranscriptExchangeRow` diverts every interaction
+///   - `.interaction` (mac-chat-parity Task 3): `TranscriptCell` diverts every interaction
 ///     item to `TranscriptInteractionCard` before reaching `TranscriptActivityRow`. Its literal `⚠`
 ///     and one-line summary are what an interaction USED to render as, kept correct (and pinned by
 ///     `ActivityRowTests`) rather than deleted.

@@ -349,6 +349,9 @@ final class FieldStateAdapter: ObservableObject {
     /// thinking pill shows until the block's persisted record replaces it. Read only by an OPENED pill.
     func liveThinkingText(_ blockId: String) -> String? { session.liveThinking.text(for: blockId) }
 
+    /// The buffer itself, for the one view that follows a streaming block's words (`PillLiveThinkingText`).
+    var liveThinking: ThinkingLiveText { session.liveThinking }
+
     /// Live partial reply for the window's streaming row — deliberately NOT `visibleResponse`
     /// (that one is exchangeIndex-pinned for the field).
     var liveStreamingText: String? {
@@ -594,7 +597,7 @@ final class FieldStateAdapter: ObservableObject {
     // MARK: - Task 3 (2d-iii): pending-interaction cards — mount + respond wiring
 
     /// The transcript cards' pending set (`TranscriptInteractionCard`, mounted inline by
-    /// `TranscriptExchangeRow` in both windows) — a thin
+    /// `TranscriptCell` in both windows) — a thin
     /// read-through onto the reducer's own ordered (oldest-first) list, same convention as
     /// `pinnedTasks`/`transcript` above.
     var pendingInteractions: [PendingInteraction] { session.state.pendingInteractions }

@@ -83,6 +83,26 @@ final class ChangeStampTests: XCTestCase {
         XCTAssertNotEqual(a, Exchange(prompt: "p", reply: "r", activity: [tool("x")], aborted: true))
     }
 
+    /// The live path walks the activity newest first and ends where the difference is; the walk must still find a
+    /// difference wherever it sits, and still call independently built equal content equal.
+    func testADifferenceAnywhereInALongActivityIsFoundAndEqualContentIsEqual() {
+        func items(replacing index: Int? = nil) -> [ActivityItem] {
+            (0..<300).map { i in tool(i == index ? "changed" : "out \(i)", callId: "c\(i)") }
+        }
+        let base = Exchange(prompt: "p", reply: "r", activity: items())
+        XCTAssertEqual(base, Exchange(prompt: "p", reply: "r", activity: items()), "built apart, equal by content")
+        for index in [0, 1, 149, 150, 298, 299] {
+            XCTAssertNotEqual(base, Exchange(prompt: "p", reply: "r", activity: items(replacing: index)), "a change at item \(index)")
+        }
+        var longer = base
+        longer.appendActivityItem(tool("one more", callId: "c300"))
+        XCTAssertNotEqual(base, longer, "a different count")
+        var shorter = base
+        shorter.removeActivityItem(at: 5)
+        XCTAssertNotEqual(base, shorter)
+        XCTAssertNotEqual(base, Exchange(prompt: "other", reply: "r", activity: items()), "the prompt is compared too")
+    }
+
     /// Two copies of one snapshot that then change in DIFFERENT ways are not equal, even though each
     /// changed once — the stamps are unique per change, not a count.
     func testDivergentCopiesAreNotEqual() {

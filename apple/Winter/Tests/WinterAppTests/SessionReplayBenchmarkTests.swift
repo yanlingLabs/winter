@@ -1,6 +1,7 @@
 import XCTest
 import SwiftUI
 import AppKit
+import Darwin
 import WinterProtocol
 import WinterKit
 @testable import Winter
@@ -22,6 +23,21 @@ import WinterKit
 // The log keeps only persisted events; the streamed deltas a window also receives (reasoning and reply chunks) are
 // synthesised from each `thinking_block` / `assistant_message` and spread over the time before it.
 // -----------------------------------------------------------------------------------------------
+
+/// CPU seconds (user + system) the CALLING thread has used so far: sampled at the start and end of a run on the main
+/// thread, the difference over the wall clock is how busy the main thread was.
+func currentThreadCPUSeconds() -> Double {
+    var info = thread_basic_info()
+    var count = mach_msg_type_number_t(MemoryLayout<thread_basic_info>.size / MemoryLayout<integer_t>.size)
+    let kr = withUnsafeMutablePointer(to: &info) {
+        $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+            thread_info(mach_thread_self(), thread_flavor_t(THREAD_BASIC_INFO), $0, &count)
+        }
+    }
+    guard kr == KERN_SUCCESS else { return 0 }
+    func seconds(_ t: time_value_t) -> Double { Double(t.seconds) + Double(t.microseconds) / 1_000_000 }
+    return seconds(info.user_time) + seconds(info.system_time)
+}
 
 /// One line the daemon would send, at a time since the start of the session.
 struct ReplayWire {
@@ -182,6 +198,8 @@ final class ReplayRun {
         var drainedMs = 0.0
         /// Scroll-step latency (ms) measured halfway through the replay, while events are still arriving.
         var scrollUnderLoad: [Double] = []
+        /// Share of the run's wall clock the main thread spent on the CPU (0…1).
+        var mainBusy = 0.0
     }
 
     private let script: [ReplayWire]
@@ -198,9 +216,26 @@ final class ReplayRun {
     private var renderMs = 0.0, renders = 0, slowest = 0.0
     private var meter: FeedLatencyMeter!
 
-    init(script: [ReplayWire], speed: Double) {
+    /// Also host the dispatch pill's working plume (a live turn shows it beside the window) in a second window.
+    private let withPlume: Bool
+    private var plumeWindow: NSWindow?
+
+    init(script: [ReplayWire], speed: Double, withPlume: Bool = false) {
         self.script = script
         self.speed = speed
+        self.withPlume = withPlume
+    }
+
+    private func buildPlume() {
+        guard withPlume else { return }
+        let throwsList = [PlumeThrow(id: "a", kind: .tool(symbol: "terminal.fill")), PlumeThrow(id: "b", kind: .tool(symbol: "doc.text.fill")),
+                          PlumeThrow(id: "c", kind: .tool(symbol: "magnifyingglass"))]
+        let host = NSHostingView(rootView: WorkingAnimationView(thrown: throwsList, repeating: throwsList).frame(width: 380, height: 44).background(Color.black))
+        host.frame = NSRect(x: 0, y: 0, width: 380, height: 44)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        plumeWindow = window
     }
 
     private func buildWindow() {
@@ -242,6 +277,9 @@ final class ReplayRun {
 
     func run(timeoutSeconds: Double) async throws -> Result {
         buildWindow()
+        buildPlume()
+        let cpuStart = currentThreadCPUSeconds()
+        let wallStart = DispatchTime.now().uptimeNanoseconds
         defer {
             if let observer { CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, .commonModes) }
             observer = nil
@@ -312,7 +350,17 @@ final class ReplayRun {
         result.transcriptItems = session.state.exchanges.reduce(0) { $0 + $1.activity.count }
         result.drainedMs = drainedMs
         result.scrollUnderLoad = scrollUnderLoad
+        let wallSeconds = Double(DispatchTime.now().uptimeNanoseconds - wallStart) / 1_000_000_000
+        result.mainBusy = (currentThreadCPUSeconds() - cpuStart) / max(wallSeconds, 0.001)
         return result
+    }
+
+    /// Empties the windows the run hosted, so a plume in them stops ticking (a plume left running would cost the next
+    /// test its main thread).
+    func close() {
+        window?.contentView = NSView()
+        plumeWindow?.contentView = NSView()
+        plumeWindow = nil
     }
 
     /// Scrolls the finished transcript from the bottom to the top and back in `steps` steps, laying out (and, when
@@ -355,9 +403,9 @@ final class ReplayRun {
 
     static func describe(_ r: Result, label: String) -> String {
         func spread(_ s: FeedLatencyMeter.Spread) -> String { String(format: "p50 %.0f p95 %.0f max %.0f", s.p50, s.p95, s.max) }
-        return String(format: "REPLAY %@: %d lines (%d persisted) in %.1f s; %d exchanges / %d items; lag ms %@ | legs p95: wire %.0f queue %.0f fold %.0f render %.0f | main-thread render %.0f ms over %d draws (slowest %.0f ms) | drained %.0f ms after the last line",
+        return String(format: "REPLAY %@: %d lines (%d persisted) in %.1f s; %d exchanges / %d items; lag ms %@ | legs p95: wire %.0f queue %.0f fold %.0f render %.0f | main-thread render %.0f ms over %d draws (slowest %.0f ms), busy %.0f%% | drained %.0f ms after the last line",
                       label, r.sent, r.persisted, r.wallSeconds, r.exchanges, r.transcriptItems, spread(r.report.endToEnd),
-                      r.report.wire.p95, r.report.queue.p95, r.report.fold.p95, r.report.render.p95, r.renderMs, r.renders, r.slowestRenderMs, r.drainedMs)
+                      r.report.wire.p95, r.report.queue.p95, r.report.fold.p95, r.report.render.p95, r.renderMs, r.renders, r.slowestRenderMs, r.mainBusy * 100, r.drainedMs)
     }
 }
 
@@ -367,6 +415,18 @@ private final class SilentNotifier: NotificationPosting {
 
 @MainActor
 final class SessionReplayBenchmarkTests: XCTestCase {
+    /// The windows these tests host are never shown, and a plume in a window that is not on screen does nothing
+    /// (`PlumeLayerView.isShown`): let them run, or the benchmarks would measure a paused plume.
+    override func setUp() {
+        super.setUp()
+        PlumeLayerView.runsInUnshownWindows = true
+    }
+
+    override func tearDown() {
+        PlumeLayerView.runsInUnshownWindows = false
+        super.tearDown()
+    }
+
     private var logPath: String? { ProcessInfo.processInfo.environment["WINTER_REPLAY_LOG"].flatMap { $0.isEmpty ? nil : $0 } }
     private var speed: Double { Double(ProcessInfo.processInfo.environment["WINTER_REPLAY_SPEED"] ?? "") ?? 1 }
 
@@ -392,6 +452,7 @@ final class SessionReplayBenchmarkTests: XCTestCase {
         let script = ReplayScript.wire(from: persisted)
         let span = (script.last?.atMs ?? 0) / 1000 / speed
         let run = ReplayRun(script: script, speed: speed)
+        defer { run.close() }
         let result = try await run.run(timeoutSeconds: span + 120)
         print(ReplayRun.describe(result, label: "local log ×\(speed)"))
         if !result.scrollUnderLoad.isEmpty {
@@ -418,7 +479,9 @@ final class SessionReplayBenchmarkTests: XCTestCase {
     /// 84% idle.
     func testASyntheticSessionOfTheLiveGatesShapeNeverLagsMoreThanASecond() async throws {
         let script = ReplayScript.wire(from: SyntheticSession.persisted(blocks: 100, seconds: 40))
-        let result = try await ReplayRun(script: script, speed: 1).run(timeoutSeconds: 120)
+        let run = ReplayRun(script: script, speed: 1)
+        defer { run.close() }
+        let result = try await run.run(timeoutSeconds: 120)
         print(ReplayRun.describe(result, label: "synthetic, 100 blocks in 40 s"))
         XCTAssertGreaterThan(result.sent, 40_000, "the shape: tens of thousands of lines")
         XCTAssertEqual(result.exchanges, 1)
@@ -428,5 +491,45 @@ final class SessionReplayBenchmarkTests: XCTestCase {
         XCTAssertLessThan(result.report.queue.p95, 500, "the stream is read as fast as it fills")
         XCTAssertEqual(result.report.backlog, 0)
         XCTAssertLessThan(result.drainedMs, 2_000, "and nothing is left to catch up on after the last line")
+    }
+
+    /// A LIVE turn as the live gate lagged on it: the window's session streaming at ~30 events a second (reasoning
+    /// and reply chunks of the size providers send them in), with the dispatch pill's working plume drawing beside
+    /// it (and the window's own, in its composer). Main-thread busy share and the render leg are what the user feels
+    /// as lag. Measured on a Debug build, alone in its process: 43% busy / 32 ms render p95 / 121 ms lag p95 before
+    /// the plume moved to layers, the transcript to one lazy cell per entry and reasoning increments stopped
+    /// republishing the session; about 12% / 12 ms / 85 ms after.
+    func testALiveTurnAtThirtyEventsASecondWithThePillsPlume() async throws {
+        try XCTSkipUnless(PlumeLayerView.tickingCount == 0, "another test left a plume ticking: its cost would be counted here")
+        let script = ReplayScript.wire(from: SyntheticSession.persisted(blocks: 30, seconds: 60), reasoningChunk: 40, replyChunk: 24)
+        let run = ReplayRun(script: script, speed: 1, withPlume: true)
+        defer { run.close() }
+        let result = try await run.run(timeoutSeconds: 120)
+        print(ReplayRun.describe(result, label: "live turn, ~30 events/s, plume up"))
+        print(String(format: "LIVE busy %.1f%% render p95 %.0f ms lag p95 %.0f ms", result.mainBusy * 100, result.report.render.p95, result.report.endToEnd.p95))
+        XCTAssertGreaterThan(result.sent / 60, 20, "about thirty events a second")
+        XCTAssertLessThan(result.report.render.p95, 50, "render leg p95 (ms)")
+        XCTAssertLessThan(result.mainBusy, 0.15, "main-thread busy share")
+        XCTAssertLessThan(result.report.endToEnd.p95, 1_000)
+    }
+
+    /// The plume alone, hosted: the main-thread CPU it costs a second, drawing while a turn works.
+    func testThePlumeAloneKeepsTheMainThreadMostlyIdle() async throws {
+        try XCTSkipUnless(PlumeLayerView.tickingCount == 0, "another test left a plume ticking: its cost would be counted here")
+        let throwsList = [PlumeThrow(id: "a", kind: .tool(symbol: "terminal.fill")), PlumeThrow(id: "b", kind: .tool(symbol: "doc.text.fill")),
+                          PlumeThrow(id: "c", kind: .tool(symbol: "magnifyingglass"))]
+        let host = NSHostingView(rootView: WorkingAnimationView(thrown: throwsList, repeating: throwsList).frame(width: 380, height: 44).background(Color.black))
+        host.frame = NSRect(x: 0, y: 0, width: 380, height: 44)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(nanoseconds: 1_000_000_000) // warm
+        let cpu = currentThreadCPUSeconds()
+        let start = DispatchTime.now().uptimeNanoseconds
+        try await Task.sleep(nanoseconds: 4_000_000_000)
+        let busy = (currentThreadCPUSeconds() - cpu) / (Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000)
+        print(String(format: "PLUME alone: main thread busy %.2f%%", busy * 100))
+        window.contentView = NSView() // stops the plume
+        XCTAssertLessThan(busy, 0.03, "the plume's share of the main thread (the Canvas it replaced took 8%)")
     }
 }

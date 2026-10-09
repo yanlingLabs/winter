@@ -308,6 +308,9 @@ struct PillToolRunHeader: View {
     let turnIsLive: Bool
     let isExpanded: Bool
     let toggle: () -> Void
+    /// What `toggle` opens and closes (the transcript's expansion key). `==` compares it in place of the closure, so a
+    /// pill whose key moved is rebuilt with the new `toggle`.
+    var identity: String = ""
 
     /// The bash safety reviewer is judging one of this pill's calls right now: the pill turns amber and
     /// breathes (`PillReviewGlow`). Read from the environment so no row in between carries it.
@@ -329,7 +332,7 @@ struct PillToolRunHeader: View {
 
     /// A SEARCH pill opens INTO itself (2026-10-06): the capsule morphs into a rounded rectangle
     /// holding the same row, then the queries and one flat pill per website the run found. Every other
-    /// kind keeps its body beneath the pill (`TranscriptExchangeRow.toolPillBody`).
+    /// kind keeps its body beneath the pill (`TranscriptCell.toolPillBody`).
     static func opensInPlace(_ entry: ToolRunEntry) -> Bool { PillToolKind(toolName: entry.name) == .search }
 
     var body: some View {
@@ -466,6 +469,17 @@ struct PillToolRunHeader: View {
             if Task.isCancelled { return }
             faviconTick += 1
         }
+    }
+}
+
+/// A pill is a function of its calls, whether its turn is live, whether it is open and which key it toggles: the
+/// closure is the only input that is new every pass, and it is what made every pill of a long turn (120 of them, each
+/// with a shimmer, a clock and a chrome) evaluate its body on every event. With this and `.equatable()` at the call
+/// site, a fold re-evaluates only the pills whose calls changed. The review glow and the reduce-motion switch are
+/// environment reads inside the body and still reach it.
+extension PillToolRunHeader: Equatable {
+    static func == (a: PillToolRunHeader, b: PillToolRunHeader) -> Bool {
+        a.turnIsLive == b.turnIsLive && a.isExpanded == b.isExpanded && a.identity == b.identity && a.entries == b.entries
     }
 }
 

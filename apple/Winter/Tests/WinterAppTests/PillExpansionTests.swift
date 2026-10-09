@@ -204,7 +204,10 @@ final class PillExpansionTests: XCTestCase {
         let item = session.state.exchanges.last!.activity.compactMap(\.thinkingItem).first!
         XCTAssertTrue(item.isLive)
         XCTAssertEqual(item.text, "", "the shared item still carries no live text")
-        XCTAssertEqual(item.liveTextLength, "Let me read the files.".utf16.count)
+        // The item says only that the block has text (the one thing the app asks of the count): the increment that
+        // followed the first words drew nothing new, so it was folded into the buffer and the session not republished.
+        XCTAssertEqual(item.liveTextLength, "Let me read ".utf16.count)
+        XCTAssertGreaterThan(item.liveTextLength, 0)
         XCTAssertEqual(thinkingDisplayText(item, liveText: adapter.liveThinkingText(item.blockId)), "Let me read the files.")
 
         session.apply(block(text: "**Reading** the persisted text"))

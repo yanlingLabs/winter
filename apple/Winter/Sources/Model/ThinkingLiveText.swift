@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import WinterProtocol
 
@@ -10,17 +11,22 @@ import WinterProtocol
 /// state would be shared with it and every `append` would copy the whole block (O(n) per delta). This
 /// buffer is owned by `SessionModel` alone, so each append is O(the delta), amortised.
 ///
-/// Nothing compares the text: each block carries a `revision` bumped per append, and the views are
-/// re-rendered by the item itself (`ThinkingItem.liveTextLength` grows with every delta that carries
-/// text, which changes the exchange). A block's persisted `thinking_block` REPLACES its live text —
-/// the entry is dropped and the item's own `text` is the truth from then on; a late delta for a
-/// closed block is ignored, as the shared fold ignores it.
+/// Nothing compares the text: each block carries a `revision` bumped per append, and the one view that shows it —
+/// an opened pill's body (`PillLiveThinkingText`) — observes this object and is re-rendered by every append. (The
+/// session itself is NOT republished for an increment that changes nothing else a view draws.) A block's persisted
+/// `thinking_block` REPLACES its live text — the entry is dropped and the item's own `text` is the truth from then
+/// on; a late delta for a closed block is ignored, as the shared fold ignores it.
 ///
 /// Main thread only, like the reducer's thinking fold. Bounded: at most `maxBlocks` live blocks (the
 /// oldest dropped), each at most `ThinkingItem.maxTextLength` UTF-16 units (the daemon's own cap on a
 /// persisted block) — the rest of a longer stream is not kept, and `truncated` says so.
 @MainActor
-final class ThinkingLiveText {
+final class ThinkingLiveText: ObservableObject {
+    /// Fires when a block's live text grows or is dropped. Only an OPEN thinking pill's text view observes this
+    /// (`PillLiveThinkingText`): the session is not republished for an increment that draws nothing else
+    /// (`SessionReducer.thinkingIncrementIsInvisible`), so the words an opened pill streams reach it from here.
+    let objectWillChange = ObservableObjectPublisher()
+
     struct Block: Equatable {
         var text: String = ""
         /// UTF-16 units in `text`, kept so the cap check never counts the string.
@@ -71,6 +77,7 @@ final class ThinkingLiveText {
 
     private func append(_ increment: String?, to blockId: String) {
         guard !closedSet.contains(blockId), let increment, !increment.isEmpty else { return }
+        objectWillChange.send()
         if blocks[blockId] == nil {
             blocks[blockId] = Block()
             order.append(blockId)
@@ -96,6 +103,7 @@ final class ThinkingLiveText {
     }
 
     private func close(_ blockId: String) {
+        if blocks[blockId] != nil { objectWillChange.send() }
         if blocks.removeValue(forKey: blockId) != nil, let i = order.firstIndex(of: blockId) { order.remove(at: i) }
         guard closedSet.insert(blockId).inserted else { return }
         closed.append(blockId)

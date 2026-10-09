@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 import WinterProtocol
 @testable import Winter
 
@@ -62,6 +63,47 @@ final class ThinkingPillTests: XCTestCase {
         XCTAssertEqual(thinking(s)[0].liveTextLength, "**Planning**".utf16.count)
         XCTAssertEqual(pillThinkingLabel(thinking(s)[0], turnIsLive: s.turnRunning), "Planning")
         XCTAssertEqual(s.streamingText, "", "thinking never feeds the reply's streaming row")
+    }
+
+    // MARK: - Reasoning increments that draw nothing are not published
+
+    func testAnIncrementToABlockThatAlreadyShowsItsTitleChangesNothingAViewDraws() {
+        let s = fold([userMessage("go"), turnStarted(), delta("start"), delta("delta", text: "**Plan", title: "Plan")])
+        XCTAssertFalse(SessionReducer.thinkingIncrementIsInvisible(delta("start"), in: OrbSessionState()), "a block's first delta opens its pill")
+        XCTAssertTrue(SessionReducer.thinkingIncrementIsInvisible(delta("delta", text: "ning"), in: s), "more text, no new title")
+        XCTAssertTrue(SessionReducer.thinkingIncrementIsInvisible(delta("delta", text: "ning", title: "Plan"), in: s), "the same title again")
+        XCTAssertTrue(SessionReducer.thinkingIncrementIsInvisible(delta("delta", text: "ning", title: "  "), in: s), "a blank title is no title")
+        XCTAssertFalse(SessionReducer.thinkingIncrementIsInvisible(delta("delta", text: "ning", title: "Planning"), in: s), "a new title is drawn")
+        XCTAssertFalse(SessionReducer.thinkingIncrementIsInvisible(delta("delta", kind: "exposed", text: "ning"), in: s), "a changed kind is drawn")
+        XCTAssertFalse(SessionReducer.thinkingIncrementIsInvisible(delta("delta", block: "rb_2", text: "x"), in: s), "another block's first text")
+        XCTAssertTrue(SessionReducer.thinkingIncrementIsInvisible(delta("delta", text: "x", thread: "child"), in: s), "a child thread's delta is ignored by the reducer")
+        XCTAssertFalse(SessionReducer.thinkingIncrementIsInvisible(block(), in: s), "the persisted block replaces the item")
+    }
+
+    @MainActor
+    func testTheSessionIsPublishedOnceForAReasoningStreamNotOncePerBatch() {
+        let model = SessionModel(notifier: SilentNotifier())
+        var publishes = 0
+        let cancellable = model.$state.dropFirst().sink { _ in publishes += 1 }
+        var liveChanges = 0
+        let liveWatch = model.liveThinking.objectWillChange.sink { liveChanges += 1 }
+        defer { cancellable.cancel(); liveWatch.cancel() }
+        model.apply(userMessage("go"))
+        model.apply(turnStarted())
+        publishes = 0
+        model.apply(contentsOf: [delta("start"), delta("delta", text: "**Plan", title: "Plan")])
+        XCTAssertEqual(publishes, 1, "the pill opens, with its title")
+        for chunk in ["ning the ", "next steps ", "for the ", "work ahead"] {
+            model.apply(contentsOf: [delta("delta", text: chunk)])
+        }
+        XCTAssertEqual(publishes, 1, "the rest of the stream draws nothing new, so it publishes nothing")
+        XCTAssertEqual(model.liveThinking.text(for: "rb_1"), "**Planning the next steps for the work ahead", "but an open pill still reads every word")
+        XCTAssertEqual(liveChanges, 5, "and the buffer, which an open pill's text view observes, announced each of the five increments")
+        model.apply(contentsOf: [delta("delta", text: "!", title: "Planning")])
+        XCTAssertEqual(publishes, 2, "a new title does")
+        model.apply(block(title: "Planning", text: "Planning the next steps"))
+        XCTAssertEqual(publishes, 3, "and so does the persisted block")
+        XCTAssertEqual(thinking(model.state).map(\.isLive), [false])
     }
 
     func testThePersistedBlockReplacesTheLiveItemInPlace() {
@@ -139,4 +181,8 @@ final class ThinkingPillTests: XCTestCase {
         XCTAssertEqual(pillThinkingLabel(titled, turnIsLive: true), "Planning the migration")
         XCTAssertEqual(pillThinkingLabel(titled, turnIsLive: false), "Planning the migration")
     }
+}
+
+private final class SilentNotifier: NotificationPosting {
+    func post(title: String, body: String) {}
 }

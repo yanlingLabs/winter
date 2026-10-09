@@ -40,7 +40,10 @@ struct TranscriptView: View {
     /// Which tool runs and pills are open, for the whole transcript (`TranscriptExpansion`) — here
     /// rather than per exchange row, so a row the lazy stack recycles comes back as it was.
     @State private var expansion = TranscriptExpansion()
+    /// What each exchange's timeline was worked out to, by the exchange's content stamp (`TranscriptLayoutMemo`).
+    @State private var layoutMemo = TranscriptLayoutMemo()
     @Environment(\.transcriptSeededExpansion) private var seededExpansion
+    @Environment(\.transcriptToolRowStyle) private var toolRowStyle
     /// Told when a history that arrived into this transcript has come to rest at its bottom.
     @Environment(\.transcriptOnLanded) private var onLanded
 
@@ -50,9 +53,8 @@ struct TranscriptView: View {
             transcriptScroll
                 .onAppear {
                     follower.onLanded = onLanded
-                    follower.farJump = { [adapter] in
-                        let count = adapter.transcript.count
-                        if count > 0 { proxy.scrollTo(count - 1, anchor: .bottom) }
+                    follower.farJump = { [layoutMemo] in
+                        if let last = layoutMemo.lastCellID { proxy.scrollTo(last, anchor: .bottom) }
                     }
                 }
         }
@@ -60,36 +62,112 @@ struct TranscriptView: View {
         .environment(\.reviewingCallIds, adapter.reviewingCallIds)
     }
 
+    /// Every cell of the transcript, in order: for each exchange its prompt, one cell per timeline entry (a row of
+    /// pills, a reply, a card…), its stopped line, and — for the newest while a reply streams — the reply itself.
+    ///
+    /// **One cell per entry, not one per exchange** (2026-10-09): a lazy stack realizes the cells that are on screen,
+    /// and a publish from the session marks everything REALIZED dirty, a cost that grew with the number of items
+    /// held (measured: 6 ms with nothing in the transcript, 19 ms with 96 items, for a publish that changed nothing).
+    /// With the exchange as the cell, a turn of two hundred tool calls was one cell with all of them realized; as
+    /// cells, only those near the viewport are, and each skips its body unless what it shows changed.
+    ///
+    /// Spacing is each cell's own top gap rather than the stack's: 14 pt separates exchanges, 10 pt separates the
+    /// cells of one.
+    private func cellSpecs(_ transcript: [Exchange], streaming: String?, cards: TranscriptCardState) -> [TranscriptCellSpec] {
+        var specs: [TranscriptCellSpec] = []
+        var known: Set<TranscriptLayoutMemo.Key> = []
+        for (index, exchange) in transcript.enumerated() {
+            let isLast = index == transcript.count - 1
+            // Live only for the newest exchange (mac-chat-parity Task 2). That is not quite the same as "every in-flight
+            // call lives here": a main-thread steer's `user_message` is persisted at SEND time, so it can open a NEW
+            // exchange while a call in the previous one is still out — the case `SessionReducer.foldToolResult` scans
+            // backwards for, pinned by `testToolResultFoldsIntoAnEarlierExchangeWhenASteerOpenedANewOne`. Such a call
+            // reads "no result" rather than "running" until its result lands, then corrects itself. Deliberate:
+            // erring toward "no result" is recoverable, while a false "running" is the permanent lie this whole gate
+            // exists to prevent.
+            let turnIsLive = isLast && adapter.turnRunning
+            let streamingText = isLast ? streaming : nil
+            let layout = layoutMemo.layout(for: exchange, style: toolRowStyle)
+            known.insert(layout.key)
+            let base = index * TranscriptCellSpec.idStride
+            var cells: [(id: Int, content: TranscriptCellContent)] = []
+            if !exchange.prompt.isEmpty || exchange.promptEnvelope != nil {
+                cells.append((base, .prompt(text: exchange.prompt, envelope: exchange.promptEnvelope)))
+            }
+            let finalReply = streamingText == nil ? layout.finalReply : nil
+            for (offset, entry) in layout.entries.enumerated() {
+                let id = base + TranscriptCellSpec.firstEntryOffset + offset
+                switch entry {
+                case .group(let groupIndex, let group):
+                    if let content = groupContent(group, index: groupIndex, exchangeIndex: index, cards: cards) {
+                        cells.append((id, content))
+                    }
+                case .pillRow(let items):
+                    cells.append((id, .pillRow(items: items, open: items.map { pillIsOpen($0, exchangeIndex: index) })))
+                case .reply(let replyIndex):
+                    cells.append((id, .reply(text: exchange.replies[replyIndex], showsCopy: replyIndex == finalReply)))
+                }
+            }
+            if exchange.aborted { cells.append((base + TranscriptCellSpec.stoppedOffset, .stopped)) }
+            if let streamingText { cells.append((base + TranscriptCellSpec.streamingOffset, .streaming(streamingText))) }
+            for (position, cell) in cells.enumerated() {
+                specs.append(TranscriptCellSpec(id: cell.id, exchangeIndex: index, content: cell.content, turnIsLive: turnIsLive,
+                                                topGap: specs.isEmpty ? 0 : (position == 0 ? 14 : 10)))
+            }
+        }
+        layoutMemo.keep(known)
+        layoutMemo.lastCellID = specs.last?.id
+        return specs
+    }
+
+    /// A non-pill activity row's content, or nil when it draws nothing (a pending question the composer has become).
+    private func groupContent(_ group: ActivityGroup, index: Int, exchangeIndex: Int, cards: TranscriptCardState) -> TranscriptCellContent? {
+        switch group {
+        case .toolRun(let entries):
+            let key = transcriptExpansionKey(toolRunExpansionKey(entries, fallbackIndex: index), exchangeIndex: exchangeIndex)
+            return .group(index: index, group: group, isExpanded: expansion.contains(key), cards: nil)
+        case .single(let item):
+            if let record = item.interactionRecord {
+                if questionMorphsTheComposer(record, closed: cards.closedAsks) { return nil }
+                return .group(index: index, group: group, isExpanded: false, cards: cards)
+            }
+            return .group(index: index, group: group, isExpanded: false, cards: nil)
+        }
+    }
+
+    /// Whether a pill in an exchange's row is open (the tool pills' key, the thinking pill's block).
+    private func pillIsOpen(_ item: PillRowItem, exchangeIndex: Int) -> Bool {
+        switch item {
+        case .tool(let index, let entry):
+            return expansion.contains(transcriptExpansionKey(toolRunExpansionKey([entry], fallbackIndex: index), exchangeIndex: exchangeIndex))
+        case .thinking(let thinking):
+            return thinkingHasReadableText(thinking) && expansion.contains(thinkingExpansionKey(thinking.blockId))
+        }
+    }
+
     private var transcriptScroll: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 14) {
-                ForEach(Array(adapter.transcript.enumerated()), id: \.offset) { index, exchange in
-                    let isLast = index == adapter.transcript.count - 1
-                    TranscriptExchangeRow(
-                        exchange: exchange,
-                        exchangeIndex: index,
+            LazyVStack(alignment: .leading, spacing: 0) {
+                let cards = TranscriptCardState(wiring: cardWiring, drafts: adapter.pendingCardDrafts)
+                let specs = cellSpecs(adapter.transcript, streaming: adapter.liveStreamingText, cards: cards)
+                ForEach(specs) { spec in
+                    TranscriptCell(
+                        exchangeIndex: spec.exchangeIndex,
+                        content: spec.content,
                         expansion: $expansion,
-                        liveThinkingText: { [adapter] in adapter.liveThinkingText($0) },
+                        liveThinking: adapter.liveThinking,
                         cardWiring: cardWiring,
                         onOpenDiff: onOpenDiff,
                         onOpenFile: onOpenFile,
                         sessionHasWorkingDirectory: sessionHasWorkingDirectory,
                         fileMentionBaseDirectory: fileMentionBaseDirectory,
-                        streamingText: isLast ? adapter.liveStreamingText : nil,
-                        // Live only for the newest exchange (mac-chat-parity Task 2). That is
-                        // not quite the same as "every in-flight call lives here": a main-thread
-                        // steer's `user_message` is persisted at SEND time, so it can open a NEW
-                        // exchange while a call in the previous one is still out — the case
-                        // `SessionReducer.foldToolResult` scans backwards for, pinned by
-                        // `testToolResultFoldsIntoAnEarlierExchangeWhenASteerOpenedANewOne`.
-                        // Such a call reads "no result" rather than "running" until its result
-                        // lands, then corrects itself. Deliberate: erring toward "no result" is
-                        // recoverable, while a false "running" is the permanent lie this whole
-                        // gate exists to prevent.
-                        turnIsLive: isLast && adapter.turnRunning,
+                        turnIsLive: spec.turnIsLive,
                         tint: tint
                     )
-                    .id(index)
+                    // Rebuilt only when something it shows changed.
+                    .equatable()
+                    .padding(.top, spec.topGap)
+                    .id(spec.id)
                 }
             }
             .padding(.vertical, 4)
@@ -190,29 +268,147 @@ struct TranscriptView: View {
     }
 }
 
-/// One exchange's rows — prompt bubble, GROUPED activity (LIVE-GATE G3 / r1b: `groupActivity`
-/// folds any UNBROKEN run of tool calls — even across different tool names — into one `.toolRun`
-/// sentence row carrying its status and expanding to every call's arguments and output, skips
-/// `.task` entirely), one row per assistant message plus the live streaming row, stopped flag.
-///
-/// Activity and replies ARE interleaved in arrival order (2026-10-02, `exchangeTimeline`): `Exchange`
-/// still stores them in two lists, but records where each reply fell among the activity. Which tool
-/// runs and pills are open is NOT this row's state: it reads and toggles the transcript's one
-/// `TranscriptExpansion` (`TranscriptView.expansion`), keyed by item identity — a run's
-/// `toolRunExpansionKey` (its first `callId`, NOT its position: the reducer's drop-oldest activity cap
-/// shifts positions during a marathon turn, which would silently re-point an open row at a
-/// neighbouring run's output), a reasoning block's `thinkingExpansionKey` — so a row the lazy stack
-/// recycles comes back as it was (expansion is still a transient reading aid, never persisted).
-private struct TranscriptExchangeRow: View {
-    let exchange: Exchange
+// MARK: - The cells
+
+/// One timeline entry of an exchange: an activity group (numbered across the whole exchange, so a tool run's fallback
+/// expansion key stays unique), a reply (by its index in `Exchange.replies`), or a row of pills.
+private enum TimelineEntry: Equatable {
+    case group(index: Int, ActivityGroup)
+    case reply(Int)
+    /// Consecutive tools' pills — and thinking pills — side by side (pill-themed window only).
+    case pillRow([PillRowItem])
+}
+
+/// One pill in a row: a tool's calls, or a reasoning block (the thinking pill, 2026-10-05).
+private enum PillRowItem: Equatable {
+    case tool(index: Int, entry: ToolRunEntry)
+    case thinking(ThinkingItem)
+}
+
+/// PURE: an exchange's entries in the order they happened (`exchangeTimeline`, user 2026-10-02): each reply after
+/// exactly the activity that preceded it, so a "search, write, search, write" turn reads that way instead of every
+/// search first.
+private func transcriptTimeline(_ exchange: Exchange, style: TranscriptToolRowStyle) -> [TimelineEntry] {
+    var entries: [TimelineEntry] = []
+    var groupIndex = 0
+    var row: [PillRowItem] = []
+    func closeRow() {
+        if !row.isEmpty { entries.append(.pillRow(row)); row = [] }
+    }
+    for segment in exchangeTimeline(exchange) {
+        switch segment {
+        case .activity(let items):
+            for group in groupActivity(items) {
+                // The pill-themed window gives each tool its own pill and lays consecutive ones
+                // side by side (user, 2026-10-02): a stretch that searched, read pages and ran
+                // commands is one row of three pills, each with its own words.
+                if style == .pill, case .toolRun(let runs) = group {
+                    for run in runs {
+                        row.append(.tool(index: groupIndex, entry: run))
+                        groupIndex += 1
+                    }
+                } else if style == .pill, case .single(let item) = group, let thinking = item.thinkingItem {
+                    // The thinking pill joins the same flow as the tool pills where adjacent.
+                    row.append(.thinking(thinking))
+                    groupIndex += 1
+                } else {
+                    closeRow()
+                    entries.append(.group(index: groupIndex, group))
+                    groupIndex += 1
+                }
+            }
+        case .reply(let index):
+            closeRow()
+            entries.append(.reply(index))
+        }
+    }
+    closeRow()
+    return entries
+}
+
+/// What an exchange's timeline was worked out to, kept by the exchange's content stamp (`Exchange.stamp` moves
+/// whenever its content does): every cell of a long transcript is asked for on every publish, and grouping a turn's
+/// activity is linear in it.
+@MainActor
+private final class TranscriptLayoutMemo {
+    struct Key: Hashable {
+        let stamp: UInt64
+        let pill: Bool
+    }
+
+    struct Layout {
+        let key: Key
+        let entries: [TimelineEntry]
+        /// Which reply carries the copy button once nothing is streaming (`exchangeFinalReplyIndex`).
+        let finalReply: Int?
+    }
+
+    private var known: [Key: Layout] = [:]
+    /// The last cell of the transcript as last laid out — where a far jump lands.
+    var lastCellID: Int?
+
+    func layout(for exchange: Exchange, style: TranscriptToolRowStyle) -> Layout {
+        let key = Key(stamp: exchange.stamp, pill: style == .pill)
+        if let layout = known[key] { return layout }
+        let layout = Layout(key: key, entries: transcriptTimeline(exchange, style: style),
+                            finalReply: exchangeFinalReplyIndex(exchange, isStreaming: false))
+        known[key] = layout
+        return layout
+    }
+
+    /// Forgets the exchanges that are gone (a reset, an edited-out turn): only those of the last layout stay.
+    func keep(_ keys: Set<Key>) {
+        guard known.count > keys.count else { return }
+        known = known.filter { keys.contains($0.key) }
+    }
+}
+
+/// What one cell draws — a value, so a cell can be told apart from what it was without running its body.
+private enum TranscriptCellContent: Equatable {
+    case prompt(text: String, envelope: AgentMessageEnvelope?)
+    /// A non-pill activity row. `isExpanded` is the tool run's open state; `cards` is the card state an interaction
+    /// card draws from (nil for every other row, so typing in a card does not rebuild them).
+    case group(index: Int, group: ActivityGroup, isExpanded: Bool, cards: TranscriptCardState?)
+    /// A row of pills with which of them are open.
+    case pillRow(items: [PillRowItem], open: [Bool])
+    case reply(text: String, showsCopy: Bool)
+    case streaming(String)
+    case stopped
+}
+
+private struct TranscriptCellSpec: Identifiable {
+    /// Cells of exchange `n` have ids from `n * idStride`: its prompt first, its entries from `firstEntryOffset`, then
+    /// the stopped line and the streaming reply at the top of the range. Entries are capped far below the stride (the
+    /// reducer keeps 200 activity items).
+    static let idStride = 100_000
+    static let firstEntryOffset = 1
+    static let stoppedOffset = 99_998
+    static let streamingOffset = 99_999
+
+    let id: Int
+    let exchangeIndex: Int
+    let content: TranscriptCellContent
+    let turnIsLive: Bool
+    let topGap: CGFloat
+}
+
+/// One cell of the transcript. Which tool runs and pills are open is NOT this cell's state: it reads and toggles the
+/// transcript's one `TranscriptExpansion` (`TranscriptView.expansion`), keyed by item identity — a run's
+/// `toolRunExpansionKey` (its first `callId`, NOT its position: the reducer's drop-oldest activity cap shifts positions
+/// during a marathon turn, which would silently re-point an open row at a neighbouring run's output), a reasoning
+/// block's `thinkingExpansionKey` — so a cell the lazy stack recycles comes back as it was (expansion is still a
+/// transient reading aid, never persisted).
+private struct TranscriptCell: View {
     /// The exchange's place in the transcript — scopes a positional expansion key
     /// (`transcriptExpansionKey`).
     let exchangeIndex: Int
-    /// The transcript's open rows and pills (`TranscriptView.expansion`).
+    let content: TranscriptCellContent
+    /// The transcript's open rows and pills (`TranscriptView.expansion`). Which of them THIS cell shows is part of
+    /// `content`, so it is compared there.
     @Binding var expansion: TranscriptExpansion
-    /// A streaming reasoning block's text so far (`FieldStateAdapter.liveThinkingText`), read only for
-    /// an OPEN thinking pill.
-    let liveThinkingText: (String) -> String?
+    /// The streaming reasoning blocks' text (`FieldStateAdapter.liveThinking`), followed only by an OPEN thinking
+    /// pill's own text view.
+    let liveThinking: ThinkingLiveText
     /// mac-chat-parity Task 3 — see `TranscriptView.cardWiring`.
     let cardWiring: InteractionCardWiring
     /// diff-tabs Task 9 — see `TranscriptView.onOpenDiff`. Carried, never captured: this view is a
@@ -224,17 +420,10 @@ private struct TranscriptExchangeRow: View {
     var sessionHasWorkingDirectory: Bool = false
     /// Transcript file links — see `WindowContentView.fileMentionBaseDirectory`'s own doc.
     var fileMentionBaseDirectory: String? = nil
-    /// Non-nil only for the LAST exchange while a reply is actively streaming (v1's synthetic
-    /// trailing-stream mechanism) — `TranscriptView.body` computes this per-index so this view
-    /// stays a pure function of its own inputs.
-    let streamingText: String?
     /// True only for the LAST exchange while its turn is still running — the tool rows' gate for
-    /// drawing a running glyph. Same per-index computation as `streamingText`, and for the same
-    /// reason: this view stays a pure function of its inputs.
+    /// drawing a running glyph. Per exchange, for the reason the whole gate exists: a false "running" is permanent.
     let turnIsLive: Bool
     let tint: Color
-
-    @Environment(\.transcriptToolRowStyle) private var toolRowStyle
 
     /// The replies' file door — only where the window layer wired `onOpenFile`, so the orb's morph
     /// window and detached windows keep plain replies.
@@ -247,94 +436,26 @@ private struct TranscriptExchangeRow: View {
     }
 
     var body: some View {
-        // Only the turn's final reply carries the copy button (`exchangeFinalReplyIndex`).
-        let finalReply = exchangeFinalReplyIndex(exchange, isStreaming: streamingText != nil)
-        VStack(alignment: .leading, spacing: 10) {
-            if !exchange.prompt.isEmpty || exchange.promptEnvelope != nil {
-                TranscriptUserBubble(text: exchange.prompt, tint: tint, envelope: exchange.promptEnvelope)
-            }
-            // Tools, cards and replies in the order they happened (`exchangeTimeline`, user
-            // 2026-10-02): each reply after exactly the activity that preceded it, so a "search,
-            // write, search, write" turn reads that way instead of every search first.
-            ForEach(Array(timeline.enumerated()), id: \.offset) { _, entry in
-                switch entry {
-                case .group(let index, let group):
-                    activityGroupRow(group, index: index)
-                case .pillRow(let items):
-                    pillRow(items)
-                case .reply(let index):
-                    // One row per assistant message (mac-chat-parity Task 1) — the engine emits one
-                    // per ROUND. `.assistant`: the transcript reply IS `docs/brand.md` § 4's serif
-                    // allowlist binding #4. A FINISHED reply gets the file door (2026-09-30); the
-                    // streaming row below never does (`TranscriptAssistantMessage.fileDoor`'s doc).
-                    TranscriptAssistantMessage(text: exchange.replies[index], isStreaming: false, role: .assistant,
-                                               fileDoor: fileDoor, showsCopyButton: index == finalReply)
-                        .equatable()
-                }
-            }
-            // The streaming row is ADDITIVE: while round N streams, rounds 1…N-1 stay on screen.
-            if let streamingText {
-                TranscriptAssistantMessage(text: streamingText, isStreaming: true, role: .assistant)
-            }
-            if exchange.aborted { TranscriptStoppedRow() }
+        switch content {
+        case .prompt(let text, let envelope):
+            TranscriptUserBubble(text: text, tint: tint, envelope: envelope)
+        case .group(let index, let group, _, _):
+            activityGroupRow(group, index: index)
+        case .pillRow(let items, _):
+            pillRow(items)
+        case .reply(let text, let showsCopy):
+            // One cell per assistant message (mac-chat-parity Task 1) — the engine emits one per ROUND. `.assistant`:
+            // the transcript reply IS `docs/brand.md` § 4's serif allowlist binding #4. A FINISHED reply gets the
+            // file door (2026-09-30); the streaming one never does (`TranscriptAssistantMessage.fileDoor`'s doc).
+            TranscriptAssistantMessage(text: text, isStreaming: false, role: .assistant, fileDoor: fileDoor, showsCopyButton: showsCopy)
+        case .streaming(let text):
+            // ADDITIVE: while round N streams, rounds 1…N-1 stay on screen.
+            TranscriptAssistantMessage(text: text, isStreaming: true, role: .assistant)
+        case .stopped:
+            TranscriptStoppedRow()
         }
     }
 
-    /// One timeline entry: an activity group (numbered across the whole exchange, so a tool run's
-    /// fallback expansion key stays unique) or a reply.
-    private enum TimelineEntry {
-        case group(index: Int, ActivityGroup)
-        case reply(Int)
-        /// Consecutive tools' pills — and thinking pills — side by side (pill-themed window only).
-        case pillRow([PillRowItem])
-    }
-
-    /// One pill in a row: a tool's calls, or a reasoning block (the thinking pill, 2026-10-05).
-    private enum PillRowItem {
-        case tool(index: Int, entry: ToolRunEntry)
-        case thinking(ThinkingItem)
-    }
-
-    private var timeline: [TimelineEntry] {
-        var entries: [TimelineEntry] = []
-        var groupIndex = 0
-        var row: [PillRowItem] = []
-        func closeRow() {
-            if !row.isEmpty { entries.append(.pillRow(row)); row = [] }
-        }
-        for segment in exchangeTimeline(exchange) {
-            switch segment {
-            case .activity(let items):
-                for group in groupActivity(items) {
-                    // The pill-themed window gives each tool its own pill and lays consecutive ones
-                    // side by side (user, 2026-10-02): a stretch that searched, read pages and ran
-                    // commands is one row of three pills, each with its own words.
-                    if toolRowStyle == .pill, case .toolRun(let runs) = group {
-                        for run in runs {
-                            row.append(.tool(index: groupIndex, entry: run))
-                            groupIndex += 1
-                        }
-                    } else if toolRowStyle == .pill, case .single(let item) = group, let thinking = item.thinkingItem {
-                        // The thinking pill joins the same flow as the tool pills where adjacent.
-                        row.append(.thinking(thinking))
-                        groupIndex += 1
-                    } else {
-                        closeRow()
-                        entries.append(.group(index: groupIndex, group))
-                        groupIndex += 1
-                    }
-                }
-            case .reply(let index):
-                closeRow()
-                entries.append(.reply(index))
-            }
-        }
-        closeRow()
-        return entries
-    }
-
-    /// A row of tool pills, then — beneath it — each pill's body that has something to show: an
-    /// opened pill's calls, a failure line, its diff chips.
     /// The open-state key of a tool pill, unique across the transcript.
     private func toolKey(_ entry: ToolRunEntry, index: Int) -> String {
         transcriptExpansionKey(toolRunExpansionKey([entry], fallbackIndex: index), exchangeIndex: exchangeIndex)
@@ -347,18 +468,19 @@ private struct TranscriptExchangeRow: View {
         case .tool(let index, let entry):
             return PillToolRunHeader.opensInPlace(entry) && expansion.contains(toolKey(entry, index: index))
         case .thinking(let thinking):
-            return openThinkingText(thinking) != nil
+            return thinkingIsOpen(thinking)
         }
     }
 
-    /// The text an OPEN thinking pill shows — nil while it is closed or has nothing readable yet (a
-    /// live block whose increments so far are whitespace). The live buffer is read only for a pill
-    /// that is open: its text is O(n).
-    private func openThinkingText(_ thinking: ThinkingItem) -> String? {
-        guard thinkingHasReadableText(thinking), expansion.contains(thinkingExpansionKey(thinking.blockId)) else { return nil }
-        return thinkingDisplayText(thinking, liveText: thinking.isLive ? liveThinkingText(thinking.blockId) : nil)
+    /// Whether a thinking pill is open: it was asked open and its block has something to show. A streaming block's
+    /// words are not read here — the open pill's own text view follows the live buffer — so a fold that only
+    /// lengthens them does not reach this cell at all.
+    private func thinkingIsOpen(_ thinking: ThinkingItem) -> Bool {
+        thinkingHasReadableText(thinking) && expansion.contains(thinkingExpansionKey(thinking.blockId))
     }
 
+    /// A row of tool pills, then — beneath it — each pill's body that has something to show: an
+    /// opened pill's calls, a failure line, its diff chips.
     @ViewBuilder
     private func pillRow(_ items: [PillRowItem]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -382,12 +504,16 @@ private struct TranscriptExchangeRow: View {
         case .tool(let index, let entry):
             let key = toolKey(entry, index: index)
             PillToolRunHeader(entries: [entry], turnIsLive: turnIsLive, isExpanded: expansion.contains(key),
-                              toggle: { toggle(key, morph: PillToolRunHeader.opensInPlace(entry)) })
+                              toggle: { toggle(key, morph: PillToolRunHeader.opensInPlace(entry)) }, identity: key)
+                .equatable()
         case .thinking(let thinking):
             let key = thinkingExpansionKey(thinking.blockId)
-            let text = openThinkingText(thinking)
-            PillThinkingHeader(item: thinking, turnIsLive: turnIsLive, isExpanded: text != nil, text: text,
+            let open = thinkingIsOpen(thinking)
+            PillThinkingHeader(item: thinking, turnIsLive: turnIsLive, isExpanded: open,
+                               text: open && !thinking.isLive ? thinkingDisplayText(thinking, liveText: nil) : nil,
+                               live: open && thinking.isLive ? liveThinking : nil,
                                toggle: { toggle(key, morph: true) })
+                .equatable()
         }
     }
 
@@ -436,7 +562,8 @@ private struct TranscriptExchangeRow: View {
             if let record = item.interactionRecord {
                 // A PENDING question renders nowhere here — the composer has become it
                 // (`composerMorphQuestion`, user call 2026-08-12). It reappears in this exact slot
-                // the moment it is answered, frozen with what was chosen.
+                // the moment it is answered, frozen with what was chosen. (`TranscriptView` leaves the cell out
+                // while that holds.)
                 if !questionMorphsTheComposer(record, closed: cardWiring.closedAsks) {
                     TranscriptInteractionCard(record: record, wiring: cardWiring)
                 }
@@ -457,6 +584,36 @@ private struct TranscriptExchangeRow: View {
         } else {
             expansion.toggle(key)
         }
+    }
+}
+
+/// A cell is a function of its inputs, so it is rebuilt only when one changed. The closures it carries are rebuilt
+/// every pass and are not compared; which of the transcript's open rows it shows is part of its `content`.
+extension TranscriptCell: Equatable {
+    static func == (a: TranscriptCell, b: TranscriptCell) -> Bool {
+        a.exchangeIndex == b.exchangeIndex && a.turnIsLive == b.turnIsLive && a.tint == b.tint
+            && a.sessionHasWorkingDirectory == b.sessionHasWorkingDirectory
+            && a.fileMentionBaseDirectory == b.fileMentionBaseDirectory
+            && (a.onOpenDiff == nil) == (b.onOpenDiff == nil) && (a.onOpenFile == nil) == (b.onOpenFile == nil)
+            && a.content == b.content
+    }
+}
+
+/// What the interaction cards draw from — the wiring's sets and the adapter's typed-but-unsent answers — as values, so
+/// a cell can tell whether a card needs redrawing without running its body.
+struct TranscriptCardState: Equatable {
+    var inFlight: Set<String>
+    var closedAsks: Set<String>
+    var errorLines: [String: String]
+    var inactiveElicitations: Set<String>
+    var drafts: [String: PendingCardDraft]
+
+    init(wiring: InteractionCardWiring, drafts: [String: PendingCardDraft]) {
+        inFlight = wiring.inFlight
+        closedAsks = wiring.closedAsks
+        errorLines = wiring.errorLines
+        inactiveElicitations = wiring.inactiveElicitations
+        self.drafts = drafts
     }
 }
 
