@@ -204,7 +204,13 @@ public enum WindowRelative {
     /// A watched target with no action for `idleAfter` whose picture has not changed for this long is PAUSED: its
     /// live capture stops (off screen: its 1 s stills stop) and the last frame stays up. Measured before: an idle
     /// helper spent ~4.6% CPU taking, drawing and encoding one unchanged still a second of an off-Space window.
+    /// An on-screen stream waits for this only once its session's turn has ended (`turnEnded`): mid-turn, the
+    /// pauses between actions (the model thinking) would stop and restart the stream around every action — a
+    /// restart is what makes the mirror flash — and an unchanged stream costs little (ScreenCaptureKit's idle frames
+    /// are dropped before any work). Off screen a resume costs nothing, so stills pause at once.
     public static let pauseAfterUnchanged: TimeInterval = 5
+    /// An on-screen stream mid-turn (or with no `turn.ended` ever coming) pauses only after this long unchanged.
+    public static let midTurnPauseAfterUnchanged: TimeInterval = 30
     /// While paused, one still this often checks the window for change (there is no notification for a window's
     /// pixels): a different one resumes at once. An action, a new frames subscriber or the window going off or
     /// back on screen resume too.
@@ -279,6 +285,8 @@ public enum WindowRelative {
     /// Targets whose capture (or off-screen stills) is paused: unchanged and unworked-in (`pauseAfterUnchanged`).
     private var paused: Set<String> = []
     private var pauseCounts = (pauses: 0, resumes: 0)
+    /// Targets whose session's turn ended with no action on them since.
+    private var turnOver: Set<String> = []
 
     public init(capture: FrameCaptureFactory, geometry: WindowGeometry, snapshotter: WindowSnapshotter, clock: ViewClock) {
         self.capture = capture
@@ -414,6 +422,7 @@ public enum WindowRelative {
         lastActionAt.removeValue(forKey: targetId)
         lastChangeAt.removeValue(forKey: targetId)
         paused.remove(targetId)
+        turnOver.remove(targetId)
         pendingStops.removeValue(forKey: targetId)?.cancel()
         emit(sessionId: target.sessionId, method: "view.released",
              params: ["sessionId": .string(target.sessionId), "targetId": .string(targetId)])
@@ -422,6 +431,11 @@ public enum WindowRelative {
     /// The engine's `targetReleased`, which names the window rather than the target.
     public func released(sessionId: String, pid: pid_t, windowId: CGWindowID) {
         for id in matching(sessionId: sessionId, pid: pid, windowId: windowId) { release(targetId: id, reason: "the engine released it") }
+    }
+
+    /// `turn.ended`: the session's windows may pause once unchanged for `pauseAfterUnchanged` (until the next action).
+    public func turnEnded(sessionId: String) {
+        for target in targets.values where target.sessionId == sessionId { turnOver.insert(target.targetId) }
     }
 
     public func sessionEnded(sessionId: String) {
@@ -478,6 +492,7 @@ public enum WindowRelative {
         // The agent is working there: the picture is about to change.
         resume(targetId, reason: "an action")
         lastChangeAt[targetId] = clock.now
+        turnOver.remove(targetId)
         let wasActive = active[targetId] != nil
         if !wasActive {
             // Waking up: is the window where a live capture can see it? (Off screen, a snapshot is due now.)
@@ -658,12 +673,14 @@ public enum WindowRelative {
 
     // MARK: Pause (unchanged and unworked-in)
 
-    /// Pauses every watched target with no action for `idleAfter` and no change for `pauseAfterUnchanged`.
+    /// Pauses every watched target with no action for `idleAfter` and no change for `pauseAfterUnchanged` (an
+    /// on-screen stream whose turn has not ended: `midTurnPauseAfterUnchanged`).
     private func pauseUnchanged() {
         let now = clock.now
         for id in watched where !paused.contains(id) && active[id] == nil {
+            let after = offScreen.contains(id) || turnOver.contains(id) ? Self.pauseAfterUnchanged : Self.midTurnPauseAfterUnchanged
             guard now - (lastActionAt[id] ?? -.infinity) >= Self.idleAfter,
-                  now - (lastChangeAt[id] ?? -.infinity) >= Self.pauseAfterUnchanged else { continue }
+                  now - (lastChangeAt[id] ?? -.infinity) >= after else { continue }
             pause(id)
         }
     }
@@ -682,8 +699,10 @@ public enum WindowRelative {
             // A still now, as the baseline the checks compare against (not sent: the last frame stays up).
             snapshots[id] = SnapshotState(nextAt: now)
         }
+        let quietFor = Int((now - (lastChangeAt[id] ?? now)).rounded())
         log("view: \(id) (\(target.appName) window \(target.windowId)) paused — no change and no action for "
-            + "\(Int(Self.pauseAfterUnchanged)) s; the last frame stays, checked every \(Int(Self.pausedPeekInterval)) s")
+            + "\(quietFor) s\(turnOver.contains(id) ? " after its turn ended" : ""); the last frame stays, "
+            + "checked every \(Int(Self.pausedPeekInterval)) s")
         scheduleStats()
     }
 

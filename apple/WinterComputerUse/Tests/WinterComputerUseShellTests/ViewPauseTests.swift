@@ -3,10 +3,11 @@ import Foundation
 import WinterComputerUseShell
 import XCTest
 
-/// An idle bound window — no action for `idleAfter`, a picture unchanged for `pauseAfterUnchanged` — is PAUSED: its
-/// live capture stops (off screen: its stills stop), the last frame stays up, and a still every `pausedPeekInterval`
-/// checks it for change. An action, a changed picture, a new frames subscriber or the window going off or back on
-/// screen resume it. All on fakes: the clock, the capture and the stills are driven by hand.
+/// An idle bound window — no action for `idleAfter`, a picture unchanged for `pauseAfterUnchanged` (an on-screen one:
+/// once its turn has ended; mid-turn only after `midTurnPauseAfterUnchanged`) — is PAUSED: its live capture stops (off
+/// screen: its stills stop), the last frame stays up, and a still every `pausedPeekInterval` checks it for change. An
+/// action, a changed picture, a new frames subscriber or the window going off or back on screen resume it. All on
+/// fakes: the clock, the capture and the stills are driven by hand.
 @MainActor
 final class ViewPauseTests: XCTestCase {
     private func safari() -> ViewTarget {
@@ -42,11 +43,13 @@ final class ViewPauseTests: XCTestCase {
         return asked
     }
 
-    /// Bound and watched at 0 with one frame sent; paused at 5 s (its baseline still answered with frame 1).
+    /// Bound and watched at 0 with one frame sent, the turn over; paused at 5 s (its baseline still answered with
+    /// frame 1).
     private func pausedRig() -> Rig {
         let rig = Rig()
         watch(rig)
         rig.viewHub.bound(safari())
+        rig.coordinator.turnEnded(sessionId: "s_1")
         rig.capture.live[0].onFrame(frame(1))
         run(rig, until: 5, step: 1) { _ in self.frame(1) }
         return rig
@@ -54,10 +57,11 @@ final class ViewPauseTests: XCTestCase {
 
     // MARK: On screen: the stream
 
-    func testAnUnchangedUnworkedInWindowPausesItsStreamAfterFiveSeconds() {
+    func testAfterItsTurnAnUnchangedWindowPausesItsStreamFiveSecondsAfterTheLastChange() {
         let rig = Rig()
         watch(rig)
         rig.viewHub.bound(safari())
+        rig.viewHub.turnEnded(sessionId: "s_1")
         rig.capture.live[0].onFrame(frame(1))
         for second in 1...4 {
             rig.clock.advance(by: 1)
@@ -81,6 +85,7 @@ final class ViewPauseTests: XCTestCase {
         let rig = Rig()
         watch(rig)
         rig.viewHub.bound(safari())
+        rig.viewHub.turnEnded(sessionId: "s_1")
         for second in 0..<30 {
             rig.capture.live.first?.onFrame(frame(UInt8(second)))
             rig.clock.advance(by: 1)
@@ -94,11 +99,62 @@ final class ViewPauseTests: XCTestCase {
         let rig = Rig()
         watch(rig)
         rig.viewHub.bound(safari())
+        rig.viewHub.turnEnded(sessionId: "s_1")
         for _ in 0..<6 {
             rig.capture.live.first?.onFrame(frame(4)) // the window redraws the same pixels
             rig.clock.advance(by: 1)
         }
         XCTAssertTrue(rig.viewHub.isPaused("t1"))
+    }
+
+    func testMidTurnTheStreamKeepsRunningThroughTheGapsBetweenActions() {
+        let rig = Rig()
+        watch(rig)
+        rig.viewHub.bound(safari())
+        rig.capture.live[0].onFrame(frame(1))
+        for _ in 0..<3 { // the model thinks 20 s between actions; the window does not change meanwhile
+            run(rig, until: rig.clock.now + 20, step: 1) { _ in self.frame(1) }
+            XCTAssertFalse(rig.viewHub.isPaused("t1"))
+            act(rig)
+        }
+        XCTAssertEqual(rig.capture.started.count, 1, "never stopped and restarted around an action (a restart flashes)")
+        XCTAssertTrue(rig.snapshotter.requests.isEmpty)
+    }
+
+    func testMidTurnALongUnchangedStretchStillPauses() {
+        let rig = Rig()
+        watch(rig)
+        rig.viewHub.bound(safari()) // and turn.ended never comes
+        rig.capture.live[0].onFrame(frame(1))
+        run(rig, until: 29, step: 1) { _ in self.frame(1) }
+        XCTAssertFalse(rig.viewHub.isPaused("t1"))
+        run(rig, until: 30, step: 1) { _ in self.frame(1) }
+        XCTAssertTrue(rig.viewHub.isPaused("t1"))
+        XCTAssertTrue(rig.logLines.contains { $0.contains("paused — no change and no action for 30 s;") }, "\(rig.logLines)")
+    }
+
+    func testTheTurnEndingPausesAWindowThatHasNotChangedForFiveSeconds() {
+        let rig = Rig()
+        watch(rig)
+        rig.viewHub.bound(safari())
+        rig.capture.live[0].onFrame(frame(1))
+        run(rig, until: 20, step: 1) { _ in self.frame(1) }
+        XCTAssertFalse(rig.viewHub.isPaused("t1"))
+        rig.coordinator.turnEnded(sessionId: "s_1") // turn.ended from the daemon
+        rig.clock.advance(by: 1)
+        XCTAssertTrue(rig.viewHub.isPaused("t1"), "unchanged for 20 s already: at the next tick")
+        XCTAssertTrue(rig.logLines.contains { $0.contains("after its turn ended") })
+    }
+
+    func testAnActionAfterTheTurnEndedMeansMidTurnAgain() {
+        let rig = Rig()
+        watch(rig)
+        rig.viewHub.bound(safari())
+        rig.capture.live[0].onFrame(frame(1))
+        rig.viewHub.turnEnded(sessionId: "s_1")
+        act(rig) // the next turn started
+        run(rig, until: 15, step: 1) { _ in self.frame(1) }
+        XCTAssertFalse(rig.viewHub.isPaused("t1"))
     }
 
     func testAnActionResumesAPausedStreamAtFullRate() {

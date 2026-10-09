@@ -12,12 +12,13 @@ final class ViewStreamCostTests: XCTestCase {
                    windowFrame: CGRect(x: 100, y: 50, width: 800, height: 600), mirror: true)
     }
 
-    /// Captured-and-encoded frames over one minute of an idle bound window, at 10 fps asked: Σ fps × time — and,
-    /// once it is paused (unchanged for `pauseAfterUnchanged` with no action), the stills that check it for change.
+    /// Captured-and-encoded frames over the minute after a turn of an idle bound window, at 10 fps asked: Σ fps × time
+    /// — and, once it is paused (unchanged for `pauseAfterUnchanged` with no action), the stills that check it.
     func testEncodedFramesPerIdleMinute() {
         let rig = Rig()
         rig.viewHub.bound(notes())
         _ = rig.viewHub.subscribe(connection: 1, ViewSubscribeParams(sessionId: "s_1", frames: true))
+        rig.viewHub.turnEnded(sessionId: "s_1") // the minute after a turn
         let same = ViewFrame(jpeg: Data(repeating: 7, count: 64), width: 720, height: 540, windowSize: CGSize(width: 800, height: 600))
         var encoded = 0.0
         var stills = 0
