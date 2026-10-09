@@ -1133,7 +1133,8 @@ public final class CUCore: @unchecked Sendable {
         Task { @MainActor in CUKeyboardLayout.refresh() }
 
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-        timer.schedule(deadline: .now() + 2, repeating: 2)
+        // With leeway: a grant change noticed a second later is fine, and the poll rides other wake-ups.
+        timer.schedule(deadline: .now() + 2, repeating: 2, leeway: .seconds(1))
         timer.setEventHandler { [weak self] in self?.pollPermissions() }
         timer.resume()
         permissionTimer = timer

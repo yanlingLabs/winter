@@ -125,6 +125,28 @@ final class IdleQuitTimerTests: XCTestCase {
         rig.coordinator.sessionEnded(sessionId: "s_1")
         XCTAssertEqual(rig.coordinator.boundTargetCount, 1)
     }
+
+    // MARK: The real scheduler
+
+    func testTheRealTimersHaveLeewaySoTheSystemCanCoalesceThem() {
+        XCTAssertEqual(MainQueueIdleScheduler.leeway(for: 0.5), .milliseconds(100))
+        XCTAssertEqual(MainQueueIdleScheduler.leeway(for: 1), .milliseconds(200))
+        XCTAssertEqual(MainQueueIdleScheduler.leeway(for: 3), .milliseconds(600))
+        XCTAssertEqual(MainQueueIdleScheduler.leeway(for: 600), .milliseconds(5000), "capped at 5 s")
+        XCTAssertEqual(MainQueueIdleScheduler.leeway(for: 0), .milliseconds(10))
+    }
+
+    func testTheRealSchedulerFiresOnceAndACancelledTimerNever() {
+        let scheduler = MainQueueIdleScheduler()
+        var fired = 0, cancelledFired = 0
+        _ = scheduler.schedule(after: 0.05) { fired += 1 }
+        scheduler.schedule(after: 0.05) { cancelledFired += 1 }.cancel()
+        let deadline = Date().addingTimeInterval(2)
+        while fired == 0, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(fired, 1)
+        XCTAssertEqual(cancelledFired, 0)
+    }
 }
 
 @MainActor

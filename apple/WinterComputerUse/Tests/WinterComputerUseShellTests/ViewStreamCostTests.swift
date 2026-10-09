@@ -12,19 +12,28 @@ final class ViewStreamCostTests: XCTestCase {
                    windowFrame: CGRect(x: 100, y: 50, width: 800, height: 600), mirror: true)
     }
 
-    /// Captured-and-encoded frames over one minute of an idle bound window, at 10 fps asked: Σ fps × time.
+    /// Captured-and-encoded frames over the minute after a turn of an idle bound window, at 10 fps asked: Σ fps × time
+    /// — and, once it is paused (unchanged for `pauseAfterUnchanged` with no action), the stills that check it.
     func testEncodedFramesPerIdleMinute() {
         let rig = Rig()
         rig.viewHub.bound(notes())
         _ = rig.viewHub.subscribe(connection: 1, ViewSubscribeParams(sessionId: "s_1", frames: true))
+        rig.viewHub.turnEnded(sessionId: "s_1") // the minute after a turn
+        let same = ViewFrame(jpeg: Data(repeating: 7, count: 64), width: 720, height: 540, windowSize: CGSize(width: 800, height: 600))
         var encoded = 0.0
+        var stills = 0
         for _ in 0..<600 { // 100 ms steps
             encoded += Double(rig.capture.live.first?.maxFps ?? 0) * 0.1
             rig.clock.advance(by: 0.1)
+            stills += rig.snapshotter.requests.count
+            rig.snapshotter.answer(same)
         }
-        let before = 10.0 * 60
-        print("view-cost: encoded frames per idle minute — before \(Int(before)), after \(Int(encoded.rounded()))")
-        XCTAssertEqual(encoded, 3 * 10 + 57 * 1, accuracy: 1)
+        let before = 10.0 * 60, throttled = 3.0 * 10 + 57 * 1
+        print("view-cost: encoded frames per idle minute — before \(Int(before)), idle throttle \(Int(throttled)), "
+              + "paused \(Int(encoded.rounded())) + \(stills) unchanged still(s), none encoded")
+        XCTAssertEqual(encoded, 3 * 10 + 2 * 1, accuracy: 1.5, "full rate for 3 s, the idle rate until 5 s unchanged, then nothing")
+        XCTAssertEqual(stills, 2, "the baseline at the pause and one check 30 s later")
+        XCTAssertTrue(rig.capture.live.isEmpty)
     }
 
     /// Frames SENT over one minute of an unchanged window at full rate (the window redraws, the pixels do not).

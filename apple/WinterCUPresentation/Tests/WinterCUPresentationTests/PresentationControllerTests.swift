@@ -17,6 +17,8 @@ import XCTest
                                      visibleFrame: CGRect(x: 0, y: 25, width: 1512, height: 897))]
         func snapshot(of windowID: CGWindowID) -> WindowSnapshot? { windows[windowID] }
         func screens() -> [ScreenInfo] { screenList }
+        var followIntervals: [TimeInterval] = []
+        func setFollowInterval(_ seconds: TimeInterval) { followIntervals.append(seconds) }
     }
 
     final class FakeMirror: MirrorSurface {
@@ -124,8 +126,10 @@ import XCTest
         var tick: (@MainActor () -> Void)?
         var isRunning: Bool { tick != nil }
         var starts = 0
+        var interval: TimeInterval?
         func start(interval: TimeInterval, _ tick: @escaping @MainActor () -> Void) {
             starts += 1
+            self.interval = interval
             self.tick = tick
         }
         func stop() { tick = nil }
@@ -379,6 +383,49 @@ import XCTest
         driver.fire()
         XCTAssertEqual(driver.need, .low)
         XCTAssertTrue(driver.isRunning)
+    }
+
+    func testARestingCursorStopsBreathingAfterFiveSecondsAndTheNextEventStartsItAgain() {
+        addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400))
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 150, y: 150), kind: .move)
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 700, y: 400), kind: .press)
+        clock.now += 2
+        driver.fire()
+        XCTAssertEqual(driver.need, .low, "breathing")
+        clock.now += 3
+        driver.fire()
+        XCTAssertFalse(driver.isRunning, "5 s at rest: held still, no display link")
+        let o = try! XCTUnwrap(surfaces.overlay(1))
+        XCTAssertEqual(o.shown, true, "still shown: only the redraws stop")
+        let drawn = o.frames.count
+        for _ in 0..<20 {
+            clock.now += 0.5
+            ticker.fire()
+        }
+        XCTAssertEqual(o.frames.count, drawn, "the tracking tick hands an unchanged cursor nothing to draw")
+        XCTAssertFalse(driver.isRunning)
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 300), kind: .move)
+        XCTAssertTrue(driver.isRunning, "the next event animates again")
+        XCTAssertGreaterThan(o.frames.count, drawn)
+    }
+
+    func testTrackingRunsAtTheIdleRateWhileNothingMovesAndAtFullRateWhenTheWindowMoves() {
+        addWindow(1, CGRect(x: 100, y: 100, width: 800, height: 400))
+        controller.cursor(sessionId: "s", target: ref(1), point: CGPoint(x: 300, y: 200), kind: .move)
+        XCTAssertEqual(ticker.interval, 1.0 / 20, "full rate around an event")
+        clock.now += 2.5
+        ticker.fire()
+        XCTAssertEqual(ticker.interval, 0.5, "a resting cursor over a still window: twice a second")
+        XCTAssertEqual(windows.followIntervals.last, 0.5, "and the window cache is refreshed no more often")
+        addWindow(1, CGRect(x: 160, y: 120, width: 800, height: 400)) // the user drags the window
+        clock.now += 0.5
+        ticker.fire()
+        XCTAssertEqual(surfaces.overlay(1)?.placed.last, CGRect(x: 160, y: 120, width: 800, height: 400))
+        XCTAssertEqual(ticker.interval, 1.0 / 20, "a move: followed at full rate")
+        XCTAssertEqual(windows.followIntervals.last, 1.0 / 20)
+        clock.now += 2.1
+        ticker.fire()
+        XCTAssertEqual(ticker.interval, 0.5, "still again")
     }
 
     func testTheCursorFadesWhileAnotherWindowCoversItsPoint() {

@@ -237,20 +237,38 @@ final class FakeGeometry: WindowGeometry {
         calls += 1
         return frames[windowID]
     }
-    func isOnScreen(_ windowID: CGWindowID) -> Bool? { onScreen[windowID] ?? true }
+    /// How often the window server was asked whether a window is on screen (the visibility poll).
+    var visibilityCalls = 0
+    func isOnScreen(_ windowID: CGWindowID) -> Bool? {
+        visibilityCalls += 1
+        return onScreen[windowID] ?? true
+    }
 }
 
 /// One-shot snapshots, answered by the test.
 @MainActor final class FakeSnapshotter: WindowSnapshotter {
-    var requests: [(windowID: CGWindowID, maxWidth: Int, privatePath: Bool, completion: @MainActor (ViewFrame?) -> Void)] = []
-    func snapshot(windowID: CGWindowID, maxWidth: Int, privatePath: Bool, completion: @escaping @MainActor (ViewFrame?) -> Void) {
-        requests.append((windowID, maxWidth, privatePath, completion))
+    var requests: [(windowID: CGWindowID, maxWidth: Int, privatePath: Bool, unlessDigest: Int?,
+                    completion: @MainActor (WindowStill) -> Void)] = []
+    func snapshot(windowID: CGWindowID, maxWidth: Int, privatePath: Bool, unlessDigest: Int?,
+                  completion: @escaping @MainActor (WindowStill) -> Void) {
+        requests.append((windowID, maxWidth, privatePath, unlessDigest, completion))
     }
-    /// Answers every pending request with `frame`.
+    /// Answers every pending request with `frame` (its digest: its bytes, as the live one digests pixels), or none.
     func answer(_ frame: ViewFrame?) {
         let pending = requests
         requests = []
-        pending.forEach { $0.completion(frame) }
+        for request in pending {
+            guard let frame else { request.completion(.none); continue }
+            let digest = Self.digest(frame)
+            request.completion(digest == request.unlessDigest ? .unchanged : .frame(frame, digest: digest))
+        }
+    }
+
+    static func digest(_ frame: ViewFrame) -> Int {
+        var hasher = Hasher()
+        hasher.combine(frame.jpeg)
+        hasher.combine(frame.width)
+        return hasher.finalize()
     }
 }
 

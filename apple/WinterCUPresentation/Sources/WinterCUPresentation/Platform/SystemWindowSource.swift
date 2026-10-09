@@ -18,6 +18,10 @@ import CoreGraphics
         tracker.windowsAbove(windowID)
     }
 
+    func setFollowInterval(_ seconds: TimeInterval) {
+        tracker.setPollInterval(seconds)
+    }
+
     func screens() -> [ScreenInfo] {
         AppKitScreens.all()
     }

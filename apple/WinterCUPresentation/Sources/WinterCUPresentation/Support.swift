@@ -30,6 +30,10 @@ struct PresentationTuning: Sendable {
     var framesPerSecond: Int = 12
     /// How often windows are re-read to follow them, and timers are checked.
     var trackingInterval: TimeInterval = 1.0 / 20
+    /// The same while nothing moves: no cursor animating, no cursor event and no window move for `fastTrackingHold`.
+    /// A window the user starts dragging is noticed within this and followed at full rate from then on.
+    var idleTrackingInterval: TimeInterval = 0.5
+    var fastTrackingHold: TimeInterval = 2
     /// The overlay is re-asserted in front at most this often.
     var overlayReorderInterval: TimeInterval = 0.5
     /// How often the window list is read to tell whether another window covers the cursor.

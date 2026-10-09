@@ -109,7 +109,11 @@ final class ViewFlashTests: XCTestCase {
         rig.viewHub.unsubscribe(connection: 1, sessionId: "s_1")
         rig.clock.advance(by: ViewHub.stopGrace - 1)
         watch(rig)
-        rig.clock.advance(by: 10)
+        // Past the grace: the pending stop was dropped. (The window keeps changing, so it is never paused.)
+        for i in 0..<10 {
+            rig.capture.live.first?.onFrame(ViewFrame(jpeg: Data([UInt8(i)]), width: 720, height: 392, windowSize: CGSize(width: 1211, height: 824)))
+            rig.clock.advance(by: 1)
+        }
         XCTAssertEqual(rig.capture.started.count, 1)
         XCTAssertEqual(rig.capture.live.count, 1)
     }
@@ -132,7 +136,11 @@ final class ViewFlashTests: XCTestCase {
         rig.viewHub.bound(safari())
         rig.clock.advance(by: 3)
         act(rig)
-        rig.clock.advance(by: ViewHub.statsInterval - 3)
+        for second in 3..<Int(ViewHub.statsInterval) { // a window that keeps changing: captured all minute
+            rig.capture.live.first?.onFrame(ViewFrame(jpeg: Data([UInt8(second)]), width: 720, height: 392,
+                                                      windowSize: CGSize(width: 1211, height: 824)))
+            rig.clock.advance(by: 1)
+        }
         let line = rig.logLines.last { $0.contains("in the last 60 s") }
         XCTAssertEqual(line, "view: in the last 60 s — 1 stream start(s), 0 restart(s), 3 in-place update(s); 1 capturing now")
         XCTAssertEqual(rig.viewHub.captureStats.starts, 0, "counted afresh each minute")

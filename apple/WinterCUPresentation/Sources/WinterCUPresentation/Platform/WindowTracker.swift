@@ -75,9 +75,13 @@ struct SystemWindowServer: WindowServer {
 /// - The one main-thread query left is the FIRST sight of a window (a single-window description), so a new target can
 ///   be placed at once.
 final class WindowTracker: @unchecked Sendable {
-    let pollInterval: TimeInterval
-    let aboveTTL: TimeInterval
+    /// The fastest poll and above-list refresh (the controller's full tracking rate).
+    let basePollInterval: TimeInterval
+    let baseAboveTTL: TimeInterval
     let forgetAfter: TimeInterval
+    /// The poll interval now: never faster than the controller reads the cache (`setPollInterval`).
+    var pollInterval: TimeInterval { lock.withLock { currentPoll } }
+    var aboveTTL: TimeInterval { lock.withLock { currentAboveTTL } }
 
     private let server: WindowServer
     private let now: @Sendable () -> TimeInterval
@@ -88,6 +92,8 @@ final class WindowTracker: @unchecked Sendable {
     private var above: [CGWindowID: (windows: [StackWindow], at: TimeInterval)] = [:]
     private var aboveAsked: [CGWindowID: TimeInterval] = [:]
     private var polling = false
+    private var currentPoll: TimeInterval
+    private var currentAboveTTL: TimeInterval
 
     /// - Parameter queue: where polls run; nil means "only when `pollNow()` is called" (tests).
     init(server: WindowServer = SystemWindowServer(), pollInterval: TimeInterval = 0.05, aboveTTL: TimeInterval = 0.15,
@@ -95,8 +101,10 @@ final class WindowTracker: @unchecked Sendable {
                                                                                 qos: .userInitiated),
          now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.server = server
-        self.pollInterval = pollInterval
-        self.aboveTTL = aboveTTL
+        self.basePollInterval = pollInterval
+        self.baseAboveTTL = aboveTTL
+        self.currentPoll = pollInterval
+        self.currentAboveTTL = aboveTTL
         self.forgetAfter = forgetAfter
         self.queue = queue
         self.now = now
@@ -134,11 +142,26 @@ final class WindowTracker: @unchecked Sendable {
         return cached
     }
 
+    /// Polls no more often than `seconds` (and never faster than the base rate): the controller reads the cache at its
+    /// idle rate while nothing moves, so polling at 20 Hz then would only wake the CPU. Back to a faster rate, one poll
+    /// runs at once so the cache is fresh for the first read.
+    func setPollInterval(_ seconds: TimeInterval) {
+        let poll = max(basePollInterval, seconds)
+        let faster: Bool = lock.withLock {
+            let faster = poll < currentPoll
+            currentPoll = poll
+            currentAboveTTL = max(baseAboveTTL, poll)
+            return faster && polling
+        }
+        if faster, let queue { queue.async { [weak self] in self?.pollNow() } }
+    }
+
     /// One poll: everything followed in one `describe`, plus the above-lists that are due. Runs on the tracker's queue
     /// (or directly, in tests).
     func pollNow() {
         let t = now()
         lock.lock()
+        let aboveTTL = currentAboveTTL
         asked = asked.filter { t - $0.value < forgetAfter }
         aboveAsked = aboveAsked.filter { t - $0.value < forgetAfter }
         for id in snapshots.keys where asked[id] == nil { snapshots[id] = nil }
@@ -181,8 +204,9 @@ final class WindowTracker: @unchecked Sendable {
         lock.lock()
         let keepGoing = !asked.isEmpty || !aboveAsked.isEmpty
         if !keepGoing { polling = false }
+        let interval = currentPoll
         lock.unlock()
         guard keepGoing, let queue else { return }
-        queue.asyncAfter(deadline: .now() + pollInterval) { [weak self] in self?.pollLoop() }
+        queue.asyncAfter(deadline: .now() + interval) { [weak self] in self?.pollLoop() }
     }
 }

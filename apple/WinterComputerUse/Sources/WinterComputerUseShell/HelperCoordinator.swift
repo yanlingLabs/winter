@@ -111,6 +111,7 @@ public enum HelperNotification: Equatable, Sendable {
 
     public func turnEnded(sessionId: String) {
         presentation.turnEnded(sessionId: sessionId)
+        viewHub.turnEnded(sessionId: sessionId)
     }
 
     /// `session.ended`, or the last daemon connection that used the session went away.

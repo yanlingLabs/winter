@@ -43,6 +43,35 @@ final class WindowTrackerTests: XCTestCase {
         WindowTracker(server: server, queue: nil, now: { clock.now })
     }
 
+    func testThePollSlowsToTheRateTheControllerReadsAtButNeverBelowItsBase() {
+        let server = FakeServer(total: 10)
+        let clock = Clock()
+        let tracker = makeTracker(server, clock)
+        XCTAssertEqual(tracker.pollInterval, 0.05)
+        tracker.setPollInterval(0.5)
+        XCTAssertEqual(tracker.pollInterval, 0.5)
+        XCTAssertEqual(tracker.aboveTTL, 0.5, "the covered check's list is refreshed no faster either")
+        tracker.setPollInterval(0.01)
+        XCTAssertEqual(tracker.pollInterval, 0.05)
+        XCTAssertEqual(tracker.aboveTTL, 0.15)
+    }
+
+    func testAtTheIdleRateTheAboveListIsFetchedNoMoreOftenThanItIsRead() {
+        let server = FakeServer(total: 10)
+        let clock = Clock()
+        let tracker = makeTracker(server, clock)
+        tracker.setPollInterval(0.5)
+        _ = tracker.windowsAbove(3)
+        tracker.pollNow()
+        let calls = server.aboveCalls
+        for _ in 0..<4 { // polls 0.2 s apart (a late fast poll) inside one idle period
+            clock.now += 0.2
+            _ = tracker.windowsAbove(3)
+            tracker.pollNow()
+        }
+        XCTAssertEqual(server.aboveCalls - calls, 1, "once in 0.8 s, not every poll")
+    }
+
     func testOnlyTheFirstSightIsDescribedOnTheSpotThenItIsACacheRead() {
         let server = FakeServer(total: 10)
         let clock = Clock()
