@@ -685,7 +685,9 @@ extension CUCore {
                 // value-change notification alone is not (Google Docs' title took the insert, notified, and
                 // reverted it).
                 let web = t.isChromium || isWebContent(e)
-                switch waitForInsert(e, text, before: before, capMs: web ? 400 : 150) {
+                let verdict = waitForInsert(e, text, before: before, capMs: web ? 400 : 150)
+                CULog.act.notice("type in \(t.appName, privacy: .public): AX insert \(verdict == .landed ? "landed" : verdict == .missing ? "missing" : "unreadable", privacy: .public) (web \(web, privacy: .public))")
+                switch verdict {
                 case .landed:
                     return ActOutcome(rung: .accessibility)
                 case .unreadable where !web:
@@ -876,7 +878,19 @@ extension CUCore {
     /// Whether the app's focused UI element is `e` now (its own, or its focused window's).
     func isFocused(_ e: AXUIElement, _ t: CUTarget) -> Bool { focusRelation(e, t) == .onIt }
 
+    /// Whether the bound window is its app's key (focused) window, as the app tells accessibility; nil when it
+    /// can't be read.
+    func boundWindowIsKeyInApp(_ t: CUTarget) -> Bool? {
+        guard let w = try? windowElement(t) else { return nil }
+        if let f = ax.element(ax.application(t.pid), kAXFocusedWindowAttribute) { return CFEqual(f, w) }
+        return ax.bool(w, kAXFocusedAttribute)
+    }
+
     enum FocusRelation { case onIt, elsewhere, unknown }
+
+    static func relationWord(_ r: FocusRelation) -> String {
+        switch r { case .onIt: return "on the field"; case .elsewhere: return "elsewhere"; case .unknown: return "not reported" }
+    }
 
     /// Where the keyboard focus is relative to `e`: on it (the focused element is `e` or inside it, or `e`
     /// says it is focused), elsewhere (the app reports another element), or unknown (the app reports none —
@@ -971,7 +985,21 @@ extension CUCore {
         let web = isWebContent(e) || keyboardTarget(t, focused: e) != t.pid
         let actions = ax.actions(e)
         for a in [kAXPressAction, "AXConfirm"] where actions.contains(a) {
-            if (try? ax.perform(e, a)) != nil, waitFocused(e, t, web: web) { return true }
+            let done = (try? ax.perform(e, a)) != nil
+            let placed = done && waitFocused(e, t, web: web)
+            CULog.act.notice("focus in \(t.appName, privacy: .public): \(a, privacy: .public) \(done ? "sent" : "refused", privacy: .public) → focus \(Self.relationWord(self.focusRelation(e, t)), privacy: .public)")
+            if placed { return true }
+        }
+        // A selection write puts the caret in a text control (WebKit focuses the control it selects in) — an AX
+        // write of the selection, never of AXFocused. At the end, so nothing is replaced.
+        if ax.isSettable(e, kAXSelectedTextRangeAttribute) {
+            let end = ax.string(e, kAXValueAttribute)?.utf16.count ?? 0
+            if let r = AX.makeRange(location: end, length: 0) {
+                let done = (try? ax.set(e, kAXSelectedTextRangeAttribute, r)) != nil
+                let placed = done && waitFocused(e, t, web: web)
+                CULog.act.notice("focus in \(t.appName, privacy: .public): caret placed by a selection write \(done ? "sent" : "refused", privacy: .public) → focus \(Self.relationWord(self.focusRelation(e, t)), privacy: .public)")
+                if placed { return true }
+            }
         }
         // AXPress may not focus a web textarea: a window-targeted click at its centre, on this desktop or (with
         // the private path) on another Space, after the synthetic activation so it isn't taken as activation.
@@ -983,12 +1011,16 @@ extension CUCore {
         var s = synth
         s.windowSPI = t.privatePath
         let windowFor = self.windowFor(t)
-        let wasKey = keyFocusPidForTarget(t) == t.pid
+        // Key IN ITS APP (the app's focused window): in the background the system-wide key focus is the user's
+        // app, always, so it can't tell whether the click only made the window key.
+        let wasKey = boundWindowIsKeyInApp(t)
         postSyntheticActivation(t, privatePath: t.privatePath)
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
-        if waitFocused(e, t, web: web) { return true }
-        // The window was not key and the click only made it key: once more.
-        if !wasKey, keyFocusPidForTarget(t) == t.pid {
+        let clicked = waitFocused(e, t, web: web)
+        CULog.act.notice("focus in \(t.appName, privacy: .public): window-targeted click (\(onScreen ? "on this desktop" : "elsewhere", privacy: .public), \(route == .skyLight ? "SkyLight" : "pid", privacy: .public), window was key in its app: \(wasKey.map { $0 ? "yes" : "no" } ?? "unknown", privacy: .public)) → focus \(Self.relationWord(self.focusRelation(e, t)), privacy: .public)")
+        if clicked { return true }
+        // The window was not key in its app and the click only made it key: once more.
+        if wasKey != true, boundWindowIsKeyInApp(t) != false {
             CULog.act.notice("focus in \(t.appName, privacy: .public): the first click only made the window key — clicking the field once more")
             try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
             if waitFocused(e, t, web: web) { return true }
@@ -1132,8 +1164,10 @@ extension CUCore {
             let editing = Self.isEditingShortcut(chord) && editableFocus(t, g.explicit ?? reportedFocus(t))
             if !editing, t.accessible, let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
                 if CUPasteMenu.isPasteTitle(item.title) { try requirePasteSafe(p, t, g) }
+                CULog.act.notice("key in \(t.appName, privacy: .public): the chord goes to its menu item")
                 return .menuItem(item.element, title: item.title)
             }
+            CULog.act.notice("key in \(t.appName, privacy: .public): the chord goes as key events (editing shortcut into editable focus: \(editing, privacy: .public))")
         }
         let code: CGKeyCode
         switch chord.key {

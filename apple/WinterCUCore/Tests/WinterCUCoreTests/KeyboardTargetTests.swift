@@ -337,6 +337,37 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertFalse(ax.written.contains { $0.hasSuffix(":\(kAXFocusedAttribute)") })
     }
 
+    func testASelectionWritePlacesTheCaretWhenAPressDoesNot() async throws {
+        safari(fieldOwner: pid)
+        _ = searchHasFocus()
+        ax.setActions(field, [kAXPressAction])  // the press leaves focus in Search (a textarea)
+        ax.makeSettable(field, kAXSelectedTextRangeAttribute)
+        ax.onSet = { [unowned self] what in
+            XCTAssertFalse(what.hasSuffix(":\(kAXFocusedAttribute)"), "never the AXFocused write")
+            if what.hasSuffix(":\(kAXSelectedTextRangeAttribute)") { ax.focus(pid: pid, on: field) }
+        }
+        try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+        XCTAssertTrue(ax.written.contains("\(token(field)):\(kAXSelectedTextRangeAttribute)"))
+        XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "no click needed")
+        XCTAssertEqual(poster.keyDowns.count, 2)
+    }
+
+    func testAClickThatOnlyMadeTheWindowKeyInItsAppIsSentOnceMore() async throws {
+        safari(fieldOwner: pid)
+        _ = searchHasFocus()
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: fakeElement(93_099)])  // another window is key in Safari
+        var downs = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .leftMouseUp else { return }
+            downs += 1
+            if downs == 1 { ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window]) }  // only made it key
+            else { ax.focus(pid: pid, on: field) }  // the second click focuses the field
+        }
+        try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+        XCTAssertEqual(poster.entries.filter { $0.type == .leftMouseDown }.count, 2)
+        XCTAssertEqual(poster.keyDowns.count, 2)
+    }
+
     func testAFocusedDescendantOrTheFieldsOwnFocusedFlagCounts() {
         safari(fieldOwner: pid)
         let inner = fakeElement(93_091)
