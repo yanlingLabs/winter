@@ -159,6 +159,55 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertEqual(Set(poster.entries.map(\.pid)), [pid])
     }
 
+    func testEditingShortcutsIntoAWebFieldGoAsKeysNotTheAppsMenu() async throws {
+        safari(fieldOwner: content)
+        sys.contentProcesses[content] = pid
+        // Safari lists a Select All menu item with cmd+A; it must not be used for a web field.
+        let bar = fakeElement(93_050), edit = fakeElement(93_051), menu = fakeElement(93_052), all = fakeElement(93_053)
+        ax.put(ax.application(pid), [kAXMenuBarAttribute: bar])
+        ax.put(bar, [kAXChildrenAttribute: [edit]])
+        ax.add(edit, role: "AXMenuBarItem", title: "Edit", extra: [kAXChildrenAttribute: [menu]])
+        ax.add(menu, role: kAXMenuRole, extra: [kAXChildrenAttribute: [all]])
+        ax.add(all, role: kAXMenuItemRole, title: "Select All",
+               extra: [kAXMenuItemCmdCharAttribute: "a", kAXMenuItemCmdModifiersAttribute: 0, kAXEnabledAttribute: true])
+        ax.setActions(all, [kAXPressAction])
+        let r = try await act(.key(CUKeyAction(combo: "cmd+a", into: ref(field))))
+        XCTAssertEqual(r.rung, 2, "keys, not the menu item (rung 1)")
+        XCTAssertTrue(ax.performed.isEmpty, "the menu item was not pressed")
+        let down = poster.entries.first { $0.type == .keyDown }
+        XCTAssertEqual(down?.keycode, Int64(kVK_ANSI_A))
+        XCTAssertTrue(down?.flags.contains(.maskCommand) ?? false)
+        XCTAssertEqual(down?.pid, content, "to the web field's content process")
+    }
+
+    func testAppLevelCommandsStillUseTheMenuWhenFocusIsNotEditable() async throws {
+        safari(fieldOwner: pid)
+        ax.put(field, [kAXRoleAttribute: kAXButtonRole])  // focus is not an editable element
+        let bar = fakeElement(93_060), apple = fakeElement(93_064), file = fakeElement(93_061), menu = fakeElement(93_062), nw = fakeElement(93_063)
+        ax.put(ax.application(pid), [kAXMenuBarAttribute: bar])
+        ax.add(apple, role: "AXMenuBarItem", title: "Apple")
+        ax.put(bar, [kAXChildrenAttribute: [apple, file]])
+        ax.add(file, role: "AXMenuBarItem", title: "File", extra: [kAXChildrenAttribute: [menu]])
+        ax.add(menu, role: kAXMenuRole, extra: [kAXChildrenAttribute: [nw]])
+        ax.add(nw, role: kAXMenuItemRole, title: "New Window",
+               extra: [kAXMenuItemCmdCharAttribute: "n", kAXMenuItemCmdModifiersAttribute: 0, kAXEnabledAttribute: true])
+        ax.setActions(nw, [kAXPressAction])
+        let r = try await act(.key(CUKeyAction(combo: "cmd+n")))
+        XCTAssertEqual(r.rung, 1, "an app-level command uses the menu item")
+        XCTAssertEqual(ax.performed, ["\(token(nw)):AXPress"])
+    }
+
+    func testAPasteIntoAWebEditorReturnsUnconfirmedWithoutASecondWait() async throws {
+        // A web field whose value is readable but the paste does not land (it reads the clipboard late).
+        safari(fieldOwner: content)
+        sys.contentProcesses[content] = pid
+        ax.put(field, [kAXValueAttribute: "existing"])
+        let start = Date()
+        let r = try await act(.paste(CUPasteAction(text: "hello")))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1.0, "no 1.5 s wait for a web editor")
+        XCTAssertTrue(r.detail?.contains("unconfirmed") ?? false, r.detail ?? "")
+    }
+
     func testAnAccessibilityInsertCountsOnlyWhenItsTextReadsBack() async throws {
         // The insert is taken and reverted (Google Docs' title): the value never shows the text → keys.
         safari(fieldOwner: pid, settableText: true)

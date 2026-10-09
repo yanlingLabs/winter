@@ -108,6 +108,9 @@ struct CUPasteSequence {
     /// sequence returns right after the paste and hands `(saved, ours)` here to restore once the target has
     /// had time to read the clipboard.
     var deferRestore: (([[String: Data]], Int) -> Void)? = nil
+    /// Set for a web editor: when no evidence came within the (short) wait, the restore is handed here too
+    /// instead of happening at once — the page may still read the clipboard late.
+    var deferIfUnconfirmed: (([[String: Data]], Int) -> Void)? = nil
 
     enum Outcome: Equatable {
         /// The user's clipboard is back. `evidence`: the paste was observed before restoring.
@@ -115,6 +118,8 @@ struct CUPasteSequence {
         case leftAlone
         /// Not confirmable: the restore is scheduled.
         case deferred
+        /// Confirmable, but not seen within the wait (web content): the restore is scheduled.
+        case unconfirmed
     }
 
     func run(items: [[String: Data]], plain: String) throws -> Outcome {
@@ -138,6 +143,10 @@ struct CUPasteSequence {
         let evidence = waitForEvidence()
         // If the user (or the target) copied something meanwhile, theirs wins.
         guard pasteboard.changeCount == ours else { return .leftAlone }
+        if !evidence, let deferIfUnconfirmed {
+            deferIfUnconfirmed(saved, ours)
+            return .unconfirmed
+        }
         _ = pasteboard.write(saved)
         return .restored(evidence: evidence)
     }

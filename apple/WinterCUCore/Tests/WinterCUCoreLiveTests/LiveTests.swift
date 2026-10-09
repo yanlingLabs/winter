@@ -147,6 +147,28 @@ final class LiveTests: XCTestCase {
         XCTAssertTrue(dictionary.scriptable)
     }
 
+    /// Typing into a Safari web field on another desktop leaves the user where they are: no Space change, no
+    /// front change. Arrange a Safari window with an editable web field (a Google Doc, a search box) on another
+    /// Space, then run from this one. Skips when Safari's bound window is on this desktop or no field is found.
+    func testTypingIntoAnOffSpaceSafariFieldDoesNotSwitchTheUsersView() async throws {
+        try requireAccessibility()
+        let sky = CUSkyLight.system
+        let bound = try await core.targetBind(TargetBindParams(sessionId: "live-focus", app: "Safari", mirror: false, privatePath: true))
+        defer { Task { _ = try? await core.targetRelease(TargetReleaseParams(targetId: bound.targetId)) } }
+        let t = try core.target(bound.targetId)
+        try XCTSkipUnless(core.isOffThisDesktop(t), "put a Safari window with a web text field on another desktop first")
+        let fields = try await core.targetFind(TargetFindParams(targetId: bound.targetId, query: .fields(role: "text field", name: nil, text: nil)))
+        let field = try XCTUnwrap(fields.elements.first, "no text field in the Safari window")
+        let space = sky.activeSpace(), front = sky.frontProcessPid()
+        for i in 0..<6 {
+            _ = try? await core.targetAct(TargetActParams(targetId: bound.targetId, sessionId: "live-focus", callId: "f\(i)",
+                action: .type(CUTypeAction(text: "x", into: field.ref)), access: .full, allowForeground: false, privatePath: true))
+            try await Task.sleep(nanoseconds: 400_000_000)
+            XCTAssertEqual(sky.activeSpace(), space, "typing \(i) switched the desktop")
+            XCTAssertEqual(sky.frontProcessPid(), front, "typing \(i) changed the frontmost app")
+        }
+    }
+
     func testStaleRefAfterRelease() async throws {
         try requireAccessibility()
         let bound = try await core.targetBind(TargetBindParams(sessionId: "live", app: "TextEdit", mirror: false))
