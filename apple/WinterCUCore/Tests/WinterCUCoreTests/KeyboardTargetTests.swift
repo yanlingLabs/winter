@@ -213,6 +213,26 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertEqual(poster.keyDowns.count, 2)
     }
 
+    func testAMenuCommandMakesTheBoundWindowKeyThroughTheElementJustWorkedOn() async throws {
+        safari(fieldOwner: pid)
+        ax.makeSettable(field, kAXValueAttribute)
+        try await act(.setValue(CUSetValueAction(ref: ref(field), value: "make me loud")))  // the element worked on
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: fakeElement(93_099)])  // another window is key
+        let bar = fakeElement(93_070), apple = fakeElement(93_071), fixture = fakeElement(93_072), menu = fakeElement(93_073)
+        let upper = fakeElement(93_074)
+        ax.put(ax.application(pid), [kAXMenuBarAttribute: bar])
+        ax.add(apple, role: "AXMenuBarItem", title: "Apple")
+        ax.put(bar, [kAXChildrenAttribute: [apple, fixture]])
+        ax.add(fixture, role: "AXMenuBarItem", title: "Fixture", extra: [kAXChildrenAttribute: [menu]])
+        ax.add(menu, role: kAXMenuRole, extra: [kAXChildrenAttribute: [upper]])
+        ax.add(upper, role: kAXMenuItemRole, title: "Uppercase Selection", extra: [kAXEnabledAttribute: true])
+        ax.setActions(upper, [kAXPressAction])
+        poster.onPost = { [unowned self] e in if e.type == .leftMouseUp { ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window]) } }
+        try await act(.menu(CUMenuAction(path: ["Fixture", "Uppercase Selection"])))
+        XCTAssertEqual(poster.entries.filter { $0.type == .leftMouseDown }.count, 1, "the field clicked so its window is key")
+        XCTAssertTrue(ax.performed.contains("\(token(upper)):\(kAXPressAction)"))
+    }
+
     func testAppLevelCommandsStillUseTheMenuWhenFocusIsNotEditable() async throws {
         safari(fieldOwner: pid)
         ax.put(field, [kAXRoleAttribute: kAXButtonRole])  // focus is not an editable element

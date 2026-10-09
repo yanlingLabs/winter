@@ -1900,6 +1900,10 @@ extension CUCore {
         aimMenuCommands(at: t)
         let keyed = focusBoundWindow(p, t)
         defer { keyed?() }
+        // The menu bar validates commands against the app's KEY window: when another of its windows is key
+        // (live: the fixture's web window, after typing there), make the bound one key by clicking the element
+        // the script just worked on — its selection put back — so "Uppercase Selection" sees that selection.
+        if boundWindowIsKeyInApp(t) == false, let e = recentlyTargeted(t) { makeWindowKeyForField(e, t) }
         let item: CUAXMenuNode
         do {
             item = try resolveMenu(a, p, t)
