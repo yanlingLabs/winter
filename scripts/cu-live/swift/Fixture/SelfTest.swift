@@ -380,6 +380,36 @@ func runFixtureSelfTest() -> Int32 {
     c.check(!ActivationOutcome.took(isActive: false, frontPid: 42, ownPid: 42), "did not take: the app reports inactive")
     c.check(!ActivationOutcome.took(isActive: true, frontPid: nil, ownPid: 42), "did not take: no frontmost app known")
 
+    // --- the completion window's model (`--done`; nothing is shown) ------------------------------------------
+    let utc = TimeZone(identifier: "UTC")!
+    let passed = DoneModel.parse(#"{"status":"pass","passed":42,"failed":0,"skipped":14,"durationMs":372400,"finishedAt":1791552423000,"path":"/tmp/r.json"}"#)
+    c.check(passed != nil, "done: a well-formed model parses")
+    if let m = passed {
+        c.equal(m.glyph, "✓", "done: pass → ✓")
+        c.equal(m.tone, .green, "done: pass → green")
+        c.equal(m.subtitle, "Everything passed.", "done: pass subtitle")
+        c.equal(m.countsLine, "42 passed · 0 failed · 14 skipped", "done: counts line")
+        c.equal(m.durationText, "6 min 12 s", "done: duration")
+        c.equal(m.finishedText(timeZone: utc), "13:27:03", "done: finish time (UTC)")
+        c.equal(m.timingLine(timeZone: utc), "Took 6 min 12 s · finished at 13:27:03", "done: timing line")
+        c.equal(m.path, "/tmp/r.json", "done: report path")
+    }
+    let failed = DoneModel(status: .fail, passed: 42, failed: 13, skipped: 14, durationMs: 59_400, finishedAt: 0, path: "")
+    c.equal(failed.glyph, "!", "done: fail → !")
+    c.equal(failed.tone, .amber, "done: fail → amber")
+    c.equal(failed.subtitle, "13 tests failed.", "done: fail subtitle")
+    c.equal(failed.durationText, "59 s", "done: seconds only")
+    c.equal(DoneModel(status: .fail, passed: 1, failed: 1, skipped: 0, durationMs: 120_000, finishedAt: 0, path: "").subtitle, "1 test failed.", "done: one failure")
+    c.equal(DoneModel(status: .fail, passed: 1, failed: 1, skipped: 0, durationMs: 120_000, finishedAt: 0, path: "").durationText, "2 min", "done: whole minutes")
+    let aborted = DoneModel(status: .aborted, passed: 3, failed: 1, skipped: 0, durationMs: 1, finishedAt: 0, path: "")
+    c.equal(aborted.glyph, "✕", "done: aborted → ✕")
+    c.equal(aborted.tone, .red, "done: aborted → red")
+    c.equal(DoneModel.title, "Winter computer-use live test finished", "done: title")
+    c.check(DoneModel.lifetime == 1800, "done: 30 minutes at most")
+    c.check(DoneModel.parse(#"{"status":"maybe","passed":1,"failed":0,"skipped":0,"durationMs":1,"finishedAt":1,"path":""}"#) == nil, "done: unknown status refused")
+    c.check(DoneModel.parse(#"{"status":"pass","passed":-1,"failed":0,"skipped":0,"durationMs":1,"finishedAt":1,"path":""}"#) == nil, "done: negative count refused")
+    c.check(DoneModel.parse("not json") == nil, "done: malformed refused")
+
     if c.failures.isEmpty {
         print("SELFTEST OK \(c.passed) checks")
         return 0

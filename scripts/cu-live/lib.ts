@@ -214,3 +214,32 @@ export function renderTable(results: readonly ScenarioResult[]): string {
 
 /** A string with mixed case, symbols and non-ASCII — what typing must deliver EXACTLY (spaces included). */
 export const MIXED_TEXT = "Ada Lovelace — ÆØÅ ✓ Ünïcödé 日本語 #42 @x $&*()[]{} 'q' \"dq\" tab-less";
+
+// ── the end-of-run completion window (the fixture bundle's `--done` mode) ─────────────────────────────────────
+
+/** What the completion window shows — the JSON `WinterCUFixture --done` reads (`DoneModel` in Done.swift). */
+export interface DoneWindowModel {
+  status: "pass" | "fail" | "aborted";
+  passed: number;
+  failed: number;
+  skipped: number;
+  durationMs: number;
+  finishedAt: number;
+  path: string;
+}
+
+/**
+ * Red (aborted) when the run itself stopped — real input, a setup error, anything the runner caught as a "run" row
+ * other than its cleanup; amber when any row failed; green only when nothing did.
+ */
+export function doneWindowModel(results: readonly ScenarioResult[], durationMs: number, finishedAt: number, path: string): DoneWindowModel {
+  const count = (s: Status): number => results.filter((r) => r.status === s).length;
+  const stopped = results.some((r) => r.group === "run" && r.status === "fail" && r.name !== "cleanup");
+  const status = stopped ? "aborted" : count("fail") > 0 ? "fail" : "pass";
+  return { status, passed: count("pass"), failed: count("fail"), skipped: count("skip"), durationMs: Math.max(0, Math.round(durationMs)), finishedAt, path };
+}
+
+/** `open` arguments: a fresh instance of the fixture bundle, in the background (never activated), in `--done` mode. */
+export function doneWindowOpenArgs(fixtureApp: string, model: DoneWindowModel): string[] {
+  return ["-n", "-g", "-a", fixtureApp, "--args", "--done", JSON.stringify(model)];
+}

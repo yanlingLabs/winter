@@ -11,6 +11,7 @@
  *   options: --only <text> (scenarios whose name contains it; a|b for either), --yes (no countdown), --keep-temp,
  *            --report <file.json> (every check + failing outputs), --script <file.js> (one ad-hoc script),
  *            --unattended (an agent's run: no countdown, and it starts only after 60 s with no real input),
+ *            --no-done-window (CI: no end-of-run completion window; else it shows after the cleanup, 30 min at most),
  *            --helper-app <path to "Winter Computer Use Dev.app"> (else $WINTER_COMPUTER_USE_APP, else dist/dev/)
  *
  * WHAT RUNS (all isolated — nothing touches ~/.winter*, the Keychain, or the user's own daemon and helper):
@@ -36,10 +37,10 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { METHODS, type SessionEvent } from "../../packages/protocol/src/index";
 import { resolvePlatformPackageWinter } from "../../packages/core/src/runtime-sdk/executable";
-import { buildAll, FIXTURE_MAIN, REPO_ROOT, type Built } from "./build";
+import { buildAll, FIXTURE_MAIN, OUT_DIR, REPO_ROOT, type Built } from "./build";
 import { DaemonClient } from "./client";
 import {
-  check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, pointerMoves, startRefusal, parseFixtureLog, parseMonitorLine, parseTopDelta,
+  check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, pointerMoves, startRefusal, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, type RealAppsRun } from "./real-apps";
@@ -59,10 +60,10 @@ const LIMITS = {
 const WATCH_AFTER_MS = 3_000;
 const MONITOR_INTERVAL_MS = 20;
 
-interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string; report?: string; script?: string; unattended: boolean }
+interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string; report?: string; script?: string; unattended: boolean; noDoneWindow: boolean }
 
 function parseOptions(argv: string[]): Options {
-  const o: Options = { dryRun: false, realApps: false, yes: false, keepTemp: false, unattended: false };
+  const o: Options = { dryRun: false, realApps: false, yes: false, keepTemp: false, unattended: false, noDoneWindow: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--dry-run") o.dryRun = true;
@@ -74,6 +75,7 @@ function parseOptions(argv: string[]): Options {
     else if (a === "--apps") o.apps = argv[++i];
     else if (a === "--report") o.report = argv[++i];
     else if (a === "--unattended") { o.unattended = true; o.yes = true; }
+    else if (a === "--no-done-window") o.noDoneWindow = true;
     else if (a === "--script") { o.script = argv[++i]; o.only = "script"; }
     else throw new Error(`unknown option ${a}`);
   }
@@ -937,6 +939,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const built = buildAll(log);
+  const startedAt = Date.now();
   const results = o.dryRun ? await dryRun(built, o) : await (async () => {
     console.error([
       "",
@@ -950,12 +953,27 @@ async function main(): Promise<void> {
     ].join("\n"));
     if (!o.yes) for (let i = 5; i > 0; i--) { process.stderr.write(`  starting in ${i}… (ctrl+C to cancel)\r`); await sleep(1_000); }
     process.stderr.write("\n");
-    return await liveRun(built, o);
+    try {
+      return await liveRun(built, o);
+    } catch (err) {
+      // liveRun reports its own setup errors and aborts as rows; anything escaping it still ends the run in red.
+      return [{ name: "error", group: "run", status: "fail", ms: 0, checks: [check("the run finished", false, err instanceof Error ? err.message : String(err))] }] satisfies ScenarioResult[];
+    }
   })();
   console.log(renderTable(results));
   // `--report <file>`: every row's checks in full, plus each failing scenario's tool output (capped) — what the
   // table's one cut-short detail column cannot hold.
-  if (o.report !== undefined) writeFileSync(o.report, `${JSON.stringify({ results, outputs: Object.fromEntries(failedOutputs) }, null, 2)}\n`);
+  // A live run always leaves a report (out/cu-live/last-run.json unless --report says where) — the completion
+  // window names it.
+  const report = o.report ?? (o.dryRun ? undefined : join(OUT_DIR, "last-run.json"));
+  if (report !== undefined) writeFileSync(report, `${JSON.stringify({ results, outputs: Object.fromEntries(failedOutputs) }, null, 2)}\n`);
+  // After the cleanup (liveRun has returned): the completion window, so the user knows the run ended. Never during
+  // the run, never for a dry run, never with --no-done-window (CI).
+  if (!o.dryRun && !o.noDoneWindow) {
+    const model = doneWindowModel(results, Date.now() - startedAt, Date.now(), report ?? "");
+    const shown = sh("open", doneWindowOpenArgs(built.fixtureMain, model));
+    if (shown.status !== 0) log(`the completion window did not open: ${shown.stderr.trim()}`);
+  }
   process.exit(results.some((r) => r.status === "fail") ? 1 : 0);
 }
 
