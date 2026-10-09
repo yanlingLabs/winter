@@ -88,6 +88,7 @@ public final class CUCore: @unchecked Sendable {
             focusEnforcerFactory = { _ in CUNoopFocusEnforcer() }
             pressSettleMs = 0
             menuSettleMs = 0
+            selectionHoldMs = 0
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
         }
     }
@@ -460,6 +461,10 @@ public final class CUCore: @unchecked Sendable {
     var pressSettleMs: Double = 500
     /// How long a menu command that reads disabled is read again before it is called disabled. 0 in test cores.
     var menuSettleMs: Double = 400
+    /// How long a selection set right after a focus click is watched (and set again if the late click moved
+    /// it), and how long a click made to key a window is waited for before the selection is put back. 0 in
+    /// test cores.
+    var selectionHoldMs: Double = 300
     /// How long focus placement waits for the focused element to become the field (WebKit moves it
     /// asynchronously), for web content and for native fields. 0 in test cores (one read).
     var focusWaitWebMs: Double = 400

@@ -77,6 +77,19 @@ final class CUTarget: @unchecked Sendable {
     private(set) var lastTargeted: (element: AXUIElement, atMs: Double)?
     func noteTargeted(_ e: AXUIElement, at ms: Double) { lastTargeted = (e, ms) }
 
+    /// The selection `select` last set — the element, its range, its value then — which a selection-dependent
+    /// menu command acts on: checked again (and put back if a late click moved it) before the menu is
+    /// validated. Pid-queue only.
+    private(set) var lastSelection: (element: AXUIElement, location: Int, length: Int, value: String?, atMs: Double)?
+    func noteSelection(_ e: AXUIElement, location: Int, length: Int, value: String?, at ms: Double) {
+        lastSelection = (e, location, length, value, ms)
+    }
+
+    /// When this target last had a window-targeted click posted to place the focus or make its window key:
+    /// the app may handle it after the act's next accessibility write (a late click moves the caret).
+    /// Pid-queue only.
+    var lastFocusClickMs: Double?
+
     /// Actions an app listed for an element but refused (`AXOpen` on Finder's icons), by role: hidden from
     /// state when `action()` has no equivalent to fall back on. Pid-queue only.
     private(set) var refusedActions: [String: Set<String>] = [:]
@@ -136,6 +149,7 @@ final class CUTarget: @unchecked Sendable {
     func resetForNewWindow() {
         refs = CURefCache<AXIdentity>(firstRef: refs.highestRef + 1)
         lastTargeted = nil
+        lastSelection = nil
         lock.withLock { _snapshots.removeAll(); _lastFullRead = nil }
     }
 

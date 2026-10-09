@@ -293,6 +293,9 @@ final class WebController: NSObject, WKScriptMessageHandler, WKNavigationDelegat
     init(slot: Int) {
         window = makeFixtureWindow(title: "Fixture Web", slot: slot)
         let configuration = WKWebViewConfiguration()
+        // No inline predictions: a space accepted one mid-type ("ünï " became "ünïversity "), and the scenarios
+        // check that typed text arrives exactly (like the substitutions switched off in main.swift).
+        configuration.allowsInlinePredictions = false
         webView = FixtureWebView(frame: NSRect(origin: .zero, size: WindowGrid.contentSize), configuration: configuration)
         super.init()
         configuration.userContentController.add(self, name: "fixture")

@@ -244,7 +244,15 @@ public protocol CUFocusEnforcing: AnyObject {
     /// Ensure the target believes it is active before keys are sent. Returns whether an enforcement was done
     /// (true) — for logging "the enforcer prevented an activation" versus the guard undoing one.
     func enforce(windowID: UInt32) -> Bool
+    /// Posts the synthetic activation whatever the target is believed to be (only not when it is front for
+    /// the user): before a selection-dependent menu command is validated, since the app re-validates its
+    /// menu on the activation it handles. Returns whether it posted.
+    func forceActivation(windowID: UInt32) -> Bool
     func teardown()
+}
+
+public extension CUFocusEnforcing {
+    func forceActivation(windowID: UInt32) -> Bool { enforce(windowID: windowID) }
 }
 
 /// The live enforcer: synthetic activation posted to the target under an `SLSDisableUpdate` bracket, with
@@ -289,7 +297,24 @@ public final class CULiveFocusEnforcer: CUFocusEnforcing {
         let active = NSRunningApplication(processIdentifier: pid)?.isActive ?? false
         state = CUSyntheticFocusState(believesActive: active, believesFocus: active, isReallyActive: active)
         guard state.needsEnforcing else { return false }
-        let (activate, focus) = (state.needsActivation, state.needsFocus)
+        postActivation(windowID: windowID, activate: state.needsActivation, focus: state.needsFocus)
+        return true
+    }
+
+    public func forceActivation(windowID: UInt32) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+            state = CUSyntheticFocusState(believesActive: true, believesFocus: true, isReallyActive: true)
+            return false
+        }
+        state = CUSyntheticFocusState(believesActive: false, believesFocus: false, isReallyActive: false)
+        postActivation(windowID: windowID, activate: true, focus: true)
+        return true
+    }
+
+    /// Posts the activation and/or key-focus events under an `SLSDisableUpdate` bracket (so the synthetic
+    /// activation never shows) and records the state as enforced. Caller holds `lock`.
+    private func postActivation(windowID: UInt32, activate: Bool, focus: Bool) {
         // Suspend drawing so the synthetic activation never shows, enforce, re-enable on every exit.
         let cid = skyLight.disableUpdate()
         defer { if let cid { skyLight.reenableUpdate(cid) } }
@@ -301,7 +326,6 @@ public final class CULiveFocusEnforcer: CUFocusEnforcing {
             post(focusEvent, pid)
         }
         state.markEnforced()
-        return true
     }
 
     public func teardown() {

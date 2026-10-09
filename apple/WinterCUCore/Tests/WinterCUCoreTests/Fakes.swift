@@ -141,6 +141,9 @@ final class FakeFocusEnforcer: CUFocusEnforcing, @unchecked Sendable {
     /// What `enforce` reports (whether it did anything).
     var result = true
     func enforce(windowID: UInt32) -> Bool { enforced.append(windowID); return result }
+    /// The activations posted whatever the target was believed to be (a menu command's validation).
+    private(set) var forced: [UInt32] = []
+    func forceActivation(windowID: UInt32) -> Bool { forced.append(windowID); return true }
     func teardown() { tornDown += 1 }
 }
 
