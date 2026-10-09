@@ -180,7 +180,7 @@ describe("the credential migration lock (the holder process itself, never a sock
     const after = acquireCredentialMigrationLock(h);
     expect("release" in after).toBe(true);
     (after as { release(): void }).release();
-  });
+  }, 20_000); // a holder and a taker process
 });
 
 describe("a removed credential takes its migration shadow with it (so recovery can never resurrect it)", () => {

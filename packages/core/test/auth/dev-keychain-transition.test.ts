@@ -98,7 +98,7 @@ describe("who may take part", () => {
       expect(r.stdout.toString()).toBe("");
       expect(r.stderr.toString()).toContain("__dev-keychain-adopt refused");
     }
-  });
+  }, 20_000); // two child processes, ~2.4 s each before the refusal — the default 5 s sat on the edge
 });
 
 describe.skipIf(!darwin)("the dev Keychain transition (throwaway keychain file)", () => {
