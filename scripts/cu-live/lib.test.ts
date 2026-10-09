@@ -7,9 +7,9 @@ import { join } from "node:path";
 import { liveHomeRefusal } from "./daemon-entry";
 import {
   callLine, computerV2Message, describeViolations, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hidInputTimes, lastValue, pointerMoves, idleGate, parseDuration, parseFrontReading, startPlan, describeStartPlan, type FrontReading, markerFacts, MIXED_TEXT,
-  parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type MonitorSample, type ScenarioResult,
+  parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type FixtureEvent, type MonitorSample, type ScenarioResult,
 } from "./lib";
-import { minimalPdf, REAL_APP_SCENARIOS } from "./real-apps";
+import { minimalPdf, REAL_APP_SCENARIOS, REAL_DIR_TOKEN, withRealDir } from "./real-apps";
 import { PRELUDE, SCENARIOS, scriptOf } from "./scenarios";
 
 const sample = (t: number, frontPid: number, space: number | null, hidIdleMs: number | null = 1000): MonitorSample => ({ t, front: `app${frontPid}`, frontPid, space, hidIdleMs });
@@ -174,8 +174,47 @@ describe("the scenarios", () => {
   test("every script (prelude included) is valid JavaScript for the automation runtime", () => {
     for (const s of all) {
       expect(() => new Function("apps", "screen", "print", "sleep", "show", `return (async () => {${scriptOf(s)}})`)).not.toThrow();
+      for (const step of s.prepare ?? []) {
+        if ("turn" in step) expect(() => new Function("apps", "screen", "print", "sleep", "show", `return (async () => {${scriptOf({ code: step.turn })}})`)).not.toThrow();
+      }
     }
     expect(PRELUDE).toContain("var H =");
+  });
+
+  test("off-Space: never seen here → capture only (point click + keys); shown here first → a full bind", () => {
+    const captureOnly = SCENARIOS.find((s) => s.name.startsWith("bind off-Space (full screen, never seen here)"))!;
+    const act = SCENARIOS.find((s) => s.name.startsWith("act in the off-Space window"))!;
+    const seen = SCENARIOS.find((s) => s.name.startsWith("bind off-Space after it was shown"))!;
+    expect(captureOnly.prepare).toBeUndefined();
+    expect(act.code).toContain("off.click([");
+    // The order matters: the capture-only rows run while accessibility has never seen the window.
+    expect(SCENARIOS.indexOf(captureOnly)).toBeLessThan(SCENARIOS.indexOf(seen));
+    expect(SCENARIOS.indexOf(act)).toBeLessThan(SCENARIOS.indexOf(seen));
+    expect(seen.session).toBe("fresh");
+    expect(seen.prepare?.map((p) => ("cmd" in p ? p.cmd : "turn" in p ? "turn" : "returnUser"))).toEqual(["restoreSpace", "returnUser", "turn", "offspace", "returnUser"]);
+    const ok = (o: Record<string, unknown>, output: string): boolean => seen.verify({ output, isError: false, facts: o, events: [], since: 0, probe: [], metrics: [], shots: [] }).every((c) => c.ok);
+    expect(ok({ hasField: true, noAxNote: false, onScreen: [false] }, "bound Winter CU Fixture")).toBe(true);
+    expect(ok({ hasField: false, noAxNote: true, onScreen: [false] }, "bound … as capture only")).toBe(false);
+    // Keys refused with focus_not_placed is the documented alternative to keys landing.
+    const actOk = (typed: string, events: FixtureEvent[]): boolean => act.verify({ output: "", isError: false, facts: { typed }, events, since: 0, probe: [], metrics: [], shots: [] }).every((c) => c.ok);
+    const focus: FixtureEvent = { t: 1, role: "main", ev: "focus", id: "offspace" };
+    expect(actOk("Refused: couldn't put the keyboard focus in [3] (focus_not_placed)", [focus])).toBe(true);
+    expect(actOk("sent", [focus])).toBe(false);
+    expect(actOk("sent", [focus, { t: 2, role: "main", ev: "field.change", id: "offspace", value: "off-Space ✓ Typed" }])).toBe(true);
+  });
+
+  test("Finder works in a NEW window made through its dictionary, closed by its id; capture only is a skip", () => {
+    const finder = REAL_APP_SCENARIOS.find((s) => s.name.startsWith("Finder"))!;
+    expect(finder.code).toContain("make new Finder window to (POSIX file");
+    expect(finder.code).toContain("close Finder window id");
+    expect(finder.code).toContain(REAL_DIR_TOKEN);
+    const placed = withRealDir(finder, "/tmp/winter-cu-live-x/cu-live-real");
+    expect(placed.code).not.toContain(REAL_DIR_TOKEN);
+    expect(placed.code).toContain("/tmp/winter-cu-live-x/cu-live-real/cu-live-folder");
+    const verify = (facts: Record<string, unknown>): boolean => finder.verify({ output: "", isError: false, facts, events: [], since: 0, probe: [], metrics: [], shots: [] }).every((c) => c.ok);
+    expect(verify({ skipped: "Finder showed the folder in a window on another Space (capture only)" })).toBe(true);
+    expect(verify({ alpha: true, beta: true, closed: true })).toBe(true);
+    expect(verify({ alpha: true, beta: true, closed: "Refused" })).toBe(false);
   });
 
   test("names are unique; every group the suite promises is covered", () => {

@@ -12,7 +12,14 @@ export const REAL_DIR_NAME = "cu-live-real";
 const PAGE_TITLE = "CU Live Page";
 const FOLDER = "cu-live-folder";
 
-export interface RealAppsRun { cleanup(): Promise<void> }
+export interface RealAppsRun { dir: string; cleanup(): Promise<void> }
+
+/** Stands for the run's temp documents folder in a scenario's code; `withRealDir` puts the real path in. */
+export const REAL_DIR_TOKEN = "__CU_LIVE_REAL_DIR__";
+
+export function withRealDir(s: Scenario, dir: string): Scenario {
+  return { ...s, code: s.code.split(REAL_DIR_TOKEN).join(dir) };
+}
 
 const APPS = [
   { name: "TextEdit", bundleId: "com.apple.TextEdit" },
@@ -57,12 +64,14 @@ export function realAppsPreflight(root: string, log: (l: string) => void): RealA
   writeFileSync(join(dir, "doc.pdf"), minimalPdf("Winter CU live PDF"));
   const before = new Map(APPS.map((a) => [a.name, running(a.name)] as const));
   const open = (args: string[]): void => { const r = spawnSync("open", args, { encoding: "utf8" }); if (r.status !== 0) throw new Error(`open ${args.join(" ")}: ${r.stderr}`); };
-  log("opening temp documents in Safari, TextEdit, Finder and Preview (in the background)…");
+  // Not the folder: Finder may put an `open`ed folder in a TAB of the user's own window (on any Space) — the Finder
+  // scenario makes a NEW Finder window for it instead.
+  log("opening temp documents in Safari, TextEdit and Preview (in the background)…");
   open(["-g", "-a", "TextEdit", join(dir, "note.txt")]);
   open(["-g", "-a", "Preview", join(dir, "doc.pdf")]);
   open(["-g", "-a", "Safari", join(dir, "page.html")]);
-  open(["-g", join(dir, FOLDER)]);
   return {
+    dir,
     async cleanup(): Promise<void> {
       // Quit only what this run launched (it held nothing of the user's): SIGTERM, no Apple Event.
       for (const a of APPS) {
@@ -122,13 +131,36 @@ await closeOwn(te);`,
   },
   {
     name: "Finder: a temp folder — read its items", group: "real-apps", timeoutMs: 45_000,
-    code: `${CLOSE}
-const fd = await apps.open("com.apple.finder", { window: ${JSON.stringify(FOLDER)} });
-const s = await fd.state({ emit: false, full: true });
-const seen = { alpha: s.includes("alpha.txt"), beta: s.includes("beta.txt") };
-report(seen);
-await closeOwn(fd);`,
-    verify: (ctx) => [okRun(ctx), check("Finder lists both temp files", ctx.facts.alpha === true && ctx.facts.beta === true, JSON.stringify(ctx.facts))],
+    // A NEW Finder window on this desktop for the temp folder (never one of the user's windows, never a tab in one),
+    // made through Finder's own dictionary (the guarded applescript() of the bound Finder) and closed the same way, by
+    // its id. Finder showing it in a window AX never saw (another Space: capture only), or no new window, is a skip.
+    code: `
+const folder = ${JSON.stringify(`${REAL_DIR_TOKEN}/${FOLDER}`)};
+let finder = null;
+try { finder = await apps.open("com.apple.finder"); } catch (e) { report({ skipped: "Finder could not be bound to reach its dictionary (" + e.name + ")" }); }
+if (finder) {
+  let id = null, why = "no id came back";
+  try {
+    const r = await finder.applescript('tell application "Finder"\\nset w to make new Finder window to (POSIX file "' + folder + '" as alias)\\nreturn id of w\\nend tell', { emit: false, timeoutMs: 15000 });
+    const n = Number(String(r.result ?? "").replace(/[^0-9]/g, ""));
+    if (n > 0) id = n;
+  } catch (e) { why = e.name + ": " + String(e.message).slice(0, 160); }
+  if (id === null) report({ skipped: "no new Finder window: " + why });
+  else {
+    try {
+      const fd = await apps.open("com.apple.finder", { window: ${JSON.stringify(FOLDER)} });
+      const s = await fd.state({ emit: false, full: true });
+      if (/no accessibility here/i.test(s)) report({ skipped: "Finder showed the folder in a window on another Space (capture only)" });
+      else report({ alpha: s.includes("alpha.txt"), beta: s.includes("beta.txt") });
+    } finally {
+      await finder.applescript('tell application "Finder" to close Finder window id ' + id, { emit: false, timeoutMs: 10000 })
+        .then(() => report({ closed: true }), (e) => report({ closed: e.name }));
+    }
+  }
+}`,
+    verify: (ctx) => typeof ctx.facts.skipped === "string" ? [okRun(ctx)] : [okRun(ctx),
+      check("Finder lists both temp files", ctx.facts.alpha === true && ctx.facts.beta === true, JSON.stringify(ctx.facts)),
+      check("the new Finder window was closed again", ctx.facts.closed === true, String(ctx.facts.closed))],
   },
   {
     name: "Preview: a temp PDF — screenshot", group: "real-apps", timeoutMs: 45_000,
