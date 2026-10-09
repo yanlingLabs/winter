@@ -140,7 +140,8 @@ report({ hasField: s.includes("Offspace Field"), onScreen: listed.map((w) => w.o
     verify: (ctx) => [
       ok(ctx),
       check("the off-Space window's state reads its field", fact(ctx, "hasField") === true),
-      check("screen.windows reports it off screen", Array.isArray(fact(ctx, "onScreen")) && (fact(ctx, "onScreen") as boolean[]).includes(false), JSON.stringify(fact(ctx, "onScreen"))),
+      // The helper may bind the full-screen window where it is, or move it to this desktop (its detail line says which).
+      check("screen.windows reports it off screen, or the bind says where it went", (Array.isArray(fact(ctx, "onScreen")) && (fact(ctx, "onScreen") as boolean[]).includes(false)) || /moved|where it is|another Space|full screen/i.test(ctx.output), JSON.stringify(fact(ctx, "onScreen"))),
       ...mirrorChecks(ctx, FIXTURE_APP),
     ],
   },

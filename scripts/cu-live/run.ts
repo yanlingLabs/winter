@@ -88,6 +88,11 @@ async function until<T>(what: string, ms: number, probe: () => T | undefined | f
   }
 }
 
+/** Every running process whose executable is `exe` (`pgrep -f` on its full path). */
+function pidsOf(exe: string): number[] {
+  return sh("pgrep", ["-f", exe]).stdout.split("\n").map(Number).filter((n) => Number.isInteger(n) && n > 0);
+}
+
 function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
@@ -213,7 +218,8 @@ async function runTurn(client: DaemonClient, sessionId: string, text: string, ms
       if (e.type !== "approval_requested" || e.sessionId !== sessionId || e.callId === undefined || answered.has(e.callId)) continue;
       answered.add(e.callId);
       cards.push(e);
-      const approved = answer !== undefined && answer !== false;
+      // Only the per-app card is approved; any other card (a foreground request would hand over the real pointer) is denied.
+      const approved = answer !== undefined && answer !== false && (e as { summary?: string }).summary === expectedCardSummary();
       void client.call(METHODS.approvalRespond, { sessionId, callId: e.callId, approved, ...(approved ? { optionId: answer } : {}) }).catch(() => {});
     }
   });
@@ -327,13 +333,18 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     log("starting the live daemon and a dev helper instance for its temp home…");
     daemon = await startLiveDaemon(built, home);
     const socket = join(home, "run", "computer-use.sock");
+    const helperExe = join(helperApp, "Contents", "MacOS", "Winter Computer Use Dev");
+    const helpersBefore = new Set(pidsOf(helperExe));
     const opened = sh("open", ["-n", "-g", "-j", "--env", `WINTER_CU_HOME=${home}`, "-a", helperApp]);
     if (opened.status !== 0) throw new Error(`open the dev helper failed: ${opened.stderr.trim()}`);
     await until("the helper's socket", 15_000, () => existsSync(socket));
-    helperPid = await until("the helper's pid", 5_000, () => {
-      const pid = Number(sh("lsof", ["-t", "--", socket]).stdout.trim().split("\n")[0]);
-      return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+    helperPid = await until("the helper instance's pid", 5_000, () => {
+      // The process holding the socket, confirmed as a dev helper; else the one dev helper that was not running before.
+      const byPath = sh("lsof", ["-t", "--", socket]).stdout.trim().split("\n").map(Number).find((p) => Number.isInteger(p) && p > 0 && pidsOf(helperExe).includes(p));
+      const fresh = pidsOf(helperExe).filter((p) => !helpersBefore.has(p));
+      return byPath ?? (fresh.length === 1 ? fresh[0] : undefined);
     });
+    log(`helper instance pid ${helperPid}`);
     client = await DaemonClient.connect(daemon.socket);
     await client.hello(readFileSync(join(home, "test-secrets", "harness-token"), "utf8").trim(), "cu-live");
     const mainSid = await openSession(client, work, "bypass");
@@ -367,6 +378,10 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         const timeout = s.timeoutMs ?? 60_000;
         const turn = await runTurn(client, sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer);
         const t1 = Date.now();
+        // HID input DURING the action is this scenario's failure (a rung-4 fallback took the real pointer — or it was
+        // you); after it, it stops the run.
+        const during = hidInputTimes(monitor.items, since, t1);
+        inputWatchFrom = t1;
         while (Date.now() < t1 + WATCH_AFTER_MS) { abortIfInput(); await sleep(50); }
         const state = s.dump === true ? await dumpState(built.tool, f) : undefined;
         const checks = s.verify({
@@ -374,6 +389,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           ...(state === undefined ? {} : { state }), probe: probe.items.filter((p) => p.t >= since), metrics: readMetrics(home, since),
         });
         if (s.session === "ask") checks.push(...cardChecks(turn.cards));
+        checks.push(check("no keyboard/pointer input during the action (no rung-4 fallback)", during.length === 0, `HID input at +${during.map((t) => t - since).join(", +")} ms`));
         checks.push(...focusChecks(monitor.items, since, t1 + WATCH_AFTER_MS, baseline, s.allowExcursionMs));
         results.push({ name: s.name, group: s.group, status: statusOf(checks), ms: Date.now() - t0, checks });
       } catch (err) {
