@@ -140,8 +140,10 @@ const plan = pickPressable(await byRoles(app, roles));
 if (!plan) skip("no harmless, reversible control (tabs, toggles, view buttons; never delete/close/send/…)");
 else {
   await app.action(plan.element.ref, "press");
-  if (plan.undo === "reselect") await app.action(plan.reselect.ref, "press");
-  else await app.action(plan.element.ref, "press");
+  // Undo by NAME, found again: the press may have redrawn the tree (a stale ref must not leave the change behind).
+  const back = plan.undo === "reselect" ? plan.reselect : plan.element;
+  const again = (await app.find({ role: back.role, name: back.name }, { emit: false })).find((e) => e.name === back.name) || back;
+  await app.action(again.ref, "press");
   report({ pressed: plan.element.role + " " + JSON.stringify(plan.element.name), undo: plan.undo });
 }`,
   type: (a: GenericApp): string => `${G(a.key)}
