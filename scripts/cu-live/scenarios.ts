@@ -79,6 +79,11 @@ export interface Scenario {
   allowExcursionMs?: number;
   /** In the ask session: a foreground card (denied by the rig) is expected besides the per-app card. */
   foregroundCard?: boolean;
+  /**
+   * The USER switches app mid-run: this many ms into the action the runner brings Finder (an app the agent never
+   * touched) to the front, and the focus check becomes "that switch held — never pulled back".
+   */
+  userSwitchAfterMs?: number;
   /** The script prelude (default PRELUDE; the generic app checks bring their own, which includes it). */
   prelude?: string;
   verify(ctx: VerifyContext): Check[];
@@ -528,6 +533,20 @@ const off = await win("Fixture Offspace");
 const img = await off.screenshot({ emit: false });
 report({ w: img.width, h: img.height });`,
     verify: (ctx) => [ok(ctx), ...screenshotChecks(ctx), check("a real size", Number(fact(ctx, "w")) > 100 && Number(fact(ctx, "h")) > 100)],
+  },
+  {
+    // The guardian protects the user FROM the agent, never from themselves: an app the agent never touched coming
+    // forward mid-run (the user switching to it) is never pulled back.
+    name: "guardian: the user switching to another app mid-run is left alone", group: "guardian",
+    before: [{ role: "main", cmd: "reset" }],
+    userSwitchAfterMs: 1_200,
+    code: `
+const form = await win("Fixture Form");
+const email = await pick(form, "Email", "text field");
+await form.click(email.ref);
+for (let i = 0; i < 6; i++) { await form.state({ emit: false }); await sleep(500); }
+report({ ok: true });`,
+    verify: (ctx) => [ok(ctx)],
   },
   // ── the focus guardian ─────────────────────────────────────────────────────────────────────────────────────
   {

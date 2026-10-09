@@ -106,9 +106,10 @@ public final class RPCDispatcher: @unchecked Sendable {
         engine("screen.screenshot") { try await $0.screenScreenshot($1 as ScreenScreenshotParams) }
         engine("screen.appAt") { try await $0.screenAppAt($1 as ScreenAppAtParams) }
 
-        routes["script.active"] = { [coordinator] params, _ in
+        routes["script.active"] = { [core, coordinator] params, _ in
             let p = try RPCDispatcher.decode(ScriptActiveParams.self, params)
             await coordinator.setScriptActive(sessionId: p.sessionId, active: p.active)
+            core.scriptActivity(sessionId: p.sessionId, active: p.active)
             return AnyEncodable(EmptyResult())
         }
         routes["turn.ended"] = { [core, coordinator] params, _ in
@@ -119,6 +120,7 @@ public final class RPCDispatcher: @unchecked Sendable {
         routes["session.ended"] = { [core, coordinator] params, _ in
             let p = try RPCDispatcher.decode(SessionEndedParams.self, params)
             let sessionId = try RPCDispatcher.sessionId(params)
+            core.scriptActivity(sessionId: sessionId, active: false)  // an ended session runs no script
             // The shell's half (mirrors closed, Esc disarmed, targets forgotten) happens even if the engine fails.
             let result: SessionEndedResult
             do {

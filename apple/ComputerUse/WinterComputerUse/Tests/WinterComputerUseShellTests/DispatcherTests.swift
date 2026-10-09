@@ -128,7 +128,11 @@ final class DispatcherTests: XCTestCase {
         _ = try await rig.dispatcher.handle(method: "script.active", params: json(#"{"sessionId":"s_2","active":false}"#))
         armed = await rig.tap.armedCalls
         XCTAssertEqual(armed, [true, false])
-        XCTAssertTrue(rig.core.calls.isEmpty, "script.active is the shell's alone")
+        XCTAssertTrue(rig.core.calls.isEmpty, "no engine RPC for it")
+        // The engine is told too: its Focus Guardian runs only while a script does.
+        XCTAssertEqual(rig.core.activity, ["s_1:true", "s_2:true", "s_1:false", "s_2:false"])
+        _ = try await rig.dispatcher.handle(method: "session.ended", params: json(#"{"sessionId":"s_3"}"#))
+        XCTAssertEqual(rig.core.activity.last, "s_3:false", "an ended session runs no script")
     }
 
     func testTurnEndedAndSessionEndedReachBothTheEngineAndThePresentation() async throws {

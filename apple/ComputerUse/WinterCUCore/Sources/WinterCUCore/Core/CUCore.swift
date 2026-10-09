@@ -177,6 +177,7 @@ public final class CUCore: @unchecked Sendable {
         let r = try resolveOpen(strings, app: app)
         try refuseFloorApp(bundleId: r.bundle.bundleIdentifier, pid: 0, name: r.bundle.bundleIdentifier ?? r.appURL.lastPathComponent)
         let opened = try await CUDocumentOpen.open(r.urls, withApp: r.appURL)
+        noteGuardianOpened(opened.processIdentifier)
         return opened.localizedName ?? CUApps.displayName(r.bundle, fallback: r.appURL.deletingPathExtension().lastPathComponent)
     }
 
@@ -194,6 +195,7 @@ public final class CUCore: @unchecked Sendable {
             Set(CUBindWait.realWindows(sys.windows(pid: r.processIdentifier)).map(\.id))
         } ?? []
         let app = try await CUDocumentOpen.open(urls, withApp: appURL)
+        noteGuardianOpened(app.processIdentifier)  // it may come forward late: a possible thief for the guard
         // A real window of the opener not seen before the open: the document's. Polled briefly (it is async).
         let windowID: UInt32? = await {
             let deadline = clock.nowMs() + windowWaitMs
@@ -328,7 +330,8 @@ public final class CUCore: @unchecked Sendable {
         windowElementsLock.withLock { windowElements[target.id] = chosen.element }
         target.knownWindows = Set(CUBindWait.realWindows(serverNow).map(\.id)).union([chosen.id])
         emit { $0.targetBound(sessionId: p.sessionId, pid: pid, windowID: chosen.id, appName: appName, mirror: p.mirror) }
-        if startGuardian(privatePath: privatePath) { guardianLock.withLock { _ = guardianStartedTargets.insert(target.id) } }
+        noteGuardianPrivatePath(privatePath)
+        noteGuardianActed(pid)
         return TargetBindResult(targetId: target.id,
                                 app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid),
                                 window: CUWindowInfo(id: chosen.id, title: chosen.title, frame: cuFrame(chosen.frame)),
@@ -440,15 +443,30 @@ public final class CUCore: @unchecked Sendable {
     /// Background steps that once moved the user's view: never used again while the helper runs.
     let retiredStepsLock = NSLock()
     var retiredSteps: Set<CUBackgroundStep> = []
-    // The continuous Focus Guardian (CUCore+Guardian): started while any target is bound, stopped when the
-    // last is released (private-path gated).
+    // The Focus Guardian (CUCore+Guardian): runs while a script is active (the daemon's `script.active`) and a
+    // short tail after, private-path gated — never merely because targets are bound.
     let guardianLock = NSLock()
     var guardianCore = CUFocusGuardianCore()
     var guardianRefs = 0
     var guardianObservers: [NSObjectProtocol] = []
     var pendingGuardianNotes: [String] = []
-    var guardianStartedTargets: Set<String> = []
     var lastSyntheticActivationAt: Double = -1
+    /// Sessions with a script running, the latest private-path setting seen, and the pending end of the tail.
+    var guardianScripts: Set<String> = []
+    var guardianPrivatePath = false
+    var guardianTailWork: DispatchWorkItem?
+    /// Apps that may be thieves besides the bound targets: a document was opened in them during the script
+    /// (until the guard ends), or the agent acted on them (for `guardianActedWindow` after the act).
+    var guardianOpened: Set<pid_t> = []
+    var guardianActedAt: [pid_t: TimeInterval] = [:]
+    /// The last hardware-origin input event (any type, trackpad gestures included) the listen-only tap saw.
+    var lastHardwareInputAt: TimeInterval = -1
+    /// Schedules the end of the guard's tail; tests run it by hand.
+    var guardianTailSchedule: (TimeInterval, @escaping () -> Void) -> DispatchWorkItem? = { seconds, work in
+        let item = DispatchWorkItem(block: work)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + seconds, execute: item)
+        return item
+    }
     /// The CPS key-focus-theft state machine (fed by the listen-only type-21 tap).
     var focusTheftGuard = CUFocusGuard()
     /// The live CPS tap's run-loop thread and port (best-effort; nil when it could not be created).
@@ -1064,7 +1082,6 @@ public final class CUCore: @unchecked Sendable {
         focusEnforcersLock.lock()
         focusEnforcers.removeValue(forKey: id)?.teardown()
         focusEnforcersLock.unlock()
-        if guardianLock.withLock({ guardianStartedTargets.remove(id) != nil }) { stopGuardian() }
         if let t { unwatchIfUnused(t.pid) }
         return t
     }
