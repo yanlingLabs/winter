@@ -273,9 +273,11 @@ public final class CUCore: @unchecked Sendable {
         if chromium, let running = app.running { try await queues.run(pid) { CUChromium.enableAccessibilityOnce(running) } }
         let found = try await CUBindWait.run(launched: launched, deadlineMs: launched ? 8000 : 3000, CUBindWait.Effects(
             read: { [queues] in
-                try await queues.run(pid) {
+                try await queues.run(pid) { [self] in
                     let server = sys.windows(pid: pid)
-                    return (CUAXWindows.list(pid: pid, ax: ax, server: server), server)
+                    let listed = CUAXWindows.list(pid: pid, ax: ax, server: server)
+                    noteWindows(pid: pid, listed)
+                    return (listed, server)
                 }
             },
             reopen: { [reopenApp] in
@@ -331,7 +333,7 @@ public final class CUCore: @unchecked Sendable {
                        appKey: String) -> CUWindowResolver.Effects {
         let ax = self.ax, sys = self.sys
         return CUWindowResolver.Effects(
-            remote: { ax.remoteWindows(pid: pid, windowIDs: $0) },
+            remote: { [self] in reachWindows(pid: pid, ids: $0) },
             describe: { element, s in
                 CUAXWindow(element: element, id: s.id, title: ax.string(element, kAXTitleAttribute) ?? s.title,
                            frame: ax.frame(element) ?? s.frame, focused: false, main: false)
@@ -1074,6 +1076,51 @@ public final class CUCore: @unchecked Sendable {
     private var windowElements: [String: AXUIElement] = [:]
     private var remoteMisses: [String: Double] = [:]
     private let windowElementsLock = NSLock()
+    /// Every AX window element seen, by pid and window id. An element stays valid when its window moves to
+    /// another Space or into full screen, so a window once listed is reached again with no probe.
+    private var seenWindows: [pid_t: [UInt32: AXUIElement]] = [:]
+
+    /// Remembers the windows an AX listing returned (and every window reached another way).
+    func noteWindows(pid: pid_t, _ windows: [CUAXWindow]) {
+        guard !windows.isEmpty else { return }
+        windowElementsLock.withLock { for w in windows { seenWindows[pid, default: [:]][w.id] = w.element } }
+    }
+
+    /// The AX elements of `ids`, the cheap ways first and the remote-token walk last (it walked 94k ids in
+    /// 1.5 s for a small fixture and still missed a full-screen window: its token id is not a low integer):
+    /// 1. a window element seen before (validated: alive, still that window id);
+    /// 2. the application's own references — AXMainWindow, AXFocusedWindow, AXChildren, AXWindows — an
+    ///    AppKit app's main window answers there even in full screen on its own Space;
+    /// 3. the remote-token walk, for what is still missing.
+    /// A hit is an element with the AXWindow role AND a wanted window id, the walk's own bar.
+    func reachWindows(pid: pid_t, ids: [UInt32], walk: Bool = true) -> [UInt32: AXUIElement] {
+        let wanted = Set(ids)
+        guard !wanted.isEmpty else { return [:] }
+        var found: [UInt32: AXUIElement] = [:]
+        func take(_ e: AXUIElement) {
+            guard let id = ax.windowID(e), wanted.contains(id), found[id] == nil,
+                  ax.string(e, kAXRoleAttribute) == kAXWindowRole else { return }
+            found[id] = e
+        }
+        let seen = windowElementsLock.withLock { seenWindows[pid] ?? [:] }
+        for id in wanted { if let e = seen[id], ax.isAlive(e), ax.windowID(e) == id { found[id] = e } }
+        if found.count < wanted.count {
+            let app = ax.application(pid)
+            for name in [kAXMainWindowAttribute, kAXFocusedWindowAttribute] { if let e = ax.element(app, name) { take(e) } }
+            if found.count < wanted.count {
+                for name in [kAXChildrenAttribute, kAXWindowsAttribute] { ax.elements(app, name).forEach(take) }
+            }
+        }
+        if !found.isEmpty {
+            CULog.bind.debug("reached \(found.count, privacy: .public) of \(wanted.count, privacy: .public) window(s) of pid \(pid, privacy: .public) without a probe")
+        }
+        if walk, found.isEmpty {
+            // The walk takes one window for a bind (stopAtFirst); only when nothing cheaper answered.
+            for (id, e) in ax.remoteWindows(pid: pid, windowIDs: Array(wanted)) where wanted.contains(id) { found[id] = e }
+        }
+        if !found.isEmpty { windowElementsLock.withLock { for (id, e) in found { seenWindows[pid, default: [:]][id] = e } } }
+        return found
+    }
 
     /// The bound window's AX element, re-resolved when the cached one died or the binding moved.
     func windowElement(_ t: CUTarget) throws -> AXUIElement {
@@ -1084,7 +1131,9 @@ public final class CUCore: @unchecked Sendable {
         if let c = cached, ax.isAlive(c), ax.windowID(c).map({ $0 == wid }) ?? true { return c }
         // Without the grant AX lists nothing — that must never read as "the window closed".
         try requireAccessibility()
-        guard let w = CUAXWindows.list(pid: t.pid, ax: ax, server: sys.windows(pid: t.pid)).first(where: { $0.id == wid }) else {
+        let listed = CUAXWindows.list(pid: t.pid, ax: ax, server: sys.windows(pid: t.pid))
+        noteWindows(pid: t.pid, listed)
+        guard let w = listed.first(where: { $0.id == wid }) else {
             guard let server = liveServerWindow(t), !(!server.onScreen && sys.windowOnAnySpace(wid) == false) else {
                 lose(t, reason: "window_closed")
                 throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window")
@@ -1109,8 +1158,10 @@ public final class CUCore: @unchecked Sendable {
     func remoteWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement? {
         let key = "\(pid):\(windowID)"
         let now = clock.nowMs()
+        // The cheap reads run every time; only the walk is held back for 15 s after a miss.
+        if let e = reachWindows(pid: pid, ids: [windowID], walk: false)[windowID] { return e }
         if let missed = windowElementsLock.withLock({ remoteMisses[key] }), now - missed < 15_000 { return nil }
-        if let e = ax.remoteWindows(pid: pid, windowIDs: [windowID])[windowID] { return e }
+        if let e = reachWindows(pid: pid, ids: [windowID])[windowID] { return e }
         windowElementsLock.withLock { remoteMisses[key] = now }
         return nil
     }

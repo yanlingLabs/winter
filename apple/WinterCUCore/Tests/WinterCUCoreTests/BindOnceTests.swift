@@ -137,6 +137,58 @@ final class BindOnceTests: XCTestCase {
         XCTAssertTrue(poster.entries.isEmpty)
     }
 
+    // MARK: reaching an off-Space / full-screen window without the walk
+
+    func testAFullScreenWindowIsReachedThroughTheAppsMainWindowWithNoWalk() async throws {
+        safari(reachable: false)  // the walk would miss it (a full-screen window's token id is not a low integer)
+        ax.put(ax.application(pid), [kAXMainWindowAttribute: original])
+        let r = try await bind()
+        XCTAssertEqual(r.window.id, 77)
+        XCTAssertTrue(r.detail?.hasPrefix("step 0 (where it is): ") ?? false, r.detail ?? "")
+        XCTAssertEqual(ax.remoteWalks, 0, "no remote-token walk")
+    }
+
+    func testTheAppsChildrenReachItToo() async throws {
+        safari(reachable: false)
+        ax.put(ax.application(pid), [kAXChildrenAttribute: [original]])
+        let r = try await bind()
+        XCTAssertEqual(r.window.id, 77)
+        XCTAssertEqual(ax.remoteWalks, 0)
+    }
+
+    func testAWindowSeenBeforeIsReachedFromTheCacheAfterItLeavesTheDesktop() async throws {
+        safari(windowElsewhere: false, reachable: false)
+        // First on this desktop: AX lists it, and the bind remembers its element.
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [original]])
+        sys.windows[77] = FakeSystem.window(77, pid: pid, CGRect(x: 0, y: 0, width: 1200, height: 800), owner: "Safari")
+        let first = try await bind()
+        _ = try await core.targetRelease(TargetReleaseParams(targetId: first.targetId))
+        // Then into full screen on its own Space: AX stops listing it.
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [AXUIElement]()])
+        sys.windows[77]?.onScreen = false
+        let again = try await bind()
+        XCTAssertEqual(again.window.id, 77)
+        XCTAssertFalse(again.detail?.contains("capture only") ?? false, again.detail ?? "")
+        XCTAssertEqual(ax.remoteWalks, 0, "the remembered element, no walk")
+    }
+
+    func testTheWalkRunsOnlyWhenEverythingCheaperMisses() async throws {
+        safari()  // reachable by remote token only
+        let r = try await bind()
+        XCTAssertEqual(r.window.id, 77)
+        XCTAssertEqual(ax.remoteWalks, 1)
+    }
+
+    func testAMainWindowThatIsNotThatWindowIsNotTaken() {
+        safari(reachable: false)
+        let sheet = fakeElement(90_009)
+        ax.add(sheet, role: kAXSheetRole, frame: CGRect(x: 0, y: 0, width: 300, height: 200))
+        ax.windowIDs[AXIdentity(element: sheet)] = 77  // a sheet reporting the window's id is not the window
+        ax.put(ax.application(pid), [kAXMainWindowAttribute: sheet, kAXFocusedWindowAttribute: original])
+        let found = core.reachWindows(pid: pid, ids: [77], walk: false)
+        XCTAssertTrue(found[77].map { CFEqual($0, original) } ?? false, "only an AXWindow with that id counts")
+    }
+
     func testReusableTargetMatchesSessionAppAndWindow() async throws {
         safari()
         let first = try await bind()
