@@ -1211,15 +1211,19 @@ extension CUCore {
     /// ⌘A ⌘C ⌘X ⌘V for a web field in an app that is not in front. Live: neither the key equivalents posted to
     /// the app nor its Edit menu items (unvalidated in the background) did anything in a WebKit view, while the
     /// selection, the selected text and plain typing all work there.
-    enum EditCommand: String { case selectAll = "select all", copy, cut, paste }
+    enum EditCommand: String { case selectAll = "select all", copy, cut, paste, undo, redo }
 
     static func editCommand(_ chord: CUKeyChord) -> EditCommand? {
-        guard case .character(let raw) = chord.key, chord.modifiers == [.command] else { return nil }
-        switch Character(String(raw).lowercased()) {
+        guard case .character(let raw) = chord.key else { return nil }
+        let ch = Character(String(raw).lowercased())
+        if chord.modifiers == [.command, .shift] { return ch == "z" ? .redo : nil }
+        guard chord.modifiers == [.command] else { return nil }
+        switch ch {
         case "a": return .selectAll
         case "c": return .copy
         case "x": return .cut
         case "v": return .paste
+        case "z": return .undo
         default: return nil
         }
     }
@@ -1310,6 +1314,36 @@ extension CUCore {
                          _ token: CUCancellation.Token, keyPid: pid_t) throws -> ActOutcome? {
         let note = "in the background \(t.appName)'s web view takes no editing shortcut, so"
         switch command {
+        case .undo, .redo:
+            // No accessibility equivalent. With the foreground agreed (the card, or the policy), the real
+            // shortcut with the app in front; else its Edit item, verified by the field's value; else ask for
+            // the foreground — never a silent no-op.
+            if p.allowForeground {
+                return try inForeground(t) { () -> ActOutcome in
+                    let synth = self.synth(p)
+                    let flags: CGEventFlags = command == .undo ? .maskCommand : [.maskCommand, .maskShift]
+                    synth.key(pid: t.pid, code: CUKeyCodes.code(for: Character("z")) ?? 6, flags: flags, route: .publicPid)
+                    return ActOutcome(rung: .foreground, detail: "\(t.appName) was brought forward for the \(command.rawValue), and the front given back after")
+                }
+            }
+            let before = ax.string(f, kAXValueAttribute)
+            let mods: CUKeyChord.Modifiers = command == .undo ? [.command] : [.command, .shift]
+            if let item = menuItem(forKey: "z", modifiers: mods, pid: t.pid, includeDisabled: true) {
+                postSyntheticActivation(t, privatePath: p.privatePath)
+                try? ax.perform(item.element, kAXPressAction)
+                let deadline = clock.nowMs() + (focusWaitWebMs > 0 ? 500 : 0)
+                repeat {
+                    if ax.string(f, kAXValueAttribute) != before {
+                        CULog.act.notice("key in \(t.appName, privacy: .public): \(command.rawValue, privacy: .public) through its Edit menu item, verified")
+                        return ActOutcome(rung: .accessibility, detail: "the \(command.rawValue) was done through \(t.appName)'s Edit › \(item.title) and the field changed")
+                    }
+                    if clock.nowMs() >= deadline { break }
+                    usleep(30_000)
+                } while true
+            }
+            CULog.act.notice("key in \(t.appName, privacy: .public): \(command.rawValue, privacy: .public) took no effect in the background — asking for the foreground")
+            throw CUError(code: "needs_foreground",
+                          message: "\(t.appName)'s web view takes no \(command == .undo ? "⌘Z" : "⇧⌘Z") in the background, and its Edit › \(command == .undo ? "Undo" : "Redo") changed nothing — that needs \(t.appName) in front")
         case .selectAll:
             let length = ax.string(f, kAXValueAttribute)?.utf16.count ?? 0
             guard ax.isSettable(f, kAXSelectedTextRangeAttribute), let r = AX.makeRange(location: 0, length: length),
@@ -1866,6 +1900,10 @@ extension CUCore {
         aimMenuCommands(at: t)
         let keyed = focusBoundWindow(p, t)
         defer { keyed?() }
+        // The menu bar validates commands against the app's KEY window: when another of its windows is key
+        // (live: the fixture's web window, after typing there), make the bound one key by clicking the element
+        // the script just worked on — its selection put back — so "Uppercase Selection" sees that selection.
+        if boundWindowIsKeyInApp(t) == false, let e = recentlyTargeted(t) { makeWindowKeyForField(e, t) }
         let item: CUAXMenuNode
         do {
             item = try resolveMenu(a, p, t)

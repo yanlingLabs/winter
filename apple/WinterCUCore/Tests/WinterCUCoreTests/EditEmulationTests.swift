@@ -98,4 +98,60 @@ final class EditEmulationTests: XCTestCase {
         try await key("cmd+v")
         XCTAssertTrue(poster.keyDowns.first?.flags.contains(.maskCommand) ?? false, "the real ⌘V")
     }
+
+    // MARK: ⌘Z / ⇧⌘Z: no accessibility equivalent
+
+    private let undoItem = fakeElement(98_810)
+    private let redoItem = fakeElement(98_811)
+
+    /// An Edit menu with Undo/Redo — validated only when the menu opens, so they read disabled.
+    private func editMenu() {
+        let bar = fakeElement(98_812), apple = fakeElement(98_813), edit = fakeElement(98_814), menu = fakeElement(98_815)
+        ax.put(ax.application(pid), [kAXMenuBarAttribute: bar])
+        ax.add(apple, role: "AXMenuBarItem", title: "Apple")
+        ax.put(bar, [kAXChildrenAttribute: [apple, edit]])
+        ax.add(edit, role: "AXMenuBarItem", title: "Edit", extra: [kAXChildrenAttribute: [menu]])
+        ax.add(menu, role: kAXMenuRole, extra: [kAXChildrenAttribute: [undoItem, redoItem]])
+        ax.add(undoItem, role: kAXMenuItemRole, title: "Undo",
+               extra: [kAXMenuItemCmdCharAttribute: "Z", kAXMenuItemCmdModifiersAttribute: 0, kAXEnabledAttribute: false])
+        ax.add(redoItem, role: kAXMenuItemRole, title: "Redo",
+               extra: [kAXMenuItemCmdCharAttribute: "Z", kAXMenuItemCmdModifiersAttribute: 1, kAXEnabledAttribute: false])
+        ax.setActions(undoItem, [kAXPressAction])
+        ax.setActions(redoItem, [kAXPressAction])
+    }
+
+    func testUndoThroughTheEditItemIsVerifiedByTheValue() async throws {
+        world(value: "copy me")
+        editMenu()
+        ax.onPerform = { [unowned self] what in
+            if what == "\(token(undoItem)):\(kAXPressAction)" { ax.put(field, [kAXValueAttribute: "old"]) }
+        }
+        let r = try await key("cmd+z")
+        XCTAssertTrue(r.detail?.contains("Edit › Undo and the field changed") ?? false, r.detail ?? "")
+        XCTAssertTrue(poster.keyDowns.isEmpty)
+    }
+
+    func testAnUndoThatChangesNothingAsksForTheForegroundNeverASilentNoOp() async throws {
+        world(value: "copy me")
+        editMenu()  // pressing the unvalidated item does nothing
+        for combo in ["cmd+z", "shift+cmd+z"] {
+            do {
+                try await key(combo)
+                XCTFail("expected needs_foreground for \(combo)")
+            } catch let e as CUError {
+                XCTAssertEqual(e.code, "needs_foreground")
+                XCTAssertTrue(e.message.contains("needs Web in front"), e.message)
+            }
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty, "no key equivalent posted into the void")
+    }
+
+    func testWithTheForegroundAgreedUndoIsTheRealShortcut() async throws {
+        world(value: "copy me")
+        try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+            action: .key(CUKeyAction(combo: "cmd+z", into: target.refs.ref(for: AXIdentity(element: field)))),
+            access: .full, allowForeground: true, privatePath: false))
+        XCTAssertTrue(sys.activated.contains(pid), "brought forward for it (with consent)")
+        XCTAssertTrue(poster.keyDowns.first?.flags.contains(.maskCommand) ?? false)
+    }
 }

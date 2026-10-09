@@ -660,7 +660,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           ...(state === undefined ? {} : { state }), probe: probe!.items.filter((p) => p.t >= since), metrics: readMetrics(home, since),
           shots: shotsSince(built.tool, home, since),
         });
-        if (s.session === "ask") checks.push(...cardChecks(turn.cards));
+        if (s.session === "ask") checks.push(...cardChecks(turn.cards, s.foregroundCard === true));
         const leaked = events.filter((e) => e.role === "user" && (e.ev === "user.key" || e.ev === "user.mouse") && e.t >= since && e.t <= t1);
         checks.push(check("the real pointer stayed put and your app got no keys or clicks (no rung-4 fallback)", moved.length === 0 && leaked.length === 0,
           [moved.length > 0 ? `pointer moved at +${moved.map((t) => t - since).join(", +")} ms` : "", leaked.length > 0 ? `your app got ${leaked.map((e) => e.ev).join(", ")}` : ""].filter(Boolean).join("; ")));
@@ -926,13 +926,20 @@ function readMetrics(home: string, since: number): Record<string, unknown>[] {
   }
 }
 
-function cardChecks(cards: readonly SessionEvent[]): Check[] {
+function cardChecks(cards: readonly SessionEvent[], foregroundCard = false): Check[] {
   const c = cards[0] as (SessionEvent & { summary?: string; toolName?: string; options?: Array<{ id: string }> }) | undefined;
+  const summaries = cards.map((e) => String((e as { summary?: string }).summary));
+  const perApp = summaries.filter((x) => x === expectedCardSummary()).length;
+  const others = summaries.filter((x) => x !== expectedCardSummary());
   return [
     check("the per-app card was raised", c !== undefined, "no approval_requested"),
     check("it names the app and its bundle id", c?.summary === expectedCardSummary(), String(c?.summary)),
     check("it offers once / this session / always", JSON.stringify((c?.options ?? []).map((x) => x.id)) === JSON.stringify(["once", "session", "always"]), JSON.stringify(c?.options)),
-    check("one card for the call", cards.length === 1, `${cards.length} cards`),
+    foregroundCard
+      // The scenario provokes a foreground request (denied by the rig): one per-app card, and only the
+      // foreground card besides it.
+      ? check("one per-app card, plus only the foreground card", perApp === 1 && others.every((x) => /bring .* to the front/.test(x)), JSON.stringify(summaries))
+      : check("one card for the call", cards.length === 1, `${cards.length} cards`),
   ];
 }
 

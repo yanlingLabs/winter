@@ -183,6 +183,7 @@ enum AX {
         let start = DispatchTime.now().uptimeNanoseconds
         func elapsed() -> Double { Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000 }
         var silent = 0
+        var pauses = 0
         var id: UInt64 = 0
         var lastLive: UInt64 = 0
         while id < maxID {
@@ -201,7 +202,19 @@ enum AX {
             let err = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
             if err == .cannotComplete {
                 silent += 1
-                if silent >= remoteProbeSilentLimit { r.stoppedBy = "an app that is not answering"; break }
+                if silent >= remoteProbeSilentLimit {
+                    // A busy app (Finder, just told to open a folder, answered nothing for ~0.4 s): pause and go on,
+                    // twice, before calling it not answering.
+                    if pauses < 2 {
+                        pauses += 1
+                        silent = 0
+                        id = id >= UInt64(remoteProbeSilentLimit) ? id - UInt64(remoteProbeSilentLimit) : 0
+                        usleep(250_000)
+                        continue
+                    }
+                    r.stoppedBy = "an app that is not answering"
+                    break
+                }
                 continue
             }
             silent = 0
