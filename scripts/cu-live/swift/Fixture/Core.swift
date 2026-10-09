@@ -186,7 +186,7 @@ enum CommandDecoder {
     static func supported(role: String) -> Set<String> {
         switch role {
         case "main": return ["ping", "steal", "reset", "dump", "fullscreen", "exitFullscreen", "openSample", "quit", "animate",
-                             "offspace", "restoreSpace"]
+                             "offspace", "restoreSpace", "docsOpenFind"]
         case "user": return ["ping", "activate", "reset", "dump", "quit"]
         default: return []
         }

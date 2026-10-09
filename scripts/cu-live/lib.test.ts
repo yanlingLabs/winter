@@ -10,7 +10,7 @@ import {
   parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type FixtureEvent, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { minimalPdf, REAL_APP_SCENARIOS, REAL_DIR_TOKEN, withRealDir } from "./real-apps";
-import { PRELUDE, SCENARIOS, scriptOf, usesWebPage } from "./scenarios";
+import { DOCS_BIG_PASTE, DOCS_TEXT, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage } from "./scenarios";
 
 const sample = (t: number, frontPid: number, space: number | null, hidIdleMs: number | null = 1000): MonitorSample => ({ t, front: `app${frontPid}`, frontPid, space, hidIdleMs });
 
@@ -234,6 +234,40 @@ describe("the scenarios", () => {
     expect(usesWebPage({ code: 'const f = await win("Fixture Form");' })).toBe(false);
   });
 
+  test("the Docs-like page: seven scenarios against the contract, each judged by the page's own log", () => {
+    const docs = SCENARIOS.filter((s) => s.group === "docs");
+    expect(docs.length).toBe(7);
+    for (const s of docs) { expect(usesDocsPage(s)).toBe(true); expect(s.before?.[0]?.cmd).toBe("reset"); }
+    expect(DOCS_BIG_PASTE.length).toBe(3_000);
+    expect(DOCS_BIG_PASTE.split("\n").length).toBeGreaterThan(20);
+    const ev = (ev: string, o: Record<string, unknown>): FixtureEvent => ({ t: 5, role: "main", ev, ...o });
+    const judge = (name: string, facts: Record<string, unknown>, events: FixtureEvent[], output = "", state?: Record<string, unknown>): boolean =>
+      docs.find((s) => s.name.startsWith(name))!.verify({ output, isError: false, facts, events, since: 0, probe: [], metrics: [], shots: [], ...(state === undefined ? {} : { state }) }).every((c) => c.ok);
+    // 1. typing: focus in the hidden input, the exact text, the receiver named, "can't be read back".
+    const typed = [ev("docs.focus", { id: "doc" }), ev("docs.text", { text: DOCS_TEXT })];
+    expect(judge("Docs: type", {}, typed, "typed into [9] text area \"Document content\" — typed 40 characters; it can't be read back here")).toBe(true);
+    expect(judge("Docs: type", {}, typed, "typed into [9] text area")).toBe(false);
+    // 2. the Close button: a click it ignored must be followed by a said fallback; the panel closed.
+    const closed = [ev("docs.mouse", { id: "find-close", phase: "down" }), ev("docs.mouse", { id: "find-close", phase: "up" }), ev("docs.panel", { open: false })];
+    expect(judge("Docs: press", {}, closed, "", { docs: { panelOpen: false } })).toBe(true);
+    expect(judge("Docs: press", {}, [ev("docs.click", { id: "find-close", ignored: true }), ...closed], "", { docs: { panelOpen: false } })).toBe(false);
+    expect(judge("Docs: press", {}, [ev("docs.click", { id: "find-close", ignored: true }), ...closed], "the AX press did nothing — clicked instead", { docs: { panelOpen: false } })).toBe(true);
+    // 3./4. refusals: the reason, and nothing pasted.
+    const titleFocus = [ev("docs.focus", { id: "title" })];
+    expect(judge("Docs: paste with no into, multi-line", { refused: "Refused: wrong_field_shape — the title takes one line" }, titleFocus)).toBe(true);
+    expect(judge("Docs: paste with no into, multi-line", { refused: "Refused: wrong_field_shape" }, [...titleFocus, ev("docs.title", { value: "line one" })])).toBe(false);
+    expect(judge("Docs: paste with no into, multi-line", { refused: null }, titleFocus)).toBe(false);
+    expect(judge("Docs: paste with no into while the HTML menu bar", { refused: "Refused: focus_not_editable" }, [ev("docs.focus", { id: "menu-edit" })])).toBe(true);
+    expect(judge("Docs: paste with no into while the HTML menu bar", { refused: "Refused: focus_not_editable" }, [ev("docs.focus", { id: "menu-edit" }), ev("docs.paste", { length: 3 })])).toBe(false);
+    // 5. focus: now …
+    const moved = [ev("docs.focus", { id: "find" }), ev("docs.focus", { id: "replace" })];
+    expect(judge("Docs: an act that moves", {}, moved, "pressed tab in [4] text field \"Find\" — focus: now [5] text field \"Replace with\"")).toBe(true);
+    expect(judge("Docs: an act that moves", {}, moved, "pressed tab in [4] text field \"Find\"")).toBe(false);
+    // 6. the big paste: the whole text, through one paste event.
+    expect(judge("Docs: a 3,000", {}, [ev("docs.paste", { length: 3_000 })], "", { docs: { text: DOCS_BIG_PASTE } })).toBe(true);
+    expect(judge("Docs: a 3,000", {}, [ev("docs.key", { key: "a" })], "", { docs: { text: DOCS_BIG_PASTE } })).toBe(false);
+  });
+
   test("off-Space: never seen here → capture only (point click + keys); shown here first → a full bind", () => {
     const captureOnly = SCENARIOS.find((s) => s.name.startsWith("bind off-Space (full screen, never seen here)"))!;
     const act = SCENARIOS.find((s) => s.name.startsWith("act in the off-Space window"))!;
@@ -274,7 +308,7 @@ describe("the scenarios", () => {
   test("names are unique; every group the suite promises is covered", () => {
     expect(new Set(all.map((s) => s.name)).size).toBe(all.length);
     const groups = new Set(SCENARIOS.map((s) => s.group));
-    for (const g of ["bind", "click", "type", "scroll", "menu", "applescript", "screenshot", "guardian", "document", "card"]) expect(groups.has(g)).toBe(true);
+    for (const g of ["bind", "click", "type", "scroll", "menu", "applescript", "screenshot", "guardian", "document", "card", "docs"]) expect(groups.has(g)).toBe(true);
     // The undo scenario runs in the ask session too (its foreground card is denied there): once, once, false.
     expect(SCENARIOS.filter((s) => s.session === "ask").map((s) => s.answer)).toEqual(["once", "once", false]);
   });

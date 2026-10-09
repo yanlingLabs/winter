@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var web: WebController?
     private var canvas: CanvasController?
     private var offspace: OffspaceController?
+    private var docs: DocsController?
     private var user: UserController?
     private var documents: [FixtureWindow] = []
     private var activity: NSObjectProtocol?
@@ -44,11 +45,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let form = FormController(slot: 0, openDocument: { [weak self] in self?.openSample(via: "button") })
             let web = WebController(slot: 1)
             let canvas = CanvasController(slot: 2)
+            // Slot 3 (the Offspace window's, which leaves this desktop at setup): the Docs-like page.
+            let docs = DocsController(slot: 3)
             self.form = form
             self.web = web
             self.canvas = canvas
+            self.docs = docs
             // orderFront, never makeKeyAndOrderFront: the app must not become active, and no window.key at launch.
-            for window in [form.window, web.window, canvas.window] { window.orderFront(nil) }
+            for window in [form.window, web.window, canvas.window, docs.window] { window.orderFront(nil) }
             // `open -j` launches hidden, and a hidden app's windows are not drawn: show them, without activating.
             NSApp.unhideWithoutActivation()
             registerCommandObserver()
@@ -59,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 MainActor.assumeIsolated { self?.markLaunched() }
             }
             web.start()
+            docs.start()
         } else {
             let user = UserController()
             self.user = user
@@ -343,6 +348,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 await self.restoreOffspace(logNone: true, fullscreenTimeout: 5)
                 done(nil)
             }
+        case "docsOpenFind":
+            guard let docs else { return done("no Docs window") }
+            docs.run("window.docsFixture ? window.docsFixture.openFind() : false") { ok in done(ok ? nil : "the Docs page did not open its panel (not loaded?)") }
         case "openSample":
             if sampleURL() == nil {
                 done("sample.wcufix is missing from the app bundle")
@@ -369,7 +377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         // Focus first (ends any editing), then the values — both silent: programmatic changes fire no field
         // delegate callbacks, the page's reset is guarded against logging, and focus loss logs nothing.
-        for window in ([form?.window, web?.window, canvas?.window, offspace?.window] + documents.map { Optional($0) }) {
+        for window in ([form?.window, web?.window, canvas?.window, offspace?.window, docs?.window] + documents.map { Optional($0) }) {
             _ = window?.makeFirstResponder(nil)
         }
         form?.reset()
@@ -379,7 +387,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             canvas?.canvas.setAnimating(false)
             fixture.emit("animate", [("on", .bool(false))])
         }
-        if let web { web.reset(completion: done) } else { done() }
+        let resetDocs: () -> Void = { [docs] in
+            if let docs { docs.run("window.docsFixture ? window.docsFixture.reset() : false") { _ in done() } } else { done() }
+        }
+        if let web { web.reset(completion: resetDocs) } else { resetDocs() }
     }
 
     private func dump(done: @escaping () -> Void) {
@@ -389,7 +400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             done()
             return
         }
-        let finish: (JV) -> Void = { [fixture, form, canvas] webState in
+        let finish: (JV, JV) -> Void = { [fixture, form, canvas] webState, docsState in
             let selection = form?.notes.selectedRange() ?? NSRange(location: 0, length: 0)
             fixture.emit("state", [
                 ("name", .str(form?.name.stringValue ?? "")),
@@ -398,6 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 ("notesSelection", .arr([.int(selection.location), .int(selection.length)])),
                 ("agree", .bool(form?.agree.state == .on)),
                 ("web", webState),
+                ("docs", docsState),
                 ("active", .bool(NSApp.isActive)),
                 ("keyWindow", keyWindow),
                 ("steal", .str(fixture.stealMode.rawValue)),
@@ -405,7 +417,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             ])
             done()
         }
-        if let web { web.state(completion: finish) } else { finish(.null) }
+        let withDocs: (JV) -> Void = { [docs] webState in
+            if let docs { docs.state { finish(webState, $0) } } else { finish(webState, .null) }
+        }
+        if let web { web.state(completion: withDocs) } else { withDocs(.null) }
     }
 
     // MARK: Full screen

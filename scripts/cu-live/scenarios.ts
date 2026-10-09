@@ -110,8 +110,24 @@ async function webWin() {
     await sleep(250);
   }
 }
+// The Docs-like window, once its page shows the hidden "Document content" input (state() retried for up to 5 s).
+// The runner also waits for the page's own ready message before any scenario that calls this.
+async function docsWin() {
+  const docs = await win("Fixture Docs");
+  const t0 = Date.now();
+  for (;;) {
+    if ((await docs.state({ emit: false, full: true })).includes("Document content")) return docs;
+    if (Date.now() - t0 > 5000) throw new Error("the docs page didn't load");
+    await sleep(250);
+  }
+}
 function report(o) { print(${JSON.stringify(MARKER)} + " " + JSON.stringify(o)); }
 `;
+
+/** Whether a scenario works in the Docs-like page (it calls `docsWin()`): the runner first waits for its ready message. */
+export function usesDocsPage(s: Pick<Scenario, "code">): boolean {
+  return s.code.includes("docsWin()");
+}
 
 /** Whether a scenario works in the web window's page (it calls `webWin()`): the runner first waits for didFinish. */
 export function usesWebPage(s: Pick<Scenario, "code">): boolean {
@@ -161,6 +177,31 @@ const LONG_PASTE = Array.from({ length: 60 }, (_, i) => `Line ${String(i + 1).pa
 const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
 const PASTE_TEXT = "Pasted ✓ «text» — 2026";
 const OFFSPACE_TEXT = "off-Space ✓ Typed";
+/** Typed into the Docs-like page's hidden input: mixed case, symbols, non-ASCII, one line. */
+export const DOCS_TEXT = "Docs ✓ Typed: Mixed CASE ünï 日本 #42 (ok)";
+/** Exactly 3,000 characters over many lines, for the big paste. */
+export const DOCS_BIG_PASTE = (() => {
+  const lines: string[] = [];
+  for (let i = 1; lines.join("\n").length < 3_000; i++) lines.push(`Line ${String(i).padStart(3, "0")} — the quick brown fox ✓ jumps over ${i} lazy dogs; ünï 日本.`);
+  return lines.join("\n").slice(0, 3_000);
+})();
+
+/** The Docs-like page's events since the scenario started (`docs.<type>`, main fixture). */
+function docsEvents(ctx: VerifyContext, type: string): FixtureEvent[] {
+  return eventsSince(ctx.events, ctx.since, `docs.${type}`);
+}
+/** The page's model text: the dump's, else the last `docs.text` line. */
+function docsText(ctx: VerifyContext): string | undefined {
+  const d = ctx.state?.docs;
+  if (d !== null && typeof d === "object" && typeof (d as Record<string, unknown>).text === "string") return (d as Record<string, string>).text;
+  const last = docsEvents(ctx, "text").at(-1);
+  return typeof last?.text === "string" ? last.text : undefined;
+}
+function docsState(ctx: VerifyContext): Record<string, unknown> {
+  const d = ctx.state?.docs;
+  return d !== null && typeof d === "object" ? d as Record<string, unknown> : {};
+}
+const refusedFor = (ctx: VerifyContext): string => String(ctx.facts.refused ?? "");
 
 export const SCENARIOS: Scenario[] = [
   // ── binding ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -568,6 +609,133 @@ report({ ok: true });`,
     verify: (ctx) => [ok(ctx),
       check("the document opened", has(ctx.events, ctx.since, "doc.window", () => true)),
       check("the app tried to activate on open", has(ctx.events, ctx.since, "activated", (e) => e.reason === "doc-open"))],
+  },
+  // ── a Docs-like page (Google Docs' failure modes, offline) ─────────────────────────────────────────────────
+  // Written against the CONTRACT (the receiver named, the press fallback said, wrong-shaped and non-editable focus
+  // refused, the focus move reported, the real paste route), not against whatever the helper does today.
+  {
+    name: "Docs: type into the doc through its hidden input", group: "docs",
+    before: [{ role: "main", cmd: "reset" }],
+    code: `
+const docs = await docsWin();
+const canvas = await pick(docs, "Document canvas");
+await docs.click(canvas.ref);
+await docs.type(${JSON.stringify(DOCS_TEXT)});
+await sleep(300);
+report({ typed: true });`,
+    dump: true,
+    verify: (ctx) => [ok(ctx),
+      check("the click put the focus in the hidden input (fixture log)", docsEvents(ctx, "focus").some((e) => e.id === "doc"), JSON.stringify(docsEvents(ctx, "focus").slice(-3))),
+      check("the exact text arrived (the page's model)", docsText(ctx) === DOCS_TEXT, JSON.stringify(docsText(ctx))),
+      check("the result names the receiver (the window's focus, or Docs' hidden input)", /typed into \S/.test(ctx.output) || /hidden input/i.test(ctx.output), ctx.output.slice(0, 300)),
+      check("the result says the text can't be read back", /can'?t be read back|cannot be read back|can not be read back/i.test(ctx.output), ctx.output.slice(0, 300))],
+  },
+  {
+    name: "Docs: press a Closure-style Close button (it ignores click)", group: "docs",
+    before: [{ role: "main", cmd: "reset" }, { role: "main", cmd: "docsOpenFind" }],
+    code: `
+const docs = await docsWin();
+const close = (await docs.find({ role: "button", name: "Close" }, { emit: false })).find((e) => e.name === "Close");
+if (!close) throw new Error("no Close button: " + JSON.stringify(await docs.find("Close", { emit: false })));
+await docs.click(close.ref);
+await sleep(300);
+report({ pressed: close.ref });`,
+    dump: true,
+    verify: (ctx) => {
+      const ignored = docsEvents(ctx, "click").some((e) => e.id === "find-close" && e.ignored === true);
+      const fellBack = /did nothing|clicked (it )?instead|click(ed)? with the pointer|mouse (down|events)/i.test(ctx.output);
+      const mouse = docsEvents(ctx, "mouse").filter((e) => e.id === "find-close").map((e) => e.phase);
+      return [ok(ctx),
+        check("the panel closed (fixture log)", docsEvents(ctx, "panel").some((e) => e.open === false) && docsState(ctx).panelOpen === false, JSON.stringify(docsEvents(ctx, "panel"))),
+        check("the button got a mousedown and a mouseup", mouse.includes("down") && mouse.includes("up"), JSON.stringify(mouse)),
+        check("the result says the AX press did nothing and it clicked instead (or the AX press itself worked)", !ignored || fellBack, ctx.output.slice(0, 300))];
+    },
+  },
+  {
+    name: "Docs: paste with no into, multi-line, into the single-line title — refused (wrong_field_shape)", group: "docs",
+    before: [{ role: "main", cmd: "reset" }],
+    code: `
+const docs = await docsWin();
+const title = await pick(docs, "Document title", "text field");
+await docs.click(title.ref);
+let refused = null;
+try { await docs.paste("line one\\nline two"); } catch (e) { refused = e.name + ": " + String(e.message).slice(0, 300); }
+report({ refused });`,
+    dump: true,
+    verify: (ctx) => [ok(ctx),
+      check("the click put the focus in the title (fixture log)", docsEvents(ctx, "focus").some((e) => e.id === "title"), JSON.stringify(docsEvents(ctx, "focus").slice(-3))),
+      check("refused: wrong_field_shape", /^Refused/.test(refusedFor(ctx)) && /wrong_field_shape|single[- ]line|multi[- ]?line|line break|one line/i.test(refusedFor(ctx)), refusedFor(ctx)),
+      check("nothing was pasted", docsEvents(ctx, "title").length === 0 && docsEvents(ctx, "paste").length === 0 && (docsState(ctx).title === undefined || docsState(ctx).title === "Untitled document"), JSON.stringify(docsState(ctx).title))],
+  },
+  {
+    name: "Docs: paste with no into, over 200 characters, into the search input — refused (wrong_field_shape)", group: "docs",
+    before: [{ role: "main", cmd: "reset" }],
+    code: `
+const docs = await docsWin();
+const search = await pick(docs, "Search the menus", "field");
+await docs.click(search.ref);
+let refused = null;
+try { await docs.paste(${JSON.stringify("A long single line for a search box. ".repeat(7).trim())}); } catch (e) { refused = e.name + ": " + String(e.message).slice(0, 300); }
+report({ refused });`,
+    dump: true,
+    verify: (ctx) => [ok(ctx),
+      check("the click put the focus in the search input (fixture log)", docsEvents(ctx, "focus").some((e) => e.id === "page-search"), JSON.stringify(docsEvents(ctx, "focus").slice(-3))),
+      check("refused: wrong_field_shape", /^Refused/.test(refusedFor(ctx)) && /wrong_field_shape|200|too long|single[- ]line|short field/i.test(refusedFor(ctx)), refusedFor(ctx)),
+      check("nothing was pasted", docsEvents(ctx, "search").length === 0 && docsEvents(ctx, "paste").length === 0 && (docsState(ctx).search === undefined || docsState(ctx).search === ""), JSON.stringify(docsState(ctx).search))],
+  },
+  {
+    name: "Docs: paste with no into while the HTML menu bar has the focus — refused (focus_not_editable)", group: "docs",
+    before: [{ role: "main", cmd: "reset" }],
+    code: `
+const docs = await docsWin();
+const edit = (await docs.find("Edit", { emit: false })).find((e) => /menu/.test(e.role) && e.name === "Edit");
+if (!edit) throw new Error("no Edit menu in the page: " + JSON.stringify(await docs.find("Edit", { emit: false })));
+await docs.click(edit.ref);
+let refused = null;
+try { await docs.paste("should not land anywhere"); } catch (e) { refused = e.name + ": " + String(e.message).slice(0, 300); }
+report({ refused });`,
+    dump: true,
+    verify: (ctx) => [ok(ctx),
+      check("the click put the focus on the menu bar (fixture log)", docsEvents(ctx, "focus").some((e) => e.id === "menu-edit"), JSON.stringify(docsEvents(ctx, "focus").slice(-3))),
+      check("refused: focus_not_editable", /^Refused/.test(refusedFor(ctx)) && /focus_not_editable|not editable|isn'?t editable|not a text|can'?t take text/i.test(refusedFor(ctx)), refusedFor(ctx)),
+      check("nothing was pasted", ["paste", "text", "title", "search", "find", "replace"].every((t) => docsEvents(ctx, t).length === 0) && (docsState(ctx).text === undefined || docsState(ctx).text === ""), JSON.stringify(docsState(ctx)))],
+  },
+  {
+    name: "Docs: an act that moves the focus says where it went (focus: now …)", group: "docs",
+    before: [{ role: "main", cmd: "reset" }, { role: "main", cmd: "docsOpenFind" }],
+    code: `
+const docs = await docsWin();
+const find = await pick(docs, "Find", "text field");
+await docs.click(find.ref);
+await docs.key("tab");
+report({ ok: true });`,
+    verify: (ctx) => {
+      const ids = docsEvents(ctx, "focus").map((e) => String(e.id));
+      return [ok(ctx),
+        check("the focus went from Find to Replace with (fixture log)", ids.includes("find") && ids.lastIndexOf("replace") > ids.indexOf("find"), JSON.stringify(ids)),
+        check("the result carries a `focus: now …` line", /focus: now/i.test(ctx.output), ctx.output.slice(0, 400))];
+    },
+  },
+  {
+    name: "Docs: a 3,000-character paste into the doc with { into } — the real paste route", group: "docs",
+    before: [{ role: "main", cmd: "reset" }],
+    timeoutMs: 90_000,
+    code: `
+const docs = await docsWin();
+const els = await docs.find("Document content", { emit: false });
+const input = els.find((e) => /text/.test(e.role) && e.role !== "static text") || els[0];
+if (!input) throw new Error("no Document content element");
+await docs.paste(${JSON.stringify(DOCS_BIG_PASTE)}, { into: input.ref });
+await sleep(500);
+report({ into: input.role });`,
+    dump: true,
+    verify: (ctx) => {
+      const pastes = docsEvents(ctx, "paste");
+      return [ok(ctx),
+        check("the full 3,000 characters arrived (the page's model)", docsText(ctx) === DOCS_BIG_PASTE, `${docsText(ctx)?.length ?? "no"} characters`),
+        check("through a real paste: the page got a paste event of 3,000 characters, not keystrokes", pastes.some((e) => e.length === DOCS_BIG_PASTE.length) && docsEvents(ctx, "key").filter((e) => e.meta !== true).length < 20,
+          `paste events ${JSON.stringify(pastes.map((e) => e.length))}, keys ${docsEvents(ctx, "key").length}`)];
+    },
   },
   // ── the per-app card (the `ask` session) ───────────────────────────────────────────────────────────────────
   {

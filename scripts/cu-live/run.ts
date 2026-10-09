@@ -47,7 +47,7 @@ import {
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, withRealDir, type RealAppsRun } from "./real-apps";
-import { expectedCardSummary, PRELUDE, SCENARIOS, scriptOf, usesWebPage, type ImageStats, type ProbeEvent, type Scenario } from "./scenarios";
+import { expectedCardSummary, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage, type ImageStats, type ProbeEvent, type Scenario } from "./scenarios";
 import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, offSpacePlan, offSpaceSkipReason, onDesktopPlan, visualSkipReason, parseApps, resolveApp, restorePlan, SCRIPTS, type GenericApp, type ResolveDeps } from "./generic";
 
 // ── thresholds (env overrides) ───────────────────────────────────────────────────────────────────────────────────
@@ -727,6 +727,12 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
             await sleep(800);
             await activateUser();
           }
+        }
+        if (usesDocsPage(s)) {
+          // The Docs-like page must have loaded and wired its hidden input (it posts `ready`); the script then
+          // waits for the "Document content" element.
+          await until("the fixture's Docs page (ready)", 10_000, () => fixtureEvents(f).find((e) => e.role === "main" && e.ev === "docs.ready"))
+            .catch(() => { throw new Error(`the docs page didn't load (no ready message in 10 s${fixtureEvents(f).some((e) => e.ev === "docs.didFail") ? `; didFail: ${String(fixtureEvents(f).find((e) => e.ev === "docs.didFail")!.error)}` : ""})`); });
         }
         if (usesWebPage(s)) {
           // The page must have loaded (the fixture logs its WKWebView didFinish); the script then waits for "First".

@@ -424,6 +424,13 @@ func runFixtureSelfTest() -> Int32 {
     c.check(BannerModel.parse(#"{"kind":"running"}"#) == nil, "banner: a runner pid is required")
     c.check(BannerModel.parse(#"{"kind":"toast","watchPid":7}"#) == nil, "banner: unknown kind refused")
 
+    // --- the Docs-like page's messages → `docs.<type>` log fields ----------------------------------------------
+    c.check(DocsEvent.isName("paste") && DocsEvent.isName("panel"), "docs: plain names pass")
+    c.check(!DocsEvent.isName("") && !DocsEvent.isName("a.b") && !DocsEvent.isName("x y") && !DocsEvent.isName(String(repeating: "a", count: 25)), "docs: odd names refused")
+    let fields = DocsEvent.fields(["type": "paste", "length": 3000, "text": "abc"])
+    c.equal(fields.map { $0.0 }, ["length", "text"], "docs: every field but type, sorted")
+    c.check(CommandDecoder.supported(role: "main").contains("docsOpenFind"), "docs: the panel command")
+
     if c.failures.isEmpty {
         print("SELFTEST OK \(c.passed) checks")
         return 0
