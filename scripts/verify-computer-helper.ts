@@ -6,7 +6,8 @@
  *
  *  1. The dev helper `bun run dev:helper` left in `dist/dev/` is what TCC and the daemon need: Winter's team,
  *     identifier com.winter.computeruse.dev, the hardened runtime, EXACTLY the stated designated requirement,
- *     the Apple Events entitlement only, an LSUIElement Info.plist at this VERSION, and no test hooks compiled in.
+ *     the Apple Events entitlement only, an LSUIElement Info.plist at the helper's own version
+ *     (apple/ComputerUse/VERSION), and no test hooks compiled in.
  *  2. That very binary, run against a temp home (WINTER_CU_HOME), creates `run/computer-use.sock` 0600 in a
  *     0700 `run/` — and closes a connection from this script (bun: signed, but not the dev daemon) with no
  *     response at all, hello or not. The real peer check, no bypass.
@@ -29,9 +30,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WINTER_TEAM_ID } from "../packages/core/src/auth/app-token-acl";
-import { HELPER, HELPER_SOCKET_NAME, helperExecutable, helperRequirement, LSREGISTER } from "./computer-helper-lib";
+import { HELPER_PROTOCOL } from "../packages/core/src/computer-use/protocol";
+import { HELPER, HELPER_SOCKET_NAME, helperExecutable, helperRequirement, LSREGISTER, readHelperVersion } from "./computer-helper-lib";
 import { buildHelper, DEV_HELPER_APP, inspectHelper, run, signHelper, signingIdentity } from "./dev-helper";
-import { readCanonical } from "./version-lib";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const VERIFY_DIR = join(REPO_ROOT, "out", "computer-helper", "verify");
@@ -156,7 +157,8 @@ async function stop(launched: Launched): Promise<void> {
 
 async function main(): Promise<void> {
   if (process.platform !== "darwin") throw new Error("the helper is macOS-only");
-  const version = readCanonical();
+  // The helper's OWN version (apple/ComputerUse/VERSION), not Winter's.
+  const version = readHelperVersion();
   const homes: string[] = [];
   const launched: Launched[] = [];
   try {
@@ -179,7 +181,7 @@ async function main(): Promise<void> {
         check(mode(socketPath) === 0o600, "the socket is 0600", `mode ${mode(socketPath)?.toString(8)}`);
         check(mode(join(home, "run")) === 0o700, "run/ is 0700", `mode ${mode(join(home, "run"))?.toString(8)}`);
         const impostor = await LineClient.connect(socketPath);
-        impostor.send({ id: 1, method: "hello", params: { protocol: 1, client: "daemon", home } });
+        impostor.send({ id: 1, method: "hello", params: { protocol: HELPER_PROTOCOL, client: "daemon", home } });
         check(await impostor.closedSilently(), "a peer that is not com.winter.core.dev is closed with no response at all");
         impostor.close();
         check(await waitFor(() => dev.stderr.some((l) => l.includes("refused")), 3000), "the helper logged the refusal", dev.stderr.slice(-3).join(" | "));
@@ -220,10 +222,10 @@ async function main(): Promise<void> {
     check(mode(socketPath) === 0o600, "its socket is 0600");
 
     const daemon = await LineClient.connect(socketPath);
-    const hello = await daemon.request(1, "hello", { protocol: 1, client: "daemon", home });
+    const hello = await daemon.request(1, "hello", { protocol: HELPER_PROTOCOL, client: "daemon", home });
     const result = typeof hello === "object" ? hello.result : undefined;
-    check(result?.protocol === 1 && result?.helperVersion === version && result?.pid === helper.child.pid,
-      `hello → {protocol: 1, helperVersion: ${version}, pid: ${helper.child.pid}} (the helper accepted bun's code)`, JSON.stringify(hello));
+    check(result?.protocol === HELPER_PROTOCOL && result?.helperVersion === version && result?.pid === helper.child.pid,
+      `hello → {protocol: ${HELPER_PROTOCOL}, helperVersion: ${version}, pid: ${helper.child.pid}} (the helper accepted bun's code)`, JSON.stringify(hello));
     const helperDr = helperRequirement(HELPER.test.identifier, WINTER_TEAM_ID);
     const mutual = run("codesign", ["--verify", `-R=${helperDr}`, String(result?.pid ?? -1)]);
     check(mutual.status === 0, "mutual auth: the pid hello names satisfies the helper's stated designated requirement", mutual.stderr.trim());
@@ -244,7 +246,7 @@ async function main(): Promise<void> {
 
     // ── 3b. Winter.app as the second client (the in-window mirror's view stream) ──
     const app = await LineClient.connect(socketPath);
-    const appHello = await app.request(1, "hello", { protocol: 1, client: "app", home });
+    const appHello = await app.request(1, "hello", { protocol: HELPER_PROTOCOL, client: "app", home });
     check(typeof appHello === "object" && appHello.result?.pid === helper.child.pid, "Winter.app (fake identity): hello client:\"app\" → {protocol, helperVersion, pid}", JSON.stringify(appHello));
     const appStatus = await app.request(2, "status");
     check(typeof appStatus === "object" && appStatus.result?.helperVersion === version, "Winter.app may read status", JSON.stringify(appStatus));
@@ -260,16 +262,19 @@ async function main(): Promise<void> {
     check(typeof daemonView === "object" && daemonView.error?.data?.code === "not_allowed", "the daemon may not subscribe to frames → not_allowed", JSON.stringify(daemonView));
     app.close();
 
-    const refusals: { what: string; first: Record<string, unknown>; code: string }[] = [
-      { what: "a protocol mismatch", first: { id: 1, method: "hello", params: { protocol: 2, client: "daemon", home } }, code: "protocol_mismatch" },
-      { what: "a home mismatch", first: { id: 1, method: "hello", params: { protocol: 1, client: "daemon", home: realpathSync(tmpdir()) } }, code: "home_mismatch" },
+    const refusals: { what: string; first: Record<string, unknown>; code: string; data?: Record<string, unknown> }[] = [
+      // The helper names its own protocol and version, so the client can say which side is out of date.
+      { what: "a protocol mismatch", first: { id: 1, method: "hello", params: { protocol: HELPER_PROTOCOL + 1, client: "daemon", home } }, code: "protocol_mismatch",
+        data: { expected: HELPER_PROTOCOL, helperVersion: version } },
+      { what: "a home mismatch", first: { id: 1, method: "hello", params: { protocol: HELPER_PROTOCOL, client: "daemon", home: realpathSync(tmpdir()) } }, code: "home_mismatch" },
       { what: "a first request that is not hello", first: { id: 1, method: "status", params: {} }, code: "protocol_mismatch" },
     ];
-    for (const { what, first, code } of refusals) {
+    for (const { what, first, code, data } of refusals) {
       const client = await LineClient.connect(socketPath);
       client.send(first);
       const reply = await client.next();
-      const replied = typeof reply === "object" && reply.error?.data?.code === code;
+      const replied = typeof reply === "object" && reply.error?.data?.code === code
+        && Object.entries(data ?? {}).every(([k, v]) => reply.error?.data?.[k] === v);
       check(replied && (await client.next()) === "eof", `${what} → ${code}, then the connection is closed`, JSON.stringify(reply));
       client.close();
     }
@@ -287,7 +292,7 @@ async function main(): Promise<void> {
       launched.push(strict);
       if (check(await waitFor(() => existsSync(socket2), 10_000), "a second test helper (no app identity this bun satisfies) listens")) {
         const claimant = await LineClient.connect(socket2);
-        const reply = await claimant.request(1, "hello", { protocol: 1, client: "app", home: home2 });
+        const reply = await claimant.request(1, "hello", { protocol: HELPER_PROTOCOL, client: "app", home: home2 });
         check(typeof reply === "object" && reply.error?.data?.code === "not_allowed" && (await claimant.next()) === "eof",
           "a peer that is not Winter.app saying client:\"app\" → not_allowed, then closed", JSON.stringify(reply));
         claimant.close();

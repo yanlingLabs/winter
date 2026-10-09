@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { syncHelperVersion } from "./computer-helper-lib";
 
 export const ROOT = join(import.meta.dir, "..");
 
@@ -94,24 +95,23 @@ export function stampAll(v: string): string[] {
   // 3. apple: project.yml is the XcodeGen source of truth; the Info.plists are the
   //    git-tracked generated mirrors that builds actually read (INFOPLIST_FILE) until the
   //    next `xcodegen generate`. Stamp ALL of them so a sync never needs xcodegen installed.
-  //    project.yml carries the version once per versioned target (Winter.app, and the Winter
-  //    Computer Use helper, which reports it as `helperVersion`), so every occurrence is stamped.
+  //    Every unmarked version line in project.yml is Winter's. The Winter Computer Use helper's lines carry
+  //    its OWN version (apple/ComputerUse/VERSION, semver), so they are marked and skipped here, and stamped —
+  //    with its generated Info.plist — by `syncHelperVersion` instead.
   const yml = join(ROOT, "apple", "Winter", "project.yml");
   put(yml, stampProjectYml(readFileSync(yml, "utf8"), v));
-  for (const plist of [
-    join(ROOT, "apple", "Winter", "Support", "Info.plist"),
-    join(ROOT, "apple", "WinterComputerUse", "Support", "Info.plist"),
-  ]) {
-    put(plist, stampInfoPlist(readFileSync(plist, "utf8"), v));
-  }
+  const plist = join(ROOT, "apple", "Winter", "Support", "Info.plist");
+  put(plist, stampInfoPlist(readFileSync(plist, "utf8"), v));
+  files.push(...syncHelperVersion());
   return files;
 }
 
-/** Every `CFBundleShortVersionString:` / `CFBundleVersion:` in project.yml, not just the first. */
+/** Every Winter `CFBundleShortVersionString:` / `CFBundleVersion:` in project.yml, not just the first — all but
+ *  the helper's, which are marked `# apple/ComputerUse/VERSION` (its own version: `syncHelperVersion`). */
 export function stampProjectYml(yml: string, v: string): string {
   return yml
-    .replace(/CFBundleShortVersionString: "[^"]*"/g, `CFBundleShortVersionString: "${v}"`)
-    .replace(/CFBundleVersion: "[^"]*"/g, `CFBundleVersion: "${v}"`);
+    .replace(/CFBundleShortVersionString: "[^"]*"(?![^\n]*# apple\/ComputerUse\/VERSION)/g, `CFBundleShortVersionString: "${v}"`)
+    .replace(/CFBundleVersion: "[^"]*"(?![^\n]*# apple\/ComputerUse\/VERSION)/g, `CFBundleVersion: "${v}"`);
 }
 
 export function stampInfoPlist(plist: string, v: string): string {

@@ -57,6 +57,22 @@ public struct ComputerUsePermissions: Codable, Equatable, Sendable {
     }
 }
 
+/// The running helper speaks another helper protocol (apple/ComputerUse/PROTOCOL.md, "Compatibility"):
+/// nothing works until Winter is updated. `message` is the daemon's sentence to show.
+public struct ComputerUseHelperProtocolMismatch: Codable, Equatable, Sendable {
+    public let helperProtocol: Int?
+    public let helperVersion: String?
+    public let winterProtocol: Int
+    public let message: String
+
+    public init(helperProtocol: Int?, helperVersion: String? = nil, winterProtocol: Int, message: String) {
+        self.helperProtocol = helperProtocol
+        self.helperVersion = helperVersion
+        self.winterProtocol = winterProtocol
+        self.message = message
+    }
+}
+
 /// `computerUse.status`' `helper` block. `permissions` is absent while the helper is not running (the
 /// daemon cannot ask a helper that is not there), which is different from both being denied.
 public struct ComputerUseHelperStatus: Codable, Equatable, Sendable {
@@ -64,12 +80,16 @@ public struct ComputerUseHelperStatus: Codable, Equatable, Sendable {
     public let running: Bool
     public let version: String?
     public let permissions: ComputerUsePermissions?
+    /// Present when the running helper is incompatible (an older daemon never sends it).
+    public let protocolMismatch: ComputerUseHelperProtocolMismatch?
 
-    public init(installed: Bool, running: Bool, version: String? = nil, permissions: ComputerUsePermissions? = nil) {
+    public init(installed: Bool, running: Bool, version: String? = nil, permissions: ComputerUsePermissions? = nil,
+                protocolMismatch: ComputerUseHelperProtocolMismatch? = nil) {
         self.installed = installed
         self.running = running
         self.version = version
         self.permissions = permissions
+        self.protocolMismatch = protocolMismatch
     }
 }
 

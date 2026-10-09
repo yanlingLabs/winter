@@ -7,6 +7,9 @@
 //   2. `hello {protocol: 1, client: "daemon", home}` → `{protocol, helperVersion, pid}`;
 //   3. VERIFY the helper: `pid`'s running code against the helper's designated requirement
 //      (`helper-verify.ts`). A mismatch closes the connection and fails `helper_unavailable`.
+//      A helper speaking another protocol (its `protocol_mismatch` refusal, or another number in its `hello`
+//      result) is the typed `HelperProtocolMismatchError` — "too old/too new for this Winter — update Winter",
+//      never retried — and `status()` reports it (apple/ComputerUse/PROTOCOL.md, "Compatibility").
 //
 // Every failure to reach it is the typed `HelperUnavailableError` (retryable): the next call tries again, and
 // a relaunched helper starts with no targets — the service turns that into `TargetLost` on the next use.
@@ -27,8 +30,9 @@ import { join } from "node:path";
 import type { WinterProfile } from "../profile";
 import { processSatisfiesRequirement } from "./helper-verify";
 import {
-  HELPER_MAX_RESPONSE_LINE, HELPER_PROTOCOL, HelperRpcError, HelperUnavailableError, helperAppPathFor, helperBundleIdFor, helperRequirementFor,
-  helperSocketPath, type HelloResult, type HelperNotification, type HelperPermissions, type StatusResult,
+  HELPER_MAX_RESPONSE_LINE, HELPER_PROTOCOL, HelperProtocolMismatchError, HelperRpcError, HelperUnavailableError, helperAppPathFor,
+  helperBundleIdFor, helperRequirementFor, helperSocketPath, type HelloResult, type HelperNotification, type HelperPermissions,
+  type HelperProtocolMismatch, type StatusResult,
 } from "./protocol";
 
 export interface HelperConnection {
@@ -119,7 +123,11 @@ export const launchServicesLauncher: HelperLauncher = {
 
 interface Pending { resolve(v: unknown): void; reject(e: unknown): void; timer: ReturnType<typeof setTimeout> }
 
-export interface HelperStatus { installed: boolean; running: boolean; version?: string; permissions?: HelperPermissions }
+export interface HelperStatus {
+  installed: boolean; running: boolean; version?: string; permissions?: HelperPermissions;
+  /** The running helper speaks another protocol: nothing works until Winter is updated. */
+  protocolMismatch?: HelperProtocolMismatch;
+}
 
 export class HelperClient {
   private conn: HelperConnection | undefined;
@@ -127,6 +135,8 @@ export class HelperClient {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private helperVersion: string | undefined;
+  /** The last handshake's protocol mismatch, until a handshake succeeds. */
+  private lastMismatch: HelperProtocolMismatch | undefined;
   private permissionsCache: HelperPermissions | undefined;
   private closedByUs = false;
   private connectionGeneration = 0;
@@ -213,12 +223,17 @@ export class HelperClient {
       hello = await this.send(conn, "hello", { protocol: HELPER_PROTOCOL, client: "daemon", home: this.deps.home }, 5_000) as HelloResult;
     } catch (err) {
       this.drop(conn);
+      if (err instanceof HelperRpcError && err.code === "protocol_mismatch") {
+        // The helper refused OUR number; `data.expected` is its own (absent: a hello it could not read at all).
+        const expected = typeof err.data.expected === "number" ? err.data.expected : undefined;
+        throw this.mismatch(expected, typeof err.data.helperVersion === "string" ? err.data.helperVersion : undefined);
+      }
       if (err instanceof HelperRpcError) throw new HelperUnavailableError(`Winter Computer Use refused the connection (${err.code})`, false);
       throw err instanceof HelperUnavailableError ? err : new HelperUnavailableError("Winter Computer Use did not answer its handshake");
     }
     if (hello?.protocol !== HELPER_PROTOCOL) {
       this.drop(conn);
-      throw new HelperUnavailableError(`Winter Computer Use speaks protocol ${String(hello?.protocol)}, this daemon ${HELPER_PROTOCOL} — update Winter`, false);
+      throw this.mismatch(typeof hello?.protocol === "number" ? hello.protocol : undefined, hello?.helperVersion);
     }
     if (!this.verifier(hello.pid, helperRequirementFor(this.deps.profile))) {
       this.drop(conn);
@@ -226,11 +241,22 @@ export class HelperClient {
       throw new HelperUnavailableError("the process answering on the computer-use socket is not a verified Winter Computer Use", false);
     }
     this.helperVersion = hello.helperVersion;
+    this.lastMismatch = undefined;
     this.conn = conn;
     this.connectionGeneration++;
     this.closedByUs = false;
     this.log(`computer-use: connected to Winter Computer Use ${hello.helperVersion} (pid ${hello.pid})`);
     return conn;
+  }
+
+  /** A typed mismatch, remembered for `status()` and logged once per distinct mismatch. */
+  private mismatch(helperProtocol: number | undefined, helperVersion: string | undefined): HelperProtocolMismatchError {
+    const err = new HelperProtocolMismatchError(helperProtocol, helperVersion);
+    if (this.lastMismatch?.message !== err.mismatch.message || this.lastMismatch?.helperVersion !== err.mismatch.helperVersion) {
+      this.log(`computer-use: ${err.message}${helperVersion === undefined ? "" : ` (Winter Computer Use ${helperVersion})`}`);
+    }
+    this.lastMismatch = err.mismatch;
+    return err;
   }
 
   private drop(conn: HelperConnection): void {
@@ -340,7 +366,11 @@ export class HelperClient {
     try { installed = this.launcher.installed(this.appPath); } catch { installed = false; }
     // Not connected: connect only if it is already running (no launch), inside the single-flight connect.
     if (this.conn === undefined) await this.connectIfRunning();
-    if (this.conn === undefined) return { installed, running: false };
+    if (this.conn === undefined) {
+      // It answered, in another protocol: running, and unusable until Winter is updated.
+      if (this.lastMismatch !== undefined) return { installed, running: true, protocolMismatch: this.lastMismatch };
+      return { installed, running: false };
+    }
     try {
       const st = await this.request<StatusResult>("status", {}, { timeoutMs: 5_000 });
       this.permissionsCache = st.permissions;

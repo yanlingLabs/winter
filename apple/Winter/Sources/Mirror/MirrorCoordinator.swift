@@ -521,7 +521,7 @@ final class MirrorCoordinator: ObservableObject {
                 return true
             } catch let error as HelperClientError where error.isTerminal {
                 isBlocked = true
-                log("computer-use helper refused this app (\(error)); the mirror stays off")
+                log("computer-use helper: \(error) — the mirror stays off")
                 return false
             } catch {
                 if !failureLogged { failureLogged = true; log("computer-use helper not reachable; retrying quietly") }

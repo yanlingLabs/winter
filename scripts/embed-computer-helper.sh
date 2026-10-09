@@ -11,13 +11,15 @@
 # What this does, Release only (a Debug Winter.app embeds no helper; dev uses `bun run dev:helper`):
 #   1. ditto the built helper from BUILT_PRODUCTS_DIR into Contents/Helpers.
 #   2. Re-sign it with the app's identity, the hardened runtime, a secure timestamp, EXACTLY ONE entitlement
-#      (com.apple.security.automation.apple-events, from apple/WinterComputerUse/Support — applescript() sends
+#      (com.apple.security.automation.apple-events, from apple/ComputerUse/WinterComputerUse/Support — applescript() sends
 #      Apple Events, which the hardened runtime refuses without it), the
 #      stable identifier com.winter.computeruse and a STATED designated requirement (identifier + Winter's
 #      team under Apple's anchor). The requirement is what TCC keys the user's grants on, so it must not
 #      change between releases: the one Xcode derives names the signing certificate's common name. It is
 #      stated here rather than through OTHER_CODE_SIGN_FLAGS because release.ts overrides that setting on
 #      its xcodebuild command line for every target.
+#   0. Refuse a helper whose CFBundleShortVersionString is not its own version, apple/ComputerUse/VERSION
+#      (independent of Winter's; stamped by version:sync — see scripts/computer-helper-lib.ts).
 #   3. Check the signature took: the recorded requirement is exactly the stated one, the identifier is
 #      right, the hardened runtime flag is set, and the entitlements are exactly that one.
 #
@@ -38,7 +40,9 @@ IDENTIFIER="com.winter.computeruse"
 TEAM="${DEVELOPMENT_TEAM:-37N77U9RSZ}"
 REQUIREMENT="identifier \"${IDENTIFIER}\" and anchor apple generic and certificate leaf[subject.OU] = \"${TEAM}\""
 ENTITLEMENT="com.apple.security.automation.apple-events"
-ENTITLEMENTS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/apple/WinterComputerUse/Support/WinterComputerUse.entitlements"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENTITLEMENTS_FILE="${REPO}/apple/ComputerUse/WinterComputerUse/Support/WinterComputerUse.entitlements"
+HELPER_VERSION="$(tr -d '[:space:]' < "${REPO}/apple/ComputerUse/VERSION")"
 SRC="${BUILT_PRODUCTS_DIR}/${NAME}.app"
 DEST_DIR="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Helpers"
 DEST="${DEST_DIR}/${NAME}.app"
@@ -50,6 +54,11 @@ fi
 BUILT_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${SRC}/Contents/Info.plist" 2>/dev/null || true)"
 if [ "${BUILT_ID}" != "${IDENTIFIER}" ]; then
   echo "error: the built helper's bundle id is '${BUILT_ID}', not ${IDENTIFIER} — a Release Winter.app embeds only the dist helper" >&2
+  exit 1
+fi
+BUILT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${SRC}/Contents/Info.plist" 2>/dev/null || true)"
+if [ "${BUILT_VERSION}" != "${HELPER_VERSION}" ]; then
+  echo "error: the built helper is version '${BUILT_VERSION}', but apple/ComputerUse/VERSION says ${HELPER_VERSION} — run \`bun run version:sync\` (it stamps the helper's own version into project.yml and its Info.plist) and rebuild" >&2
   exit 1
 fi
 

@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { processSatisfiesRequirement } from "../../src/computer-use/helper-verify";
-import { HelperRpcError, HelperUnavailableError, helperAppNameFor, helperAppPathFor, helperBundleIdFor, helperRequirementFor, helperSocketPath } from "../../src/computer-use/protocol";
+import { HELPER_PROTOCOL, HelperProtocolMismatchError, HelperRpcError, HelperUnavailableError, helperAppNameFor, helperAppPathFor, helperBundleIdFor, helperProtocolMismatchMessage, helperRequirementFor, helperSocketPath } from "../../src/computer-use/protocol";
 import type { HelperNotification } from "../../src/computer-use/protocol";
 import { FakeHelper, FakeHelperError } from "./fake-helper";
 
@@ -99,6 +99,59 @@ describe("the helper client", () => {
     const refusing = new FakeHelper();
     refusing.handlers.hello = () => { throw new FakeHelperError("home_mismatch", "wrong home"); };
     await expect(client(refusing).c.ensure()).rejects.toThrow("home_mismatch");
+  });
+
+  describe("protocol compatibility at hello (apple/ComputerUse/PROTOCOL.md)", () => {
+    test("a helper that refuses our number with an OLDER one of its own: too old — update Winter, typed, never retried", async () => {
+      const fake = new FakeHelper();
+      fake.handlers.hello = () => { throw new FakeHelperError("protocol_mismatch", "this helper speaks protocol 0, not 1", { expected: 0, helperVersion: "0.9.0" }); };
+      const { c } = client(fake);
+      const err = (await c.ensure().catch((e: unknown) => e)) as HelperProtocolMismatchError;
+      expect(err).toBeInstanceOf(HelperProtocolMismatchError);
+      expect(err).toBeInstanceOf(HelperUnavailableError); // every existing surface still reports it
+      expect(err.code).toBe("helper_unavailable");
+      expect(err.reason).toBe("protocol_mismatch");
+      expect(err.retryable).toBe(false);
+      expect(err.message).toBe("Winter Computer Use is too old for this Winter (it speaks helper protocol 0, Winter speaks 1) — update Winter");
+      expect(err.mismatch).toEqual({ helperProtocol: 0, helperVersion: "0.9.0", winterProtocol: 1, message: err.message });
+      expect(c.connected).toBe(false);
+    });
+
+    test("a helper that is NEWER: too new — update Winter", async () => {
+      const fake = new FakeHelper();
+      fake.handlers.hello = () => { throw new FakeHelperError("protocol_mismatch", "this helper speaks protocol 2, not 1", { expected: 2, helperVersion: "2.0.0" }); };
+      const err = (await client(fake).c.ensure().catch((e: unknown) => e)) as HelperProtocolMismatchError;
+      expect(err.message).toBe("Winter Computer Use is too new for this Winter (it speaks helper protocol 2, Winter speaks 1) — update Winter");
+    });
+
+    test("a hello RESULT in another protocol is the same typed mismatch; one that names none says so", async () => {
+      const fake = new FakeHelper();
+      fake.helloProtocol = 2;
+      const err = (await client(fake).c.ensure().catch((e: unknown) => e)) as HelperProtocolMismatchError;
+      expect(err).toBeInstanceOf(HelperProtocolMismatchError);
+      expect(err.mismatch.helperProtocol).toBe(2);
+      expect(err.mismatch.helperVersion).toBe("1.0-test");
+      expect(helperProtocolMismatchMessage(undefined)).toBe("Winter Computer Use speaks a different helper protocol than this Winter (1) — update Winter");
+      const unreadable = new FakeHelper();
+      unreadable.handlers.hello = () => { throw new FakeHelperError("protocol_mismatch", "the first request must be hello"); };
+      const e2 = (await client(unreadable).c.ensure().catch((e: unknown) => e)) as HelperProtocolMismatchError;
+      expect(e2.message).toBe(helperProtocolMismatchMessage(undefined));
+    });
+
+    test("status() reports a running helper it cannot use, until a handshake succeeds", async () => {
+      const fake = new FakeHelper();
+      fake.helloProtocol = 2;
+      const { c } = client(fake);
+      await c.ensure().catch(() => undefined);
+      const st = await c.status();
+      expect(st.running).toBe(true);
+      expect(st.protocolMismatch?.message).toContain("too new for this Winter");
+      expect(st.protocolMismatch?.winterProtocol).toBe(HELPER_PROTOCOL);
+      fake.helloProtocol = HELPER_PROTOCOL; // Winter was updated (or the helper)
+      const ok = await c.status();
+      expect(ok.protocolMismatch).toBeUndefined();
+      expect(ok.running).toBe(true);
+    });
   });
 
   test("a helper error arrives as HelperRpcError with its data.code and data", async () => {

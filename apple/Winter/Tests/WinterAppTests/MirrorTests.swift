@@ -599,7 +599,7 @@ final class MirrorTests: XCTestCase {
 
     func testAMismatchIsNotRetried() async {
         let r = rig()
-        r.client.scriptConnect([.protocolMismatch])
+        r.client.scriptConnect([.protocolMismatch(helper: 2, client: 1)])
         r.coordinator.setWindow(window(.shell, session: "s1", id: "shell"))
         await expect({ r.coordinator.isBlocked })
         try? await Task.sleep(nanoseconds: 100_000_000)

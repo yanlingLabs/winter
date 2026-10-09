@@ -228,7 +228,7 @@ describe("ComputerV2: release.ts signs, verifies and scans the Winter Computer U
     expect(line).toContain('"-r=designated => ${REQUIREMENT}"');
     expect(line).toContain('--entitlements "${ENTITLEMENTS_FILE}"');
     expect(embedScript).toContain('ENTITLEMENT="com.apple.security.automation.apple-events"');
-    expect(projectYml).toContain("CODE_SIGN_ENTITLEMENTS: ../WinterComputerUse/Support/WinterComputerUse.entitlements");
+    expect(projectYml).toContain("CODE_SIGN_ENTITLEMENTS: ../ComputerUse/WinterComputerUse/Support/WinterComputerUse.entitlements");
     expect(projectYml).toContain("NSAppleEventsUsageDescription:");
     expect(embedScript).toContain('REQUIREMENT="identifier \\"${IDENTIFIER}\\" and anchor apple generic and certificate leaf[subject.OU] = \\"${TEAM}\\""');
   });
@@ -237,7 +237,9 @@ describe("ComputerV2: release.ts signs, verifies and scans the Winter Computer U
     expect(source).toMatch(/import \{[^}]*checkSignedHelper[^}]*\} from "\.\/computer-helper-lib"/);
     expect(source).toContain("const computerHelperApp = join(app, HELPER_EMBED_RELATIVE);");
     expect(source).toContain('assertSigned(computerHelperApp, "Winter Computer Use");');
-    expect(source).toContain('checkSignedHelper("dist", TEAM_ID, version, {');
+    // At the helper's OWN version (apple/ComputerUse/VERSION), not this release's.
+    expect(source).toContain("const helperVersion = readHelperVersion();");
+    expect(source).toContain('checkSignedHelper("dist", TEAM_ID, helperVersion, {');
     expect(source).toMatch(/codesign --verify --strict -R='\$\{stated\}' "\$\{computerHelperApp\}"/);
   });
 

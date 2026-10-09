@@ -357,10 +357,12 @@ public final class HelperServer: @unchecked Sendable {
             connection.send(RPCOutbound.error(id: id, RPCError.from(error)))
             return false
         }
+        // The client compares `expected` with its own number to say which side is out of date
+        // (apple/ComputerUse/PROTOCOL.md, "Compatibility").
         guard p.protocol == RPCWire.protocolVersion else {
             connection.send(RPCOutbound.error(id: id, RPCError(code: "protocol_mismatch",
-                message: "this helper speaks protocol \(RPCWire.protocolVersion), not \(p.protocol)",
-                data: ["expected": .number(Double(RPCWire.protocolVersion))])))
+                message: "this helper (Winter Computer Use \(config.helperVersion)) speaks protocol \(RPCWire.protocolVersion), not \(p.protocol)",
+                data: ["expected": .number(Double(RPCWire.protocolVersion)), "helperVersion": .string(config.helperVersion)])))
             return false
         }
         guard let client = PeerClientKind(rawValue: p.client) else {

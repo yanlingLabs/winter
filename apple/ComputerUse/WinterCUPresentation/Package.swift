@@ -2,7 +2,7 @@
 import PackageDescription
 
 // The visible layer of the Winter Computer Use helper: the live window mirror, the agent cursor
-// overlay and the Esc stop tap. The helper app (apple/WinterComputerUse) links the library and
+// overlay and the Esc stop tap. The helper app (apple/ComputerUse/WinterComputerUse) links the library and
 // drives it from core events; nothing here talks to the daemon.
 let package = Package(
     name: "WinterCUPresentation",

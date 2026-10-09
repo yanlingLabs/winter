@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { WINTER_TEAM_ID } from "../auth/app-token-acl";
 import type { WinterProfile } from "../profile";
 
+/** The helper protocol this daemon speaks — `apple/ComputerUse/PROTOCOL.md`'s "Protocol version", the helper's
+ *  `RPCWire.protocolVersion` and WinterKit's `ComputerUseHelperProtocol.version` (a repo test keeps them equal). */
 export const HELPER_PROTOCOL = 1;
 
 /** The helper's bundle id per profile: dist `com.winter.computeruse`, dev `com.winter.computeruse.dev`. */
@@ -76,6 +78,41 @@ export class HelperUnavailableError extends Error {
   constructor(message: string, readonly retryable = true) {
     super(message);
     this.name = "HelperUnavailableError";
+  }
+}
+
+/** What a protocol mismatch at `hello` knew: the helper's protocol (from its `hello` result, or the
+ *  `protocol_mismatch` error's `data.expected`), its version, and ours. */
+export interface HelperProtocolMismatch {
+  helperProtocol?: number;
+  helperVersion?: string;
+  winterProtocol: number;
+  message: string;
+}
+
+/** The ONE sentence for a protocol mismatch, which side is out of date first; the fix is always the same. */
+export function helperProtocolMismatchMessage(helperProtocol: number | undefined, winterProtocol: number = HELPER_PROTOCOL): string {
+  if (helperProtocol === undefined) {
+    return `Winter Computer Use speaks a different helper protocol than this Winter (${winterProtocol}) — update Winter`;
+  }
+  const side = helperProtocol < winterProtocol ? "too old" : "too new";
+  return `Winter Computer Use is ${side} for this Winter (it speaks helper protocol ${helperProtocol}, Winter speaks ${winterProtocol}) — update Winter`;
+}
+
+/** The helper answered, but speaks another protocol: a `helper_unavailable` that no retry can cure. Typed by
+ *  `reason` (and the class) so callers and Settings → Computer Use can say exactly that. */
+export class HelperProtocolMismatchError extends HelperUnavailableError {
+  readonly reason = "protocol_mismatch" as const;
+  readonly mismatch: HelperProtocolMismatch;
+  constructor(helperProtocol: number | undefined, helperVersion?: string, winterProtocol: number = HELPER_PROTOCOL) {
+    const message = helperProtocolMismatchMessage(helperProtocol, winterProtocol);
+    super(message, false);
+    this.name = "HelperProtocolMismatchError";
+    this.mismatch = {
+      ...(helperProtocol === undefined ? {} : { helperProtocol }),
+      ...(helperVersion === undefined ? {} : { helperVersion }),
+      winterProtocol, message,
+    };
   }
 }
 

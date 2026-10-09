@@ -435,6 +435,14 @@ export const ComputerUseStatusResult = z.object({
     running: z.boolean(),
     version: z.string().optional(),
     permissions: ComputerUsePermissionsSchema.optional(),
+    /** The running helper speaks another helper protocol (apple/ComputerUse/PROTOCOL.md): nothing works until
+     *  Winter is updated. `message` is the sentence to show ("… is too old for this Winter … — update Winter"). */
+    protocolMismatch: z.object({
+      helperProtocol: z.number().int().optional(),
+      helperVersion: z.string().optional(),
+      winterProtocol: z.number().int(),
+      message: z.string(),
+    }).optional(),
   }),
 });
 /** Launches the helper if needed and asks IT to raise the system prompt (or open the Privacy pane). Refuses

@@ -30,9 +30,11 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WINTER_TEAM_ID } from "../packages/core/src/auth/app-token-acl";
-import { checkSignedHelper, HELPER, helperBuildArgs, helperExecutable, helperRequirement, helperSignArgs, builtHelperPath, LSREGISTER, pidsRunning, type HelperFlavor } from "./computer-helper-lib";
+import {
+  checkSignedHelper, HELPER, helperBuildArgs, helperExecutable, helperRequirement, helperSignArgs, builtHelperPath, LSREGISTER, pidsRunning,
+  readHelperVersion, syncHelperVersion, type HelperFlavor,
+} from "./computer-helper-lib";
 import { resolveDevSigningIdentity } from "./dev-daemon-lib";
-import { readCanonical } from "./version-lib";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const APPLE_DIR = join(REPO_ROOT, "apple", "Winter");
@@ -69,6 +71,8 @@ export function signingIdentity(): { hash: string; name: string } {
  * xcodebuild log goes to `out/computer-helper/<flavor>-build.log` (its tail is printed on failure).
  */
 export function buildHelper(flavor: "dev" | "test", log: (line: string) => void): string {
+  // The helper's own version (apple/ComputerUse/VERSION) into project.yml and its Info.plist first.
+  for (const file of syncHelperVersion()) log(`stamped Winter Computer Use ${readHelperVersion()} into ${file}`);
   const generated = run("xcodegen", ["generate"], { cwd: APPLE_DIR });
   if (generated.status !== 0) throw new Error(`xcodegen generate failed: ${generated.stderr.trim() || generated.stdout.trim()}`);
   mkdirSync(OUT_DIR, { recursive: true });
@@ -99,7 +103,7 @@ export function inspectHelper(appPath: string, flavor: HelperFlavor): string[] {
   if (!existsSync(exe)) return [`no executable at ${exe}`];
   const dr = run("codesign", ["-d", "-r-", appPath]);
   const plist = run("plutil", ["-convert", "json", "-o", "-", join(appPath, "Contents", "Info.plist")]);
-  const failures = checkSignedHelper(flavor, WINTER_TEAM_ID, readCanonical(), {
+  const failures = checkSignedHelper(flavor, WINTER_TEAM_ID, readHelperVersion(), {
     codesignDvv: run("codesign", ["-dvv", appPath]).stderr,
     codesignDr: `${dr.stdout}\n${dr.stderr}`,
     entitlementsXml: run("codesign", ["-d", "--entitlements", "-", "--xml", appPath]).stdout,
