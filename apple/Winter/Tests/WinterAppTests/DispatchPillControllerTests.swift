@@ -1089,6 +1089,26 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertNil(pill.gateTimerIntervalForTesting, "no clock while the pill is away")
     }
 
+    /// A pill that is put away is not idle if its SwiftUI tree is still in the hidden panel: SwiftUI keeps running its
+    /// `TimelineView`s there (a put-away pill with a turn working redrew its plume for as long as the app lived). The
+    /// tree exists between `show()` and `hide()` only.
+    func testAPutAwayPillHoldsNoSwiftUITreeAndIsRebuiltWhenShownAgain() async throws {
+        let pill = makePill()
+        XCTAssertFalse(pill.hasContentForTesting, "never shown: no tree")
+        pill.show()
+        XCTAssertTrue(pill.hasContentForTesting)
+        weak var first = pill.hostingViewForTesting
+        XCTAssertNotNil(first)
+        pill.hide()
+        XCTAssertFalse(pill.hasContentForTesting, "put away: the tree is dropped")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNil(first, "and nothing keeps its hosting view alive")
+        pill.show()
+        XCTAssertTrue(pill.hasContentForTesting, "summoned again: rebuilt")
+        XCTAssertTrue(pill.panelContentViewForTesting?.acceptsFirstMouse(for: nil) ?? false)
+        pill.hide()
+    }
+
     /// The user's report: with a session window holding the keyboard, the first click on a child pill
     /// only made the (non-key) pill panel key and the tap was lost — a second click was needed. The
     /// pill's content acts on the first click.
