@@ -122,6 +122,16 @@ final class FakeAX: CUAXBackend {
     }
 }
 
+/// A focus enforcer that records its calls instead of posting events.
+final class FakeFocusEnforcer: CUFocusEnforcing, @unchecked Sendable {
+    private(set) var enforced: [UInt32] = []
+    private(set) var tornDown = 0
+    /// What `enforce` reports (whether it did anything).
+    var result = true
+    func enforce(windowID: UInt32) -> Bool { enforced.append(windowID); return result }
+    func teardown() { tornDown += 1 }
+}
+
 /// The process and window-server world for the same tests.
 final class FakeSystem: CUSystemBackend {
     var running: Set<pid_t> = []

@@ -327,6 +327,25 @@ public final class CUCore: @unchecked Sendable {
     var userViewSettleMs: Double = 60
     var stepSettleMs: Double = 20
     var userViewLateCheck = true
+    /// The per-target focus enforcer (makes a background app believe it is active, so it does not activate
+    /// itself when typed into); one per target, reused across actions. Replaceable by tests.
+    private let focusEnforcersLock = NSLock()
+    private var focusEnforcers: [String: CUFocusEnforcing] = [:]
+    var focusEnforcerFactory: (pid_t) -> CUFocusEnforcing = { pid in
+        CULiveFocusEnforcer(pid: pid, skyLight: .system)
+    }
+
+    /// The enforcer for a target, lazily made and reused — only with the private path on (it uses private
+    /// APIs, like the rest). nil otherwise (the user-view guard stays the backstop either way).
+    func focusEnforcer(for t: CUTarget, privatePath: Bool) -> CUFocusEnforcing? {
+        guard privatePath else { return nil }
+        focusEnforcersLock.lock(); defer { focusEnforcersLock.unlock() }
+        if let e = focusEnforcers[t.id] { return e }
+        let e = focusEnforcerFactory(t.pid)
+        focusEnforcers[t.id] = e
+        return e
+    }
+
     /// AppleScript, replaceable by tests (nothing there may run a script or ask macOS about Automation).
     var appleScriptOverride: ((String, CUTarget) throws -> String?)?
     var automationPermissionOverride: ((pid_t) -> OSStatus)?
@@ -856,6 +875,9 @@ public final class CUCore: @unchecked Sendable {
         windowElementsLock.lock()
         windowElements[id] = nil
         windowElementsLock.unlock()
+        focusEnforcersLock.lock()
+        focusEnforcers.removeValue(forKey: id)?.teardown()
+        focusEnforcersLock.unlock()
         if let t { unwatchIfUnused(t.pid) }
         return t
     }

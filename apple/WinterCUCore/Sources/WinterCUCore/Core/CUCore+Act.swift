@@ -532,6 +532,7 @@ extension CUCore {
 
     private func setValue(_ a: CUSetValueAction, _ p: TargetActParams, _ t: CUTarget,
                           _ token: CUCancellation.Token) throws -> ActOutcome {
+        enforceFocus(p, t)
         let e = try element(a.ref, in: t)
         let info = ElementInfo(e, ax)
         if info.secure { throw secureRefusal() }
@@ -562,12 +563,14 @@ extension CUCore {
     }
 
     private func type(_ a: CUTypeAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+        enforceFocus(p, t)  // believe-active before any focus write, so the app does not activate itself
         let (e, g) = try textTarget(into: a.into, t, text: a.text)
         cursor(t, "type", at: e.flatMap { ElementInfo($0, ax).center })
         return try typeText(a.text, into: e, p, t, token, g)
     }
 
     private func paste(_ a: CUPasteAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+        enforceFocus(p, t)
         let (e, g) = try textTarget(into: a.into, t, text: a.text)
         cursor(t, "type", at: e.flatMap { ElementInfo($0, ax).center })
         return try pasteText(a.text, format: a.format ?? .text, p, t, token, g)
@@ -658,6 +661,12 @@ extension CUCore {
         return typed
     }
 
+    /// A value that shows text: not nil-like zero-width filler (Google Docs' body reads as "\u{200B}\u{200B}"
+    /// whatever it holds). An empty value shows text — a paste into it changes it.
+    static func showsText(_ value: String) -> Bool {
+        value.isEmpty || value.unicodeScalars.contains { !["\u{200B}", "\u{200C}", "\u{200D}", "\u{FEFF}", "\u{2060}"].contains($0) }
+    }
+
     /// Up to this many characters are typed as keys (one real key per character); longer or multi-line text is
     /// pasted. A paste needs evidence that can be missing (Google Docs' title took no cmd+V from the
     /// background), and keys are what a person types.
@@ -690,6 +699,16 @@ extension CUCore {
             cur = ax.element(c, kAXParentAttribute)
         }
         return false
+    }
+
+    /// Makes the target believe it is active before keys go to it, so it does not activate itself and pull the
+    /// user to its Space (the user-view guard around the act is the backstop). Logs that the enforcer acted;
+    /// if the app still activates, the guard's note says it had to be undone.
+    func enforceFocus(_ p: TargetActParams, _ t: CUTarget) {
+        guard let enforcer = focusEnforcer(for: t, privatePath: p.privatePath) else { return }
+        if enforcer.enforce(windowID: t.windowID) {
+            CULog.act.notice("focus in \(t.appName, privacy: .public): set the app's active state so it need not activate itself")
+        }
     }
 
     /// Where key events go: the focused element's OWN process when it isn't the app's — Safari's web content
@@ -738,11 +757,15 @@ extension CUCore {
                            _ token: CUCancellation.Token, _ g: TypingFocus) throws -> ActOutcome {
         try token.check()
         let focus = try requireTypableFocus(t, g)
-        let before = focus.flatMap { ax.string($0, kAXValueAttribute) }
+        let before = focus.flatMap { ax.string($0, kAXValueAttribute) }.flatMap { Self.showsText($0) ? $0 : nil }
         let selectionBefore = focus.flatMap { Self.selectionText(ax, $0) }
         // Confirmable only where the focused element shows its value or selection. A web or canvas editor
-        // (Google Docs) shows neither: waiting 1.5 s for evidence that never comes was pure delay.
+        // (Google Docs) shows neither — its body reads as zero-width characters whatever it holds: waiting
+        // for evidence that never comes was pure delay.
         let confirmable = before != nil || selectionBefore != nil
+        // Web content takes a paste late, if at all (Docs' title took none from the background): a short look
+        // at the value, then the answer — unconfirmed, the clipboard restored once the page has had time.
+        let web = isWebContent(focus) || (focus.map { keyboardTarget(t, focused: $0) != t.pid } ?? false)
         var sent: ActOutcome?
         var since = clock.nowMs()
         let pb = pasteboard()
@@ -755,13 +778,15 @@ extension CUCore {
             // Restore only once the paste visibly happened (or 1.5 s passed): an app that reads the
             // clipboard late must not get the user's own contents instead.
             waitForEvidence: {
-                self.waitForEdit(t, focus, before: before, selectionBefore: selectionBefore, since: since, capMs: 1500)
+                self.waitForEdit(t, focus, before: before, selectionBefore: selectionBefore, since: since, capMs: web ? 400 : 1500)
             })
         // An earlier unconfirmed paste's restore still pending: its saved clipboard is the user's (what is on the
         // clipboard now is Winter's text), unless the user copied something since.
         if let pending = takePendingRestore(), pb.changeCount == pending.ours { seq.pendingSaved = pending.saved }
         if !confirmable {
             seq.deferRestore = { [self] saved, ours in scheduleRestore(pb, saved: saved, ours: ours) }
+        } else if web {
+            seq.deferIfUnconfirmed = { [self] saved, ours in scheduleRestore(pb, saved: saved, ours: ours) }
         }
         let result = try seq.run(items: CUPasteSequence.items(text: text, format: format),
                                  plain: CUPasteSequence.plain(text: text, format: format))
@@ -771,6 +796,9 @@ extension CUCore {
             o.detail = [o.detail, "the clipboard changed meanwhile, so it was not restored"].compactMap { $0 }.joined(separator: "; ")
         case .restored(let evidence) where !evidence:
             o.detail = [o.detail, "the paste was not confirmed within 1.5 s"].compactMap { $0 }.joined(separator: "; ")
+        case .unconfirmed:
+            o.detail = [o.detail, "the paste was sent but is not in the field yet — unconfirmed; check the state; the clipboard is restored once \(t.appName) has had time to read it"]
+                .compactMap { $0 }.joined(separator: "; ")
         case .deferred:
             o.detail = [o.detail, "the paste was sent; \(t.appName) doesn't show its text to accessibility here, so it can't be confirmed — check the state; the clipboard is restored once \(t.appName) has had time to read it"]
                 .compactMap { $0 }.joined(separator: "; ")
@@ -782,6 +810,7 @@ extension CUCore {
     // MARK: keys
 
     private func key(_ a: CUKeyAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+        enforceFocus(p, t)
         let chord = try CUKeyChord.parse(a.combo)
         let rep = a.repeat ?? 1
         guard (1...100).contains(rep) else { throw CUError.invalidParams("repeat must be 1–100") }
@@ -831,12 +860,17 @@ extension CUCore {
     }
 
     func chordPlan(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget, _ g: TypingFocus = TypingFocus()) throws -> ChordPlan {
-        if chord.modifiers.contains(.command), case .character(let ch) = chord.key,
-           let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
-            if ch == "v" || CUPasteMenu.isPasteTitle(item.title) {
-                try requirePasteSafe(p, t, g)
+        if chord.modifiers.contains(.command), case .character(let ch) = chord.key {
+            // A paste however it is sent: never into a password field, never under click only.
+            if Character(String(ch).lowercased()) == "v" { try requirePasteSafe(p, t, g) }
+            // An editing shortcut with the focus in an editable element or a content process goes to that
+            // element as KEYS: the app's menu item acts on the app's responder, not the web field (Safari's
+            // Select All selected nothing in Google Docs' title, so typing appended).
+            let editing = Self.isEditingShortcut(chord) && editableFocus(t, g.explicit ?? reportedFocus(t))
+            if !editing, let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
+                if CUPasteMenu.isPasteTitle(item.title) { try requirePasteSafe(p, t, g) }
+                return .menuItem(item.element, title: item.title)
             }
-            return .menuItem(item.element, title: item.title)
         }
         let code: CGKeyCode
         switch chord.key {
@@ -847,6 +881,25 @@ extension CUCore {
         }
         return .events(code: code, flags: chord.modifiers.cgFlags,
                        decision: try CUInputLadder.decideEvents(context(p, t, pointer: false)))
+    }
+
+    /// Select all, copy, cut, paste, undo and redo: the shortcuts that act on the focused text.
+    static func isEditingShortcut(_ chord: CUKeyChord) -> Bool {
+        guard case .character(let raw) = chord.key, chord.modifiers.contains(.command),
+              !chord.modifiers.contains(.control), !chord.modifiers.contains(.option) else { return false }
+        let ch = Character(String(raw).lowercased())
+        if chord.modifiers.contains(.shift) { return ch == "z" }
+        return ["a", "c", "x", "v", "z"].contains(ch)
+    }
+
+    /// The focus takes text itself — a text field or area, editable web content — or lives in a content
+    /// process (Safari's WebContent): editing shortcuts go to it as keys.
+    func editableFocus(_ t: CUTarget, _ e: AXUIElement?) -> Bool {
+        guard let e else { return false }
+        if keyboardTarget(t, focused: e) != t.pid { return true }
+        let role = ax.string(e, kAXRoleAttribute)
+        if role == kAXTextFieldRole || role == kAXTextAreaRole || role == kAXComboBoxRole || role == "AXSearchField" { return true }
+        return ax.attribute(e, "AXEditableAncestor") != nil
     }
 
     /// `keyPid`: where key events go (`keyboardTarget`), the app's pid when nil.
@@ -873,9 +926,10 @@ extension CUCore {
     /// One chord, start to finish.
     func sendChord(_ chord: CUKeyChord, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token,
                    _ g: TypingFocus = TypingFocus()) throws -> ActOutcome {
+        let focused = g.explicit ?? reportedFocus(t)
         let keyed = focusBoundWindow(p, t)
         defer { keyed?() }
-        return try execute(try chordPlan(chord, p, t, g), p, t, token, keyPid: keyboardTarget(t, focused: reportedFocus(t)))
+        return try execute(try chordPlan(chord, p, t, g), p, t, token, keyPid: keyboardTarget(t, focused: focused))
     }
 
     /// A menu-bar item whose key equivalent is `key` with `modifiers` (command implied). The walk is bounded
@@ -932,6 +986,7 @@ extension CUCore {
     // MARK: scroll and drag
 
     private func scroll(_ a: CUScrollAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+        enforceFocus(p, t)
         let pages = a.pages ?? 1
         guard pages > 0, pages <= 50 else { throw CUError.invalidParams("pages must be between 0 and 50") }
         var point: CGPoint
@@ -1196,6 +1251,7 @@ extension CUCore {
     // MARK: select, action, menu
 
     private func select(_ a: CUSelectAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+        enforceFocus(p, t)
         let e = try element(a.ref, in: t)
         let info = ElementInfo(e, ax)
         if info.secure { throw secureRefusal() }

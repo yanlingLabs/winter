@@ -29,6 +29,10 @@ public struct CUSkyLight: @unchecked Sendable {
     typealias SpaceType = @convention(c) (UInt32, UInt64) -> Int32
     typealias CaptureInRect = @convention(c) (UInt32, UnsafeMutablePointer<UInt32>, Int32, UInt32, CGRect) -> Unmanaged<CFArray>?
     typealias CaptureList = @convention(c) (UInt32, UnsafeMutablePointer<UInt32>, Int32, UInt32) -> Unmanaged<CFArray>?
+    typealias UpdateFn = @convention(c) (UInt32) -> Int32
+    typealias GetKeyFocus = @convention(c) (UnsafeMutableRawPointer) -> Int32
+    typealias ReleaseKeyFocus = @convention(c) (Int32) -> Int32
+    typealias ProcessPID = @convention(c) (UnsafeRawPointer, UnsafeMutablePointer<pid_t>) -> Int32
 
     var postToPidFn: PostToPid?
     var setIntFieldFn: SetIntField?
@@ -47,6 +51,11 @@ public struct CUSkyLight: @unchecked Sendable {
     var spaceTypeFn: SpaceType?
     var captureInRectFn: CaptureInRect?
     var captureListFn: CaptureList?
+    var disableUpdateFn: UpdateFn?
+    var reenableUpdateFn: UpdateFn?
+    var getKeyFocusFn: GetKeyFocus?
+    var releaseKeyFocusFn: ReleaseKeyFocus?
+    var processPIDFn: ProcessPID?
 
     /// `SLEventPostToPid` resolved: rung 3 is possible.
     public var isAvailable: Bool { postToPidFn != nil }
@@ -59,6 +68,8 @@ public struct CUSkyLight: @unchecked Sendable {
 
     /// A window can be captured wherever it is (`SLSHWCaptureWindowListInRect`, or the list call).
     public var canCaptureWindows: Bool { mainConnectionFn != nil && (captureInRectFn != nil || captureListFn != nil) }
+    /// WindowServer updates can be suspended around a focus change (ChatGPT's `SLSDisableUpdate` bracket).
+    public var canSuspendUpdates: Bool { mainConnectionFn != nil && disableUpdateFn != nil && reenableUpdateFn != nil }
 
     /// Resolves every symbol through `lookup` (a `dlsym` stand-in, injectable for tests).
     public static func resolve(lookup: (String) -> UnsafeMutableRawPointer?) -> CUSkyLight {
@@ -87,6 +98,11 @@ public struct CUSkyLight: @unchecked Sendable {
         s.captureInRectFn = fn("SLSHWCaptureWindowListInRect", CaptureInRect.self)
             ?? fn("CGSHWCaptureWindowListInRect", CaptureInRect.self)
         s.captureListFn = fn("SLSHWCaptureWindowList", CaptureList.self) ?? fn("CGSHWCaptureWindowList", CaptureList.self)
+        s.disableUpdateFn = fn("SLSDisableUpdate", UpdateFn.self) ?? fn("CGSDisableUpdate", UpdateFn.self)
+        s.reenableUpdateFn = fn("SLSReenableUpdate", UpdateFn.self) ?? fn("CGSReenableUpdate", UpdateFn.self)
+        s.getKeyFocusFn = fn("CPSGetKeyFocusProcess", GetKeyFocus.self)
+        s.releaseKeyFocusFn = fn("CPSReleaseKeyFocusWithID", ReleaseKeyFocus.self)
+        s.processPIDFn = fn("GetProcessPID", ProcessPID.self)
         return s
     }
 
@@ -310,5 +326,39 @@ public struct CUSkyLight: @unchecked Sendable {
         let pixels = CGRect(x: local.minX * scale, y: local.minY * scale, width: local.width * scale,
                             height: local.height * scale).integral
         return image.cropping(to: pixels)
+    }
+
+    // MARK: focus enforcement (ChatGPT's SLSDisableUpdate bracket)
+
+    /// Suspends WindowServer drawing on the main connection while a focus change is set up, so a synthetic
+    /// activation never shows as a flash or a Space jump. Pair every `disableUpdate()` with `reenableUpdate()`.
+    /// Returns the connection to re-enable on, or nil when the symbols are missing (the caller then skips both).
+    public func disableUpdate() -> UInt32? {
+        guard let mainConnectionFn, let disableUpdateFn else { return nil }
+        let cid = mainConnectionFn()
+        guard cid != 0 else { return nil }
+        _ = disableUpdateFn(cid)
+        return cid
+    }
+
+    public func reenableUpdate(_ cid: UInt32) {
+        _ = reenableUpdateFn?(cid)
+    }
+
+    /// The pid that holds the window server's KEY focus now (`CPSGetKeyFocusProcess` → `GetProcessPID`), or nil.
+    public func keyFocusPid() -> pid_t? {
+        guard let getKeyFocusFn, let processPIDFn else { return nil }
+        var psn = [UInt8](repeating: 0, count: 8)
+        guard psn.withUnsafeMutableBytes({ getKeyFocusFn($0.baseAddress!) }) == 0 else { return nil }
+        var pid: pid_t = 0
+        guard psn.withUnsafeBytes({ processPIDFn($0.baseAddress!, &pid) }) == 0, pid > 0 else { return nil }
+        return pid
+    }
+
+    /// Releases a key-focus theft by its token (a type-21 notification's field 71). False when unavailable.
+    @discardableResult
+    public func releaseKeyFocus(id: Int32) -> Bool {
+        guard let releaseKeyFocusFn else { return false }
+        return releaseKeyFocusFn(id) == 0
     }
 }
