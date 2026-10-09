@@ -181,8 +181,9 @@ enum CUAXWindows {
 ///    AX actions and text work there with no move;
 /// a. move it to this desktop (SkyLight, `privatePath`), then wait for AX to list it;
 /// c. bind it capture-only (`privatePath`): the window server has it but accessibility can't reach it.
-/// Never a new window: no File › New Window, no ⌘N, no reopen — the user hated stray windows. An app with no
-/// window anywhere is `no_window`, which names `apps.open` (a document opens in the background).
+/// Never a new window: no File › New Window, no ⌘N — the user hated stray windows. (The bind wait's one
+/// background reopen, for an app with ZERO windows anywhere, happens before this.) An app still with no window
+/// is `no_window`, which names `apps.open` (a document opens in the background).
 enum CUWindowResolver {
     /// Which step reached the window (logged, and named in the bind's detail).
     enum Step: String {
@@ -290,14 +291,17 @@ enum CUWindowResolver {
 }
 
 /// The window wait at the start of a bind (every effect injected). A just-launched app needs a moment, and AX
-/// can lag a window already on screen, so it polls. It never asks an app for a window: a running app with no
-/// window anywhere (on no Space, minimized or not) ends the wait at once — the bind reports `no_window`, which
-/// names `apps.open`. (A reopen request made Safari open a new window on every bind; the user hated stray
-/// windows.)
+/// can lag a window already on screen, so it polls. The app is asked to reopen — in the background, once per
+/// bind — ONLY when it is running with ZERO real windows on any Space (minimized or not): then the reopen opens
+/// its default window, and with none there it can't make a second one. An app with a window anywhere never
+/// gets one (a reopen sent to Safari with its windows elsewhere opened a new one on every bind — twelve); its
+/// windows go straight to the resolver. Nothing else is ever asked for (no ⌘N, no New Window).
 enum CUBindWait {
     struct Effects {
         /// The AX windows (this desktop) and the window-server windows (every Space) of the app.
         var read: () async throws -> ([CUAXWindow], [CUWindowServerWindow])
+        /// The background reopen (NSWorkspace.openApplication, activates:false).
+        var reopen: () async -> Void
         var sleep: (Double) async throws -> Void
         var now: () -> Double
     }
@@ -305,6 +309,8 @@ enum CUBindWait {
     struct Found {
         var ax: [CUAXWindow]
         var server: [CUWindowServerWindow]
+        /// The app was asked to reopen (it had no window anywhere).
+        var reopened: Bool
     }
 
     /// The app's real windows anywhere (`CUWindowServer.isRealWindow`), on screen or not.
@@ -315,15 +321,19 @@ enum CUBindWait {
     static func run(launched: Bool, deadlineMs: Double, _ fx: Effects) async throws -> Found {
         var (ax, server) = try await fx.read()
         let end = fx.now() + deadlineMs
+        var reopened = false
         while ax.isEmpty, fx.now() < end {
             let real = realWindows(server)
             // Every real window is off screen: another Space, full screen or minimized — nothing to wait for.
             if !real.isEmpty, real.allSatisfy({ !$0.onScreen }) { break }
-            // Already running with no window anywhere: nothing will appear by itself, and none is asked for.
-            if real.isEmpty, !launched { break }
+            // Running with zero windows anywhere: the one reopen, then wait for its default window.
+            if real.isEmpty, !launched, !reopened {
+                reopened = true
+                await fx.reopen()
+            }
             try await fx.sleep(100)
             (ax, server) = try await fx.read()
         }
-        return Found(ax: ax, server: server)
+        return Found(ax: ax, server: server, reopened: reopened)
     }
 }

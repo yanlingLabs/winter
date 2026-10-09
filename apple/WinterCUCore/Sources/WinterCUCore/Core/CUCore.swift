@@ -209,7 +209,7 @@ public final class CUCore: @unchecked Sendable {
         var executableName: String?
         var isChromium: Bool
         var launched: Bool
-        /// The live app (nil in tests): Chromium's accessibility switch needs it.
+        /// The live app (nil in tests): Chromium's accessibility switch and the background reopen need it.
         var running: NSRunningApplication?
     }
 
@@ -275,6 +275,10 @@ public final class CUCore: @unchecked Sendable {
                     return (CUAXWindows.list(pid: pid, ax: ax, server: server), server)
                 }
             },
+            reopen: { [reopenApp] in
+                CULog.bind.notice("bind \(appName, privacy: .public): running with no window on any Space — reopening it in the background")
+                await reopenApp(app)
+            },
             sleep: { [clock] in try await clock.sleep(ms: $0) },
             now: { [clock] in clock.nowMs() }))
         let (axNow, serverNow) = (found.ax, found.server)
@@ -315,7 +319,8 @@ public final class CUCore: @unchecked Sendable {
         return TargetBindResult(targetId: target.id,
                                 app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid),
                                 window: CUWindowInfo(id: chosen.id, title: chosen.title, frame: cuFrame(chosen.frame)),
-                                detail: outcome.detail)
+                                detail: found.reopened ? ["opened the app's default window", outcome.detail].compactMap { $0 }.joined(separator: "; ")
+                                    : outcome.detail)
     }
 
     /// The live effects behind `CUWindowResolver` (run on the pid queue).
@@ -466,6 +471,13 @@ public final class CUCore: @unchecked Sendable {
 
     /// How long a moved window or an opened document's window may take to appear (shortened by tests).
     var windowWaitMs: Double = 3000
+
+    /// The background reopen for an app running with zero windows: LaunchServices' open of the running app with
+    /// activates:false sends it the reopen event, and it opens its default window — no raw Apple Event, no ⌘N.
+    /// The Focus Guardian puts the user back if the app activates anyway. Replaceable by tests.
+    var reopenApp: (BindApp) async -> Void = { app in
+        if let url = app.running?.bundleURL { _ = try? await CUApps.launchInBackground(url, timeoutMs: 2000) }
+    }
 
     /// The session's live target for `pid` that a repeated bind returns: its window still exists and, when
     /// the bind names a window, it is that one. The most recent wins.

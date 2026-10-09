@@ -4,8 +4,8 @@ import XCTest
 @testable import WinterCUCore
 
 /// The live bug where 64 `apps.open('Safari')` calls left Safari with twelve windows: a repeated bind returns
-/// the bound target; no app is ever asked for a window (no reopen, no ⌘N / New Window) — a window AX can't
-/// reach is bound capture-only, and an app with none is `no_window`; each bind names its step.
+/// the bound target; no ⌘N / New Window, ever; the background reopen only for an app with ZERO windows on any
+/// Space, once per bind; a window AX can't reach is bound capture-only; each bind names its step.
 final class BindOnceTests: XCTestCase {
     let pid: pid_t = 4747
     let original = fakeElement(90_001)
@@ -15,6 +15,9 @@ final class BindOnceTests: XCTestCase {
     var sys: FakeSystem!
     var poster: RecordingPoster!
     var core: CUCore!
+    var reopens = 0
+    /// What a reopen does to the fake world (e.g. the app opens its default window).
+    var onReopen: (() -> Void)?
 
     /// Safari, with its one window (77) on another Space: off screen for the window server, absent from AX,
     /// reachable by remote token unless `reachable` is false.
@@ -36,6 +39,9 @@ final class BindOnceTests: XCTestCase {
         core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: poster, ax: ax, sys: sys,
                       pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
         core.windowWaitMs = 150
+        reopens = 0
+        onReopen = nil
+        core.reopenApp = { [unowned self] _ in reopens += 1; onReopen?() }
         let pid = self.pid
         core.resolveBindApp = { _, _ in
             CUCore.BindApp(pid: pid, bundleIdentifier: "com.apple.Safari", name: "Safari", executableName: "Safari",
@@ -106,15 +112,29 @@ final class BindOnceTests: XCTestCase {
         _ = try await self.bind("s2")
         XCTAssertTrue(poster.entries.isEmpty, "no ⌘N, no key, nothing posted to reach a window")
         XCTAssertTrue(ax.performed.isEmpty, "no File › New Window pressed")
+        XCTAssertEqual(reopens, 0, "it has a window (elsewhere): never a reopen")
     }
 
-    func testAnAppWithNoWindowAnywhereIsNoWindowAtOnceAndNothingIsAskedOfIt() async throws {
-        safari(windowElsewhere: false)
-        let started = Date()
-        await expectCode("no_window") { _ = try await self.bind() }
-        XCTAssertLessThan(Date().timeIntervalSince(started), 1, "a running app with no window: no 3 s wait")
-        XCTAssertTrue(poster.entries.isEmpty)
+    func testAnAppWithZeroWindowsIsReopenedOnceInTheBackgroundAndItsDefaultWindowBound() async throws {
+        safari(windowElsewhere: false)  // Safari runs with all its windows closed
+        onReopen = { [unowned self] in
+            // The reopen opens the app's default window on this desktop.
+            ax.put(ax.application(pid), [kAXWindowsAttribute: [original]])
+            sys.windows[77] = FakeSystem.window(77, pid: pid, CGRect(x: 0, y: 0, width: 1200, height: 800), owner: "Safari")
+        }
+        let r = try await bind()
+        XCTAssertEqual(reopens, 1)
+        XCTAssertEqual(r.window.id, 77)
+        XCTAssertTrue(r.detail?.hasPrefix("opened the app's default window") ?? false, r.detail ?? "")
+        XCTAssertTrue(poster.entries.isEmpty, "a reopen, never ⌘N")
         XCTAssertTrue(ax.performed.isEmpty)
+    }
+
+    func testAReopenThatOpensNothingIsNoWindowAfterOneReopen() async throws {
+        safari(windowElsewhere: false)
+        await expectCode("no_window") { _ = try await self.bind() }
+        XCTAssertEqual(reopens, 1, "once per bind")
+        XCTAssertTrue(poster.entries.isEmpty)
     }
 
     func testReusableTargetMatchesSessionAppAndWindow() async throws {
@@ -134,9 +154,11 @@ final class BindOnceTests: XCTestCase {
     private final class Wait {
         var ax: [CUAXWindow] = []
         var server: [CUWindowServerWindow] = []
+        var reopens = 0
         var now: Double = 0
         func effects() -> CUBindWait.Effects {
             CUBindWait.Effects(read: { [self] in (ax, server) },
+                               reopen: { [self] in reopens += 1 },
                                sleep: { [self] ms in now += ms },
                                now: { [self] in now })
         }
@@ -151,29 +173,38 @@ final class BindOnceTests: XCTestCase {
         let w = Wait()
         w.server = (1...12).map { server($0, onScreen: false) }
         let found = try await CUBindWait.run(launched: false, deadlineMs: 3000, w.effects())
+        XCTAssertEqual(w.reopens, 0, "windows elsewhere or minimized: never a reopen")
+        XCTAssertFalse(found.reopened)
         XCTAssertEqual(w.now, 0, "no wait: the resolver reaches them")
         XCTAssertEqual(found.server.count, 12)
     }
 
-    func testARunningAppWithNoRealWindowEndsTheWaitAtOnce() async throws {
+    func testOnlyARunningAppWithZeroWindowsAnywhereIsReopenedOnce() async throws {
         let none = Wait()
-        _ = try await CUBindWait.run(launched: false, deadlineMs: 1000, none.effects())
-        XCTAssertEqual(none.now, 0, "nothing will appear by itself, and nothing is asked for")
+        let found = try await CUBindWait.run(launched: false, deadlineMs: 1000, none.effects())
+        XCTAssertEqual(none.reopens, 1, "one reopen for the whole wait")
+        XCTAssertTrue(found.reopened)
 
         let stubs = Wait()
         stubs.server = [server(1, onScreen: false, size: 10), server(2, onScreen: true, layer: 25)]
         _ = try await CUBindWait.run(launched: false, deadlineMs: 1000, stubs.effects())
-        XCTAssertEqual(stubs.now, 0, "a 10-pt stub and a menu-bar item are not windows")
+        XCTAssertEqual(stubs.reopens, 1, "a 10-pt stub and a menu-bar item are not windows")
+
+        let oneElsewhere = Wait()
+        oneElsewhere.server = [server(1, onScreen: false)]
+        _ = try await CUBindWait.run(launched: false, deadlineMs: 1000, oneElsewhere.effects())
+        XCTAssertEqual(oneElsewhere.reopens, 0, "one window on another Space or minimized: no reopen")
 
         let justLaunched = Wait()
         _ = try await CUBindWait.run(launched: true, deadlineMs: 1000, justLaunched.effects())
-        XCTAssertGreaterThanOrEqual(justLaunched.now, 1000, "an app this bind launched opens its own window: waited for")
+        XCTAssertEqual(justLaunched.reopens, 0, "an app this bind launched is never reopened")
     }
 
     func testAWindowOnScreenThatAXHasNotListedYetIsWaitedFor() async throws {
         let w = Wait()
         w.server = [server(1, onScreen: true)]
         let found = try await CUBindWait.run(launched: false, deadlineMs: 500, w.effects())
+        XCTAssertEqual(w.reopens, 0)
         XCTAssertGreaterThanOrEqual(w.now, 500, "it waited for AX")
         XCTAssertTrue(found.ax.isEmpty)
     }
