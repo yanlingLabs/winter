@@ -29,6 +29,25 @@ final class DispatcherTests: XCTestCase {
         XCTAssertEqual(Set(rig.dispatcher.methods), expected)
     }
 
+    func testTestActivateExistsOnlyOnALiveTestInstance() async throws {
+        let rig = await Rig()
+        XCTAssertFalse(rig.dispatcher.methods.contains("test.activate"))
+        do {
+            _ = try await rig.dispatcher.handle(method: "test.activate", params: .object(["pid": .number(42)]))
+            XCTFail("a normal helper must not answer test.activate")
+        } catch {}
+        let asked = ActivateLog()
+        let live = await MainActor.run {
+            RPCDispatcher(core: rig.core, coordinator: rig.coordinator, viewHub: rig.viewHub, inFlight: rig.inFlight, liveTest: true,
+                          activator: { pid in await asked.add(pid); return TestActivateResult(frontmostSet: true, raised: true, frontmost: true) })
+        }
+        XCTAssertTrue(live.methods.contains("test.activate"))
+        let result = try await live.handle(method: "test.activate", params: .object(["pid": .number(42)]))
+        XCTAssertEqual(try JSONDecoder().decode(TestActivateResult.self, from: JSONEncoder().encode(result)), TestActivateResult(frontmostSet: true, raised: true, frontmost: true))
+        let pids = await asked.pids
+        XCTAssertEqual(pids, [42])
+    }
+
     func testAnUnknownMethodIsUnsupported() async {
         let rig = await Rig()
         do {
@@ -139,4 +158,9 @@ final class DispatcherTests: XCTestCase {
         let active = await rig.coordinator.activeScripts
         XCTAssertTrue(active.isEmpty)
     }
+}
+
+private actor ActivateLog {
+    var pids: [Int32] = []
+    func add(_ pid: Int32) { pids.append(pid) }
 }
