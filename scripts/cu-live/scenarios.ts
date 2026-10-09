@@ -44,6 +44,11 @@ export interface VerifyContext {
 
 export interface FixtureCommand { role: "main" | "user"; cmd: string; args?: Record<string, unknown> }
 
+export type PrepareStep =
+  | { cmd: string; args?: Record<string, unknown>; waitFor?: string }
+  | { turn: string }
+  | { returnUser: true };
+
 export interface Scenario {
   name: string;
   group: string;
@@ -54,8 +59,17 @@ export interface Scenario {
   timeoutMs?: number;
   /** Dump the main fixture's state after the action (passed as `state`). */
   dump?: boolean;
-  /** Which session: the `bypass` one (default) or the `ask` one (its cards are answered by the runner). */
-  session?: "main" | "ask";
+  /**
+   * Which session: the `bypass` one (default), the `ask` one (its cards are answered by the runner), or a FRESH
+   * `bypass` session of its own (no target an earlier scenario bound is reused).
+   */
+  session?: "main" | "ask" | "fresh";
+  /**
+   * SETUP before the action, not asserted (the focus/input checks start after it): fixture commands (each waited for
+   * by the fixture event it logs), ComputerV2 turns in a fresh session of their own, and putting the user back in
+   * front on their Space (a full-screen change moves them).
+   */
+  prepare?: PrepareStep[];
   /** The approval answer for an `ask` scenario's card(s): an option id, or false to deny. */
   answer?: "once" | "session" | "always" | false;
   /**
@@ -145,29 +159,74 @@ report({ bundleId: form.bundleId, windows: (await form.windows()).map((w) => w.t
       ...mirrorChecks(ctx, FIXTURE_APP),
     ],
   },
+  // A full-screen window accessibility never saw on the active Space binds CAPTURE ONLY by design (macOS never
+  // exposed its elements): the bind says so, a screenshot works, a point click lands, and keys go to the window — or
+  // are refused (focus_not_placed) rather than sent blind.
   {
-    name: "bind off-Space (full-screen window)", group: "bind",
+    name: "bind off-Space (full screen, never seen here): capture only", group: "bind",
     code: `
 const off = await win("Fixture Offspace");
 const s = await off.state({ emit: false, full: true });
+const img = await off.screenshot({ emit: false });
 const listed = (await screen.windows({ emit: false })).filter((w) => w.title === "Fixture Offspace");
-report({ hasField: s.includes("Offspace Field"), onScreen: listed.map((w) => w.onScreen) });`,
+report({ hasField: s.includes("Offspace Field"), noAxNote: /no accessibility here/i.test(s), w: img.width, h: img.height, onScreen: listed.map((w) => w.onScreen) });`,
     verify: (ctx) => [
       ok(ctx),
-      check("the off-Space window's state reads its field", fact(ctx, "hasField") === true),
-      // The helper may bind the full-screen window where it is, or move it to this desktop (its detail line says which).
-      check("screen.windows reports it off screen, or the bind says where it went", (Array.isArray(fact(ctx, "onScreen")) && (fact(ctx, "onScreen") as boolean[]).includes(false)) || /moved|where it is|another Space|full screen/i.test(ctx.output), JSON.stringify(fact(ctx, "onScreen"))),
+      check("bound capture only, with the \"no accessibility here\" note", /capture only/i.test(ctx.output) && fact(ctx, "noAxNote") === true, ctx.output.slice(0, 200)),
+      check("its state lists no elements (no Offspace Field)", fact(ctx, "hasField") === false),
+      check("screen.windows reports it off screen", Array.isArray(fact(ctx, "onScreen")) && (fact(ctx, "onScreen") as boolean[]).includes(false), JSON.stringify(fact(ctx, "onScreen"))),
+      ...screenshotChecks(ctx),
       ...mirrorChecks(ctx, FIXTURE_APP),
     ],
   },
   {
-    name: "type into the off-Space window", group: "bind",
+    name: "act in the off-Space window (capture only): a point click, then keys", group: "bind",
+    before: [{ role: "main", cmd: "steal", args: { mode: "off" } }],
     code: `
 const off = await win("Fixture Offspace");
-const field = await pick(off, "Offspace Field", "text field");
-await off.type(${JSON.stringify(OFFSPACE_TEXT)}, { into: field.ref });
-report({ typed: true });`,
-    verify: (ctx) => [ok(ctx), check("the off-Space field received the exact text", lastValue(ctx.events, ctx.since, "field.change", "offspace") === OFFSPACE_TEXT, String(lastValue(ctx.events, ctx.since, "field.change", "offspace")))],
+const img = await off.screenshot({ emit: false });
+const frame = (await screen.windows({ emit: false })).find((w) => w.title === "Fixture Offspace")?.frame;
+// The Offspace Field's centre is (232, 112) points from the content's top-left — the window's, in full screen —
+// and a point is in the screenshot's pixels.
+const sx = frame ? img.width / frame[2] : 1, sy = frame ? img.height / frame[3] : 1;
+await off.click([Math.round(232 * sx), Math.round(112 * sy)]);
+let typed = null;
+try { await off.type(${JSON.stringify(OFFSPACE_TEXT)}); typed = "sent"; } catch (e) { typed = e.name + ": " + String(e.message).slice(0, 200); }
+report({ typed, scale: [sx, sy] });`,
+    verify: (ctx) => {
+      const landed = lastValue(ctx.events, ctx.since, "field.change", "offspace");
+      const typed = String(fact(ctx, "typed"));
+      return [ok(ctx),
+        check("the point click landed (the fixture logged the field's focus or the window becoming key)",
+          has(ctx.events, ctx.since, "focus", (e) => e.id === "offspace") || has(ctx.events, ctx.since, "window.key", (e) => e.title === "Fixture Offspace"),
+          JSON.stringify(eventsSince(ctx.events, ctx.since, "focus").concat(eventsSince(ctx.events, ctx.since, "window.key")).slice(-3))),
+        check("the keys landed in the field, or were refused with focus_not_placed", landed === OFFSPACE_TEXT || /focus_not_placed|couldn't put the keyboard focus/i.test(typed),
+          `field ${JSON.stringify(landed)}; type: ${typed}`)];
+    },
+  },
+  // The same window first SHOWN on the user's Space — accessibility sees it there — then taken off-Space again: it
+  // is AX-reachable, so a fresh bind (a session with no earlier target for it) is a full one.
+  {
+    name: "bind off-Space after it was shown on this desktop: a full bind", group: "bind", session: "fresh",
+    prepare: [
+      { cmd: "restoreSpace", waitFor: "offspace.restored" },
+      { returnUser: true },
+      { turn: `const shown = await apps.open(${JSON.stringify(FIXTURE_APP)}, { window: "Fixture Offspace" });
+report({ seen: (await shown.state({ emit: false, full: true })).includes("Offspace Field") });` },
+      { cmd: "offspace", waitFor: "offspace" },
+      { returnUser: true },
+    ],
+    code: `
+const off = await apps.open(${JSON.stringify(FIXTURE_APP)}, { window: "Fixture Offspace" });
+const s = await off.state({ emit: false, full: true });
+const listed = (await screen.windows({ emit: false })).filter((w) => w.title === "Fixture Offspace");
+report({ hasField: s.includes("Offspace Field"), noAxNote: /no accessibility here/i.test(s), onScreen: listed.map((w) => w.onScreen) });`,
+    verify: (ctx) => [
+      ok(ctx),
+      check("a full bind: not capture only", !/capture only/i.test(ctx.output) && fact(ctx, "noAxNote") === false, ctx.output.slice(0, 200)),
+      check("its state reads the Offspace Field", fact(ctx, "hasField") === true),
+      check("it is off this desktop again", Array.isArray(fact(ctx, "onScreen")) && (fact(ctx, "onScreen") as boolean[]).includes(false), JSON.stringify(fact(ctx, "onScreen"))),
+    ],
   },
   // ── clicks ─────────────────────────────────────────────────────────────────────────────────────────────────
   {

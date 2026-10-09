@@ -45,7 +45,7 @@ import {
   parseDuration, check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, pointerMoves, idleGate, parseFrontReading, startPlan, describeStartPlan, UNATTENDED_POLL_MS, type FrontReading, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
-import { REAL_APP_SCENARIOS, realAppsPreflight, type RealAppsRun } from "./real-apps";
+import { REAL_APP_SCENARIOS, realAppsPreflight, withRealDir, type RealAppsRun } from "./real-apps";
 import { expectedCardSummary, PRELUDE, SCENARIOS, scriptOf, type ImageStats, type ProbeEvent, type Scenario } from "./scenarios";
 import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, offSpacePlan, offSpaceSkipReason, onDesktopPlan, visualSkipReason, parseApps, resolveApp, restorePlan, SCRIPTS, type GenericApp, type ResolveDeps } from "./generic";
 
@@ -462,6 +462,8 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   let helperPid: number | undefined;
   let client: DaemonClient | undefined;
   let askClient: DaemonClient | undefined;
+  /** Connections of the fresh sessions some scenarios (and their prepare turns) use. */
+  const extraClients: DaemonClient[] = [];
   let realApps: RealAppsRun | undefined;
   let baseline: FocusBaseline | undefined;
   let offspaceMethod = "?";
@@ -611,6 +613,13 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     await askClient.hello(token, "cu-live-ask");
     const mainSid = await openSession(client, work, "bypass");
     const askSid = await openSession(askClient, work, "ask");
+    /** A new `bypass` session on its own connection: no target an earlier scenario bound is reused there. */
+    const freshSession = async (): Promise<{ client: DaemonClient; sid: string }> => {
+      const c = await DaemonClient.connect(daemon!.socket);
+      await c.hello(token, `cu-live-fresh-${extraClients.length + 1}`);
+      extraClients.push(c);
+      return { client: c, sid: await openSession(c, work, "bypass") };
+    };
     probe = new LineProcess<ProbeEvent>(spawn(built.viewProbe, ["--socket", socket, "--home", home, "--session", mainSid, "--max-fps", "10", "--max-width", "480"], { stdio: ["pipe", "pipe", "pipe"] }),
       (l) => { try { return JSON.parse(l) as ProbeEvent; } catch { return undefined; } });
     await until("the mirror probe's subscription", 10_000, () => {
@@ -639,10 +648,26 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
       try {
         abortIfInput();
         for (const c of s.before ?? []) await postCommand(built.tool, f, c.role, c.cmd, c.args ?? {});
+        // SETUP, not asserted: the focus and input checks start after it.
+        for (const step of s.prepare ?? []) {
+          if ("cmd" in step) {
+            const t = Date.now();
+            await postCommand(built.tool, f, "main", step.cmd, step.args ?? {}, 20_000);
+            if (step.waitFor !== undefined) await until(`the fixture's ${step.waitFor}`, 15_000, () => fixtureEvents(f).find((e) => e.role === "main" && e.ev === step.waitFor && e.t >= t));
+          } else if ("turn" in step) {
+            const fresh = await freshSession();
+            const r = await runTurn(fresh.client, fresh.sid, computerV2Message(scriptOf({ code: step.turn }), 30_000), 90_000);
+            if (r.isError) throw new Error(`the prepare turn failed: ${r.output.slice(-200)}`);
+          } else {
+            await sleep(800);
+            await activateUser();
+          }
+        }
+        abortIfInput();
         since = Date.now();
-        const sid = s.session === "ask" ? askSid : mainSid;
         const timeout = s.timeoutMs ?? 60_000;
-        const turn = await runTurn(s.session === "ask" ? askClient! : client!, sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer);
+        const where = s.session === "ask" ? { client: askClient!, sid: askSid } : s.session === "fresh" ? await freshSession() : { client: client!, sid: mainSid };
+        const turn = await runTurn(where.client, where.sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer);
         const t1 = Date.now();
         // A rung-4 fallback DURING the action is this scenario's failure: the real pointer moved, or keys/clicks
         // reached the user's app (which is in front). Not the HID idle counter: SkyLight's background pid route
@@ -692,7 +717,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     // for working out what a scenario sees. Nothing else runs.
     const scenarios: Scenario[] = o.script !== undefined
       ? [{ name: `script ${o.script}`, group: "script", code: readFileSync(o.script, "utf8"), verify: (ctx) => [check("ran", !ctx.isError, ctx.output.slice(-300))] }]
-      : [...SCENARIOS, ...(o.realApps ? REAL_APP_SCENARIOS : [])].filter((s) => o.only === undefined || o.only.toLowerCase().split("|").some((part) => s.name.toLowerCase().includes(part)));
+      : [...SCENARIOS, ...(o.realApps && realApps !== undefined ? REAL_APP_SCENARIOS.map((r) => withRealDir(r, realApps!.dir)) : [])].filter((s) => o.only === undefined || o.only.toLowerCase().split("|").some((part) => s.name.toLowerCase().includes(part)));
     for (const s of scenarios) {
       const r = await runScenario(s);
       if (o.script !== undefined) log(`script output:\n${r.output}`);
@@ -765,6 +790,7 @@ report({ ok: true });`, 40_000), 100_000);
     if (probe !== undefined) await step("stopped the mirror probe", () => probe!.stop());
     client?.close();
     askClient?.close();
+    for (const c of extraClients) c.close();
     if (daemon !== undefined) await step("stopped the live daemon", () => daemon!.proc.stop(10_000));
     if (helperPid !== undefined) await step("quit the helper instance", async () => {
       try { process.kill(helperPid!, "SIGTERM"); } catch { /* gone */ }

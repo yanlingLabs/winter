@@ -145,18 +145,28 @@ if (!plan) skip("no harmless, reversible control (tabs, toggles, view buttons; n
 else {
   // AX press; an element that lists no press action (Chrome's web controls: "show menu, scroll to visible") is
   // clicked instead — the same harmless, reversible control.
-  const press = async (ref) => {
+  const pressRef = async (ref) => {
     try { await app.action(ref, "press"); return "press"; } catch (e) {
       if (e.name !== "TypeError" || !/has no action/.test(String(e.message))) throw e;
       await app.click(ref);
       return "click";
     }
   };
-  const how = await press(plan.element.ref);
+  // A redraw between the read and the press (VS Code re-renders its tree) leaves the ref stale: re-find the element
+  // by role and name ONCE and press that.
+  const press = async (el) => {
+    try { return await pressRef(el.ref); } catch (e) {
+      if (e.name !== "StaleRef") throw e;
+      const fresh = (await app.find({ role: el.role, name: el.name }, { emit: false })).find((x) => x.role === el.role && x.name === el.name);
+      if (!fresh) throw e;
+      return (await pressRef(fresh.ref)) + " (re-found after StaleRef)";
+    }
+  };
+  const how = await press(plan.element);
   // Undo by NAME, found again: the press may have redrawn the tree (a stale ref must not leave the change behind).
   const back = plan.undo === "reselect" ? plan.reselect : plan.element;
   const again = (await app.find({ role: back.role, name: back.name }, { emit: false })).find((e) => e.name === back.name) || back;
-  await press(again.ref);
+  await press(again);
   report({ pressed: plan.element.role + " " + JSON.stringify(plan.element.name), undo: plan.undo, how });
 }`,
   type: (a: GenericApp): string => `${G(a.key)}

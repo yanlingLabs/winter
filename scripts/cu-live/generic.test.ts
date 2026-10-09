@@ -73,6 +73,12 @@ for (const [label, p] of impls) {
 }
 
 describe("the generic run's plan", () => {
+  test("the AX press re-finds the element once on StaleRef (VS Code redraws), then retries", () => {
+    const code = SCRIPTS.press({ query: "x", key: "k" });
+    expect(code).toContain('e.name !== "StaleRef"');
+    expect(code).toContain("re-found after StaleRef");
+  });
+
   test("--apps: trimmed, deduplicated (case-insensitively), each with its own key", () => {
     expect(parseApps(" VRoid Studio, com.microsoft.VSCode ,vroid studio,,")).toEqual([{ query: "VRoid Studio", key: "app0" }, { query: "com.microsoft.VSCode", key: "app1" }]);
     expect(parseApps(undefined)).toEqual([]);
