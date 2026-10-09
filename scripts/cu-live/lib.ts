@@ -11,6 +11,8 @@ export interface MonitorSample {
   frontPid: number | null;
   space: number | null;
   hidIdleMs: number | null;
+  /** The real pointer (global points); absent from an older monitor. */
+  mouse?: [number, number] | null;
 }
 
 export function parseMonitorLine(line: string): MonitorSample | undefined {
@@ -18,7 +20,8 @@ export function parseMonitorLine(line: string): MonitorSample | undefined {
     const o = JSON.parse(line) as Record<string, unknown>;
     if (typeof o.t !== "number") return undefined;
     const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
-    return { t: o.t, front: typeof o.front === "string" ? o.front : null, frontPid: num(o.frontPid), space: num(o.space), hidIdleMs: num(o.hidIdleMs) };
+    const m = Array.isArray(o.mouse) && o.mouse.length === 2 && o.mouse.every((v) => typeof v === "number" && Number.isFinite(v)) ? [o.mouse[0] as number, o.mouse[1] as number] as [number, number] : undefined;
+    return { t: o.t, front: typeof o.front === "string" ? o.front : null, frontPid: num(o.frontPid), space: num(o.space), hidIdleMs: num(o.hidIdleMs), ...(m === undefined ? {} : { mouse: m }) };
   } catch {
     return undefined;
   }
@@ -55,6 +58,21 @@ export function hidInputTimes(samples: readonly MonitorSample[], from: number, t
   for (const s of samples) {
     if (prev !== undefined && s.t >= from && s.t <= to && s.hidIdleMs !== null && prev.hidIdleMs !== null && s.hidIdleMs + slackMs < prev.hidIdleMs) out.push(s.t);
     prev = s;
+  }
+  return out;
+}
+
+/**
+ * When the REAL pointer moved within [from, to]: the rung-4 signal. Synthetic pid-routed events never move it,
+ * while SkyLight's pid route resets the HID idle time like real input would — so `hidInputTimes` cannot tell
+ * the helper's background events from a rung-4 fallback, and this can.
+ */
+export function pointerMoves(samples: readonly MonitorSample[], from: number, to: number): number[] {
+  const out: number[] = [];
+  let prev: MonitorSample | undefined;
+  for (const s of samples) {
+    if (prev !== undefined && s.t >= from && s.t <= to && s.mouse && prev.mouse && (s.mouse[0] !== prev.mouse[0] || s.mouse[1] !== prev.mouse[1])) out.push(s.t);
+    if (s.mouse) prev = s;
   }
   return out;
 }

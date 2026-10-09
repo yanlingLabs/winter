@@ -34,10 +34,17 @@ WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live   # the LIVE ComputerV2 suite (script
                                      # file-store daemon (winter-core-live), the scripted double (no LLM); asserts the
                                      # fixture's own log, screenshot pixels (a #FF00FF sentinel), the mirror frames, and
                                      # that your frontmost app/Space never change (20 ms sampling). Aborts on real input.
+                                     # "No rung-4 fallback" = the REAL pointer never moved and the user's app got no
+                                     # key/click — never the HID idle counter, which SkyLight's background pid route resets.
                                      # The suite's daemon and mirror probe carry TEST-ONLY identities
                                      # (com.winter.core.cutest / com.winter.app.cutest): a dev helper accepts them only as a
                                      # live-test instance (a home in <user temp>/winter-cu-live-*, HelperIdentity.isLiveTestHome)
-                                     # — never sign a test tool with a production identifier. --dry-run: builds, self-tests,
+                                     # — never sign a test tool with a production identifier. Only such an instance answers
+                                     # the TEST-ONLY `test.activate {pid}` (AXFrontmost + raise): macOS 26 ignores a background
+                                     # process's activation, so the runner puts its "user's app" in front through it.
+                                     # Fixture bundle ids are never `com.winter.*` (that prefix is refused as Winter itself).
+                                     # --report <file.json>: every check in full + failing outputs; --script <file.js>: one
+                                     # ad-hoc ComputerV2 script on the fixture, its output printed. --dry-run: builds, self-tests,
                                      # the no-screen plumbing and that identity rule against the dev helper; --real-apps:
                                      # Safari/TextEdit/Finder/Preview on temp docs, plus the generic check on VS Code and
                                      # Chrome when installed; --apps "<name or bundle id>,…": the generic, app-agnostic

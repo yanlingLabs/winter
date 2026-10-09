@@ -7,7 +7,7 @@
 	<key>CFBundleExecutable</key>
 	<string>WinterCUFixture</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.winter.cu-fixture</string>
+	<string>dev.cu-live.fixture</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -29,7 +29,7 @@
 			</array>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>com.winter.cu-fixture.document</string>
+				<string>dev.cu-live.fixture.document</string>
 			</array>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
@@ -41,7 +41,7 @@
 	<array>
 		<dict>
 			<key>UTTypeIdentifier</key>
-			<string>com.winter.cu-fixture.document</string>
+			<string>dev.cu-live.fixture.document</string>
 			<key>UTTypeDescription</key>
 			<string>Winter CU Fixture Document</string>
 			<key>UTTypeConformsTo</key>

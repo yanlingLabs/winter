@@ -140,12 +140,21 @@ const roles = ["tab", "radio button", "disclosure triangle", "check box", "toggl
 const plan = pickPressable(await byRoles(app, roles));
 if (!plan) skip("no harmless, reversible control (tabs, toggles, view buttons; never delete/close/send/…)");
 else {
-  await app.action(plan.element.ref, "press");
+  // AX press; an element that lists no press action (Chrome's web controls: "show menu, scroll to visible") is
+  // clicked instead — the same harmless, reversible control.
+  const press = async (ref) => {
+    try { await app.action(ref, "press"); return "press"; } catch (e) {
+      if (e.name !== "TypeError" || !/has no action/.test(String(e.message))) throw e;
+      await app.click(ref);
+      return "click";
+    }
+  };
+  const how = await press(plan.element.ref);
   // Undo by NAME, found again: the press may have redrawn the tree (a stale ref must not leave the change behind).
   const back = plan.undo === "reselect" ? plan.reselect : plan.element;
   const again = (await app.find({ role: back.role, name: back.name }, { emit: false })).find((e) => e.name === back.name) || back;
-  await app.action(again.ref, "press");
-  report({ pressed: plan.element.role + " " + JSON.stringify(plan.element.name), undo: plan.undo });
+  await press(again.ref);
+  report({ pressed: plan.element.role + " " + JSON.stringify(plan.element.name), undo: plan.undo, how });
 }`,
   type: (a: GenericApp): string => `${G(a.key)}
 const secure = await app.find({ role: "secure text field" }, { emit: false });

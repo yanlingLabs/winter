@@ -34,7 +34,7 @@ case .success(.post(let run, let role, let cmd, let args, let seq)):
     var info: [String: String] = ["role": role, "cmd": cmd]
     if let args { info["args"] = args }
     if let seq { info["seq"] = seq }
-    DistributedNotificationCenter.default().postNotificationName(Notification.Name("com.winter.cu-fixture.command"),
+    DistributedNotificationCenter.default().postNotificationName(Notification.Name("dev.cu-live.fixture.command"),
                                                                  object: run, userInfo: info, deliverImmediately: true)
     // The post is an XPC hand-off to distnoted; exiting this instant can drop it. A short run-loop turn flushes it.
     RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.15))

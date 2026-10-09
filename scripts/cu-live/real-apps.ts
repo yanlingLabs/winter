@@ -75,16 +75,22 @@ export function realAppsPreflight(root: string, log: (l: string) => void): RealA
 
 const okRun = (ctx: VerifyContext): Check => check("the script ran without an error", !ctx.isError, ctx.output.slice(-300));
 
-/** Close the bound window with its own close button, and dismiss a save sheet if one appears. */
+/**
+ * Close the bound window with its own close button, and dismiss a save sheet if one appears. Once the window has
+ * closed, the bound target is gone: a look for a sheet then answers TargetLost/NoWindow (or times out), which
+ * means the close worked — reported as `closed`, never thrown.
+ */
 const CLOSE = `
 async function closeOwn(app) {
   const btn = (await app.find({ role: "close button" }, { emit: false }))[0];
   if (!btn) throw new Error("no close button in the bound window");
   await app.action(btn.ref, "press");
   for (const label of ["Don't Save", "Revert Changes", "Delete"]) {
-    const b = (await app.find({ role: "button", name: label }, { emit: false }))[0];
-    if (b) { await app.action(b.ref, "press"); break; }
+    let b;
+    try { b = (await app.find({ role: "button", name: label }, { emit: false }))[0]; } catch (e) { report({ closed: "window gone (" + e.name + ")" }); return; }
+    if (b) { await app.action(b.ref, "press"); report({ closed: "after " + label }); return; }
   }
+  report({ closed: "no sheet" });
 }`;
 
 export const REAL_APP_SCENARIOS: Scenario[] = [
@@ -97,8 +103,8 @@ await sf.type("safari ✓", { into: input.ref });
 const go = await pick(sf, "Live Button", "button");
 await sf.action(go.ref, "press");
 const w = await sf.waitFor({ title: "Clicked: safari ✓" }, { timeoutMs: 5000 }).then(() => true, () => false);
-await closeOwn(sf);
-report({ titled: w });`,
+report({ titled: w });
+await closeOwn(sf);`,
     verify: (ctx) => [okRun(ctx), check("the page saw the typed text and the click", ctx.facts.titled === true)],
   },
   {
@@ -110,8 +116,8 @@ if (!area) throw new Error("no text area");
 await te.select(area.ref, "temp note.", { caret: "end" });
 await te.type(" Appended ✓ by Winter.", { into: area.ref });
 const value = (await te.find({ role: "text area" }, { emit: false }))[0]?.value ?? "";
-await closeOwn(te);
-report({ value });`,
+report({ value });
+await closeOwn(te);`,
     verify: (ctx) => [okRun(ctx), check("the note holds the appended text", String(ctx.facts.value ?? "").includes("temp note. Appended ✓ by Winter."), String(ctx.facts.value))],
   },
   {
@@ -120,8 +126,8 @@ report({ value });`,
 const fd = await apps.open("com.apple.finder", { window: ${JSON.stringify(FOLDER)} });
 const s = await fd.state({ emit: false, full: true });
 const seen = { alpha: s.includes("alpha.txt"), beta: s.includes("beta.txt") };
-await closeOwn(fd);
-report(seen);`,
+report(seen);
+await closeOwn(fd);`,
     verify: (ctx) => [okRun(ctx), check("Finder lists both temp files", ctx.facts.alpha === true && ctx.facts.beta === true, JSON.stringify(ctx.facts))],
   },
   {
@@ -129,8 +135,8 @@ report(seen);`,
     code: `${CLOSE}
 const pv = await apps.open("com.apple.Preview", { window: "doc.pdf" });
 const img = await pv.screenshot({ emit: false });
-await closeOwn(pv);
-report({ w: img.width, h: img.height });`,
+report({ w: img.width, h: img.height });
+await closeOwn(pv);`,
     verify: (ctx) => {
       const shots = ctx.shots.filter((s) => s.error === undefined);
       return [okRun(ctx), check("the PDF window was captured, and its pixels are not blank", shots.length > 0 && shots.every((s) => !s.blank), shots.map((s) => `σ${s.stddevLuma.toFixed(1)}`).join(", ") || "no screenshot")];

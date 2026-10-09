@@ -17,7 +17,14 @@ enum Sampling {
                       front: running?.bundleIdentifier,
                       frontPid: running.map { Int($0.processIdentifier) },
                       space: activeSpace(),
-                      hidIdleMs: hidIdleMs())
+                      hidIdleMs: hidIdleMs(),
+                      mouse: pointer())
+    }
+
+    /// The real pointer's location (CGEvent with no source reads the current one; no TCC grant).
+    static func pointer() -> (x: Int, y: Int)? {
+        guard let p = CGEvent(source: nil)?.location else { return nil }
+        return (Int(p.x.rounded()), Int(p.y.rounded()))
     }
 
     // MARK: Active Space

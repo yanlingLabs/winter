@@ -179,7 +179,7 @@ enum CommandDecision {
 }
 
 enum CommandDecoder {
-    static let notificationName = "com.winter.cu-fixture.command"
+    static let notificationName = "dev.cu-live.fixture.command"
 
     /// The commands each role implements. `dump`/`reset`/`ping`/`quit` exist on both so a runner can always
     /// probe and clean up either process.

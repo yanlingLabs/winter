@@ -46,11 +46,20 @@ struct Sample: Equatable {
     var frontPid: Int?
     var space: Int?
     var hidIdleMs: Int?
+    /// Where the REAL pointer is (global points, whole). Synthetic pid-routed events (rungs 2 and 3) never move
+    /// it; only the HID route (rung 4) does — unlike `hidIdleMs`, which SkyLight's pid route resets too.
+    var mouse: (x: Int, y: Int)? = nil
 
-    /// `{"t","front","frontPid","space","hidIdleMs"}` — the key order the rig's parser and a human both expect.
+    static func == (a: Sample, b: Sample) -> Bool {
+        a.t == b.t && a.front == b.front && a.frontPid == b.frontPid && a.space == b.space && a.hidIdleMs == b.hidIdleMs
+            && a.mouse?.x == b.mouse?.x && a.mouse?.y == b.mouse?.y
+    }
+
+    /// `{"t","front","frontPid","space","hidIdleMs"[,"mouse":[x,y]]}` — the key order the rig's parser and a human both expect.
     var json: String {
         "{\"t\":\(t),\"front\":\(JSONOut.optional(front)),\"frontPid\":\(JSONOut.optional(frontPid)),"
-            + "\"space\":\(JSONOut.optional(space)),\"hidIdleMs\":\(JSONOut.optional(hidIdleMs))}"
+            + "\"space\":\(JSONOut.optional(space)),\"hidIdleMs\":\(JSONOut.optional(hidIdleMs))"
+            + (mouse.map { ",\"mouse\":[\($0.x),\($0.y)]" } ?? "") + "}"
     }
 }
 

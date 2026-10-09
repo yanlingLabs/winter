@@ -8,7 +8,7 @@
  *   bun run e2e:cu-live --dry-run                            # builds, self-tests, the no-screen plumbing check
  *   WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live --apps "VRoid Studio,com.figma.Desktop"   # + the generic focus check
  *     on ANY installed app (a Unity app: --apps "VRoid Studio"); --real-apps adds VS Code and Chrome when installed
- *   options: --only <text> (scenarios whose name contains it), --yes (no countdown), --keep-temp,
+ *   options: --only <text> (scenarios whose name contains it; a|b for either), --yes (no countdown), --keep-temp, --report <file.json>, --script <file.js> (one ad-hoc script),
  *            --helper-app <path to "Winter Computer Use Dev.app"> (else $WINTER_COMPUTER_USE_APP, else dist/dev/)
  *
  * WHAT RUNS (all isolated — nothing touches ~/.winter*, the Keychain, or the user's own daemon and helper):
@@ -28,19 +28,20 @@
  * Every window, Space and process it made is closed at the end, whatever happened.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { METHODS, type SessionEvent } from "../../packages/protocol/src/index";
 import { resolvePlatformPackageWinter } from "../../packages/core/src/runtime-sdk/executable";
-import { buildAll, REPO_ROOT, type Built } from "./build";
+import { buildAll, FIXTURE_MAIN, REPO_ROOT, type Built } from "./build";
 import { DaemonClient } from "./client";
 import {
-  check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, parseFixtureLog, parseMonitorLine, parseTopDelta,
+  check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, pointerMoves, parseFixtureLog, parseMonitorLine, parseTopDelta,
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, type RealAppsRun } from "./real-apps";
-import { expectedCardSummary, SCENARIOS, scriptOf, type ImageStats, type ProbeEvent, type Scenario } from "./scenarios";
+import { expectedCardSummary, PRELUDE, SCENARIOS, scriptOf, type ImageStats, type ProbeEvent, type Scenario } from "./scenarios";
 import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, offSpacePlan, offSpaceSkipReason, onDesktopPlan, parseApps, resolveApp, restorePlan, SCRIPTS, type GenericApp, type ResolveDeps } from "./generic";
 
 // ── thresholds (env overrides) ───────────────────────────────────────────────────────────────────────────────────
@@ -56,7 +57,7 @@ const LIMITS = {
 const WATCH_AFTER_MS = 3_000;
 const MONITOR_INTERVAL_MS = 20;
 
-interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string }
+interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string; report?: string; script?: string }
 
 function parseOptions(argv: string[]): Options {
   const o: Options = { dryRun: false, realApps: false, yes: false, keepTemp: false };
@@ -69,11 +70,15 @@ function parseOptions(argv: string[]): Options {
     else if (a === "--only") o.only = argv[++i];
     else if (a === "--helper-app") o.helperApp = argv[++i];
     else if (a === "--apps") o.apps = argv[++i];
+    else if (a === "--report") o.report = argv[++i];
+    else if (a === "--script") { o.script = argv[++i]; o.only = "script"; }
     else throw new Error(`unknown option ${a}`);
   }
   return o;
 }
 
+/** Each failing scenario's ComputerV2 output (capped), for `--report`. */
+const failedOutputs = new Map<string, string>();
 const log = (line: string): void => { process.stderr.write(`e2e:cu-live: ${line}\n`); };
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -131,6 +136,18 @@ async function until<T>(what: string, ms: number, probe: () => T | undefined | f
     if (Date.now() - t0 > ms) throw new Error(`timed out (${ms} ms) waiting for ${what}`);
     await sleep(25);
   }
+}
+
+/** One call to the live-test helper as its (test) daemon: `winter-core-live __helper-call`. */
+function helperCall(built: Pick<Built, "daemon">, socket: string, home: string, method: string, params: unknown): { accepted?: boolean; result?: unknown; error?: unknown } {
+  const r = sh(built.daemon, ["__helper-call", socket, home, method, JSON.stringify(params)], undefined, { ...cleanEnv(), WINTER_CU_LIVE_TESTS: "1" });
+  try { return JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "{}") as { accepted?: boolean; result?: unknown; error?: unknown }; } catch { return { error: (r.stderr || r.stdout).trim().slice(0, 200) }; }
+}
+
+function cleanEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("WINTER_")) env[k] = v;
+  return env;
 }
 
 /** Every running process whose executable is `exe` (`pgrep -f` on its full path). */
@@ -234,7 +251,7 @@ async function startLiveDaemon(built: Pick<Built, "daemon">, home: string): Prom
   if (winter === undefined) throw new Error("no `winter` runtime (the npm platform package) — run `bun install`, or set WINTER_RUNTIME_EXECUTABLE");
   Object.assign(env, {
     WINTER_HOME: home, WINTER_PROFILE: "dev", WINTER_CU_LIVE_TESTS: "1", WINTER_RUNTIME_EXECUTABLE: winter, TMPDIR: `${userTempDir()}/`,
-    WINTER_LOGIN_SHELL_PATH: "off", WINTER_KEYCHAIN_SERVICE: "com.winter.core.test-cu-live",
+    WINTER_LOGIN_SHELL_PATH: "off", WINTER_KEYCHAIN_SERVICE: `com.winter.core.test-cu-live-${randomBytes(6).toString("hex")}`,
   });
   const child = spawn(built.daemon, [], { env, stdio: ["pipe", "pipe", "pipe"] });
   const proc = new LineProcess<Record<string, unknown>>(child, (l) => { try { return JSON.parse(l) as Record<string, unknown>; } catch { return undefined; } });
@@ -256,18 +273,24 @@ async function runTurn(client: DaemonClient, sessionId: string, text: string, ms
   const from = client.events.length;
   const cards: SessionEvent[] = [];
   const answered = new Set<string>();
-  await client.call(METHODS.sessionSend, { sessionId, text });
-  await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && (e as { threadId?: string }).threadId === "main", ms, from, () => {
-    for (let i = from; i < client.events.length; i++) {
-      const e = client.events[i]! as SessionEvent & { callId?: string; toolName?: string };
-      if (e.type !== "approval_requested" || e.sessionId !== sessionId || e.callId === undefined || answered.has(e.callId)) continue;
-      answered.add(e.callId);
-      cards.push(e);
-      // Only the per-app card is approved; any other card (a foreground request would hand over the real pointer) is denied.
-      const approved = answer !== undefined && answer !== false && (e as { summary?: string }).summary === expectedCardSummary();
-      void client.call(METHODS.approvalRespond, { sessionId, callId: e.callId, approved, ...(approved ? { optionId: answer } : {}) }).catch(() => {});
-    }
-  });
+  const span: [number, number] = [Date.now(), Number.POSITIVE_INFINITY];
+  actionWindows.push(span);
+  try {
+    await client.call(METHODS.sessionSend, { sessionId, text });
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && (e as { threadId?: string }).threadId === "main", ms, from, () => {
+      for (let i = from; i < client.events.length; i++) {
+        const e = client.events[i]! as SessionEvent & { callId?: string; toolName?: string };
+        if (e.type !== "approval_requested" || e.sessionId !== sessionId || e.callId === undefined || answered.has(e.callId)) continue;
+        answered.add(e.callId);
+        cards.push(e);
+        // Only the per-app card is approved; any other card (a foreground request would hand over the real pointer) is denied.
+        const approved = answer !== undefined && answer !== false && (e as { summary?: string }).summary === expectedCardSummary();
+        void client.call(METHODS.approvalRespond, { sessionId, callId: e.callId, approved, ...(approved ? { optionId: answer } : {}) }).catch(() => {});
+      }
+    });
+  } finally {
+    span[1] = Date.now();
+  }
   const events = client.events.slice(from).filter((e) => e.sessionId === sessionId);
   const call = events.find((e): e is Extract<SessionEvent, { type: "tool_call" }> => e.type === "tool_call" && /computer_?v2/i.test((e as { name: string }).name));
   const result = call === undefined ? undefined : events.find((e): e is Extract<SessionEvent, { type: "tool_result" }> => e.type === "tool_result" && e.callId === call.callId);
@@ -383,6 +406,10 @@ export async function plumbingCheck(built: Pick<Built, "daemon">): Promise<Scena
 
 class Aborted extends Error {}
 
+/** When ComputerV2 turns ran ([sent, completed]): the helper's own background events land inside these. */
+const actionWindows: Array<[number, number]> = [];
+const ACTION_SLACK_MS = 1_500;
+
 async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   const helperApp = helperAppPath(o);
   const results: ScenarioResult[] = [];
@@ -399,45 +426,37 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   let daemon: Awaited<ReturnType<typeof startLiveDaemon>> | undefined;
   let helperPid: number | undefined;
   let client: DaemonClient | undefined;
+  let askClient: DaemonClient | undefined;
   let realApps: RealAppsRun | undefined;
   let baseline: FocusBaseline | undefined;
   let offspaceMethod = "?";
+  let activateUser: () => Promise<void> = async () => { throw new Error("the helper is not up yet"); };
   let inputWatchFrom = Number.POSITIVE_INFINITY;
   const runStartedAt = Date.now();
   const abortIfInput = (): void => {
-    const hits = monitor === undefined ? [] : hidInputTimes(monitor.items, inputWatchFrom, Date.now());
-    if (hits.length > 0) throw new Aborted(`real keyboard/mouse input at ${new Date(hits[0]!).toISOString()} — the run was stopped so nothing acts against you`);
+    if (monitor === undefined) return;
+    const now = Date.now();
+    // Real input: the pointer moved, a key or click reached the user's app (in front), or the HID idle counter
+    // dropped while no ComputerV2 turn was working — the helper's SkyLight-routed background events (rung 3)
+    // reset that counter too, so a drop during a turn (or just after it) is the helper, not you.
+    const hid = hidInputTimes(monitor.items, inputWatchFrom, now).filter((t) => !actionWindows.some(([a, b]) => t >= a && t <= b + ACTION_SLACK_MS));
+    const moved = pointerMoves(monitor.items, inputWatchFrom, now);
+    const leaked = fixtureEvents(f).filter((e) => e.role === "user" && (e.ev === "user.key" || e.ev === "user.mouse") && e.t >= inputWatchFrom);
+    const first = [...hid, ...moved, ...leaked.map((e) => e.t)].sort((x, y) => x - y)[0];
+    if (first !== undefined) {
+      const what = [hid.length > 0 ? "keyboard/trackpad" : "", moved.length > 0 ? "the pointer moved" : "", leaked.length > 0 ? "your app got input" : ""].filter(Boolean).join(", ");
+      throw new Aborted(`real input at ${new Date(first).toISOString()} (${what}) — the run was stopped so nothing acts against you`);
+    }
   };
   try {
     // ── setup ──────────────────────────────────────────────────────────────────────────────────────────────────
     monitor = new LineProcess<MonitorSample>(spawn(built.tool, ["monitor", "--interval-ms", String(MONITOR_INTERVAL_MS)], { stdio: ["pipe", "pipe", "pipe"] }), parseMonitorLine);
     await until("the monitor's first sample", 5_000, () => monitor!.items.length > 0);
     const spaceBefore = monitor.items.at(-1)!.space;
-    log("launching the user's app and the fixture…");
-    launchFixture(built.fixtureUser, "user", f, false);
-    f.userPid = Number((await until("the user's app", 15_000, () => fixtureEvents(f).find((e) => e.role === "user" && e.ev === "launched"))).pid);
-    launchFixture(built.fixtureMain, "main", f, true);
-    f.mainPid = Number((await until("the fixture", 15_000, () => fixtureEvents(f).find((e) => e.role === "main" && e.ev === "launched"))).pid);
-    await until("the user's app frontmost", 10_000, () => monitor!.items.at(-1)?.frontPid === f.userPid);
-    // The off-Space window: the fixture moves its OWN window to another regular Space (an existing desktop, else one
-    // it creates — private SkyLight, which may be allowed for one's own connection), falling back to full screen
-    // (its own Space; macOS switches to it, and activating the user's app brings the user back).
-    log("putting a fixture window on another Space…");
-    await postCommand(built.tool, f, "main", "offspace", {}, 15_000);
-    const placed = await until("the fixture's off-Space window", 15_000, () => fixtureEvents(f).find((e) => e.role === "main" && e.ev === "offspace"));
-    offspaceMethod = String(placed.method);
-    log(`off-Space window: ${offspaceMethod}${placed.error ? ` (earlier attempts: ${String(placed.error)})` : ""}`);
-    await sleep(800);
-    await postCommand(built.tool, f, "user", "activate");
-    await until("your Space and the user's app back in front", 10_000, () => {
-      const s = monitor!.items.at(-1);
-      return s !== undefined && s.frontPid === f.userPid && (spaceBefore === null || s.space === spaceBefore) ? s : undefined;
-    });
-    await sleep(500);
-    const now = monitor.items.at(-1)!;
-    baseline = { frontPid: f.userPid, front: now.front, space: now.space };
-    log(`baseline: frontmost ${baseline.front} (pid ${baseline.frontPid}), Space ${baseline.space ?? "?"}`);
 
+    // The daemon and the helper instance FIRST: on macOS 26 a background process's activation requests are ignored
+    // (cooperative activation), so the runner puts the user's app in front through the live-test helper's
+    // Accessibility (`test.activate`), falling back to LaunchServices' `lsappinfo setfront`.
     log("starting the live daemon and a dev helper instance for its temp home…");
     daemon = await startLiveDaemon(built, home);
     const socket = join(home, "run", "computer-use.sock");
@@ -452,11 +471,73 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
       const fresh = pidsOf(helperExe).filter((p) => !helpersBefore.has(p));
       return byPath ?? (fresh.length === 1 ? fresh[0] : undefined);
     });
-    log(`helper instance pid ${helperPid}`);
+    const status = helperCall(built, socket, home, "status", {});
+    log(`helper instance pid ${helperPid}: ${JSON.stringify((status.result as { permissions?: unknown } | undefined)?.permissions ?? status)}`);
+    /** Put `pid` in front and wait for the monitor to see it (and, when given, the Space). */
+    const bringToFront = async (pid: number, what: string, space?: number | null): Promise<string> => {
+      const routes: string[] = [];
+      const ok = (): boolean => {
+        const last = monitor!.items.at(-1);
+        return last !== undefined && last.frontPid === pid && (space === undefined || space === null || last.space === space);
+      };
+      for (const route of ["helper test.activate", "lsappinfo setfront", "helper test.activate", "lsappinfo setfront", "helper test.activate"] as const) {
+        if (ok()) break;
+        if (route === "helper test.activate") {
+          const r = helperCall(built, socket, home, "test.activate", { pid });
+          routes.push(`${route}: ${r.error !== undefined ? JSON.stringify(r.error).slice(0, 80) : JSON.stringify(r.result)}`);
+        } else {
+          const asn = sh("lsappinfo", ["find", `pid=${pid}`]).stdout.match(/ASN:[^\s"]+/)?.[0];
+          const r = asn === undefined ? { status: 1, stderr: "no ASN" } : sh("lsappinfo", ["setfront", asn]);
+          routes.push(`${route}: ${r.status === 0 ? "ok" : String(r.stderr).trim().slice(0, 80)}`);
+        }
+        const t0 = Date.now();
+        while (!ok() && Date.now() - t0 < 4_000) await sleep(50);
+      }
+      if (!ok()) {
+        const last = monitor!.items.at(-1);
+        const message = `could not bring ${what} (pid ${pid}${space === undefined || space === null ? "" : `, Space ${space}`}) to the front: now ${last?.front ?? "?"} (pid ${last?.frontPid ?? "?"}), Space ${last?.space ?? "?"} (${routes.join("; ")})`;
+        log(message);
+        throw new Error(message);
+      }
+      return routes.join("; ");
+    };
+    activateUser = async () => { await bringToFront(f.userPid!, "the user's app", baseline?.space ?? spaceBefore); };
+
+    log("launching the user's app and the fixture…");
+    launchFixture(built.fixtureUser, "user", f, false);
+    f.userPid = Number((await until("the user's app", 15_000, () => fixtureEvents(f).find((e) => e.role === "user" && e.ev === "launched"))).pid);
+    launchFixture(built.fixtureMain, "main", f, true);
+    f.mainPid = Number((await until("the fixture", 15_000, () => fixtureEvents(f).find((e) => e.role === "main" && e.ev === "launched"))).pid);
+    log(`the user's app in front: ${await bringToFront(f.userPid, "the user's app")}`);
+    // A full-screen app's Space takes no other window: the user's app opened on a regular desktop instead, and
+    // nothing could bring the user back to where they were. Refuse rather than leave them elsewhere.
+    const landedOn = monitor.items.at(-1)!.space;
+    if (spaceBefore !== null && landedOn !== null && landedOn !== spaceBefore) {
+      throw new Error(`the run started on Space ${spaceBefore}, but the user's app opened on Space ${landedOn} — start it from a regular desktop, not a full-screen app's Space`);
+    }
+    // The off-Space window: the fixture moves its OWN window to another regular Space (an existing desktop, else one
+    // it creates — private SkyLight, which may be allowed for one's own connection), falling back to full screen
+    // (its own Space; macOS switches to it, and bringing the user's app back to front returns the user's Space).
+    log("putting a fixture window on another Space…");
+    await postCommand(built.tool, f, "main", "offspace", {}, 15_000);
+    const placed = await until("the fixture's off-Space window", 15_000, () => fixtureEvents(f).find((e) => e.role === "main" && e.ev === "offspace"));
+    offspaceMethod = String(placed.method);
+    log(`off-Space window: ${offspaceMethod}${placed.error ? ` (earlier attempts: ${String(placed.error)})` : ""}`);
+    await sleep(800);
+    log(`back to your Space: ${await bringToFront(f.userPid, "the user's app on your Space", spaceBefore)}`);
+    await sleep(500);
+    const now = monitor.items.at(-1)!;
+    baseline = { frontPid: f.userPid, front: now.front, space: now.space };
+    log(`baseline: frontmost ${baseline.front} (pid ${baseline.frontPid}), Space ${baseline.space ?? "?"}`);
+
+    // One connection per session: a client is attached to ONE session at a time (a second attach moves it).
+    const token = readFileSync(join(home, "test-secrets", "harness-token"), "utf8").trim();
     client = await DaemonClient.connect(daemon.socket);
-    await client.hello(readFileSync(join(home, "test-secrets", "harness-token"), "utf8").trim(), "cu-live");
+    await client.hello(token, "cu-live");
+    askClient = await DaemonClient.connect(daemon.socket);
+    await askClient.hello(token, "cu-live-ask");
     const mainSid = await openSession(client, work, "bypass");
-    const askSid = await openSession(client, work, "ask");
+    const askSid = await openSession(askClient, work, "ask");
     probe = new LineProcess<ProbeEvent>(spawn(built.viewProbe, ["--socket", socket, "--home", home, "--session", mainSid, "--max-fps", "10", "--max-width", "480"], { stdio: ["pipe", "pipe", "pipe"] }),
       (l) => { try { return JSON.parse(l) as ProbeEvent; } catch { return undefined; } });
     await until("the mirror probe's subscription", 10_000, () => {
@@ -469,8 +550,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
       // Opening documents can bring an app forward (that is part of what is tested later): give the user back
       // their app before the scenarios start.
       await sleep(2_000);
-      await postCommand(built.tool, f, "user", "activate");
-      await until("the user's app frontmost again", 10_000, () => monitor!.items.at(-1)?.frontPid === baseline!.frontPid);
+      await activateUser();
     }
     inputWatchFrom = Date.now();
 
@@ -489,11 +569,12 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         since = Date.now();
         const sid = s.session === "ask" ? askSid : mainSid;
         const timeout = s.timeoutMs ?? 60_000;
-        const turn = await runTurn(client!, sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer);
+        const turn = await runTurn(s.session === "ask" ? askClient! : client!, sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer);
         const t1 = Date.now();
-        // HID input DURING the action is this scenario's failure (a rung-4 fallback took the real pointer — or it was
-        // you); after it, it stops the run.
-        const during = hidInputTimes(monitor!.items, since, t1);
+        // A rung-4 fallback DURING the action is this scenario's failure: the real pointer moved, or keys/clicks
+        // reached the user's app (which is in front). Not the HID idle counter: SkyLight's background pid route
+        // (rung 3) resets it like real input. After the action, real input (that counter) stops the run.
+        const moved = pointerMoves(monitor!.items, since, t1);
         inputWatchFrom = t1;
         while (Date.now() < t1 + WATCH_AFTER_MS) { abortIfInput(); await sleep(50); }
         end = Date.now();
@@ -507,7 +588,9 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           shots: shotsSince(built.tool, home, since),
         });
         if (s.session === "ask") checks.push(...cardChecks(turn.cards));
-        checks.push(check("no keyboard/pointer input during the action (no rung-4 fallback)", during.length === 0, `HID input at +${during.map((t) => t - since).join(", +")} ms`));
+        const leaked = events.filter((e) => e.role === "user" && (e.ev === "user.key" || e.ev === "user.mouse") && e.t >= since && e.t <= t1);
+        checks.push(check("the real pointer stayed put and your app got no keys or clicks (no rung-4 fallback)", moved.length === 0 && leaked.length === 0,
+          [moved.length > 0 ? `pointer moved at +${moved.map((t) => t - since).join(", +")} ms` : "", leaked.length > 0 ? `your app got ${leaked.map((e) => e.ev).join(", ")}` : ""].filter(Boolean).join("; ")));
         const focus = focusChecks(monitor!.items, since, t1 + WATCH_AFTER_MS, baseline!, s.allowExcursionMs);
         checks.push(...focus.checks);
         // Whether the deliberate self-activation REALLY took (macOS 14+ may refuse it) — else the scenario proves less.
@@ -525,14 +608,23 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
       }
       // Never carry a stolen focus into the next scenario.
       if (monitor!.items.at(-1)?.frontPid !== baseline!.frontPid) {
-        await postCommand(built.tool, f, "user", "activate").catch(() => undefined);
+        await activateUser().catch((e: unknown) => log(`could not restore your app: ${e instanceof Error ? e.message : String(e)}`));
         await sleep(500);
       }
+      if (result.status === "fail") failedOutputs.set(result.name, output.slice(0, 6_000));
       return { result, facts, output, since, end };
     };
 
-    const scenarios = [...SCENARIOS, ...(o.realApps ? REAL_APP_SCENARIOS : [])].filter((s) => o.only === undefined || s.name.toLowerCase().includes(o.only.toLowerCase()));
-    for (const s of scenarios) results.push((await runScenario(s)).result);
+    // `--script <file>`: run ONE ad-hoc ComputerV2 script (after the prelude) on the fixture and print its output —
+    // for working out what a scenario sees. Nothing else runs.
+    const scenarios: Scenario[] = o.script !== undefined
+      ? [{ name: `script ${o.script}`, group: "script", code: readFileSync(o.script, "utf8"), verify: (ctx) => [check("ran", !ctx.isError, ctx.output.slice(-300))] }]
+      : [...SCENARIOS, ...(o.realApps ? REAL_APP_SCENARIOS : [])].filter((s) => o.only === undefined || o.only.toLowerCase().split("|").some((part) => s.name.toLowerCase().includes(part)));
+    for (const s of scenarios) {
+      const r = await runScenario(s);
+      if (o.script !== undefined) log(`script output:\n${r.output}`);
+      results.push(r.result);
+    }
 
     // ── any app (`--apps`, and with --real-apps VS Code and Chrome when installed) ─────────────────────────────
     const deps = liveResolveDeps();
@@ -549,11 +641,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         const turn = await runTurn(client!, mainSid, computerV2Message(`${GENERIC_PRELUDE}\n${code}`, 30_000), 90_000);
         return { output: turn.output, isError: turn.isError, facts: markerFacts(turn.output) };
       }, async () => {
-        await postCommand(built.tool, f, "user", "activate");
-        await until("your Space and app back after the full-screen setup", 10_000, () => {
-          const last = monitor!.items.at(-1);
-          return last !== undefined && last.frontPid === baseline!.frontPid && (baseline!.space === null || last.space === baseline!.space);
-        });
+        await activateUser();
         await sleep(500);
         inputWatchFrom = Date.now();
       });
@@ -565,7 +653,18 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     if (failed.length > 0) attachRoutes(failed, helperPid!, runStartedAt, home);
 
     // ── performance ────────────────────────────────────────────────────────────────────────────────────────────
-    if (o.only === undefined) results.push(...await perf(built, f, helperPid, daemon.pid, probe, monitor, baseline, abortIfInput));
+    if (o.only === undefined) {
+      // The streaming measurement runs inside a turn that keeps working in the canvas: the helper streams a window
+      // at full rate only while it is being worked in (idle after 3 s → 1 fps; after the turn, a stream that has
+      // not changed pauses, peeking every 30 s) — measured without a turn, "streaming" was a paused mirror.
+      const streamTurn = (): Promise<unknown> => runTurn(client!, mainSid, computerV2Message(`${PRELUDE}
+const canvas = await apps.open(${JSON.stringify(FIXTURE_MAIN.name)}, { window: "Fixture Canvas" });
+await canvas.screenshot({ emit: false });
+const t0 = Date.now();
+while (Date.now() - t0 < 14000) { await canvas.click([4, 4]); await sleep(700); }
+report({ ok: true });`, 40_000), 100_000);
+      results.push(...await perf(built, f, helperPid, daemon.pid, probe, monitor, baseline, abortIfInput, streamTurn));
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     results.push({ name: err instanceof Aborted ? "ABORTED" : "setup", group: "run", status: "fail", ms: 0, checks: [check(err instanceof Aborted ? "no real input during the run" : "the run's setup", false, message)] });
@@ -589,6 +688,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     }
     if (probe !== undefined) await step("stopped the mirror probe", () => probe!.stop());
     client?.close();
+    askClient?.close();
     if (daemon !== undefined) await step("stopped the live daemon", () => daemon!.proc.stop(10_000));
     if (helperPid !== undefined) await step("quit the helper instance", async () => {
       try { process.kill(helperPid!, "SIGTERM"); } catch { /* gone */ }
@@ -661,7 +761,9 @@ async function runGenericApp(a: GenericApp, runScenario: RunScenario, setupTurn:
   const rows: Row[] = [];
   const group = `app ${a.query}`;
   const skipRow = (label: string, reason: string): Row => ({ result: { name: `${a.query}: ${label}`, group, status: "skip", ms: 0, checks: [], note: reason }, since: 0, end: 0 });
-  const bind = await runScenario(genericScenario(a, "bind on this desktop", "bind"));
+  // An app the bind LAUNCHES may activate itself as it starts (Chrome does); the guardian puts your app back — the
+  // same allowance as the fixture's own self-activation scenarios.
+  const bind = await runScenario({ ...genericScenario(a, "bind on this desktop", "bind"), allowExcursionMs: 500 });
   rows.push(bind);
   if (bind.facts.installed === false) return rows;
   const wasRunning = typeof bind.facts.wasRunning === "boolean" ? bind.facts.wasRunning : undefined;
@@ -777,13 +879,15 @@ function focusChecks(samples: readonly MonitorSample[], from: number, to: number
   };
 }
 
-async function perf(built: Built, f: Fixtures, helperPid: number, daemonPid: number, probe: LineProcess<ProbeEvent>, monitor: LineProcess<MonitorSample>, base: FocusBaseline, abortIfInput: () => void): Promise<ScenarioResult[]> {
+async function perf(built: Built, f: Fixtures, helperPid: number, daemonPid: number, probe: LineProcess<ProbeEvent>, monitor: LineProcess<MonitorSample>, base: FocusBaseline, abortIfInput: () => void, streamTurn: () => Promise<unknown>): Promise<ScenarioResult[]> {
   const out: ScenarioResult[] = [];
-  // Streaming: the canvas animates, its window is bound, the probe subscribes to frames.
+  // Streaming: the canvas animates while a turn works in it; the probe is subscribed to the session's frames.
   let t0 = Date.now();
   await postCommand(built.tool, f, "main", "animate", { on: true });
-  await sleep(2_000);
+  const turn = streamTurn().catch((e: unknown) => e);
+  await sleep(2_500);
   const stream = summarizeTop(await topDelta(helperPid, 2, 5), 5);
+  await turn;
   await postCommand(built.tool, f, "main", "animate", { on: false });
   abortIfInput();
   const framesWhileStreaming = probe.items.filter((p) => p.ev === "frame" && p.t >= t0).length;
@@ -838,6 +942,9 @@ async function main(): Promise<void> {
     return await liveRun(built, o);
   })();
   console.log(renderTable(results));
+  // `--report <file>`: every row's checks in full, plus each failing scenario's tool output (capped) — what the
+  // table's one cut-short detail column cannot hold.
+  if (o.report !== undefined) writeFileSync(o.report, `${JSON.stringify({ results, outputs: Object.fromEntries(failedOutputs) }, null, 2)}\n`);
   process.exit(results.some((r) => r.status === "fail") ? 1 : 0);
 }
 
