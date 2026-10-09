@@ -110,7 +110,10 @@ extension CUCore {
     }
 
     /// Re-activates the user's app, raising its key window first so macOS returns to the desktop that window
-    /// is on, then waits up to 600 ms for the view to come back. Returns the view it ends on.
+    /// is on, and retries the activation the way activateWithOptions does: again every `restoreRetryMs` while
+    /// the app is not front, polling every 30 ms, until the view is back or `restoreDeadlineMs` (2 s) passes.
+    /// Never on the main queue: the guardian dispatches it, and the per-act guard runs on the target's pid
+    /// queue. Returns the view it ends on.
     @discardableResult
     func restoreUserView(_ before: CUUserView, user: pid_t) -> CUUserView {
         if before.space != nil, userView().space != before.space,
@@ -118,11 +121,22 @@ extension CUCore {
             try? ax.perform(window, kAXRaiseAction)
         }
         _ = sys.activate(pid: user)
+        var lastActivate = clock.nowMs()
+        var attempts = 1
         var now = userView()
-        let deadline = clock.nowMs() + (userViewSettleMs > 0 ? 600 : 0)
+        let deadline = lastActivate + restoreDeadlineMs
         while now != before, clock.nowMs() < deadline {
             usleep(30_000)
             now = userView()
+            if now.front != user, clock.nowMs() - lastActivate >= restoreRetryMs, clock.nowMs() < deadline {
+                _ = sys.activate(pid: user)
+                lastActivate = clock.nowMs()
+                attempts += 1
+                now = userView()
+            }
+        }
+        if attempts > 1 {
+            CULog.guardian.notice("restore: activated the user's app \(attempts, privacy: .public) times; \(now == before ? "back" : "not back within the deadline", privacy: .public)")
         }
         return now
     }

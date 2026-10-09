@@ -131,6 +131,44 @@ final class FocusGuardianTests: XCTestCase {
         XCTAssertEqual(sys.activated.last, 500)
     }
 
+    /// A core whose restore retries for real (a short deadline), with a thief that takes the front back
+    /// `refusals` times after each activation of the user's app (a negative count: it never yields).
+    private func retryWorld(refusals: Int) -> (CUCore, FakeSystem) {
+        let sys = FakeSystem()
+        sys.running = [500, 800]; sys.front = 800; sys.space = 100
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        core.restoreDeadlineMs = 400
+        core.restoreRetryMs = 40
+        var left = refusals
+        sys.onActivate = { pid in
+            guard pid == 500, left != 0 else { return }
+            left -= 1
+            sys.front = 800  // the thief comes back in front
+        }
+        return (core, sys)
+    }
+
+    func testTheRestoreRetriesTheUsersActivationUntilItIsFront() {
+        let (core, sys) = retryWorld(refusals: 2)
+        core.guardianRestore(CUGuardedView(app: 500, space: 100), thief: 800, repeatOffender: false, cause: "test")
+        XCTAssertEqual(sys.activated.filter { $0 == 500 }.count, 3, "two refused activations, then the one that held")
+        XCTAssertEqual(sys.frontmostPid(), 500)
+        let notes = core.takeGuardianNotes()
+        XCTAssertEqual(notes.count, 1)
+        XCTAssertTrue(notes.first?.hasSuffix("tried to come to the front; you were put back") ?? false, notes.first ?? "")
+    }
+
+    func testTheRestoreGivesUpAtTheDeadline() {
+        let (core, sys) = retryWorld(refusals: -1)
+        let start = Date()
+        core.guardianRestore(CUGuardedView(app: 500, space: 100), thief: 800, repeatOffender: false, cause: "test")
+        let took = Date().timeIntervalSince(start)
+        XCTAssertGreaterThan(sys.activated.filter { $0 == 500 }.count, 3, "kept retrying")
+        XCTAssertLessThan(took, 1.5, "stopped at the deadline (400 ms here; 2 s live)")
+        XCTAssertEqual(sys.frontmostPid(), 800)
+    }
+
     func testAnUnprotectedCPSTheftIsPassedThrough() {
         let sys = FakeSystem()
         sys.running = [1]; sys.front = 1

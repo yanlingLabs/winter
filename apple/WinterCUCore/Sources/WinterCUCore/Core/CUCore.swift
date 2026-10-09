@@ -82,6 +82,7 @@ public final class CUCore: @unchecked Sendable {
             userViewLateCheck = false
             guardianLiveTapEnabled = false
             guardianRestoreSync = true
+            restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
         }
     }
 
@@ -447,6 +448,9 @@ public final class CUCore: @unchecked Sendable {
     var guardianLiveTapEnabled = true
     /// Whether the guardian's restore runs inline (tests, synchronous) rather than dispatched off-main.
     var guardianRestoreSync = false
+    /// How long a restore keeps re-activating the user's app (activateWithOptions' 2 s), and how often.
+    var restoreDeadlineMs: Double = 2000
+    var restoreRetryMs: Double = 120
     /// Seconds since the last physical user input, injectable for tests.
     var secondsSinceUserInputOverride: (() -> TimeInterval)?
     /// The window server's key-focus pid, injectable for tests (the swallowed-click retry).
