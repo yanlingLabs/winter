@@ -245,7 +245,7 @@ final class OffDesktopActTests: XCTestCase {
         poster.onPost = nil
         try await act(.scroll(CUScrollAction(point: [400, 300], shotId: s, direction: .down, pages: 3)))
         XCTAssertEqual(poster.keyDowns.map(\.keycode), [121, 121, 121], "Page Down ×3")
-        XCTAssertTrue(ax.written.contains("\(token(webArea)):AXFocused"))
+        XCTAssertFalse(ax.written.contains("\(token(webArea)):AXFocused"), "web content is focused by press, never the AXFocused write")
         XCTAssertTrue(sys.moved.isEmpty)
     }
 

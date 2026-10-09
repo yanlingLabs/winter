@@ -169,6 +169,29 @@ final class LiveTests: XCTestCase {
         }
     }
 
+    /// Opening a PDF via Finder's Open in the background must not switch the user's front app or desktop: the
+    /// Focus Guardian puts them back. Arrange a Finder window with a document selected; run from this desktop.
+    /// Skips without a selection. Asserts the front app and Space are unchanged a second after the open.
+    func testOpeningADocumentInTheBackgroundLeavesTheUsersFrontAndSpaceAlone() async throws {
+        try requireAccessibility()
+        let sky = CUSkyLight.system
+        let bound = try await core.targetBind(TargetBindParams(sessionId: "live-guard", app: "Finder", mirror: false, privatePath: true))
+        defer { Task { _ = try? await core.targetRelease(TargetReleaseParams(targetId: bound.targetId)) } }
+        let front0 = sky.frontProcessPid(), space0 = sky.activeSpace()
+        let selected = try await core.targetFind(TargetFindParams(targetId: bound.targetId, query: .fields(role: "image", name: nil, text: nil)))
+        try XCTSkipUnless(selected.elements.contains { ($0.name ?? "").lowercased().hasSuffix(".pdf") },
+                          "select a PDF in a Finder window first")
+        let pdf = try XCTUnwrap(selected.elements.first { ($0.name ?? "").lowercased().hasSuffix(".pdf") })
+        _ = try? await core.targetAct(TargetActParams(targetId: bound.targetId, sessionId: "live-guard", callId: "o",
+            action: .action(CUAXAction(ref: pdf.ref, name: "open")), access: .full, allowForeground: false, privatePath: true))
+        // The opening app can take seconds to come up; the guardian must still put the user back.
+        for _ in 0..<12 {
+            try await Task.sleep(nanoseconds: 300_000_000)
+            XCTAssertEqual(sky.frontProcessPid(), front0, "an app that opened the document took the front")
+            XCTAssertEqual(sky.activeSpace(), space0, "the desktop changed")
+        }
+    }
+
     func testStaleRefAfterRelease() async throws {
         try requireAccessibility()
         let bound = try await core.targetBind(TargetBindParams(sessionId: "live", app: "TextEdit", mirror: false))

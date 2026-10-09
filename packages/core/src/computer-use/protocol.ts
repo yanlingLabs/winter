@@ -97,6 +97,8 @@ export interface FindResult { elements: Array<{ ref: number; role: string; name?
 export interface ScreenshotBudget { maxLongEdge: number; tile?: number; maxTiles?: number; quality: number }
 export interface ScreenshotResult {
   imageBase64: string; mime: "image/jpeg"; width: number; height: number; shotId: string; settled?: boolean; waitedMs?: number;
+  /** The captured area's size in window POINTS (clicks take image pixels, which differ on a Retina display). */
+  pointsWidth?: number; pointsHeight?: number;
   /** `target.screenshot`: what the image is when it is not a live capture, e.g. captured from another desktop. */
   detail?: string;
 }

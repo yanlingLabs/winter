@@ -7,6 +7,11 @@ public protocol CUClock: Sendable {
     func sleep(ms: Double) async throws
 }
 
+public extension CUClock {
+    /// Monotonic seconds (for the focus guardian's windows).
+    func nowSeconds() -> Double { nowMs() / 1000 }
+}
+
 public struct CUSystemClock: CUClock {
     public init() {}
     public func nowMs() -> Double { Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000 }

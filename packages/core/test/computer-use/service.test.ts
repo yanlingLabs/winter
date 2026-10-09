@@ -381,6 +381,12 @@ describe("ComputerV2: screenshots, points and the vision gate", () => {
     expect(r.content.filter((c) => c.type === "image")).toHaveLength(2);
   }, 30_000);
 
+  macOnly("a screenshot says its pixel coordinate frame and the window's point size", async () => {
+    const w = world();
+    const r = await w.run("const notes = await apps.open('Notes')\nawait notes.screenshot()");
+    expect(text(r)).toContain("clicks take this image's pixel coordinates: 800\u00d7600 (window 1512\u00d7949 pt)");
+  }, 30_000);
+
   macOnly("without vision: screenshot, show and Points are NotAllowed", async () => {
     const w = world();
     const r = await w.run("const notes = await apps.open('Notes')\ntry { await notes.screenshot() } catch (e) { print('shot', e.name, e.message) }\ntry { await notes.click([10, 10]) } catch (e) { print('point', e.name) }", { vision: false });

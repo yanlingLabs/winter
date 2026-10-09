@@ -303,10 +303,13 @@ public struct TargetScreenshotResult: Codable, Sendable, Equatable {
     public var shotId: String
     public var settled: Bool
     public var waitedMs: Int
+    /// The captured area's size in WINDOW POINTS (what a click's point maps onto differs from the image px).
+    public var pointsWidth: Double?
+    public var pointsHeight: Double?
     /// What was done to take it (e.g. the window was moved here from another Space).
     public var detail: String?
     public init(imageBase64: String, mime: String, width: Int, height: Int, shotId: String, settled: Bool, waitedMs: Int,
-                detail: String? = nil) {
+                pointsWidth: Double? = nil, pointsHeight: Double? = nil, detail: String? = nil) {
         self.imageBase64 = imageBase64
         self.mime = mime
         self.width = width
@@ -314,6 +317,8 @@ public struct TargetScreenshotResult: Codable, Sendable, Equatable {
         self.shotId = shotId
         self.settled = settled
         self.waitedMs = waitedMs
+        self.pointsWidth = pointsWidth
+        self.pointsHeight = pointsHeight
         self.detail = detail
     }
 }

@@ -9,4 +9,6 @@ enum CULog {
     static let bind = Logger(subsystem: "com.winter.computeruse", category: "bind")
     /// Which route each act took (AX, pid events, private path, foreground) and why one failed.
     static let act = Logger(subsystem: "com.winter.computeruse", category: "act")
+    /// The continuous focus guardian: when an app took the user's front/desktop and was put back.
+    static let guardian = Logger(subsystem: "com.winter.computeruse", category: "guardian")
 }

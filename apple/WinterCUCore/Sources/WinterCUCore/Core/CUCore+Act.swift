@@ -62,7 +62,10 @@ extension CUCore {
             }
         }
         CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): \(Self.routeName(outcome.rung), privacy: .public)\(outcome.detail.map { " — " + $0 } ?? "", privacy: .public)")
-        return TargetActResult(rung: outcome.rung.rawValue, detail: outcome.detail)
+        let notes = takeGuardianNotes()
+        let detail = (notes + [outcome.detail].compactMap { $0 }).isEmpty ? nil
+            : (notes + [outcome.detail].compactMap { $0 }).joined(separator: "; ")
+        return TargetActResult(rung: outcome.rung.rawValue, detail: detail)
     }
 
     static func actionName(_ a: CUAction) -> String {
@@ -367,6 +370,7 @@ extension CUCore {
             throw CUError.windowElsewhere(t.appName, sending: what, subject: subject)
         }
         let route: CURoute = t.isChromium && skyLight.isAvailable ? .skyLight : .publicPid
+        enforceFocus(p, t)  // believe-active first: an inactive window takes a click as activation only
         send(event, t)
         try token.check()
         let used = try body(synth(p), route)
@@ -706,8 +710,12 @@ extension CUCore {
     /// if the app still activates, the guard's note says it had to be undone.
     func enforceFocus(_ p: TargetActParams, _ t: CUTarget) {
         guard let enforcer = focusEnforcer(for: t, privatePath: p.privatePath) else { return }
+        noteSyntheticActivation()  // the guardian must not read the activation this posts as the user's
+        // Advisory now that focus no longer uses the AXFocused write: if the guard still logs a fault on this
+        // act the synthetic activation did not help, and we can drop it; if the enforcer ran and no fault
+        // follows, it was unneeded or it held. The guard is authoritative either way.
         if enforcer.enforce(windowID: t.windowID) {
-            CULog.act.notice("focus in \(t.appName, privacy: .public): set the app's active state so it need not activate itself")
+            CULog.act.notice("focus in \(t.appName, privacy: .public): posted a synthetic active state (advisory; the user-view guard is authoritative)")
         }
     }
 
@@ -723,15 +731,56 @@ extension CUCore {
         return pid
     }
 
-    /// Focuses an element over accessibility, checking the user's view: WebKit makes the page's window key and
-    /// its app ACTIVE when a web field is focused this way. A move is put back at once and said (the act's
-    /// guard would put it back too, after the act); the write itself is kept — the text needs the focus.
-    func focusField(_ e: AXUIElement, _ t: CUTarget) {
+    /// Whether the app's focused UI element is `e` now (its own, or its focused window's).
+    func isFocused(_ e: AXUIElement, _ t: CUTarget) -> Bool {
+        if let f = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute), CFEqual(f, e) { return true }
+        if let w = try? windowElement(t), let f = ax.element(w, kAXFocusedUIElementAttribute), CFEqual(f, e) { return true }
+        return false
+    }
+
+    /// Focuses `e` for typing WITHOUT the `AXFocused` write where that write would steal the user's view: on a
+    /// WebKit/Chromium web element, or in an app remembered as activating itself on the write (the live gate:
+    /// writing AXFocused on a Safari web field made Safari come forward and switch the user's Space; AXPress
+    /// and key events did not). The order (the controller's ruling): already focused → nothing; else press it
+    /// (AXPress/AXConfirm, or a window-targeted click at its centre when it is on screen) and verify; only for
+    /// a plain native field in an app not known to activate does the `AXFocused` write remain, under the
+    /// user-view guard — and if that write trips the guard, the app is remembered so its native fields use the
+    /// press route first too, for the helper's lifetime. Returns whether focus is on `e` now.
+    @discardableResult
+    func focusField(_ e: AXUIElement, _ t: CUTarget) -> Bool {
+        if isFocused(e, t) { return true }
+        if pressToFocus(e, t) { return true }
+        // The write is forbidden for web content and apps known to activate on it: leave focus, say so.
+        let web = isWebContent(e) || keyboardTarget(t, focused: e) != t.pid
+        if web || appActivatesOnFocusWrite(t) {
+            t.addViewNote("couldn't place focus in \(t.appName)'s field without the accessibility focus write (which makes \(t.appName) come forward), so the action went to whatever had focus — check the state")
+            return false
+        }
+        // A plain native field, no history of activating: the write, under the guard.
         let before = userView()
         try? ax.set(e, kAXFocusedAttribute, kCFBooleanTrue)
         let after = view(after: before, settleMs: stepSettleMs)
-        guard after != before else { return }
-        t.addViewNote(viewMoved(before, after, t, route: "focusing the field over accessibility", late: false))
+        if after != before {
+            rememberFocusWriteActivates(t)  // use the press route first for this app from now on
+            t.addViewNote(viewMoved(before, after, t, route: "focusing the field over accessibility", late: false))
+        }
+        return isFocused(e, t)
+    }
+
+    /// Focuses `e` by pressing it, never by the `AXFocused` write: a listed `AXPress`/`AXConfirm`, else a
+    /// window-targeted click at its centre when the window is on screen. Verified against the focused element.
+    /// False when nothing placed focus on it.
+    func pressToFocus(_ e: AXUIElement, _ t: CUTarget) -> Bool {
+        let actions = ax.actions(e)
+        for a in [kAXPressAction, "AXConfirm"] where actions.contains(a) {
+            if (try? ax.perform(e, a)) != nil, isFocused(e, t) { return true }
+        }
+        if let c = ElementInfo(e, ax).center, sys.window(id: t.windowID)?.onScreen == true {
+            let windowFor = self.windowFor(t)
+            try? synth.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: .publicPid)
+            if isFocused(e, t) { return true }
+        }
+        return false
     }
 
     /// Polls for evidence that an edit landed: the value changed, or a value-change notification arrived.
@@ -1572,8 +1621,10 @@ extension CUCore {
     /// Rung 4: bring the app forward, act with the real pointer, then put the pointer and the user's app back.
     /// Every press, drag step and release is hit-tested by the caller's check.
     private func inForeground<T>(_ t: CUTarget, _ body: () throws -> T) throws -> T {
-        // The user agreed to this act taking the foreground: the user-view guard leaves it alone.
+        // The user agreed to this act taking the foreground: the user-view guard and the Focus Guardian leave
+        // it alone, for this one action.
         t.consentedForeground = true
+        guardianExempt(t.pid)
         let previous = sys.frontmostPid()
         let cursor = sys.cursorLocation()
         _ = sys.activate(pid: t.pid)

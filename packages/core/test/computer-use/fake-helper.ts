@@ -127,7 +127,7 @@ export class FakeHelper {
       case "target.screenshot":
       case "screen.screenshot": {
         const shotId = `shot${this.nextShot++}`;
-        return { imageBase64: Buffer.from(`jpeg-${shotId}`).toString("base64"), mime: "image/jpeg", width: 800, height: 600, shotId, settled: true, waitedMs: 0 };
+        return { imageBase64: Buffer.from(`jpeg-${shotId}`).toString("base64"), mime: "image/jpeg", width: 800, height: 600, pointsWidth: 1512, pointsHeight: 949, shotId, settled: true, waitedMs: 0 };
       }
       case "screen.appAt": return { app: "Notes", bundleId: "com.apple.Notes", windowId: 7 };
       case "target.act": return { rung: 1 };

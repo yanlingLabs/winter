@@ -38,8 +38,16 @@ public struct CUShotSpace: Sendable, Equatable {
               pixel.x >= 0, pixel.y >= 0,
               pixel.x <= Double(imageWidth), pixel.y <= Double(imageHeight)
         else {
+            // A common mistake is window POINTS (or a 2× pixel value) instead of this image's pixels.
+            let looksPoints = pixel.x <= pointsWidth + 1 && pixel.y <= pointsHeight + 1
+                && (pixel.x > Double(imageWidth) || pixel.y > Double(imageHeight))
+            let looks2x = pixel.x <= Double(imageWidth) * 2 + 1 && pixel.y <= Double(imageHeight) * 2 + 1
+                && (pixel.x > Double(imageWidth) || pixel.y > Double(imageHeight))
+            let hint = looksPoints ? " — that looks like window points (\(fmt(pointsWidth))×\(fmt(pointsHeight))); use this image's pixels"
+                : looks2x ? " — that looks like a 2× (Retina) value; use this image's pixels, not the backing size"
+                : ""
             throw CUError.invalidParams(
-                "point [\(fmt(pixel.x)), \(fmt(pixel.y))] is outside screenshot \(id) (\(imageWidth)×\(imageHeight) px)")
+                "point [\(fmt(pixel.x)), \(fmt(pixel.y))] is outside screenshot \(id); valid x 0–\(imageWidth), y 0–\(imageHeight) px (window \(fmt(pointsWidth))×\(fmt(pointsHeight)) pt)\(hint)")
         }
         let x = pixel.x * pointsWidth / Double(imageWidth)
         let y = pixel.y * pointsHeight / Double(imageHeight)
