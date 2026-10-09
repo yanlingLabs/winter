@@ -95,11 +95,11 @@ final class LiveGateFinderTests: XCTestCase {
         let stub = FakeSystem.window(28, pid: pid, CGRect(x: 0, y: 482, width: 64, height: 64))  // on screen
         var now: Double = 0
         let found = try await CUBindWait.run(launched: false, deadlineMs: 3000, CUBindWait.Effects(
-            read: { reads += 1; return ([], [real, stub]) },
+            read: { reads += 1; return ([], [real, stub]) }, reopen: { XCTFail("no reopen") },
             sleep: { now += $0 }, now: { now }))
         XCTAssertEqual(reads, 1, "straight to the resolver")
         XCTAssertEqual(now, 0)
-        XCTAssertEqual(found.server.count, 2)
+        XCTAssertFalse(found.reopened)
     }
 
     // MARK: disabled controls and menu commands
