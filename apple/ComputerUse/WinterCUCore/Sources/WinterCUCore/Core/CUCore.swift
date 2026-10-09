@@ -747,6 +747,8 @@ public final class CUCore: @unchecked Sendable {
             } catch let e as CUError where !["permission_missing", "cancelled", "invalid_params"].contains(e.code) {
                 // ScreenCaptureKit refuses a window on another Space or in full screen ("Failed to start stream").
                 // Never moved here for a picture (that needs Dock injection): the window server's image or nothing.
+                // The capturer knows only the window: whether its app quit or only the window closed is the target's.
+                if e.code == "target_lost" { throw CUError.targetLost(e.message, reason: lostReason(t)) }
                 guard try await queues.run(t.pid, { [self] in isOffThisDesktop(t) }) else { throw e }
                 guard t.privatePath, !privateTried, let shot = try await offScreenShot(t, region, p.budget) else {
                     throw CUError.screenshotElsewhere(t.appName)
@@ -786,7 +788,7 @@ public final class CUCore: @unchecked Sendable {
     /// drawing there), cropped to `region` and fitted to the budget like a ScreenCaptureKit capture. Nil when
     /// there is none, or it is blank (a window macOS has not drawn).
     func offScreenShot(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget) async throws -> CUCapturedImage? {
-        guard let frame = sys.window(id: t.windowID)?.frame else { throw CUError.targetLost("the window is gone") }
+        guard let frame = sys.window(id: t.windowID)?.frame else { throw CUError.targetLost("the window is gone", reason: lostReason(t)) }
         let area = try CUCapturer.windowArea(region: region, windowSize: frame.size)
         guard let image = try privateWindowImage(t.windowID, globalRect: area.offsetBy(dx: frame.minX, dy: frame.minY)) else {
             CULog.act.notice("screenshot: no window-server image of \(t.appName, privacy: .public)'s window \(t.windowID, privacy: .public)")
@@ -925,7 +927,7 @@ public final class CUCore: @unchecked Sendable {
         if let s = screenShot { return try s.screenPoint(pixel: pixel) }
         for t in all {
             if let s = t.shots.last(where: { $0.id == shotId }), case .window(let wid, _) = s.anchor {
-                guard let w = CUWindowServer.window(id: wid) else { throw CUError.targetLost("that window is gone") }
+                guard let w = CUWindowServer.window(id: wid) else { throw CUError.targetLost("that window is gone", reason: lostReason(t)) }
                 return try s.screenPoint(pixel: pixel, windowOrigin: w.frame.origin)
             }
         }
@@ -996,7 +998,9 @@ public final class CUCore: @unchecked Sendable {
 
     func target(_ id: String) throws -> CUTarget {
         lock.lock(); defer { lock.unlock() }
-        guard let t = targets[id] else { throw CUError.targetLost("unknown target \(id) — bind the app again") }
+        guard let t = targets[id] else {
+            throw CUError.targetLost("unknown target \(id) — bind the app again", reason: Self.unknownTargetReason(id, issuedUpTo: targetSeq))
+        }
         return t
     }
 
@@ -1039,12 +1043,12 @@ public final class CUCore: @unchecked Sendable {
     /// The target's app and window still exist; otherwise it is dropped, `targetLost` fires and this throws.
     func ensureAlive(_ t: CUTarget) throws {
         if !sys.appRunning(t.pid) {
-            lose(t, reason: "app_quit")
-            throw CUError.targetLost("\(t.appName) quit — bind it again")
+            lose(t, reason: .appQuit)
+            throw CUError.targetLost("\(t.appName) quit — bind it again", reason: .appQuit)
         }
         if windowGone(t) {
-            lose(t, reason: "window_closed")
-            throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window")
+            lose(t, reason: .windowClosed)
+            throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window", reason: .windowClosed)
         }
     }
 
@@ -1073,9 +1077,21 @@ public final class CUCore: @unchecked Sendable {
         return nil
     }
 
-    func lose(_ t: CUTarget, reason: String) {
+    /// Why an id names no target: one this run never issued (`t<N>` past the counter `issuedUpTo`) came from a helper
+    /// that has since restarted; one it did issue was released or lost earlier.
+    static func unknownTargetReason(_ id: String, issuedUpTo: Int) -> CUTargetLostReason {
+        guard id.hasPrefix("t"), let n = Int(id.dropFirst()), n >= 1 else { return .unknown }
+        return n <= issuedUpTo ? .unknown : .helperRestart
+    }
+
+    /// What a window that cannot be found means for its target: its app quit, or only the window closed.
+    func lostReason(_ t: CUTarget) -> CUTargetLostReason {
+        sys.appRunning(t.pid) ? .windowClosed : .appQuit
+    }
+
+    func lose(_ t: CUTarget, reason: CUTargetLostReason) {
         guard remove(t.id) != nil else { return }
-        emit { $0.targetLost(targetId: t.id, reason: reason) }
+        emit { $0.targetLost(targetId: t.id, reason: reason.rawValue) }
         emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: t.windowID) }
     }
 
@@ -1089,7 +1105,7 @@ public final class CUCore: @unchecked Sendable {
         let affected = targets.values.filter { $0.pid == pid }
         lock.unlock()
         for t in affected where windowGone(t) {
-            lose(t, reason: "window_closed")
+            lose(t, reason: .windowClosed)
         }
     }
 
@@ -1183,8 +1199,8 @@ public final class CUCore: @unchecked Sendable {
         noteWindows(pid: t.pid, listed)
         guard let w = listed.first(where: { $0.id == wid }) else {
             guard let server = liveServerWindow(t), !(!server.onScreen && sys.windowOnAnySpace(wid) == false) else {
-                lose(t, reason: "window_closed")
-                throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window")
+                lose(t, reason: .windowClosed)
+                throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window", reason: .windowClosed)
             }
             // Still there for the window server but not in the AX list: another Space or full screen (reached
             // where it is by remote token), or an app that is not answering.
@@ -1333,7 +1349,7 @@ public final class CUCore: @unchecked Sendable {
             self.lock.lock()
             let affected = self.targets.values.filter { $0.pid == app.processIdentifier }
             self.lock.unlock()
-            for t in affected { self.lose(t, reason: "app_quit") }
+            for t in affected { self.lose(t, reason: .appQuit) }
         })
         observers.append(DistributedNotificationCenter.default().addObserver(
             forName: NSNotification.Name("com.apple.Carbon.TISNotifySelectedKeyboardInputSourceChanged"), object: nil,

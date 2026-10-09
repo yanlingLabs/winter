@@ -257,6 +257,16 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(rig.notifications, [.targetLost(targetId: "t1", reason: "window_closed")])
     }
 
+    func testTargetLostCarriesOnlyTheDocumentedReasons() {
+        let rig = Rig()
+        for reason in ["app_quit", "window_closed", "helper_restart", "unknown", "something_else"] {
+            rig.coordinator.targetLost(targetId: "t1", reason: reason)
+        }
+        XCTAssertEqual(rig.notifications, ["app_quit", "window_closed", "helper_restart", "unknown", "unknown"].map {
+            .targetLost(targetId: "t1", reason: $0)
+        }, "an undocumented reason goes out as unknown")
+    }
+
     func testTheEnginesPermissionChangesReachTheDaemonOncePerChange() {
         let rig = Rig()
         rig.coordinator.permissionsChanged(accessibility: true, screenRecording: false)

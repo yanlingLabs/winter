@@ -185,6 +185,14 @@ describe("the helper's own version (apple/ComputerUse/VERSION)", () => {
       .toMatch(new RegExp(`<key>CFBundleShortVersionString</key>\\s*<string>${v.replaceAll(".", "\\.")}</string>`));
   });
 
+  test("PROTOCOL.md names the same helper version, and its changelog ends at it", () => {
+    const spec = readFileSync(join(REPO_ROOT, "apple", "ComputerUse", "PROTOCOL.md"), "utf8");
+    const v = readHelperVersion();
+    expect(/^Helper version: `([^`]+)`/m.exec(spec)?.[1]).toBe(v);
+    const rows = [...spec.matchAll(/^\| \d+ \| (\d+\.\d+\.\d+) \|/gm)].map((m) => m[1]);
+    expect(rows.at(-1)).toBe(v);
+  });
+
   test("stamping touches only the marked helper lines, and refuses a project.yml without them", () => {
     const yml = [
       `        CFBundleShortVersionString: "0.124.0"`, `        CFBundleVersion: "0.124.0"`,

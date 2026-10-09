@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.0.0` (the contents of [`VERSION`](VERSION))
+Helper version: `1.1.0` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -119,7 +119,7 @@ The first request on every connection must be `hello`.
 | `client` | `"daemon"` \| `"app"` | the kind the client claims; its code must satisfy it (§2.1) |
 | `home` | string | the Winter home the client belongs to; compared after `realpath` |
 
-Result: `{"protocol": 1, "helperVersion": "1.0.0", "pid": 4242}` — the helper's protocol, its version and
+Result: `{"protocol": 1, "helperVersion": "1.1.0", "pid": 4242}` — the helper's protocol, its version and
 its pid (the daemon verifies that pid's code signature).
 
 Refusals — each is answered, then the connection is **closed**:
@@ -140,7 +140,8 @@ succeeds, an unparseable line is answered and the connection closed.
 ## 4. Methods
 
 Frames are `[x, y, w, h]` and points `[x, y]`, in global screen points with a top-left origin unless stated.
-Every method that names a `targetId` fails `target_lost` when the target is unknown or its app/window is gone.
+Every method that names a `targetId` fails `target_lost` when the target is unknown or its app/window is gone;
+its `data.reason` says which (§5).
 Engine methods that read the accessibility tree fail `permission_missing` (`permission: "accessibility"`)
 without the grant; captures fail `permission_missing` (`"screenRecording"`) without that one.
 
@@ -309,7 +310,7 @@ failure are `unsupported`; a Swift task cancellation is `cancelled`.
 | `home_mismatch` | `home` | §3 |
 | `not_allowed` | `reason`: `identity` \| `client` \| `click_only` | the client or the user's setting does not allow it |
 | `permission_missing` | `permission`: `accessibility` \| `screenRecording` | the helper lacks that grant |
-| `target_lost` | — | the target is unknown, its app quit or its window closed |
+| `target_lost` | `reason`: `app_quit` \| `window_closed` \| `helper_restart` \| `unknown` | the target is gone; `reason` is what the helper observed (below) |
 | `stale_ref` | `ref` | the element is gone — snapshot again |
 | `needs_foreground` | — | the app accepts this input only in the foreground |
 | `window_elsewhere` | — | the window is on another Space / in full screen and could not be reached |
@@ -320,6 +321,19 @@ failure are `unsupported`; a Swift task cancellation is `cancelled`.
 | `invalid_params` | — | bad params, an unknown shot, an oversize line or result |
 | `unsupported` | `axError?` | unknown method, an element that does not support it, an internal failure |
 | `busy` | `retryable` (default `true`), `uncertain?`, `axError?` | retry, unless `uncertain: true` (then `retryable: false`: it may have happened) |
+
+`target_lost` reasons — what the helper observed, so a client never calls a closed window a quit app:
+
+| `reason` | When |
+| --- | --- |
+| `app_quit` | the target's app is no longer running (checked on use, while typing, or when macOS reports it terminated) |
+| `window_closed` | the app runs but the bound window is gone (a window the helper cannot find is classified by whether its app still runs) |
+| `helper_restart` | the `targetId` was never issued by this helper run (`t<N>` past its counter): it came from before a restart |
+| `unknown` | anything else, e.g. an id this run issued and has since released |
+
+The same four values are the `targetLost` notification's `reason` (§7.1); a helper never sends another. The
+daemon words each one ("Notes quit — open it again with apps.open()", "Notes's window closed — call apps.open or
+useWindow to pick another", …) and reads an absent `reason` (an older helper) as `unknown`.
 
 `refused` reasons: `secure_field`, `auth_dialog`, `privacy_pane`, `winter_itself`, `save_path`,
 `focus_unknown`, `focus_not_placed`, `applescript`, `automation_denied`.
@@ -340,7 +354,7 @@ Notifications are `{"jsonrpc":"2.0","method":…,"params":…}` lines with no `i
 | Method | Params | When |
 | --- | --- | --- |
 | `escPressed` | `{sessionIds: [string]}` | the user pressed Esc while scripts ran; the ids of every session marked active by `script.active` (sorted) |
-| `targetLost` | `{targetId, reason: "app_quit" \| "window_closed"}` | a bound target's app quit or its window closed |
+| `targetLost` | `{targetId, reason: "app_quit" \| "window_closed" \| "helper_restart" \| "unknown"}` | a bound target's app quit or its window closed (§5's reasons; the helper itself sends `app_quit` and `window_closed` here) |
 | `permissionsChanged` | `{permissions: {accessibility, screenRecording}}` | a grant changed (each change once) |
 
 They go to every ready `daemon` connection, never to Winter.app.
@@ -466,3 +480,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | Protocol | Helper | Change |
 | --- | --- | --- |
 | 1 | 1.0.0 | Initial: the methods, errors, notifications and `view.*` stream above. `protocol_mismatch` refusals of `hello` carry `helperVersion` beside `expected` (additive). |
+| 1 | 1.1.0 | `target_lost` errors carry `data.reason` (`app_quit`, `window_closed`, `helper_restart`, `unknown`) and the `targetLost` notification's `reason` takes the same four values (additive: a client that ignores it is unaffected; one that reads it must treat an absent reason as `unknown`). |

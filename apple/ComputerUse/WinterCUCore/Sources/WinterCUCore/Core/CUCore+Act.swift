@@ -485,7 +485,7 @@ extension CUCore {
         let shot = try t.shot(shotId)
         switch shot.anchor {
         case .window(let wid, _):
-            guard let w = sys.window(id: wid) else { throw CUError.targetLost("that screenshot's window is gone") }
+            guard let w = sys.window(id: wid) else { throw CUError.targetLost("that screenshot's window is gone", reason: lostReason(t)) }
             return try shot.screenPoint(pixel: pixel, windowOrigin: w.frame.origin)
         case .screen:
             return try shot.screenPoint(pixel: pixel)
@@ -713,7 +713,7 @@ extension CUCore {
                 // Before EVERY character: not cancelled, still running, and focus still on a typable,
                 // non-sensitive field — a tab or return may just have moved it to a password field.
                 try token.check()
-                guard sys.appRunning(t.pid) else { throw CUError.targetLost("\(t.appName) quit while typing") }
+                guard sys.appRunning(t.pid) else { throw CUError.targetLost("\(t.appName) quit while typing", reason: .appQuit) }
                 if next > 0, chars[next - 1] == "\t" || chars[next - 1].isNewline { g.focusMayHaveMoved = true }
                 next += 1
                 try requireTypableFocus(t, g)

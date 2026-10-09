@@ -163,10 +163,14 @@ export type ActAction =
   | { kind: "action"; ref: number; name: string }
   | { kind: "menu"; path: string[] };
 
+/** Why a target is gone — `target_lost`'s `data.reason` and the `targetLost` notification's `reason`, as the helper
+ *  observed it (apple/ComputerUse/PROTOCOL.md). */
+export type TargetLostReason = "app_quit" | "window_closed" | "helper_restart" | "unknown";
+
 /** The three notifications the helper sends (spine §2.2). */
 export type HelperNotification =
   | { method: "escPressed"; params: { sessionIds: string[] } }
-  | { method: "targetLost"; params: { targetId: string; reason: "app_quit" | "window_closed" | "helper_restart" } }
+  | { method: "targetLost"; params: { targetId: string; reason: TargetLostReason } }
   | { method: "permissionsChanged"; params: { permissions: HelperPermissions } };
 
 /** One request line is at most 1 MiB; one response line at most 16 MiB (images). */

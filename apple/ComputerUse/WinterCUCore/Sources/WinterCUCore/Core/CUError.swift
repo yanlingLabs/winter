@@ -38,6 +38,18 @@ public enum CUJSON: Codable, Sendable, Equatable {
     public static func int(_ v: Int) -> CUJSON { .number(Double(v)) }
 }
 
+/// Why a target is gone (`target_lost`'s `data.reason`, the `targetLost` notification's `reason`).
+public enum CUTargetLostReason: String, Sendable, CaseIterable {
+    /// The target's app is no longer running.
+    case appQuit = "app_quit"
+    /// The app runs, but the bound window closed.
+    case windowClosed = "window_closed"
+    /// A target id this helper run never issued: it came from before the helper restarted.
+    case helperRestart = "helper_restart"
+    /// Gone for a reason the engine did not observe (released earlier, say).
+    case unknown
+}
+
 /// Every failure `CUCore` throws. `code` is one of the spine's `error.data.code` strings (§2.3); the shell
 /// copies it, plus `data`, into the JSON-RPC error's `data` object.
 public struct CUError: Error, Codable, Sendable, Equatable, CustomStringConvertible {
@@ -62,8 +74,10 @@ public struct CUError: Error, Codable, Sendable, Equatable, CustomStringConverti
                        data: ["permission": .string(permission.rawValue)])
     }
 
-    public static func targetLost(_ detail: String) -> CUError {
-        CUError(code: "target_lost", message: detail)
+    /// The target is gone. `reason` is what the engine observed (`data.reason`, and the `targetLost`
+    /// notification's): the daemon words each case differently — a closed window is not a quit app.
+    public static func targetLost(_ detail: String, reason: CUTargetLostReason) -> CUError {
+        CUError(code: "target_lost", message: detail, data: ["reason": .string(reason.rawValue)])
     }
 
     /// The app runs but has no window at all, even after its one background reopen. Winter never asks for a new

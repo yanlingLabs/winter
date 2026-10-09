@@ -176,7 +176,10 @@ public enum HelperNotification: Equatable, Sendable {
         presentation.cursor(sessionId: sessionId, target: CUWindowRef(pid: pid, windowID: windowID, appName: appName), point: point, kind: cursorKind)
     }
 
+    /// The daemon hears the engine's observed reason — `app_quit`, `window_closed`, `helper_restart` or `unknown`
+    /// (PROTOCOL.md §7.1); anything else goes out as `unknown`, so the wire carries only documented values.
     public func targetLost(targetId: String, reason: String) {
+        let reason = (CUTargetLostReason(rawValue: reason) ?? .unknown).rawValue
         viewHub.release(targetId: targetId, reason: "lost (\(reason))")
         notify(.targetLost(targetId: targetId, reason: reason))
     }
