@@ -46,7 +46,7 @@ import {
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, withRealDir, type RealAppsRun } from "./real-apps";
-import { expectedCardSummary, PRELUDE, SCENARIOS, scriptOf, type ImageStats, type ProbeEvent, type Scenario } from "./scenarios";
+import { expectedCardSummary, PRELUDE, SCENARIOS, scriptOf, usesWebPage, type ImageStats, type ProbeEvent, type Scenario } from "./scenarios";
 import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, offSpacePlan, offSpaceSkipReason, onDesktopPlan, visualSkipReason, parseApps, resolveApp, restorePlan, SCRIPTS, type GenericApp, type ResolveDeps } from "./generic";
 
 // ── thresholds (env overrides) ───────────────────────────────────────────────────────────────────────────────────
@@ -674,6 +674,11 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
             await sleep(800);
             await activateUser();
           }
+        }
+        if (usesWebPage(s)) {
+          // The page must have loaded (the fixture logs its WKWebView didFinish); the script then waits for "First".
+          await until("the fixture's web page (WKWebView didFinish)", 10_000, () => fixtureEvents(f).find((e) => e.role === "main" && e.ev === "web.didFinish"))
+            .catch(() => { throw new Error(`the fixture page didn't load (no WKWebView didFinish in 10 s${fixtureEvents(f).some((e) => e.ev === "web.didFail") ? `; didFail: ${String(fixtureEvents(f).find((e) => e.ev === "web.didFail")!.error)}` : ""})`); });
         }
         abortIfInput();
         since = Date.now();

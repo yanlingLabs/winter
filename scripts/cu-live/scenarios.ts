@@ -99,8 +99,24 @@ async function pick(app, name, role) {
   if (!hit) throw new Error("no " + (role || "element") + " named " + name + ": " + JSON.stringify(els.slice(0, 8)));
   return hit;
 }
+// The web window, once its page shows the "First" field (state() retried for up to 5 s) — a page still loading has
+// no fields yet. The runner also waits for the fixture's WKWebView didFinish before any scenario that calls this.
+async function webWin() {
+  const web = await win("Fixture Web");
+  const t0 = Date.now();
+  for (;;) {
+    if (/text field ["\u201C]First["\u201D]/.test(await web.state({ emit: false, full: true }))) return web;
+    if (Date.now() - t0 > 5000) throw new Error("the fixture page didn't load");
+    await sleep(250);
+  }
+}
 function report(o) { print(${JSON.stringify(MARKER)} + " " + JSON.stringify(o)); }
 `;
+
+/** Whether a scenario works in the web window's page (it calls `webWin()`): the runner first waits for didFinish. */
+export function usesWebPage(s: Pick<Scenario, "code">): boolean {
+  return s.code.includes("webWin()");
+}
 
 export function scriptOf(s: Pick<Scenario, "code" | "prelude">): string {
   return `${s.prelude ?? PRELUDE}\n${s.code.trim()}\n`;
@@ -149,7 +165,7 @@ export const SCENARIOS: Scenario[] = [
     name: "bind on-Space (Form, Web, Canvas)", group: "bind",
     code: `
 const form = await win("Fixture Form");
-const web = await win("Fixture Web");
+const web = await webWin();
 const canvas = await win("Fixture Canvas");
 report({ bundleId: form.bundleId, windows: (await form.windows()).map((w) => w.title) });`,
     verify: (ctx) => [
@@ -310,7 +326,7 @@ report({ ok: true });`,
     name: "type into web inputs (exact text)", group: "type",
     before: [{ role: "main", cmd: "reset" }],
     code: `
-const web = await win("Fixture Web");
+const web = await webWin();
 const first = await pick(web, "First", "text");
 await web.type(${JSON.stringify(MIXED_TEXT)}, { into: first.ref });
 const search = await pick(web, "Search", "text");
@@ -328,7 +344,7 @@ report({ ok: true });`,
     name: "type into a contenteditable doc", group: "type",
     before: [{ role: "main", cmd: "reset" }],
     code: `
-const web = await win("Fixture Web");
+const web = await webWin();
 const doc = await pick(web, "Doc");
 await web.type(${JSON.stringify(DOC_TEXT)}, { into: doc.ref });
 report({ ok: true });`,
@@ -342,7 +358,7 @@ report({ ok: true });`,
     name: "cmd+a/c/v/z in web fields", group: "type", session: "ask", answer: "once", foregroundCard: true,
     before: [{ role: "main", cmd: "reset" }],
     code: `
-const web = await win("Fixture Web");
+const web = await webWin();
 const first = await pick(web, "First", "text");
 const search = await pick(web, "Search", "text");
 await web.type("copy me ✓", { into: first.ref });
@@ -366,7 +382,7 @@ report({ pasted, undo });`,
     name: "paste into a web field", group: "type",
     before: [{ role: "main", cmd: "reset" }],
     code: `
-const web = await win("Fixture Web");
+const web = await webWin();
 const comment = await pick(web, "Comment", "text");
 await web.paste(${JSON.stringify(PASTE_TEXT)}, { into: comment.ref });
 report({ ok: true });`,
@@ -378,7 +394,7 @@ report({ ok: true });`,
     name: "scroll by wheel (web page)", group: "scroll",
     before: [{ role: "main", cmd: "reset" }],
     code: `
-const web = await win("Fixture Web");
+const web = await webWin();
 const area = (await web.find({ role: "web area" }, { emit: false }))[0];
 if (!area) throw new Error("no web area");
 await web.scroll(area.ref, "down", 2);
@@ -390,7 +406,7 @@ report({ ok: true });`,
     name: "scroll by keys (web page, End)", group: "scroll",
     before: [{ role: "main", cmd: "reset" }],
     code: `
-const web = await win("Fixture Web");
+const web = await webWin();
 const button = await pick(web, "Web Button", "button");
 await web.key("end", { into: button.ref });
 report({ ok: true });`,

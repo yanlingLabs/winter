@@ -10,7 +10,7 @@ import {
   parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type FixtureEvent, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { minimalPdf, REAL_APP_SCENARIOS, REAL_DIR_TOKEN, withRealDir } from "./real-apps";
-import { PRELUDE, SCENARIOS, scriptOf } from "./scenarios";
+import { PRELUDE, SCENARIOS, scriptOf, usesWebPage } from "./scenarios";
 
 const sample = (t: number, frontPid: number, space: number | null, hidIdleMs: number | null = 1000): MonitorSample => ({ t, front: `app${frontPid}`, frontPid, space, hidIdleMs });
 
@@ -189,6 +189,19 @@ describe("the scenarios", () => {
       }
     }
     expect(PRELUDE).toContain("var H =");
+  });
+
+  test("every scenario in the web page waits for it: didFinish (runner) and the First field (webWin, 5 s)", () => {
+    // (The Deny card scenario names the window only to be refused the bind — it never reaches the page.)
+    const web = SCENARIOS.filter((s) => s.code.includes('win("Fixture Web")') || s.code.includes("webWin()"));
+    expect(web.length).toBeGreaterThanOrEqual(7);
+    for (const s of web) {
+      expect(usesWebPage(s)).toBe(true);
+      expect(s.code).not.toContain('win("Fixture Web")');
+    }
+    expect(PRELUDE).toContain("async function webWin()");
+    expect(PRELUDE).toContain("the fixture page didn't load");
+    expect(usesWebPage({ code: 'const f = await win("Fixture Form");' })).toBe(false);
   });
 
   test("off-Space: never seen here → capture only (point click + keys); shown here first → a full bind", () => {
