@@ -29,7 +29,10 @@ bun test -t "test name"              # one test by name
 # WINTER_LOGIN_SHELL_PATH=off (or 0/false) skips it — both test preloads set it, so no test runs your real shell.
 pnpm typecheck:core                  # tsc --noEmit (also typecheck:protocol)
 WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live   # the LIVE ComputerV2 suite (scripts/cu-live): takes over the screen for
-                                     # ~2-3 min — fixture apps (one window moved to another Space, else full screen), a
+                                     # ~2-3 min — fixture apps (one window moved to another Space, else full screen; a
+                                     # Docs-like page, fixture-web/docs.html: a hidden off-screen input iframe drawn on
+                                     # a canvas, Closure buttons that ignore click, Find and replace, an HTML menu bar,
+                                     # single-line inputs — the "docs" scenarios, written against the contract), a
                                      # SECOND dev-helper instance on a temp home (open -n --env WINTER_CU_HOME), a
                                      # file-store daemon (winter-core-live), the scripted double (no LLM); asserts the
                                      # fixture's own log, screenshot pixels (a #FF00FF sentinel), the mirror frames, and

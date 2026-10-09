@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture Docs</title>
+<!--
+  A local, offline page that MIMICS Google Docs' hard parts for the live ComputerV2 suite (scripts/cu-live):
+  (a) keystrokes go to a hidden, off-screen contenteditable iframe ("Document content") that is emptied after every
+      input, while the visible text is drawn on a <canvas> from what the iframe received — so nothing can read the
+      text back through accessibility;
+  (b) a toolbar of Closure-style buttons that IGNORE `click` and act only on mousedown + mouseup;
+  (c) a "Find and replace" panel (Find / Replace with inputs, a Close button of the same kind);
+  (d) its own HTML menu bar (File / Edit; Edit's Select all and Delete are disabled without a selection);
+  (e) a single-line title input and a page search input.
+  Every keystroke, input, paste, mousedown/up, click, focus change and panel open/close is posted to the fixture
+  (window.webkit.messageHandlers.docs), which logs it as `docs.<type>`.
+-->
+<style>
+  body { font: 13px -apple-system, sans-serif; margin: 0; background: #f1f3f4; }
+  #sentinel { position: fixed; left: 8px; top: 8px; width: 48px; height: 48px; background: #ff00ff; z-index: 10; }
+  #chrome { padding: 8px 8px 4px 64px; }
+  #title { font-size: 15px; width: 260px; border: 1px solid transparent; padding: 2px 4px; }
+  #menubar { display: flex; gap: 2px; margin-top: 4px; }
+  .menu-item { padding: 2px 8px; border-radius: 4px; cursor: default; }
+  .menu-item:focus, .menu-item.open { background: #dadce0; outline: none; }
+  .menu { position: absolute; background: #fff; border: 1px solid #ccc; box-shadow: 0 2px 6px rgba(0,0,0,.2); padding: 4px 0; z-index: 5; }
+  .menu [role=menuitem] { padding: 3px 24px; }
+  .menu [aria-disabled=true] { color: #aaa; }
+  #toolbar { display: flex; gap: 4px; align-items: center; padding: 4px 8px; background: #edf2fa; border-radius: 16px; margin: 4px 8px; }
+  .goog-button { padding: 2px 8px; border-radius: 4px; user-select: none; cursor: default; }
+  .goog-button:hover { background: #dadce0; }
+  #page-search { margin-left: auto; width: 160px; }
+  #page { display: block; margin: 6px auto; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+  #input-frame { position: absolute; left: -9999px; top: 0; width: 1px; height: 1px; border: 0; opacity: 0; }
+  #find-panel { position: absolute; right: 16px; top: 96px; background: #fff; border: 1px solid #ccc; padding: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.25); z-index: 6; }
+  #find-panel input { width: 150px; margin: 2px 0; }
+</style>
+</head>
+<body>
+<div id="sentinel" aria-hidden="true"></div>
+<div id="chrome">
+  <input id="title" type="text" aria-label="Document title" value="Untitled document" spellcheck="false" autocorrect="off">
+  <div id="menubar" role="menubar" aria-label="Menu bar">
+    <div class="menu-item" role="menuitem" id="menu-file" tabindex="0" aria-haspopup="true">File</div>
+    <div class="menu-item" role="menuitem" id="menu-edit" tabindex="0" aria-haspopup="true">Edit</div>
+  </div>
+</div>
+<div id="edit-menu" class="menu" role="menu" aria-label="Edit" hidden>
+  <div role="menuitem" id="mi-select-all" aria-disabled="true" tabindex="-1">Select all</div>
+  <div role="menuitem" id="mi-delete" aria-disabled="true" tabindex="-1">Delete</div>
+</div>
+<div id="file-menu" class="menu" role="menu" aria-label="File" hidden>
+  <div role="menuitem" id="mi-rename" tabindex="-1">Rename</div>
+</div>
+<div id="toolbar" role="toolbar" aria-label="Formatting">
+  <div class="goog-button" role="button" id="tb-bold" aria-label="Bold" aria-pressed="false" tabindex="0"><b>B</b></div>
+  <div class="goog-button" role="button" id="tb-find" aria-label="Find and replace" tabindex="0">Find</div>
+  <input id="page-search" type="search" aria-label="Search the menus" placeholder="Search the menus" spellcheck="false" autocorrect="off">
+</div>
+<canvas id="page" width="600" height="230" aria-label="Document canvas" role="img"></canvas>
+<iframe id="input-frame" title="Document content" tabindex="-1"
+  srcdoc="<!doctype html><html><body contenteditable='true' role='textbox' aria-multiline='true' aria-label='Document content' spellcheck='false' autocorrect='off' style='margin:0'></body></html>"></iframe>
+<div id="find-panel" role="dialog" aria-label="Find and replace" hidden>
+  <div><input id="find" type="text" aria-label="Find" spellcheck="false" autocorrect="off"></div>
+  <div><input id="replace" type="text" aria-label="Replace with" spellcheck="false" autocorrect="off"></div>
+  <div class="goog-button" role="button" id="find-close" aria-label="Close" tabindex="0">✕ Close</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  function post(message) {
+    try { window.webkit.messageHandlers.docs.postMessage(message); } catch (e) { /* no native host */ }
+  }
+  function $(id) { return document.getElementById(id); }
+  function idOf(el) { return (el && (el.id || (el.getAttribute && el.getAttribute("aria-label")))) || (el && el.tagName) || "?"; }
+
+  var model = "";          // the document's text: what the canvas draws
+  var bold = false;
+  var focusId = null;
+  var quiet = false;        // programmatic resets log nothing
+  var frame = $("input-frame");
+  var fbody = null;         // the hidden contenteditable body (inside the iframe)
+  var textTimer = null;
+
+  // --- the canvas: draws the model ---------------------------------------------------------------------------
+  function render() {
+    var c = $("page"), g = c.getContext("2d");
+    g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = "#202124"; g.font = (bold ? "bold " : "") + "14px -apple-system, sans-serif";
+    var lines = [];
+    model.split("\n").forEach(function (l) { while (l.length > 70) { lines.push(l.slice(0, 70)); l = l.slice(70); } lines.push(l); });
+    lines.slice(-12).forEach(function (l, i) { g.fillText(l, 16, 24 + i * 17); });
+  }
+  // The full text, once a burst of input has settled (a 3,000-character paste is one line, not 3,000).
+  function textChanged() {
+    render();
+    if (quiet) return;
+    clearTimeout(textTimer);
+    textTimer = setTimeout(function () { post({ type: "text", text: model, length: model.length }); }, 60);
+  }
+
+  // --- (a) the hidden input: receives, hands to the model, then empties itself --------------------------------
+  // The srcdoc loads after this script: until then the iframe holds an empty about:blank body. Wired once, to the
+  // contenteditable body.
+  function wireFrame() {
+    var d = frame.contentDocument, b = d && d.body;
+    if (!b || b.getAttribute("contenteditable") !== "true") return false;
+    if (fbody === b) return true;
+    fbody = b;
+    fbody.addEventListener("keydown", function (e) { if (!quiet) post({ type: "key", key: e.key, code: e.code, meta: e.metaKey }); });
+    fbody.addEventListener("paste", function (e) {
+      var text = (e.clipboardData && e.clipboardData.getData("text/plain")) || "";
+      e.preventDefault(); // Docs inserts it itself; the hidden input stays empty
+      if (!quiet) post({ type: "paste", length: text.length, text: text });
+      model += text;
+      textChanged();
+    });
+    fbody.addEventListener("input", function (e) {
+      if (e.inputType === "deleteContentBackward") model = model.slice(0, -1);
+      else model += fbody.innerText.replace(/ /g, " ");
+      fbody.textContent = ""; // emptied after every input: the text cannot be read back from here
+      if (!quiet) post({ type: "input", inputType: e.inputType || "", data: e.data === null || e.data === undefined ? null : String(e.data) });
+      textChanged();
+    });
+    fbody.addEventListener("focus", function () { focusId = "doc"; if (!quiet) post({ type: "focus", id: "doc" }); });
+    frame.contentDocument.addEventListener("selectionchange", updateEditMenu);
+    return true;
+  }
+  function focusDoc() {
+    if (!fbody) return;
+    frame.contentWindow.focus();
+    fbody.focus();
+  }
+  $("page").addEventListener("mousedown", function (e) { e.preventDefault(); if (!quiet) post({ type: "mouse", id: "page", phase: "down" }); focusDoc(); });
+  $("page").addEventListener("mouseup", function () { if (!quiet) post({ type: "mouse", id: "page", phase: "up" }); });
+  $("page").addEventListener("click", function () { if (!quiet) post({ type: "click", id: "page" }); focusDoc(); });
+
+  // --- (b)/(c) Closure-style buttons: mousedown + mouseup act; click is ignored ------------------------------
+  var actions = {
+    "tb-bold": function () { bold = !bold; $("tb-bold").setAttribute("aria-pressed", String(bold)); post({ type: "bold", on: bold }); render(); },
+    "tb-find": function () { openPanel(); },
+    "find-close": function () { closePanel(); },
+  };
+  Array.prototype.forEach.call(document.querySelectorAll(".goog-button"), function (b) {
+    var armed = false;
+    b.addEventListener("mousedown", function (e) { e.preventDefault(); armed = true; if (!quiet) post({ type: "mouse", id: b.id, phase: "down" }); });
+    b.addEventListener("mouseup", function () {
+      if (!quiet) post({ type: "mouse", id: b.id, phase: "up" });
+      if (armed) { armed = false; actions[b.id](); }
+    });
+    b.addEventListener("mouseleave", function () { armed = false; });
+    b.addEventListener("click", function () { if (!quiet) post({ type: "click", id: b.id, ignored: true }); });
+  });
+  function openPanel() {
+    if (!$("find-panel").hidden) return;
+    $("find-panel").hidden = false;
+    if (!quiet) post({ type: "panel", open: true });
+  }
+  function closePanel() {
+    if ($("find-panel").hidden) return;
+    $("find-panel").hidden = true;
+    if (!quiet) post({ type: "panel", open: false });
+  }
+
+  // --- (d) the HTML menu bar ---------------------------------------------------------------------------------
+  function hasSelection() {
+    var s = frame.contentWindow && frame.contentWindow.getSelection();
+    return !!(s && !s.isCollapsed && String(s).length > 0);
+  }
+  function updateEditMenu() {
+    var on = hasSelection();
+    $("mi-select-all").setAttribute("aria-disabled", String(!on));
+    $("mi-delete").setAttribute("aria-disabled", String(!on));
+  }
+  function toggleMenu(item, menu) {
+    var open = menu.hidden;
+    ["edit-menu", "file-menu"].forEach(function (id) { $(id).hidden = true; });
+    document.querySelectorAll(".menu-item").forEach(function (m) { m.classList.remove("open"); });
+    if (open) {
+      var r = item.getBoundingClientRect();
+      menu.style.left = r.left + "px"; menu.style.top = (r.bottom + 2) + "px";
+      menu.hidden = false; item.classList.add("open");
+      updateEditMenu();
+    }
+    item.focus(); // a menu bar item takes the focus — not an editable element
+    if (!quiet) post({ type: "menu", id: item.id, open: open });
+  }
+  [["menu-edit", "edit-menu"], ["menu-file", "file-menu"]].forEach(function (pair) {
+    var item = $(pair[0]), menu = $(pair[1]), viaMouse = false;
+    item.addEventListener("mousedown", function (e) { e.preventDefault(); viaMouse = true; if (!quiet) post({ type: "mouse", id: item.id, phase: "down" }); toggleMenu(item, menu); });
+    item.addEventListener("click", function () {
+      if (!quiet) post({ type: "click", id: item.id });
+      if (viaMouse) { viaMouse = false; return; } // the mousedown already toggled it
+      toggleMenu(item, menu);
+    });
+  });
+  ["mi-select-all", "mi-delete", "mi-rename"].forEach(function (id) {
+    $(id).addEventListener("click", function () {
+      var disabled = $(id).getAttribute("aria-disabled") === "true";
+      if (!quiet) post({ type: "click", id: id, ignored: disabled });
+    });
+  });
+
+  // --- (e) single-line inputs --------------------------------------------------------------------------------
+  [["title", "title"], ["page-search", "search"], ["find", "find"], ["replace", "replace"]].forEach(function (pair) {
+    $(pair[0]).addEventListener("input", function (e) { if (!quiet) post({ type: pair[1], value: e.target.value }); });
+  });
+
+  // --- focus changes in the page ------------------------------------------------------------------------------
+  document.addEventListener("focusin", function (e) {
+    if (e.target === frame) return; // the iframe's own body reports "doc"
+    focusId = idOf(e.target);
+    if (!quiet) post({ type: "focus", id: focusId });
+  });
+
+  // --- the fixture's hooks ------------------------------------------------------------------------------------
+  window.docsFixture = {
+    state: function () {
+      return { text: model, title: $("title").value, search: $("page-search").value, find: $("find").value,
+               replace: $("replace").value, panelOpen: !$("find-panel").hidden, bold: bold, focus: focusId,
+               hiddenInput: fbody ? fbody.textContent : null };
+    },
+    reset: function () {
+      quiet = true;
+      clearTimeout(textTimer);
+      model = ""; bold = false; focusId = null;
+      $("tb-bold").setAttribute("aria-pressed", "false");
+      $("title").value = "Untitled document";
+      ["page-search", "find", "replace"].forEach(function (id) { $(id).value = ""; });
+      $("find-panel").hidden = true;
+      ["edit-menu", "file-menu"].forEach(function (id) { $(id).hidden = true; });
+      document.querySelectorAll(".menu-item").forEach(function (m) { m.classList.remove("open"); });
+      if (fbody) fbody.textContent = "";
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      render();
+      quiet = false;
+      return true;
+    },
+    openFind: function () { openPanel(); return true; },
+  };
+
+  render();
+  var readyPosted = false;
+  function ready() { if (readyPosted || !fbody) return; readyPosted = true; post({ type: "ready", hiddenInput: true }); }
+  frame.addEventListener("load", function () { if (wireFrame()) ready(); });
+  if (wireFrame()) ready();
+})();
+</script>
+</body>
+</html>
