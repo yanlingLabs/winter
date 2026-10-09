@@ -75,7 +75,13 @@ final class FakeAX: CUAXBackend {
 
     func isTrusted() -> Bool { trusted }
     func application(_ pid: pid_t) -> AXUIElement { fakeElement(pid) }
-    func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef? { attrs[AXIdentity(element: e)]?[name] }
+    /// Runs before each attribute read ("token:attribute"), to change the fake world as time passes (WebKit
+    /// moving focus a moment after a click).
+    var onRead: ((String) -> Void)?
+    func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
+        onRead?("\(token(e)):\(name)")
+        return attrs[AXIdentity(element: e)]?[name]
+    }
     func copyMultiple(_ e: AXUIElement, _ names: [String]) -> [String: CFTypeRef]? {
         let d = attrs[AXIdentity(element: e)] ?? [:]
         var out: [String: CFTypeRef] = [:]

@@ -139,4 +139,7 @@ public enum CUFloorReason: String, Codable, Sendable {
     case savePath = "save_path"
     /// Typing with the focus unreadable while the window holds a password or payment field.
     case focusUnknown = "focus_unknown"
+    /// The named field could not be given the keyboard focus, so nothing was typed (keys would have gone to
+    /// whatever had it).
+    case focusNotPlaced = "focus_not_placed"
 }

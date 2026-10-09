@@ -588,9 +588,9 @@ extension CUCore {
             }
             return ActOutcome(rung: .accessibility)
         }
-        // Not settable: focus it, select everything, and type over it.
+        // Not settable: focus it, select everything, and type over it — never over another field.
         let g = TypingFocus(explicit: e)
-        focusField(e, t)
+        try placeFocus(e, t, ref: a.ref)
         if let len = ax.string(e, kAXValueAttribute)?.utf16.count, ax.isSettable(e, kAXSelectedTextRangeAttribute),
            let r = AX.makeRange(location: 0, length: len) {
             try? ax.set(e, kAXSelectedTextRangeAttribute, r)
@@ -625,7 +625,7 @@ extension CUCore {
             let info = ElementInfo(el, ax)
             if info.secure { throw secureRefusal() }
             announceTarget(t, info, pressing: false)
-            focusField(el, t)
+            try placeFocus(el, t, ref: into)
             t.noteTargeted(el, at: clock.nowMs())
             g.explicit = el
             e = el
@@ -848,10 +848,34 @@ extension CUCore {
     }
 
     /// Whether the app's focused UI element is `e` now (its own, or its focused window's).
-    func isFocused(_ e: AXUIElement, _ t: CUTarget) -> Bool {
-        if let f = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute), CFEqual(f, e) { return true }
-        if let w = try? windowElement(t), let f = ax.element(w, kAXFocusedUIElementAttribute), CFEqual(f, e) { return true }
-        return false
+    func isFocused(_ e: AXUIElement, _ t: CUTarget) -> Bool { focusRelation(e, t) == .onIt }
+
+    enum FocusRelation { case onIt, elsewhere, unknown }
+
+    /// Where the keyboard focus is relative to `e`: on it (the focused element is `e` or inside it, or `e`
+    /// says it is focused), elsewhere (the app reports another element), or unknown (the app reports none —
+    /// Electron apps often don't).
+    func focusRelation(_ e: AXUIElement, _ t: CUTarget) -> FocusRelation {
+        if ax.bool(e, kAXFocusedAttribute) == true { return .onIt }
+        let reported = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
+            ?? (try? windowElement(t)).flatMap { ax.element($0, kAXFocusedUIElementAttribute) }
+        guard var f = reported else { return .unknown }
+        for _ in 0..<12 {
+            if CFEqual(f, e) { return .onIt }
+            guard let parent = ax.element(f, kAXParentAttribute) else { break }
+            f = parent
+        }
+        return .elsewhere
+    }
+
+    /// Puts the focus in the field an act named, or refuses: when it lands elsewhere — the app reports
+    /// another element focused — nothing is typed, because the keys would go there. When the app reports no
+    /// focus at all there is nothing to check against: the focus-unknown floor still governs the typing.
+    func placeFocus(_ e: AXUIElement, _ t: CUTarget, ref: Int?) throws {
+        if focusField(e, t) { return }
+        guard t.accessible else { return }
+        if focusRelation(e, t) == .elsewhere { throw focusNotPlacedRefusal(t, ref: ref) }
+        CULog.act.notice("focus in \(t.appName, privacy: .public): not confirmed (the app reports no focused element)")
     }
 
     /// Focuses `e` for typing WITHOUT the `AXFocused` write where that write would steal the user's view: on a
@@ -869,10 +893,11 @@ extension CUCore {
         guard t.accessible else { return false }
         if isFocused(e, t) { return true }
         if pressToFocus(e, t) { return true }
-        // The write is forbidden for web content and apps known to activate on it: leave focus, say so.
+        // The write is forbidden for web content and apps known to activate on it: focus is not placed, and
+        // the caller refuses rather than typing into whatever has it.
         let web = isWebContent(e) || keyboardTarget(t, focused: e) != t.pid
         if web || appActivatesOnFocusWrite(t) {
-            t.addViewNote("couldn't place focus in \(t.appName)'s field without the accessibility focus write (which makes \(t.appName) come forward), so the action went to whatever had focus — check the state")
+            CULog.act.notice("focus in \(t.appName, privacy: .public): neither a press nor a click placed it, and the AXFocused write is not used here")
             return false
         }
         // A plain native field, no history of activating: the write, under the guard.
@@ -883,21 +908,64 @@ extension CUCore {
             rememberFocusWriteActivates(t)  // use the press route first for this app from now on
             t.addViewNote(viewMoved(before, after, t, route: "focusing the field over accessibility", late: false))
         }
-        return isFocused(e, t)
+        return waitFocused(e, t, web: false)
+    }
+
+    /// The refusal when focus can't be placed on the field the act named: nothing is typed, because the keys
+    /// would go to whatever has the focus (a live run put a comment into the page's search field).
+    func focusNotPlacedRefusal(_ t: CUTarget, ref: Int?) -> CUError {
+        let which = ref.map { "[\($0)]" } ?? "that field"
+        return CUError.refused(.focusNotPlaced,
+                               "couldn't put the keyboard focus in \(which) of \(t.appName) from the background, so nothing was typed (the keys would have gone to whatever field has focus) — use setValue(\(ref.map(String.init) ?? "ref"), text) if the field takes a value, or click it first and retry")
+    }
+
+    /// Polls whether `e` has the focus: WebKit moves `AXFocusedUIElement` asynchronously after a press or a
+    /// click, so an immediate read misses a focus that did land.
+    func waitFocused(_ e: AXUIElement, _ t: CUTarget, web: Bool) -> Bool {
+        let deadline = clock.nowMs() + (web ? focusWaitWebMs : focusWaitNativeMs)
+        repeat {
+            if isFocused(e, t) { return true }
+            if clock.nowMs() >= deadline { return false }
+            usleep(30_000)
+        } while true
+    }
+
+    /// The synthetic "you are active" state for the bound window, before a click that must not be swallowed as
+    /// activation (only with the private path, like the rest of the enforcer).
+    func postSyntheticActivation(_ t: CUTarget, privatePath: Bool) {
+        guard let enforcer = focusEnforcer(for: t, privatePath: privatePath) else { return }
+        noteSyntheticActivation()  // the guardian must not read the activation this posts as the user's
+        _ = enforcer.enforce(windowID: t.windowID)
     }
 
     /// Focuses `e` by pressing it, never by the `AXFocused` write: a listed `AXPress`/`AXConfirm`, else a
     /// window-targeted click at its centre when the window is on screen. Verified against the focused element.
     /// False when nothing placed focus on it.
     func pressToFocus(_ e: AXUIElement, _ t: CUTarget) -> Bool {
+        let web = isWebContent(e) || keyboardTarget(t, focused: e) != t.pid
         let actions = ax.actions(e)
         for a in [kAXPressAction, "AXConfirm"] where actions.contains(a) {
-            if (try? ax.perform(e, a)) != nil, isFocused(e, t) { return true }
+            if (try? ax.perform(e, a)) != nil, waitFocused(e, t, web: web) { return true }
         }
-        if let c = ElementInfo(e, ax).center, sys.window(id: t.windowID)?.onScreen == true {
-            let windowFor = self.windowFor(t)
-            try? synth.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: .publicPid)
-            if isFocused(e, t) { return true }
+        // AXPress may not focus a web textarea: a window-targeted click at its centre, on this desktop or (with
+        // the private path) on another Space, after the synthetic activation so it isn't taken as activation.
+        guard let c = ElementInfo(e, ax).center else { return false }
+        let onScreen = sys.window(id: t.windowID)?.onScreen == true
+        let elsewhere = !onScreen && t.privatePath && skyLight.canSetWindowLocation
+        guard onScreen || elsewhere else { return false }
+        let route: CURoute = elsewhere && t.isChromium && skyLight.isAvailable ? .skyLight : .publicPid
+        var s = synth
+        s.windowSPI = t.privatePath
+        let windowFor = self.windowFor(t)
+        let wasKey = keyFocusPidForTarget(t) == t.pid
+        postSyntheticActivation(t, privatePath: t.privatePath)
+        try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
+        if waitFocused(e, t, web: web) { return true }
+        // The window was not key and the click only made it key: once more.
+        if !wasKey, keyFocusPidForTarget(t) == t.pid {
+            CULog.act.notice("focus in \(t.appName, privacy: .public): the first click only made the window key — clicking the field once more")
+            try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
+            if waitFocused(e, t, web: web) { return true }
         }
         return false
     }
@@ -989,7 +1057,7 @@ extension CUCore {
             let info = ElementInfo(el, ax)
             if Self.producesText(chord), info.secure { throw secureRefusal() }
             announceTarget(t, info, pressing: false)
-            focusField(el, t)
+            try placeFocus(el, t, ref: into)
             t.noteTargeted(el, at: clock.nowMs())
             g.explicit = el
             e = el

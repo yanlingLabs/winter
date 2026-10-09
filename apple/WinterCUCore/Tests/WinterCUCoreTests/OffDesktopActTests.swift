@@ -282,6 +282,40 @@ final class OffDesktopActTests: XCTestCase {
         XCTAssertTrue(sys.moved.isEmpty)
     }
 
+    func testAWebFieldOnAnotherSpaceIsFocusedByAWindowTargetedClickBeforeAnyKey() async throws {
+        world()
+        let comment = fakeElement(95_020)
+        ax.add(comment, role: kAXTextAreaRole, title: "Comment", frame: CGRect(x: 120, y: 260, width: 300, height: 80),
+               extra: [kAXParentAttribute: webArea])
+        ax.focus(pid: pid, on: field)  // the page's Search field has the focus
+        let order = OrderLog()
+        poster.onPost = { [unowned self] e in
+            if e.type == .leftMouseUp { ax.focus(pid: pid, on: comment) }  // the click focuses the textarea
+            order.add(e.type == .leftMouseDown ? "click" : e.type == .keyDown ? "key" : "other")
+        }
+        try await act(.type(CUTypeAction(text: "ok", into: ref(comment))))
+        let down = try XCTUnwrap(poster.entries.first { $0.type == .leftMouseDown })
+        XCTAssertEqual(down.window, 77, "addressed to the off-Space window")
+        XCTAssertEqual(down.location, CGPoint(x: 270, y: 300), "the textarea's centre")
+        XCTAssertEqual(order.items.filter { $0 != "other" }, ["click", "key", "key"], "the click, then the keys")
+        XCTAssertFalse(ax.written.contains { $0.hasSuffix(":\(kAXFocusedAttribute)") }, "no AXFocused write on web content")
+    }
+
+    func testAWebFieldOnAnotherSpaceThatTheClickDoesNotFocusIsRefused() async throws {
+        world()
+        let comment = fakeElement(95_021)
+        ax.add(comment, role: kAXTextAreaRole, title: "Comment", frame: CGRect(x: 120, y: 260, width: 300, height: 80),
+               extra: [kAXParentAttribute: webArea])
+        ax.focus(pid: pid, on: field)  // and it stays there
+        do {
+            try await act(.type(CUTypeAction(text: "line one", into: ref(comment))))
+            XCTFail("expected focus_not_placed")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("focus_not_placed"))
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty, "nothing typed into Search")
+    }
+
     func testADragElsewhereIsWindowTargetedEvents() async throws {
         world()
         let r = try await act(.drag(CUDragAction(from: CUDragEnd(ref: ref(icon)), to: CUDragEnd(ref: ref(link)))))
