@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture Web Page</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /* Plain, high-contrast layout: the live suite reads this page by accessibility tree AND by screenshot. */
+  html { font: 15px -apple-system, BlinkMacSystemFont, sans-serif; }
+  body { margin: 0; padding: 16px 20px 80px; color: #1d1d1f; background: #fafafa; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  h2 { margin: 28px 0 6px; font-size: 18px; }
+  p { margin: 0 0 10px; line-height: 1.45; max-width: 60em; }
+  .row { margin: 0 0 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  input, textarea { font: inherit; padding: 4px 6px; border: 1px solid #888; border-radius: 4px; background: #fff; }
+  textarea { width: 360px; height: 52px; }
+  #doc { min-width: 360px; min-height: 52px; padding: 4px 6px; border: 1px solid #888; border-radius: 4px; background: #fff; white-space: pre-wrap; }
+  button { font: inherit; padding: 4px 12px; }
+  canvas { border: 1px solid #444; background: #fff; display: block; }
+</style>
+</head>
+<body>
+<h1>Fixture Web</h1>
+<div class="row">
+  <label for="first">First</label><input id="first" aria-label="First" placeholder="First">
+  <label for="search">Search</label><input id="search" type="text" aria-label="Search" placeholder="Search">
+</div>
+<div class="row">
+  <label for="comment">Comment</label><textarea id="comment" aria-label="Comment"></textarea>
+</div>
+<div class="row">
+  <span>Doc</span>
+  <div id="doc" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Doc"></div>
+</div>
+<div class="row">
+  <button id="web-button" type="button">Web Button</button>
+  <a id="jump" href="#section-20">Jump</a>
+</div>
+<div class="row">
+  <canvas id="paint" width="300" height="150" aria-label="Paint"></canvas>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // The native side (App.swift's WebController) turns each message into a `web.*` log line. Posting never throws:
+  // a page opened in a plain browser just has no handler.
+  function post(message) {
+    try { window.webkit.messageHandlers.fixture.postMessage(message); } catch (e) { /* no native host */ }
+  }
+  function half(v) { return Math.round(v * 2) / 2; }
+  function $(id) { return document.getElementById(id); }
+
+  var quiet = false; // true while fixtureReset() scrolls the page, so a programmatic scroll is not logged
+
+  // --- text inputs -------------------------------------------------------------------------------------------
+  ["first", "search", "comment"].forEach(function (id) {
+    $(id).addEventListener("input", function (e) { post({ type: "input", id: id, value: e.target.value }); });
+  });
+  $("doc").addEventListener("input", function () { post({ type: "doc", text: $("doc").innerText }); });
+
+  // --- focus -------------------------------------------------------------------------------------------------
+  // `field` marks the elements that count for the native "steal on focus" mode (text-entry things, not buttons).
+  var FOCUSABLE = { first: true, search: true, comment: true, doc: true, "web-button": false, jump: false };
+  var lastFocus = null;
+  function reportFocus(el) {
+    if (!el || !(el.id in FOCUSABLE) || lastFocus === el) return;
+    lastFocus = el;
+    post({ type: "focus", id: el.id, field: FOCUSABLE[el.id] });
+  }
+  document.addEventListener("focusin", function (e) { reportFocus(e.target); });
+  document.addEventListener("focusout", function () { lastFocus = null; });
+  // A page in a window that is not key may skip focus events; a press on a field still moves focus there.
+  document.addEventListener("mousedown", function (e) {
+    var el = e.target;
+    setTimeout(function () { if (document.activeElement === el) reportFocus(el); }, 0);
+  }, true);
+
+  // --- clicks and links --------------------------------------------------------------------------------------
+  document.addEventListener("click", function (e) {
+    var el = e.target.closest ? e.target.closest("button, a") : null;
+    if (!el || !el.id) return;
+    post({ type: "click", id: el.id, x: half(e.pageX), y: half(e.pageY) });
+    if (el.tagName === "A") post({ type: "link", href: el.getAttribute("href") || "" });
+  }, true);
+
+  // --- the paint canvas --------------------------------------------------------------------------------------
+  var paint = $("paint");
+  var ctx = paint.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, 300, 150);
+  for (var gx = 0; gx < 300; gx += 30) {
+    for (var gy = 0; gy < 150; gy += 30) {
+      ctx.fillStyle = "hsl(" + ((gx * 3 + gy * 5) % 360) + ", 55%, 80%)";
+      ctx.fillRect(gx, gy, 30, 30);
+    }
+  }
+  ctx.fillStyle = "#222";
+  ctx.font = "14px sans-serif";
+  ctx.fillText("Paint", 8, 20);
+  paint.addEventListener("mousedown", function (e) {
+    var button = e.button === 0 ? "left" : e.button === 2 ? "right" : "other";
+    var rect = paint.getBoundingClientRect();
+    // Canvas-local coordinates (CSS px from the canvas's top-left), unlike web.click's page coordinates.
+    post({ type: "canvas", x: half(e.clientX - rect.left), y: half(e.clientY - rect.top), button: button });
+  });
+  // No WebKit context menu over the canvas: a right-click there is only logged, not a modal menu to dismiss.
+  paint.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+
+  // --- scrolling ---------------------------------------------------------------------------------------------
+  window.addEventListener("scroll", function () {
+    if (!quiet) post({ type: "scroll", y: Math.round(window.scrollY) });
+  }, { passive: true });
+
+  // --- the contract with the test rig --------------------------------------------------------------------------
+  window.fixtureState = function () {
+    return {
+      first: $("first").value,
+      search: $("search").value,
+      comment: $("comment").value,
+      doc: $("doc").innerText,
+      scrollY: Math.round(window.scrollY)
+    };
+  };
+  window.fixtureReset = function () {
+    quiet = true;
+    $("first").value = "";
+    $("search").value = "";
+    $("comment").value = "";
+    $("doc").textContent = "";
+    if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+    lastFocus = null;
+    window.scrollTo(0, 0);
+    // The scroll event is delivered a frame later; keep ignoring it until it has.
+    setTimeout(function () { quiet = false; }, 200);
+    return true;
+  };
+})();
+</script>
+
+<main>
+<h2 id="section-1">Section 1</h2>
+<p>This is section 1 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 1 of forty.</p>
+<h2 id="section-2">Section 2</h2>
+<p>This is section 2 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 2 of forty.</p>
+<h2 id="section-3">Section 3</h2>
+<p>This is section 3 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 3 of forty.</p>
+<h2 id="section-4">Section 4</h2>
+<p>This is section 4 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 4 of forty.</p>
+<h2 id="section-5">Section 5</h2>
+<p>This is section 5 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 5 of forty.</p>
+<h2 id="section-6">Section 6</h2>
+<p>This is section 6 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 6 of forty.</p>
+<h2 id="section-7">Section 7</h2>
+<p>This is section 7 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 7 of forty.</p>
+<h2 id="section-8">Section 8</h2>
+<p>This is section 8 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 8 of forty.</p>
+<h2 id="section-9">Section 9</h2>
+<p>This is section 9 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 9 of forty.</p>
+<h2 id="section-10">Section 10</h2>
+<p>This is section 10 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 10 of forty.</p>
+<h2 id="section-11">Section 11</h2>
+<p>This is section 11 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 11 of forty.</p>
+<h2 id="section-12">Section 12</h2>
+<p>This is section 12 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 12 of forty.</p>
+<h2 id="section-13">Section 13</h2>
+<p>This is section 13 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 13 of forty.</p>
+<h2 id="section-14">Section 14</h2>
+<p>This is section 14 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 14 of forty.</p>
+<h2 id="section-15">Section 15</h2>
+<p>This is section 15 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 15 of forty.</p>
+<h2 id="section-16">Section 16</h2>
+<p>This is section 16 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 16 of forty.</p>
+<h2 id="section-17">Section 17</h2>
+<p>This is section 17 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 17 of forty.</p>
+<h2 id="section-18">Section 18</h2>
+<p>This is section 18 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 18 of forty.</p>
+<h2 id="section-19">Section 19</h2>
+<p>This is section 19 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 19 of forty.</p>
+<h2 id="section-20">Section 20</h2>
+<p>This is section 20 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 20 of forty.</p>
+<h2 id="section-21">Section 21</h2>
+<p>This is section 21 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 21 of forty.</p>
+<h2 id="section-22">Section 22</h2>
+<p>This is section 22 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 22 of forty.</p>
+<h2 id="section-23">Section 23</h2>
+<p>This is section 23 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 23 of forty.</p>
+<h2 id="section-24">Section 24</h2>
+<p>This is section 24 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 24 of forty.</p>
+<h2 id="section-25">Section 25</h2>
+<p>This is section 25 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 25 of forty.</p>
+<h2 id="section-26">Section 26</h2>
+<p>This is section 26 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 26 of forty.</p>
+<h2 id="section-27">Section 27</h2>
+<p>This is section 27 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 27 of forty.</p>
+<h2 id="section-28">Section 28</h2>
+<p>This is section 28 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 28 of forty.</p>
+<h2 id="section-29">Section 29</h2>
+<p>This is section 29 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 29 of forty.</p>
+<h2 id="section-30">Section 30</h2>
+<p>This is section 30 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 30 of forty.</p>
+<h2 id="section-31">Section 31</h2>
+<p>This is section 31 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 31 of forty.</p>
+<h2 id="section-32">Section 32</h2>
+<p>This is section 32 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 32 of forty.</p>
+<h2 id="section-33">Section 33</h2>
+<p>This is section 33 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 33 of forty.</p>
+<h2 id="section-34">Section 34</h2>
+<p>This is section 34 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 34 of forty.</p>
+<h2 id="section-35">Section 35</h2>
+<p>This is section 35 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 35 of forty.</p>
+<h2 id="section-36">Section 36</h2>
+<p>This is section 36 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 36 of forty.</p>
+<h2 id="section-37">Section 37</h2>
+<p>This is section 37 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 37 of forty.</p>
+<h2 id="section-38">Section 38</h2>
+<p>This is section 38 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 38 of forty.</p>
+<h2 id="section-39">Section 39</h2>
+<p>This is section 39 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 39 of forty.</p>
+<h2 id="section-40">Section 40</h2>
+<p>This is section 40 of the fixture page. It exists only to make the page much taller than its window, so scrolling, anchor jumps and page-down have somewhere to go. It is section 40 of forty.</p>
+</main>
+</body>
+</html>
