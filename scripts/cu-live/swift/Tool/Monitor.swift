@@ -64,7 +64,9 @@ enum Monitor {
         app.setActivationPolicy(.prohibited)
         // Let the workspace deliver its initial state before reading it.
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
-        Out.line(Sampling.sample().json)
+        var sample = Sampling.sample()
+        sample.spaceType = Sampling.activeSpaceType()
+        Out.line(sample.json)
         exit(0)
     }
 }

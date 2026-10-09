@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { liveHomeRefusal } from "./daemon-entry";
 import {
-  callLine, computerV2Message, describeViolations, extractMarkers, focusViolations, hidInputTimes, lastValue, pointerMoves, markerFacts, MIXED_TEXT,
+  callLine, computerV2Message, describeViolations, extractMarkers, focusViolations, hidInputTimes, lastValue, pointerMoves, startRefusal, markerFacts, MIXED_TEXT,
   parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type MonitorSample,
 } from "./lib";
 import { minimalPdf, REAL_APP_SCENARIOS } from "./real-apps";
@@ -47,6 +47,16 @@ describe("the monitor analysis", () => {
     expect(hidInputTimes(typed, 0, 100)).toEqual([40]);
     expect(hidInputTimes(typed, 50, 100)).toEqual([]);
     expect(hidInputTimes([sample(0, 7, 3, null), sample(20, 7, 3, 5)], 0, 100)).toEqual([]);
+  });
+
+  test("the start gate: never from a full-screen Space; unattended only after a minute with no input", () => {
+    const line = (o: Record<string, unknown>): string => JSON.stringify({ t: 1, front: "x", frontPid: 1, space: 3, ...o });
+    expect(startRefusal(line({ hidIdleMs: 5, spaceType: 0 }), false)).toBeUndefined();
+    expect(startRefusal(line({ hidIdleMs: 999_999, spaceType: 4 }), false)).toContain("full-screen");
+    expect(startRefusal(line({ hidIdleMs: 3_000, spaceType: 0 }), true)).toContain("someone is at the Mac");
+    expect(startRefusal(line({ hidIdleMs: null, spaceType: 0 }), true)).toContain("no HID idle reading");
+    expect(startRefusal(line({ hidIdleMs: 61_000 }), true)).toBeUndefined();
+    expect(startRefusal("not json", false)).toContain("no reading");
   });
 
   test("the real pointer moving is the rung-4 signal; samples without a pointer are skipped", () => {

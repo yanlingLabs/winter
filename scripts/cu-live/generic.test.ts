@@ -3,7 +3,7 @@
 // the scripts carry into the sandboxed worker (`PLANNING`), so the two cannot drift.
 import { describe, expect, test } from "bun:test";
 import {
-  describePlan, GENERIC_PRELUDE, genericScenario, isDestructiveName, looksLikeBundleId, normalizeAppName, offSpacePlan, offSpaceSkipReason, onDesktopPlan,
+  describePlan, GENERIC_PRELUDE, genericScenario, isDestructiveName, looksLikeBundleId, normalizeAppName, offSpacePlan, offSpaceSkipReason, onDesktopPlan, visualSkipReason,
   parseApps, pickEditable, pickPressable, PLANNING, refCount, resolveApp, restorePlan, SCRIPTS, secureFocused, TYPE_MARKER, type PlanElement, type ResolveDeps,
 } from "./generic";
 import { spawnSync } from "node:child_process";
@@ -88,6 +88,15 @@ describe("the generic run's plan", () => {
     expect(offSpaceSkipReason(true)).toContain("already running");
     expect(offSpaceSkipReason(undefined)).toContain("unknown");
     expect(offSpaceSkipReason(false)).toBeUndefined();
+  });
+
+  test("visual steps skip for an already-running app with no window on this desktop (VS Code with none open)", () => {
+    expect(visualSkipReason(true, false, "screenshot")).toContain("never moves your windows");
+    expect(visualSkipReason(true, false, "noAx")).toContain("this desktop");
+    expect(visualSkipReason(true, false, "state")).toBeUndefined();
+    expect(visualSkipReason(true, true, "screenshot")).toBeUndefined();
+    expect(visualSkipReason(false, false, "screenshot")).toBeUndefined();
+    expect(visualSkipReason(true, undefined, "screenshot")).toBeUndefined();
   });
 
   test("restore: quit what the run launched; otherwise close only a window the run opened", () => {

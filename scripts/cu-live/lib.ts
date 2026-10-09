@@ -77,6 +77,21 @@ export function pointerMoves(samples: readonly MonitorSample[], from: number, to
   return out;
 }
 
+/** `--unattended`: how long the Mac must have had no real input before a run may start. */
+const UNATTENDED_IDLE_MS = 60_000;
+
+/** Why the run must not start, from `cu-live-tool front`'s line (the active Space's type, HID idle); else undefined. */
+export function startRefusal(frontLine: string, unattended: boolean): string | undefined {
+  let o: Record<string, unknown>;
+  try { o = JSON.parse(frontLine.trim().split("\n").at(-1) ?? "") as Record<string, unknown>; } catch { return "cu-live-tool front gave no reading"; }
+  if (o.spaceType === 4) return "the active Space is a full-screen app's — start the run from a regular desktop";
+  if (unattended) {
+    if (typeof o.hidIdleMs !== "number") return "--unattended: no HID idle reading, so it cannot tell whether someone is at the Mac";
+    if (o.hidIdleMs < UNATTENDED_IDLE_MS) return `--unattended: real input ${Math.round(o.hidIdleMs / 1000)} s ago — someone is at the Mac, so the run was not started`;
+  }
+  return undefined;
+}
+
 /** Collapse a violation list into one readable line (first time, count). */
 export function describeViolations(v: readonly FocusViolation[], t0: number): string {
   if (v.length === 0) return "";

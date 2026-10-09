@@ -49,17 +49,20 @@ struct Sample: Equatable {
     /// Where the REAL pointer is (global points, whole). Synthetic pid-routed events (rungs 2 and 3) never move
     /// it; only the HID route (rung 4) does — unlike `hidIdleMs`, which SkyLight's pid route resets too.
     var mouse: (x: Int, y: Int)? = nil
+    /// The active Space's type (SkyLight's `SLSSpaceGetType`: 0 a desktop, 4 a full-screen app's Space) — `front` only.
+    var spaceType: Int? = nil
 
     static func == (a: Sample, b: Sample) -> Bool {
         a.t == b.t && a.front == b.front && a.frontPid == b.frontPid && a.space == b.space && a.hidIdleMs == b.hidIdleMs
-            && a.mouse?.x == b.mouse?.x && a.mouse?.y == b.mouse?.y
+            && a.mouse?.x == b.mouse?.x && a.mouse?.y == b.mouse?.y && a.spaceType == b.spaceType
     }
 
     /// `{"t","front","frontPid","space","hidIdleMs"[,"mouse":[x,y]]}` — the key order the rig's parser and a human both expect.
     var json: String {
         "{\"t\":\(t),\"front\":\(JSONOut.optional(front)),\"frontPid\":\(JSONOut.optional(frontPid)),"
             + "\"space\":\(JSONOut.optional(space)),\"hidIdleMs\":\(JSONOut.optional(hidIdleMs))"
-            + (mouse.map { ",\"mouse\":[\($0.x),\($0.y)]" } ?? "") + "}"
+            + (mouse.map { ",\"mouse\":[\($0.x),\($0.y)]" } ?? "")
+            + (spaceType.map { ",\"spaceType\":\($0)" } ?? "") + "}"
     }
 }
 
@@ -83,7 +86,7 @@ enum ArgParser {
     static let usage = """
     usage:
       cu-live-tool monitor [--interval-ms 20]    one JSON line per interval (and per app activation) until stdin EOF / SIGTERM
-      cu-live-tool front                         one JSON line, then exit
+      cu-live-tool front                         one JSON line (with the active Space's type), then exit
       cu-live-tool image-stats <file>            one JSON line about a JPEG/PNG: size, luma, blank, sentinel pixels (exit 2 + {"error"} if undecodable)
       cu-live-tool post --run <id> --role <main|user> --cmd <name> [--args <json object>] [--seq <n>]
       cu-live-tool self-test

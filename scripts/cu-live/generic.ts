@@ -130,7 +130,10 @@ else {
   const app = await apps.open(entry.bundleId);
   GH.set(${JSON.stringify(a.key)}, app);
   const s = await app.state({ emit: false, full: true });
-  report({ bound: true, refs: refCount(s), windows: (await app.windows()).length });
+  // Whether any of its windows is on THIS desktop (screen.windows: onScreen false = another Space, full screen or
+  // minimized) — an already-running app's windows elsewhere are never moved, so the visual steps then skip.
+  const onScreen = (await screen.windows({ emit: false })).some((w) => (w.app === app.name || w.app === entry.name) && w.onScreen);
+  report({ bound: true, refs: refCount(s), windows: (await app.windows()).length, onScreen });
 }`,
   state: (a: GenericApp): string => `${G(a.key)}
 const s = await app.state({ full: true });
@@ -268,6 +271,13 @@ export function offSpacePlan(): Array<{ label: string; action: keyof typeof SCRI
  * Why off-Space is skipped for an app, or undefined to try it: never for an app the user already had running (the run
  * never moves the user's windows), and only through a full-screen button (decided live).
  */
+/** Why a visual step (screenshot, coordinate click) skips: an already-running app with no window on this desktop. */
+export function visualSkipReason(wasRunning: boolean | undefined, onScreen: unknown, action: string): string | undefined {
+  if (action !== "screenshot" && action !== "noAx") return undefined;
+  if (wasRunning === true && onScreen === false) return "none of its windows is on this desktop (another Space, minimized or not open) — the test never moves your windows";
+  return undefined;
+}
+
 export function offSpaceSkipReason(wasRunning: boolean | undefined): string | undefined {
   if (wasRunning === true) return "the app was already running — the test never moves your windows";
   if (wasRunning === undefined) return "unknown whether the app was running";

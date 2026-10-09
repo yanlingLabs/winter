@@ -8,7 +8,9 @@
  *   bun run e2e:cu-live --dry-run                            # builds, self-tests, the no-screen plumbing check
  *   WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live --apps "VRoid Studio,com.figma.Desktop"   # + the generic focus check
  *     on ANY installed app (a Unity app: --apps "VRoid Studio"); --real-apps adds VS Code and Chrome when installed
- *   options: --only <text> (scenarios whose name contains it; a|b for either), --yes (no countdown), --keep-temp, --report <file.json>, --script <file.js> (one ad-hoc script),
+ *   options: --only <text> (scenarios whose name contains it; a|b for either), --yes (no countdown), --keep-temp,
+ *            --report <file.json> (every check + failing outputs), --script <file.js> (one ad-hoc script),
+ *            --unattended (an agent's run: no countdown, and it starts only after 60 s with no real input),
  *            --helper-app <path to "Winter Computer Use Dev.app"> (else $WINTER_COMPUTER_USE_APP, else dist/dev/)
  *
  * WHAT RUNS (all isolated — nothing touches ~/.winter*, the Keychain, or the user's own daemon and helper):
@@ -37,12 +39,12 @@ import { resolvePlatformPackageWinter } from "../../packages/core/src/runtime-sd
 import { buildAll, FIXTURE_MAIN, REPO_ROOT, type Built } from "./build";
 import { DaemonClient } from "./client";
 import {
-  check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, pointerMoves, parseFixtureLog, parseMonitorLine, parseTopDelta,
+  check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, pointerMoves, startRefusal, parseFixtureLog, parseMonitorLine, parseTopDelta,
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, type RealAppsRun } from "./real-apps";
 import { expectedCardSummary, PRELUDE, SCENARIOS, scriptOf, type ImageStats, type ProbeEvent, type Scenario } from "./scenarios";
-import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, offSpacePlan, offSpaceSkipReason, onDesktopPlan, parseApps, resolveApp, restorePlan, SCRIPTS, type GenericApp, type ResolveDeps } from "./generic";
+import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, offSpacePlan, offSpaceSkipReason, onDesktopPlan, visualSkipReason, parseApps, resolveApp, restorePlan, SCRIPTS, type GenericApp, type ResolveDeps } from "./generic";
 
 // ── thresholds (env overrides) ───────────────────────────────────────────────────────────────────────────────────
 const num = (name: string, fallback: number): number => {
@@ -57,10 +59,10 @@ const LIMITS = {
 const WATCH_AFTER_MS = 3_000;
 const MONITOR_INTERVAL_MS = 20;
 
-interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string; report?: string; script?: string }
+interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string; report?: string; script?: string; unattended: boolean }
 
 function parseOptions(argv: string[]): Options {
-  const o: Options = { dryRun: false, realApps: false, yes: false, keepTemp: false };
+  const o: Options = { dryRun: false, realApps: false, yes: false, keepTemp: false, unattended: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--dry-run") o.dryRun = true;
@@ -71,6 +73,7 @@ function parseOptions(argv: string[]): Options {
     else if (a === "--helper-app") o.helperApp = argv[++i];
     else if (a === "--apps") o.apps = argv[++i];
     else if (a === "--report") o.report = argv[++i];
+    else if (a === "--unattended") { o.unattended = true; o.yes = true; }
     else if (a === "--script") { o.script = argv[++i]; o.only = "script"; }
     else throw new Error(`unknown option ${a}`);
   }
@@ -406,6 +409,7 @@ export async function plumbingCheck(built: Pick<Built, "daemon">): Promise<Scena
 
 class Aborted extends Error {}
 
+
 /** When ComputerV2 turns ran ([sent, completed]): the helper's own background events land inside these. */
 const actionWindows: Array<[number, number]> = [];
 const ACTION_SLACK_MS = 1_500;
@@ -450,6 +454,10 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   };
   try {
     // ── setup ──────────────────────────────────────────────────────────────────────────────────────────────────
+    // Before anything launches: never from a full-screen app's Space (the user's app could not open there, and the
+    // run could not bring the user back to it); unattended (an agent's run), never while someone is at the Mac.
+    const start = startRefusal(sh(built.tool, ["front"]).stdout, o.unattended);
+    if (start !== undefined) throw new Error(start);
     monitor = new LineProcess<MonitorSample>(spawn(built.tool, ["monitor", "--interval-ms", String(MONITOR_INTERVAL_MS)], { stdio: ["pipe", "pipe", "pipe"] }), parseMonitorLine);
     await until("the monitor's first sample", 5_000, () => monitor!.items.length > 0);
     const spaceBefore = monitor.items.at(-1)!.space;
@@ -770,7 +778,10 @@ async function runGenericApp(a: GenericApp, runScenario: RunScenario, setupTurn:
   const bundleId = typeof bind.facts.bundleId === "string" ? bind.facts.bundleId : undefined;
   if (bind.facts.bound === true) {
     const refs = Number(bind.facts.refs ?? 0);
-    for (const step of onDesktopPlan(refs)) rows.push(await runScenario(genericScenario(a, step.label, step.action)));
+    for (const step of onDesktopPlan(refs)) {
+      const skipped = visualSkipReason(wasRunning, bind.facts.onScreen, step.action);
+      rows.push(skipped !== undefined ? skipRow(step.label, skipped) : await runScenario(genericScenario(a, step.label, step.action)));
+    }
     if (refs >= 4) rows.push(skipRow("no accessibility tree: a coordinate click + a wheel scroll", `the app has an accessibility tree (${refs} refs)`));
     const reason = offSpaceSkipReason(wasRunning);
     if (reason !== undefined) rows.push(skipRow("off-Space", reason));

@@ -29,6 +29,24 @@ enum Sampling {
 
     // MARK: Active Space
 
+    private typealias SpaceTypeFn = @convention(c) (Int32, UInt64) -> Int32
+
+    /// The active Space's type: 0 a regular desktop, 4 a full-screen app's Space (SkyLight `SLSSpaceGetType`, else
+    /// CoreGraphics' `CGSSpaceGetType`). nil when unresolvable.
+    static func activeSpaceType() -> Int? {
+        let skylight = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
+        let handle = skylight ?? UnsafeMutableRawPointer(bitPattern: -2) // RTLD_DEFAULT
+        for (connectionName, spaceName, typeName) in [("SLSMainConnectionID", "SLSGetActiveSpace", "SLSSpaceGetType"),
+                                                      ("CGSMainConnectionID", "CGSGetActiveSpace", "CGSSpaceGetType")] {
+            guard let c = dlsym(handle, connectionName), let a = dlsym(handle, spaceName), let t = dlsym(handle, typeName) else { continue }
+            let connection = unsafeBitCast(c, to: ConnectionFn.self)()
+            let space = unsafeBitCast(a, to: ActiveSpaceFn.self)(connection)
+            guard space != 0 else { return nil }
+            return Int(unsafeBitCast(t, to: SpaceTypeFn.self)(connection, space))
+        }
+        return nil
+    }
+
     private typealias ConnectionFn = @convention(c) () -> Int32
     private typealias ActiveSpaceFn = @convention(c) (Int32) -> UInt64
 
