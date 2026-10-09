@@ -20,6 +20,13 @@ final class DispatchPillSnapshotTests: XCTestCase {
         }
         outputDirectory = URL(fileURLWithPath: dir, isDirectory: true)
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        // A render draws a layer's own values, not its animations: the plumes are drawn as one still frame each.
+        PlumeLayerView.rendersStillFrames = true
+    }
+
+    override func tearDown() {
+        PlumeLayerView.rendersStillFrames = false
+        super.tearDown()
     }
 
     private let screen = CGRect(x: 0, y: 0, width: 1280, height: 800)

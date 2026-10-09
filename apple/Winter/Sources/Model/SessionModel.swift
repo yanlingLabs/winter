@@ -508,12 +508,26 @@ struct Exchange: Equatable {
     /// exchanges differ (an `Exchange(prompt:reply:activity:)` a test builds has no arrival order).
     ///
     /// **The same stamp answers at once** — the exchange is the same content, and SwiftUI asks this of every
-    /// transcript row on every render (`ActivityItem.==` has the reason). A different stamp compares the
-    /// fields, and `activity` then compares item by item, each by ITS stamp: only the item that changed
-    /// is walked.
+    /// transcript row on every render (`ActivityItem.==` has the reason). A different stamp compares the fields
+    /// — and for the LIVE exchange (the only one whose stamp moves, on every streamed event) the comparison must
+    /// end where the difference is: counts and the short fields first, then the activity NEWEST FIRST, each item
+    /// by ITS stamp. A walk from the oldest item copied and compared a few hundred items that had not changed to
+    /// reach the one that had (measured: `Exchange.==` and the copies under it were a fifth of a lagging main
+    /// thread); from the newest it ends on the first one, since an event touches the newest items.
     static func == (a: Exchange, b: Exchange) -> Bool {
-        a.stamp == b.stamp
-            || (a.prompt == b.prompt && a.promptEnvelope == b.promptEnvelope && a.replies == b.replies && a.activity == b.activity && a.aborted == b.aborted)
+        if a.stamp == b.stamp { return true }
+        guard a.aborted == b.aborted, a.replies.count == b.replies.count, a.activity.count == b.activity.count else { return false }
+        guard a.prompt == b.prompt, a.promptEnvelope == b.promptEnvelope, a.replies == b.replies else { return false }
+        return a.activity.withUnsafeBufferPointer { left in
+            b.activity.withUnsafeBufferPointer { right in
+                var i = left.count - 1
+                while i >= 0 {
+                    if left[i].stamp != right[i].stamp, !ActivityItem.contentEquals(left[i], right[i]) { return false }
+                    i -= 1
+                }
+                return true
+            }
+        }
     }
 
     /// The LAST assistant message of this exchange, or `""` when none has arrived yet. This is
@@ -1271,6 +1285,30 @@ enum SessionReducer {
         }
     }
 
+    /// Whether folding this `thinking_delta` would change nothing a view draws, so the session need not be
+    /// republished for it. A model streams reasoning in increments every few milliseconds (folded in batches of
+    /// 80 ms, twelve a second), and almost all of them only lengthen a block the pill already shows: its title
+    /// is its title, the pill reads "has text" once (`liveTextLength > 0` is the only thing the app asks of the
+    /// running count, `thinkingHasReadableText`), and an OPEN pill reads its words from the live buffer
+    /// (`ThinkingLiveText`), not from here. Republishing the whole session for each cost a full window update
+    /// that drew the same thing — most of a reasoning model's load on the main thread.
+    ///
+    /// True for a main-thread delta to a block already live with text, with the same kind and no new title; and for
+    /// a child thread's delta, which the reducer ignores. The block's first text, a new or changed title, a changed
+    /// kind and the persisted block are all folded as before.
+    static func thinkingIncrementIsInvisible(_ event: SessionEvent, in state: OrbSessionState) -> Bool {
+        guard case .thinkingDelta(let v) = event else { return false }
+        guard v.threadId == mainThread else { return true }
+        for e in state.exchanges.indices.reversed().prefix(toolResultFoldSearchDepth) {
+            guard let i = state.exchanges[e].activity.lastIndex(where: { $0.thinkingItem?.blockId == v.blockId }),
+                  let item = state.exchanges[e].activity[i].thinkingItem else { continue }
+            guard item.isLive, item.liveTextLength > 0, item.kind == v.kind else { return false }
+            guard let title = v.title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return true }
+            return title == item.title
+        }
+        return false
+    }
+
     private static func foldThinking(_ state: inout OrbSessionState, blockId: String,
                                      _ fold: (ThinkingItem?) -> ThinkingItem) {
         for e in state.exchanges.indices.reversed().prefix(toolResultFoldSearchDepth) {
@@ -1325,7 +1363,7 @@ enum SessionReducer {
     ///    is the only door to responding — the pinned band that used to be a second door is gone.
     ///    Opening an empty-prompt exchange is exactly what the `.assistantMessage` case already does
     ///    for the same "arrived before any user_message" shape, and the transcript renders one
-    ///    correctly (`TranscriptExchangeRow` draws no prompt bubble for an empty prompt).
+    ///    correctly (`TranscriptCell` draws no prompt bubble for an empty prompt).
     /// 2. **It dedupes by callId**, mirroring `appendPending`'s replay guard, so a re-seen
     ///    `approval_requested` during a replay is a no-op rather than a second card. This is a
     ///    stronger guard than `appendActivity`'s adjacent-dupe collapse, which compares whole values:
@@ -1767,11 +1805,15 @@ final class SessionModel: ObservableObject {
     func apply(contentsOf events: [SessionEvent]) {
         guard !events.isEmpty else { return }
         var next = state
+        var changed = false
         for event in events {
             liveThinking.fold(event)
+            // A reasoning increment that changes nothing a view draws goes to the live text buffer alone.
+            if SessionReducer.thinkingIncrementIsInvisible(event, in: next) { continue }
             SessionReducer.reduceInPlace(&next, event)
+            changed = true
         }
-        state = next
+        if changed { state = next }
     }
 
     /// Folds a session's REPLAYED history with ONE publish (`SessionFeed`, on attach): applied one

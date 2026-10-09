@@ -101,7 +101,33 @@ struct PlumeThrow: Equatable, Hashable {
 /// before. The last `plumeThrowWindow` only — older ones were thrown long ago.
 func plumeThrows(for exchange: Exchange?) -> [PlumeThrow] {
     guard let exchange else { return [] }
-    return Array(plumeThrows(in: exchange.activity, from: 0).suffix(plumeThrowWindow))
+    if let known = PlumeThrowsMemo.shared.throwsFor(stamp: exchange.stamp) { return known }
+    let made = Array(plumeThrows(in: exchange.activity, from: 0).suffix(plumeThrowWindow))
+    PlumeThrowsMemo.shared.remember(made, stamp: exchange.stamp)
+    return made
+}
+
+/// What an exchange throws, by the exchange's content stamp (`Exchange.stamp` moves whenever its content does). The
+/// pill, a session window and each child's pill all ask on every update of their session, and working it out reads
+/// every tool call and, for the web tools, scans each result's text for urls: a turn of searches re-did that for every
+/// streamed event.
+final class PlumeThrowsMemo: @unchecked Sendable {
+    static let shared = PlumeThrowsMemo()
+    /// Enough for the surfaces that ask at once; past it the memo starts over.
+    static let capacity = 16
+    private let lock = NSLock()
+    private var known: [UInt64: [PlumeThrow]] = [:]
+
+    func throwsFor(stamp: UInt64) -> [PlumeThrow]? {
+        lock.lock(); defer { lock.unlock() }
+        return known[stamp]
+    }
+
+    func remember(_ throwsList: [PlumeThrow], stamp: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        if known.count >= Self.capacity { known.removeAll(keepingCapacity: true) }
+        known[stamp] = throwsList
+    }
 }
 
 /// PURE: what the plume streams again and again while the turn runs — EVERY tool and site the turn
@@ -236,6 +262,9 @@ struct PropulsionPlume: Equatable {
         let size: Double
         /// A spark: small, hot, and quicker down the plume than a puff.
         let spark: Bool
+        /// Its place in birth order, counted from the plume's creation (`spawnedPuffs`). A view that draws each puff
+        /// as its own animated layer binds the ones it has not yet seen by this.
+        var serial: Int = 0
     }
 
     static let defaultSeed: UInt64 = 0x9E37_79B9_7F4A_7C15
@@ -268,6 +297,8 @@ struct PropulsionPlume: Equatable {
         let lifetime: Double
         let lane: Double
         let item: PlumeThrow
+        /// Its place in launch order (`launchedTokens`), as `Puff.serial`.
+        var serial: Int = 0
     }
 
     static let tokenLifetime: ClosedRange<Double> = 1.6...1.9
@@ -281,6 +312,9 @@ struct PropulsionPlume: Equatable {
 
     private(set) var puffs: [Puff] = []
     private(set) var tokens: [Token] = []
+    /// How many puffs and tokens this plume has ever made — the next one's `serial`.
+    private(set) var spawnedPuffs = 0
+    private(set) var launchedTokens = 0
     private var puffDebt: Double = 0
     private var sparkDebt: Double = 0
     private var rng: SplitMix64
@@ -314,7 +348,8 @@ struct PropulsionPlume: Equatable {
     /// Throw `item` out of the nozzle now.
     mutating func launch(_ item: PlumeThrow) {
         tokens.append(Token(age: 0, lifetime: rng.next(in: Self.tokenLifetime), lane: rng.next(in: -0.85...0.85),
-                            item: item))
+                            item: item, serial: launchedTokens))
+        launchedTokens += 1
     }
 
     /// Every riding tile laid out in `rect`, oldest first (the newest, nearest the nozzle, on top).
@@ -340,7 +375,9 @@ struct PropulsionPlume: Equatable {
         let lifetime = rng.next(in: spark ? Self.sparkLifetime : Self.puffLifetime)
         let lane = rng.next(in: -1...1)
         let size = spark ? 1 : rng.next(in: Self.puffSize)
-        puffs.append(Puff(age: min(age, lifetime * 0.5), lifetime: lifetime, lane: lane, size: size, spark: spark))
+        puffs.append(Puff(age: min(age, lifetime * 0.5), lifetime: lifetime, lane: lane, size: size, spark: spark,
+                          serial: spawnedPuffs))
+        spawnedPuffs += 1
     }
 
     /// Every puff laid out in `rect`: born at `emitterX` (the nozzle, on the rect's mid line),
@@ -518,138 +555,38 @@ func workingToolName(_ status: OrbStatus) -> String? {
 /// `emitterInset` in from the trailing edge (by default half the height — the centre of a round
 /// trailing button the height of the frame, which is where the pill's stop button sits) all the way
 /// to the leading end, and `thrown` items leave the nozzle as tiles riding it.
+///
+/// Drawn by `PlumeLayerView` on Core Animation: each puff and tile flies its trip as one keyframe animation the
+/// render server runs, and the main thread wakes ten times a second to start the ones born since. It stops when the
+/// view is not on screen (a hidden or occluded window) and picks up, already full, when it is again.
 struct WorkingAnimationView: View {
     var thrown: [PlumeThrow] = []
     /// The current tool round's throws (`plumeRepeatingThrows`), streamed again while it runs.
     var repeating: [PlumeThrow] = []
     var emitterInset: CGFloat?
     var palette: PlumePalette = .blue
+    /// A model already run forward, drawn as it stands (offscreen renders); the app never passes one.
+    private let initialModel: WorkingAnimationModel?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var model: WorkingAnimationModel
-    @State private var lastTick: Date?
 
-    /// `initialModel` starts the plume from a model already run forward (offscreen renders); the app
-    /// never passes one.
     init(thrown: [PlumeThrow] = [], repeating: [PlumeThrow] = [], emitterInset: CGFloat? = nil,
          palette: PlumePalette = .blue, initialModel: WorkingAnimationModel? = nil) {
         self.thrown = thrown
         self.repeating = repeating
         self.emitterInset = emitterInset
         self.palette = palette
-        _model = State(initialValue: initialModel ?? Self.freshModel)
+        self.initialModel = initialModel
     }
 
-    /// A new plume's starting state, pre-warmed ONCE and copied (user, 2026-10-02): a view's init runs
-    /// on every re-render of whatever holds it — a streaming window's composer, per chunk — and
-    /// `@State` keeps only the first value, so pre-warming in the init threw that work away each time.
-    /// Every default plume starts from the same seed, so one copy is every plume's start.
-    private static let freshModel = WorkingAnimationModel()
+    /// A new plume's starting state, pre-warmed ONCE and copied (user, 2026-10-02): every default plume
+    /// starts from the same seed, so one copy is every plume's start.
+    static let freshModel = WorkingAnimationModel()
 
     var body: some View {
-        TimelineView(.animation) { timeline in
-            plume
-                .onChange(of: timeline.date) { _, now in step(now) }
-        }
-        .accessibilityElement()
-        .accessibilityLabel("Working")
-    }
-
-    private var plume: some View {
-        let model = self.model
-        let emitterInset = self.emitterInset
-        let palette = self.palette
-        // Favicons are looked up HERE, on the main actor, for the tiles riding right now; the
-        // Canvas below only draws what it is handed.
-        var favicons: [String: NSImage] = [:]
-        for token in model.plume.tokens {
-            if case .site(let host, let iconURL) = token.item.kind,
-               let image = FaviconCache.shared.image(host: host, iconURL: iconURL) {
-                favicons[plumeFaviconKey(host: host, iconURL: iconURL)] = image
-            }
-        }
-        return Canvas { context, size in
-            let rect = CGRect(origin: .zero, size: size)
-            let emitterX = size.width - (emitterInset ?? size.height / 2)
-            // Past the pill's leading edge: the exhaust runs the whole length and out (the pill's shape
-            // clips it), never stopping short.
-            let tailX = PropulsionPlume.tailX(height: size.height)
-            let circles = model.plume.circles(in: rect, emitterX: emitterX, tailX: tailX)
-
-            // A soft glow under everything, added rather than painted, so the bunched nozzle
-            // blooms brightest.
-            context.drawLayer { glow in
-                glow.addFilter(.blur(radius: size.height * 0.22))
-                glow.blendMode = .plusLighter
-                glow.opacity = 0.55
-                for circle in circles where !circle.spark {
-                    glow.fill(Self.disc(circle, scale: 1.15), with: .color(Self.color(heat: circle.heat, palette)))
-                }
-            }
-            // The puffs themselves — flat colour, no outline.
-            for circle in circles where !circle.spark {
-                context.fill(Self.disc(circle), with: .color(Self.color(heat: circle.heat, palette)))
-            }
-            for circle in circles where circle.spark {
-                context.fill(Self.disc(circle), with: .color(Self.color(heat: 1, palette).opacity(0.95)))
-            }
-            // The thrown tiles ride on top of the exhaust.
-            for tile in model.plume.tiles(in: rect, emitterX: emitterX, tailX: tailX) {
-                Self.draw(tile, palette: palette, favicons: favicons, in: &context)
-            }
-        }
-    }
-
-    /// One tile: a rounded square, turned by its tumble — a tool's white symbol on its own colour, or
-    /// a site's favicon on white (a globe until the favicon has loaded, or if it never does).
-    /// One thrown item: a white disc holding a TOOL's symbol (in the plume's deep colour) or a SITE's
-    /// favicon (a grey globe until the favicon has loaded, or if it never does).
-    private static func draw(_ tile: PlumeTile, palette: PlumePalette, favicons: [String: NSImage],
-                             in context: inout GraphicsContext) {
-        let side = tile.side
-        let disc = CGRect(x: tile.center.x - side / 2, y: tile.center.y - side / 2, width: side, height: side)
-        let shape = Path(ellipseIn: disc)
-        switch tile.item.kind {
-        case .tool(let symbol):
-            context.fill(shape, with: .color(.white))
-            drawSymbol(symbol, color: color(heat: 0, palette), in: disc.insetBy(dx: side * 0.25, dy: side * 0.25), context: &context)
-        case .site(let host, let iconURL):
-            context.fill(shape, with: .color(.white))
-            let inner = disc.insetBy(dx: side * 0.18, dy: side * 0.18)
-            if let image = favicons[plumeFaviconKey(host: host, iconURL: iconURL)] {
-                var clipped = context
-                clipped.clip(to: Path(ellipseIn: inner.insetBy(dx: -side * 0.04, dy: -side * 0.04)))
-                clipped.draw(Image(nsImage: image).resizable(), in: inner)
-            } else {
-                drawSymbol("globe", color: Color(white: 0.45), in: inner.insetBy(dx: side * 0.03, dy: side * 0.03), context: &context)
-            }
-        }
-    }
-
-    private static func drawSymbol(_ symbol: String, color: Color, in box: CGRect, context: inout GraphicsContext) {
-        var image = context.resolve(Image(systemName: symbol))
-        image.shading = .color(color)
-        let natural = image.size
-        guard natural.width > 0, natural.height > 0 else { return }
-        let scale = min(box.width / natural.width, box.height / natural.height)
-        let size = CGSize(width: natural.width * scale, height: natural.height * scale)
-        context.draw(image, in: CGRect(x: box.midX - size.width / 2, y: box.midY - size.height / 2,
-                                       width: size.width, height: size.height))
-    }
-
-    private static func disc(_ circle: PlumeCircle, scale: CGFloat = 1) -> Path {
-        let d = circle.diameter * scale
-        return Path(ellipseIn: CGRect(x: circle.center.x - d / 2, y: circle.center.y - d / 2, width: d, height: d))
-    }
-
-    private static func color(heat: Double, _ palette: PlumePalette) -> Color {
-        let c = plumeColorComponents(heat: heat, palette: palette)
-        return Color(red: c.red, green: c.green, blue: c.blue)
-    }
-
-    private func step(_ now: Date) {
-        let dt = lastTick.map { now.timeIntervalSince($0) } ?? (1.0 / 60.0)
-        lastTick = now
-        model.tick(dt: dt, thrown: thrown, repeating: repeating, animatesPlume: !reduceMotion)
+        PlumeLayerRepresentable(thrown: thrown, repeating: repeating, emitterInset: emitterInset, palette: palette,
+                                animates: !reduceMotion, initialModel: initialModel)
+            .accessibilityElement()
+            .accessibilityLabel("Working")
     }
 }

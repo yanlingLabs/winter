@@ -296,7 +296,7 @@ final class ToolRowTests: XCTestCase {
     /// run's output. The key follows the run instead.
     ///
     /// This drives the key function against real `groupActivity` output before and after an
-    /// eviction. It does NOT cover the `@State` set in `TranscriptExchangeRow` that consumes the
+    /// eviction. It does NOT cover the `@State` set in `TranscriptCell` that consumes the
     /// key, nor what SwiftUI draws.
     func testTheExpansionKeyFollowsTheRunNotItsPosition() {
         let evicted = ActivityItem(kind: .tool(name: "read", detail: "/old", callId: "c0"))

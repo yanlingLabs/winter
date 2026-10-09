@@ -4,7 +4,7 @@ import WinterProtocol
 /// Cards for approvals/questions/plans — PURE UI: consumes one `InteractionRecord` (the reducer's
 /// per-exchange record of an ask and, once it lands, its outcome) plus injected response closures.
 ///
-/// Mounted INLINE IN THE TRANSCRIPT (`TranscriptExchangeRow`, `ChatContent/TranscriptView.swift`),
+/// Mounted INLINE IN THE TRANSCRIPT (`TranscriptCell`, `ChatContent/TranscriptView.swift`),
 /// at the point the ask was made, and never removed — mac-chat-parity Task 3. It used to be a
 /// pinned band between the transcript and the composer, deleted the instant the ask resolved, which
 /// left the Mac with no record anywhere in scrollback of anything the user had approved or
@@ -23,7 +23,7 @@ import WinterProtocol
 /// is now Winter's teal. And a card is CHROME: its text stays sans, including a plan's markdown body,
 /// which is why both plan bodies pass `TranscriptAssistantMessage` the `.sans` role explicitly.
 
-/// Everything a transcript-mounted card needs from its surface, bundled so `TranscriptExchangeRow`
+/// Everything a transcript-mounted card needs from its surface, bundled so `TranscriptCell`
 /// keeps taking values and closures rather than the adapter itself — the same "value/closure, not
 /// the object" shape the composer's `draftBinding` already follows, and what keeps the transcript
 /// rows pure functions of their inputs.
