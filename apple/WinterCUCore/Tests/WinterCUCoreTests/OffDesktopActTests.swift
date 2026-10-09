@@ -334,6 +334,7 @@ final class OffDesktopActTests: XCTestCase {
     func testAClosedWindowTheServerStillListsIsTargetLostNotNoWindow() async throws {
         world()
         sys.noSpaceWindows = [77]  // closed: off screen, on no Space, not in the app's list
+        ax.dead.insert(AXIdentity(element: window))  // and its element no longer answers
         do {
             _ = try await core.targetFind(TargetFindParams(targetId: "t1", query: .fields(role: "button", name: nil, text: nil)))
             XCTFail("expected target_lost")
