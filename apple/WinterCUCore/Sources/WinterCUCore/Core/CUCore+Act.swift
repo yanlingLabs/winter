@@ -243,11 +243,15 @@ extension CUCore {
                     cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
                     announced = true
                     try token.check()
+                    let before = pressEvidence(e, t)
                     do {
                         try ax.perform(e, axAction)
                         return ActOutcome(rung: .accessibility)
-                    } catch let error where Self.deliveryUncertain(error) {
-                        throw busyAfterSend(t)
+                    } catch let error where Self.pressMayHaveActed(error) != nil {
+                        // Never fall through to a click here: the press may have acted, and a click would repeat it.
+                        let note = try judgeErroredPress(e, t, before: before, code: Self.pressMayHaveActed(error)!,
+                                                         what: "the press on [\(ref)]")
+                        return ActOutcome(rung: .accessibility, detail: note)
                     } catch let err as CUError where err.code == "stale_element" || err.code == "permission_missing" {
                         throw err
                     } catch {
@@ -343,13 +347,17 @@ extension CUCore {
             }
             if let action {
                 for el in tries {
+                    let before = pressEvidence(el, t)
                     do {
                         try ax.perform(el, action)
                         CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): AX \(action, privacy: .public)")
                         return ActOutcome(rung: .accessibility,
                                           detail: "\(subject), so the element was sent \(CURoleWords.actionWords(action)) over accessibility")
-                    } catch let error where Self.deliveryUncertain(error) {
-                        throw busyAfterSend(t)
+                    } catch let error where Self.pressMayHaveActed(error) != nil {
+                        // Not the next ancestor, not events: the press may have acted.
+                        let note = try judgeErroredPress(el, t, before: before, code: Self.pressMayHaveActed(error)!,
+                                                         what: CURoleWords.actionWords(action))
+                        return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent \(CURoleWords.actionWords(action)) over accessibility; \(note)")
                     } catch let err as CUError where err.code == "stale_element" || err.code == "permission_missing" {
                         throw err
                     } catch {
@@ -1563,11 +1571,13 @@ extension CUCore {
             cursor(t, "press", at: info.center, count: 1, button: button)
             shown = (1, button)
             try token.check()
+            let before = pressEvidence(e, t)
             do {
                 try ax.perform(e, name)
                 return ActOutcome(rung: .accessibility)
-            } catch let error where Self.deliveryUncertain(error) {
-                throw busyAfterSend(t)
+            } catch let error where Self.pressMayHaveActed(error) != nil {
+                let note = try judgeErroredPress(e, t, before: before, code: Self.pressMayHaveActed(error)!, what: "“\(words)” on [\(a.ref)]")
+                return ActOutcome(rung: .accessibility, detail: note)
             } catch let err as CUError where Self.refusedAction(err) {
                 t.noteRefused(action: name, role: role)
             }
@@ -1583,6 +1593,56 @@ extension CUCore {
         return try pointerClick(p, t, at: center, button: pointer.button, count: pointer.count, flags: [], token, announced: same,
                                 element: e, axTried: true)
             .noting("\(t.appName) refused “\(words)” over accessibility, so [\(a.ref)] was \(pointer.verb) instead")
+    }
+
+    /// What a press can change, read before it so a press the app answered with an error can be judged.
+    struct PressEvidence: Equatable {
+        var windows: Set<UInt32>
+        var focused: AXIdentity?
+        var value: String?
+        var alive: Bool
+    }
+
+    func pressEvidence(_ e: AXUIElement, _ t: CUTarget) -> PressEvidence {
+        PressEvidence(windows: Set(sys.windows(pid: t.pid).filter { $0.layer == 0 }.map(\.id)),
+                      focused: ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute).map { AXIdentity(element: $0) },
+                      value: ax.string(e, kAXValueAttribute), alive: ax.isAlive(e))
+    }
+
+    /// The AX error of a press that may have acted anyway: -25200 (kAXErrorFailure) — a live fixture opened its
+    /// document window and still answered it — and -25204 (cannot complete: no answer in time). Nil for an
+    /// outright refusal (unsupported, not implemented), which did nothing.
+    static func pressMayHaveActed(_ error: Error) -> Int? {
+        guard let e = error as? CUError else { return nil }
+        if e.code == "busy" { return Int(AXError.cannotComplete.rawValue) }
+        if e.code == "unsupported", case .number(let n)? = e.data?["axError"], Int32(n) == AXError.failure.rawValue { return Int(n) }
+        return nil
+    }
+
+    /// A press the app answered with -25200/-25204: did it act? Something changed (a new or closed window, the
+    /// element's value, the focus, the element gone) → it took effect, said with a note so the model does not
+    /// press again. Nothing changed → an error that says it may have acted — never a second press here.
+    func judgeErroredPress(_ e: AXUIElement, _ t: CUTarget, before: PressEvidence, code: Int, what: String) throws -> String {
+        let deadline = clock.nowMs() + pressSettleMs
+        var after = pressEvidence(e, t)
+        while after == before, clock.nowMs() < deadline {
+            usleep(50_000)
+            after = pressEvidence(e, t)
+        }
+        guard after != before else {
+            CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public): AXError \(code, privacy: .public), and nothing visibly changed")
+            throw CUError(code: "unsupported",
+                          message: "\(t.appName) answered \(what) with an error (AXError \(code)) but may have acted — check state() before retrying",
+                          data: ["axError": .int(code)])
+        }
+        var changed: [String] = []
+        if !after.windows.subtracting(before.windows).isEmpty { changed.append("a new window opened") }
+        if !before.windows.subtracting(after.windows).isEmpty { changed.append("a window closed") }
+        if after.value != before.value { changed.append("its value changed") }
+        if after.focused != before.focused { changed.append("the focus moved") }
+        if before.alive, !after.alive { changed.append("the element went away") }
+        CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public): AXError \(code, privacy: .public), but it took effect")
+        return "\(t.appName) answered \(what) with an error (AXError \(code)), but it took effect — \(changed.joined(separator: ", ")); don't repeat it"
     }
 
     /// The app answered that the element does not support the action (not a timeout or a dead element).
@@ -1641,9 +1701,10 @@ extension CUCore {
                           data: ["disabled": .string(title)])
         }
         t.disabledMenuCommands.remove(key)
-        try pressMenu(item, t)
-        return ActOutcome(rung: .accessibility,
-                          detail: keyed != nil ? "\(t.appName)'s window was made key in the background for the command" : nil)
+        let note = try pressMenu(item, t)
+        let made = keyed != nil ? "\(t.appName)'s window was made key in the background for the command" : nil
+        let detail = [made, note].compactMap { $0 }.joined(separator: "; ")
+        return ActOutcome(rung: .accessibility, detail: detail.isEmpty ? nil : detail)
     }
 
     /// What to do about a menu command disabled in the background: the UI routes that check the item itself,
@@ -1708,11 +1769,16 @@ extension CUCore {
         return item
     }
 
-    private func pressMenu(_ item: CUAXMenuNode, _ t: CUTarget) throws {
+    /// Presses a menu item; a note when the app answered with an error but the command took effect.
+    @discardableResult
+    private func pressMenu(_ item: CUAXMenuNode, _ t: CUTarget) throws -> String? {
+        let before = pressEvidence(item.element, t)
         do {
             try ax.perform(item.element, kAXPressAction)
-        } catch let error where Self.deliveryUncertain(error) {
-            throw busyAfterSend(t)
+            return nil
+        } catch let error where Self.pressMayHaveActed(error) != nil {
+            return try judgeErroredPress(item.element, t, before: before, code: Self.pressMayHaveActed(error)!,
+                                         what: "the menu command “\(item.menuTitle)”")
         }
     }
 

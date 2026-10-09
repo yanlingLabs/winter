@@ -105,8 +105,14 @@ final class FakeAX: CUAXBackend {
     var refuses: Set<String> = []
     /// Runs after each perform that went through ("token:action"), to change the fake world.
     var onPerform: ((String) -> Void)?
+    /// Thrown AFTER the action took effect (onPerform ran): an app that acts and still answers with an error.
+    var performErrorAfterActing: CUError?
     func perform(_ e: AXUIElement, _ action: String) throws {
         performed.append("\(token(e)):\(action)")
+        if let err = performErrorAfterActing {
+            onPerform?("\(token(e)):\(action)")
+            throw err
+        }
         defer { if performError == nil, !refuses.contains("\(token(e)):\(action)") { onPerform?("\(token(e)):\(action)") } }
         if let err = performError { throw err }
         if refuses.contains("\(token(e)):\(action)") {

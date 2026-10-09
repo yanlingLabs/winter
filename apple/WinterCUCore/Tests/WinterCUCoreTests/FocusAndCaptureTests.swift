@@ -360,7 +360,7 @@ final class FocusAndCaptureTests: XCTestCase {
     func testATimeoutIsNotARefusal() async throws {
         electron()
         ax.performError = CUError.busy()
-        await expect("busy") { try await self.act(.action(CUAXAction(ref: self.ref(self.icon), name: "open"))) }
+        await expect("unsupported") { try await self.act(.action(CUAXAction(ref: self.ref(self.icon), name: "open"))) }
         XCTAssertTrue(target.refusedActions.isEmpty)
         XCTAssertTrue(poster.entries.isEmpty, "an AX action that may still land is never repeated as events")
     }

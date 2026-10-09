@@ -84,6 +84,7 @@ public final class CUCore: @unchecked Sendable {
             guardianRestoreSync = true
             focusWaitWebMs = 0
             focusWaitNativeMs = 0
+            pressSettleMs = 0
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
         }
     }
@@ -449,6 +450,9 @@ public final class CUCore: @unchecked Sendable {
     var guardianLiveTapEnabled = true
     /// Whether the guardian's restore runs inline (tests, synchronous) rather than dispatched off-main.
     var guardianRestoreSync = false
+    /// How long a press the app answered with an error is watched for its effect (a new window, a value, the
+    /// focus). 0 in test cores (one read).
+    var pressSettleMs: Double = 500
     /// How long focus placement waits for the focused element to become the field (WebKit moves it
     /// asynchronously), for web content and for native fields. 0 in test cores (one read).
     var focusWaitWebMs: Double = 400
