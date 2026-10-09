@@ -157,6 +157,14 @@ final class AppModel: ObservableObject {
         return (detachedFeed, detachedSession)
     }
 
+    /// The pinned feeds the app's surfaces share (`SessionFeedHub`): one per session however many surfaces — a child's
+    /// pill, a detached window, the main window — show it, each holding it through a lease. Built over
+    /// `makeDetachedFeed`, so a feed is the same harness it always was (this model's transport factory, token and client
+    /// name); what changed is that a second surface on a session joins the first's instead of opening another.
+    private(set) lazy var feedHub = SessionFeedHub { [weak self] sessionId in
+        self?.makeDetachedFeed(sessionId: sessionId)
+    }
+
     /// Field summon path: a session to talk to — the ONE permanent dispatch session (Phase 7),
     /// get-or-created via `session.dispatch` when none is focused.
     ///

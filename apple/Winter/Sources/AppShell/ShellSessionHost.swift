@@ -193,25 +193,25 @@ func officeRuntimeReleasedOnDeparture(dirtyDocuments: Int) -> Bool {
 
 // MARK: - The live harness behind an open session
 
-/// One live attachment: a pinned `SessionFeed` (its own `WinterClient`/socket — a full harness, the
-/// spec's "harness-per-window", here "harness-per-shell"), the `SessionModel` it pumps into, and the
+/// One live attachment: a hold on a session's pinned feed (`SessionFeedLease` — shared with any other surface showing the
+/// session, one socket and one fold between them), the shell's own `SessionModel` that FOLLOWS the feed's, and the
 /// `FieldStateAdapter` the hosted `WindowContentView` renders.
 ///
-/// A class, not a struct: identity is the point. A HOP keeps this exact object (same socket, same
-/// adapter, the transcript replaced by `SessionFeed.repin`'s reset+replay), while a hide DESTROYS it
-/// — and those two are precisely the policy table's two different rows.
+/// A class, not a struct: identity is the point. A HOP keeps this exact object (same adapter, the same model — which
+/// now follows the new session's, emptied first — and the lease moved), while a hide DESTROYS it — and those two are
+/// precisely the policy table's two different rows.
 @MainActor
 final class ShellSessionAttachment {
-    let feed: SessionFeed
+    let lease: SessionFeedLease
+    /// The shell's model: what the adapter is built on. It follows `lease.session` (`SessionModel.follow`) and never
+    /// changes identity, however many sessions the attachment hops through.
     let session: SessionModel
     let adapter: FieldStateAdapter
-    /// The `feed.start()` task, held so a detach can CANCEL it — `SessionFeed.start()`'s initial
-    /// connect-backoff loop exits only on `Task.isCancelled` (the same fix `DetachedWindowController`
-    /// carries: a hidden shell whose daemon never came up must leave nothing spinning).
-    var feedTask: Task<Void, Never>?
+    /// The feed the lease is on now (a hop can put it on another).
+    var feed: SessionFeed { lease.feed }
 
-    init(feed: SessionFeed, session: SessionModel, adapter: FieldStateAdapter) {
-        self.feed = feed
+    init(lease: SessionFeedLease, session: SessionModel, adapter: FieldStateAdapter) {
+        self.lease = lease
         self.session = session
         self.adapter = adapter
     }
@@ -231,16 +231,17 @@ final class ShellSessionAttachment {
 ///
 /// **Why a fresh harness rather than the orb's.** `AppModel`'s own feed is `followFocus` and
 /// dispatch-only (`AppModel.refocus`'s mode gate) — the shell shows code and chat sessions too, and
-/// borrowing that connection would either break the orb's focus or silently refuse. `makeFeed` is
-/// `AppModel.makeDetachedFeed` in production: the SAME transport factory and token (one Keychain
-/// read, shared), a separate socket. That separateness is also what makes the policy table's last
-/// row true — the shell's attachment is its own, so a detached window closing is never the last
-/// detach for a session the shell is showing.
+/// borrowing that connection would either break the orb's focus or silently refuse. In production the feeds
+/// come from the app's `SessionFeedHub` (over `AppModel.makeDetachedFeed`): the SAME transport factory
+/// and token (one Keychain read, shared), a pinned harness of its own unless another surface already shows the
+/// session — then it is that feed, held by both. That is also what makes the policy table's last row true: a
+/// detached window closing is never the last detach for a session the shell is showing — the feed stays up until
+/// its last holder lets go.
 @MainActor
 final class ShellSessionHost: ObservableObject {
     /// Mints a pinned harness for a session, or `nil` when one cannot be spawned (no daemon token —
     /// `AppModel.makeDetachedFeed`'s own refusal). Injected so tests drive a scripted transport.
-    typealias FeedFactory = (String) -> (feed: SessionFeed, session: SessionModel)?
+    typealias FeedFactory = SessionFeedHub.Factory
 
     /// The session the shell is SHOWING. Survives a hide; `nil` whenever the shell is on a landing
     /// surface, the dashboard, or has never opened a session.
@@ -261,7 +262,9 @@ final class ShellSessionHost: ObservableObject {
     /// and the hosted view's work column all read.
     let directory: SessionDirectory
 
-    private let makeFeed: FeedFactory
+    /// The feeds the app's surfaces share (`SessionFeedHub`): the shell takes a lease on the session it shows, so a
+    /// detached window or a child's pill on the same session is the SAME feed, not another harness.
+    private let hub: SessionFeedHub
 
     /// The window an `NSOpenPanel`/confirm alert attaches to (the working-folders chip's two doors).
     /// AppKit belongs to the window controller, so this is injected by it; `nil` in tests, where the
@@ -357,10 +360,18 @@ final class ShellSessionHost: ObservableObject {
     /// own (no separate teardown needed; `AnyCancellable.cancel()` fires on deinit).
     private var cancellables = Set<AnyCancellable>()
 
-    init(directory: SessionDirectory, makeFeed: @escaping FeedFactory, managementClient: WinterClient? = nil,
+    /// A host with feeds of its own: `makeFeed` mints each session's harness (a scripted one in tests), held through a
+    /// hub no other surface shares.
+    convenience init(directory: SessionDirectory, makeFeed: @escaping FeedFactory, managementClient: WinterClient? = nil,
+                     outputsWatcher: OutputsWatcher? = nil) {
+        self.init(directory: directory, hub: SessionFeedHub(factory: makeFeed), managementClient: managementClient,
+                  outputsWatcher: outputsWatcher)
+    }
+
+    init(directory: SessionDirectory, hub: SessionFeedHub, managementClient: WinterClient? = nil,
          outputsWatcher: OutputsWatcher? = nil) {
         self.directory = directory
-        self.makeFeed = makeFeed
+        self.hub = hub
         self.managementClient = managementClient
         self.outputsWatcher = outputsWatcher
         let previousOnChange = outputsWatcher?.onChange
@@ -2290,13 +2301,18 @@ final class ShellSessionHost: ObservableObject {
     /// skipped (`SessionEvent`'s per-event `try?` decode); a snapshot that disagreed with what
     /// replay would eventually show for the same wire value would be a second, diverging behavior
     /// for the identical case.
-    private func refreshPanelTabs(for sessionId: String) {
+    ///
+    /// `joinedAttachedFeed`: the session's feed was already attached when this shell joined it (a pill or a window
+    /// holds it too), so there is NO replay coming and the panel's tabs are this snapshot plus what arrives live —
+    /// `PanelStore.applyFetchedSnapshot(foldingBufferedEvents:)`.
+    private func refreshPanelTabs(for sessionId: String, joinedAttachedFeed: Bool = false) {
         guard let client = managementClient else { return }
         Task { @MainActor [weak self] in
             guard let result = try? await client.listPanelTabs(sessionId: sessionId) else { return }
             self?.panelStore.applyFetchedSnapshot(sessionId: sessionId,
                                                   tabs: panelTabs(fromSnapshot: result.tabs),
-                                                  activeTabId: result.activeTabId)
+                                                  activeTabId: result.activeTabId,
+                                                  foldingBufferedEvents: joinedAttachedFeed)
         }
     }
 
@@ -2922,13 +2938,17 @@ final class ShellSessionHost: ObservableObject {
     // MARK: - Attach / hop / detach
 
     private func attachFresh(to sessionId: String) {
-        guard let made = makeFeed(sessionId) else {
+        guard let lease = hub.lease(sessionId: sessionId) else {
             // No token yet (`AppModel.missingTokenSentinel`). The shell simply stays detached and
             // says so in the view — never a half-wired harness that can't authenticate.
             OrbDebug.log("ShellSessionHost: no harness for \(sessionId.prefix(10)) — the shell stays detached")
             return
         }
-        let adapter = FieldStateAdapter(session: made.session)
+        // The shell's own model, following the feed's: the adapter and the views are built on a model that never
+        // changes, and a hop re-points it.
+        let surface = SessionModel()
+        surface.follow(lease.session)
+        let adapter = FieldStateAdapter(session: surface)
         // A ONE-SHOT read of whatever `directory.rows` holds right now — for a session attached
         // before its own row has loaded (the New-Chat race: create, then navigate onto the id
         // immediately, always losing the `session_created` broadcast's own refresh round trip)
@@ -2983,7 +3003,7 @@ final class ShellSessionHost: ObservableObject {
         // **`return false` is load-bearing, unchanged**: `SessionFeed.handle` reads `true` as
         // "swallowed" and skips its own pinned application entirely, which would stop the session
         // model dead.
-        made.feed.onEvent = { [weak self] event in
+        lease.onEvent = { [weak self] event in
             if case .session(let e) = event {
                 self?.directory.handle(e)
                 if let attached = self?.attachedSessionId, e.sessionId == attached {
@@ -2993,7 +3013,6 @@ final class ShellSessionHost: ObservableObject {
                     self?.onPanelCommand?(command)
                 }
             }
-            return false
         }
         // The pickers' catalogue, fetched when this harness is actually CONNECTED. Deliberately not
         // at construction like `DetachedWindowController`'s: `WinterClient.request` throws outright
@@ -3004,7 +3023,7 @@ final class ShellSessionHost: ObservableObject {
         // chatgpt-ui T2: the pending first message delivers here too — in PINNED mode this hook
         // fires only after `client.attach`'s ack (`SessionFeed.start()`), which is the whole
         // create → attach → send ordering guarantee in one line.
-        made.feed.onConnected = { [weak self] in
+        lease.onConnected = { [weak self] in
             self?.refreshModelCatalogue()
             self?.deliverPendingFirstMessage(for: sessionId)
         }
@@ -3013,10 +3032,10 @@ final class ShellSessionHost: ObservableObject {
         // attachment, which is what makes `repin`'s re-attach report its own ceiling too. The
         // session comes from the hook rather than this closure's captured `sessionId` for the same
         // reason `onEvent` re-reads `attachedSessionId`: a hop changes which session is current.
-        made.feed.onPinnedAttach = { [weak self] attachedSessionId, ceilingSeq in
+        lease.onAttach = { [weak self] attachedSessionId, ceilingSeq in
             self?.panelStore.endReplay(for: attachedSessionId, throughSeq: ceilingSeq)
         }
-        let live = ShellSessionAttachment(feed: made.feed, session: made.session, adapter: adapter)
+        let live = ShellSessionAttachment(lease: lease, session: surface, adapter: adapter)
         attachment = live
         attachedSessionId = sessionId
         refreshOutputFiles(for: sessionId)
@@ -3031,11 +3050,11 @@ final class ShellSessionHost: ObservableObject {
         // attach, and AFTER `switchSession` — which must keep its own instant republish of this
         // session's cached fold, since that is the frame the panel shows while the replay runs.
         panelStore.beginReplay(for: sessionId)
-        refreshPanelTabs(for: sessionId)
-        wire(adapter: adapter, feed: made.feed)
+        refreshPanelTabs(for: sessionId, joinedAttachedFeed: lease.joinedAttachedFeed)
+        wire(adapter: adapter, lease: lease)
         // office-live-ux Job 3, wiring door 1 of 3 — see `rewireOfficeTurnSignal`.
         rewireOfficeTurnSignal(departing: nil)
-        live.feedTask = Task { await made.feed.start() }
+        lease.begin()
     }
 
     /// The hop. ONE `session.attach` on the SAME connection, which IS "detach previous, attach new":
@@ -3085,7 +3104,8 @@ final class ShellSessionHost: ObservableObject {
         // live-gate fix A: same pair as `attachFresh`, and it matters MORE here — `repin` re-attaches
         // on a live pump, so the replay starts arriving the moment the RPC goes out.
         panelStore.beginReplay(for: sessionId)
-        refreshPanelTabs(for: sessionId)
+        // (`refreshPanelTabs` follows the lease's move below: whether the new session's feed was already attached decides
+        // how its snapshot is taken, and only the move knows.)
         // Everything the OLD session's identity decided has to be re-derived or dropped, exactly as
         // an in-place switch does elsewhere: a different session means a different mode, a different
         // pinned model/effort, and refusals that were about the session the user just left.
@@ -3141,10 +3161,16 @@ final class ShellSessionHost: ObservableObject {
         if let pending = pendingFirstMessages[sessionId] {
             live.adapter.composerDraft = pending
         }
+        // The lease moves onto the new session's feed — this one re-pinned (one `session.attach` on the same socket) when
+        // the shell is the only holder of the session it leaves, the new session's own when another surface already
+        // shows it — and the shell's model follows that session's, emptied first (the shape a re-pin always gave).
+        let attached = live.lease.move(to: sessionId)
+        if live.session.following !== live.lease.session { live.session.follow(live.lease.session, resetting: true) }
+        // panel-shell T9's instant-display seed — see `panelStore.switchSession` above, and `refreshPanelTabs` for the flag.
+        refreshPanelTabs(for: sessionId, joinedAttachedFeed: live.lease.joinedAttachedFeed)
         Task { @MainActor [weak self] in
-            await live.feed.repin(to: sessionId)
-            // After the repin's attach ack — same attach-before-send guarantee as `onConnected`'s
-            // fresh-attach ordering (`repin` awaits `client.attach` before returning).
+            await attached.value
+            // After the attach's answer — same attach-before-send guarantee as `onConnected`'s fresh-attach ordering.
             self?.deliverPendingFirstMessage(for: sessionId)
         }
     }
@@ -3182,9 +3208,8 @@ final class ShellSessionHost: ObservableObject {
         // dirty one. See `releaseOfficeRuntimeIfClean`'s own doc.
         if let departing = attachedSessionId { releaseOfficeRuntimeIfClean(for: departing) }
         let officeDeparting = attachedSessionId
-        live.feedTask?.cancel()
-        live.feedTask = nil
-        live.feed.stop()
+        live.lease.release()
+        live.session.stopFollowing()
         attachment = nil
         attachedSessionId = nil
         // office-live-ux Job 3, wiring door 2 of 3 — tears the sink down and pushes `false` into
@@ -3375,8 +3400,10 @@ final class ShellSessionHost: ObservableObject {
     /// `DetachedWindowController.init`'s: `[weak self]`/`[weak adapter]` throughout (one adapter per
     /// attachment, so a strong self-capture is a real leak, not a harmless app-lifetime one), and
     /// `attachedSessionId` read FRESH at call time so a hop re-targets everything at once.
-    private func wire(adapter: FieldStateAdapter, feed: SessionFeed) {
-        let client = feed.client
+    private func wire(adapter: FieldStateAdapter, lease: SessionFeedLease) {
+        // Read off the lease at each use: a hop can put the attachment on another session's feed, and the client of
+        // the one it left is closed when nobody holds that any more.
+        var client: WinterClient { lease.feed.client }
         adapter.onSubmit = { [weak self] text in self?.submit(text) }
         adapter.onClearMessage = { [weak adapter] in adapter?.composerDraft = "" }
         adapter.boundSessionId = { [weak self] in self?.attachedSessionId }

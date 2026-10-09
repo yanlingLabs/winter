@@ -395,11 +395,20 @@ final class PanelStore: ObservableObject {
     /// one; `panel.list` carries no seq to order by. Never a WRONG-session read either way — a
     /// response for a session the shell has since switched AWAY from still lands correctly, keyed
     /// to that session, just not currently shown.
-    func applyFetchedSnapshot(sessionId: String, tabs: [PanelTab], activeTabId: String?) {
-        guard (eventsBySession[sessionId] ?? []).isEmpty else { return }
+    ///
+    /// **`foldingBufferedEvents`: the snapshot is all there is.** A surface that JOINED a feed already attached
+    /// (`SessionFeedLease.joinedAttachedFeed`) gets no replay — the buffer holds only what arrived since the join, a
+    /// tail, not the history the drop above assumes. Dropping the snapshot for it would leave that tail folded onto
+    /// whatever was cached (nothing, for a session this store never showed) for good. So with the flag the snapshot
+    /// is taken as the seed whatever the buffer holds, and the buffer is folded again on top of it — which
+    /// converges: an event the snapshot already reflects (the fetch ran after it) is idempotent, one it does not
+    /// (the fetch ran before it) is applied.
+    func applyFetchedSnapshot(sessionId: String, tabs: [PanelTab], activeTabId: String?, foldingBufferedEvents: Bool = false) {
+        let buffered = eventsBySession[sessionId] ?? []
+        guard buffered.isEmpty || foldingBufferedEvents else { return }
         let state = PanelTabState(tabs: tabs, activeTabId: activeTabId)
         seedBySession[sessionId] = state
-        bySession.set(sessionId: sessionId, state: state)
+        bySession.set(sessionId: sessionId, state: buffered.isEmpty ? state : foldPanelTabs(buffered, startingFrom: state))
         if sessionId == currentSessionId {
             publish(for: sessionId)
         }

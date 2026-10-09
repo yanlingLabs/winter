@@ -72,6 +72,79 @@ final class SessionFeed {
     /// own focus machinery, and nothing there has a panel to coalesce folds for.
     var onPinnedAttach: ((_ sessionId: String, _ ceilingSeq: Int?) -> Void)?
 
+    // MARK: - Observers: what a shared feed gives each of its surfaces
+
+    /// `onEvent`, `onConnected` and `onPinnedAttach` above are ONE closure each — the owner's. A feed that several
+    /// surfaces share (`SessionFeedHub`) gives each of them its own tap on the same three moments instead: events
+    /// as they are folded, the connect, and the attach (or re-attach) answer. A tap added to a feed that is ALREADY
+    /// connected/attached is told so at once, one turn later — the moment it missed is not coming back, and a surface
+    /// waiting on it (the shell arms a replay window and waits for its end) must not wait forever.
+    private var eventObservers: [(id: Int, run: (WinterEvent) -> Void)] = []
+    private var connectedObservers: [(id: Int, run: () -> Void)] = []
+    private var attachObservers: [(id: Int, run: (String, Int?) -> Void)] = []
+    private var nextObserverId = 0
+
+    /// True once `stop()` has run: the feed is closed for good (a shared feed's last holder let go).
+    var isStopped: Bool { stopped }
+    /// True once `session.markConnected()` has run (the connect, and for a pinned feed the attach, succeeded).
+    private(set) var isConnected = false
+    /// A pinned feed's attach has been answered (success or failure) and no re-attach is in flight.
+    private(set) var isAttached = false
+    private var attachWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Every event this feed reads, before it is folded (before `onEvent`). Raw events: a surface that keeps its own
+    /// side store (the shell's panel, a sidebar's directory) folds what it needs from them.
+    func observeEvents(_ run: @escaping (WinterEvent) -> Void) -> FeedObservation {
+        let id = takeObserverId()
+        eventObservers.append((id, run))
+        return FeedObservation { [weak self] in self?.eventObservers.removeAll { $0.id == id } }
+    }
+
+    /// The feed's connect (for a pinned feed: after the attach is answered). `fireIfAlreadyConnected` tells a tap that
+    /// joins later, one turn on.
+    func observeConnected(fireIfAlreadyConnected: Bool = true, _ run: @escaping () -> Void) -> FeedObservation {
+        let id = takeObserverId()
+        connectedObservers.append((id, run))
+        let observation = FeedObservation { [weak self] in self?.connectedObservers.removeAll { $0.id == id } }
+        if fireIfAlreadyConnected, isConnected {
+            DispatchQueue.main.async { [weak observation] in MainActor.assumeIsolated { if observation?.isActive == true { run() } } }
+        }
+        return observation
+    }
+
+    /// The attach answer — `start()`'s, and every `repin`'s. A tap that joins a feed already attached is told
+    /// `(sessionId, nil)`: nil is "no replay is coming", which is the truth for it.
+    func observeAttach(_ run: @escaping (_ sessionId: String, _ ceilingSeq: Int?) -> Void) -> FeedObservation {
+        let id = takeObserverId()
+        attachObservers.append((id, run))
+        let observation = FeedObservation { [weak self] in self?.attachObservers.removeAll { $0.id == id } }
+        if isAttached, let sessionId = pinnedSessionId {
+            DispatchQueue.main.async { [weak observation] in MainActor.assumeIsolated { if observation?.isActive == true { run(sessionId, nil) } } }
+        }
+        return observation
+    }
+
+    private func takeObserverId() -> Int {
+        nextObserverId += 1
+        return nextObserverId
+    }
+
+    /// Returns once this feed's pinned attach has been answered — at once if it already has. Also returns when the feed
+    /// is stopped, so nothing waits on a feed that is gone.
+    func waitUntilAttached() async {
+        if isAttached || stopped { return }
+        await withCheckedContinuation { attachWaiters.append($0) }
+    }
+
+    private func attachAnswered(sessionId: String, ceilingSeq: Int?) {
+        isAttached = true
+        onPinnedAttach?(sessionId, ceilingSeq)
+        for observer in attachObservers { observer.run(sessionId, ceilingSeq) }
+        let waiters = attachWaiters
+        attachWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
     init(makeTransport: @escaping @Sendable () -> WinterTransport, token: String, clientName: String, mode: Mode, session: SessionModel,
          latencyReportInterval: TimeInterval = FeedLatencyMeter.interval) {
         self.latencyReportInterval = latencyReportInterval
@@ -149,11 +222,13 @@ final class SessionFeed {
             // two rows timed out having seen only `protocol.hello` on the wire.
             beginReplay()
             let ceilingSeq = try? await client.attach(sessionId: sessionId, fromSeq: 0)
-            onPinnedAttach?(sessionId, ceilingSeq)
+            attachAnswered(sessionId: sessionId, ceilingSeq: ceilingSeq)
             armReplayCeiling(ceilingSeq)
         }
         session.markConnected() // M2: connect() success IS the connected signal
+        isConnected = true
         onConnected?()
+        for observer in connectedObservers { observer.run() }
 
         // The stream is read OFF the main actor and handed over in batches. Iterating an `AsyncStream` from a
         // main-actor task costs a hop per element however full the stream is — measured on a replay of a real
@@ -200,6 +275,9 @@ final class SessionFeed {
         replayDeadline?.cancel()
         stopped = true
         pumpTask?.cancel()
+        let waiters = attachWaiters
+        attachWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
         Task { await client.close() }
     }
 
@@ -214,6 +292,7 @@ final class SessionFeed {
     func repin(to sessionId: String) async {
         guard case .pinned = mode else { return }
         mode = .pinned(sessionId: sessionId)
+        isAttached = false
         chunks.removeAll() // the old session's — never folded into the new one
         session.reset()
         // Buffering starts BEFORE the attach: the pump is already running here, so the replay can
@@ -221,11 +300,12 @@ final class SessionFeed {
         beginReplay()
         // Same two lines, and for the same reason — see `start()`'s pinned branch.
         let ceilingSeq = try? await client.attach(sessionId: sessionId, fromSeq: 0)
-        onPinnedAttach?(sessionId, ceilingSeq)
+        attachAnswered(sessionId: sessionId, ceilingSeq: ceilingSeq)
         armReplayCeiling(ceilingSeq)
     }
 
     private func handle(_ ev: WinterEvent) async {
+        for observer in eventObservers { observer.run(ev) }
         if let onEvent, await onEvent(ev) { return }
         switch ev {
         case .session(let e):
@@ -426,4 +506,22 @@ final class EventRelay: @unchecked Sendable {
     }
 
     var count: Int { lock.lock(); defer { lock.unlock() }; return entries.count }
+}
+
+
+/// One tap on a feed (`SessionFeed.observeEvents`/`observeConnected`/`observeAttach`): cancelled by its owner when the
+/// owner lets go of the feed, or leaves it for another.
+@MainActor
+final class FeedObservation {
+    private var onCancel: (() -> Void)?
+    private(set) var isActive = true
+
+    init(onCancel: @escaping () -> Void) { self.onCancel = onCancel }
+
+    func cancel() {
+        guard isActive else { return }
+        isActive = false
+        onCancel?()
+        onCancel = nil
+    }
 }

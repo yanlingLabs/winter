@@ -164,10 +164,11 @@ final class UpdatesPanelTests: XCTestCase {
 
     // MARK: - The installed-versions table
 
-    func testTheTableAlwaysCarriesFiveRowsInAFixedOrder() {
+    /// Four rows: WS-23 retired the official runtime, and its "Claude agent SDK" row went with it
+    /// (`pendingSdkComponents`' own doc) — nothing Winter ships runs on it any more.
+    func testTheTableAlwaysCarriesFourRowsInAFixedOrder() {
         let rows = installedComponents(winter: "0.114.4", chromium: "151.3.16.0", sdk: [])
-        XCTAssertEqual(rows.map(\.name),
-                       ["Winter", "Chromium", "Winter agent SDK", "Winter runtime SDK", "Claude agent SDK"])
+        XCTAssertEqual(rows.map(\.name), ["Winter", "Chromium", "Winter agent SDK", "Winter runtime SDK"])
     }
 
     /// The SDK rows are PENDING, not missing. Omitting them would make the panel quietly claim
@@ -184,8 +185,7 @@ final class UpdatesPanelTests: XCTestCase {
         let rows = installedComponents(
             winter: "0.114.4", chromium: "151.3.16.0",
             sdk: [InstalledComponent(name: "Winter runtime SDK", installed: "0.0.8", pinned: "0.0.8")])
-        XCTAssertEqual(rows.map(\.name),
-                       ["Winter", "Chromium", "Winter agent SDK", "Winter runtime SDK", "Claude agent SDK"])
+        XCTAssertEqual(rows.map(\.name), ["Winter", "Chromium", "Winter agent SDK", "Winter runtime SDK"])
         XCTAssertEqual(installedComponentValue(rows[3]), "0.0.8")
         XCTAssertTrue(installedComponentIsPending(rows[2]))
     }
@@ -240,8 +240,7 @@ final class UpdatesPanelTests: XCTestCase {
     }
 
     func testEveryComponentHasAGlyph() {
-        for name in ["Winter", "Chromium", "Winter agent SDK", "Winter runtime SDK",
-                     "Claude agent SDK", "something new the daemon added"] {
+        for name in ["Winter", "Chromium", "Winter agent SDK", "Winter runtime SDK", "something new the daemon added"] {
             XCTAssertFalse(updatesComponentGlyph(name).isEmpty)
         }
     }

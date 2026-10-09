@@ -1772,7 +1772,7 @@ final class SessionModel: ObservableObject {
     /// The Mac's live reasoning text (`ThinkingLiveText`): kept beside `state`, never in it, so a
     /// streaming block's text grows in O(the delta). Fed by every `apply` before the reducer runs, so a
     /// view re-rendered by the new state already reads the text that state counts.
-    let liveThinking = ThinkingLiveText()
+    private(set) var liveThinking = ThinkingLiveText()
 
     /// provider_retry (WinterProtocol Swift mirror): a raw pass-through of every event `apply`
     /// receives, one event at a time, in arrival order — for UI-only consumers that need a
@@ -1784,6 +1784,9 @@ final class SessionModel: ObservableObject {
     /// survive replay. Fires synchronously from `apply`, after the reducer has already run.
     /// WS-27: see `SessionReducer.dismissInactiveElicitation`.
     func dismissInactiveElicitation(_ callId: String) {
+        // A model that follows another has nothing of its own to dismiss: the card lives in the shared one, and
+        // dismissing it there reaches every surface showing it.
+        if let following { following.dismissInactiveElicitation(callId); return }
         state = SessionReducer.dismissInactiveElicitation(state, callId: callId)
     }
 
@@ -1893,6 +1896,58 @@ final class SessionModel: ObservableObject {
         liveThinking.reset()
         state = OrbSessionState()
         if wasConnected { state.status = .idle }
+    }
+
+    // MARK: - Following another model
+
+    /// The model this one mirrors, if any (`follow`).
+    private(set) var following: SessionModel?
+    private var followSinks: [AnyCancellable] = []
+    private var adoption: DispatchWorkItem?
+
+    /// Makes this model a MIRROR of `upstream`: its state, loading flag, live reasoning buffer and event stream are the
+    /// upstream's, republished as they change — no decode and no fold of its own. A surface that shares a session's
+    /// feed (`SessionFeedHub`) keeps its own model (its adapter and views are built on one that never changes) and
+    /// follows the shared one; moving to another session is a `follow` of that session's model.
+    ///
+    /// `resetting`: show nothing first — the empty transcript, loading — and take the upstream's state one turn later,
+    /// the shape a re-pin gives the views (`SessionFeed.repin`: reset, then the replay) and the one the transcript's
+    /// landing logic keys on (a count that falls to zero and rises again). Without it the state is taken at once.
+    func follow(_ upstream: SessionModel, resetting: Bool = false) {
+        guard upstream !== self else { return }
+        if following === upstream, !resetting { return }
+        stopFollowing()
+        following = upstream
+        liveThinking = upstream.liveThinking
+        guard resetting else { adopt(upstream); return }
+        let wasConnected = state.status != .disconnected
+        state = OrbSessionState()
+        if wasConnected { state.status = .idle }
+        isLoadingHistory = true
+        let item = DispatchWorkItem { [weak self, weak upstream] in
+            guard let self, let upstream, self.following === upstream else { return }
+            self.adopt(upstream)
+        }
+        adoption = item
+        DispatchQueue.main.async(execute: item)
+    }
+
+    /// Lets go of the upstream: this model keeps what it last showed.
+    func stopFollowing() {
+        adoption?.cancel()
+        adoption = nil
+        followSinks.removeAll()
+        following = nil
+    }
+
+    private func adopt(_ upstream: SessionModel) {
+        followSinks.removeAll()
+        state = upstream.state
+        isLoadingHistory = upstream.isLoadingHistory
+        // `$state` publishes on willSet with the NEW value: the sink never reads the upstream's stored one.
+        upstream.$state.dropFirst().sink { [weak self] in self?.state = $0 }.store(in: &followSinks)
+        upstream.$isLoadingHistory.dropFirst().sink { [weak self] in self?.isLoadingHistory = $0 }.store(in: &followSinks)
+        upstream.events.sink { [weak self] in self?.events.send($0) }.store(in: &followSinks)
     }
 
     /// Test-only mutation seam (Task 2, fluid state derivation tests): lets tests set arbitrary

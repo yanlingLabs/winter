@@ -296,19 +296,19 @@ struct CredentialsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Provider credentials").font(.headline)
+                Text("Provider credentials").font(Typography.paneTitle)
                 Spacer()
                 Button("Refresh") { Task { await model.refresh() } }
                     .disabled(model.loading)
             }
 
             Text("Keys live only in this Mac's Keychain. Adding or removing one takes effect immediately — no restart.")
-                .font(.caption)
+                .font(Typography.landingCaption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             if let loadErrorText = model.loadErrorText {
-                Text(loadErrorText).foregroundStyle(.red).font(.callout)
+                Text(loadErrorText).foregroundStyle(.red).font(Typography.emptyStateSubtitle)
             }
             // LAZY, deliberately. The inventory is derived from the agent SDK's catalog (W19-1) —
             // on the order of a hundred rows today and growing with every SDK bump — and each row
@@ -358,7 +358,7 @@ struct CredentialsSection: View {
                 Text(row.displayName)
                 Spacer()
                 Text(row.present ? "stored" : "not set")
-                    .font(.caption)
+                    .font(Typography.landingCaption)
                     .foregroundStyle(.secondary)
             }
 
@@ -389,7 +389,7 @@ struct CredentialsSection: View {
                 // where the credential is CREATED, which is a different question from whether this
                 // window can delete it.
                 Text(credentialDoorText(row.door))
-                    .font(.caption)
+                    .font(Typography.landingCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -399,7 +399,7 @@ struct CredentialsSection: View {
             // indistinguishable from a Save that did nothing.
             if let rowErrorText = model.rowError(for: row.providerId) {
                 Text(rowErrorText)
-                    .font(.caption)
+                    .font(Typography.landingCaption)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }

@@ -336,7 +336,6 @@ func updatesComponentGlyph(_ name: String) -> String {
     switch name {
     case "Winter": return "snowflake"
     case "Chromium": return "globe"
-    case "Claude agent SDK": return "sparkles"
     default: return "shippingbox"
     }
 }
