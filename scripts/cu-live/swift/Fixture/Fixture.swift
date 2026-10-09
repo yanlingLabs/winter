@@ -41,11 +41,26 @@ final class Fixture {
         pendingSteals.removeAll()
     }
 
-    /// Logs the call, then makes it. `activated` is logged for every CALL, whether or not the system honours it
-    /// (macOS 14+ may refuse a non-cooperative activation): the rig's front-app monitor is what observes the outcome.
+    /// `NSApplication.ActivationOptions` as the raw values the SDK declares (activateAllWindows = 1 << 0,
+    /// activateIgnoringOtherApps = 1 << 1). The second is deprecated since macOS 14; spelling it by raw value is how
+    /// this one deliberate use stays out of the build's warnings.
+    private static let activationOptions = NSApplication.ActivationOptions(rawValue: (1 << 0) | (1 << 1))
+
+    /// Every steal path (steal-focus, steal-mousedown, steal-delayed, doc-open) and the user app's own activations
+    /// come through here. macOS 14+ grants a non-cooperative activation only some of the time, and which API it
+    /// honours varies, so BOTH are called; 150 ms later the outcome is read and logged once: `activated {reason,
+    /// took}`. `took` is true only when the app reports itself active AND NSWorkspace's frontmost pid is ours.
     func activate(reason: String) {
-        emit("activated", [("reason", .str(reason))])
+        NSRunningApplication.current.activate(options: Self.activationOptions)
         NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            MainActor.assumeIsolated {
+                let took = ActivationOutcome.took(isActive: NSRunningApplication.current.isActive,
+                                                  frontPid: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                                                  ownPid: getpid())
+                self?.emit("activated", [("reason", .str(reason)), ("took", .bool(took))])
+            }
+        }
     }
 
     func fire(_ trigger: StealTrigger) {
@@ -152,7 +167,8 @@ func makeFixtureWindow(title: String, slot: Int, fullScreenPrimary: Bool = false
 }
 
 @MainActor
-func place(_ window: NSWindow, slot: Int) {
+func place(_ window: NSWindow, slot: Int, offset: CGPoint = .zero) {
     let visible = (NSScreen.screens.first ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-    window.setFrameTopLeftPoint(WindowGrid.topLeft(slot: slot, visible: visible))
+    let corner = WindowGrid.topLeft(slot: slot, visible: visible)
+    window.setFrameTopLeftPoint(CGPoint(x: corner.x + offset.x, y: corner.y + offset.y))
 }

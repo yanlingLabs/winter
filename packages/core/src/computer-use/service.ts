@@ -79,6 +79,12 @@ export interface ComputerV2ServiceDeps {
   idleMs?: number;
   now?(): number;
   log?(line: string): void;
+  /**
+   * TEST SEAM (`ComputerUseInjection.screenshotSink`): every screenshot the helper returned, as encoded — wired
+   * only by the live suite's own daemon (`scripts/cu-live/daemon-entry.ts`), so it can judge the capture's pixels.
+   * The production daemon never sets it; the bytes otherwise never leave the daemon.
+   */
+  screenshotSink?(shot: { sessionId: string; primitive: string; mime: string; base64: string }): void;
 }
 
 interface TargetInfo { targetId: string; bundleId: string; name: string; pid: number; lost?: string }
@@ -642,7 +648,13 @@ export class ComputerV2Service {
       const res = await this.helperCall<ScreenshotResult>(ctx, method, { ...params, budget: screenshotBudgetFor(ctx.call.model, maxDim, quality) }, metric);
       const bytes = Math.floor((res.imageBase64.length * 3) / 4);
       const next = nextScreenshotQuality(quality);
-      if (bytes <= SCREENSHOT_BYTE_CAP || next === undefined) { metric.imageBytes = bytes; return { ...res, bytes }; }
+      if (bytes <= SCREENSHOT_BYTE_CAP || next === undefined) {
+        metric.imageBytes = bytes;
+        if (this.deps.screenshotSink !== undefined) {
+          try { this.deps.screenshotSink({ sessionId: ctx.sessionId, primitive: method, mime: res.mime ?? "image/jpeg", base64: res.imageBase64 }); } catch { /* a test sink never fails a shot */ }
+        }
+        return { ...res, bytes };
+      }
       quality = next;
     }
   }

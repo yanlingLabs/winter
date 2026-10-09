@@ -28,6 +28,13 @@ enum JSONOut {
         return out + "\""
     }
 
+    /// JSON has no NaN/Infinity (they become null); whole numbers print without a fraction.
+    static func number(_ d: Double) -> String {
+        guard d.isFinite else { return "null" }
+        if d == d.rounded(), abs(d) < 1e15 { return String(Int64(d)) }
+        return "\(d)"
+    }
+
     static func optional(_ s: String?) -> String { s.map(quote) ?? "null" }
     static func optional(_ n: Int?) -> String { n.map(String.init) ?? "null" }
 }
@@ -52,6 +59,7 @@ struct Sample: Equatable {
 enum ToolCommand: Equatable {
     case monitor(intervalMs: Int)
     case front
+    case imageStats(path: String)
     case post(run: String, role: String, cmd: String, args: String?, seq: String?)
     case selfTest
     case help
@@ -67,6 +75,7 @@ enum ArgParser {
     usage:
       cu-live-tool monitor [--interval-ms 20]    one JSON line per interval (and per app activation) until stdin EOF / SIGTERM
       cu-live-tool front                         one JSON line, then exit
+      cu-live-tool image-stats <file>            one JSON line about a JPEG/PNG: size, luma, blank, sentinel pixels (exit 2 + {"error"} if undecodable)
       cu-live-tool post --run <id> --role <main|user> --cmd <name> [--args <json object>] [--seq <n>]
       cu-live-tool self-test
     """
@@ -85,6 +94,8 @@ enum ArgParser {
             return rest.isEmpty ? .success(.selfTest) : .failure(UsageError("self-test takes no arguments"))
         case "front":
             return rest.isEmpty ? .success(.front) : .failure(UsageError("front takes no arguments"))
+        case "image-stats":
+            return rest.count == 1 ? .success(.imageStats(path: rest[0])) : .failure(UsageError("image-stats takes exactly one file"))
         case "monitor":
             return parseMonitor(rest)
         case "post":

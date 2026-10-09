@@ -123,7 +123,10 @@ func runFixtureSelfTest() -> Int32 {
     c.check(rejection(decode(info: ["role": "main", "cmd": "activate"])) != nil, "activate is not a main command")
     c.check(runCommand(decode(info: ["role": "user", "cmd": "activate"], role: "user")) != nil, "activate is a user command")
     c.check(rejection(decode(info: ["role": "user", "cmd": "steal"], role: "user")) != nil, "steal is not a user command")
-    c.check(CommandDecoder.supported(role: "main").isSuperset(of: ["ping", "steal", "reset", "dump", "fullscreen", "exitFullscreen", "openSample", "quit", "animate"]), "main command set")
+    c.check(CommandDecoder.supported(role: "main").isSuperset(of: ["ping", "steal", "reset", "dump", "fullscreen", "exitFullscreen", "openSample", "quit", "animate", "offspace", "restoreSpace"]), "main command set")
+    c.check(!CommandDecoder.supported(role: "user").contains("offspace"), "offspace is not a user command")
+    c.check(runCommand(decode(info: ["role": "main", "cmd": "offspace", "seq": "3"])) != nil, "offspace decodes")
+    c.check(runCommand(decode(info: ["role": "main", "cmd": "restoreSpace"])) != nil, "restoreSpace decodes")
     c.equal(CommandDecoder.supported(role: "user"), ["ping", "activate", "reset", "dump", "quit"], "user command set")
 
     for raw in ["off", "focus", "mousedown", "delayed"] {
@@ -228,6 +231,154 @@ func runFixtureSelfTest() -> Int32 {
     c.check(abs(Animation.squareX(elapsed: (width - Animation.squareSize) / Animation.speed, width: width) - (width - Animation.squareSize)) < 0.001, "animation reaches the right edge")
     c.check(Animation.squareX(elapsed: -3, width: width) >= 0, "animation tolerates negative elapsed")
     c.check(Animation.squareX(elapsed: 5, width: 10) >= 0, "animation tolerates a tiny canvas")
+
+    // --- scroller route --------------------------------------------------------------------------------------
+    c.equal(ScrollerMath.value(offset: 0, contentHeight: 1000, viewportHeight: 150), 0, "scroller at the top is 0")
+    c.equal(ScrollerMath.value(offset: 850, contentHeight: 1000, viewportHeight: 150), 1, "scroller at the bottom is 1")
+    c.equal(ScrollerMath.value(offset: 425, contentHeight: 1000, viewportHeight: 150), 0.5, "scroller halfway is 0.5")
+    c.equal(ScrollerMath.value(offset: 50, contentHeight: 100, viewportHeight: 150), 0, "everything fits -> 0")
+    c.equal(ScrollerMath.value(offset: 900, contentHeight: 1000, viewportHeight: 150), 1, "overscroll clamps to 1")
+    c.equal(ScrollerMath.value(offset: -20, contentHeight: 1000, viewportHeight: 150), 0, "rubber-band clamps to 0")
+    c.equal(ScrollerMath.rounded(0.123456), 0.123, "scroller value rounds to 0.001")
+    c.equal(ScrollerMath.rounded(0.9996), 1.0, "scroller value rounds up to 1")
+
+    var wheel = WheelWindow()
+    c.check(!wheel.isWheel(now: 10), "no wheel yet: a scroll is not by wheel")
+    wheel.begin()
+    c.check(wheel.isWheel(now: 10.5), "while a wheel event is handled, a scroll is by wheel")
+    wheel.end(now: 11)
+    c.check(wheel.isWheel(now: 11.0), "right after the wheel it is still by wheel")
+    c.check(wheel.isWheel(now: 11.29), "just under 300 ms after the wheel it is still by wheel")
+    c.check(!wheel.isWheel(now: 11.31), "past 300 ms after the wheel it is not")
+    wheel.begin(); wheel.end(now: 20)
+    c.check(wheel.isWheel(now: 20.1) && !wheel.isWheel(now: 20.5), "a new wheel event restarts the window")
+
+    var report = ScrollerReport()
+    report.rebase(0)
+    c.check(!report.changed(0), "an unmoved position is not reported")
+    c.check(report.changed(0.25), "a moved position is reported")
+    c.check(!report.changed(0.25), "the same position twice is reported once")
+    report.rebase(0.5)
+    c.check(!report.changed(0.5), "a re-based position is not reported")
+    c.check(report.changed(0.6), "movement after a re-base is reported")
+
+    var scrollerThrottle = Throttle<ScrollerSample>(minInterval: 0.1)
+    c.equal(scrollerThrottle.offer(ScrollerSample(value: 0.1, byWheel: true), now: 0), .emit(ScrollerSample(value: 0.1, byWheel: true)), "scroller: first change emits at once")
+    c.equal(scrollerThrottle.offer(ScrollerSample(value: 0.2, byWheel: true), now: 0.03), .flushAt(0.1), "scroller: the next waits for the interval")
+    c.equal(scrollerThrottle.offer(ScrollerSample(value: 0.3, byWheel: false), now: 0.06), .absorbed, "scroller: a burst is absorbed")
+    c.equal(scrollerThrottle.flush(now: 0.1), ScrollerSample(value: 0.3, byWheel: false), "scroller: the burst's final sample (with its own byWheel) goes out")
+    var scrollerBurst = Throttle<ScrollerSample>(minInterval: 0.1)
+    var scrollerLines = 0
+    var scrollerDue: Double?
+    var clock = 0.0
+    while clock < 1.0 {
+        if let due = scrollerDue, clock >= due { if scrollerBurst.flush(now: clock) != nil { scrollerLines += 1 }; scrollerDue = nil }
+        switch scrollerBurst.offer(ScrollerSample(value: clock, byWheel: true), now: clock) {
+        case .emit: scrollerLines += 1
+        case .flushAt(let due): scrollerDue = due
+        case .absorbed: break
+        }
+        clock += 1.0 / 120
+    }
+    c.check(scrollerLines <= 11, "scroller: a 1 s burst logs at most ~10 lines (got \(scrollerLines))")
+
+    // --- sentinel ----------------------------------------------------------------------------------------------
+    c.equal(Sentinel.rect, CGRect(x: 8, y: 8, width: 48, height: 48), "sentinel is 48x48 inset 8 from the top-left")
+    c.check(Sentinel.red == 255 && Sentinel.green == 0 && Sentinel.blue == 255, "sentinel colour is #FF00FF")
+
+    /// Renders what a view's `draw` produces into a 640x390 sRGB bitmap (top-left origin, as on screen) and
+    /// measures the magenta in it. Headless: a bitmap context, no window, no NSApplication.
+    func magenta(width: Int, height: Int, draw: () -> Void) -> (exact: Int, rule: Int, minX: Int, minY: Int, maxX: Int, maxY: Int)? {
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = context.data else { return nil }
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: 1, y: -1)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+        draw()
+        NSGraphicsContext.restoreGraphicsState()
+        let pixels = data.bindMemory(to: UInt8.self, capacity: width * height * 4)
+        var exact = 0, rule = 0, minX = Int.max, minY = Int.max, maxX = -1, maxY = -1
+        for y in 0..<height {
+            for x in 0..<width {
+                let r = pixels[(y * width + x) * 4], g = pixels[(y * width + x) * 4 + 1], b = pixels[(y * width + x) * 4 + 2]
+                if r == 255 && g == 0 && b == 255 { exact += 1 }
+                if r >= 200 && g <= 70 && b >= 200 {
+                    rule += 1
+                    minX = min(minX, x); minY = min(minY, y); maxX = max(maxX, x); maxY = max(maxY, y)
+                }
+            }
+        }
+        return (exact, rule, minX, minY, maxX, maxY)
+    }
+    MainActor.assumeIsolated {
+        let size = WindowGrid.contentSize
+        let width = Int(size.width), height = Int(size.height)
+        // The canvas, with its animation running (the moving square must not touch the sentinel) and its title text.
+        let canvas = CanvasView(frame: NSRect(origin: .zero, size: size))
+        canvas.setAnimating(true)
+        let canvasResult = magenta(width: width, height: height) { canvas.draw(canvas.bounds) }
+        canvas.setAnimating(false)
+        c.equal(canvasResult?.exact, 2304, "canvas: exactly 48x48 pixels of #FF00FF")
+        c.equal(canvasResult?.rule, 2304, "canvas: nothing else in the canvas passes the magenta rule")
+        c.check(canvasResult?.minX == 8 && canvasResult?.minY == 8 && canvasResult?.maxX == 55 && canvasResult?.maxY == 55, "canvas: the sentinel is at the top-left, inset 8")
+        // The view used by Form and Offspace, drawn at its position in a window-sized bitmap.
+        let sentinelView = SentinelView(frame: Sentinel.rect)
+        let viewResult = magenta(width: width, height: height) {
+            let context = NSGraphicsContext.current!.cgContext
+            context.saveGState()
+            context.translateBy(x: sentinelView.frame.minX, y: sentinelView.frame.minY)
+            sentinelView.draw(sentinelView.bounds)
+            context.restoreGState()
+        }
+        c.equal(viewResult?.exact, 2304, "SentinelView: exactly 48x48 pixels of #FF00FF")
+        c.check(viewResult?.minX == 8 && viewResult?.minY == 8 && viewResult?.maxX == 55 && viewResult?.maxY == 55, "SentinelView: lands at the top-left, inset 8")
+        c.check(sentinelView.isOpaque && sentinelView.hitTest(NSPoint(x: 10, y: 10)) == nil && !sentinelView.isAccessibilityElement(), "SentinelView is opaque, takes no events, is not an accessibility element")
+        // The rainbow behind Offspace's sentinel must never pass the magenta rule on its own.
+        let rainbow = RainbowView(frame: NSRect(origin: .zero, size: size))
+        let rainbowResult = magenta(width: width, height: height) { rainbow.draw(rainbow.bounds) }
+        c.equal(rainbowResult?.rule, 0, "Offspace background has no pixel that passes the magenta rule")
+    }
+
+    // --- Spaces (pure planning on the real SLSCopyManagedDisplaySpaces shape) ------------------------------------
+    func space(_ id: Int, _ type: Int) -> [String: Any] { ["id64": NSNumber(value: id), "ManagedSpaceID": NSNumber(value: id), "type": NSNumber(value: type), "uuid": "u\(id)"] }
+    let rawDisplays: [[String: Any]] = [[
+        "Display Identifier": "D1",
+        "Current Space": space(2926, 4),
+        "Spaces": [space(1853, 0), space(2926, 4), space(2994, 4), space(2498, 0), space(2688, 0)],
+    ]]
+    let displays = SpacePlanner.parse(rawDisplays)
+    c.equal(displays.count, 1, "one display parsed")
+    c.equal(displays.first?.identifier, "D1", "display identifier parsed")
+    c.equal(displays.first?.current, 2926, "current Space parsed")
+    c.equal(displays.first?.spaces.map(\.id) ?? [], [1853, 2926, 2994, 2498, 2688], "Spaces parsed in order")
+    c.equal(displays.first?.spaces.map(\.type) ?? [], [0, 4, 4, 0, 0], "Space types parsed")
+    c.equal(SpacePlanner.otherDesktop(displays: displays, windowSpaces: [2926], active: 2926), 1853, "picks the first desktop that is not showing")
+    c.equal(SpacePlanner.otherDesktop(displays: displays, windowSpaces: [1853], active: 1853), 2498, "never picks the Space the window is on")
+    c.equal(SpacePlanner.otherDesktop(displays: SpacePlanner.parse([["Display Identifier": "D", "Current Space": space(5, 0), "Spaces": [space(5, 0), space(6, 4)]]]), windowSpaces: [5], active: 5), nil, "no other desktop -> nil (full-screen Spaces do not count)")
+    c.equal(SpacePlanner.otherDesktop(displays: [], windowSpaces: [1], active: 1), nil, "no displays -> nil")
+    let twoDisplays = SpacePlanner.parse([
+        ["Display Identifier": "A", "Current Space": space(10, 0), "Spaces": [space(10, 0), space(11, 0)]],
+        ["Display Identifier": "B", "Current Space": space(20, 0), "Spaces": [space(20, 0), space(21, 0)]],
+    ])
+    c.equal(SpacePlanner.otherDesktop(displays: twoDisplays, windowSpaces: [20], active: 10), 21, "stays on the window's own display")
+    c.equal(SpacePlanner.visibleSpaces(twoDisplays, active: 10), [10, 20], "every display's current Space is visible")
+    c.check(SpacePlanner.isOffScreen(windowSpaces: [1853], visible: [2926], mustBeOn: 1853), "on a hidden Space = off screen")
+    c.check(!SpacePlanner.isOffScreen(windowSpaces: [1853, 2926], visible: [2926]), "also on the active Space = still on screen")
+    c.check(!SpacePlanner.isOffScreen(windowSpaces: [], visible: [2926]), "on no Space at all is not success")
+    c.check(!SpacePlanner.isOffScreen(windowSpaces: [1853], visible: [2926], mustBeOn: 2498), "not on the Space it was sent to")
+    c.equal(OffspaceMethod.managedSpace.rawValue, "managed-space", "method name managed-space")
+    c.equal(OffspaceMethod.createdSpace.rawValue, "created-space", "method name created-space")
+    c.equal(OffspaceMethod.fullscreen.rawValue, "fullscreen", "method name fullscreen")
+    c.check(SpacePlanner.spaceID(NSNumber(value: 0)) == nil && SpacePlanner.spaceID("x") == nil, "bad Space ids are rejected")
+
+    // --- self-activation -------------------------------------------------------------------------------------
+    c.check(ActivationOutcome.took(isActive: true, frontPid: 42, ownPid: 42), "took: active and frontmost")
+    c.check(!ActivationOutcome.took(isActive: true, frontPid: 7, ownPid: 42), "did not take: another app is frontmost")
+    c.check(!ActivationOutcome.took(isActive: false, frontPid: 42, ownPid: 42), "did not take: the app reports inactive")
+    c.check(!ActivationOutcome.took(isActive: true, frontPid: nil, ownPid: 42), "did not take: no frontmost app known")
 
     if c.failures.isEmpty {
         print("SELFTEST OK \(c.passed) checks")

@@ -7,7 +7,13 @@
 <style>
   /* Plain, high-contrast layout: the live suite reads this page by accessibility tree AND by screenshot. */
   html { font: 15px -apple-system, BlinkMacSystemFont, sans-serif; }
-  body { margin: 0; padding: 16px 20px 80px; color: #1d1d1f; background: #fafafa; }
+  /* The left padding leaves the top-left corner to the sentinel (below): no page content sits under it at scrollY 0. */
+  body { margin: 0; padding: 16px 20px 80px 72px; color: #1d1d1f; background: #fafafa; }
+  /* SENTINEL: solid #FF00FF, 48x48 CSS px, 8 px from the top-left of the page area, above everything. The live suite
+     counts exactly-magenta pixels in a screenshot or mirrored frame to prove the picture is this window. It takes no
+     events (clicks go to the page beneath), is not selectable, and is hidden from accessibility. */
+  #sentinel { position: fixed; top: 8px; left: 8px; width: 48px; height: 48px; background: #ff00ff;
+              z-index: 2147483647; pointer-events: none; user-select: none; -webkit-user-select: none; }
   h1 { font-size: 20px; margin: 0 0 12px; }
   h2 { margin: 28px 0 6px; font-size: 18px; }
   p { margin: 0 0 10px; line-height: 1.45; max-width: 60em; }
@@ -20,6 +26,7 @@
 </style>
 </head>
 <body>
+<div id="sentinel" aria-hidden="true" role="presentation"></div>
 <h1>Fixture Web</h1>
 <div class="row">
   <label for="first">First</label><input id="first" aria-label="First" placeholder="First">

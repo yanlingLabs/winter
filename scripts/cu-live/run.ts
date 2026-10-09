@@ -26,7 +26,7 @@
  * Every window, Space and process it made is closed at the end, whatever happened.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { METHODS, type SessionEvent } from "../../packages/protocol/src/index";
@@ -38,7 +38,7 @@ import {
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, type RealAppsRun } from "./real-apps";
-import { expectedCardSummary, SCENARIOS, scriptOf, type ProbeEvent, type Scenario } from "./scenarios";
+import { expectedCardSummary, SCENARIOS, scriptOf, type ImageStats, type ProbeEvent, type Scenario } from "./scenarios";
 
 // ── thresholds (env overrides) ───────────────────────────────────────────────────────────────────────────────────
 const num = (name: string, fallback: number): number => {
@@ -73,9 +73,50 @@ function parseOptions(argv: string[]): Options {
 const log = (line: string): void => { process.stderr.write(`e2e:cu-live: ${line}\n`); };
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-function sh(cmd: string, args: string[], input?: string): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync(cmd, args, { encoding: "utf8", input });
+function sh(cmd: string, args: string[], input?: string, env?: Record<string, string>): { status: number | null; stdout: string; stderr: string } {
+  const r = spawnSync(cmd, args, { encoding: "utf8", input, ...(env === undefined ? {} : { env }) });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+
+/**
+ * The per-user temp dir (`getconf DARWIN_USER_TEMP_DIR`) — the one a LaunchServices-launched helper sees as its
+ * `NSTemporaryDirectory()`. The run dir must live there: only a home inside `<it>/winter-cu-live-*` makes the dev
+ * helper a live-test instance (`HelperIdentity.isLiveTestHome`), whatever `$TMPDIR` this shell has.
+ */
+function userTempDir(): string {
+  const dir = sh("getconf", ["DARWIN_USER_TEMP_DIR"]).stdout.trim();
+  return dir.length > 0 && existsSync(dir) ? realpathSync(dir) : realpathSync(tmpdir());
+}
+
+function makeRunDir(): string {
+  return realpathSync(mkdtempSync(join(userTempDir(), "winter-cu-live-")));
+}
+
+/** A unix socket path is at most 103 bytes (`sockaddr_un`); the per-user temp dir alone is ~57, so the run dir's
+ *  home is one letter and the helper's `<home>/run/computer-use.sock` still fits. Refused here, not by the helper. */
+const SOCKET_PATH_MAX = 103;
+function homeIn(root: string): string {
+  const home = join(root, "h");
+  const socket = join(home, "run", "computer-use.sock");
+  if (Buffer.byteLength(socket) > SOCKET_PATH_MAX) throw new Error(`the helper's socket path would be ${Buffer.byteLength(socket)} bytes (limit ${SOCKET_PATH_MAX}): ${socket}`);
+  return home;
+}
+
+/** `cu-live-tool image-stats` on every screenshot the live daemon wrote since `since` (`<home>/cu-live-shots`). */
+function shotsSince(tool: string, home: string, since: number): ImageStats[] {
+  const dir = join(home, "cu-live-shots");
+  let files: string[] = [];
+  try { files = readdirSync(dir).filter((f) => Number(f.split("-")[0]) >= since).sort(); } catch { return []; }
+  return files.map((f) => {
+    const r = sh(tool, ["image-stats", join(dir, f)]);
+    try {
+      const o = JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "{}") as Partial<ImageStats> & { error?: string };
+      if (o.error !== undefined || typeof o.width !== "number") return { file: f, width: 0, height: 0, stddevLuma: 0, blank: true, sentinelPixels: 0, error: o.error ?? "undecodable" };
+      return { file: f, width: o.width, height: o.height ?? 0, stddevLuma: o.stddevLuma ?? 0, blank: o.blank === true, sentinelPixels: o.sentinelPixels ?? 0 };
+    } catch {
+      return { file: f, width: 0, height: 0, stddevLuma: 0, blank: true, sentinelPixels: 0, error: (r.stderr || r.stdout).trim().slice(0, 200) };
+    }
+  });
 }
 
 async function until<T>(what: string, ms: number, probe: () => T | undefined | false): Promise<T> {
@@ -188,7 +229,7 @@ async function startLiveDaemon(built: Pick<Built, "daemon">, home: string): Prom
   const winter = process.env.WINTER_RUNTIME_EXECUTABLE ?? resolvePlatformPackageWinter();
   if (winter === undefined) throw new Error("no `winter` runtime (the npm platform package) — run `bun install`, or set WINTER_RUNTIME_EXECUTABLE");
   Object.assign(env, {
-    WINTER_HOME: home, WINTER_PROFILE: "dev", WINTER_CU_LIVE_TESTS: "1", WINTER_RUNTIME_EXECUTABLE: winter,
+    WINTER_HOME: home, WINTER_PROFILE: "dev", WINTER_CU_LIVE_TESTS: "1", WINTER_RUNTIME_EXECUTABLE: winter, TMPDIR: `${userTempDir()}/`,
     WINTER_LOGIN_SHELL_PATH: "off", WINTER_KEYCHAIN_SERVICE: "com.winter.core.test-cu-live",
   });
   const child = spawn(built.daemon, [], { env, stdio: ["pipe", "pipe", "pipe"] });
@@ -230,7 +271,7 @@ async function runTurn(client: DaemonClient, sessionId: string, text: string, ms
   return { output: result.output, isError: result.isError, cards };
 }
 
-async function dryRun(built: Built): Promise<ScenarioResult[]> {
+async function dryRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   const results: ScenarioResult[] = [];
   const selfTest = (name: string, cmd: string, args: string[]): void => {
     const t0 = Date.now();
@@ -241,7 +282,57 @@ async function dryRun(built: Built): Promise<ScenarioResult[]> {
   selfTest("cu-live-tool self-test", built.tool, ["self-test"]);
   selfTest("cu-live-viewprobe self-test", built.viewProbe, ["self-test"]);
   results.push(await plumbingCheck(built));
+  results.push(await peerCheck(built, o));
   return results;
+}
+
+/**
+ * Which dev helpers accept the suite's TEST identities — no screen, no script (so no Esc tap): the dev helper's
+ * executable is run as a plain child on two temp homes, as `verify:computer-helper` does. On an ordinary home it must
+ * close both the test daemon (`winter-core-live __peer-hello`) and the test probe unanswered; on a live-test home
+ * (`<user temp>/winter-cu-live-*`) it must accept both. A helper built before the live-test rule fails the second
+ * half — rebuild it from this branch (`bun run dev:helper`; its TCC grants survive, its requirement is stated).
+ */
+async function peerCheck(built: Built, o: Options): Promise<ScenarioResult> {
+  const t0 = Date.now();
+  const checks: Check[] = [];
+  let helperApp: string;
+  try { helperApp = helperAppPath(o); } catch (err) {
+    return { name: "the dev helper accepts the test identities only on a live-test home", group: "identity", status: "skip", ms: 0, checks: [], note: err instanceof Error ? err.message : String(err) };
+  }
+  const exe = join(helperApp, "Contents", "MacOS", "Winter Computer Use Dev");
+  const normalRoot = realpathSync(mkdtempSync(join(userTempDir(), "winter-cu-x-")));
+  const liveRoot = makeRunDir();
+  try {
+    for (const [label, root, expectAccepted] of [["an ordinary temp home", normalRoot, false], ["a live-test home", liveRoot, true]] as const) {
+      const home = homeIn(root);
+      mkdirSync(home);
+      const env: Record<string, string> = {};
+      for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("WINTER_")) env[k] = v;
+      const helper = new LineProcess<string>(spawn(exe, [], { env: { ...env, WINTER_CU_HOME: home, TMPDIR: `${userTempDir()}/` }, stdio: ["ignore", "pipe", "pipe"] }), (l) => l);
+      try {
+        const socket = join(home, "run", "computer-use.sock");
+        await until(`the helper's socket (${label})`, 10_000, () => {
+          if (helper.child.exitCode !== null) throw new Error(`the dev helper exited (${helper.child.exitCode}): ${helper.stderr.slice(-3).join(" | ")}`);
+          return existsSync(socket);
+        });
+        const hello = sh(built.daemon, ["__peer-hello", socket, home], undefined, { ...env, WINTER_CU_LIVE_TESTS: "1" });
+        const daemonAnswer = JSON.parse(hello.stdout.trim() || "{}") as { accepted?: boolean };
+        const probe = spawnSync(built.viewProbe, ["--socket", socket, "--home", home, "--session", "s_identitycheck"], { input: "", encoding: "utf8", timeout: 8_000 });
+        const probeAccepted = probe.status === 0 && /"ev":"subscribed"/.test(probe.stdout ?? "");
+        checks.push(check(`${label}: the test daemon is ${expectAccepted ? "accepted" : "refused"}`, daemonAnswer.accepted === expectAccepted, hello.stdout.trim().slice(0, 200)));
+        checks.push(check(`${label}: the test probe is ${expectAccepted ? "accepted" : "refused"}`, probeAccepted === expectAccepted, `exit ${probe.status}: ${(probe.stdout ?? "").trim().slice(0, 160)}`));
+      } finally {
+        await helper.stop(5_000);
+      }
+    }
+  } catch (err) {
+    checks.push(check("the identity check ran", false, err instanceof Error ? err.message : String(err)));
+  } finally {
+    rmSync(normalRoot, { recursive: true, force: true });
+    rmSync(liveRoot, { recursive: true, force: true });
+  }
+  return { name: "the dev helper accepts the test identities only on a live-test home", group: "identity", status: statusOf(checks), ms: Date.now() - t0, checks };
 }
 
 /**
@@ -250,8 +341,8 @@ async function dryRun(built: Built): Promise<ScenarioResult[]> {
  */
 export async function plumbingCheck(built: Pick<Built, "daemon">): Promise<ScenarioResult> {
   const t0 = Date.now();
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "winter-cu-live-")));
-  const home = join(root, "home");
+  const root = makeRunDir();
+  const home = homeIn(root);
   mkdirSync(home);
   let daemon: Awaited<ReturnType<typeof startLiveDaemon>> | undefined;
   const checks: Check[] = [];
@@ -283,9 +374,9 @@ class Aborted extends Error {}
 async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   const helperApp = helperAppPath(o);
   const results: ScenarioResult[] = [];
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "winter-cu-live-")));
-  const home = join(root, "home");
-  const work = join(root, "work");
+  const root = makeRunDir();
+  const home = homeIn(root);
+  const work = join(root, "w");
   mkdirSync(home);
   mkdirSync(work);
   const f: Fixtures = { runId: `cu-live-${process.pid}-${Date.now()}`, logPath: join(root, "fixture.jsonl"), seq: 0 };
@@ -298,6 +389,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   let client: DaemonClient | undefined;
   let realApps: RealAppsRun | undefined;
   let baseline: FocusBaseline | undefined;
+  let offspaceMethod = "?";
   let inputWatchFrom = Number.POSITIVE_INFINITY;
   const abortIfInput = (): void => {
     const hits = monitor === undefined ? [] : hidInputTimes(monitor.items, inputWatchFrom, Date.now());
@@ -314,11 +406,14 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     launchFixture(built.fixtureMain, "main", f, true);
     f.mainPid = Number((await until("the fixture", 15_000, () => fixtureEvents(f).find((e) => e.role === "main" && e.ev === "launched"))).pid);
     await until("the user's app frontmost", 10_000, () => monitor!.items.at(-1)?.frontPid === f.userPid);
-    // The off-Space window: full screen gives it its own Space (macOS switches to it), then the user's app is
-    // activated, which brings the user back to their own Space.
-    log("putting a fixture window into full screen (its own Space), then back to your Space…");
-    await postCommand(built.tool, f, "main", "fullscreen", {}, 10_000);
-    await until("the fixture's full-screen window", 10_000, () => fixtureEvents(f).find((e) => e.role === "main" && e.ev === "fullscreen" && e.entered === true));
+    // The off-Space window: the fixture moves its OWN window to another regular Space (an existing desktop, else one
+    // it creates — private SkyLight, which may be allowed for one's own connection), falling back to full screen
+    // (its own Space; macOS switches to it, and activating the user's app brings the user back).
+    log("putting a fixture window on another Space…");
+    await postCommand(built.tool, f, "main", "offspace", {}, 15_000);
+    const placed = await until("the fixture's off-Space window", 15_000, () => fixtureEvents(f).find((e) => e.role === "main" && e.ev === "offspace"));
+    offspaceMethod = String(placed.method);
+    log(`off-Space window: ${offspaceMethod}${placed.error ? ` (earlier attempts: ${String(placed.error)})` : ""}`);
     await sleep(800);
     await postCommand(built.tool, f, "user", "activate");
     await until("your Space and the user's app back in front", 10_000, () => {
@@ -384,14 +479,22 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         inputWatchFrom = t1;
         while (Date.now() < t1 + WATCH_AFTER_MS) { abortIfInput(); await sleep(50); }
         const state = s.dump === true ? await dumpState(built.tool, f) : undefined;
+        const events = fixtureEvents(f);
         const checks = s.verify({
-          output: turn.output, isError: turn.isError, facts: markerFacts(turn.output), events: fixtureEvents(f), since,
+          output: turn.output, isError: turn.isError, facts: markerFacts(turn.output), events, since,
           ...(state === undefined ? {} : { state }), probe: probe.items.filter((p) => p.t >= since), metrics: readMetrics(home, since),
+          shots: shotsSince(built.tool, home, since),
         });
         if (s.session === "ask") checks.push(...cardChecks(turn.cards));
         checks.push(check("no keyboard/pointer input during the action (no rung-4 fallback)", during.length === 0, `HID input at +${during.map((t) => t - since).join(", +")} ms`));
-        checks.push(...focusChecks(monitor.items, since, t1 + WATCH_AFTER_MS, baseline, s.allowExcursionMs));
-        results.push({ name: s.name, group: s.group, status: statusOf(checks), ms: Date.now() - t0, checks });
+        const focus = focusChecks(monitor.items, since, t1 + WATCH_AFTER_MS, baseline, s.allowExcursionMs);
+        checks.push(...focus.checks);
+        // Whether the deliberate self-activation REALLY took (macOS 14+ may refuse it) — else the scenario proves less.
+        const steals = events.filter((e) => e.role === "main" && e.ev === "activated" && e.t >= since);
+        const note = s.allowExcursionMs === undefined ? (s.name.startsWith("bind off-Space") ? `off-Space by ${offspaceMethod}` : undefined)
+          : steals.length === 0 ? "no steal attempt was logged"
+            : `steal ${steals.some((e) => e.took === true) ? "TOOK" : "did not take (macOS refused the activation)"}; your app was away ${focus.longestAwayMs} ms`;
+        results.push({ name: s.name, group: s.group, status: statusOf(checks), ms: Date.now() - t0, checks, ...(note === undefined ? {} : { note }) });
       } catch (err) {
         if (err instanceof Aborted) throw err;
         results.push({ name: s.name, group: s.group, status: "fail", ms: Date.now() - t0, checks: [check("ran", false, err instanceof Error ? err.message : String(err))] });
@@ -470,11 +573,11 @@ function cardChecks(cards: readonly SessionEvent[]): Check[] {
 }
 
 /** The focus check: nothing changes — or, for a scenario that provokes a self-activation, one short excursion back. */
-function focusChecks(samples: readonly MonitorSample[], from: number, to: number, base: FocusBaseline, allowExcursionMs?: number): Check[] {
+function focusChecks(samples: readonly MonitorSample[], from: number, to: number, base: FocusBaseline, allowExcursionMs?: number): { checks: Check[]; longestAwayMs: number } {
   const v = focusViolations(samples, from, to, base);
   const lastInWindow = samples.filter((s) => s.t >= from && s.t <= to).at(-1);
   if (allowExcursionMs === undefined) {
-    return [check("your frontmost app and Space never changed (sampled every 20 ms, until 3 s after)", v.length === 0, describeViolations(v, from))];
+    return { checks: [check("your frontmost app and Space never changed (sampled every 20 ms, until 3 s after)", v.length === 0, describeViolations(v, from))], longestAwayMs: 0 };
   }
   let longest = 0;
   let start: number | undefined;
@@ -486,10 +589,13 @@ function focusChecks(samples: readonly MonitorSample[], from: number, to: number
     prevT = s.t;
   }
   if (start !== undefined && prevT !== undefined) longest = Math.max(longest, prevT - start + 1);
-  return [
-    check(`any jump away from your app was undone within ${allowExcursionMs} ms`, longest <= allowExcursionMs, `away for ${longest} ms: ${describeViolations(v, from)}`),
-    check("your app is frontmost again afterwards", lastInWindow === undefined || lastInWindow.frontPid === base.frontPid, `frontmost pid ${lastInWindow?.frontPid}`),
-  ];
+  return {
+    checks: [
+      check(`any jump away from your app was undone within ${allowExcursionMs} ms`, longest <= allowExcursionMs, `away for ${longest} ms: ${describeViolations(v, from)}`),
+      check("your app is frontmost again afterwards", lastInWindow === undefined || lastInWindow.frontPid === base.frontPid, `frontmost pid ${lastInWindow?.frontPid}`),
+    ],
+    longestAwayMs: longest,
+  };
 }
 
 async function perf(built: Built, f: Fixtures, helperPid: number, daemonPid: number, probe: LineProcess<ProbeEvent>, monitor: LineProcess<MonitorSample>, base: FocusBaseline, abortIfInput: () => void): Promise<ScenarioResult[]> {
@@ -537,13 +643,14 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const built = buildAll(log);
-  const results = o.dryRun ? await dryRun(built) : await (async () => {
+  const results = o.dryRun ? await dryRun(built, o) : await (async () => {
     console.error([
       "",
       "  ComputerV2 LIVE end-to-end suite",
       "  It uses the screen for about 2-3 minutes (longer with --real-apps): windows appear, one goes full screen on",
       "  its own Space and you are brought back to yours. DON'T type, click or move the mouse until it finishes —",
       "  real input stops the run. Your clipboard's text is restored at the end (rich clipboard content is not).",
+      "  Start it from a regular desktop, not from a full-screen app (the user's app must open on your Space).",
       "  Nothing touches ~/.winter*, the Keychain, or your own Winter.",
       "",
     ].join("\n"));

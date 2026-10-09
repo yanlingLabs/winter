@@ -29,6 +29,8 @@ interface WorldOpts {
   allowAllApps?: boolean;
   /** `computerUse.privateEventPath` (absent: the default, on). */
   privateEventPath?: boolean;
+  /** The live suite's screenshot sink (test seam). */
+  screenshotSink?: (shot: { sessionId: string; primitive: string; mime: string; base64: string }) => void;
   attended?: boolean;
   answer?: (e: Extract<NewSessionEvent, { type: "approval_requested" }>, broker: ApprovalBroker) => void;
 }
@@ -70,6 +72,7 @@ function world(opts: WorldOpts = {}) {
   svc = new ComputerV2Service({
     helper, policy, settings: () => settings, telemetry, recentApps: new RecentApps(home),
     audit: (l) => audits.push(l), interrupt: (sid) => interrupts.push(sid), log: (l) => logs.push(l),
+    ...(opts.screenshotSink === undefined ? {} : { screenshotSink: opts.screenshotSink }),
   });
   services.push(svc);
   const run = (code: string, o: { sessionId?: string; vision?: boolean; timeoutMs?: number; reset?: boolean; signal?: AbortSignal; model?: string } = {}): Promise<ScriptResult> =>
@@ -385,6 +388,18 @@ describe("ComputerV2: screenshots, points and the vision gate", () => {
     const w = world();
     const r = await w.run("const notes = await apps.open('Notes')\nawait notes.screenshot()");
     expect(text(r)).toContain("clicks take this image's pixel coordinates: 800\u00d7600 (window 1512\u00d7949 pt)");
+  }, 30_000);
+
+  macOnly("the live suite's screenshot sink receives each capture as encoded (a test seam, never set in production)", async () => {
+    const shots: Array<{ sessionId: string; primitive: string; mime: string; base64: string }> = [];
+    const w = world({ screenshotSink: (s) => shots.push(s) });
+    await w.run("const notes = await apps.open('Notes')\nawait notes.screenshot({ emit: false })\nawait screen.screenshot({ emit: false })");
+    expect(shots.map((s) => [s.sessionId, s.primitive, s.mime])).toEqual([["s1", "target.screenshot", "image/jpeg"], ["s1", "screen.screenshot", "image/jpeg"]]);
+    expect(Buffer.from(shots[0]!.base64, "base64").toString()).toStartWith("jpeg-shot");
+    // A sink that throws never fails the shot.
+    const bad = world({ screenshotSink: () => { throw new Error("disk full"); } });
+    const r = await bad.run("const notes = await apps.open('Notes')\nconst img = await notes.screenshot({ emit: false })\nprint(img.width)");
+    expect(r.isError).toBe(false);
   }, 30_000);
 
   macOnly("without vision: screenshot, show and Points are NotAllowed", async () => {

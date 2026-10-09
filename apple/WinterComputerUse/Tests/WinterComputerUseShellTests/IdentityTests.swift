@@ -59,6 +59,71 @@ final class IdentityTests: XCTestCase {
         }
     }
 
+    // ── the live suite's test instance (`bun run e2e:cu-live`) ───────────────────────────────────────────────
+    private let devDaemon = #"identifier "com.winter.core.dev" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ""#
+    private let devApp = #"identifier "com.winter.app.dev" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ""#
+    private let testDaemon = #"identifier "com.winter.core.cutest" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ""#
+    private let testApp = #"identifier "com.winter.app.cutest" and anchor apple generic and certificate leaf[subject.OU] = "37N77U9RSZ""#
+
+    /// A fake temp dir with a live run dir (and its home) and a look-alike outside it.
+    private func liveDirs() throws -> (temp: String, liveHome: String) {
+        let temp = home("tmp")
+        let liveHome = (temp as NSString).appendingPathComponent("winter-cu-live-abc123/home")
+        try FileManager.default.createDirectory(atPath: liveHome, withIntermediateDirectories: true)
+        return (temp, liveHome)
+    }
+
+    private func resolveDev(env: [String: String], temp: String, path: String? = nil) throws -> HelperIdentity {
+        try HelperIdentity.resolve(bundleIdentifier: "com.winter.computeruse.dev", bundlePath: path ?? standalone, environment: env,
+                                   userHome: userHome, helperVersion: "0.124.0", testHooks: nil, temporaryDirectory: temp)
+    }
+
+    func testADevHelperForALiveTestHomeAcceptsOnlyTheTestIdentities() throws {
+        let (temp, liveHome) = try liveDirs()
+        let id = try resolveDev(env: ["WINTER_CU_HOME": liveHome], temp: temp)
+        XCTAssertTrue(id.liveTest)
+        XCTAssertEqual(id.daemonRequirement, testDaemon)
+        XCTAssertEqual(id.appRequirement, testApp)
+    }
+
+    func testTheNormalDevHelperKeepsRejectingTheTestIdentities() throws {
+        let (temp, liveHome) = try liveDirs()
+        // The default dev home, another WINTER_CU_HOME, a look-alike outside the temp dir, the run dir itself, a
+        // marker-less temp dir, and a copy installed inside an app (WINTER_CU_HOME ignored): all keep the dev rule.
+        let lookAlike = home("winter-cu-live-xyz/home")
+        let runDirOnly = (temp as NSString).appendingPathComponent("winter-cu-live-abc123")
+        let plainTemp = (temp as NSString).appendingPathComponent("not-live/home")
+        for path in [lookAlike, plainTemp] { try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true) }
+        let cases: [(String, [String: String], String?)] = [
+            ("the default dev home", [:], nil),
+            ("another WINTER_CU_HOME", ["WINTER_CU_HOME": home("elsewhere")], nil),
+            ("a look-alike outside the temp dir", ["WINTER_CU_HOME": lookAlike], nil),
+            ("the run dir itself", ["WINTER_CU_HOME": runDirOnly], nil),
+            ("a temp home without the marker", ["WINTER_CU_HOME": plainTemp], nil),
+            ("a copy inside an app", ["WINTER_CU_HOME": liveHome], "/Applications/Winter Dev.app/Contents/Helpers/Winter Computer Use Dev.app"),
+        ]
+        for (name, env, path) in cases {
+            let id = try resolveDev(env: env, temp: temp, path: path)
+            XCTAssertFalse(id.liveTest, name)
+            XCTAssertEqual(id.daemonRequirement, devDaemon, name)
+            XCTAssertEqual(id.appRequirement, devApp, name)
+            XCTAssertFalse(id.daemonRequirement.contains("cutest"), name)
+        }
+        // The shipped helper never: not even for a live-test home.
+        let dist = try HelperIdentity.resolve(bundleIdentifier: "com.winter.computeruse", bundlePath: standalone, environment: ["WINTER_CU_HOME": liveHome],
+                                              userHome: userHome, helperVersion: "0.124.0", testHooks: nil, temporaryDirectory: temp)
+        XCTAssertFalse(dist.liveTest)
+        XCTAssertFalse(dist.daemonRequirement.contains("cutest"))
+    }
+
+    func testTheLiveTestHomeRuleItself() throws {
+        let (temp, liveHome) = try liveDirs()
+        XCTAssertTrue(HelperIdentity.isLiveTestHome(HelperIdentity.canonicalPath(liveHome)!, temporaryDirectory: temp))
+        XCTAssertFalse(HelperIdentity.isLiveTestHome(HelperIdentity.canonicalPath(liveHome)!, temporaryDirectory: home("elsewhere")))
+        XCTAssertFalse(HelperIdentity.isLiveTestHome(HelperIdentity.canonicalPath(temp)!, temporaryDirectory: temp))
+        XCTAssertFalse(HelperIdentity.isLiveTestHome("/x/winter-cu-live-/home", temporaryDirectory: "/x"))
+    }
+
     func testTheHelperNeverCreatesAHome() throws {
         try FileManager.default.removeItem(atPath: home(".winter-dev"))
         XCTAssertThrowsError(try resolve("com.winter.computeruse.dev")) {

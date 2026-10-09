@@ -14,6 +14,16 @@ case .success(.help):
     exit(0)
 case .success(.selfTest):
     exit(runToolSelfTest())
+case .success(.imageStats(let path)):
+    // Pure ImageIO: no window server, no NSApplication.
+    switch ImageStats.analyze(path: path) {
+    case .success(let report):
+        Out.line(report.json)
+        exit(0)
+    case .failure(let error):
+        Out.line("{\"error\":\(JSONOut.quote(error.message))}")
+        exit(2)
+    }
 case .success(.front):
     MainActor.assumeIsolated { Monitor.front() }
 case .success(.monitor(let intervalMs)):

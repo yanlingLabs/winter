@@ -29,12 +29,17 @@ bun test -t "test name"              # one test by name
 # WINTER_LOGIN_SHELL_PATH=off (or 0/false) skips it — both test preloads set it, so no test runs your real shell.
 pnpm typecheck:core                  # tsc --noEmit (also typecheck:protocol)
 WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live   # the LIVE ComputerV2 suite (scripts/cu-live): takes over the screen for
-                                     # ~2-3 min — fixture apps (one full screen = off-Space), a SECOND dev-helper
-                                     # instance on a temp home (open -n --env WINTER_CU_HOME), a signed file-store daemon
-                                     # (winter-core-live), the scripted double (no LLM); asserts the fixture's own log, the
-                                     # mirror frames, and that your frontmost app/Space never change (20 ms sampling).
-                                     # Aborts on real input. --dry-run: builds + self-tests + the no-screen plumbing;
-                                     # --real-apps: Safari/TextEdit/Finder/Preview on temp docs. Never run it from an agent.
+                                     # ~2-3 min — fixture apps (one window moved to another Space, else full screen), a
+                                     # SECOND dev-helper instance on a temp home (open -n --env WINTER_CU_HOME), a
+                                     # file-store daemon (winter-core-live), the scripted double (no LLM); asserts the
+                                     # fixture's own log, screenshot pixels (a #FF00FF sentinel), the mirror frames, and
+                                     # that your frontmost app/Space never change (20 ms sampling). Aborts on real input.
+                                     # The suite's daemon and mirror probe carry TEST-ONLY identities
+                                     # (com.winter.core.cutest / com.winter.app.cutest): a dev helper accepts them only as a
+                                     # live-test instance (a home in <user temp>/winter-cu-live-*, HelperIdentity.isLiveTestHome)
+                                     # — never sign a test tool with a production identifier. --dry-run: builds, self-tests,
+                                     # the no-screen plumbing and that identity rule against the dev helper; --real-apps:
+                                     # Safari/TextEdit/Finder/Preview on temp docs. Never run it from an agent.
 bun run check:idle-wakeups           # an isolated idle daemon's CPU wakeups/s, via `top -c d` (fails over 50/s);
                                      # `--pid N` measures a running one read-only. top's IDLEW is the SINCE-LAUNCH
                                      # count unless `-c d` — 3,962 on an 8 h daemon is ~0.14/s, not 3,962/s.

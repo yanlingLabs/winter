@@ -3,16 +3,19 @@
 //     Swift binary in two bundles, ad-hoc signed (nothing here needs an identity: the helper reads them through ITS
 //     Accessibility grant);
 //   - `cu-live-tool` (the focus/Space/HID monitor and the fixtures' command poster — needs no TCC grant at all);
-//   - `cu-live-viewprobe`, signed `com.winter.app.dev` with Winter's team identity: the helper streams mirror frames
-//     only to a peer satisfying Winter Dev's designated requirement (it is how the suite watches `view.*`);
-//   - `winter-core-live` (`daemon-entry.ts` compiled), signed `com.winter.core.dev` like `bun run dev:daemon`: the
-//     helper accepts only that daemon. A file secret store inside — it never touches the Keychain.
+//   - `cu-live-viewprobe`, signed `com.winter.app.cutest` with Winter's team identity, and
+//   - `winter-core-live` (`daemon-entry.ts` compiled), signed `com.winter.core.cutest`:
+//     TEST-ONLY identifiers. The production ones (`com.winter.app.dev`, `com.winter.core.dev`) satisfy the dev
+//     Keychain items' and the pairing tokens' access lists, so a test binary carrying them would be a key to the
+//     user's dev secrets. A dev helper accepts the test identities only as a live-test instance (launched for a
+//     home inside a `winter-cu-live-` temp dir — `HelperIdentity.isLiveTestHome`); every other dev helper rejects
+//     them. The daemon has a file secret store inside — it never touches the Keychain.
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WINTER_TEAM_ID } from "../../packages/core/src/auth/app-token-acl";
-import { designatedRequirementOf, DEV_DAEMON_IDENTIFIER, devDaemonRequirement, resolveDevSigningIdentity, signedFacts, type SigningIdentity } from "../dev-daemon-lib";
+import { designatedRequirementOf, resolveDevSigningIdentity, signedFacts, type SigningIdentity } from "../dev-daemon-lib";
 
 export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const OUT_DIR = join(REPO_ROOT, "out", "cu-live");
@@ -22,7 +25,14 @@ const ENTITLEMENTS = join(REPO_ROOT, "scripts", "winter-core.entitlements");
 
 export const FIXTURE_MAIN = { name: "Winter CU Fixture", bundleId: "com.winter.cu-fixture" } as const;
 export const FIXTURE_USER = { name: "Winter CU User App", bundleId: "com.winter.cu-fixture-user" } as const;
-export const VIEW_PROBE_IDENTIFIER = "com.winter.app.dev";
+/** Test-only identities (never a production identifier) — `WinterCodeIdentity.liveTest*Identifier` in the helper. */
+export const VIEW_PROBE_IDENTIFIER = "com.winter.app.cutest";
+export const LIVE_DAEMON_IDENTIFIER = "com.winter.core.cutest";
+
+/** A stated designated requirement: the identifier under Apple's anchor, Winter's team. */
+export function stated(identifier: string, teamId = WINTER_TEAM_ID): string {
+  return `identifier "${identifier}" and anchor apple generic and certificate leaf[subject.OU] = "${teamId}"`;
+}
 
 export interface Built {
   fixtureMain: string;
@@ -131,17 +141,13 @@ export function buildTool(log: (l: string) => void): string {
   return out;
 }
 
-/** Winter Dev's stated requirement — what the helper demands of an app client. */
-export function appClientRequirement(teamId = WINTER_TEAM_ID): string {
-  return `identifier "${VIEW_PROBE_IDENTIFIER}" and anchor apple generic and certificate leaf[subject.OU] = "${teamId}"`;
-}
 
 export function buildViewProbe(identity: SigningIdentity, log: (l: string) => void): string {
   const out = join(OUT_DIR, "cu-live-viewprobe");
-  if (current(out, [join(SWIFT_DIR, "ViewProbe")])) return out;
+  if (current(out, [join(SWIFT_DIR, "ViewProbe"), fileURLToPath(import.meta.url)])) return out;
   log("building cu-live-viewprobe (swiftc, signed as an app client)…");
   swiftc(join(SWIFT_DIR, "ViewProbe"), out, ["AppKit", "ImageIO", "CoreGraphics"]);
-  const requirement = appClientRequirement();
+  const requirement = stated(VIEW_PROBE_IDENTIFIER);
   must(run("codesign", ["--force", "--sign", identity.hash, "--identifier", VIEW_PROBE_IDENTIFIER, "--options", "runtime", "--timestamp=none", `-r=designated => ${requirement}`, out]), "codesign cu-live-viewprobe");
   must(run("codesign", ["--verify", "--strict", `-R=${requirement}`, out]), "the view probe's signature check");
   return out;
@@ -149,19 +155,19 @@ export function buildViewProbe(identity: SigningIdentity, log: (l: string) => vo
 
 export function buildDaemon(identity: SigningIdentity, log: (l: string) => void): string {
   const out = join(OUT_DIR, "winter-core-live");
-  const inputs = [join(REPO_ROOT, "scripts", "cu-live", "daemon-entry.ts"), join(REPO_ROOT, "packages", "core", "src"), join(REPO_ROOT, "packages", "protocol", "src")];
+  const inputs = [join(REPO_ROOT, "scripts", "cu-live", "daemon-entry.ts"), fileURLToPath(import.meta.url), join(REPO_ROOT, "packages", "core", "src"), join(REPO_ROOT, "packages", "protocol", "src")];
   if (current(out, inputs)) return out;
   log("compiling winter-core-live (bun build --compile)…");
   mkdirSync(OUT_DIR, { recursive: true });
   const tmp = `${out}.${process.pid}.tmp`;
   try {
     must(run("bun", ["build", "--compile", "--no-compile-autoload-bunfig", "--no-compile-autoload-dotenv", join("scripts", "cu-live", "daemon-entry.ts"), "--outfile", tmp], { cwd: REPO_ROOT }), "bun build --compile");
-    const requirement = devDaemonRequirement(WINTER_TEAM_ID);
-    must(run("codesign", ["--force", "--sign", identity.hash, "--identifier", DEV_DAEMON_IDENTIFIER, "--options", "runtime", "--timestamp=none", "--entitlements", ENTITLEMENTS, `-r=designated => ${requirement}`, tmp]), "codesign winter-core-live");
+    const requirement = stated(LIVE_DAEMON_IDENTIFIER);
+    must(run("codesign", ["--force", "--sign", identity.hash, "--identifier", LIVE_DAEMON_IDENTIFIER, "--options", "runtime", "--timestamp=none", "--entitlements", ENTITLEMENTS, `-r=designated => ${requirement}`, tmp]), "codesign winter-core-live");
     const shown = run("codesign", ["-d", "-r-", tmp]);
     if (designatedRequirementOf(`${shown.stdout}\n${shown.stderr}`) !== requirement) throw new Error("winter-core-live: the stated designated requirement did not take");
     const facts = signedFacts(run("codesign", ["-dv", tmp]).stderr);
-    if (facts.teamId !== WINTER_TEAM_ID || facts.identifier !== DEV_DAEMON_IDENTIFIER || !facts.runtime) throw new Error(`winter-core-live is not signed as the dev daemon (team ${facts.teamId}, ${facts.identifier})`);
+    if (facts.teamId !== WINTER_TEAM_ID || facts.identifier !== LIVE_DAEMON_IDENTIFIER || !facts.runtime) throw new Error(`winter-core-live is not signed with the live-test identity (team ${facts.teamId}, ${facts.identifier})`);
     renameSync(tmp, out);
   } finally {
     rmSync(tmp, { force: true });

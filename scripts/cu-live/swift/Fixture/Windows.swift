@@ -68,9 +68,93 @@ private func plainTextConfigured(_ view: NSTextView) {
     view.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
 }
 
+/// The sentinel as a view (Form, Offspace): opaque, drawn with exactly #FF00FF, and invisible to hit-testing and
+/// accessibility so it changes nothing about how the window is driven. See `Sentinel`.
+final class SentinelView: NSView {
+    override var isOpaque: Bool { true }
+    override var isFlipped: Bool { true }
+    override func draw(_ dirtyRect: NSRect) { Sentinel.fill(bounds) }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func isAccessibilityElement() -> Bool { false }
+}
+
+/// The notes text view's scroll view. It logs `scroller {id:"notes", value, byWheel}` whenever the vertical
+/// position changes (the clip view's bounds-changed notification), so the suite can tell a wheel scroll from a
+/// scroll made through the scroller itself (accessibility increment/value set, a click on the track, the keyboard).
+/// `value` is the vertical scroller's doubleValue (0 top .. 1 bottom), computed from the geometry so it does not
+/// depend on whether the scroller has caught up yet. At most 10 lines a second; the last value of a burst is
+/// always logged.
+final class NotesScrollView: NSScrollView {
+    private var wheel = WheelWindow()
+    private var throttle = Throttle<ScrollerSample>(minInterval: 0.1)
+    private var report = ScrollerReport()
+    private var silentUntil = 0.0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        // The initial position is the top; creating the view is not a scroll.
+        report.rebase(0)
+        contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(clipBoundsChanged(_:)),
+                                               name: NSView.boundsDidChangeNotification, object: contentView)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    private var uptime: Double { ProcessInfo.processInfo.systemUptime }
+
+    /// The text system hands wheel events up the responder chain to here. The flag covers the event's own handling
+    /// and the 300 ms after it (see `WheelWindow`).
+    override func scrollWheel(with event: NSEvent) {
+        wheel.begin()
+        super.scrollWheel(with: event)
+        wheel.end(now: uptime)
+    }
+
+    /// A programmatic reset moves the position without it being a scroll the suite should see: ignored for a
+    /// moment (text-driven scrolling can land a little after the assignment), with the position re-based.
+    func silence(for seconds: Double = 0.5) { silentUntil = uptime + seconds }
+
+    @objc private func clipBoundsChanged(_ note: Notification) {
+        guard let document = documentView else { return }
+        let now = uptime
+        let value = ScrollerMath.rounded(ScrollerMath.value(offset: Double(contentView.bounds.origin.y),
+                                                            contentHeight: Double(document.frame.height),
+                                                            viewportHeight: Double(contentView.bounds.height)))
+        if now < silentUntil {
+            report.rebase(value)
+            return
+        }
+        guard report.changed(value) else { return }
+        let sample = ScrollerSample(value: value, byWheel: wheel.isWheel(now: now))
+        switch throttle.offer(sample, now: now) {
+        case .emit(let sample):
+            emit(sample)
+        case .flushAt(let due):
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, due - now)) { [weak self] in
+                MainActor.assumeIsolated { self?.flush() }
+            }
+        case .absorbed:
+            break
+        }
+    }
+
+    private func flush() {
+        if let sample = throttle.flush(now: uptime) { emit(sample) }
+    }
+
+    private func emit(_ sample: ScrollerSample) {
+        Fixture.shared.emit("scroller", [("id", .str("notes")), ("value", .num(sample.value)), ("byWheel", .bool(sample.byWheel))])
+    }
+}
+
 @MainActor
 private func scrollContaining(_ textView: NSTextView, frame: NSRect) -> NSScrollView {
-    let scroll = NSScrollView(frame: frame)
+    scrollContaining(textView, in: NSScrollView(frame: frame))
+}
+
+@MainActor
+private func scrollContaining(_ textView: NSTextView, in scroll: NSScrollView) -> NSScrollView {
     scroll.hasVerticalScroller = true
     scroll.borderType = .bezelBorder
     scroll.autoresizingMask = [.width, .height]
@@ -95,6 +179,7 @@ final class FormController: NSObject {
     let name: FocusTextField
     let email: FocusTextField
     let notes: NotesTextView
+    let notesScroll: NotesScrollView
     let agree: NSButton
     private let openDocument: () -> Void
 
@@ -103,15 +188,17 @@ final class FormController: NSObject {
         window = makeFixtureWindow(title: "Fixture Form", slot: slot)
         let root = FlippedView(frame: NSRect(origin: .zero, size: WindowGrid.contentSize))
 
+        // Everything starts at x = 72: the top-left 8..56 pt square belongs to the sentinel (see `Sentinel`).
+        let left: CGFloat = 72
         func caption(_ text: String, y: CGFloat) {
             let label = NSTextField(labelWithString: text)
-            label.frame = NSRect(x: 20, y: y, width: 200, height: 18)
+            label.frame = NSRect(x: left, y: y, width: 200, height: 18)
             root.addSubview(label)
         }
         caption("Name", y: 16)
-        name = FocusTextField(id: "name", label: "Name", placeholder: "Name", frame: NSRect(x: 20, y: 36, width: 300, height: 24))
+        name = FocusTextField(id: "name", label: "Name", placeholder: "Name", frame: NSRect(x: left, y: 36, width: 300, height: 24))
         caption("Email", y: 70)
-        email = FocusTextField(id: "email", label: "Email", placeholder: "Email", frame: NSRect(x: 20, y: 90, width: 300, height: 24))
+        email = FocusTextField(id: "email", label: "Email", placeholder: "Email", frame: NSRect(x: left, y: 90, width: 300, height: 24))
         caption("Notes", y: 124)
         notes = NotesTextView(frame: .zero)
         plainTextConfigured(notes)
@@ -119,25 +206,29 @@ final class FormController: NSObject {
         notes.setAccessibilityIdentifier("notes")
         notes.setAccessibilityLabel("Notes")
         notes.identifier = NSUserInterfaceItemIdentifier("notes")
-        let notesScroll = scrollContaining(notes, frame: NSRect(x: 20, y: 144, width: 600, height: 150))
+        let scroll = NotesScrollView(frame: NSRect(x: left, y: 144, width: 548, height: 150))
+        _ = scrollContaining(notes, in: scroll)
+        notesScroll = scroll
         agree = NSButton(checkboxWithTitle: "Agree", target: nil, action: nil)
         super.init()
 
         let submit = NSButton(title: "Submit", target: self, action: #selector(submitPressed(_:)))
-        submit.frame = NSRect(x: 20, y: 312, width: 90, height: 28)
+        submit.frame = NSRect(x: left, y: 312, width: 90, height: 28)
         submit.identifier = NSUserInterfaceItemIdentifier("submit")
         submit.setAccessibilityIdentifier("submit")
         let open = NSButton(title: "Open Document", target: self, action: #selector(openDocumentPressed(_:)))
-        open.frame = NSRect(x: 120, y: 312, width: 140, height: 28)
+        open.frame = NSRect(x: left + 100, y: 312, width: 140, height: 28)
         open.identifier = NSUserInterfaceItemIdentifier("open-document")
         open.setAccessibilityIdentifier("open-document")
         agree.target = self
         agree.action = #selector(agreeToggled(_:))
-        agree.frame = NSRect(x: 280, y: 314, width: 100, height: 24)
+        agree.frame = NSRect(x: left + 260, y: 314, width: 100, height: 24)
         agree.identifier = NSUserInterfaceItemIdentifier("agree")
         agree.setAccessibilityIdentifier("agree")
 
         for view in [name, email, notesScroll, submit, open, agree] as [NSView] { root.addSubview(view) }
+        // Added last, so it is topmost.
+        root.addSubview(SentinelView(frame: Sentinel.rect))
         window.contentView = root
     }
 
@@ -158,6 +249,7 @@ final class FormController: NSObject {
     func reset() {
         name.stringValue = ""
         email.stringValue = ""
+        notesScroll.silence()
         notes.string = ""
         notes.setSelectedRange(NSRange(location: 0, length: 0))
         notes.undoManager?.removeAllActions()
@@ -380,6 +472,8 @@ final class CanvasView: NSView {
             NSColor.systemPink.setFill()
             NSRect(x: x, y: (bounds.height - Animation.squareSize) / 2 + 60, width: Animation.squareSize, height: Animation.squareSize).fill()
         }
+        // Last of all, so neither the tint nor the moving square can touch it. See `Sentinel`.
+        Sentinel.fill(Sentinel.rect)
     }
 
     // MARK: Animation
@@ -503,10 +597,12 @@ final class OffspaceController {
         let root = RainbowView(frame: NSRect(origin: .zero, size: WindowGrid.contentSize))
         let caption = NSTextField(labelWithString: "Offspace")
         caption.font = NSFont.boldSystemFont(ofSize: 24)
-        caption.frame = NSRect(x: 40, y: 40, width: 300, height: 32)
-        field = FocusTextField(id: "offspace", label: "Offspace Field", placeholder: "Offspace", frame: NSRect(x: 40, y: 100, width: 320, height: 24))
+        caption.frame = NSRect(x: 72, y: 40, width: 300, height: 32)
+        field = FocusTextField(id: "offspace", label: "Offspace Field", placeholder: "Offspace", frame: NSRect(x: 72, y: 100, width: 320, height: 24))
         root.addSubview(caption)
         root.addSubview(field)
+        // Topmost, at the top-left of the content area — also in full screen. See `Sentinel`.
+        root.addSubview(SentinelView(frame: Sentinel.rect))
         window.contentView = root
     }
 
@@ -537,7 +633,7 @@ final class UserController {
         root.addSubview(field)
         window.contentView = root
         // Bottom-right cell: Fixture Form (slot 0, the main typing target) and the other fixture windows stay
-        // unobstructed. Only Offspace (before it goes full screen) and later documents share this corner.
-        place(window, slot: 3)
+        // unobstructed. Offset inside the cell so Offspace's top-left corner (and its sentinel) stays uncovered.
+        place(window, slot: 3, offset: CGPoint(x: 100, y: -60))
     }
 }
