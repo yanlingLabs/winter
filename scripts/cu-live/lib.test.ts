@@ -6,8 +6,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { liveHomeRefusal } from "./daemon-entry";
 import {
-  callLine, computerV2Message, describeViolations, extractMarkers, focusViolations, hidInputTimes, lastValue, pointerMoves, startRefusal, markerFacts, MIXED_TEXT,
-  parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type MonitorSample,
+  callLine, computerV2Message, describeViolations, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hidInputTimes, lastValue, pointerMoves, startRefusal, markerFacts, MIXED_TEXT,
+  parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { minimalPdf, REAL_APP_SCENARIOS } from "./real-apps";
 import { PRELUDE, SCENARIOS, scriptOf } from "./scenarios";
@@ -47,6 +47,19 @@ describe("the monitor analysis", () => {
     expect(hidInputTimes(typed, 0, 100)).toEqual([40]);
     expect(hidInputTimes(typed, 50, 100)).toEqual([]);
     expect(hidInputTimes([sample(0, 7, 3, null), sample(20, 7, 3, 5)], 0, 100)).toEqual([]);
+  });
+
+  test("the completion window's model: status → ✓/!/✕ by rows, counts, and the open arguments", () => {
+    const row = (name: string, group: string, status: "pass" | "fail" | "skip"): ScenarioResult => ({ name, group, status, ms: 0, checks: [] });
+    const ok = [row("a", "bind", "pass"), row("b", "click", "skip"), row("cleanup", "run", "pass")];
+    expect(doneWindowModel(ok, 1234.6, 99, "/r.json")).toEqual({ status: "pass", passed: 2, failed: 0, skipped: 1, durationMs: 1235, finishedAt: 99, path: "/r.json" });
+    expect(doneWindowModel([...ok, row("c", "type", "fail")], 1, 1, "").status).toBe("fail");
+    expect(doneWindowModel([row("a", "bind", "pass"), row("cleanup", "run", "fail")], 1, 1, "").status).toBe("fail");
+    expect(doneWindowModel([row("a", "bind", "pass"), row("ABORTED", "run", "fail"), row("cleanup", "run", "pass")], 1, 1, "").status).toBe("aborted");
+    expect(doneWindowModel([row("setup", "run", "fail")], 1, 1, "").status).toBe("aborted");
+    const args = doneWindowOpenArgs("/x/Winter CU Fixture.app", doneWindowModel(ok, 1, 2, "/r.json"));
+    expect(args.slice(0, 6)).toEqual(["-n", "-g", "-a", "/x/Winter CU Fixture.app", "--args", "--done"]);
+    expect(JSON.parse(args[6]!)).toMatchObject({ status: "pass", passed: 2, path: "/r.json" });
   });
 
   test("the start gate: never from a full-screen Space; unattended only after a minute with no input", () => {

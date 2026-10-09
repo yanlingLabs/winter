@@ -12,6 +12,14 @@ private func fail(_ message: String, code: Int32) -> Never {
     exit(code)
 }
 
+// `--done <json>`: not a fixture at all — the runner's end-of-run completion window (Done.swift). No log, no role.
+if let index = CommandLine.arguments.firstIndex(of: "--done") {
+    guard index + 1 < CommandLine.arguments.count, let model = DoneModel.parse(CommandLine.arguments[index + 1]) else {
+        fail("--done takes one JSON object {status, passed, failed, skipped, durationMs, finishedAt, path}", code: 64)
+    }
+    MainActor.assumeIsolated { runDoneWindow(model) }
+}
+
 let environment = ProcessInfo.processInfo.environment
 guard let logPath = environment["WINTER_CU_FIXTURE_LOG"], !logPath.isEmpty else {
     fail("WINTER_CU_FIXTURE_LOG (an absolute path for the JSONL log) is required", code: 64)

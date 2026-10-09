@@ -46,7 +46,10 @@ WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live   # the LIVE ComputerV2 suite (script
                                      # --report <file.json>: every check in full + failing outputs; --script <file.js>: one
                                      # ad-hoc ComputerV2 script on the fixture, its output printed. It never starts from a
                                      # full-screen app's Space; --unattended (an approved agent run) also needs 60 s with no
-                                     # real input first. --dry-run: builds, self-tests,
+                                     # real input first. After the cleanup a small non-activating panel (the fixture
+                                     # bundle's --done mode, open -g) shows ✓/!/✕, the counts and the report path
+                                     # (out/cu-live/last-run.json unless --report) until closed, 30 min at most;
+                                     # --no-done-window for CI. --dry-run: builds, self-tests,
                                      # the no-screen plumbing and that identity rule against the dev helper; --real-apps:
                                      # Safari/TextEdit/Finder/Preview on temp docs, plus the generic check on VS Code and
                                      # Chrome when installed; --apps "<name or bundle id>,…": the generic, app-agnostic
