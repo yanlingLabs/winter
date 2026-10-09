@@ -370,14 +370,24 @@ extension CUCore {
             throw CUError.windowElsewhere(t.appName, sending: what, subject: subject)
         }
         let route: CURoute = t.isChromium && skyLight.isAvailable ? .skyLight : .publicPid
+        let isClick = what == "the click"
+        let wasKey = isClick ? keyFocusPidForTarget(t) == t.pid : true
         enforceFocus(p, t)  // believe-active first: an inactive window takes a click as activation only
         send(event, t)
         try token.check()
         let used = try body(synth(p), route)
+        // A first click on an inactive window can be swallowed as "activate the window" and never reach the UI.
+        // If the window was not key before and is key now, resend the click once (ChatGPT's retry).
+        var resent = false
+        if isClick, !wasKey, keyFocusPidForTarget(t) == t.pid {
+            CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): the window was not key — it likely took the first click as activation; resending once")
+            _ = try body(synth(p), route)
+            resent = true
+        }
         let routeName = used == .skyLight ? "window-targeted SkyLight pid events" : "window-targeted pid events"
         CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public) (off screen): \(routeName, privacy: .public)")
         return ActOutcome(rung: used == .skyLight ? .privatePath : .processEvents,
-                          detail: "\(subject): \(what) was sent to that window as \(routeName); whether it landed can't be confirmed there — check the state")
+                          detail: "\(subject): \(what) was sent to that window as \(routeName)\(resent ? " (resent once — the first click only made the window key)" : ""); whether it landed can't be confirmed there — check the state")
     }
 
     /// Where a pointer click on `e` goes: its centre, or — when that lies outside the window (scrolled out
@@ -717,6 +727,13 @@ extension CUCore {
         if enforcer.enforce(windowID: t.windowID) {
             CULog.act.notice("focus in \(t.appName, privacy: .public): posted a synthetic active state (advisory; the user-view guard is authoritative)")
         }
+    }
+
+    /// The window server's key-focus pid (which window takes keys), for the swallowed-click retry; nil when
+    /// it can't be read.
+    func keyFocusPidForTarget(_ t: CUTarget) -> pid_t? {
+        if let o = keyFocusPidOverride { return o() }
+        return skyLight.keyFocusPid()
     }
 
     /// Where key events go: the focused element's OWN process when it isn't the app's — Safari's web content

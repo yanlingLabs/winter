@@ -431,6 +431,8 @@ public final class CUCore: @unchecked Sendable {
     var lastSyntheticActivationAt: Double = -1
     /// Seconds since the last physical user input, injectable for tests.
     var secondsSinceUserInputOverride: (() -> TimeInterval)?
+    /// The window server's key-focus pid, injectable for tests (the swallowed-click retry).
+    var keyFocusPidOverride: (() -> pid_t?)?
 
     /// Apps whose `AXFocused` write was seen to activate them (move the user's view): their fields use the
     /// press route first thereafter, for the helper's lifetime. Keyed by bundle id, else app name.

@@ -177,6 +177,27 @@ final class OffDesktopActTests: XCTestCase {
         XCTAssertEqual(r.detail, "Safari's window is on another desktop: the click was sent to that window as window-targeted pid events; whether it landed can't be confirmed there — check the state")
     }
 
+    func testASwallowedWindowTargetedClickIsResentOnce() async throws {
+        world()
+        ax.refuses = ["\(token(link)):AXPress"]  // force the window-targeted events route
+        // The window was not key before, and becomes key after the first click (it only activated the window).
+        var key: pid_t? = nil
+        core.keyFocusPidOverride = { key }
+        poster.onPost = { [unowned self] e in if e.type == .leftMouseDown { key = pid } }
+        let r = try await act(.click(CUClickAction(ref: ref(link))))
+        XCTAssertEqual(downs.count, 2, "resent once after the window became key")
+        XCTAssertTrue(r.detail?.contains("resent once — the first click only made the window key") ?? false, r.detail ?? "")
+    }
+
+    func testAClickOnAnAlreadyKeyWindowIsNotResent() async throws {
+        world()
+        ax.refuses = ["\(token(link)):AXPress"]
+        core.keyFocusPidOverride = { [unowned self] in pid }  // already key
+        let r = try await act(.click(CUClickAction(ref: ref(link))))
+        XCTAssertEqual(downs.count, 1, "no resend when the window was already key")
+        XCTAssertFalse(r.detail?.contains("resent once") ?? false)
+    }
+
     func testAListedPressTheAppRefusesFallsBackToEvents() async throws {
         world()
         ax.refuses = ["\(token(link)):AXPress"]
