@@ -737,7 +737,18 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         since = Date.now();
         const timeout = s.timeoutMs ?? 60_000;
         const where = s.session === "ask" ? { client: askClient!, sid: askSid } : s.session === "fresh" ? await freshSession() : { client: client!, sid: mainSid };
+        // The user's own switch mid-run (`userSwitchAfterMs`): Finder, an app the agent never touched, comes forward.
+        let switchedAt: number | undefined;
+        let finderPid: number | undefined;
+        const userSwitch = s.userSwitchAfterMs === undefined ? undefined : (async () => {
+          await sleep(s.userSwitchAfterMs!);
+          finderPid = pidsOf("/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder")[0];
+          if (finderPid === undefined) throw new Error("Finder is not running");
+          switchedAt = Date.now();
+          await bringToFront(finderPid, "Finder (the user's switch)");
+        })();
         const turn = await runTurn(where.client, where.sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer);
+        await userSwitch;
         // A prompt during the action stops the run here, before this row is judged (its failure would be the prompt's).
         abortIfPrompt();
         const t1 = Date.now();
@@ -761,7 +772,9 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         const leaked = events.filter((e) => e.role === "user" && (e.ev === "user.key" || e.ev === "user.mouse") && e.t >= since && e.t <= t1);
         checks.push(check("the real pointer stayed put and your app got no keys or clicks (no rung-4 fallback)", moved.length === 0 && leaked.length === 0,
           [moved.length > 0 ? `pointer moved at +${moved.map((t) => t - since).join(", +")} ms` : "", leaked.length > 0 ? `your app got ${leaked.map((e) => e.ev).join(", ")}` : ""].filter(Boolean).join("; ")));
-        const focus = focusChecks(monitor!.items, since, t1 + WATCH_AFTER_MS, baseline!, s.allowExcursionMs);
+        const focus = s.userSwitchAfterMs !== undefined
+          ? { checks: [userSwitchHeld(monitor!.items, switchedAt, finderPid, t1 + WATCH_AFTER_MS)], longestAwayMs: 0 }
+          : focusChecks(monitor!.items, since, t1 + WATCH_AFTER_MS, baseline!, s.allowExcursionMs);
         checks.push(...focus.checks);
         // Whether the deliberate self-activation REALLY took (macOS 14+ may refuse it) — else the scenario proves less.
         const steals = events.filter((e) => e.role === "main" && e.ev === "activated" && e.t >= since);
@@ -1068,6 +1081,15 @@ function cardChecks(cards: readonly SessionEvent[], foregroundCard = false): Che
 }
 
 /** The focus check: nothing changes — or, for a scenario that provokes a self-activation, one short excursion back. */
+/** The user's own switch to `pid` held: from shortly after it until the end of the watch, `pid` stayed in front. */
+function userSwitchHeld(samples: readonly MonitorSample[], at: number | undefined, pid: number | undefined, to: number): Check {
+  if (at === undefined || pid === undefined) return check("the user's switch was made", false, "it never happened");
+  const after = samples.filter((m) => m.t >= at + 1_500 && m.t <= to);
+  const pulled = after.filter((m) => m.frontPid !== pid);
+  return check("the user's own switch to another app was never pulled back", after.length > 0 && pulled.length === 0,
+    pulled.length > 0 ? `front was ${pulled[0]!.front ?? "?"} at +${pulled[0]!.t - at} ms` : `${after.length} samples`);
+}
+
 function focusChecks(samples: readonly MonitorSample[], from: number, to: number, base: FocusBaseline, allowExcursionMs?: number): { checks: Check[]; longestAwayMs: number } {
   const v = focusViolations(samples, from, to, base);
   const lastInWindow = samples.filter((s) => s.t >= from && s.t <= to).at(-1);

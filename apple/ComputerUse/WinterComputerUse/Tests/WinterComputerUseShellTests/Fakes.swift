@@ -74,6 +74,12 @@ final class FakeCore: CoreService, @unchecked Sendable {
     var blocking: Set<String> = []
     /// Set when a blocked call notices its cancellation.
     let cancelledCalls = Counter()
+    /// `scriptActivity` as the engine was told it (the Focus Guardian's on/off), in order.
+    private var _activity: [String] = []
+    var activity: [String] { lock.lock(); defer { lock.unlock() }; return _activity }
+    func scriptActivity(sessionId: String, active: Bool) {
+        lock.lock(); _activity.append("\(sessionId):\(active)"); lock.unlock()
+    }
 
     var calls: [(method: String, params: JSONValue)] {
         lock.lock(); defer { lock.unlock() }

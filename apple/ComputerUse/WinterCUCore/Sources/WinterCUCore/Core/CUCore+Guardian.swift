@@ -4,41 +4,129 @@ import CoreGraphics
 import Foundation
 
 /// The live Focus Guardian: `CUCore` drives `CUFocusGuardianCore` from system-wide activation and
-/// active-Space notifications, attributing each to the user (physical input just before it) or the agent, and
-/// restoring the user the instant an agent-caused one lands — at any delay, so a document that opens or an app
-/// that activates itself seconds later is caught too. Gated by the private-path setting; off, the per-action
-/// user-view guard stays the only backstop. The keyboard reroute runs only inside the focus blip (CUCore+Blip).
+/// active-Space notifications, attributing each to the user or the agent, and restoring the user the instant an
+/// agent-caused one lands. Two rules keep it from ever fighting the USER (live: it re-activated "the user's
+/// previous app" each time they switched to Terminal, the app they were working in):
+/// - it runs only while the agent is acting — from a script's start (`script.active`) to its end plus a short
+///   tail for delayed activations — never merely because targets are bound;
+/// - only an app the agent touched can be a thief: a bound target's, one a document was opened in during the
+///   script, or one acted on in the last few seconds. Any other app coming forward is the user's choice, always.
+/// And any hardware input in the last second (trackpad gestures, Mission Control, ⌘Tab, the Dock) makes an
+/// activation or Space switch the user's. Gated by the private-path setting; off, the per-action user-view guard
+/// stays the only backstop. The keyboard reroute runs only inside the focus blip (CUCore+Blip).
 extension CUCore {
     /// How long the guardian treats an activation as following one of our own synthetic events.
     static let guardianSyntheticWindow: TimeInterval = 0.6
     /// The restore's deadline.
     static let guardianRestoreDeadlineMs: Double = 2000
+    /// How long the guard outlives the last script (an app activating itself a moment after the end).
+    static let guardianTail: TimeInterval = 3
+    /// How long after an act on an app its activation may still be the act's doing.
+    static let guardianActedWindow: TimeInterval = 3
+    /// Hardware input this recent makes an activation or a Space switch the user's.
+    static let guardianHardwareWindow: TimeInterval = 1
 
-    /// Starts guarding for a bound target (private path only). Returns whether it counted this target, so the
-    /// caller releases it symmetrically.
+    // MARK: when it runs
+
+    /// A script started or ended in a session (the daemon's `script.active`, and `session.ended`): the guard
+    /// runs while any script does, and for `guardianTail` after the last one ends.
+    public func scriptActivity(sessionId: String, active: Bool) {
+        var arm = false
+        var tailFrom = false
+        guardianLock.withLock {
+            if active {
+                guardianScripts.insert(sessionId)
+                guardianTailWork?.cancel()
+                guardianTailWork = nil
+                arm = guardianPrivatePath
+            } else if guardianScripts.remove(sessionId) != nil, guardianScripts.isEmpty {
+                tailFrom = true
+            }
+        }
+        if arm { _ = startGuardian(privatePath: true) }
+        if tailFrom {
+            let work = guardianTailSchedule(Self.guardianTail) { [weak self] in self?.endGuardIfIdle() }
+            guardianLock.withLock { guardianTailWork = work }
+        }
+    }
+
+    /// The tail ran out: the guard stops unless a script started meanwhile.
+    func endGuardIfIdle() {
+        let idle = guardianLock.withLock { guardianScripts.isEmpty }
+        if idle { stopGuardian() }
+    }
+
+    /// The private-path setting as the daemon sends it with each bind and act: the guard runs only with it on.
+    func noteGuardianPrivatePath(_ on: Bool) {
+        let arm = guardianLock.withLock { () -> Bool in
+            guardianPrivatePath = on
+            return on && !guardianScripts.isEmpty
+        }
+        if arm { _ = startGuardian(privatePath: true) }
+    }
+
+    /// A document opened in `pid` during the script: it may come forward late — a possible thief while guarding.
+    func noteGuardianOpened(_ pid: pid_t) {
+        guardianLock.withLock { _ = guardianOpened.insert(pid) }
+    }
+
+    /// The agent acted on `pid`: its activation in the next `guardianActedWindow` may be the act's doing.
+    func noteGuardianActed(_ pid: pid_t) {
+        let now = clock.nowSeconds()
+        guardianLock.withLock { guardianActedAt[pid] = now }
+    }
+
+    /// Whether `pid` coming forward can be a theft: a bound target's app, an app a document was opened in, or one
+    /// acted on in the last `guardianActedWindow`. Anything else is the user's.
+    func guardianSuspect(_ pid: pid_t, now: TimeInterval) -> Bool {
+        if boundTargetPids().contains(pid) { return true }
+        return guardianLock.withLock {
+            guardianOpened.contains(pid) || (guardianActedAt[pid].map { now - $0 <= Self.guardianActedWindow } ?? false)
+        }
+    }
+
+    /// Recent user input: physical mouse/keys (HID state, the original 0.4 s window), or ANY hardware-origin event
+    /// the listen-only tap saw in the last `guardianHardwareWindow` (trackpad gestures, scrolls, moves included).
+    func userInputRecent(now: TimeInterval) -> Bool {
+        if secondsSinceUserInput < CUFocusGuardianCore.userInputWindow { return true }
+        let last = guardianLock.withLock { lastHardwareInputAt }
+        return last >= 0 && now - last <= Self.guardianHardwareWindow
+    }
+
+    /// The listen-only tap saw a hardware-origin event (source pid 0, not ours).
+    func noteHardwareInput(now: TimeInterval) {
+        guardianLock.withLock { lastHardwareInputAt = now }
+    }
+
+    /// Starts guarding (private path only). Idempotent; returns whether it is running.
     @discardableResult
     func startGuardian(privatePath: Bool) -> Bool {
         guard privatePath else { return false }
         guardianLock.lock(); defer { guardianLock.unlock() }
-        guardianRefs += 1
-        if guardianRefs == 1 {
-            guardianCore.begin(view: CUGuardedView(app: sys.frontmostPid(), space: sys.activeSpace()))
-            installGuardianObservers()
-            startCPSTap()
-        }
+        guard guardianRefs == 0 else { return true }
+        guardianRefs = 1
+        guardianCore.begin(view: CUGuardedView(app: sys.frontmostPid(), space: sys.activeSpace()))
+        installGuardianObservers()
+        startCPSTap()
+        CULog.guardian.notice("guarding the user's view while a script runs")
         return true
     }
 
+    /// Stops guarding (the tail ran out, or the helper is going away). Idempotent.
     func stopGuardian() {
         guardianLock.lock(); defer { guardianLock.unlock() }
         guard guardianRefs > 0 else { return }
-        guardianRefs -= 1
-        guard guardianRefs == 0 else { return }
+        guardianRefs = 0
         guardianCore.end()
+        guardianOpened.removeAll()
+        guardianActedAt.removeAll()
         for o in guardianObservers { NSWorkspace.shared.notificationCenter.removeObserver(o) }
         guardianObservers.removeAll()
         stopCPSTap()
+        CULog.guardian.notice("stopped guarding: no script running")
     }
+
+    var guardianRunning: Bool { guardianLock.withLock { guardianRefs > 0 } }
 
     /// The consented foreground rung takes the front for one action: exempt that app briefly.
     func guardianExempt(_ pid: pid_t) {
@@ -93,9 +181,10 @@ extension CUCore {
 
     func onActivation(pid: pid_t) {
         let now = clock.nowSeconds()
-        let userInput = secondsSinceUserInput < CUFocusGuardianCore.userInputWindow
+        let userInput = userInputRecent(now: now)
         let synthetic = now - lastSyntheticActivationAt < Self.guardianSyntheticWindow
-        let activation = CUActivation(app: pid, space: sys.activeSpace(), hadRecentUserInput: userInput, fromSyntheticEvent: synthetic)
+        let activation = CUActivation(app: pid, space: sys.activeSpace(), hadRecentUserInput: userInput, fromSyntheticEvent: synthetic,
+                                      suspect: guardianSuspect(pid, now: now))
         guardianLock.lock()
         let verdict = guardianCore.handle(activation, now: now)
         guardianLock.unlock()
@@ -105,7 +194,7 @@ extension CUCore {
 
     func onSpaceChange() {
         let now = clock.nowSeconds()
-        let userInput = secondsSinceUserInput < CUFocusGuardianCore.userInputWindow
+        let userInput = userInputRecent(now: now)
         guardianLock.lock()
         let restore = guardianCore.handleSpaceChange(to: sys.activeSpace(), hadRecentUserInput: userInput, now: now)
         guardianLock.unlock()
@@ -195,9 +284,9 @@ extension CUCore {
     func startCPSTap() {
         guard guardianLiveTapEnabled, cpsTapThread == nil else { return }
         let box = Unmanaged.passRetained(CUCPSTapContext(core: self)).toOpaque()
-        // The CPS notifications (key-focus thefts) and every left-mouse-down (the user's own clicks).
-        let mask: CGEventMask = (CGEventMask(1) << CUFocusTaps.processNotificationType)
-            | (CGEventMask(1) << CGEventType.leftMouseDown.rawValue)
+        // Every event type, listen-only: the CPS notifications (key-focus thefts), every left-mouse-down (the user's
+        // own clicks), and the time of any hardware-origin event (trackpad gestures included) for attribution.
+        let mask: CGEventMask = CGEventMask.max
         guard let port = CGEvent.tapCreate(tap: .cgAnnotatedSessionEventTap, place: .tailAppendEventTap,
                                            options: .listenOnly, eventsOfInterest: mask, callback: cpsTapCallback, userInfo: box) else {
             Unmanaged<CUCPSTapContext>.fromOpaque(box).release()
@@ -241,11 +330,17 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
     guard let refcon, let core = Unmanaged<CUCPSTapContext>.fromOpaque(refcon).takeUnretainedValue().core else {
         return Unmanaged.passUnretained(event)
     }
+    // Hardware-origin input (no source process, not ours): the user's own, whatever its type.
+    if type.rawValue != CUFocusTaps.processNotificationType, event.getIntegerValueField(.eventSourceUnixProcessID) == 0,
+       !CUEventStamp.isOurs(event.getIntegerValueField(.eventSourceUserData)) {
+        core.noteHardwareInput(now: core.clock.nowSeconds())
+    }
     if type == .leftMouseDown {
         core.onPhysicalClick(at: event.location, userData: event.getIntegerValueField(.eventSourceUserData),
                              now: core.clock.nowSeconds())
         return Unmanaged.passUnretained(event)
     }
+    guard type.rawValue == CUFocusTaps.processNotificationType else { return Unmanaged.passUnretained(event) }
     func f(_ n: UInt32) -> Int64 { event.getIntegerValueField(CGEventField(rawValue: n)!) }
     core.onCPSNotification(recipientPID: pid_t(f(CUFocusField.targetPID)), subtype: f(CUFocusField.cpsSubtype),
                            subjectPID: pid_t(f(CUFocusField.subjectPID)), theftID: Int32(truncatingIfNeeded: f(CUFocusField.theftID)),

@@ -90,6 +90,7 @@ final class FocusGuardianTests: XCTestCase {
         core.secondsSinceUserInputOverride = { 5 }  // no recent user input: an agent activation
         XCTAssertTrue(core.startGuardian(privatePath: true))
         defer { core.stopGuardian() }
+        core.noteGuardianActed(2203)  // the agent just acted on it
         // VRoid/Preview comes to the front a second after a window-targeted click.
         sys.front = 2203
         sys.space = 150
@@ -112,6 +113,109 @@ final class FocusGuardianTests: XCTestCase {
         XCTAssertTrue(sys.activated.isEmpty, "the user's own switch is respected")
         XCTAssertTrue(core.takeGuardianNotes().isEmpty)
     }
+    // MARK: only apps the agent touched, only while it acts
+
+    func testAnAppTheAgentNeverTouchedComingForwardIsAlwaysTheUsersChoice() {
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        // Terminal (pid 77) comes forward with no input on record: still the user's — the agent never touched it.
+        XCTAssertEqual(g.handle(CUActivation(app: 77, space: 200, hadRecentUserInput: false, suspect: false), now: 10), .userSwitch)
+        XCTAssertEqual(g.view, CUGuardedView(app: 77, space: 200), "it is the user's app and Space now")
+        // A touched app taking the front after that is put back to Terminal, never to the old app.
+        guard case .theft(let restore, _, _) = g.handle(CUActivation(app: 500, space: 200, hadRecentUserInput: false), now: 11)
+        else { return XCTFail("expected a theft") }
+        XCTAssertEqual(restore.app, 77)
+    }
+
+    private func guardWorld() -> (CUCore, FakeSystem, () -> Void) {
+        let sys = FakeSystem()
+        sys.running = [1, 77, 500]; sys.front = 1; sys.space = 100
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        core.registerForTesting(CUTarget(id: "t1", sessionId: "s", pid: 500, bundleId: "x", appName: "Agent's app",
+                                         isChromium: false, mirror: false, windowID: 77, windowTitle: ""), windowElement: nil)
+        core.secondsSinceUserInputOverride = { 5 }
+        var tail: (() -> Void)?
+        core.guardianTailSchedule = { _, work in tail = work; return nil }
+        return (core, sys, { tail?() })
+    }
+
+    func testANonTargetAppActivatingDuringAScriptIsNeverRestored() {
+        let (core, sys, _) = guardWorld()
+        core.noteGuardianPrivatePath(true)
+        core.scriptActivity(sessionId: "s", active: true)
+        defer { core.stopGuardian() }
+        XCTAssertTrue(core.guardianRunning)
+        sys.front = 77
+        core.onActivation(pid: 77)  // the user switched to Terminal
+        XCTAssertTrue(sys.activated.isEmpty, "never pulled back")
+        XCTAssertTrue(core.takeGuardianNotes().isEmpty)
+        // The bound target's own activation is still caught.
+        sys.front = 500
+        core.onActivation(pid: 500)
+        XCTAssertEqual(sys.activated.last, 77, "put back to the user's CURRENT app")
+    }
+
+    func testAnIdleOrStoppedSessionHasNoGuardian() {
+        let (core, sys, _) = guardWorld()
+        core.noteGuardianPrivatePath(true)  // a target bound, no script running
+        XCTAssertFalse(core.guardianRunning, "bound targets alone start nothing")
+        sys.front = 500
+        core.onActivation(pid: 500)
+        XCTAssertTrue(sys.activated.isEmpty)
+        // With the private path off, a script starts no guard either.
+        core.noteGuardianPrivatePath(false)
+        core.scriptActivity(sessionId: "s", active: true)
+        XCTAssertFalse(core.guardianRunning)
+    }
+
+    func testTheGuardOutlivesTheScriptByItsTailOnly() {
+        let (core, sys, fireTail) = guardWorld()
+        core.noteGuardianPrivatePath(true)
+        core.scriptActivity(sessionId: "s", active: true)
+        core.scriptActivity(sessionId: "s", active: false)
+        XCTAssertTrue(core.guardianRunning, "the tail: a late activation is still caught")
+        sys.front = 500
+        core.onActivation(pid: 500)
+        XCTAssertEqual(sys.activated.last, 1)
+        fireTail()
+        XCTAssertFalse(core.guardianRunning, "then nothing")
+        // A script that starts within the tail keeps the guard.
+        core.scriptActivity(sessionId: "s", active: true)
+        core.scriptActivity(sessionId: "s", active: false)
+        core.scriptActivity(sessionId: "s2", active: true)
+        fireTail()
+        XCTAssertTrue(core.guardianRunning)
+        core.stopGuardian()
+    }
+
+    func testAGestureSpaceSwitchOrActivationWithHardwareInputIsTheUsers() {
+        let (core, sys, _) = guardWorld()
+        core.noteGuardianPrivatePath(true)
+        core.scriptActivity(sessionId: "s", active: true)
+        defer { core.stopGuardian() }
+        // A three-finger swipe: gesture events (hardware), no click or key.
+        core.noteHardwareInput(now: core.clock.nowSeconds())
+        sys.space = 300
+        core.onSpaceChange()
+        sys.front = 500
+        core.onActivation(pid: 500)
+        XCTAssertTrue(sys.activated.isEmpty, "the user's own switch")
+        XCTAssertTrue(core.takeGuardianNotes().isEmpty)
+    }
+
+    func testAppsTheAgentOpenedOrActedOnAreSuspectsTheRestAreNot() {
+        let (core, _, _) = guardWorld()
+        let now = core.clock.nowSeconds()
+        XCTAssertTrue(core.guardianSuspect(500, now: now), "a bound target's app")
+        XCTAssertFalse(core.guardianSuspect(77, now: now))
+        core.noteGuardianOpened(77)
+        XCTAssertTrue(core.guardianSuspect(77, now: now), "a document was opened in it")
+        core.noteGuardianActed(88)
+        XCTAssertTrue(core.guardianSuspect(88, now: now + 1))
+        XCTAssertFalse(core.guardianSuspect(88, now: now + CUCore.guardianActedWindow + 1), "only for a few seconds after the act")
+    }
+
     // MARK: the user's own click into the agent's app (a listen-only left-mouse-down observer)
 
     func testAClickClaimsTheActivationItCausesWhateverTheTiming() {
