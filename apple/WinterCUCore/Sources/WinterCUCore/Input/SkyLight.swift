@@ -254,6 +254,13 @@ public struct CUSkyLight: @unchecked Sendable {
         return arr.map(\.uint64Value).filter { $0 != 0 }
     }
 
+    /// Whether a window is on any Space at all (an ordered-out — closed but still allocated — window is on
+    /// none); nil when it can't be read.
+    public func isOnAnySpace(windowID id: UInt32) -> Bool? {
+        guard let mainConnectionFn, copySpacesFn != nil else { return nil }
+        return !spaces(ofWindow: id, connection: mainConnectionFn()).isEmpty
+    }
+
     /// Moves a window to the active Space without activating anything: added to the active Space first,
     /// verified, and only then removed from its old ones, so a refused move changes nothing. Windows in a
     /// full-screen Space are left alone (they are sized for it). False when any symbol is missing, the

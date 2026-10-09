@@ -243,11 +243,15 @@ extension CUCore {
                     cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
                     announced = true
                     try token.check()
+                    let before = pressEvidence(e, t)
                     do {
                         try ax.perform(e, axAction)
                         return ActOutcome(rung: .accessibility)
-                    } catch let error where Self.deliveryUncertain(error) {
-                        throw busyAfterSend(t)
+                    } catch let error where Self.pressMayHaveActed(error) != nil {
+                        // Never fall through to a click here: the press may have acted, and a click would repeat it.
+                        let note = try judgeErroredPress(e, t, before: before, code: Self.pressMayHaveActed(error)!,
+                                                         what: "the press on [\(ref)]")
+                        return ActOutcome(rung: .accessibility, detail: note)
                     } catch let err as CUError where err.code == "stale_element" || err.code == "permission_missing" {
                         throw err
                     } catch {
@@ -343,13 +347,17 @@ extension CUCore {
             }
             if let action {
                 for el in tries {
+                    let before = pressEvidence(el, t)
                     do {
                         try ax.perform(el, action)
                         CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): AX \(action, privacy: .public)")
                         return ActOutcome(rung: .accessibility,
                                           detail: "\(subject), so the element was sent \(CURoleWords.actionWords(action)) over accessibility")
-                    } catch let error where Self.deliveryUncertain(error) {
-                        throw busyAfterSend(t)
+                    } catch let error where Self.pressMayHaveActed(error) != nil {
+                        // Not the next ancestor, not events: the press may have acted.
+                        let note = try judgeErroredPress(el, t, before: before, code: Self.pressMayHaveActed(error)!,
+                                                         what: CURoleWords.actionWords(action))
+                        return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent \(CURoleWords.actionWords(action)) over accessibility; \(note)")
                     } catch let err as CUError where err.code == "stale_element" || err.code == "permission_missing" {
                         throw err
                     } catch {
@@ -581,16 +589,34 @@ extension CUCore {
         cursor(t, "type", at: info.center)
         try token.check()
         if ax.isSettable(e, kAXValueAttribute) {
+            // A scroll bar, slider or stepper holds a NUMBER: the text "0.5" is an illegal argument to it.
+            let current = ax.attribute(e, kAXValueAttribute)
+            let numeric = current.map { CFGetTypeID($0) == CFNumberGetTypeID() } ?? false
+                || [kAXScrollBarRole, kAXSliderRole, kAXIncrementorRole].contains(info.role ?? "")
+            let value: CFTypeRef
+            if numeric {
+                guard let n = Double(a.value.trimmingCharacters(in: .whitespaces)) else {
+                    throw CUError.invalidParams("[\(a.ref)] holds a number — pass one, e.g. setValue(\(a.ref), \"0.5\")")
+                }
+                if info.role == kAXScrollBarRole, !(0...1).contains(n) {
+                    throw CUError.invalidParams("a scroll bar's value runs from 0 (top or left) to 1 (bottom or right) — got \(a.value)")
+                }
+                value = NSNumber(value: n)
+            } else {
+                value = a.value as CFString
+            }
             do {
-                try ax.set(e, kAXValueAttribute, a.value as CFString)
+                try ax.set(e, kAXValueAttribute, value)
             } catch let error where Self.deliveryUncertain(error) {
                 throw busyAfterSend(t)
+            } catch let error as CUError where info.role == kAXScrollBarRole && error.code == "invalid_params" {
+                throw CUError.unsupported("\(t.appName)'s scroll bar [\(a.ref)] won't take a value — scroll its area with scroll() instead")
             }
             return ActOutcome(rung: .accessibility)
         }
-        // Not settable: focus it, select everything, and type over it.
+        // Not settable: focus it, select everything, and type over it — never over another field.
         let g = TypingFocus(explicit: e)
-        focusField(e, t)
+        try placeFocus(e, t, ref: a.ref)
         if let len = ax.string(e, kAXValueAttribute)?.utf16.count, ax.isSettable(e, kAXSelectedTextRangeAttribute),
            let r = AX.makeRange(location: 0, length: len) {
             try? ax.set(e, kAXSelectedTextRangeAttribute, r)
@@ -625,7 +651,7 @@ extension CUCore {
             let info = ElementInfo(el, ax)
             if info.secure { throw secureRefusal() }
             announceTarget(t, info, pressing: false)
-            focusField(el, t)
+            try placeFocus(el, t, ref: into)
             t.noteTargeted(el, at: clock.nowMs())
             g.explicit = el
             e = el
@@ -848,10 +874,34 @@ extension CUCore {
     }
 
     /// Whether the app's focused UI element is `e` now (its own, or its focused window's).
-    func isFocused(_ e: AXUIElement, _ t: CUTarget) -> Bool {
-        if let f = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute), CFEqual(f, e) { return true }
-        if let w = try? windowElement(t), let f = ax.element(w, kAXFocusedUIElementAttribute), CFEqual(f, e) { return true }
-        return false
+    func isFocused(_ e: AXUIElement, _ t: CUTarget) -> Bool { focusRelation(e, t) == .onIt }
+
+    enum FocusRelation { case onIt, elsewhere, unknown }
+
+    /// Where the keyboard focus is relative to `e`: on it (the focused element is `e` or inside it, or `e`
+    /// says it is focused), elsewhere (the app reports another element), or unknown (the app reports none —
+    /// Electron apps often don't).
+    func focusRelation(_ e: AXUIElement, _ t: CUTarget) -> FocusRelation {
+        if ax.bool(e, kAXFocusedAttribute) == true { return .onIt }
+        let reported = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute)
+            ?? (try? windowElement(t)).flatMap { ax.element($0, kAXFocusedUIElementAttribute) }
+        guard var f = reported else { return .unknown }
+        for _ in 0..<12 {
+            if CFEqual(f, e) { return .onIt }
+            guard let parent = ax.element(f, kAXParentAttribute) else { break }
+            f = parent
+        }
+        return .elsewhere
+    }
+
+    /// Puts the focus in the field an act named, or refuses: when it lands elsewhere — the app reports
+    /// another element focused — nothing is typed, because the keys would go there. When the app reports no
+    /// focus at all there is nothing to check against: the focus-unknown floor still governs the typing.
+    func placeFocus(_ e: AXUIElement, _ t: CUTarget, ref: Int?) throws {
+        if focusField(e, t) { return }
+        guard t.accessible else { return }
+        if focusRelation(e, t) == .elsewhere { throw focusNotPlacedRefusal(t, ref: ref) }
+        CULog.act.notice("focus in \(t.appName, privacy: .public): not confirmed (the app reports no focused element)")
     }
 
     /// Focuses `e` for typing WITHOUT the `AXFocused` write where that write would steal the user's view: on a
@@ -869,10 +919,11 @@ extension CUCore {
         guard t.accessible else { return false }
         if isFocused(e, t) { return true }
         if pressToFocus(e, t) { return true }
-        // The write is forbidden for web content and apps known to activate on it: leave focus, say so.
+        // The write is forbidden for web content and apps known to activate on it: focus is not placed, and
+        // the caller refuses rather than typing into whatever has it.
         let web = isWebContent(e) || keyboardTarget(t, focused: e) != t.pid
         if web || appActivatesOnFocusWrite(t) {
-            t.addViewNote("couldn't place focus in \(t.appName)'s field without the accessibility focus write (which makes \(t.appName) come forward), so the action went to whatever had focus — check the state")
+            CULog.act.notice("focus in \(t.appName, privacy: .public): neither a press nor a click placed it, and the AXFocused write is not used here")
             return false
         }
         // A plain native field, no history of activating: the write, under the guard.
@@ -883,21 +934,64 @@ extension CUCore {
             rememberFocusWriteActivates(t)  // use the press route first for this app from now on
             t.addViewNote(viewMoved(before, after, t, route: "focusing the field over accessibility", late: false))
         }
-        return isFocused(e, t)
+        return waitFocused(e, t, web: false)
+    }
+
+    /// The refusal when focus can't be placed on the field the act named: nothing is typed, because the keys
+    /// would go to whatever has the focus (a live run put a comment into the page's search field).
+    func focusNotPlacedRefusal(_ t: CUTarget, ref: Int?) -> CUError {
+        let which = ref.map { "[\($0)]" } ?? "that field"
+        return CUError.refused(.focusNotPlaced,
+                               "couldn't put the keyboard focus in \(which) of \(t.appName) from the background, so nothing was typed (the keys would have gone to whatever field has focus) — use setValue(\(ref.map(String.init) ?? "ref"), text) if the field takes a value, or click it first and retry")
+    }
+
+    /// Polls whether `e` has the focus: WebKit moves `AXFocusedUIElement` asynchronously after a press or a
+    /// click, so an immediate read misses a focus that did land.
+    func waitFocused(_ e: AXUIElement, _ t: CUTarget, web: Bool) -> Bool {
+        let deadline = clock.nowMs() + (web ? focusWaitWebMs : focusWaitNativeMs)
+        repeat {
+            if isFocused(e, t) { return true }
+            if clock.nowMs() >= deadline { return false }
+            usleep(30_000)
+        } while true
+    }
+
+    /// The synthetic "you are active" state for the bound window, before a click that must not be swallowed as
+    /// activation (only with the private path, like the rest of the enforcer).
+    func postSyntheticActivation(_ t: CUTarget, privatePath: Bool) {
+        guard let enforcer = focusEnforcer(for: t, privatePath: privatePath) else { return }
+        noteSyntheticActivation()  // the guardian must not read the activation this posts as the user's
+        _ = enforcer.enforce(windowID: t.windowID)
     }
 
     /// Focuses `e` by pressing it, never by the `AXFocused` write: a listed `AXPress`/`AXConfirm`, else a
     /// window-targeted click at its centre when the window is on screen. Verified against the focused element.
     /// False when nothing placed focus on it.
     func pressToFocus(_ e: AXUIElement, _ t: CUTarget) -> Bool {
+        let web = isWebContent(e) || keyboardTarget(t, focused: e) != t.pid
         let actions = ax.actions(e)
         for a in [kAXPressAction, "AXConfirm"] where actions.contains(a) {
-            if (try? ax.perform(e, a)) != nil, isFocused(e, t) { return true }
+            if (try? ax.perform(e, a)) != nil, waitFocused(e, t, web: web) { return true }
         }
-        if let c = ElementInfo(e, ax).center, sys.window(id: t.windowID)?.onScreen == true {
-            let windowFor = self.windowFor(t)
-            try? synth.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: .publicPid)
-            if isFocused(e, t) { return true }
+        // AXPress may not focus a web textarea: a window-targeted click at its centre, on this desktop or (with
+        // the private path) on another Space, after the synthetic activation so it isn't taken as activation.
+        guard let c = ElementInfo(e, ax).center else { return false }
+        let onScreen = sys.window(id: t.windowID)?.onScreen == true
+        let elsewhere = !onScreen && t.privatePath && skyLight.canSetWindowLocation
+        guard onScreen || elsewhere else { return false }
+        let route: CURoute = elsewhere && t.isChromium && skyLight.isAvailable ? .skyLight : .publicPid
+        var s = synth
+        s.windowSPI = t.privatePath
+        let windowFor = self.windowFor(t)
+        let wasKey = keyFocusPidForTarget(t) == t.pid
+        postSyntheticActivation(t, privatePath: t.privatePath)
+        try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
+        if waitFocused(e, t, web: web) { return true }
+        // The window was not key and the click only made it key: once more.
+        if !wasKey, keyFocusPidForTarget(t) == t.pid {
+            CULog.act.notice("focus in \(t.appName, privacy: .public): the first click only made the window key — clicking the field once more")
+            try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
+            if waitFocused(e, t, web: web) { return true }
         }
         return false
     }
@@ -989,7 +1083,7 @@ extension CUCore {
             let info = ElementInfo(el, ax)
             if Self.producesText(chord), info.secure { throw secureRefusal() }
             announceTarget(t, info, pressing: false)
-            focusField(el, t)
+            try placeFocus(el, t, ref: into)
             t.noteTargeted(el, at: clock.nowMs())
             g.explicit = el
             e = el
@@ -1495,11 +1589,13 @@ extension CUCore {
             cursor(t, "press", at: info.center, count: 1, button: button)
             shown = (1, button)
             try token.check()
+            let before = pressEvidence(e, t)
             do {
                 try ax.perform(e, name)
                 return ActOutcome(rung: .accessibility)
-            } catch let error where Self.deliveryUncertain(error) {
-                throw busyAfterSend(t)
+            } catch let error where Self.pressMayHaveActed(error) != nil {
+                let note = try judgeErroredPress(e, t, before: before, code: Self.pressMayHaveActed(error)!, what: "“\(words)” on [\(a.ref)]")
+                return ActOutcome(rung: .accessibility, detail: note)
             } catch let err as CUError where Self.refusedAction(err) {
                 t.noteRefused(action: name, role: role)
             }
@@ -1515,6 +1611,56 @@ extension CUCore {
         return try pointerClick(p, t, at: center, button: pointer.button, count: pointer.count, flags: [], token, announced: same,
                                 element: e, axTried: true)
             .noting("\(t.appName) refused “\(words)” over accessibility, so [\(a.ref)] was \(pointer.verb) instead")
+    }
+
+    /// What a press can change, read before it so a press the app answered with an error can be judged.
+    struct PressEvidence: Equatable {
+        var windows: Set<UInt32>
+        var focused: AXIdentity?
+        var value: String?
+        var alive: Bool
+    }
+
+    func pressEvidence(_ e: AXUIElement, _ t: CUTarget) -> PressEvidence {
+        PressEvidence(windows: Set(sys.windows(pid: t.pid).filter { $0.layer == 0 }.map(\.id)),
+                      focused: ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute).map { AXIdentity(element: $0) },
+                      value: ax.string(e, kAXValueAttribute), alive: ax.isAlive(e))
+    }
+
+    /// The AX error of a press that may have acted anyway: -25200 (kAXErrorFailure) — a live fixture opened its
+    /// document window and still answered it — and -25204 (cannot complete: no answer in time). Nil for an
+    /// outright refusal (unsupported, not implemented), which did nothing.
+    static func pressMayHaveActed(_ error: Error) -> Int? {
+        guard let e = error as? CUError else { return nil }
+        if e.code == "busy" { return Int(AXError.cannotComplete.rawValue) }
+        if e.code == "unsupported", case .number(let n)? = e.data?["axError"], Int32(n) == AXError.failure.rawValue { return Int(n) }
+        return nil
+    }
+
+    /// A press the app answered with -25200/-25204: did it act? Something changed (a new or closed window, the
+    /// element's value, the focus, the element gone) → it took effect, said with a note so the model does not
+    /// press again. Nothing changed → an error that says it may have acted — never a second press here.
+    func judgeErroredPress(_ e: AXUIElement, _ t: CUTarget, before: PressEvidence, code: Int, what: String) throws -> String {
+        let deadline = clock.nowMs() + pressSettleMs
+        var after = pressEvidence(e, t)
+        while after == before, clock.nowMs() < deadline {
+            usleep(50_000)
+            after = pressEvidence(e, t)
+        }
+        guard after != before else {
+            CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public): AXError \(code, privacy: .public), and nothing visibly changed")
+            throw CUError(code: "unsupported",
+                          message: "\(t.appName) answered \(what) with an error (AXError \(code)) but may have acted — check state() before retrying",
+                          data: ["axError": .int(code)])
+        }
+        var changed: [String] = []
+        if !after.windows.subtracting(before.windows).isEmpty { changed.append("a new window opened") }
+        if !before.windows.subtracting(after.windows).isEmpty { changed.append("a window closed") }
+        if after.value != before.value { changed.append("its value changed") }
+        if after.focused != before.focused { changed.append("the focus moved") }
+        if before.alive, !after.alive { changed.append("the element went away") }
+        CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public): AXError \(code, privacy: .public), but it took effect")
+        return "\(t.appName) answered \(what) with an error (AXError \(code)), but it took effect — \(changed.joined(separator: ", ")); don't repeat it"
     }
 
     /// The app answered that the element does not support the action (not a timeout or a dead element).
@@ -1573,9 +1719,10 @@ extension CUCore {
                           data: ["disabled": .string(title)])
         }
         t.disabledMenuCommands.remove(key)
-        try pressMenu(item, t)
-        return ActOutcome(rung: .accessibility,
-                          detail: keyed != nil ? "\(t.appName)'s window was made key in the background for the command" : nil)
+        let note = try pressMenu(item, t)
+        let made = keyed != nil ? "\(t.appName)'s window was made key in the background for the command" : nil
+        let detail = [made, note].compactMap { $0 }.joined(separator: "; ")
+        return ActOutcome(rung: .accessibility, detail: detail.isEmpty ? nil : detail)
     }
 
     /// What to do about a menu command disabled in the background: the UI routes that check the item itself,
@@ -1640,11 +1787,16 @@ extension CUCore {
         return item
     }
 
-    private func pressMenu(_ item: CUAXMenuNode, _ t: CUTarget) throws {
+    /// Presses a menu item; a note when the app answered with an error but the command took effect.
+    @discardableResult
+    private func pressMenu(_ item: CUAXMenuNode, _ t: CUTarget) throws -> String? {
+        let before = pressEvidence(item.element, t)
         do {
             try ax.perform(item.element, kAXPressAction)
-        } catch let error where Self.deliveryUncertain(error) {
-            throw busyAfterSend(t)
+            return nil
+        } catch let error where Self.pressMayHaveActed(error) != nil {
+            return try judgeErroredPress(item.element, t, before: before, code: Self.pressMayHaveActed(error)!,
+                                         what: "the menu command “\(item.menuTitle)”")
         }
     }
 

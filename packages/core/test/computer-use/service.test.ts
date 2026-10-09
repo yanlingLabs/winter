@@ -646,6 +646,10 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     w.fake.handlers["target.act"] = () => { throw new FakeHelperError("refused", "", { reason: "focus_unknown" }); };
     const r2 = await w.run("try { await notes.type('hello') } catch (e) { print(e.name, e.message) }");
     expect(text(r2)).toContain("Refused can't tell which field has focus in Notes, so it could be a password field — pass `into` or click a text field first");
+    // focus_not_placed: nothing was typed, and what to do instead.
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("refused", "", { reason: "focus_not_placed" }); };
+    const r3 = await w.run("try { await notes.type('hello', { into: 14 }) } catch (e) { print(e.name, e.message) }");
+    expect(text(r3)).toContain("Refused couldn't put the keyboard focus in that field of Notes, so nothing was typed");
   }, 30_000);
 
   macOnly("targetLost and the helper quitting: TargetLost next use; HelperUnavailable mid-call; the next call relaunches", async () => {

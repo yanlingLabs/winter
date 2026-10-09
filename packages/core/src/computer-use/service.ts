@@ -1160,6 +1160,7 @@ function refusedWords(reason: string, name: string): string {
   switch (reason) {
     case "secure_field": return "that is a password or payment field — Winter never reads or types into one; ask the user to fill it in";
     case "focus_unknown": return `can't tell which field has focus in ${name}, so it could be a password field — pass \`into\` or click a text field first`;
+    case "focus_not_placed": return `couldn't put the keyboard focus in that field of ${name}, so nothing was typed — use setValue(ref, text) if it takes a value, or click it first and retry`;
     case "auth_dialog": return "that is a system authentication dialog — ask the user to handle it";
     case "privacy_pane": return "System Settings' Privacy & Security panes are off limits — ask the user to change them";
     case "winter_itself": return "Winter never controls itself";

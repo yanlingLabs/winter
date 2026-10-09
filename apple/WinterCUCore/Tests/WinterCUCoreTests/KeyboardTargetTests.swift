@@ -254,7 +254,7 @@ final class KeyboardTargetTests: XCTestCase {
         let f = nativeField()  // no press actions → press route fails → the guarded write
         ax.onSet = { [unowned self] what in if what.hasSuffix(":\(kAXFocusedAttribute)") { sys.front = pid } }
         sys.windows[77]?.onScreen = false  // no on-screen click either
-        XCTAssertFalse(core.focusField(f, target), "the write activated the app; focus not confirmed")
+        _ = core.focusField(f, target)  // the write may place it (the field reads focused) — but it activated the app
         XCTAssertEqual(sys.activated, [1], "the user's app put back at once")
         XCTAssertTrue(target.takeViewNotes().contains { $0.contains("Native activated itself — the user's app was put back") })
         XCTAssertTrue(core.appActivatesOnFocusWrite(target), "remembered")
@@ -278,14 +278,74 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertTrue(sys.activated.isEmpty, "pressing does not activate")
     }
 
-    func testAWebFieldThatCannotBePressedIsNotWrittenAndSaysSo() {
+    /// The page's search field, which holds the focus while the agent means to type into the comment field.
+    private func searchHasFocus() -> AXUIElement {
+        let search = fakeElement(93_090)
+        ax.add(search, role: kAXTextFieldRole, title: "Search", frame: CGRect(x: 400, y: 60, width: 200, height: 24),
+               extra: [kAXValueAttribute: "search term"])
+        ax.focus(pid: pid, on: search)
+        return search
+    }
+
+    func testAWebFieldThatCannotBePressedIsNotWritten() {
         safari(fieldOwner: pid)
         ax.focus(pid: pid, on: nil)   // not focused, no press actions
-        sys.windows[77]?.onScreen = false  // and no on-screen click
+        sys.windows[77]?.onScreen = false  // and no click: the private path is off for this target
+        target = CUTarget(id: "t2", sessionId: "s", pid: pid, bundleId: "com.apple.Safari", appName: "Safari",
+                          isChromium: false, mirror: false, windowID: 77, windowTitle: "Docs", privatePath: false)
+        core.registerForTesting(target, windowElement: window)
         ax.onSet = { _ in XCTFail("the write is forbidden for a web field") }
         XCTAssertFalse(core.focusField(field, target))
-        XCTAssertTrue(target.takeViewNotes().contains { $0.contains("couldn't place focus in Native's field") || $0.contains("couldn't place focus in Safari's field") },
-                      "says focus could not be placed without the write")
+    }
+
+    func testTypingIntoAFieldWhoseFocusStaysElsewhereIsRefusedAndTypesNothing() async throws {
+        safari(fieldOwner: pid)
+        _ = searchHasFocus()
+        sys.windows[77]?.onScreen = false  // nothing places it: no press, no click with the private path off
+        ax.onSet = { _ in XCTFail("no AXFocused write on a web field") }
+        for action in [CUAction.type(CUTypeAction(text: "line one", into: ref(field))),
+                       .paste(CUPasteAction(text: "line one", into: ref(field))),
+                       .key(CUKeyAction(combo: "a", into: ref(field)))] {
+            do {
+                try await act(action)
+                XCTFail("expected focus_not_placed for \(action)")
+            } catch let e as CUError {
+                XCTAssertEqual(e.code, "refused")
+                XCTAssertEqual(e.data?["reason"], .string("focus_not_placed"))
+                XCTAssertTrue(e.message.contains("nothing was typed"), e.message)
+            }
+        }
+        XCTAssertTrue(poster.keyDowns.isEmpty, "not one key went to the search field")
+    }
+
+    func testAClickAtTheFieldsCentrePlacesFocusThatWebKitMovesLate() async throws {
+        safari(fieldOwner: pid)
+        _ = searchHasFocus()
+        core.focusWaitWebMs = 300
+        // The click lands; WebKit reports the new focus a few reads later.
+        var clicked = false, reads = 0
+        poster.onPost = { e in if e.type == .leftMouseUp { clicked = true } }
+        ax.onRead = { [unowned self] what in
+            guard clicked, what.hasSuffix(":\(kAXFocusedUIElementAttribute)") else { return }
+            reads += 1
+            if reads == 3 { ax.focus(pid: pid, on: field) }
+        }
+        try await act(.type(CUTypeAction(text: "hi", into: ref(field))))
+        let down = try XCTUnwrap(poster.entries.first { $0.type == .leftMouseDown })
+        XCTAssertEqual(down.window, 77, "a window-targeted click")
+        XCTAssertEqual(poster.keyDowns.count, 2, "typed once the field had the focus")
+        XCTAssertFalse(ax.written.contains { $0.hasSuffix(":\(kAXFocusedAttribute)") })
+    }
+
+    func testAFocusedDescendantOrTheFieldsOwnFocusedFlagCounts() {
+        safari(fieldOwner: pid)
+        let inner = fakeElement(93_091)
+        ax.add(inner, role: "AXGroup", frame: CGRect(x: 20, y: 60, width: 10, height: 10), extra: [kAXParentAttribute: field!])
+        ax.focus(pid: pid, on: inner)
+        XCTAssertTrue(core.isFocused(field, target), "the focus is inside the field")
+        ax.focus(pid: pid, on: nil)
+        ax.put(field, [kAXFocusedAttribute: kCFBooleanTrue])
+        XCTAssertTrue(core.isFocused(field, target), "the field says it has the focus")
     }
 
     func testTextUpToTwoHundredCharactersIsTypedAsKeys() async throws {

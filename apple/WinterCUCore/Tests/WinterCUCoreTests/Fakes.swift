@@ -75,7 +75,13 @@ final class FakeAX: CUAXBackend {
 
     func isTrusted() -> Bool { trusted }
     func application(_ pid: pid_t) -> AXUIElement { fakeElement(pid) }
-    func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef? { attrs[AXIdentity(element: e)]?[name] }
+    /// Runs before each attribute read ("token:attribute"), to change the fake world as time passes (WebKit
+    /// moving focus a moment after a click).
+    var onRead: ((String) -> Void)?
+    func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
+        onRead?("\(token(e)):\(name)")
+        return attrs[AXIdentity(element: e)]?[name]
+    }
     func copyMultiple(_ e: AXUIElement, _ names: [String]) -> [String: CFTypeRef]? {
         let d = attrs[AXIdentity(element: e)] ?? [:]
         var out: [String: CFTypeRef] = [:]
@@ -99,8 +105,14 @@ final class FakeAX: CUAXBackend {
     var refuses: Set<String> = []
     /// Runs after each perform that went through ("token:action"), to change the fake world.
     var onPerform: ((String) -> Void)?
+    /// Thrown AFTER the action took effect (onPerform ran): an app that acts and still answers with an error.
+    var performErrorAfterActing: CUError?
     func perform(_ e: AXUIElement, _ action: String) throws {
         performed.append("\(token(e)):\(action)")
+        if let err = performErrorAfterActing {
+            onPerform?("\(token(e)):\(action)")
+            throw err
+        }
         defer { if performError == nil, !refuses.contains("\(token(e)):\(action)") { onPerform?("\(token(e)):\(action)") } }
         if let err = performError { throw err }
         if refuses.contains("\(token(e)):\(action)") {
@@ -179,6 +191,10 @@ final class FakeSystem: CUSystemBackend {
     func activate(pid: pid_t) -> Bool { activated.append(pid); front = pid; onActivate?(pid); return true }
     var stageManager = false
     func stageManagerEnabled() -> Bool { stageManager }
+    /// Windows on no Space at all (closed but still listed); others answer `onSpace` (nil = unknown).
+    var noSpaceWindows: Set<UInt32> = []
+    var onSpace: Bool? = nil
+    func windowOnAnySpace(_ id: UInt32) -> Bool? { noSpaceWindows.contains(id) ? false : onSpace }
     /// Content processes (Safari's WebContent), each with the app it serves.
     var contentProcesses: [pid_t: pid_t] = [:]
     func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { contentProcesses[pid] == appPid }

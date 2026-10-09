@@ -129,7 +129,14 @@ final class ActGateTests: XCTestCase {
     func testAnAXTimeoutNeverFallsBackToEvents() async throws {
         world()
         ax.performError = CUError.busy()
-        await expect("busy") { try await self.act(.click(CUClickAction(ref: self.ref(self.button)))) }
+        // A timed-out press may have acted: said so (kept by the daemon, unlike `busy`), never repeated.
+        do {
+            try await act(.click(CUClickAction(ref: ref(button))))
+            XCTFail("expected the may-have-acted error")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "unsupported")
+            XCTAssertTrue(e.message.contains("may have acted — check state() before retrying"), e.message)
+        }
         XCTAssertTrue(poster.entries.isEmpty, "no second click by events")
         ax.performError = nil
         ax.makeSettable(field, kAXSelectedTextAttribute)
