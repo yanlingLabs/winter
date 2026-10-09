@@ -13,11 +13,18 @@ extension CUCore {
     struct ActOutcome {
         var rung: CUInputLadder.Rung
         var detail: String?
+        /// Paths to open in the background once the act has released the target's queue (Finder's Open):
+        /// resolved under the queue, opened after it, so a slow launch never holds the target.
+        var pendingOpen: [String]? = nil
+        /// What the open stands for in the result ("“File › Open”"), when it came from a menu.
+        var openWhat: String? = nil
 
         /// Puts `note` (what was done to reach the window) in front of the rung's own detail.
         func noting(_ note: String?) -> ActOutcome {
             guard let note else { return self }
-            return ActOutcome(rung: rung, detail: [note, detail].compactMap { $0 }.joined(separator: "; "))
+            var o = self
+            o.detail = [note, detail].compactMap { $0 }.joined(separator: "; ")
+            return o
         }
     }
 
@@ -38,7 +45,7 @@ extension CUCore {
         if case .key(let k) = p.action, (try? CUKeyChord.parse(k.combo))?.isEscape == true {
             await MainActor.run { [weak self] in self?.events?.willSendEscape() }
         }
-        let outcome = try await queues.run(t.pid) { [self] () -> ActOutcome in
+        var outcome = try await queues.run(t.pid) { [self] () -> ActOutcome in
             do {
                 // A cancel that arrived while this act waited behind others stops it here.
                 try token.check()
@@ -57,6 +64,17 @@ extension CUCore {
                 // A refusal or a failure: a gentle "no" where the act was aimed. Not for a cancel (the user
                 // or the script stopped it) or a target that is gone (its cursor goes with it).
                 if Self.showsRefusal(error) { cursor(t, "refused", at: attemptPoint(p.action, t)) }
+                logAct(p, t, failed: error)
+                throw error
+            }
+        }
+        if let paths = outcome.pendingOpen {
+            // The queue is released: open now, bounded, and say what happened.
+            do {
+                let said = try await finishBackgroundOpen(paths, what: outcome.openWhat, t)
+                outcome.detail = [outcome.detail, said].compactMap { $0 }.joined(separator: "; ")
+            } catch {
+                cursor(t, "refused")
                 logAct(p, t, failed: error)
                 throw error
             }
@@ -505,6 +523,13 @@ extension CUCore {
     /// been typed since. Returns nil when the focus is unknown but allowed.
     @discardableResult
     func requireTypableFocus(_ t: CUTarget, _ g: TypingFocus = TypingFocus()) throws -> AXUIElement? {
+        let f = try typableFocusChecked(t, g)
+        // Capture-only: the app's reported focus may be an element of ANOTHER window — checked (a password
+        // field still refuses), never typed or inserted into.
+        return t.accessible ? f : nil
+    }
+
+    private func typableFocusChecked(_ t: CUTarget, _ g: TypingFocus) throws -> AXUIElement? {
         if let f = reportedFocus(t) {
             if ElementInfo(f, ax).secure { throw secureRefusal() }
             return f
@@ -747,26 +772,46 @@ extension CUCore {
         guard !paths.isEmpty else {
             throw CUError.unsupported("nothing is selected in \(t.appName) to open — select a file first, or use apps.open(path)")
         }
-        let opened = try openDocumentsBlocking(paths)
-        return ActOutcome(rung: .accessibility,
-                          detail: "\(what): opened \(paths.count == 1 ? (paths[0] as NSString).lastPathComponent : "\(paths.count) items") in \(opened) in the background (not through Finder, so nothing came to the front)")
+        return try pendingBackgroundOpen(paths, what: what)
     }
 
-    /// Runs `openDocuments` synchronously from the act (pid) queue; returns the opener's name.
-    func openDocumentsBlocking(_ paths: [String]) throws -> String {
-        let box = NSObject()  // just to satisfy the semaphore closure capture
-        _ = box
-        var out: Result<String, Error>!
-        let done = DispatchSemaphore(value: 0)
-        Task { [self] in
-            do {
-                let r = try await openDocuments(OpenDocumentsParams(urls: paths, sessionId: "finder-open", mirror: false, privatePath: true))
-                out = .success(r.app.name)
-            } catch { out = .failure(error) }
-            done.signal()
+    /// An outcome that opens `paths` after the act releases the target's queue. The protected-path floor is
+    /// checked here, under the queue, so a refusal is an ordinary refused act.
+    func pendingBackgroundOpen(_ paths: [String], what: String?) throws -> ActOutcome {
+        if let bad = paths.first(where: { CUFloors.isProtectedSavePath($0) }) {
+            throw CUError.refused(.privacyPane, "opening \((bad as NSString).lastPathComponent) is off limits — it is a protected location")
         }
-        done.wait()
-        return try out.get()
+        return ActOutcome(rung: .accessibility, detail: nil, pendingOpen: paths, openWhat: what)
+    }
+
+    /// Opens `paths` in the background, waiting at most `openTimeoutMs` (NSWorkspace's open can't be
+    /// cancelled: past the bound it keeps going and the result says so). Throws what the open threw.
+    func finishBackgroundOpen(_ paths: [String], what: String?, _ t: CUTarget) async throws -> String {
+        let label = paths.count == 1 ? (paths[0] as NSString).lastPathComponent : "\(paths.count) items"
+        let prefix = what.map { "\($0): " } ?? ""
+        enum Result { case opened(String), failed(Error), timedOut }
+        let gate = CUResumeOnce()
+        let timeoutMs = openTimeoutMs
+        let result: Result = await withCheckedContinuation { (cont: CheckedContinuation<Result, Never>) in
+            Task { [self] in
+                let r: Result
+                do { r = .opened(try await openInBackground(paths)) } catch { r = .failed(error) }
+                if gate.claim() { cont.resume(returning: r) }
+            }
+            Task { [clock] in
+                try? await clock.sleep(ms: timeoutMs)
+                if gate.claim() { cont.resume(returning: .timedOut) }
+            }
+        }
+        switch result {
+        case .opened(let app):
+            return "\(prefix)opened \(label) in \(app) in the background (not through Finder, so nothing came to the front)"
+        case .failed(let error):
+            throw error
+        case .timedOut:
+            CULog.act.notice("open from \(t.appName, privacy: .public): still opening after \(Int(timeoutMs), privacy: .public) ms")
+            return "\(prefix)asked macOS to open \(label) in the background, but it had not finished after \(Int(timeoutMs / 1000)) s — it may still open; check with screenshot() or apps.list()"
+        }
     }
 
     /// Makes the target believe it is active before keys go to it, so it does not activate itself and pull the
@@ -795,7 +840,7 @@ extension CUCore {
     /// a web field made Safari activate itself and pull the user to its desktop; the content process takes
     /// them without that. The app's pid otherwise.
     func keyboardTarget(_ t: CUTarget, focused: AXUIElement?) -> pid_t {
-        guard let f = focused ?? reportedFocus(t) else { return t.pid }
+        guard t.accessible, let f = focused ?? reportedFocus(t) else { return t.pid }
         var pid: pid_t = 0
         guard AXUIElementGetPid(f, &pid) == .success, pid != t.pid, sys.isContentProcess(pid, of: t.pid) else { return t.pid }
         CULog.act.notice("keys in \(t.appName, privacy: .public): pid events → \(self.sys.processName(pid: pid) ?? "content process", privacy: .public) \(pid, privacy: .public)")
@@ -819,6 +864,9 @@ extension CUCore {
     /// press route first too, for the helper's lifetime. Returns whether focus is on `e` now.
     @discardableResult
     func focusField(_ e: AXUIElement, _ t: CUTarget) -> Bool {
+        // A capture-only window has no element of its own to focus: never a write (its "window" element is the
+        // application's). Keys reach it by the synthetic activation and window-targeted focus records.
+        guard t.accessible else { return false }
         if isFocused(e, t) { return true }
         if pressToFocus(e, t) { return true }
         // The write is forbidden for web content and apps known to activate on it: leave focus, say so.
@@ -951,6 +999,7 @@ extension CUCore {
         let textual = Self.producesText(chord)
         // Characters (and cmd+V) are text input: never into a password or payment field (C1).
         if textual { e = try requireTypableFocus(t, g) ?? e }
+        if !t.accessible { e = nil }  // capture-only: keys go to the window, not to a reported element
         cursor(t, "key", at: e.flatMap { ElementInfo($0, ax).center }, text: a.combo)
         // Keys go to the app's key window: make it the bound one first (in the background, never the front).
         let keyed = focusBoundWindow(p, t)
@@ -987,7 +1036,7 @@ extension CUCore {
             // element as KEYS: the app's menu item acts on the app's responder, not the web field (Safari's
             // Select All selected nothing in Google Docs' title, so typing appended).
             let editing = Self.isEditingShortcut(chord) && editableFocus(t, g.explicit ?? reportedFocus(t))
-            if !editing, let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
+            if !editing, t.accessible, let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
                 if CUPasteMenu.isPasteTitle(item.title) { try requirePasteSafe(p, t, g) }
                 return .menuItem(item.element, title: item.title)
             }
@@ -1423,8 +1472,7 @@ extension CUCore {
         let info = ElementInfo(e, ax)
         // Opening a Finder item is a background NSWorkspace open of its file, never a Finder open event.
         if t.bundleId == "com.apple.finder", CUMenuWalker.normalize(a.name) == "open", let path = finderItemPath(e) {
-            let opened = try openDocumentsBlocking([path])
-            return ActOutcome(rung: .accessibility, detail: "opened \((path as NSString).lastPathComponent) in \(opened) in the background (not through Finder, so nothing came to the front)")
+            return try pendingBackgroundOpen([path], what: nil)
         }
         try requireEnabled(info, ref: a.ref, t)
         guard let name = CURoleWords.resolveAction(a.name, among: info.actions) else {

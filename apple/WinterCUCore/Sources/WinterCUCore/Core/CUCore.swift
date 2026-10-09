@@ -82,6 +82,7 @@ public final class CUCore: @unchecked Sendable {
             userViewLateCheck = false
             guardianLiveTapEnabled = false
             guardianRestoreSync = true
+            restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
         }
     }
 
@@ -126,13 +127,15 @@ public final class CUCore: @unchecked Sendable {
 
     /// Which app would open these urls (the `app` override, else the first url's default handler), for the
     /// opener's per-app card — resolved WITHOUT opening anything. Refuses a protected destination.
-    public func defaultOpener(_ p: DefaultOpenerParams) async throws -> DefaultOpenerResult {
-        let urls = try CUDocumentOpen.resolve(p.urls)
+    /// The urls to open and the app that will open them (the `app` override, else the first url's default
+    /// handler). Refuses a protected destination (the save-path floors apply to paths too). Opens nothing.
+    func resolveOpen(_ strings: [String], app: String?) throws -> (urls: [URL], appURL: URL, bundle: Bundle) {
+        let urls = try CUDocumentOpen.resolve(strings)
         if let bad = urls.compactMap({ $0.isFileURL ? $0.path : nil }).first(where: { CUFloors.isProtectedSavePath($0) }) {
             throw CUError.refused(.privacyPane, "opening \((bad as NSString).lastPathComponent) is off limits — it is a protected location")
         }
         let appURL: URL
-        if let a = p.app {
+        if let a = app {
             switch try CUApps.resolve(a) {
             case .running(let r): guard let u = r.bundleURL else { throw CUError.invalidParams("no app at \(a)") }; appURL = u
             case .installed(let u, _, _): appURL = u
@@ -140,10 +143,30 @@ public final class CUCore: @unchecked Sendable {
         } else if let first = urls.first, let def = CUDocumentOpen.defaultApp(for: first) {
             appURL = def
         } else {
-            throw CUError.invalidParams("no app opens \(p.urls.first ?? "that")")
+            throw CUError.invalidParams("no app opens \(strings.first ?? "that")")
         }
-        guard let b = Bundle(url: appURL), let id = b.bundleIdentifier else { throw CUError.invalidParams("no app at \(appURL.path)") }
-        return DefaultOpenerResult(bundleId: id, name: CUApps.displayName(b, fallback: appURL.deletingPathExtension().lastPathComponent), path: appURL.path)
+        guard let b = Bundle(url: appURL) else { throw CUError.invalidParams("no app at \(appURL.path)") }
+        return (urls, appURL, b)
+    }
+
+    /// Which app would open these urls, for the opener's per-app card — resolved WITHOUT opening anything.
+    public func defaultOpener(_ p: DefaultOpenerParams) async throws -> DefaultOpenerResult {
+        let r = try resolveOpen(p.urls, app: p.app)
+        guard let id = r.bundle.bundleIdentifier else { throw CUError.invalidParams("no app at \(r.appURL.path)") }
+        return DefaultOpenerResult(bundleId: id, name: CUApps.displayName(r.bundle, fallback: r.appURL.deletingPathExtension().lastPathComponent),
+                                   path: r.appURL.path)
+    }
+
+    /// Opens paths/urls in the background (activates:false) and returns the opener's name — no window wait.
+    /// Finder's Open uses it after the act has released the target's queue.
+    func openInBackground(_ strings: [String], app: String? = nil) async throws -> String {
+        if let o = openDocumentsOverride {
+            return try await o(OpenDocumentsParams(urls: strings, app: app, sessionId: "background-open", mirror: false, privatePath: true)).app.name
+        }
+        let r = try resolveOpen(strings, app: app)
+        try refuseFloorApp(bundleId: r.bundle.bundleIdentifier, pid: 0, name: r.bundle.bundleIdentifier ?? r.appURL.lastPathComponent)
+        let opened = try await CUDocumentOpen.open(r.urls, withApp: r.appURL)
+        return opened.localizedName ?? CUApps.displayName(r.bundle, fallback: r.appURL.deletingPathExtension().lastPathComponent)
     }
 
     /// Opens file paths / URLs with an app WITHOUT activating it (NSWorkspace.open, activates:false —
@@ -152,22 +175,7 @@ public final class CUCore: @unchecked Sendable {
     /// a new window to bind. Protected destinations are refused (the save-path floors apply to paths too).
     public func openDocuments(_ p: OpenDocumentsParams) async throws -> OpenDocumentsResult {
         if let o = openDocumentsOverride { return try await o(p) }
-        let urls = try CUDocumentOpen.resolve(p.urls)
-        if let bad = urls.compactMap({ $0.isFileURL ? $0.path : nil }).first(where: { CUFloors.isProtectedSavePath($0) }) {
-            throw CUError.refused(.privacyPane, "opening \((bad as NSString).lastPathComponent) is off limits — it is a protected location")
-        }
-        let appURL: URL
-        if let a = p.app {
-            switch try CUApps.resolve(a) {
-            case .running(let r): guard let u = r.bundleURL else { throw CUError.invalidParams("no app at \(a)") }; appURL = u
-            case .installed(let u, _, _): appURL = u
-            }
-        } else if let first = urls.first, let def = CUDocumentOpen.defaultApp(for: first) {
-            appURL = def
-        } else {
-            throw CUError.invalidParams("no app opens \(p.urls.first ?? "that")")
-        }
-        guard let b = Bundle(url: appURL) else { throw CUError.invalidParams("no app at \(appURL.path)") }
+        let (urls, appURL, b) = try resolveOpen(p.urls, app: p.app)
         try refuseFloorApp(bundleId: b.bundleIdentifier, pid: 0, name: b.bundleIdentifier ?? appURL.lastPathComponent)
         // The opener's windows before the open (empty if it was not running), so the new one can be told apart.
         let runningOpener = NSRunningApplication.runningApplications(withBundleIdentifier: b.bundleIdentifier ?? "").first
@@ -201,7 +209,7 @@ public final class CUCore: @unchecked Sendable {
         var executableName: String?
         var isChromium: Bool
         var launched: Bool
-        /// The live app (nil in tests): Chromium's accessibility switch and the reopen request need it.
+        /// The live app (nil in tests): Chromium's accessibility switch needs it.
         var running: NSRunningApplication?
     }
 
@@ -267,10 +275,6 @@ public final class CUCore: @unchecked Sendable {
                     return (CUAXWindows.list(pid: pid, ax: ax, server: server), server)
                 }
             },
-            reopen: { [reopenApp] in
-                CULog.bind.notice("bind \(appName, privacy: .public): no window on any Space — asking the app to reopen one")
-                await reopenApp(app)
-            },
             sleep: { [clock] in try await clock.sleep(ms: $0) },
             now: { [clock] in clock.nowMs() }))
         let (axNow, serverNow) = (found.ax, found.server)
@@ -325,18 +329,7 @@ public final class CUCore: @unchecked Sendable {
                            frame: ax.frame(element) ?? s.frame, focused: false, main: false)
             },
             moveToActiveSpace: { sys.moveWindowToActiveSpace($0) },
-            openNewWindow: { [self] in
-                // Once per session and app, whatever happens to the window: one that opens on the app's own
-                // Space instead of this one must not be followed by another, and another, on every bind.
-                guard claimNewWindow(sessionId: sessionId, appKey: appKey) else {
-                    CULog.bind.notice("\(appName, privacy: .public): a new window was already asked for in this session — not again")
-                    return false
-                }
-                CULog.bind.notice("\(appName, privacy: .public): asking for a new window (step b)")
-                return openNewWindow(pid: pid, chromium: chromium, privatePath: privatePath)
-            },
             axWindows: { CUAXWindows.list(pid: pid, ax: ax, server: sys.windows(pid: pid)) },
-            serverWindows: { sys.windows(pid: pid) },
             wait: { [clock, windowWaitMs] probe in
                 let deadline = clock.nowMs() + windowWaitMs
                 while clock.nowMs() < deadline {
@@ -422,6 +415,8 @@ public final class CUCore: @unchecked Sendable {
     var appleScriptOverride: ((String, CUTarget) throws -> String?)?
     /// Document open, replaceable by tests (nothing there may touch NSWorkspace).
     var openDocumentsOverride: ((OpenDocumentsParams) async throws -> OpenDocumentsResult)?
+    /// How long an act waits for a background open (Finder's Open) before reporting it as still opening.
+    var openTimeoutMs: Double = 8000
     var automationPermissionOverride: ((pid_t) -> OSStatus)?
     var scriptingDictionaryOverride: ((CUTarget) -> CUScriptingDictionary.Model?)?
     /// Background steps that once moved the user's view: never used again while the helper runs.
@@ -447,6 +442,9 @@ public final class CUCore: @unchecked Sendable {
     var guardianLiveTapEnabled = true
     /// Whether the guardian's restore runs inline (tests, synchronous) rather than dispatched off-main.
     var guardianRestoreSync = false
+    /// How long a restore keeps re-activating the user's app (activateWithOptions' 2 s), and how often.
+    var restoreDeadlineMs: Double = 2000
+    var restoreRetryMs: Double = 120
     /// Seconds since the last physical user input, injectable for tests.
     var secondsSinceUserInputOverride: (() -> TimeInterval)?
     /// The window server's key-focus pid, injectable for tests (the swallowed-click retry).
@@ -466,21 +464,8 @@ public final class CUCore: @unchecked Sendable {
     /// The window's tree for the off-desktop hit test; replaceable by tests (the live reader walks real AX).
     var treeReadOverride: ((CUTarget) -> [CUNode])?
 
-    /// How long a moved or newly opened window may take to appear in the AX list (shortened by tests).
+    /// How long a moved window or an opened document's window may take to appear (shortened by tests).
     var windowWaitMs: Double = 3000
-
-    /// The reopen request (an app with no window anywhere opens one); replaceable by tests.
-    var reopenApp: (BindApp) async -> Void = { app in
-        if let url = app.running?.bundleURL { _ = try? await CUApps.launchInBackground(url, timeoutMs: 2000) }
-    }
-
-    /// (session, app) pairs that have had their one new window (step b).
-    private var newWindowClaims: Set<String> = []
-
-    /// True the first time a session asks an app for a new window, false ever after.
-    func claimNewWindow(sessionId: String, appKey: String) -> Bool {
-        lock.withLock { newWindowClaims.insert("\(sessionId)\u{1F}\(appKey)").inserted }
-    }
 
     /// The session's live target for `pid` that a repeated bind returns: its window still exists and, when
     /// the bind names a window, it is that one. The most recent wins.
@@ -497,29 +482,6 @@ public final class CUCore: @unchecked Sendable {
                 return have == want || (!want.isEmpty && have.contains(want))
             }
         }
-    }
-
-    /// Asks the app for a new window without activating it: File → New Window (by title or by its ⌘N key
-    /// equivalent; the menu bar is reachable with no window on this Space), else ⌘N posted to the pid.
-    func openNewWindow(pid: pid_t, chromium: Bool, privatePath: Bool) -> Bool {
-        if let roots = try? CUAXMenuNode.menuBar(pid: pid, ax: ax) {
-            var queue = Array(roots.dropFirst())
-            var seen = 0
-            let deadline = CUFloorScan.Deadline(ms: 250)
-            while !queue.isEmpty, seen < 600, !deadline.passed {
-                let n = queue.removeFirst()
-                seen += 1
-                if CUMenuWalker.normalize(n.menuTitle) == "new window", n.menuEnabled,
-                   (try? ax.perform(n.element, kAXPressAction)) != nil { return true }
-                queue.append(contentsOf: n.menuChildren)
-            }
-        }
-        if let item = menuItem(forKey: "n", modifiers: [.command], pid: pid),
-           (try? ax.perform(item.element, kAXPressAction)) != nil { return true }
-        guard let code = CUKeyCodes.code(for: "n") else { return false }
-        let route: CURoute = chromium && privatePath && skyLight.isAvailable ? .skyLight : .publicPid
-        synth.key(pid: pid, code: code, flags: .maskCommand, route: route)
-        return true
     }
 
     public func targetUseWindow(_ p: TargetUseWindowParams) async throws -> TargetUseWindowResult {
@@ -939,7 +901,6 @@ public final class CUCore: @unchecked Sendable {
             guard let t = remove(id) else { continue }
             emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: t.windowID) }
         }
-        lock.withLock { newWindowClaims = newWindowClaims.filter { !$0.hasPrefix("\(p.sessionId)\u{1F}") } }
         return SessionEndedResult()
     }
 

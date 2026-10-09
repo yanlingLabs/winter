@@ -66,9 +66,10 @@ public struct CUError: Error, Codable, Sendable, Equatable, CustomStringConverti
         CUError(code: "target_lost", message: detail)
     }
 
-    /// The app runs but has no window at all, even after it was asked to reopen one.
+    /// The app runs but has no window at all. Winter never asks an app for a new window to reach one (no ⌘N,
+    /// no reopen): the way to get one is to open a document, which opens in the background.
     public static func noWindow(_ app: String) -> CUError {
-        CUError(code: "no_window", message: "\(app) has no open window")
+        CUError(code: "no_window", message: "\(app) has no open window — open a document in it with apps.open(path or URL, { app: \"\(app)\" }); it opens in the background and binds that window")
     }
 
     /// The window exists but is on another Space or in full screen, and could not be reached there.
