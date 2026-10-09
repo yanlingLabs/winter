@@ -239,31 +239,63 @@ struct CUEventSynth {
         return used
     }
 
-    /// Types `text` one character at a time as Unicode key events (layout-independent), `gapMs` apart.
-    /// `between` runs before each character and may throw to stop (cancellation, target re-check).
+    /// The key that types a character (the current layout's, else US-ANSI); replaceable by tests.
+    var stroke: (Character) -> CUKeyStroke? = { CUKeyboardLayout.stroke(for: $0) }
+
+    /// At most this many UTF-16 units ride on one key event (CGEvent truncates longer strings).
+    static let unicodeChunk = 16
+
+    /// Types `text`, `gapMs` between presses. Each character is ITS OWN KEY — the layout's key code with
+    /// Shift/Option as needed — carrying the character as its Unicode string, so an editor that reads the key
+    /// (Google Docs' canvas) sees the key it expects and one that reads the text gets the exact character.
+    /// Only characters no key types (emoji, CJK) go as Unicode alone, a run of them in one event (in chunks of
+    /// `unicodeChunk` UTF-16 units), never one carrier key per character. Return and Tab are their keys.
+    /// `between` runs before each character (a run: before its first) and may throw to stop.
     @discardableResult
     func type(pid: pid_t, text: String, route: CURoute, gapMs: Double = 8, between: () throws -> Void) throws -> CURoute {
         let src = source(route)
         var used = route
-        for ch in text {
-            try between()
-            if ch == "\n" || ch == "\r" {
-                used = key(pid: pid, code: CUKeyCodes.code(for: .returnKey), flags: [], route: route)
-                continue
-            }
-            if ch == "\t" {
-                used = key(pid: pid, code: CUKeyCodes.code(for: .tab), flags: [], route: route)
-                continue
-            }
-            let utf16 = Array(String(ch).utf16)
+        func post(code: CGKeyCode, flags: CGEventFlags, unicode: String?) {
             for down in [true, false] {
-                guard let e = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: down) else { continue }
-                utf16.withUnsafeBufferPointer { e.keyboardSetUnicodeString(stringLength: $0.count, unicodeString: $0.baseAddress) }
-                e.flags = []
+                guard let e = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: down) else { continue }
+                if let unicode {
+                    let utf16 = Array(unicode.utf16)
+                    utf16.withUnsafeBufferPointer { e.keyboardSetUnicodeString(stringLength: $0.count, unicodeString: $0.baseAddress) }
+                }
+                e.flags = flags
                 if route != .hid { e.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid)) }
                 used = poster.post(e, pid: pid, route: route, authenticate: true)
             }
             sleep(gapMs)
+        }
+        let chars = Array(text)
+        var i = 0
+        while i < chars.count {
+            try between()
+            let ch = chars[i]
+            if ch == "\n" || ch == "\r" || ch == "\r\n" {
+                used = key(pid: pid, code: CUKeyCodes.code(for: .returnKey), flags: [], route: route)
+                i += 1
+                continue
+            }
+            if ch == "\t" {
+                used = key(pid: pid, code: CUKeyCodes.code(for: .tab), flags: [], route: route)
+                i += 1
+                continue
+            }
+            if let k = stroke(ch) {
+                post(code: k.code, flags: k.flags, unicode: String(ch))
+                i += 1
+                continue
+            }
+            // A run of characters no key types: one event per chunk, never splitting a character.
+            var run = ""
+            while i < chars.count, stroke(chars[i]) == nil, !["\n", "\r", "\r\n", "\t"].contains(chars[i]),
+                  run.utf16.count + String(chars[i]).utf16.count <= Self.unicodeChunk || run.isEmpty {
+                run.append(chars[i])
+                i += 1
+            }
+            post(code: 0, flags: [], unicode: run)
         }
         return used
     }

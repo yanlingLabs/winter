@@ -169,6 +169,9 @@ final class FakeSystem: CUSystemBackend {
     func activate(pid: pid_t) -> Bool { activated.append(pid); front = pid; onActivate?(pid); return true }
     var stageManager = false
     func stageManagerEnabled() -> Bool { stageManager }
+    /// Content processes (Safari's WebContent), each with the app it serves.
+    var contentProcesses: [pid_t: pid_t] = [:]
+    func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { contentProcesses[pid] == appPid }
     func cursorLocation() -> CGPoint? { cursor }
     func warpCursor(to p: CGPoint) { warpedTo.append(p) }
 
@@ -189,6 +192,9 @@ final class RecordingPoster: CUEventPoster, @unchecked Sendable {
         var window: Int64
         var window2: Int64 = 0
         var subtype: Int64 = 0
+        /// The process it was posted to, and the target-pid field it carries.
+        var pid: pid_t = 0
+        var targetPid: Int64 = 0
     }
     private let lock = NSLock()
     private(set) var entries: [Entry] = []
@@ -196,14 +202,15 @@ final class RecordingPoster: CUEventPoster, @unchecked Sendable {
 
     func post(_ event: CGEvent, pid: pid_t, route: CURoute, authenticate: Bool) -> CURoute {
         var length = 0
-        var chars = [UniChar](repeating: 0, count: 8)
-        event.keyboardGetUnicodeString(maxStringLength: 8, actualStringLength: &length, unicodeString: &chars)
+        var chars = [UniChar](repeating: 0, count: 32)
+        event.keyboardGetUnicodeString(maxStringLength: 32, actualStringLength: &length, unicodeString: &chars)
         let e = Entry(type: event.type, route: route, location: event.location,
                       keycode: event.getIntegerValueField(.keyboardEventKeycode),
                       unicode: String(utf16CodeUnits: chars, count: length), flags: event.flags,
                       window: event.getIntegerValueField(.mouseEventWindowUnderMousePointer),
                       window2: event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent),
-                      subtype: event.getIntegerValueField(.mouseEventSubtype))
+                      subtype: event.getIntegerValueField(.mouseEventSubtype), pid: pid,
+                      targetPid: event.getIntegerValueField(.eventTargetUnixProcessID))
         lock.withLock { entries.append(e) }
         onPost?(e)
         return route == .skyLight ? .publicPid : route

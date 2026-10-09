@@ -91,17 +91,44 @@ public enum CUKeyCodes {
     }
 }
 
+/// One key press that types a character: the key, and whether Shift and/or Option are held.
+public struct CUKeyStroke: Equatable, Sendable {
+    public var code: CGKeyCode
+    public var shift: Bool
+    public var option: Bool
+    public init(code: CGKeyCode, shift: Bool = false, option: Bool = false) {
+        self.code = code
+        self.shift = shift
+        self.option = option
+    }
+    public var flags: CGEventFlags {
+        var f: CGEventFlags = []
+        if shift { f.insert(.maskShift) }
+        if option { f.insert(.maskAlternate) }
+        return f
+    }
+}
+
 /// A character → key-code table for the current keyboard layout, built with `UCKeyTranslate`.
 ///
 /// Text Input Sources must be queried on the main thread (HIToolbox asserts it on recent macOS), so the
 /// table is built by `refresh()` on the main actor — at startup and whenever the input source changes —
 /// and background input code only reads the cached copy.
+///
+/// Two tables: the unshifted characters (a chord's key: `cmd+z` is the Z key on AZERTY too) and every
+/// character the layout types with Shift and/or Option (typing: a real key code for each character, so an
+/// editor that reads the key, like Google Docs' canvas, sees the key it expects).
 public final class CUKeyboardLayout: @unchecked Sendable {
     private let table: [Character: CGKeyCode]
+    private let strokes: [Character: CUKeyStroke]
 
-    init(table: [Character: CGKeyCode]) { self.table = table }
+    init(table: [Character: CGKeyCode], strokes: [Character: CUKeyStroke] = [:]) {
+        self.table = table
+        self.strokes = strokes
+    }
 
     func code(for ch: Character) -> CGKeyCode? { table[ch] }
+    func stroke(for ch: Character) -> CUKeyStroke? { strokes[ch] }
 
     private static let lock = NSLock()
     private static var cached: CUKeyboardLayout?
@@ -110,6 +137,41 @@ public final class CUKeyboardLayout: @unchecked Sendable {
     public static var current: CUKeyboardLayout? {
         lock.lock(); defer { lock.unlock() }
         return cached
+    }
+
+    /// The key that types `ch` in the current layout, else on US-ANSI; nil when no key types it (emoji, CJK).
+    public static func stroke(for ch: Character) -> CUKeyStroke? {
+        if let s = current?.stroke(for: ch) { return s }
+        return ansiStroke(for: ch)
+    }
+
+    /// The US-ANSI key for `ch` (letters, digits, punctuation, space; their shifted forms with Shift).
+    public static func ansiStroke(for ch: Character) -> CUKeyStroke? {
+        if let c = CUKeyCodes.ansi[ch], ch != "\t", ch != "\n", ch != "\r" { return CUKeyStroke(code: c) }
+        let s = String(ch)
+        if s.count == 1, s.lowercased() != s, let c = CUKeyCodes.ansi[Character(s.lowercased())] {
+            return CUKeyStroke(code: c, shift: true)
+        }
+        if let base = CUKeyCodes.shiftedBase[ch], let c = CUKeyCodes.ansi[base] { return CUKeyStroke(code: c, shift: true) }
+        return nil
+    }
+
+    /// `UCKeyTranslate`'s modifier states (EventModifiers >> 8): none, Shift, Option, Shift+Option.
+    static let modifierStates: [(state: UInt32, shift: Bool, option: Bool)] = [(0, false, false), (2, true, false), (8, false, true), (10, true, true)]
+
+    /// Every character the layout types, by key and modifiers, from `translate(keyCode, modifierState)`
+    /// (the characters it produces, nil for none or a dead key). The fewest modifiers win; a key earlier in
+    /// code order wins a tie. Pure.
+    static func strokes(translate: (Int, UInt32) -> String?) -> [Character: CUKeyStroke] {
+        var out: [Character: CUKeyStroke] = [:]
+        for mods in modifierStates {
+            for code in 0..<128 {
+                guard let s = translate(code, mods.state), s.count == 1, let ch = s.first,
+                      out[ch] == nil, let scalar = s.unicodeScalars.first, scalar.value >= 0x20, scalar.value != 0x7F else { continue }
+                out[ch] = CUKeyStroke(code: CGKeyCode(code), shift: mods.shift, option: mods.option)
+            }
+        }
+        return out
     }
 
     @MainActor public static func refresh() {
@@ -122,21 +184,25 @@ public final class CUKeyboardLayout: @unchecked Sendable {
         guard let raw = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return nil }
         let data = Unmanaged<CFData>.fromOpaque(raw).takeUnretainedValue() as Data
         var table: [Character: CGKeyCode] = [:]
+        var strokes: [Character: CUKeyStroke] = [:]
         data.withUnsafeBytes { buf in
             guard let ptr = buf.baseAddress?.assumingMemoryBound(to: UCKeyboardLayout.self) else { return }
-            for code in 0..<128 {
+            let translate = { (code: Int, state: UInt32) -> String? in
                 var deadKeys: UInt32 = 0
                 var chars = [UniChar](repeating: 0, count: 4)
                 var length = 0
-                let status = UCKeyTranslate(ptr, UInt16(code), UInt16(kUCKeyActionDown), 0, UInt32(LMGetKbdType()),
+                let status = UCKeyTranslate(ptr, UInt16(code), UInt16(kUCKeyActionDown), state, UInt32(LMGetKbdType()),
                                             OptionBits(kUCKeyTranslateNoDeadKeysBit), &deadKeys, 4, &length, &chars)
-                guard status == noErr, length > 0 else { continue }
-                let s = String(utf16CodeUnits: chars, count: length)
-                guard s.count == 1, let ch = s.first else { continue }
+                guard status == noErr, length > 0, deadKeys == 0 else { return nil }
+                return String(utf16CodeUnits: chars, count: length)
+            }
+            for code in 0..<128 {
+                guard let s = translate(code, 0), s.count == 1, let ch = s.first else { continue }
                 if table[ch] == nil { table[ch] = CGKeyCode(code) }
             }
+            strokes = Self.strokes(translate: translate)
         }
         guard !table.isEmpty else { return nil }
-        return CUKeyboardLayout(table: table)
+        return CUKeyboardLayout(table: table, strokes: strokes)
     }
 }
