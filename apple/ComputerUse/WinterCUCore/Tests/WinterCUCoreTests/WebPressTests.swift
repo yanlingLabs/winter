@@ -120,7 +120,7 @@ final class WebPressTests: XCTestCase {
         world(buttonName: "Send")
         let r = try await click(button)
         XCTAssertEqual(mouseDowns, 0, "a repeat could send twice")
-        XCTAssertTrue(r.detail?.contains("may still have acted without showing it, so it was not clicked as well") ?? false, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("had no visible effect — a command like this may still act without showing it at once, so it was not clicked as well; check state() before pressing again") ?? false, r.detail ?? "")
     }
 
     func testANativePressIsNotWatched() async throws {

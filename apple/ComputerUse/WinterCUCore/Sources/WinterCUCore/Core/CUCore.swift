@@ -463,8 +463,9 @@ public final class CUCore: @unchecked Sendable {
     /// How long a press the app answered with an error is watched for its effect (a new window, a value, the
     /// focus). 0 in test cores (one read).
     var pressSettleMs: Double = 500
-    /// How long a press on web content is watched for an effect before it is called ignored. 0 in test cores.
-    var webPressWatchMs: Double = 500
+    /// How long a press on web content is watched for an effect before it is called ignored (web handlers can
+    /// act late; a click after a press that did act would do it twice). 0 in test cores.
+    var webPressWatchMs: Double = 800
     /// How long a menu command that reads disabled is read again before it is called disabled. 0 in test cores.
     var menuSettleMs: Double = 400
     /// How long a selection set right after a focus click is watched (and set again if the late click moved
@@ -668,7 +669,7 @@ public final class CUCore: @unchecked Sendable {
             try floorCheckPrivacy(t)
             let obs = try observe(t, within: p.within)
             let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note,
-                                       caret: obs.caret, focusUnknown: obs.focusUnknown)
+                                       caret: obs.caret, focusUnknown: obs.focusUnknown, focusText: obs.focusText)
             let snap = CUSnapshot(id: t.nextSnapshotId(), scope: p.within, header: header, roots: obs.roots, formatter: formatter)
             // A whole-window, non-full state folds what is out of view first; `within` and `full` don't.
             var text = formatter.full(header: header, roots: obs.roots, viewportFirst: p.within == nil && p.full != true)
@@ -1298,6 +1299,7 @@ public final class CUCore: @unchecked Sendable {
         var title: String
         var caret: String? = nil
         var focusUnknown = false
+        var focusText: String? = nil
     }
 
     /// Reads the bound window (plus open app menus), or the subtree at `within`.
@@ -1328,17 +1330,30 @@ public final class CUCore: @unchecked Sendable {
         let hidden = Self.hiddenActions(t.refusedActions)
         let roots = hidden.isEmpty ? result.roots : result.roots.map { Self.removing(hidden, from: $0) }
         if full { t.lastFullRead = (roots, readAt) }
+        // The bound window's own focus (an app answers for its key window only).
         var focusedRef: Int?
         var caret: String?
-        let focused = AX.element(app, kAXFocusedUIElementAttribute) ?? AX.element(win, kAXFocusedUIElementAttribute)
-        if let f = focused, let r = t.refs.existingRef(for: AXIdentity(element: f)),
-           roots.contains(where: { $0.find(ref: r) != nil }) {
-            focusedRef = r
-            caret = formatter.caretNote(value: ax.string(f, kAXValueAttribute), selection: selectionRange(f),
-                                        secure: ElementInfo(f, ax).secure)
+        var focusText: String?
+        let wf = windowFocus(t, fresh: true)
+        if let f = wf.element {
+            if let hidden = wf.hiddenInput {
+                focusText = "focused: \(hidden)"
+            } else if let r = t.refs.existingRef(for: AXIdentity(element: f)), roots.contains(where: { $0.find(ref: r) != nil }) {
+                focusedRef = r
+                caret = formatter.caretNote(value: ax.string(f, kAXValueAttribute), selection: selectionRange(f),
+                                            secure: ElementInfo(f, ax).secure)
+                // The page's own focus in a window that is not its app's key window: where keys go once the
+                // window holds the key focus — said, so it is not taken for where the system routes them now.
+                if wf.source == .webArea {
+                    caret = [caret, "the page's focus (its window is not key)"].compactMap { $0 }.joined(separator: " · ")
+                }
+            }
+        } else if wf.elsewhere != nil {
+            focusText = "focus in another of \(t.appName)'s windows — click the field first, or pass { into }"
         }
         let title = AX.string(win, kAXTitleAttribute) ?? t.windowTitle
-        return Observation(roots: roots, focusedRef: focusedRef, title: title, caret: caret, focusUnknown: focused == nil)
+        return Observation(roots: roots, focusedRef: focusedRef, title: title, caret: caret,
+                           focusUnknown: wf.element == nil && wf.elsewhere == nil, focusText: focusText)
     }
 
     /// Actions the app listed but refused and `action()` has no pointer equivalent for: state stops listing

@@ -353,11 +353,18 @@ public struct TargetActResult: Codable, Sendable, Equatable {
     public var input: String?
     /// true when the app reported no focused element, so where the input went is unknown.
     public var inputUnknown: Bool?
-    public init(rung: Int, detail: String? = nil, input: String? = nil, inputUnknown: Bool? = nil) {
+    /// The bound window's focus moved during the act: where it is now (name and role only).
+    public var focusNow: String?
+    /// The focus was known before the act and the app reports none now.
+    public var focusLost: Bool?
+    public init(rung: Int, detail: String? = nil, input: String? = nil, inputUnknown: Bool? = nil,
+                focusNow: String? = nil, focusLost: Bool? = nil) {
         self.rung = rung
         self.detail = detail
         self.input = input
         self.inputUnknown = inputUnknown
+        self.focusNow = focusNow
+        self.focusLost = focusLost
     }
 }
 

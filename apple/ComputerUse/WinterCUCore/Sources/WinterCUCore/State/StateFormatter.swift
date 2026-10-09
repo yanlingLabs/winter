@@ -25,15 +25,18 @@ public struct CUStateHeader: Sendable, Equatable {
     /// The app reports no focused element at all (a canvas editor, some Electron views): said, so the model
     /// does not type into the unknown.
     public var focusUnknown: Bool
+    /// What the focus is when it is not an element of the tree shown (a web page's hidden input, another window).
+    public var focusText: String?
 
     public init(appName: String, windowTitle: String?, focusedRef: Int?, settle: CUSettleNote?,
-                caret: String? = nil, focusUnknown: Bool = false) {
+                caret: String? = nil, focusUnknown: Bool = false, focusText: String? = nil) {
         self.appName = appName
         self.windowTitle = windowTitle
         self.focusedRef = focusedRef
         self.settle = settle
         self.caret = caret
         self.focusUnknown = focusUnknown
+        self.focusText = focusText
     }
 }
 
@@ -64,6 +67,8 @@ public struct CUStateFormatter: Sendable {
         if let f = h.focusedRef {
             parts.append("focused [\(f)]")
             if let c = h.caret { parts.append(c) }
+        } else if let text = h.focusText {
+            parts.append(text)
         } else if h.focusUnknown {
             parts.append("focus unknown — click the field first, or pass { into }")
         }

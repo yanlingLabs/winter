@@ -52,6 +52,9 @@ final class StateFormatterTests: XCTestCase {
                        "Notes — focused [14] · caret 12/40 · settled 80 ms")
         XCTAssertEqual(f.header(CUStateHeader(appName: "Docs", windowTitle: nil, focusedRef: nil, settle: nil, focusUnknown: true)),
                        "Docs — focus unknown — click the field first, or pass { into }")
+        XCTAssertEqual(f.header(CUStateHeader(appName: "Safari", windowTitle: nil, focusedRef: nil, settle: nil,
+                                              focusText: "focused: the page's hidden text input (it types into the document)")),
+                       "Safari — focused: the page's hidden text input (it types into the document)")
         // A focus elsewhere (not in this window's tree) is not "unknown": nothing is said.
         XCTAssertEqual(f.header(CUStateHeader(appName: "Notes", windowTitle: nil, focusedRef: nil, settle: nil)), "Notes")
         // The diff header carries it too.

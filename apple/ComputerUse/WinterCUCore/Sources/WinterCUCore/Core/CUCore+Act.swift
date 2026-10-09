@@ -22,6 +22,10 @@ extension CUCore {
         /// or `inputUnknown` when the app reported no focused element.
         var input: String? = nil
         var inputUnknown = false
+        /// The focus moved during the act: where to (`[226] text field “smart search field”`), or lost
+        /// (`focusLost`: the app reports none now).
+        var focusNow: String? = nil
+        var focusLost = false
 
         /// Puts `note` (what was done to reach the window) in front of the rung's own detail.
         func noting(_ note: String?) -> ActOutcome {
@@ -56,8 +60,10 @@ extension CUCore {
                 try floorCheckPrivacy(t)
                 try saveFloorBeforeAct(p, t)
                 do {
-                    let o = try guardingUserView(p, t) { try perform(p, on: t, token: token) }
+                    let focusBefore = t.accessible ? focusBeforeAct(t) : nil
+                    var o = try guardingUserView(p, t) { try perform(p, on: t, token: token) }
                     t.lastActionMs = clock.nowMs()
+                    if let focusBefore { o = noteFocusChange(from: focusBefore, t, o) }
                     return o
                 } catch let e as CUError where e.code == "stale_element" {
                     if let ref = Self.primaryRef(p.action) { t.refs.forget(ref); throw CUError.staleRef(ref) }
@@ -88,7 +94,35 @@ extension CUCore {
         let detail = (notes + [outcome.detail].compactMap { $0 }).isEmpty ? nil
             : (notes + [outcome.detail].compactMap { $0 }).joined(separator: "; ")
         return TargetActResult(rung: outcome.rung.rawValue, detail: detail, input: outcome.input,
-                               inputUnknown: outcome.inputUnknown ? true : nil)
+                               inputUnknown: outcome.inputUnknown ? true : nil, focusNow: outcome.focusNow,
+                               focusLost: outcome.focusLost ? true : nil)
+    }
+
+    /// The focus before an act: the one read after the last act when that is recent (one read per act), else a
+    /// fresh read.
+    func focusBeforeAct(_ t: CUTarget) -> WindowFocus {
+        if let last = t.focusAfterLastAct, clock.nowMs() - last.atMs < 5_000 { return last.focus }
+        return windowFocus(t, fresh: true)
+    }
+
+    /// After an act: when the bound window's focus changed (⌘R moves it to the address bar, a click into
+    /// another field, Tab), the result says where it is now — name and role only — or that it is unknown now.
+    func noteFocusChange(from before: WindowFocus, _ t: CUTarget, _ o: ActOutcome) -> ActOutcome {
+        let after = windowFocus(t, fresh: true)
+        t.focusAfterLastAct = (clock.nowMs(), after)
+        var o = o
+        switch (before.element, after.element) {
+        case (let b?, let a?) where CFEqual(b, a):
+            return o
+        case (_, let a?):
+            o.focusNow = focusWords(a, t)
+        case (.some, nil):
+            if after.elsewhere != nil { o.focusNow = "outside this window (in another of \(t.appName)'s windows)" } else { o.focusLost = true }
+        case (nil, nil):
+            return o
+        }
+        CULog.act.notice("focus in \(t.appName, privacy: .public) moved during the act")
+        return o
     }
 
     /// The act's outcome, naming the element that received its input (type, paste, key, setValue): the model
@@ -103,11 +137,7 @@ extension CUCore {
             o.inputUnknown = true
             return o
         }
-        let info = ElementInfo(e, ax)
-        let ref = t.refs.ref(for: AXIdentity(element: e))
-        let role = CURoleWords.words(role: info.role ?? "AXUnknown", subrole: info.subrole)
-        let name = info.labels.compactMap { $0 }.first { !$0.isEmpty }.map { $0.count <= 40 ? $0 : String($0.prefix(40)) + "…" }
-        o.input = "[\(ref)] \(role)" + (name.map { " " + formatter.quote($0) } ?? "")
+        o.input = focusWords(e, t)
         return o
     }
 
@@ -712,7 +742,16 @@ extension CUCore {
             g.explicit = el
             e = el
         } else {
-            e = try requireTypableFocus(t, g)
+            // The bound window's own focus (an app answers for its key window only): where the keys go once its
+            // window holds the key focus. The floors as for any focus; then the guards for unnamed targets.
+            let wf = windowFocus(t, fresh: true)
+            if let w = wf.element, wf.source != .app {
+                if ElementInfo(w, ax).secure { throw secureRefusal() }
+                e = w
+            } else {
+                e = try requireTypableFocus(t, g)
+            }
+            try guardUnnamedTarget(e, wf, text: text, t)
         }
         try CUFloorScan.checkTypedIntoSavePanel(e, text: text, pid: t.pid, ax: ax)
         return (e, g)
@@ -741,13 +780,20 @@ extension CUCore {
                 // value-change notification alone is not (Google Docs' title took the insert, notified, and
                 // reverted it).
                 let web = t.isChromium || isWebContent(e)
-                let verdict = waitForInsert(e, text, before: before, capMs: web ? 400 : 150)
+                // Web content applies an edit late: watched for longer, since typing after an insert that did land
+                // would put the text in twice.
+                let verdict = waitForInsert(e, text, before: before, capMs: web ? 800 : 150)
                 CULog.act.notice("type in \(t.appName, privacy: .public): AX insert \(verdict == .landed ? "landed" : verdict == .missing ? "missing" : "unreadable", privacy: .public) (web \(web, privacy: .public))")
                 switch verdict {
                 case .landed:
                     return ActOutcome(rung: .accessibility)
                 case .unreadable where !web:
                     return ActOutcome(rung: .accessibility)  // nothing to read it back by: trusted, as before
+                case .unreadable:
+                    // Applied, and nothing to read it back by: typing it as well could put it in twice. Said, not
+                    // repeated.
+                    CULog.act.notice("type in \(t.appName, privacy: .public): the accessibility insert can't be read back — not typed again")
+                    return ActOutcome(rung: .accessibility, detail: "the text was inserted over accessibility, but the field can't be read back, so it was not typed again — check state() before typing it again")
                 default:
                     _ = since
                     CULog.act.notice("type in \(t.appName, privacy: .public): the accessibility insert did not stick — typing keys")
@@ -2284,7 +2330,7 @@ extension CUCore {
     }
 
     static func unseenPressNote(_ label: String) -> String {
-        "the accessibility press on \(label) changed nothing that accessibility can see — a command like this may still have acted without showing it, so it was not clicked as well; check with state() or a screenshot before pressing again"
+        "the accessibility press on \(label) had no visible effect — a command like this may still act without showing it at once, so it was not clicked as well; check state() before pressing again"
     }
 
     /// After an accessibility press on web content: something changed → done; nothing → a window-targeted click

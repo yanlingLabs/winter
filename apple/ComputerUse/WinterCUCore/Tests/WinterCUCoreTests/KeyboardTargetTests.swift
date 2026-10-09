@@ -358,6 +358,15 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertTrue(r.detail?.contains("unconfirmed") ?? false, r.detail ?? "")
     }
 
+    func testAnInsertThatCantBeReadBackInWebContentIsNeverTypedAgain() async throws {
+        safari(fieldOwner: pid, settableText: true)
+        ax.drop(field, kAXValueAttribute)  // nothing to read it back by
+        let r = try await act(.type(CUTypeAction(text: "Test", into: ref(field))))
+        XCTAssertTrue(ax.written.contains("\(token(field)):\(kAXSelectedTextAttribute)"), "inserted over accessibility")
+        XCTAssertTrue(poster.keyDowns.isEmpty, "never typed a second time")
+        XCTAssertTrue(r.detail?.contains("so it was not typed again — check state() before typing it again") ?? false, r.detail ?? "")
+    }
+
     func testAnAccessibilityInsertCountsOnlyWhenItsTextReadsBack() async throws {
         // The insert is taken and reverted (Google Docs' title): the value never shows the text → keys.
         safari(fieldOwner: pid, settableText: true)
