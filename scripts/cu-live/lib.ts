@@ -4,15 +4,25 @@
 
 // ── the monitor (`cu-live-tool monitor`) ──────────────────────────────────────────────────────────────────────
 
-/** One sample: the frontmost app, the active Space, and how long since the last HID (real) input. */
+/** One sample: the frontmost app, the active Space, the pointer, and the user's hardware input so far. */
 export interface MonitorSample {
   t: number;
   front: string | null;
   frontPid: number | null;
   space: number | null;
+  /** IOHIDSystem's idle counter — reported, NEVER used: a Unity app's HID tickles and synthetic events reset it. */
   hidIdleMs: number | null;
   /** The real pointer (global points); absent from an older monitor. */
   mouse?: [number, number] | null;
+  /**
+   * The monitor's listen-only session tap (`HardwareInput`): hardware-origin events (source pid 0) of the pointer,
+   * button, scroll — and, with listen access, key — types counted since the tap started (`hwStart`); `hwLast` the
+   * last one's time; `hwKeys` whether keys are watched. Absent when the tap could not start.
+   */
+  hw?: number;
+  hwLast?: number | null;
+  hwStart?: number;
+  hwKeys?: boolean;
 }
 
 export function parseMonitorLine(line: string): MonitorSample | undefined {
@@ -21,7 +31,10 @@ export function parseMonitorLine(line: string): MonitorSample | undefined {
     if (typeof o.t !== "number") return undefined;
     const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
     const m = Array.isArray(o.mouse) && o.mouse.length === 2 && o.mouse.every((v) => typeof v === "number" && Number.isFinite(v)) ? [o.mouse[0] as number, o.mouse[1] as number] as [number, number] : undefined;
-    return { t: o.t, front: typeof o.front === "string" ? o.front : null, frontPid: num(o.frontPid), space: num(o.space), hidIdleMs: num(o.hidIdleMs), ...(m === undefined ? {} : { mouse: m }) };
+    const hw = typeof o.hw === "number" && typeof o.hwStart === "number"
+      ? { hw: o.hw, hwLast: num(o.hwLast), hwStart: o.hwStart, hwKeys: o.hwKeys === true }
+      : {};
+    return { t: o.t, front: typeof o.front === "string" ? o.front : null, frontPid: num(o.frontPid), space: num(o.space), hidIdleMs: num(o.hidIdleMs), ...(m === undefined ? {} : { mouse: m }), ...hw };
   } catch {
     return undefined;
   }
@@ -48,24 +61,38 @@ export function focusViolations(samples: readonly MonitorSample[], from: number,
 }
 
 /**
- * The times real HID input happened in [from, to]: the HID idle counter only grows between samples, so a DROP means
- * a keyboard, mouse or trackpad event (the helper's background input never goes through the HID system). `slackMs`
- * absorbs the counter's own jitter.
+ * When the USER's input happened in [from, to]: the hardware-only tap's count grew between two samples and its
+ * last event falls in the window (an increase whose events all came before `from` is not this window's). Only
+ * hardware-origin events count — never the HID idle counter (a Unity app's tickles reset it with no event at all)
+ * and never a synthetic event (the helper's, a keep-awake app's).
  */
-export function hidInputTimes(samples: readonly MonitorSample[], from: number, to: number, slackMs = 60): number[] {
+export function hardwareInputTimes(samples: readonly MonitorSample[], from: number, to: number): number[] {
   const out: number[] = [];
   let prev: MonitorSample | undefined;
   for (const s of samples) {
-    if (prev !== undefined && s.t >= from && s.t <= to && s.hidIdleMs !== null && prev.hidIdleMs !== null && s.hidIdleMs + slackMs < prev.hidIdleMs) out.push(s.t);
+    if (s.hw === undefined) continue;
+    if (prev !== undefined && s.hw > prev.hw! && s.t >= from) {
+      const at = s.hwLast ?? s.t;
+      if (at >= from && at <= to) out.push(at);
+    }
     prev = s;
   }
   return out;
 }
 
+/** How long the user has given no hardware input, as of `now` (since the tap started if none yet); null without a tap. */
+export function hardwareIdleMs(samples: readonly MonitorSample[], now: number): number | null {
+  for (let i = samples.length - 1; i >= 0; i--) {
+    const s = samples[i]!;
+    if (s.hw !== undefined && s.hwStart !== undefined) return Math.max(0, now - Math.max(s.hwStart, s.hwLast ?? s.hwStart));
+  }
+  return null;
+}
+
 /**
- * When the REAL pointer moved within [from, to]: the rung-4 signal. Synthetic pid-routed events never move it,
- * while SkyLight's pid route resets the HID idle time like real input would — so `hidInputTimes` cannot tell
- * the helper's background events from a rung-4 fallback, and this can.
+ * When the REAL pointer moved within [from, to]: the per-scenario rung-4 signal (the helper's pid-routed events
+ * never move it; a HID-route fallback does). Not the user's-presence signal: a keep-awake app's synthetic warp
+ * moves it too — presence is `hardwareInputTimes`.
  */
 export function pointerMoves(samples: readonly MonitorSample[], from: number, to: number): number[] {
   const out: number[] = [];
@@ -85,14 +112,14 @@ export const COUNTDOWN_MS = 30_000;
 export const UNATTENDED_POLL_MS = 5_000;
 
 /** `cu-live-tool front`: what is in front, the active Space and its type (4 = a full-screen app's), HID idle. */
-export interface FrontReading { front: string | null; frontPid: number | null; space: number | null; spaceType: number | null; hidIdleMs: number | null }
+export interface FrontReading { front: string | null; frontPid: number | null; space: number | null; spaceType: number | null }
 
 export function parseFrontReading(stdout: string): FrontReading | undefined {
   try {
     const o = JSON.parse(stdout.trim().split("\n").at(-1) ?? "") as Record<string, unknown>;
     const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
     if (typeof o.t !== "number") return undefined;
-    return { front: typeof o.front === "string" ? o.front : null, frontPid: num(o.frontPid), space: num(o.space), spaceType: num(o.spaceType), hidIdleMs: num(o.hidIdleMs) };
+    return { front: typeof o.front === "string" ? o.front : null, frontPid: num(o.frontPid), space: num(o.space), spaceType: num(o.spaceType) };
   } catch {
     return undefined;
   }
@@ -113,29 +140,25 @@ export type IdleDecision = { kind: "go" } | { kind: "wait"; reason: string } | {
  * run) waits — polled every `UNATTENDED_POLL_MS` — until the Mac has had `idleMs` with no real input (then the
  * countdown banner, `countdownDecision`), and gives up after `maxWaitMs`.
  */
-export function idleGate(reading: FrontReading | undefined, waitedMs: number, maxWaitMs: number, unattended: boolean, idleMs = UNATTENDED_IDLE_MS): IdleDecision {
+export function idleGate(hardwareIdle: number | null, waitedMs: number, maxWaitMs: number, unattended: boolean, idleMs = UNATTENDED_IDLE_MS): IdleDecision {
   if (!unattended) return { kind: "go" };
-  if (reading === undefined || reading.hidIdleMs === null) return { kind: "refuse", reason: "--unattended: no HID idle reading, so it cannot tell whether someone is at the Mac" };
-  if (reading.hidIdleMs >= idleMs) return { kind: "go" };
+  if (hardwareIdle === null) return { kind: "refuse", reason: "--unattended: the hardware input tap did not start, so it cannot tell whether someone is at the Mac" };
+  if (hardwareIdle >= idleMs) return { kind: "go" };
   if (waitedMs + UNATTENDED_POLL_MS > maxWaitMs) {
     return { kind: "refuse", reason: `--unattended: waited ${Math.round(waitedMs / 60_000)} min and the Mac was never idle for ${idleMs / 1000} s and an untouched countdown — the run was not started` };
   }
-  return { kind: "wait", reason: `waiting for ${idleMs / 1000} s with no input (last input ${Math.round(reading.hidIdleMs / 1000)} s ago)…` };
+  return { kind: "wait", reason: `waiting for ${idleMs / 1000} s with no hardware input (none for ${Math.round(hardwareIdle / 1000)} s)…` };
 }
 
 export type CountdownDecision = { kind: "wait"; remainingMs: number } | { kind: "go" } | { kind: "postpone"; at: number; why: string };
 
 /**
- * The countdown banner, from the monitor's samples since it went up: ANY input — a key or the trackpad (the HID
- * idle counter dropped) or the pointer moving — postpones the run (the idle gate starts over); only a countdown
- * that ran out untouched starts it.
+ * The countdown banner, from the monitor's samples since it went up: ANY hardware input — the pointer, a click, a
+ * scroll, a key — postpones the run (the idle gate starts over); only a countdown that ran out untouched starts it.
  */
 export function countdownDecision(samples: readonly MonitorSample[], startedAt: number, now: number, countdownMs: number): CountdownDecision {
-  const hid = hidInputTimes(samples, startedAt, now);
-  const moved = pointerMoves(samples, startedAt, now);
-  if (hid.length > 0 || moved.length > 0) {
-    return { kind: "postpone", at: Math.min(...hid, ...moved), why: hid.length > 0 ? "a key or the trackpad" : "the pointer moved" };
-  }
+  const input = hardwareInputTimes(samples, startedAt, now);
+  if (input.length > 0) return { kind: "postpone", at: Math.min(...input), why: "input from the mouse, trackpad or keyboard" };
   if (now - startedAt >= countdownMs) return { kind: "go" };
   return { kind: "wait", remainingMs: countdownMs - (now - startedAt) };
 }

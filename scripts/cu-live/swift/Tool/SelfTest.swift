@@ -73,6 +73,23 @@ func runToolSelfTest() -> Int32 {
     var pointed = Sample(t: 2, front: nil, frontPid: nil, space: nil, hidIdleMs: nil)
     pointed.mouse = (x: 10, y: -3)
     check(pointed.json == "{\"t\":2,\"front\":null,\"frontPid\":null,\"space\":null,\"hidIdleMs\":null,\"mouse\":[10,-3]}", "a sample with the pointer")
+    var tapped = Sample(t: 3, front: nil, frontPid: nil, space: nil, hidIdleMs: nil)
+    tapped.hardware = (count: 2, lastMs: 1_700, startedMs: 1_000, keys: false)
+    check(tapped.json.hasSuffix(",\"hw\":2,\"hwLast\":1700,\"hwStart\":1000,\"hwKeys\":false}"), "a monitor sample with the hardware tap")
+    tapped.hardware = (count: 0, lastMs: nil, startedMs: 1_000, keys: true)
+    check(tapped.json.hasSuffix(",\"hw\":0,\"hwLast\":null,\"hwStart\":1000,\"hwKeys\":true}"), "no hardware event yet")
+    // Only hardware-origin events of the watched types count (source pid 0); synthetic ones never do.
+    check(HardwareInput.counts(type: .mouseMoved, sourcePid: 0, keys: false), "hardware: a real mouse move counts")
+    check(HardwareInput.counts(type: .scrollWheel, sourcePid: 0, keys: false), "hardware: a real scroll counts")
+    check(HardwareInput.counts(type: .leftMouseDown, sourcePid: 0, keys: false), "hardware: a real click counts")
+    check(!HardwareInput.counts(type: .mouseMoved, sourcePid: 4242, keys: true), "hardware: a synthetic move never counts")
+    check(!HardwareInput.counts(type: .keyDown, sourcePid: 77, keys: true), "hardware: a synthetic key never counts")
+    check(HardwareInput.counts(type: .keyDown, sourcePid: 0, keys: true), "hardware: a real key counts when keys are watched")
+    check(!HardwareInput.counts(type: .keyDown, sourcePid: 0, keys: false), "hardware: keys unwatched without listen access")
+    check(HardwareInput.counts(type: .flagsChanged, sourcePid: 0, keys: true), "hardware: a modifier counts")
+    check(!HardwareInput.counts(type: .null, sourcePid: 0, keys: true), "hardware: other types never count")
+    check(HardwareInput.mask(keys: false) & (CGEventMask(1) << CGEventMask(CGEventType.keyDown.rawValue)) == 0, "hardware: no key bit without access")
+    check(HardwareInput.mask(keys: true) & (CGEventMask(1) << CGEventMask(CGEventType.keyDown.rawValue)) != 0, "hardware: the key bit with access")
     pointed.spaceType = 4
     check(pointed.json.hasSuffix(",\"mouse\":[10,-3],\"spaceType\":4}"), "a front sample with the Space's type")
 

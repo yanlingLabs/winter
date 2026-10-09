@@ -35,7 +35,13 @@ WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live   # the LIVE ComputerV2 suite (script
                                      # fixture's own log, screenshot pixels (a #FF00FF sentinel), the mirror frames, and
                                      # that your frontmost app/Space never change (20 ms sampling). Aborts on real input.
                                      # "No rung-4 fallback" = the REAL pointer never moved and the user's app got no
-                                     # key/click — never the HID idle counter, which SkyLight's background pid route resets.
+                                     # key/click. "Real input" (the idle gate, the countdown's postpone, the mid-run abort) is
+                                     # HARDWARE input only: the monitor's listen-only session tap counts events whose
+                                     # eventSourceUnixProcessID is 0 (pointer, buttons, scroll; keys only with existing
+                                     # Input Monitoring access — never requested). Never HIDIdleTime or SecondsSince-
+                                     # LastEventType: Unity apps (VRoid) tickle the HID system every few seconds with no
+                                     # event, and synthetic events (the helper's, keep-awake apps') never count. An abort
+                                     # still quits every app the run launched and closes what it opened.
                                      # The suite's daemon and mirror probe carry TEST-ONLY identities
                                      # (com.winter.core.cutest / com.winter.app.cutest): a dev helper accepts them only as a
                                      # live-test instance (a home in <user temp>/winter-cu-live-*, HelperIdentity.isLiveTestHome)
@@ -46,7 +52,7 @@ WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live   # the LIVE ComputerV2 suite (script
                                      # --report <file.json>: every check in full + failing outputs; --script <file.js>: one
                                      # ad-hoc ComputerV2 script on the fixture, its output printed. --unattended (an
                                      # approved agent run) waits, every 5 s up to --max-wait (3h), for --idle-seconds
-                                     # (180) with no input, then shows a --countdown-seconds (30) banner ("… will take
+                                     # (180) with no hardware input, then shows a --countdown-seconds (30) banner ("… will take
                                      # over the screen in 30 s — move the mouse or press a key to postpone"); any input
                                      # postpones and the wait starts over. Every live run shows "Winter test running —
                                      # don't touch the Mac" (non-activating, sharingType .none: never in a capture).
