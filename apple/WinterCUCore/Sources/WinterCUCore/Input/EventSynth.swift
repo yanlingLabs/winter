@@ -78,7 +78,7 @@ struct CUEventSynth {
         CGPoint(x: point.x - origin.x, y: point.y - origin.y)
     }
 
-    /// Window-targeted pid events, as ChatGPT's computer-use helper builds them: the target pid (field 40), the
+    /// Window-targeted pid events: the target pid (field 40), the
     /// window id in fields 91 and 92 (the window under the pointer, and the one that can handle the event)
     /// and 51 (its window number), and the window location. On the public route that location is LOCAL to
     /// the window (screen point minus its bounds origin), so the event is addressed to the window and not to
@@ -88,7 +88,7 @@ struct CUEventSynth {
                               clickGroup: Int64?) {
         guard route != .hid else { return }
         e.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid))
-        // Mouse subtype 3, as ChatGPT's helper and cua-driver stamp their synthesized mouse events.
+        // Mouse subtype 3, the synthesized-mouse subtype (cua-driver stamps its events the same way).
         if e.type != .scrollWheel { e.setIntegerValueField(.mouseEventSubtype, value: 3) }
         if windowID != 0 {
             e.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))

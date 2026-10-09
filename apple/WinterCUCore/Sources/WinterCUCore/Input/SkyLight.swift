@@ -68,7 +68,7 @@ public struct CUSkyLight: @unchecked Sendable {
 
     /// A window can be captured wherever it is (`SLSHWCaptureWindowListInRect`, or the list call).
     public var canCaptureWindows: Bool { mainConnectionFn != nil && (captureInRectFn != nil || captureListFn != nil) }
-    /// WindowServer updates can be suspended around a focus change (ChatGPT's `SLSDisableUpdate` bracket).
+    /// WindowServer updates can be suspended around a focus change (an `SLSDisableUpdate` bracket, so the change is never drawn half-done).
     public var canSuspendUpdates: Bool { mainConnectionFn != nil && disableUpdateFn != nil && reenableUpdateFn != nil }
 
     /// Resolves every symbol through `lookup` (a `dlsym` stand-in, injectable for tests).
@@ -284,14 +284,14 @@ public struct CUSkyLight: @unchecked Sendable {
     // MARK: window capture
 
     /// `kCGSCaptureIgnoreGlobalClipShape` (0x800): the window's own content, not clipped to what is visible on
-    /// screen. The only option ChatGPT's off-screen capture passes; the image comes back at the display's
+    /// screen. The only option the off-screen capture needs; the image comes back at the display's
     /// backing scale (two pixels per point on a Retina display).
     public static let captureIgnoreGlobalClipShape: UInt32 = 0x800
 
     /// The window server's own image of each window, wherever it is: on another Space, in full screen
     /// elsewhere, minimized — current for an app that keeps drawing there (measured live: a working full-screen
     /// Terminal on another Space changed in every capture), older for one that stops drawing while hidden
-    /// (App Nap, some browsers). ChatGPT's stills take a window that is not on screen
+    /// (App Nap, some browsers). Stills of a window that is not on screen take it
     /// this way (`SLSHWCaptureWindowListInRect`, options 0x800, the first image); AltTab's thumbnails too.
     /// Needs Screen Recording. Moves, raises and focuses nothing.
     ///
@@ -335,7 +335,7 @@ public struct CUSkyLight: @unchecked Sendable {
         return image.cropping(to: pixels)
     }
 
-    // MARK: focus enforcement (ChatGPT's SLSDisableUpdate bracket)
+    // MARK: focus enforcement (the SLSDisableUpdate bracket)
 
     /// Suspends WindowServer drawing on the main connection while a focus change is set up, so a synthetic
     /// activation never shows as a flash or a Space jump. Pair every `disableUpdate()` with `reenableUpdate()`.

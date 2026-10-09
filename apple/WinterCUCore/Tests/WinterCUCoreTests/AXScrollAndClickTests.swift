@@ -3,7 +3,7 @@ import CoreGraphics
 import XCTest
 @testable import WinterCUCore
 
-/// The AX routes the Codex analysis of ChatGPT's helper turned up: scrolling by the scroll bar's page buttons
+/// The accessibility routes that need no events: scrolling by the scroll bar's page buttons
 /// (and an element's own page action) when its value can't be moved, `AXPick` for elements that take no press,
 /// and scrolling an element into view before a pointer click instead of clicking outside the window.
 final class AXScrollAndClickTests: XCTestCase {

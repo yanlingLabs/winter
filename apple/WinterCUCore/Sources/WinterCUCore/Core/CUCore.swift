@@ -87,6 +87,7 @@ public final class CUCore: @unchecked Sendable {
             focusWaitNativeMs = 0
             focusEnforcerFactory = { _ in CUNoopFocusEnforcer() }
             pressSettleMs = 0
+            menuSettleMs = 0
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
         }
     }
@@ -457,6 +458,8 @@ public final class CUCore: @unchecked Sendable {
     /// How long a press the app answered with an error is watched for its effect (a new window, a value, the
     /// focus). 0 in test cores (one read).
     var pressSettleMs: Double = 500
+    /// How long a menu command that reads disabled is read again before it is called disabled. 0 in test cores.
+    var menuSettleMs: Double = 400
     /// How long focus placement waits for the focused element to become the field (WebKit moves it
     /// asynchronously), for web content and for native fields. 0 in test cores (one read).
     var focusWaitWebMs: Double = 400
@@ -700,7 +703,7 @@ public final class CUCore: @unchecked Sendable {
         var privateTried = false
         // Not on screen (another Space, full screen elsewhere, minimized, hidden): ScreenCaptureKit refuses such
         // a window or returns nothing, so the private path goes straight to the window server's own image of it
-        // (ChatGPT's dispatch: off screen → SkyLight). Nothing is moved, raised or focused.
+        // (off screen → the SkyLight capture). Nothing is moved, raised or focused.
         if t.privatePath, sys.window(id: t.windowID)?.onScreen == false {
             privateTried = true
             if let shot = try await offScreenShot(t, region, p.budget) {

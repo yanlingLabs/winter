@@ -233,6 +233,45 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertTrue(ax.performed.contains("\(token(upper)):\(kAXPressAction)"))
     }
 
+    /// A Fixture › Uppercase Selection menu; returns the item.
+    private func uppercaseMenu(enabled: Bool) -> AXUIElement {
+        let bar = fakeElement(93_075), apple = fakeElement(93_076), fixture = fakeElement(93_077), menu = fakeElement(93_078)
+        let upper = fakeElement(93_079)
+        ax.put(ax.application(pid), [kAXMenuBarAttribute: bar])
+        ax.add(apple, role: "AXMenuBarItem", title: "Apple")
+        ax.put(bar, [kAXChildrenAttribute: [apple, fixture]])
+        ax.add(fixture, role: "AXMenuBarItem", title: "Fixture", extra: [kAXChildrenAttribute: [menu]])
+        ax.add(menu, role: kAXMenuRole, extra: [kAXChildrenAttribute: [upper]])
+        ax.add(upper, role: kAXMenuItemRole, title: "Uppercase Selection", extra: [kAXEnabledAttribute: enabled])
+        ax.setActions(upper, [kAXPressAction])
+        return upper
+    }
+
+    func testAMenuCommandClicksTheSelectionEvenWhenTheKeyWindowCantBeRead() async throws {
+        safari(fieldOwner: pid)
+        ax.makeSettable(field, kAXValueAttribute)
+        try await act(.setValue(CUSetValueAction(ref: ref(field), value: "make me loud")))
+        let upper = uppercaseMenu(enabled: true)  // no AXFocusedWindow, no AXFocused: the key window is unknown
+        try await act(.menu(CUMenuAction(path: ["Fixture", "Uppercase Selection"])))
+        XCTAssertGreaterThanOrEqual(poster.entries.filter { $0.type == .leftMouseDown }.count, 1, "clicked to make it certain")
+        XCTAssertTrue(ax.performed.contains("\(token(upper)):\(kAXPressAction)"))
+    }
+
+    func testAMenuItemThatReadsDisabledIsReadAgainBeforeItIsCalledDisabled() async throws {
+        safari(fieldOwner: pid)
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window])  // already key
+        let upper = uppercaseMenu(enabled: false)
+        core.menuSettleMs = 400
+        var reads = 0
+        ax.onRead = { [unowned self] what in
+            guard what == "\(token(upper)):\(kAXEnabledAttribute)" else { return }
+            reads += 1
+            if reads == 2 { ax.put(upper, [kAXEnabledAttribute: true]) }  // the app re-validated
+        }
+        try await act(.menu(CUMenuAction(path: ["Fixture", "Uppercase Selection"])))
+        XCTAssertTrue(ax.performed.contains("\(token(upper)):\(kAXPressAction)"))
+    }
+
     func testAppLevelCommandsStillUseTheMenuWhenFocusIsNotEditable() async throws {
         safari(fieldOwner: pid)
         ax.put(field, [kAXRoleAttribute: kAXButtonRole])  // focus is not an editable element
