@@ -691,19 +691,10 @@ final class PluginManagerModelConsentTests: XCTestCase {
         return dir
     }
 
-    /// Helper: feeds the bare-id ambiguity pre-check (`plugin.list`, round 3's new FIRST RPC) with
-    /// an empty/non-colliding result, so a test can get straight to the marketplace steps.
-    private func feedNoBareIdCollision(_ t: FeedScriptedTransport, index: Int = 1) async {
-        let req = await feedNextRequest(t, index: index)
-        XCTAssertEqual(req["method"] as? String, "plugin.list")
-        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"plugins":[]}}"#)
-    }
-
-    /// Ordering (round 3 minor): `installFromFolder(_:)` checks the bare-id ambiguity FIRST
-    /// (`plugin.list`, using the manifest's own plugin name — nothing is installed yet), then
-    /// `plugin.marketplace.list` (C1's collision check), all before ever calling
-    /// `plugin.marketplace.add` — this pins the full ordering.
-    func testInstallFromFolderChecksBareIdThenMarketplaceListBeforeAdding() async throws {
+    /// Ordering: `installFromFolder(_:)` checks `plugin.marketplace.list` FIRST (C1's collision check — there is no
+    /// bare-id pre-check since WS-24 keyed every call by spec), all before ever calling `plugin.marketplace.add` —
+    /// this pins the full ordering.
+    func testInstallFromFolderChecksMarketplaceListBeforeAdding() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
         let dir = try makeMarketplaceDir()
@@ -711,21 +702,19 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        await feedNoBareIdCollision(t)
-
-        let listReq = await feedNextRequest(t, index: 2)
+        let listReq = await feedNextRequest(t, index: 1)
         XCTAssertEqual(listReq["method"] as? String, "plugin.marketplace.list")
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
 
-        let addReq = await feedNextRequest(t, index: 3)
+        let addReq = await feedNextRequest(t, index: 2)
         XCTAssertEqual(addReq["method"] as? String, "plugin.marketplace.add")
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
 
-        let installReq = await feedNextRequest(t, index: 4)
+        let installReq = await feedNextRequest(t, index: 3)
         XCTAssertEqual(installReq["method"] as? String, "plugin.install")
         t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
 
-        await feedNextResult(t, index: 5, result: #"{"plugins":[\#(echoListing)]}"#)
+        await feedNextResult(t, index: 4, result: #"{"plugins":[\#(echoListing)]}"#)
 
         await action
 
@@ -733,10 +722,10 @@ final class PluginManagerModelConsentTests: XCTestCase {
         XCTAssertTrue(model.consentSheet?.openedByInstall ?? false)
     }
 
-    /// Ordering (round 3 minor): a bare-id collision is refused via the PRE-install check, before
-    /// any marketplace RPC is ever sent — `pluginName` ("demo") is already installed from another
-    /// marketplace.
-    func testInstallFromFolderRefusesABareIdCollisionBeforeAnyMarketplaceCall() async throws {
+    /// WS-24: the pane no longer refuses a bare-id collision — every call it makes is spec-keyed
+    /// (`<id>@<marketplace>`), so "demo" already installed from ANOTHER marketplace is a different install, not an
+    /// ambiguity: the first RPC an install sends is the marketplace collision check, and it goes on from there.
+    func testInstallFromFolderDoesNotRefuseASameNamedPluginFromAnotherMarketplace() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
         let dir = try makeMarketplaceDir()
@@ -744,14 +733,16 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        let bareIdReq = await feedNextRequest(t, index: 1)
-        t.feed(#"{"jsonrpc":"2.0","id":\#(bareIdReq["id"] as! Int),"result":{"plugins":[{"id":"demo","installPath":"/elsewhere","scope":"user","enabled":true,"marketplace":"other-market"}]}}"#)
+        let listReq = await feedNextRequest(t, index: 1)
+        XCTAssertEqual(listReq["method"] as? String, "plugin.marketplace.list", "no plugin.list bare-id check first")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[{"name":"other-market","source":"/elsewhere","kind":"directory","path":"/elsewhere"}]}}"#)
+        let addReq = await feedNextRequest(t, index: 2)
+        XCTAssertEqual(addReq["method"] as? String, "plugin.marketplace.add")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"error":{"code":-32000,"message":"stop here"}}"#)
 
         await action
 
-        XCTAssertEqual(t.sent.count, 2, "hello + the bare-id check — no marketplace.list/add/install")
-        XCTAssertNil(model.consentSheet)
-        XCTAssertTrue(model.errorText?.contains("demo") ?? false, "\(model.errorText ?? "nil")")
+        XCTAssertEqual(model.errorText, "couldn't install \(dir.lastPathComponent): stop here")
     }
 
     /// C1: a marketplace name collision with a DIFFERENT path is refused before `plugin.marketplace.
@@ -765,14 +756,12 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        await feedNoBareIdCollision(t)
-
-        let listReq = await feedNextRequest(t, index: 2)
+        let listReq = await feedNextRequest(t, index: 1)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[{"name":"winter-examples","source":"/somewhere/else","kind":"directory","path":"/somewhere/else"}]}}"#)
 
         await action
 
-        XCTAssertEqual(t.sent.count, 3, "no marketplace.add/install/refresh — refused before any of them")
+        XCTAssertEqual(t.sent.count, 2, "no marketplace.add/install/refresh — refused before any of them")
         XCTAssertNil(model.consentSheet)
         XCTAssertTrue(model.errorText?.contains("/somewhere/else") ?? false, "\(model.errorText ?? "nil")")
     }
@@ -787,19 +776,17 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        await feedNoBareIdCollision(t)
-
-        let listReq = await feedNextRequest(t, index: 2)
+        let listReq = await feedNextRequest(t, index: 1)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}]}}"#)
 
-        let addReq = await feedNextRequest(t, index: 3)
+        let addReq = await feedNextRequest(t, index: 2)
         XCTAssertEqual(addReq["method"] as? String, "plugin.marketplace.add", "the same path is not a collision")
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
 
-        let installReq = await feedNextRequest(t, index: 4)
+        let installReq = await feedNextRequest(t, index: 3)
         t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
 
-        await feedNextResult(t, index: 5, result: #"{"plugins":[\#(echoListing)]}"#)
+        await feedNextResult(t, index: 4, result: #"{"plugins":[\#(echoListing)]}"#)
 
         await action
     }
@@ -814,29 +801,28 @@ final class PluginManagerModelConsentTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         async let action: Void = model.installFromFolder(dir)
-        await feedNoBareIdCollision(t)
-        let listReq = await feedNextRequest(t, index: 2)
+        let listReq = await feedNextRequest(t, index: 1)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}]}}"#)
-        let addReq = await feedNextRequest(t, index: 3)
+        let addReq = await feedNextRequest(t, index: 2)
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
-        let installReq = await feedNextRequest(t, index: 4)
+        let installReq = await feedNextRequest(t, index: 3)
         t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
-        await feedNextResult(t, index: 5, result: #"{"plugins":[\#(echoListing)]}"#)
+        await feedNextResult(t, index: 4, result: #"{"plugins":[\#(echoListing)]}"#)
         await action
 
         // Now uninstall — since the marketplace was already known (not app-added), no
         // plugin.marketplace.remove should ever be sent, and no unfiltered plugin.list check for
         // "still used" either (the `marketplacesAddedThisSession.contains` guard short-circuits).
         async let uninstallAction: Void = model.uninstall("demo@winter-examples")
-        let uninstallReq = await feedNextRequest(t, index: 6)
+        let uninstallReq = await feedNextRequest(t, index: 5)
         XCTAssertEqual(uninstallReq["method"] as? String, "plugin.uninstall")
         t.feed(#"{"jsonrpc":"2.0","id":\#(uninstallReq["id"] as! Int),"result":{"ok":true,"spec":"demo@winter-examples","scope":"user"}}"#)
-        let refreshReq = await feedNextRequest(t, index: 7)
+        let refreshReq = await feedNextRequest(t, index: 6)
         XCTAssertEqual(refreshReq["method"] as? String, "plugin.list", "the trailing refresh — NOT a marketplace.remove or an extra unused-check plugin.list")
         t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"result":{"plugins":[]}}"#)
         await uninstallAction
 
-        XCTAssertEqual(t.sent.count, 8, "no plugin.marketplace.remove anywhere in this sequence")
+        XCTAssertEqual(t.sent.count, 7, "no plugin.marketplace.remove anywhere in this sequence")
     }
 
     /// N2 (round 3, controller-required): a marketplace this session DID add (via
@@ -851,27 +837,26 @@ final class PluginManagerModelConsentTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         async let installAction: Void = model.installFromFolder(dir)
-        await feedNoBareIdCollision(t)
-        let listReq = await feedNextRequest(t, index: 2)
+        let listReq = await feedNextRequest(t, index: 1)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
-        let addReq = await feedNextRequest(t, index: 3)
+        let addReq = await feedNextRequest(t, index: 2)
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
-        let installReq = await feedNextRequest(t, index: 4)
+        let installReq = await feedNextRequest(t, index: 3)
         t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
-        await feedNextResult(t, index: 5, result: #"{"plugins":[\#(echoListing)]}"#)
+        await feedNextResult(t, index: 4, result: #"{"plugins":[\#(echoListing)]}"#)
         await installAction
 
         async let uninstallAction: Void = model.uninstall("demo@winter-examples")
-        let uninstallReq = await feedNextRequest(t, index: 6)
+        let uninstallReq = await feedNextRequest(t, index: 5)
         XCTAssertEqual(uninstallReq["method"] as? String, "plugin.uninstall")
         t.feed(#"{"jsonrpc":"2.0","id":\#(uninstallReq["id"] as! Int),"result":{"ok":true,"spec":"demo@winter-examples","scope":"user"}}"#)
 
         // The unfiltered "still used" check — a DIFFERENT plugin, PROJECT scope, same marketplace.
-        let checkReq = await feedNextRequest(t, index: 7)
+        let checkReq = await feedNextRequest(t, index: 6)
         XCTAssertEqual(checkReq["method"] as? String, "plugin.list")
         t.feed(#"{"jsonrpc":"2.0","id":\#(checkReq["id"] as! Int),"result":{"plugins":[{"id":"demo2","installPath":"/proj","scope":"project","enabled":true,"marketplace":"winter-examples"}]}}"#)
 
-        let refreshReq = await feedNextRequest(t, index: 8)
+        let refreshReq = await feedNextRequest(t, index: 7)
         XCTAssertEqual(refreshReq["method"] as? String, "plugin.list")
         t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"result":{"plugins":[]}}"#)
 
@@ -895,27 +880,26 @@ final class PluginManagerModelConsentTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         async let installAction: Void = model.installFromFolder(dir)
-        await feedNoBareIdCollision(t)
-        let listReq = await feedNextRequest(t, index: 2)
+        let listReq = await feedNextRequest(t, index: 1)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
-        let addReq = await feedNextRequest(t, index: 3)
+        let addReq = await feedNextRequest(t, index: 2)
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
-        let installReq = await feedNextRequest(t, index: 4)
+        let installReq = await feedNextRequest(t, index: 3)
         t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
-        await feedNextResult(t, index: 5, result: #"{"plugins":[\#(echoListing)]}"#)
+        await feedNextResult(t, index: 4, result: #"{"plugins":[\#(echoListing)]}"#)
         await installAction
 
         async let uninstallAction: Void = model.uninstall("demo@winter-examples")
-        let uninstallReq = await feedNextRequest(t, index: 6)
+        let uninstallReq = await feedNextRequest(t, index: 5)
         t.feed(#"{"jsonrpc":"2.0","id":\#(uninstallReq["id"] as! Int),"result":{"ok":true,"spec":"demo@winter-examples","scope":"user"}}"#)
 
         // The unfiltered "still used" check — the IDENTICAL spec "demo@winter-examples", but at
         // project scope: a wholly separate installation record that just happens to share the same
         // id+marketplace pair as the one just uninstalled.
-        let checkReq = await feedNextRequest(t, index: 7)
+        let checkReq = await feedNextRequest(t, index: 6)
         t.feed(#"{"jsonrpc":"2.0","id":\#(checkReq["id"] as! Int),"result":{"plugins":[{"id":"demo","installPath":"/proj","scope":"project","enabled":true,"marketplace":"winter-examples"}]}}"#)
 
-        let refreshReq = await feedNextRequest(t, index: 8)
+        let refreshReq = await feedNextRequest(t, index: 7)
         t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"result":{"plugins":[]}}"#)
 
         await uninstallAction
@@ -966,23 +950,22 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        await feedNoBareIdCollision(t)
-        let listReq = await feedNextRequest(t, index: 2)
+        let listReq = await feedNextRequest(t, index: 1)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
-        let addReq = await feedNextRequest(t, index: 3)
+        let addReq = await feedNextRequest(t, index: 2)
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
-        let installReq = await feedNextRequest(t, index: 4)
+        let installReq = await feedNextRequest(t, index: 3)
         t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
 
         // The post-install refresh reports the plugin ALREADY fully consented (fingerprint match).
-        await feedNextResult(t, index: 5, result: #"{"plugins":[\#(echoListingAlreadyConsented)]}"#)
+        await feedNextResult(t, index: 4, result: #"{"plugins":[\#(echoListingAlreadyConsented)]}"#)
 
         await action
 
         // Still opens the sheet, and never calls plugin.enable directly.
         XCTAssertEqual(model.consentSheet?.pluginId, "demo")
         XCTAssertTrue(model.consentSheet?.openedByInstall ?? false)
-        XCTAssertEqual(t.sent.count, 6, "hello + bare-id-check + marketplace.list + marketplace.add + install + refresh — no plugin.enable")
+        XCTAssertEqual(t.sent.count, 5, "hello + marketplace.list + marketplace.add + install + refresh — no plugin.enable")
     }
 
     /// M3: a failed post-install refresh must not fall through to opening a sheet or calling
@@ -995,22 +978,21 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        await feedNoBareIdCollision(t)
-        let listReq = await feedNextRequest(t, index: 2)
+        let listReq = await feedNextRequest(t, index: 1)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
-        let addReq = await feedNextRequest(t, index: 3)
+        let addReq = await feedNextRequest(t, index: 2)
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
-        let installReq = await feedNextRequest(t, index: 4)
+        let installReq = await feedNextRequest(t, index: 3)
         t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
 
-        let refreshReq = await feedNextRequest(t, index: 5)
+        let refreshReq = await feedNextRequest(t, index: 4)
         t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"error":{"code":-32000,"message":"daemon unavailable"}}"#)
 
         await action
 
         XCTAssertNil(model.consentSheet)
         XCTAssertEqual(model.errorText, "couldn't load plugins: daemon unavailable")
-        XCTAssertEqual(t.sent.count, 6, "no plugin.enable after a failed refresh")
+        XCTAssertEqual(t.sent.count, 5, "no plugin.enable after a failed refresh")
     }
 
     /// Minor (round 3): a SUCCESSFUL refresh that simply doesn't contain the spec just installed
@@ -1023,16 +1005,15 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        await feedNoBareIdCollision(t)
-        let listReq = await feedNextRequest(t, index: 2)
+        let listReq = await feedNextRequest(t, index: 1)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
-        let addReq = await feedNextRequest(t, index: 3)
+        let addReq = await feedNextRequest(t, index: 2)
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
-        let installReq = await feedNextRequest(t, index: 4)
+        let installReq = await feedNextRequest(t, index: 3)
         t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
 
         // A SUCCESSFUL refresh, but it comes back with no row for "demo@winter-examples" at all.
-        await feedNextResult(t, index: 5, result: #"{"plugins":[]}"#)
+        await feedNextResult(t, index: 4, result: #"{"plugins":[]}"#)
 
         await action
 
@@ -1049,10 +1030,9 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        await feedNoBareIdCollision(t)
-        let listReq = await feedNextRequest(t, index: 2)
+        let listReq = await feedNextRequest(t, index: 1)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
-        let addReq = await feedNextRequest(t, index: 3)
+        let addReq = await feedNextRequest(t, index: 2)
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"error":{"code":-32000,"message":"not a directory marketplace"}}"#)
 
         await action

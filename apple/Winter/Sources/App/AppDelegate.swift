@@ -393,8 +393,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// mode, is the fix: it resolves the race with real data instead of guessing.
     private func openSessionInNewDetachedWindow(_ sessionId: String, frame: NSRect? = nil, title: String = "Winter", isChat: Bool? = nil, sourceRows: [SessionSummary] = [], palette: PlumePalette = .blue, stacked: Bool = false) {
         guard let model = appModel,
-              let (feed, session) = model.makeDetachedFeed(sessionId: sessionId) else {
-            OrbDebug.log("openSessionInNewDetachedWindow: no appModel or makeDetachedFeed nil — spawn aborted")
+              let lease = model.feedHub.lease(sessionId: sessionId) else {
+            OrbDebug.log("openSessionInNewDetachedWindow: no appModel or no feed for the session — spawn aborted")
             return
         }
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -407,7 +407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DetachedWindowController.isChatSession(sessionId, in: sourceRows)
                 || DetachedWindowController.isChatSession(sessionId, in: model.directory.rows)
         )
-        let spawned = spawnDetachedWindow(feed: feed, session: session, frame: resolvedFrame, title: title,
+        let spawned = spawnDetachedWindow(lease: lease, frame: resolvedFrame, title: title,
                                           isChat: resolvedIsChat, palette: palette)
         if stacked { sessionWindowStack.add(spawned) }
     }
@@ -434,14 +434,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return false
         }
         let sid = model.focusedSessionId // capture BEFORE the fresh session flips it
-        guard let sid, let (feed, session) = model.makeDetachedFeed(sessionId: sid) else {
-            OrbDebug.log("onWindowDetach: no focused session or makeDetachedFeed nil — spawn aborted, window surface kept")
+        guard let sid, let lease = model.feedHub.lease(sessionId: sid) else {
+            OrbDebug.log("onWindowDetach: no focused session or no feed for it — spawn aborted, window surface kept")
             return false
         }
         let title = model.session.state.exchanges.first.map { String($0.prompt.prefix(40)) } ?? "Winter"
         let isChat = DetachedWindowController.isChatSession(sid, in: model.directory.rows)
         // detached window VISIBLE first — the orb panel is still `.window` here
-        spawnDetachedWindow(feed: feed, session: session, frame: frame, title: title, isChat: isChat)
+        spawnDetachedWindow(lease: lease, frame: frame, title: title, isChat: isChat)
         Task { await model.startFreshSessionAfterDetach() } // orb's next summon = clean slate
         return true
     }
@@ -531,11 +531,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pill.onOpenInApp = { [weak self] in
             self?.summonAppWindow(navigatingTo: .mode(.dispatch))
         }
-        // Each working child pill's plume throws what THAT child uses: a pinned harness onto the child
-        // session — the detached windows' own door — opened while the child works, closed after.
+        // Each working child pill's plume throws what THAT child uses: a hold on the child session's shared
+        // feed, taken while the child works and let go after. When a window is open on the same child it is the
+        // window's feed — one socket, one fold — and the pill's letting go leaves it running.
         pill.makeChildFeed = { [weak self] sessionId in
-            guard let (feed, session) = self?.appModel?.makeDetachedFeed(sessionId: sessionId) else { return nil }
-            return DispatchPillChildFeed(session: session, start: { await feed.start() }, stop: { feed.stop() })
+            guard let lease = self?.appModel?.feedHub.lease(sessionId: sessionId) else { return nil }
+            return DispatchPillChildFeed(session: lease.session, start: {}, stop: { lease.release() })
         }
     }
 
@@ -609,12 +610,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        // Task 3: the session host — spec §1's attachment policy. Its harnesses come from
-        // `makeDetachedFeed`, so the shell shares this AppModel's transport factory and token (one
-        // Keychain read) on its OWN socket: the orb's feed is `followFocus` and dispatch-only, and
-        // the shell shows code and chat sessions too. A separate socket is also what makes the
-        // policy's last row true — the shell's attachment is its own, so a detached window closing
-        // is never the last detach for a session the shell is showing.
+        // Task 3: the session host — spec §1's attachment policy. Its harnesses come from this AppModel's
+        // `feedHub` (over `makeDetachedFeed`), so the shell shares the app's transport factory and token (one
+        // Keychain read) and gets a pinned harness of its own for a session no other surface shows: the orb's feed is
+        // `followFocus` and dispatch-only, and the shell shows code and chat sessions too. A session that a detached
+        // window or a child's pill shows is the SAME feed — one socket, one fold — held by each surface in turn,
+        // which is also what makes the policy's last row true: a detached window closing is never the last detach
+        // for a session the shell is showing (the feed stays up until the last holder lets go).
         // app-shell T4: the landing's roster verbs (stop/background/archive) and "New" button ride
         // this SAME always-connected client — see `ShellSessionHost.managementClient`'s doc for why
         // that must be a bare, non-attaching connection rather than another `makeFeed` harness.
@@ -623,7 +625,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // own doc comment).
         let host = ShellSessionHost(
             directory: model.directory,
-            makeFeed: { [weak model] sessionId in model?.makeDetachedFeed(sessionId: sessionId) },
+            hub: model.feedHub,
             managementClient: model.client,
             outputsWatcher: outputsWatcher
         )
@@ -971,9 +973,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
-    private func spawnDetachedWindow(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String, isChat: Bool = false,
+    private func spawnDetachedWindow(lease: SessionFeedLease, frame: NSRect, title: String, isChat: Bool = false,
                                      palette: PlumePalette = .blue) -> DetachedWindowController {
-        let detached = DetachedWindowController(feed: feed, session: session, frame: frame, title: title.isEmpty ? "Winter" : title,
+        // The window's own model, following the shared one: its adapter and views are built on a model that never
+        // changes, whichever session the window is on.
+        let session = SessionModel()
+        session.follow(lease.session)
+        let detached = DetachedWindowController(lease: lease, session: session, frame: frame, title: title.isEmpty ? "Winter" : title,
                                                 isChat: isChat, palette: palette)
         registerDetachedWindow(detached)
         detached.show()

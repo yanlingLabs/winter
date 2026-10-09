@@ -19,7 +19,13 @@ import SwiftUI
 /// programmatic `close()` path (app termination) and the user's own red traffic light.
 @MainActor
 final class DetachedWindowController: NSObject, NSWindowDelegate {
-    private let feed: SessionFeed
+    /// This window's hold on its session's feed — shared with any other surface showing the session
+    /// (`SessionFeedHub`), or its own (`init(feed:session:…)`). `feed` is read off it fresh: a lease that moves
+    /// (`selectSession`) can be on another feed.
+    private let lease: SessionFeedLease
+    private var feed: SessionFeed { lease.feed }
+    /// The model this window's adapter and views are built on. With a shared feed it FOLLOWS the leased one
+    /// (`SessionModel.follow`), so it never changes under them whatever session the window is on.
     private let session: SessionModel
     private let window: NSWindow
     private let adapter: FieldStateAdapter
@@ -48,11 +54,6 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     var onOpenSessionDetached: ((String) -> Void)?
 
     private var escMonitor: Any?
-    /// FINAL-REVIEW FIX (minor #3): the feed-start Task is stored so close can CANCEL it —
-    /// `SessionFeed.start()`'s initial connect-backoff loop exits only on Task.isCancelled;
-    /// without this, closing a window whose daemon never came up left the loop spinning
-    /// (bounded at 10s backoff, but D9 says a closed window leaves NOTHING running).
-    private var feedTask: Task<Void, Never>?
     /// One-shot latch: `windowWillClose` runs teardown + fires `onClosed` exactly once, whether it
     /// arrived via the programmatic `close()` (termination hook) or the user's red traffic light —
     /// both funnel through this same AppKit delegate callback.
@@ -112,19 +113,28 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     ///     what pass `true` today — App shell T6 retired `createAndOpenChat()`/`openChat()`'s reopen
     ///     path, the pair that used to pass an explicit `true` here. Seeds `adapter.isChatSession`
     ///     (see that property's own doc comment for what it gates).
-    init(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String, isChat: Bool = false,
+    convenience init(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String, isChat: Bool = false,
+                     palette: PlumePalette = .blue) {
+        self.init(lease: SessionFeedLease(standalone: feed, session: session), session: session, frame: frame, title: title,
+                  isChat: isChat, palette: palette)
+    }
+
+    /// - Parameters:
+    ///   - lease: the window's hold on its session's feed. When it is a shared one, `session` is this window's own model
+    ///     and follows `lease.session` (the caller sets that up; `selectSession` moves it).
+    init(lease: SessionFeedLease, session: SessionModel, frame: NSRect, title: String, isChat: Bool = false,
          palette: PlumePalette = .blue) {
-        self.feed = feed
+        self.lease = lease
         self.session = session
-        if let pinned = feed.pinnedSessionId {
-            self.sessionId = pinned
+        if lease.feed.pinnedSessionId != nil {
+            self.sessionId = lease.sessionId
         } else {
             OrbDebug.log("DetachedWindowController: feed has no pinned session id — contract violation (submit/interrupt will target an empty id)")
             self.sessionId = ""
         }
-        let feedClient = feed.client
-        let sessionDirectory = SessionDirectory(lister: {
-            try await feedClient.listSessions().map {
+        // Read off the lease at each call: the window's feed changes when it moves between sessions.
+        let sessionDirectory = SessionDirectory(lister: { [lease] in
+            try await lease.feed.client.listSessions().map {
                 SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals, approvalPolicy: $0.approvalPolicy, runtimeKind: $0.runtimeKind, providerId: $0.providerId)
             }
         })
@@ -139,9 +149,8 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // pinned-mode fallback (apply only events matching the pinned sessionId, plus every
         // connection state) still runs unchanged; the directory is purely an ADDITIONAL observer,
         // not a replacement for the existing event-application path.
-        feed.onEvent = { [sessionDirectory] ev in
+        lease.onEvent = { [sessionDirectory] ev in
             if case .session(let e) = ev { sessionDirectory.handle(e) }
-            return false
         }
 
         // Drawn entirely by Winter in the dispatch pill's material (user, 2026-10-02): no macOS frame,
@@ -196,7 +205,9 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // place" re-pins THIS controller's `sessionId` after construction, and these closures
         // outlive that repin (they're stored on the adapter for the window's whole lifetime). A
         // captured `sid` would keep targeting the OLD session forever after a repin.
-        let client = feed.client
+        // Read off the lease at each use, not once: the window can move onto another session's feed (`selectSession`),
+        // and the client of the feed it left is closed once nobody holds that one.
+        var client: WinterClient { lease.feed.client }
         adapter.onApprovalRespond = { [weak self, weak adapter] callId, approved, optionId, childSessionId in
             guard let adapter else { return }
             adapter.interactionInFlight.insert(callId)
@@ -426,7 +437,10 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // holding Winter's windows.
         window.orderFrontRegardless()
         window.makeKey()
-        feedTask = Task { await feed.start() }
+        // A standalone lease starts its feed here (and cancels the start Task on close — `SessionFeed.start()`'s connect
+        // backoff exits only on cancellation, and D9 says a closed window leaves NOTHING running); a shared one was
+        // started by the hub when the first surface took it.
+        lease.begin()
         installEscMonitor()
     }
 
@@ -492,9 +506,10 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // session being left.
         adapter.interactionInFlight = []
         adapter.interactionErrors = [:]
-        Task { @MainActor [weak self] in
-            await self?.feed.repin(to: sessionId)
-        }
+        // Onto the new session's feed — this window's own re-pinned (the only holder of the old one) or one it shares —
+        // and its model onto that session's: emptied first, then the history, the shape a re-pin always gave the views.
+        lease.move(to: sessionId)
+        if session.following !== lease.session { session.follow(lease.session, resetting: true) }
     }
 
     /// Plan-immunity (2026-07-28 design; fix round 1, Minor 3 — comment corrected, default kept):
@@ -709,9 +724,8 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         stackMembership?.remove(self)
         guard !didClose else { return }
         didClose = true
-        feedTask?.cancel()
-        feedTask = nil
-        feed.stop()
+        lease.release()
+        session.stopFollowing()
         mirrorWatch = nil
         mirrorBinder?.close()
         mirrorBinder = nil

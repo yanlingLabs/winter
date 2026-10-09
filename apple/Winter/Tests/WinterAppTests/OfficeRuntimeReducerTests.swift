@@ -2815,15 +2815,37 @@ final class OfficePlaceAtomicallyTests: XCTestCase {
         XCTAssertEqual(mode, 0o600)
     }
 
-    func testThrowsAndLeavesNoSiblingWhenTheDestinationDirectoryIsNotThere() throws {
-        let missingDir = URL(fileURLWithPath: "/tmp/office-place-atomically-missing-\(UUID().uuidString.prefix(8))")
-        let destination = missingDir.appendingPathComponent("gate.xlsx")
+    /// office-authoring: a destination whose PARENT is not there yet is a document being CREATED, and
+    /// `placeAtomically` makes the directories (the write contract — `fs-write.ts`: "creates parent
+    /// directories" — so an agent writing `reports/2026/q3.docx` never has to mkdir first). The
+    /// primitive used to refuse this; the doc on the function and this test now say the same thing.
+    func testCreatesTheDestinationsMissingParentDirectories() throws {
+        let root = makeScratchDirectory()
+        let destination = root.appendingPathComponent("reports/2026/q3.docx")
+        let helperTemp = makeScratchDirectory().appendingPathComponent("rendered")
+        try "brand new".write(to: helperTemp, atomically: true, encoding: .utf8)
+
+        try OfficeRuntime.placeAtomically(tempPath: helperTemp.path, at: destination.path)
+
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "brand new")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: destination.deletingLastPathComponent().path),
+                       ["q3.docx"], "and no `.winter-save-…` sibling in the directory it made")
+    }
+
+    /// A directory that CANNOT be made is a real save failure: it throws, and leaves nothing beside the
+    /// user's files. (The parent here is a regular file, which no `mkdir -p` can turn into a directory.)
+    func testThrowsAndLeavesNothingWhenTheDestinationDirectoryCannotBeCreated() throws {
+        let root = makeScratchDirectory()
+        let blocker = root.appendingPathComponent("blocker")
+        try "I am a file".write(to: blocker, atomically: true, encoding: .utf8)
+        let destination = blocker.appendingPathComponent("gate.xlsx")
         let helperTemp = makeScratchDirectory().appendingPathComponent("rendered")
         try "rendered".write(to: helperTemp, atomically: true, encoding: .utf8)
 
         XCTAssertThrowsError(try OfficeRuntime.placeAtomically(tempPath: helperTemp.path, at: destination.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: missingDir.path), "never even creates "
-                       + "the missing directory, let alone a leftover sibling in it")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["blocker"],
+                       "nothing was left beside the file that is in the way")
+        XCTAssertEqual(try String(contentsOf: blocker, encoding: .utf8), "I am a file", "and it was not touched")
     }
 
     /// The EXDEV-safety argument, made concrete rather than only argued in the doc comment: the

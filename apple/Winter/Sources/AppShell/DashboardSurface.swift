@@ -254,10 +254,10 @@ struct DashboardWiring {
     /// is one; `nil` renders the page's control inert.
     var dispatchPillSettings: DispatchPillSettings? = nil
 
-    /// 2026-09-18 — the three SDK versions (Winter agent SDK, Winter runtime SDK, Claude agent SDK).
+    /// 2026-09-18 — the SDK versions (Winter agent SDK, Winter runtime SDK; WS-23 dropped the Claude agent SDK row).
     ///
     /// `nil` TODAY, deliberately: the daemon RPC that answers this is being built by another
-    /// session. The panel renders `pendingSdkComponents` in that case — three named rows that say
+    /// session. The panel renders `pendingSdkComponents` in that case — two named rows that say
     /// they are waiting — so the shape of the table is already final and wiring the RPC is a single
     /// closure here, with no view change at all.
     ///
