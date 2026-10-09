@@ -78,18 +78,73 @@ export function pointerMoves(samples: readonly MonitorSample[], from: number, to
 }
 
 /** `--unattended`: how long the Mac must have had no real input before a run may start. */
-const UNATTENDED_IDLE_MS = 60_000;
+export const UNATTENDED_IDLE_MS = 60_000;
+/** `--unattended`: how often the idle gate looks again. */
+export const UNATTENDED_POLL_MS = 5_000;
 
-/** Why the run must not start, from `cu-live-tool front`'s line (the active Space's type, HID idle); else undefined. */
-export function startRefusal(frontLine: string, unattended: boolean): string | undefined {
-  let o: Record<string, unknown>;
-  try { o = JSON.parse(frontLine.trim().split("\n").at(-1) ?? "") as Record<string, unknown>; } catch { return "cu-live-tool front gave no reading"; }
-  if (o.spaceType === 4) return "the active Space is a full-screen app's — start the run from a regular desktop";
-  if (unattended) {
-    if (typeof o.hidIdleMs !== "number") return "--unattended: no HID idle reading, so it cannot tell whether someone is at the Mac";
-    if (o.hidIdleMs < UNATTENDED_IDLE_MS) return `--unattended: real input ${Math.round(o.hidIdleMs / 1000)} s ago — someone is at the Mac, so the run was not started`;
+/** `cu-live-tool front`: what is in front, the active Space and its type (4 = a full-screen app's), HID idle. */
+export interface FrontReading { front: string | null; frontPid: number | null; space: number | null; spaceType: number | null; hidIdleMs: number | null }
+
+export function parseFrontReading(stdout: string): FrontReading | undefined {
+  try {
+    const o = JSON.parse(stdout.trim().split("\n").at(-1) ?? "") as Record<string, unknown>;
+    const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    if (typeof o.t !== "number") return undefined;
+    return { front: typeof o.front === "string" ? o.front : null, frontPid: num(o.frontPid), space: num(o.space), spaceType: num(o.spaceType), hidIdleMs: num(o.hidIdleMs) };
+  } catch {
+    return undefined;
   }
-  return undefined;
+}
+
+/** `--max-wait`: "90", "90s", "45m", "3h" → milliseconds; undefined when malformed. */
+export function parseDuration(text: string): number | undefined {
+  const m = /^(\d+(?:\.\d+)?)(s|m|h)?$/.exec(text.trim());
+  if (m === null) return undefined;
+  const n = Number(m[1]);
+  return Math.round(n * (m[2] === "h" ? 3_600_000 : m[2] === "m" ? 60_000 : 1_000));
+}
+
+export type IdleDecision = { kind: "go" } | { kind: "wait"; reason: string } | { kind: "refuse"; reason: string };
+
+/**
+ * Whether the run may start now. A run someone started by hand goes at once; an unattended one (an approved agent
+ * run) waits — polled every `UNATTENDED_POLL_MS` — until the Mac has had `UNATTENDED_IDLE_MS` with no real input, and
+ * gives up after `maxWaitMs`.
+ */
+export function idleGate(reading: FrontReading | undefined, waitedMs: number, maxWaitMs: number, unattended: boolean): IdleDecision {
+  if (!unattended) return { kind: "go" };
+  if (reading === undefined || reading.hidIdleMs === null) return { kind: "refuse", reason: "--unattended: no HID idle reading, so it cannot tell whether someone is at the Mac" };
+  if (reading.hidIdleMs >= UNATTENDED_IDLE_MS) return { kind: "go" };
+  if (waitedMs + UNATTENDED_POLL_MS > maxWaitMs) {
+    return { kind: "refuse", reason: `--unattended: waited ${Math.round(waitedMs / 60_000)} min and the Mac was never idle for ${UNATTENDED_IDLE_MS / 1000} s — the run was not started` };
+  }
+  return { kind: "wait", reason: `waiting for ${UNATTENDED_IDLE_MS / 1000} s with no input (last input ${Math.round(reading.hidIdleMs / 1000)} s ago)…` };
+}
+
+/** Where the user is when the run starts, and where they go back to at its end. */
+export type StartPlan =
+  | { kind: "desktop"; space: number | null }
+  | { kind: "from-fullscreen"; returnTo: { pid: number; bundleId: string | null; space: number } }
+  | { kind: "refuse"; reason: string };
+
+/**
+ * On a regular desktop the run starts where the user is. On a full-screen app's Space (no other window can open
+ * there) the run records that app and Space, moves the user to a regular desktop — the user's-app fixture opens on
+ * one, and `test.activate` brings it in front — and at the end (an abort included) activates the recorded app again
+ * and checks the active Space is the recorded one.
+ */
+export function startPlan(reading: FrontReading): StartPlan {
+  if (reading.spaceType !== 4) return { kind: "desktop", space: reading.space };
+  if (reading.frontPid === null || reading.space === null) return { kind: "refuse", reason: "the active Space is a full-screen app's, but there is no frontmost app or Space id to return the user to" };
+  return { kind: "from-fullscreen", returnTo: { pid: reading.frontPid, bundleId: reading.front, space: reading.space } };
+}
+
+export function describeStartPlan(plan: StartPlan): string {
+  switch (plan.kind) {
+    case "desktop": return `starts on your regular desktop (Space ${plan.space ?? "?"}) and stays there`;
+    case "from-fullscreen": return `you are in full screen (${plan.returnTo.bundleId ?? "pid " + plan.returnTo.pid}, Space ${plan.returnTo.space}): the run moves you to a regular desktop, then returns you to that app and Space at the end (an abort too)`;
+    case "refuse": return `refuses: ${plan.reason}`;
+  }
 }
 
 /** Collapse a violation list into one readable line (first time, count). */

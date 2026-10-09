@@ -10,7 +10,9 @@
  *     on ANY installed app (a Unity app: --apps "VRoid Studio"); --real-apps adds VS Code and Chrome when installed
  *   options: --only <text> (scenarios whose name contains it; a|b for either), --yes (no countdown), --keep-temp,
  *            --report <file.json> (every check + failing outputs), --script <file.js> (one ad-hoc script),
- *            --unattended (an agent's run: no countdown, and it starts only after 60 s with no real input),
+ *            --unattended (an agent's run: no countdown; waits — every 5 s, up to --max-wait <90s|45m|3h>, default 3h —
+ *            until 60 s with no real input). From a full-screen app's Space any run moves the user to a regular desktop
+ *            and returns them to that app and Space at the end (an abort too).
  *            --no-done-window (CI: no end-of-run completion window; else it shows after the cleanup, 30 min at most),
  *            --helper-app <path to "Winter Computer Use Dev.app"> (else $WINTER_COMPUTER_USE_APP, else dist/dev/)
  *
@@ -40,7 +42,7 @@ import { resolvePlatformPackageWinter } from "../../packages/core/src/runtime-sd
 import { buildAll, FIXTURE_MAIN, OUT_DIR, REPO_ROOT, type Built } from "./build";
 import { DaemonClient } from "./client";
 import {
-  check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, pointerMoves, startRefusal, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
+  parseDuration, check, computerV2Message, describeViolations, focusViolations, hidInputTimes, markerFacts, pointerMoves, idleGate, parseFrontReading, startPlan, describeStartPlan, UNATTENDED_POLL_MS, type FrontReading, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, type RealAppsRun } from "./real-apps";
@@ -60,10 +62,10 @@ const LIMITS = {
 const WATCH_AFTER_MS = 3_000;
 const MONITOR_INTERVAL_MS = 20;
 
-interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string; report?: string; script?: string; unattended: boolean; noDoneWindow: boolean }
+interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string; report?: string; script?: string; unattended: boolean; noDoneWindow: boolean; maxWaitMs: number }
 
 function parseOptions(argv: string[]): Options {
-  const o: Options = { dryRun: false, realApps: false, yes: false, keepTemp: false, unattended: false, noDoneWindow: false };
+  const o: Options = { dryRun: false, realApps: false, yes: false, keepTemp: false, unattended: false, noDoneWindow: false, maxWaitMs: 3 * 3_600_000 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--dry-run") o.dryRun = true;
@@ -76,6 +78,11 @@ function parseOptions(argv: string[]): Options {
     else if (a === "--report") o.report = argv[++i];
     else if (a === "--unattended") { o.unattended = true; o.yes = true; }
     else if (a === "--no-done-window") o.noDoneWindow = true;
+    else if (a === "--max-wait") {
+      const ms = parseDuration(argv[++i] ?? "");
+      if (ms === undefined) throw new Error("--max-wait takes a duration: 90s, 45m, 3h");
+      o.maxWaitMs = ms;
+    }
     else if (a === "--script") { o.script = argv[++i]; o.only = "script"; }
     else throw new Error(`unknown option ${a}`);
   }
@@ -315,6 +322,11 @@ async function dryRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   selfTest("cu-live-viewprobe self-test", built.viewProbe, ["self-test"]);
   results.push(await plumbingCheck(built));
   results.push(await peerCheck(built, o));
+  // The START plan (read-only, no wait): what a live run would do from where the user is now.
+  const reading = parseFrontReading(sh(built.tool, ["front"]).stdout);
+  results.push(reading === undefined
+    ? { name: "plan: the start", group: "plan", status: "fail", ms: 0, checks: [check("cu-live-tool front gave a reading", false)] }
+    : { name: "plan: the start", group: "plan", status: "pass", ms: 0, checks: [check("cu-live-tool front gave a reading", true)], note: `${describeStartPlan(startPlan(reading))}; ${o.unattended ? `waits for 60 s with no input (now ${Math.round((reading.hidIdleMs ?? 0) / 1000)} s)` : "starts at once"}` });
   // The generic app checks' PLAN (no screen): which apps would run, and what each would do.
   const deps = liveResolveDeps();
   for (const a of [...parseApps(o.apps), ...(o.realApps ? DEFAULT_GENERIC_APPS.map((d, i) => ({ query: d.query, key: `default${i}` })) : [])]) {
@@ -416,6 +428,23 @@ class Aborted extends Error {}
 const actionWindows: Array<[number, number]> = [];
 const ACTION_SLACK_MS = 1_500;
 
+/** The `front` reading the run starts from — after the unattended idle wait (every 5 s, up to --max-wait). */
+async function waitToStart(built: Pick<Built, "tool">, o: Options): Promise<FrontReading> {
+  const t0 = Date.now();
+  let logged = 0;
+  for (;;) {
+    const reading = parseFrontReading(sh(built.tool, ["front"]).stdout);
+    const d = idleGate(reading, Date.now() - t0, o.maxWaitMs, o.unattended);
+    if (d.kind === "go") {
+      if (reading === undefined) throw new Error("cu-live-tool front gave no reading");
+      return reading;
+    }
+    if (d.kind === "refuse") throw new Error(d.reason);
+    if (Date.now() - logged >= 60_000) { log(d.reason); logged = Date.now(); }
+    await sleep(UNATTENDED_POLL_MS);
+  }
+}
+
 async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   const helperApp = helperAppPath(o);
   const results: ScenarioResult[] = [];
@@ -437,6 +466,9 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   let baseline: FocusBaseline | undefined;
   let offspaceMethod = "?";
   let activateUser: () => Promise<void> = async () => { throw new Error("the helper is not up yet"); };
+  /** A full-screen start: the app and Space to return the user to at the end (abort included). */
+  let returnTo: { pid: number; bundleId: string | null; space: number } | undefined;
+  let returnHome: (() => Promise<string>) | undefined;
   let inputWatchFrom = Number.POSITIVE_INFINITY;
   const runStartedAt = Date.now();
   const abortIfInput = (): void => {
@@ -456,13 +488,29 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   };
   try {
     // ── setup ──────────────────────────────────────────────────────────────────────────────────────────────────
-    // Before anything launches: never from a full-screen app's Space (the user's app could not open there, and the
-    // run could not bring the user back to it); unattended (an agent's run), never while someone is at the Mac.
-    const start = startRefusal(sh(built.tool, ["front"]).stdout, o.unattended);
-    if (start !== undefined) throw new Error(start);
+    // Before anything launches: unattended (an approved agent run), wait until nobody is at the Mac; then the plan —
+    // where the user is, and, from a full-screen app's Space, where to return them at the end.
+    const reading = await waitToStart(built, o);
+    // Nothing of an earlier run may stay up: a fixture a crashed run left (binds resolve the fixture by NAME, so a
+    // second "Winter CU Fixture" is picked up), or the previous run's completion window. Every process of the
+    // suite's fixture binary (its own executable name, whatever checkout built it) is closed.
+    const leftovers = sh("pgrep", ["-x", "WinterCUFixture"]).stdout.split("\n").map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    for (const pid of leftovers) { try { process.kill(pid, "SIGTERM"); } catch { /* gone */ } }
+    if (leftovers.length > 0) {
+      await until("earlier fixture processes to exit", 5_000, () => leftovers.every((p) => !processAlive(p))).catch(() => undefined);
+      log(`closed ${leftovers.length} fixture process(es) an earlier run left (a completion window included)`);
+    }
+    const plan = startPlan(reading);
+    if (plan.kind === "refuse") throw new Error(plan.reason);
+    log(`start: ${describeStartPlan(plan)}`);
+    if (plan.kind === "from-fullscreen") returnTo = plan.returnTo;
     monitor = new LineProcess<MonitorSample>(spawn(built.tool, ["monitor", "--interval-ms", String(MONITOR_INTERVAL_MS)], { stdio: ["pipe", "pipe", "pipe"] }), parseMonitorLine);
     await until("the monitor's first sample", 5_000, () => monitor!.items.length > 0);
     const spaceBefore = monitor.items.at(-1)!.space;
+    // The user's Space for this run: where they are, or — from full screen — the regular desktop the run moves them to.
+    let homeSpace: number | null = returnTo === undefined ? spaceBefore : null;
+    // From here on real input stops the run (setup included: moving the user is no reason to act against them).
+    inputWatchFrom = Date.now();
 
     // The daemon and the helper instance FIRST: on macOS 26 a background process's activation requests are ignored
     // (cooperative activation), so the runner puts the user's app in front through the live-test helper's
@@ -511,7 +559,12 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
       }
       return routes.join("; ");
     };
-    activateUser = async () => { await bringToFront(f.userPid!, "the user's app", baseline?.space ?? spaceBefore); };
+    activateUser = async () => { await bringToFront(f.userPid!, "the user's app", baseline?.space ?? homeSpace); };
+    if (returnTo !== undefined) {
+      const back = returnTo;
+      returnHome = () => bringToFront(back.pid, `your full-screen app (${back.bundleId ?? "pid " + back.pid})`, back.space);
+    }
+    abortIfInput();
 
     log("launching the user's app and the fixture…");
     launchFixture(built.fixtureUser, "user", f, false);
@@ -519,11 +572,20 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     launchFixture(built.fixtureMain, "main", f, true);
     f.mainPid = Number((await until("the fixture", 15_000, () => fixtureEvents(f).find((e) => e.role === "main" && e.ev === "launched"))).pid);
     log(`the user's app in front: ${await bringToFront(f.userPid, "the user's app")}`);
-    // A full-screen app's Space takes no other window: the user's app opened on a regular desktop instead, and
-    // nothing could bring the user back to where they were. Refuse rather than leave them elsewhere.
+    abortIfInput();
     const landedOn = monitor.items.at(-1)!.space;
-    if (spaceBefore !== null && landedOn !== null && landedOn !== spaceBefore) {
-      throw new Error(`the run started on Space ${spaceBefore}, but the user's app opened on Space ${landedOn} — start it from a regular desktop, not a full-screen app's Space`);
+    if (returnTo !== undefined) {
+      // From full screen: the user's app opened on a regular desktop (a full-screen app's Space takes no other
+      // window) and bringing it in front moved the user there. That desktop is the run's Space.
+      const here = parseFrontReading(sh(built.tool, ["front"]).stdout);
+      if (landedOn === null || landedOn === returnTo.space || here?.spaceType === 4) {
+        throw new Error(`could not move you to a regular desktop from full screen (now Space ${landedOn ?? "?"}, type ${here?.spaceType ?? "?"})`);
+      }
+      homeSpace = landedOn;
+      log(`moved you from full screen (Space ${returnTo.space}) to a regular desktop (Space ${landedOn}); you go back at the end`);
+    } else if (spaceBefore !== null && landedOn !== null && landedOn !== spaceBefore) {
+      // On a desktop the user's app opens where the user is; anywhere else nothing could bring them back.
+      throw new Error(`the run started on Space ${spaceBefore}, but the user's app opened on Space ${landedOn}`);
     }
     // The off-Space window: the fixture moves its OWN window to another regular Space (an existing desktop, else one
     // it creates — private SkyLight, which may be allowed for one's own connection), falling back to full screen
@@ -534,8 +596,9 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     offspaceMethod = String(placed.method);
     log(`off-Space window: ${offspaceMethod}${placed.error ? ` (earlier attempts: ${String(placed.error)})` : ""}`);
     await sleep(800);
-    log(`back to your Space: ${await bringToFront(f.userPid, "the user's app on your Space", spaceBefore)}`);
+    log(`back to your Space: ${await bringToFront(f.userPid, "the user's app on your Space", homeSpace)}`);
     await sleep(500);
+    abortIfInput();
     const now = monitor.items.at(-1)!;
     baseline = { frontPid: f.userPid, front: now.front, space: now.space };
     log(`baseline: frontmost ${baseline.front} (pid ${baseline.frontPid}), Space ${baseline.space ?? "?"}`);
@@ -562,7 +625,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
       await sleep(2_000);
       await activateUser();
     }
-    inputWatchFrom = Date.now();
+    abortIfInput();
 
     // ── scenarios ──────────────────────────────────────────────────────────────────────────────────────────────
     /** One scenario: its before-commands, the ComputerV2 call, the 3 s watch, then every check. */
@@ -696,6 +759,9 @@ report({ ok: true });`, 40_000), 100_000);
         if (processAlive(pid)) throw new Error(`pid ${pid} is still running`);
       });
     }
+    // From a full-screen start (an abort included): back to the user's full-screen app and its Space — while the
+    // helper (test.activate) is still up, after the fixtures (one of them full screen) are gone.
+    if (returnHome !== undefined) await step(`returned you to your full-screen app and Space ${returnTo!.space}`, async () => { log(`back to full screen: ${await returnHome!()}`); });
     if (probe !== undefined) await step("stopped the mirror probe", () => probe!.stop());
     client?.close();
     askClient?.close();
@@ -707,7 +773,11 @@ report({ ok: true });`, 40_000), 100_000);
       if (processAlive(helperPid!)) throw new Error(`helper pid ${helperPid} is still running`);
     });
     if (clipboard.length > 0) await step("restored the clipboard's text", () => { sh("pbcopy", [], clipboard); });
-    if (monitor !== undefined && baseline !== undefined) {
+    if (monitor !== undefined && returnTo !== undefined && returnHome !== undefined) {
+      await sleep(800);
+      const last = monitor.items.at(-1);
+      cleanup.push(check("you are back in your full-screen app, on its Space", last !== undefined && last.space === returnTo.space && last.frontPid === returnTo.pid, `Space ${last?.space}, frontmost ${last?.front} (pid ${last?.frontPid})`));
+    } else if (monitor !== undefined && baseline !== undefined) {
       await sleep(800);
       const last = monitor.items.at(-1);
       cleanup.push(check("you are back on your Space", last === undefined || baseline.space === null || last.space === baseline.space, `Space ${last?.space}`));
@@ -971,7 +1041,7 @@ async function main(): Promise<void> {
   // the run, never for a dry run, never with --no-done-window (CI).
   if (!o.dryRun && !o.noDoneWindow) {
     const model = doneWindowModel(results, Date.now() - startedAt, Date.now(), report ?? "");
-    const shown = sh("open", doneWindowOpenArgs(built.fixtureMain, model));
+    const shown = sh("open", doneWindowOpenArgs(built.fixtureDone, model));
     if (shown.status !== 0) log(`the completion window did not open: ${shown.stderr.trim()}`);
   }
   process.exit(results.some((r) => r.status === "fail") ? 1 : 0);

@@ -26,6 +26,12 @@ const ENTITLEMENTS = join(REPO_ROOT, "scripts", "winter-core.entitlements");
 // Never a `com.winter.` id: ComputerV2 refuses to bind any app under that prefix ("Winter can't control itself").
 export const FIXTURE_MAIN = { name: "Winter CU Fixture", bundleId: "dev.cu-live.fixture" } as const;
 export const FIXTURE_USER = { name: "Winter CU User App", bundleId: "dev.cu-live.fixture-user" } as const;
+/**
+ * The end-of-run completion window (the same binary's `--done` mode) — its OWN bundle, name and id: run from the
+ * fixture's bundle it was a second "Winter CU Fixture" (one floating window) that the next run's binds picked up.
+ * An agent app (LSUIElement): no Dock icon, never the active app.
+ */
+export const FIXTURE_DONE = { name: "Winter CU Live Result", bundleId: "dev.cu-live.result" } as const;
 /** Test-only identities (never a production identifier) — `WinterCodeIdentity.liveTest*Identifier` in the helper. */
 export const VIEW_PROBE_IDENTIFIER = "com.winter.app.cutest";
 export const LIVE_DAEMON_IDENTIFIER = "com.winter.core.cutest";
@@ -38,6 +44,8 @@ export function stated(identifier: string, teamId = WINTER_TEAM_ID): string {
 export interface Built {
   fixtureMain: string;
   fixtureUser: string;
+  /** The completion window's bundle (`--done` mode of the fixture binary). */
+  fixtureDone: string;
   tool: string;
   viewProbe: string;
   daemon: string;
@@ -111,12 +119,13 @@ function wrapFixture(binary: string, app: { name: string; bundleId: string }): s
     // Only the target fixture opens `.wcufix` documents: two bundles claiming one type would let LaunchServices pick either.
     for (const key of ["CFBundleDocumentTypes", "UTExportedTypeDeclarations"]) run("plutil", ["-remove", key, plist]);
   }
+  if (app.bundleId === FIXTURE_DONE.bundleId) must(run("plutil", ["-replace", "LSUIElement", "-bool", "true", plist]), "plutil LSUIElement");
   for (const f of readdirSync(WEB_DIR)) copyFileSync(join(WEB_DIR, f), join(bundle, "Contents", "Resources", f));
   must(run("codesign", ["--force", "--sign", "-", "--timestamp=none", bundle]), `codesign ${app.name}`);
   return bundle;
 }
 
-export function buildFixtures(log: (l: string) => void): { main: string; user: string } {
+export function buildFixtures(log: (l: string) => void): { main: string; user: string; done: string } {
   const binary = join(OUT_DIR, "WinterCUFixture.bin");
   const inputs = [join(SWIFT_DIR, "Fixture"), WEB_DIR];
   if (!current(binary, inputs)) {
@@ -125,11 +134,13 @@ export function buildFixtures(log: (l: string) => void): { main: string; user: s
   }
   const main = appPath(FIXTURE_MAIN);
   const user = appPath(FIXTURE_USER);
-  if (!current(join(main, "Contents", "MacOS", "WinterCUFixture"), [binary]) || !current(join(user, "Contents", "MacOS", "WinterCUFixture"), [binary])) {
+  const done = appPath(FIXTURE_DONE);
+  if ([main, user, done].some((b) => !current(join(b, "Contents", "MacOS", "WinterCUFixture"), [binary]))) {
     wrapFixture(binary, FIXTURE_MAIN);
     wrapFixture(binary, FIXTURE_USER);
+    wrapFixture(binary, FIXTURE_DONE);
   }
-  return { main, user };
+  return { main, user, done };
 }
 
 export function buildTool(log: (l: string) => void): string {
@@ -182,6 +193,6 @@ export function buildAll(log: (l: string) => void): Built {
   writeFileSync(join(OUT_DIR, "README.txt"), "Built by scripts/cu-live/build.ts for `bun run e2e:cu-live`. Safe to delete.\n");
   const identity = signingIdentity();
   log(`signing identity: ${identity.name}`);
-  const { main, user } = buildFixtures(log);
-  return { fixtureMain: main, fixtureUser: user, tool: buildTool(log), viewProbe: buildViewProbe(identity, log), daemon: buildDaemon(identity, log) };
+  const { main, user, done } = buildFixtures(log);
+  return { fixtureMain: main, fixtureUser: user, fixtureDone: done, tool: buildTool(log), viewProbe: buildViewProbe(identity, log), daemon: buildDaemon(identity, log) };
 }
