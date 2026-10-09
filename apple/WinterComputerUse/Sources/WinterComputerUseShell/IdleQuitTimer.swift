@@ -47,19 +47,32 @@ public protocol IdleCancellable: AnyObject {
     }
 }
 
-/// The real clock: the main queue.
+/// The real clock: one-shot main-queue timers WITH leeway, so the system can fire them together with other
+/// wake-ups instead of waking the CPU for each (a plain `asyncAfter` has none: every hub timer, the idle quit and
+/// the off-screen stills each woke it on their own).
 @MainActor public final class MainQueueIdleScheduler: IdleScheduler {
     private final class Item: IdleCancellable {
-        let work: DispatchWorkItem
-        init(_ work: DispatchWorkItem) { self.work = work }
-        func cancel() { work.cancel() }
+        let source: DispatchSourceTimer
+        init(_ source: DispatchSourceTimer) { self.source = source }
+        func cancel() { source.cancel() }
     }
 
     public init() {}
 
+    /// A fifth of the delay, at most 5 s: a 1 s poll may slip 0.2 s, the 10-minute idle quit 5 s.
+    public nonisolated static func leeway(for seconds: TimeInterval) -> DispatchTimeInterval {
+        .milliseconds(Int((min(5, max(0.01, seconds * 0.2)) * 1000).rounded()))
+    }
+
     public func schedule(after seconds: TimeInterval, _ fire: @escaping @MainActor () -> Void) -> IdleCancellable {
-        let work = DispatchWorkItem { MainActor.assumeIsolated { fire() } }
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
-        return Item(work)
+        let source = DispatchSource.makeTimerSource(queue: .main)
+        source.schedule(deadline: .now() + max(0, seconds), leeway: Self.leeway(for: seconds))
+        source.setEventHandler { [source] in
+            // One-shot: the cancel also releases this handler (and the source it holds).
+            source.cancel()
+            MainActor.assumeIsolated { fire() }
+        }
+        source.resume()
+        return Item(source)
     }
 }

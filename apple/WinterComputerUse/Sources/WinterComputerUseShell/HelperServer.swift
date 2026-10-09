@@ -190,7 +190,9 @@ public final class HelperServer: @unchecked Sendable {
     private func startWatchdog() {
         guard config.socketCheckInterval > 0 else { return }
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-        timer.schedule(deadline: .now() + config.socketCheckInterval, repeating: config.socketCheckInterval)
+        // Half the interval of leeway: a re-bind a second late is harmless, and the check rides other wake-ups.
+        timer.schedule(deadline: .now() + config.socketCheckInterval, repeating: config.socketCheckInterval,
+                       leeway: .milliseconds(Int(config.socketCheckInterval * 500)))
         timer.setEventHandler { [weak self] in self?.ensureListening() }
         timer.resume()
         watchdog = timer

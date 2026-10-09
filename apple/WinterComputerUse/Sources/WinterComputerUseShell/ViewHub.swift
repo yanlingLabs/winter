@@ -201,6 +201,16 @@ public enum WindowRelative {
     public static let offScreenSnapshotIdle: TimeInterval = 1
     public static let offScreenSnapshotBackoff: TimeInterval = 30
     public static let offScreenSnapshotFailuresBeforeBackoff = 3
+    /// A watched target with no action for `idleAfter` whose picture has not changed for this long is PAUSED: its
+    /// live capture stops (off screen: its 1 s stills stop) and the last frame stays up. Measured before: an idle
+    /// helper spent ~4.6% CPU taking, drawing and encoding one unchanged still a second of an off-Space window.
+    public static let pauseAfterUnchanged: TimeInterval = 5
+    /// While paused, one still this often checks the window for change (there is no notification for a window's
+    /// pixels): a different one resumes at once. An action, a new frames subscriber or the window going off or
+    /// back on screen resume too.
+    public static let pausedPeekInterval: TimeInterval = 30
+    /// The visibility poll while every watched target is paused.
+    public static let pausedVisibilityPollInterval: TimeInterval = 2
 
     private struct Capture {
         let handle: FrameCapture
@@ -223,6 +233,8 @@ public enum WindowRelative {
         var failures = 0
         var inFlight = false
         var loggedEmpty = false
+        /// The digest of the last still's pixels: the next one with the same pixels is not encoded.
+        var digest: Int?
     }
 
     private let capture: FrameCaptureFactory
@@ -258,8 +270,15 @@ public enum WindowRelative {
     private var offScreen: Set<String> = []
     private var snapshots: [String: SnapshotState] = [:]
     private var visibilityTimer: IdleCancellable?
-    /// The next off-screen snapshot due (its own timer: the cadence is finer than the visibility poll).
+    /// When the armed visibility poll fires: a still due no sooner is taken by that tick, not by a timer of its own.
+    private var visibilityDue: TimeInterval?
+    /// The next snapshot due before the next visibility tick (the active cadence is finer than the poll).
     private var snapshotTimer: (cancellable: IdleCancellable, due: TimeInterval)?
+    /// When each watched target's picture last changed (a new frame sent, an action, a capture started, a resume).
+    private var lastChangeAt: [String: TimeInterval] = [:]
+    /// Targets whose capture (or off-screen stills) is paused: unchanged and unworked-in (`pauseAfterUnchanged`).
+    private var paused: Set<String> = []
+    private var pauseCounts = (pauses: 0, resumes: 0)
 
     public init(capture: FrameCaptureFactory, geometry: WindowGeometry, snapshotter: WindowSnapshotter, clock: ViewClock) {
         self.capture = capture
@@ -270,6 +289,12 @@ public enum WindowRelative {
 
     /// Whether a target's window is known to be off every screen (its live capture paused, its view kept).
     public func isOffScreen(_ targetId: String) -> Bool { offScreen.contains(targetId) }
+
+    /// Whether a target's capture (or off-screen stills) is paused for being unchanged and unworked-in.
+    public func isPaused(_ targetId: String) -> Bool { paused.contains(targetId) }
+
+    /// Pauses and resumes since the last stats line. For tests.
+    public var pauseStats: (pauses: Int, resumes: Int) { pauseCounts }
 
     /// Stream starts, restarts (another window) and in-place updates since the last stats line. For tests.
     public var captureStats: (starts: Int, restarts: Int, updates: Int) { stats }
@@ -292,10 +317,13 @@ public enum WindowRelative {
         let previous = subscriptions[connection]?[p.sessionId]
         subscriptions[connection, default: [:]][p.sessionId] = ViewSubscription(frames: p.frames, maxFps: fps, maxWidth: width)
         log("view: connection \(connection) subscribed to \(p.sessionId) (frames \(p.frames), \(fps) fps, \(width) px)")
-        refreshCaptures()
         let bound = targets.values.filter { $0.sessionId == p.sessionId }.sorted { $0.targetId < $1.targetId }
+        let freshFrames = p.frames && previous?.frames != true
+        // Someone opened the view: a paused window is looked at again (its last frame may be old).
+        if freshFrames { for target in bound { resume(target.targetId, reason: "a new frames subscriber") } }
+        refreshCaptures()
         // A window that is not changing sends no new frame: a new frames subscriber gets the last one at once.
-        if p.frames, previous?.frames != true {
+        if freshFrames {
             for target in bound { if let last = lastFrame[target.targetId] { sendFrame(connection, target.targetId, last.line) } }
         }
         return bound
@@ -351,7 +379,9 @@ public enum WindowRelative {
             lastFrame.removeValue(forKey: target.targetId)
             offScreen.remove(target.targetId)
             snapshots.removeValue(forKey: target.targetId)
+            paused.remove(target.targetId)
         }
+        lastChangeAt[target.targetId] = clock.now
         log("view: \(target.targetId) bound — \(target.appName) window \(target.windowId) "
             + "\(Int(target.windowFrame.width))×\(Int(target.windowFrame.height)), session \(target.sessionId), mirror \(target.mirror)")
         updateVisibility(target.targetId)
@@ -382,6 +412,8 @@ public enum WindowRelative {
         offScreen.remove(targetId)
         snapshots.removeValue(forKey: targetId)
         lastActionAt.removeValue(forKey: targetId)
+        lastChangeAt.removeValue(forKey: targetId)
+        paused.remove(targetId)
         pendingStops.removeValue(forKey: targetId)?.cancel()
         emit(sessionId: target.sessionId, method: "view.released",
              params: ["sessionId": .string(target.sessionId), "targetId": .string(targetId)])
@@ -443,6 +475,9 @@ public enum WindowRelative {
     /// An engine action on a target: full rate now, and for `idleAfter` seconds after the last one.
     private func markActive(_ targetId: String) {
         guard targets[targetId] != nil else { return }
+        // The agent is working there: the picture is about to change.
+        resume(targetId, reason: "an action")
+        lastChangeAt[targetId] = clock.now
         let wasActive = active[targetId] != nil
         if !wasActive {
             // Waking up: is the window where a live capture can see it? (Off screen, a snapshot is due now.)
@@ -488,6 +523,11 @@ public enum WindowRelative {
                 stopCapture(id, reason: "the window is off screen")
                 continue
             }
+            // Unchanged and unworked-in: no stream until an action, a change or a new subscriber resumes it.
+            if paused.contains(id) {
+                stopCapture(id, reason: "paused")
+                continue
+            }
             if var running = captures[id], running.windowId == target.windowId {
                 // A healthy stream is never restarted: a new rate or width is applied in place.
                 if running.maxFps != fps || running.maxWidth != width {
@@ -504,6 +544,7 @@ public enum WindowRelative {
             if restart { stats.restarts += 1 } else { stats.starts += 1 }
             generation += 1
             let current = generation
+            lastChangeAt[id] = clock.now // a new stream gets its time to deliver before it can pause
             log("view: capture of \(id) (\(target.appName) window \(target.windowId)) started at \(fps) fps, \(width) px")
             let handle = capture.start(windowID: CGWindowID(target.windowId), maxFps: fps, maxWidth: width, onFrame: { [weak self] frame in
                 self?.deliver(frame, targetId: id, generation: current)
@@ -538,13 +579,20 @@ public enum WindowRelative {
     /// One `.notice` line a minute while anything is captured: how often streams started, restarted (another
     /// window) and were updated in place — the numbers a live gate checks for flapping.
     private func scheduleStats() {
-        guard statsTimer == nil, !captures.isEmpty else { return }
+        guard statsTimer == nil, !captures.isEmpty || pauseCounts != (0, 0) else { return }
         statsTimer = clock.schedule(after: Self.statsInterval) { [weak self] in
             guard let self else { return }
             self.statsTimer = nil
-            self.log("view: in the last \(Int(Self.statsInterval)) s — \(self.stats.starts) stream start(s), \(self.stats.restarts) restart(s), "
-                + "\(self.stats.updates) in-place update(s); \(self.captures.count) capturing now")
+            var line = "view: in the last \(Int(Self.statsInterval)) s — \(self.stats.starts) stream start(s), \(self.stats.restarts) restart(s), "
+                + "\(self.stats.updates) in-place update(s)"
+            if self.pauseCounts != (0, 0) || !self.paused.isEmpty {
+                line += ", \(self.pauseCounts.pauses) pause(s), \(self.pauseCounts.resumes) resume(s)"
+            }
+            line += "; \(self.captures.count) capturing now"
+            if !self.paused.isEmpty { line += ", \(self.paused.count) paused" }
+            self.log(line)
             self.stats = (0, 0, 0)
+            self.pauseCounts = (0, 0)
             self.scheduleStats()
         }
     }
@@ -566,6 +614,8 @@ public enum WindowRelative {
         if !onScreen, !offScreen.contains(targetId) {
             offScreen.insert(targetId)
             snapshots[targetId] = SnapshotState(nextAt: clock.now)
+            unpauseQuietly(targetId)
+            lastChangeAt[targetId] = clock.now // where it went, its picture is looked at afresh
             log("view: \(targetId) (\(target.appName) window \(target.windowId)) is off screen (another Space or display, "
                 + "or minimized) — its view stays; live frames paused, keeping the last frame and trying snapshots")
             return true
@@ -573,18 +623,26 @@ public enum WindowRelative {
         if onScreen, offScreen.contains(targetId) {
             offScreen.remove(targetId)
             snapshots.removeValue(forKey: targetId)
+            unpauseQuietly(targetId)
+            lastChangeAt[targetId] = clock.now
             log("view: \(targetId) (\(target.appName)) is back on screen — live capture resumes")
             return true
         }
         return false
     }
 
-    /// Runs while anything is watched: re-reads the watched windows' visibility, then takes the snapshots due.
+    /// Runs while anything is watched: re-reads the watched windows' visibility, pauses what is unchanged, then takes
+    /// the stills due. Once a second (every `pausedVisibilityPollInterval` while everything watched is paused), with
+    /// leeway: the idle cadence of the off-screen stills rides this tick instead of a timer of its own.
     private func scheduleVisibilityPoll() {
+        let watched = self.watched
         guard visibilityTimer == nil, !watched.isEmpty else { return }
-        visibilityTimer = clock.schedule(after: Self.visibilityPollInterval) { [weak self] in
+        let interval = watched.allSatisfy(paused.contains) ? Self.pausedVisibilityPollInterval : Self.visibilityPollInterval
+        visibilityDue = clock.now + interval
+        visibilityTimer = clock.schedule(after: interval) { [weak self] in
             guard let self else { return }
             self.visibilityTimer = nil
+            self.visibilityDue = nil
             self.visibilityTick()
         }
     }
@@ -593,32 +651,105 @@ public enum WindowRelative {
         var changed = false
         for id in watched where updateVisibility(id) { changed = true }
         if changed { refreshCaptures() }
-        takeDueSnapshots()
+        pauseUnchanged()
         scheduleVisibilityPoll()
+        takeDueSnapshots()
     }
 
-    /// Asks for every off-screen snapshot that is due, then arms the timer for the next one.
+    // MARK: Pause (unchanged and unworked-in)
+
+    /// Pauses every watched target with no action for `idleAfter` and no change for `pauseAfterUnchanged`.
+    private func pauseUnchanged() {
+        let now = clock.now
+        for id in watched where !paused.contains(id) && active[id] == nil {
+            guard now - (lastActionAt[id] ?? -.infinity) >= Self.idleAfter,
+                  now - (lastChangeAt[id] ?? -.infinity) >= Self.pauseAfterUnchanged else { continue }
+            pause(id)
+        }
+    }
+
+    private func pause(_ id: String) {
+        guard let target = targets[id], paused.insert(id).inserted else { return }
+        pauseCounts.pauses += 1
+        let now = clock.now
+        if offScreen.contains(id) {
+            if var state = snapshots[id], !state.inFlight {
+                state.nextAt = max(state.nextAt, state.startedAt + Self.pausedPeekInterval)
+                snapshots[id] = state
+            }
+        } else {
+            stopCapture(id, reason: "paused")
+            // A still now, as the baseline the checks compare against (not sent: the last frame stays up).
+            snapshots[id] = SnapshotState(nextAt: now)
+        }
+        log("view: \(id) (\(target.appName) window \(target.windowId)) paused — no change and no action for "
+            + "\(Int(Self.pauseAfterUnchanged)) s; the last frame stays, checked every \(Int(Self.pausedPeekInterval)) s")
+        scheduleStats()
+    }
+
+    /// Ends a pause: the caller refreshes the captures (an on-screen target's stream starts again; an off-screen
+    /// one's next still is due at once unless `stillDueNow` is false).
+    @discardableResult
+    private func resume(_ id: String, reason: String, stillDueNow: Bool = true) -> Bool {
+        guard let target = targets[id], unpauseQuietly(id) else { return false }
+        if offScreen.contains(id) {
+            if stillDueNow, var state = snapshots[id], !state.inFlight {
+                state.nextAt = clock.now
+                snapshots[id] = state
+            }
+        } else {
+            snapshots.removeValue(forKey: id) // the live capture owns the picture again
+        }
+        log("view: \(id) (\(target.appName)) resumed — \(reason)")
+        return true
+    }
+
+    /// Clears a pause (counted, not logged: the caller says why). The visibility poll goes back to its full rate.
+    @discardableResult
+    private func unpauseQuietly(_ id: String) -> Bool {
+        guard paused.remove(id) != nil else { return false }
+        pauseCounts.resumes += 1
+        lastChangeAt[id] = clock.now
+        if let due = visibilityDue, due > clock.now + Self.visibilityPollInterval {
+            visibilityTimer?.cancel()
+            visibilityTimer = nil
+            visibilityDue = nil
+            scheduleVisibilityPoll()
+        }
+        return true
+    }
+
+    // MARK: Stills (off screen, and the checks of a paused target)
+
+    /// Asks for every still that is due, then arms the timer for the next one.
     private func takeDueSnapshots() {
         let now = clock.now
-        for id in watched where offScreen.contains(id) {
+        for id in watched where offScreen.contains(id) || paused.contains(id) {
             guard let target = targets[id], var state = snapshots[id], !state.inFlight, now >= state.nextAt else { continue }
             let width = subscribers(of: target.sessionId).map(\.subscription).filter(\.frames).map(\.maxWidth).min() ?? Self.defaultMaxWidth
             state.inFlight = true
             state.startedAt = now
             snapshots[id] = state
             snapshotter.snapshot(windowID: CGWindowID(target.windowId), maxWidth: width,
-                                 privatePath: target.privatePath) { [weak self] frame in
-                self?.snapshotDone(targetId: id, windowId: target.windowId, frame: frame)
+                                 privatePath: target.privatePath, unlessDigest: state.digest) { [weak self] still in
+                self?.snapshotDone(targetId: id, windowId: target.windowId, still: still)
             }
         }
         scheduleSnapshots()
     }
 
-    /// Arms one timer for the earliest snapshot due among watched off-screen targets (none in flight, none due:
-    /// no timer). A timer already armed for that time or earlier is kept.
+    /// Arms one timer for the earliest still due of a target being worked in (its half-second cadence is finer than
+    /// the poll). Every other still — the idle cadence, a paused window's check, a backoff — is taken by the first
+    /// visibility tick at or after it is due: one wake-up for both. A timer already armed for that time or earlier
+    /// is kept.
     private func scheduleSnapshots() {
-        let due = watched.filter { offScreen.contains($0) }
-            .compactMap { id in snapshots[id].flatMap { $0.inFlight ? nil : $0.nextAt } }.min()
+        let tick = visibilityTimer == nil ? nil : visibilityDue
+        let due = watched.filter { offScreen.contains($0) || paused.contains($0) }
+            .compactMap { id -> TimeInterval? in
+                guard let state = snapshots[id], !state.inFlight else { return nil }
+                guard let tick else { return state.nextAt }
+                return active[id] != nil && state.nextAt < tick ? state.nextAt : nil
+            }.min()
         guard let due else {
             snapshotTimer?.cancellable.cancel()
             snapshotTimer = nil
@@ -634,28 +765,45 @@ public enum WindowRelative {
         snapshotTimer = (cancellable, due)
     }
 
-    private func snapshotDone(targetId: String, windowId: UInt32, frame: ViewFrame?) {
+    private func snapshotDone(targetId: String, windowId: UInt32, still: WindowStill) {
         guard var state = snapshots[targetId], targets[targetId]?.windowId == windowId else { return }
         state.inFlight = false
         let now = clock.now
-        let cadence = active[targetId] != nil ? Self.offScreenSnapshotActive : Self.offScreenSnapshotIdle
-        if let frame {
-            state.failures = 0
-            state.loggedEmpty = false
-            state.nextAt = max(now, state.startedAt + cadence)
+        let isPaused = paused.contains(targetId)
+        let cadence = isPaused ? Self.pausedPeekInterval
+            : active[targetId] != nil ? Self.offScreenSnapshotActive : Self.offScreenSnapshotIdle
+        let changed: (frame: ViewFrame, digest: Int)?
+        switch still {
+        case .none:
+            state.failures += 1
+            if !state.loggedEmpty {
+                state.loggedEmpty = true
+                log("view: no snapshot of \(targetId)'s off-screen window — the last frame stays up")
+            }
+            state.nextAt = state.failures >= Self.offScreenSnapshotFailuresBeforeBackoff ? now + Self.offScreenSnapshotBackoff
+                : max(now, state.startedAt + cadence)
             snapshots[targetId] = state
-            if offScreen.contains(targetId) { publish(frame, targetId: targetId) }
             scheduleSnapshots()
             return
+        case .unchanged:
+            changed = nil
+        case .frame(let frame, let digest):
+            changed = digest == state.digest ? nil : (frame, digest)
         }
-        state.failures += 1
-        if !state.loggedEmpty {
-            state.loggedEmpty = true
-            log("view: no snapshot of \(targetId)'s off-screen window — the last frame stays up")
-        }
-        state.nextAt = state.failures >= Self.offScreenSnapshotFailuresBeforeBackoff ? now + Self.offScreenSnapshotBackoff
-            : max(now, state.startedAt + cadence)
+        state.failures = 0
+        state.loggedEmpty = false
+        let baseline = state.digest == nil
+        if let changed { state.digest = changed.digest }
+        // A paused window whose picture changed resumes (an on-screen one's first check is only the baseline).
+        let resumes = isPaused && changed != nil && (!baseline || offScreen.contains(targetId))
+        let next = resumes ? (active[targetId] != nil ? Self.offScreenSnapshotActive : Self.offScreenSnapshotIdle) : cadence
+        state.nextAt = max(now, state.startedAt + next)
         snapshots[targetId] = state
+        if let changed, offScreen.contains(targetId) { publish(changed.frame, targetId: targetId) }
+        if resumes {
+            resume(targetId, reason: "its picture changed", stillDueNow: false)
+            refreshCaptures()
+        }
         scheduleSnapshots()
     }
 
@@ -672,6 +820,7 @@ public enum WindowRelative {
         frame.windowSize = realSize(of: target, reported: captured.windowSize)
         let digest = Self.digest(frame)
         if lastFrame[targetId]?.digest == digest { return }
+        lastChangeAt[targetId] = clock.now
         let seq = (seqs[targetId] ?? 0) + 1
         seqs[targetId] = seq
         guard let line = Self.frameLine(sessionId: target.sessionId, targetId: targetId, seq: seq, frame: frame) else { return }
@@ -681,7 +830,7 @@ public enum WindowRelative {
         }
     }
 
-    static func hasSize(_ size: CGSize) -> Bool { size.width >= 1 && size.height >= 1 }
+    nonisolated static func hasSize(_ size: CGSize) -> Bool { size.width >= 1 && size.height >= 1 }
 
     /// The window's size for a frame: what the capture reported, else the window server's bounds, else the size it
     /// was bound with — a zero size makes Winter.app's mirror a panel of nothing.
@@ -693,7 +842,7 @@ public enum WindowRelative {
 
     /// A cheap fingerprint of a frame: its size and its encoded bytes (the encoder is deterministic, so the same
     /// pixels give the same bytes).
-    static func digest(_ frame: ViewFrame) -> Int {
+    nonisolated static func digest(_ frame: ViewFrame) -> Int {
         var hasher = Hasher()
         hasher.combine(frame.width)
         hasher.combine(frame.height)

@@ -38,6 +38,17 @@ import Foundation
     private var overlays: [TargetKey: CursorOverlaySurface] = [:]
     private var shownOverlays: Set<TargetKey> = []
     private var lastReorder: [TargetKey: TimeInterval] = [:]
+    /// Each target's last cursor event: a cursor resting longer than `restingCursorStillAfter` stops breathing.
+    private var lastCursorAt: [TargetKey: TimeInterval] = [:]
+    /// What each overlay was last handed: an identical frame is not handed again (a still cursor draws nothing).
+    private var appliedToOverlay: [TargetKey: (frame: CursorFrame, style: CursorStyle)] = [:]
+    /// The last cursor event or window move: tracking runs at full rate for `fastTrackingHold` after it.
+    private var lastMotion: TimeInterval = -.infinity
+    private var trackingInterval: TimeInterval?
+
+    /// How long a resting overlay cursor keeps breathing after its last event before it holds still: the same 5 s as
+    /// the in-app mirror's cursor (`CUMirrorModel.restingCursorStillAfter`). The next event starts it again.
+    static let restingCursorStillAfter: TimeInterval = 5
 
     init(windows: CUWindowSource, surfaces: CUSurfaceFactory, clock: CUClock, ticker: CUTicker,
          frames: CUFrameDriver, accessibility: CUAccessibilitySource, ownPID: pid_t = getpid(),
@@ -94,6 +105,8 @@ import Foundation
                 + "\(String(describing: kind).prefix { $0 != "(" }) at \(point), window frame \(frame)")
         }
         windowFrames[key] = frame
+        lastCursorAt[key] = now
+        lastMotion = now
         let local = { (p: CGPoint) in CGPoint(x: p.x - frame.minX, y: p.y - frame.minY) }
         var timeline = cursors[key] ?? CursorTimeline()
         timeline.options.reduceMotion = accessibility.reduceMotion
@@ -185,7 +198,10 @@ import Foundation
         let live = Set(cursors.filter { !$0.value.isHidden(at: now) }.keys)
         for key in live {
             let p = presence(of: key)
-            if let f = p.frame { windowFrames[key] = f }
+            if let f = p.frame {
+                if let was = windowFrames[key], was != f { lastMotion = now } // the user moved or resized it
+                windowFrames[key] = f
+            }
             guard case .visible(let frame) = p else {
                 let reason: String
                 if case .hidden(let last) = p, last != nil {
@@ -198,6 +214,7 @@ import Foundation
                 if shownOverlays.remove(key) != nil {
                     overlays[key]?.setShown(false)
                     occluded[key] = nil
+                    appliedToOverlay[key] = nil
                 }
                 continue
             }
@@ -217,21 +234,31 @@ import Foundation
             overlays[key]?.setShown(false)
             shownOverlays.remove(key)
             occluded[key] = nil
+            appliedToOverlay[key] = nil
         }
         for (key, overlay) in overlays where state.entries[key] == nil && cursors[key] == nil {
             overlay.close()
             overlays[key] = nil
             lastReorder[key] = nil
             occluded[key] = nil
+            appliedToOverlay[key] = nil
+            lastCursorAt[key] = nil
         }
         updateOcclusion(now: now)
         pushCursorFrames(now: now)
 
         let busy = !shownMirrors.isEmpty || !shownOverlays.isEmpty || state.hasPendingTimers
-        if busy, !ticker.isRunning {
-            ticker.start(interval: tuning.trackingInterval) { [weak self] in self?.refresh() }
+        // Full rate while something moves (a cursor gliding or ringing, an event or a window move in the last
+        // `fastTrackingHold`) or a mirror shows; a resting cursor over a still window is followed at the idle rate.
+        let fast = !shownMirrors.isEmpty || driverNeed == .full || now - lastMotion < tuning.fastTrackingHold
+        let interval = fast ? tuning.trackingInterval : tuning.idleTrackingInterval
+        if busy, !ticker.isRunning || trackingInterval != interval {
+            ticker.start(interval: interval) { [weak self] in self?.refresh() }
+            windows.setFollowInterval(interval)
+            trackingInterval = interval
         } else if !busy, ticker.isRunning {
             ticker.stop()
+            trackingInterval = nil
         }
     }
 
@@ -280,12 +307,27 @@ import Foundation
         let style = CursorStyle(increaseContrast: accessibility.increaseContrast)
         var need = CursorAnimationNeed.none
         for (key, timeline) in cursors {
-            let frame = timeline.frame(at: now)
-            if shownOverlays.contains(key) { overlays[key]?.apply(cursor: frame, style: style) }
+            var keyNeed = timeline.animationNeed(at: now)
+            var at = now
+            // Resting (only breathing) for longer than `restingCursorStillAfter`: held still on the frame it had then,
+            // so neither the display link nor the tracking tick redraws it. Anything else (a fade, an event) moves.
+            if keyNeed == .low, let last = lastCursorAt[key], now - last >= Self.restingCursorStillAfter {
+                keyNeed = .none
+                at = last + Self.restingCursorStillAfter
+            }
+            let frame = timeline.frame(at: at)
+            if shownOverlays.contains(key), let overlay = overlays[key] {
+                if let applied = appliedToOverlay[key], applied.frame == frame, applied.style == style {
+                    // unchanged: nothing to draw
+                } else {
+                    overlay.apply(cursor: frame, style: style)
+                    appliedToOverlay[key] = (frame, style)
+                }
+            }
             if shownMirrors.contains(key), let size = windowFrames[key]?.size {
                 mirrors[key]?.apply(cursor: frame, style: style, windowSize: size)
             }
-            need = max(need, timeline.animationNeed(at: now))
+            need = max(need, keyNeed)
         }
         if need == .none {
             if frames.isRunning { frames.stop() }
@@ -311,6 +353,8 @@ import Foundation
         overlays.removeValue(forKey: key)?.close()
         shownOverlays.remove(key)
         lastReorder[key] = nil
+        appliedToOverlay[key] = nil
+        lastCursorAt[key] = nil
         mirrorOrder.removeAll { $0 == key }
         cursors[key] = nil
         windowFrames[key] = nil

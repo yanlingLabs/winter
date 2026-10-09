@@ -46,7 +46,7 @@ final class OffScreenStillTests: XCTestCase {
 
     private func take(_ s: LiveWindowSnapshotter, privatePath: Bool, maxWidth: Int = 720) async -> ViewFrame? {
         await withCheckedContinuation { done in
-            s.snapshot(windowID: 77, maxWidth: maxWidth, privatePath: privatePath) { done.resume(returning: $0) }
+            s.snapshot(windowID: 77, maxWidth: maxWidth, privatePath: privatePath) { (frame: ViewFrame?) in done.resume(returning: frame) }
         }
     }
 

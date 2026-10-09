@@ -127,8 +127,9 @@ final class ViewOffScreenTests: XCTestCase {
         rig.clock.advance(by: 1)
         rig.snapshotter.answer(nil)
         let asked = run(rig, for: 60, answer: nil)
-        // first at once (4 s), then 5 s, 6 s, then every 30 s
-        XCTAssertEqual(asked, [5, 6, 36], "not a capture a second for a window macOS will not render")
+        // first at once (4 s), then 5 s, 6 s, then every 30 s — on the visibility poll's tick (every 2 s once the
+        // window is also paused for being unchanged), so 37 s rather than 36
+        XCTAssertEqual(asked, [5, 6, 37], "not a capture a second for a window macOS will not render")
     }
 
     func testAnActionOnAnOffScreenWindowAsksForASnapshotAtOnce() {

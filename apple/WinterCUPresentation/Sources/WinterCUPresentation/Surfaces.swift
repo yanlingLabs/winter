@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 
 // The seams between the controller's decisions and what AppKit draws. The real implementations live in Platform/;
 // tests use recording fakes, so no window is ever created by a unit test.
@@ -10,6 +11,12 @@ import CoreGraphics
     func screens() -> [ScreenInfo]
     /// The on-screen windows above `windowID`, front to back, as last fetched; nil before the first fetch.
     func windowsAbove(_ windowID: CGWindowID) -> [StackWindow]?
+    /// How often the controller reads the cache now: the source need not refresh it more often than that.
+    func setFollowInterval(_ seconds: TimeInterval)
+}
+
+extension CUWindowSource {
+    func setFollowInterval(_ seconds: TimeInterval) {}
 }
 
 /// One entry of the on-screen window list.

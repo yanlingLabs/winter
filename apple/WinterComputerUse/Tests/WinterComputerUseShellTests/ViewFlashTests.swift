@@ -109,7 +109,11 @@ final class ViewFlashTests: XCTestCase {
         rig.viewHub.unsubscribe(connection: 1, sessionId: "s_1")
         rig.clock.advance(by: ViewHub.stopGrace - 1)
         watch(rig)
-        rig.clock.advance(by: 10)
+        // Past the grace: the pending stop was dropped. (The window keeps changing, so it is never paused.)
+        for i in 0..<10 {
+            rig.capture.live.first?.onFrame(ViewFrame(jpeg: Data([UInt8(i)]), width: 720, height: 392, windowSize: CGSize(width: 1211, height: 824)))
+            rig.clock.advance(by: 1)
+        }
         XCTAssertEqual(rig.capture.started.count, 1)
         XCTAssertEqual(rig.capture.live.count, 1)
     }
