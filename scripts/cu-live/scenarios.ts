@@ -275,7 +275,10 @@ report({ ok: true });`,
     verify: (ctx) => [ok(ctx), check("the doc holds the exact text", String(webState(ctx).doc ?? "").trim() === DOC_TEXT, JSON.stringify(webState(ctx).doc))],
   },
   {
-    name: "cmd+a/c/v/z in web fields", group: "type",
+    // In the ASK session: the per-app card is approved (once); the foreground card a background ⌘Z may raise is
+    // denied by the rig — so ⌘Z either is undone for real (verified) or answers NeedsForeground, never a silent
+    // no-op.
+    name: "cmd+a/c/v/z in web fields", group: "type", session: "ask", answer: "once",
     before: [{ role: "main", cmd: "reset" }],
     code: `
 const web = await win("Fixture Web");
@@ -288,12 +291,15 @@ await web.key("cmd+c", { into: first.ref });
 await web.key("cmd+a", { into: search.ref });
 await web.key("cmd+v", { into: search.ref });
 const pasted = (await web.find({ name: "Search" }, { emit: false }))[0]?.value ?? null;
-await web.key("cmd+z", { into: search.ref });
-report({ pasted });`,
+let undo = "done";
+try { await web.key("cmd+z", { into: search.ref }); } catch (e) { undo = e.name; }
+report({ pasted, undo });`,
     dump: true,
     verify: (ctx) => [ok(ctx),
       check("cmd+a/c/v copied First into Search", lastValueEver(ctx.events, ctx.since, "web.input", "search", "copy me ✓"), JSON.stringify(fact(ctx, "pasted"))),
-      check("cmd+z undid the paste", webState(ctx).search === "old", JSON.stringify(webState(ctx).search))],
+      check("cmd+z undid the paste (verified), or said it needs the foreground — never a silent no-op",
+        fact(ctx, "undo") === "NeedsForeground" || (fact(ctx, "undo") === "done" && webState(ctx).search === "old"),
+        `undo: ${JSON.stringify(fact(ctx, "undo"))}, search: ${JSON.stringify(webState(ctx).search)}`)],
   },
   {
     name: "paste into a web field", group: "type",

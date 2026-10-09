@@ -222,7 +222,7 @@ enum CUWindowResolver {
     }
 
     static func captureOnlyDetail(_ appName: String) -> String {
-        "bound \(appName)'s window as capture only — it exposes no accessibility; read it with screenshot() and act by point coordinates (type and keys go to the window)"
+        "bound \(appName)'s window as capture only: this window has no accessibility here — use screenshot() and point clicks, or ask the user to show it once on its desktop (macOS then exposes it); type and keys go to the window"
     }
 
     static func captureOnly(_ s: CUWindowServerWindow, _ appName: String, _ fx: Effects) -> Outcome {

@@ -182,7 +182,8 @@ describe("the scenarios", () => {
     expect(new Set(all.map((s) => s.name)).size).toBe(all.length);
     const groups = new Set(SCENARIOS.map((s) => s.group));
     for (const g of ["bind", "click", "type", "scroll", "menu", "applescript", "screenshot", "guardian", "document", "card"]) expect(groups.has(g)).toBe(true);
-    expect(SCENARIOS.filter((s) => s.session === "ask").map((s) => s.answer)).toEqual(["once", false]);
+    // The undo scenario runs in the ask session too (its foreground card is denied there): once, once, false.
+    expect(SCENARIOS.filter((s) => s.session === "ask").map((s) => s.answer)).toEqual(["once", "once", false]);
   });
 
   test("every verify returns checks on an empty context, and fails them (nothing passes by default)", () => {

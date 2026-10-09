@@ -605,7 +605,7 @@ public final class CUCore: @unchecked Sendable {
         if !t.accessible {
             return try await queues.run(t.pid) { [self] in
                 let title = sys.window(id: t.windowID)?.title ?? t.windowTitle
-                let text = "\(t.appName) — window \(title.isEmpty ? "(untitled)" : "\u{201C}\(title)\u{201D}") — no accessibility: this window exposes no elements. Use screenshot() to see it and click at point coordinates; type and keys go to the window."
+                let text = "\(t.appName) — window \(title.isEmpty ? "(untitled)" : "\u{201C}\(title)\u{201D}") — this window has no accessibility here: use screenshot() and point clicks, or ask the user to show it once on its desktop (macOS then exposes it); type and keys go to the window."
                 return TargetSnapshotResult(snapshotId: t.nextSnapshotId(), text: text, isDiff: false, changedRatio: 1, settled: settled, waitedMs: waited)
             }
         }

@@ -39,9 +39,8 @@ final class CaptureOnlyTests: XCTestCase {
         bind()
         let snap = try await core.targetSnapshot(TargetSnapshotParams(targetId: "t1"))
         XCTAssertFalse(snap.isDiff)
-        XCTAssertTrue(snap.text.contains("VRoid Studio — window (untitled) — no accessibility"), snap.text)
-        XCTAssertTrue(snap.text.contains("screenshot()"), snap.text)
-        XCTAssertTrue(snap.text.contains("click at point coordinates"), snap.text)
+        XCTAssertTrue(snap.text.contains("VRoid Studio — window (untitled) — this window has no accessibility here"), snap.text)
+        XCTAssertTrue(snap.text.contains("use screenshot() and point clicks, or ask the user to show it once"), snap.text)
     }
 
     func testFindReturnsNothing() async throws {
