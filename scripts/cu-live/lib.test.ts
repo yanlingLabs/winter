@@ -57,8 +57,8 @@ describe("the monitor analysis", () => {
     expect(doneWindowModel([row("a", "bind", "pass"), row("cleanup", "run", "fail")], 1, 1, "").status).toBe("fail");
     expect(doneWindowModel([row("a", "bind", "pass"), row("ABORTED", "run", "fail"), row("cleanup", "run", "pass")], 1, 1, "").status).toBe("aborted");
     expect(doneWindowModel([row("setup", "run", "fail")], 1, 1, "").status).toBe("aborted");
-    const args = doneWindowOpenArgs("/x/Winter CU Fixture.app", doneWindowModel(ok, 1, 2, "/r.json"));
-    expect(args.slice(0, 6)).toEqual(["-n", "-g", "-a", "/x/Winter CU Fixture.app", "--args", "--done"]);
+    const args = doneWindowOpenArgs("/x/Winter CU Live Result.app", doneWindowModel(ok, 1, 2, "/r.json"));
+    expect(args.slice(0, 6)).toEqual(["-n", "-g", "-a", "/x/Winter CU Live Result.app", "--args", "--done"]);
     expect(JSON.parse(args[6]!)).toMatchObject({ status: "pass", passed: 2, path: "/r.json" });
   });
 

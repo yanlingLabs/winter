@@ -491,6 +491,15 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     // Before anything launches: unattended (an approved agent run), wait until nobody is at the Mac; then the plan —
     // where the user is, and, from a full-screen app's Space, where to return them at the end.
     const reading = await waitToStart(built, o);
+    // Nothing of an earlier run may stay up: a fixture a crashed run left (binds resolve the fixture by NAME, so a
+    // second "Winter CU Fixture" is picked up), or the previous run's completion window. Every process of the
+    // suite's fixture binary (its own executable name, whatever checkout built it) is closed.
+    const leftovers = sh("pgrep", ["-x", "WinterCUFixture"]).stdout.split("\n").map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    for (const pid of leftovers) { try { process.kill(pid, "SIGTERM"); } catch { /* gone */ } }
+    if (leftovers.length > 0) {
+      await until("earlier fixture processes to exit", 5_000, () => leftovers.every((p) => !processAlive(p))).catch(() => undefined);
+      log(`closed ${leftovers.length} fixture process(es) an earlier run left (a completion window included)`);
+    }
     const plan = startPlan(reading);
     if (plan.kind === "refuse") throw new Error(plan.reason);
     log(`start: ${describeStartPlan(plan)}`);
@@ -1032,7 +1041,7 @@ async function main(): Promise<void> {
   // the run, never for a dry run, never with --no-done-window (CI).
   if (!o.dryRun && !o.noDoneWindow) {
     const model = doneWindowModel(results, Date.now() - startedAt, Date.now(), report ?? "");
-    const shown = sh("open", doneWindowOpenArgs(built.fixtureMain, model));
+    const shown = sh("open", doneWindowOpenArgs(built.fixtureDone, model));
     if (shown.status !== 0) log(`the completion window did not open: ${shown.stderr.trim()}`);
   }
   process.exit(results.some((r) => r.status === "fail") ? 1 : 0);
