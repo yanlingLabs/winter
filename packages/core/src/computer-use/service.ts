@@ -910,6 +910,11 @@ export class ComputerV2Service {
     }
     ctx.acted.add(t.targetId);
     metric.rung = res.rung;
+    // What the act did, in the helper's words: for keyboard input, FIRST where it went (so the model never has
+    // to guess), then the helper's detail (an unconfirmed paste, an editor that hides its text, a view put back).
+    // Element names come from the screen: inside the fence.
+    const line = actLine(primitive, action, res);
+    if (line !== undefined) ctx.builder.text(line, { screen: true });
     return undefined;
   }
 
@@ -1185,9 +1190,27 @@ const ERROR_MESSAGE_CAP = 4_096;
  * TRUSTED (shown outside the fence) only when its message is one the daemon itself sent in this call.
  */
 /** A bind's or useWindow's `detail` from the helper, as one short line (or nothing). */
-function helperDetail(detail: unknown): string | undefined {
+/** The line an act prints: `typed into [14] text area "Comment"` (and the helper's detail after it) for keyboard
+ *  input, the detail alone for any other act; nothing when there is nothing to say. */
+export function actLine(primitive: string, action: ActAction, res: ActResult): string | undefined {
+  const detail = helperDetail(res.detail, 700);
+  const input = typeof res.input === "string" ? res.input.replace(/\s+/g, " ").trim().slice(0, 200) : undefined;
+  const verb = action.kind === "type" ? "typed into"
+    : action.kind === "paste" ? "pasted into"
+    : action.kind === "key" ? `pressed ${action.combo} in`
+    : action.kind === "setValue" ? "set the value of" : undefined;
+  let head: string | undefined;
+  if (verb !== undefined && input !== undefined) head = `${verb} ${input}`;
+  else if (verb !== undefined && res.inputUnknown === true) {
+    head = `${primitive}: the app reports no focused element, so where it went is unknown — click the field first, or pass { into }`;
+  }
+  if (head === undefined) return detail;
+  return detail === undefined ? head : `${head} — ${detail}`;
+}
+
+function helperDetail(detail: unknown, cap = 300): string | undefined {
   if (typeof detail !== "string") return undefined;
-  const line = detail.replace(/\s+/g, " ").trim().slice(0, 300);
+  const line = detail.replace(/\s+/g, " ").trim().slice(0, cap);
   return line.length === 0 ? undefined : line;
 }
 

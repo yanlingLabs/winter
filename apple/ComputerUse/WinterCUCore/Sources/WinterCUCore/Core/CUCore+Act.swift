@@ -18,6 +18,10 @@ extension CUCore {
         var pendingOpen: [String]? = nil
         /// What the open stands for in the result ("“File › Open”"), when it came from a menu.
         var openWhat: String? = nil
+        /// For type, paste, key and setValue: the element that received the input (`[14] text area "Comment"`),
+        /// or `inputUnknown` when the app reported no focused element.
+        var input: String? = nil
+        var inputUnknown = false
 
         /// Puts `note` (what was done to reach the window) in front of the rung's own detail.
         func noting(_ note: String?) -> ActOutcome {
@@ -83,7 +87,28 @@ extension CUCore {
         let notes = takeGuardianNotes()
         let detail = (notes + [outcome.detail].compactMap { $0 }).isEmpty ? nil
             : (notes + [outcome.detail].compactMap { $0 }).joined(separator: "; ")
-        return TargetActResult(rung: outcome.rung.rawValue, detail: detail)
+        return TargetActResult(rung: outcome.rung.rawValue, detail: detail, input: outcome.input,
+                               inputUnknown: outcome.inputUnknown ? true : nil)
+    }
+
+    /// The act's outcome, naming the element that received its input (type, paste, key, setValue): the model
+    /// never has to guess where text went. Nil `e`: the app reported no focused element.
+    func receiving(_ e: AXUIElement?, _ t: CUTarget, _ o: ActOutcome) -> ActOutcome {
+        var o = o
+        guard t.accessible else {
+            o.input = "the window (it has no accessibility here)"
+            return o
+        }
+        guard let e else {
+            o.inputUnknown = true
+            return o
+        }
+        let info = ElementInfo(e, ax)
+        let ref = t.refs.ref(for: AXIdentity(element: e))
+        let role = CURoleWords.words(role: info.role ?? "AXUnknown", subrole: info.subrole)
+        let name = info.labels.compactMap { $0 }.first { !$0.isEmpty }.map { $0.count <= 40 ? $0 : String($0.prefix(40)) + "…" }
+        o.input = "[\(ref)] \(role)" + (name.map { " " + formatter.quote($0) } ?? "")
+        return o
     }
 
     static func actionName(_ a: CUAction) -> String {
@@ -618,7 +643,7 @@ extension CUCore {
             } catch let error as CUError where info.role == kAXScrollBarRole && error.code == "invalid_params" {
                 throw CUError.unsupported("\(t.appName)'s scroll bar [\(a.ref)] won't take a value — scroll its area with scroll() instead")
             }
-            return ActOutcome(rung: .accessibility)
+            return receiving(e, t, ActOutcome(rung: .accessibility))
         }
         // Not settable: focus it, select everything, and type over it — never over another field.
         let g = TypingFocus(explicit: e)
@@ -630,21 +655,21 @@ extension CUCore {
             try requireTypableFocus(t, g)
             _ = try sendChord(CUKeyChord(key: .character("a"), modifiers: [.command]), p, t, token, g)
         }
-        return try typeText(a.value, into: e, p, t, token, g)
+        return receiving(e, t, try typeText(a.value, into: e, p, t, token, g))
     }
 
     private func type(_ a: CUTypeAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         enforceFocus(p, t)  // believe-active before any focus write, so the app does not activate itself
         let (e, g) = try textTarget(into: a.into, t, text: a.text)
         cursor(t, "type", at: e.flatMap { ElementInfo($0, ax).center })
-        return try typeText(a.text, into: e, p, t, token, g)
+        return receiving(e, t, try typeText(a.text, into: e, p, t, token, g))
     }
 
     private func paste(_ a: CUPasteAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         enforceFocus(p, t)
         let (e, g) = try textTarget(into: a.into, t, text: a.text)
         cursor(t, "type", at: e.flatMap { ElementInfo($0, ax).center })
-        return try pasteText(a.text, format: a.format ?? .text, p, t, token, g)
+        return receiving(e, t, try pasteText(a.text, format: a.format ?? .text, p, t, token, g))
     }
 
     /// The element text goes into: `into` (focused first), else the focus (see `requireTypableFocus`; nil
@@ -1369,7 +1394,11 @@ extension CUCore {
             if textual { try requireTypableFocus(t, g) }
             out = try execute(plan, p, t, token, keyPid: keyPid, blips: blips)
         }
-        return out
+        // A chord that is a menu command went to the app's menu, not to an element (its detail says which item).
+        switch plan {
+        case .menuItem, .blipMenuItem: return out
+        default: return receiving(e, t, out)
+        }
     }
 
     static func producesText(_ c: CUKeyChord) -> Bool {

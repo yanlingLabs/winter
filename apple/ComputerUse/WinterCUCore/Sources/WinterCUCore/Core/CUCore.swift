@@ -645,7 +645,8 @@ public final class CUCore: @unchecked Sendable {
         return try await queues.run(t.pid) { [self] in
             try floorCheckPrivacy(t)
             let obs = try observe(t, within: p.within)
-            let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note)
+            let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note,
+                                       caret: obs.caret, focusUnknown: obs.focusUnknown)
             let snap = CUSnapshot(id: t.nextSnapshotId(), scope: p.within, header: header, roots: obs.roots, formatter: formatter)
             // A whole-window, non-full state folds what is out of view first; `within` and `full` don't.
             var text = formatter.full(header: header, roots: obs.roots, viewportFirst: p.within == nil && p.full != true)
@@ -1273,6 +1274,8 @@ public final class CUCore: @unchecked Sendable {
         var roots: [CUNode]
         var focusedRef: Int?
         var title: String
+        var caret: String? = nil
+        var focusUnknown = false
     }
 
     /// Reads the bound window (plus open app menus), or the subtree at `within`.
@@ -1304,12 +1307,16 @@ public final class CUCore: @unchecked Sendable {
         let roots = hidden.isEmpty ? result.roots : result.roots.map { Self.removing(hidden, from: $0) }
         if full { t.lastFullRead = (roots, readAt) }
         var focusedRef: Int?
-        if let f = AX.element(app, kAXFocusedUIElementAttribute), let r = t.refs.existingRef(for: AXIdentity(element: f)),
+        var caret: String?
+        let focused = AX.element(app, kAXFocusedUIElementAttribute) ?? AX.element(win, kAXFocusedUIElementAttribute)
+        if let f = focused, let r = t.refs.existingRef(for: AXIdentity(element: f)),
            roots.contains(where: { $0.find(ref: r) != nil }) {
             focusedRef = r
+            caret = formatter.caretNote(value: ax.string(f, kAXValueAttribute), selection: selectionRange(f),
+                                        secure: ElementInfo(f, ax).secure)
         }
         let title = AX.string(win, kAXTitleAttribute) ?? t.windowTitle
-        return Observation(roots: roots, focusedRef: focusedRef, title: title)
+        return Observation(roots: roots, focusedRef: focusedRef, title: title, caret: caret, focusUnknown: focused == nil)
     }
 
     /// Actions the app listed but refused and `action()` has no pointer equivalent for: state stops listing

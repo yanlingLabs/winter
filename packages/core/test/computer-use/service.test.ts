@@ -13,7 +13,7 @@ import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { ComputerPolicy, type SessionFacts } from "../../src/computer-use/policy";
 import { RecentApps } from "../../src/computer-use/recent-apps";
-import { ComputerV2Service, targetLostMessage, type ScriptResult } from "../../src/computer-use/service";
+import { ComputerV2Service, actLine, targetLostMessage, type ScriptResult } from "../../src/computer-use/service";
 import { AutomationTelemetry } from "../../src/computer-use/telemetry";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
 import type { Settings } from "../../src/settings";
@@ -773,5 +773,34 @@ describe("ComputerV2: the record it leaves", () => {
     expect(text(await w.run("print('plain')"))).not.toContain("screen-data");
     const r = await w.run("const s = await (await apps.open('Notes')).state({ emit: false })\nprint(s.split('\\n')[0])");
     expect(text(r)).toMatch(/<screen-data id="[0-9a-f]{12}">\nNotes — /);
+  }, 30_000);
+});
+
+describe("ComputerV2: where keyboard input went", () => {
+  test("a keyboard act names the element first, then the helper's detail", () => {
+    expect(actLine("type", { kind: "type", text: "hi" }, { rung: 1, input: '[14] text area "Comment"' })).toBe('typed into [14] text area "Comment"');
+    expect(actLine("paste", { kind: "paste", text: "x" }, { rung: 1, input: '[3] text area "Doc"', detail: "pasted, unconfirmed: check the state" }))
+      .toBe('pasted into [3] text area "Doc" — pasted, unconfirmed: check the state');
+    expect(actLine("key", { kind: "key", combo: "cmd+a" }, { rung: 2, input: "[9] text field" })).toBe("pressed cmd+a in [9] text field");
+    expect(actLine("setValue", { kind: "setValue", ref: 4, value: "v" }, { rung: 1, input: '[4] text field "Name"' })).toBe('set the value of [4] text field "Name"');
+  });
+  test("no focused element: said, with what to do", () => {
+    expect(actLine("type", { kind: "type", text: "hi" }, { rung: 2, inputUnknown: true }))
+      .toBe("type: the app reports no focused element, so where it went is unknown — click the field first, or pass { into }");
+  });
+  test("another act prints only its detail; nothing to say prints nothing", () => {
+    expect(actLine("click", { kind: "click", ref: 3 }, { rung: 1, detail: "the click can't be confirmed there" })).toBe("the click can't be confirmed there");
+    expect(actLine("click", { kind: "click", ref: 3 }, { rung: 1 })).toBeUndefined();
+    expect(actLine("type", { kind: "type", text: "hi" }, { rung: 1 })).toBeUndefined();  // an older helper says nothing
+  });
+
+  macOnly("the line reaches the script's result, inside the fence", async () => {
+    const w = world();
+    w.fake.handlers["target.act"] = () => ({ rung: 1, input: '[14] text area "Comment"', detail: "typed 5 characters; Notes doesn't expose this editor's text to accessibility, so it can't be read back here" });
+    const r = await w.run("const notes = await apps.open('Notes')\nawait notes.type('hello', { into: 14 })");
+    expect(r.isError).toBe(false);
+    const out = text(r);
+    expect(out).toContain('typed into [14] text area "Comment" — typed 5 characters; Notes doesn\'t expose this editor\'s text');
+    expect(out.indexOf("typed into")).toBeGreaterThan(out.indexOf("<screen-data"));
   }, 30_000);
 });

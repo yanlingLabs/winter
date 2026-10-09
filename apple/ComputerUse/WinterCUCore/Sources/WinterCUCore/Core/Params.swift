@@ -349,9 +349,15 @@ public struct TargetActParams: Codable, Sendable, Equatable {
 public struct TargetActResult: Codable, Sendable, Equatable {
     public var rung: Int
     public var detail: String?
-    public init(rung: Int, detail: String? = nil) {
+    /// type, paste, key, setValue: the element that received the input (`[14] text area "Comment"`).
+    public var input: String?
+    /// true when the app reported no focused element, so where the input went is unknown.
+    public var inputUnknown: Bool?
+    public init(rung: Int, detail: String? = nil, input: String? = nil, inputUnknown: Bool? = nil) {
         self.rung = rung
         self.detail = detail
+        self.input = input
+        self.inputUnknown = inputUnknown
     }
 }
 

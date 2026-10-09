@@ -47,6 +47,35 @@ final class StateFormatterTests: XCTestCase {
                                 includeWindow: false), "Notes — focused [3] · settled 80 ms")
     }
 
+    func testTheHeaderSaysWhereTypedTextGoes() {
+        XCTAssertEqual(f.header(CUStateHeader(appName: "Notes", windowTitle: nil, focusedRef: 14, settle: .settled(ms: 80), caret: "caret 12/40")),
+                       "Notes — focused [14] · caret 12/40 · settled 80 ms")
+        XCTAssertEqual(f.header(CUStateHeader(appName: "Docs", windowTitle: nil, focusedRef: nil, settle: nil, focusUnknown: true)),
+                       "Docs — focus unknown — click the field first, or pass { into }")
+        // A focus elsewhere (not in this window's tree) is not "unknown": nothing is said.
+        XCTAssertEqual(f.header(CUStateHeader(appName: "Notes", windowTitle: nil, focusedRef: nil, settle: nil)), "Notes")
+        // The diff header carries it too.
+        let snap = CUSnapshot(id: "s", scope: nil, header: CUStateHeader(appName: "Notes", windowTitle: nil, focusedRef: 14, settle: nil), roots: [], formatter: f)
+        let d = CUStateDiff.compute(old: snap, new: snap)
+        XCTAssertTrue(d.render(header: CUStateHeader(appName: "Notes", windowTitle: nil, focusedRef: 14, settle: nil, caret: "caret 3/5"),
+                               new: snap, includeWindowTitle: false, formatter: f).hasPrefix("Notes — focused [14] · caret 3/5"))
+    }
+
+    func testTheCaretNote() {
+        XCTAssertEqual(f.caretNote(value: "hello world", selection: NSRange(location: 5, length: 0), secure: false), "caret 5/11")
+        XCTAssertEqual(f.caretNote(value: "say \"hi\" now", selection: NSRange(location: 4, length: 4), secure: false),
+                       #"selected 4–8 ("\"hi\"")"#)
+        let long = String(repeating: "abcdefghij", count: 6)
+        XCTAssertEqual(f.caretNote(value: long, selection: NSRange(location: 0, length: 60), secure: false),
+                       "selected 0–60 (\"" + String(long.prefix(40)) + "…\")", "the text cut to 40 characters")
+        XCTAssertNil(f.caretNote(value: "hunter2", selection: NSRange(location: 3, length: 2), secure: true), "never a secure field's text")
+        XCTAssertNil(f.caretNote(value: "hunter2", selection: NSRange(location: 7, length: 0), secure: true), "nor its length")
+        XCTAssertNil(f.caretNote(value: "\u{200B}\u{200B}", selection: NSRange(location: 1, length: 0), secure: false), "filler means nothing")
+        XCTAssertNil(f.caretNote(value: "abc", selection: NSRange(location: 2, length: 5), secure: false), "a range past the text")
+        XCTAssertNil(f.caretNote(value: "abc", selection: nil, secure: false))
+        XCTAssertEqual(f.caretNote(value: "", selection: NSRange(location: 0, length: 0), secure: false), "caret 0/0")
+    }
+
     func testRoleWords() {
         XCTAssertEqual(CURoleWords.split("AXPopUpButton"), "pop up button")
         XCTAssertEqual(CURoleWords.split("AXTextArea"), "text area")

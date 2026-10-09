@@ -34,7 +34,7 @@ final class BackgroundPasteTests: XCTestCase {
 
     /// A browser in the background (the user's app, pid 1, in front) with a canvas-like web editor whose value
     /// reads as zero-width filler (it can't be read back), and an Edit menu whose Paste reads disabled.
-    private func world() {
+    private func world(focused: Bool = true) {
         ax = FakeAX()
         let app = ax.application(pid)
         ax.put(app, [kAXWindowsAttribute: [window], kAXFocusedWindowAttribute: window])
@@ -44,7 +44,7 @@ final class BackgroundPasteTests: XCTestCase {
         ax.add(web, role: "AXWebArea", frame: CGRect(x: 0, y: 40, width: 900, height: 660), extra: [kAXChildrenAttribute: [doc]])
         ax.add(doc, role: kAXTextAreaRole, title: "Document", frame: CGRect(x: 40, y: 80, width: 800, height: 500),
                extra: [kAXValueAttribute: "\u{200B}\u{200B}", kAXParentAttribute: web])
-        ax.focus(pid: pid, on: doc)
+        if focused { ax.focus(pid: pid, on: doc) }
         ax.put(ax.application(1), [kAXFocusedWindowAttribute: userWindow])
         ax.windowIDs[AXIdentity(element: userWindow)] = 31
         let bar = fakeElement(97_010), apple = fakeElement(97_011), edit = fakeElement(97_012), menu = fakeElement(97_013)
@@ -181,6 +181,38 @@ final class BackgroundPasteTests: XCTestCase {
         poster.onPost = { [unowned self] e in if e.type == .keyUp { ax.put(doc, [kAXValueAttribute: "\u{200B}\u{200B}\u{200B}"]) } }
         let r = try await type("hi")
         XCTAssertTrue(r.detail?.contains("(its input target changed, so the keys arrived)") ?? false, r.detail ?? "")
+    }
+
+    // MARK: where the input went
+
+    func testTheResultNamesTheElementThatReceivedTheInput() async throws {
+        world()
+        let r = try await type("hello")
+        let ref = target.refs.ref(for: AXIdentity(element: doc))
+        XCTAssertEqual(r.input, "[\(ref)] text area \"Document\"")
+        XCTAssertNil(r.inputUnknown)
+        let set = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+            action: .setValue(CUSetValueAction(ref: ref, value: "x")), access: .full, allowForeground: false, privatePath: true))
+        XCTAssertEqual(set.input, "[\(ref)] text area \"Document\"")
+    }
+
+    func testKeysWithNoFocusedElementSaySoInTheResult() async throws {
+        world(focused: false)
+        let r = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+            action: .key(CUKeyAction(combo: "end")), access: .full, allowForeground: false, privatePath: true))
+        XCTAssertNil(r.input)
+        XCTAssertEqual(r.inputUnknown, true)
+    }
+
+    func testAMenuShortcutNamesNoElement() async throws {
+        world()
+        ax.put(pasteItem, [kAXEnabledAttribute: true, kAXMenuItemCmdCharAttribute: "T"])
+        ax.put(doc, [kAXRoleAttribute: kAXButtonRole])  // not an editable focus: the chord goes to its menu item
+        let r = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+            action: .key(CUKeyAction(combo: "cmd+t")), access: .full, allowForeground: false, privatePath: true))
+        XCTAssertNil(r.input)
+        XCTAssertNil(r.inputUnknown)
+        XCTAssertTrue(r.detail?.contains("used the menu item") ?? false, r.detail ?? "")
     }
 
     // MARK: typing pace and progress

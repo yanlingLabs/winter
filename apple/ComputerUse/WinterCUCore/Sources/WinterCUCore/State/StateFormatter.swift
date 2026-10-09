@@ -19,12 +19,21 @@ public struct CUStateHeader: Sendable, Equatable {
     public var focusedRef: Int?
     /// nil when the caller asked for no settle wait (the clause is then omitted).
     public var settle: CUSettleNote?
+    /// Where typed text goes in the focused element — "caret 12/40" or `selected 3–9 ("hello")` — when its text
+    /// can be read; never for a secure field (`CUStateFormatter.caretNote`).
+    public var caret: String?
+    /// The app reports no focused element at all (a canvas editor, some Electron views): said, so the model
+    /// does not type into the unknown.
+    public var focusUnknown: Bool
 
-    public init(appName: String, windowTitle: String?, focusedRef: Int?, settle: CUSettleNote?) {
+    public init(appName: String, windowTitle: String?, focusedRef: Int?, settle: CUSettleNote?,
+                caret: String? = nil, focusUnknown: Bool = false) {
         self.appName = appName
         self.windowTitle = windowTitle
         self.focusedRef = focusedRef
         self.settle = settle
+        self.caret = caret
+        self.focusUnknown = focusUnknown
     }
 }
 
@@ -52,7 +61,12 @@ public struct CUStateFormatter: Sendable {
     public func header(_ h: CUStateHeader, includeWindow: Bool = true) -> String {
         var parts: [String] = []
         if includeWindow, let title = h.windowTitle { parts.append("window \(quote(title))") }
-        if let f = h.focusedRef { parts.append("focused [\(f)]") }
+        if let f = h.focusedRef {
+            parts.append("focused [\(f)]")
+            if let c = h.caret { parts.append(c) }
+        } else if h.focusUnknown {
+            parts.append("focus unknown — click the field first, or pass { into }")
+        }
         if let s = h.settle { parts.append(s.text) }
         return parts.isEmpty ? h.appName : "\(h.appName) — " + parts.joined(separator: " · ")
     }
@@ -78,6 +92,23 @@ public struct CUStateFormatter: Sendable {
         if n.isSecure { return "<redacted>" }
         guard let v = n.value, !v.isEmpty, v != n.name else { return nil }
         return quote(cut(v))
+    }
+
+    /// Where typed text goes in a focused text element: "caret 12/40" (the caret's UTF-16 offset and the text's
+    /// length, as accessibility counts), or `selected 3–9 ("hello")` with the selected text cut to 40 characters.
+    /// Nil for a secure field (not even its length), a value that is only zero-width filler (a canvas editor's
+    /// input target: its numbers would mean nothing), or no readable range. Pure.
+    public static let caretTextCap = 40
+    public func caretNote(value: String?, selection: NSRange?, secure: Bool) -> String? {
+        guard !secure, let value, let r = selection, r.location >= 0, r.length >= 0 else { return nil }
+        guard value.isEmpty || value.unicodeScalars.contains(where: { !["\u{200B}", "\u{200C}", "\u{200D}", "\u{FEFF}", "\u{2060}"].contains($0) })
+        else { return nil }
+        let ns = value as NSString
+        guard r.location + r.length <= ns.length else { return nil }
+        if r.length == 0 { return "caret \(r.location)/\(ns.length)" }
+        let selected = ns.substring(with: r)
+        let shown = selected.count <= Self.caretTextCap ? selected : String(selected.prefix(Self.caretTextCap)) + "…"
+        return "selected \(r.location)–\(r.location + r.length) (\(quote(shown)))"
     }
 
     func cut(_ s: String) -> String {
