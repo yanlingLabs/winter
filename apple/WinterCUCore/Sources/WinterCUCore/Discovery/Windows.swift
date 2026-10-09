@@ -246,7 +246,10 @@ enum CUWindowResolver {
             guard let match else {
                 // Not AX-listed and not an off-Space real window — but the server may still have it (a popup or
                 // a Unity window with an empty AX tree): bind capture-only when we can find it by id/title.
-                if privatePath, let s = captureOnlyMatch(selector, server) { return captureOnly(s, appName, fx) }
+                if privatePath, let s = captureOnlyMatch(selector, server) {
+                    if let w = listedOnceAnswering(s, fx) { return Outcome(window: w) }
+                    return captureOnly(s, appName, fx)
+                }
                 return Outcome(window: try CUAXWindows.choose(axWindows, selector: selector, appName: appName))
             }
             return try reach([match], appName: appName, privatePath: privatePath, fx)
@@ -286,7 +289,16 @@ enum CUWindowResolver {
                                step: .moved)
             }
         }
+        if let w = listedOnceAnswering(first, fx) { return Outcome(window: w) }
         return captureOnly(first, appName, fx)
+    }
+
+    /// A window ON THIS DESKTOP that AX doesn't list yet: the app may only be busy (live: Finder, just told to
+    /// open a folder, answered no accessibility call for half a second) — waited for before it is called
+    /// inaccessible. Off-screen windows are not waited for (AX never lists them).
+    static func listedOnceAnswering(_ s: CUWindowServerWindow, _ fx: Effects) -> CUAXWindow? {
+        guard s.onScreen else { return nil }
+        return fx.wait { fx.axWindows().first { $0.id == s.id } }
     }
 }
 

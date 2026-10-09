@@ -105,6 +105,15 @@ final class OffSpaceWindowTests: XCTestCase {
         XCTAssertTrue(out.detail?.contains("capture only") ?? false, out.detail ?? "")
     }
 
+    func testAnOnScreenWindowAXListsAMomentLaterIsNotCaptureOnly() throws {
+        let w = World()
+        w.listed = [axWindow(freshWindow, 9)]  // what AX lists once the busy app answers (Finder)
+        let out = try resolve(w, server: [serverWindow(9, onScreen: true)])
+        XCTAssertFalse(out.captureOnly)
+        XCTAssertEqual(out.window.id, 9)
+        XCTAssertTrue(CFEqual(out.window.element, freshWindow))
+    }
+
     func testAnExplicitWindowTheServerHasButAXCannotIsCaptureOnly() throws {
         let w = World()
         // A popup smaller than isRealWindow's floor, not in AX and not an off-Space real window.

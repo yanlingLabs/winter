@@ -63,6 +63,8 @@ export interface Scenario {
    * check allows one excursion no longer than this many ms (and still demands the original app at the end).
    */
   allowExcursionMs?: number;
+  /** In the ask session: a foreground card (denied by the rig) is expected besides the per-app card. */
+  foregroundCard?: boolean;
   /** The script prelude (default PRELUDE; the generic app checks bring their own, which includes it). */
   prelude?: string;
   verify(ctx: VerifyContext): Check[];
@@ -278,7 +280,7 @@ report({ ok: true });`,
     // In the ASK session: the per-app card is approved (once); the foreground card a background ⌘Z may raise is
     // denied by the rig — so ⌘Z either is undone for real (verified) or answers NeedsForeground, never a silent
     // no-op.
-    name: "cmd+a/c/v/z in web fields", group: "type", session: "ask", answer: "once",
+    name: "cmd+a/c/v/z in web fields", group: "type", session: "ask", answer: "once", foregroundCard: true,
     before: [{ role: "main", cmd: "reset" }],
     code: `
 const web = await win("Fixture Web");
