@@ -136,13 +136,14 @@ extension CUCore {
             guard let window = try? windowElement(t), let folder = Self.folderPath(ax.string(window, "AXDocument")) else { return nil }
             let at = "folder (POSIX file \(Self.quoted(folder)) as alias)"
             switch key {
-            case "file › move to trash", "file › open":
+            case "file › move to trash":
+                // Open is NOT here: Finder's Open is routed to a background NSWorkspace open (finderOpenRoute),
+                // never a Finder open event (which would bring the opener to the front).
                 let names = selectedNames(in: window)
                 guard !names.isEmpty else { return nil }
-                let verb = key == "file › open" ? "open" : "delete"
                 let list = "{" + names.map(Self.quoted).joined(separator: ", ") + "}"
-                return KnownScript(source: "tell application \"Finder\" to \(verb) (every item of \(at) whose name is in \(list))",
-                                   what: "Finder's \(verb) of \(names.count) selected item\(names.count == 1 ? "" : "s")")
+                return KnownScript(source: "tell application \"Finder\" to delete (every item of \(at) whose name is in \(list))",
+                                   what: "Finder's delete of \(names.count) selected item\(names.count == 1 ? "" : "s")")
             case "file › new folder":
                 return KnownScript(source: "tell application \"Finder\" to make new folder at \(at)", what: "Finder's make new folder")
             default:

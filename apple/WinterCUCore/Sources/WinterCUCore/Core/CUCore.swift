@@ -148,6 +148,7 @@ public final class CUCore: @unchecked Sendable {
     /// else the default handler for the first url. Returns the opener (never activated) and, when one appears,
     /// a new window to bind. Protected destinations are refused (the save-path floors apply to paths too).
     public func openDocuments(_ p: OpenDocumentsParams) async throws -> OpenDocumentsResult {
+        if let o = openDocumentsOverride { return try await o(p) }
         let urls = try CUDocumentOpen.resolve(p.urls)
         if let bad = urls.compactMap({ $0.isFileURL ? $0.path : nil }).first(where: { CUFloors.isProtectedSavePath($0) }) {
             throw CUError.refused(.privacyPane, "opening \((bad as NSString).lastPathComponent) is off limits — it is a protected location")
@@ -416,6 +417,8 @@ public final class CUCore: @unchecked Sendable {
 
     /// AppleScript, replaceable by tests (nothing there may run a script or ask macOS about Automation).
     var appleScriptOverride: ((String, CUTarget) throws -> String?)?
+    /// Document open, replaceable by tests (nothing there may touch NSWorkspace).
+    var openDocumentsOverride: ((OpenDocumentsParams) async throws -> OpenDocumentsResult)?
     var automationPermissionOverride: ((pid_t) -> OSStatus)?
     var scriptingDictionaryOverride: ((CUTarget) -> CUScriptingDictionary.Model?)?
     /// Background steps that once moved the user's view: never used again while the helper runs.

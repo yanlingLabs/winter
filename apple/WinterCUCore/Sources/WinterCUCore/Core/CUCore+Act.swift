@@ -715,6 +715,60 @@ extension CUCore {
         return false
     }
 
+    /// Finder's Open routed to a background open: when the bound app is Finder and the menu path is an Open
+    /// command, resolve the selected items' POSIX paths and open them (activates:false). Nil otherwise.
+    func finderOpenRoute(_ path: [String], _ p: TargetActParams, _ t: CUTarget) throws -> ActOutcome? {
+        guard t.bundleId == "com.apple.finder", path.last.map(CUMenuWalker.normalize) == "open" else { return nil }
+        return try openFinderSelection(p, t, what: "“\(path.joined(separator: " › "))”")
+    }
+
+    /// A Finder item's file path from its `AXURL` (a file URL), or nil.
+    func finderItemPath(_ e: AXUIElement) -> String? {
+        guard let s = ax.string(e, "AXURL") ?? ax.string(e, kAXURLAttribute as String), let url = URL(string: s), url.isFileURL else { return nil }
+        return url.path
+    }
+
+    /// Opens Finder's current selection in the background (never a Finder open event). The paths come from a
+    /// guarded AppleScript read of the selection (an app the policy allows for the bound Finder).
+    func openFinderSelection(_ p: TargetActParams, _ t: CUTarget, what: String) throws -> ActOutcome {
+        let script = """
+        tell application "Finder"
+            set out to ""
+            repeat with i in (selection as list)
+                try
+                    set out to out & POSIX path of (i as alias) & linefeed
+                end try
+            end repeat
+            return out
+        end tell
+        """
+        let result = (try? runAppleScript(script, t, timeoutMs: 6000)) ?? nil
+        let paths = (result ?? "").split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
+        guard !paths.isEmpty else {
+            throw CUError.unsupported("nothing is selected in \(t.appName) to open — select a file first, or use apps.open(path)")
+        }
+        let opened = try openDocumentsBlocking(paths)
+        return ActOutcome(rung: .accessibility,
+                          detail: "\(what): opened \(paths.count == 1 ? (paths[0] as NSString).lastPathComponent : "\(paths.count) items") in \(opened) in the background (not through Finder, so nothing came to the front)")
+    }
+
+    /// Runs `openDocuments` synchronously from the act (pid) queue; returns the opener's name.
+    func openDocumentsBlocking(_ paths: [String]) throws -> String {
+        let box = NSObject()  // just to satisfy the semaphore closure capture
+        _ = box
+        var out: Result<String, Error>!
+        let done = DispatchSemaphore(value: 0)
+        Task { [self] in
+            do {
+                let r = try await openDocuments(OpenDocumentsParams(urls: paths, sessionId: "finder-open", mirror: false, privatePath: true))
+                out = .success(r.app.name)
+            } catch { out = .failure(error) }
+            done.signal()
+        }
+        done.wait()
+        return try out.get()
+    }
+
     /// Makes the target believe it is active before keys go to it, so it does not activate itself and pull the
     /// user to its Space (the user-view guard around the act is the backstop). Logs that the enforcer acted;
     /// if the app still activates, the guard's note says it had to be undone.
@@ -1367,6 +1421,11 @@ extension CUCore {
     private func axAction(_ a: CUAXAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         let e = try element(a.ref, in: t)
         let info = ElementInfo(e, ax)
+        // Opening a Finder item is a background NSWorkspace open of its file, never a Finder open event.
+        if t.bundleId == "com.apple.finder", CUMenuWalker.normalize(a.name) == "open", let path = finderItemPath(e) {
+            let opened = try openDocumentsBlocking([path])
+            return ActOutcome(rung: .accessibility, detail: "opened \((path as NSString).lastPathComponent) in \(opened) in the background (not through Finder, so nothing came to the front)")
+        }
         try requireEnabled(info, ref: a.ref, t)
         guard let name = CURoleWords.resolveAction(a.name, among: info.actions) else {
             let have = info.actions.map(CURoleWords.actionWords).joined(separator: ", ")
@@ -1428,6 +1487,9 @@ extension CUCore {
         // A menu command has no on-screen point in the background: a caption only, no press.
         cursor(t, "caption", text: Self.caption("Choosing", a.path.joined(separator: " › ")))
         try token.check()
+        // Finder's Open (File › Open, or Open on the selection) opens the selected items in the background
+        // (NSWorkspace activates:false), never a Finder open event that would bring the opener to the front.
+        if let open = try finderOpenRoute(a.path, p, t) { return open }
         let key = a.path.map(CUMenuWalker.normalize).joined(separator: "\u{1F}")
         if p.allowForeground {
             return try inForeground(t) {
