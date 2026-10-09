@@ -1011,8 +1011,14 @@ public final class CUCore: @unchecked Sendable {
 
     /// The window is gone for good: not in the window server by id, nor in the app's list, twice 150 ms apart.
     /// One lookup can miss a window that is changing Space (a live run lost Safari's target while the user
-    /// switched desktops, and the rebind found the very same window).
-    func windowGone(_ t: CUTarget) -> Bool { liveServerWindow(t) == nil }
+    /// switched desktops, and the rebind found the very same window). A CLOSED window the app keeps allocated
+    /// stays in the server's listing, off screen: it counts as gone when it is on no Space at all and the app
+    /// doesn't list it (a minimized window or a hidden app's is listed; one on another Space is on a Space).
+    func windowGone(_ t: CUTarget) -> Bool {
+        guard let w = liveServerWindow(t) else { return true }
+        guard !w.onScreen, sys.windowOnAnySpace(w.id) == false else { return false }
+        return !CUAXWindows.list(pid: t.pid, ax: ax, server: sys.windows(pid: t.pid)).contains { $0.id == w.id }
+    }
 
     /// The bound window's window-server record, looked up the same patient way.
     func liveServerWindow(_ t: CUTarget) -> CUWindowServerWindow? {
@@ -1079,7 +1085,7 @@ public final class CUCore: @unchecked Sendable {
         // Without the grant AX lists nothing — that must never read as "the window closed".
         try requireAccessibility()
         guard let w = CUAXWindows.list(pid: t.pid, ax: ax, server: sys.windows(pid: t.pid)).first(where: { $0.id == wid }) else {
-            guard let server = liveServerWindow(t) else {
+            guard let server = liveServerWindow(t), !(!server.onScreen && sys.windowOnAnySpace(wid) == false) else {
                 lose(t, reason: "window_closed")
                 throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window")
             }

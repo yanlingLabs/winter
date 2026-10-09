@@ -191,6 +191,10 @@ final class FakeSystem: CUSystemBackend {
     func activate(pid: pid_t) -> Bool { activated.append(pid); front = pid; onActivate?(pid); return true }
     var stageManager = false
     func stageManagerEnabled() -> Bool { stageManager }
+    /// Windows on no Space at all (closed but still listed); others answer `onSpace` (nil = unknown).
+    var noSpaceWindows: Set<UInt32> = []
+    var onSpace: Bool? = nil
+    func windowOnAnySpace(_ id: UInt32) -> Bool? { noSpaceWindows.contains(id) ? false : onSpace }
     /// Content processes (Safari's WebContent), each with the app it serves.
     var contentProcesses: [pid_t: pid_t] = [:]
     func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { contentProcesses[pid] == appPid }

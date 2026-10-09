@@ -85,6 +85,8 @@ protocol CUSystemBackend: AnyObject {
     func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool
     /// Stage Manager is on (windows of other stage sets sit off stage on this Space).
     func stageManagerEnabled() -> Bool
+    /// Whether the window is on any Space (false for a closed window the server still lists); nil = unknown.
+    func windowOnAnySpace(_ id: UInt32) -> Bool?
     func cursorLocation() -> CGPoint?
     func warpCursor(to: CGPoint)
 }
@@ -107,6 +109,7 @@ final class CULiveSystem: CUSystemBackend {
     }
     func windowStack() -> [CUWindowServerWindow] { CUWindowServer.windows(onScreenOnly: true, includeOtherLayers: true) }
     func moveWindowToActiveSpace(_ id: UInt32) -> Bool { CUSkyLight.system.moveWindowToActiveSpace(windowID: id) }
+    func windowOnAnySpace(_ id: UInt32) -> Bool? { CUSkyLight.system.isOnAnySpace(windowID: id) }
     func frontmostPid() -> pid_t? {
         // The window server's front process changes the moment an app activates; NSWorkspace hears of it later,
         // on the main run loop — too late for the check right after an act.

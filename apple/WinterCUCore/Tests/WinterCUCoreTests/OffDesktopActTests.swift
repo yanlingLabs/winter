@@ -316,6 +316,40 @@ final class OffDesktopActTests: XCTestCase {
         XCTAssertTrue(poster.keyDowns.isEmpty, "nothing typed into Search")
     }
 
+    func testSetValueOnAScrollBarSetsANumberInZeroToOne() async throws {
+        world(scrollBar: true)
+        try await act(.setValue(CUSetValueAction(ref: ref(bar), value: "0.5")))
+        let v = try XCTUnwrap(ax.attribute(bar, kAXValueAttribute) as? NSNumber)
+        XCTAssertEqual(v.doubleValue, 0.5, accuracy: 0.0001, "a number, not the text \"0.5\"")
+        for bad in ["2", "fifty"] {
+            do {
+                try await act(.setValue(CUSetValueAction(ref: ref(bar), value: bad)))
+                XCTFail("expected invalid_params for \(bad)")
+            } catch let e as CUError {
+                XCTAssertEqual(e.code, "invalid_params", e.message)
+            }
+        }
+    }
+
+    func testAClosedWindowTheServerStillListsIsTargetLostNotNoWindow() async throws {
+        world()
+        sys.noSpaceWindows = [77]  // closed: off screen, on no Space, not in the app's list
+        do {
+            _ = try await core.targetFind(TargetFindParams(targetId: "t1", query: .fields(role: "button", name: nil, text: nil)))
+            XCTFail("expected target_lost")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "target_lost", e.message)
+        }
+    }
+
+    func testAWindowOnAnotherSpaceIsNotTakenForClosed() {
+        world()
+        sys.onSpace = true  // on another Space: on a Space
+        XCTAssertFalse(core.windowGone(target))
+        sys.onSpace = nil   // unknown: never guessed closed
+        XCTAssertFalse(core.windowGone(target))
+    }
+
     func testADragElsewhereIsWindowTargetedEvents() async throws {
         world()
         let r = try await act(.drag(CUDragAction(from: CUDragEnd(ref: ref(icon)), to: CUDragEnd(ref: ref(link)))))

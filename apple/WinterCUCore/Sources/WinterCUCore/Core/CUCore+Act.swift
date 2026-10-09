@@ -589,10 +589,28 @@ extension CUCore {
         cursor(t, "type", at: info.center)
         try token.check()
         if ax.isSettable(e, kAXValueAttribute) {
+            // A scroll bar, slider or stepper holds a NUMBER: the text "0.5" is an illegal argument to it.
+            let current = ax.attribute(e, kAXValueAttribute)
+            let numeric = current.map { CFGetTypeID($0) == CFNumberGetTypeID() } ?? false
+                || [kAXScrollBarRole, kAXSliderRole, kAXIncrementorRole].contains(info.role ?? "")
+            let value: CFTypeRef
+            if numeric {
+                guard let n = Double(a.value.trimmingCharacters(in: .whitespaces)) else {
+                    throw CUError.invalidParams("[\(a.ref)] holds a number — pass one, e.g. setValue(\(a.ref), \"0.5\")")
+                }
+                if info.role == kAXScrollBarRole, !(0...1).contains(n) {
+                    throw CUError.invalidParams("a scroll bar's value runs from 0 (top or left) to 1 (bottom or right) — got \(a.value)")
+                }
+                value = NSNumber(value: n)
+            } else {
+                value = a.value as CFString
+            }
             do {
-                try ax.set(e, kAXValueAttribute, a.value as CFString)
+                try ax.set(e, kAXValueAttribute, value)
             } catch let error where Self.deliveryUncertain(error) {
                 throw busyAfterSend(t)
+            } catch let error as CUError where info.role == kAXScrollBarRole && error.code == "invalid_params" {
+                throw CUError.unsupported("\(t.appName)'s scroll bar [\(a.ref)] won't take a value — scroll its area with scroll() instead")
             }
             return ActOutcome(rung: .accessibility)
         }
