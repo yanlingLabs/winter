@@ -80,6 +80,9 @@ protocol CUSystemBackend: AnyObject {
     func activeSpace() -> UInt64?
     /// Activates an app. Only the consented foreground rung and the restores of the user's own app call it.
     func activate(pid: pid_t) -> Bool
+    /// `pid` is a content process serving part of `appPid`'s UI — Safari's WebContent, an XPC service — not a
+    /// regular app of its own (nor this helper): key events for what it shows go to it.
+    func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool
     /// Stage Manager is on (windows of other stage sets sit off stage on this Space).
     func stageManagerEnabled() -> Bool
     func cursorLocation() -> CGPoint?
@@ -116,6 +119,12 @@ final class CULiveSystem: CUSystemBackend {
     }
     func stageManagerEnabled() -> Bool {
         UserDefaults(suiteName: "com.apple.WindowManager")?.bool(forKey: "GloballyEnabled") ?? false
+    }
+    func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool {
+        guard pid > 0, pid != appPid, pid != getpid(), kill(pid, 0) == 0 || errno == EPERM else { return false }
+        // A regular app is a different app, never a part of this one.
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return true }
+        return app.activationPolicy != .regular
     }
     func cursorLocation() -> CGPoint? { CGEvent(source: nil)?.location }
     func warpCursor(to p: CGPoint) {

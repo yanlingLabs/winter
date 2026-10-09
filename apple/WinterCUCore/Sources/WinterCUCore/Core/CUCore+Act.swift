@@ -550,7 +550,7 @@ extension CUCore {
         }
         // Not settable: focus it, select everything, and type over it.
         let g = TypingFocus(explicit: e)
-        try? ax.set(e, kAXFocusedAttribute, kCFBooleanTrue)
+        focusField(e, t)
         if let len = ax.string(e, kAXValueAttribute)?.utf16.count, ax.isSettable(e, kAXSelectedTextRangeAttribute),
            let r = AX.makeRange(location: 0, length: len) {
             try? ax.set(e, kAXSelectedTextRangeAttribute, r)
@@ -583,7 +583,7 @@ extension CUCore {
             let info = ElementInfo(el, ax)
             if info.secure { throw secureRefusal() }
             announceTarget(t, info, pressing: false)
-            try? ax.set(el, kAXFocusedAttribute, kCFBooleanTrue)
+            focusField(el, t)
             t.noteTargeted(el, at: clock.nowMs())
             g.explicit = el
             e = el
@@ -612,15 +612,23 @@ extension CUCore {
                 // Refused outright: nothing was inserted, so the fallbacks below can't double it.
             }
             if applied {
-                // Chromium applies the edit asynchronously: wait for it before deciding it failed, or the
-                // fallback would type it a second time.
-                if before == nil { return ActOutcome(rung: .accessibility) }
-                if waitForEdit(t, e, before: before, since: since, capMs: t.isChromium ? 300 : 150) {
+                // Chromium and WebKit apply the edit asynchronously: wait for it before deciding it failed, or
+                // the fallback would type it a second time. The proof is the TEXT in the value read back — a
+                // value-change notification alone is not (Google Docs' title took the insert, notified, and
+                // reverted it).
+                let web = t.isChromium || isWebContent(e)
+                switch waitForInsert(e, text, before: before, capMs: web ? 400 : 150) {
+                case .landed:
                     return ActOutcome(rung: .accessibility)
+                case .unreadable where !web:
+                    return ActOutcome(rung: .accessibility)  // nothing to read it back by: trusted, as before
+                default:
+                    _ = since
+                    CULog.act.notice("type in \(t.appName, privacy: .public): the accessibility insert did not stick — typing keys")
                 }
             }
         }
-        if text.contains("\n") || text.count > 64 {
+        if text.contains("\n") || text.count > Self.typeKeysMax {
             return try pasteText(text, format: .text, p, t, token, g)
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
@@ -629,8 +637,10 @@ extension CUCore {
         let synth = self.synth(p)
         let chars = Array(text)
         var next = 0
-        return try runEvents(p, t, d, focus: true, token) { [self] route, _ in
-            try synth.type(pid: t.pid, text: text, route: route) {
+        let keyPid = keyboardTarget(t, focused: e)
+        let valueBefore = keyPid != t.pid ? e.flatMap { ax.string($0, kAXValueAttribute) } : nil
+        let typed = try runEvents(p, t, d, focus: true, token) { [self] route, _ in
+            try synth.type(pid: keyPid, text: text, route: route) {
                 // Before EVERY character: not cancelled, still running, and focus still on a typable,
                 // non-sensitive field — a tab or return may just have moved it to a password field.
                 try token.check()
@@ -640,6 +650,69 @@ extension CUCore {
                 try requireTypableFocus(t, g)
             }
         }
+        // Keys to a content process can't be confirmed by the route itself: read the field back when it can be.
+        if keyPid != t.pid, let e, valueBefore != nil, waitForInsert(e, text, before: valueBefore, capMs: 400) == .missing {
+            CULog.act.notice("type in \(t.appName, privacy: .public): keys to the content process \(keyPid, privacy: .public) left the field unchanged")
+            return typed.noting("the keys went to \(t.appName)'s web content process, and the field's value did not change — check the state")
+        }
+        return typed
+    }
+
+    /// Up to this many characters are typed as keys (one real key per character); longer or multi-line text is
+    /// pasted. A paste needs evidence that can be missing (Google Docs' title took no cmd+V from the
+    /// background), and keys are what a person types.
+    static let typeKeysMax = 200
+
+    enum InsertEvidence { case landed, missing, unreadable }
+
+    /// Polls the element's value for the inserted text: `landed` when the value now differs from `before` and
+    /// contains `text`, `unreadable` when there is no value to read.
+    func waitForInsert(_ e: AXUIElement, _ text: String, before: String?, capMs: Double) -> InsertEvidence {
+        let deadline = clock.nowMs() + capMs
+        var readAny = before != nil
+        repeat {
+            if let now = ax.string(e, kAXValueAttribute) {
+                readAny = true
+                if now != before, now.contains(text) { return .landed }
+            }
+            if clock.nowMs() >= deadline { break }
+            usleep(25_000)
+        } while true
+        return readAny ? .missing : .unreadable
+    }
+
+    /// The element is web content (inside an `AXWebArea`): WebKit and Chromium page fields.
+    func isWebContent(_ e: AXUIElement?) -> Bool {
+        var cur = e
+        for _ in 0..<40 {
+            guard let c = cur else { return false }
+            if ax.string(c, kAXRoleAttribute) == "AXWebArea" { return true }
+            cur = ax.element(c, kAXParentAttribute)
+        }
+        return false
+    }
+
+    /// Where key events go: the focused element's OWN process when it isn't the app's — Safari's web content
+    /// lives in a WebContent process (ChatGPT's `outOfProcessTarget`). Keys posted to Safari's UI process for
+    /// a web field made Safari activate itself and pull the user to its desktop; the content process takes
+    /// them without that. The app's pid otherwise.
+    func keyboardTarget(_ t: CUTarget, focused: AXUIElement?) -> pid_t {
+        guard let f = focused ?? reportedFocus(t) else { return t.pid }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(f, &pid) == .success, pid != t.pid, sys.isContentProcess(pid, of: t.pid) else { return t.pid }
+        CULog.act.notice("keys in \(t.appName, privacy: .public): pid events → \(self.sys.processName(pid: pid) ?? "content process", privacy: .public) \(pid, privacy: .public)")
+        return pid
+    }
+
+    /// Focuses an element over accessibility, checking the user's view: WebKit makes the page's window key and
+    /// its app ACTIVE when a web field is focused this way. A move is put back at once and said (the act's
+    /// guard would put it back too, after the act); the write itself is kept — the text needs the focus.
+    func focusField(_ e: AXUIElement, _ t: CUTarget) {
+        let before = userView()
+        try? ax.set(e, kAXFocusedAttribute, kCFBooleanTrue)
+        let after = view(after: before, settleMs: stepSettleMs)
+        guard after != before else { return }
+        t.addViewNote(viewMoved(before, after, t, route: "focusing the field over accessibility", late: false))
     }
 
     /// Polls for evidence that an edit landed: the value changed, or a value-change notification arrived.
@@ -719,7 +792,7 @@ extension CUCore {
             let info = ElementInfo(el, ax)
             if Self.producesText(chord), info.secure { throw secureRefusal() }
             announceTarget(t, info, pressing: false)
-            try? ax.set(el, kAXFocusedAttribute, kCFBooleanTrue)
+            focusField(el, t)
             t.noteTargeted(el, at: clock.nowMs())
             g.explicit = el
             e = el
@@ -736,10 +809,11 @@ extension CUCore {
         // Resolve the route once (the menu lookup walks the menu bar), then press it `repeat` times.
         let plan = try chordPlan(chord, p, t, g)
         var out = ActOutcome(rung: .accessibility)
+        let keyPid = keyboardTarget(t, focused: e)
         for _ in 0..<rep {
             try token.check()
             if textual { try requireTypableFocus(t, g) }
-            out = try execute(plan, p, t, token)
+            out = try execute(plan, p, t, token, keyPid: keyPid)
         }
         return out
     }
@@ -775,7 +849,9 @@ extension CUCore {
                        decision: try CUInputLadder.decideEvents(context(p, t, pointer: false)))
     }
 
-    func execute(_ plan: ChordPlan, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+    /// `keyPid`: where key events go (`keyboardTarget`), the app's pid when nil.
+    func execute(_ plan: ChordPlan, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token,
+                 keyPid: pid_t? = nil) throws -> ActOutcome {
         switch plan {
         case .menuItem(let element, let title):
             aimMenuCommands(at: t)
@@ -787,8 +863,9 @@ extension CUCore {
             return ActOutcome(rung: .accessibility, detail: "used the menu item “\(title)”")
         case .events(let code, let flags, let d):
             let synth = self.synth(p)
+            let pid = keyPid ?? t.pid
             return try runEvents(p, t, d, focus: true, token) { route, _ in
-                synth.key(pid: t.pid, code: code, flags: flags, route: route)
+                synth.key(pid: pid, code: code, flags: flags, route: route)
             }
         }
     }
@@ -798,7 +875,7 @@ extension CUCore {
                    _ g: TypingFocus = TypingFocus()) throws -> ActOutcome {
         let keyed = focusBoundWindow(p, t)
         defer { keyed?() }
-        return try execute(try chordPlan(chord, p, t, g), p, t, token)
+        return try execute(try chordPlan(chord, p, t, g), p, t, token, keyPid: keyboardTarget(t, focused: reportedFocus(t)))
     }
 
     /// A menu-bar item whose key equivalent is `key` with `modifiers` (command implied). The walk is bounded
@@ -942,7 +1019,7 @@ extension CUCore {
             // Keys go to the focused element: make it the scrolled content, not a search field.
             let content = ax.elements(area, kAXChildrenAttribute).first { ax.string($0, kAXRoleAttribute) != kAXScrollBarRole }
             for target in [content, area].compactMap({ $0 }) where ax.isSettable(target, kAXFocusedAttribute) {
-                try? ax.set(target, kAXFocusedAttribute, kCFBooleanTrue)
+                focusField(target, t)
                 break
             }
         }
@@ -950,6 +1027,7 @@ extension CUCore {
         let key: CUNamedKey = direction == .down ? .pageDown : direction == .up ? .pageUp : direction == .left ? .left : .right
         let presses = vertical ? max(1, Int(pages.rounded(.up))) : max(1, Int((pages * 8).rounded(.up)))
         let code = CUKeyCodes.code(for: key)
+        let keyPid = keyboardTarget(t, focused: reportedFocus(t))
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
         let synth = self.synth(p)
         let event = p.privatePath && skyLight.canSetWindowLocation ? nil : CursorEvent(kind: "scroll", point: point, text: direction.rawValue)
@@ -957,7 +1035,7 @@ extension CUCore {
             var used = route
             for _ in 0..<presses {
                 try token.check()
-                used = synth.key(pid: t.pid, code: code, flags: [], route: route)
+                used = synth.key(pid: keyPid, code: code, flags: [], route: route)
             }
             return used
         }
@@ -1130,7 +1208,7 @@ extension CUCore {
         announceTarget(t, info, pressing: false)
         cursor(t, "press", at: info.center, count: 1, button: "left")
         try token.check()
-        try? ax.set(e, kAXFocusedAttribute, kCFBooleanTrue)
+        focusField(e, t)
         do {
             try ax.set(e, kAXSelectedTextRangeAttribute, r)
         } catch let error where Self.deliveryUncertain(error) {
