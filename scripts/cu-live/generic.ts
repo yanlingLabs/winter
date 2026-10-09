@@ -103,7 +103,7 @@ async function byRoles(app, roles) {
 function skip(reason) { report({ skipped: reason }); }
 `;
 
-export interface GenericApp { query: string; key: string }
+export interface GenericApp { query: string; key: string; /** Resolved by the runner (`resolveApp`), when it could. */ bundleId?: string }
 
 export function parseApps(spec: string | undefined): GenericApp[] {
   if (spec === undefined) return [];
@@ -121,8 +121,9 @@ const G = (key: string): string => `const app = GH.get(${JSON.stringify(key)}); 
 export const SCRIPTS = {
   bind: (a: GenericApp): string => `
 const list = await apps.list({ emit: false });
-const want = ${JSON.stringify(a.query.toLowerCase())};
-const entry = list.find((x) => x.bundleId.toLowerCase() === want) || list.find((x) => x.name.toLowerCase() === want);
+const want = ${JSON.stringify((a.bundleId ?? a.query).toLowerCase())};
+const norm = (s) => s.toLowerCase().replace(/\\.app$/, "").replace(/[^a-z0-9]/g, "");
+const entry = list.find((x) => x.bundleId.toLowerCase() === want) || list.find((x) => norm(x.name) === norm(want));
 if (!entry) { report({ installed: false }); skip("not installed (apps.list() does not name it)"); }
 else {
   report({ installed: true, bundleId: entry.bundleId, name: entry.name, wasRunning: entry.running });
@@ -275,12 +276,65 @@ export function looksLikeBundleId(query: string): boolean {
   return /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+){2,}$/.test(query);
 }
 
-/** The Spotlight query that finds an installed app by bundle id or by name (no permission needed). */
-export function installedQuery(query: string): string {
-  const q = query.replace(/'/g, "");
-  return looksLikeBundleId(q)
-    ? `kMDItemCFBundleIdentifier == '${q}'`
-    : `kMDItemContentType == 'com.apple.application-bundle' && (kMDItemDisplayName == '${q}' || kMDItemDisplayName == '${q}.app')`;
+export interface ResolvedApp { path: string; bundleId: string; name: string; via: "bundle id" | "LaunchServices" | "bundle names" }
+
+export interface ResolveDeps {
+  /** `mdfind <query>` → its lines. */
+  mdfind(query: string): string[];
+  /** The bundle's Info.plist as an object (`plutil -convert json`), or undefined. */
+  infoPlist(appPath: string): Record<string, unknown> | undefined;
+  /** The bundles to scan in the last step (default /Applications, ~/Applications, /System/Applications). */
+  dirs: string[];
+  /** The `.app` entries of a directory (one level, plus one sub-folder level like Utilities). */
+  listApps(dir: string): string[];
+}
+
+/** Names compared case- and space-insensitively ("VRoid Studio" ≡ "VRoidStudio" ≡ "vroid-studio"). */
+export function normalizeAppName(s: string): string {
+  return s.toLowerCase().replace(/\.app$/, "").replace(/[^a-z0-9]/g, "");
+}
+
+function namesOf(plist: Record<string, unknown> | undefined, path: string): string[] {
+  const base = path.split("/").at(-1) ?? "";
+  return [plist?.CFBundleDisplayName, plist?.CFBundleName, plist?.CFBundleExecutable, base].filter((v): v is string => typeof v === "string" && v.length > 0);
+}
+
+/**
+ * `--apps` names → an installed app, in order: (1) a bundle id (Spotlight's `kMDItemCFBundleIdentifier`);
+ * (2) LaunchServices' display name (`mdfind` on application bundles, name prefix, case/diacritic-insensitive);
+ * (3) CFBundleDisplayName / CFBundleName / CFBundleExecutable (and the bundle's file name) of the apps in
+ * /Applications, ~/Applications and /System/Applications, matched case- and space-insensitively — so "VRoid Studio"
+ * finds /Applications/VRoidStudio.app (bundle id net.pixiv.vroid.macosx, a file name with no space).
+ */
+export function resolveApp(query: string, deps: ResolveDeps): ResolvedApp | undefined {
+  const fromPath = (path: string, via: ResolvedApp["via"]): ResolvedApp | undefined => {
+    const plist = deps.infoPlist(path);
+    const bundleId = typeof plist?.CFBundleIdentifier === "string" ? plist.CFBundleIdentifier : undefined;
+    if (bundleId === undefined) return undefined;
+    return { path, bundleId, name: namesOf(plist, path)[0] ?? query, via };
+  };
+  const q = query.replace(/'/g, "").trim();
+  const apps = (lines: string[]): string[] => lines.map((l) => l.trim()).filter((l) => l.endsWith(".app"));
+  if (looksLikeBundleId(q)) {
+    for (const path of apps(deps.mdfind(`kMDItemCFBundleIdentifier == '${q}'`))) {
+      const hit = fromPath(path, "bundle id");
+      if (hit !== undefined && hit.bundleId.toLowerCase() === q.toLowerCase()) return hit;
+    }
+  }
+  const want = normalizeAppName(q);
+  for (const path of apps(deps.mdfind(`kMDItemContentType == 'com.apple.application-bundle' && kMDItemDisplayName == '${q}*'cd`))) {
+    const hit = fromPath(path, "LaunchServices");
+    if (hit !== undefined && namesOf(deps.infoPlist(path), path).some((n) => normalizeAppName(n) === want)) return hit;
+  }
+  for (const dir of deps.dirs) {
+    for (const path of deps.listApps(dir)) {
+      if (namesOf(deps.infoPlist(path), path).some((n) => normalizeAppName(n) === want)) {
+        const hit = fromPath(path, "bundle names");
+        if (hit !== undefined) return hit;
+      }
+    }
+  }
+  return undefined;
 }
 
 /** A one-line description of what the run would do with an app (the dry run prints it). */

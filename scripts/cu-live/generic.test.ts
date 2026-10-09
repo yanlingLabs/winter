@@ -3,9 +3,13 @@
 // the scripts carry into the sandboxed worker (`PLANNING`), so the two cannot drift.
 import { describe, expect, test } from "bun:test";
 import {
-  describePlan, GENERIC_PRELUDE, genericScenario, installedQuery, isDestructiveName, looksLikeBundleId, offSpacePlan, offSpaceSkipReason, onDesktopPlan,
-  parseApps, pickEditable, pickPressable, PLANNING, refCount, restorePlan, SCRIPTS, secureFocused, TYPE_MARKER, type PlanElement,
+  describePlan, GENERIC_PRELUDE, genericScenario, isDestructiveName, looksLikeBundleId, normalizeAppName, offSpacePlan, offSpaceSkipReason, onDesktopPlan,
+  parseApps, pickEditable, pickPressable, PLANNING, refCount, resolveApp, restorePlan, SCRIPTS, secureFocused, TYPE_MARKER, type PlanElement, type ResolveDeps,
 } from "./generic";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseLogTimestamp } from "./run";
 import { scriptOf } from "./scenarios";
 
@@ -104,12 +108,72 @@ describe("the generic run's plan", () => {
     expect(genericScenario(a, "x", "state", true).name).toBe("VRoid Studio (off-Space): x");
   });
 
-  test("installed lookups and the plan line", () => {
+  test("bundle-id detection, name normalisation and the plan line", () => {
     expect(looksLikeBundleId("com.microsoft.VSCode")).toBe(true);
+    expect(looksLikeBundleId("net.pixiv.vroid.macosx")).toBe(true);
     expect(looksLikeBundleId("VRoid Studio")).toBe(false);
-    expect(installedQuery("com.google.Chrome")).toBe("kMDItemCFBundleIdentifier == 'com.google.Chrome'");
-    expect(installedQuery("VRoid Studio")).toContain("kMDItemDisplayName == 'VRoid Studio.app'");
+    expect(normalizeAppName("VRoid Studio")).toBe(normalizeAppName("VRoidStudio.app"));
+    expect(normalizeAppName("Visual Studio Code")).toBe("visualstudiocode");
     expect(describePlan({ query: "VRoid Studio", key: "app0" })).toContain("off-Space via its full-screen button only if the run launched it");
+  });
+});
+
+describe("resolving --apps names (bundle id, LaunchServices, bundle names)", () => {
+  /** A fake app folder: "VRoidStudio.app" (no space in the FILE name) whose names say "VRoid Studio". */
+  function fakeApps(): { dir: string; deps: (mdfind?: (q: string) => string[]) => ResolveDeps; cleanup(): void } {
+    const dir = mkdtempSync(join(tmpdir(), "cu-live-apps-"));
+    const plist = (id: string, name: string, exe: string): string => `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${id}</string><key>CFBundleName</key><string>${name}</string><key>CFBundleExecutable</key><string>${exe}</string></dict></plist>\n`;
+    for (const [file, id, name, exe] of [["VRoidStudio.app", "net.pixiv.vroid.macosx", "VRoid Studio", "VRoid Studio"], ["Other.app", "com.example.other", "Other", "Other"]]) {
+      mkdirSync(join(dir, file!, "Contents"), { recursive: true });
+      writeFileSync(join(dir, file!, "Contents", "Info.plist"), plist(id!, name!, exe!));
+    }
+    mkdirSync(join(dir, "Utilities", "Nested Tool.app", "Contents"), { recursive: true });
+    writeFileSync(join(dir, "Utilities", "Nested Tool.app", "Contents", "Info.plist"), plist("com.example.nested", "Nested Tool", "nested"));
+    const deps = (mdfind: (q: string) => string[] = () => []): ResolveDeps => ({
+      mdfind,
+      infoPlist: (app) => {
+        const r = spawnSync("plutil", ["-convert", "json", "-o", "-", join(app, "Contents", "Info.plist")], { encoding: "utf8" });
+        return r.status === 0 ? JSON.parse(r.stdout) as Record<string, unknown> : undefined;
+      },
+      dirs: [dir],
+      listApps: (d) => readdirSync(d).flatMap((e) => (e.endsWith(".app") ? [join(d, e)] : readdirSync(join(d, e)).filter((x) => x.endsWith(".app")).map((x) => join(d, e, x)))),
+    });
+    return { dir, deps, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  }
+
+  test('"VRoid Studio" resolves to VRoidStudio.app by its bundle names when Spotlight finds nothing by that name', () => {
+    const f = fakeApps();
+    try {
+      const hit = resolveApp("VRoid Studio", f.deps());
+      expect(hit).toEqual({ path: join(f.dir, "VRoidStudio.app"), bundleId: "net.pixiv.vroid.macosx", name: "VRoid Studio", via: "bundle names" });
+      expect(resolveApp("vroidstudio", f.deps())?.bundleId).toBe("net.pixiv.vroid.macosx");
+      expect(resolveApp("Nested Tool", f.deps())?.bundleId).toBe("com.example.nested");
+      expect(resolveApp("Missing App", f.deps())).toBeUndefined();
+    } finally { f.cleanup(); }
+  });
+
+  test("a bundle id resolves first, through Spotlight, and must match the bundle's own id", () => {
+    const f = fakeApps();
+    try {
+      const spotlight = (q: string): string[] => (q === "kMDItemCFBundleIdentifier == 'net.pixiv.vroid.macosx'" ? [join(f.dir, "VRoidStudio.app")] : []);
+      expect(resolveApp("net.pixiv.vroid.macosx", f.deps(spotlight))).toMatchObject({ bundleId: "net.pixiv.vroid.macosx", via: "bundle id" });
+      // Spotlight naming a bundle with a different id is not trusted.
+      expect(resolveApp("com.example.liar", f.deps(() => [join(f.dir, "Other.app")]))).toBeUndefined();
+    } finally { f.cleanup(); }
+  });
+
+  test("LaunchServices by display name comes before the folder scan, and its hit must carry the name", () => {
+    const f = fakeApps();
+    try {
+      const queries: string[] = [];
+      const spotlight = (q: string): string[] => { queries.push(q); return q.includes("kMDItemDisplayName == 'VRoid Studio*'cd") ? [join(f.dir, "VRoidStudio.app")] : []; };
+      expect(resolveApp("VRoid Studio", f.deps(spotlight))).toMatchObject({ via: "LaunchServices", bundleId: "net.pixiv.vroid.macosx" });
+      expect(queries[0]).toContain("kMDItemContentType == 'com.apple.application-bundle'");
+      // A display-name hit whose names don't match (a prefix match on something else) falls through to the scan.
+      expect(resolveApp("Other", f.deps(() => [join(f.dir, "VRoidStudio.app")]))).toMatchObject({ via: "bundle names", bundleId: "com.example.other" });
+    } finally { f.cleanup(); }
   });
 
   test("helper log timestamps (log show --style ndjson) parse to epoch ms", () => {
