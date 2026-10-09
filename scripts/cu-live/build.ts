@@ -1,5 +1,5 @@
 // Builds everything the live ComputerV2 suite runs, into `out/cu-live/` (git-ignored), and skips what is current:
-//   - "Winter CU Fixture.app" (com.winter.cu-fixture) and "Winter CU User App.app" (com.winter.cu-fixture-user): ONE
+//   - "Winter CU Fixture.app" (dev.cu-live.fixture) and "Winter CU User App.app" (dev.cu-live.fixture-user): ONE
 //     Swift binary in two bundles, ad-hoc signed (nothing here needs an identity: the helper reads them through ITS
 //     Accessibility grant);
 //   - `cu-live-tool` (the focus/Space/HID monitor and the fixtures' command poster — needs no TCC grant at all);
@@ -23,8 +23,9 @@ const SWIFT_DIR = join(REPO_ROOT, "scripts", "cu-live", "swift");
 const WEB_DIR = join(REPO_ROOT, "scripts", "cu-live", "fixture-web");
 const ENTITLEMENTS = join(REPO_ROOT, "scripts", "winter-core.entitlements");
 
-export const FIXTURE_MAIN = { name: "Winter CU Fixture", bundleId: "com.winter.cu-fixture" } as const;
-export const FIXTURE_USER = { name: "Winter CU User App", bundleId: "com.winter.cu-fixture-user" } as const;
+// Never a `com.winter.` id: ComputerV2 refuses to bind any app under that prefix ("Winter can't control itself").
+export const FIXTURE_MAIN = { name: "Winter CU Fixture", bundleId: "dev.cu-live.fixture" } as const;
+export const FIXTURE_USER = { name: "Winter CU User App", bundleId: "dev.cu-live.fixture-user" } as const;
 /** Test-only identities (never a production identifier) — `WinterCodeIdentity.liveTest*Identifier` in the helper. */
 export const VIEW_PROBE_IDENTIFIER = "com.winter.app.cutest";
 export const LIVE_DAEMON_IDENTIFIER = "com.winter.core.cutest";

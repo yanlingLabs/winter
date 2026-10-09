@@ -130,7 +130,10 @@ else {
   const app = await apps.open(entry.bundleId);
   GH.set(${JSON.stringify(a.key)}, app);
   const s = await app.state({ emit: false, full: true });
-  report({ bound: true, refs: refCount(s), windows: (await app.windows()).length });
+  // Whether any of its windows is on THIS desktop (screen.windows: onScreen false = another Space, full screen or
+  // minimized) — an already-running app's windows elsewhere are never moved, so the visual steps then skip.
+  const onScreen = (await screen.windows({ emit: false })).some((w) => (w.app === app.name || w.app === entry.name) && w.onScreen);
+  report({ bound: true, refs: refCount(s), windows: (await app.windows()).length, onScreen });
 }`,
   state: (a: GenericApp): string => `${G(a.key)}
 const s = await app.state({ full: true });
@@ -140,12 +143,21 @@ const roles = ["tab", "radio button", "disclosure triangle", "check box", "toggl
 const plan = pickPressable(await byRoles(app, roles));
 if (!plan) skip("no harmless, reversible control (tabs, toggles, view buttons; never delete/close/send/…)");
 else {
-  await app.action(plan.element.ref, "press");
+  // AX press; an element that lists no press action (Chrome's web controls: "show menu, scroll to visible") is
+  // clicked instead — the same harmless, reversible control.
+  const press = async (ref) => {
+    try { await app.action(ref, "press"); return "press"; } catch (e) {
+      if (e.name !== "TypeError" || !/has no action/.test(String(e.message))) throw e;
+      await app.click(ref);
+      return "click";
+    }
+  };
+  const how = await press(plan.element.ref);
   // Undo by NAME, found again: the press may have redrawn the tree (a stale ref must not leave the change behind).
   const back = plan.undo === "reselect" ? plan.reselect : plan.element;
   const again = (await app.find({ role: back.role, name: back.name }, { emit: false })).find((e) => e.name === back.name) || back;
-  await app.action(again.ref, "press");
-  report({ pressed: plan.element.role + " " + JSON.stringify(plan.element.name), undo: plan.undo });
+  await press(again.ref);
+  report({ pressed: plan.element.role + " " + JSON.stringify(plan.element.name), undo: plan.undo, how });
 }`,
   type: (a: GenericApp): string => `${G(a.key)}
 const secure = await app.find({ role: "secure text field" }, { emit: false });
@@ -259,6 +271,13 @@ export function offSpacePlan(): Array<{ label: string; action: keyof typeof SCRI
  * Why off-Space is skipped for an app, or undefined to try it: never for an app the user already had running (the run
  * never moves the user's windows), and only through a full-screen button (decided live).
  */
+/** Why a visual step (screenshot, coordinate click) skips: an already-running app with no window on this desktop. */
+export function visualSkipReason(wasRunning: boolean | undefined, onScreen: unknown, action: string): string | undefined {
+  if (action !== "screenshot" && action !== "noAx") return undefined;
+  if (wasRunning === true && onScreen === false) return "none of its windows is on this desktop (another Space, minimized or not open) — the test never moves your windows";
+  return undefined;
+}
+
 export function offSpaceSkipReason(wasRunning: boolean | undefined): string | undefined {
   if (wasRunning === true) return "the app was already running — the test never moves your windows";
   if (wasRunning === undefined) return "unknown whether the app was running";

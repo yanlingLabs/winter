@@ -70,6 +70,11 @@ func runToolSelfTest() -> Int32 {
     check(Sampling.nowMs() > 1_700_000_000_000, "nowMs is epoch milliseconds")
     // IOKit needs no permission and no window server: either a sane number or nil, never negative.
     check((Sampling.hidIdleMs() ?? 0) >= 0, "hidIdleMs is non-negative when present")
+    var pointed = Sample(t: 2, front: nil, frontPid: nil, space: nil, hidIdleMs: nil)
+    pointed.mouse = (x: 10, y: -3)
+    check(pointed.json == "{\"t\":2,\"front\":null,\"frontPid\":null,\"space\":null,\"hidIdleMs\":null,\"mouse\":[10,-3]}", "a sample with the pointer")
+    pointed.spaceType = 4
+    check(pointed.json.hasSuffix(",\"mouse\":[10,-3],\"spaceType\":4}"), "a front sample with the Space's type")
 
     // --- image-stats on synthetic images ---------------------------------------------------------------------
     func image(width: Int, height: Int, space: CGColorSpace, _ draw: (CGContext) -> Void) -> CGImage? {

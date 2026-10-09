@@ -27,12 +27,23 @@ public final class RPCDispatcher: @unchecked Sendable {
     private let inFlight: InFlightRegistry
     private var routes: [String: Handler] = [:]
 
-    public init(core: CoreService, coordinator: HelperCoordinator, viewHub: ViewHub, inFlight: InFlightRegistry) {
+    /// `liveTest`: the helper is a live-test instance (`HelperIdentity.liveTest` — a dev helper serving a
+    /// `winter-cu-live-` temp home, which accepts only the live suite's test identities). Only then does it answer the
+    /// TEST-ONLY `test.activate` the suite uses to put its own "user's app" in front (`activator`).
+    public init(core: CoreService, coordinator: HelperCoordinator, viewHub: ViewHub, inFlight: InFlightRegistry,
+                liveTest: Bool = false, activator: (@Sendable (Int32) async -> TestActivateResult)? = nil) {
         self.core = core
         self.coordinator = coordinator
         self.viewHub = viewHub
         self.inFlight = inFlight
         buildRoutes()
+        if liveTest {
+            let activate = activator ?? { pid in await MainActor.run { TestActivator.activate(pid: pid) } }
+            routes["test.activate"] = { params, _ in
+                let p = try RPCDispatcher.decode(TestActivateParams.self, params)
+                return AnyEncodable(await activate(p.pid))
+            }
+        }
     }
 
     /// Every method this dispatcher answers (`hello` is the connection's own).

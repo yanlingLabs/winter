@@ -134,11 +134,13 @@ final class FixtureWindow: NSWindow {
     }
 }
 
-/// The user-role window: every key that reaches it is input that leaked into "the user's app".
+/// The user-role window: every key or click that reaches it is input that leaked into "the user's app".
 final class UserWindow: NSWindow {
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown {
             Fixture.shared.emit("user.key", [("chars", .str(event.characters ?? ""))])
+        } else if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) {
+            Fixture.shared.emit("user.mouse", [("button", .num(Double(event.buttonNumber)))])
         }
         super.sendEvent(event)
     }

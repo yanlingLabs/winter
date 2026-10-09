@@ -7,14 +7,14 @@
 // the daemon's metrics. The runner adds, for EVERY scenario, the focus check: the user's frontmost app and active
 // Space unchanged from the action's start until 3 s after it.
 //
-// The windows (the fixture app "Winter CU Fixture", `com.winter.cu-fixture`): "Fixture Form" (native fields),
+// The windows (the fixture app "Winter CU Fixture", `dev.cu-live.fixture`): "Fixture Form" (native fields),
 // "Fixture Web" (WKWebView), "Fixture Canvas" (no accessibility), "Fixture Offspace" (full screen = its own Space).
 // Handles persist across calls in the session's runtime (`win()` binds a window once and keeps it).
 import { check, eventsSince, lastValue, MARKER, MIXED_TEXT, type Check, type FixtureEvent } from "./lib";
 
 export const FIXTURE_APP = "Winter CU Fixture";
-export const FIXTURE_BUNDLE = "com.winter.cu-fixture";
-export const USER_APP_BUNDLE = "com.winter.cu-fixture-user";
+export const FIXTURE_BUNDLE = "dev.cu-live.fixture";
+export const USER_APP_BUNDLE = "dev.cu-live.fixture-user";
 
 /** One event the view probe printed (`cu-live-viewprobe`). */
 export interface ProbeEvent { t: number; ev: string; targetId?: string; appName?: string; blank?: boolean; bytes?: number; stddevLuma?: number; sentinelPixels?: number }
@@ -77,7 +77,8 @@ async function win(title) {
 }
 async function pick(app, name, role) {
   const els = await app.find(name, { emit: false });
-  const fits = (e) => role === undefined || e.role.includes(role);
+  // A label is never what a scenario acts on: "text" must not match the static text "Notes" beside the text area.
+  const fits = (e) => role === undefined ? e.role !== "static text" : e.role.includes(role) && (role === "static text" || e.role !== "static text");
   const hit = els.find((e) => fits(e) && e.name === name) || els.find((e) => fits(e) && (e.name || "").includes(name)) || els.find(fits);
   if (!hit) throw new Error("no " + (role || "element") + " named " + name + ": " + JSON.stringify(els.slice(0, 8)));
   return hit;
@@ -334,18 +335,25 @@ report({ ok: true });`,
     before: [{ role: "main", cmd: "reset" }],
     code: `
 const form = await win("Fixture Form");
-const notes = await pick(form, "Notes", "text");
+const notes = await pick(form, "Notes", "text area");
 await form.setValue(notes.ref, Array.from({ length: 120 }, (_, i) => "line " + (i + 1)).join("\\n"));
-const bars = await form.find({ role: "scroll bar" }, { emit: false });
+await form.state({ emit: false });
+const bars = (await form.find({ role: "scroll bar" }, { emit: false })).filter((b) => !(b.states || []).includes("disabled"));
 const bar = bars.find((b) => (b.name || "").toLowerCase().includes("vertical")) || bars[0];
-if (!bar) throw new Error("no scroll bar");
+if (!bar) throw new Error("no enabled scroll bar: " + JSON.stringify(await form.find({ role: "scroll bar" }, { emit: false })));
+// The bar's own parts (value indicator, arrows, page areas) — what state() lists under it.
+const parts = (await form.state({ emit: false, full: true, within: bar.ref })).split("\\n")
+  .map((l) => l.match(/^\\s*\\[(\\d+)\\] (value indicator|increment arrow|increment page|button)\\b/)).filter(Boolean).map((m) => ({ ref: Number(m[1]), role: m[2] }));
 let route = null;
 const tried = [];
-try { await form.setValue(bar.ref, "0.7"); route = "setValue"; } catch (e) { tried.push("setValue: " + e.name); }
-if (route === null) for (const a of ["increment", "page down", "AXIncrement"]) {
-  try { await form.action(bar.ref, a); route = "action " + a; break; } catch (e) { tried.push(a + ": " + e.name); }
-}
-report({ route, tried });`,
+const attempt = async (name, f) => { if (route !== null) return; try { await f(); route = name; } catch (e) { tried.push(name + ": " + e.name + " " + String(e.message).slice(0, 100)); } };
+await attempt("setValue on the bar", () => form.setValue(bar.ref, "0.7"));
+const indicator = parts.find((p) => p.role === "value indicator");
+if (indicator) await attempt("setValue on the value indicator", () => form.setValue(indicator.ref, "0.7"));
+const arrow = parts.find((p) => p.role === "increment arrow");
+if (arrow) await attempt("press the increment arrow", () => form.click(arrow.ref));
+for (const p of parts.filter((p) => p.role === "increment page" || p.role === "button")) await attempt("press page area [" + p.ref + "]", () => form.click(p.ref));
+report({ route, tried, parts });`,
     verify: (ctx) => {
       const moved = eventsSince(ctx.events, ctx.since, "scroller").filter((e) => e.id === "notes" && e.byWheel === false && Number(e.value) > 0);
       return [ok(ctx),
@@ -359,7 +367,7 @@ report({ route, tried });`,
     before: [{ role: "main", cmd: "reset" }],
     code: `
 const form = await win("Fixture Form");
-const notes = await pick(form, "Notes", "text");
+const notes = await pick(form, "Notes", "text area");
 await form.setValue(notes.ref, "make me loud please");
 await form.select(notes.ref, "loud");
 await form.menu(["Fixture", "Uppercase Selection"]);
@@ -381,7 +389,8 @@ try { await form.applescript('tell application "Finder" to get name of startup d
 const dict = await form.scriptingDictionary({ emit: false });
 report({ result: r.result, shell, other, scriptable: dict.scriptable });`,
     verify: (ctx) => [ok(ctx),
-      check("a script with no Apple Event ran", fact(ctx, "result") === "winter 5", String(fact(ctx, "result"))),
+      // The result comes back as AppleScript writes the value (a string quoted, `"winter 5"`); either form counts.
+      check("a script with no Apple Event ran", fact(ctx, "result") === "winter 5" || fact(ctx, "result") === '"winter 5"', String(fact(ctx, "result"))),
       check("do shell script is refused", fact(ctx, "shell") === "Refused" || fact(ctx, "shell") === "NotAllowed", String(fact(ctx, "shell"))),
       check("another app is refused", fact(ctx, "other") === "Refused" || fact(ctx, "other") === "NotAllowed", String(fact(ctx, "other"))),
       check("scriptingDictionary answers", typeof fact(ctx, "scriptable") === "boolean")],

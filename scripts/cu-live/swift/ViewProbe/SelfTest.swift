@@ -146,7 +146,7 @@ func runProbeSelfTest() -> Int32 {
 
     // --- output lines ----------------------------------------------------------------------------------------
     let bound = parsed(ProbeProtocol.eventLine(method: "view.bound", params: ["sessionId": "s", "targetId": "t1", "pid": 321, "windowId": 77,
-                                                                               "appName": "Winter CU Fixture", "bundleId": "com.winter.cu-fixture",
+                                                                               "appName": "Winter CU Fixture", "bundleId": "dev.cu-live.fixture",
                                                                                "windowSize": [640, 390]], t: 1000))
     check(bound?["ev"] as? String == "bound" && bound?["targetId"] as? String == "t1" && bound?["pid"] as? Int == 321
           && bound?["windowId"] as? Int == 77 && bound?["appName"] as? String == "Winter CU Fixture" && bound?["t"] as? Int == 1000, "bound line")

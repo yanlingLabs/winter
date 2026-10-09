@@ -26,30 +26,41 @@ if (process.argv[2] === AUTOMATION_WORKER_ARG) {
 }
 
 /**
- * `winter-core-live __peer-hello <socket> <home>`: one `hello` as a DAEMON client to a helper socket, nothing more —
+ * `winter-core-live __peer-hello <socket> <home>`: one `hello` as a DAEMON client to a helper socket (and, for
+ * `__helper-call`, one method after it) —
  * how the dry run proves which helpers accept this test identity (a live-test instance) and which close it unanswered
  * (every other dev helper). Prints one JSON line: `{"accepted":true,"result":…}` or `{"accepted":false,…}`.
  */
-async function peerHello(socketPath: string, home: string): Promise<void> {
+async function peerHello(socketPath: string, home: string, call?: { method: string; params: unknown }): Promise<void> {
   let buf = "";
+  let helloDone = false;
   const answer = await new Promise<Record<string, unknown>>((resolve) => {
-    const timer = setTimeout(() => resolve({ accepted: false, timeout: true }), 4_000);
+    const timer = setTimeout(() => resolve({ accepted: helloDone, timeout: true }), 6_000);
     Bun.connect({
       unix: socketPath,
       socket: {
         open(s) { s.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "hello", params: { protocol: 1, client: "daemon", home } })}\n`); },
-        data(_s, chunk) {
+        data(s, chunk) {
           buf += new TextDecoder().decode(chunk);
-          const nl = buf.indexOf("\n");
-          if (nl < 0) return;
-          clearTimeout(timer);
-          try {
-            const msg = JSON.parse(buf.slice(0, nl)) as { result?: unknown; error?: unknown };
-            resolve(msg.result !== undefined ? { accepted: true, result: msg.result } : { accepted: false, error: msg.error });
-          } catch { resolve({ accepted: false, error: "unreadable answer" }); }
+          for (let nl = buf.indexOf("\n"); nl >= 0; nl = buf.indexOf("\n")) {
+            const line = buf.slice(0, nl);
+            buf = buf.slice(nl + 1);
+            let msg: { id?: number; result?: unknown; error?: unknown };
+            try { msg = JSON.parse(line) as typeof msg; } catch { clearTimeout(timer); resolve({ accepted: helloDone, error: "unreadable answer" }); return; }
+            if (msg.id === 1) {
+              if (msg.result === undefined) { clearTimeout(timer); resolve({ accepted: false, error: msg.error }); return; }
+              helloDone = true;
+              if (call === undefined) { clearTimeout(timer); resolve({ accepted: true, result: msg.result }); return; }
+              s.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: call.method, params: call.params })}\n`);
+            } else if (msg.id === 2) {
+              clearTimeout(timer);
+              resolve(msg.result !== undefined ? { accepted: true, result: msg.result } : { accepted: true, error: msg.error });
+              return;
+            }
+          }
         },
-        close() { clearTimeout(timer); resolve({ accepted: false, closed: true }); },
-        error() { clearTimeout(timer); resolve({ accepted: false, closed: true }); },
+        close() { clearTimeout(timer); resolve({ accepted: helloDone, closed: true }); },
+        error() { clearTimeout(timer); resolve({ accepted: helloDone, closed: true }); },
       },
     }).catch(() => { clearTimeout(timer); resolve({ accepted: false, connectFailed: true }); });
   });
@@ -78,6 +89,9 @@ export function liveHomeRefusal(home: string | undefined, tempRoot: string): str
 if (import.meta.main) {
   if (process.env.WINTER_CU_LIVE_TESTS !== "1") refuse("WINTER_CU_LIVE_TESTS=1 is not set");
   if (process.argv[2] === "__peer-hello") await peerHello(process.argv[3] ?? "", process.argv[4] ?? "");
+  // `__helper-call <socket> <home> <method> <json params>`: one call after hello — the runner's door to a live-test
+  // helper's test-only methods (`test.activate`) and its `status`.
+  if (process.argv[2] === "__helper-call") await peerHello(process.argv[3] ?? "", process.argv[4] ?? "", { method: process.argv[5] ?? "status", params: JSON.parse(process.argv[6] ?? "{}") as unknown });
   const home = process.env.WINTER_HOME;
   const refusal = liveHomeRefusal(home, tmpdir());
   if (refusal !== undefined) refuse(refusal);

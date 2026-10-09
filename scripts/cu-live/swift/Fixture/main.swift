@@ -26,6 +26,17 @@ guard let log = FixtureLog(path: logPath, role: role) else {
 
 // No window-state restoration: every launch is a fresh fixture, never a resurrected one.
 UserDefaults.standard.register(defaults: ["NSQuitAlwaysKeepsWindows": false])
+// No text substitution: the scenarios check that typed text arrives EXACTLY, and the user's own smart quotes,
+// dashes or replacements (honoured by the web view's fields) would rewrite it. The argument domain outranks the
+// user's global setting and is never written to disk.
+var arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+for key in ["NSAutomaticQuoteSubstitutionEnabled", "NSAutomaticDashSubstitutionEnabled", "NSAutomaticTextReplacementEnabled",
+            "NSAutomaticSpellingCorrectionEnabled", "NSAutomaticCapitalizationEnabled", "NSAutomaticPeriodSubstitutionEnabled",
+            "WebAutomaticQuoteSubstitutionEnabled", "WebAutomaticDashSubstitutionEnabled", "WebAutomaticTextReplacementEnabled",
+            "WebAutomaticSpellingCorrectionEnabled", "WebContinuousSpellCheckingEnabled"] {
+    arguments[key] = false
+}
+UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
 
 MainActor.assumeIsolated {
     let fixture = Fixture(role: role, run: runId, log: log)
