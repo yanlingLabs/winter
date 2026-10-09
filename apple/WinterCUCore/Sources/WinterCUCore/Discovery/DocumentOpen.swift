@@ -48,3 +48,10 @@ enum CUDocumentOpen {
         }
     }
 }
+
+/// A one-shot latch: the first `claim()` wins (resuming a continuation exactly once from racing tasks).
+final class CUResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+    func claim() -> Bool { lock.withLock { if claimed { return false }; claimed = true; return true } }
+}

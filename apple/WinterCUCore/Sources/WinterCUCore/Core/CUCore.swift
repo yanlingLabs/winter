@@ -127,13 +127,15 @@ public final class CUCore: @unchecked Sendable {
 
     /// Which app would open these urls (the `app` override, else the first url's default handler), for the
     /// opener's per-app card — resolved WITHOUT opening anything. Refuses a protected destination.
-    public func defaultOpener(_ p: DefaultOpenerParams) async throws -> DefaultOpenerResult {
-        let urls = try CUDocumentOpen.resolve(p.urls)
+    /// The urls to open and the app that will open them (the `app` override, else the first url's default
+    /// handler). Refuses a protected destination (the save-path floors apply to paths too). Opens nothing.
+    func resolveOpen(_ strings: [String], app: String?) throws -> (urls: [URL], appURL: URL, bundle: Bundle) {
+        let urls = try CUDocumentOpen.resolve(strings)
         if let bad = urls.compactMap({ $0.isFileURL ? $0.path : nil }).first(where: { CUFloors.isProtectedSavePath($0) }) {
             throw CUError.refused(.privacyPane, "opening \((bad as NSString).lastPathComponent) is off limits — it is a protected location")
         }
         let appURL: URL
-        if let a = p.app {
+        if let a = app {
             switch try CUApps.resolve(a) {
             case .running(let r): guard let u = r.bundleURL else { throw CUError.invalidParams("no app at \(a)") }; appURL = u
             case .installed(let u, _, _): appURL = u
@@ -141,10 +143,30 @@ public final class CUCore: @unchecked Sendable {
         } else if let first = urls.first, let def = CUDocumentOpen.defaultApp(for: first) {
             appURL = def
         } else {
-            throw CUError.invalidParams("no app opens \(p.urls.first ?? "that")")
+            throw CUError.invalidParams("no app opens \(strings.first ?? "that")")
         }
-        guard let b = Bundle(url: appURL), let id = b.bundleIdentifier else { throw CUError.invalidParams("no app at \(appURL.path)") }
-        return DefaultOpenerResult(bundleId: id, name: CUApps.displayName(b, fallback: appURL.deletingPathExtension().lastPathComponent), path: appURL.path)
+        guard let b = Bundle(url: appURL) else { throw CUError.invalidParams("no app at \(appURL.path)") }
+        return (urls, appURL, b)
+    }
+
+    /// Which app would open these urls, for the opener's per-app card — resolved WITHOUT opening anything.
+    public func defaultOpener(_ p: DefaultOpenerParams) async throws -> DefaultOpenerResult {
+        let r = try resolveOpen(p.urls, app: p.app)
+        guard let id = r.bundle.bundleIdentifier else { throw CUError.invalidParams("no app at \(r.appURL.path)") }
+        return DefaultOpenerResult(bundleId: id, name: CUApps.displayName(r.bundle, fallback: r.appURL.deletingPathExtension().lastPathComponent),
+                                   path: r.appURL.path)
+    }
+
+    /// Opens paths/urls in the background (activates:false) and returns the opener's name — no window wait.
+    /// Finder's Open uses it after the act has released the target's queue.
+    func openInBackground(_ strings: [String], app: String? = nil) async throws -> String {
+        if let o = openDocumentsOverride {
+            return try await o(OpenDocumentsParams(urls: strings, app: app, sessionId: "background-open", mirror: false, privatePath: true)).app.name
+        }
+        let r = try resolveOpen(strings, app: app)
+        try refuseFloorApp(bundleId: r.bundle.bundleIdentifier, pid: 0, name: r.bundle.bundleIdentifier ?? r.appURL.lastPathComponent)
+        let opened = try await CUDocumentOpen.open(r.urls, withApp: r.appURL)
+        return opened.localizedName ?? CUApps.displayName(r.bundle, fallback: r.appURL.deletingPathExtension().lastPathComponent)
     }
 
     /// Opens file paths / URLs with an app WITHOUT activating it (NSWorkspace.open, activates:false —
@@ -153,22 +175,7 @@ public final class CUCore: @unchecked Sendable {
     /// a new window to bind. Protected destinations are refused (the save-path floors apply to paths too).
     public func openDocuments(_ p: OpenDocumentsParams) async throws -> OpenDocumentsResult {
         if let o = openDocumentsOverride { return try await o(p) }
-        let urls = try CUDocumentOpen.resolve(p.urls)
-        if let bad = urls.compactMap({ $0.isFileURL ? $0.path : nil }).first(where: { CUFloors.isProtectedSavePath($0) }) {
-            throw CUError.refused(.privacyPane, "opening \((bad as NSString).lastPathComponent) is off limits — it is a protected location")
-        }
-        let appURL: URL
-        if let a = p.app {
-            switch try CUApps.resolve(a) {
-            case .running(let r): guard let u = r.bundleURL else { throw CUError.invalidParams("no app at \(a)") }; appURL = u
-            case .installed(let u, _, _): appURL = u
-            }
-        } else if let first = urls.first, let def = CUDocumentOpen.defaultApp(for: first) {
-            appURL = def
-        } else {
-            throw CUError.invalidParams("no app opens \(p.urls.first ?? "that")")
-        }
-        guard let b = Bundle(url: appURL) else { throw CUError.invalidParams("no app at \(appURL.path)") }
+        let (urls, appURL, b) = try resolveOpen(p.urls, app: p.app)
         try refuseFloorApp(bundleId: b.bundleIdentifier, pid: 0, name: b.bundleIdentifier ?? appURL.lastPathComponent)
         // The opener's windows before the open (empty if it was not running), so the new one can be told apart.
         let runningOpener = NSRunningApplication.runningApplications(withBundleIdentifier: b.bundleIdentifier ?? "").first
@@ -423,6 +430,8 @@ public final class CUCore: @unchecked Sendable {
     var appleScriptOverride: ((String, CUTarget) throws -> String?)?
     /// Document open, replaceable by tests (nothing there may touch NSWorkspace).
     var openDocumentsOverride: ((OpenDocumentsParams) async throws -> OpenDocumentsResult)?
+    /// How long an act waits for a background open (Finder's Open) before reporting it as still opening.
+    var openTimeoutMs: Double = 8000
     var automationPermissionOverride: ((pid_t) -> OSStatus)?
     var scriptingDictionaryOverride: ((CUTarget) -> CUScriptingDictionary.Model?)?
     /// Background steps that once moved the user's view: never used again while the helper runs.
