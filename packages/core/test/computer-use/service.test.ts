@@ -405,6 +405,35 @@ describe("ComputerV2: locks, timeouts and cancellation", () => {
     expect(typeof w.fake.calls("target.waitFor")[0]!.callId).toBe("string");
   }, 30_000);
 
+  macOnly("a paste that would outlast the run's time left extends the run instead of being killed halfway", async () => {
+    const w = world();
+    w.fake.handlers["target.act"] = async (params) => {
+      if ((params.action as { kind: string }).kind === "paste") await Bun.sleep(1_500);
+      return { rung: 1 };
+    };
+    const r = await w.run(`const notes = await apps.open('Notes')\nawait notes.paste(${JSON.stringify("Lorem ipsum.\n".repeat(250))})\nprint("pasted")`, { timeoutMs: 1_000 });
+    expect(r.isError).toBe(false);
+    expect(text(r)).toContain("pasted");
+    expect(w.logs.some((l) => l.includes("paste of 3250 characters") && l.includes("the run extended"))).toBe(true);
+  }, 30_000);
+
+  macOnly("a type cancelled mid-way says how many characters had already gone in", async () => {
+    const w = world();
+    let stop: ((e: unknown) => void) | undefined;
+    w.fake.handlers["target.act"] = () => new Promise((_, reject) => { stop = reject; });
+    w.fake.handlers["cancel"] = () => {
+      stop?.(new FakeHelperError("cancelled", "cancelled", { typed: 120, total: 180 }));
+      return {};
+    };
+    const ac = new AbortController();
+    const p = w.run(`const notes = await apps.open('Notes')\nawait notes.type(${JSON.stringify("x".repeat(180))})`, { signal: ac.signal });
+    await Bun.sleep(600);
+    ac.abort();
+    const r = await p;
+    expect(r.isError).toBe(true);
+    expect(text(r)).toContain("120 of 180 characters had already been typed into Notes — the field is partly filled; check it before typing again");
+  }, 30_000);
+
   macOnly("Esc from the helper interrupts the session's turn and cancels its script", async () => {
     const w = world();
     const p = w.run("await sleep(20000)");

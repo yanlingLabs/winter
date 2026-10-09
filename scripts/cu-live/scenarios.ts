@@ -156,6 +156,9 @@ function screenshotChecks(ctx: VerifyContext): Check[] {
 }
 
 const DOC_TEXT = "Doc line: Mixed CASE ✓ ünï 日本 & <tag> 100%";
+/** ~3,000 characters over many lines: a paste that, typed as keys, ran out a 30 s script (the live failure). */
+const LONG_PASTE = Array.from({ length: 60 }, (_, i) => `Line ${String(i + 1).padStart(2, "0")}: the quick brown fox jumps over the lazy dog.`).join("\n");
+const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
 const PASTE_TEXT = "Pasted ✓ «text» — 2026";
 const OFFSPACE_TEXT = "off-Space ✓ Typed";
 
@@ -388,6 +391,22 @@ await web.paste(${JSON.stringify(PASTE_TEXT)}, { into: comment.ref });
 report({ ok: true });`,
     dump: true,
     verify: (ctx) => [ok(ctx), check("Comment holds the pasted text", String(webState(ctx).comment ?? "").includes(PASTE_TEXT), JSON.stringify(webState(ctx).comment))],
+  },
+  {
+    // The real paste (Edit › Paste in the focus blip), never thousands of keys: well inside the default 30 s.
+    name: "paste ~3,000 characters into a contenteditable doc", group: "type",
+    before: [{ role: "main", cmd: "reset" }],
+    code: `
+const web = await webWin();
+const doc = await pick(web, "Doc");
+const t0 = Date.now();
+await web.paste(${JSON.stringify(LONG_PASTE)}, { into: doc.ref });
+report({ ms: Date.now() - t0 });`,
+    dump: true,
+    verify: (ctx) => [ok(ctx),
+      check("it took seconds, not a key per character", Number(fact(ctx, "ms")) < 10_000, `${String(fact(ctx, "ms"))} ms`),
+      check("the doc holds all of it", squash(String(webState(ctx).doc ?? "")) === squash(LONG_PASTE),
+        `${String(webState(ctx).doc ?? "").length} characters`)],
   },
   // ── scrolling ──────────────────────────────────────────────────────────────────────────────────────────────
   {

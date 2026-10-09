@@ -21,6 +21,7 @@ import { isAppPath, isBundleIdShaped, isDocumentTarget, systemAppResolver, type 
 import type { HelperClient } from "./helper-client";
 import { FOREGROUND_LOCK_KEY, LOCK_WAIT_MS, TargetLocks } from "./locks";
 import { ACT_PRIMITIVES, newRunGrants, type AppRef, type ComputerPolicy, type RunGrants } from "./policy";
+import { typingEstimateMs, typingFit } from "./typing-estimate";
 import {
   HelperRpcError, HelperUnavailableError, WINTER_OWN_BUNDLE_IDS,
   type ActAction, type ActResult, type AppAtResult, type AppleScriptResult, type AppsListResult, type FindResult, type HelperNotification,
@@ -36,6 +37,10 @@ import { APP_PRIMITIVES, GLOBAL_PRIMITIVES, type AppHandle, type ImageHandle } f
 export const SCRIPT_TIMEOUT_DEFAULT_MS = 30_000;
 export const SCRIPT_TIMEOUT_MIN_MS = 1_000;
 export const SCRIPT_TIMEOUT_MAX_MS = 300_000;
+/** The text primitives whose cancellation reports how far they got. */
+const TEXT_PRIMITIVES = new Set(["type", "paste"]);
+/** How long a cancelled run waits for a type/paste's answer (the helper-client's 1 s cancel grace, and a margin). */
+const TEXT_ANSWER_AFTER_CANCEL_MS = 1_500;
 /** A cancelled script that has not settled after this long loses its worker. */
 export const CANCEL_KILL_MS = 1_000;
 /** A session's worker ends after this long without a call (spec §4). */
@@ -115,8 +120,21 @@ class PausableTimer {
   private handle: ReturnType<typeof setTimeout> | undefined;
   private paused = 0;
   private done = false;
+  /** The run's whole allowance: its timeout plus every extension (≤ `SCRIPT_TIMEOUT_MAX_MS`). */
+  private _budget: number;
   constructor(ms: number, private readonly fire: () => void, private readonly now: () => number) {
     this.remaining = ms;
+    this._budget = ms;
+    this.start();
+  }
+  get budget(): number { return this._budget; }
+  /** Moves the deadline `ms` later (a known-long primitive, like a card's wait pauses it). */
+  extend(ms: number): void {
+    if (this.done || ms <= 0) return;
+    this._budget += ms;
+    if (this.paused > 0) { this.remaining += ms; return; }
+    if (this.handle !== undefined) clearTimeout(this.handle);
+    this.remaining = this.left() + ms;
     this.start();
   }
   private start(): void {
@@ -138,6 +156,8 @@ class PausableTimer {
 }
 
 interface RunCtx {
+  /** The answers of type/paste calls still in flight (see `runNow`). */
+  textInFlight: Set<Promise<void>>;
   sessionId: string;
   runId: string;
   callId: string;
@@ -258,7 +278,7 @@ export class ComputerV2Service {
     const ctx: RunCtx = {
       sessionId, runId, callId: `cv2_${randomBytes(6).toString("hex")}`, call, state, worker, builder, grants,
       abort: new AbortController(), timer, locks: new Map(), acted: new Set(), chains: new Map(), primitives: new Map(),
-      apps: new Set(), timedOut: false, ended: false, bound: new Set(), daemonSentences: new Set(),
+      apps: new Set(), timedOut: false, ended: false, bound: new Set(), daemonSentences: new Set(), textInFlight: new Set(),
     };
     ctxRef.ctx = ctx;
     state.active = ctx;
@@ -271,7 +291,15 @@ export class ComputerV2Service {
     else call.signal?.addEventListener("abort", onAbort, { once: true });
 
     const outcome = await worker.run(runId, input.code, {
-      onCall: (msg) => { void this.answer(ctx, msg); },
+      onCall: (msg) => {
+        const answered = this.answer(ctx, msg);
+        // A type/paste in flight when the run is cancelled is waited for (briefly) below: its answer says how many
+        // characters had already been typed.
+        if (TEXT_PRIMITIVES.has(msg.primitive)) {
+          ctx.textInFlight.add(answered);
+          void answered.finally(() => ctx.textInFlight.delete(answered));
+        }
+      },
       onPrint: (text) => builder.text(text),
       onShow: (image) => {
         const img = state.images.get(image);
@@ -280,6 +308,14 @@ export class ComputerV2Service {
       },
     });
 
+    // Cancelled with a type/paste still in flight: the worker gave the script up at once, but the helper's answer
+    // (how far the typing got) is worth the wait — the helper stops within a key and answers within the client's
+    // grace.
+    if (ctx.cancelled !== undefined && ctx.textInFlight.size > 0) {
+      let wait: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([Promise.allSettled([...ctx.textInFlight]), new Promise<void>((r) => { wait = setTimeout(r, TEXT_ANSWER_AFTER_CANCEL_MS); })]);
+      if (wait !== undefined) clearTimeout(wait);
+    }
     timer.clear();
     call.signal?.removeEventListener("abort", onAbort);
     if (ctx.killTimer !== undefined) clearTimeout(ctx.killTimer);
@@ -826,6 +862,22 @@ export class ComputerV2Service {
     }
   }
 
+  /**
+   * A type/paste's expected time against the run's time left: it fits; or the run is extended by the estimate
+   * (within the 300 s maximum, like a card's wait holds the clock); or, when even that is too little, it is refused
+   * before anything is typed. Returns the helper request timeout to use when the default would be too short.
+   */
+  private fitTyping(ctx: RunCtx, primitive: "type" | "paste", text: string): number | undefined {
+    const estimate = typingEstimateMs(primitive, text);
+    const fit = typingFit(estimate, ctx.timer.left(), ctx.timer.budget, SCRIPT_TIMEOUT_MAX_MS);
+    if (fit.kind === "refuse") throw new AutomationFailure("Refused", fit.message);
+    if (fit.kind === "extend") {
+      ctx.timer.extend(fit.byMs);
+      this.deps.log?.(`computer-use: ${primitive} of ${[...text].length} characters (~${Math.ceil(estimate / 1000)} s): the run extended by ${Math.ceil(fit.byMs / 1000)} s`);
+    }
+    return estimate > 60_000 ? estimate + 60_000 : undefined;
+  }
+
   /** One action, through the input ladder; rung 4 (the foreground) only after the user agreed — or at once under `bypass`. */
   private async act(ctx: RunCtx, t: TargetInfo, primitive: string, action: ActAction, metric: PrimitiveMetric): Promise<undefined> {
     const settings = this.deps.settings();
@@ -834,9 +886,12 @@ export class ComputerV2Service {
       access: this.deps.policy.accessFor(t.bundleId) === "click" ? "click" : "full",
       privatePath: computerUsePrivateEventPathFrom(settings),
     };
+    // A type or paste long enough to outlast the run's time left gets the run extended (or is refused up front)
+    // — never killed halfway with the field part-filled.
+    const actTimeout = action.kind === "type" || action.kind === "paste" ? this.fitTyping(ctx, action.kind, action.text) : undefined;
     let res: ActResult;
     try {
-      res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground: false }, metric);
+      res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground: false }, metric, actTimeout);
     } catch (err) {
       if (!(err instanceof HelperRpcError) || err.code !== "needs_foreground") throw err;
       const app: AppRef = { bundleId: t.bundleId, name: t.name };
@@ -850,7 +905,7 @@ export class ComputerV2Service {
         waitMs: Math.min(LOCK_WAIT_MS, Math.max(500, ctx.timer.left() - 500)), signal: ctx.abort.signal, label: "The screen's foreground",
       });
       try {
-        res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground: true }, metric);
+        res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground: true }, metric, actTimeout);
       } finally { release(); }
     }
     ctx.acted.add(t.targetId);
@@ -973,7 +1028,14 @@ export class ComputerV2Service {
           const seen = typeof data.seen === "string" && data.seen.length > 0 ? ` — seen: ${data.seen.slice(0, 2_000)}` : "";
           return { kind: "WaitTimeout", message: `the wait timed out without the condition being met${seen}` };
         }
-        case "cancelled": return { kind: "Cancelled", message: ctx.cancelled ?? "the call was cancelled" };
+        case "cancelled": {
+          // A type or paste stopped while typing keys says how far it got: the field is partly filled.
+          const base = ctx.cancelled ?? "the call was cancelled";
+          if (typeof data.typed !== "number" || typeof data.total !== "number") return { kind: "Cancelled", message: base };
+          const partly = `${data.typed} of ${data.total} characters had already been typed${name === "the app" ? "" : ` into ${name}`} — the field is partly filled; check it before typing again`;
+          ctx.builder.notice(`The cancelled ${msg.primitive}: ${partly}.`);
+          return { kind: "Cancelled", message: `${base}; ${partly}` };
+        }
         case "permission_missing": {
           const which = data.permission === "screenRecording" ? "Screen Recording" : "Accessibility";
           return { kind: "PermissionMissing", message: `Winter Computer Use needs the ${which} permission — ask the user to grant it in Settings → Computer Use` };

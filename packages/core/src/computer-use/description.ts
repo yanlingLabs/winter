@@ -49,7 +49,7 @@ export function computerV2Description(input: ComputerV2DescriptionInput): string
     `  click(t: ${target}, o?: { button?: "left" | "right" | "middle"; count?: 1 | 2 | 3; modifiers?: string[] }): Promise<void>;`,
     "  setValue(ref: Ref, value: string): Promise<void>;",
     "  type(text: string, o?: { into?: Ref }): Promise<void>;",
-    "  paste(text: string, o?: { into?: Ref; format?: \"text\" | \"html\" | \"markdown\" }): Promise<void>;",
+    "  paste(text: string, o?: { into?: Ref; format?: \"text\" | \"html\" | \"markdown\" }): Promise<void>; // long or multi-line text: paste it (seconds, not a key per character); a long type/paste extends the script's time by itself, and one that is cancelled says how many characters had gone in",
     "  key(combo: string, o?: { into?: Ref; repeat?: number }): Promise<void>;       // \"cmd+s\", \"return\", \"shift+tab\"",
     `  scroll(t: ${target}, direction: "up" | "down" | "left" | "right", pages?: number): Promise<void>;`,
     `  drag(from: ${target}, to: ${target}): Promise<void>;`,
