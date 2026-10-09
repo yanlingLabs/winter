@@ -6,8 +6,11 @@ import Foundation
 /// the window server's key window for a moment — the user's app resigns active for about 60 ms while its front
 /// and Space stay as they are — and that is what makes an app in the background re-validate its menu (live: a
 /// selection-dependent command read enabled only on the activation that followed the focus records, never on
-/// a click or a synthetic activation alone). So it is used ONLY to validate a menu command or menu shortcut
-/// that reads disabled in the background, and in its one retry — never for typing, clicks or reads.
+/// a click or a synthetic activation alone). So it is used to validate a menu command or menu shortcut that
+/// reads disabled in the background, and in its one retry; and (the ruling's extension, same day) for keyboard
+/// input — type, paste as keys, key, editing shortcuts — into a window that does not hold the key focus, once
+/// per burst of keys (`CUKeyBlips`): an app takes no keys for a window that isn't key (live: typed text never
+/// reached Google Docs in a background Safari without it). Never for clicks or reads.
 ///
 /// It never runs without the keyboard reroute (`CUKeyReroute`): a head keyboard tap on the target, installed
 /// just before the focus records, sends the user's own keys to their app and drops them from the target, and
@@ -43,8 +46,8 @@ extension CUCore {
     /// unavailable or retired (the user-view guard undid them once).
     func beginBlip(_ p: TargetActParams, _ t: CUTarget, why: String) -> CUFocusBlip? {
         let app = t.appName
-        guard p.privatePath, t.accessible, let user = sys.frontmostPid(), user != t.pid else {
-            CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used (private path off, capture-only, or the app is in front)")
+        guard p.privatePath, let user = sys.frontmostPid(), user != t.pid else {
+            CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used (private path off, or the app is in front)")
             return nil
         }
         let reroute = CUKeyReroute(target: t.pid, victim: user, installer: keyTapInstaller, post: keyReroutePost)
@@ -109,5 +112,64 @@ extension CUCore {
             CULog.act.notice("menu in \(t.appName, privacy: .public): “\(title, privacy: .public)” still disabled in the focus blip (try \(attempt, privacy: .public), \(reads, privacy: .public) reads)")
         }
         return .stillDisabled
+    }
+}
+
+// MARK: keyboard input
+
+extension CUCore {
+    /// Whether keys for the bound window need the focus blip: the private path is on, the app is in the
+    /// background, and the window does not hold the key focus — not its app's key window by accessibility, or
+    /// not the window server's key focus.
+    func needsKeyBlip(_ p: TargetActParams, _ t: CUTarget) -> Bool {
+        guard p.privatePath, sys.frontmostPid() != t.pid else { return false }
+        return boundWindowIsKeyInApp(t) != true || keyFocusPidForTarget(t) != t.pid
+    }
+}
+
+/// The focus blip for one act's keyboard input: begun before the first key when the window does not hold the
+/// key focus, and — since a blip ends within `blipDeadlineMs` — ended and begun afresh before the next key once
+/// its burst (`blipBurstMs` from its start) is spent. A window that already holds it takes none; a blip that
+/// can't run is not asked for again in this act.
+final class CUKeyBlips {
+    private unowned let core: CUCore
+    private let p: TargetActParams
+    private let t: CUTarget
+    private let why: String
+    private var blip: CUFocusBlip?
+    private var settled = false  // not needed, or not possible: never asked again in this act
+    private(set) var bursts = 0
+
+    init(_ core: CUCore, _ p: TargetActParams, _ t: CUTarget, why: String) {
+        self.core = core
+        self.p = p
+        self.t = t
+        self.why = why
+    }
+
+    /// Before a key, or a run of keys.
+    func before() {
+        if settled { return }
+        if let b = blip, !b.isEnded, core.clock.nowMs() - b.begunMs < core.blipBurstMs { return }
+        blip?.end("its burst was spent")
+        blip = nil
+        guard core.needsKeyBlip(p, t) else {
+            if bursts == 0 { CULog.act.notice("keys in \(self.t.appName, privacy: .public): the window holds the key focus — no focus blip") }
+            settled = bursts == 0
+            return
+        }
+        guard let b = core.beginBlip(p, t, why: "\(why) (burst \(bursts + 1))") else {
+            settled = true
+            return
+        }
+        blip = b
+        bursts += 1
+        // The app takes the key focus as it handles the focus record: keys sent before that are lost.
+        if core.blipKeySettleMs > 0 { usleep(useconds_t(core.blipKeySettleMs * 1000)) }
+    }
+
+    func end() {
+        blip?.end()
+        blip = nil
     }
 }
