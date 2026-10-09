@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { liveHomeRefusal } from "./daemon-entry";
 import {
-  callLine, computerV2Message, describeViolations, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hidInputTimes, lastValue, pointerMoves, startRefusal, markerFacts, MIXED_TEXT,
+  callLine, computerV2Message, describeViolations, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hidInputTimes, lastValue, pointerMoves, idleGate, parseDuration, parseFrontReading, startPlan, describeStartPlan, type FrontReading, markerFacts, MIXED_TEXT,
   parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { minimalPdf, REAL_APP_SCENARIOS } from "./real-apps";
@@ -62,14 +62,34 @@ describe("the monitor analysis", () => {
     expect(JSON.parse(args[6]!)).toMatchObject({ status: "pass", passed: 2, path: "/r.json" });
   });
 
-  test("the start gate: never from a full-screen Space; unattended only after a minute with no input", () => {
-    const line = (o: Record<string, unknown>): string => JSON.stringify({ t: 1, front: "x", frontPid: 1, space: 3, ...o });
-    expect(startRefusal(line({ hidIdleMs: 5, spaceType: 0 }), false)).toBeUndefined();
-    expect(startRefusal(line({ hidIdleMs: 999_999, spaceType: 4 }), false)).toContain("full-screen");
-    expect(startRefusal(line({ hidIdleMs: 3_000, spaceType: 0 }), true)).toContain("someone is at the Mac");
-    expect(startRefusal(line({ hidIdleMs: null, spaceType: 0 }), true)).toContain("no HID idle reading");
-    expect(startRefusal(line({ hidIdleMs: 61_000 }), true)).toBeUndefined();
-    expect(startRefusal("not json", false)).toContain("no reading");
+  test("the start: an unattended run waits for a minute with no input, up to --max-wait", () => {
+    const reading = (o: Partial<FrontReading>): FrontReading => ({ front: "com.apple.Terminal", frontPid: 9, space: 7, spaceType: 0, hidIdleMs: 0, ...o });
+    expect(idleGate(reading({ hidIdleMs: 5 }), 0, 1_000, false)).toEqual({ kind: "go" });
+    expect(idleGate(reading({ hidIdleMs: 61_000 }), 0, 10_800_000, true)).toEqual({ kind: "go" });
+    expect(idleGate(reading({ hidIdleMs: 3_000 }), 60_000, 10_800_000, true).kind).toBe("wait");
+    expect(idleGate(reading({ hidIdleMs: 3_000 }), 10_797_000, 10_800_000, true)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("never idle") });
+    expect(idleGate(reading({ hidIdleMs: null }), 0, 10_800_000, true).kind).toBe("refuse");
+    expect(idleGate(undefined, 0, 10_800_000, true).kind).toBe("refuse");
+    expect(parseDuration("3h")).toBe(10_800_000);
+    expect(parseDuration("45m")).toBe(2_700_000);
+    expect(parseDuration("90")).toBe(90_000);
+    expect(parseDuration("1.5h")).toBe(5_400_000);
+    expect(parseDuration("soon")).toBeUndefined();
+  });
+
+  test("the start plan: a regular desktop stays put; a full-screen start records the app and Space to return to", () => {
+    const line = (o: Record<string, unknown>): string => JSON.stringify({ t: 1, front: "com.apple.Terminal", frontPid: 996, space: 2994, hidIdleMs: 70_000, ...o });
+    expect(parseFrontReading(line({ spaceType: 0 }))).toEqual({ front: "com.apple.Terminal", frontPid: 996, space: 2994, spaceType: 0, hidIdleMs: 70_000 });
+    expect(parseFrontReading("not json")).toBeUndefined();
+    const desktop = startPlan(parseFrontReading(line({ space: 1853, spaceType: 0 }))!);
+    expect(desktop).toEqual({ kind: "desktop", space: 1853 });
+    expect(describeStartPlan(desktop)).toContain("stays there");
+    const full = startPlan(parseFrontReading(line({ spaceType: 4 }))!);
+    expect(full).toEqual({ kind: "from-fullscreen", returnTo: { pid: 996, bundleId: "com.apple.Terminal", space: 2994 } });
+    expect(describeStartPlan(full)).toContain("returns you to that app and Space");
+    expect(startPlan(parseFrontReading(line({ spaceType: 4, frontPid: null }))!).kind).toBe("refuse");
+    // An older tool without spaceType reads as a desktop (the run then behaves as before).
+    expect(startPlan(parseFrontReading(line({}))!).kind).toBe("desktop");
   });
 
   test("the real pointer moving is the rung-4 signal; samples without a pointer are skipped", () => {

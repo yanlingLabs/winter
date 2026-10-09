@@ -44,9 +44,11 @@ WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live   # the LIVE ComputerV2 suite (script
                                      # process's activation, so the runner puts its "user's app" in front through it.
                                      # Fixture bundle ids are never `com.winter.*` (that prefix is refused as Winter itself).
                                      # --report <file.json>: every check in full + failing outputs; --script <file.js>: one
-                                     # ad-hoc ComputerV2 script on the fixture, its output printed. It never starts from a
-                                     # full-screen app's Space; --unattended (an approved agent run) also needs 60 s with no
-                                     # real input first. After the cleanup a small non-activating panel (the fixture
+                                     # ad-hoc ComputerV2 script on the fixture, its output printed. --unattended (an
+                                     # approved agent run) waits, every 5 s up to --max-wait (3h), for 60 s with no input.
+                                     # From a full-screen app's Space (the user's Claude Code Terminal) a run records that
+                                     # app + Space, moves the user to a regular desktop (test.activate of the user's-app
+                                     # fixture), and returns them there at the end, an abort too. After the cleanup a small non-activating panel (the fixture
                                      # bundle's --done mode, open -g) shows ✓/!/✕, the counts and the report path
                                      # (out/cu-live/last-run.json unless --report) until closed, 30 min at most;
                                      # --no-done-window for CI. --dry-run: builds, self-tests,
