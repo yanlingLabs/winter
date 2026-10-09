@@ -451,7 +451,9 @@ export async function startDaemon(opts: {
     throw new MigrationCRefused("sdk_home_half_migrated", `migration C: a rollback of this home was interrupted (${migrationCManifestPath(home)}) — run \`winter migrate --sdk-home --rollback\` to finish it`);
   }
 
-  const secrets = opts.secrets ?? new KeychainSecretStore();
+  // The service is THIS daemon's home's (`keychainService(profile, home)`): on a custom home a
+  // `WINTER_KEYCHAIN_SERVICE` is honoured, so an experiment or e2e daemon never reads the profile's real items.
+  const secrets = opts.secrets ?? new KeychainSecretStore(Bun.secrets, keychainService(profile, home));
 
   // WS-27: the credential items' access lists (`auth/credential-acl.ts`) — same guards as the app-token
   // slot below: real production boot, the profile's own default home, macOS, never fatal, skipped when the
