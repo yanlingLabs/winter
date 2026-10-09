@@ -311,6 +311,21 @@ await canvas.click(item.ref);
 report({ item: item.name });`,
     verify: (ctx) => [ok(ctx), check("the context menu item ran", has(ctx.events, ctx.since, "context", (e) => e.item === "Canvas Red"))],
   },
+  {
+    // Google Docs' widgets act on a real mouse press: an accessibility press is ignored, and the helper must notice
+    // (nothing changed) and click the element instead — pressing it exactly once.
+    name: "a web button that ignores accessibility presses (acts on a real mouse press)", group: "click",
+    before: [{ role: "main", cmd: "reset" }],
+    code: `
+const web = await webWin();
+const b = await pick(web, "Closure Button", "button");
+await web.click(b.ref);
+report({ ok: true });`,
+    verify: (ctx) => {
+      const presses = eventsSince(ctx.events, ctx.since, "web.closure");
+      return [ok(ctx), check("it was pressed exactly once", presses.length === 1, JSON.stringify(presses))];
+    },
+  },
   // ── typing ─────────────────────────────────────────────────────────────────────────────────────────────────
   {
     name: "type into a native field (exact text)", group: "type",

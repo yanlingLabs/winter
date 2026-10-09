@@ -261,6 +261,14 @@ extension CUCore {
             t.noteTargeted(e, at: clock.nowMs())
             announceTarget(t, info, pressing: button == .left)
             var announced = false
+            let webPress = button == .left && count == 1 && flags.isEmpty && isWebContent(e)
+            // An app whose web content ignored accessibility presses twice: its web buttons are clicked.
+            if webPress, info.actions.contains(kAXPressAction), prefersWebClicks(t) {
+                cursor(t, "press", at: info.center, count: 1, button: button.rawValue)
+                CULog.act.notice("click in \(t.appName, privacy: .public): its web content ignores accessibility presses — a window-targeted click")
+                return try clickWebElement(e, info, ref: ref, p, t, token, pressIgnored: false,
+                                           why: "\(t.appName)'s web page ignores accessibility presses")
+            }
             if count == 1, flags.isEmpty {
                 let axAction: String? = button == .left && info.actions.contains(kAXPressAction) ? kAXPressAction
                     : button == .left && info.actions.contains(kAXPickAction) ? kAXPickAction
@@ -270,8 +278,10 @@ extension CUCore {
                     announced = true
                     try token.check()
                     let before = pressEvidence(e, t)
+                    let webBefore = webPress && axAction == kAXPressAction ? webPressEvidence(e, t) : nil
                     do {
                         try ax.perform(e, axAction)
+                        if let webBefore { return try verifyWebPress(e, info, ref: ref, before: webBefore, p, t, token) }
                         return ActOutcome(rung: .accessibility)
                     } catch let error where Self.pressMayHaveActed(error) != nil {
                         // Never fall through to a click here: the press may have acted, and a click would repeat it.
@@ -374,9 +384,24 @@ extension CUCore {
             if let action {
                 for el in tries {
                     let before = pressEvidence(el, t)
+                    let webBefore = action == kAXPressAction && isWebContent(el) ? webPressEvidence(el, t) : nil
                     do {
                         try ax.perform(el, action)
                         CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): AX \(action, privacy: .public)")
+                        if let webBefore, !webPressChanged(el, t, since: webBefore) {
+                            // Web content that acts on a real mouse press (Google Docs' widgets) ignores the
+                            // accessibility press: the window-targeted click below, unless a repeat could do harm.
+                            let info = ElementInfo(el, ax)
+                            if Self.mayActUnseen(info.labels) {
+                                return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.unseenPressNote(Self.elementLabel(nil, info)))")
+                            }
+                            CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): the accessibility press changed nothing — clicking instead")
+                            return try webClickVerified(el, t, pressIgnored: true, why: "the accessibility press did nothing", label: Self.elementLabel(nil, info)) {
+                                try eventsElsewhere(p, t, token, cursor: nil, what: "the click", subject: subject) { synth, route in
+                                    try synth.click(pid: t.pid, windowFor: { _ in t.windowID }, at: pt, button: button, count: count, flags: flags, route: route)
+                                }
+                            }
+                        }
                         return ActOutcome(rung: .accessibility,
                                           detail: "\(subject), so the element was sent \(CURoleWords.actionWords(action)) over accessibility")
                     } catch let error where Self.pressMayHaveActed(error) != nil {
@@ -2201,6 +2226,107 @@ extension CUCore {
         if before.alive, !after.alive { changed.append("the element went away") }
         CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public): AXError \(code, privacy: .public), but it took effect")
         return "\(t.appName) answered \(what) with an error (AXError \(code)), but it took effect — \(changed.joined(separator: ", ")); don't repeat it"
+    }
+
+    // MARK: verified presses on web content
+
+    /// What a press on web content can visibly change. Google Docs' widgets act on a real mouse press: an
+    /// accessibility press (a simulated DOM click) is accepted and ignored, and nothing says so — the model loops.
+    struct WebPressEvidence: Equatable {
+        var windows: Set<UInt32>
+        var focused: AXIdentity?
+        var alive: Bool
+        var value: String?
+        var selected: Bool?
+        var expanded: Bool?
+        var title: String?
+        var frame: CGRect?
+        /// The children of its parent and grandparent: a structural change near it (a panel closed, a list grew).
+        var near: [AXIdentity]
+    }
+
+    func webPressEvidence(_ e: AXUIElement, _ t: CUTarget) -> WebPressEvidence {
+        let parent = ax.element(e, kAXParentAttribute)
+        let grand = parent.flatMap { ax.element($0, kAXParentAttribute) }
+        let near = [parent, grand].compactMap { $0 }.flatMap { ax.elements($0, kAXChildrenAttribute) }.map { AXIdentity(element: $0) }
+        return WebPressEvidence(windows: Set(sys.windows(pid: t.pid).filter { $0.layer == 0 }.map(\.id)),
+                                focused: ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute).map { AXIdentity(element: $0) },
+                                alive: ax.isAlive(e), value: ax.string(e, kAXValueAttribute),
+                                selected: ax.bool(e, kAXSelectedAttribute), expanded: ax.bool(e, kAXExpandedAttribute),
+                                title: ax.string(e, kAXTitleAttribute) ?? ax.string(e, kAXDescriptionAttribute),
+                                frame: ax.frame(e), near: near)
+    }
+
+    /// Whether anything changed since `before`, watched for up to `webPressWatchMs` (the element gone or moved or
+    /// hidden, its value / selected / expanded / title, a window opened or closed, the focus, the tree near it).
+    func webPressChanged(_ e: AXUIElement, _ t: CUTarget, since before: WebPressEvidence) -> Bool {
+        let deadline = clock.nowMs() + webPressWatchMs
+        repeat {
+            if webPressEvidence(e, t) != before { return true }
+            if clock.nowMs() >= deadline { return false }
+            usleep(50_000)
+        } while true
+    }
+
+    /// `[15] “Close”` (or the role when it has no name).
+    static func elementLabel(_ ref: Int?, _ info: ElementInfo) -> String {
+        let name = info.labels.compactMap { $0 }.first { !$0.isEmpty }.map { "\u{201C}\($0.prefix(40))\u{201D}" }
+        let role = CURoleWords.words(role: info.role ?? "AXUnknown", subrole: info.subrole)
+        return [ref.map { "[\($0)]" }, name ?? role].compactMap { $0 }.joined(separator: " ")
+    }
+
+    /// A command that may act without showing anything at once (it sends, pays, deletes…): an accessibility press
+    /// that changed nothing visible is NOT followed by a click — that could do it twice.
+    static func mayActUnseen(_ labels: [String?]) -> Bool {
+        let words = labels.compactMap { $0 }.joined(separator: " ").lowercased()
+        let pattern = #"\b(send|submit|post|publish|pay|buy|order|purchase|checkout|delete|remove|trash|confirm|transfer|sign|invite|upload)\b"#
+        return words.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    static func unseenPressNote(_ label: String) -> String {
+        "the accessibility press on \(label) changed nothing that accessibility can see — a command like this may still have acted without showing it, so it was not clicked as well; check with state() or a screenshot before pressing again"
+    }
+
+    /// After an accessibility press on web content: something changed → done; nothing → a window-targeted click
+    /// at its centre (unless a repeat could do harm), itself verified.
+    private func verifyWebPress(_ e: AXUIElement, _ info: ElementInfo, ref: Int, before: WebPressEvidence,
+                                _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+        if webPressChanged(e, t, since: before) { return ActOutcome(rung: .accessibility) }
+        if Self.mayActUnseen(info.labels) {
+            CULog.act.notice("click in \(t.appName, privacy: .public): the accessibility press changed nothing visible, and the command may act unseen — not clicked as well")
+            return ActOutcome(rung: .accessibility, detail: Self.unseenPressNote(Self.elementLabel(ref, info)))
+        }
+        CULog.act.notice("click in \(t.appName, privacy: .public): the accessibility press on web content changed nothing — a window-targeted click instead")
+        return try clickWebElement(e, info, ref: ref, p, t, token, pressIgnored: true, why: "the accessibility press did nothing")
+    }
+
+    /// A window-targeted left click at the element's centre, after the synthetic activation (an inactive window
+    /// may take a first click as activation only; no focus blip — a click needs no key focus), verified.
+    private func clickWebElement(_ e: AXUIElement, _ info: ElementInfo, ref: Int, _ p: TargetActParams, _ t: CUTarget,
+                                 _ token: CUCancellation.Token, pressIgnored: Bool, why: String) throws -> ActOutcome {
+        guard let center = clickablePoint(e, info, t) else {
+            throw CUError.unsupported("[\(ref)] is outside the window and could not be scrolled into view — scroll to it first")
+        }
+        return try webClickVerified(e, t, pressIgnored: pressIgnored, why: why, label: Self.elementLabel(ref, info)) {
+            enforceFocus(p, t)
+            return try pointerClick(p, t, at: center, button: .left, count: 1, flags: [], token, announced: true,
+                                    element: e, axTried: true)
+        }
+    }
+
+    /// Runs `click`, then says what it did: the effect seen (the app's web content ignored the press: counted,
+    /// see `prefersWebClicks`), or plainly that nothing changed that accessibility can see — never a silent success.
+    func webClickVerified(_ e: AXUIElement, _ t: CUTarget, pressIgnored: Bool, why: String, label: String,
+                          _ click: () throws -> ActOutcome) throws -> ActOutcome {
+        let before = webPressEvidence(e, t)
+        let o = try click()
+        if webPressChanged(e, t, since: before) {
+            if pressIgnored { noteWebPressIgnored(t) }
+            CULog.act.notice("click in \(t.appName, privacy: .public): the window-targeted click took effect")
+            return o.noting(pressIgnored ? "\(why); clicked it instead" : "\(why), so \(label) was clicked")
+        }
+        CULog.act.notice("click in \(t.appName, privacy: .public): nothing changed after the window-targeted click either")
+        return o.noting("\(why); clicked \(label), and nothing changed that accessibility can see — check with state() or a screenshot")
     }
 
     /// The app answered that the element does not support the action (not a timeout or a dead element).

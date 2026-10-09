@@ -87,6 +87,7 @@ public final class CUCore: @unchecked Sendable {
             focusWaitNativeMs = 0
             focusEnforcerFactory = { _ in CUNoopFocusEnforcer() }
             pressSettleMs = 0
+            webPressWatchMs = 0
             menuSettleMs = 0
             selectionHoldMs = 0
             blipReadMs = 0
@@ -462,6 +463,8 @@ public final class CUCore: @unchecked Sendable {
     /// How long a press the app answered with an error is watched for its effect (a new window, a value, the
     /// focus). 0 in test cores (one read).
     var pressSettleMs: Double = 500
+    /// How long a press on web content is watched for an effect before it is called ignored. 0 in test cores.
+    var webPressWatchMs: Double = 500
     /// How long a menu command that reads disabled is read again before it is called disabled. 0 in test cores.
     var menuSettleMs: Double = 400
     /// How long a selection set right after a focus click is watched (and set again if the late click moved
@@ -511,6 +514,25 @@ public final class CUCore: @unchecked Sendable {
     }
     func rememberFocusWriteActivates(_ t: CUTarget) {
         focusWriteActivatesLock.withLock { _ = focusWriteActivatesApps.insert(t.bundleId ?? t.appName) }
+    }
+
+    /// Apps whose web content ignored an accessibility press that a window-targeted click then carried out:
+    /// counted, and from the second time on their web buttons are clicked rather than pressed, for the
+    /// helper's lifetime. Keyed by bundle id, else app name.
+    private let webPressLock = NSLock()
+    private var webPressIgnored: [String: Int] = [:]
+    func prefersWebClicks(_ t: CUTarget) -> Bool {
+        webPressLock.withLock { (webPressIgnored[t.bundleId ?? t.appName] ?? 0) >= 2 }
+    }
+    func noteWebPressIgnored(_ t: CUTarget) {
+        let n = webPressLock.withLock { () -> Int in
+            let key = t.bundleId ?? t.appName
+            webPressIgnored[key, default: 0] += 1
+            return webPressIgnored[key]!
+        }
+        if n == 2 {
+            CULog.act.notice("click in \(t.appName, privacy: .public): its web content ignored an accessibility press twice — its web buttons are clicked from now on")
+        }
     }
 
     /// The window's tree for the off-desktop hit test; replaceable by tests (the live reader walks real AX).

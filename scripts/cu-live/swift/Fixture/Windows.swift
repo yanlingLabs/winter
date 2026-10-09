@@ -348,6 +348,8 @@ final class WebController: NSObject, WKScriptMessageHandler, WKNavigationDelegat
                                         ("button", .str(body["button"] as? String ?? "left"))])
         case "link":
             fixture.emit("web.link", [("href", .str(body["href"] as? String ?? ""))])
+        case "closure":
+            fixture.emit("web.closure", [("count", .num(number("count") ?? 0))])
         case "scroll":
             guard let y = number("y") else { return }
             offerScroll(y)
