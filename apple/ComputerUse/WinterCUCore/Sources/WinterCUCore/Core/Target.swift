@@ -90,6 +90,16 @@ final class CUTarget: @unchecked Sendable {
     /// Pid-queue only.
     var lastFocusClickMs: Double?
 
+    /// The last off-screen image of the window (a digest) and when: a later identical one, with input sent in
+    /// between, is called stale. Returns the one before this.
+    private var _lastOffScreenShot: (digest: Int, atMs: Double)?
+    func noteOffScreenShot(digest: Int, at ms: Double) -> (digest: Int, atMs: Double)? {
+        lock.lock(); defer { lock.unlock() }
+        let before = _lastOffScreenShot
+        _lastOffScreenShot = (digest, ms)
+        return before
+    }
+
     /// Actions an app listed for an element but refused (`AXOpen` on Finder's icons), by role: hidden from
     /// state when `action()` has no equivalent to fall back on. Pid-queue only.
     private(set) var refusedActions: [String: Set<String>] = [:]

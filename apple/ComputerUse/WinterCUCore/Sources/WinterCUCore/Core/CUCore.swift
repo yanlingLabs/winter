@@ -738,7 +738,7 @@ public final class CUCore: @unchecked Sendable {
             privateTried = true
             if let shot = try await offScreenShot(t, region, p.budget) {
                 taken = shot
-                detail = try await offScreenNote(t)
+                detail = try await offScreenNote(t, shot)
             } else if try await queues.run(t.pid, { [self] in isOffThisDesktop(t) }) {
                 throw CUError.screenshotElsewhere(t.appName)
             }
@@ -760,7 +760,7 @@ public final class CUCore: @unchecked Sendable {
                     throw CUError.screenshotElsewhere(t.appName)
                 }
                 img = shot
-                detail = try await offScreenNote(t)
+                detail = try await offScreenNote(t, shot)
             }
         }
         let shot = try await queues.run(t.pid) {
@@ -807,11 +807,20 @@ public final class CUCore: @unchecked Sendable {
         return try CUCapturer.encodeWindowImage(image, pointsRect: area, budget: budget)
     }
 
-    /// What an image from `offScreenShot` is.
-    func offScreenNote(_ t: CUTarget) async throws -> String {
+    /// What an image from `offScreenShot` is, and how stale it may be: the window is hidden, and an app may not
+    /// redraw it there (live: Safari stopped drawing a Google Docs window on another Space, so its screenshots
+    /// showed none of the text just typed). When the image is the same as the last one of this window although
+    /// input was sent since, it says so, with its age — and always how to check what is really there.
+    func offScreenNote(_ t: CUTarget, _ img: CUCapturedImage) async throws -> String {
         let elsewhere = try await queues.run(t.pid) { [self] in isOffThisDesktop(t) }
-        let place = elsewhere ? "on another desktop (another Space or full screen)" : "while it is not on screen (minimized or hidden)"
-        return "captured \(t.appName)'s window \(place) — an app that stops drawing while hidden may show slightly older content"
+        let now = clock.nowMs()
+        let digest = img.jpeg.hashValue ^ img.jpeg.count
+        let previous = t.noteOffScreenShot(digest: digest, at: now)
+        var note = "captured \(t.appName)'s window \(elsewhere ? "on another desktop (another Space or full screen)" : "while it is not on screen (minimized or hidden)"): it is hidden there, so \(t.appName) may not be redrawing it and this image can be older than what was just done"
+        if let previous, previous.digest == digest, let acted = t.lastActionMs, acted > previous.atMs {
+            note += " — it is unchanged since the screenshot \(Int(((now - previous.atMs) / 1000).rounded())) s ago although input was sent since, so it is likely stale"
+        }
+        return note + "; to see what is really there, read it (state() or find() text, or something the app counts, such as a word count), or take a screenshot once the user shows the window"
     }
 
     // MARK: - waits

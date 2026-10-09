@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.1.0` (the contents of [`VERSION`](VERSION))
+Helper version: `1.2.0` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -317,7 +317,7 @@ failure are `unsupported`; a Swift task cancellation is `cancelled`.
 | `no_window` | — | the app runs but has no open window |
 | `refused` | `reason` (§6) | a floor refused it |
 | `wait_timeout` | `seen`, `waitedMs` | `waitFor` ran out |
-| `cancelled` | — | `cancel`, or the connection closed |
+| `cancelled` | `typed?`, `total?` | `cancel`, or the connection closed; a type or paste stopped while typing keys says how many of its characters had gone out (`typed` of `total`): the field is partly filled |
 | `invalid_params` | — | bad params, an unknown shot, an oversize line or result |
 | `unsupported` | `axError?` | unknown method, an element that does not support it, an internal failure |
 | `busy` | `retryable` (default `true`), `uncertain?`, `axError?` | retry, unless `uncertain: true` (then `retryable: false`: it may have happened) |
@@ -481,3 +481,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | --- | --- | --- |
 | 1 | 1.0.0 | Initial: the methods, errors, notifications and `view.*` stream above. `protocol_mismatch` refusals of `hello` carry `helperVersion` beside `expected` (additive). |
 | 1 | 1.1.0 | `target_lost` errors carry `data.reason` (`app_quit`, `window_closed`, `helper_restart`, `unknown`) and the `targetLost` notification's `reason` takes the same four values (additive: a client that ignores it is unaffected; one that reads it must treat an absent reason as `unknown`). |
+| 1 | 1.2.0 | A type or paste stopped while typing keys carries `data.typed` and `data.total` (on `cancelled`, and on any other error it hit mid-typing, whose message also says it) — additive: a client that ignores them is unaffected. |

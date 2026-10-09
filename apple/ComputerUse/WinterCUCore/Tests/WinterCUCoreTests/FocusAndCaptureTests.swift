@@ -218,9 +218,23 @@ final class FocusAndCaptureTests: XCTestCase {
         XCTAssertEqual([r.width, r.height], [800, 533], "fitted to the budget like any capture")
         XCTAssertEqual(r.mime, "image/jpeg")
         XCTAssertNotNil(Data(base64Encoded: r.imageBase64).flatMap { CGImageSourceCreateWithData($0 as CFData, nil) })
-        XCTAssertEqual(r.detail, "captured Code's window on another desktop (another Space or full screen) — an app that stops "
-            + "drawing while hidden may show slightly older content")
+        XCTAssertEqual(r.detail, "captured Code's window on another desktop (another Space or full screen): it is hidden there, so Code "
+            + "may not be redrawing it and this image can be older than what was just done; to see what is really there, read it "
+            + "(state() or find() text, or something the app counts, such as a word count), or take a screenshot once the user shows the window")
         XCTAssertTrue(sys.moved.isEmpty, "never moved here for a picture")
+    }
+
+    func testAnOffScreenImageUnchangedThroughInputSentSinceIsCalledStale() async throws {
+        electron(onScreen: false)
+        _ = privateCapture(solid(2400, 1600))
+        let first = try await core.targetScreenshot(shotParams())
+        XCTAssertFalse(first.detail?.contains("likely stale") ?? true, "nothing to compare with yet")
+        let again = try await core.targetScreenshot(shotParams())
+        XCTAssertFalse(again.detail?.contains("likely stale") ?? true, "no input since: the same picture is no news")
+        target.lastActionMs = CUSystemClock().nowMs() + 1  // input sent after the last shot
+        let after = try await core.targetScreenshot(shotParams())
+        XCTAssertTrue(after.detail?.contains("unchanged since the screenshot 0 s ago although input was sent since, so it is likely stale") ?? false,
+                      after.detail ?? "")
     }
 
     func testARegionOfAWindowElsewhereIsTheGlobalRectOfThatRegion() async throws {
