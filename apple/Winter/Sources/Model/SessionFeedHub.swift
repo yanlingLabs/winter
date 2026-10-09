@@ -60,8 +60,9 @@ final class SessionFeedHub {
 
     /// A hold on `sessionId`'s feed — opened, and started, if this is the first. Nil when no feed can be made.
     func lease(sessionId: String) -> SessionFeedLease? {
+        let joinedAttached = entries[sessionId]?.feed.isAttached ?? false
         guard let entry = acquire(sessionId) else { return nil }
-        return SessionFeedLease(hub: self, entry: entry)
+        return SessionFeedLease(hub: self, entry: entry, joinedAttachedFeed: joinedAttached)
     }
 
     // MARK: - What a lease does
@@ -94,8 +95,9 @@ final class SessionFeedHub {
     fileprivate func move(_ lease: SessionFeedLease, from old: Entry, to sessionId: String) -> Task<Void, Never> {
         // The session is already open somewhere: join it, and let go of the old one.
         if let target = entries[sessionId] {
+            let joinedAttached = target.feed.isAttached
             target.holders += 1
-            lease.adopt(target)
+            lease.adopt(target, joinedAttachedFeed: joinedAttached)
             release(old)
             return Task { await target.feed.waitUntilAttached() }
         }
@@ -105,12 +107,12 @@ final class SessionFeedHub {
             entries[old.sessionId] = nil
             old.sessionId = sessionId
             entries[sessionId] = old
-            lease.adopt(old)
+            lease.adopt(old, joinedAttachedFeed: false) // re-pinned: its replay comes to every holder
             return Task { await old.feed.repin(to: sessionId) }
         }
         // Others still hold the session being left: this surface gets a feed of its own onto the new one.
         guard let target = acquire(sessionId) else { return Task {} }
-        lease.adopt(target)
+        lease.adopt(target, joinedAttachedFeed: false) // a feed of its own: it replays from the start
         old.holders -= 1
         return Task { await target.feed.waitUntilAttached() }
     }
@@ -127,14 +129,21 @@ final class SessionFeedLease {
     /// own and follows this one.
     private(set) var session: SessionModel
     private(set) var isReleased = false
+    /// True when this lease's last acquire or move landed on a feed that was ALREADY attached: its replay has been (or
+    /// is being) delivered to the surfaces that were there first, and a later joiner's taps hear only what comes after
+    /// — never the history. A surface that builds a store from the event stream rather than from the model's `state`
+    /// must seed it another way (`ShellSessionHost`'s panel tabs take the daemon's `panel.list`). False for a lease
+    /// that opened its feed, whose taps are in place before the attach answers, and for one whose feed was re-pinned.
+    private(set) var joinedAttachedFeed = false
 
     private weak var hub: SessionFeedHub?
     private var entry: SessionFeedHub.Entry?
     private var standaloneTask: Task<Void, Never>?
 
-    fileprivate init(hub: SessionFeedHub, entry: SessionFeedHub.Entry) {
+    fileprivate init(hub: SessionFeedHub, entry: SessionFeedHub.Entry, joinedAttachedFeed: Bool) {
         self.hub = hub
         self.entry = entry
+        self.joinedAttachedFeed = joinedAttachedFeed
         sessionId = entry.sessionId
         feed = entry.feed
         session = entry.session
@@ -181,12 +190,14 @@ final class SessionFeedLease {
             return hub.move(self, from: entry, to: sessionId)
         }
         self.sessionId = sessionId
+        joinedAttachedFeed = false
         let feed = self.feed
         return Task { await feed.repin(to: sessionId) }
     }
 
-    fileprivate func adopt(_ entry: SessionFeedHub.Entry) {
+    fileprivate func adopt(_ entry: SessionFeedHub.Entry, joinedAttachedFeed: Bool) {
         self.entry = entry
+        self.joinedAttachedFeed = joinedAttachedFeed
         sessionId = entry.sessionId
         feed = entry.feed
         session = entry.session

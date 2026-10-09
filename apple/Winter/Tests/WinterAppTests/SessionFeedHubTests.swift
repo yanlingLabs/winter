@@ -55,6 +55,10 @@ final class SessionFeedHubTests: XCTestCase {
         #"{"jsonrpc":"2.0","method":"event","params":{"type":"turn_started","seq":\#(seq),"sessionId":"\#(sessionId)","ts":0,"threadId":"main"}}"#
     }
 
+    private func panelOpened(_ sessionId: String, tabId: String, seq: Int) -> String {
+        #"{"jsonrpc":"2.0","method":"event","params":{"type":"panel_tab_opened","seq":\#(seq),"sessionId":"\#(sessionId)","ts":0,"tabId":"\#(tabId)","kind":"web","url":null,"title":null}}"#
+    }
+
     // MARK: - Sharing
 
     func testTwoSurfacesOnOneSessionShareOneFeedAndOneAttach() async throws {
@@ -510,5 +514,63 @@ final class SessionFeedHubTests: XCTestCase {
         XCTAssertEqual(host.attachment?.feed.pinnedSessionId, "S2")
         XCTAssertTrue(host.attachment?.session.following === rig.made[1].session, "its model follows S2's")
         host.setShellVisible(false)
+    }
+    // MARK: - Joining a feed that is already attached
+
+    /// A lease says whether the feed it landed on was already attached — the surfaces that were there first got the
+    /// replay, a later joiner's taps hear only what comes after.
+    func testALeaseKnowsWhetherItJoinedAFeedThatWasAlreadyAttached() async throws {
+        let rig = Rig()
+        let first = try XCTUnwrap(rig.hub.lease(sessionId: "S1"))
+        let early = try XCTUnwrap(rig.hub.lease(sessionId: "S1")) // before the attach answers: its taps hear the replay
+        XCTAssertFalse(first.joinedAttachedFeed)
+        XCTAssertFalse(early.joinedAttachedFeed)
+
+        await answerHandshake(rig.made[0].transport)
+        await feedWaitUntil { rig.made[0].feed.isAttached }
+        let late = try XCTUnwrap(rig.hub.lease(sessionId: "S1"))
+        XCTAssertTrue(late.joinedAttachedFeed, "the replay is over for the feed it joined")
+
+        // A move onto an attached session joins it; a re-pin of the only holder's own feed does not.
+        let mover = try XCTUnwrap(rig.hub.lease(sessionId: "S9"))
+        mover.move(to: "S1")
+        XCTAssertTrue(mover.joinedAttachedFeed)
+        let solo = try XCTUnwrap(rig.hub.lease(sessionId: "S5"))
+        solo.move(to: "S6")
+        XCTAssertFalse(solo.joinedAttachedFeed, "its feed re-attaches: the replay comes to it")
+        for lease in [first, early, late, mover, solo] { lease.release() }
+    }
+
+    /// The shell joining a session another surface already shows has no replay to rebuild its panel tabs from: they
+    /// are `panel.list`'s snapshot, and a tab opened live before the answer is folded on top of it, not instead of it.
+    func testAShellJoiningAnAttachedFeedTakesItsPanelTabsFromTheSnapshotPlusTheLiveTail() async throws {
+        let rig = Rig()
+        let mgmt = ShellScriptedTransport()
+        let client = WinterClient(makeTransport: { mgmt }, token: "tok", clientName: "orb")
+        let connecting = Task { try? await client.connect() }
+        await feedWaitUntil { mgmt.sent.count >= 1 }
+        let hello = feedLineJSON(mgmt.sent[0])
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        await connecting.value
+
+        let holder = try XCTUnwrap(rig.hub.lease(sessionId: "S1"))
+        defer { holder.release() }
+        await answerHandshake(rig.made[0].transport)
+        await feedWaitUntil { rig.made[0].feed.isAttached }
+
+        let host = ShellSessionHost(directory: SessionDirectory(lister: { [] }), hub: rig.hub, managementClient: client)
+        defer { host.setShellVisible(false) }
+        host.setShellVisible(true)
+        host.select("S1")
+        XCTAssertEqual(rig.made.count, 1, "the shell joined the holder's feed")
+
+        // A tab is opened live before panel.list answers.
+        rig.made[0].transport.feed(panelOpened("S1", tabId: "live", seq: 1))
+        await feedWaitUntil { host.panelStore.tabs.map(\.tabId) == ["live"] }
+        await feedWaitUntil { mgmt.methods.contains("panel.list") }
+        let request = try XCTUnwrap(mgmt.sent.map { feedLineJSON($0) }.first { $0["method"] as? String == "panel.list" })
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(request["id"] as! Int),"result":{"tabs":[{"tabId":"snap","kind":"web","url":null,"title":null}],"activeTabId":"snap"}}"#)
+        await feedWaitUntil { host.panelStore.tabs.count == 2 }
+        XCTAssertEqual(host.panelStore.tabs.map(\.tabId), ["snap", "live"])
     }
 }

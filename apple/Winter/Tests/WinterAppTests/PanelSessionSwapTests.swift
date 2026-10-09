@@ -160,4 +160,38 @@ final class PanelStoreSessionSwapTests: XCTestCase {
         store.applyFetchedSnapshot(sessionId: "s1", tabs: [], activeTabId: nil)
         XCTAssertEqual(store.tabs.map(\.tabId), ["live"], "a fetch racing behind replay must not regress it")
     }
+
+    /// A surface that joined a feed ALREADY attached gets no replay (`SessionFeedLease.joinedAttachedFeed`): what is
+    /// in the buffer is only the tail since the join, so the snapshot is the whole truth and must land — with the
+    /// tail folded back on top.
+    func testFetchedSnapshotLandsUnderTheLiveTailWhenNoReplayIsComing() {
+        let store = PanelStore()
+        store.switchSession(to: "s1")
+        store.apply(opened(sessionId: "s1", tabId: "live"))
+        store.applyFetchedSnapshot(
+            sessionId: "s1",
+            tabs: [PanelTab(tabId: "snap", kind: .web, url: nil, title: nil)],
+            activeTabId: "snap",
+            foldingBufferedEvents: true
+        )
+        XCTAssertEqual(store.tabs.map(\.tabId), ["snap", "live"], "the snapshot's tab AND the one opened since")
+        XCTAssertEqual(store.activeTabId, "snap")
+        // A later live event still builds on the same seed.
+        store.apply(opened(sessionId: "s1", tabId: "later", seq: 2))
+        XCTAssertEqual(store.tabs.map(\.tabId), ["snap", "live", "later"])
+    }
+
+    /// The fetch ran AFTER the tail's event: the snapshot already shows it, and folding it again adds nothing.
+    func testFoldingTheTailOntoASnapshotThatAlreadyHasItAddsNothing() {
+        let store = PanelStore()
+        store.switchSession(to: "s1")
+        store.apply(opened(sessionId: "s1", tabId: "live"))
+        store.applyFetchedSnapshot(
+            sessionId: "s1",
+            tabs: [PanelTab(tabId: "live", kind: .web, url: nil, title: nil)],
+            activeTabId: "live",
+            foldingBufferedEvents: true
+        )
+        XCTAssertEqual(store.tabs.map(\.tabId), ["live"])
+    }
 }

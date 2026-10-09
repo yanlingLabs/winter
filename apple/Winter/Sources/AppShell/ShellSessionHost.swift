@@ -2301,13 +2301,18 @@ final class ShellSessionHost: ObservableObject {
     /// skipped (`SessionEvent`'s per-event `try?` decode); a snapshot that disagreed with what
     /// replay would eventually show for the same wire value would be a second, diverging behavior
     /// for the identical case.
-    private func refreshPanelTabs(for sessionId: String) {
+    ///
+    /// `joinedAttachedFeed`: the session's feed was already attached when this shell joined it (a pill or a window
+    /// holds it too), so there is NO replay coming and the panel's tabs are this snapshot plus what arrives live —
+    /// `PanelStore.applyFetchedSnapshot(foldingBufferedEvents:)`.
+    private func refreshPanelTabs(for sessionId: String, joinedAttachedFeed: Bool = false) {
         guard let client = managementClient else { return }
         Task { @MainActor [weak self] in
             guard let result = try? await client.listPanelTabs(sessionId: sessionId) else { return }
             self?.panelStore.applyFetchedSnapshot(sessionId: sessionId,
                                                   tabs: panelTabs(fromSnapshot: result.tabs),
-                                                  activeTabId: result.activeTabId)
+                                                  activeTabId: result.activeTabId,
+                                                  foldingBufferedEvents: joinedAttachedFeed)
         }
     }
 
@@ -3045,7 +3050,7 @@ final class ShellSessionHost: ObservableObject {
         // attach, and AFTER `switchSession` — which must keep its own instant republish of this
         // session's cached fold, since that is the frame the panel shows while the replay runs.
         panelStore.beginReplay(for: sessionId)
-        refreshPanelTabs(for: sessionId)
+        refreshPanelTabs(for: sessionId, joinedAttachedFeed: lease.joinedAttachedFeed)
         wire(adapter: adapter, lease: lease)
         // office-live-ux Job 3, wiring door 1 of 3 — see `rewireOfficeTurnSignal`.
         rewireOfficeTurnSignal(departing: nil)
@@ -3099,7 +3104,8 @@ final class ShellSessionHost: ObservableObject {
         // live-gate fix A: same pair as `attachFresh`, and it matters MORE here — `repin` re-attaches
         // on a live pump, so the replay starts arriving the moment the RPC goes out.
         panelStore.beginReplay(for: sessionId)
-        refreshPanelTabs(for: sessionId)
+        // (`refreshPanelTabs` follows the lease's move below: whether the new session's feed was already attached decides
+        // how its snapshot is taken, and only the move knows.)
         // Everything the OLD session's identity decided has to be re-derived or dropped, exactly as
         // an in-place switch does elsewhere: a different session means a different mode, a different
         // pinned model/effort, and refusals that were about the session the user just left.
@@ -3160,6 +3166,8 @@ final class ShellSessionHost: ObservableObject {
         // shows it — and the shell's model follows that session's, emptied first (the shape a re-pin always gave).
         let attached = live.lease.move(to: sessionId)
         if live.session.following !== live.lease.session { live.session.follow(live.lease.session, resetting: true) }
+        // panel-shell T9's instant-display seed — see `panelStore.switchSession` above, and `refreshPanelTabs` for the flag.
+        refreshPanelTabs(for: sessionId, joinedAttachedFeed: live.lease.joinedAttachedFeed)
         Task { @MainActor [weak self] in
             await attached.value
             // After the attach's answer — same attach-before-send guarantee as `onConnected`'s fresh-attach ordering.
