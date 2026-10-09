@@ -62,6 +62,12 @@ public struct CUFocusGuardianCore: Sendable {
     private var exemptUntil: TimeInterval = 0
     /// Theft times per app, for repeat detection.
     private var thefts: [pid_t: [TimeInterval]] = [:]
+    /// The user physically clicked into this app's window: its activation (and a Space change that comes with
+    /// it) is the user's until `claimUntil`, whatever the 0.4 s input heuristic says.
+    private var claimApp: pid_t?
+    private var claimUntil: TimeInterval = 0
+    /// How long a physical click claims the activation it causes (an app can take a while to activate).
+    public static let clickClaimWindow: TimeInterval = 1.5
 
     public init() {}
 
@@ -74,7 +80,21 @@ public struct CUFocusGuardianCore: Sendable {
         active = false
         thefts.removeAll()
         exemptApp = nil
+        claimApp = nil
     }
+
+    /// The user physically clicked a window of `app` (a bound target's): the user's app and Space are now that
+    /// app and the Space it is on — immediately, before any activation arrives — and the activation it causes
+    /// is theirs. The guardian never fights a user who clicks into the agent's app.
+    public mutating func userClicked(app: pid_t, space: UInt64?, now: TimeInterval) {
+        guard active else { return }
+        view = CUGuardedView(app: app, space: space ?? view.space)
+        claimApp = app
+        claimUntil = now + Self.clickClaimWindow
+        thefts[app] = nil
+    }
+
+    private func claimed(_ app: pid_t, now: TimeInterval) -> Bool { claimApp == app && now <= claimUntil }
 
     /// The consented foreground rung takes the front for one action: its activation is allowed until `until`.
     public mutating func exempt(_ app: pid_t, until: TimeInterval) {
@@ -91,6 +111,11 @@ public struct CUFocusGuardianCore: Sendable {
     /// Decide what one activation means and update the tracked view.
     public mutating func handle(_ a: CUActivation, now: TimeInterval) -> CUGuardianVerdict {
         guard active else { return .ignore }
+        // The user clicked into this app's window: theirs, whatever the timing.
+        if claimed(a.app, now: now) {
+            view = CUGuardedView(app: a.app, space: a.space ?? view.space)
+            return .userSwitch
+        }
         // The user's own switch: physical input just before it, and not one of our synthetic events.
         if a.hadRecentUserInput, !a.fromSyntheticEvent {
             view = CUGuardedView(app: a.app, space: a.space ?? view.space)
@@ -114,7 +139,7 @@ public struct CUFocusGuardianCore: Sendable {
     /// theft to put back. Returns the restore view for a theft, nil when it was the user's.
     public mutating func handleSpaceChange(to space: UInt64?, hadRecentUserInput: Bool, now: TimeInterval) -> CUGuardedView? {
         guard active, let space, space != view.space else { return nil }
-        if hadRecentUserInput {
+        if hadRecentUserInput || (claimApp != nil && now <= claimUntil) {
             view.space = space
             return nil
         }

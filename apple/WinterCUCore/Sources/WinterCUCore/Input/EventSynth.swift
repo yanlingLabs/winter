@@ -18,6 +18,15 @@ protocol CUEventPoster: Sendable {
     @discardableResult func post(_ event: CGEvent, pid: pid_t, route: CURoute, authenticate: Bool) -> CURoute
 }
 
+/// The mark on every event the helper posts (`kCGEventSourceUserData`), so the Focus Guardian's listen-only
+/// left-mouse-down tap can tell the helper's own clicks from the user's physical ones.
+enum CUEventStamp {
+    /// "WINTERCU" as eight ASCII bytes.
+    static let value: Int64 = 0x5749_4E54_4552_4355
+    static func stamp(_ e: CGEvent) { e.setIntegerValueField(.eventSourceUserData, value: value) }
+    static func isOurs(_ userData: Int64) -> Bool { userData == value }
+}
+
 struct CULiveEventPoster: CUEventPoster {
     let skyLight: CUSkyLight
     /// The public routes, injectable so the SkyLight → public fallback is testable without posting anything.
@@ -25,6 +34,7 @@ struct CULiveEventPoster: CUEventPoster {
     var postHID: @Sendable (CGEvent) -> Void = { e in e.post(tap: .cghidEventTap) }
 
     func post(_ event: CGEvent, pid: pid_t, route: CURoute, authenticate: Bool) -> CURoute {
+        CUEventStamp.stamp(event)  // every helper event carries the mark, whatever the route
         switch route {
         case .publicPid:
             postToPid(event, pid)
