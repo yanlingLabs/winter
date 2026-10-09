@@ -114,7 +114,7 @@ import {
   keychainFfiProbeOk,
 } from "./release-lib";
 import { fetchAnt, parseAntPin } from "./fetch-ant";
-import { checkSignedHelper, HELPER, HELPER_EMBED_RELATIVE, helperExecutable, helperRequirement, LSREGISTER } from "./computer-helper-lib";
+import { checkSignedHelper, HELPER, HELPER_EMBED_RELATIVE, helperExecutable, helperRequirement, LSREGISTER, readHelperVersion } from "./computer-helper-lib";
 import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 import { buildWinter } from "./build-winter";
@@ -830,16 +830,17 @@ for (const name of CEF_HELPERS) {
 // daemon key on: the identifier com.winter.computeruse; EXACTLY the stated designated requirement (identifier
 // + team OU — a derived one names the signing certificate's common name, and a change there would silently
 // cost every user their grants); the hardened runtime; exactly one entitlement, Apple Events, for applescript()
-// (no cs.* relaxation — the cs.* family is pinned in HARDENING_PINS below); an LSUIElement Info.plist at this
-// release's version with its Apple Events usage text (the daemon reads the version as
-// `helperVersion`); and no test hooks — they compile only into `verify:computer-helper`'s test flavor, and a
+// (no cs.* relaxation — the cs.* family is pinned in HARDENING_PINS below); an LSUIElement Info.plist at the
+// helper's OWN version (apple/ComputerUse/VERSION, semver — not this release's) with its Apple Events usage text
+// (the daemon reads it as `helperVersion`); and no test hooks — they compile only into `verify:computer-helper`'s test flavor, and a
 // release binary containing one would accept a fake daemon. `checkSignedHelper` is the same check
 // `dev:helper` and `verify:computer-helper` run on their bundles.
 const computerHelperApp = join(app, HELPER_EMBED_RELATIVE);
 assertSigned(computerHelperApp, "Winter Computer Use");
 {
   const plist = probe(`plutil -convert json -o - "${join(computerHelperApp, "Contents", "Info.plist")}"`);
-  const failures = checkSignedHelper("dist", TEAM_ID, version, {
+  const helperVersion = readHelperVersion();
+  const failures = checkSignedHelper("dist", TEAM_ID, helperVersion, {
     codesignDvv: probe(`codesign -dvv "${computerHelperApp}" 2>&1`).stdout,
     codesignDr: probe(`codesign -d -r- "${computerHelperApp}" 2>&1`).stdout,
     entitlementsXml: probe(`codesign -d --entitlements - --xml "${computerHelperApp}" 2>/dev/null`).stdout,
@@ -850,7 +851,7 @@ assertSigned(computerHelperApp, "Winter Computer Use");
   const satisfied = probe(`codesign --verify --strict -R='${stated}' "${computerHelperApp}" 2>&1`);
   if (!satisfied.ok) failures.push(`the signature does not satisfy its own stated requirement: ${satisfied.stdout.trim()}`);
   if (failures.length > 0) fail(`Winter Computer Use is not signed the way TCC and the daemon need:\n  ${failures.join("\n  ")}`);
-  console.log(`Winter Computer Use verified: ${HELPER.dist.identifier}, designated => ${stated}, hardened runtime, the Apple Events entitlement only, version ${version}, no test hooks.`);
+  console.log(`Winter Computer Use verified: ${HELPER.dist.identifier}, designated => ${stated}, hardened runtime, the Apple Events entitlement only, version ${helperVersion}, no test hooks.`);
 }
 // "Start from nothing" pinned where it SHIPS, across every component this repo signs — not just
 // where entitlements are declared. project.yml can hand CODE_SIGN_ENTITLEMENTS to the wrong

@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { AUTOMATION_WORKER_ARG, FileSecretStore, isDefaultWinterHome, runAutomationWorker, startDaemon } from "../../packages/core/src/index";
+import { HELPER_PROTOCOL } from "../../packages/core/src/computer-use/protocol";
 
 if (process.argv[2] === AUTOMATION_WORKER_ARG) {
   runAutomationWorker();
@@ -39,7 +40,7 @@ async function peerHello(socketPath: string, home: string, call?: { method: stri
     Bun.connect({
       unix: socketPath,
       socket: {
-        open(s) { s.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "hello", params: { protocol: 1, client: "daemon", home } })}\n`); },
+        open(s) { s.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "hello", params: { protocol: HELPER_PROTOCOL, client: "daemon", home } })}\n`); },
         data(s, chunk) {
           buf += new TextDecoder().decode(chunk);
           for (let nl = buf.indexOf("\n"); nl >= 0; nl = buf.indexOf("\n")) {

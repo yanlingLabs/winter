@@ -91,6 +91,18 @@ final class ServerHandshakeTests: XCTestCase {
         let reply = try XCTUnwrap(client.response(id: 1))
         XCTAssertEqual(reply["error"]?["data"]?["code"], .string("protocol_mismatch"))
         XCTAssertEqual(reply["error"]?["data"]?["expected"], .number(1))
+        XCTAssertEqual(reply["error"]?["data"]?["helperVersion"], .string("9.876.5"), "so the client can say which side is out of date")
+        XCTAssertTrue(client.closedWithoutData())
+    }
+
+    func testAnOlderClientIsToldTheHelpersProtocolToo() async throws {
+        let rig = await Rig()
+        try await start(rig)
+        let client = try LineClient(path: socketPath)
+        client.send(id: 1, method: "hello", params: "{\"protocol\":0,\"client\":\"app\",\"home\":\"\(home)\"}")
+        let reply = try XCTUnwrap(client.response(id: 1))
+        XCTAssertEqual(reply["error"]?["data"]?["code"], .string("protocol_mismatch"))
+        XCTAssertEqual(reply["error"]?["data"]?["expected"], .number(Double(RPCWire.protocolVersion)))
         XCTAssertTrue(client.closedWithoutData())
     }
 

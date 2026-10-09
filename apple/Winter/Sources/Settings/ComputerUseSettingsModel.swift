@@ -54,6 +54,8 @@ func computerUsePermissionDescription(_ kind: ComputerUsePermissionKind) -> Stri
 /// PURE: the helper's state in a few words. A helper that is installed but not running is the normal
 /// idle state — it starts when a session needs it and quits when it is unused — so it is not an error.
 func computerUseHelperSummary(_ helper: ComputerUseHelperStatus) -> String {
+    // Incompatible beats everything: the helper answers, but nothing will work until Winter is updated.
+    if let mismatch = helper.protocolMismatch { return mismatch.message }
     if !helper.installed { return "Not installed" }
     if !helper.running { return "Installed — starts when a session needs it" }
     if let version = helper.version, !version.isEmpty { return "Running — version \(version)" }

@@ -54,6 +54,18 @@ final class ComputerUseClientTests: XCTestCase {
         XCTAssertTrue(status.allowAllApps, "a daemon that predates the master switch reads as on, the default")
     }
 
+    /// An incompatible helper: running, with the daemon's sentence (apple/ComputerUse/PROTOCOL.md, "Compatibility").
+    func testStatusDecodesAHelperOfAnotherProtocol() async throws {
+        let (client, t) = try await connected()
+        let live = LiveComputerUseClient(client: client)
+        let message = "Winter Computer Use is too new for this Winter (it speaks helper protocol 2, Winter speaks 1) — update Winter"
+        let result = #"{"enabled":true,"legacyComputer":false,"mirror":true,"privateEventPath":true,"helper":{"installed":true,"running":true,"#
+            + #""protocolMismatch":{"helperProtocol":2,"helperVersion":"2.0.0","winterProtocol":1,"message":"\#(message)"}}}"#
+        let (_, status) = try await roundTrip(t, sentIndex: 1, result: result) { try await live.status() }
+        XCTAssertEqual(status.helper.protocolMismatch,
+                       ComputerUseHelperProtocolMismatch(helperProtocol: 2, helperVersion: "2.0.0", winterProtocol: 1, message: message))
+    }
+
     func testStatusThrowsOnAMalformedResult() async throws {
         let (client, t) = try await connected()
         let live = LiveComputerUseClient(client: client)

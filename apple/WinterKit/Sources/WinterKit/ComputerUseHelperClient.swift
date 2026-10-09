@@ -8,7 +8,7 @@ import Foundation
 //
 // The wire is the helper's socket (`<WINTER_HOME>/run/computer-use.sock`), NDJSON JSON-RPC, the same
 // framing the daemon uses to talk to it. An app client authenticates with
-// `hello {protocol: 1, client: "app", home}` and may call only `hello`, `view.subscribe`,
+// `hello {protocol: ComputerUseHelperProtocol.version, client: "app", home}` and may call only `hello`, `view.subscribe`,
 // `view.unsubscribe` and `status`; the helper verifies the peer against Winter.app's designated
 // requirement. Notifications reach a subscriber of a session: `view.bound`, `view.released`,
 // `view.frame`, `view.cursor`.
@@ -99,12 +99,29 @@ public enum HelperViewEvent: Equatable, Sendable {
     case connectionLost
 }
 
+/// The helper protocol Winter.app speaks: `apple/ComputerUse/PROTOCOL.md`'s "Protocol version", the helper's
+/// `RPCWire.protocolVersion` and the daemon's `HELPER_PROTOCOL` (a repo test keeps all of them equal). WinterKit
+/// never links the helper's packages, so the number is stated here.
+public enum ComputerUseHelperProtocol {
+    public static let version = 1
+
+    /// The ONE sentence for a mismatch — the daemon's `helperProtocolMismatchMessage` word for word.
+    public static func mismatchMessage(helperProtocol: Int?, clientProtocol: Int = version) -> String {
+        guard let helperProtocol else {
+            return "Winter Computer Use speaks a different helper protocol than this Winter (\(clientProtocol)) — update Winter"
+        }
+        let side = helperProtocol < clientProtocol ? "too old" : "too new"
+        return "Winter Computer Use is \(side) for this Winter (it speaks helper protocol \(helperProtocol), Winter speaks \(clientProtocol)) — update Winter"
+    }
+}
+
 /// Why a helper call failed. `protocolMismatch` and `homeMismatch` are final — retrying cannot fix
 /// either; `socketMissing` means the helper is not running, which is not an error and must never launch
-/// it (the daemon owns that).
-public enum HelperClientError: Error, Equatable, Sendable {
+/// it (the daemon owns that). `protocolMismatch` carries the helper's protocol (nil when it did not say) and
+/// ours; its `description` is the sentence to show.
+public enum HelperClientError: Error, Equatable, Sendable, CustomStringConvertible {
     case socketMissing
-    case protocolMismatch
+    case protocolMismatch(helper: Int?, client: Int)
     case homeMismatch
     case notAllowed(String)
     case notConnected
@@ -115,6 +132,18 @@ public enum HelperClientError: Error, Equatable, Sendable {
         switch self {
         case .protocolMismatch, .homeMismatch: return true
         default: return false
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .socketMissing: return "Winter Computer Use is not running"
+        case .protocolMismatch(let helper, let client):
+            return ComputerUseHelperProtocol.mismatchMessage(helperProtocol: helper, clientProtocol: client)
+        case .homeMismatch: return "Winter Computer Use serves a different Winter home"
+        case .notAllowed(let message): return "not allowed: \(message)"
+        case .notConnected: return "not connected to Winter Computer Use"
+        case .rpc(let code, let message): return "helper error \(code): \(message)"
         }
     }
 }
@@ -203,11 +232,18 @@ public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
                 await self.handle(event)
             }
         }
+        let hello: JSONValue
         do {
-            _ = try await request("hello", params: ["protocol": .number(1), "client": .string("app"), "home": .string(home)])
+            hello = try await request("hello", params: ["protocol": .number(Double(ComputerUseHelperProtocol.version)),
+                                                        "client": .string("app"), "home": .string(home)])
         } catch {
             await disconnect()
             throw error
+        }
+        // A helper that accepted but answers another number is no more usable than one that refused ours.
+        if let theirs = hello["protocol"]?.intValue, theirs != ComputerUseHelperProtocol.version {
+            await disconnect()
+            throw HelperClientError.protocolMismatch(helper: theirs, client: ComputerUseHelperProtocol.version)
         }
     }
 
@@ -372,7 +408,9 @@ public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
     static func error(from error: JSONValue) -> HelperClientError {
         let message = error["message"]?.stringValue ?? "helper error"
         switch error["data"]?["code"]?.stringValue {
-        case "protocol_mismatch": return .protocolMismatch
+        // `data.expected` is the helper's own number (absent: it could not read our hello at all).
+        case "protocol_mismatch":
+            return .protocolMismatch(helper: error["data"]?["expected"]?.intValue, client: ComputerUseHelperProtocol.version)
         case "home_mismatch": return .homeMismatch
         case "not_allowed": return .notAllowed(message)
         default: return .rpc(code: error["code"]?.intValue ?? -1, message: message)

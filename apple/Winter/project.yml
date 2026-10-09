@@ -21,12 +21,12 @@ packages:
   # ComputerV2: the Winter Computer Use helper's shell (and, through it, the automation engine and the
   # mirror/cursor/Esc packages). Only the WinterComputerUse target links the shell.
   WinterComputerUse:
-    path: ../WinterComputerUse
+    path: ../ComputerUse/WinterComputerUse
   # ComputerV2 mirror (spine 11b): the live mirror of the controlled app renders INSIDE Winter's windows,
   # so Winter.app links the presentation package for `CUMirrorModel`/`CUMirrorView` (it captures nothing:
   # the helper keeps the Screen Recording grant and streams frames over its socket).
   WinterCUPresentation:
-    path: ../WinterCUPresentation
+    path: ../ComputerUse/WinterCUPresentation
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.6.0"
@@ -991,23 +991,25 @@ targets:
     type: application
     platform: macOS
     sources:
-      - path: ../WinterComputerUse/App
+      - path: ../ComputerUse/WinterComputerUse/App
       - path: Support/AppIcon.icns
       - path: Support/AppIconDev.icns
     dependencies:
       - package: WinterComputerUse
         product: WinterComputerUseShell
     info:
-      path: ../WinterComputerUse/Support/Info.plist
+      path: ../ComputerUse/WinterComputerUse/Support/Info.plist
       properties:
         CFBundleName: "$(WINTER_CU_APP_NAME)"
         CFBundleDisplayName: "$(WINTER_CU_APP_NAME)"
         CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
         CFBundleIconFile: "$(WINTER_CU_APP_ICON)"
-        # Stamped with the Winter target's by scripts/version-lib.ts (every occurrence in this file, plus
-        # the generated Support/Info.plist) — the helper reports it as `helperVersion`.
-        CFBundleShortVersionString: "0.124.0"
-        CFBundleVersion: "0.124.0"
+        # The helper's OWN version (semver, apple/ComputerUse/VERSION — not Winter's), stamped into these two
+        # marked lines and the generated Info.plist by scripts/computer-helper-lib.ts's syncHelperVersion
+        # (version:sync, dev:helper, verify:computer-helper); Winter's own stamp skips the marked lines. The
+        # helper reports it as `helperVersion`.
+        CFBundleShortVersionString: "1.1.0" # apple/ComputerUse/VERSION
+        CFBundleVersion: "1.1.0" # apple/ComputerUse/VERSION
         LSUIElement: true
         LSMinimumSystemVersion: "26.0"
         NSScreenCaptureUsageDescription: "Winter Computer Use captures the windows Winter works in, and the screen when Winter is asked to look at it."
@@ -1015,7 +1017,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: "$(WINTER_CU_APP_NAME)"
-        CODE_SIGN_ENTITLEMENTS: ../WinterComputerUse/Support/WinterComputerUse.entitlements
+        CODE_SIGN_ENTITLEMENTS: ../ComputerUse/WinterComputerUse/Support/WinterComputerUse.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: com.winter.computeruse
         WINTER_CU_APP_NAME: Winter Computer Use
         WINTER_CU_APP_ICON: AppIcon

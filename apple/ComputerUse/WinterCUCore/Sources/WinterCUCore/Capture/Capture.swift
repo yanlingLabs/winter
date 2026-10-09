@@ -58,12 +58,12 @@ actor CUCapturer {
         guard CGPreflightScreenCaptureAccess() else { throw CUError.permissionMissing(.screenRecording) }
         // The size the image maps onto must be the window's size NOW: a cached SCWindow can be up to 2 s old
         // and a resized window would be letterboxed inside its stale frame, skewing every point click.
-        guard let current = CUWindowServer.window(id: windowID)?.frame else { throw CUError.targetLost("the window is gone") }
+        guard let current = CUWindowServer.window(id: windowID)?.frame else { throw CUError.targetLost("the window is gone", reason: .windowClosed) }
         var scWindow = try await content().windows.first { $0.windowID == windowID }
         if scWindow == nil || !Self.sameFrame(scWindow!.frame, current) {
             scWindow = try await content(fresh: true).windows.first { $0.windowID == windowID }
         }
-        guard let window = scWindow else { throw CUError.targetLost("the window is gone") }
+        guard let window = scWindow else { throw CUError.targetLost("the window is gone", reason: .windowClosed) }
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let scale = Double(filter.pointPixelScale)
         let area = try Self.windowArea(region: region, windowSize: current.size)

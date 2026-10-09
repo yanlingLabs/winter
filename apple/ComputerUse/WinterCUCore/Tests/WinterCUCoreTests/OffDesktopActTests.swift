@@ -340,7 +340,55 @@ final class OffDesktopActTests: XCTestCase {
             XCTFail("expected target_lost")
         } catch let e as CUError {
             XCTAssertEqual(e.code, "target_lost", e.message)
+            XCTAssertEqual(e.data?["reason"], .string("window_closed"), "Safari still runs: only its window closed")
         }
+    }
+
+    // MARK: Why a target is lost (`data.reason`, and the `targetLost` notification's)
+
+    @MainActor final class LostRecorder: CUCoreEvents {
+        var lost: [String] = []
+        func targetBound(sessionId: String, pid: pid_t, windowID: CGWindowID, appName: String, mirror: Bool) {}
+        func targetReleased(sessionId: String, pid: pid_t, windowID: CGWindowID) {}
+        func actionAt(sessionId: String, pid: pid_t, windowID: CGWindowID, point: CGPoint, kind: String, dragTo: CGPoint?,
+                      frame: CGRect?, text: String?, count: Int?, button: String?) {}
+        func targetLost(targetId: String, reason: String) { lost.append("\(targetId) \(reason)") }
+        func permissionsChanged(accessibility: Bool, screenRecording: Bool) {}
+        func willSendEscape() {}
+    }
+
+    /// The error and the notification name what the engine saw: the app gone, or only its window.
+    @MainActor func testTheReasonSaysWhetherTheAppQuitOrOnlyItsWindowClosed() async throws {
+        for (quit, expected) in [(true, "app_quit"), (false, "window_closed")] {
+            world()
+            let recorder = LostRecorder()
+            core.events = recorder
+            if quit { sys.running = [] } else { sys.windows[77] = nil }
+            do {
+                _ = try await core.targetFind(TargetFindParams(targetId: "t1", query: .fields(role: "button", name: nil, text: nil)))
+                XCTFail("expected target_lost")
+            } catch let e as CUError {
+                XCTAssertEqual(e.code, "target_lost", e.message)
+                XCTAssertEqual(e.data?["reason"], .string(expected))
+            }
+            for _ in 0..<50 where recorder.lost.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+            XCTAssertEqual(recorder.lost, ["t1 \(expected)"], "the notification carries the same reason")
+        }
+    }
+
+    func testAnUnknownTargetIdSaysWhetherAnEarlierHelperIssuedIt() async throws {
+        world()
+        do {
+            _ = try await core.targetFind(TargetFindParams(targetId: "t99", query: .fields(role: "button", name: nil, text: nil)))
+            XCTFail("expected target_lost")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("helper_restart"), "this run never issued t99: the helper restarted")
+        }
+        XCTAssertEqual(CUCore.unknownTargetReason("t3", issuedUpTo: 5), .unknown, "issued, then released or lost")
+        XCTAssertEqual(CUCore.unknownTargetReason("t6", issuedUpTo: 5), .helperRestart)
+        XCTAssertEqual(CUCore.unknownTargetReason("t1", issuedUpTo: 0), .helperRestart)
+        for odd in ["x1", "t", "t0", "tabc", ""] { XCTAssertEqual(CUCore.unknownTargetReason(odd, issuedUpTo: 5), .unknown, odd) }
+        XCTAssertEqual(CUTargetLostReason.allCases.map(\.rawValue), ["app_quit", "window_closed", "helper_restart", "unknown"])
     }
 
     func testAWindowOnAnotherSpaceIsNotTakenForClosed() {

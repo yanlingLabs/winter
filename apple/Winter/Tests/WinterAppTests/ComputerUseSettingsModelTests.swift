@@ -530,6 +530,11 @@ final class ComputerUseSettingsModelTests: XCTestCase {
         XCTAssertEqual(computerUseHelperSummary(ComputerUseHelperStatus(installed: true, running: true, version: "0.1.0")),
                        "Running — version 0.1.0")
         XCTAssertEqual(computerUseHelperSummary(ComputerUseHelperStatus(installed: true, running: true)), "Running")
+        let tooOld = "Winter Computer Use is too old for this Winter (it speaks helper protocol 0, Winter speaks 1) — update Winter"
+        XCTAssertEqual(computerUseHelperSummary(ComputerUseHelperStatus(
+            installed: true, running: true, version: "0.9.0",
+            protocolMismatch: ComputerUseHelperProtocolMismatch(helperProtocol: 0, helperVersion: "0.9.0", winterProtocol: 1, message: tooOld))),
+            tooOld, "an incompatible helper says so, not \"Running\"")
     }
 
     // MARK: - Where the page sits

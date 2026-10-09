@@ -13,7 +13,7 @@ import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { ComputerPolicy, type SessionFacts } from "../../src/computer-use/policy";
 import { RecentApps } from "../../src/computer-use/recent-apps";
-import { ComputerV2Service, type ScriptResult } from "../../src/computer-use/service";
+import { ComputerV2Service, targetLostMessage, type ScriptResult } from "../../src/computer-use/service";
 import { AutomationTelemetry } from "../../src/computer-use/telemetry";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
 import type { Settings } from "../../src/settings";
@@ -228,7 +228,7 @@ describe("ComputerV2: the policy, through a script", () => {
     // "Once" covered that call: the target is released, so the next call can neither act nor LOOK (review I3).
     expect(w.fake.calls("target.release")).toEqual([{ targetId: "t1" }]);
     const looked = await w.run("try { await notes.state() } catch (e) { print(e.name, e.message) }");
-    expect(text(looked)).toContain("TargetLost Notes is gone (it was allowed for one call only)");
+    expect(text(looked)).toContain("TargetLost Notes was allowed for one call only — bind it again with apps.open()");
     expect(w.fake.calls("target.snapshot")).toHaveLength(1); // the bind's own snapshot only
     // Binding again asks again.
     await w.run("const again = await apps.open('Notes')");
@@ -670,7 +670,7 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     w.fake.notify("targetLost", { targetId: "t1", reason: "app_quit" });
     await Bun.sleep(20);
     const r1 = await w.run("try { await notes.state() } catch (e) { print(e.name, e.message) }");
-    expect(text(r1)).toContain("TargetLost Notes is gone (the app quit)");
+    expect(text(r1)).toContain("TargetLost Notes quit — open it again with apps.open()");
 
     w.fake.handlers["apps.list"] = () => new Promise(() => {});
     const p = w.run("try { await apps.list() } catch (e) { print(e.name) }");
@@ -681,6 +681,45 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     const r3 = await w.run("const again = await apps.open('Notes')\nprint(again.name)");
     expect(r3.isError).toBe(false);
     expect(w.fake.launched).toEqual([expect.stringMatching(/dist\/dev\/Winter Computer Use Dev\.app$/)]);
+  }, 30_000);
+});
+
+describe("ComputerV2: a lost target is worded by what the helper observed", () => {
+  test("each reason in its own words — a closed window is never \"the app quit\"", () => {
+    expect(targetLostMessage("Notes", "app_quit")).toBe("Notes quit — open it again with apps.open()");
+    expect(targetLostMessage("Notes", "window_closed")).toBe("Notes's window closed — call apps.open or useWindow to pick another");
+    expect(targetLostMessage("Notes", "helper_restart")).toBe("Winter Computer Use restarted, so Notes is no longer bound — bind it again with apps.open()");
+    expect(targetLostMessage("Notes", "unknown")).toBe("Notes is no longer bound — bind it again with apps.open()");
+    expect(targetLostMessage("Notes", "something-new")).toBe(targetLostMessage("Notes", "unknown"));
+    for (const reason of ["window_closed", "helper_restart", "unknown"]) expect(targetLostMessage("Notes", reason)).not.toContain("quit");
+  });
+
+  macOnly("a target_lost error: its data.reason decides the words, and the next use says the same", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')");
+    w.fake.handlers["target.snapshot"] = () => { throw new FakeHelperError("target_lost", "the Notes window was closed", { reason: "window_closed" }); };
+    const r1 = await w.run("try { await notes.state() } catch (e) { print(e.name, e.message) }");
+    expect(text(r1)).toContain("TargetLost Notes's window closed — call apps.open or useWindow to pick another");
+    expect(text(r1)).not.toContain("quit");
+    const r2 = await w.run("try { await notes.click(3) } catch (e) { print(e.name, e.message) }");
+    expect(text(r2)).toContain("TargetLost Notes's window closed — call apps.open or useWindow to pick another");
+  }, 30_000);
+
+  macOnly("a target_lost with no reason (an older helper) is not called a quit either", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')");
+    w.fake.handlers["target.snapshot"] = () => { throw new FakeHelperError("target_lost", "gone"); };
+    const r = await w.run("try { await notes.state() } catch (e) { print(e.name, e.message) }");
+    expect(text(r)).toContain("TargetLost Notes is no longer bound — bind it again with apps.open()");
+  }, 30_000);
+
+  macOnly("the targetLost notification's window_closed reaches the next use", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')");
+    w.fake.notify("targetLost", { targetId: "t1", reason: "window_closed" });
+    await Bun.sleep(20);
+    const r = await w.run("try { await notes.state() } catch (e) { print(e.name, e.message) }");
+    expect(text(r)).toContain("TargetLost Notes's window closed — call apps.open or useWindow to pick another");
   }, 30_000);
 });
 

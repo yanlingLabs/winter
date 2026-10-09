@@ -1,8 +1,11 @@
 // ComputerV2: the pure half of the Winter Computer Use helper's build, signing and checks — shared by
 // `scripts/dev-helper.ts` (`bun run dev:helper`), `scripts/verify-computer-helper.ts`
 // (`bun run verify:computer-helper`) and `scripts/release.ts`. Unit-tested in `computer-helper-lib.test.ts`.
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { signedFacts } from "./dev-daemon-lib";
+
+const REPO = join(import.meta.dir, "..");
 
 /**
  * The helper's three identities. dist ships inside Winter.app; dev is what `bun run dev:helper` builds into
@@ -22,7 +25,66 @@ export const HELPER_EMBED_RELATIVE = join("Contents", "Helpers", `${HELPER.dist.
 /** The helper's ONE entitlement: sending Apple Events, for `applescript()` (the hardened runtime refuses them
  *  without it). Every signing site passes this file and every check expects exactly this key. */
 export const HELPER_ENTITLEMENT = "com.apple.security.automation.apple-events";
-export const HELPER_ENTITLEMENTS_FILE = join(import.meta.dir, "..", "apple", "WinterComputerUse", "Support", "WinterComputerUse.entitlements");
+export const HELPER_ENTITLEMENTS_FILE = join(REPO, "apple", "ComputerUse", "WinterComputerUse", "Support", "WinterComputerUse.entitlements");
+
+// The helper's OWN version — semver, independent of Winter's #.###.# VERSION — lives in `apple/ComputerUse/VERSION`
+// (bump rules: apple/ComputerUse/PROTOCOL.md). `syncHelperVersion` stamps it into the helper target's two lines of
+// apple/Winter/project.yml (marked with `HELPER_VERSION_MARKER`, which Winter's own stamp skips) and into the
+// generated Support/Info.plist; version:sync, dev:helper and verify:computer-helper run it, and release.ts and
+// embed-computer-helper.sh check the built bundle against it. The helper reports it as `helperVersion`.
+export const HELPER_VERSION_FILE = join(REPO, "apple", "ComputerUse", "VERSION");
+export const HELPER_INFO_PLIST = join(REPO, "apple", "ComputerUse", "WinterComputerUse", "Support", "Info.plist");
+const PROJECT_YML = join(REPO, "apple", "Winter", "project.yml");
+export const HELPER_VERSION_MARKER = "# apple/ComputerUse/VERSION";
+export const HELPER_VERSION_FORMAT = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+/** The helper version in `raw` (a VERSION file's content), or a throw naming the format. */
+export function parseHelperVersion(raw: string): string {
+  const v = raw.trim();
+  if (!HELPER_VERSION_FORMAT.test(v)) throw new Error(`apple/ComputerUse/VERSION "${v}" is not a semver MAJOR.MINOR.PATCH (e.g. 1.0.0)`);
+  return v;
+}
+
+export function readHelperVersion(path: string = HELPER_VERSION_FILE): string {
+  return parseHelperVersion(readFileSync(path, "utf8"));
+}
+
+/** project.yml with the helper target's marked version lines set to `v` (exactly two marked lines, or a throw). */
+export function stampHelperProjectYml(yml: string, v: string): string {
+  const marker = HELPER_VERSION_MARKER.replace(/[/.]/g, (c) => `\\${c}`);
+  const short = new RegExp(`(CFBundleShortVersionString: )"[^"]*"( ${marker})`, "g");
+  const build = new RegExp(`(CFBundleVersion: )"[^"]*"( ${marker})`, "g");
+  if ([...yml.matchAll(short)].length !== 1 || [...yml.matchAll(build)].length !== 1) {
+    throw new Error(`apple/Winter/project.yml must carry the helper's CFBundleShortVersionString and CFBundleVersion once each, marked "${HELPER_VERSION_MARKER}"`);
+  }
+  return yml.replace(short, `$1"${v}"$2`).replace(build, `$1"${v}"$2`);
+}
+
+/** The helper's Info.plist with both version keys set to `v`. */
+export function stampHelperInfoPlist(plist: string, v: string): string {
+  return plist
+    .replace(/(<key>CFBundleShortVersionString<\/key>\s*<string>)[^<]*(<\/string>)/, `$1${v}$2`)
+    .replace(/(<key>CFBundleVersion<\/key>\s*<string>)[^<]*(<\/string>)/, `$1${v}$2`);
+}
+
+/** Stamps `apple/ComputerUse/VERSION` into project.yml and the helper's Info.plist; writes only what changes (an
+ *  unchanged source keeps its mtime, so a build after it is not dirtied). Returns the files written. */
+export function syncHelperVersion(paths: { versionFile?: string; projectYml?: string; infoPlist?: string } = {}): string[] {
+  const v = readHelperVersion(paths.versionFile);
+  const written: string[] = [];
+  for (const [path, stamp] of [
+    [paths.projectYml ?? PROJECT_YML, stampHelperProjectYml],
+    [paths.infoPlist ?? HELPER_INFO_PLIST, stampHelperInfoPlist],
+  ] as const) {
+    const before = readFileSync(path, "utf8");
+    const after = stamp(before, v);
+    if (after !== before) {
+      writeFileSync(path, after);
+      written.push(path);
+    }
+  }
+  return written;
+}
 
 /** `<WINTER_HOME>/run/<this>`. */
 export const HELPER_SOCKET_NAME = "computer-use.sock";

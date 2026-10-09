@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { WINTER_TEAM_ID } from "../auth/app-token-acl";
 import type { WinterProfile } from "../profile";
 
+/** The helper protocol this daemon speaks — `apple/ComputerUse/PROTOCOL.md`'s "Protocol version", the helper's
+ *  `RPCWire.protocolVersion` and WinterKit's `ComputerUseHelperProtocol.version` (a repo test keeps them equal). */
 export const HELPER_PROTOCOL = 1;
 
 /** The helper's bundle id per profile: dist `com.winter.computeruse`, dev `com.winter.computeruse.dev`. */
@@ -79,6 +81,41 @@ export class HelperUnavailableError extends Error {
   }
 }
 
+/** What a protocol mismatch at `hello` knew: the helper's protocol (from its `hello` result, or the
+ *  `protocol_mismatch` error's `data.expected`), its version, and ours. */
+export interface HelperProtocolMismatch {
+  helperProtocol?: number;
+  helperVersion?: string;
+  winterProtocol: number;
+  message: string;
+}
+
+/** The ONE sentence for a protocol mismatch, which side is out of date first; the fix is always the same. */
+export function helperProtocolMismatchMessage(helperProtocol: number | undefined, winterProtocol: number = HELPER_PROTOCOL): string {
+  if (helperProtocol === undefined) {
+    return `Winter Computer Use speaks a different helper protocol than this Winter (${winterProtocol}) — update Winter`;
+  }
+  const side = helperProtocol < winterProtocol ? "too old" : "too new";
+  return `Winter Computer Use is ${side} for this Winter (it speaks helper protocol ${helperProtocol}, Winter speaks ${winterProtocol}) — update Winter`;
+}
+
+/** The helper answered, but speaks another protocol: a `helper_unavailable` that no retry can cure. Typed by
+ *  `reason` (and the class) so callers and Settings → Computer Use can say exactly that. */
+export class HelperProtocolMismatchError extends HelperUnavailableError {
+  readonly reason = "protocol_mismatch" as const;
+  readonly mismatch: HelperProtocolMismatch;
+  constructor(helperProtocol: number | undefined, helperVersion?: string, winterProtocol: number = HELPER_PROTOCOL) {
+    const message = helperProtocolMismatchMessage(helperProtocol, winterProtocol);
+    super(message, false);
+    this.name = "HelperProtocolMismatchError";
+    this.mismatch = {
+      ...(helperProtocol === undefined ? {} : { helperProtocol }),
+      ...(helperVersion === undefined ? {} : { helperVersion }),
+      winterProtocol, message,
+    };
+  }
+}
+
 export type Rect = [x: number, y: number, w: number, h: number];
 
 export interface HelloResult { protocol: number; helperVersion: string; pid: number }
@@ -126,10 +163,14 @@ export type ActAction =
   | { kind: "action"; ref: number; name: string }
   | { kind: "menu"; path: string[] };
 
+/** Why a target is gone — `target_lost`'s `data.reason` and the `targetLost` notification's `reason`, as the helper
+ *  observed it (apple/ComputerUse/PROTOCOL.md). */
+export type TargetLostReason = "app_quit" | "window_closed" | "helper_restart" | "unknown";
+
 /** The three notifications the helper sends (spine §2.2). */
 export type HelperNotification =
   | { method: "escPressed"; params: { sessionIds: string[] } }
-  | { method: "targetLost"; params: { targetId: string; reason: "app_quit" | "window_closed" | "helper_restart" } }
+  | { method: "targetLost"; params: { targetId: string; reason: TargetLostReason } }
   | { method: "permissionsChanged"; params: { permissions: HelperPermissions } };
 
 /** One request line is at most 1 MiB; one response line at most 16 MiB (images). */

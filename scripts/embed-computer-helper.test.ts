@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HELPER, HELPER_EMBED_RELATIVE, helperRequirement } from "./computer-helper-lib";
+import { HELPER, HELPER_EMBED_RELATIVE, helperRequirement, readHelperVersion } from "./computer-helper-lib";
 
 const SCRIPT = join(import.meta.dir, "embed-computer-helper.sh");
 const temps: string[] = [];
@@ -16,8 +16,9 @@ afterEach(() => {
   for (const d of temps.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
-/** A built-products dir holding a minimal "Winter Computer Use.app" with `bundleId`. */
-function builtProducts(bundleId: string): string {
+/** A built-products dir holding a minimal "Winter Computer Use.app" with `bundleId` at `version` (default: the
+ *  helper's own, apple/ComputerUse/VERSION). */
+function builtProducts(bundleId: string, version: string = readHelperVersion()): string {
   const dir = mkdtempSync(join(tmpdir(), "embed-cu-"));
   temps.push(dir);
   const app = join(dir, `${HELPER.dist.name}.app`, "Contents");
@@ -31,6 +32,7 @@ function builtProducts(bundleId: string): string {
 <key>CFBundleExecutable</key><string>${HELPER.dist.name}</string>
 <key>CFBundleIdentifier</key><string>${bundleId}</string>
 <key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>${version}</string>
 <key>LSUIElement</key><true/>
 </dict></plist>
 `,
@@ -86,6 +88,15 @@ describe("embed-computer-helper.sh (the 'Embed Winter Computer Use' postCompileS
     writeFileSync(stray, "left over");
     expect(embed(dir).status).toBe(0);
     expect(existsSync(stray)).toBe(false);
+  });
+
+  test("refuses a helper that is not at its own version (apple/ComputerUse/VERSION), naming the fix", () => {
+    const dir = builtProducts(HELPER.dist.identifier, "0.124.0"); // Winter's version: the old, shared stamp
+    const r = embed(dir);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`the built helper is version '0.124.0', but apple/ComputerUse/VERSION says ${readHelperVersion()}`);
+    expect(r.stderr).toContain("bun run version:sync");
+    expect(existsSync(join(dir, "Winter.app", HELPER_EMBED_RELATIVE))).toBe(false);
   });
 
   test("refuses a missing build product, and a helper built with any identity but the shipped one", () => {

@@ -54,14 +54,15 @@ final class ComputerUseHelperClientTests: XCTestCase {
         let hello = decodeLine(t.sent[0])
         XCTAssertEqual(hello["method"] as? String, "hello")
         let params = try XCTUnwrap(hello["params"] as? [String: Any])
-        XCTAssertEqual(params["protocol"] as? Int, 1)
+        XCTAssertEqual(params["protocol"] as? Int, ComputerUseHelperProtocol.version)
+        XCTAssertEqual(ComputerUseHelperProtocol.version, 1, "apple/ComputerUse/PROTOCOL.md's protocol version")
         XCTAssertEqual(params["client"] as? String, "app")
         XCTAssertEqual(params["home"] as? String, "/tmp/winter-test-home")
         XCTAssertEqual(HelperPaths.socketPath(home: "/h"), "/h/run/computer-use.sock")
     }
 
     func testAMismatchIsTerminalAndNotAllowedIsReported() async throws {
-        for (code, expected) in [("protocol_mismatch", HelperClientError.protocolMismatch), ("home_mismatch", .homeMismatch)] {
+        for (code, expected) in [("protocol_mismatch", HelperClientError.protocolMismatch(helper: nil, client: 1)), ("home_mismatch", .homeMismatch)] {
             let t = ScriptedTransport()
             let c = client(t)
             async let connected: Void = c.connect()
@@ -78,6 +79,50 @@ final class ComputerUseHelperClientTests: XCTestCase {
         XCTAssertEqual(LiveComputerUseHelperClient.error(from: .object(["message": .string("only hello"), "data": .object(["code": .string("not_allowed")])])),
                        .notAllowed("only hello"))
         XCTAssertFalse(HelperClientError.notAllowed("x").isTerminal)
+    }
+
+    /// The helper's refusal names its own protocol (`data.expected`): the error says which side is out of date,
+    /// in the daemon's words, and is final.
+    func testAProtocolMismatchSaysWhetherTheHelperIsTooOldOrTooNew() async throws {
+        let cases: [(expected: Int, sentence: String)] = [
+            (0, "Winter Computer Use is too old for this Winter (it speaks helper protocol 0, Winter speaks 1) — update Winter"),
+            (2, "Winter Computer Use is too new for this Winter (it speaks helper protocol 2, Winter speaks 1) — update Winter"),
+        ]
+        for (theirs, sentence) in cases {
+            let t = ScriptedTransport()
+            let c = client(t)
+            async let connected: Void = c.connect()
+            let hello = try await waitForSent(t, count: 1)[0]
+            t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"error":{"code":-32000,"message":"no","data":{"code":"protocol_mismatch","expected":\#(theirs),"helperVersion":"9.0.0"}}}"#)
+            do {
+                try await connected
+                XCTFail("a mismatch must throw")
+            } catch let error as HelperClientError {
+                XCTAssertEqual(error, .protocolMismatch(helper: theirs, client: 1))
+                XCTAssertTrue(error.isTerminal)
+                XCTAssertEqual(error.description, sentence)
+                XCTAssertEqual("\(error)", sentence, "what the mirror's log line prints")
+            }
+        }
+        XCTAssertEqual(HelperClientError.protocolMismatch(helper: nil, client: 1).description,
+                       "Winter Computer Use speaks a different helper protocol than this Winter (1) — update Winter")
+    }
+
+    func testAHelloResultInAnotherProtocolIsAMismatchToo() async throws {
+        let t = ScriptedTransport()
+        let c = client(t)
+        do {
+            try await connect(c, t, result: #"{"protocol":2,"helperVersion":"2.0.0","pid":4242}"#)
+            XCTFail("a helper answering protocol 2 must be refused")
+        } catch let error as HelperClientError {
+            XCTAssertEqual(error, .protocolMismatch(helper: 2, client: 1))
+        }
+        do {
+            _ = try await c.subscribe(sessionId: "s", frames: false, maxFps: nil, maxWidth: nil)
+            XCTFail("nothing is usable after the refusal")
+        } catch let error as HelperClientError {
+            XCTAssertEqual(error, .notConnected)
+        }
     }
 
     // MARK: - Calls

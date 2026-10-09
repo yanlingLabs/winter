@@ -288,6 +288,7 @@ final class OffSpaceWindowTests: XCTestCase {
         sys.windows[77] = nil
         XCTAssertThrowsError(try core.windowElement(target)) { e in
             XCTAssertEqual((e as? CUError)?.code, "target_lost")
+            XCTAssertEqual((e as? CUError)?.data?["reason"], .string("window_closed"))
         }
     }
 

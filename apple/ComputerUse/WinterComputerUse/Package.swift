@@ -9,8 +9,8 @@ import PackageDescription
 // is only `App/main.swift` on top of the `WinterComputerUseShell` library, so everything here is tested
 // with `swift test`, and the helper never links WinterKit.
 //
-// The engine and the presentation layer are sibling packages, `apple/WinterCUCore` and
-// `apple/WinterCUPresentation`.
+// The engine and the presentation layer are sibling packages in `apple/ComputerUse`, `WinterCUCore` and
+// `WinterCUPresentation`.
 let package = Package(
     name: "WinterComputerUse",
     platforms: [.macOS("26.0")],

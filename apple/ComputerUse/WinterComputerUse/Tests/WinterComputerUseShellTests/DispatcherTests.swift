@@ -145,6 +145,20 @@ final class DispatcherTests: XCTestCase {
         XCTAssertEqual(armed, [true, false])
     }
 
+    /// The engine's observed reason reaches the daemon in `data.reason` (PROTOCOL.md §5).
+    func testATargetLostErrorCarriesItsReasonOnTheWire() async throws {
+        let rig = await Rig()
+        rig.core.errors["target.find"] = CUError.targetLost("the Notes window was closed", reason: .windowClosed)
+        do {
+            _ = try await rig.dispatcher.handle(method: "target.find", params: json(#"{"targetId":"t1","query":"Share"}"#))
+            XCTFail("expected target_lost")
+        } catch {
+            let e = RPCError.from(error)
+            XCTAssertEqual(e.code, "target_lost")
+            XCTAssertEqual(e.data["reason"], .string("window_closed"))
+        }
+    }
+
     func testSessionEndedCleansTheShellsStateEvenWhenTheEngineFails() async throws {
         let rig = await Rig()
         rig.core.errors["session.ended"] = CUError(code: "busy", message: "later")

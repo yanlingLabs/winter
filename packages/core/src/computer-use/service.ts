@@ -463,7 +463,7 @@ export class ComputerV2Service {
   private target(ctx: RunCtx, targetId: string): TargetInfo {
     const t = ctx.state.targets.get(targetId);
     if (t === undefined) throw new AutomationFailure("TargetLost", "that app is no longer bound (the runtime or Winter Computer Use restarted) — bind it again with apps.open()");
-    if (t.lost !== undefined) throw new AutomationFailure("TargetLost", `${t.name} is gone (${lostWords(t.lost)}) — bind it again with apps.open()`);
+    if (t.lost !== undefined) throw new AutomationFailure("TargetLost", targetLostMessage(t.name, t.lost));
     return t;
   }
 
@@ -938,9 +938,12 @@ export class ComputerV2Service {
       const data = err.data;
       switch (err.code) {
         case "stale_ref": return { kind: "StaleRef", message: `${typeof data.ref === "number" ? `[${data.ref}]` : "that element"} is gone — call state()` };
-        case "target_lost":
-          if (t !== undefined) { t.lost = typeof data.reason === "string" ? data.reason : "app_quit"; this.diffBases.clearTarget(ctx.sessionId, t.targetId); }
-          return { kind: "TargetLost", message: `${name} is gone (the app quit or its window closed) — bind it again with apps.open()` };
+        case "target_lost": {
+          // The helper says what it observed (`data.reason`); a closed window is never worded as a quit app.
+          const reason = typeof data.reason === "string" ? data.reason : "unknown";
+          if (t !== undefined) { t.lost = reason; this.diffBases.clearTarget(ctx.sessionId, t.targetId); }
+          return { kind: "TargetLost", message: targetLostMessage(name, reason) };
+        }
         // The app is still running — never worded as "the app quit". The helper's own message is kept (capped), with
         // what to do next; the target stays bound (the window may come back) but its diff base is reset.
         case "window_elsewhere":
@@ -1160,11 +1163,17 @@ function elementLine(e: { ref: number; role: string; name?: string; value?: stri
   return `[${e.ref}] ${e.role}${e.name === undefined ? "" : ` "${e.name}"`}${e.value === undefined ? "" : ` value="${e.value.slice(0, 200)}"`}${states}`;
 }
 
-function lostWords(reason: string): string {
-  return reason === "window_closed" ? "its window closed"
-    : reason === "helper_restart" ? "Winter Computer Use restarted"
-      : reason === "once" ? "it was allowed for one call only"
-        : "the app quit";
+/** What the model reads for a target that is gone, in the words of what happened to it: the helper's observed
+ *  `reason` (`app_quit`, `window_closed`, `helper_restart`, `unknown` — apple/ComputerUse/PROTOCOL.md) or the
+ *  daemon's own `once` (an "Allow once" binding released after its call). */
+export function targetLostMessage(name: string, reason: string): string {
+  switch (reason) {
+    case "app_quit": return `${name} quit — open it again with apps.open()`;
+    case "window_closed": return `${name}'s window closed — call apps.open or useWindow to pick another`;
+    case "helper_restart": return `Winter Computer Use restarted, so ${name} is no longer bound — bind it again with apps.open()`;
+    case "once": return `${name} was allowed for one call only — bind it again with apps.open()`;
+    default: return `${name} is no longer bound — bind it again with apps.open()`;
+  }
 }
 
 function refusedWords(reason: string, name: string): string {

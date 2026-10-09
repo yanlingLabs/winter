@@ -7,14 +7,16 @@ public enum RPCWire {
     public static let maxRequestLineBytes = 1 << 20
     /// One response line is at most 16 MiB (screenshots); a longer result is answered with an error instead.
     public static let maxResponseLineBytes = 16 << 20
-    /// The only protocol version this helper speaks (`hello.protocol`).
+    /// The only protocol version this helper speaks (`hello.protocol`) — apple/ComputerUse/PROTOCOL.md's
+    /// "Protocol version" (scripts/computer-helper-lib.test.ts holds every client to it).
     public static let protocolVersion = 1
 }
 
 /// A typed failure on the wire: `error.data.code` is `code`, one of the helper RPC's codes (`protocol_mismatch`,
 /// `home_mismatch`, `permission_missing`, `target_lost`, `stale_ref`, `needs_foreground`, `not_allowed`,
-/// `refused`, `wait_timeout`, `cancelled`, `invalid_params`, `unsupported`, `busy`). `data` carries the code's
-/// own fields (`permission`, `ref`, `reason`, `seen`, …).
+/// `refused`, `wait_timeout`, `cancelled`, `invalid_params`, `unsupported`, `busy`, `window_elsewhere`,
+/// `no_window`). `data` carries the code's own fields (`permission`, `ref`, `reason`, `seen`, …). The full
+/// vocabulary is apple/ComputerUse/PROTOCOL.md's "Errors".
 public struct RPCError: Error, Equatable, Sendable {
     public var code: String
     public var message: String
