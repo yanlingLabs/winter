@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import WinterKit
 import SwiftUI
 
@@ -46,6 +47,17 @@ final class OrbWindowController: ObservableObject {
     let fluidModel = FluidModel()
     private let panel: KeyableNonActivatingPanel
     private(set) var isVisible = false
+    /// The orb's SwiftUI tree (`GlassRootView` → `WinterFieldView` → `FluidOrbSlot`…). It exists ONLY while the orb is
+    /// on screen: a hosting view in a hidden panel is not idle — SwiftUI keeps running its `TimelineView`s there, so a
+    /// hidden orb with an unread reply redrew its liquid for as long as the app ran (measured: the only thing animating
+    /// in an otherwise idle Winter, ~21,000 wake-ups a second). Built by `show()`, dropped by `hide()`.
+    private var hosting: NSHostingView<GlassRootView>?
+    private var hiddenTurnWatch: AnyCancellable?
+
+    /// Test-only: whether the orb's SwiftUI tree is alive.
+    var hasContentForTesting: Bool { hosting != nil }
+    /// Test-only: the live hosting view, for a weak reference that proves it is released.
+    var hostingViewForTesting: NSView? { hosting }
     /// Derived, not driven directly by callers: `.field` the instant an expand STARTS,
     /// `.orb` only once a collapse COMPLETES (the morph spring settles at 0). Kept as
     /// `@Published` purely for input/draft logic (GlassRootView's `onChange` + the Esc
@@ -428,18 +440,63 @@ final class OrbWindowController: ObservableObject {
 
         // ARCHITECTURE NOTE above: GlassRootView (not OrbView) is the panel's content — it hosts
         // `WinterFieldView` (FieldKit), which owns its own `GlassEffectContainer` and renders the
-        // whole orb↔field morph off `morphModel.progress`.
-        panel.contentView = NSHostingView(
+        // whole orb↔field morph off `morphModel.progress`. It is built when the orb is SHOWN (`installContent()`),
+        // not here: a hidden orb has no SwiftUI tree at all.
+        panel.contentView = NSView(frame: NSRect(origin: .zero, size: morph.collapsedWindowSize))
+
+        // The one thing a hidden orb still does with a finished turn: mark it unread, so the next "Show Orb" says
+        // an answer arrived. (The view does this itself while the orb is up — there is no view to do it now.)
+        hiddenTurnWatch = session.$state.map(\.turnRunning).removeDuplicates().dropFirst()
+            .sink { [weak self] running in
+                guard !running else { return }
+                // `$state` publishes before the change lands: read the settled state a turn of the run loop later.
+                DispatchQueue.main.async { [weak self] in self?.markUnreadForTurnCompletedWhileHidden() }
+            }
+    }
+
+    /// Builds the SwiftUI tree into the panel (once; a no-op while it is there).
+    private func installContent() {
+        guard hosting == nil else { return }
+        let host = NSHostingView(
             rootView: GlassRootView(
-                session: session, controller: self, morphModel: morph,
+                session: session, controller: self, morphModel: morphModel,
                 fluidModel: fluidModel, adapter: fieldAdapter
             )
         )
+        hosting = host
+        panel.contentView = host
+    }
+
+    /// Drops the SwiftUI tree: no hosting view, no `TimelineView`, nothing for SwiftUI to tick.
+    private func removeContent() {
+        guard hosting != nil else { return }
+        hosting = nil
+        panel.contentView = NSView(frame: NSRect(origin: .zero, size: morphModel.collapsedWindowSize))
+    }
+
+    /// A turn finished while the orb is hidden. The same decision `GlassRootView.handleTurnCompleted` takes for the
+    /// part of it that applies to a hidden panel — suppression for a CLI the user is chatting with in a terminal,
+    /// unread only with something readable for a turn the orb did not start, unread for its own turn — made here
+    /// because the view does not exist to make it.
+    func markUnreadForTurnCompletedWhileHidden() {
+        guard !isVisible, surface == .orb else { return }
+        let cliAttached = session.state.cliAttached
+        let terminal = frontmostApplicationIsTerminal()
+        let orbInitiated = session.state.lastTurnWasOrbInitiated
+        guard !isAutoRevealSuppressed(cliAttachedToFocused: cliAttached, frontmostIsTerminal: terminal, orbInitiated: orbInitiated) else {
+            if suppressionMarksUnread(cliAttachedToFocused: cliAttached, frontmostIsTerminal: terminal, orbInitiated: orbInitiated),
+               hasReadableReply(in: session.state.exchanges) {
+                fieldAdapter.hasUnread = true
+            }
+            return
+        }
+        fieldAdapter.hasUnread = true
     }
 
     func show() {
         guard !isVisible else { return }
         isVisible = true
+        installContent()
         panel.orderFrontRegardless()
         follower.start()
     }
@@ -473,6 +530,7 @@ final class OrbWindowController: ObservableObject {
         isVisible = false
         follower.stop()
         panel.orderOut(nil)
+        removeContent()
     }
 
     func toggle() { isVisible ? hide() : show() }

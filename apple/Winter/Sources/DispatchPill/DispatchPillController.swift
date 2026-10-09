@@ -299,14 +299,37 @@ final class DispatchPillController: ObservableObject {
         canvas.size = initialCanvas
         lockedVisibleFrame = currentVisibleFrame()
 
-        let hosting = FirstClickHostingView(rootView: DispatchPillView(controller: self))
-        hosting.sizingOptions = []
-        panel.contentView = hosting
+        // The SwiftUI tree is built when the pill is SHOWN and dropped when it is put away (`installContent`): a hosting
+        // view in a hidden panel keeps running its `TimelineView`s — a put-away pill with a turn working would redraw
+        // its plume for as long as the app ran.
+        panel.contentView = NSView(frame: NSRect(origin: .zero, size: initialCanvas))
         panel.onRestingMouseDown = { [weak self] location in self?.handleRestingMouseDown(at: location) }
 
         wireAdapter()
         observeSession()
         observeSettings()
+    }
+
+    // MARK: - The SwiftUI tree (exists only while the pill is up)
+
+    private var hosting: FirstClickHostingView<DispatchPillView>?
+    /// Test-only: whether the pill's SwiftUI tree is alive, and the hosting view itself (for a weak reference).
+    var hasContentForTesting: Bool { hosting != nil }
+    var hostingViewForTesting: NSView? { hosting }
+
+    private func installContent() {
+        guard hosting == nil else { return }
+        let host = FirstClickHostingView(rootView: DispatchPillView(controller: self))
+        host.sizingOptions = []
+        hosting = host
+        panel.contentView = host
+    }
+
+    private func removeContent() {
+        guard hosting != nil else { return }
+        hosting = nil
+        composerView = nil
+        panel.contentView = NSView(frame: NSRect(origin: .zero, size: canvas.size))
     }
 
     // MARK: - Visibility
@@ -336,6 +359,7 @@ final class DispatchPillController: ObservableObject {
         snapToTarget()
         isVisible = true
         reconcileChildFeeds()
+        installContent()
         panel.orderFrontRegardless()
         installMonitors()
         engage()
@@ -356,6 +380,7 @@ final class DispatchPillController: ObservableObject {
         reconcileChildFeeds()
         snapToTarget()
         panel.orderOut(nil)
+        removeContent()
         rest(restoreFocus: true)
         startDraftExpiry()
     }
