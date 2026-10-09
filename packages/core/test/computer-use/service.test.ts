@@ -560,18 +560,6 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     expect(w.logs.some((l) => l.includes("AX error -25205"))).toBe(true);
   }, 30_000);
 
-  macOnly("window_elsewhere with newWindowId: NoWindow says a new window was opened — call state() and retry; the diff base resets", async () => {
-    const w = world();
-    await w.run("const notes = await apps.open('Notes')");
-    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("window_elsewhere", "Notes's window is on another Space or in full screen and could not be moved here, so a new Notes window was opened on this desktop and the target now uses it — the action did not run; refs and screenshots were reset, so call state() and retry", { newWindowId: 12 }); };
-    const r = await w.run("try { await notes.click(14) } catch (e) { print(e.name, e.message) }\nawait notes.state()");
-    expect(text(r)).toContain("NoWindow Notes's window is on another Space or in full screen, so a new window was opened on this desktop and the target now uses it — the action did not run; call state() and retry");
-    expect(text(r)).not.toContain("quit");
-    // The next state() is FULL: no `since` from the old window's base.
-    const snaps = w.fake.calls("target.snapshot");
-    expect(snaps[snaps.length - 1]!.since).toBeUndefined();
-  }, 30_000);
-
   macOnly("window_elsewhere and no_window are NoWindow, keep the helper's message, never say the app quit", async () => {
     const w = world();
     let code = "window_elsewhere";
@@ -581,7 +569,7 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     expect(text(r)).not.toContain("quit");
     code = "no_window";
     const r2 = await w.run("try { await notes.find({ role: 'button' }) } catch (e) { print(e.name, e.message) }\nawait notes.state()");
-    expect(text(r2)).toContain("NoWindow Notes: the app has no open window — ask the user to open one");
+    expect(text(r2)).toContain("NoWindow Notes: the app has no open window — open a document in it with apps.open(path or URL), which opens in the background, or ask the user to open one");
     expect(text(r2)).not.toContain("quit");
     // The target stays bound (the window may come back): the next call reaches the helper again.
     expect(r2.isError).toBe(false);

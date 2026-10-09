@@ -209,7 +209,7 @@ public final class CUCore: @unchecked Sendable {
         var executableName: String?
         var isChromium: Bool
         var launched: Bool
-        /// The live app (nil in tests): Chromium's accessibility switch and the reopen request need it.
+        /// The live app (nil in tests): Chromium's accessibility switch needs it.
         var running: NSRunningApplication?
     }
 
@@ -275,10 +275,6 @@ public final class CUCore: @unchecked Sendable {
                     return (CUAXWindows.list(pid: pid, ax: ax, server: server), server)
                 }
             },
-            reopen: { [reopenApp] in
-                CULog.bind.notice("bind \(appName, privacy: .public): no window on any Space — asking the app to reopen one")
-                await reopenApp(app)
-            },
             sleep: { [clock] in try await clock.sleep(ms: $0) },
             now: { [clock] in clock.nowMs() }))
         let (axNow, serverNow) = (found.ax, found.server)
@@ -333,18 +329,7 @@ public final class CUCore: @unchecked Sendable {
                            frame: ax.frame(element) ?? s.frame, focused: false, main: false)
             },
             moveToActiveSpace: { sys.moveWindowToActiveSpace($0) },
-            openNewWindow: { [self] in
-                // Once per session and app, whatever happens to the window: one that opens on the app's own
-                // Space instead of this one must not be followed by another, and another, on every bind.
-                guard claimNewWindow(sessionId: sessionId, appKey: appKey) else {
-                    CULog.bind.notice("\(appName, privacy: .public): a new window was already asked for in this session — not again")
-                    return false
-                }
-                CULog.bind.notice("\(appName, privacy: .public): asking for a new window (step b)")
-                return openNewWindow(pid: pid, chromium: chromium, privatePath: privatePath)
-            },
             axWindows: { CUAXWindows.list(pid: pid, ax: ax, server: sys.windows(pid: pid)) },
-            serverWindows: { sys.windows(pid: pid) },
             wait: { [clock, windowWaitMs] probe in
                 let deadline = clock.nowMs() + windowWaitMs
                 while clock.nowMs() < deadline {
@@ -479,21 +464,8 @@ public final class CUCore: @unchecked Sendable {
     /// The window's tree for the off-desktop hit test; replaceable by tests (the live reader walks real AX).
     var treeReadOverride: ((CUTarget) -> [CUNode])?
 
-    /// How long a moved or newly opened window may take to appear in the AX list (shortened by tests).
+    /// How long a moved window or an opened document's window may take to appear (shortened by tests).
     var windowWaitMs: Double = 3000
-
-    /// The reopen request (an app with no window anywhere opens one); replaceable by tests.
-    var reopenApp: (BindApp) async -> Void = { app in
-        if let url = app.running?.bundleURL { _ = try? await CUApps.launchInBackground(url, timeoutMs: 2000) }
-    }
-
-    /// (session, app) pairs that have had their one new window (step b).
-    private var newWindowClaims: Set<String> = []
-
-    /// True the first time a session asks an app for a new window, false ever after.
-    func claimNewWindow(sessionId: String, appKey: String) -> Bool {
-        lock.withLock { newWindowClaims.insert("\(sessionId)\u{1F}\(appKey)").inserted }
-    }
 
     /// The session's live target for `pid` that a repeated bind returns: its window still exists and, when
     /// the bind names a window, it is that one. The most recent wins.
@@ -510,29 +482,6 @@ public final class CUCore: @unchecked Sendable {
                 return have == want || (!want.isEmpty && have.contains(want))
             }
         }
-    }
-
-    /// Asks the app for a new window without activating it: File → New Window (by title or by its ⌘N key
-    /// equivalent; the menu bar is reachable with no window on this Space), else ⌘N posted to the pid.
-    func openNewWindow(pid: pid_t, chromium: Bool, privatePath: Bool) -> Bool {
-        if let roots = try? CUAXMenuNode.menuBar(pid: pid, ax: ax) {
-            var queue = Array(roots.dropFirst())
-            var seen = 0
-            let deadline = CUFloorScan.Deadline(ms: 250)
-            while !queue.isEmpty, seen < 600, !deadline.passed {
-                let n = queue.removeFirst()
-                seen += 1
-                if CUMenuWalker.normalize(n.menuTitle) == "new window", n.menuEnabled,
-                   (try? ax.perform(n.element, kAXPressAction)) != nil { return true }
-                queue.append(contentsOf: n.menuChildren)
-            }
-        }
-        if let item = menuItem(forKey: "n", modifiers: [.command], pid: pid),
-           (try? ax.perform(item.element, kAXPressAction)) != nil { return true }
-        guard let code = CUKeyCodes.code(for: "n") else { return false }
-        let route: CURoute = chromium && privatePath && skyLight.isAvailable ? .skyLight : .publicPid
-        synth.key(pid: pid, code: code, flags: .maskCommand, route: route)
-        return true
     }
 
     public func targetUseWindow(_ p: TargetUseWindowParams) async throws -> TargetUseWindowResult {
@@ -952,7 +901,6 @@ public final class CUCore: @unchecked Sendable {
             guard let t = remove(id) else { continue }
             emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: t.windowID) }
         }
-        lock.withLock { newWindowClaims = newWindowClaims.filter { !$0.hasPrefix("\(p.sessionId)\u{1F}") } }
         return SessionEndedResult()
     }
 

@@ -30,11 +30,9 @@ final class OffSpaceWindowTests: XCTestCase {
     final class World {
         var remote: [UInt32: AXUIElement] = [:]
         var moveWorks = false
-        var newWindowWorks = false
         var listed: [CUAXWindow] = []
         var server: [CUWindowServerWindow] = []
         var onMove: ((UInt32) -> Void)?
-        var onNewWindow: (() -> Void)?
         private(set) var tried: [String] = []
 
         func effects() -> CUWindowResolver.Effects {
@@ -51,13 +49,7 @@ final class OffSpaceWindowTests: XCTestCase {
                     if moveWorks { onMove?(id) }
                     return moveWorks
                 },
-                openNewWindow: { [self] in
-                    tried.append("new")
-                    if newWindowWorks { onNewWindow?() }
-                    return newWindowWorks
-                },
                 axWindows: { [self] in listed },
-                serverWindows: { [self] in server },
                 wait: { probe in probe() },
                 appElement: fakeElement(60_099))
         }
@@ -102,21 +94,10 @@ final class OffSpaceWindowTests: XCTestCase {
         XCTAssertEqual(out.step, .moved)
     }
 
-    func testThenANewWindowIsOpened() throws {
-        let w = World()
-        w.newWindowWorks = true
-        w.onNewWindow = { [unowned self] in w.listed = [axWindow(freshWindow, 12)] }
-        let out = try resolve(w, server: [serverWindow(9)])
-        XCTAssertEqual(out.window.id, 12)
-        XCTAssertEqual(w.tried, ["remote:9", "move:9", "new"])
-        XCTAssertEqual(out.detail, "step b (new window): opened a new Safari window; the existing one is on another Space or in full screen")
-        XCTAssertEqual(out.step, .newWindow)
-    }
-
     func testWhenAccessibilityCannotReachItTheWindowIsBoundCaptureOnly() throws {
         let w = World()
         let out = try resolve(w, server: [serverWindow(9)])
-        XCTAssertEqual(w.tried, ["remote:9", "move:9", "new"])
+        XCTAssertEqual(w.tried, ["remote:9", "move:9"], "never a new window: straight to capture-only")
         XCTAssertTrue(out.captureOnly)
         XCTAssertEqual(out.step, .captureOnly)
         XCTAssertEqual(out.window.id, 9)
@@ -137,28 +118,24 @@ final class OffSpaceWindowTests: XCTestCase {
         expectCode("window_elsewhere") { _ = try resolve(w, server: [serverWindow(9)], privatePath: false) }
     }
 
-    func testThePrivatePathOffSkipsTheRemoteTokenAndTheMove() throws {
+    func testThePrivatePathOffSkipsTheRemoteTokenAndTheMove() {
         let w = World()
         w.remote[9] = offWindow
         w.moveWorks = true
-        w.newWindowWorks = true
-        w.onNewWindow = { [unowned self] in w.listed = [axWindow(freshWindow, 12)] }
-        let out = try resolve(w, server: [serverWindow(9)], privatePath: false)
-        XCTAssertEqual(out.window.id, 12)
-        XCTAssertEqual(w.tried, ["new"])
+        expectCode("window_elsewhere") { _ = try resolve(w, server: [serverWindow(9)], privatePath: false) }
+        XCTAssertEqual(w.tried, [], "no remote token, no move, no new window")
     }
 
-    func testAnAppWithNoWindowGetsANewOneElseNoWindow() throws {
+    func testAnAppWithNoWindowIsNoWindowNamingAppsOpenNeverANewWindow() {
         let none = World()
-        expectCode("no_window") { _ = try resolve(none, server: []) }
-        XCTAssertEqual(none.tried, ["new"])
-
-        let opens = World()
-        opens.newWindowWorks = true
-        opens.onNewWindow = { [unowned self] in opens.listed = [axWindow(freshWindow, 12)] }
-        let out = try resolve(opens, server: [])
-        XCTAssertEqual(out.window.id, 12)
-        XCTAssertEqual(out.detail, "step b (new window): opened a new Safari window")
+        do {
+            _ = try resolve(none, server: [])
+            XCTFail("expected no_window")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "no_window")
+            XCTAssertTrue(e.message.contains("apps.open("), e.message)
+        } catch { XCTFail("\(error)") }
+        XCTAssertEqual(none.tried, [], "nothing asked of the app")
     }
 
     func testOnlyNormalLayerWindowsCount() {
@@ -166,7 +143,7 @@ final class OffSpaceWindowTests: XCTestCase {
         let w = World()
         w.remote[3] = offWindow
         expectCode("no_window") { _ = try resolve(w, server: [serverWindow(3, layer: 25)]) }
-        XCTAssertEqual(w.tried, ["new"])
+        XCTAssertEqual(w.tried, [])
     }
 
     func testAWindowOnThisDesktopWinsAndNeedsNothing() throws {
@@ -189,10 +166,9 @@ final class OffSpaceWindowTests: XCTestCase {
 
         // A specific window was asked for and AX can't reach it: bound capture-only, never a new window.
         let stuck = World()
-        stuck.newWindowWorks = true
         let cap = try resolve(stuck, server: [serverWindow(9)], selector: .id(9))
         XCTAssertTrue(cap.captureOnly)
-        XCTAssertFalse(stuck.tried.contains("new"))
+        XCTAssertEqual(stuck.tried, ["remote:9", "move:9"])
 
         // An id nobody has is still a parameter error.
         expectCode("invalid_params") { _ = try resolve(World(), server: [serverWindow(9)], selector: .id(99)) }
@@ -203,7 +179,7 @@ final class OffSpaceWindowTests: XCTestCase {
         do {
             _ = try CUAXWindows.choose([], selector: nil, appName: "Safari")
         } catch let e as CUError {
-            XCTAssertEqual(e.message, "Safari has no open window")
+            XCTAssertEqual(e.message, "Safari has no open window — open a document in it with apps.open(path or URL, { app: \"Safari\" }); it opens in the background and binds that window")
         } catch {}
     }
 

@@ -141,7 +141,7 @@ extension CUCore {
         return now
     }
 
-    /// A bind or `useWindow` (which may launch the app, ask it to reopen, or ask it for a new window) checked
+    /// A bind or `useWindow` (which may launch the app or move its window here) checked
     /// like an act: what moved the user's view is put back where it is the app's doing, and said.
     func viewNoteAfterBind(_ before: CUUserView, app: String, pid: pid_t, route: String) -> String? {
         let after = view(after: before, settleMs: userViewSettleMs)

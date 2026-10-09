@@ -79,7 +79,7 @@ final class LiveGateFinderTests: XCTestCase {
         let fx = CUWindowResolver.Effects(
             remote: { ids in walked.append(ids); return [:] }, describe: { e, s in
                 CUAXWindow(element: e, id: s.id, title: s.title, frame: s.frame, focused: false, main: false) },
-            moveToActiveSpace: { _ in false }, openNewWindow: { false }, axWindows: { [] }, serverWindows: { [] },
+            moveToActiveSpace: { _ in false }, axWindows: { [] },
             wait: { $0() }, appElement: fakeElement(60_097))
         var off = sys.windows[77]!
         off.onScreen = false
@@ -95,11 +95,11 @@ final class LiveGateFinderTests: XCTestCase {
         let stub = FakeSystem.window(28, pid: pid, CGRect(x: 0, y: 482, width: 64, height: 64))  // on screen
         var now: Double = 0
         let found = try await CUBindWait.run(launched: false, deadlineMs: 3000, CUBindWait.Effects(
-            read: { reads += 1; return ([], [real, stub]) }, reopen: { XCTFail("no reopen") },
+            read: { reads += 1; return ([], [real, stub]) },
             sleep: { now += $0 }, now: { now }))
         XCTAssertEqual(reads, 1, "straight to the resolver")
         XCTAssertEqual(now, 0)
-        XCTAssertFalse(found.reopened)
+        XCTAssertEqual(found.server.count, 2)
     }
 
     // MARK: disabled controls and menu commands

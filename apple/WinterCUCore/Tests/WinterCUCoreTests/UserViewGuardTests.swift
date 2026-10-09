@@ -145,7 +145,7 @@ final class UserViewGuardTests: XCTestCase {
     func testABindThatBringsTheAppForwardIsPutBack() {
         safari()
         let before = core.userView()
-        sys.front = pid  // launched or reopened, it activated itself
+        sys.front = pid  // launched, it activated itself
         let note = core.viewNoteAfterBind(before, app: "Safari", pid: pid, route: "bind")
         XCTAssertEqual(note, "Safari activated itself — the user's app was put back")
         XCTAssertEqual(sys.activated, [1])

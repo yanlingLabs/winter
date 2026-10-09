@@ -944,18 +944,13 @@ export class ComputerV2Service {
         case "window_elsewhere":
         case "no_window": {
           if (t !== undefined) { this.diffBases.clearTarget(ctx.sessionId, t.targetId); ctx.state.lastTargetShot.delete(t.targetId); }
-          // The helper opened a NEW window on this desktop and switched the target to it: the action did not run,
-          // and the refs and screenshots belong to the new window now (reset above).
-          if (err.code === "window_elsewhere" && data.newWindowId !== undefined) {
-            return { kind: "NoWindow", message: `${name}'s window is on another Space or in full screen, so a new window was opened on this desktop and the target now uses it — the action did not run; call state() and retry` };
-          }
           const elsewhere = err.code === "window_elsewhere";
           const said = err.message.replace(/\s+/g, " ").trim().slice(0, 400) || (elsewhere ? "the window is on another Space or in full screen" : "the app has no open window");
           // The helper's own sentence is kept; it names the app and often says what to do — add only what is missing.
           const prefix = t === undefined || said.includes(name) ? "" : `${name}: `;
           const next = said.includes(" — ") ? "" : elsewhere
             ? " — ask the user to bring it to this desktop (or out of full screen), then try again"
-            : " — ask the user to open one, or try again once it is open";
+            : " — open a document in it with apps.open(path or URL), which opens in the background, or ask the user to open one";
           return { kind: "NoWindow", message: `${prefix}${said}${next}`, untrusted: true };
         }
         case "needs_foreground": return { kind: "NeedsForeground", message: `${name} needs the foreground for that — try an element ref, or ask the user` };
