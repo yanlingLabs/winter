@@ -7,7 +7,7 @@ import Foundation
 /// active-Space notifications, attributing each to the user (physical input just before it) or the agent, and
 /// restoring the user the instant an agent-caused one lands — at any delay, so a document that opens or an app
 /// that activates itself seconds later is caught too. Gated by the private-path setting; off, the per-action
-/// user-view guard stays the only backstop. The keyboard reroute (thief → victim) is NOT enabled here.
+/// user-view guard stays the only backstop. The keyboard reroute runs only inside the focus blip (CUCore+Blip).
 extension CUCore {
     /// How long the guardian treats an activation as following one of our own synthetic events.
     static let guardianSyntheticWindow: TimeInterval = 0.6

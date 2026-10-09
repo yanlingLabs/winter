@@ -297,7 +297,8 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertTrue(poster.entries.filter { $0.type == .leftMouseDown }.isEmpty, "the window was key: no click")
     }
 
-    func testAMenuCommandStillDisabledIsValidatedOnceMoreAfterAnotherActivationWithoutAClick() async throws {
+    /// No focus blip possible here (no reroute tap in a test core): the activation again and a settled read.
+    func testAMenuCommandDisabledWithNoBlipPossibleIsReadAgainAfterAnotherActivationWithoutAClick() async throws {
         let upper = try await selectedLoud()
         let enforcer = FakeFocusEnforcer()
         core.focusEnforcerFactory = { _ in enforcer }
@@ -311,7 +312,7 @@ final class KeyboardTargetTests: XCTestCase {
         try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
                                                  action: .menu(CUMenuAction(path: ["Fixture", "Uppercase Selection"])),
                                                  access: .full, allowForeground: false, privatePath: true))
-        XCTAssertEqual(enforcer.forced, [77, 77], "the activation posted again for the second validation")
+        XCTAssertEqual(enforcer.forced, [77, 77], "the activation posted again for the second read")
         XCTAssertTrue(poster.entries.dropFirst(before).filter { $0.type == .leftMouseDown }.isEmpty, "no click: the window was key")
         XCTAssertEqual(core.selectionRange(field), NSRange(location: 8, length: 4))
         XCTAssertTrue(ax.performed.contains("\(token(upper)):\(kAXPressAction)"))

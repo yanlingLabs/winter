@@ -168,9 +168,10 @@ extension CUCore {
         return false
     }
 
-    /// Makes the bound window key in its app without raising it or activating the app (yabai's focus records),
-    /// when the app is in the background and the private path is on. Returns the undo: the user's key window
-    /// handed back.
+    /// Makes the bound window key without raising it or activating the app (yabai's focus records), when the
+    /// app is in the background and the private path is on. Returns the undo: the user's key window handed back.
+    /// The user's app resigns active while it lasts, so it is used ONLY inside the focus blip (`beginBlip`, with
+    /// the keyboard reroute on) — never for typing, clicks or reads.
     func keyWithoutRaise(_ t: CUTarget) -> (() -> Void)? {
         guard skyLight.canFocusWithoutRaise, let user = sys.frontmostPid(), user != t.pid else { return nil }
         let userWindow = ax.element(ax.application(user), kAXFocusedWindowAttribute).flatMap { ax.windowID($0) }

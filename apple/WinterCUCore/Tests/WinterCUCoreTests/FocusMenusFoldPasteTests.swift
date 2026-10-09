@@ -58,6 +58,10 @@ final class FocusMenusFoldPasteTests: XCTestCase {
     var core: CUCore!
     var target: CUTarget!
     var trash: AXUIElement!
+    var installer: FakeKeyTapInstaller!
+    /// Where the reroute posted the user's keys, and the blip deadlines scheduled (delay, work).
+    var posted: [pid_t] = []
+    var scheduled: [(ms: Double, work: () -> Void)] = []
 
     override func setUp() {
         FocusSPI.calls = []
@@ -109,6 +113,12 @@ final class FocusMenusFoldPasteTests: XCTestCase {
                           isChromium: false, mirror: false, windowID: 77, windowTitle: "Downloads")
         core.registerForTesting(target, windowElement: window)
         target.refs.beginGeneration()
+        installer = FakeKeyTapInstaller()
+        core.keyTapInstaller = installer
+        posted = []
+        scheduled = []
+        core.keyReroutePost = { [unowned self] _, pid in posted.append(pid) }
+        core.blipSchedule = { [unowned self] ms, work in scheduled.append((ms, work)) }
     }
 
     private func token(_ e: AXUIElement) -> String { var p: pid_t = 0; AXUIElementGetPid(e, &p); return "\(p)" }
@@ -121,20 +131,157 @@ final class FocusMenusFoldPasteTests: XCTestCase {
 
     // MARK: 1. focus without raise
 
-    func testAMenuCommandMakesTheBoundWindowKeyInTheBackgroundAndGivesEverythingBack() async throws {
+    func testAnEnabledMenuCommandTakesNoFocusBlip() async throws {
         finder()
-        XCTAssertEqual(sys.frontmostPid(), 1)
-        var during: [String] = []
-        ax.onPerform = { _ in during = FocusSPI.calls }
         let r = try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
-        XCTAssertEqual(during, ["defocus pid 1 window 77", "focus pid 5252 window 77"], "yabai: key without raise")
+        XCTAssertEqual(ax.performed, ["\(token(trash)):AXPress"])
+        XCTAssertTrue(FocusSPI.calls.isEmpty, "no focus records: the command already reads enabled")
+        XCTAssertTrue(installer.installed.isEmpty, "no reroute tap")
+        XCTAssertNil(r.detail)
+    }
+
+    func testADisabledCommandIsReValidatedInTheFocusBlipWithTheRerouteOnAndEverythingGivenBack() async throws {
+        finder(trashEnabled: false)
+        XCTAssertEqual(sys.frontmostPid(), 1)
+        var tapAtFocus = false
+        FocusSPI.onFocus = { [unowned self] in
+            guard FocusSPI.calls.last == "focus pid \(pid) window 77" else { return }
+            tapAtFocus = installer.isInstalled
+            ax.put(trash, [kAXEnabledAttribute: true])  // the app re-validates once its window holds the key focus
+        }
+        var during: [String] = []
+        var tapAtPress = false
+        ax.onPerform = { [unowned self] _ in during = FocusSPI.calls; tapAtPress = installer.isInstalled }
+        let r = try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
+        XCTAssertTrue(tapAtFocus, "the reroute tap is installed BEFORE the focus records")
+        XCTAssertEqual(installer.installed, [pid], "a tap on the target")
+        XCTAssertEqual(during, ["defocus pid 1 window 77", "focus pid 5252 window 77"], "pressed inside the blip")
+        XCTAssertTrue(tapAtPress)
         XCTAssertEqual(Array(FocusSPI.calls.dropFirst(2)), ["defocus pid 5252 window 77", "focus pid 1 window 31"],
                        "the user's key window handed back")
+        XCTAssertEqual(installer.removed, 1, "the tap removed once the user's app is back")
         XCTAssertFalse(FocusSPI.calls.contains { $0.hasPrefix("front ") }, "never the front process: that switches Spaces")
         XCTAssertEqual(ax.performed, ["\(token(trash)):AXPress"])
         XCTAssertEqual(sys.frontmostPid(), 1, "the user's app stayed frontmost")
         XCTAssertTrue(sys.activated.isEmpty, "nothing was activated")
-        XCTAssertEqual(r.detail, "Finder's window was made key in the background for the command")
+        XCTAssertEqual(scheduled.count, 1, "one hard deadline")
+        XCTAssertTrue(scheduled.allSatisfy { $0.ms <= 250 && $0.ms > 200 }, "250 ms from the tap's install: \(scheduled.map(\.ms))")
+        XCTAssertEqual(r.detail, "Finder's window was made key for a moment to re-validate the command (your app kept the front)")
+    }
+
+    func testTheBlipEndsOnAnErrorWithTheTapRemoved() async throws {
+        finder(trashEnabled: false)
+        FocusSPI.onFocus = { [unowned self] in ax.put(trash, [kAXEnabledAttribute: true]) }
+        ax.refuses = ["\(token(trash)):AXPress"]  // the press fails
+        do {
+            try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
+            XCTFail("the press failed")
+        } catch is CUError {}
+        XCTAssertEqual(installer.installed.count, 1)
+        XCTAssertEqual(installer.removed, 1, "removed on the error path too")
+        XCTAssertEqual(Array(FocusSPI.calls.suffix(2)), ["defocus pid 5252 window 77", "focus pid 1 window 31"], "handed back")
+    }
+
+    func testTheDeadlineEndsTheBlipAndRemovesTheTapWhateverTheActIsDoing() async throws {
+        finder(trashEnabled: false)
+        var removedAtDeadline: Int?
+        ax.onRead = { [unowned self] what in
+            // The deadline passes while the act is still reading the command.
+            guard what == "\(token(trash)):\(kAXEnabledAttribute)", let deadline = scheduled.first, removedAtDeadline == nil else { return }
+            deadline.work()
+            removedAtDeadline = installer.removed
+        }
+        do {
+            try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
+            XCTFail("still disabled")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "unsupported", e.message)
+        }
+        XCTAssertEqual(removedAtDeadline, 1, "the deadline removed the tap at once")
+        XCTAssertEqual(Array(FocusSPI.calls.prefix(4)), ["defocus pid 1 window 77", "focus pid 5252 window 77",
+                                                         "defocus pid 5252 window 77", "focus pid 1 window 31"],
+                       "and handed the key focus back")
+        XCTAssertEqual(installer.removed, installer.installed.count, "every tap removed, none twice")
+        XCTAssertTrue(scheduled.allSatisfy { $0.ms <= 250 }, "a hard deadline of at most 250 ms")
+        XCTAssertEqual(installer.installed.count, 2, "the one retry, in a fresh blip")
+    }
+
+    func testTheUsersKeysDuringTheBlipGoToTheirAppAndTheHelpersPass() async throws {
+        finder(trashEnabled: false)
+        var verdicts: [Bool] = []
+        FocusSPI.onFocus = { [unowned self] in
+            guard FocusSPI.calls.last == "focus pid \(pid) window 77", let tap = installer.handler else { return }
+            verdicts.append(tap(keyEvent(stamped: false)) == nil)        // the user's key: dropped from the target
+            verdicts.append(tap(keyEvent(down: false, stamped: false)) == nil)
+            verdicts.append(tap(keyEvent(stamped: true)) != nil)         // the helper's own: passes
+            ax.put(trash, [kAXEnabledAttribute: true])
+        }
+        try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
+        XCTAssertEqual(verdicts, [true, true, true])
+        XCTAssertEqual(posted, [1, 1], "the user's key down and up went to their app (pid 1), never the target")
+        XCTAssertEqual(installer.removed, 1)
+    }
+
+    func testTheRerouteCountsWhatItReroutedAndIsRemovedOnce() {
+        let tap = FakeKeyTapInstaller()
+        var sent: [pid_t] = []
+        let reroute = CUKeyReroute(target: 5252, victim: 1, installer: tap, post: { _, pid in sent.append(pid) })
+        XCTAssertTrue(reroute.begin())
+        XCTAssertEqual(tap.installed, [5252], "on the target")
+        let own = keyEvent(stamped: true)
+        XCTAssertTrue(reroute.handle(own) === own, "the helper's own key passes unchanged")
+        XCTAssertNil(reroute.handle(keyEvent(stamped: false)), "the user's key never reaches the target")
+        XCTAssertEqual(sent, [1], "it went to the user's app")
+        XCTAssertEqual(reroute.end(), 1, "one rerouted")
+        XCTAssertEqual(reroute.end(), 1)
+        XCTAssertEqual(tap.removed, 1, "removed once")
+        XCTAssertFalse(reroute.isInstalled)
+        tap.refuse = true
+        XCTAssertFalse(CUKeyReroute(target: 5252, victim: 1, installer: tap, post: { _, _ in }).begin(), "no tap, no reroute")
+    }
+
+    func testWithNoRerouteTapThereIsNoBlip() async throws {
+        finder(trashEnabled: false)
+        installer.refuse = true
+        do {
+            try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
+            XCTFail("disabled")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "unsupported", e.message)
+        }
+        XCTAssertTrue(FocusSPI.calls.isEmpty, "never the focus records without the reroute")
+    }
+
+    func testIfTheBlipDidNotHandTheFrontBackTheGuardianRestoresIt() async throws {
+        finder(trashEnabled: false)
+        FocusSPI.onFocus = { [unowned self] in ax.put(trash, [kAXEnabledAttribute: true]) }
+        ax.onPerform = { [unowned self] _ in sys.front = pid }  // the press brings Finder forward
+        _ = try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
+        XCTAssertEqual(sys.activated.first, 1, "the user's app restored by the blip's end")
+        XCTAssertEqual(sys.frontmostPid(), 1)
+        XCTAssertEqual(installer.removed, 1)
+    }
+
+    func testADisabledMenuShortcutIsReValidatedInTheBlipAndPressed() async throws {
+        finder(trashEnabled: false)
+        ax.put(trash, [kAXMenuItemCmdCharAttribute: "T", kAXMenuItemCmdModifiersAttribute: 0])
+        FocusSPI.onFocus = { [unowned self] in ax.put(trash, [kAXEnabledAttribute: true]) }
+        let r = try await act(.key(CUKeyAction(combo: "cmd+t")))
+        XCTAssertEqual(ax.performed, ["\(token(trash)):AXPress"], "the menu item, pressed")
+        XCTAssertTrue(poster.keyDowns.isEmpty, "no keys")
+        XCTAssertEqual(installer.installed, [pid])
+        XCTAssertEqual(installer.removed, 1)
+        XCTAssertTrue(r.detail?.contains("re-validated with Finder's window key for a moment") ?? false, r.detail ?? "")
+    }
+
+    func testADisabledMenuShortcutThatStaysDisabledGoesAsKeys() async throws {
+        finder(trashEnabled: false)
+        ax.put(trash, [kAXMenuItemCmdCharAttribute: "T", kAXMenuItemCmdModifiersAttribute: 0])
+        try await act(.key(CUKeyAction(combo: "cmd+t")))
+        XCTAssertTrue(ax.performed.isEmpty)
+        XCTAssertEqual(poster.keyDowns.last?.keycode, Int64(CUKeyCodes.code(for: "t")!), "the keys, as before")
+        XCTAssertEqual(installer.installed.count, 2, "the blip and its one retry")
+        XCTAssertEqual(installer.removed, 2)
     }
 
     func testIfTheTargetActivatesItselfTheUsersAppGetsTheFrontBack() async throws {
@@ -221,16 +368,14 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         XCTAssertEqual(ax.performed, ["\(token(trash)):AXPress"])
     }
 
-    func testShortcutsAndTypingGetKeyFocusNeverTheFront() async throws {
+    func testTypingKeysAndClicksTakeNoFocusBlip() async throws {
         finder(focusedField: true)
         try await act(.key(CUKeyAction(combo: "cmd+delete")))
-        XCTAssertTrue(FocusSPI.calls.contains("focus pid 5252 window 77"), "a shortcut: the bound window made key")
-        XCTAssertFalse(FocusSPI.calls.contains { $0.hasPrefix("front ") }, "never the front process")
         XCTAssertEqual(poster.keyDowns.last?.keycode, 51)
-        FocusSPI.calls = []
         try await act(.type(CUTypeAction(text: "ab")))
-        XCTAssertTrue(FocusSPI.calls.contains("focus pid 5252 window 77"))
-        XCTAssertFalse(FocusSPI.calls.contains { $0.hasPrefix("front ") }, "typing never takes the front")
+        try await act(.click(CUClickAction(ref: target.refs.ref(for: AXIdentity(element: field)))))
+        XCTAssertTrue(FocusSPI.calls.isEmpty, "never the focus records for keys, typing or clicks")
+        XCTAssertTrue(installer.installed.isEmpty)
         XCTAssertEqual(sys.frontmostPid(), 1)
     }
 

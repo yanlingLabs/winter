@@ -89,6 +89,8 @@ public final class CUCore: @unchecked Sendable {
             pressSettleMs = 0
             menuSettleMs = 0
             selectionHoldMs = 0
+            blipReadMs = 0
+            keyTapInstaller = CUNoKeyTapInstaller()  // no real tap from a unit test: no blip unless a test fakes one
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
         }
     }
@@ -476,6 +478,23 @@ public final class CUCore: @unchecked Sendable {
     var secondsSinceUserInputOverride: (() -> TimeInterval)?
     /// The window server's key-focus pid, injectable for tests (the swallowed-click retry).
     var keyFocusPidOverride: (() -> pid_t?)?
+
+    // The focus blip (CUCore+Blip) and the keyboard reroute that guards it.
+    /// Installs the reroute's head keyboard tap on the target; test cores install none (no blip).
+    var keyTapInstaller: CUKeyTapInstalling = CULiveKeyTapInstaller()
+    /// Posts a rerouted key event to the user's app.
+    var keyReroutePost: (CGEvent, pid_t) -> Void = { e, pid in e.postToPid(pid) }
+    /// Runs `work` after `ms` (the blip's hard deadline); tests fire it by hand.
+    var blipSchedule: (Double, @escaping () -> Void) -> Void = { ms, work in
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + ms / 1000, execute: work)
+    }
+    /// The blip's hard deadline: the focus handed back and the reroute tap removed by then, whatever happens.
+    static let blipDeadlineMs: Double = 250
+    /// How long the blip's end waits for the user's app to hold the key focus and the front again before the
+    /// guardian restores it.
+    static let blipFrontWaitMs: Double = 150
+    /// How long a command is read for inside one blip. 0 in test cores (one read).
+    var blipReadMs: Double = 120
 
     /// Apps whose `AXFocused` write was seen to activate them (move the user's view): their fields use the
     /// press route first thereafter, for the helper's lifetime. Keyed by bundle id, else app name.
