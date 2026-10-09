@@ -72,6 +72,7 @@ public final class CUCore: @unchecked Sendable {
         self.monitor = CUAXActivityMonitor(clock: clock)
         AX.configureProcessTimeout()
         monitor.onDestroyed = { [weak self] pid in self?.windowMaybeClosed(pid: pid) }
+        monitor.onWindowCreated = { [weak self] pid, element in self?.noteCreatedWindow(pid: pid, element) }
         if startMonitors {
             startMonitoring()
         } else {
@@ -274,7 +275,7 @@ public final class CUCore: @unchecked Sendable {
         let found = try await CUBindWait.run(launched: launched, deadlineMs: launched ? 8000 : 3000, CUBindWait.Effects(
             read: { [queues] in
                 try await queues.run(pid) { [self] in
-                    let server = sys.windows(pid: pid)
+                    let server = spacedWindows(sys.windows(pid: pid))
                     let listed = CUAXWindows.list(pid: pid, ax: ax, server: server)
                     noteWindows(pid: pid, listed)
                     return (listed, server)
@@ -971,6 +972,14 @@ public final class CUCore: @unchecked Sendable {
         return t
     }
 
+    /// The windows that are on some Space. An app's window that is off screen AND on no Space at all was never
+    /// shown or was closed and kept (most apps keep a hidden 500×500 one at (0,482): VS Code with no editor open
+    /// bound it and lost it at once) — not a window to bind, and not one that stops the zero-window reopen. An
+    /// unreadable Space answer keeps the window.
+    func spacedWindows(_ windows: [CUWindowServerWindow]) -> [CUWindowServerWindow] {
+        windows.filter { $0.onScreen || sys.windowOnAnySpace($0.id) != false }
+    }
+
     /// The pids of all bound targets (for the Focus Guardian's CPS tap).
     func boundTargetPids() -> Set<pid_t> { lock.withLock { Set(targets.values.map(\.pid)) } }
 
@@ -1080,6 +1089,13 @@ public final class CUCore: @unchecked Sendable {
     /// another Space or into full screen, so a window once listed is reached again with no probe.
     private var seenWindows: [pid_t: [UInt32: AXUIElement]] = [:]
 
+    /// A window the app just created (the monitor's notification): remembered with its id, while it is still on a
+    /// Space where AX vends it.
+    func noteCreatedWindow(pid: pid_t, _ element: AXUIElement) {
+        guard let id = ax.windowID(element) else { return }
+        windowElementsLock.withLock { seenWindows[pid, default: [:]][id] = element }
+    }
+
     /// Remembers the windows an AX listing returned (and every window reached another way).
     func noteWindows(pid: pid_t, _ windows: [CUAXWindow]) {
         guard !windows.isEmpty else { return }
@@ -1117,6 +1133,24 @@ public final class CUCore: @unchecked Sendable {
         if walk, found.isEmpty {
             // The walk takes one window for a bind (stopAtFirst); only when nothing cheaper answered.
             for (id, e) in ax.remoteWindows(pid: pid, windowIDs: Array(wanted)) where wanted.contains(id) { found[id] = e }
+        }
+        if walk, found.isEmpty, let id = ids.first {
+            // Never vended: no live element id exists, so no walk can find it. The window visits this Space for a
+            // moment (screen updates suspended) so AppKit lists it, and its element is kept from then on.
+            let started = clock.nowMs()
+            let visited = sys.visitActiveSpace(id) { [ax] in
+                ax.elements(ax.application(pid), kAXWindowsAttribute).first { ax.windowID($0) == id }
+            }
+            let ms = Int(clock.nowMs() - started)
+            switch visited {
+            case .some(.some(let e)):
+                found[id] = e
+                CULog.bind.notice("reached window \(id, privacy: .public) of pid \(pid, privacy: .public) by a brief visit to this Space (\(ms, privacy: .public) ms)")
+            case .some(.none):
+                CULog.bind.notice("a visit to this Space did not list window \(id, privacy: .public) of pid \(pid, privacy: .public) (\(ms, privacy: .public) ms)")
+            case .none:
+                break
+            }
         }
         if !found.isEmpty { windowElementsLock.withLock { for (id, e) in found { seenWindows[pid, default: [:]][id] = e } } }
         return found

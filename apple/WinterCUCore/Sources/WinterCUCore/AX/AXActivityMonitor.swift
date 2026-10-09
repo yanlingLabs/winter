@@ -33,6 +33,9 @@ final class CUAXActivityMonitor: @unchecked Sendable {
     private let box = RunLoopBox()
     /// Called (off the main thread) when an element of `pid` is destroyed.
     var onDestroyed: (@Sendable (pid_t) -> Void)?
+    /// Called (off the main thread) with a new window's element: remembered, so the window stays reachable after
+    /// it leaves this Space (an AppKit window has no AX element on another Space unless one was vended here).
+    var onWindowCreated: (@Sendable (pid_t, AXUIElement) -> Void)?
 
     init(clock: CUClock) {
         self.clock = clock
@@ -53,6 +56,8 @@ final class CUAXActivityMonitor: @unchecked Sendable {
     func lastValueChangeMs(pid: pid_t) -> Double? {
         lock.withLock { lastValue[pid] }
     }
+
+    fileprivate func windowCreated(pid: pid_t, element: AXUIElement) { onWindowCreated?(pid, element) }
 
     fileprivate func record(pid: pid_t, notification: String) {
         let t = clock.nowMs()
@@ -135,5 +140,6 @@ private func cuAXObserverCallback(_ observer: AXObserver, _ element: AXUIElement
     let monitor = Unmanaged<CUAXActivityMonitor>.fromOpaque(refcon).takeUnretainedValue()
     var pid: pid_t = 0
     guard AXUIElementGetPid(element, &pid) == .success else { return }
+    if (notification as String) == kAXWindowCreatedNotification { monitor.windowCreated(pid: pid, element: element) }
     monitor.record(pid: pid, notification: notification as String)
 }

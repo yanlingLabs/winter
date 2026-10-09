@@ -195,6 +195,19 @@ final class FakeSystem: CUSystemBackend {
     var noSpaceWindows: Set<UInt32> = []
     var onSpace: Bool? = nil
     func windowOnAnySpace(_ id: UInt32) -> Bool? { noSpaceWindows.contains(id) ? false : onSpace }
+    /// The brief visit to the active Space: nil = not possible (the default); `onVisit` changes the fake world for
+    /// the visit's length (AX lists the window), `afterVisit` undoes it.
+    var visits: [UInt32] = []
+    var visitPossible = false
+    var onVisit: ((UInt32) -> Void)?
+    var afterVisit: ((UInt32) -> Void)?
+    func visitActiveSpace(_ id: UInt32, _ body: () -> AXUIElement?) -> AXUIElement?? {
+        guard visitPossible else { return nil }
+        visits.append(id)
+        onVisit?(id)
+        defer { afterVisit?(id) }
+        return .some(body())
+    }
     /// Content processes (Safari's WebContent), each with the app it serves.
     var contentProcesses: [pid_t: pid_t] = [:]
     func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { contentProcesses[pid] == appPid }

@@ -156,6 +156,11 @@ enum AX {
     /// Per-candidate messaging timeout; this many in a row that time out means the app is not answering.
     static let remoteProbeCandidateTimeout: Float = 0.05
     static let remoteProbeSilentLimit = 8
+    /// Live element ids sit in a dense run from 1: measured live, the largest gap between two live ids was 839
+    /// (Preview), 507 (Safari), 254 (Terminal), all below ~2,100. This many dead ids in a row past the last
+    /// live one ends the walk (~160 ms) — a window with no live id (never vended to any client) is not further
+    /// up, and walking to the deadline only burned 1.5 s.
+    static let remoteProbeDeadRun: UInt64 = 10_000
 
     /// What one remote-token walk found and why it stopped (logged on a miss).
     struct RemoteProbe {
@@ -179,8 +184,13 @@ enum AX {
         func elapsed() -> Double { Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000 }
         var silent = 0
         var id: UInt64 = 0
+        var lastLive: UInt64 = 0
         while id < maxID {
             if elapsed() > deadlineMs { r.stoppedBy = "the \(Int(deadlineMs)) ms deadline"; break }
+            if id > lastLive + remoteProbeDeadRun {
+                r.stoppedBy = "\(remoteProbeDeadRun) dead ids past the last live one (\(lastLive))"
+                break
+            }
             let current = id
             id += 1
             guard let element = create(remoteToken(pid: pid, elementID: current) as CFData)?.takeRetainedValue() else { continue }
@@ -195,6 +205,7 @@ enum AX {
                 continue
             }
             silent = 0
+            if err == .success { lastLive = current }
             guard err == .success, (role as? String) == kAXWindowRole, let wid = windowID(element), wanted.contains(wid),
                   r.found[wid] == nil else { continue }
             AXUIElementSetMessagingTimeout(element, 0)  // back to the process-wide timeout

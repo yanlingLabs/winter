@@ -137,6 +137,34 @@ final class BindOnceTests: XCTestCase {
         XCTAssertTrue(poster.entries.isEmpty)
     }
 
+    // MARK: windows on no Space are not windows (VS Code with no editor open)
+
+    func testAHiddenWindowOnNoSpaceIsNotAWindowSoTheAppGetsItsReopen() async throws {
+        safari(windowElsewhere: false)
+        // The hidden 500×500 window most apps keep at (0,482): off screen and on no Space.
+        var phantom = FakeSystem.window(75_997, pid: pid, CGRect(x: 0, y: 482, width: 500, height: 500), owner: "Code")
+        phantom.onScreen = false
+        sys.windows[75_997] = phantom
+        sys.noSpaceWindows = [75_997]
+        sys.onSpace = true
+        onReopen = { [unowned self] in
+            ax.put(ax.application(pid), [kAXWindowsAttribute: [original]])
+            sys.windows[77] = FakeSystem.window(77, pid: pid, CGRect(x: 0, y: 0, width: 1200, height: 800), owner: "Code")
+        }
+        let r = try await bind()
+        XCTAssertEqual(reopens, 1, "zero real windows: the background reopen")
+        XCTAssertEqual(r.window.id, 77, "the app's default window, not the hidden one")
+        XCTAssertFalse(r.detail?.contains("capture only") ?? false, r.detail ?? "")
+    }
+
+    func testAWindowOnAnotherSpaceIsStillAWindow() async throws {
+        safari()  // window 77 off screen on another Space, reachable by remote token
+        sys.onSpace = true
+        let r = try await bind()
+        XCTAssertEqual(r.window.id, 77)
+        XCTAssertEqual(reopens, 0)
+    }
+
     // MARK: reaching an off-Space / full-screen window without the walk
 
     func testAFullScreenWindowIsReachedThroughTheAppsMainWindowWithNoWalk() async throws {
@@ -170,6 +198,28 @@ final class BindOnceTests: XCTestCase {
         XCTAssertEqual(again.window.id, 77)
         XCTAssertFalse(again.detail?.contains("capture only") ?? false, again.detail ?? "")
         XCTAssertEqual(ax.remoteWalks, 0, "the remembered element, no walk")
+    }
+
+    func testANeverVendedWindowIsReachedByABriefVisitToThisSpace() async throws {
+        safari(reachable: false)  // no cheap route, and the walk misses: AppKit never vended it
+        sys.visitPossible = true
+        sys.onVisit = { [unowned self] _ in ax.put(ax.application(pid), [kAXWindowsAttribute: [original]]) }
+        sys.afterVisit = { [unowned self] _ in ax.put(ax.application(pid), [kAXWindowsAttribute: [AXUIElement]()]) }
+        let r = try await bind()
+        XCTAssertEqual(sys.visits, [77], "one visit, for that window")
+        XCTAssertEqual(r.window.id, 77)
+        XCTAssertTrue(r.detail?.hasPrefix("step 0 (where it is): ") ?? false, "reached where it is, not capture-only: \(r.detail ?? "")")
+        // Kept: the next reach needs no visit.
+        _ = try await core.targetRelease(TargetReleaseParams(targetId: r.targetId))
+        _ = try await bind()
+        XCTAssertEqual(sys.visits, [77])
+    }
+
+    func testWhenNoVisitIsPossibleTheWindowIsCaptureOnly() async throws {
+        safari(reachable: false)
+        let r = try await bind()
+        XCTAssertTrue(sys.visits.isEmpty)
+        XCTAssertTrue(r.detail?.contains("capture only") ?? false, r.detail ?? "")
     }
 
     func testTheWalkRunsOnlyWhenEverythingCheaperMisses() async throws {
