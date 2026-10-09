@@ -662,13 +662,19 @@ export class ComputerV2Service {
     const res = await this.shoot(ctx, "target.screenshot", { targetId: t.targetId, callId: ctx.callId, ...(region === undefined ? {} : { region }), ...(settle === undefined ? {} : { settle }) }, metric);
     ctx.state.lastTargetShot.set(t.targetId, res.shotId);
     const handle = this.keepImage(ctx, res);
-    // What the image is when it is not an ordinary capture ("captured …'s window on another desktop … — an app
-    // that stops drawing while hidden may show slightly older content") — said even for an `emit: false` read,
-    // since it bears on what the agent concludes from the image: an unfenced daemon line, like a bind's.
+    // What the image is when it is not an ordinary capture ("captured …'s window on another desktop …") — said
+    // even for an `emit: false` read, since it bears on what the agent concludes from the image.
     const detail = helperDetail(res.detail);
     if (detail !== undefined) ctx.builder.daemonLine(detail);
-    if (args.emit !== false) ctx.builder.image(res.imageBase64, res.mime ?? "image/jpeg");
-    else ctx.builder.markScreenRead();
+    if (args.emit !== false) {
+      // The coordinate frame, so the model does not guess the scale: clicks take THIS image's pixels.
+      const pts = typeof res.pointsWidth === "number" && typeof res.pointsHeight === "number" && res.pointsWidth > 0
+        ? ` (window ${Math.round(res.pointsWidth)}×${Math.round(res.pointsHeight)} pt)` : "";
+      ctx.builder.daemonLine(`clicks take this image's pixel coordinates: ${res.width}×${res.height}${pts}`);
+      ctx.builder.image(res.imageBase64, res.mime ?? "image/jpeg");
+    } else {
+      ctx.builder.markScreenRead();
+    }
     return handle;
   }
 

@@ -88,6 +88,24 @@ final class CaptureMathTests: XCTestCase {
         XCTAssertEqual(try shot.screenPoint(pixel: CGPoint(x: 0, y: 0)), CGPoint(x: -1440, y: 0))
     }
 
+    func testOutOfBoundsErrorHintsAtWindowPointsOrA2xValue() {
+        // A 1280×803 image of a 1512×949 pt window (a < 1 scale, like the live VRoid case).
+        let shot = CUShotSpace(id: "t1.i1", anchor: .window(windowID: 42, regionOrigin: .zero),
+                               imageWidth: 1280, imageHeight: 803, pointsWidth: 1512, pointsHeight: 949)
+        func message(_ x: Double, _ y: Double) -> String {
+            do { _ = try shot.localPoint(pixel: CGPoint(x: x, y: y)); return "" }
+            catch { return (error as? CUError)?.message ?? "" }
+        }
+        // Beyond the image px but within the window's points: a window-points mistake.
+        let points = message(1400, 900)
+        XCTAssertTrue(points.contains("valid x 0–1280, y 0–803 px (window 1512×949 pt)"), points)
+        XCTAssertTrue(points.contains("looks like window points"), points)
+        // The live case: [2000, 200] on a 1280×803 image is a 2× (Retina/backing) value.
+        let retina = message(2000, 200)
+        XCTAssertTrue(retina.contains("looks like a 2× (Retina) value"), retina)
+    }
+
+
     func testOutOfImagePointsAreRejected() {
         let shot = CUShotSpace(id: "s", anchor: .screen(origin: .zero), imageWidth: 100, imageHeight: 100,
                                pointsWidth: 100, pointsHeight: 100)

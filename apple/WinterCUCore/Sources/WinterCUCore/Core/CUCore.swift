@@ -651,7 +651,7 @@ public final class CUCore: @unchecked Sendable {
         }
         return TargetScreenshotResult(imageBase64: img.jpeg.base64EncodedString(), mime: "image/jpeg", width: img.width,
                                       height: img.height, shotId: shot.id, settled: settled, waitedMs: waited,
-                                      detail: detail)
+                                      pointsWidth: img.pointsRect.width, pointsHeight: img.pointsRect.height, detail: detail)
     }
 
     /// Window capture; replaceable by tests (nothing there may touch ScreenCaptureKit).
