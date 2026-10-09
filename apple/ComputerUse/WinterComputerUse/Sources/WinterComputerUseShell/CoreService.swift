@@ -27,6 +27,12 @@ public protocol CoreService: AnyObject {
     func cancel(_ params: CancelParams) async throws -> CancelResult
     func turnEnded(_ params: TurnEndedParams) async throws -> TurnEndedResult
     func sessionEnded(_ params: SessionEndedParams) async throws -> SessionEndedResult
+    /// A session's script started or ended (`script.active`): the engine's Focus Guardian runs only meanwhile.
+    func scriptActivity(sessionId: String, active: Bool)
+}
+
+public extension CoreService {
+    func scriptActivity(sessionId: String, active: Bool) {}
 }
 
 extension CUCore: CoreService {}

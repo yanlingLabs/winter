@@ -2,9 +2,9 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-/// The continuous Focus Guardian: while any session has a bound target or a running script, NO app may take
-/// the user's front app, key focus or desktop because of the agent — for any action, at any delay (user rule
-/// 2026-10-09). It is event-driven, not per-action: it watches every activation the moment it happens and, when
+/// The Focus Guardian: while the agent is acting (a script runs, plus a short tail), NO app it touched may take
+/// the user's front app, key focus or desktop because of the agent — at any delay (user rule 2026-10-09); and an
+/// app it did not touch coming forward is always the user's own choice. It is event-driven, not per-action: it watches every activation the moment it happens and, when
 /// one was not the user's own doing, puts the user back at once.
 ///
 /// This is the PURE decision core — attribution (user vs agent), the restore plan, repeat-offender detection
@@ -29,11 +29,16 @@ public struct CUActivation: Equatable, Sendable {
     public var hadRecentUserInput: Bool
     /// This activation was caused by the helper's own synthetic event (never counts as the user).
     public var fromSyntheticEvent: Bool
-    public init(app: pid_t, space: UInt64? = nil, hadRecentUserInput: Bool, fromSyntheticEvent: Bool = false) {
+    /// The app is one the agent touched (a bound target's, a document opened in it, or acted on just now): only
+    /// such an app can be a thief. Any other app coming forward is the user's choice.
+    public var suspect: Bool
+    public init(app: pid_t, space: UInt64? = nil, hadRecentUserInput: Bool, fromSyntheticEvent: Bool = false,
+                suspect: Bool = true) {
         self.app = app
         self.space = space
         self.hadRecentUserInput = hadRecentUserInput
         self.fromSyntheticEvent = fromSyntheticEvent
+        self.suspect = suspect
     }
 }
 
@@ -111,6 +116,12 @@ public struct CUFocusGuardianCore: Sendable {
     /// Decide what one activation means and update the tracked view.
     public mutating func handle(_ a: CUActivation, now: TimeInterval) -> CUGuardianVerdict {
         guard active else { return .ignore }
+        // An app the agent never touched: the user's choice, always — it becomes the user's app and is never undone.
+        if !a.suspect {
+            view = CUGuardedView(app: a.app, space: a.space ?? view.space)
+            thefts[a.app] = nil
+            return .userSwitch
+        }
         // The user clicked into this app's window: theirs, whatever the timing.
         if claimed(a.app, now: now) {
             view = CUGuardedView(app: a.app, space: a.space ?? view.space)
