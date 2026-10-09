@@ -28,6 +28,12 @@ bun test -t "test name"              # one test by name
 # Every daemon boot merges the user's login-shell PATH into its own (core/src/login-shell-path.ts);
 # WINTER_LOGIN_SHELL_PATH=off (or 0/false) skips it — both test preloads set it, so no test runs your real shell.
 pnpm typecheck:core                  # tsc --noEmit (also typecheck:protocol)
+bun run check:idle-wakeups           # an isolated idle daemon's CPU wakeups/s, via `top -c d` (fails over 50/s);
+                                     # `--pid N` measures a running one read-only. top's IDLEW is the SINCE-LAUNCH
+                                     # count unless `-c d` — 3,962 on an 8 h daemon is ~0.14/s, not 3,962/s.
+# A hand-started experiment daemon: a temp WINTER_HOME, no WINTER_PROFILE, and a random
+# WINTER_KEYCHAIN_SERVICE=com.winter.core.test-<random> (honoured on a custom home since 2026-10-09 —
+# `auth/secret-store.ts`); better still `startDaemon({ home, secrets: new FileSecretStore(...) })` in-process.
 
 # Protocol codegen — REQUIRED after changing packages/protocol/src/events.ts
 pnpm protocol:generate               # JSON schema + per-variant fixtures, synced into the Swift test bundle
