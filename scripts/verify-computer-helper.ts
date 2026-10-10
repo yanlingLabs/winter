@@ -42,6 +42,7 @@ import { fileURLToPath } from "node:url";
 import { WINTER_TEAM_ID } from "../packages/core/src/auth/app-token-acl";
 import { HELPER_PROTOCOL } from "../packages/core/src/computer-use/protocol";
 import { EXTENSION_IDS } from "../packages/core/src/computer-use/browser/extension/extension-ids";
+import { BROWSER_HOST_PROTOCOL, EXTENSION_PROTOCOL } from "../packages/core/src/computer-use/browser/extension/protocol";
 import { processSatisfiesRequirement } from "../packages/core/src/computer-use/helper-verify";
 import { BROWSER_HOST, browserHostExecutable, HELPER, HELPER_SOCKET_NAME, helperExecutable, helperRequirement, LSREGISTER, readHelperVersion } from "./computer-helper-lib";
 import { buildHelper, DEV_HELPER_APP, inspectHelper, run, signHelper, signingIdentity } from "./dev-helper";
@@ -266,16 +267,16 @@ async function verifyBrowserHost(testApp: string, fakeDaemon: string, homes: str
     try {
       const hello = await daemon.line((m) => m.method === "host.hello", 8000);
       const p = hello?.params ?? {};
-      check(hello?.id === "h1" && p.protocol === 1 && p.client === "browser-host" && p.origin === origin && p.hostPid === host.child.pid
+      check(hello?.id === "h1" && p.protocol === BROWSER_HOST_PROTOCOL && p.client === "browser-host" && p.origin === origin && p.hostPid === host.child.pid
         && p.hostVersion === version && p.browserPid === process.pid && typeof p.browserBundleId === "string",
-        "the daemon appears within the retry: host.hello {protocol 1, client, hostVersion, hostPid, origin, browserBundleId, browserPid} first", JSON.stringify(hello));
+        "the daemon appears within the retry: host.hello {protocol, client, hostVersion, hostPid, origin, browserBundleId, browserPid} first", JSON.stringify(hello));
       const hostDr = helperRequirement(BROWSER_HOST.test.identifier, WINTER_TEAM_ID);
       check(processSatisfiesRequirement(Number(p.hostPid), hostDr), "the daemon's own check: the pid host.hello names satisfies the host's stated requirement (Security.framework by pid)");
       check(run("codesign", ["--verify", `-R=${hostDr}`, String(p.hostPid)]).status === 0, "…and codesign agrees on the running process");
       check(!processSatisfiesRequirement(Number(p.hostPid), helperRequirement(HELPER.test.identifier, WINTER_TEAM_ID)), "…and the check discriminates: the host is not the helper");
-      daemon.write({ id: "h1", result: { protocol: 1, daemonVersion: "verify" } });
+      daemon.write({ id: "h1", result: { protocol: BROWSER_HOST_PROTOCOL, daemonVersion: "verify" } });
       check(await host.pipe.next(status("connected")) !== undefined, "host.hello answered → host.status {daemon: \"connected\"} to the extension");
-      host.pipe.send({ id: "e1", method: "hello", params: { protocol: 1, extensionVersion: "1.0.0", instanceId: "00000000-0000-4000-8000-000000000001" } });
+      host.pipe.send({ id: "e1", method: "hello", params: { protocol: EXTENSION_PROTOCOL, extensionVersion: "1.0.0", instanceId: "00000000-0000-4000-8000-000000000001" } });
       const relayed = await daemon.line((m) => m.id === "e1");
       check(relayed?.method === "hello" && relayed?.params?.instanceId === "00000000-0000-4000-8000-000000000001", "the relay: an extension message reaches the daemon unchanged", JSON.stringify(relayed));
       daemon.write({ id: "d1", method: "tabs.list", params: {} });
