@@ -66,6 +66,11 @@ const controller = new ExtensionController(api, { notify: (method, params) => co
 connection = new HostConnection(api, controller, status, { hostName: __WINTER_HOST_NAME__, log });
 
 // Listeners are registered synchronously at the top level (an MV3 worker woken by an event must find them).
+// The worker must also START with the browser — an MV3 worker runs only for an event it listens to, so without these a
+// browser restart would leave Winter for Chrome asleep (and Winter unable to reach it) until some tab closed. Waking is
+// all they are for: the code below opens the port to the host on every start.
+chrome.runtime.onStartup.addListener(() => undefined);
+chrome.runtime.onInstalled.addListener(() => undefined);
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (typeof message === "object" && message !== null && (message as { type?: unknown }).type === "winter.status") {
     if (sender.id !== api.runtimeId) return undefined;

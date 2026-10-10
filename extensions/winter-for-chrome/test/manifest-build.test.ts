@@ -65,6 +65,12 @@ describe("the build", () => {
     }
   });
 
+  test("the worker starts with the browser: it listens for onStartup and onInstalled at the top level", () => {
+    const bg = readFileSync(join(import.meta.dir, "..", "src", "background.ts"), "utf8");
+    expect(bg).toMatch(/^chrome\.runtime\.onStartup\.addListener\(/m);
+    expect(bg).toMatch(/^chrome\.runtime\.onInstalled\.addListener\(/m);
+  });
+
   test("the overlay function stands alone (Chrome serializes it) and draws under one tag", () => {
     const fn = new Function(`return (${drawOverlay.toString()});`)() as unknown;
     expect(typeof fn).toBe("function");
