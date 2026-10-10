@@ -103,6 +103,7 @@ public final class CUCore: @unchecked Sendable {
             keyTapInstaller = CUNoKeyTapInstaller()  // no real tap from a unit test: no blip unless a test fakes one
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
             visitArriveMs = 0
+            visitLateSwitchMs = 0
             visitFreshMaxMs = 0
             visitFreshStableMs = 0
             visitNoProbeWaitMs = 0
@@ -505,6 +506,8 @@ public final class CUCore: @unchecked Sendable {
     /// unchanged picture must stay so to count as painted, how often it is sampled, and how long it waits when no
     /// frame can be sampled. 0 in test cores (one look each, no waiting).
     var visitArriveMs: Double = 1500
+    /// After a visit that never arrived, how long a late switch (the target answering its AX calls late) is watched for.
+    var visitLateSwitchMs: Double = 1200
     /// How long a window read as closed while the server still lists it is watched before it counts as gone
     /// (`windowGone`): a full-screen transition reads like that for a moment.
     var windowGoneSettleMs: Double = 1500

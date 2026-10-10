@@ -217,6 +217,13 @@ extension CUCore {
             throw CUError.refused(.frontUnknown, "Winter can't tell which app you are in, so it could not bring you back — nothing was moved")
         }
         let userWindow = before.front.flatMap { ax.element(ax.application($0), kAXFocusedWindowAttribute) }
+        // Nothing to anchor the way back: the return would be the user's app made frontmost ALONE — the very call
+        // that takes macOS to a desktop with that app's windows — so with windows of it on other desktops it could
+        // land the user on a third one. Refused before anything moves.
+        if userWindow == nil, let user = before.front, appHasWindowsElsewhere(user) {
+            CULog.act.notice("visit (\(why.rawValue, privacy: .public)): the user's app has no focused window to come back to, and has windows on other desktops — not visited, nothing moved")
+            throw CUError.unsupported("Winter can't tell which window you are in, so it could not be sure to bring you back to this desktop afterwards — nothing was moved; ask the user to click into the window they are working in, or to show \(t.appName)'s window themselves")
+        }
         let base = VisitBase(sessionId: sessionId, callId: callId, targetId: t.id, pid: t.pid, windowID: t.windowID,
                              appName: t.appName, why: why, before: before, userWindow: userWindow,
                              userWindowID: userWindow.flatMap { ax.windowID($0) }, privatePath: privatePath,
@@ -254,12 +261,15 @@ extension CUCore {
             if !arrived, !again, clock.nowMs() - start >= visitArriveMs / 2 {
                 again = true
                 CULog.act.notice("visit \(v.id, privacy: .public): not on \(t.appName, privacy: .public)'s desktop yet — bringing the window forward once more")
+                noteGuardianCause(t.pid)  // a switch this causes late is still the agent's own
                 noteSyntheticActivation()
                 _ = sys.bringForward(pid: t.pid, windowID: t.windowID, window: element, makeMain: true)
             }
         }
         guard arrived else {
             CULog.act.error("visit \(v.id, privacy: .public): \(t.appName, privacy: .public)'s window never came on screen — nothing was done there")
+            // Its queued raise and activation (a busy app answers AX late) may still switch the desktop: a cause now.
+            noteGuardianCause(t.pid)
             let failure = CUError.unsupported("macOS did not show \(t.appName)'s desktop — nothing was done there")
             // Closed here — unless a close (a cancel, the script's end) claimed it meanwhile: that one, queued behind
             // this on the pid queue, brings the user back and reports it.
@@ -515,14 +525,29 @@ extension CUCore {
             CULog.act.notice("visit \(v.id, privacy: .public) to \(s.appName, privacy: .public)'s desktop (\(reason.rawValue, privacy: .public)): the user moved elsewhere during it — left there (\(ms, privacy: .public) ms, \(actions, privacy: .public) actions)")
             return report(ms, false, true, "the user moved somewhere else during the visit, so Winter left them there")
         }
-        var back = now == s.before
+        var back = now == s.before && userWindowBack(s)
         if !back, let user = s.before.front {
-            back = returnOnce(s, user: user, window: s.userWindow) == s.before
+            back = returnOnce(s, user: user, window: s.userWindow) == s.before && userWindowBack(s)
             if !back {
                 // Once more, the way the guardian restores (the app's focused window, the activation retried).
                 CULog.guardian.notice("visit \(v.id, privacy: .public): not back after the first return — trying once more")
-                back = returnOnce(s, user: user, window: s.userWindow) == s.before
+                back = returnOnce(s, user: user, window: s.userWindow) == s.before && userWindowBack(s)
             }
+        }
+        // A visit that never arrived: the target's raise and activation are AX calls a busy app answers late (each
+        // bounded only by the messaging timeout), so its switch can still land after the deadline — even after the
+        // user was put back. Watched for `visitLateSwitchMs`, and undone (at most twice) if it lands.
+        if reason == .neverArrived, let user = s.before.front {
+            let until = clock.nowMs() + visitLateSwitchMs
+            var undone = 0
+            while clock.nowMs() < until, undone < 2 {
+                usleep(40_000)
+                guard userView() != s.before else { continue }
+                undone += 1
+                CULog.act.notice("visit \(v.id, privacy: .public): the switch to \(s.appName, privacy: .public)'s desktop landed after the arrival deadline — bringing the user back")
+                back = returnOnce(s, user: user, window: s.userWindow) == s.before && userWindowBack(s)
+            }
+            back = userView() == s.before && userWindowBack(s)
         }
         // The guardian's view was never changed by the visit: if the user is not back, it still knows where they
         // belong, and the next activation or Space change puts them there.
@@ -558,8 +583,24 @@ extension CUCore {
         let sameDesktop = s.before.space == nil || sys.activeSpace() == s.before.space
         let cid = sameDesktop ? skyLight.disableUpdate() : nil
         defer { if let cid { skyLight.reenableUpdate(cid) } }
-        _ = sys.bringForward(pid: user, windowID: s.userWindowID ?? 0, window: window, makeMain: false)
+        // Made main again too (an AX write, never an event): when the user's app IS the target app, the visit made
+        // the target's window main, and the user's own window must be the one keys go to once they are back.
+        _ = sys.bringForward(pid: user, windowID: s.userWindowID ?? 0, window: window, makeMain: true)
         return restoreUserView(s.before, user: user, window: window)
+    }
+
+    /// The user's app's focused window is the one they were in (when it was recorded and can be read): back means
+    /// in THAT window, not merely in that app on that desktop (the user's app may be the target app).
+    func userWindowBack(_ s: VisitBase) -> Bool {
+        guard let want = s.userWindowID, let user = s.before.front,
+              let focused = ax.element(ax.application(user), kAXFocusedWindowAttribute), let id = ax.windowID(focused)
+        else { return true }
+        return id == want
+    }
+
+    /// `pid` has a real window that is not on screen (another desktop, full screen).
+    func appHasWindowsElsewhere(_ pid: pid_t) -> Bool {
+        sys.windows(pid: pid).contains { !$0.onScreen && CUWindowServer.isRealWindow($0) && sys.windowOnAnySpace($0.id) != false }
     }
 
     // MARK: errors
