@@ -89,6 +89,7 @@ public final class CUCore: @unchecked Sendable {
             focusWaitWebMs = 0
             focusWaitNativeMs = 0
             focusEnforcerFactory = { _ in CUNoopFocusEnforcer() }
+            privateCaptureOverride = { _, _ in nil }  // never the window server's capture from a unit test
             pressSettleMs = 0
             webPressWatchMs = 0
             menuSettleMs = 0

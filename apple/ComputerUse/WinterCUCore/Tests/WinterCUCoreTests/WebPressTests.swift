@@ -52,6 +52,17 @@ final class WebPressTests: XCTestCase {
                           isChromium: false, mirror: false, windowID: 77, windowTitle: "Doc")
         core.registerForTesting(target, windowElement: window)
         target.refs.beginGeneration()
+        let steady = Self.image(gray: 200)
+        core.privateCaptureOverride = { _, _ in steady }  // the element's pixels: unchanged unless a test says so
+    }
+
+    /// A small opaque image of one shade (a capture of the element's area).
+    static func image(gray: CGFloat, width: Int = 80, height: Int = 40) -> CGImage {
+        let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.setFillColor(red: gray / 255, green: gray / 255, blue: gray / 255, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return ctx.makeImage()!
     }
 
     private func token(_ e: AXUIElement) -> String { var p: pid_t = 0; AXUIElementGetPid(e, &p); return "\(p)" }
@@ -143,6 +154,51 @@ final class WebPressTests: XCTestCase {
         XCTAssertTrue(ax.performed.isEmpty)
         XCTAssertTrue(r.detail?.contains("the pointer rested on [\(ref(button))] \u{201C}Close\u{201D} for 50 ms") ?? false, r.detail ?? "")
         // Allowed under click-only access, like a click.
+    }
+
+    // MARK: a conservative fallback
+
+    func testAPressWhoseEffectOnlyShowsInPixelsIsNeverClickedAsWell() async throws {
+        world()
+        var shots = 0
+        let before = Self.image(gray: 200), after = Self.image(gray: 60)
+        core.privateCaptureOverride = { _, _ in shots += 1; return shots == 1 ? before : after }  // it redrew
+        let r = try await click(button)
+        XCTAssertEqual(mouseDowns, 0, "pressed once")
+        XCTAssertEqual(r.detail, "pressed [\(ref(button))] \u{201C}Close\u{201D} (the effect is visible but not to accessibility)")
+    }
+
+    func testNoCaptureToCompareMeansNoSecondAction() async throws {
+        world()
+        core.privateCaptureOverride = { _, _ in nil }  // no Screen Recording, say
+        let r = try await click(button)
+        XCTAssertEqual(mouseDowns, 0)
+        XCTAssertTrue(r.detail?.contains("had no effect accessibility can see — check state() or a screenshot before pressing again") ?? false, r.detail ?? "")
+    }
+
+    func testAToggleWhoseStateCantBeReadIsNeverPressedTwice() async throws {
+        world()
+        ax.put(button, [kAXRoleAttribute: kAXCheckBoxRole])  // a toggle, with no value to read
+        let r = try await click(button)
+        XCTAssertEqual(mouseDowns, 0)
+        XCTAssertTrue(r.detail?.contains("a second press could undo it") ?? false, r.detail ?? "")
+    }
+
+    func testAToggleWhoseStateReadsUnchangedMayBeClicked() async throws {
+        world()
+        ax.put(button, [kAXRoleAttribute: kAXCheckBoxRole, kAXValueAttribute: 0])
+        closesOn(press: false, mouse: true)
+        let r = try await click(button)
+        XCTAssertEqual(mouseDowns, 1, "provably unchanged: the click")
+        XCTAssertTrue(r.detail?.hasPrefix("the accessibility press did nothing; clicked it instead") ?? false, r.detail ?? "")
+    }
+
+    func testAWindowNotOnScreenGetsNoSecondActionUntilTheAppIsLearned() async throws {
+        world()
+        sys.windows[77]?.onScreen = false
+        let r = try await click(button)
+        XCTAssertEqual(mouseDowns, 0, "its pixels may be stale")
+        XCTAssertTrue(r.detail?.contains("had no effect accessibility can see") ?? false, r.detail ?? "")
     }
 
     func testEvidenceSeesTheElementGoneHiddenOrChanged() {

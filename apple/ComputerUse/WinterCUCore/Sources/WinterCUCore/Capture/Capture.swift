@@ -259,6 +259,36 @@ public enum CUImageTools {
         }
     }
 
+    /// Whether two captures of the same area differ beyond noise: both drawn at a common size (at most 128 px on
+    /// the long side), a pixel counts as changed when a channel moved by more than `channelTolerance`, and the
+    /// images differ when more than `fraction` of the pixels (and at least `minPixels`) changed. A caret's blink
+    /// in a large crop stays under it; a button that redraws does not.
+    public static func differs(_ a: CGImage, _ b: CGImage, channelTolerance: Int = 24, fraction: Double = 0.004,
+                               minPixels: Int = 6) -> Bool {
+        let longSide = Double(max(a.width, a.height, 1))
+        let scale = min(1, 128 / longSide)
+        let w = max(1, Int((Double(a.width) * scale).rounded())), h = max(1, Int((Double(a.height) * scale).rounded()))
+        func pixels(_ image: CGImage) -> [UInt8]? {
+            var out = [UInt8](repeating: 0, count: w * h * 4)
+            let ok = out.withUnsafeMutableBytes { raw -> Bool in
+                guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                          space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+                else { return false }
+                ctx.interpolationQuality = .low
+                ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+                return true
+            }
+            return ok ? out : nil
+        }
+        guard let pa = pixels(a), let pb = pixels(b) else { return true }  // can't compare: assume it changed (no repeat)
+        var changed = 0
+        for i in stride(from: 0, to: pa.count, by: 4) {
+            if abs(Int(pa[i]) - Int(pb[i])) > channelTolerance || abs(Int(pa[i + 1]) - Int(pb[i + 1])) > channelTolerance
+                || abs(Int(pa[i + 2]) - Int(pb[i + 2])) > channelTolerance { changed += 1 }
+        }
+        return changed >= minPixels && Double(changed) > fraction * Double(w * h)
+    }
+
     /// `image` redrawn at `width`×`height` pixels (sRGB, opaque, high-quality interpolation).
     public static func scaled(_ image: CGImage, width: Int, height: Int) -> CGImage? {
         guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
