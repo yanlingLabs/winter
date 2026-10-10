@@ -3,8 +3,8 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
-/// One desktop visit at a time, helper-wide: an async acquire (a capture awaits between the switch and the
-/// return), a synchronous release.
+/// One desktop visit at a time, helper-wide: an async acquire (taken when a visit opens), a synchronous release
+/// (when it closes).
 final class CUVisitGate: @unchecked Sendable {
     private let lock = NSLock()
     private var busy = false
@@ -37,21 +37,66 @@ final class CUVisitGate: @unchecked Sendable {
     }
 }
 
+/// The visit `visitArrive` made, so its caller can give back the gate it holds when the arrival throws.
+final class VisitBox: @unchecked Sendable { var visit: CUOpenVisit? }
+
 /// The background attempt of an act needs the window on screen, its window is on another desktop, and the
-/// request carries the user's say (`desktopVisit`): the act is done once more inside a visit. Internal — never
-/// on the wire.
+/// request carries the user's say (`desktopVisit`). Internal — never on the wire.
 struct CUVisitNeeded: Error {}
 
-/// A DESKTOP VISIT (user ruling 2026-10-10): when an act can't land, or a live picture can't be had, without
-/// taking the user to the window's desktop, and the user allowed it (the daemon's prompt — its own card and the
-/// helper's on-screen panel): the user's place is recorded (their desktop, their front app and its window), the
-/// window's desktop is brought forward, the window is waited for until it is on screen and has painted, EXACTLY
-/// the one primitive runs, and the user is brought back at once — under `SLSDisableUpdate`, verified, retried
-/// once, and said loudly when it failed. The guardian treats the switch and the return as the agent's own
-/// (neither undone nor adopted), so a failed return can still be put right; a user who moved somewhere of their
-/// own during it is left where they went. Nothing ever holds the user there past the primitive.
+/// An OPEN desktop visit: the user is on a window's desktop for a stretch of work. Its fields after `base` are
+/// guarded by `CUCore.visitLock`.
+final class CUOpenVisit: @unchecked Sendable {
+    let id: String
+    let base: CUCore.VisitBase
+    /// Where the visit took the user (the window's desktop), once it arrived.
+    var arrived: CUUserView?
+    /// Primitives running in it now (activity id → its `visitMaxMs`), and the call ids that ran in it.
+    var inFlight: [UUID: Int?] = [:]
+    var callIds: Set<String> = []
+    /// Every target that ran in it (their off-screen baselines are refreshed at the close).
+    var targets: [String: CUTarget] = [:]
+    var actions = 0
+    /// When the last primitive in it finished (the grace close counts from there).
+    var lastEndMs: Double = 0
+    var closing = false
+    /// The helper-wide gate this visit holds was given back (once, by whichever close ran).
+    var gateReleased = false
+    var graceWork: DispatchWorkItem?
+    var capWork: DispatchWorkItem?
+
+    init(id: String, base: CUCore.VisitBase) {
+        self.id = id
+        self.base = base
+    }
+}
+
+/// DESKTOP VISITS (user rulings 2026-10-10): when an act can't land, or a live picture can't be had, without taking
+/// the user to the window's desktop, and the user allowed it (the daemon's prompt — its card and the helper's
+/// panel), the user is taken there ONCE for the whole stretch of work that needs it and brought back right after the
+/// last of it — never back and forth between their view and the window's, never held there to the script's end.
+///
+/// - OPEN: the first primitive that needs the window's desktop records the user's place (their desktop, front app,
+///   and that app's window), brings the WINDOW forward (by id with the private path), waits for it on screen and
+///   painted, and leaves the visit open.
+/// - WHILE OPEN: every later primitive of that session on a window of the visited desktop runs there, with no
+///   further switch (a live shot of it is an on-screen capture) — reads and waits too, which keep it open. One that
+///   needs ANOTHER desktop — the user's own, or a third — closes the visit first (the user returned), then runs as
+///   ever: no prompt for the user's own desktop, a new visit (with `desktopVisit`) or `needs_desktop_visit` for a
+///   third. `needs_desktop_visit` is never answered while the session's visit is open.
+/// - CLOSE, at the first of: `visitCloseGraceMs` after the last primitive in it finished with none started since;
+///   the script's end, a cancel of a request in it, Esc, the session's end, `visit.close`; another desktop needed;
+///   the user moving by themselves (a hardware-attributed activation or Space change — then left there); the
+///   safety cap. The user is brought back under `SLSDisableUpdate`, verified, retried once, a fault logged when it
+///   failed; each closed visit is reported once (`visit.close`) and announced (`desktopVisited`).
+///
+/// The guardian treats the whole open visit as the agent's own: neither undone nor adopted.
 extension CUCore {
-    struct VisitState {
+    /// What a visit records when it opens.
+    struct VisitBase {
+        let sessionId: String
+        /// The request that opened it, when it had a call id.
+        let callId: String?
         let targetId: String
         let pid: pid_t
         let windowID: CGWindowID
@@ -67,57 +112,121 @@ extension CUCore {
         let privatePath: Bool
         let startedMs: Double
         let startedAt: TimeInterval
-        /// Where the visit took the user (the window's desktop), once it arrived.
-        var arrived: CUUserView?
     }
 
-    /// Whether `t` is being visited now (the per-act guard and `inForeground` read it).
-    func isVisiting(_ t: CUTarget) -> Bool { visitLock.withLock { visitingTargetId == t.id } }
+    enum VisitCloseReason: String {
+        case grace, scriptEnded = "script ended", cancelled, escape, sessionEnded = "session ended", requested,
+             otherDesktop = "another desktop needed", userMoved = "the user moved", cap = "safety cap", neverArrived = "never arrived"
+    }
+
+    // MARK: what is open
+
+    /// The open visit, if it belongs to `sessionId` (and is not closing).
+    func openVisit(of sessionId: String) -> CUOpenVisit? {
+        visitLock.withLock { openVisit.flatMap { $0.base.sessionId == sessionId && !$0.closing ? $0 : nil } }
+    }
+
+    /// `t`'s window is on the visited desktop now: on screen, with the visited desktop showing.
+    func onVisitedDesktop(_ v: CUOpenVisit, _ t: CUTarget) -> Bool {
+        guard t.sessionId == v.base.sessionId, sys.window(id: t.windowID)?.onScreen == true else { return false }
+        let there = visitLock.withLock { v.arrived?.space }
+        guard let there, let now = sys.activeSpace() else { return true }
+        return now == there
+    }
+
+    /// Whether `t` runs inside its session's open visit now (the per-act guard and `inForeground` read it).
+    func isVisiting(_ t: CUTarget) -> Bool {
+        guard let v = openVisit(of: t.sessionId) else { return false }
+        return onVisitedDesktop(v, t)
+    }
 
     /// When the visit in progress began, or nil when there is none.
-    func visitStart() -> TimeInterval? { visitLock.withLock { visitingTargetId == nil ? nil : visitStartedAt } }
+    func visitStart() -> TimeInterval? { visitLock.withLock { openVisit?.base.startedAt } }
 
-    /// Hardware input after `start`: the listen-only tap's last hardware event, or the HID state.
-    func hardwareInputSince(_ start: TimeInterval, now: TimeInterval) -> Bool {
-        let last = guardianLock.withLock { lastHardwareInputAt }
-        if last >= 0, last > start { return true }
-        return secondsSinceUserInput < max(0, now - start)
-    }
-
-    /// During a visit, the guardian's "user input" is only input that came AFTER the visit began (the click on the
-    /// panel's "Switch now" a moment before must never make the visit's own switch the user's). Nil: no visit.
+    /// During a visit, the guardian's "user input" is only a HARDWARE ACTION — a click, a key, a scroll, a gesture
+    /// from no process (`eventSourceUnixProcessID` 0) and not the helper's stamp; a pointer move alone never counts
+    /// — that came after the visit began AND after the agent's own latest cause (the click on the panel's "Switch
+    /// now" a moment before, or the helper's own rung-4 events, must never make the visit's switch the user's).
+    /// Never the HID idle state, which counts synthetic events too. Nil: no visit.
     func visitInput(now: TimeInterval) -> Bool? {
         guard let start = visitStart() else { return nil }
-        return hardwareInputSince(start, now: now)
+        let (action, cause) = guardianLock.withLock { (lastHardwareActionAt, guardianLastCause) }
+        return action >= 0 && action > max(start, cause)
     }
 
-    // MARK: there
+    /// The guardian saw the user move by themselves during the visit (a hardware-attributed activation or Space
+    /// change): the visit closes now, leaving them where they went.
+    func noteVisitUserMove() {
+        // Only once the visit has arrived (its own switch there is not the user's doing).
+        guard let v = visitLock.withLock({ openVisit.flatMap { $0.arrived != nil && !$0.closing ? $0 : nil } }) else { return }
+        Task { [weak self] in _ = await self?.closeVisit(v, reason: .userMoved) }
+    }
 
-    /// Takes the user to `t`'s desktop and waits until its window is on screen and has painted. Runs on the
-    /// target's pid queue. If the window never comes on screen, the user is brought back and it throws.
-    ///
-    /// The WINDOW is brought forward, not merely its app: activating an app that has other windows on the user's
-    /// desktop activates it right here and never switches Spaces, and a capture-only window has no element to
-    /// raise. So with the private path on, the window goes to the front BY ID (the window server then switches to
-    /// its Space) and is made key, its element raised as well when there is one; with it off, the app is activated
-    /// and the element raised — and a window with no element can't be reached at all (typed, nothing moved).
-    func visitArrive(_ t: CUTarget, why: CUError.DesktopVisitWhy, privatePath: Bool) throws -> VisitState {
+    /// How long a visit mode lasts for a primitive's deadline (`visitMaxMs`), clamped to 10…330 s. Pure.
+    static func visitModeSeconds(maxMs: Int?) -> TimeInterval {
+        Double(min(max(maxMs ?? 10_000, 10_000), 330_000)) / 1000
+    }
+
+    // MARK: open
+
+    /// Opens a visit to `t`'s desktop (one at a time, helper-wide): the user's place recorded, the window brought
+    /// forward and waited for on screen and painted. Refused before anything moves when the window can't be reached
+    /// or the user's front app can't be read; a window that never comes on screen brings the user back and throws.
+    func openDesktopVisit(_ t: CUTarget, why: CUError.DesktopVisitWhy, privatePath: Bool, sessionId: String,
+                          callId: String?, maxMs: Int?) async throws -> CUOpenVisit {
+        await visitGate.acquire()
+        let made = VisitBox()
+        do {
+            let v = try await queues.run(t.pid) { [self] in try visitArrive(t, why: why, privatePath: privatePath, sessionId: sessionId,
+                                                                            callId: callId, maxMs: maxMs, made: made) }
+            rearmVisitTimers(v)
+            return v
+        } catch {
+            // Refused before anything moved (no visit made): the gate back now. A visit made and then closed (never
+            // arrived, or a close claimed it) gives its gate back with that close.
+            if let v = made.visit { releaseVisitGate(v) } else { visitGate.release() }
+            throw error
+        }
+    }
+
+    /// The way there (on `t`'s pid queue). The WINDOW is brought forward, not merely its app: activating an app
+    /// that has other windows on the user's desktop activates it right here and never switches Spaces, and a
+    /// capture-only window has no element to raise. So with the private path on, the window goes to the front BY ID
+    /// (the window server then switches to its Space) and is made key, its element raised as well when there is one;
+    /// with it off, the app is activated and the element raised — and a window with no element can't be reached at
+    /// all (typed, nothing moved).
+    func visitArrive(_ t: CUTarget, why: CUError.DesktopVisitWhy, privatePath: Bool, sessionId: String, callId: String?,
+                     maxMs: Int?, made: VisitBox) throws -> CUOpenVisit {
         let element = t.accessible ? (try? windowElement(t)) : nil
         guard privatePath || element != nil else {
             CULog.act.notice("visit (\(why.rawValue, privacy: .public)): \(t.appName, privacy: .public)'s window has no element and the private path is off — not reachable, nothing moved")
             throw CUError.unsupported("\(t.appName)'s window can't be brought forward on its desktop with the private event path off (Settings → Computer Use) — nothing was moved")
         }
         let before = userView()
-        let userWindow = before.front.flatMap { ax.element(ax.application($0), kAXFocusedWindowAttribute) }
-        var s = VisitState(targetId: t.id, pid: t.pid, windowID: t.windowID, appName: t.appName, why: why, before: before,
-                           userWindow: userWindow, userWindowID: userWindow.flatMap { ax.windowID($0) }, privatePath: privatePath,
-                           startedMs: clock.nowMs(), startedAt: clock.nowSeconds())
-        visitLock.withLock {
-            visitingTargetId = t.id
-            visitStartedAt = s.startedAt
+        // Where to bring the user back: without their front app, nowhere — so they are not taken anywhere.
+        guard before.front != nil else {
+            CULog.act.notice("visit (\(why.rawValue, privacy: .public)): the user's front app can't be read — not visited, nothing moved")
+            throw CUError.refused(.frontUnknown, "Winter can't tell which app you are in, so it could not bring you back — nothing was moved")
         }
-        guardianLock.withLock { guardianCore.beginVisit(app: t.pid, now: s.startedAt) }
-        CULog.act.notice("visit (\(why.rawValue, privacy: .public)): taking the user to \(t.appName, privacy: .public)'s desktop for window \(t.windowID, privacy: .public)")
+        let userWindow = before.front.flatMap { ax.element(ax.application($0), kAXFocusedWindowAttribute) }
+        let base = VisitBase(sessionId: sessionId, callId: callId, targetId: t.id, pid: t.pid, windowID: t.windowID,
+                             appName: t.appName, why: why, before: before, userWindow: userWindow,
+                             userWindowID: userWindow.flatMap { ax.windowID($0) }, privatePath: privatePath,
+                             startedMs: clock.nowMs(), startedAt: clock.nowSeconds())
+        let v: CUOpenVisit = visitLock.withLock {
+            visitSeq += 1
+            let v = CUOpenVisit(id: "v\(visitSeq)", base: base)
+            v.targets[t.id] = t
+            openVisit = v
+            return v
+        }
+        made.visit = v
+        guardianLock.withLock {
+            guardianCore.beginVisit(app: t.pid, now: base.startedAt, maxSeconds: max(Self.visitModeSeconds(maxMs: maxMs), visitCapMs / 1000))
+        }
+        // The switch is the agent's own cause: only input after it can be the user's.
+        noteGuardianCause(t.pid)
+        CULog.act.notice("visit \(v.id, privacy: .public) (\(why.rawValue, privacy: .public)): taking the user to \(t.appName, privacy: .public)'s desktop for window \(t.windowID, privacy: .public)")
         noteSyntheticActivation()
         let byId = privatePath && sys.frontWindow(pid: t.pid, windowID: t.windowID)
         if let element { try? ax.perform(element, kAXRaiseAction) }
@@ -138,15 +247,25 @@ extension CUCore {
             arrived = arrivedNow()
         }
         guard arrived else {
-            let report = visitReturn(s, t)
-            CULog.act.error("visit: \(t.appName, privacy: .public)'s window never came on screen — nothing was done there")
-            throw Self.withVisit(CUError.unsupported("macOS did not show \(t.appName)'s desktop — nothing was done there"),
-                                 report, app: t.appName)
+            CULog.act.error("visit \(v.id, privacy: .public): \(t.appName, privacy: .public)'s window never came on screen — nothing was done there")
+            let failure = CUError.unsupported("macOS did not show \(t.appName)'s desktop — nothing was done there")
+            // Closed here — unless a close (a cancel, the script's end) claimed it meanwhile: that one, queued behind
+            // this on the pid queue, brings the user back and reports it.
+            let mine: Bool = visitLock.withLock {
+                guard !v.closing else { return false }
+                v.closing = true
+                return true
+            }
+            guard mine else { throw failure }
+            let report = finishVisit(v, reason: .neverArrived)
+            recordClosed(v, report)
+            throw Self.withVisit(failure, report, app: t.appName)
         }
-        s.arrived = userView()
+        let there = userView()
+        visitLock.withLock { v.arrived = there }
         let painted = waitForFreshFrame(t)
-        CULog.act.debug("visit: \(t.appName, privacy: .public) on screen after \(Int(self.clock.nowMs() - s.startedMs), privacy: .public) ms (\(painted, privacy: .public))")
-        return s
+        CULog.act.debug("visit \(v.id, privacy: .public): \(t.appName, privacy: .public) on screen after \(Int(self.clock.nowMs() - base.startedMs), privacy: .public) ms (\(painted, privacy: .public))")
+        return v
     }
 
     /// The window is on screen: wait for a picture it painted THERE, bounded — a repaint landed (the picture
@@ -192,61 +311,219 @@ extension CUCore {
         return Int(bitPattern: UInt(truncatingIfNeeded: h))
     }
 
-    // MARK: back
+    // MARK: work in it
 
-    /// Brings the user back to where they were before the visit, AS SOON AS POSSIBLE, and verifies it — unless
-    /// they moved somewhere of their own during it (hardware input, and they are now neither on the window's
-    /// desktop nor back where they were): then they are left there. Never throws; runs on the pid queue.
-    func visitReturn(_ s: VisitState, _ t: CUTarget) -> CUVisitReport {
-        defer {
-            visitLock.withLock { if visitingTargetId == s.targetId { visitingTargetId = nil; visitStartedAt = -1 } }
-            // Shown on its desktop and repainted there: the next off-screen picture's freshness is unknown again.
-            t.forgetOffScreenShot()
+    /// A primitive starts running in the visit: the grace close is off while it runs, and the cap extends to its
+    /// own deadline. Nil when the visit is closing (the caller runs outside it).
+    func beginVisitActivity(_ v: CUOpenVisit, _ t: CUTarget, callId: String?, maxMs: Int?) -> UUID? {
+        let id = UUID()
+        let ok: Bool = visitLock.withLock {
+            guard openVisit === v, !v.closing else { return false }
+            v.inFlight[id] = maxMs
+            if let callId { v.callIds.insert(callId) }
+            v.targets[t.id] = t
+            v.actions += 1
+            v.graceWork?.cancel()
+            v.graceWork = nil
+            return true
+        }
+        guard ok else { return nil }
+        rearmVisitTimers(v)
+        return id
+    }
+
+    /// It finished: with nothing else running, the visit closes `visitGraceMs` from now unless another starts.
+    func endVisitActivity(_ v: CUOpenVisit, _ id: UUID?) {
+        guard let id else { return }
+        let now = clock.nowMs()
+        visitLock.withLock {
+            _ = v.inFlight.removeValue(forKey: id)
+            v.lastEndMs = now
+        }
+        rearmVisitTimers(v)
+    }
+
+    /// The grace close (nothing running) and the safety cap, re-armed after every start and end; the guardian's
+    /// visit mode follows the cap.
+    func rearmVisitTimers(_ v: CUOpenVisit) {
+        let plan: (grace: Bool, capMs: Double)? = visitLock.withLock {
+            guard openVisit === v, !v.closing else { return nil }
+            v.capWork?.cancel()
+            let longest = v.inFlight.values.compactMap { $0 }.max().map(Double.init) ?? 0
+            return (v.inFlight.isEmpty, v.inFlight.isEmpty ? visitCapMs : max(visitCapMs, longest))
+        }
+        guard let plan else { return }
+        let cap = visitSchedule(plan.capMs) { [weak self] in
+            Task { _ = await self?.closeVisit(v, reason: .cap) }
+        }
+        var grace: DispatchWorkItem?
+        if plan.grace {
+            grace = visitSchedule(visitGraceMs) { [weak self] in
+                Task { _ = await self?.closeVisit(v, reason: .grace) }
+            }
+        }
+        visitLock.withLock {
+            v.capWork = cap
+            if let grace { v.graceWork?.cancel(); v.graceWork = grace }
+        }
+        let until = clock.nowSeconds() + plan.capMs / 1000
+        guardianLock.withLock { guardianCore.extendVisit(until: until) }
+    }
+
+    /// Runs `body` as a primitive of `t` inside its session's open visit when `t`'s window is on the visited desktop
+    /// (it keeps the visit open meanwhile); else as it is. Returns whether it ran inside.
+    func inOpenVisit<T>(_ t: CUTarget, callId: String?, maxMs: Int? = nil, _ body: () async throws -> T) async throws -> (T, Bool) {
+        guard let v = openVisit(of: t.sessionId), onVisitedDesktop(v, t), let id = beginVisitActivity(v, t, callId: callId, maxMs: maxMs) else {
+            return (try await body(), false)
+        }
+        defer { endVisitActivity(v, id) }
+        do { return (try await body(), true) } catch { throw Self.markedInVisit(error) }
+    }
+
+    // MARK: close
+
+    /// Closes the session's open visit (if any), returning the user. True when one was closed.
+    @discardableResult
+    func closeVisit(of sessionId: String, reason: VisitCloseReason) async -> Bool {
+        guard let v = openVisit(of: sessionId) else { return false }
+        return await closeVisit(v, reason: reason) != nil
+    }
+
+    /// Closes every open visit (Esc).
+    public func closeAllVisits() async {
+        guard let v = visitLock.withLock({ openVisit }) else { return }
+        _ = await closeVisit(v, reason: .escape)
+    }
+
+    /// Closes `v` once (any later call is nil): the return, run on the visited target's pid queue (after a primitive
+    /// still running there), the baselines refreshed, the report kept for `visit.close` and announced. A grace close
+    /// that a new primitive overtook does nothing.
+    func closeVisit(_ v: CUOpenVisit, reason: VisitCloseReason) async -> CUVisitReport? {
+        let claimed: Bool = visitLock.withLock {
+            guard openVisit === v, !v.closing else { return false }
+            // A grace close a newer primitive overtook (running, or finished less than the grace ago) does nothing.
+            if reason == .grace, !v.inFlight.isEmpty || clock.nowMs() - v.lastEndMs < visitGraceMs - 50 { return false }
+            v.closing = true
+            v.graceWork?.cancel()
+            v.capWork?.cancel()
+            return true
+        }
+        guard claimed else { return nil }
+        let report: CUVisitReport
+        if let r = try? await queues.run(v.base.pid, { [self] in finishVisit(v, reason: reason) }) {
+            report = r
+        } else {
+            report = finishVisit(v, reason: reason)
+        }
+        recordClosed(v, report)
+        releaseVisitGate(v)
+        return report
+    }
+
+    /// Gives back the helper-wide gate `v` holds — once.
+    func releaseVisitGate(_ v: CUOpenVisit) {
+        let first: Bool = visitLock.withLock {
+            guard !v.gateReleased else { return false }
+            v.gateReleased = true
+            return true
+        }
+        if first { visitGate.release() }
+    }
+
+    /// The visit is over: `openVisit` cleared, its report kept (bounded) for `visit.close`, and announced.
+    func recordClosed(_ v: CUOpenVisit, _ report: CUVisitReport) {
+        visitLock.withLock {
+            if openVisit === v { openVisit = nil }
+            var list = closedVisits[v.base.sessionId] ?? []
+            list.append(report)
+            if list.count > 32 { list.removeFirst(list.count - 32) }
+            closedVisits[v.base.sessionId] = list
+        }
+        let event = CUDesktopVisitEvent(sessionId: v.base.sessionId, callId: v.base.callId, report: report)
+        emit { $0.desktopVisited(event) }
+    }
+
+    /// `visit.close`: the session's open visit closed (the user returned), and every closed, unclaimed report of the
+    /// session — each exactly once.
+    public func visitClose(_ p: VisitCloseParams) async throws -> VisitCloseResult {
+        await closeVisit(of: p.sessionId, reason: .requested)
+        let reports = visitLock.withLock { closedVisits.removeValue(forKey: p.sessionId) ?? [] }
+        return VisitCloseResult(visits: reports)
+    }
+
+    /// The session is gone: its open visit closed, its unclaimed reports dropped.
+    func endSessionVisits(_ sessionId: String) async {
+        await closeVisit(of: sessionId, reason: .sessionEnded)
+        visitLock.withLock { _ = closedVisits.removeValue(forKey: sessionId) }
+    }
+
+    /// A cancel for a request that ran in the open visit closes it.
+    func cancelVisit(callId: String) {
+        guard let v = visitLock.withLock({ openVisit.flatMap { $0.callIds.contains(callId) ? $0 : nil } }) else { return }
+        Task { [weak self] in _ = await self?.closeVisit(v, reason: .cancelled) }
+    }
+
+    /// The return (on the visited target's pid queue): the user brought back AS SOON AS POSSIBLE and verified —
+    /// unless they moved somewhere of their own during it (the guardian saw a hardware-attributed activation or
+    /// Space change, and they are now neither on the window's desktop nor back where they were): then they are
+    /// left there. A visit that never arrived always brings them back. Then, the user already back (their time
+    /// away never lengthened), the off-screen baselines of the windows that ran in it are refreshed.
+    func finishVisit(_ v: CUOpenVisit, reason: VisitCloseReason) -> CUVisitReport {
+        let s = v.base
+        let (arrived, actions, targets) = visitLock.withLock { (v.arrived, v.actions, Array(v.targets.values)) }
+        let report = { (ms: Int, returned: Bool, userMoved: Bool?, detail: String?) in
+            CUVisitReport(visitId: v.id, targetId: s.targetId, app: s.appName, why: s.why.rawValue, actions: actions, ms: ms,
+                          returned: returned, userMoved: userMoved, detail: detail)
         }
         let now = userView()
-        let sawInput = guardianLock.withLock { guardianCore.visitSawUserInput }
-            || hardwareInputSince(s.startedAt, now: clock.nowSeconds())
-        if sawInput, now != s.before, s.arrived == nil || now != s.arrived {
-            // The user went somewhere of their own during the visit: theirs, never fought.
+        let sawUserMove = guardianLock.withLock { guardianCore.visitSawUserInput }
+        if let arrived, sawUserMove, now != s.before, now != arrived {
+            // Theirs, never fought.
             guardianLock.withLock {
                 guardianCore.endVisit()
                 guardianCore.adoptUserView(CUGuardedView(app: now.front, space: now.space))
             }
             let ms = Int(clock.nowMs() - s.startedMs)
-            CULog.act.notice("visit (\(s.why.rawValue, privacy: .public)) to \(s.appName, privacy: .public)'s desktop: the user moved elsewhere during it — left there (\(ms, privacy: .public) ms)")
-            return CUVisitReport(ms: ms, returned: false, userMoved: true,
-                                 detail: "the user moved somewhere else during the visit, so Winter left them there")
+            CULog.act.notice("visit \(v.id, privacy: .public) to \(s.appName, privacy: .public)'s desktop (\(reason.rawValue, privacy: .public)): the user moved elsewhere during it — left there (\(ms, privacy: .public) ms, \(actions, privacy: .public) actions)")
+            return report(ms, false, true, "the user moved somewhere else during the visit, so Winter left them there")
         }
         var back = now == s.before
         if !back, let user = s.before.front {
             back = returnOnce(s, user: user, window: s.userWindow) == s.before
             if !back {
                 // Once more, the way the guardian restores (the app's focused window, the activation retried).
-                CULog.guardian.notice("visit: not back after the first return — trying once more")
-                back = returnOnce(s, user: user, window: nil) == s.before
+                CULog.guardian.notice("visit \(v.id, privacy: .public): not back after the first return — trying once more")
+                back = returnOnce(s, user: user, window: s.userWindow) == s.before
             }
-        } else if !back {
-            // No front app to bring back (unreadable before): back when the desktop is.
-            back = s.before.space == nil || userView().space == s.before.space
         }
         // The guardian's view was never changed by the visit: if the user is not back, it still knows where they
         // belong, and the next activation or Space change puts them there.
         guardianLock.withLock { _ = guardianCore.endVisit() }
         let ms = Int(clock.nowMs() - s.startedMs)
         if back {
-            CULog.act.notice("visit (\(s.why.rawValue, privacy: .public)) to \(s.appName, privacy: .public)'s desktop: \(ms, privacy: .public) ms, the user is back")
+            CULog.act.notice("visit \(v.id, privacy: .public) (\(s.why.rawValue, privacy: .public)) to \(s.appName, privacy: .public)'s desktop closed (\(reason.rawValue, privacy: .public)): \(ms, privacy: .public) ms, \(actions, privacy: .public) actions, the user is back")
+            for t in targets { refreshOffScreenBaseline(t) }
         } else {
-            CULog.act.fault("visit (\(s.why.rawValue, privacy: .public)) to \(s.appName, privacy: .public)'s desktop: \(ms, privacy: .public) ms, the user could NOT be brought back (space \(s.before.space.map(String.init) ?? "?", privacy: .public), front \(s.before.front.map(String.init) ?? "?", privacy: .public))")
+            CULog.act.fault("visit \(v.id, privacy: .public) (\(s.why.rawValue, privacy: .public)) to \(s.appName, privacy: .public)'s desktop closed (\(reason.rawValue, privacy: .public)): \(ms, privacy: .public) ms, the user could NOT be brought back (space \(s.before.space.map(String.init) ?? "?", privacy: .public), front \(s.before.front.map(String.init) ?? "?", privacy: .public))")
         }
-        return CUVisitReport(ms: ms, returned: back, detail: back ? nil
-            : "Winter could not bring the user back from \(s.appName)'s desktop — they may still be there")
+        return report(ms, back, nil, back ? nil : "Winter could not bring the user back from \(s.appName)'s desktop — they may still be there")
+    }
+
+    /// The window's off-screen picture taken again the way its last off-screen or live shot was (region and budget)
+    /// and recorded as the baseline (`noteOffScreenShot`): a later live shot is then served without a visit when the
+    /// window server's copy changed since (the app draws there), and visits again when it did not. Kept as it was
+    /// when the picture can't be taken.
+    func refreshOffScreenBaseline(_ t: CUTarget) {
+        guard t.privatePath, let last = t.lastStill, sys.window(id: t.windowID)?.onScreen == false,
+              let still = try? offScreenStill(t, last.region, last.budget) else { return }
+        _ = t.noteOffScreenShot(digest: Self.contentDigest(still.jpeg), at: clock.nowMs())
     }
 
     /// One return attempt under `SLSDisableUpdate` (the switch back is not drawn as a flash): with the private path,
     /// the user's recorded window brought to the front BY ID (their app may have windows on several Spaces); then the
     /// recorded window raised and the user's app re-activated, retried within the restore deadline. Returns the view
     /// it ends on.
-    private func returnOnce(_ s: VisitState, user: pid_t, window: AXUIElement?) -> CUUserView {
+    private func returnOnce(_ s: VisitBase, user: pid_t, window: AXUIElement?) -> CUUserView {
         noteSyntheticActivation()
         let cid = skyLight.disableUpdate()
         defer { if let cid { skyLight.reenableUpdate(cid) } }
@@ -254,33 +531,16 @@ extension CUCore {
         return restoreUserView(s.before, user: user, window: window)
     }
 
-    // MARK: scoped
+    // MARK: errors
 
-    /// Runs `body` — exactly ONE primitive — inside a visit to `t`'s desktop (on its pid queue). The user is
-    /// brought back on every exit path; a failure carries the visit in its `data.visit`.
-    func inDesktopVisit<T>(_ t: CUTarget, why: CUError.DesktopVisitWhy, privatePath: Bool, token: CUCancellation.Token?,
-                           _ body: () throws -> T) throws -> (T, CUVisitReport) {
-        let s = try visitArrive(t, why: why, privatePath: privatePath)
-        let result: Result<T, Error>
-        do {
-            try token?.check()
-            result = .success(try body())
-        } catch {
-            result = .failure(error)
-        }
-        let report = visitReturn(s, t)
-        switch result {
-        case .success(let value): return (value, report)
-        case .failure(let error): throw Self.withVisit(error, report, app: t.appName)
-        }
-    }
-
-    /// A failure after (or during) a visit, carrying the visit (`data.visit`) — and saying so when the user could
-    /// not be brought back.
+    /// A failure that closed a visit (a window that never came on screen), carrying the visit (`data.visit`) — and
+    /// saying so when the user could not be brought back. A failure that is not a `CUError` (a Swift cancellation)
+    /// becomes the `cancelled` one, so the visit still rides it.
     static func withVisit(_ error: Error, _ r: CUVisitReport, app: String) -> Error {
-        guard var e = error as? CUError else { return error }
+        var e = asCUError(error)
         var data = e.data ?? [:]
-        var v: [String: CUJSON] = ["ms": .int(r.ms), "returned": .bool(r.returned)]
+        var v: [String: CUJSON] = ["visitId": .string(r.visitId), "actions": .int(r.actions), "ms": .int(r.ms),
+                                   "returned": .bool(r.returned)]
         if r.userMoved == true { v["userMoved"] = .bool(true) }
         if let d = r.detail { v["detail"] = .string(d) }
         data["visit"] = .object(v)
@@ -291,9 +551,30 @@ extension CUCore {
         return e
     }
 
+    /// A failure of a primitive that ran inside a visit: `data.inVisit` (a Swift cancellation becomes `cancelled`).
+    static func markedInVisit(_ error: Error) -> Error {
+        if error is CUVisitNeeded { return error }
+        var e = asCUError(error)
+        var data = e.data ?? [:]
+        data["inVisit"] = .bool(true)
+        e.data = data
+        return e
+    }
+
+    static func asCUError(_ error: Error) -> CUError {
+        if let c = error as? CUError { return c }
+        if error is CancellationError { return .cancelled }
+        return CUError.unsupported("the helper failed (\(type(of: error)))")
+    }
+
     /// The helper errors a visit could get past, when the window is on another desktop: the foreground it needs,
     /// a window it can't reach from here, or the foreground rung finding it elsewhere.
     static func visitCouldHelp(_ e: CUError) -> Bool {
         ["needs_foreground", "window_elsewhere", "needs_desktop_visit"].contains(e.code)
+    }
+
+    /// The act needs its window's desktop (with the user's say, or without it).
+    static func needsItsDesktop(_ error: Error) -> Bool {
+        error is CUVisitNeeded || (error as? CUError)?.code == "needs_desktop_visit"
     }
 }

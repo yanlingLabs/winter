@@ -189,4 +189,6 @@ public enum CUFloorReason: String, Codable, Sendable {
     case wrongFieldShape = "wrong_field_shape"
     /// Typing stopped: the focus left the field it was typing into (the rest would have landed elsewhere).
     case focusMoved = "focus_moved"
+    /// A desktop visit was not made: the app the user is in can't be read, so they could not be brought back.
+    case frontUnknown = "front_unknown"
 }

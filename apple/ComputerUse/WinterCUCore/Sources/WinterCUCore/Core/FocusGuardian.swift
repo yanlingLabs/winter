@@ -89,12 +89,19 @@ public struct CUFocusGuardianCore: Sendable {
     /// A visit is in progress at `now` (begun, not ended, within its safety deadline).
     public func visiting(now: TimeInterval) -> Bool { visitApp != nil && now <= visitUntil }
 
-    /// The user agreed to be taken to `app`'s desktop for one primitive: until `endVisit` (or the deadline), its
-    /// activation and the Space changes are the visit's own.
-    public mutating func beginVisit(app: pid_t, now: TimeInterval) {
+    /// The user agreed to be taken to `app`'s desktop for one primitive: until `endVisit` (or the deadline —
+    /// `maxSeconds`, the primitive's own, else `visitMaxSeconds`), its activation and the Space changes are the
+    /// visit's own.
+    public mutating func beginVisit(app: pid_t, now: TimeInterval, maxSeconds: TimeInterval = visitMaxSeconds) {
         visitApp = app
-        visitUntil = now + Self.visitMaxSeconds
+        visitUntil = now + maxSeconds
         visitSawUserInput = false
+    }
+
+    /// The open visit runs on: its visit mode lasts until `until` (the safety cap, re-armed as work starts and ends).
+    public mutating func extendVisit(until: TimeInterval) {
+        guard visitApp != nil else { return }
+        visitUntil = until
     }
 
     /// The visit is over: returns whether user input was seen during it (the caller decides, by where the user

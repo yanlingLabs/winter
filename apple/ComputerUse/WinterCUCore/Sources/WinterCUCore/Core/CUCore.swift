@@ -479,9 +479,24 @@ public final class CUCore: @unchecked Sendable {
     // brought back right after. One at a time, helper-wide.
     let visitGate = CUVisitGate()
     let visitLock = NSLock()
-    /// The target being visited now, and when the visit began (the guardian and the per-act guard read them).
-    var visitingTargetId: String?
-    var visitStartedAt: TimeInterval = -1
+    /// The ONE open visit (helper-wide), the closed visits each session has not claimed yet (`visit.close`), and
+    /// the visit ids' counter. Guarded by `visitLock`.
+    var openVisit: CUOpenVisit?
+    var closedVisits: [String: [CUVisitReport]] = [:]
+    var visitSeq = 0
+    /// An open visit closes this long after the last primitive that ran in it finished, with none started since.
+    static let visitCloseGraceMs: Double = 1000
+    /// The guardian's safety cap on an open visit with nothing running in it (one running extends it to at least its
+    /// own `visitMaxMs`).
+    static let visitIdleCapMs: Double = 60_000
+    var visitGraceMs: Double = CUCore.visitCloseGraceMs
+    var visitCapMs: Double = CUCore.visitIdleCapMs
+    /// Schedules a visit's grace close or cap; tests may run their own.
+    var visitSchedule: (Double, @escaping @Sendable () -> Void) -> DispatchWorkItem = { ms, work in
+        let item = DispatchWorkItem(block: work)
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + ms / 1000, execute: item)
+        return item
+    }
     /// How long a visit waits for the window to come on screen, how long at most for a fresh frame, how long an
     /// unchanged picture must stay so to count as painted, how often it is sampled, and how long it waits when no
     /// frame can be sampled. 0 in test cores (one look each, no waiting).
@@ -509,6 +524,9 @@ public final class CUCore: @unchecked Sendable {
     var guardianGestureMonitor: Any?
     /// The last hardware-origin input event (any type, trackpad gestures included) the listen-only tap saw.
     var lastHardwareInputAt: TimeInterval = -1
+    /// The same, for a hardware ACTION only (a click, a key, a scroll, a gesture — never a pointer move): what a
+    /// desktop visit counts as the user acting during it.
+    var lastHardwareActionAt: TimeInterval = -1
     /// Schedules the end of the guard's tail; tests run it by hand.
     var guardianTailSchedule: (TimeInterval, @escaping () -> Void) -> DispatchWorkItem? = { seconds, work in
         let item = DispatchWorkItem(block: work)
@@ -717,6 +735,12 @@ public final class CUCore: @unchecked Sendable {
     // MARK: - observation
 
     public func targetSnapshot(_ p: TargetSnapshotParams) async throws -> TargetSnapshotResult {
+        // A window on the session's visited desktop is read there, keeping the visit open.
+        let t = try target(p.targetId)
+        return try await inOpenVisit(t, callId: p.callId) { try await targetSnapshotBody(p) }.0
+    }
+
+    private func targetSnapshotBody(_ p: TargetSnapshotParams) async throws -> TargetSnapshotResult {
         try requireAccessibility()
         let t = try target(p.targetId)
         try ensureAlive(t)
@@ -821,6 +845,12 @@ public final class CUCore: @unchecked Sendable {
     }
 
     public func targetFind(_ p: TargetFindParams) async throws -> TargetFindResult {
+        // A window on the session's visited desktop is read there, keeping the visit open.
+        let t = try target(p.targetId)
+        return try await inOpenVisit(t, callId: nil) { try await targetFindBody(p) }.0
+    }
+
+    private func targetFindBody(_ p: TargetFindParams) async throws -> TargetFindResult {
         try requireAccessibility()
         let t = try target(p.targetId)
         try ensureAlive(t)
@@ -890,6 +920,15 @@ public final class CUCore: @unchecked Sendable {
     public func targetScreenshot(_ p: TargetScreenshotParams) async throws -> TargetScreenshotResult {
         let t = try target(p.targetId)
         try ensureAlive(t)
+        // A window on the session's visited desktop is captured there, keeping the visit open (a live shot of it is an
+        // on-screen capture).
+        let ran = try await inOpenVisit(t, callId: p.callId, maxMs: p.visitMaxMs) { try await screenshot(p, t) }
+        var r = ran.0
+        if ran.1 { r.inVisit = true }
+        return r
+    }
+
+    private func screenshot(_ p: TargetScreenshotParams, _ t: CUTarget) async throws -> TargetScreenshotResult {
         let region = try cuRect(p.region)
         let token = cancels.begin(p.callId)
         defer { cancels.end(p.callId) }
@@ -912,8 +951,14 @@ public final class CUCore: @unchecked Sendable {
         var privateTried = false
         // LIVE (the model needs what is on screen now) of a window on ANOTHER DESKTOP: the window server's picture
         // first, kept when it is known live; else a brief visit to its desktop, only with the user's say.
-        if p.live == true, sys.window(id: t.windowID)?.onScreen == false,
-           try await queues.run(t.pid, { [self] in isOffThisDesktop(t) }) {
+        // An off-screen or live shot's region and budget: a visit's return takes the window's next baseline picture
+        // the same way (`refreshOffScreenBaseline`).
+        if p.live == true || sys.window(id: t.windowID)?.onScreen == false { t.lastStill = (region, p.budget) }
+        let offDesktop = { [self] () async throws -> Bool in
+            guard sys.window(id: t.windowID)?.onScreen == false else { return false }
+            return try await queues.run(t.pid) { [self] in isOffThisDesktop(t) }
+        }
+        if p.live == true, try await offDesktop() {
             if t.privatePath, let shot = try await offScreenShot(t, region, p.budget) {
                 privateTried = true
                 let note = try await offScreenNote(t, shot)
@@ -922,13 +967,32 @@ public final class CUCore: @unchecked Sendable {
                     return try await screenshotResult(t, shot, settled: settled, waited: waited, detail: note)
                 }
             }
-            guard p.desktopVisit == true else {
-                CULog.act.notice("live screenshot of \(t.appName, privacy: .public): its picture there is not known live — needs the user's say for a desktop visit")
-                throw CUError.needsDesktopVisit(t.appName, why: .live)
+            // It needs its window's desktop: never asked for (nor answered) while the session sits on another one —
+            // closed first, and the window may be where the user is now (then the ordinary capture below).
+            let closed = await closeVisit(of: t.sessionId, reason: .otherDesktop)
+            let stillElsewhere = try await offDesktop()
+            if !closed || stillElsewhere {
+                guard p.desktopVisit == true else {
+                    CULog.act.notice("live screenshot of \(t.appName, privacy: .public): its picture there is not known live — needs the user's say for a desktop visit")
+                    throw CUError.needsDesktopVisit(t.appName, why: .live)
+                }
+                try token.check()
+                let v = try await openDesktopVisit(t, why: .live, privatePath: t.privatePath, sessionId: t.sessionId,
+                                                   callId: p.callId, maxMs: p.visitMaxMs)
+                let id = beginVisitActivity(v, t, callId: p.callId, maxMs: p.visitMaxMs)
+                defer { endVisitActivity(v, id) }
+                do {
+                    try token.check()
+                    let img = try await captureWindow(t.windowID, region, p.budget)
+                    var r = try await screenshotResult(t, img, settled: settled, waited: waited,
+                                                       detail: "captured \(t.appName)'s window on its own desktop, just now (live)")
+                    r.inVisit = true
+                    return r
+                } catch {
+                    throw Self.markedInVisit(error)
+                }
             }
-            let (img, visit) = try await liveShotInVisit(t, region, p.budget, token)
-            let said = "captured \(t.appName)'s window on its own desktop, just now (live)"
-            return try await screenshotResult(t, img, settled: settled, waited: waited, detail: said, visit: visit)
+            privateTried = false
         }
         // Not on screen (another Space, full screen elsewhere, minimized, hidden): ScreenCaptureKit refuses such
         // a window or returns nothing, so the private path goes straight to the window server's own image of it
@@ -966,40 +1030,15 @@ public final class CUCore: @unchecked Sendable {
     }
 
     /// A window picture registered as the target's latest shot (a click's point maps onto it), as the result.
-    func screenshotResult(_ t: CUTarget, _ img: CUCapturedImage, settled: Bool, waited: Int, detail: String?,
-                          visit: CUVisitReport? = nil) async throws -> TargetScreenshotResult {
+    func screenshotResult(_ t: CUTarget, _ img: CUCapturedImage, settled: Bool, waited: Int, detail: String?) async throws
+        -> TargetScreenshotResult {
         let shot = try await queues.run(t.pid) {
             t.registerShot(anchor: .window(windowID: t.windowID, regionOrigin: img.pointsRect.origin),
                            imageWidth: img.width, imageHeight: img.height, points: img.pointsRect.size)
         }
         return TargetScreenshotResult(imageBase64: img.jpeg.base64EncodedString(), mime: "image/jpeg", width: img.width,
                                       height: img.height, shotId: shot.id, settled: settled, waitedMs: waited,
-                                      pointsWidth: img.pointsRect.width, pointsHeight: img.pointsRect.height, detail: detail,
-                                      visit: visit)
-    }
-
-    /// A LIVE picture of a window on another desktop, inside a visit (the user allowed it): there, on screen and
-    /// painted, captured, and the user brought back — on every exit path. One visit at a time, helper-wide.
-    func liveShotInVisit(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget,
-                         _ token: CUCancellation.Token) async throws -> (CUCapturedImage, CUVisitReport) {
-        await visitGate.acquire()
-        defer { visitGate.release() }
-        try token.check()
-        let state = try await queues.run(t.pid) { [self] in try visitArrive(t, why: .live, privatePath: t.privatePath) }
-        let captured: Result<CUCapturedImage, Error>
-        do {
-            try token.check()
-            captured = .success(try await captureWindow(t.windowID, region, budget))
-        } catch {
-            captured = .failure(error)
-        }
-        // Back at once, whatever happened — the pid queue never throws for the return.
-        let report = (try? await queues.run(t.pid) { [self] in visitReturn(state, t) })
-            ?? visitReturn(state, t)
-        switch captured {
-        case .success(let img): return (img, report)
-        case .failure(let error): throw Self.withVisit(error, report, app: t.appName)
-        }
+                                      pointsWidth: img.pointsRect.width, pointsHeight: img.pointsRect.height, detail: detail)
     }
 
     /// Window capture; replaceable by tests (nothing there may touch ScreenCaptureKit).
@@ -1024,6 +1063,11 @@ public final class CUCore: @unchecked Sendable {
     /// drawing there), cropped to `region` and fitted to the budget like a ScreenCaptureKit capture. Nil when
     /// there is none, or it is blank (a window macOS has not drawn).
     func offScreenShot(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget) async throws -> CUCapturedImage? {
+        try offScreenStill(t, region, budget)
+    }
+
+    /// `offScreenShot`, synchronously (a visit's return takes one on the pid queue).
+    func offScreenStill(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget) throws -> CUCapturedImage? {
         guard let frame = sys.window(id: t.windowID)?.frame else { throw CUError.targetLost("the window is gone", reason: lostReason(t)) }
         let area = try CUCapturer.windowArea(region: region, windowSize: frame.size)
         guard let image = try privateWindowImage(t.windowID, globalRect: area.offsetBy(dx: frame.minX, dy: frame.minY)) else {
@@ -1089,6 +1133,12 @@ public final class CUCore: @unchecked Sendable {
     // MARK: - waits
 
     public func targetWaitIdle(_ p: TargetWaitIdleParams) async throws -> TargetWaitIdleResult {
+        // A window on the session's visited desktop is read there, keeping the visit open.
+        let t = try target(p.targetId)
+        return try await inOpenVisit(t, callId: p.callId) { try await targetWaitIdleBody(p) }.0
+    }
+
+    private func targetWaitIdleBody(_ p: TargetWaitIdleParams) async throws -> TargetWaitIdleResult {
         let t = try target(p.targetId)
         try ensureAlive(t)
         let token = cancels.begin(p.callId)
@@ -1102,6 +1152,12 @@ public final class CUCore: @unchecked Sendable {
     }
 
     public func targetWaitFor(_ p: TargetWaitForParams) async throws -> TargetWaitForResult {
+        // A window on the session's visited desktop is read there, keeping the visit open.
+        let t = try target(p.targetId)
+        return try await inOpenVisit(t, callId: p.callId) { try await targetWaitForBody(p) }.0
+    }
+
+    private func targetWaitForBody(_ p: TargetWaitForParams) async throws -> TargetWaitForResult {
         try requireAccessibility()
         let t = try target(p.targetId)
         try ensureAlive(t)
@@ -1238,6 +1294,8 @@ public final class CUCore: @unchecked Sendable {
 
     public func cancel(_ p: CancelParams) async throws -> CancelResult {
         cancels.cancel(p.callId)
+        // A request that ran in the open visit was cancelled: the visit closes (the user returned).
+        cancelVisit(callId: p.callId)
         return CancelResult()
     }
 
@@ -1248,6 +1306,7 @@ public final class CUCore: @unchecked Sendable {
 
     public func sessionEnded(_ p: SessionEndedParams) async throws -> SessionEndedResult {
         flushPendingRestore()
+        await endSessionVisits(p.sessionId)
         let ids: [String] = {
             lock.lock(); defer { lock.unlock() }
             return targets.values.filter { $0.sessionId == p.sessionId }.map(\.id)
