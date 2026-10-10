@@ -195,7 +195,9 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 
 - `snapshot`: `text` is the window's accessibility state with numbered refs. With `since` (a previous
   `snapshotId` of the same scope) and not `full`, the answer is a diff when at most half of it changed
-  (`isDiff: true`). `within` scopes it to one ref. `settle` first waits for 150 ms of quiet, up to `maxMs`.
+  (`isDiff: true`). A diff also prints, as `+ <line> — now shown, in [p] …`, what the state shows now that the
+  `since` print had folded or left out of view (a scroll, a fold that opened), and a change to an element that print
+  never showed carries the element's line and context. `within` scopes it to one ref. `settle` first waits for 150 ms of quiet, up to `maxMs`.
   A window with no accessibility answers a one-paragraph `text` instead. A state is folded to 300 lines (`full`:
   everything the read saw — the read stops at 2,500 elements — held to 2,500 lines and 48 KB, a long list keeping its
   head with its tail folded, and, past either cap, a last line saying where it was cut), folded parts showing
@@ -280,8 +282,10 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   says so.
 - A keyboard focus blip holds the window key a moment after its last key (the app takes queued keys then). In
   every focus blip, and before a window-targeted click in the background (not a Chromium app, a window on this
-  desktop), the bound window is made its app's KEY window (posted to the app alone: nothing raised or activated, the
-  user's key focus unchanged), so keys, a menu command and a first click reach that window.
+  desktop), the bound window is made its app's KEY window when it is not (posted to the app alone: nothing raised or
+  activated, the user's key focus unchanged), so keys, a menu command and a first click reach that window — never while
+  the app shows a menu, popover or sheet, never when another of its panels or dialogs holds the keys, never for a click
+  that lands on another of its windows, and stopped if the app comes to the front meanwhile.
 - `menu` walks the app's menu bar; when that has no `path[0]` and the bound window's page has its own menu bar
   (an `AXMenuBar` in its web area) that does, each level is opened with a window-targeted click and verified by
   the menu it shows, and the last item clicked and verified by its menu closing (`detail` says which). A page menu
@@ -310,7 +314,7 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 | `select` | `ref`, `text`, `before?`, `after?`, `caret?: "start"\|"end"` |
 | `action` | `ref`, `name` (an accessibility action) |
 | `menu` | `path: [string]` |
-| `hover` | `ref` or `point` (+ `shotId`), `ms?` (0–5000, default 600): the pointer rests there — window-targeted moves, never the user's cursor (with `click_only` access too); over a WebKit page that then shows nothing new, `detail` says so (such a page takes no hover from a synthetic pointer) |
+| `hover` | `ref` or `point` (+ `shotId`), `ms?` (0–5000, default 600): the pointer rests there — window-targeted moves, never the user's cursor (with `click_only` access too); over a WebKit page that then shows nothing new, `detail` says so (such a page takes no hover from a synthetic pointer; a page too big to count claims nothing) |
 
 A `point` is in image pixels of `shotId` (a screenshot of this target or of the screen), or of the target's
 latest screenshot when `shotId` is absent. An unknown `kind` is `invalid_params`.
@@ -704,4 +708,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.8.0 | Additive — app adapters: `target.scriptingCommands` (§4.7: the bound app's dictionary commands, structured, with event codes, enumerators and `bundleVersion`; hidden, refused and JavaScript commands left out; a dynamic dictionary left unread); `target.bind` results carry `app.path` and `app.version`; AppleScript refuses the Chromium family's `execute … javascript` (`CrSu/ExJa`) everywhere and, per run, every JavaScript door the bound app's dictionary declares, and its source check refuses any `javascript:` URL literal; the live-test-only `test.automation` (§9). The daemon still requires ≥ 1.7.0 and uses `scriptingCommands` only from a helper ≥ 1.8.0 (its version at `hello`). |
 | 1 | 1.9.0 | No wire change: the bundle carries `winter-browser-host` (`Contents/MacOS`), the native-messaging host behind Winter for Chrome — its own protocol is [`WinterBrowserHost/PROTOCOL.md`](WinterBrowserHost/PROTOCOL.md). |
 | 1 | 1.9.1 | No wire change — the live gate's fixes: a web page's state is never one folded line (WebKit's `AXDisclosing = 0` on every element no longer reads as collapsed; `full` has its own hard cap and says where it cut; a page's content folds last); a desktop visit raises the window's element and makes its app frontmost over accessibility (the by-id front and the key-window records are gone: they never switched desktops on macOS 26 and reached the user's window as a click), finds a capture-only window's element at the visit, refuses before anything moves when it can't get there, and returns the same way; the guardian counts only input a person makes (the window server's own events at an activation or a desktop change made a delayed self-activation "the user's switch"). |
-| 1 | 1.9.2 | No wire change — the live gate's second round: a window in a full-screen transition (listed, on no Space for a moment) is not a closed one; an explicit `full` state is held to 48 KB as well; a desktop visit that switched late is undone, returns to the user's own window (made main), and is refused before anything moves when the user's window can't be told; in every focus blip and before a background window-targeted click the bound window is made its app's key window (after a blip's hand-back an app held no key window and later blips left it so: keys went nowhere, Edit › Paste stayed disabled, a first click only made the window key); a page menu WebKit keeps alive after closing counts as closed; a hover over a WebKit page that shows nothing new says so. |
+| 1 | 1.9.2 | No wire change — the live gate's second round: a window in a full-screen transition (listed, on no Space for a moment) is not a closed one; an explicit `full` state is held to 48 KB as well; a desktop visit that switched late is undone, returns to the user's own window (made main), and is refused before anything moves when the user's window can't be told; in every focus blip and before a background window-targeted click the bound window is made its app's key window (after a blip's hand-back an app held no key window and later blips left it so: keys went nowhere, Edit › Paste stayed disabled, a first click only made the window key); a page menu WebKit keeps alive after closing counts as closed; a hover over a WebKit page that shows nothing new says so. Its review: the key-window step only when the window is not key (an app's focused element tells; a blip's hand-back is remembered as none), never over a menu, popover, sheet or a panel holding the keys, never for a click landing on another window, Chromium excluded (measured), the front re-read before it acts; a visit's late-switch watch undoes only the target's own switch and never fights a window the user changed; the window-gone watch suspends under the call's cancel, coalesced per pid; a diff surfaces what its folded base never showed. |
