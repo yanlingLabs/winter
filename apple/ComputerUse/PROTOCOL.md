@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.7.0` (the contents of [`VERSION`](VERSION))
+Helper version: `1.9.0` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
