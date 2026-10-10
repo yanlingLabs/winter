@@ -207,16 +207,32 @@ public struct CUSkyLight: @unchecked Sendable {
         return a == 0 && b == 0
     }
 
+    /// Where the make-key records say the "click" is, in global points AND in window points: far outside every screen
+    /// and every window, so no view is hit — and FINITE. yabai fills these 16 bytes with 0xFF (NaN), but an app that
+    /// converts an event's `locationInWindow` to `Int` in a `sendEvent` override or an event monitor traps on NaN
+    /// (Swift's `Int(Double.nan)`): measured on 2026-10-10, a probe app doing that crashed on the 0xFF records and
+    /// took these unharmed, with the same key-window switch (and no view mouseDown).
+    static let makeKeyLocation = CGPoint(x: -32_000, y: -32_000)
+
     /// yabai's make-key-window records: a synthesized left mouse down and up (event types 1 and 2) for the window,
-    /// flagged 0x10 at 0x3A, with an invalid location (0xFF bytes at 0x20–0x2F) so no view under it is hit. The
-    /// app makes the window its key window — what a click on it does, without the click.
+    /// with the command modifier (0x10 at 0x3A — flags 0x100000; a ⌘-click is the one that leaves a background
+    /// window where it is), at `makeKeyLocation` (doubles: the record's location at 0x10, its window location at
+    /// 0x20). The app makes the window its key window — what a click on it does, without the click.
     static func makeKeyRecords(windowID: UInt32) -> [[UInt8]] {
         [UInt8(0x01), UInt8(0x02)].map { type in
             var buf = [UInt8](repeating: 0, count: 0xF8)
             buf[0x04] = 0xF8
             buf[0x08] = type
             buf[0x3A] = 0x10
-            for i in 0x20..<0x30 { buf[i] = 0xFF }
+            func put(_ v: CGFloat, at offset: Int) {
+                withUnsafeBytes(of: Double(v).bitPattern.littleEndian) { bytes in
+                    for (i, b) in bytes.enumerated() { buf[offset + i] = b }
+                }
+            }
+            for base in [0x10, 0x20] {
+                put(makeKeyLocation.x, at: base)
+                put(makeKeyLocation.y, at: base + 8)
+            }
             withUnsafeBytes(of: windowID.littleEndian) { bytes in
                 for (i, b) in bytes.enumerated() { buf[0x3C + i] = b }
             }
