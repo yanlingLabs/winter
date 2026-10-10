@@ -188,7 +188,7 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 | Method | Params | Result |
 | --- | --- | --- |
 | `target.snapshot` | `{targetId, since?, full?, within?, settle?: {maxMs}, callId?}` | `{snapshotId, text, isDiff, changedRatio, settled, waitedMs}` |
-| `target.find` | `{targetId, query}` | `{elements: [{ref, role, name?, value?, states?}]}` |
+| `target.find` | `{targetId, query}` | `{elements: [{ref, role, name?, value?, states?}], page?, note?}` |
 | `target.screenshot` | `{targetId, region?, budget, settle?: {maxMs}, callId?}` | `{imageBase64, mime: "image/jpeg", width, height, shotId, settled, waitedMs, pointsWidth?, pointsHeight?, detail?}` |
 | `screen.screenshot` | `{display?, displayId?, excludeBundleIds: [string], budget}` | `{imageBase64, mime: "image/jpeg", width, height, shotId, detail?}` |
 | `screen.appAt` | `{shotId, point}` | `{app, bundleId, windowId}` |
@@ -197,7 +197,13 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   `snapshotId` of the same scope) and not `full`, the answer is a diff when at most half of it changed
   (`isDiff: true`). `within` scopes it to one ref. `settle` first waits for 150 ms of quiet, up to `maxMs`.
   A window with no accessibility answers a one-paragraph `text` instead.
-- `find`: `query` is a string or `{role?, name?, text?}`. A window with no accessibility answers `[]`.
+- `find`: `query` is a string or `{role?, name?, text?}`. A window with no accessibility answers `[]`. `page` is
+  the window's page number (as the state header says it); `note` says when the page changed since the last
+  whole-window `snapshot`, or the read was cut short.
+- A `snapshot`'s header ends with `page N` (the window's page, numbered: it goes up when the page's URL — an
+  in-page `#fragment` aside — or, with none, its title changes; absent when it shows no web page), `state N`
+  (the snapshot's number), and, when the read stopped at its budget, `read cut short: at least N elements not
+  read (the "more" markers show where)`.
 - `budget`: `{maxLongEdge, tile?, maxTiles?, quality}` (JPEG quality 0…1). `region` is in window points.
   `pointsWidth`/`pointsHeight` are the captured area in window points (a click's point is in image pixels).
 - `screen.screenshot`: `display` is an index into the active displays (0 = main) or `"all"`; `displayId`

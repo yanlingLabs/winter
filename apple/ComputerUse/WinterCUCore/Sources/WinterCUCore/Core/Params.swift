@@ -260,8 +260,14 @@ public struct CUElementSummary: Codable, Sendable, Equatable {
 }
 public struct TargetFindResult: Codable, Sendable, Equatable {
     public var elements: [CUElementSummary]
-    public init(elements: [CUElementSummary]) {
+    /// The window's page number (as state() headers say it); nil when it shows no web page.
+    public var page: Int?
+    /// The page changed since the last state(), or the read was cut short: said.
+    public var note: String?
+    public init(elements: [CUElementSummary], page: Int? = nil, note: String? = nil) {
         self.elements = elements
+        self.page = page
+        self.note = note
     }
 }
 

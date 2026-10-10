@@ -522,6 +522,15 @@ describe("ComputerV2: screenshots, points and the vision gate", () => {
     expect(r.content.filter((c) => c.type === "image")).toHaveLength(2);
   }, 30_000);
 
+  macOnly("find() says when the page changed since the last state()", async () => {
+    const w = world();
+    const note = "the page changed since your last state() (page 2 now; that state was page 1) — refs from before it are gone";
+    w.fake.handlers["target.find"] = () => ({ elements: [{ ref: 31, role: "link", name: "Next" }], page: 2, note });
+    const r = await w.run("const notes = await apps.open('Notes')\nconst found = await notes.find('Next', { emit: false })\nprint(found.length)");
+    expect(r.isError).toBe(false);
+    expect(text(r)).toContain(note);
+  }, 30_000);
+
   macOnly("a display shot that shows Winter's own window says where it is: a picture of an app inside it is the mirror", async () => {
     const w = world();
     const note = "Winter's own window is in this picture at [200, 100, 800, 600] (image pixels): an app shown inside it is Winter's live mirror of that app, not the app itself — act on the app through its handle, never by points inside Winter's window";

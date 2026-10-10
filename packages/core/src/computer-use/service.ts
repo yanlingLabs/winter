@@ -731,6 +731,10 @@ export class ComputerV2Service {
     } else throw bad("find() takes text, or { role, name, text }");
     const res = await this.helperCall<FindResult>(ctx, "target.find", { targetId: t.targetId, query }, metric);
     ctx.builder.markScreenRead();
+    // The page changed since the last state(), or the read was cut short: the helper's fixed words, said even
+    // with emit:false (a model reading only the value would miss it).
+    const note = helperDetail(res.note, 400);
+    if (note !== undefined) ctx.builder.daemonLine(note);
     if (args.emit !== false) {
       ctx.builder.text(res.elements.length === 0 ? `(nothing in ${t.name} matches)` : res.elements.map(elementLine).join("\n"), { screen: true });
     }

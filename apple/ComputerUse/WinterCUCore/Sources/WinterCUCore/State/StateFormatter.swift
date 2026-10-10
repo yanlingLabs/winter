@@ -24,15 +24,24 @@ public struct CUStateHeader: Sendable, Equatable {
     public var caret: String?
     /// What the focus is when it is not an element of the tree shown (a web page's hidden input, another window).
     public var focusText: String?
+    /// The page this state is of (its number in this window: it goes up when the page changes) and the state's own
+    /// number — refs from an earlier page are gone. Nil when the window shows no web page / for a diff base.
+    public var page: Int?
+    public var stateNumber: Int?
+    /// The read stopped at its budget (nodes or time): at least this many elements were not read.
+    public var unread: Int?
 
     public init(appName: String, windowTitle: String?, focusedRef: Int?, settle: CUSettleNote?,
-                caret: String? = nil, focusText: String? = nil) {
+                caret: String? = nil, focusText: String? = nil, page: Int? = nil, stateNumber: Int? = nil, unread: Int? = nil) {
         self.appName = appName
         self.windowTitle = windowTitle
         self.focusedRef = focusedRef
         self.settle = settle
         self.caret = caret
         self.focusText = focusText
+        self.page = page
+        self.stateNumber = stateNumber
+        self.unread = unread
     }
 }
 
@@ -68,6 +77,11 @@ public struct CUStateFormatter: Sendable {
         }
         // No focus the app reports: nothing said here — a keyboard act that needs one says so (`focus_unknown`).
         if let s = h.settle { parts.append(s.text) }
+        if let p = h.page { parts.append("page \(p)") }
+        if let n = h.stateNumber { parts.append("state \(n)") }
+        if let u = h.unread, u > 0 {
+            parts.append("read cut short: at least \(u.formatted(.number.grouping(.automatic).locale(Locale(identifier: "en_US")))) elements not read (the \"more\" markers show where)")
+        }
         return parts.isEmpty ? h.appName : "\(h.appName) — " + parts.joined(separator: " · ")
     }
 

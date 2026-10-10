@@ -91,6 +91,15 @@ final class CUTarget: @unchecked Sendable {
     /// The page (web area URL, window title) read after the last act, and when: the next act's "before".
     /// Pid-queue only.
     var pageAfterLastAct: (atMs: Double, page: CUCore.PageSignature?)?
+    /// The page numbering (`CUCore.pageNumber`): the page last numbered and its number. Pid-queue only.
+    private var numberedPage: (sig: CUCore.PageSignature, number: Int)?
+    func numberPage(isNew: (CUCore.PageSignature?) -> Bool, sig: CUCore.PageSignature) -> Int {
+        if isNew(numberedPage?.sig) { numberedPage = (sig, (numberedPage?.number ?? 0) + 1) }
+        return numberedPage!.number
+    }
+    /// The page number the last whole-window state() showed. Pid-queue only.
+    var pageNumberAtState: Int?
+
     /// The page when the last whole-window state was read: a `within` ref gone since then is "the page changed"
     /// only when this differs. Pid-queue only.
     var pageAtSnapshot: CUCore.PageSignature?

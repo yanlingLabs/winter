@@ -47,6 +47,13 @@ final class StateFormatterTests: XCTestCase {
                                 includeWindow: false), "Notes — focused [3] · settled 80 ms")
     }
 
+    func testTheHeaderNumbersThePageAndTheStateAndSaysAReadCutShort() {
+        XCTAssertEqual(f.header(CUStateHeader(appName: "Safari", windowTitle: "Doc", focusedRef: 4, settle: .settled(ms: 80),
+                                              page: 3, stateNumber: 12, unread: 1240)),
+                       "Safari — window \"Doc\" · focused [4] · settled 80 ms · page 3 · state 12 · read cut short: at least 1,240 elements not read (the \"more\" markers show where)")
+        XCTAssertEqual(f.header(CUStateHeader(appName: "Notes", windowTitle: nil, focusedRef: nil, settle: nil, stateNumber: 2)), "Notes — state 2")
+    }
+
     func testTheHeaderSaysWhereTypedTextGoes() {
         XCTAssertEqual(f.header(CUStateHeader(appName: "Notes", windowTitle: nil, focusedRef: 14, settle: .settled(ms: 80), caret: "caret 12/40")),
                        "Notes — focused [14] · caret 12/40 · settled 80 ms")

@@ -131,7 +131,13 @@ export interface TargetBindResult {
 }
 export interface TargetUseWindowResult { window: { id: number; title: string; frame: Rect }; detail?: string }
 export interface SnapshotResult { snapshotId: string; text: string; isDiff: boolean; changedRatio: number; settled: boolean; waitedMs: number }
-export interface FindResult { elements: Array<{ ref: number; role: string; name?: string; value?: string; states?: string[] }> }
+export interface FindResult {
+  elements: Array<{ ref: number; role: string; name?: string; value?: string; states?: string[] }>;
+  /** The window's page number, as state() headers say it (helper 1.6.0+). */
+  page?: number;
+  /** The page changed since the last state(), or the read was cut short (helper 1.6.0+). */
+  note?: string;
+}
 export interface ScreenshotBudget { maxLongEdge: number; tile?: number; maxTiles?: number; quality: number }
 export interface ScreenshotResult {
   imageBase64: string; mime: "image/jpeg"; width: number; height: number; shotId: string; settled?: boolean; waitedMs?: number;

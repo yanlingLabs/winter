@@ -728,9 +728,13 @@ public final class CUCore: @unchecked Sendable {
             // header names the window's page, not that one.
             var elsewhere: String?
             if let within, let e = try? element(within, in: t) { elsewhere = notShowingNote(e, ref: within, t) }
+            let sid = t.nextSnapshotId()
+            let page = pageNumber(t, pageSignature(t))
+            if within == nil { t.pageNumberAtState = page }
             let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note,
-                                       caret: obs.caret, focusText: obs.focusText)
-            let snap = CUSnapshot(id: t.nextSnapshotId(), scope: within, header: header, roots: obs.roots, formatter: formatter)
+                                       caret: obs.caret, focusText: obs.focusText, page: page,
+                                       stateNumber: Int(sid.components(separatedBy: ".s").last ?? ""), unread: obs.unread)
+            let snap = CUSnapshot(id: sid, scope: within, header: header, roots: obs.roots, formatter: formatter)
             // A whole-window, non-full state folds what is out of view first; `within` and `full` don't.
             var text = formatter.full(header: header, roots: obs.roots, viewportFirst: within == nil && p.full != true)
             var isDiff = false
@@ -789,8 +793,24 @@ public final class CUCore: @unchecked Sendable {
         let formatter = self.formatter
         return try await queues.run(t.pid) { [self] in
             try floorCheckPrivacy(t)
-            let roots = try freshRead(t) ?? observe(t, within: nil).roots
-            return TargetFindResult(elements: CUFinder.find(p.query, in: roots, formatter: formatter))
+            var unread: Int?
+            let roots: [CUNode]
+            if let fresh = freshRead(t) { roots = fresh } else {
+                let obs = try observe(t, within: nil)
+                roots = obs.roots
+                unread = obs.unread
+            }
+            // What the matches are of: a page other than the last state()'s, or a read cut short, is said.
+            var notes: [String] = []
+            let page = pageNumber(t, pageSignature(t))
+            if let page, let seen = t.pageNumberAtState, page != seen {
+                notes.append("the page changed since your last state() (page \(page) now; that state was page \(seen)) — refs from before it are gone")
+            }
+            if let unread, unread > 0 {
+                notes.append("the read was cut short (at least \(unread) elements not read), so matches past it are missing — state({ within }) reads a part")
+            }
+            return TargetFindResult(elements: CUFinder.find(p.query, in: roots, formatter: formatter), page: page,
+                                    note: notes.isEmpty ? nil : notes.joined(separator: "; "))
         }
     }
 
@@ -1453,6 +1473,8 @@ public final class CUCore: @unchecked Sendable {
         var title: String
         var caret: String? = nil
         var focusText: String? = nil
+        /// The read stopped at its budget: at least this many elements not read.
+        var unread: Int? = nil
     }
 
     /// Reads the bound window (plus open app menus), or the subtree at `within`.
@@ -1505,7 +1527,21 @@ public final class CUCore: @unchecked Sendable {
             focusText = "focus in another of \(t.appName)'s windows — click the field first, or pass { into }"
         }
         let title = AX.string(win, kAXTitleAttribute) ?? t.windowTitle
-        return Observation(roots: roots, focusedRef: focusedRef, title: title, caret: caret, focusText: focusText)
+        let unread = result.truncated ? roots.reduce(0) { $0 + Self.unreadCount($1) } : nil
+        return Observation(roots: roots, focusedRef: focusedRef, title: title, caret: caret, focusText: focusText,
+                           unread: unread.map { max(1, $0) })
+    }
+
+    /// The children a read saw but did not read, over the whole tree.
+    static func unreadCount(_ n: CUNode) -> Int {
+        n.unreadChildren + n.children.reduce(0) { $0 + unreadCount($1) }
+    }
+
+    /// The window's page number: it goes up when the page (its URL, or with none its title) is another than the
+    /// one last numbered. Nil when the window shows no web page.
+    func pageNumber(_ t: CUTarget, _ sig: PageSignature?) -> Int? {
+        guard let sig else { return nil }
+        return t.numberPage(isNew: { last in last.map { !Self.isSamePage($0, sig) } ?? true }, sig: sig)
     }
 
     /// Actions the app listed but refused and `action()` has no pointer equivalent for: state stops listing

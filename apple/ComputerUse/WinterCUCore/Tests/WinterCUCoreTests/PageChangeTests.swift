@@ -129,6 +129,20 @@ final class PageChangeTests: XCTestCase {
         XCTAssertNil(core.notShowingNote(link, ref: 3, target), "the page the window shows: nothing to say")
     }
 
+    func testPagesAreNumberedAndAFindOnANewerPageSaysSo() async throws {
+        world()
+        XCTAssertEqual(core.pageNumber(target, core.pageSignature(target)), 1)
+        XCTAssertEqual(core.pageNumber(target, core.pageSignature(target)), 1, "the same page keeps its number")
+        target.pageNumberAtState = 1
+        ax.put(web, ["AXURL": URL(string: "https://example.test/one#faq")! as CFURL])
+        XCTAssertEqual(core.pageNumber(target, core.pageSignature(target)), 1, "an anchor jump is the same page")
+        ax.put(web, ["AXURL": URL(string: "https://example.test/two")! as CFURL])
+        target.lastFullRead = ([], CUSystemClock().nowMs() + 1)  // the read find() answers from
+        let r = try await core.targetFind(TargetFindParams(targetId: "t1", query: .text("Next")))
+        XCTAssertEqual(r.page, 2)
+        XCTAssertEqual(r.note, "the page changed since your last state() (page 2 now; that state was page 1) — refs from before it are gone")
+    }
+
     func testAnActThatLeavesThePageSaysNothingEvenIfTheTitleTicks() async throws {
         world()
         ax.onPerform = { [unowned self] _ in ax.put(window, [kAXTitleAttribute: "(1) Page One"]) }  // an unread count
