@@ -119,5 +119,25 @@ export function rows(result: string | null, fields: number): string[][] {
   return out;
 }
 
+/**
+ * A result as AppleScript DISPLAYS it — what `target.applescript` answers, a string in quotes with `"` and `\` escaped
+ * (and tab / line feed / return as `\t` `\n` `\r` when the user's AppleScript preference escapes them) — back to the
+ * string itself. Any other value (a number, a boolean, a list, a date) is returned as displayed. A string the helper
+ * cut at its 64,000-byte cap has no closing quote: what arrived is decoded.
+ */
+export function appleScriptText(display: string | null): string | null {
+  if (display === null || !display.startsWith("\"")) return display;
+  let out = "";
+  for (let i = 1; i < display.length; i++) {
+    const c = display[i]!;
+    if (c === "\"") return out;
+    if (c !== "\\") { out += c; continue; }
+    const n = display[++i];
+    if (n === undefined) break;
+    out += n === "t" ? "\t" : n === "n" ? "\n" : n === "r" ? "\r" : n;
+  }
+  return out;
+}
+
 /** AppleScript's `true`/`false` as text. */
 export const yes = (s: string | undefined): boolean => s?.trim().toLowerCase() === "true";

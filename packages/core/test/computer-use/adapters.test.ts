@@ -14,6 +14,7 @@ import { AdapterDelivery } from "../../src/computer-use/adapters/delivery";
 import {
   asNumber, asString, buildDictSource, camelName, checkRef, DICT_LISTING_CAP, dictListing, generateDict, parseDictType,
 } from "../../src/computer-use/adapters/dict";
+import { appleScriptText } from "../../src/computer-use/adapters/apps/common";
 import { mountFor, parseMounts, trashDialogReason, trashRefusal } from "../../src/computer-use/adapters/apps/finder";
 import { noteHtml } from "../../src/computer-use/adapters/apps/notes";
 import { CHROMIUM_BUNDLE_IDS } from "../../src/computer-use/adapters/apps/chromium";
@@ -33,6 +34,23 @@ const noop = async (): Promise<unknown> => undefined;
 const extra = (over: Partial<ExtraDef> = {}): ExtraDef => ({ name: "go", access: "view", signature: "go(): Promise<void>", summary: "does it", run: noop, ...over });
 
 // ── the table ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+describe("an AppleScript result as the helper answers it (its display form)", () => {
+  test("a string comes back as the string itself; any other value as displayed; a cut string is decoded", () => {
+    // OSAScript.executeAndReturnDisplayValue's real answer for "TEXT:" & "a\"b" & tab & "c" & linefeed & "d\\e" & return & "f é 🎉".
+    expect(appleScriptText("\"TEXT:a\\\"b\tc\nd\\\\e\rf é 🎉\"")).toBe("TEXT:a\"b\tc\nd\\e\rf é 🎉");
+    // The user's "escape tabs and line breaks" preference: the escaped forms decode the same.
+    expect(appleScriptText("\"a\\tb\\nc\\rd\"")).toBe("a\tb\nc\rd");
+    // A literal backslash before a t stays one (it is always escaped itself).
+    expect(appleScriptText("\"C:\\\\temp\"")).toBe("C:\\temp");
+    expect(appleScriptText("\"\"")).toBe("");
+    for (const other of ["true", "5", "{1, 2}", "date \"Saturday, 10 October 2026\"", "missing value"]) expect(appleScriptText(other)).toBe(other);
+    expect(appleScriptText(null)).toBeNull();
+    // Cut at the helper's cap: no closing quote (and possibly half an escape).
+    expect(appleScriptText("\"TEXT:abc")).toBe("TEXT:abc");
+    expect(appleScriptText("\"TEXT:ab\\")).toBe("TEXT:ab");
+  });
+});
 
 describe("the adapter table", () => {
   test("the built-in table is valid: caps, names, classes, unique guide ids", () => {

@@ -20,6 +20,7 @@ import {
   type ActResult, type FindResult, type ScriptingCommandsResult, type SnapshotResult, type WaitForResult,
 } from "../protocol";
 import type { ExtraSpec } from "../worker/bridge";
+import { appleScriptText } from "./apps/common";
 import { AdapterDelivery } from "./delivery";
 import { buildDictSource, dictListing, generateDict, type DictInfo } from "./dict";
 import { AdapterRegistry, BUILTIN_ADAPTERS } from "./registry";
@@ -351,7 +352,7 @@ export class AppAdapters {
         }
         return t.windowId;
       },
-      applescript: async (source, o) => (await scope.applescript(t, source, o)).result,
+      applescript: async (source, o) => appleScriptText((await scope.applescript(t, source, o)).result),
       find: async (query) => (await scope.helper<FindResult>("target.find", { targetId: t.targetId, query })).elements,
       snapshot: async (o) => (await scope.helper<SnapshotResult>("target.snapshot", {
         targetId: t.targetId, callId, full: true, ...(o?.within === undefined ? {} : { within: o.within }),

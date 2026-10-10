@@ -238,10 +238,16 @@ describe("adapters: extras and dictionary commands", () => {
     const file = join(dir, "a.txt");
     writeFileSync(file, "x");
     await w.run("const f = await apps.open('Finder')");
-    w.setResult(`file://${dir}/a.txt\n`);
-    const r = await w.run(`const sel = await f.extras.selection()\nprint(sel)\nawait f.extras.reveal(${JSON.stringify(file)})`);
+    // The real helper answers a string in AppleScript's display form (quotes, `"` and `\\` escaped); extras get the string.
+    const display = (s: string): string => `"${s.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
+    w.setResult(display(`SEL:file://${dir}/a.txt\n`));
+    const r0 = await w.run("const sel = await f.extras.selection()\nprint(JSON.stringify(sel))");
+    expect(r0.isError).toBe(false);
+    expect(fenced(r0)).toContain(JSON.stringify([file]));
+    w.setResult(display("SELECTED"));
+    const r = await w.run(`print(JSON.stringify(await f.extras.reveal(${JSON.stringify(file)})))`);
     expect(r.isError).toBe(false);
-    expect(fenced(r)).toContain(`${dir}/a.txt`);
+    expect(fenced(r)).toContain('{"selected":true}');
     expect(w.scripts[0]).toContain('tell application id "com.apple.finder"');
     expect(w.scripts[0]).toContain("repeat with i in (get selection)");
     // The BOUND window (the bind's window id 7), never Finder's front window.
@@ -249,7 +255,7 @@ describe("adapters: extras and dictionary commands", () => {
     expect(w.scripts[0]).toContain('if insertionURL is not boundURL then return "NOTFOCUSED"');
     expect(w.scripts[1]).toContain(`set target of Finder window id 7 to ((POSIX file ${JSON.stringify(dir)}) as alias)`);
     expect(w.scripts[1]).toContain(`select ((POSIX file ${JSON.stringify(file)}) as alias)`);
-    expect(unfenced(r)).toContain("the bound Finder window shows the item's folder");
+    expect(unfenced(r)).toContain("the bound Finder window shows the item's folder, the item selected");
     const metrics = readFileSync(join(w.home, "logs", "automation-metrics.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
     expect(metrics.filter((m) => m.primitive === "extra").map((m) => m.extra)).toEqual(["selection", "reveal"]);
     // Never the arguments.
