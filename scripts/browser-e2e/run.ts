@@ -29,8 +29,14 @@ if (process.env.WINTER_BROWSER_E2E !== "1") {
   process.exit(0);
 }
 if (process.argv.includes("--extension")) {
-  console.log("e2e:browser --extension belongs to the Winter for Chrome lane (scripts/browser-e2e/extension/); nothing to run here");
-  process.exit(0);
+  // The Winter for Chrome suite (its own runner, beside this one): the extension, its host and a temp-home daemon.
+  const runner = join(import.meta.dir, "extension", "run.ts");
+  if (!existsSync(runner)) {
+    console.log("e2e:browser --extension: the Winter for Chrome suite (scripts/browser-e2e/extension/run.ts) is not on this branch");
+    process.exit(0);
+  }
+  const child = Bun.spawn(["bun", "run", runner, ...process.argv.slice(2).filter((a) => a !== "--extension")], { stdio: ["inherit", "inherit", "inherit"] });
+  process.exit(await child.exited);
 }
 
 /** `$WINTER_TEST_CHROME`, else the newest Chrome for Testing in Playwright's cache. */
@@ -119,7 +125,8 @@ async function check(name: string, fn: () => Promise<void>): Promise<void> {
   const t0 = Date.now();
   try { await fn(); passed++; console.log(`  ✓ ${name} (${Date.now() - t0} ms)`); } catch (err) {
     failures.push(name);
-    console.log(`  ✗ ${name}\n      ${err instanceof Error ? err.stack?.split("\n").slice(0, 4).join("\n      ") : String(err)}`);
+    const detail = err instanceof Error ? `${err.name}: ${err.message}`.slice(0, 4_000) : String(err);
+    console.log(`  ✗ ${name}\n      ${detail.split("\n").join("\n      ")}`);
   }
 }
 const expect = (cond: boolean, what: string, detail = ""): void => { if (!cond) throw new Error(`${what}${detail.length > 0 ? `\n${detail}` : ""}`); };
@@ -240,6 +247,40 @@ await check("a confirm dialog: shown first in state, other acts are TargetBusy, 
   expect(after.includes("confirmed"), "the page got OK", after);
 });
 
+await check("a prompt dialog: setValue on its field, then OK sends the reply", async () => {
+  const s = await P("state", { full: true, emit: false }) as string;
+  await P("click", { target: refOf(s, /button "Ask my name"/) });
+  const d = await P("state", {}) as string;
+  const line = d.split("\n")[1] ?? "";
+  expect(/^dialog prompt "Your name\?" — \[\d+\] text field value="nobody" · \[\d+\] button "OK" · \[\d+\] button "Cancel"$/.test(line), "the prompt line", d);
+  await P("setValue", { ref: Number(/\[(\d+)\] text field/.exec(line)![1]), value: "Ada" });
+  await P("click", { target: Number(/\[(\d+)\] button "OK"/.exec(line)![1]) });
+  const after = await P("state", { full: true, emit: false }) as string;
+  expect(after.includes("hello Ada"), "the page got the reply", after);
+});
+
+await check("typing into a field inside a child frame: focus is placed there, keys reach it, the page sees input events", async () => {
+  const s = await P("state", { full: true, emit: false }) as string;
+  await P("type", { text: "hi there", into: refOf(s, /text field "Frame note"/) });
+  const after = await P("state", { full: true, emit: false }) as string;
+  expect(after.includes("echo hi there"), "the frame's input handler ran per key", after);
+  expect(run1.text().includes('sent 8 characters to ['), "the act line");
+});
+
+await check("hover shows hover-only content; scroll and key() reach the page; text({ markdown }) has headings and links", async () => {
+  const s = await P("state", { full: true, emit: false }) as string;
+  await P("hover", { target: refOf(s, /button "Hover me"/), ms: 50 });
+  let after = await P("state", { full: true, emit: false }) as string;
+  expect(after.includes("tooltip shown"), "the hover handler ran", after);
+  await P("scroll", { target: refOf(s, /heading "Your cart"/), direction: "down", pages: 1 });
+  await P("key", { combo: "cmd+a", into: refOf(s, /text field "Coupon"/) });
+  await P("key", { combo: "backspace" });
+  after = await P("state", { full: true, emit: false }) as string;
+  expect(/text field "Coupon" value=""/.test(after), "select-all then backspace cleared the field", after);
+  const md = await P("text", { markdown: true, emit: false }) as string;
+  expect(md.includes("# Your cart") && /\[Next page\]\(http:\/\/localhost:\d+\/page2\.html\)/.test(md) === false, "a heading (the nav is boilerplate outside main)", md.slice(0, 600));
+});
+
 await check("upload a file from the session's cwd into the file input", async () => {
   const s = await P("state", { full: true, emit: false }) as string;
   await P("upload", { ref: refOf(s, /file input "Receipt"/), paths: "receipt.txt" });
@@ -248,6 +289,7 @@ await check("upload a file from the session's cwd into the file input", async ()
 });
 
 await check("a screenshot's point maps back to the page (click by pixels)", async () => {
+  await P("goto", { url: `${BASE}/index.html` });
   const img = await P("screenshot", { emit: false }) as { width: number; height: number };
   expect(img.width > 0 && img.width <= 1280 && img.height <= 1280, "within the default budget", JSON.stringify(img));
   // The Apply button's centre, measured by the page runtime, as image pixels.

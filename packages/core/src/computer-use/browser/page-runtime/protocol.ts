@@ -76,9 +76,9 @@ export interface RtOps {
   text: { arg: { markdown?: boolean }; result: string };
   /** The id of the element `this` (an element-bound call). */
   owner: { arg: null; result: RtId };
-  /** An iframe element's content-box origin in this frame's viewport. */
-  frameOffset: { arg: { id: RtId }; result: { x: number; y: number } | null };
-  point: { arg: { id: RtId; scroll?: boolean }; result: RtPoint };
+  /** An iframe element's content-box origin in this frame's viewport (scrolled into view first with `scroll`). */
+  frameOffset: { arg: { id: RtId; scroll?: boolean; inner?: { x: number; y: number } }; result: { x: number; y: number } | null };
+  point: { arg: { id: RtId; scroll?: boolean; settle?: boolean }; result: RtPoint };
   /** The keyboard target: `id`'s element, else the focused element. */
   classify: { arg: { id?: RtId }; result: RtClassify };
   focus: { arg: { id: RtId }; result: RtClassify };

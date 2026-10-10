@@ -237,16 +237,23 @@ type Any = Record<string, unknown>;
   };
 
   // ── names, values, states ───────────────────────────────────────────────────────────────────────
-  const textOf = (n: Node, budget = 400): string => {
+  /** The text a reader hears for `n` (a name from content, a label). `exclude`: the control a label names — its own
+   *  value is never part of its name. Embedded text fields contribute their value; check boxes and buttons nothing. */
+  const textOf = (n: Node, budget = 400, exclude?: Element): string => {
     let out = "";
     const walk = (x: Node): void => {
       if (out.length > budget) return;
       if (x.nodeType === Node.TEXT_NODE) { out += x.textContent ?? ""; return; }
       if (!(x instanceof Element)) { for (const c of composedChildren(x)) walk(c); return; }
+      if (x === exclude) return;
       if (SKIP.has(x.tagName.toUpperCase())) return;
       if (x.getAttribute("aria-hidden") === "true") return;
       if (x instanceof HTMLImageElement) { out += ` ${x.alt} `; return; }
-      if (x instanceof HTMLInputElement && x.type.toLowerCase() !== "hidden" && !isSecure(x)) { out += ` ${x.value} `; return; }
+      if (x instanceof HTMLSelectElement) return;
+      if (x instanceof HTMLInputElement) {
+        if (TEXT_INPUT_TYPES.has(x.type.toLowerCase()) && !isSecure(x) && !looksSecret(x.value)) out += ` ${x.value} `;
+        return;
+      }
       for (const c of composedChildren(x)) walk(c);
       const st = styleOf(x);
       if (isBlock(st)) out += " ";
@@ -270,7 +277,7 @@ type Any = Record<string, unknown>;
     if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
       const labels = (el as HTMLInputElement).labels;
       if (labels !== null && labels.length > 0) {
-        const s = collapse([...labels].map((l) => textOf(l)).join(" "));
+        const s = collapse([...labels].map((l) => textOf(l, 400, el)).join(" "));
         if (s.length > 0) return s;
       }
       if (el instanceof HTMLInputElement) {
@@ -582,7 +589,17 @@ type Any = Record<string, unknown>;
     return hit;
   };
   const isDisabled = (el: Element): boolean => (el as HTMLButtonElement).disabled === true || el.getAttribute("aria-disabled") === "true";
-  const point = (arg: { id: RtId; scroll?: boolean }): RtPoint => {
+  /** The next painted frame (two, so a scroll has reached the compositor that hit-tests input) — bounded, since a
+   *  background tab may not paint at all. */
+  const nextFrame = (): Promise<void> => new Promise((resolve) => {
+    let done = false;
+    const finish = (): void => { if (!done) { done = true; resolve(); } };
+    setTimeout(finish, 120);
+    try { requestAnimationFrame(() => requestAnimationFrame(finish)); } catch { finish(); }
+  });
+  const point = async (arg: { id: RtId; scroll?: boolean; settle?: boolean }): Promise<RtPoint> => {
+    // In a child frame just brought into view, the frame paints before its point is measured and hit-tested.
+    if (arg.settle === true) await nextFrame();
     const el = elementOf(arg.id);
     if (el === undefined) return { ok: false, reason: "gone" };
     if (isDisabled(el)) return { ok: false, reason: "disabled" };
@@ -592,6 +609,8 @@ type Any = Record<string, unknown>;
     if (r === undefined) return { ok: false, reason: "hidden" };
     if (!inViewport(r) && arg.scroll !== false) {
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" as ScrollBehavior });
+      await nextFrame();
+      if (!el.isConnected) return { ok: false, reason: "gone" };
       r = visibleRect(el);
       if (r === undefined) return { ok: false, reason: "hidden" };
     }
@@ -785,13 +804,30 @@ type Any = Record<string, unknown>;
   });
 
   // ── frames ──────────────────────────────────────────────────────────────────────────────────────
-  const frameOffset = (arg: { id: RtId }): { x: number; y: number } | null => {
+  /** An iframe element's content-box origin in this frame's viewport. With `scroll`, the point `inner` (CSS px in the
+   *  frame's own viewport) is brought into this frame's view first, so a click there lands in the frame. */
+  const frameOffset = async (arg: { id: RtId; scroll?: boolean; inner?: { x: number; y: number } }): Promise<{ x: number; y: number } | null> => {
     const el = elementOf(arg.id);
     if (el === undefined) return null;
-    const r = el.getBoundingClientRect();
     const st = styleOf(el);
     const px = (v: string | undefined): number => { const n = parseFloat(v ?? "0"); return Number.isFinite(n) ? n : 0; };
-    return { x: r.left + px(st?.borderLeftWidth) + px(st?.paddingLeft), y: r.top + px(st?.borderTopWidth) + px(st?.paddingTop) };
+    const origin = (): { x: number; y: number } => {
+      const r = el.getBoundingClientRect();
+      return { x: r.left + px(st?.borderLeftWidth) + px(st?.paddingLeft), y: r.top + px(st?.borderTopWidth) + px(st?.paddingTop) };
+    };
+    const target = (): { x: number; y: number } => {
+      const o = origin();
+      const r = el.getBoundingClientRect();
+      return { x: o.x + (arg.inner?.x ?? r.width / 2), y: o.y + (arg.inner?.y ?? r.height / 2) };
+    };
+    const visible = (t: { x: number; y: number }): boolean => t.x >= 0 && t.y >= 0 && t.x < innerWidth && t.y < innerHeight;
+    if (arg.scroll === true && !visible(target())) {
+      el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" as ScrollBehavior });
+      const t = target();
+      if (!visible(t)) window.scrollBy({ left: t.x - innerWidth / 2, top: t.y - innerHeight / 2, behavior: "instant" as ScrollBehavior });
+      await nextFrame();
+    }
+    return origin();
   };
 
   // ── the entry ───────────────────────────────────────────────────────────────────────────────────
@@ -803,8 +839,8 @@ type Any = Record<string, unknown>;
       case "find": return find((a ?? {}) as RtFindQuery);
       case "text": return readable(a?.markdown === true);
       case "owner": return self instanceof Node ? idOf(self) : null;
-      case "frameOffset": return frameOffset(a as { id: RtId });
-      case "point": return point(a as { id: RtId; scroll?: boolean });
+      case "frameOffset": return frameOffset(a as { id: RtId; scroll?: boolean; inner?: { x: number; y: number } });
+      case "point": return point(a as { id: RtId; scroll?: boolean; settle?: boolean });
       case "classify": return classify(a as { id?: RtId } | null);
       case "focus": return focus(a as { id: RtId });
       case "setValue": return setValue(a as { id: RtId; value: string });

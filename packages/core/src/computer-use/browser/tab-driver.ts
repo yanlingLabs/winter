@@ -142,12 +142,40 @@ export class TabDriver {
 
   async send<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}, session?: string, timeoutMs?: number): Promise<T> {
     if (this.gone !== undefined) throw this.lost();
+    const sent = this.transport.send<T>(this.tabKey, method, params, { ...(session === undefined ? {} : { cdpSessionId: session }), ...(timeoutMs === undefined ? {} : { timeoutMs }) });
     try {
-      return await this.transport.send<T>(this.tabKey, method, params, { ...(session === undefined ? {} : { cdpSessionId: session }), ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+      // A page dialog pauses the page: input that raised it, and any read of the page, are answered only once the
+      // dialog is. Stop waiting the moment one opens — input counts as delivered; a read is TargetBusy.
+      if (this.dialog === undefined && (method.startsWith("Input.") || method === "Runtime.callFunctionOn" || method === "Runtime.evaluate")) {
+        const opened = await this.raceDialog(sent);
+        if (opened) {
+          void sent.catch(() => undefined);
+          if (method.startsWith("Input.")) return {} as T;
+          throw new AutomationFailure("TargetBusy", this.dialogBusySentence());
+        }
+      }
+      return await sent;
     } catch (err) {
+      if (err instanceof AutomationFailure) throw err;
       if (err instanceof TransportError && err.code === "tab_gone") this.gone ??= "closed";
       throw transportFailure(err, this.browserName);
     }
+  }
+
+  /** `true` when a page dialog opened before `p` settled (then `p` is left running); else `p`'s outcome. */
+  private raceDialog(p: Promise<unknown>): Promise<boolean> {
+    return new Promise<boolean>((resolve, reject) => {
+      let done = false;
+      const check = (): void => {
+        if (done || this.dialog === undefined) return;
+        done = true;
+        this.pokes.delete(check);
+        resolve(true);
+      };
+      this.pokes.add(check);
+      p.then(() => { if (done) return; done = true; this.pokes.delete(check); resolve(false); },
+        (e: unknown) => { if (done) return; done = true; this.pokes.delete(check); reject(e); });
+    });
   }
 
   lost(): AutomationFailure {
@@ -517,17 +545,18 @@ export class TabDriver {
     return undefined;
   }
 
-  /** Where `rec`'s viewport sits in the top frame's (CSS px). */
-  private async frameOrigin(rec: FrameRec): Promise<{ x: number; y: number }> {
+  /** Where `rec`'s viewport sits in the top frame's (CSS px), with the point `inner` (in `rec`'s viewport) brought
+   *  into view in every ancestor on the way up — so a click there lands in `rec`. */
+  private async frameOrigin(rec: FrameRec, inner: { x: number; y: number }): Promise<{ x: number; y: number }> {
     if (rec.parentId === undefined) return { x: 0, y: 0 };
     const parent = this.frames.get(rec.parentId);
     if (parent === undefined) throw new AutomationFailure("StaleRef", "that element's frame is gone — call state()");
     await this.ensureRuntime(parent);
     await this.ensureOwners(parent);
     if (rec.owner === undefined) throw new Error("can't place that frame on the page");
-    const off = await this.callIn<{ x: number; y: number } | null>(parent, "frameOffset", { id: rec.owner.id }, { expectRt: rec.owner.parentRt });
+    const off = await this.callIn<{ x: number; y: number } | null>(parent, "frameOffset", { id: rec.owner.id, scroll: true, inner }, { expectRt: rec.owner.parentRt });
     if (off === null) throw new AutomationFailure("StaleRef", "that element's frame is gone — call state()");
-    const up = await this.frameOrigin(parent);
+    const up = await this.frameOrigin(parent, { x: off.x + inner.x, y: off.y + inner.y });
     return { x: off.x + up.x, y: off.y + up.y };
   }
 
@@ -770,7 +799,11 @@ export class TabDriver {
         }
       }
     }
-    const origin = await this.frameOrigin(rec);
+    if (rec.parentId === undefined) return { x: p.x, y: p.y };
+    // In a child frame: every ancestor brings this point into its view, then the frame paints where it now is
+    // before the click (an out-of-process frame is hit-tested by where it last painted).
+    const origin = await this.frameOrigin(rec, { x: p.x, y: p.y });
+    await this.callIn<RtPoint>(rec, "point", { id, scroll: false, settle: true }, { expectRt: rtId });
     return { x: p.x + origin.x, y: p.y + origin.y };
   }
 

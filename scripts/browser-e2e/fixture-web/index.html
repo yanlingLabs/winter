@@ -21,6 +21,9 @@
   <p id="status">Nothing applied</p>
   <button id="more" onclick="setTimeout(() => { const p = document.createElement('p'); p.id = 'later'; p.textContent = 'Delayed content arrived'; document.querySelector('main').appendChild(p); }, 400)">Load more</button>
   <button id="ask" onclick="document.getElementById('answer').textContent = confirm('Leave this page?') ? 'confirmed' : 'cancelled'">Confirm something</button>
+  <button id="name" onclick="document.getElementById('answer').textContent = 'hello ' + prompt('Your name?', 'nobody')">Ask my name</button>
+  <button id="hov" onmouseenter="document.getElementById('tip').textContent = 'tooltip shown'">Hover me</button>
+  <p id="tip">no tooltip</p>
   <p id="answer">no answer yet</p>
   <label>Receipt <input id="file" type="file" onchange="document.getElementById('picked').textContent = 'picked ' + this.files[0].name"></label>
   <p id="picked">nothing picked</p>
