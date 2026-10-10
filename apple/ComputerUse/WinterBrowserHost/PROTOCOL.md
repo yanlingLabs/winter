@@ -260,9 +260,12 @@ A "winter" context is one THIS extension's own `Page.createIsolatedWorld` return
 which another extension's world could share. The Runtime domain must be on in that session (so every context's coming
 and going is seen); contexts are also matched by the browser's `uniqueId`, and an id handed out again to another context
 (a cross-process navigation reuses them) stops being "winter" at once; a new document in the world's frame,
-`Runtime.disable`, `Runtime.executionContextsCleared` and its destruction end it. Contexts and objects are tracked per
-CDP session (the tab's, or a child target's). `Runtime.releaseObject` of an object the world no longer holds is
-answered `{}` without being sent.
+`Runtime.disable`, `Runtime.executionContextsCleared` and its destruction end it. A command naming a "winter" context
+that has ENDED is refused with a message beginning with the browser's own words, `Cannot find context with specified
+id` — the daemon may send it before it sees the ending, and it reads that as "make a fresh world and try again", as it
+would the browser's own answer; a context that never was "winter" gets the plain refusal. Contexts and objects are
+tracked per CDP session (the tab's, or a child target's). `Runtime.releaseObject` of an object the world no longer
+holds is answered `{}` without being sent.
 
 ### 7.4 The debugger and the overlay
 

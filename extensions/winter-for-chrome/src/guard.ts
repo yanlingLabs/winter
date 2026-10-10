@@ -19,6 +19,11 @@
 // Runtime domain enabled before a world is created or code runs in it; `Runtime.disable`, a cross-document navigation
 // of the world's frame and `Runtime.executionContextsCleared` all end it. Contexts, and the objects minted in them, are
 // per CDP session (the tab's own, or a flattened child target's).
+//
+// A command naming a "winter" context that has ENDED (its document went, or the domain was turned off) is refused with
+// the browser's own words, "Cannot find context with specified id": the daemon may have sent it before it saw the same
+// event, and it treats that sentence — and only that one — as "the world is gone, make a fresh one and try again", as
+// it would for the browser's own answer. A context that was never "winter" gets the plain refusal.
 import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_NETWORK_EVENT_PARAMS, CDP_WORLD_NAME } from "../../../packages/core/src/computer-use/browser/cdp-allowlist";
 import { openable } from "./urls";
 
@@ -54,12 +59,18 @@ interface SessionWorlds {
   /** Recently announced isolated "winter"-named contexts, by id — consulted only when our own createIsolatedWorld
    *  returns that id (the event can arrive before the answer), never trusted by themselves. */
   announced: Map<number, { uniqueId?: string; frameId?: string }>;
+  /** Recently ended "winter" contexts, as `i:<contextId>` and `u:<uniqueId>` (bounded; a newer one supersedes). */
+  ended: Set<string>;
 }
 
 /** What `check` decided: send it, answer without sending, or refuse with a sentence. */
 export type GuardDecision = { kind: "send" } | { kind: "answer"; result: Record<string, unknown> } | { kind: "refuse"; reason: string };
 
 const MAX_ANNOUNCED = 64;
+const MAX_ENDED = 256;
+
+/** The browser's own sentence for a context that is gone — what the daemon retries on. */
+export const CONTEXT_GONE = "Cannot find context with specified id";
 
 export class TabGuard {
   private readonly sessions = new Map<string, SessionWorlds>();
@@ -68,7 +79,7 @@ export class TabGuard {
     const key = cdpSessionId ?? "";
     let w = this.sessions.get(key);
     if (w === undefined) {
-      w = { runtime: false, contexts: new Map(), objects: new Map(), announced: new Map() };
+      w = { runtime: false, contexts: new Map(), objects: new Map(), announced: new Map(), ended: new Set() };
       this.sessions.set(key, w);
     }
     return w;
@@ -85,12 +96,12 @@ export class TabGuard {
     if (!w.runtime) return `${method} needs the Runtime domain enabled in that session first`;
     let byId: number | undefined;
     if (id !== undefined) {
-      if (typeof id !== "number" || !w.contexts.has(id)) return `${method} runs only in the "${CDP_WORLD_NAME}" world (its ${idKey})`;
+      if (typeof id !== "number" || !w.contexts.has(id)) return w.ended.has(`i:${String(id)}`) ? this.gone(method) : `${method} runs only in the "${CDP_WORLD_NAME}" world (its ${idKey})`;
       byId = id;
     }
     if (unique !== undefined) {
       const match = typeof unique === "string" ? [...w.contexts].find(([, c]) => c.uniqueId === unique)?.[0] : undefined;
-      if (match === undefined) return `${method} runs only in the "${CDP_WORLD_NAME}" world (its ${uniqueKey})`;
+      if (match === undefined) return w.ended.has(`u:${String(unique)}`) ? this.gone(method) : `${method} runs only in the "${CDP_WORLD_NAME}" world (the context its unique id names)`;
       if (byId !== undefined && byId !== match) return `${method}'s ${idKey} and ${uniqueKey} name different contexts`;
       byId = match;
     }
@@ -128,7 +139,9 @@ export class TabGuard {
       }
       case "DOM.resolveNode": {
         const id = params.executionContextId;
-        if (typeof id !== "number" || !w.contexts.has(id)) return { kind: "refuse", reason: `DOM.resolveNode resolves only into the "${CDP_WORLD_NAME}" world (its executionContextId)` };
+        if (typeof id !== "number" || !w.contexts.has(id)) {
+          return { kind: "refuse", reason: w.ended.has(`i:${String(id)}`) ? this.gone(method) : `DOM.resolveNode resolves only into the "${CDP_WORLD_NAME}" world (its executionContextId)` };
+        }
         break;
       }
       case "Page.createIsolatedWorld":
@@ -170,7 +183,7 @@ export class TabGuard {
         break;
       case "Runtime.disable":
         w.runtime = false;
-        w.contexts.clear();
+        for (const cid of [...w.contexts.keys()]) this.forget(w, cid);
         w.objects.clear();
         break;
       case "Page.createIsolatedWorld": {
@@ -181,6 +194,8 @@ export class TabGuard {
         const seen = w.announced.get(id);
         const uniqueId = seen !== undefined && seen.frameId === frameId ? seen.uniqueId : undefined;
         this.forget(w, id);
+        w.ended.delete(`i:${id}`);
+        if (uniqueId !== undefined) w.ended.delete(`u:${uniqueId}`);
         w.contexts.set(id, { ...(frameId === undefined ? {} : { frameId }), ...(uniqueId === undefined ? {} : { uniqueId }) });
         break;
       }
@@ -247,7 +262,7 @@ export class TabGuard {
       }
       case "Runtime.executionContextsCleared": {
         const w = this.worlds(cdpSessionId);
-        w.contexts.clear();
+        for (const cid of [...w.contexts.keys()]) this.forget(w, cid);
         w.objects.clear();
         w.announced.clear();
         break;
@@ -266,7 +281,20 @@ export class TabGuard {
     }
   }
 
+  private gone(method: string): string {
+    return `${CONTEXT_GONE} (${method}: that "${CDP_WORLD_NAME}" world ended with its document)`;
+  }
+
+  /** A "winter" context ends: it, and the objects minted in it, are no longer usable, and naming it again says so. */
   private forget(w: SessionWorlds, contextId: number): void {
+    const c = w.contexts.get(contextId);
+    if (c !== undefined) {
+      for (const key of [`i:${contextId}`, ...(c.uniqueId === undefined ? [] : [`u:${c.uniqueId}`])]) {
+        w.ended.delete(key);
+        w.ended.add(key);
+      }
+      while (w.ended.size > MAX_ENDED) w.ended.delete(w.ended.values().next().value!);
+    }
     w.contexts.delete(contextId);
     for (const [obj, ctx] of w.objects) if (ctx === contextId) w.objects.delete(obj);
   }

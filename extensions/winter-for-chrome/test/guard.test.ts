@@ -134,6 +134,58 @@ describe("the winter world", () => {
     expect(refused(m, "Runtime.callFunctionOn", { objectId: "obj-1", functionDeclaration: "f" })).toBe(true);
   });
 
+  test("a winter world that ENDED is refused in the browser's own words (the daemon retries in a fresh world); one that never was is not", () => {
+    // The daemon's tab driver retries a page-runtime call once in a fresh world when the error reads like this — the
+    // same test it applies to the browser's own answer. A command it sent before it saw the ending must get it.
+    const contextGone = (reason: string): boolean => /Cannot find context|context was destroyed|Execution context|No frame|Cannot find default execution context|uniqueContextId/i.test(reason);
+    const reasonOf = (g: TabGuard, method: string, params: Record<string, unknown>, session?: string): string => {
+      const d = g.check(method, params, session);
+      if (d.kind !== "refuse") throw new Error(`${method} was not refused`);
+      return d.reason;
+    };
+    const endings: Array<[string, (g: TabGuard) => void]> = [
+      ["a new document in its frame", (g) => g.observeEvent("Page.frameNavigated", { frame: { id: "F", url: "https://x/" } })],
+      ["destroyed by id", (g) => g.observeEvent("Runtime.executionContextDestroyed", { executionContextId: 7 })],
+      ["destroyed by unique id", (g) => g.observeEvent("Runtime.executionContextDestroyed", { executionContextId: 99, executionContextUniqueId: "U7" })],
+      ["contextsCleared", (g) => g.observeEvent("Runtime.executionContextsCleared", {})],
+      ["its id handed out again", (g) => g.observeEvent("Runtime.executionContextCreated", { context: { id: 7, uniqueId: "U-main", name: "", auxData: { type: "default", isDefault: true, frameId: "F" } } })],
+    ];
+    for (const [why, end] of endings) {
+      const g = primed();
+      end(g);
+      for (const [method, params] of [
+        ["Runtime.evaluate", { contextId: 7, expression: "1" }],
+        ["Runtime.evaluate", { uniqueContextId: "U7", expression: "1" }],
+        ["Runtime.callFunctionOn", { executionContextId: 7, functionDeclaration: "f" }],
+        ["DOM.resolveNode", { backendNodeId: 1, executionContextId: 7 }],
+      ] as const) {
+        const reason = reasonOf(g, method, params);
+        expect({ why, method, gone: contextGone(reason) }).toEqual({ why, method, gone: true });
+      }
+      // An object minted in it is still just refused (the driver re-reads its refs on a new document anyway).
+      expect(refused(g, "Runtime.callFunctionOn", { objectId: "obj-1", functionDeclaration: "f" })).toBe(true);
+    }
+    // After Runtime.disable the domain sentence comes first — the driver turns it back on when it attaches again.
+    const d = primed();
+    d.observeResult("Runtime.disable", {}, {});
+    expect(contextGone(reasonOf(d, "Runtime.evaluate", { contextId: 7, expression: "1" }))).toBe(false);
+    // A context that was never winter (the page's own, or another extension's) gets the plain refusal, never "gone".
+    const g = primed();
+    for (const [method, params] of [
+      ["Runtime.evaluate", { contextId: 1, expression: "document.cookie" }],
+      ["Runtime.evaluate", { uniqueContextId: "U-main", expression: "1" }],
+      ["Runtime.callFunctionOn", { executionContextId: 2, functionDeclaration: "f" }],
+      ["DOM.resolveNode", { backendNodeId: 1, executionContextId: 3 }],
+    ] as const) {
+      expect({ method, gone: contextGone(reasonOf(g, method, params)) }).toEqual({ method, gone: false });
+    }
+    // A fresh world that is handed the ended id again is winter again.
+    const r = primed();
+    r.observeEvent("Page.frameNavigated", { frame: { id: "F", url: "https://x/" } });
+    r.observeResult("Page.createIsolatedWorld", { frameId: "F", worldName: "winter" }, { executionContextId: 7 });
+    expect(r.check("Runtime.evaluate", { contextId: 7, expression: "1" })).toEqual(send);
+  });
+
   test("Runtime.callFunctionOn: a winter context or a winter object, and winter objects as arguments", () => {
     const g = primed();
     expect(g.check("Runtime.callFunctionOn", { executionContextId: 7, functionDeclaration: "() => 1" })).toEqual(send);
