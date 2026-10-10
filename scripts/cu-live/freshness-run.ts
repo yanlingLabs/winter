@@ -258,15 +258,21 @@ else {
     for (let attempt = 1; attempt <= 2 && open !== false; attempt++) {
       const c = await d.turn(`
 const sfClose = ${attempt === 1 ? handle : `(await apps.open("com.apple.Safari", { window: ${id} }))`};
-const sfFsb = ${fullScreen && attempt === 1 ? `(await sfClose.find({ role: "full screen button" }, { emit: false }))[0]` : "undefined"};
-if (sfFsb) { await sfClose.action(sfFsb.ref, "press"); await sleep(2500); }
+${fullScreen ? `// Out of full screen first. A full-screen window's title-bar buttons are not in its tree; the menu item is
+// matched by its EXACT title, so if another window were the one menus act on, the item would read "Enter Full
+// Screen" and this throws instead of acting there.
+const sfFsb = (await sfClose.find({ role: "full screen button" }, { emit: false }))[0];
+try {
+  if (sfFsb) await sfClose.action(sfFsb.ref, "press"); else await sfClose.menu(["View", "Exit Full Screen"]);
+  await sleep(2500);
+} catch (e) { print("exit full screen: " + String(e?.name ?? e) + " " + String(e?.message ?? "").slice(0, 160)); }` : ""}
 const sfBtn = (await sfClose.find({ role: "close button" }, { emit: false }))[0];
 if (sfBtn) { await sfClose.action(sfBtn.ref, "press"); report({ closed: true }); } else report({ closed: false });`).catch((err: unknown) => ({ output: String(err), isError: true, facts: {} as Record<string, unknown> }));
       await (d.sleep ?? sleep)(1_500);
       const check = await d.turn(`
 try { report({ open: (await sfApp.windows()).some((w) => w.id === ${id}) }); } catch (e) { report({ checkError: String(e?.name ?? e) }); }`).catch(() => undefined);
       open = typeof check?.facts.open === "boolean" ? check.facts.open : undefined;
-      d.log(`freshness ${variant}: closing the test's Safari window ${id} (try ${attempt}): ${JSON.stringify(c.facts)}${c.isError ? ` — ${c.output.slice(-200)}` : ""}; still in Safari's window list: ${open === undefined ? `unknown (${JSON.stringify(check?.facts ?? {})})` : open}`);
+      d.log(`freshness ${variant}: closing the test's Safari window ${id} (try ${attempt}): ${JSON.stringify(c.facts)}${c.isError ? ` — ${c.output.slice(-200)}` : ""}${/exit full screen: [^\n<]*/.exec(c.output) ? ` (${/exit full screen: [^\n<]*/.exec(c.output)![0]})` : ""}; still in Safari's window list: ${open === undefined ? `unknown (${JSON.stringify(check?.facts ?? {})})` : open}`);
     }
     if (open !== false) {
       const left = open === true
