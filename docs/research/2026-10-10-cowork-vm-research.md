@@ -11,12 +11,13 @@ The [existing implementation map](../cowork-status.md) records the reusable grou
 The user selected the following behavior after the initial research:
 
 - Standalone Cowork has one durable workspace per conversation.
-- Introduce the workspace portion of Projects: a Project owns a reusable workspace. This does not approve unrelated Project UI, collaboration, or organization features. Simultaneous conversations sharing a Project workspace still need a concurrency policy.
+- Introduce the workspace portion of Projects: a Project owns a reusable workspace. This does not approve unrelated Project UI, collaboration, or organization features.
+- Project conversations may execute concurrently against the same workspace and share Project memory. Their logical transcripts remain separate; this is not a confidentiality boundary between agents with access to the same shared files.
 - Changes to granted writable Mac folders take effect directly, rather than going through a staged-copy/apply flow.
 - Prefer stopping and restarting a quiescent guest with files and agent state retained. Subagent history and identity must survive so `SendMessage` can logically continue a prior child after restart; retaining arbitrary process RAM is not the requested mechanism.
 - Avoid a new host process for each Cowork session, preferably by placing VM control inside the existing daemon. The feasibility boundary between in-process control and Apple-managed VM execution is described below; a helper process per conversation is not the selected design.
 
-These settle product direction, not implementation completion. Remaining decisions include the physical VM isolation boundary, Project writer concurrency, Project memory sharing, and schedule target semantics.
+These settle product direction, not implementation completion. Remaining decisions include the VM backend and isolation layout, shared-file/Git conflict handling, and schedule target semantics. The [working specification](../cowork-spec.md) records accepted decisions; architecture selection remains open while the options are compared.
 
 ## Documented external behavior
 
@@ -70,7 +71,7 @@ flowchart TB
   D --> B[Scoped provider, Git and host-tool brokers]
   V --> G
   subgraph G[One running Cowork guest]
-    W[Winter runtime and in-process subagents]
+    W[Winter conversation runtimes and their subagents]
     T[Shell, workflows and guest tools]
     W --> T
     W --> S[Persistent workspace, memory and scratch]
@@ -88,7 +89,7 @@ Subagents should stay in the session's guest and inherit its access ceiling. Tod
 
 ### Workspace and persistence contract
 
-Accepted ownership: a standalone Cowork conversation owns its workspace; a Project owns a reusable workspace used by its conversations. Keep conversation identity, workspace identity, and running VM identity separate. Proposed execution default is one active writer lease per workspace; whether Project conversations run concurrently remains open. Physical VM sharing is also undecided because of the host-process requirement above.
+Accepted ownership: a standalone Cowork conversation owns its workspace; a Project owns a reusable workspace used concurrently by its conversations. Keep conversation identity, workspace identity, and running VM identity separate. The earlier one-conversation-at-a-time proposal was not selected. Exclusive ownership of an ordinary writable VM disk is still required, but is distinct from serializing conversations: one Project guest may run several conversations, or separate guests need a validated shared-filesystem design. Physical VM sharing remains undecided.
 
 | Data | Proposed location/ownership | Survives normal VM stop? |
 | --- | --- | --- |
@@ -108,11 +109,11 @@ The proposed persistent scratch gives Cowork its own tmp directory without treat
 
 For folder-backed work, select at least one grant and its read-only/read-write policy. No automatic home, SSH agent, host socket, dotfile, or Keychain share. Writable mounts edit real host files immediately; VM disk rollback does not roll those files back. Apple provides explicit shared-directory primitives, but a read-write-no-delete promise needs additional enforcement rather than being inferred from ordinary writable virtiofs. [Shared directories](https://developer.apple.com/documentation/virtualization/shared-directories)
 
-For repository-backed work, connecting GitHub authorizes account access but is not itself a workspace: explicitly select one or more repositories and starting refs, clone them into the guest disk, and record a branch per repository. Use a session branch by default. Keep dirty files and local commits across stop/start, do not re-clone on every turn, and do not reset to the remote when reopening. Local filesystem and Git operations remain available offline; agent turns still need access to their configured model provider unless it is available locally. Pushes wait for connectivity and authorization.
+For repository-backed work, connecting GitHub authorizes account access but is not itself a workspace: explicitly select one or more repositories and starting refs, clone them into workspace storage through guest execution, and record a branch per repository. A standalone conversation may default to a session branch. Project conversations reuse the workspace's current branches; starting one must not silently switch a checkout shared with other running conversations. Keep dirty files and local commits across stop/start, do not re-clone on every turn, and do not reset to the remote when reopening. Local filesystem and Git operations remain available offline; agent turns still need access to their configured model provider unless it is available locally. Pushes wait for connectivity and authorization.
 
 Each repo in a multi-repo workspace needs its own remote, base ref, current branch, dirty state, and publication authority. Cloning selected repositories does not implicitly authorize every repository accessible to the account. Git commit, branch push, PR creation, and merge are separate actions; the eventual product's permission policy should state which are pre-authorized. This development session's PR permission is not a default policy for future Cowork users.
 
-For v1, avoid overlapping writable grants across Winter sessions unless the user explicitly chooses that concurrency. Existing directory “locks” mean the assignment cannot change after writing; they are not cross-process writer locks. External editors can still modify shared files. Grant revocation must remain possible independently of preserving the historical directory record. [Directory model](../../packages/core/src/sessions/dirs.ts)
+The user explicitly selected concurrent writes within a shared Project. Conflict handling must account for those conversations and external editors; unrelated workspaces sharing writable grants need their own explicit policy. Existing directory “locks” mean the assignment cannot change after writing; they are not cross-process writer locks. Grant revocation must remain possible independently of preserving the historical directory record. [Directory model](../../packages/core/src/sessions/dirs.ts)
 
 ### Activity and VM power
 
@@ -149,22 +150,22 @@ At that revision, the durable child record is not the complete construction snap
 
 Recommended: one authoritative host schedule store with canonical job IDs. Guest schedule tools should await a durable host acknowledgment before reporting success. Listing and deletion must read that same authority. A stopped guest cannot own the timer that starts it.
 
-Store the target session/workspace, prompt, one-shot or recurring intent, timezone, next due time, current grant requirements, overlap policy, missed-run policy, and durable run status. Proposed defaults: queue behind current work, no overlapping runs against one writable workspace, coalesce missed recurring occurrences after the Mac resumes, and keep one-shot delivery distinct. Persist enough run state to avoid blindly repeating an external side effect after a daemon crash.
+Store the target session/workspace, prompt, one-shot or recurring intent, timezone, next due time, current grant requirements, overlap policy, missed-run policy, and durable run status. Proposed defaults: prevent duplicate concurrent executions of the same occurrence, coalesce missed recurring occurrences after the Mac resumes, and keep one-shot delivery distinct. Distinct Project conversations may run concurrently, including scheduled conversations; this is not a workspace-wide queue. Persist enough run state to avoid blindly repeating an external side effect after a daemon crash.
 
 Agent-created wakeups naturally target the same session. Existing user routines start fresh sessions; whether Cowork routines instead reuse a conversation or create a new conversation on retained workspace data remains a product choice. The spec must choose this explicitly rather than inheriting today's Code runner accidentally.
 
 Local host scheduling only operates when the Mac and daemon can run. Waking a stopped guest is separate from waking a sleeping Mac. Initial behavior should queue/report missed runs rather than promise an always-online cloud service.
 
-## Current Winter gaps that affect the design
+## Winter integration gaps and the historical source baseline
 
-These are static source findings, not live reproductions. They are recorded for the specification; no fixes are included in this research.
+These are static source findings, not live reproductions. The original audit used the revisions recorded above; later SDK work is called out explicitly. No Cowork implementation is included in this research.
 
 | Finding | Evidence | Required design consequence |
 | --- | --- | --- |
 | No validated Linux guest artifact | SDK build compiles for its current native target; shipped platform fallback is darwin-arm64. [Build](https://github.com/yanlingLabs/winter-agent-sdk/blob/8601190c/scripts/build-runtime.ts#L155), [transport](https://github.com/yanlingLabs/winter-agent-sdk/blob/8601190c/packages/sdk/src/transport.ts#L47) | Define Linux ARM64 packaging, provisioning, updates, and guest smoke checks. |
 | Shell sandbox is macOS-specific | Required sandbox execution refuses when macOS `sandbox-exec` is unavailable. [Sandbox spawn](https://github.com/yanlingLabs/winter-agent-sdk/blob/8601190c/packages/runtime/src/sandbox/spawn.ts#L258) | Add an explicit Linux/VM execution posture; do not silently turn off a required sandbox. |
 | Idle is weaker than no guest work | [WinterSession.idle](../../packages/core/src/runtime-sdk/winter-session.ts#L936) checks in-flight turns; [daemon background work](../../packages/core/src/daemon.ts#L2110) uses child-agent roster entries. | Guest-wide task occupancy and a drain handshake must cover shells, workflows, monitors, and pending requests too. |
-| Restored subagents are addressable but cannot restart | [Restored child handle](https://github.com/yanlingLabs/winter-agent-sdk/blob/8601190c/packages/runtime/src/subagents/restore.ts#L42) refuses `resume()` after a parent runtime restart. | Implement logical child continuation from durable state before automatic VM cold-stop can meet the selected subagent behavior. |
+| Subagent cold continuation needs release and host integration | The [historically audited handle](https://github.com/yanlingLabs/winter-agent-sdk/blob/8601190c/packages/runtime/src/subagents/restore.ts#L42) refused cold resume; [SDK PR #2](https://github.com/yanlingLabs/winter-agent-sdk/pull/2) subsequently merged the restoration prerequisite. | Release/pin the compatible SDK and verify real guest continuation before automatic VM cold-stop can meet the selected behavior. |
 | Cron already reaches the host, incompletely | [Cron sink](../../packages/core/src/runtime-sdk/sinks.ts#L304) mirrors successful tool creates into routines. | Reuse host ownership, but replace eventual result mirroring with one authoritative acknowledged schedule operation. |
 | One-shot intent is lost | [PendingCronCreate/parser](../../packages/core/src/runtime-sdk/sinks.ts#L184) retains only cron/prompt, ignoring `recurring`; successful creates reach the recurring RoutineStore. | Preserve one-shot versus repeating semantics. The current comment claiming one-shots are excluded does not match the parser. |
 | Schedule ID/list authority is split | [ID mapping](../../packages/core/src/runtime-sdk/sinks.ts#L273) is a process-local Map; CronList remains child-side. Host creation can fail after the child has already answered success. | Persist canonical identities and return success only after durable host acceptance. |
@@ -184,15 +185,15 @@ Guest paths and host capabilities require separate authority. Filesystem/shell w
 | Execution location | Winter loop and subagents in a local Linux ARM64 guest | User direction; Linux choice proposed |
 | VM ownership | Prefer native VM controller inside the existing daemon; avoid a Winter helper per conversation | User requirement; Apple backing-process constraint unresolved |
 | VM technology | Evaluate Containerization before building all VZ device/image plumbing directly | Proposed; no runtime validation yet |
-| Workspace | Per-conversation for standalone Cowork; reusable workspace for Projects | Accepted; Project concurrency remains open |
+| Workspace | Per-conversation for standalone Cowork; reusable workspace for Projects, with concurrent conversations | Accepted; shared-file/Git conflict handling remains open |
 | Access | Direct writes to explicitly granted folders, or selected repos cloned into guest storage | Accepted; no ambient home/SSH sharing remains proposed enforcement |
-| Memory and temp | Workspace-scoped persistent MEMDIR and scratch; disposable OS tmp | Proposed; sharing/retention choices remain open |
-| Resource release | Quiescent cold stop, retained files and durable parent/child continuation | Accepted direction; child cold-resume currently requires SDK work |
-| Scheduling | Durable host authority, VM start on demand, no overlapping workspace runs | Proposed |
+| Memory and temp | Shared Project MEMDIR; private logical transcripts; persistent conversation scratch and disposable OS tmp proposed | Project memory sharing accepted; scratch/retention details open |
+| Resource release | Quiescent cold stop, retained files and durable parent/child continuation | Accepted direction; SDK prerequisite merged, release and Winter integration pending |
+| Scheduling | Durable host authority, VM start on demand, occurrence deduplication while Project conversations may overlap | Proposed |
 | Host tools | Explicit narrow capabilities, no automatic guest-to-host shell fallback | Proposed |
 | Git publication | Session branches; separate commit/push/PR/merge authority | Proposed |
 
-The next discussion should resolve whether Apple's VM backing processes are acceptable or a shared VM is required, whether Project conversations may write concurrently, Project memory scope, and schedule target semantics. Direct host-folder writes and workspace ownership are already settled. Only then should this draft become an implementation spec with acceptance gates.
+The next discussion compares VM backends, controller placement and guest-sharing layouts before selecting one, then resolves shared-file/Git conflict behavior and schedule targets. Direct host-folder writes, workspace ownership, concurrent Project conversations and shared Project memory are settled. The working specification must retain the distinction between accepted requirements, proposed defaults and implementation gates.
 
 ## Research limits and later validation
 
