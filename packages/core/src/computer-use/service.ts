@@ -209,6 +209,9 @@ interface RunCtx {
 }
 
 const isRef = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+/** A helper visit report (`DesktopVisitReport`) as it arrives in an error's `data` — checked, never assumed. */
+const isVisitReport = (v: unknown): v is DesktopVisitReport =>
+  v !== null && typeof v === "object" && typeof (v as { ms?: unknown }).ms === "number" && typeof (v as { returned?: unknown }).returned === "boolean";
 /** A desktop-switch answer's scope within a run: the app, by bundle id AND pid (a relaunched app asks again). */
 const visitKey = (t: { bundleId: string; pid: number }): string => `${t.bundleId}:${t.pid}`;
 const isPoint = (v: unknown): v is [number, number] => Array.isArray(v) && v.length === 2 && v.every((n) => typeof n === "number" && Number.isFinite(n));
@@ -431,6 +434,12 @@ export class ComputerV2Service {
       const value = await this.dispatch(ctx, msg, metric);
       ctx.worker.reply(msg.id, { ok: true, ...(value === undefined ? {} : { value }) });
     } catch (err) {
+      // A request that failed DURING or AFTER a desktop visit (helper 1.7.0's `data.visit`): the user was still moved —
+      // said and counted like any visit (the ruling: every switch is counted), a failed return loudest of all.
+      if (err instanceof HelperRpcError && isVisitReport(err.data.visit)) {
+        const t = msg.target === undefined ? undefined : ctx.state.targets.get(msg.target);
+        if (t !== undefined) this.noteVisit(ctx, t, err.data.visit, metric);
+      }
       const wire = this.toWire(ctx, err, msg);
       metric.error = wire.kind;
       // The helper's own code (`unsupported`, `window_elsewhere`, …): `Error` alone says nothing in the metrics.

@@ -430,6 +430,23 @@ describe("ComputerV2: the desktop switch end to end", () => {
     expect(w.fake.calls("target.act").map((a) => a.desktopVisit)).toEqual([undefined, true]);
   }, 30_000);
 
+  macOnly("an act that FAILED during its visit still says the visit (data.visit) and counts it; a failed return is loud", async () => {
+    const w = world({ policy: "bypass", answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "switch") });
+    w.fake.handlers["target.act"] = (p) => {
+      if (p.desktopVisit !== true) throw new FakeHelperError("needs_desktop_visit", "elsewhere", { why: "act" });
+      throw new FakeHelperError("unsupported", "the click found nothing there", { visit: { ms: 510, returned: true } });
+    };
+    const r = await w.run("const notes = await apps.open('Notes')\ntry { await notes.click(14) } catch (e) { print(e.name) }");
+    expect(text(r)).toContain("moved the user to Notes's desktop for 510 ms and back");
+    expect(w.metrics().find((m) => m.primitive === "click")).toMatchObject({ visit: { count: 1, ms: 510, returned: true }, error: "Error", errorCode: "unsupported" });
+    w.fake.handlers["target.act"] = (p) => {
+      if (p.desktopVisit !== true) throw new FakeHelperError("needs_desktop_visit", "elsewhere", { why: "act" });
+      throw new FakeHelperError("unsupported", "lost", { visit: { ms: 2_200, returned: false } });
+    };
+    const r2 = await w.run("try { await notes.click(14) } catch (e) { print(e.name) }");
+    expect(r2.content.some((c) => c.type === "text" && c.text.startsWith("Winter moved the user to Notes's desktop and could NOT bring them back"))).toBe(true);
+  }, 30_000);
+
   macOnly("view-only apps never get the prompt for an act, but may for a live read", async () => {
     const w = world({ policy: "bypass", apps: { "com.apple.Notes": { access: "view" } }, answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "switch") });
     w.fake.handlers["target.act"] = visitingAct();
