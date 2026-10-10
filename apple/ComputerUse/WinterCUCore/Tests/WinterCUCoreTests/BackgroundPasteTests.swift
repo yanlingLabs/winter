@@ -25,7 +25,7 @@ final class BackgroundPasteTests: XCTestCase {
     var installer: FakeKeyTapInstaller!
 
     override func setUp() {
-        FocusSPI.calls = []
+        FocusSPI.reset()
         FocusSPI.frontPid = 1
         FocusSPI.onFocus = nil
     }

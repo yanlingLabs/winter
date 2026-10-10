@@ -815,13 +815,17 @@ await sleep(300);
 report({ pressed: close.ref });`,
     dump: true,
     verify: (ctx) => {
-      const ignored = docsEvents(ctx, "click").some((e) => e.id === "find-close" && e.ignored === true);
       const fellBack = /did nothing|clicked (it )?instead|click(ed)? with the pointer|mouse (down|events)/i.test(ctx.output);
       const mouse = docsEvents(ctx, "mouse").filter((e) => e.id === "find-close").map((e) => e.phase);
+      // WebKit's accessibility press is itself a mousedown + mouseup + click (the button's ignored `click` is logged
+      // either way): the press worked when the button got ONE press; a second one is the helper's click, which the
+      // result must say.
+      const presses = mouse.filter((p) => p === "down").length;
       return [ok(ctx),
         check("the panel closed (fixture log)", docsEvents(ctx, "panel").some((e) => e.open === false) && docsState(ctx).panelOpen === false, JSON.stringify(docsEvents(ctx, "panel"))),
         check("the button got a mousedown and a mouseup", mouse.includes("down") && mouse.includes("up"), JSON.stringify(mouse)),
-        check("the result says the AX press did nothing and it clicked instead (or the AX press itself worked)", !ignored || fellBack, ctx.output.slice(0, 300))];
+        check("the result says the AX press did nothing and it clicked instead (or the AX press itself worked)", presses <= 1 || fellBack,
+          `${presses} presses; ${ctx.output.slice(0, 260)}`)];
     },
   },
   {

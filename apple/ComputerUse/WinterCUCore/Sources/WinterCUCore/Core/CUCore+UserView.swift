@@ -190,10 +190,58 @@ extension CUCore {
         let undo = {
             if let userWindow { sky.restoreFocus(previousPid: user, previousWindowID: userWindow, targetPid: tp, targetWindowID: tw) }
         }
-        guard backgroundStep(.focusRecords, t, run: { sky.focusWithoutRaise(pid: tp, windowID: tw) }, undo: { _ = undo() })
+        // The focus record makes the app active, but its key window is the one it already had: after an earlier
+        // blip's hand-back the app holds NO key window, and a later blip left it so (live 2026-10-10: the second
+        // paste of a run read Edit › Paste disabled and took no ⌘V; keys for the Docs window went nowhere). The
+        // make-key records name the bound window — with the app deactivated first when another of its windows
+        // is key, since the records only take where no window is.
+        let makeKey = makeKeyApplies(t)
+        let release = makeKey && boundWindowIsKeyInApp(t) == false
+        guard backgroundStep(.focusRecords, t, run: { [self] in
+            if release { releaseOtherKeyWindow(t) }
+            guard sky.focusWithoutRaise(pid: tp, windowID: tw) else { return false }
+            if makeKey { _ = sky.makeKeyWindow(pid: tp, windowID: tw) }
+            return true
+        }, undo: { _ = undo() })
         else { return nil }
-        CULog.act.notice("\(t.appName, privacy: .public): window \(tw, privacy: .public) made key without raising")
+        CULog.act.notice("\(t.appName, privacy: .public): window \(tw, privacy: .public) made key without raising\(makeKey ? " (make-key records\(release ? ", after another of its windows resigned key" : ""))" : "", privacy: .public)")
         return { _ = undo() }
+    }
+
+    /// The make-key records apply: they can be posted, the app is in the background, and the bound window is on
+    /// this desktop (a window on another Space keeps the routes it had — nothing new is sent there).
+    func makeKeyApplies(_ t: CUTarget) -> Bool {
+        guard t.accessible, skyLight.canFocusWithoutRaise, sys.frontmostPid() != t.pid else { return false }
+        return sys.window(id: t.windowID)?.onScreen == true
+    }
+
+    /// The synthetic deactivation, so another of the app's windows resigns key, then `keySwitchGapMs` for the
+    /// app to take it before the records that follow (live: with no gap one switch in six was lost; 20 ms
+    /// and up, none in twelve).
+    func releaseOtherKeyWindow(_ t: CUTarget) {
+        guard let enforcer = focusEnforcer(for: t, privatePath: true) else { return }
+        noteSyntheticActivation()  // the guardian must not read it as the user's
+        if enforcer.deactivate(), keySwitchGapMs > 0 { usleep(useconds_t(keySwitchGapMs * 1000)) }
+    }
+
+    /// Before a window-targeted click in the background: the bound window made its app's key window (the
+    /// synthetic activation, then the make-key records — the deactivation first when another of its windows is
+    /// key), so the click reaches the page instead of being taken as the click that makes the window key
+    /// (AppKit's first click; live: the page's own “Tools” menu never opened, a click on a canvas only made its
+    /// window key). Posted to the app alone: nothing is raised, nothing activates, the user's key focus stays.
+    /// False — nothing posted — when it does not apply (the private path off, a Chromium app, the app in front,
+    /// the window elsewhere); a caller that posted the synthetic activation alone before still does.
+    @discardableResult
+    func keyForClick(_ t: CUTarget, privatePath: Bool) -> Bool {
+        guard privatePath, !t.isChromium, makeKeyApplies(t), let enforcer = focusEnforcer(for: t, privatePath: true) else {
+            return false
+        }
+        if boundWindowIsKeyInApp(t) == false { releaseOtherKeyWindow(t) }
+        noteSyntheticActivation()
+        _ = enforcer.forceActivation(windowID: t.windowID)
+        let made = skyLight.makeKeyWindow(pid: t.pid, windowID: t.windowID)
+        CULog.act.notice("click in \(t.appName, privacy: .public): window \(t.windowID, privacy: .public) made its app's key window first (make-key records \(made ? "sent" : "refused", privacy: .public))")
+        return made
     }
 
     /// Makes the bound window the app's main window (menu commands and keys apply to it), checked like any

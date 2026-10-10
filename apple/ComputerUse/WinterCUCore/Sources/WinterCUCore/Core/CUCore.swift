@@ -104,6 +104,7 @@ public final class CUCore: @unchecked Sendable {
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
             visitArriveMs = 0
             visitLateSwitchMs = 0
+            keySwitchGapMs = 0
             visitFreshMaxMs = 0
             visitFreshStableMs = 0
             visitNoProbeWaitMs = 0
@@ -513,6 +514,9 @@ public final class CUCore: @unchecked Sendable {
     var windowGoneSettleMs: Double = 1500
     /// The destroyed-element check runs inline (tests) instead of off the notification's thread.
     var windowCheckSync = false
+    /// The pause between the synthetic deactivation and the make-key records (`releaseOtherKeyWindow`); 0 in
+    /// test cores.
+    var keySwitchGapMs: Double = 30
     var visitFreshMaxMs: Double = 1000
     var visitFreshStableMs: Double = 300
     var visitFrameIntervalMs: Double = 50

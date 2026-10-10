@@ -207,6 +207,41 @@ public struct CUSkyLight: @unchecked Sendable {
         return a == 0 && b == 0
     }
 
+    /// yabai's make-key-window records: a synthesized left mouse down and up (event types 1 and 2) for the window,
+    /// flagged 0x10 at 0x3A, with an invalid location (0xFF bytes at 0x20–0x2F) so no view under it is hit. The
+    /// app makes the window its key window — what a click on it does, without the click.
+    static func makeKeyRecords(windowID: UInt32) -> [[UInt8]] {
+        [UInt8(0x01), UInt8(0x02)].map { type in
+            var buf = [UInt8](repeating: 0, count: 0xF8)
+            buf[0x04] = 0xF8
+            buf[0x08] = type
+            buf[0x3A] = 0x10
+            for i in 0x20..<0x30 { buf[i] = 0xFF }
+            withUnsafeBytes(of: windowID.littleEndian) { bytes in
+                for (i, b) in bytes.enumerated() { buf[0x3C + i] = b }
+            }
+            return buf
+        }
+    }
+
+    /// Makes `windowID` its app's KEY window (AppKit's own, not the system's key focus): the make-key records,
+    /// posted to the app alone. Live (2026-10-10, a WebKit host app in the background): the app takes it only
+    /// while it believes it is active and holds no key window — the focus record or the synthetic activation
+    /// first, and the app deactivated before when ANOTHER of its windows is key. Nothing is raised, nothing
+    /// activates, the user's key focus stays where it is (all measured). False when a symbol is missing.
+    @discardableResult
+    func makeKeyWindow(pid: pid_t, windowID: UInt32) -> Bool {
+        guard let postEventRecordToFn, let getProcessForPIDFn else { return false }
+        var target = [UInt8](repeating: 0, count: 8)
+        guard target.withUnsafeMutableBytes({ getProcessForPIDFn(pid, $0.baseAddress!) }) == 0 else { return false }
+        var ok = true
+        for record in Self.makeKeyRecords(windowID: windowID) {
+            let r = target.withUnsafeBytes { psn in record.withUnsafeBufferPointer { postEventRecordToFn(psn.baseAddress!, $0.baseAddress!) } }
+            ok = ok && r == 0
+        }
+        return ok
+    }
+
     /// Undoes `focusWithoutRaise`: the target window loses key focus and the user's previous key window
     /// (`previousWindowID` of `previousPid`) gets it back, so their typing goes where it went before.
     @discardableResult

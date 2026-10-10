@@ -10,12 +10,29 @@ enum FocusSPI {
     nonisolated(unsafe) static var frontPid: pid_t = 1
     /// Runs after each focus record (not a defocus), to change the fake world as an app might react.
     nonisolated(unsafe) static var onFocus: (() -> Void)?
+    /// The make-key records (synthesized mouse down/up, type 1/2), apart from the focus records: "down pid 5252
+    /// window 77", "up pid 5252 window 77". `order` interleaves both kinds, with the enforcer's deactivations.
+    nonisolated(unsafe) static var makeKey: [String] = []
+    nonisolated(unsafe) static var order: [String] = []
     static func pid(_ psn: UnsafeRawPointer) -> pid_t { pid_t(psn.load(fromByteOffset: 4, as: UInt32.self)) }
+    static func reset() {
+        calls = []
+        makeKey = []
+        order = []
+    }
 }
 
 private let fakePostRecord: CUSkyLight.PostEventRecordTo = { psn, bytes in
     let wid = UInt32(bytes[0x3C]) | UInt32(bytes[0x3D]) << 8 | UInt32(bytes[0x3E]) << 16 | UInt32(bytes[0x3F]) << 24
-    FocusSPI.calls.append("\(bytes[0x8A] == 1 ? "focus" : "defocus") pid \(FocusSPI.pid(psn)) window \(wid)")
+    guard bytes[0x08] == 0x0D else {
+        let entry = "\(bytes[0x08] == 0x01 ? "down" : "up") pid \(FocusSPI.pid(psn)) window \(wid)"
+        FocusSPI.makeKey.append(entry)
+        FocusSPI.order.append(entry)
+        return 0
+    }
+    let entry = "\(bytes[0x8A] == 1 ? "focus" : "defocus") pid \(FocusSPI.pid(psn)) window \(wid)"
+    FocusSPI.calls.append(entry)
+    FocusSPI.order.append(entry)
     if bytes[0x8A] == 1 { FocusSPI.onFocus?() }
     return 0
 }
@@ -64,7 +81,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
     var scheduled: [(ms: Double, work: () -> Void)] = []
 
     override func setUp() {
-        FocusSPI.calls = []
+        FocusSPI.reset()
         FocusSPI.frontPid = 1
         FocusSPI.onFocus = nil
     }
@@ -406,6 +423,68 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         XCTAssertTrue(scheduled.allSatisfy { $0.ms <= 1_500 }, "the hard bound of a keyboard blip")
         XCTAssertFalse(FocusSPI.calls.contains { $0.hasPrefix("front ") })
         XCTAssertEqual(sys.frontmostPid(), 1)
+        XCTAssertTrue(sys.activated.isEmpty)
+    }
+
+    /// Live (2026-10-10): after a blip handed the key focus back, the app held NO key window, and the focus record of
+    /// every later blip left it so — keys for the window went nowhere (Docs' hidden input, its Tab), and Edit › Paste
+    /// read disabled and took no ⌘V (every paste after the first). The make-key records follow the focus record,
+    /// before the first key; the hand-back is as before.
+    func testTheBlipNamesTheBoundWindowAsItsAppsKeyWindowBeforeTheFirstKey() async throws {
+        finder(focusedField: true)
+        var atFirstKey: [String]?
+        poster.onPost = { e in if atFirstKey == nil, e.type == .keyDown { atFirstKey = FocusSPI.order } }
+        try await act(.type(CUTypeAction(text: "ab")))
+        XCTAssertEqual(atFirstKey, ["defocus pid 1 window 77", "focus pid 5252 window 77", "down pid 5252 window 77", "up pid 5252 window 77"])
+        XCTAssertEqual(Array(FocusSPI.calls.suffix(2)), ["defocus pid 5252 window 77", "focus pid 1 window 31"], "handed back as before")
+        XCTAssertEqual(FocusSPI.makeKey.count, 2, "once per blip")
+        XCTAssertTrue(sys.activated.isEmpty)
+        XCTAssertEqual(sys.frontmostPid(), 1)
+    }
+
+    /// The records only take where the app holds no key window (measured): when ANOTHER of its windows is key, the
+    /// synthetic deactivation comes first, so it resigns.
+    func testAnotherKeyWindowOfTheAppResignsBeforeTheBlip() async throws {
+        finder(focusedField: true)
+        let other = fakeElement(98_020)
+        ax.add(other, role: kAXWindowRole, title: "Other")
+        ax.windowIDs[AXIdentity(element: other)] = 78
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: other])
+        let enforcer = FakeFocusEnforcer()
+        core.focusEnforcerFactory = { _ in enforcer }
+        try await act(.type(CUTypeAction(text: "ab")))
+        XCTAssertEqual(Array(FocusSPI.order.prefix(5)),
+                       ["deactivate", "defocus pid 1 window 77", "focus pid 5252 window 77", "down pid 5252 window 77", "up pid 5252 window 77"])
+        XCTAssertEqual(enforcer.deactivated, 1)
+        XCTAssertEqual(poster.keyDowns.map(\.unicode), ["a", "b"])
+    }
+
+    func testTheMakeKeyStepAppliesOnlyToABackgroundWindowOnThisDesktop() {
+        finder()
+        XCTAssertTrue(core.makeKeyApplies(target))
+        sys.front = pid
+        XCTAssertFalse(core.makeKeyApplies(target), "the app in front: it is really active")
+        sys.front = 1
+        var w = sys.windows[77]!
+        w.onScreen = false
+        sys.windows[77] = w
+        XCTAssertFalse(core.makeKeyApplies(target), "a window on another desktop keeps the routes it had")
+        let noSPI = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: poster, ax: ax, sys: sys,
+                           pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        sys.windows[77] = FakeSystem.window(77, pid: pid, CGRect(x: 100, y: 100, width: 900, height: 500))
+        XCTAssertFalse(noSPI.makeKeyApplies(target), "no records without the private SPIs")
+    }
+
+    func testABackgroundClickMakesTheWindowKeyInItsAppFirst() async throws {
+        finder(focusedField: true)
+        let enforcer = FakeFocusEnforcer()
+        core.focusEnforcerFactory = { _ in enforcer }
+        var atDown: [String]?
+        poster.onPost = { e in if atDown == nil, e.type == .leftMouseDown { atDown = FocusSPI.order } }
+        try await act(.click(CUClickAction(ref: target.refs.ref(for: AXIdentity(element: field)))))
+        XCTAssertEqual(atDown, ["activate 77", "down pid 5252 window 77", "up pid 5252 window 77"])
+        XCTAssertTrue(FocusSPI.calls.isEmpty, "no focus records: a click takes no blip")
+        XCTAssertTrue(installer.installed.isEmpty)
         XCTAssertTrue(sys.activated.isEmpty)
     }
 

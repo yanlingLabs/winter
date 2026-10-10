@@ -22,7 +22,9 @@ final class PageMenuTests: XCTestCase {
     var core: CUCore!
     var target: CUTarget!
 
-    private func world(menuOpens: Bool = true) {
+    /// `closedMenuStaysAlive`: the chosen item closes the menu the way WebKit shows a `hidden` one — its element
+    /// still alive, with its old frame, only no longer in the page. `skyLight`: the private focus SPIs, recorded.
+    private func world(menuOpens: Bool = true, closedMenuStaysAlive: Bool = false, skyLight: CUSkyLight = .none) {
         ax = FakeAX()
         let app = ax.application(pid)
         ax.put(app, [kAXWindowsAttribute: [window], kAXFocusedWindowAttribute: window])
@@ -61,10 +63,10 @@ final class PageMenuTests: XCTestCase {
                 ax.put(web, [kAXChildrenAttribute: [pageBar, toolsMenu]])
             } else if CGRect(x: 60, y: 70, width: 200, height: 60).contains(e.location) {
                 ax.put(web, [kAXChildrenAttribute: [pageBar]])
-                ax.dead.insert(AXIdentity(element: toolsMenu))
+                if !closedMenuStaysAlive { ax.dead.insert(AXIdentity(element: toolsMenu)) }
             }
         }
-        core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: poster, ax: ax, sys: sys,
+        core = CUCore(events: nil, clock: CUSystemClock(), skyLight: skyLight, poster: poster, ax: ax, sys: sys,
                       pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
         target = CUTarget(id: "t1", sessionId: "s", pid: pid, bundleId: "com.example.browser", appName: "Browser",
                           isChromium: false, mirror: false, windowID: 77, windowTitle: "Doc")
@@ -72,9 +74,71 @@ final class PageMenuTests: XCTestCase {
         target.refs.beginGeneration()
     }
 
-    private func menu(_ path: [String]) async throws -> TargetActResult {
+    private func menu(_ path: [String], privatePath: Bool = false) async throws -> TargetActResult {
         try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c", action: .menu(CUMenuAction(path: path)),
-                                                 access: .full, allowForeground: false, privatePath: false))
+                                                 access: .full, allowForeground: false, privatePath: privatePath))
+    }
+
+    func testAClosedMenuThatAccessibilityStillHoldsCountsAsClosed() async throws {
+        // Live (2026-10-10): the page closed its menu (`hidden`), WebKit kept the element alive with its frame, and
+        // the answer said "its menu is still open".
+        world(closedMenuStaysAlive: true)
+        let r = try await menu(["Tools", "Word count"])
+        XCTAssertEqual(r.detail, "chose Tools › Word count from the page's own menu bar, with real clicks (its menu closed)")
+    }
+
+    /// Live (2026-10-10): the first click on the page's "Tools" only made the background window key (AppKit's first
+    /// click) and the menu never opened. The window is made its app's key window before the click: the synthetic
+    /// activation, then the make-key records — posted to the app alone.
+    func testTheFirstClickIsPrecededByTheWindowMadeKeyInItsApp() async throws {
+        FocusSPI.reset()
+        world(skyLight: focusSkyLight())
+        let enforcer = FakeFocusEnforcer()
+        core.focusEnforcerFactory = { _ in enforcer }
+        var atFirstDown: [String]?
+        let page = poster.onPost
+        poster.onPost = { e in
+            if atFirstDown == nil, e.type == .leftMouseDown { atFirstDown = FocusSPI.order }
+            page?(e)
+        }
+        let r = try await menu(["Tools", "Word count"], privatePath: true)
+        XCTAssertEqual(r.detail, "chose Tools › Word count from the page's own menu bar, with real clicks (its menu closed)")
+        XCTAssertEqual(Array((atFirstDown ?? []).prefix(3)), ["activate 77", "down pid \(pid) window 77", "up pid \(pid) window 77"],
+                       "activation and make-key records before the first click")
+        XCTAssertEqual(enforcer.deactivated, 0, "the window was already the app's key window: nothing resigned")
+        XCTAssertTrue(FocusSPI.calls.isEmpty, "no focus records: no blip for a click")
+        XCTAssertTrue(sys.activated.isEmpty, "nothing activated")
+    }
+
+    func testAnotherKeyWindowOfTheAppResignsFirst() async throws {
+        FocusSPI.reset()
+        world(skyLight: focusSkyLight())
+        let other = fakeElement(95_099)
+        ax.add(other, role: kAXWindowRole, title: "Other")
+        ax.windowIDs[AXIdentity(element: other)] = 78
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: other])
+        let enforcer = FakeFocusEnforcer()
+        core.focusEnforcerFactory = { _ in enforcer }
+        _ = try await menu(["Tools", "Word count"], privatePath: true)
+        XCTAssertEqual(Array(FocusSPI.order.prefix(4)), ["deactivate", "activate 77", "down pid \(pid) window 77", "up pid \(pid) window 77"])
+    }
+
+    func testNoMakeKeyRecordsForAChromiumAppAnAppInFrontOrWithThePrivatePathOff() async throws {
+        for variant in ["chromium", "front", "private path off"] {
+            FocusSPI.reset()
+            world(skyLight: focusSkyLight())
+            if variant != "front" {
+                // The private path is the target's own setting (bound with it), as for the rest of the window SPIs.
+                target = CUTarget(id: "t1", sessionId: "s", pid: pid, bundleId: variant == "chromium" ? "com.google.Chrome" : "com.example.browser",
+                                  appName: "Browser", isChromium: variant == "chromium", mirror: false, windowID: 77, windowTitle: "Doc",
+                                  privatePath: variant == "chromium")
+                core.registerForTesting(target, windowElement: window)
+                target.refs.beginGeneration()
+            }
+            if variant == "front" { sys.front = pid }
+            _ = try? await menu(["Tools", "Word count"], privatePath: variant != "private path off")
+            XCTAssertTrue(FocusSPI.makeKey.isEmpty, "\(variant): \(FocusSPI.makeKey)")
+        }
     }
 
     func testAMenuOnlyThePageHasIsChosenWithRealClicksAndVerified() async throws {

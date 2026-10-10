@@ -122,6 +122,16 @@
     fbody.addEventListener("keydown", function (e) {
       if (!quiet) post({ type: "key", key: e.key, code: e.code, meta: e.metaKey, alt: e.altKey });
       optionShortcut(e);
+      // Return is the editor's own, taken on keydown as Google Docs takes it: this hidden input (a 1-px off-screen
+      // iframe body emptied after every input) gets no insertParagraph from WebKit for it — measured on 2026-10-10
+      // with the fixture really in front and its window key, the same as from the background.
+      if (e.key === "Enter" && !e.altKey && !e.metaKey && !e.ctrlKey && !e.defaultPrevented) {
+        e.preventDefault();
+        model += "\n";
+        fbody.textContent = "​";
+        if (!quiet) post({ type: "input", inputType: "insertParagraph", data: null });
+        textChanged();
+      }
     });
     fbody.addEventListener("paste", function (e) {
       var text = (e.clipboardData && e.clipboardData.getData("text/plain")) || "";

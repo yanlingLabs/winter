@@ -89,6 +89,24 @@ final class InputTests: XCTestCase {
         XCTAssertEqual(CUSkyLight.focusRecord(windowID: 1, focus: false)[0x8A], 0x02)
     }
 
+    func testMakeKeyRecordLayout() {
+        let records = CUSkyLight.makeKeyRecords(windowID: 0x1122_3344)
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.map { $0[0x08] }, [0x01, 0x02], "a synthesized mouse down, then up")
+        for r in records {
+            XCTAssertEqual(r.count, 0xF8)
+            XCTAssertEqual(r[0x04], 0xF8)
+            XCTAssertEqual(r[0x3A], 0x10)
+            XCTAssertEqual(Array(r[0x20..<0x30]), [UInt8](repeating: 0xFF, count: 16), "no location: no view is hit")
+            XCTAssertEqual(Array(r[0x3C...0x3F]), [0x44, 0x33, 0x22, 0x11], "window id little-endian")
+            XCTAssertEqual(r[0x8A], 0x00, "not a focus record")
+        }
+    }
+
+    func testMakeKeyIsNotPostedWithoutTheSymbols() {
+        XCTAssertFalse(CUSkyLight.none.makeKeyWindow(pid: 42, windowID: 7))
+    }
+
     // MARK: event sequences
 
     final class Recorder: CUEventPoster, @unchecked Sendable {
