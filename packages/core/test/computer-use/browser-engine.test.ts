@@ -649,6 +649,10 @@ describe("lifecycle", () => {
     const refused = await failure(h.engine.primitive(r.scope, kept.targetId, "close", {}));
     expect((refused as AutomationFailure).kind).toBe("NotAllowed");
     expect(refused.message).toBe("that tab is the user's now — Winter never closes it");
+    // …and tabs() no longer calls it yours (the handed-off one still is).
+    const rows = await h.engine.global(r.scope, "browsers.tabs", { browser: "chrome", emit: false }) as Array<{ id: string; yours: boolean }>;
+    expect(rows.find((x) => x.id === kept.id)?.yours).toBe(false);
+    expect(rows.find((x) => x.id === handed.id)?.yours).toBe(true);
     r.end();
     const tab = (t: TabHandle) => h.chrome.tabs.get(t.id.split(":")[1]!)!;
     expect(tab(kept).kept).toBe(true);
