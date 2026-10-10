@@ -120,6 +120,17 @@ import { createSinkCallStore, sinksFor } from "./runtime-sdk/sinks";
 import { sessionHooksFor } from "./runtime-sdk/hooks";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
 import { createComputerUseRuntime, type ComputerUseInjection } from "./computer-use/wiring";
+import { BrowserHostServer, type BrowserHostVerifier } from "./computer-use/browser/extension/host-server";
+import { BROWSER_HOST_SOCKET_NAME } from "./computer-use/browser/extension/protocol";
+import type { BackendRegistry } from "./computer-use/browser/transport";
+
+/** `startDaemon`'s Winter for Chrome test seam (see its option's doc). */
+export interface BrowserHostInjection {
+  registry?: BackendRegistry;
+  allowedExtensionIds?: readonly string[];
+  hostRequirement?: string;
+  verifyHost?: BrowserHostVerifier;
+}
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { makeDaemonRoutineRunner } from "./routines/runner";
 import { makeRoutineScheduler } from "./routines/scheduler";
@@ -407,6 +418,10 @@ export async function startDaemon(opts: {
    *  idle timeout. Absent: the real helper over `<home>/run/computer-use.sock`, launched only when this daemon
    *  runs on its profile's own default home with no injected `secrets` — so no test daemon ever starts it. */
   computerUse?: ComputerUseInjection;
+  /** ComputerV2 Phase 2 TEST SEAM: Winter for Chrome's server (`<home>/run/browser.sock`). `registry` stands in for the
+   *  engine's backends; the rest replace this profile's extension ids, the host's designated requirement and the
+   *  Security.framework check of the host's pid (the opt-in extension e2e runs a test-build host). Production sets none. */
+  browserHost?: BrowserHostInjection;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const home = opts.home ?? resolveWinterHome();
@@ -1268,6 +1283,26 @@ export async function startDaemon(opts: {
     log: (line) => console.error(line),
   });
   hub.addObserver((event) => computerUseRuntime.observe(event));
+
+  // ComputerV2 Phase 2 — Winter for Chrome's door into this daemon: `<home>/run/browser.sock`, where
+  // `winter-browser-host` (inside the Winter Computer Use bundle) connects for each browser profile running the extension.
+  // Each verified connection becomes a transport registered in the engine's backends (`computerUseRuntime.backends`).
+  // Built here, but it starts listening only once the daemon is fully up (beside the IPC server's "listening on"), so a
+  // boot that fails on the way leaves no listener behind. A socket that cannot be created never fails the boot: the
+  // user's browsers then read "not connected".
+  const browserHostServer = new BrowserHostServer({
+    socketPath: join(dirs.runDir, BROWSER_HOST_SOCKET_NAME),
+    profile,
+    daemonVersion: CORE_VERSION,
+    // The engine's backends (`computerUseRuntime.backends`, lane B's registry), read structurally so this needs no field
+    // of its own on the runtime: absent while this daemon has no browser engine, and an extension's hello is then refused.
+    registry: () => opts.browserHost?.registry ?? (computerUseRuntime as { backends?: BackendRegistry }).backends,
+    enabled: () => { const s = computerUseRuntime.settings(); return s ? computerUseEnabledFrom(s) : true; },
+    ...(opts.browserHost?.allowedExtensionIds === undefined ? {} : { allowedExtensionIds: opts.browserHost.allowedExtensionIds }),
+    ...(opts.browserHost?.hostRequirement === undefined ? {} : { hostRequirement: opts.browserHost.hostRequirement }),
+    ...(opts.browserHost?.verifyHost === undefined ? {} : { verifyHost: opts.browserHost.verifyHost }),
+    log: (line) => console.error(line),
+  });
 
   // Peripheral lease v1 (Phase 2f) — HOISTED above the `if (agentProvider)` gate (phase 5 CU): the
   // ComputerUseService (built inside the gate) needs this broker to lease screenshot/ax-read/input-
@@ -3045,6 +3080,11 @@ export async function startDaemon(opts: {
   });
 
   console.error(`winter-core ${CORE_VERSION} listening on ${dirs.socketPath}`);
+  try {
+    browserHostServer.start();
+  } catch (err) {
+    console.error(`[browser-host] could not listen on ${join(dirs.runDir, BROWSER_HOST_SOCKET_NAME)}: ${err instanceof Error ? err.message : String(err)}`);
+  }
   return {
     socketPath: dirs.socketPath,
     tokens,
@@ -3074,6 +3114,7 @@ export async function startDaemon(opts: {
       dispatchChildren?.beginShutdown();
       sessionMessaging?.beginShutdown(); // no SendMessage resumes a session into a daemon that is going away
       computerUseRuntime.stop(); // no automation worker outlives the daemon; the helper connection closes
+      browserHostServer.stop(); // Winter for Chrome's connections close (its transports read disconnected); browser.sock goes
       server.stop(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
       for (const w of sdkWatchers) w.stop();

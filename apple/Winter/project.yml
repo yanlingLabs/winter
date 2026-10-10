@@ -27,6 +27,10 @@ packages:
   # the helper keeps the Screen Recording grant and streams frames over its socket).
   WinterCUPresentation:
     path: ../ComputerUse/WinterCUPresentation
+  # ComputerV2 Phase 2: winter-browser-host, the native-messaging host behind Winter for Chrome. Only the
+  # WinterBrowserHost tool target links it; that tool is embedded in the helper's Contents/MacOS.
+  WinterBrowserHost:
+    path: ../ComputerUse/WinterBrowserHost
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.6.0"
@@ -997,6 +1001,26 @@ targets:
     dependencies:
       - package: WinterComputerUse
         product: WinterComputerUseShell
+      # ComputerV2 Phase 2: build order only — the "Embed winter-browser-host" phase below copies the tool.
+      - target: WinterBrowserHost
+        embed: false
+    # ComputerV2 Phase 2: winter-browser-host goes beside the helper's own executable, in Contents/MacOS. It is
+    # nested code with its OWN identity (com.winter.browserhost[.dev]), so every signing site — dev:helper,
+    # verify:computer-helper, embed-computer-helper.sh — signs it before it signs the helper (never --deep).
+    postCompileScripts:
+      - name: Embed winter-browser-host
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          SRC="${BUILT_PRODUCTS_DIR}/winter-browser-host"
+          DEST="${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}"
+          if [ ! -f "${SRC}" ]; then
+            echo "error: winter-browser-host is not at ${SRC} — is the WinterBrowserHost target in this build?" >&2
+            exit 1
+          fi
+          mkdir -p "${DEST}"
+          rm -f "${DEST}/winter-browser-host"
+          cp "${SRC}" "${DEST}/winter-browser-host"
     info:
       path: ../ComputerUse/WinterComputerUse/Support/Info.plist
       properties:
@@ -1044,6 +1068,41 @@ targets:
         Release:
           # The same privacy set as the Winter and WinterHelper targets (compiler-recorded paths, linker OSO
           # stabs, AST-path stabs): the release identity scan reads every byte of the helper too.
+          OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
+  # ComputerV2 Phase 2 — winter-browser-host, Chrome's native-messaging host for Winter for Chrome
+  # (apple/ComputerUse/WinterBrowserHost, its PROTOCOL.md). A bare tool: Tool/main.swift on the package's library, copied
+  # into the Winter Computer Use helper's Contents/MacOS by that target's "Embed winter-browser-host" phase. It reads its
+  # home from the enclosing helper's bundle id, so it carries no identity of its own beyond its codesign identifier,
+  # which every signing site states explicitly (com.winter.browserhost / .dev / .test, hardened runtime, no
+  # entitlements, a stated designated requirement — scripts/computer-helper-lib.ts). Test hooks compile in only under
+  # the test-build compilation condition, which only verify:computer-helper's test flavor passes.
+  WinterBrowserHost:
+    type: tool
+    platform: macOS
+    sources:
+      - path: ../ComputerUse/WinterBrowserHost/Tool
+    dependencies:
+      - package: WinterBrowserHost
+        product: WinterBrowserHostCore
+    settings:
+      base:
+        PRODUCT_NAME: winter-browser-host
+        PRODUCT_BUNDLE_IDENTIFIER: com.winter.browserhost
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        ENABLE_HARDENED_RUNTIME: YES
+        OTHER_CODE_SIGN_FLAGS: -i com.winter.browserhost
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+      configs:
+        Release:
+          # The helper's privacy set: the release identity scan reads every byte of the host too.
           OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
           OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
           DEPLOYMENT_POSTPROCESSING: YES
