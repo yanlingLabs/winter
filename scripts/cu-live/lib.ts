@@ -1,6 +1,7 @@
-// The live ComputerV2 suite's PURE parts — everything here is a function of data, unit-tested in `lib.test.ts`
-// without a screen: the focus/Space/input analysis of the monitor's samples, the fixture log, the script result
-// markers, `top` parsing, the `CALL` lines the scripted model reads, and the pass/fail table.
+// The live ComputerV2 suite's PURE parts — everything here is a function of data (or of an injected process seam),
+// unit-tested in `lib.test.ts` without a screen: the focus/Space/input/lock analysis of the monitor's samples, the
+// fixture log, the script result markers, `top` parsing, the `CALL` lines the scripted model reads, the pass/fail
+// table, and the stop-signal handler.
 
 // ── the monitor (`cu-live-tool monitor`) ──────────────────────────────────────────────────────────────────────
 
@@ -23,6 +24,12 @@ export interface MonitorSample {
   hwLast?: number | null;
   hwStart?: number;
   hwKeys?: boolean;
+  /**
+   * `CGSessionCopyCurrentDictionary()`'s view (`SessionState`): the screen is locked (`CGSSessionScreenIsLocked`), and
+   * this login session is the one on the console. Absent from an older monitor.
+   */
+  locked?: boolean;
+  onConsole?: boolean;
 }
 
 export function parseMonitorLine(line: string): MonitorSample | undefined {
@@ -34,7 +41,8 @@ export function parseMonitorLine(line: string): MonitorSample | undefined {
     const hw = typeof o.hw === "number" && typeof o.hwStart === "number"
       ? { hw: o.hw, hwLast: num(o.hwLast), hwStart: o.hwStart, hwKeys: o.hwKeys === true }
       : {};
-    return { t: o.t, front: typeof o.front === "string" ? o.front : null, frontPid: num(o.frontPid), space: num(o.space), hidIdleMs: num(o.hidIdleMs), ...(m === undefined ? {} : { mouse: m }), ...hw };
+    const session = typeof o.locked === "boolean" && typeof o.onConsole === "boolean" ? { locked: o.locked, onConsole: o.onConsole } : {};
+    return { t: o.t, front: typeof o.front === "string" ? o.front : null, frontPid: num(o.frontPid), space: num(o.space), hidIdleMs: num(o.hidIdleMs), ...(m === undefined ? {} : { mouse: m }), ...hw, ...session };
   } catch {
     return undefined;
   }
@@ -150,12 +158,72 @@ export function parseDuration(text: string): number | undefined {
 
 export type IdleDecision = { kind: "go" } | { kind: "wait"; reason: string } | { kind: "refuse"; reason: string };
 
+// ── the screen is usable at all (not locked, on the console) ─────────────────────────────────────────────────────
+
+/** `cu-live-tool session`: the screen is locked, and whether this login session is the one on the console. */
+export interface SessionState { locked: boolean; onConsole: boolean }
+
+/** The login window is the frontmost app exactly while the screen is locked (or nobody is logged in on the console). */
+export const LOGIN_WINDOW_BUNDLE_ID = "com.apple.loginwindow";
+
+export function parseSessionReading(stdout: string): SessionState | undefined {
+  try {
+    const o = JSON.parse(stdout.trim().split("\n").at(-1) ?? "") as Record<string, unknown>;
+    return typeof o.locked === "boolean" && typeof o.onConsole === "boolean" ? { locked: o.locked, onConsole: o.onConsole } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Whether the run may start now. A run someone started by hand goes at once; an unattended one (an approved agent
- * run) waits — polled every `UNATTENDED_POLL_MS` — until the Mac has had `idleMs` with no real input (then the
- * countdown banner, `countdownDecision`), and gives up after `maxWaitMs`.
+ * Why a live run cannot use the screen right now — undefined when it can. A locked Mac (or one whose console belongs
+ * to another login session, or whose state could not be read: `null`) is NEVER a go: the fixtures would open behind
+ * the lock screen and every result would be meaningless. `front` (when known) corroborates: the login window in front
+ * is the lock screen whatever the flags say.
  */
-export function idleGate(hardwareIdle: number | null, waitedMs: number, maxWaitMs: number, unattended: boolean, idleMs = UNATTENDED_IDLE_MS): IdleDecision {
+export function screenUnavailable(session: SessionState | null, front?: string | null): { what: string; waiting: string } | undefined {
+  if (session === null) return { what: "the session state could not be read", waiting: "the session state could not be read — waiting for it to be readable" };
+  if (!session.onConsole) return { what: "this login session is not the one on the console", waiting: "this login session is not the one on the console — waiting for it to come back" };
+  if (session.locked) return { what: "the screen is locked", waiting: "the screen is locked — waiting for it to be unlocked" };
+  if (front === LOGIN_WINDOW_BUNDLE_ID) return { what: "the login window is in front", waiting: "the login window is in front — waiting for the screen to be unlocked" };
+  return undefined;
+}
+
+/** The first monitor sample in [from, to] that shows the screen unusable (locked, off the console, or the login window in front). */
+export function screenUnavailableAt(samples: readonly MonitorSample[], from: number, to: number): { t: number; what: string } | undefined {
+  for (const s of samples) {
+    if (s.t < from || s.t > to) continue;
+    const why = screenUnavailable(s.locked === undefined || s.onConsole === undefined ? { locked: false, onConsole: true } : { locked: s.locked, onConsole: s.onConsole }, s.front);
+    if (why !== undefined) return { t: s.t, what: why.what };
+  }
+  return undefined;
+}
+
+/**
+ * The user's presence for the idle gate: whoever just unlocked the Mac is at it (a password or Touch ID is not always
+ * a hardware event the tap sees), so the idle clock restarts when the screen stops being unavailable. `lastBlockedAt`
+ * is the last time it was.
+ */
+export function idleAfterUnlock(hardwareIdle: number | null, now: number, lastBlockedAt: number | undefined): number | null {
+  if (hardwareIdle === null || lastBlockedAt === undefined) return hardwareIdle;
+  return Math.min(hardwareIdle, Math.max(0, now - lastBlockedAt));
+}
+
+/**
+ * Whether the run may start now. A locked screen is never "go" (before anything else — a tap that could not start while
+ * locked is the unlock's business, not a refusal): an unattended run waits for the unlock, and the wait counts toward
+ * `maxWaitMs` like any other; a run someone started by hand refuses at once (nobody is waiting at a lock screen). Then
+ * a run someone started by hand goes; an unattended one (an approved agent run) waits — polled every
+ * `UNATTENDED_POLL_MS` — until the Mac has had `idleMs` with no real input (then the countdown banner,
+ * `countdownDecision`), and gives up after `maxWaitMs`.
+ */
+export function idleGate(hardwareIdle: number | null, waitedMs: number, maxWaitMs: number, unattended: boolean, idleMs: number, session: SessionState | null): IdleDecision {
+  const blocked = screenUnavailable(session);
+  if (blocked !== undefined) {
+    if (!unattended) return { kind: "refuse", reason: `${blocked.what} — the run was not started (an --unattended run waits for it)` };
+    if (waitedMs + UNATTENDED_POLL_MS > maxWaitMs) return { kind: "refuse", reason: `--unattended: waited ${Math.round(waitedMs / 60_000)} min and ${blocked.what} — the run was not started` };
+    return { kind: "wait", reason: blocked.waiting };
+  }
   if (!unattended) return { kind: "go" };
   if (hardwareIdle === null) return { kind: "refuse", reason: "--unattended: the hardware input tap did not start, so it cannot tell whether someone is at the Mac" };
   if (hardwareIdle >= idleMs) return { kind: "go" };
@@ -378,4 +446,69 @@ export const PROMPT_BUNDLE_IDS: ReadonlySet<string> = new Set([
 export function promptAppeared(samples: readonly MonitorSample[], from: number, to: number): { t: number; front: string } | undefined {
   const hit = samples.find((s) => s.t >= from && s.t <= to && s.front !== null && PROMPT_BUNDLE_IDS.has(s.front));
   return hit === undefined ? undefined : { t: hit.t, front: hit.front! };
+}
+
+// ── stopping the run: SIGINT / SIGTERM / SIGHUP ───────────────────────────────────────────────────────────────
+
+export type StopSignal = "SIGINT" | "SIGTERM" | "SIGHUP";
+export const STOP_SIGNALS: readonly StopSignal[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+/** The shell's convention, 128 + the signal number. */
+export const STOP_EXIT_CODES: Readonly<Record<StopSignal, number>> = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
+/** The cleanup's whole budget: when it is spent the runner kills what it still owns and exits. */
+export const STOP_HARD_EXIT_MS = 20_000;
+
+/** The process seams `installStopHandler` needs (all injectable, so a test needs no real signal or timer). */
+export interface StopHandlerDeps {
+  on: (signal: StopSignal, handler: () => void) => void;
+  setTimeout: (fn: () => void, ms: number) => unknown;
+  exit: (code: number) => void;
+  log: (line: string) => void;
+  /** Synchronous last resort just before the hard exit: kill (SIGKILL) what the run still owns. */
+  onHardExit?: () => void;
+}
+
+export interface StopState {
+  /** The first signal received; undefined until one arrives. A later signal never replaces it. */
+  readonly requested: StopSignal | undefined;
+  /** The run's own cleanup has begun: its waits must no longer be cut short by `requested`. Set by the cleanup's first line. */
+  inCleanup: boolean;
+  /** 128 + the first signal's number (130 for SIGINT); 1 before any signal. */
+  readonly exitCode: number;
+  /** Resolves with the first signal (races the long awaits that cannot poll). */
+  readonly stopped: Promise<StopSignal>;
+}
+
+/**
+ * The runner's stop handler: the first SIGINT/SIGTERM/SIGHUP flags the run (the running work notices at its next check,
+ * unwinds into its `finally` — the very cleanup an abort runs — and the process exits non-zero once the report is
+ * written) and arms a hard exit `STOP_HARD_EXIT_MS` later; any further signal while that runs is logged and ignored,
+ * never a second cleanup and never a second timer.
+ */
+export function installStopHandler(deps: StopHandlerDeps): StopState {
+  let requested: StopSignal | undefined;
+  let resolveStopped!: (s: StopSignal) => void;
+  const stopped = new Promise<StopSignal>((resolve) => { resolveStopped = resolve; });
+  const state: StopState = {
+    get requested() { return requested; },
+    inCleanup: false,
+    get exitCode() { return requested === undefined ? 1 : STOP_EXIT_CODES[requested]; },
+    stopped,
+  };
+  for (const signal of STOP_SIGNALS) {
+    deps.on(signal, () => {
+      if (requested !== undefined) {
+        deps.log(`${signal} received while stopping (${requested}) — the cleanup is already running; ignored`);
+        return;
+      }
+      requested = signal;
+      deps.log(`${signal} received — stopping the run and cleaning up (exit ${STOP_EXIT_CODES[signal]}; a hard exit follows in ${STOP_HARD_EXIT_MS / 1000} s)`);
+      deps.setTimeout(() => {
+        deps.log(`the cleanup did not finish in ${STOP_HARD_EXIT_MS / 1000} s — killing what the run still owns and exiting`);
+        try { deps.onHardExit?.(); } catch { /* best effort */ }
+        deps.exit(STOP_EXIT_CODES[signal]);
+      }, STOP_HARD_EXIT_MS);
+      resolveStopped(signal);
+    });
+  }
+  return state;
 }

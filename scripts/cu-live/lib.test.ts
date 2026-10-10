@@ -6,7 +6,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { liveHomeRefusal } from "./daemon-entry";
 import {
-  callLine, computerV2Message, describeViolations, excursions, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hardwareInputTimes, hardwareIdleMs, lastValue, pointerMoves, promptAppeared, PROMPT_BUNDLE_IDS, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, parseDuration, parseFrontReading, startPlan, describeStartPlan, markerFacts, MIXED_TEXT,
+  callLine, computerV2Message, describeViolations, excursions, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hardwareInputTimes, hardwareIdleMs, lastValue, pointerMoves, promptAppeared, PROMPT_BUNDLE_IDS, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, UNATTENDED_POLL_MS, parseDuration, parseFrontReading, startPlan, describeStartPlan, markerFacts, MIXED_TEXT,
+  idleAfterUnlock, installStopHandler, LOGIN_WINDOW_BUNDLE_ID, parseSessionReading, screenUnavailable, screenUnavailableAt, STOP_EXIT_CODES, STOP_HARD_EXIT_MS, STOP_SIGNALS, type SessionState, type StopSignal,
   parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { minimalPdf, REAL_APP_SCENARIOS, REAL_DIR_TOKEN, withRealDir } from "./real-apps";
@@ -75,19 +76,93 @@ describe("the monitor analysis", () => {
   });
 
   test("the start: an unattended run waits for 3 min with no HARDWARE input, up to --max-wait", () => {
-    expect(idleGate(5, 0, 1_000, false)).toEqual({ kind: "go" });
+    const open: SessionState = { locked: false, onConsole: true };
+    expect(idleGate(5, 0, 1_000, false, UNATTENDED_IDLE_MS, open)).toEqual({ kind: "go" });
     expect(UNATTENDED_IDLE_MS).toBe(180_000);
-    expect(idleGate(61_000, 0, 10_800_000, true).kind).toBe("wait");
-    expect(idleGate(181_000, 0, 10_800_000, true)).toEqual({ kind: "go" });
-    expect(idleGate(61_000, 0, 10_800_000, true, 60_000)).toEqual({ kind: "go" });
-    expect(idleGate(3_000, 60_000, 10_800_000, true)).toMatchObject({ kind: "wait", reason: expect.stringContaining("no hardware input") });
-    expect(idleGate(3_000, 10_797_000, 10_800_000, true)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("never idle") });
-    expect(idleGate(null, 0, 10_800_000, true)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("tap did not start") });
+    expect(idleGate(61_000, 0, 10_800_000, true, UNATTENDED_IDLE_MS, open).kind).toBe("wait");
+    expect(idleGate(181_000, 0, 10_800_000, true, UNATTENDED_IDLE_MS, open)).toEqual({ kind: "go" });
+    expect(idleGate(61_000, 0, 10_800_000, true, 60_000, open)).toEqual({ kind: "go" });
+    expect(idleGate(3_000, 60_000, 10_800_000, true, UNATTENDED_IDLE_MS, open)).toMatchObject({ kind: "wait", reason: expect.stringContaining("no hardware input") });
+    expect(idleGate(3_000, 10_797_000, 10_800_000, true, UNATTENDED_IDLE_MS, open)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("never idle") });
+    expect(idleGate(null, 0, 10_800_000, true, UNATTENDED_IDLE_MS, open)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("tap did not start") });
     expect(parseDuration("3h")).toBe(10_800_000);
     expect(parseDuration("45m")).toBe(2_700_000);
     expect(parseDuration("90")).toBe(90_000);
     expect(parseDuration("1.5h")).toBe(5_400_000);
     expect(parseDuration("soon")).toBeUndefined();
+  });
+
+  test("a locked screen is NEVER a go: the unattended gate waits for the unlock (counted toward --max-wait), a hand-started run refuses", () => {
+    const locked: SessionState = { locked: true, onConsole: true };
+    const away: SessionState = { locked: false, onConsole: false };
+    const open: SessionState = { locked: false, onConsole: true };
+    const idle = UNATTENDED_IDLE_MS;
+    // Locked for hours of "idle" — the incident: the Mac locked itself while the gate counted its 180 s.
+    expect(idleGate(999_999_999, 0, 10_800_000, true, idle, locked)).toEqual({ kind: "wait", reason: "the screen is locked — waiting for it to be unlocked" });
+    expect(idleGate(0, 0, 10_800_000, true, idle, locked).kind).toBe("wait");
+    // Not the console's session (another user is active / fast user switching): the same.
+    expect(idleGate(999_999_999, 0, 10_800_000, true, idle, away)).toMatchObject({ kind: "wait", reason: expect.stringContaining("not the one on the console") });
+    // An unreadable state is never a go either.
+    expect(idleGate(999_999_999, 0, 10_800_000, true, idle, null)).toMatchObject({ kind: "wait", reason: expect.stringContaining("could not be read") });
+    // The wait keeps counting toward --max-wait: refused when the next poll would pass it.
+    expect(idleGate(0, 10_800_000 - UNATTENDED_POLL_MS, 10_800_000, true, idle, locked)).toEqual({ kind: "wait", reason: "the screen is locked — waiting for it to be unlocked" });
+    expect(idleGate(0, 10_800_000 - UNATTENDED_POLL_MS + 1, 10_800_000, true, idle, locked)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("the screen is locked — the run was not started") });
+    expect(idleGate(0, 86_000, 90_000, true, idle, away)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("not the one on the console") });
+    // A hand-started run (nobody is waiting at a lock screen to be asked) refuses at once, whatever the idle time says.
+    expect(idleGate(null, 0, 10_800_000, false, idle, locked)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("the screen is locked") });
+    expect(idleGate(5, 0, 1_000, false, idle, null).kind).toBe("refuse");
+    // The lock comes first: a tap that could not start while locked is the unlock's business, not a refusal.
+    expect(idleGate(null, 0, 10_800_000, true, idle, locked).kind).toBe("wait");
+    // Unlocked again: the ordinary gate (the tap check included).
+    expect(idleGate(null, 0, 10_800_000, true, idle, open)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("tap did not start") });
+    expect(idleGate(idle, 0, 10_800_000, true, idle, open)).toEqual({ kind: "go" });
+  });
+
+  test("the session reading, the login window and the monitor's lock fields", () => {
+    expect(parseSessionReading('{"locked":false,"onConsole":true}\n')).toEqual({ locked: false, onConsole: true });
+    expect(parseSessionReading('noise\n{"locked":true,"onConsole":true}')).toEqual({ locked: true, onConsole: true });
+    expect(parseSessionReading("")).toBeUndefined();
+    expect(parseSessionReading("not json")).toBeUndefined();
+    expect(parseSessionReading('{"locked":1,"onConsole":true}')).toBeUndefined();
+    expect(parseSessionReading('{"locked":true}')).toBeUndefined();
+    expect(screenUnavailable({ locked: false, onConsole: true })).toBeUndefined();
+    expect(screenUnavailable({ locked: false, onConsole: true }, "com.apple.finder")).toBeUndefined();
+    expect(screenUnavailable({ locked: true, onConsole: true })?.what).toBe("the screen is locked");
+    expect(screenUnavailable({ locked: false, onConsole: false })?.what).toContain("not the one on the console");
+    expect(screenUnavailable(null)?.what).toContain("could not be read");
+    // The login window in front is the lock screen even when the flags say otherwise (the incident's frontmost app).
+    expect(LOGIN_WINDOW_BUNDLE_ID).toBe("com.apple.loginwindow");
+    expect(screenUnavailable({ locked: false, onConsole: true }, "com.apple.loginwindow")?.what).toBe("the login window is in front");
+    // The monitor line carries the flags only when the tool sent both.
+    expect(parseMonitorLine('{"t":5,"front":"x","frontPid":1,"space":2,"hidIdleMs":3,"locked":true,"onConsole":true}')).toMatchObject({ locked: true, onConsole: true });
+    expect(parseMonitorLine('{"t":5,"front":"x","frontPid":1,"space":2,"hidIdleMs":3,"locked":false,"onConsole":false}')).toMatchObject({ locked: false, onConsole: false });
+    const older = parseMonitorLine('{"t":5,"front":"x","frontPid":1,"space":2,"hidIdleMs":3}')!;
+    expect(older.locked).toBeUndefined();
+    expect(older.onConsole).toBeUndefined();
+  });
+
+  test("a screen that locks during the run is found like real input: the first unusable sample in the window", () => {
+    const at = (t: number, extra: Partial<MonitorSample> = {}): MonitorSample => ({ ...sample(t, 7, 3), locked: false, onConsole: true, ...extra });
+    const quiet = [at(0), at(20), at(40)];
+    expect(screenUnavailableAt(quiet, 0, 100)).toBeUndefined();
+    expect(screenUnavailableAt([...quiet, at(60, { locked: true })], 0, 100)).toEqual({ t: 60, what: "the screen is locked" });
+    // A lock that came and went before the check is still found (it counts since the window's start), and one before `from` is not.
+    expect(screenUnavailableAt([at(0), at(20, { locked: true }), at(40), at(60)], 0, 100)?.t).toBe(20);
+    expect(screenUnavailableAt([at(0, { locked: true }), at(20), at(40)], 10, 100)).toBeUndefined();
+    expect(screenUnavailableAt([at(0), at(20, { onConsole: false })], 0, 100)?.what).toContain("not the one on the console");
+    // The login window in front alone (a sample with no flags, from an older monitor) is enough.
+    expect(screenUnavailableAt([{ t: 5, front: "com.apple.loginwindow", frontPid: 396, space: 1, hidIdleMs: 1 }], 0, 10)).toEqual({ t: 5, what: "the login window is in front" });
+    expect(screenUnavailableAt([{ t: 5, front: "com.apple.finder", frontPid: 5, space: 1, hidIdleMs: 1 }], 0, 10)).toBeUndefined();
+  });
+
+  test("whoever unlocks the Mac is at it: the idle clock restarts when the screen stops being unavailable", () => {
+    expect(idleAfterUnlock(500_000, 1_000_000, undefined)).toBe(500_000);
+    expect(idleAfterUnlock(null, 1_000_000, 900_000)).toBeNull();
+    // The tap saw no input for 500 s, but the screen was locked 4 s ago: 4 s of presence-free time so far.
+    expect(idleAfterUnlock(500_000, 1_000_000, 996_000)).toBe(4_000);
+    // Long after the unlock the hardware idle time is the smaller one again.
+    expect(idleAfterUnlock(30_000, 1_000_000, 100_000)).toBe(30_000);
+    expect(idleAfterUnlock(30_000, 1_000_000, 1_000_500)).toBe(0);
   });
 
   test("the countdown: any input postpones (the gate starts over); only an untouched countdown starts the run", () => {
@@ -423,5 +498,100 @@ describe("the real-apps documents", () => {
     expect(offsets).toHaveLength(5);
     offsets.forEach((o, i) => expect(pdf.slice(o, o + `${i + 1} 0 obj`.length)).toBe(`${i + 1} 0 obj`));
     expect(pdf).toContain("(Hello world) Tj");
+  });
+});
+
+describe("stopping the run on SIGINT / SIGTERM / SIGHUP", () => {
+  /** A fake process: records the handlers, the timers and the exits; a signal is delivered by hand. */
+  function rig() {
+    const handlers = new Map<StopSignal, Array<() => void>>();
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    const exits: number[] = [];
+    const logs: string[] = [];
+    const order: string[] = [];
+    const state = installStopHandler({
+      on: (signal, handler) => { handlers.set(signal, [...(handlers.get(signal) ?? []), handler]); },
+      setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+      exit: (code) => { exits.push(code); order.push(`exit ${code}`); },
+      log: (line) => logs.push(line),
+      onHardExit: () => { order.push("kill what is owned"); },
+    });
+    const deliver = (signal: StopSignal): void => { for (const h of handlers.get(signal) ?? []) h(); };
+    return { state, handlers, timers, exits, logs, order, deliver };
+  }
+
+  test("registers exactly SIGINT, SIGTERM and SIGHUP — one handler each — and does nothing until one arrives", () => {
+    const r = rig();
+    expect([...r.handlers.keys()].sort()).toEqual(["SIGHUP", "SIGINT", "SIGTERM"]);
+    expect([...STOP_SIGNALS].sort()).toEqual(["SIGHUP", "SIGINT", "SIGTERM"]);
+    for (const hs of r.handlers.values()) expect(hs).toHaveLength(1);
+    expect(r.state.requested).toBeUndefined();
+    expect(r.state.inCleanup).toBe(false);
+    expect(r.state.exitCode).toBe(1);
+    expect(r.timers).toHaveLength(0);
+    expect(r.logs).toHaveLength(0);
+  });
+
+  test("the first signal flags the run, arms ONE 20 s hard exit and resolves `stopped`; the exit code is 128 + the signal", async () => {
+    for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
+      const r = rig();
+      let seen: StopSignal | undefined;
+      void r.state.stopped.then((s) => { seen = s; });
+      r.deliver(signal);
+      await Promise.resolve();
+      expect(r.state.requested).toBe(signal);
+      expect(r.state.exitCode).toBe(code);
+      expect(STOP_EXIT_CODES[signal]).toBe(code);
+      expect(seen).toBe(signal);
+      expect(r.timers).toHaveLength(1);
+      expect(r.timers[0]!.ms).toBe(STOP_HARD_EXIT_MS);
+      expect(STOP_HARD_EXIT_MS).toBe(20_000);
+      expect(r.exits).toEqual([]);   // the handler never exits by itself: the run's cleanup does, after the report
+      expect(r.logs).toHaveLength(1);
+      expect(r.logs[0]).toContain(signal);
+    }
+  });
+
+  test("idempotent: a second signal (the same or another) during the cleanup re-enters nothing — no second timer, no change of state", async () => {
+    const r = rig();
+    r.deliver("SIGINT");
+    r.deliver("SIGINT");
+    r.deliver("SIGTERM");
+    r.deliver("SIGHUP");
+    expect(r.state.requested).toBe("SIGINT");
+    expect(r.state.exitCode).toBe(130);
+    expect(r.timers).toHaveLength(1);
+    expect(r.exits).toEqual([]);
+    expect(r.logs).toHaveLength(4);
+    expect(r.logs.slice(1).every((l) => l.includes("already running; ignored"))).toBe(true);
+    // `stopped` resolved once, with the first signal.
+    expect(await r.state.stopped).toBe("SIGINT");
+  });
+
+  test("bounded: when the cleanup outlives the budget the hard exit kills what is owned FIRST, then exits with the signal's code", () => {
+    const r = rig();
+    r.deliver("SIGTERM");
+    r.timers[0]!.fn();
+    expect(r.order).toEqual(["kill what is owned", "exit 143"]);
+    expect(r.exits).toEqual([143]);
+    expect(r.logs.at(-1)).toContain("did not finish in 20 s");
+  });
+
+  test("a throwing last-resort kill still exits", () => {
+    const exits: number[] = [];
+    const timers: Array<() => void> = [];
+    const handlers: Array<() => void> = [];
+    installStopHandler({ on: (_s, h) => { handlers.push(h); }, setTimeout: (fn) => { timers.push(fn); return 0; }, exit: (c) => { exits.push(c); }, log: () => {}, onHardExit: () => { throw new Error("boom"); } });
+    handlers[1]!();   // SIGTERM
+    timers[0]!();
+    expect(exits).toEqual([143]);
+  });
+
+  test("`inCleanup` is the run's switch: a pending stop is acted on only while it is false", () => {
+    const r = rig();
+    r.deliver("SIGINT");
+    expect(r.state.requested !== undefined && !r.state.inCleanup).toBe(true);    // the running work aborts here
+    r.state.inCleanup = true;
+    expect(r.state.requested !== undefined && !r.state.inCleanup).toBe(false);   // the cleanup's own waits run to the end
   });
 });

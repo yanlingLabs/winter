@@ -13,7 +13,10 @@
  *            --unattended (an agent's run: waits — every 5 s, up to --max-wait <90s|45m|3h>, default 3h — for
  *            --idle-seconds (180) with no real input, then shows a --countdown-seconds (30) banner; any input during it
  *            postpones the run and the wait starts over). From a full-screen app's Space any run moves the user to a regular desktop
- *            and returns them to that app and Space at the end (an abort too).
+ *            and returns them to that app and Space at the end (an abort too). A LOCKED screen (or a session that is not the
+ *            console's: `cu-live-tool session`) is never a go: the gate waits for the unlock (counted toward --max-wait;
+ *            the idle clock restarts at the unlock), re-checks after the countdown, and a screen that locks during the run
+ *            aborts it like real input would.
  *            --no-done-window (CI: no end-of-run completion window; else it shows after the cleanup, 30 min at most),
  *            --safari-freshness (also measure a Safari window in full screen — only while Safari is NOT running: the test
  *            launches its own and quits it), --safari-webkit-prefs (the same with three Safari WebKitPreferences keys NO,
@@ -38,7 +41,12 @@
  *   - `cu-live-viewprobe`: the helper's mirror stream (`view.*`), checked for frames, blank frames and repeats;
  *   - two sessions on the agent SDK's prompt-scripted double (`winter-test/calls`): `bypass` (no cards) and `ask`
  *     (the per-app card, answered here).
- * Every window, Space and process it made is closed at the end, whatever happened.
+ * Every window, Space and process it made is closed at the end, whatever happened — SIGINT, SIGTERM and SIGHUP included:
+ * the first one runs the same cleanup an abort runs (quit what the run launched, close what it opened, stop the test
+ * helper instance and the live daemon, remove the banners, return you to your Space/app, write the report marked
+ * aborted) and exits 128 + the signal; a second signal while that runs is ignored, and 20 s after the first the runner
+ * kills what it still owns and exits. `bun run e2e:cu-live` forwards all three to this process (and waits for it), so
+ * signalling the `bun run` pid is enough; SIGKILL cannot be caught — then stop what is left by hand.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -52,7 +60,8 @@ import { describeFreshnessPlan, freshnessTable } from "./freshness";
 import { measureFixtureVariant, measureSafari, measureSafariWithPrefs, SAFARI_PREFS_WARNING, type FreshDeps, type VariantResult } from "./freshness-run";
 import { DaemonClient } from "./client";
 import {
-  parseDuration, check, computerV2Message, describeViolations, excursions, focusViolations, hardwareInputTimes, hardwareIdleMs, markerFacts, pointerMoves, promptAppeared, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, type BannerSpec, parseFrontReading, startPlan, describeStartPlan, UNATTENDED_POLL_MS, type FrontReading, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
+  parseDuration, check, computerV2Message, describeViolations, excursions, focusViolations, hardwareInputTimes, hardwareIdleMs, markerFacts, pointerMoves, promptAppeared, idleGate, idleAfterUnlock, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, type BannerSpec,
+  installStopHandler, parseSessionReading, screenUnavailable, screenUnavailableAt, type SessionState, type StopState, parseFrontReading, startPlan, describeStartPlan, UNATTENDED_POLL_MS, type FrontReading, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, withRealDir, type RealAppsRun } from "./real-apps";
@@ -116,6 +125,42 @@ const failedOutputs = new Map<string, string>();
 const log = (line: string): void => { process.stderr.write(`e2e:cu-live: ${line}\n`); };
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+// ── stopping: SIGINT / SIGTERM / SIGHUP (installed by `main`) ────────────────────────────────────────────────────────
+
+/** Set by `main`. Undefined when this module is only imported. */
+let stop: StopState | undefined;
+
+/** The pids this run owns (children, the helper instance, the fixtures): the hard exit's last-resort SIGKILL sweep. */
+const ownedPids = new Set<number>();
+const own = (pid: number | undefined): void => { if (pid !== undefined && Number.isInteger(pid) && pid > 0) ownedPids.add(pid); };
+const disown = (pid: number | undefined): void => { if (pid !== undefined) ownedPids.delete(pid); };
+function killOwned(): void {
+  for (const pid of ownedPids) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+  ownedPids.clear();
+}
+
+/**
+ * Throws once a stop signal has arrived — from every wait and boundary of the running work, so it unwinds into its
+ * `finally` (the cleanup an abort runs). Not once the cleanup itself has begun (`inCleanup`): its own waits must finish.
+ */
+function stopCheck(): void {
+  if (stop !== undefined && stop.requested !== undefined && !stop.inCleanup) throw new Aborted(`stopped by ${stop.requested}`, "signal");
+}
+
+/** For a `catch` that would otherwise turn an error into a failed row and carry on: an abort, or any error while a
+ *  stop is pending (the daemon's closed connection after a terminal's ctrl+C), is rethrown as the abort it is. */
+function rethrowIfStopping(err: unknown): void {
+  if (err instanceof Aborted) throw err;
+  stopCheck();
+}
+
+/** An await that cannot poll (a subprocess, a long timer): ends with the abort as soon as a stop arrives (`onStop` kills what it waits on). */
+function interruptible<T>(promise: Promise<T>, onStop?: () => void): Promise<T> {
+  if (stop === undefined || stop.inCleanup) return promise;
+  const requested = (): string => stop?.requested ?? "a signal";
+  return Promise.race([promise, stop.stopped.then((): never => { onStop?.(); throw new Aborted(`stopped by ${requested()}`, "signal"); })]);
+}
+
 function sh(cmd: string, args: string[], input?: string, env?: Record<string, string>): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync(cmd, args, { encoding: "utf8", input, ...(env === undefined ? {} : { env }) });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
@@ -167,6 +212,7 @@ async function until<T>(what: string, ms: number, probe: () => T | undefined | f
   for (;;) {
     const v = probe();
     if (v !== undefined && v !== false) return v;
+    stopCheck();
     if (Date.now() - t0 > ms) throw new Error(`timed out (${ms} ms) waiting for ${what}`);
     await sleep(25);
   }
@@ -213,6 +259,8 @@ class LineProcess<T> {
   readonly stderr: string[] = [];
   private buf = "";
   constructor(readonly child: ChildProcess, parse: (line: string) => T | undefined) {
+    own(child.pid);
+    child.once("exit", () => disown(child.pid));
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (d: string) => {
       this.buf += d;
@@ -270,10 +318,16 @@ async function dumpState(tool: string, f: Fixtures): Promise<Record<string, unkn
 }
 
 async function topDelta(pid: number, windows: number, seconds: number): Promise<ReturnType<typeof parseTopDelta>> {
+  stopCheck();
   const proc = Bun.spawn(["top", "-l", String(windows + 1), "-s", String(seconds), "-c", "d", "-pid", String(pid), "-stats", "pid,cpu,idlew"], { stdout: "pipe", stderr: "pipe" });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  return parseTopDelta(out, pid);
+  own(proc.pid);
+  try {
+    const out = await interruptible(new Response(proc.stdout).text(), () => proc.kill());
+    await proc.exited;
+    return parseTopDelta(out, pid);
+  } finally {
+    disown(proc.pid);
+  }
 }
 
 // ── the dry run: builds, self-tests, and the plumbing with no screen ───────────────────────────────────────────
@@ -287,13 +341,21 @@ async function startLiveDaemon(built: Pick<Built, "daemon">, home: string): Prom
     WINTER_HOME: home, WINTER_PROFILE: "dev", WINTER_CU_LIVE_TESTS: "1", WINTER_RUNTIME_EXECUTABLE: winter, TMPDIR: `${userTempDir()}/`,
     WINTER_LOGIN_SHELL_PATH: "off", WINTER_KEYCHAIN_SERVICE: `com.winter.core.test-cu-live-${randomBytes(6).toString("hex")}`,
   });
-  const child = spawn(built.daemon, [], { env, stdio: ["pipe", "pipe", "pipe"] });
+  stopCheck();
+  // Detached (its own process group): a terminal's ctrl+C signals the whole foreground group, and the cleanup still needs the daemon.
+  const child = spawn(built.daemon, [], { env, stdio: ["pipe", "pipe", "pipe"], detached: true });
   const proc = new LineProcess<Record<string, unknown>>(child, (l) => { try { return JSON.parse(l) as Record<string, unknown>; } catch { return undefined; } });
-  const ready = await until("the live daemon to come up", 60_000, () => {
-    if (child.exitCode !== null) throw new Error(`winter-core-live exited (${child.exitCode}): ${proc.stderr.slice(-5).join(" | ")}`);
-    return proc.items.find((i) => i.ready === true);
-  });
-  return { proc, socket: String(ready.socket), pid: Number(ready.pid) };
+  try {
+    const ready = await until("the live daemon to come up", 60_000, () => {
+      if (child.exitCode !== null) throw new Error(`winter-core-live exited (${child.exitCode}): ${proc.stderr.slice(-5).join(" | ")}`);
+      return proc.items.find((i) => i.ready === true);
+    });
+    return { proc, socket: String(ready.socket), pid: Number(ready.pid) };
+  } catch (err) {
+    // A daemon that never became ready (timed out, or a stop arrived) is not handed to the caller to stop: stop it here.
+    await proc.stop(10_000);
+    throw err;
+  }
 }
 
 async function openSession(client: DaemonClient, cwd: string, policy: "bypass" | "ask"): Promise<string> {
@@ -351,6 +413,7 @@ async function runTurn(client: DaemonClient, sessionId: string, text: string, ms
   const answered = new Set<string>();
   await client.call(METHODS.sessionSend, { sessionId, text });
   await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && (e as { threadId?: string }).threadId === "main", ms, from, () => {
+    stopCheck();
     for (let i = from; i < client.events.length; i++) {
       const e = client.events[i]! as SessionEvent & { callId?: string; toolName?: string };
       if (e.type !== "approval_requested" || e.sessionId !== sessionId || e.callId === undefined || answered.has(e.callId)) continue;
@@ -374,9 +437,9 @@ async function runTurn(client: DaemonClient, sessionId: string, text: string, ms
   return { output: result.output, isError: result.isError, cards };
 }
 
-async function dryRun(built: Built, o: Options): Promise<ScenarioResult[]> {
-  const results: ScenarioResult[] = [];
+async function dryRun(built: Built, o: Options, results: ScenarioResult[]): Promise<void> {
   const selfTest = (name: string, cmd: string, args: string[]): void => {
+    stopCheck();
     const t0 = Date.now();
     const r = sh(cmd, args);
     results.push({ name, group: "self-test", status: r.status === 0 && /SELFTEST OK/.test(r.stdout) ? "pass" : "fail", ms: Date.now() - t0, checks: [check(name, r.status === 0, (r.stdout + r.stderr).trim().slice(-300))] });
@@ -384,14 +447,24 @@ async function dryRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   selfTest("fixture --self-test", join(built.fixtureMain, "Contents", "MacOS", "WinterCUFixture"), ["--self-test"]);
   selfTest("cu-live-tool self-test", built.tool, ["self-test"]);
   selfTest("cu-live-viewprobe self-test", built.viewProbe, ["self-test"]);
+  stopCheck();
   results.push(await plumbingCheck(built));
+  stopCheck();
   results.push(await peerCheck(built, o));
+  stopCheck();
   results.push(...adaptersDryRun(built, { realApps: o.realApps }));
+  // Whether the screen is usable at all: locked / off the console is never a go (read-only, no wait).
+  const session = readSession(built.tool);
+  const unusable = screenUnavailable(session);
+  results.push({ name: "plan: the session", group: "plan", status: session === null ? "fail" : "pass", ms: 0, checks: [check("cu-live-tool session gave a reading", session !== null)],
+    note: session === null ? "unreadable" : unusable === undefined
+      ? "the screen is unlocked and this session is on the console — a live run may start"
+      : `${unusable.what} — ${o.unattended ? "an --unattended run waits for it (counted toward --max-wait) and re-checks after the countdown" : "a hand-started run refuses; an --unattended run waits for it"}; a screen that locks during a run aborts it` });
   // The START plan (read-only, no wait): what a live run would do from where the user is now.
   const reading = parseFrontReading(sh(built.tool, ["front"]).stdout);
   results.push(reading === undefined
     ? { name: "plan: the start", group: "plan", status: "fail", ms: 0, checks: [check("cu-live-tool front gave a reading", false)] }
-    : { name: "plan: the start", group: "plan", status: "pass", ms: 0, checks: [check("cu-live-tool front gave a reading", true)], note: `${describeStartPlan(startPlan(reading))}; ${o.unattended ? `waits for ${o.idleMs / 1000} s with no HARDWARE input (a listen-only tap; synthetic events and HID tickles never count), then a ${o.countdownMs / 1000} s countdown banner any input postpones` : "starts at once"}; a "don't touch the Mac" banner for the whole run` });
+    : { name: "plan: the start", group: "plan", status: "pass", ms: 0, checks: [check("cu-live-tool front gave a reading", true)], note: `${unusable === undefined ? "" : `NOT NOW (${unusable.what}); once it is usable: `}${describeStartPlan(startPlan(reading))}; ${o.unattended ? `waits for ${o.idleMs / 1000} s with no HARDWARE input (a listen-only tap; synthetic events and HID tickles never count), then a ${o.countdownMs / 1000} s countdown banner any input postpones` : "starts at once"}; a "don't touch the Mac" banner for the whole run` });
   // The freshness measurement's plan (no screen).
   for (const line of describeFreshnessPlan({ safari: o.safariFreshness, safariPrefs: o.safariPrefs })) {
     results.push({ name: `plan: freshness ${line.startsWith("Safari") ? "Safari" : "fixture"}`, group: "plan", status: "pass", ms: 0, checks: [check("planned", true)], note: line });
@@ -404,7 +477,11 @@ async function dryRun(built: Built, o: Options): Promise<ScenarioResult[]> {
       ? { name: `plan: ${a.query}`, group: "plan", status: "skip", ms: 0, checks: [], note: "not installed (by bundle id, LaunchServices name, or bundle names) — the live run skips it" }
       : { name: `plan: ${a.query}`, group: "plan", status: "pass", ms: 0, checks: [check("installed", true)], note: `${found.path} (${found.bundleId}, via ${found.via}) — ${describePlan(a)}` });
   }
-  return results;
+}
+
+/** `cu-live-tool session`: null when it gave no reading (the gate then never says go). */
+function readSession(tool: string): SessionState | null {
+  return parseSessionReading(sh(tool, ["session"]).stdout) ?? null;
 }
 
 /**
@@ -430,6 +507,7 @@ async function peerCheck(built: Built, o: Options): Promise<ScenarioResult> {
       mkdirSync(home);
       const env: Record<string, string> = {};
       for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("WINTER_")) env[k] = v;
+      stopCheck();
       const helper = new LineProcess<string>(spawn(exe, [], { env: { ...env, WINTER_CU_HOME: home, TMPDIR: `${userTempDir()}/` }, stdio: ["ignore", "pipe", "pipe"] }), (l) => l);
       try {
         const socket = join(home, "run", "computer-use.sock");
@@ -448,6 +526,7 @@ async function peerCheck(built: Built, o: Options): Promise<ScenarioResult> {
       }
     }
   } catch (err) {
+    rethrowIfStopping(err);
     checks.push(check("the identity check ran", false, err instanceof Error ? err.message : String(err)));
   } finally {
     rmSync(normalRoot, { recursive: true, force: true });
@@ -480,6 +559,7 @@ export async function plumbingCheck(built: Pick<Built, "daemon">): Promise<Scena
     checks.push(check("with no helper running, nothing was launched (HelperUnavailable)", facts.unavailable === "HelperUnavailable", String(facts.unavailable)));
     client.close();
   } catch (err) {
+    rethrowIfStopping(err);
     checks.push(check("the plumbing ran", false, err instanceof Error ? err.message : String(err)));
   } finally {
     await daemon?.proc.stop();
@@ -490,9 +570,21 @@ export async function plumbingCheck(built: Pick<Built, "daemon">): Promise<Scena
 
 // ── the live run ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The run was stopped: real input (`input`), or a permission prompt on the user's screen (`prompt`). */
+/**
+ * The run was stopped: real input (`input`), a permission prompt on the user's screen (`prompt`), the screen locking
+ * or leaving the console (`locked`), or a SIGINT/SIGTERM/SIGHUP (`signal`).
+ */
 class Aborted extends Error {
-  constructor(message: string, readonly reason: "input" | "prompt" = "input") { super(message); }
+  constructor(message: string, readonly reason: "input" | "prompt" | "locked" | "signal" = "input") { super(message); }
+}
+
+/** The ABORTED row an `Aborted` becomes (and the name of the check that failed). */
+function abortedRow(err: Aborted): ScenarioResult {
+  const name = err.reason === "prompt" ? "no permission prompt during the run"
+    : err.reason === "locked" ? "the screen stayed unlocked during the run"
+    : err.reason === "signal" ? "the run was not stopped by a signal"
+    : "no real input during the run";
+  return { name: "ABORTED", group: "run", status: "fail", ms: 0, checks: [check(name, false, err.message)] };
 }
 
 
@@ -523,10 +615,16 @@ async function waitToStart(built: Pick<Built, "tool" | "fixtureDone">, o: Option
     if (r === undefined) throw new Error("cu-live-tool front gave no reading");
     return r;
   };
-  if (!o.unattended) return front();
+  if (!o.unattended) {
+    // A hand-started run goes at once — unless the screen is locked (nobody is waiting at a lock screen to be asked).
+    const d = idleGate(null, 0, o.maxWaitMs, false, o.idleMs, readSession(built.tool));
+    if (d.kind === "refuse") throw new Error(d.reason);
+    return front();
+  }
   // The user's presence is read ONLY from hardware input (the monitor's listen-only tap): a Unity app's HID
   // tickles reset the HID idle counter with no event at all, and synthetic events never count. The same monitor
   // watches the countdown.
+  stopCheck();
   const gate = new LineProcess<MonitorSample>(spawn(built.tool, ["monitor", "--interval-ms", "250"], { stdio: ["pipe", "pipe", "pipe"] }), parseMonitorLine);
   try {
     await until("the idle gate's monitor", 5_000, () => gate.items.length > 0);
@@ -534,19 +632,38 @@ async function waitToStart(built: Pick<Built, "tool" | "fixtureDone">, o: Option
     if (first.hw !== undefined && first.hwKeys === false) log("keys are not watched (this terminal has no Input Monitoring access) — the pointer, clicks and scrolls are");
     const t0 = Date.now();
     let logged = 0;
+    let loggedBlocked = false;
+    /** The last time the screen was unusable (locked...): whoever unlocked it is at the Mac, so the idle clock restarts there. */
+    let lastBlockedAt: number | undefined;
     for (;;) {
-      const d = idleGate(hardwareIdleMs(gate.items, Date.now()), Date.now() - t0, o.maxWaitMs, o.unattended, o.idleMs);
+      stopCheck();
+      const now = Date.now();
+      const session = readSession(built.tool);
+      const blocked = screenUnavailable(session) !== undefined;
+      if (blocked) lastBlockedAt = now;
+      const d = idleGate(idleAfterUnlock(hardwareIdleMs(gate.items, now), now, lastBlockedAt), now - t0, o.maxWaitMs, o.unattended, o.idleMs, session);
       if (d.kind === "refuse") throw new Error(d.reason);
       if (d.kind === "wait") {
-        if (Date.now() - logged >= 60_000) { log(d.reason); logged = Date.now(); }
-        await sleep(UNATTENDED_POLL_MS);
+        if (now - logged >= 60_000 || blocked !== loggedBlocked) { log(d.reason); logged = now; loggedBlocked = blocked; }
+        await interruptible(sleep(UNATTENDED_POLL_MS));
         continue;
       }
       // Idle long enough: the countdown banner. Any input postpones the run and the gate starts over.
       if (Date.now() - t0 + o.countdownMs > o.maxWaitMs) throw new Error("--unattended: --max-wait leaves no time for the countdown — the run was not started");
       log(`no hardware input for ${o.idleMs / 1000} s: a ${o.countdownMs / 1000} s countdown banner is up — any input postpones the run`);
       const outcome = await countdown(built, o, gate);
-      if (outcome === "go") return front();
+      if (outcome === "go") {
+        // Right before taking over: the screen may have locked during the countdown (the lock is the user going away,
+        // not coming back — but the next run must never start against a lock screen).
+        const reading = front();
+        const again = screenUnavailable(readSession(built.tool), reading.front);
+        if (again === undefined) return reading;
+        lastBlockedAt = Date.now();
+        log(`${again.what} after the countdown — the run was not started; ${again.waiting}`);
+        logged = Date.now();
+        loggedBlocked = true;
+        continue;
+      }
       log(`postponed (${outcome.why} during the countdown) — waiting for ${o.idleMs / 1000} s with no input again`);
       logged = Date.now();
     }
@@ -562,6 +679,7 @@ async function countdown(built: Pick<Built, "fixtureDone">, o: Options, gate: Li
   try {
     for (;;) {
       await sleep(100);
+      stopCheck();
       const d = countdownDecision(gate.items, startedAt, Date.now(), o.countdownMs);
       if (d.kind === "go") return "go";
       if (d.kind === "postpone") return { why: d.why };
@@ -601,6 +719,10 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   let probe: LineProcess<ProbeEvent> | undefined;
   let daemon: Awaited<ReturnType<typeof startLiveDaemon>> | undefined;
   let helperPid: number | undefined;
+  /** The process holding the helper instance's socket, confirmed as a dev helper (set once `open` has been issued): the cleanup's way to find an instance a stop landed on before its pid was known. */
+  let helperHoldingSocket: (() => number | undefined) | undefined;
+  /** The fixture roles whose `open` was issued: the cleanup waits for their pids even when a stop landed before they logged `launched`. */
+  const launchedRoles = new Set<"main" | "user">();
   let client: DaemonClient | undefined;
   let askClient: DaemonClient | undefined;
   /** What is still to undo for each `--apps`/generic app (quit what the run launched, close what it opened). */
@@ -616,15 +738,24 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   let returnHome: (() => Promise<string>) | undefined;
   let inputWatchFrom = Number.POSITIVE_INFINITY;
   const runStartedAt = Date.now();
-  /** A permission prompt came to the front since the run started: stop the run (never a row's failure). */
+  /**
+   * A permission prompt came to the front since the run started, or the screen locked / left the console: stop the run
+   * (never a row's failure — a lock screen in front fails every row for a reason that is not theirs).
+   */
   const abortIfPrompt = (): void => {
+    stopCheck();
     if (monitor === undefined) return;
+    const gone = screenUnavailableAt(monitor.items, runStartedAt, Date.now());
+    if (gone !== undefined) {
+      throw new Aborted(`the screen locked during the run: ${gone.what} at ${new Date(gone.t).toISOString()} — nothing can act against a lock screen; the run was stopped (unlock the Mac and run again)`, "locked");
+    }
     const hit = promptAppeared(monitor.items, runStartedAt, Date.now());
     if (hit !== undefined) {
       throw new Aborted(`a permission prompt appeared: ${hit.front} came to the front at ${new Date(hit.t).toISOString()} — a test must never raise one; the run was stopped (answer or dismiss it yourself)`, "prompt");
     }
   };
   const abortIfInput = (): void => {
+    stopCheck();
     if (monitor === undefined) return;
     abortIfPrompt();
     const now = Date.now();
@@ -660,7 +791,9 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     if (plan.kind === "refuse") throw new Error(plan.reason);
     log(`start: ${describeStartPlan(plan)}`);
     if (plan.kind === "from-fullscreen") returnTo = plan.returnTo;
-    monitor = new LineProcess<MonitorSample>(spawn(built.tool, ["monitor", "--interval-ms", String(MONITOR_INTERVAL_MS)], { stdio: ["pipe", "pipe", "pipe"] }), parseMonitorLine);
+    // Detached like the daemon: the cleanup (returning you to your Space) reads the monitor after a terminal's ctrl+C.
+    stopCheck();
+    monitor = new LineProcess<MonitorSample>(spawn(built.tool, ["monitor", "--interval-ms", String(MONITOR_INTERVAL_MS)], { stdio: ["pipe", "pipe", "pipe"], detached: true }), parseMonitorLine);
     await until("the monitor's first sample", 5_000, () => monitor!.items.length > 0);
     const spaceBefore = monitor.items.at(-1)!.space;
     // The user's Space for this run: where they are, or — from full screen — the regular desktop the run moves them to.
@@ -676,15 +809,18 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     const socket = join(home, "run", "computer-use.sock");
     const helperExe = join(helperApp, "Contents", "MacOS", "Winter Computer Use Dev");
     const helpersBefore = new Set(pidsOf(helperExe));
+    // The process holding the socket, confirmed as a dev helper; else the one dev helper that was not running before.
+    const holder = (): number | undefined => sh("lsof", ["-t", "--", socket]).stdout.trim().split("\n").map(Number).find((p) => Number.isInteger(p) && p > 0 && pidsOf(helperExe).includes(p));
+    stopCheck();
     const opened = sh("open", ["-n", "-g", "-j", "--env", `WINTER_CU_HOME=${home}`, "-a", helperApp]);
     if (opened.status !== 0) throw new Error(`open the dev helper failed: ${opened.stderr.trim()}`);
+    helperHoldingSocket = holder;
     await until("the helper's socket", 15_000, () => existsSync(socket));
     helperPid = await until("the helper instance's pid", 5_000, () => {
-      // The process holding the socket, confirmed as a dev helper; else the one dev helper that was not running before.
-      const byPath = sh("lsof", ["-t", "--", socket]).stdout.trim().split("\n").map(Number).find((p) => Number.isInteger(p) && p > 0 && pidsOf(helperExe).includes(p));
       const fresh = pidsOf(helperExe).filter((p) => !helpersBefore.has(p));
-      return byPath ?? (fresh.length === 1 ? fresh[0] : undefined);
+      return holder() ?? (fresh.length === 1 ? fresh[0] : undefined);
     });
+    own(helperPid);
     const status = helperCall(built, socket, home, "status", {});
     log(`helper instance pid ${helperPid}: ${JSON.stringify((status.result as { permissions?: unknown } | undefined)?.permissions ?? status)}`);
     /** Put `pid` in front and wait for the monitor to see it (and, when given, the Space). */
@@ -695,6 +831,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         return last !== undefined && last.frontPid === pid && (space === undefined || space === null || last.space === space);
       };
       for (const route of ["helper test.activate", "lsappinfo setfront", "helper test.activate", "lsappinfo setfront", "helper test.activate"] as const) {
+        stopCheck();
         if (ok()) break;
         if (route === "helper test.activate") {
           const r = helperCall(built, socket, home, "test.activate", { pid });
@@ -705,7 +842,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           routes.push(`${route}: ${r.status === 0 ? "ok" : String(r.stderr).trim().slice(0, 80)}`);
         }
         const t0 = Date.now();
-        while (!ok() && Date.now() - t0 < 4_000) await sleep(50);
+        while (!ok() && Date.now() - t0 < 4_000) { stopCheck(); await sleep(50); }
       }
       if (!ok()) {
         const last = monitor!.items.at(-1);
@@ -723,10 +860,16 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     abortIfInput();
 
     log("launching the user's app and the fixture…");
+    stopCheck();
+    launchedRoles.add("user");
     launchFixture(built.fixtureUser, "user", f, false);
     f.userPid = Number((await until("the user's app", 15_000, () => fixtureEvents(f).find((e) => e.role === "user" && e.ev === "launched"))).pid);
+    own(f.userPid);
+    stopCheck();
+    launchedRoles.add("main");
     launchFixture(built.fixtureMain, "main", f, true);
     f.mainPid = Number((await until("the fixture", 15_000, () => fixtureEvents(f).find((e) => e.role === "main" && e.ev === "launched"))).pid);
+    own(f.mainPid);
     log(`the user's app in front: ${await bringToFront(f.userPid, "the user's app")}`);
     abortIfInput();
     const landedOn = monitor.items.at(-1)!.space;
@@ -884,7 +1027,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         const status = statusOf(checks) === "pass" && typeof facts.skipped === "string" ? "skip" : statusOf(checks);
         result = { name: s.name, group: s.group, status, ms: Date.now() - t0, checks, ...(note === undefined ? {} : { note }) };
       } catch (err) {
-        if (err instanceof Aborted) throw err;
+        rethrowIfStopping(err);
         end = Date.now();
         result = { name: s.name, group: s.group, status: "fail", ms: Date.now() - t0, checks: [check("ran", false, err instanceof Error ? err.message : String(err))] };
       }
@@ -935,6 +1078,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     if (failed.length > 0) attachRoutes(failed, helperPid!, runStartedAt, home);
 
     // ── freshness: does a window on another Space keep painting, and does an SCStream change that? ───────────────
+    stopCheck();
     if (o.only === undefined || /fresh/i.test(o.only) || o.safariFreshness) {
       const deps: FreshDeps = {
         tool: built.tool, home, root, webDir: join(REPO_ROOT, "scripts", "cu-live", "fixture-web"), log,
@@ -947,16 +1091,30 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           return { output: t.output, isError: t.isError, facts: markerFacts(t.output) };
         },
         sample: async (params) => {
+          stopCheck();
           const proc = Bun.spawn([built.daemon, "__helper-freshness", socket, home, JSON.stringify(params)], { env: { ...cleanEnv(), WINTER_CU_LIVE_TESTS: "1" }, stdout: "pipe", stderr: "pipe" });
+          own(proc.pid);
           const killer = setTimeout(() => proc.kill(), 150_000);
-          const text = await new Response(proc.stdout).text();
-          await proc.exited;
-          clearTimeout(killer);
-          return text.split("\n").filter((l) => l.trim().length > 0);
+          try {
+            const text = await interruptible(new Response(proc.stdout).text(), () => proc.kill());
+            await proc.exited;
+            return text.split("\n").filter((l) => l.trim().length > 0);
+          } finally {
+            clearTimeout(killer);
+            disown(proc.pid);
+          }
         },
         monitor: () => monitor!.items,
         baseline: baseline!,
         abortIfInput,
+        // The measurement's own cleanup (stop the Fresh window, quit the Safari it launched, restore the preferences it
+        // set) finishes even while the run is being stopped; the abort itself is rethrown after it.
+        shield: async (fn) => {
+          const was = stop?.inCleanup === true;
+          if (stop !== undefined) stop.inCleanup = true;
+          try { return await fn(); } finally { if (stop !== undefined) stop.inCleanup = was; }
+        },
+        isAbort: (err) => err instanceof Aborted,
       };
       const variants: VariantResult[] = [];
       if (o.only === undefined || /fresh/i.test(o.only)) {
@@ -983,6 +1141,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     }
 
     // ── performance ────────────────────────────────────────────────────────────────────────────────────────────
+    stopCheck();
     if (o.only === undefined) {
       // The streaming measurement runs inside a turn that keeps working in the canvas: the helper streams a window
       // at full rate only while it is being worked in (idle after 3 s → 1 fps; after the turn, a stream that has
@@ -996,10 +1155,13 @@ report({ ok: true });`, 40_000), 100_000);
       results.push(...await perf(built, f, helperPid, daemon.pid, probe, monitor, baseline, abortIfInput, streamTurn));
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    const name = err instanceof Aborted ? (err.reason === "prompt" ? "no permission prompt during the run" : "no real input during the run") : "the run's setup";
-    results.push({ name: err instanceof Aborted ? "ABORTED" : "setup", group: "run", status: "fail", ms: 0, checks: [check(name, false, message)] });
+    // A stop that arrives as a plain error (the daemon's connection closed by the same ctrl+C) is still the stop.
+    if (!(err instanceof Aborted) && stop?.requested !== undefined) err = new Aborted(`stopped by ${stop.requested}`, "signal");
+    if (err instanceof Aborted) results.push(abortedRow(err));
+    else results.push({ name: "setup", group: "run", status: "fail", ms: 0, checks: [check("the run's setup", false, err instanceof Error ? err.message : String(err))] });
   } finally {
+    // From here the run's own waits (`until`, `postCommand`) must finish: a pending stop no longer cuts them short.
+    if (stop !== undefined) stop.inCleanup = true;
     log("cleaning up…");
     const cleanup: Check[] = [];
     const step = async (name: string, fn: () => Promise<void> | void): Promise<void> => {
@@ -1016,14 +1178,23 @@ report({ ok: true });`, 40_000), 100_000);
     restores.clear();
     if (realApps !== undefined) await step("closed what the real-apps scenarios opened", () => realApps!.cleanup());
     for (const role of ["main", "user"] as const) {
-      const pid = role === "main" ? f.mainPid : f.userPid;
+      // A stop can land after the `open` and before the fixture logged `launched`: wait for its pid (a few seconds) rather than leave it up.
+      const loggedPid = (): number | undefined => {
+        const n = Number(fixtureEvents(f).find((e) => e.role === role && e.ev === "launched")?.pid);
+        return Number.isInteger(n) && n > 0 ? n : undefined;
+      };
+      let pid = role === "main" ? f.mainPid : f.userPid;
+      if (pid === undefined && launchedRoles.has(role)) pid = await until(`the ${role} fixture's pid`, 5_000, loggedPid).catch(() => undefined);
       if (pid === undefined) continue;
+      own(pid);
+      const alive = pid;
       await step(`quit the ${role === "main" ? "fixture" : "user's app"}`, async () => {
         await postCommand(built.tool, f, role, "quit", {}, 5_000).catch(() => undefined);
         const t0 = Date.now();
-        while (processAlive(pid) && Date.now() - t0 < 8_000) await sleep(50);
-        if (processAlive(pid)) { process.kill(pid, "SIGTERM"); await sleep(500); }
-        if (processAlive(pid)) throw new Error(`pid ${pid} is still running`);
+        while (processAlive(alive) && Date.now() - t0 < 8_000) await sleep(50);
+        if (processAlive(alive)) { process.kill(alive, "SIGTERM"); await sleep(500); }
+        if (processAlive(alive)) throw new Error(`pid ${alive} is still running`);
+        disown(alive);
       });
     }
     // From a full-screen start (an abort included): back to the user's full-screen app and its Space — while the
@@ -1034,11 +1205,15 @@ report({ ok: true });`, 40_000), 100_000);
     askClient?.close();
     for (const c of extraClients) c.close();
     if (daemon !== undefined) await step("stopped the live daemon", () => daemon!.proc.stop(10_000));
+    // A stop that landed after the `open` and before the pid was known: the instance holding OUR socket (never a guess
+    // by "the new helper" — a helper of yours may have started meanwhile), given a few seconds to create it.
+    if (helperPid === undefined && helperHoldingSocket !== undefined) helperPid = await until("the helper instance's socket", 4_000, helperHoldingSocket).catch(() => undefined);
     if (helperPid !== undefined) await step("quit the helper instance", async () => {
       try { process.kill(helperPid!, "SIGTERM"); } catch { /* gone */ }
       const t0 = Date.now();
       while (processAlive(helperPid!) && Date.now() - t0 < 5_000) await sleep(50);
       if (processAlive(helperPid!)) throw new Error(`helper pid ${helperPid} is still running`);
+      disown(helperPid);
     });
     if (clipboard.length > 0) await step("restored the clipboard's text", () => { sh("pbcopy", [], clipboard); });
     if (monitor !== undefined && returnTo !== undefined && returnHome !== undefined) {
@@ -1316,35 +1491,50 @@ async function main(): Promise<void> {
     console.error(SAFARI_PREFS_WARNING);
     if (!o.yesRestartSafari) process.exit(2);
   }
+  // From here a SIGINT/SIGTERM/SIGHUP stops the run through the same cleanup an abort runs (see `installStopHandler`).
+  stop = installStopHandler({
+    on: (signal, handler) => { process.on(signal, handler); },
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    exit: (code) => process.exit(code),
+    log,
+    onHardExit: killOwned,
+  });
   const built = buildAll(log);
   const startedAt = Date.now();
-  const results = o.dryRun ? await dryRun(built, o) : await (async () => {
-    console.error([
-      "",
-      "  ComputerV2 LIVE end-to-end suite",
-      "  It uses the screen for about 2-3 minutes (longer with --real-apps): windows appear, one goes full screen on",
-      "  its own Space and you are brought back to yours. DON'T type, click or move the mouse until it finishes —",
-      "  real input stops the run. Your clipboard's text is restored at the end (rich clipboard content is not).",
-      "  Start it from a regular desktop, not from a full-screen app (the user's app must open on your Space).",
-      "  Nothing touches ~/.winter*, the Keychain, or your own Winter.",
-      "",
-    ].join("\n"));
-    if (!o.yes) for (let i = 5; i > 0; i--) { process.stderr.write(`  starting in ${i}… (ctrl+C to cancel)\r`); await sleep(1_000); }
-    process.stderr.write("\n");
-    try {
-      return await liveRun(built, o);
-    } catch (err) {
-      // liveRun reports its own setup errors and aborts as rows; anything escaping it still ends the run in red.
-      return [{ name: "error", group: "run", status: "fail", ms: 0, checks: [check("the run finished", false, err instanceof Error ? err.message : String(err))] }] satisfies ScenarioResult[];
+  const results: ScenarioResult[] = [];
+  try {
+    stopCheck();
+    if (o.dryRun) {
+      await dryRun(built, o, results);
+    } else {
+      console.error([
+        "",
+        "  ComputerV2 LIVE end-to-end suite",
+        "  It uses the screen for about 2-3 minutes (longer with --real-apps): windows appear, one goes full screen on",
+        "  its own Space and you are brought back to yours. DON'T type, click or move the mouse until it finishes —",
+        "  real input stops the run. Your clipboard's text is restored at the end (rich clipboard content is not).",
+        "  Start it from a regular desktop, not from a full-screen app (the user's app must open on your Space).",
+        "  Nothing touches ~/.winter*, the Keychain, or your own Winter.",
+        "",
+      ].join("\n"));
+      if (!o.yes) for (let i = 5; i > 0; i--) { process.stderr.write(`  starting in ${i}… (ctrl+C to cancel)\r`); await sleep(1_000); stopCheck(); }
+      process.stderr.write("\n");
+      results.push(...await liveRun(built, o));
     }
-  })();
+  } catch (err) {
+    // liveRun reports its own setup errors and aborts as rows; anything escaping it still ends the run in red.
+    if (err instanceof Aborted) results.push(abortedRow(err));
+    else results.push({ name: "error", group: "run", status: "fail", ms: 0, checks: [check("the run finished", false, err instanceof Error ? err.message : String(err))] });
+  }
+  stop.inCleanup = true;   // nothing below is the run's work: it must not be cut short by a late signal
   console.log(renderTable(results));
   // `--report <file>`: every row's checks in full, plus each failing scenario's tool output (capped) — what the
   // table's one cut-short detail column cannot hold.
   // A live run always leaves a report (out/cu-live/last-run.json unless --report says where) — the completion
-  // window names it.
+  // window names it. A run that was stopped (an abort row, or a signal) says so in the report itself.
   const report = o.report ?? (o.dryRun ? undefined : join(OUT_DIR, "last-run.json"));
-  if (report !== undefined) writeFileSync(report, `${JSON.stringify({ results, outputs: Object.fromEntries(failedOutputs) }, null, 2)}\n`);
+  const aborted = results.some((r) => r.group === "run" && r.name === "ABORTED") || stop.requested !== undefined;
+  if (report !== undefined) writeFileSync(report, `${JSON.stringify({ aborted, ...(stop.requested === undefined ? {} : { signal: stop.requested }), results, outputs: Object.fromEntries(failedOutputs) }, null, 2)}\n`);
   // After the cleanup (liveRun has returned): the completion window, so the user knows the run ended. Never during
   // the run, never for a dry run, never with --no-done-window (CI).
   if (!o.dryRun && !o.noDoneWindow) {
@@ -1352,12 +1542,13 @@ async function main(): Promise<void> {
     const shown = sh("open", doneWindowOpenArgs(built.fixtureDone, model));
     if (shown.status !== 0) log(`the completion window did not open: ${shown.stderr.trim()}`);
   }
-  process.exit(results.some((r) => r.status === "fail") ? 1 : 0);
+  // A stopped run exits 128 + the signal, whatever its rows say.
+  process.exit(stop.requested !== undefined ? stop.exitCode : results.some((r) => r.status === "fail") ? 1 : 0);
 }
 
 if (import.meta.main) {
   main().catch((err) => {
     console.error(`e2e:cu-live: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
+    process.exit(stop?.requested !== undefined ? stop.exitCode : 1);
   });
 }

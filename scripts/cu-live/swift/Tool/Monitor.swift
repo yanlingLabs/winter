@@ -22,6 +22,7 @@ enum Monitor {
             if HardwareInput.tapping {
                 s.hardware = (HardwareInput.count, HardwareInput.lastMs, HardwareInput.startedMs, HardwareInput.keys)
             }
+            s.session = SessionState.cachedReading()
             return s
         }
 

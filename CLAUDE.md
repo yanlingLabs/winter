@@ -76,7 +76,20 @@ WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live   # the LIVE ComputerV2 suite (script
                                      # earlier run left (binds resolve the fixture by name; a stray one hijacks them).
                                      # A test must never raise a TCC prompt (no AppleScript to other apps): if a
                                      # permission prompt (UserNotificationCenter, SecurityAgent, CoreServicesUIAgent)
-                                     # comes to the front, the run stops — "a permission prompt appeared: …". --dry-run: builds, self-tests,
+                                     # comes to the front, the run stops — "a permission prompt appeared: …".
+                                     # A LOCKED screen is never a go (`cu-live-tool session` → {"locked","onConsole"} from
+                                     # CGSessionCopyCurrentDictionary's CGSSessionScreenIsLocked / on-console key; the login
+                                     # window in front corroborates): the --unattended gate WAITS for the unlock (counted toward
+                                     # --max-wait; the idle clock restarts at the unlock — whoever unlocked is at the Mac),
+                                     # re-checks after the countdown, a hand-started run refuses, and a screen that locks
+                                     # (or leaves the console) mid-run aborts it like real input ("the screen locked during
+                                     # the run"). SIGINT/SIGTERM/SIGHUP run the SAME cleanup as an abort (quit what the run
+                                     # launched, close what it opened, stop the helper instance and the live daemon, remove the
+                                     # banners, return the user, report marked "aborted") and exit 128+n; a second signal is
+                                     # ignored, and 20 s after the first the runner SIGKILLs what it still owns and exits.
+                                     # `bun run e2e:cu-live` forwards all three to run.ts and waits for it: signal the `bun run`
+                                     # pid (SIGKILL cannot be caught — the live daemon still leaves when its stdin closes; stop
+                                     # anything else by hand). --dry-run: builds, self-tests,
                                      # the no-screen plumbing and that identity rule against the dev helper; --real-apps:
                                      # Safari/TextEdit/Finder/Preview on temp docs, plus the generic check on VS Code and
                                      # Chrome when installed; --apps "<name or bundle id>,…": the generic, app-agnostic
