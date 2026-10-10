@@ -56,10 +56,28 @@ final class LineDecoderPerformanceTests: XCTestCase {
         return out
     }
 
-    private func time(_ body: () -> Void) -> Double {
-        let start = DispatchTime.now().uptimeNanoseconds
-        body()
-        return Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+    // MARK: - Timing
+    //
+    // These tests compare timings, and on a shared CI runner a wall-clock reading includes however long the thread
+    // waited for a core — tens of milliseconds at a time, against a workload of a few. So they read the CPU time of
+    // THIS thread (it does not run while the thread is descheduled) and take the FASTEST of several rounds (what is
+    // left of the noise — a cold cache, a busy sibling core — only ever adds). A bound between two such numbers
+    // fails for an algorithm that got slower, not for a machine that was busy.
+
+    /// CPU time this thread has used so far, in milliseconds.
+    private func cpuMillis() -> Double { Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1_000_000 }
+
+    private func cpuTime(_ body: () throws -> Void) rethrows -> Double {
+        let start = cpuMillis()
+        try body()
+        return cpuMillis() - start
+    }
+
+    /// The least CPU time `body` took in `rounds` runs.
+    private func fastest(of rounds: Int, _ body: () throws -> Void) rethrows -> Double {
+        var best = Double.infinity
+        for _ in 0..<rounds { best = min(best, try cpuTime(body)) }
+        return best
     }
 
     // MARK: - Correctness
@@ -103,29 +121,24 @@ final class LineDecoderPerformanceTests: XCTestCase {
     /// A hundred 80 KB lines in random 1-64 KB chunks: twice the lines costs about twice the time, not four
     /// times (the old decoder's growth in a backlog).
     func testAHundredEightyKilobyteFramesInRandomChunksAreLinear() throws {
-        func run(_ count: Int) throws -> Double {
-            let data = stream(of: frameLines(count))
-            let pieces = chunks(data, maxChunk: 64 * 1024)
+        func pieces(_ count: Int) -> [Data] { chunks(stream(of: frameLines(count)), maxChunk: 64 * 1024) }
+        func run(_ pieces: [Data], expecting count: Int) throws {
             var total = 0
-            let ms = try timeThrowing {
-                let decoder = LineDecoder(maxLine: 16 * 1024 * 1024)
-                for piece in pieces { total += try decoder.pushData(piece).count }
-            }
+            let decoder = LineDecoder(maxLine: 16 * 1024 * 1024)
+            for piece in pieces { total += try decoder.pushData(piece).count }
             XCTAssertEqual(total, count)
-            return ms
         }
-        _ = try run(10) // warm
-        let hundred = try run(100)
-        let twoHundred = try run(200)
+        let small = pieces(100), large = pieces(200)
+        try run(pieces(10), expecting: 10) // warm
+        // Alternate the two sizes round by round, so whatever the machine is doing reaches both.
+        var hundred = Double.infinity, twoHundred = Double.infinity
+        for _ in 0..<9 {
+            hundred = min(hundred, try cpuTime { try run(small, expecting: 100) })
+            twoHundred = min(twoHundred, try cpuTime { try run(large, expecting: 200) })
+        }
         print(String(format: "BENCH LineDecoder 100 frames x 80 KB in random <=64 KB chunks: %.1f ms; 200 frames: %.1f ms (ratio %.2f)",
                      hundred, twoHundred, twoHundred / max(hundred, 0.001)))
         XCTAssertLessThan(twoHundred, hundred * 3.2, "linear growth is 2x; the quadratic one is 4x and worse")
-    }
-
-    private func timeThrowing(_ body: () throws -> Void) rethrows -> Double {
-        let start = DispatchTime.now().uptimeNanoseconds
-        try body()
-        return Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
     }
 
     func testBeforeAndAfter() throws {
@@ -134,21 +147,24 @@ final class LineDecoderPerformanceTests: XCTestCase {
         print("BENCH LineDecoder 100 frames x 80 KB (\(data.count / 1024) KB total), before -> after:")
         for (label, maxChunk) in [("1 KB chunks", 1024), ("16 KB chunks", 16 * 1024), ("64 KB chunks", 64 * 1024)] {
             let pieces = chunks(data, maxChunk: maxChunk)
-            let legacy = LegacyLineDecoder()
-            var legacyCount = 0
-            let before = time { for piece in pieces { legacyCount += legacy.push(piece).count } }
-            let decoder = LineDecoder(maxLine: 16 * 1024 * 1024)
-            var count = 0
-            let after = try timeThrowing { for piece in pieces { count += try decoder.pushData(piece).count } }
+            var legacyCount = 0, count = 0
+            let before = fastest(of: 3) {
+                let legacy = LegacyLineDecoder()
+                legacyCount = 0
+                for piece in pieces { legacyCount += legacy.push(piece).count }
+            }
+            let after = try fastest(of: 3) {
+                let decoder = LineDecoder(maxLine: 16 * 1024 * 1024)
+                count = 0
+                for piece in pieces { count += try decoder.pushData(piece).count }
+            }
             XCTAssertEqual(legacyCount, 100)
             XCTAssertEqual(count, 100)
             print(String(format: "BENCH   %@: %.0f ms -> %.0f ms (%.0fx)", label, before, after, before / max(after, 0.001)))
         }
         // A backlog: every line arrives in one read.
-        let legacy = LegacyLineDecoder()
-        let before = time { _ = legacy.push(data) }
-        let decoder = LineDecoder(maxLine: 16 * 1024 * 1024)
-        let after = try timeThrowing { _ = try decoder.pushData(data) }
+        let before = fastest(of: 3) { _ = LegacyLineDecoder().push(data) }
+        let after = try fastest(of: 3) { _ = try LineDecoder(maxLine: 16 * 1024 * 1024).pushData(data) }
         print(String(format: "BENCH   one read of all 100 lines: %.0f ms -> %.0f ms (%.0fx)", before, after, before / max(after, 0.001)))
         XCTAssertLessThan(after, before, "the backlog case is where the per-line re-copy hurt most")
     }
@@ -160,9 +176,8 @@ final class LineDecoderPerformanceTests: XCTestCase {
     /// 2,146 samples were the line splitter. Printed, not asserted.
     func testParsingOneFrameLineIsCheapEitherWay() throws {
         let line = Data(frameLines(1)[0].utf8)
-        let rounds = 60
-        let generic = time { for _ in 0..<rounds { _ = try? JSONDecoder().decode(JSONValue.self, from: line) } } / Double(rounds)
-        let native = time { for _ in 0..<rounds { _ = try? JSONSerialization.jsonObject(with: line) } } / Double(rounds)
+        let generic = fastest(of: 60) { _ = try? JSONDecoder().decode(JSONValue.self, from: line) }
+        let native = fastest(of: 60) { _ = try? JSONSerialization.jsonObject(with: line) }
         print(String(format: "BENCH parse one 80 KB frame line: Codable JSONValue %.2f ms, JSONSerialization %.2f ms", generic, native))
         XCTAssertLessThan(max(generic, native), 5, "ten of these a second is nothing")
     }
