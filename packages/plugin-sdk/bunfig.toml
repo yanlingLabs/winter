@@ -1,0 +1,3 @@
+[test]
+# One fresh temp root per test process, removed at exit (packages/core/test/per-process-tmp.ts).
+preload = ["../core/test/per-process-tmp.ts"]
