@@ -500,12 +500,13 @@ final class TranscriptBrandTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(elevatedSites, 9,
+        XCTAssertEqual(elevatedSites, 10,
                        "the question separator, the code-block rim, the latest pill, the "
                        + "interaction card's own rim, the pending box's option separators, its "
-                       + "header pills, the inline sidebars' divider, the floating cards' rim and "
-                       + "the reply's image-thumbnail rim (transcript file links, 2026-09-30) "
-                       + "— all nine, or this pin is passing because the rules stopped "
+                       + "header pills, the inline sidebars' divider, the floating cards' rim, "
+                       + "the reply's image-thumbnail rim (transcript file links, 2026-09-30) and "
+                       + "the 'Show earlier turns' pill (2026-10-10) "
+                       + "— all ten, or this pin is passing because the rules stopped "
                        + "being drawn at all")
     }
 
