@@ -24,8 +24,18 @@ final class FeedRegistry {
         feeds.append(Weak(feed: feed))
     }
 
+    /// A feed that has been stopped is no longer anyone's view of a session: it reads nothing, folds nothing, and a
+    /// surface that still holds it (a released lease, a closed window's controller) must not make it a "live feed" in a
+    /// hang report — nor leave its old session counted as attached, nor its last stream remains counted as a backlog.
+    func unregister(_ feed: SessionFeed) {
+        feeds.removeAll { $0.feed == nil || $0.feed === feed }
+    }
+
     var snapshot: [FeedDiagnostics] {
         feeds.removeAll { $0.feed == nil }
-        return feeds.compactMap { $0.feed?.diagnostics }
+        return feeds.compactMap { entry in
+            guard let feed = entry.feed, !feed.isStopped else { return nil }
+            return feed.diagnostics
+        }
     }
 }
