@@ -44,7 +44,12 @@ class TestClient {
   request(method: string, params?: unknown): Promise<{ result?: unknown; error?: { code: number; message: string; data?: unknown } }> {
     const id = this.nextId++;
     this.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, method, params }));
-    return new Promise((resolve) => this.pending.set(id, resolve));
+    // Bounded like every other wait in this file: a reply that never comes fails NAMING the method, instead of
+    // leaving the test to the harness's mute per-test timeout.
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`timed out after ${WAIT_BOUND_MS} ms waiting for the reply to ${method}`)); }, WAIT_BOUND_MS);
+      this.pending.set(id, (msg) => { clearTimeout(timer); resolve(msg); });
+    });
   }
   async call<T>(method: string, params?: unknown): Promise<T> {
     const r = await this.request(method, params);
@@ -310,7 +315,12 @@ describe("embedded sessions under failure — a real daemon", () => {
   }
   async function teardown(ctx: { home: string; daemon: RunningDaemon; client: TestClient }): Promise<void> {
     ctx.client.close();
-    await ctx.daemon.stop();
+    // `stop()` is bounded by the product's own budgets (seconds); one that is not fails naming itself.
+    let stopTimer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      ctx.daemon.stop(),
+      new Promise<never>((_, reject) => { stopTimer = setTimeout(() => reject(new Error(`daemon.stop() did not return within ${WAIT_BOUND_MS} ms`)), WAIT_BOUND_MS); }),
+    ]).finally(() => clearTimeout(stopTimer));
     rmSync(ctx.home, { recursive: true, force: true });
   }
 
