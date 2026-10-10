@@ -670,6 +670,9 @@ report({ w: img.width, h: img.height });`,
     desktopSwitch: { answer: "refuse", afterMs: 1_000 },
     code: `
 const off = await win("Fixture Offspace");
+// A still first, right here: the live shot's own still then has a previous one to compare with (unchanged → it needs
+// the visit), whatever earlier scenarios did.
+await off.screenshot({ emit: false });
 try {
   const img = await off.screenshot({ emit: false, live: true, reason: ${JSON.stringify(LIVE_REASON)} });
   report({ shot: true, w: img.width });
@@ -688,6 +691,7 @@ try {
     allowExcursionMs: DESKTOP_VISIT_MAX_AWAY_MS,
     code: `
 const off = await win("Fixture Offspace");
+await off.screenshot({ emit: false });  // a still first (see the refused row)
 const img = await off.screenshot({ emit: false, live: true, reason: ${JSON.stringify(LIVE_REASON)} });
 report({ w: img.width, h: img.height });`,
     verify: (ctx) => {
