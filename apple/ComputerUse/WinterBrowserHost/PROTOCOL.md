@@ -46,8 +46,10 @@ a test build (§9). The host never launches Winter, the daemon or the helper.
   profile's allowlist (Chrome's `allowed_origins` already restricts this; this is the second look). Its parent process
   is the browser's main process: the host reports that app's bundle id and pid in `host.hello`.
 - **Framing:** each message is a 4-byte little-endian length, then that many bytes of UTF-8 JSON.
-- **Caps:** extension → host at most **16 MiB** per message (the host drops a larger one, keeping the stream in step);
-  host → extension at most **1 MiB** (Chrome's limit for a host).
+- **Caps:** extension → host at most **16 MiB** per message; host → extension at most **1 MiB** (Chrome's limit for a
+  host). The extension never sends a larger answer: it sends the request's answer as a typed `cdp_error` instead (a
+  larger notification is dropped). Should one arrive anyway, the host skips it (keeping the stream in step) and, when its
+  start shows it answers a daemon request (`"id":"d…"`), answers the daemon with that typed error at once.
 - **stdout carries nothing but framed messages.** Every log line goes to stderr (Chrome keeps it in its own log), and
   never carries a message's content.
 - **End:** Chrome closing the host's stdin (the port closed, the extension reloaded, the browser quit) ends the host.
@@ -80,8 +82,9 @@ requirement — dist `identifier "winter-core"`, dev `identifier "com.winter.cor
 failure it closes, sends nothing, and tells the extension `host.status { daemon: "unverified" }`. With no daemon it
 says `unavailable`.
 
-**Retries:** no daemon → every **2 s**; unverified, or `host.hello` refused → every **30 s** (so turning Computer Use
-back on, or starting Winter, needs no browser restart).
+**Retries:** no daemon → after **2 s**, doubling to at most **60 s** while Winter isn't running, back to 2 s once
+connected; unverified, or `host.hello` refused → every **30 s** (so turning Computer Use back on, or starting Winter,
+needs no browser restart).
 
 ### 3.3 `host.hello` — the host's first request
 
@@ -101,16 +104,20 @@ with a JSON-RPC error whose `data.code` names it, then closes the connection:
    host's stated requirement) → `not_allowed` `{ reason: "signature" }`;
 5. `computerUse.enabled` → `disabled`.
 
-The pid check is **not load-bearing**: a same-user impostor can name the real host's pid (the daemon's sockets give it
-no peer pid of its own). It is stated, as it is for the helper; the host's audit-token check of the daemon (§3.2) is
-the direction that guards. A first message that is not `host.hello` is answered `protocol_mismatch` and closed; no
-`host.hello` within 10 s closes the connection.
+**What the pid check is, exactly.** It checks that the process the connection says it is runs Winter's signed host — it
+catches a host that is not Winter's (another build, a stale copy). It is no defence against a process of the SAME user,
+which can name the real host's pid (the daemon's sockets give it no peer pid of its own) or open the 0600 socket
+itself: **same-user code is outside this protocol's threat model**, as it is for the helper's socket and the daemon's
+own — a process running as the user can already reach everything the user can. The host's audit-token check of the
+daemon (§3.2) is what keeps the host, and so the extension's debugger, from talking to anything but Winter's signed
+daemon. A first message that is not `host.hello` is answered `protocol_mismatch` and closed; no `host.hello` within
+10 s closes the connection.
 
 ### 3.4 Browser families
 
 | Family | Bundle ids |
 | --- | --- |
-| chrome | `com.google.Chrome`, `.beta`, `.dev`, `.canary`; `com.google.chrome.for.testing` |
+| chrome | `com.google.Chrome`, `.beta`, `.dev`, `.canary`; `com.google.chrome.for.testing` (matched case-insensitively, as everywhere here) |
 | edge | `com.microsoft.edgemac`, `.Beta`, `.Dev`, `.Canary` |
 | brave | `com.brave.Browser` |
 | vivaldi | `com.vivaldi.Vivaldi` |
@@ -153,8 +160,8 @@ On `host.status { daemon: "connected" }` the extension sends:
 | Method | Params | Result |
 | --- | --- | --- |
 | `tabs.list` | `{}` | `{ tabs: Tab[] }` — every tab of the browser profile, never a private window's |
-| `tabs.create` | `{ url, sessionId, sessionTitle }` | `{ tab: Tab }` — `chrome.tabs.create({ active: false })` in the session's group "Winter · <title>" (created in the window the user used last, never a private one); `url` is http(s) or `about:blank` |
-| `tabs.close` | `{ tabKey }` | `{}` — only an agent tab (`not_allowed` otherwise); taken out of its group first, so a group's last tab leaves no group (nor a saved group) behind |
+| `tabs.create` | `{ url, sessionId, sessionTitle }` | `{ tab: Tab }` — `chrome.tabs.create({ active: false })` in the session's group "Winter · <title>" (created in the window the user used last, never a private one); `url` is http(s) or `about:blank`. Grouping is best effort: the tab is Winter's, and returned, even if the group step fails |
+| `tabs.close` | `{ tabKey }` | `{}` — only an agent tab (`not_allowed` otherwise). The debugger is held through the close (attached for it if need be) with Page events on, and that tab's own "leave this page?" (`beforeunload`) prompt is accepted — never a user tab's, never outside a close — so no native dialog is left in the user's browser; the tab is ungrouped first, so a group's last tab leaves no group (nor a saved group) behind; it answers once the tab is removed, or `timeout` if the page still holds out (10 s) |
 | `tabs.keep` | `{ tabKey }` | `{}` — hands an agent tab to the user for good: no longer an agent tab, out of its Winter group, never closed by Winter |
 | `debugger.attach` | `{ tabKey }` | `{ viewport: [w, h], dpr }` — idempotent; the CSS viewport and the device pixel ratio from `Page.getLayoutMetrics` |
 | `debugger.detach` | `{ tabKey }` | `{}` — idempotent; never closes the tab |
@@ -168,10 +175,13 @@ a tab `tabs.create` opened, by tab id — Chrome's own pin (which takes a tab ou
 only `tabs.keep` does; `sessionId` its Winter session. A tab the user drags into a Winter group stays the user's.
 
 **Which agent tabs close, and when, is the engine's decision** (at its session's turn end unless marked; the user's
-ruling): the extension only carries out `tabs.close` and `tabs.keep`, and never closes anything by itself. Agent tabs and
-groups are remembered in `chrome.storage.session` — across service-worker and daemon restarts, so the `tabs.list` the
-engine makes at the next registration reports every agent tab with its session; not across a browser restart, after
-which Winter knows none of its old tabs and they are the user's.
+ruling): the extension only carries out `tabs.close` and `tabs.keep`, and never closes anything by itself — a restart's
+orphans included (the engine closes those from the `tabs.list` it makes at the next registration, which reports every
+agent tab with its session). Agent tabs and groups are remembered in `chrome.storage.local`, so a service-worker
+restart, a daemon restart AND an update of the extension keep them. The record is cleared when the browser itself starts
+(`runtime.onStartup`; a worker start with no word in 3 s on why counts as one — forgetting is the safe side): tab and
+group ids last only one browser session, and an old id must never be taken for a new, restored tab — which is the
+user's from then on.
 
 ### 5.2 Extension → daemon (notifications)
 
@@ -180,20 +190,23 @@ which Winter knows none of its old tabs and they are the user's.
 | `cdp.event` | `{ tabKey, method, params, cdpSessionId? }` | a subscribed, allowlisted event of an attached tab; Network events carry only `requestId`, `timestamp`, `type` |
 | `tab.gone` | `{ tabKey, reason: "closed" \| "crashed" }` | the tab closed (once per tab), or its renderer crashed |
 | `debugger.detached` | `{ tabKey, reason: "canceled_by_user" \| "target_closed" \| "idle" }` | the user dismissed the browser's debugging bar; the page went where the debugger cannot follow; or 5 minutes without a command |
-| `stop.pressed` | `{ tabKey }` | the user pressed the overlay's Stop button |
+| `stop.pressed` | `{ tabKey }` | the user clicked the extension's toolbar button while Winter was driving that tab (one per driven tab) |
 
-The daemon reads `canceled_by_user` as the user taking the tab back ("the user stopped Winter from controlling this tab"),
-and the other two as a tab that can be attached again.
+The daemon reads `canceled_by_user` as the user taking the tab back ("the user stopped Winter from controlling this tab",
+a lost tab). For `idle` and `target_closed` the tab is still open: the transport hands the engine the debugger's own
+`Inspector.detached` event for the tab's top-level session (whatever the subscription), and the engine attaches again
+when it next needs the tab. Only a tab really closed or crashed is reported gone.
 
 ### 5.3 Notes for the engine
 
 - An `Input.*` event that runs a handler which opens a JavaScript dialog is answered only once the dialog is handled: send
   it without waiting, handle `Page.javascriptDialogOpening` with `Page.handleJavaScriptDialog`, then collect its answer.
-- The overlay's one element is `<winter-agent-overlay>` (light DOM, under `documentElement`; pointer events pass through
-  it except over the Stop button). A page-runtime tree walk should skip it; its arrival and departure are the only DOM
-  mutations the overlay causes (cursor moves happen inside its closed shadow root).
-- `debugger.detached { reason: "idle" | "target_closed" }` leaves a tab that `debugger.attach` can make drivable again
-  (the transport reports it as `stopped`); `canceled_by_user` is the user taking the tab back (`detached_by_user`).
+- The overlay's one element is `<winter-agent-overlay>` (light DOM, under `documentElement`). It takes no pointer event
+  at all, so an `Input.*` click reaches the page element underneath; the engine leaves it out of its tree walk and hit
+  tests. Its arrival and departure are the only DOM mutations it causes (cursor moves happen inside its closed shadow
+  root).
+- An idle or `target_closed` detach arrives as `Inspector.detached` (§5.2): attach again. `canceled_by_user` is
+  `detached_by_user`.
 
 ### 5.4 Errors
 
@@ -217,9 +230,14 @@ content scripts. `incognito: "not_allowed"`.
 ### 7.2 Never move the user's view
 
 Tabs open with `active: false` only. The extension never calls `tabs.update`, `tabs.highlight`, `windows.update` or
-`windows.create`. `Emulation.setFocusEmulationEnabled(true)` at attach keeps a background tab behaving as focused. The
-build fails if its bundle contains any of those calls, `active: true`, `focused: true`, a main-world script, or a read
-of cookies or site storage.
+`windows.create`. `Emulation.setFocusEmulationEnabled(true)` at attach keeps a background tab behaving as focused.
+
+What keeps those calls out: every module but `background.ts` reaches the browser only through the `ChromeApi` interface
+(`src/chrome-api.ts`), which has none of them, and `background.ts` (which binds the real `chrome`, typed `any`) is
+reviewed by hand. Behind that, the build runs a regex over its bundles (`background.js` and `popup.js`) — and the unit
+tests over the sources — and fails on any of those calls, `active: true`, `focused: true`, a main-world script, or a
+read of cookies or site storage. The regex is a backstop against a slip, not a proof: a call spelled another way would
+pass it.
 
 ### 7.3 The CDP allowlist and the world rules
 
@@ -227,31 +245,43 @@ The daemon's `packages/core/src/computer-use/browser/cdp-allowlist.ts` is bundle
 Before a command reaches the browser the extension refuses (`not_allowed`):
 
 - any method outside `CDP_ALLOWED_METHODS`; a subscription outside `CDP_ALLOWED_EVENTS`;
-- `Runtime.evaluate` without a `contextId` it knows as a "winter" world, or with a `uniqueContextId`;
-- `Runtime.callFunctionOn` without such an `executionContextId` or an `objectId` minted in one, or with an argument
-  `objectId` that was not;
+- `Runtime.evaluate` not in a "winter" context, named by `contextId` and/or `uniqueContextId` (both, if given, must be
+  the same context);
+- `Runtime.callFunctionOn` not in such a context (`executionContextId` / `uniqueContextId`) or on an `objectId` minted
+  in one, or with an argument `objectId` that was not;
 - `DOM.resolveNode` without such an `executionContextId`;
-- `Page.createIsolatedWorld` with a `worldName` other than `"winter"`, or with universal access;
+- `Page.createIsolatedWorld` with a `worldName` other than `"winter"`, with universal access, or before `Runtime.enable`
+  in that session;
+- `Page.reload` carrying `scriptToEvaluateOnLoad`, and `Page.navigate` to anything but http, https or exactly
+  `about:blank` (both would run code in the page's own world);
 - any other method naming an `objectId` that was not minted in a "winter" world.
 
-A "winter" context is one `Page.createIsolatedWorld` answered for, or one `Runtime.executionContextCreated` announced
-with name `"winter"` and type `isolated`. Contexts and objects are tracked per CDP session (the tab's, or a child
-target's) and dropped when destroyed. `Runtime.releaseObject` of an object the world no longer holds is answered `{}`
-without being sent.
+A "winter" context is one THIS extension's own `Page.createIsolatedWorld` returned — never one recognised by its name,
+which another extension's world could share. The Runtime domain must be on in that session (so every context's coming
+and going is seen); contexts are also matched by the browser's `uniqueId`, and an id handed out again to another context
+(a cross-process navigation reuses them) stops being "winter" at once; a new document in the world's frame,
+`Runtime.disable`, `Runtime.executionContextsCleared` and its destruction end it. Contexts and objects are tracked per
+CDP session (the tab's, or a child target's). `Runtime.releaseObject` of an object the world no longer holds is
+answered `{}` without being sent.
 
 ### 7.4 The debugger and the overlay
 
 - **Attach** only while the daemon has the tab bound; refused (`attach_refused`) on `chrome:`, `edge:`, `brave:`,
   `vivaldi:`, `opera:`, `arc:`, `chrome-extension:`, `devtools:`, `view-source:` and other `about:` pages than
-  `about:blank`, on the Chrome Web Store and Edge Add-ons, on the extension's own pages, and while another debugger
-  (DevTools, another extension) holds the tab. The browser's "started debugging this browser" bar is accepted.
+  `about:blank`, on local and opaque documents (`file:`, `data:`, `blob:`, `filesystem:`), on the Chrome Web Store and
+  Edge Add-ons, on the extension's own pages, and while another debugger (DevTools, another extension) holds the tab.
+  The browser's "started debugging this browser" bar is accepted.
 - **Detach** on `debugger.detach`, after **5 minutes** without a command (`debugger.detached { reason: "idle" }`), and
-  for every tab whenever the link to Winter drops (`host.status` not connected, or the port closed).
-- **The overlay** — a glow around the page, Winter's cursor and a Stop button — is injected on demand with
-  `chrome.scripting.executeScript({ world: "ISOLATED" })`: the extension's own content-script world, never the page's
-  main world. Everything sits in a closed shadow root under one `<winter-agent-overlay>` element (pointer events pass
-  through it, except the button); a page observing its DOM sees only that element arrive and leave. Stop counts only for
-  a trusted click.
+  for every tab whenever the link to Winter drops (`host.status` not connected, or the port closed). Attached tabs are
+  kept in `chrome.storage.session`: a restarted service worker detaches whatever its predecessor left attached, and
+  removes those overlays.
+- **The overlay** — a glow around the page, Winter's cursor and a small "Winter is working" pill — is an INDICATOR only,
+  injected on demand with `chrome.scripting.executeScript({ world: "ISOLATED" })`: the extension's own content-script
+  world, never the page's main world. Everything sits in a closed shadow root under one `<winter-agent-overlay>` element
+  whose own styles are `!important` (a page's CSS cannot hide or move it) and which takes no pointer event anywhere.
+- **Stop is the toolbar button.** While any tab is driven (its overlay on), the extension's button shows a red `STOP`
+  badge and has no popup; a click sends `stop.pressed` for every driven tab. Otherwise the button opens the status
+  popup. Nothing in the page can stop Winter, or pretend to.
 - **The port** is kept open while the browser runs (an open native port keeps an MV3 service worker alive) and
   reconnected with a 1 s → 30 s backoff.
 

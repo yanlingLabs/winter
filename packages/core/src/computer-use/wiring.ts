@@ -15,7 +15,6 @@ import {
   computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseLegacyComputerFrom, computerUseMirrorFrom,
   computerUsePrivateEventPathFrom, loadSettings, saveSettings, setComputerUseApp, setComputerUseFlags, type ComputerUseAccess, type Settings,
 } from "../settings";
-import type { BackendRegistry } from "./browser/transport";
 import { DiffBases } from "./diff-base";
 import { HelperClient, type HelperLauncher, type HelperTransport, type HelperVerifier } from "./helper-client";
 import { ComputerPolicy, DEFAULT_APP_EXCEPTIONS, defaultAppException, type DesktopVisitPanel } from "./policy";
@@ -97,10 +96,6 @@ export interface ComputerUseRuntime {
   /** The hub observer: compaction (diff bases) and main-thread turn ends (the helper fades the mirrors). */
   observe(event: SessionEvent): void;
   stop(): void;
-  /** ComputerV2 Phase 2: the browser engine's backends. The daemon's Winter for Chrome server (`<home>/run/browser.sock`,
-   *  `browser/extension/host-server.ts`) registers each connected extension's transport here; absent while this daemon
-   *  has no browser engine, and an extension's hello is then refused. */
-  backends?: BackendRegistry;
 }
 
 const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;

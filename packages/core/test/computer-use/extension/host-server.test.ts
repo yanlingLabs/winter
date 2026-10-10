@@ -153,13 +153,26 @@ describe("host.hello", () => {
     expect(await c.closed()).toBe(true);
   });
 
-  test("every family's bundle id is accepted; Chrome for Testing is Chrome", async () => {
+  test("every family's bundle id is accepted, case-insensitively (lane B's rule); Chrome for Testing is Chrome", async () => {
     start();
-    for (const browserBundleId of ["com.google.Chrome", "com.google.Chrome.canary", "com.google.chrome.for.testing", "com.microsoft.edgemac", "com.brave.Browser", "com.vivaldi.Vivaldi", "com.operasoftware.Opera", "company.thebrowser.Browser", "org.chromium.Chromium"]) {
+    for (const browserBundleId of ["com.google.Chrome", "com.google.Chrome.canary", "com.google.chrome.for.testing", "COM.GOOGLE.CHROME", "com.microsoft.edgemac", "com.microsoft.edgemac.Beta", "com.brave.Browser", "com.vivaldi.Vivaldi", "com.operasoftware.Opera", "company.thebrowser.Browser", "org.chromium.Chromium"]) {
       const c = await connect();
       const r = await c.request("h1", "host.hello", hostHello({ browserBundleId }));
-      expect(r).toMatchObject({ result: { protocol: BROWSER_HOST_PROTOCOL } });
+      expect({ browserBundleId, r }).toMatchObject({ browserBundleId, r: { result: { protocol: BROWSER_HOST_PROTOCOL } } });
     }
+  });
+
+  test("the family names are lane B's (\"Brave\", not \"Brave Browser\"), and a Chrome for Testing registers as Google Chrome", async () => {
+    const { registry } = start();
+    const t = await connect();
+    await t.request("h1", "host.hello", hostHello({ browserBundleId: "com.brave.Browser" }));
+    const r = await t.request("e1", "hello", { protocol: EXTENSION_PROTOCOL, extensionVersion: "1.0.0", instanceId: INSTANCE });
+    expect(r).toMatchObject({ result: { backend: { id: "brave", name: "Brave" } } });
+    const u = await connect();
+    await u.request("h1", "host.hello", hostHello({ browserBundleId: "com.google.chrome.for.testing" }));
+    const s2 = await u.request("e1", "hello", { protocol: EXTENSION_PROTOCOL, extensionVersion: "1.0.0", instanceId: "0b8f2b7e-1111-4c4c-8888-000000000009" });
+    expect(s2).toMatchObject({ result: { backend: { id: "chrome", name: "Google Chrome" } } });
+    expect(registry.list().find((b) => b.id === "chrome")?.bundleId).toBe("com.google.chrome.for.testing");
   });
 
   test("no host.hello in time → closed", async () => {

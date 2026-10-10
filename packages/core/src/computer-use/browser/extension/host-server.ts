@@ -6,9 +6,14 @@
 // The handshake (apple/ComputerUse/WinterBrowserHost/PROTOCOL.md):
 //  1. `host.hello` (the host's own request, first): protocol → the caller's origin in this profile's allowlist → the
 //     browser app a known Chromium family → the host's code signature, checked BY THE PID IT REPORTS against the host's
-//     stated designated requirement → computer use on. Any refusal is answered and the connection closed. The pid check is
-//     not load-bearing — a same-user impostor can name the real host's pid (Bun's sockets give no fd for LOCAL_PEERPID) —
-//     exactly as for the helper; the host's own audit-token check of THIS daemon is the direction that guards.
+//     stated designated requirement → computer use on. Any refusal is answered and the connection closed.
+//     What the pid check is, exactly: a check that the process the connection SAYS it is runs Winter's signed host — it
+//     catches a host binary that is not Winter's (another build, a stale copy). It is not proof against a process of the
+//     same user: such a process can name the real host's pid (Bun's sockets give the daemon no peer pid of its own), or
+//     open this 0600 socket itself. Same-user code is OUT of the threat model here — as it is for the helper's socket
+//     and for the daemon's own: a process running as the user can already reach everything the user can. The other
+//     direction, the host's audit-token check of THIS daemon, is what keeps the host (and so the extension's debugger)
+//     from talking to anything but Winter's signed daemon — against code that is not the user's own.
 //  2. `hello` (the extension's, relayed): the extension protocol, then registration under its `instanceId`, so a service
 //     worker restart (a new connection, the same instance) gets its BackendId back.
 //  3. Everything after is the transport's.
@@ -19,7 +24,7 @@ import { processSatisfiesRequirement } from "../../helper-verify";
 import type { BackendRegistry } from "../transport";
 import { ExtensionTransport, type ExtensionTimeouts } from "./extension-transport";
 import { browserHostRequirementFor, EXTENSION_IDS, extensionIdFromOrigin } from "./extension-ids";
-import { browserAppFor, type BrowserApp } from "./families";
+import { familyForBundleId, type FamilyInfo } from "./families";
 import {
   BROWSER_HOST_PROTOCOL, EXTENSION_PROTOCOL, HOST_TO_DAEMON_MAX_LINE, RPC_ERROR, RPC_INVALID_PARAMS, RPC_METHOD_NOT_FOUND,
   type ExtensionHelloResult, type HostHelloResult,
@@ -47,7 +52,7 @@ export interface BrowserHostServerOptions {
 }
 
 interface HostFacts {
-  app: BrowserApp;
+  app: FamilyInfo;
   bundleId: string;
   extensionId: string;
   hostPid: number;
@@ -238,8 +243,8 @@ export class BrowserHostServer {
     if (extensionId === undefined || !this.allowedIds.has(extensionId)) {
       throw new Refusal(RPC_ERROR, "that extension is not Winter for Chrome", { code: "not_allowed", reason: "origin" });
     }
-    const app = typeof browserBundleId === "string" ? browserAppFor(browserBundleId) : undefined;
-    if (app === undefined || typeof browserBundleId !== "string") {
+    const app = typeof browserBundleId === "string" ? familyForBundleId(browserBundleId) : undefined;
+    if (app === undefined || app.family === "winter" || typeof browserBundleId !== "string") {
       throw new Refusal(RPC_ERROR, "Winter for Chrome works in Chrome, Edge, Brave, Vivaldi, Opera, Arc and Chromium only", { code: "not_allowed", reason: "browser" });
     }
     if (typeof hostPid !== "number" || !Number.isInteger(hostPid) || hostPid <= 0 || !this.verifyHost(hostPid, this.hostRequirement)) {

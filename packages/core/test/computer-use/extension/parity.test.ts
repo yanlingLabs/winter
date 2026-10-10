@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { WINTER_TEAM_ID } from "../../../src/auth/app-token-acl";
 import { BROWSER_HOST_IDENTIFIER, EXTENSION_IDS, extensionIdFromKey, NATIVE_HOST_NAME } from "../../../src/computer-use/browser/extension/extension-ids";
-import { BROWSER_APPS } from "../../../src/computer-use/browser/extension/families";
+import { BROWSER_FAMILIES } from "../../../src/computer-use/browser/extension/families";
 import { NATIVE_MESSAGING_BROWSER_DIRS } from "../../../src/computer-use/browser/extension/manifest";
 import { BROWSER_HOST_PROTOCOL, EXTENSION_PROTOCOL } from "../../../src/computer-use/browser/extension/protocol";
 
@@ -90,7 +90,7 @@ describe("names and identities", () => {
 
   test("PROTOCOL.md names every browser family's bundle ids", () => {
     const spec = read(...HOST, "PROTOCOL.md");
-    for (const bundleId of Object.keys(BROWSER_APPS)) {
+    for (const bundleId of BROWSER_FAMILIES.flatMap((f) => f.bundleIds)) {
       const short = bundleId.replace(/^(com\.google\.Chrome|com\.microsoft\.edgemac)(\..+)$/, "$2");
       expect({ bundleId, named: spec.includes(`\`${bundleId}\``) || spec.includes(`\`${short}\``) }).toEqual({ bundleId, named: true });
     }

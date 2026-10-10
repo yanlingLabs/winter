@@ -30,7 +30,7 @@ export interface ExtensionTimeouts {
 export const DEFAULT_EXTENSION_TIMEOUTS: ExtensionTimeouts = { command: 10_000, cdp: 15_000, screenshot: 20_000, create: 20_000, attach: 20_000, overlay: 5_000 };
 
 export interface ExtensionTransportOptions {
-  family: Exclude<BrowserFamily, "winter">;
+  family: BrowserFamily;
   /** Writes one JSON-RPC object to the host. False when the connection can no longer carry it. */
   write(message: Record<string, unknown>): boolean;
   timeouts?: Partial<ExtensionTimeouts>;
@@ -49,7 +49,7 @@ type GoneReason = "closed" | "crashed" | "stopped" | "detached_by_user";
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 export class ExtensionTransport implements CdpTransport {
-  readonly family: Exclude<BrowserFamily, "winter">;
+  readonly family: BrowserFamily;
   private backendId: BackendId = "";
   private alive = true;
   private nextId = 1;

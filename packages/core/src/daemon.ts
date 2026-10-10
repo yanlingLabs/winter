@@ -1279,7 +1279,9 @@ export async function startDaemon(opts: {
     socketPath: join(dirs.runDir, BROWSER_HOST_SOCKET_NAME),
     profile,
     daemonVersion: CORE_VERSION,
-    registry: () => opts.browserHost?.registry ?? computerUseRuntime.backends,
+    // The engine's backends (`computerUseRuntime.backends`, lane B's registry), read structurally so this needs no field
+    // of its own on the runtime: absent while this daemon has no browser engine, and an extension's hello is then refused.
+    registry: () => opts.browserHost?.registry ?? (computerUseRuntime as { backends?: BackendRegistry }).backends,
     enabled: () => { const s = computerUseRuntime.settings(); return s ? computerUseEnabledFrom(s) : true; },
     ...(opts.browserHost?.allowedExtensionIds === undefined ? {} : { allowedExtensionIds: opts.browserHost.allowedExtensionIds }),
     ...(opts.browserHost?.hostRequirement === undefined ? {} : { hostRequirement: opts.browserHost.hostRequirement }),
