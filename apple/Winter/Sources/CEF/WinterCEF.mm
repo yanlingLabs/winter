@@ -9,6 +9,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -42,6 +43,8 @@
 #include "include/cef_jsdialog_handler.h"
 #include "include/cef_keyboard_handler.h"
 #include "include/cef_permission_handler.h"
+// ComputerV2 Phase 2 — the built-in browser's one request context, where printing is switched off.
+#include "include/cef_request_context.h"
 // editor-plumbing Task 2 — the `winter-editor://` scheme. `cef_resource_handler.h` and
 // `cef_response.h` both arrive transitively through `cef_scheme.h`; named because this file
 // IMPLEMENTS `CefResourceHandler` and `CefSchemeHandlerFactory`.
@@ -356,6 +359,8 @@ bool g_initialized = false;
 bool g_context_initialized = false;
 bool g_shutting_down = false;
 bool g_did_shutdown = false;
+// ComputerV2 Phase 2: what `DisablePrinting` answered at context init — "not attempted" until then.
+std::string g_printing_outcome = "not attempted";
 long g_do_work_count = 0;
 std::string g_last_error;
 
@@ -783,6 +788,36 @@ bool AutomationSwallowsUnhandledKeys(uint32_t flags) {
 }
 bool AutomationRefusesFocus(uint32_t flags) { return (flags & WinterCEFAutomationRefusesFocus) != 0; }
 bool AutomationExitsFullscreen(uint32_t flags) { return (flags & WinterCEFAutomationExitsFullscreen) != 0; }
+
+/// **Printing is switched off for the whole built-in browser — Chromium's own `printing.enabled`.**
+///
+/// On macOS a print reaches the system print panel, which no CEF handler can stop (`CefPrintHandler` is
+/// Linux-only) — and a page can call `window.print()` by itself, with no input from anyone, from a tab
+/// an agent holds parked where nobody can see it. Chromium's `printing.enabled` preference (the
+/// PrintingEnabled policy) makes `window.print()` and every other print a no-op instead. It is a
+/// preference of a REQUEST CONTEXT, and every Winter browser — the agent's tabs, the user's own panel
+/// tabs and the editor alike — is created on the one global context, so this covers the built-in
+/// browser as a whole; there is no narrower scope to give it.
+///
+/// The three steps are passed in so the decision runs with no CEF (`WinterCEFPrintingPreferenceDecisions`):
+/// nothing is set unless the build registers the preference and allows it to be set.
+std::string DisablePrinting(const std::function<bool()> &hasPreference,
+                            const std::function<bool()> &canSetPreference,
+                            const std::function<bool(std::string &error)> &setFalse) {
+  if (!hasPreference()) {
+    return "absent";
+  }
+  if (!canSetPreference()) {
+    return "not-settable";
+  }
+  std::string error;
+  if (!setFalse(error)) {
+    return "refused: " + error;
+  }
+  return "disabled";
+}
+
+const char kPrintingEnabledPreference[] = "printing.enabled";
 
 /// Take a JS dialog as a held, never-shown custom dialog — or answer `false` to leave it to CEF's
 /// default, which is what every tab the link does not hold gets. NOT `suppress_message`: a suppressed
@@ -2967,6 +3002,26 @@ class WinterApp : public CefApp, public CefBrowserProcessHandler {
     CEF_REQUIRE_UI_THREAD();
     g_context_initialized = true;
     Log("context initialized");
+    // Before any browser exists — the queued ones are created just below — so no page ever runs with
+    // printing on. See `DisablePrinting`.
+    if (CefRefPtr<CefRequestContext> context = CefRequestContext::GetGlobalContext()) {
+      const CefString name(kPrintingEnabledPreference);
+      g_printing_outcome = DisablePrinting(
+          [&] { return context->HasPreference(name); },
+          [&] { return context->CanSetPreference(name); },
+          [&](std::string &error) {
+            CefRefPtr<CefValue> value = CefValue::Create();
+            value->SetBool(false);
+            CefString reason;
+            const bool ok = context->SetPreference(name, value, reason);
+            error = reason.ToString();
+            return ok;
+          });
+    } else {
+      g_printing_outcome = "no global request context";
+    }
+    Log("printing on the built-in browser: %s (printing.enabled, the one global request context)",
+        g_printing_outcome.c_str());
     ReplayPendingBrowsers();
   }
 
@@ -3661,6 +3716,34 @@ NSString *WinterCEFChildSessionOfDevToolsMessage(NSString *message) {
   return session != nil ? [NSString stringWithFormat:@"%@ %@ %@", session, method,
                                     [[NSString alloc] initWithData:params encoding:NSUTF8StringEncoding]]
                         : nil;
+}
+
+NSString *WinterCEFPrintingPreferenceDecisions(void) {
+  NSMutableArray<NSString *> *rows = [[NSMutableArray alloc] init];
+  struct Case {
+    bool has;
+    bool canSet;
+    bool setOK;
+  };
+  const Case cases[] = {{false, false, false}, {true, false, false}, {true, true, false}, {true, true, true}};
+  for (const Case &c : cases) {
+    bool setCalled = false;
+    const std::string outcome = DisablePrinting(
+        [&] { return c.has; }, [&] { return c.canSet; },
+        [&](std::string &error) {
+          setCalled = true;
+          if (!c.setOK) {
+            error = "policy";
+          }
+          return c.setOK;
+        });
+    [rows addObject:[NSString stringWithFormat:@"%s%s", outcome.c_str(), setCalled ? " (set)" : ""]];
+  }
+  return [rows componentsJoinedByString:@";"];
+}
+
+NSString *WinterCEFPrintingPreferenceOutcome(void) {
+  return [NSString stringWithUTF8String:g_printing_outcome.c_str()] ?: @"";
 }
 
 NSString *WinterCEFCDPMessageIdsWithNoCEFAnywhere(void) {

@@ -435,9 +435,12 @@ BOOL WinterCEFResolveHeldDialog(NSView *parent, WinterCEFHeldDialogAction action
 
 /// **What no flag can reach, said plainly.** In this windowed (Alloy, native-view) embed on macOS, CEF
 /// offers no client handler for: a `<select>`'s popup menu (an `NSMenu` Chromium runs itself), the
-/// date/time pickers (a popup widget window), the color chooser, or `window.print()`'s print panel
-/// (`CefPrintHandler` is Linux-only). Those are kept away from a held tab by the engine, which
-/// refuses the input that opens them; they are live-gate drills, not something this layer can stop.
+/// date/time pickers (a popup widget window) or the color chooser. Those are kept away from a held tab
+/// by the engine, which refuses the input that opens them; they are live-gate drills, not something
+/// this layer can stop. Printing is the exception: there is no handler for its panel either
+/// (`CefPrintHandler` is Linux-only), but Chromium's `printing.enabled` preference is switched off for
+/// the whole built-in browser at context init, so `window.print()` does nothing
+/// (`WinterCEFPrintingPreferenceOutcome`).
 ///
 /// **Test seam.** YES when the browser client INSTALLS the six handlers the automation flags work
 /// through (`CefJSDialogHandler`, `CefPermissionHandler`, `CefDialogHandler`, `CefDownloadHandler`,
@@ -454,6 +457,17 @@ NSString *WinterCEFAutomationDecisionsForFlags(uint32_t flags);
 /// raw observer makes on every message before it parses one (results and the tab's own events go to
 /// the structured callbacks). `message` is the message's JSON text. No CEF anywhere.
 NSString *WinterCEFChildSessionOfDevToolsMessage(NSString *message);
+
+/// **Test seam.** The printing switch's decision, run with no CEF over the four cases a build can present
+/// — the preference not registered, registered but not settable, set but refused, set — as
+/// `outcome[ (set)]` rows joined by `;`, where "(set)" marks a case that tried to set it. Nothing is set
+/// unless the preference exists AND may be set.
+NSString *WinterCEFPrintingPreferenceDecisions(void);
+
+/// What switching printing off answered at context init in THIS process: "disabled", "absent" (the
+/// build does not register `printing.enabled`), "not-settable", "refused: …", "no global request
+/// context", or "not attempted" (CEF never started — every unit test).
+NSString *WinterCEFPrintingPreferenceOutcome(void);
 
 /// **Test seam.** Drive the per-browser message-id counter the way the two DevTools doors do — an
 /// `ExecuteDevToolsMethod` that answers a larger id than suggested, then raw sends — and return the

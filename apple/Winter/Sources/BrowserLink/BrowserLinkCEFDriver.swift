@@ -70,8 +70,10 @@ struct BrowserLinkCEFDriver {
 ///  * the browser's own focus requests are refused; page fullscreen is exited.
 ///
 /// **What CEF gives no handler for in this windowed embed on macOS** — a `<select>`'s popup menu,
-/// the date/time pickers, the color chooser, the print panel — is outside this list, and is stopped
-/// at the source by the engine, which refuses the input that opens them (see `WinterCEF.h`).
+/// the date/time pickers, the color chooser — is outside this list, and is stopped at the source by
+/// the engine, which refuses the input that opens them (see `WinterCEF.h`). Printing has no handler
+/// either, but needs none: Chromium's `printing.enabled` preference is off for the whole built-in
+/// browser, so a page's own `window.print()` does nothing in any tab, held or not.
 ///
 /// A tab the link does not hold gets none of it: every handler then gives CEF's own default, exactly as
 /// before the link existed.

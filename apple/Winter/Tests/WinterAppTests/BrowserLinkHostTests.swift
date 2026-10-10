@@ -521,6 +521,15 @@ final class BrowserLinkCEFSeamTests: XCTestCase {
         XCTAssertNil(WinterCEFChildSessionOfDevToolsMessage(""))
     }
 
+    /// A page can call `window.print()` with no input from anyone, and no CEF handler stops the macOS
+    /// print panel — so printing is switched off by Chromium's own preference at context init. Nothing
+    /// is set unless the build registers the preference and lets it be set.
+    func testPrintingIsSwitchedOffOnlyWhereTheBuildAllowsIt() {
+        XCTAssertEqual(WinterCEFPrintingPreferenceDecisions(),
+                       "absent;not-settable;refused: policy (set);disabled (set)")
+        XCTAssertEqual(WinterCEFPrintingPreferenceOutcome(), "not attempted", "CEF never starts under XCTest")
+    }
+
     func testOneCounterKeepsRawAndAssignedIdsApart() {
         // A raw send takes 1; the structured door is suggested 2 and CEF answers 7; the next raw is 8.
         XCTAssertEqual(WinterCEFCDPMessageIdsWithNoCEFAnywhere(), "1,7,8")
