@@ -46,8 +46,10 @@ interface FrameRec {
   /** The CDP session the frame's documents live in (absent: the tab's own). */
   session?: string;
   url: string;
-  /** The "winter" world's context id in this frame's current document (in `session`'s id space). */
+  /** The "winter" world's context id in this frame's current document, and the CDP session it was made in (a context
+   *  id means nothing in another session: a frame that moved out of process gets a new world). */
   ctx?: number;
+  ctxSession?: string;
   /** The page runtime instance installed in that world. */
   rtId?: string;
   installing?: Promise<void>;
@@ -316,7 +318,11 @@ export class TabDriver {
         const frameId = c.auxData?.frameId;
         if (c.name === "winter" && frameId !== undefined) {
           const rec = this.frames.get(frameId);
-          if (rec !== undefined && (rec.session ?? undefined) === session && rec.ctx === undefined) rec.ctx = c.id;
+          if (rec !== undefined && (rec.session ?? undefined) === session && rec.ctx === undefined) {
+            rec.ctx = c.id;
+            if (session === undefined) delete rec.ctxSession;
+            else rec.ctxSession = session;
+          }
         }
         break;
       }
@@ -404,6 +410,7 @@ export class TabDriver {
     if (rec.rtId !== undefined) this.liveRts.delete(rec.rtId);
     delete rec.rtId;
     delete rec.owner;
+    if (rec.ctx === undefined) delete rec.ctxSession;
   }
 
   /** A new top-frame document: every ref is stale, the snapshots go, the next state is full and says "new page". */
@@ -437,16 +444,22 @@ export class TabDriver {
   }
 
   private async ensureRuntime(rec: FrameRec): Promise<void> {
+    // A world made in another session than the frame's now (it moved out of process) is not this frame's any more.
+    if (rec.ctx !== undefined && rec.ctxSession !== rec.session) { delete rec.ctx; delete rec.ctxSession; this.forgetRuntime(rec); }
     if (rec.rtId !== undefined && rec.ctx !== undefined) return;
     if (rec.installing !== undefined) { await rec.installing; return; }
     rec.installing = (async () => {
+      const session = rec.session;
       if (rec.ctx === undefined) {
-        const r = await this.send<{ executionContextId: number }>("Page.createIsolatedWorld", { frameId: rec.frameId, worldName: "winter" }, rec.session);
+        const r = await this.send<{ executionContextId: number }>("Page.createIsolatedWorld", { frameId: rec.frameId, worldName: "winter" }, session);
+        if (rec.session !== session) throw new Error("the frame's execution context was destroyed (it moved to another process)");
         rec.ctx = r.executionContextId;
+        if (session === undefined) delete rec.ctxSession;
+        else rec.ctxSession = session;
       }
       const res = await this.send<{ result?: { value?: unknown }; exceptionDetails?: unknown }>("Runtime.evaluate", {
         expression: `${PAGE_RUNTIME_SOURCE}\n;globalThis.__winterRuntime.id`, contextId: rec.ctx, returnByValue: true,
-      }, rec.session);
+      }, rec.ctxSession);
       if (res.exceptionDetails !== undefined || typeof res.result?.value !== "string") throw new Error("the page runtime could not be installed in this page");
       rec.rtId = res.result.value;
       this.liveRts.set(rec.rtId, rec.frameId);
@@ -461,7 +474,7 @@ export class TabDriver {
     const res = await this.send<{ result?: { value?: unknown; objectId?: string }; exceptionDetails?: { text?: string; exception?: { description?: string } } }>("Runtime.callFunctionOn", {
       functionDeclaration: PAGE_RUNTIME_CALL, executionContextId: rec.ctx, arguments: [{ value: op }, { value: arg ?? null }],
       returnByValue: opts.byValue !== false, awaitPromise: true,
-    }, rec.session);
+    }, rec.ctxSession);
     if (res.exceptionDetails !== undefined) {
       const msg = res.exceptionDetails.exception?.description ?? res.exceptionDetails.text ?? "error";
       const m = /stale:(\d+)/.exec(msg);
@@ -519,21 +532,21 @@ export class TabDriver {
 
   /** Map each child frame of `rec` to its iframe element in `rec`'s runtime (`DOM.getFrameOwner`). */
   private async ensureOwners(rec: FrameRec): Promise<void> {
-    if (rec.rtId === undefined || rec.ctx === undefined) return;
+    if (rec.rtId === undefined || rec.ctx === undefined || rec.ctxSession !== rec.session) return;
     for (const c of this.frames.values()) {
       if (c.parentId !== rec.frameId || (c.owner !== undefined && c.owner.parentRt === rec.rtId)) continue;
       try {
         const own = await this.send<{ backendNodeId: number }>("DOM.getFrameOwner", { frameId: c.frameId }, rec.session);
-        const node = await this.send<{ object: { objectId?: string } }>("DOM.resolveNode", { backendNodeId: own.backendNodeId, executionContextId: rec.ctx }, rec.session);
+        const node = await this.send<{ object: { objectId?: string } }>("DOM.resolveNode", { backendNodeId: own.backendNodeId, executionContextId: rec.ctx }, rec.ctxSession);
         const objectId = node.object.objectId;
         if (objectId === undefined) continue;
         try {
           const res = await this.send<{ result?: { value?: unknown } }>("Runtime.callFunctionOn", {
             functionDeclaration: PAGE_RUNTIME_CALL, objectId, arguments: [{ value: "owner" }, { value: null }], returnByValue: true,
-          }, rec.session);
+          }, rec.ctxSession);
           if (typeof res.result?.value === "number" && rec.rtId !== undefined) c.owner = { parentRt: rec.rtId, id: res.result.value };
         } finally {
-          void this.send("Runtime.releaseObject", { objectId }, rec.session).catch(() => undefined);
+          void this.send("Runtime.releaseObject", { objectId }, rec.ctxSession).catch(() => undefined);
         }
       } catch { /* unreadable owner: the frame's content is shown without a place, or not at all */ }
     }
@@ -954,9 +967,9 @@ export class TabDriver {
     const objectId = await this.callIn<string | undefined>(rec, "element", { id }, { byValue: false, expectRt: rtId });
     if (objectId === undefined) throw stale(ref);
     try {
-      await this.send("DOM.setFileInputFiles", { files, objectId }, rec.session);
+      await this.send("DOM.setFileInputFiles", { files, objectId }, rec.ctxSession);
     } finally {
-      void this.send("Runtime.releaseObject", { objectId }, rec.session).catch(() => undefined);
+      void this.send("Runtime.releaseObject", { objectId }, rec.ctxSession).catch(() => undefined);
     }
     this.fileChooser = undefined;
   }

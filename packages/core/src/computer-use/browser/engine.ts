@@ -563,7 +563,8 @@ export class BrowserEngine {
     scope.live();
     scope.builder.daemonLine(this.familyOf(backend) === "winter" ? "opened a new tab in Winter's browser" : `opened a new tab in ${name} (in the background)`);
     if (!loaded) scope.builder.daemonLine("still loading after 10 s");
-    await this.printState(scope, handle.targetId, driver, { full: true });
+    // The goto rule: the new page settles (frames still loading, late content) before its state is printed.
+    await this.printState(scope, handle.targetId, driver, { full: true, settle: true });
     return handle;
   }
 
@@ -683,8 +684,11 @@ export class BrowserEngine {
   }
 
   /** Print a tab's state (fenced) and make it the diff base. */
-  private async printState(scope: TabRunScope, targetId: string, driver: TabDriver, o: { full?: boolean; since?: string; quietOnDiff?: boolean }): Promise<{ isDiff: boolean }> {
-    const res = await driver.state({ ...(o.full === true ? { full: true } : {}), ...(o.since === undefined ? {} : { since: o.since }) });
+  private async printState(scope: TabRunScope, targetId: string, driver: TabDriver, o: { full?: boolean; since?: string; quietOnDiff?: boolean; settle?: boolean }): Promise<{ isDiff: boolean }> {
+    const res = await driver.state({
+      ...(o.full === true ? { full: true } : {}), ...(o.since === undefined ? {} : { since: o.since }),
+      ...(o.settle === true ? { settle: { maxMs: Math.min(SETTLE_CAP_MS, scope.clampWait(SETTLE_CAP_MS)) } } : {}),
+    });
     scope.live();
     if (res.isDiff && o.quietOnDiff === true) {
       scope.builder.daemonLine("this tab was already bound — the same handle; what changed since its last state follows (keep the handle in a top-level const: it lasts between calls)");

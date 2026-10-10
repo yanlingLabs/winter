@@ -79,7 +79,7 @@ describe("browsers.list / open / tabs / tab", () => {
     const t = await h.engine.global(r.scope, "browsers.open", { url: "about:blank" }) as TabHandle;
     expect(h.panel.get("s1")).toEqual([{ tabId: "w1" }]);
     expect(await h.engine.primitive(r.scope, t.targetId, "url", {})).toBe("about:blank");
-    expect(r.text()).toContain('Tab "(untitled)" — about:blank\n');
+    expect(r.text()).toContain('Tab "(untitled)" — about:blank · settled ');
     expect(r.text()).not.toContain("new page");
     const js = await failure(h.engine.primitive(r.scope, t.targetId, "goto", { url: "javascript:void(0)" }));
     expect((js as AutomationFailure).kind).toBe("NotAllowed");

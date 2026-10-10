@@ -178,7 +178,11 @@ export class PipeTransport implements CdpTransport {
   async send<T = unknown>(tabKey: string, method: string, params: Record<string, unknown> = {}, opts: { cdpSessionId?: string; timeoutMs?: number } = {}): Promise<T> {
     const t = this.tab(tabKey);
     this.sent.push(method);
-    const refuse = (why: string): never => { this.refused.push(`${method}: ${why}`); throw new TransportError("not_allowed", `${method}: ${why}`); };
+    const refuse = (why: string): never => {
+      const detail = JSON.stringify({ session: opts.cdpSessionId, contextId: params.contextId, executionContextId: params.executionContextId, objectId: params.objectId, op: (params.arguments as Array<{ value?: unknown }> | undefined)?.[0]?.value, known: [...t.winterCtx] });
+      this.refused.push(`${method}: ${why} ${detail}`);
+      throw new TransportError("not_allowed", `${method}: ${why}`);
+    };
     if (!CDP_ALLOWED_METHODS.includes(method)) refuse("not on the allowlist");
     const sessKey = opts.cdpSessionId ?? "";
     if (opts.cdpSessionId !== undefined && !t.children.has(opts.cdpSessionId)) refuse("an unknown child session");
