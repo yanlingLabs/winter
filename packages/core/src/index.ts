@@ -181,7 +181,7 @@ export { QuestionBroker, type AskOutcome } from "./agent/questions";
 export { PlanBroker, type PlanOutcome } from "./agent/plans";
 export { SessionDirectories } from "./agent/dirs";
 export { sessionTmpDir } from "./agent/session-tmp";
-export { imageDimensions, sniffImageMediaType } from "./agent/stage-image";
+export { IMAGE_SNIFF_BYTES, imageDimensions, sniffImageMediaType } from "./agent/stage-image";
 export { imageTokenNumbers, modelTextOf, substituteImageTokens } from "./sessions/model-text";
 export { TrustStore } from "./agent/trust";
 export { ContextAssembler, BASE_PROMPT } from "./agent/context";

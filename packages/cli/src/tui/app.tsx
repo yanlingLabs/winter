@@ -89,7 +89,6 @@ import { Box, Text, useInput, useStdin } from "ink";
 import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
 import { METHODS, SyncConfigModel, type ApprovalPolicy, type SessionActivity, type SessionEvent, type UserMessageImageRef } from "@yanlinglabs/winter-protocol";
-import { readFileSync } from "node:fs";
 import { POLICY_ORDER } from "./policy-order";
 import { policySwitchNotes } from "./policy-switch-notes";
 import { modelIdPortion } from "../model-cli";
@@ -106,8 +105,9 @@ import { AgentList, FINISH_LABEL } from "./agent-list";
 import { Footer, type ExitKey } from "./footer";
 import { Composer, type ComposerInject } from "./composer";
 import {
-  DraftImages, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, imagePathFromPaste, imageToken, isRegularFile,
-  isStageableImage, prepareDraftImage, readClipboardImage as readClipboardImageDefault, stageDraftImages, type StagedDraft, type StagedImage,
+  DraftImages, IMAGE_FILE_TOO_LARGE_MESSAGE, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, imagePathFromPaste, imageToken, inspectImageFile,
+  isStageableImage, prepareDraftImage, readClipboardImage as readClipboardImageDefault, stageDraftImages, type ClipboardImage, type DraftImage,
+  type StagedDraft, type StagedImage,
 } from "./images";
 import { makeDraftWrapper } from "./draft-wrap";
 import { makePasteBatch } from "./paste-batch";
@@ -145,6 +145,9 @@ export interface AppClient {
    *  `imagesOnSend` when the daemon takes `images` on send/steer), rejects with the daemon's refusal
    *  (its message is what the note shows). */
   stageImage(sessionId: string, mediaType: string, dataBase64: string): Promise<StagedImage>;
+  /** Whether the daemon announced (hello `features`) that it takes the user's ORIGINAL image file by path in
+   *  `images`. Absent on a fake or a client that cannot tell: treated as yes (the real client always answers). */
+  supportsOriginalImagePaths?(): boolean;
 }
 
 /** Phase 3d T2 — everything the reducer's `dispatch` can be fed: every real wire `SessionEvent`
@@ -199,9 +202,10 @@ export interface AppProps {
   /** Injectable clipboard writer for UI tests; production uses the macOS pasteboard. */
   copyText?: (text: string) => void;
   openFile?: (path: string) => void;
-  /** Code-mode image input: the clipboard's image bytes, or `null` when it holds none. Injectable so
-   *  tests never read the real clipboard; production runs `osascript` (`images.ts`). */
-  readClipboardImage?: () => Promise<Uint8Array | null>;
+  /** Code-mode image input: the clipboard's image — a copied FILE's path, or raw image data — or `null`
+   *  when it holds none. Injectable so tests never read the real clipboard; production runs
+   *  `osascript` (`images.ts`). */
+  readClipboardImage?: () => Promise<ClipboardImage>;
   /** The delta coalescer's timer seam (`makeDeltaCoalescer`): production leaves it unset and gets the real
    *  `setTimeout`; a test passes a hand-driven clock so "how many deltas share a window" never depends on how
    *  fast the machine runs. */
@@ -551,34 +555,45 @@ export function App({
       return true;
     }
   };
-  /** Attach one image's bytes to the draft: not an image → `fallbackText` (the pasted text) is typed
-   *  instead; the model refuses images → the exact message as a note; otherwise it is prepared ONCE
-   *  here (downscaled to 1568 px, re-encoded only if it must be — `prepareDraftImage`), and only an
-   *  image that cannot be brought under the cap is refused, with a note. */
-  const attachImageBytes = async (bytes: Uint8Array, fallbackText?: string): Promise<void> => {
+  /** Attach one image to the draft. A FILE (a pasted / dragged path, a file copied in Finder) is
+   *  attached as its ORIGINAL path — checked here (a regular image file, at most 64 MiB), never read or
+   *  copied. DATA (a clipboard image with no file) keeps its raw bytes, staged at submit; only data that
+   *  cannot fit one request is downscaled (`prepareDraftImage`). Not an image → `fallbackText` (the
+   *  pasted text) is typed instead; the model refuses images → the exact message as a note; an image
+   *  that cannot be attached is refused with a note. */
+  const attachImage = async (source: { kind: "file"; path: string } | { kind: "data"; bytes: Uint8Array }, fallbackText?: string): Promise<void> => {
     // A refused PATH paste still types the path (as it did before images existed); the note says why
     // it was not attached. A clipboard image has no text to fall back to.
     const typeInstead = () => { if (fallbackText !== undefined) injectIntoComposer("insert", fallbackText); };
-    if (!isStageableImage(bytes)) { typeInstead(); return; }
-    if (!(await modelAcceptsImages())) { appendNote(IMAGE_INPUT_UNSUPPORTED_MESSAGE); typeInstead(); return; }
-    const image = await prepareDraftImage(bytes);
-    if (image === "not-image") { typeInstead(); return; }
-    if (image === "too-large") { appendNote(IMAGE_TOO_LARGE_MESSAGE); typeInstead(); return; }
+    let image: DraftImage;
+    if (source.kind === "file") {
+      const checked = inspectImageFile(source.path);
+      if (checked === "not-image") { typeInstead(); return; }
+      if (checked === "too-large") { appendNote(IMAGE_FILE_TOO_LARGE_MESSAGE); typeInstead(); return; }
+      if (!(await modelAcceptsImages())) { appendNote(IMAGE_INPUT_UNSUPPORTED_MESSAGE); typeInstead(); return; }
+      image = { kind: "file", path: source.path };
+    } else {
+      if (!isStageableImage(source.bytes)) { typeInstead(); return; }
+      if (!(await modelAcceptsImages())) { appendNote(IMAGE_INPUT_UNSUPPORTED_MESSAGE); typeInstead(); return; }
+      const prepared = await prepareDraftImage(source.bytes);
+      if (prepared === "not-image") { typeInstead(); return; }
+      if (prepared === "too-large") { appendNote(IMAGE_TOO_LARGE_MESSAGE); typeInstead(); return; }
+      image = prepared;
+    }
     injectIntoComposer("insert", imageToken(draftImagesRef.current.add(image, composerStateRef.current.text)));
   };
   // ctrl+v: the clipboard's image, if it holds one; otherwise nothing happens (what ctrl+v did before).
   const onPasteImage = () => {
     void readClipboardImage()
-      .then((bytes) => (bytes === null ? undefined : attachImageBytes(bytes)))
+      .then((clip) => (clip === null ? undefined : attachImage(clip)))
       .catch(() => { /* an unreadable clipboard is the same as an empty one */ });
   };
-  // A pasted or dragged-in path to an existing image file becomes an attachment; anything else types.
+  // A pasted or dragged-in path to an existing image file becomes an attachment (its ORIGINAL path —
+  // nothing is read beyond a few header bytes); anything else types.
   const onPastedText = (text: string): boolean => {
     const path = imagePathFromPaste(text);
-    if (path === undefined || !isRegularFile(path)) return false;
-    let bytes: Uint8Array;
-    try { bytes = new Uint8Array(readFileSync(path)); } catch { return false; }
-    attachImageBytes(bytes, text).catch((err: unknown) => appendNote(`image not attached: ${err instanceof Error ? err.message : String(err)}`));
+    if (path === undefined || inspectImageFile(path) === "not-image") return false;
+    attachImage({ kind: "file", path }, text).catch((err: unknown) => appendNote(`image not attached: ${err instanceof Error ? err.message : String(err)}`));
     return true;
   };
 
@@ -1105,8 +1120,9 @@ export function App({
   // (composer's parseSlashInput branch → onRunCommand → the MAIN session, unchanged — "built-in
   // commands still run in your main conversation").
   //
-  // Code-mode image input: a draft's `[Image #n]` placeholders are staged (`session.stageImage`, into
-  // the MAIN session's temp directory) before the text goes anywhere. The main session is sent the
+  // Code-mode image input: a draft's `[Image #n]` placeholders become paths before the text goes
+  // anywhere — a FILE attachment is its own original path (nothing staged); clipboard DATA is staged
+  // raw (`session.stageImage`, into the MAIN session's temp directory). The main session is sent the
   // text WITH its placeholders plus `images` (the user's message shows `[Image #n]`; the daemon gives
   // the model the paths). Two paths still get the paths substituted into the text itself: a daemon
   // whose stage result lacks `imagesOnSend` (it would silently drop `images`), and a child view's
@@ -1118,7 +1134,7 @@ export function App({
   // ONE queue for every submit and steer (`submitQueueRef`): a draft with images goes out only after
   // its async staging, so without the queue a plain draft typed after it would overtake it. Each
   // entry runs after the one before it has been delivered (or refused).
-  const deliver = (staged: StagedDraft, steer: boolean) => {
+  const deliver = (staged: StagedDraft, steer: boolean, held: ReadonlyArray<[number, DraftImage]> = []) => {
     if (childOpen) { sendToChild(childRow!.threadId, staged.modelText); return; }
     const sending: unknown = staged.images.length > 0 && staged.imagesOnSend
       ? (steer ? client.steer(sessionId, staged.text, staged.images) : client.send(sessionId, staged.text, staged.images))
@@ -1127,20 +1143,31 @@ export function App({
     // -- ahead of anything typed since -- so the user can send it again. Never an unhandled rejection.
     Promise.resolve(sending).catch((err: unknown) => {
       appendNote(`message not sent: ${err instanceof Error ? err.message : String(err)} — it is back in the composer`);
+      // The text goes back WITH its `[Image #n]` placeholders, so the attachments they name come back
+      // too (a refused file, or a model switched to a text-only one since the attach, must not turn
+      // the placeholders into dead text).
+      // …under fresh numbers where the user has meanwhile attached something under the same one.
+      const handedBack = draftImagesRef.current.restore(held, staged.text);
       const current = composerStateRef.current.text;
-      injectIntoComposer("replace", current.length === 0 ? staged.text : `${staged.text}\n${current}`);
+      injectIntoComposer("replace", current.length === 0 ? handedBack : `${handedBack}\n${current}`);
     });
   };
   const submitQueueRef = useRef<Promise<void>>(Promise.resolve());
   const submitDraft = (text: string, steer: boolean) => {
     const images = draftImagesRef.current;
     const mark = images.mark();
-    const hasImages = images.referencedIn(text).length > 0;
+    const held = images.snapshot(text); // what a REFUSED send hands back (`deliver`)
+    const hasImages = held.length > 0;
     submitQueueRef.current = submitQueueRef.current.then(async () => {
       let outgoing: StagedDraft = { text, images: [], modelText: text, imagesOnSend: true };
       if (hasImages) {
         try {
-          outgoing = await stageDraftImages(text, images, (image) => client.stageImage(sessionId, image.mediaType, Buffer.from(image.bytes).toString("base64")));
+          // A file is its own path (nothing staged); only clipboard DATA goes through `session.stageImage`, raw.
+          outgoing = await stageDraftImages(
+            text, images,
+            (image) => client.stageImage(sessionId, image.mediaType, Buffer.from(image.bytes).toString("base64")),
+            { originalPaths: client.supportsOriginalImagePaths?.() ?? true },
+          );
         } catch (err: unknown) {
           appendNote(err instanceof Error ? err.message : String(err));
           // Hand the refused draft back WITHOUT losing whatever was typed since: it goes first,
@@ -1151,7 +1178,7 @@ export function App({
         }
       }
       images.clearBefore(mark);
-      deliver(outgoing, steer);
+      deliver(outgoing, steer, held);
     });
   };
   const onSubmit = (text: string) => submitDraft(text, false);

@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chatSystemPrompt } from "../../src/agent/chat-prompt";
-import { ContextAssembler } from "../../src/agent/context";
+import { ContextAssembler, IMAGE_PATH_GUIDANCE } from "../../src/agent/context";
 import { dispatchSystemPrompt } from "../../src/agent/dispatch-prompt";
 import type { ResolvedStyle } from "../../src/agent/output-styles";
 import { sessionTmpDir } from "../../src/agent/session-tmp";
@@ -188,6 +188,50 @@ describe("winterSystemPromptFor — the engine's composed instructions, per mode
       expect(options.systemPrompt).toBe(x);
       expect(options.outputStyle).toBeUndefined();
     }
+  });
+});
+
+// ------------------------------------------------------------------------------------------------
+// 2026-10-10 (raw image paths): ONE standing line tells a code session's model what an image path is
+// ------------------------------------------------------------------------------------------------
+
+describe("code-mode image-path guidance", () => {
+  const LINE = "An image path in the user's message that sits inside a `winter-session-…/images/` folder is a staged copy you may move to keep; any other image path is the user's own file — read or copy it, never move, rename or edit it unless the user asks.";
+
+  test("the line is exactly the ruled sentence", () => {
+    expect(IMAGE_PATH_GUIDANCE).toBe(LINE);
+  });
+
+  test("it is in the code-mode prompt — with a cwd, workdir-less, a dispatch child, and ultra — exactly once", () => {
+    const w = world();
+    const sessionId = w.store.createSession("global", { approvalPolicy: "auto" });
+    const prompts = [
+      winterSystemPromptFor(w.assembler, { mode: "code", primary: w.cwd, cwd: w.cwd }),
+      winterSystemPromptFor(w.assembler, { mode: "code", primary: undefined, cwd: sessionTmpDir(sessionId) }),
+      winterSystemPromptFor(w.assembler, { mode: "code", origin: "dispatch-child", primary: w.cwd, cwd: w.cwd }),
+      winterSystemPromptFor(w.assembler, { mode: "code", primary: w.cwd, cwd: w.cwd, effort: "ultra" }),
+      winterSystemPromptFor(w.assembler, { mode: "code", primary: w.cwd, cwd: w.cwd, outDir: join(w.home, "outputs", "s"), runHomeApplied: true }),
+    ];
+    for (const text of prompts) expect(text.split(LINE).length - 1).toBe(1);
+  });
+
+  test("it is NOT in chat's or the dispatch coordinator's prompt", () => {
+    const w = world();
+    for (const mode of ["chat", "dispatch"] as const) {
+      expect(winterSystemPromptFor(w.assembler, { mode, primary: w.cwd, cwd: w.cwd })).not.toContain("never move, rename or edit it");
+    }
+  });
+
+  test("it is static: nothing per-message or per-session is in it, and a base-replacing output style keeps it", () => {
+    const style: ResolvedStyle = { name: "pirate", description: "arr", body: "PIRATE_STYLE_BODY", keepCodingInstructions: false };
+    const w = world(style);
+    const a = winterSystemPromptFor(w.assembler, { mode: "code", primary: w.cwd, cwd: w.cwd });
+    expect(a).toContain("PIRATE_STYLE_BODY"); // the style replaced the base slot…
+    expect(a).toContain(LINE);                // …and the line, which is not part of the base, survived
+    // …and it names the staged FOLDER SHAPE — the one thing the daemon guarantees about a staged copy —
+    // while carrying no concrete session id or path.
+    expect(LINE).toContain("`winter-session-…/images/`");
+    expect(LINE).not.toMatch(/\$\{|s_[0-9a-f]{6}|\/tmp|winter-session-[0-9a-z_]/);
   });
 });
 

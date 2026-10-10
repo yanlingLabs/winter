@@ -19,7 +19,7 @@ function instanceOf(session: CapabilitySession, service?: { run: (...a: never[])
 }
 
 describe("the computer_v2 capability server", () => {
-  test("one tool, `script`, shown as ComputerV2, concurrency-safe with no lane, deferred (no alwaysLoad)", () => {
+  test("one tool, `script`, shown as ComputerV2, concurrency-safe with no lane, deferred (no alwaysLoad), no 120 s call timeout", () => {
     const { cfg, instance } = instanceOf(SESSION);
     expect(cfg.name).toBe("winter__computer_v2");
     const tools = instance.listTools();
@@ -27,6 +27,9 @@ describe("the computer_v2 capability server", () => {
     expect((cfg as { toolNames?: Record<string, string> }).toolNames).toEqual({ script: "ComputerV2" });
     expect((cfg as { concurrentTools?: string[] }).concurrentTools).toEqual(["script"]);
     expect((cfg as { toolLanes?: unknown }).toolLanes).toBeUndefined();
+    // The runtime waits for the call as long as Claude Code waits for an MCP tool — never its own 120 s, which a
+    // script's cards (waiting on the user inside the call) or a 300 s timeout outlast.
+    expect(cfg.timeout).toBe(100_000_000);
     expect((tools[0] as { _meta?: unknown })._meta).toBeUndefined();
     expect(tools[0]!.inputSchema).toMatchObject({ required: ["code"], additionalProperties: false });
   });

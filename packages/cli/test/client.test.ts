@@ -62,6 +62,44 @@ describe("WinterClient", () => {
     client.close();
   });
 
+  // Review finding (version skew): a FILE attachment stages nothing, so the client learns from the hello answer — before
+  // it sends anything — whether the daemon takes an original image path in `images`.
+  test("the client reads the daemon's hello features: a current daemon takes original image paths", async () => {
+    await boot();
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli-test", onEvent: () => {} });
+    expect(client.supportsOriginalImagePaths()).toBe(true);
+    client.close();
+  });
+
+  test("…and an older daemon, whose hello says nothing, does not (the TUI then puts the path in the text)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-oldhello-"));
+    const socketPath = join(dir, "old.sock");
+    const answer = (features?: string[]) => ({ ok: true, serverVersion: "0.0.1", protocolVersion: PROTOCOL_VERSION, ...(features === undefined ? {} : { features }) });
+    const servers: Array<{ stop(): void }> = [];
+    try {
+      for (const [name, reply, expected] of [["older", answer(), false], ["unrelated features only", answer(["something-else"]), false], ["announced", answer(["image-original-paths"]), true]] as const) {
+        const path = `${socketPath}-${name.split(" ")[0]}`;
+        const server = Bun.listen({
+          unix: path,
+          socket: {
+            data(socket, chunk) {
+              for (const line of new TextDecoder().decode(chunk).split("\n").filter(Boolean)) {
+                const req = JSON.parse(line);
+                socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: req.id, result: reply })}\n`);
+              }
+            },
+          },
+        });
+        servers.push(server);
+        const client = await WinterClient.connect({ socketPath: path, token: "t", clientName: "cli-test", onEvent: () => {} });
+        expect({ name, supports: client.supportsOriginalImagePaths() }).toEqual({ name, supports: expected });
+        client.close();
+      }
+    } finally {
+      for (const s of servers) s.stop();
+    }
+  });
+
   test("bad token raises a clear error", async () => {
     await boot();
     await expect(WinterClient.connect({

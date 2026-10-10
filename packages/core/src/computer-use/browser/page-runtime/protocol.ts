@@ -90,12 +90,13 @@ export interface RtOps {
   /** The keyboard target: `id`'s element, else the focused element. */
   classify: { arg: { id?: RtId }; result: RtClassify };
   focus: { arg: { id: RtId }; result: RtClassify };
-  setValue: { arg: { id: RtId; value: string }; result: { ok: true; shown: string } | { ok: false; reason: string } };
+  /** `reason: "text"`: the id names a text leaf, not a field — `control` is the field it labels, if any. */
+  setValue: { arg: { id: RtId; value: string }; result: { ok: true; shown: string } | { ok: false; reason: string; control?: RtId } };
   select: { arg: { id: RtId; text: string; before?: string; after?: string; caret?: "start" | "end" }; result: { ok: true } | { ok: false; reason: string } };
   /** Read back what a field holds now (for "received: verified"); null for a secure one. */
   readValue: { arg: { id: RtId }; result: string | null };
   /** Is `id` a file input; how many files it takes. */
-  fileInput: { arg: { id: RtId }; result: { ok: true; multiple: boolean } | { ok: false; reason: string } };
+  fileInput: { arg: { id: RtId }; result: { ok: true; multiple: boolean } | { ok: false; reason: string; control?: RtId } };
   /** Return the element itself (called with returnByValue:false — the engine needs its object id). */
   element: { arg: { id: RtId }; result: unknown };
   /** A synthetic paste of `html`/`text` into the focused element; `handled` when the page took it. */

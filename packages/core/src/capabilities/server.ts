@@ -126,6 +126,10 @@ export interface CapabilityServerSpec {
    *  `mode` or `sessionId` must never be able to override the session it was built for — that is
    *  precisely how chat's read-only `browser` subset would be weakened. */
   contextExtras?(session: CapabilitySession): Partial<ToolContext>;
+  /** How long the runtime waits for one call to this server (`McpSdkServerConfig.timeout`, ms) — absent, the
+   *  runtime's own 120 s. A server whose calls wait on the user INSIDE the call sets it: on that timeout the
+   *  runtime gives up without cancelling, so the daemon's call (and its card) would run on unheard. */
+  callTimeoutMs?: number;
 }
 
 /**
@@ -321,6 +325,7 @@ export function capabilityServer(
     type: "sdk",
     name: capabilityServerName(spec.key),
     instance,
+    ...(spec.callTimeoutMs === undefined ? {} : { timeout: spec.callTimeoutMs }),
     ...(Object.keys(toolNames).length > 0 ? { toolNames } : {}),
     ...(Object.keys(toolLanes).length > 0 ? { toolLanes } : {}),
     ...(concurrentTools.length > 0 ? { concurrentTools } : {}),

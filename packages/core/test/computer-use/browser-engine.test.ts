@@ -366,6 +366,49 @@ describe("the secure-field floor and input", () => {
   });
 });
 
+describe("text leaves and frame refs", () => {
+  test("setValue / upload on a label's text name the field it labels; on other text, say what takes a field", async () => {
+    const h = harness();
+    h.winter.pages[SHOP.url] = {
+      ...SHOP,
+      nodes: [{ ...SHOP.nodes[0]!, children: [...SHOP.nodes[0]!.children!, { id: 9, role: "text", name: "Coupon" }, { id: 10, role: "text", name: "Free delivery" }, { id: 11, role: "text", name: "Receipt" }] }],
+      textLeaves: { 9: 4, 10: null, 11: 8 },
+    };
+    writeFileSync(join(h.cwd, "a.txt"), "hello");
+    const r = h.run();
+    const t = await h.engine.global(r.scope, "browsers.open", { url: SHOP.url }) as TabHandle;
+    const labelled = await failure(h.engine.primitive(r.scope, t.targetId, "setValue", { ref: 9, value: "SAVE10" }));
+    expect(labelled.message).toBe("[9] is text, not a field — it labels [4]: setValue([4], …)");
+    expect((labelled as AutomationFailure).kind).toBeUndefined();
+    const plain = await failure(h.engine.primitive(r.scope, t.targetId, "setValue", { ref: 10, value: "x" }));
+    expect(plain.message).toBe("[10] is text, not a field — setValue() takes a field's ref (state() and find() list them)");
+    const up = await failure(h.engine.primitive(r.scope, t.targetId, "upload", { ref: 11, paths: "a.txt" }));
+    expect(up.message).toBe("[11] is text, not a field — it labels [8]: upload([8], …)");
+    expect(h.winter.sent.some((s) => s.method === "DOM.setFileInputFiles")).toBe(false);
+  });
+
+  test("waitFor a ref in an iframe checks that frame's runtime, never the top frame's node with the same id", async () => {
+    const h = harness();
+    const url = "https://widget.example/";
+    h.winter.pages[url] = {
+      url, title: "Widget", nodes: [{ id: 1, role: "text", name: "Header" }, { id: 6, role: "iframe", name: "Widget", frame: true }],
+      frames: [{ frameId: "f1", ownerId: 6, nodes: [{ id: 1, role: "text", name: "Loading…" }] }],
+    };
+    const r = h.run();
+    const t = await h.engine.global(r.scope, "browsers.open", { url }) as TabHandle;
+    expect(r.text()).toContain('[3] text "Loading…"');
+    // Still there: the wait times out (the top frame's id 1, "Header", is not what it waits on).
+    const e = await failure(h.engine.primitive(r.scope, t.targetId, "waitFor", { cond: { ref: 3 }, timeoutMs: 1 }).then(() =>
+      h.engine.primitive(r.scope, t.targetId, "waitFor", { cond: { gone: 3 }, timeoutMs: 150 })));
+    expect((e as AutomationFailure).kind).toBe("WaitTimeout");
+    // The frame's text goes: the wait is met, though the top frame still has a node with id 1.
+    h.winter.tabs.get("w1")!.page.frames![0]!.nodes = [];
+    await h.engine.primitive(r.scope, t.targetId, "waitFor", { cond: { gone: 3 }, timeoutMs: 1_000 });
+    const gone = await failure(h.engine.primitive(r.scope, t.targetId, "waitFor", { cond: { ref: 3 }, timeoutMs: 150 }));
+    expect((gone as AutomationFailure).kind).toBe("WaitTimeout");
+  });
+});
+
 describe("screenshots", () => {
   test("the JPEG fits the model's budget, the daemon line names both sizes, and a point maps back to CSS px", async () => {
     const h = harness();
@@ -606,6 +649,10 @@ describe("lifecycle", () => {
     const refused = await failure(h.engine.primitive(r.scope, kept.targetId, "close", {}));
     expect((refused as AutomationFailure).kind).toBe("NotAllowed");
     expect(refused.message).toBe("that tab is the user's now — Winter never closes it");
+    // …and tabs() no longer calls it yours (the handed-off one still is).
+    const rows = await h.engine.global(r.scope, "browsers.tabs", { browser: "chrome", emit: false }) as Array<{ id: string; yours: boolean }>;
+    expect(rows.find((x) => x.id === kept.id)?.yours).toBe(false);
+    expect(rows.find((x) => x.id === handed.id)?.yours).toBe(true);
     r.end();
     const tab = (t: TabHandle) => h.chrome.tabs.get(t.id.split(":")[1]!)!;
     expect(tab(kept).kept).toBe(true);

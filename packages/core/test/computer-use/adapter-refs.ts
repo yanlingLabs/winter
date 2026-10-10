@@ -45,7 +45,7 @@ export function referenceProblems(source: string, bound: number, named: { worksp
   }
   if (proof) {
     cut(/\burl of desktop\b/g);
-    cut(/\burl of \(insertion location\)/g);
+    cut(/\burl of \(get insertion location\)/g);
     cut(/\(get selection\)/g);
   }
   // `openWindow`: the agent's OWN new window, found by the one id that was not there before.

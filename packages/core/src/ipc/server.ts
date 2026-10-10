@@ -8,7 +8,7 @@ import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
   HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
   ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams,
-  SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
+  DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
   SessionHistoryParams,
   ApprovalListParams,
@@ -1187,10 +1187,31 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    * Code-mode image input: `session.send`/`session.steer`'s `images`, checked BEFORE anything is
    * resumed or appended — every refusal leaves the log as it was. Answers the refs to store
    * (`undefined` = no images; an empty array is none). A caller other than a local client refuses:
-   * only a local client can stage (`session.stageImage` is harness-only), so a remote `images` is
-   * never one it staged. A non-code session refuses `image_session_not_code`; every entry is then
-   * held to `validateImageRefs` (the file is one this session staged, `n` unique and in `text`).
+   * only a local client can stage (`session.stageImage` is harness-only) or name a file on this Mac,
+   * so a remote `images` is never one it could have meant. A non-code session refuses
+   * `image_session_not_code`; every entry is then held to `validateImageRefs` (a file this session
+   * staged, or the user's own image file that the Read tool may itself read; `n` unique and in `text`).
    */
+  /**
+   * The model-capability BACKSTOP for code-mode images: the session's CURRENT model, by the same
+   * precedence `assertEffortSelectable` resolves it (its own override, else the daemon's live
+   * default) — for a model switched after the client attached the image. No catalog row at all
+   * refuses too: there is no evidence the model reads an image. Run by `session.stageImage` and by
+   * `session.send`/`session.steer` carrying `images` (a dragged file is never staged, so the send is
+   * the only door its image passes through).
+   */
+  function assertModelAcceptsImages(meta: { model?: string | null | undefined }): void {
+    const model = meta.model ?? opts.liveModel?.() ?? "";
+    // No model at all (the `unstated/unstated` sentinel, or none and no live default) is its own
+    // answer — "this model doesn't support images" would name a model that does not exist.
+    if (model === "" || model === UNSTATED_TAG) {
+      throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_SESSION_NO_MODEL_MESSAGE, { code: IMAGE_SESSION_NO_MODEL });
+    }
+    if (!imagesAcceptedBy(rowForTag(model))) {
+      throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_INPUT_UNSUPPORTED_MESSAGE, { code: IMAGE_INPUT_UNSUPPORTED });
+    }
+  }
+
   function checkedImageRefs(sessionId: string, text: string, images: readonly UserMessageImageRef[] | undefined, role: string | undefined): UserMessageImageRef[] | undefined {
     if (images === undefined || images.length === 0) return undefined;
     if (role !== "harness") throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be sent by a local client", { code: IMAGE_REFERENCE_INVALID });
@@ -1199,10 +1220,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     if ((meta.mode ?? "code") !== "code") {
       throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be added to code sessions", { code: IMAGE_SESSION_NOT_CODE });
     }
+    assertModelAcceptsImages(meta);
     try {
-      return validateImageRefs(sessionId, text, images);
+      return validateImageRefs(sessionId, text, images, { winterHome: opts.winterHome });
     } catch (err) {
-      if (err instanceof StageImageRefusal) throw new RpcFailure(err.internal ? ERR.INTERNAL : ERR.INVALID_PARAMS, err.message, { code: err.code });
+      if (err instanceof StageImageRefusal) throw new RpcFailure(err.internal ? ERR.INTERNAL : ERR.INVALID_PARAMS, err.message, { code: err.code, ...(err.n === undefined ? {} : { n: err.n }) });
       throw new RpcFailure(ERR.INTERNAL, "could not check the message's images", { code: IMAGE_REFERENCE_INVALID });
     }
   }
@@ -2034,7 +2056,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       if (socket.data.helloTimer) { clearTimeout(socket.data.helloTimer); socket.data.helloTimer = null; }
       socket.data.decoder = new LineDecoder(); // authed: default 8 MiB line cap
       if (p.role === "harness") harnessConns.add(socket.data);
-      return { ok: true, serverVersion: opts.serverVersion, protocolVersion: PROTOCOL_VERSION };
+      // `features`: what this daemon can do that a client must know BEFORE it relies on it (an older daemon
+      // omits the field, and the client then falls back).
+      return { ok: true, serverVersion: opts.serverVersion, protocolVersion: PROTOCOL_VERSION, features: [DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS] };
     }
 
     if (socket.data.authedRole === null) throw new RpcFailure(ERR.UNAUTHORIZED, "hello required first");
@@ -3456,10 +3480,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
       }
       case METHODS.sessionStageImage: {
-        // Code-mode image input (2026-09-29): stage a composer image into the session's temp
-        // directory and answer its path — the client names it beside its `[Image #n]` placeholder
-        // in `session.send`/`session.steer`'s `images` (the model is given the path; the stored
-        // message keeps the placeholder). LOCAL clients only: already outside
+        // Code-mode image input (2026-09-29): stage a composer image that has no file of its own
+        // (clipboard data), AS IT IS, into the session's temp directory and answer its path — the
+        // client names it beside its `[Image #n]` placeholder in `session.send`/`session.steer`'s
+        // `images` (the model is given the path; the stored message keeps the placeholder). A dragged
+        // or picked file is never staged: its own path goes in `images`. LOCAL clients only: already outside
         // `REMOTE_ALLOWED_METHODS` and the plugin list, and the explicit check keeps it so if either
         // list ever widens (`elicitation.url`'s precedent). The bytes are never logged — nothing in
         // this arm, `parseParams` or `stageSessionImage` echoes a received value.
@@ -3471,19 +3496,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if ((meta.mode ?? "code") !== "code") {
           throw new RpcFailure(ERR.INVALID_PARAMS, "images can only be added to code sessions", { code: IMAGE_SESSION_NOT_CODE });
         }
-        // The session's CURRENT model, by the same precedence `assertEffortSelectable` resolves it
-        // (its own override, else the daemon's live default) — the backstop for a model switched
-        // after the client attached the image. No catalog row at all refuses too: there is no
-        // evidence the model reads an image.
-        const model = meta.model ?? opts.liveModel?.() ?? "";
-        // No model at all (the `unstated/unstated` sentinel, or none and no live default) is its own
-        // answer — "this model doesn't support images" would name a model that does not exist.
-        if (model === "" || model === UNSTATED_TAG) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_SESSION_NO_MODEL_MESSAGE, { code: IMAGE_SESSION_NO_MODEL });
-        }
-        if (!imagesAcceptedBy(rowForTag(model))) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, IMAGE_INPUT_UNSUPPORTED_MESSAGE, { code: IMAGE_INPUT_UNSUPPORTED });
-        }
+        // The backstop on the session's CURRENT model (see `assertModelAcceptsImages`).
+        assertModelAcceptsImages(meta);
         try {
           // `imagesOnSend`: this daemon takes `images` on `session.send`/`session.steer`, so the
           // client keeps `[Image #n]` in the text and names the paths beside it.

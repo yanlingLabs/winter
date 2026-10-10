@@ -106,7 +106,8 @@ export interface AdapterScope {
    * app's front window: the user's own window may be in front. Throws `NoWindow` when Winter does not know it.
    */
   window(): number;
-  /** Winter's own AppleScript against this app; its result as AppleScript displays it. */
+  /** Winter's own AppleScript against this app; a string result as the string itself (the helper's display form
+   *  decoded — `appleScriptText`), any other value as AppleScript displays it. */
   applescript(source: string, o?: { timeoutMs?: number }): Promise<string | null>;
   find(query: string | { role?: string; name?: string; text?: string }): Promise<FindResult["elements"]>;
   /** The bound window's state text (full, or one subtree), printing nothing. */

@@ -121,7 +121,8 @@ export function selectionIsBound(w: number): string[] {
     "try",
     `  set boundURL to URL of (target of Finder window id ${w})`,
     "  set desktopURL to URL of desktop",
-    "  set insertionURL to URL of (insertion location)",
+    // An explicit `get`: Finder answers `URL of (insertion location)` with -1728 (it must resolve the location first).
+    "  set insertionURL to URL of (get insertion location)",
     "on error",
     "  return \"UNPROVEN\"",
     "end try",

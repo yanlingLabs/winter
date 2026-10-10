@@ -702,13 +702,14 @@ export class BrowserEngine {
     return handle;
   }
 
+  /** `yours`: an agent tab this session still owns — a kept one is the user's (it follows the user-tab rule). */
   private async tabRows(scope: TabRunScope, backend: BackendId): Promise<Array<{ id: string; browser: string; url: string; title: string; active: boolean; yours: boolean }>> {
     const s = this.session(scope.sessionId);
     if (this.familyOf(backend) === "winter") {
       const fold = this.deps.winterTabs(scope.sessionId);
       return fold.tabs.map((t) => ({
         id: `${backend}:${t.tabId}`, browser: backend, url: shownUrl(t.url ?? "about:blank"), title: t.title ?? "",
-        active: t.tabId === fold.activeTabId, yours: s.agentTabs.has(tabKeyOf(backend, t.tabId)),
+        active: t.tabId === fold.activeTabId, yours: s.agentTabs.get(tabKeyOf(backend, t.tabId))?.kept === false,
       }));
     }
     const transport = this.deps.registry.get(backend);
@@ -719,7 +720,7 @@ export class BrowserEngine {
     if (bundleId !== undefined) await scope.authorize(this.appRef(backend, bundleId), { kind: "bind" });
     let tabs: TransportTab[];
     try { tabs = await transport.listTabs(); } catch (err) { throw transportFailure(err, this.browserName(backend)); }
-    return tabs.map((t) => ({ id: `${backend}:${t.tabKey}`, browser: backend, url: t.url, title: t.title, active: t.active, yours: s.agentTabs.has(tabKeyOf(backend, t.tabKey)) }));
+    return tabs.map((t) => ({ id: `${backend}:${t.tabKey}`, browser: backend, url: t.url, title: t.title, active: t.active, yours: s.agentTabs.get(tabKeyOf(backend, t.tabKey))?.kept === false }));
   }
 
   /**
