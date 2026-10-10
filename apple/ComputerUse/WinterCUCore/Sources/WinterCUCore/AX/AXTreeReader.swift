@@ -88,11 +88,9 @@ struct AXTreeReader {
             if attrs[kAXEnabledAttribute].flatMap(AX.boolValue) == false { states.insert(.disabled) }
             if attrs[kAXFocusedAttribute].flatMap(AX.boolValue) == true { states.insert(.focused) }
             if attrs[kAXSelectedAttribute].flatMap(AX.boolValue) == true { states.insert(.selected) }
-            if let d = attrs["AXDisclosing"].flatMap(AX.boolValue) {
-                states.insert(d ? .expanded : .collapsed)
-            } else if attrs[kAXExpandedAttribute].flatMap(AX.boolValue) == true {
-                states.insert(.expanded)
-            }
+            states.formUnion(Self.disclosureState(role: role, subrole: subrole,
+                                                  disclosing: attrs["AXDisclosing"].flatMap(AX.boolValue),
+                                                  expanded: attrs[kAXExpandedAttribute].flatMap(AX.boolValue)))
             var frame: CGRect?
             if let p = attrs[kAXPositionAttribute].flatMap(AX.pointValue), let s = attrs[kAXSizeAttribute].flatMap(AX.sizeValue) {
                 frame = CGRect(origin: p, size: s)
@@ -129,6 +127,16 @@ struct AXTreeReader {
         var out: [CUNode] = []
         for r in roots { if let n = node(r, depth: 0) { out.append(n) } }
         return Result(roots: out, nodeCount: maxNodes - budget, truncated: truncated)
+    }
+
+    /// The collapsed/expanded state an element reports, read only where it means one. WebKit answers
+    /// `AXDisclosing` = false for EVERY element of a page (live, macOS 26: the scroll area, the web area, headings,
+    /// static text, fields, groups — all "(collapsed)"), so a `false` says something only on an OUTLINE ROW (AppKit's
+    /// outline rows, a web tree's `treeitem`s), the one kind of element that discloses. A disclosure triangle reads
+    /// its value instead (in `read`). Anything that reports itself disclosing or expanded is `.expanded`. Pure.
+    static func disclosureState(role: String, subrole: String?, disclosing: Bool?, expanded: Bool?) -> CUStates {
+        if role == "AXRow", subrole == "AXOutlineRow", let d = disclosing { return d ? .expanded : .collapsed }
+        return disclosing == true || expanded == true ? .expanded : []
     }
 
     /// An unnamed wrapper with one child and nothing of its own to say is replaced by that child.

@@ -80,9 +80,17 @@ protocol CUSystemBackend: AnyObject {
     func activeSpace() -> UInt64?
     /// Activates an app. Only the consented foreground rung and the restores of the user's own app call it.
     func activate(pid: pid_t) -> Bool
-    /// Brings ONE window to the front by id (private; the window server takes the user to its Space) and makes it
-    /// key. Only a desktop visit — there and back — calls it, and only with the private path on.
-    func frontWindow(pid: pid_t, windowID: UInt32) -> Bool
+    /// Brings `pid`'s window forward the way macOS follows to its desktop (measured on macOS 26.6, 2026-10-10): the
+    /// window's element raised — made its app's main window first when `makeMain` — then the app made frontmost over
+    /// accessibility (`AXFrontmost`). With no element, the app alone: macOS then goes to a desktop with its windows
+    /// only when it has none on the user's. (Bringing a window forward by its id — `_SLPSSetFrontProcessWithOptions`
+    /// with the key-window records — never switched desktops there, and the records reach the window as a mouse
+    /// down and up.) Only a desktop visit — there and back — calls it. `windowID` names the window for the log.
+    func bringForward(pid: pid_t, windowID: UInt32, window: AXUIElement?, makeMain: Bool) -> Bool
+    /// Whether macOS follows an app coming forward to a desktop with its windows (System Settings › Desktop & Dock ›
+    /// "When switching to an application, switch to a Space with open windows for the application": `com.apple.dock`
+    /// `workspaces-auto-swoosh`, absent = on). Nil when it can't be read.
+    func spacesFollowActivation() -> Bool?
     /// `pid` is a content process serving part of `appPid`'s UI — Safari's WebContent, an XPC service — not a
     /// regular app of its own (nor this helper): key events for what it shows go to it.
     func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool
@@ -123,8 +131,16 @@ final class CULiveSystem: CUSystemBackend {
         guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
         return DispatchQueue.main.sync { app.activate() }
     }
-    func frontWindow(pid: pid_t, windowID: UInt32) -> Bool {
-        CUSkyLight.system.frontWindow(pid: pid, windowID: windowID)
+    func bringForward(pid: pid_t, windowID: UInt32, window: AXUIElement?, makeMain: Bool) -> Bool {
+        if let window {
+            if makeMain { try? AX.set(window, kAXMainAttribute, kCFBooleanTrue) }
+            try? AX.perform(window, kAXRaiseAction)
+        }
+        return (try? AX.set(AX.app(pid), kAXFrontmostAttribute, kCFBooleanTrue)) != nil
+    }
+    func spacesFollowActivation() -> Bool? {
+        guard let v = CFPreferencesCopyAppValue("workspaces-auto-swoosh" as CFString, "com.apple.dock" as CFString) else { return true }
+        return (v as? NSNumber)?.boolValue
     }
     func stageManagerEnabled() -> Bool {
         UserDefaults(suiteName: "com.apple.WindowManager")?.bool(forKey: "GloballyEnabled") ?? false

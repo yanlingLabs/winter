@@ -818,7 +818,8 @@ export class TabDriver {
     const tree = await this.readTree(o.within);
     const header = this.header(settle, tree.focusedRef, tree.unread, o.within !== undefined);
     const snap = makeSnapshot(id, tree.roots, o.within);
-    let text = fullState(header, tree.roots, o.within === undefined && o.full !== true);
+    // A whole-tab, non-full state folds what is out of view first; `full` is everything the read saw (its cap said).
+    let text = fullState(header, tree.roots, o.within === undefined && o.full !== true, undefined, o.full === true);
     let isDiff = false;
     if (o.since !== undefined && o.full !== true) {
       const old = this.snapshots.find((s) => s.id === o.since);

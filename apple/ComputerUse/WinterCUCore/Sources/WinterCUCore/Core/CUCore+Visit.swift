@@ -77,8 +77,8 @@ final class CUOpenVisit: @unchecked Sendable {
 /// last of it — never back and forth between their view and the window's, never held there to the script's end.
 ///
 /// - OPEN: the first primitive that needs the window's desktop records the user's place (their desktop, front app,
-///   and that app's window), brings the WINDOW forward (by id with the private path), waits for it on screen and
-///   painted, and leaves the visit open.
+///   and that app's window), brings the WINDOW forward (its element raised, then its app made frontmost), waits
+///   for it on screen and painted, and leaves the visit open.
 /// - WHILE OPEN: every later primitive of that session on a window of the visited desktop runs there, with no
 ///   further switch (a live shot of it is an on-screen capture) — reads and waits too, which keep it open. One that
 ///   needs ANOTHER desktop — the user's own, or a third — closes the visit first (the user returned), then runs as
@@ -87,8 +87,9 @@ final class CUOpenVisit: @unchecked Sendable {
 /// - CLOSE, at the first of: `visitCloseGraceMs` after the last primitive in it finished with none started since;
 ///   the script's end, a cancel of a request in it, Esc, the session's end, `visit.close`; another desktop needed;
 ///   the user moving by themselves (a hardware-attributed activation or Space change — then left there); the
-///   safety cap. The user is brought back under `SLSDisableUpdate`, verified, retried once, a fault logged when it
-///   failed; each closed visit is reported once (`visit.close`) and announced (`desktopVisited`).
+///   safety cap. The user is brought back (their window raised, their app made frontmost), verified, retried once,
+///   a fault logged when it failed; each closed visit is reported once (`visit.close`) and announced
+///   (`desktopVisited`).
 ///
 /// The guardian treats the whole open visit as the agent's own: neither undone nor adopted.
 extension CUCore {
@@ -106,9 +107,9 @@ extension CUCore {
         /// by then that app's focused window can be the target's, when the user's app IS the target app).
         let before: CUUserView
         let userWindow: AXUIElement?
-        /// That window's id, to bring it back BY ID (the user's app may have windows on several Spaces).
+        /// That window's id (for the log; the recorded element is what is raised on the way back).
         let userWindowID: CGWindowID?
-        /// The private path is on: the window is brought forward (and the user's back) by id.
+        /// The private path is on (a capture-only window's element may be found by remote token).
         let privatePath: Bool
         let startedMs: Double
         let startedAt: TimeInterval
@@ -189,18 +190,25 @@ extension CUCore {
         }
     }
 
-    /// The way there (on `t`'s pid queue). The WINDOW is brought forward, not merely its app: activating an app
-    /// that has other windows on the user's desktop activates it right here and never switches Spaces, and a
-    /// capture-only window has no element to raise. So with the private path on, the window goes to the front BY ID
-    /// (the window server then switches to its Space) and is made key, its element raised as well when there is one;
-    /// with it off, the app is activated and the element raised — and a window with no element can't be reached at
-    /// all (typed, nothing moved).
+    /// The way there (on `t`'s pid queue). The WINDOW is brought forward, not merely its app — measured on macOS 26.6
+    /// (2026-10-10), with the app also having a window on the user's desktop (the live failure): the window's element
+    /// made main and raised, THEN the app made frontmost over accessibility, takes macOS to the window's desktop
+    /// (~0.3 s); activating the app alone, or bringing the window to the front by its id (`SetFrontProcess` with the
+    /// window and the key-window records), activates it right here and never switches. So the element is what it
+    /// takes: the target's own, or — for a window bound capture-only — found now by its id (macOS exposes one once
+    /// the window has been shown on its desktop). With none, the app alone comes forward, which reaches the window's
+    /// desktop only when the app has no window on the user's; otherwise the visit is refused before anything moves,
+    /// as it is when the user's Mac does not follow an app to its desktop (Desktop & Dock).
     func visitArrive(_ t: CUTarget, why: CUError.DesktopVisitWhy, privatePath: Bool, sessionId: String, callId: String?,
                      maxMs: Int?, made: VisitBox) throws -> CUOpenVisit {
-        let element = t.accessible ? (try? windowElement(t)) : nil
-        guard privatePath || element != nil else {
-            CULog.act.notice("visit (\(why.rawValue, privacy: .public)): \(t.appName, privacy: .public)'s window has no element and the private path is off — not reachable, nothing moved")
-            throw CUError.unsupported("\(t.appName)'s window can't be brought forward on its desktop with the private event path off (Settings → Computer Use) — nothing was moved")
+        guard sys.spacesFollowActivation() != false else {
+            CULog.act.notice("visit (\(why.rawValue, privacy: .public)): macOS is set not to switch to an app's desktop — not visited, nothing moved")
+            throw CUError.unsupported("this Mac is set not to switch to an app's desktop when it comes forward (System Settings › Desktop & Dock › \u{201C}When switching to an application, switch to a Space with open windows for the application\u{201D}), so Winter can't take you to \(t.appName)'s window — nothing was moved")
+        }
+        let element = visitElement(t, privatePath: privatePath)
+        if element == nil, appHasWindowHere(t) {
+            CULog.act.notice("visit (\(why.rawValue, privacy: .public)): \(t.appName, privacy: .public)'s window has no element and the app has a window on the user's desktop — not reachable, nothing moved")
+            throw CUError.unsupported("\(t.appName)'s window can't be brought forward on its desktop: macOS has not exposed it (it has not been shown there since it opened), and \(t.appName) has a window on this desktop, where it would stay — ask the user to show it once; nothing was moved")
         }
         let before = userView()
         // Where to bring the user back: without their front app, nowhere — so they are not taken anywhere.
@@ -226,25 +234,29 @@ extension CUCore {
         }
         // The switch is the agent's own cause: only input after it can be the user's.
         noteGuardianCause(t.pid)
-        CULog.act.notice("visit \(v.id, privacy: .public) (\(why.rawValue, privacy: .public)): taking the user to \(t.appName, privacy: .public)'s desktop for window \(t.windowID, privacy: .public)")
+        CULog.act.notice("visit \(v.id, privacy: .public) (\(why.rawValue, privacy: .public)): taking the user to \(t.appName, privacy: .public)'s desktop for window \(t.windowID, privacy: .public) (\(element == nil ? "the app alone: no element" : "its element raised", privacy: .public))")
         noteSyntheticActivation()
-        let byId = privatePath && sys.frontWindow(pid: t.pid, windowID: t.windowID)
-        if let element { try? ax.perform(element, kAXRaiseAction) }
-        if !byId, let element {
-            _ = sys.activate(pid: t.pid)
-            try? ax.perform(element, kAXRaiseAction)
-        }
-        // The window on screen AND the desktop changed (when it can be read), bounded.
+        _ = sys.bringForward(pid: t.pid, windowID: t.windowID, window: element, makeMain: true)
+        // The window on screen AND the desktop changed (when it can be read), bounded. Halfway, once more: by then
+        // the app is in front (here, if it stayed), and an active app's window raised takes macOS to its desktop.
         let arrivedNow = { [self] () -> Bool in
             guard sys.window(id: t.windowID)?.onScreen == true else { return false }
             guard let was = before.space, let now = sys.activeSpace() else { return true }
             return now != was
         }
-        let deadline = clock.nowMs() + visitArriveMs
+        let start = clock.nowMs()
+        let deadline = start + visitArriveMs
         var arrived = arrivedNow()
+        var again = false
         while !arrived, clock.nowMs() < deadline {
             usleep(20_000)
             arrived = arrivedNow()
+            if !arrived, !again, clock.nowMs() - start >= visitArriveMs / 2 {
+                again = true
+                CULog.act.notice("visit \(v.id, privacy: .public): not on \(t.appName, privacy: .public)'s desktop yet — bringing the window forward once more")
+                noteSyntheticActivation()
+                _ = sys.bringForward(pid: t.pid, windowID: t.windowID, window: element, makeMain: true)
+            }
         }
         guard arrived else {
             CULog.act.error("visit \(v.id, privacy: .public): \(t.appName, privacy: .public)'s window never came on screen — nothing was done there")
@@ -266,6 +278,22 @@ extension CUCore {
         let painted = waitForFreshFrame(t)
         CULog.act.debug("visit \(v.id, privacy: .public): \(t.appName, privacy: .public) on screen after \(Int(self.clock.nowMs() - base.startedMs), privacy: .public) ms (\(painted, privacy: .public))")
         return v
+    }
+
+    /// The element to raise for a visit to `t`'s window: the target's own; for a target bound capture-only, the
+    /// window's element found now by its id — in the app's list, or (with the private path) by remote token, as a
+    /// bind would — since macOS exposes one once the window has been shown on its desktop. Nil when there is none.
+    func visitElement(_ t: CUTarget, privatePath: Bool) -> AXUIElement? {
+        if t.accessible { return try? windowElement(t) }
+        if let w = CUAXWindows.list(pid: t.pid, ax: ax, server: sys.windows(pid: t.pid)).first(where: { $0.id == t.windowID }) {
+            return w.element
+        }
+        return privatePath ? remoteWindow(pid: t.pid, windowID: t.windowID) : nil
+    }
+
+    /// `t`'s app has another window on screen here (the user's desktop): brought forward alone, it stays here.
+    func appHasWindowHere(_ t: CUTarget) -> Bool {
+        sys.windows(pid: t.pid).contains { $0.id != t.windowID && $0.onScreen && CUWindowServer.isRealWindow($0) }
     }
 
     /// The window is on screen: wait for a picture it painted THERE, bounded — a repaint landed (the picture
@@ -519,15 +547,18 @@ extension CUCore {
         _ = t.noteOffScreenShot(digest: Self.contentDigest(still.jpeg), at: clock.nowMs())
     }
 
-    /// One return attempt under `SLSDisableUpdate` (the switch back is not drawn as a flash): with the private path,
-    /// the user's recorded window brought to the front BY ID (their app may have windows on several Spaces); then the
-    /// recorded window raised and the user's app re-activated, retried within the restore deadline. Returns the view
-    /// it ends on.
+    /// One return attempt: the user's recorded window raised and their app made frontmost over accessibility — the
+    /// way back measured on macOS 26.6 (~0.3 s across desktops; their app may have windows on several, the raised one
+    /// decides) — then the restore's own activation, retried within its deadline. Never a key-window record or any
+    /// event into the user's window (they arrive as a click). On the user's own desktop (a visit that never left it)
+    /// it runs under `SLSDisableUpdate`, so the switch back is not drawn as a flash; across desktops macOS draws
+    /// the switch itself. Returns the view it ends on.
     private func returnOnce(_ s: VisitBase, user: pid_t, window: AXUIElement?) -> CUUserView {
         noteSyntheticActivation()
-        let cid = skyLight.disableUpdate()
+        let sameDesktop = s.before.space == nil || sys.activeSpace() == s.before.space
+        let cid = sameDesktop ? skyLight.disableUpdate() : nil
         defer { if let cid { skyLight.reenableUpdate(cid) } }
-        if s.privatePath, let wid = s.userWindowID { _ = sys.frontWindow(pid: user, windowID: wid) }
+        _ = sys.bringForward(pid: user, windowID: s.userWindowID ?? 0, window: window, makeMain: false)
         return restoreUserView(s.before, user: user, window: window)
     }
 

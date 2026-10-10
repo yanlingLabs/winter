@@ -173,6 +173,117 @@ final class StateFormatterTests: XCTestCase {
         XCTAssertTrue(f.body(roots: [root], focusedRef: 301).contains { $0.contains("child 1") })
     }
 
+    func testOnlyAnOutlineRowIsCollapsedByItsDisclosing() {
+        // WebKit answers AXDisclosing = 0 for every element of a page: none of those is "collapsed".
+        for role in ["AXScrollArea", "AXWebArea", "AXGroup", "AXStaticText", "AXHeading", "AXTextField", "AXButton", "AXLink"] {
+            XCTAssertEqual(AXTreeReader.disclosureState(role: role, subrole: nil, disclosing: false, expanded: false), [], role)
+        }
+        XCTAssertEqual(AXTreeReader.disclosureState(role: "AXRow", subrole: "AXTableRow", disclosing: false, expanded: nil), [],
+                       "a web table's row is no disclosure")
+        XCTAssertEqual(AXTreeReader.disclosureState(role: "AXRow", subrole: "AXOutlineRow", disclosing: false, expanded: nil), .collapsed)
+        XCTAssertEqual(AXTreeReader.disclosureState(role: "AXRow", subrole: "AXOutlineRow", disclosing: true, expanded: nil), .expanded)
+        XCTAssertEqual(AXTreeReader.disclosureState(role: "AXButton", subrole: nil, disclosing: nil, expanded: true), .expanded,
+                       "aria-expanded=true still reads expanded")
+        XCTAssertEqual(AXTreeReader.disclosureState(role: "AXGroup", subrole: nil, disclosing: nil, expanded: nil), [])
+    }
+
+    func testAnAppKitOutlineRowStaysReadableWhenCollapsed() {
+        // AppKit's outline rows hold their own cells (the name is in them), never their sub-rows: nothing is folded.
+        let label = CUNode(ref: 31, role: "AXCell", children: [CUNode(ref: 32, role: "AXTextField", value: "Documents")])
+        let closed = CUNode(ref: 30, role: "AXRow", subrole: "AXOutlineRow", states: .collapsed, children: [label])
+        let lines = f.body(roots: [CUNode(ref: 1, role: "AXOutline", children: [closed])], focusedRef: nil)
+        XCTAssertTrue(lines.contains { $0.contains("[32] text field value=\"Documents\"") }, lines.joined(separator: "\n"))
+        XCTAssertFalse(lines.contains { $0.contains("more — state({within:30})") })
+    }
+
+    // MARK: a web page (the live gate, 2026-10-10: the whole page folded into one line, even with full: true)
+
+    /// The fixture's web window as the reader saw it live: WebKit answered AXDisclosing = 0 for EVERY element, so the
+    /// scroll area, the web area and every node in it carried `.collapsed` (`marked`). A page menu bar (an HTML
+    /// `menubar`, 12 menus × 3 items) and the window's chrome around it; ~190 page nodes; the "First" field near the
+    /// top, in view; sections running far below the window (out of view).
+    private func webWindow(marked: Bool = true, sections: Int = 40, toolbar: Int = 0) -> CUNode {
+        let mark: CUStates = marked ? .collapsed : []
+        var ref = 100
+        func next() -> Int { ref += 1; return ref }
+        func node(_ role: String, _ name: String? = nil, y: CGFloat, _ children: [CUNode] = []) -> CUNode {
+            CUNode(ref: next(), role: role, name: name, states: mark, frame: CGRect(x: 20, y: y, width: 600, height: 20), children: children)
+        }
+        var page: [CUNode] = [node("AXHeading", "Fixture Web", y: 60, [node("AXStaticText", "Fixture Web", y: 60)])]
+        let menus = (0..<12).map { m in
+            node("AXMenuBarItem", "Menu \(m)", y: 40, (0..<3).map { node("AXMenuItem", "Item \(m).\($0)", y: 40) })
+        }
+        page.append(CUNode(ref: next(), role: "AXMenuBar", states: mark, frame: CGRect(x: 20, y: 40, width: 600, height: 20), children: menus))
+        page += [
+            node("AXStaticText", "First", y: 90), node("AXTextField", "First", y: 110, [node("AXGroup", y: 110)]),
+            node("AXStaticText", "Search", y: 140), node("AXTextField", "Search", y: 160, [node("AXGroup", y: 160)]),
+            node("AXButton", "Web Button", y: 190), node("AXLink", "Jump", y: 220, [node("AXStaticText", "Jump", y: 220)]),
+        ]
+        // Sections 1…n: a heading and a paragraph each, 60 points apart — most of them far below the window.
+        page.append(node("AXGroup", y: 260, (1...sections).flatMap { s in
+            [node("AXHeading", "Section \(s)", y: 260 + CGFloat(s) * 60, [node("AXStaticText", "Section \(s)", y: 260 + CGFloat(s) * 60)]),
+             node("AXGroup", y: 280 + CGFloat(s) * 60, [node("AXStaticText", "Paragraph \(s)", y: 280 + CGFloat(s) * 60)])]
+        }))
+        let webArea = CUNode(ref: 5, role: "AXWebArea", name: "Fixture Web Page", states: mark,
+                             frame: CGRect(x: 0, y: 30, width: 640, height: 3000), children: page)
+        let scroll = CUNode(ref: 4, role: "AXScrollArea", states: mark, frame: CGRect(x: 0, y: 30, width: 640, height: 400), children: [webArea])
+        let chrome = (0..<toolbar).map { CUNode(ref: 50_000 + $0, role: "AXButton", name: "Tool \($0)") }
+        var children = [scroll]
+        if !chrome.isEmpty { children.insert(CUNode(ref: 3, role: "AXToolbar", children: chrome), at: 0) }
+        children += [CUNode(ref: 60_001, role: "AXButton", subrole: "AXCloseButton"), CUNode(ref: 60_002, role: "AXStaticText", name: "Fixture Web")]
+        return CUNode(ref: 1, role: "AXWindow", name: "Fixture Web", frame: CGRect(x: 0, y: 0, width: 640, height: 430), children: children)
+    }
+
+    func testAWebPageIsShownWholeWithFullAndWithoutIt() {
+        let window = webWindow()
+        XCTAssertGreaterThan(window.descendantCount, 180, "a realistic page: about 190 nodes")
+        XCTAssertLessThan(window.descendantCount, 300)
+        let header = CUStateHeader(appName: "Winter CU Fixture", windowTitle: "Fixture Web", focusedRef: nil, settle: .settled(ms: 30))
+        for (whole, viewportFirst) in [(true, false), (false, true)] {
+            let text = f.full(header: header, roots: [window], viewportFirst: viewportFirst, whole: whole)
+            // The live suite's own check (`webWin()` in scripts/cu-live/scenarios.ts).
+            XCTAssertNotNil(text.range(of: #"text field ["“]First["”]"#, options: .regularExpression), "whole \(whole):\n\(text)")
+            XCTAssertTrue(text.contains("Paragraph 40"), "the whole page, its last section included (whole \(whole))")
+            XCTAssertFalse(text.contains("more — state({within:4})"), "the scroll area holding the page is never one folded line")
+            XCTAssertFalse(text.contains("more — state({within:5})"), "nor the web area")
+            XCTAssertFalse(text.contains("the full state is cut"), "nothing was cut")
+        }
+    }
+
+    func testOverTheCapThePageIsNeverFoldedWholesaleAndItsChromeGoesFirst() {
+        // 120 lines for a ~260-line window: the toolbar (chrome) folds first; inside the page its largest parts
+        // (the sections) fold; the page itself, and the "First" field in it, stay.
+        let window = webWindow(marked: false, toolbar: 30)
+        let lines = CUStateFormatter(lineCap: 120).body(roots: [window], focusedRef: nil)
+        XCTAssertLessThanOrEqual(lines.count, 120, lines.joined(separator: "\n"))
+        XCTAssertTrue(lines.contains("  [3] toolbar (30 more — state({within:3}))"), "the chrome folded:\n" + lines.joined(separator: "\n"))
+        XCTAssertTrue(lines.contains { $0.hasPrefix("    [5] web area \"Fixture Web Page\"") && !$0.contains("more —") }, "the page itself stays open")
+        XCTAssertTrue(lines.contains { $0.contains("text field \"First\"") })
+        XCTAssertFalse(lines.contains { $0.contains("[4] scroll area") && $0.contains("more —") })
+        // Viewport-first (a non-full state): the sections far below the window go out of view, the top of the page stays.
+        let viewport = CUStateFormatter(lineCap: 120).body(roots: [window], focusedRef: nil, viewportFirst: true)
+        XCTAssertLessThanOrEqual(viewport.count, 120)
+        XCTAssertTrue(viewport.contains { $0.contains("text field \"First\"") }, viewport.joined(separator: "\n"))
+        XCTAssertTrue(viewport.contains { $0.contains("Section 1\"") }, "the on-screen section stays")
+        XCTAssertTrue(viewport.contains { $0.contains("more out of view") }, "the rest is out of view")
+        XCTAssertFalse(viewport.contains { $0.contains("[5] web area") && $0.contains("more —") })
+    }
+
+    func testAFullStateIsTheWholeTreeUpToItsHardCapAndSaysWhereItIsCut() {
+        // 400 sections: ~1,700 lines. A non-full state folds to 300; a full one shows everything (the reader's own
+        // budget is the hard cap).
+        let window = webWindow(marked: false, sections: 400)
+        let lines = f.body(roots: [window], focusedRef: nil, whole: true)
+        XCTAssertEqual(lines.count, 1 + window.descendantCount, "every element, one line each")
+        XCTAssertTrue(lines.contains { $0.contains("Paragraph 400") })
+        XCTAssertLessThanOrEqual(f.body(roots: [window], focusedRef: nil).count, 300)
+        // Past the hard cap: folded the same way, and the last line says so.
+        let capped = CUStateFormatter(lineCap: 50, fullLineCap: 200).body(roots: [window], focusedRef: nil, whole: true)
+        XCTAssertLessThanOrEqual(capped.count, 201)
+        XCTAssertTrue(capped.last?.hasPrefix("… the full state is cut at 200 lines: ") ?? false, capped.last ?? "")
+        XCTAssertTrue(capped.contains { $0.contains("text field \"First\"") }, "the page is still not folded wholesale")
+    }
+
     func testIndentationIsTwoSpacesPerLevel() {
         let tree = CUNode(ref: 1, role: "AXWindow", children: [
             CUNode(ref: 2, role: "AXGroup", name: "a", children: [CUNode(ref: 3, role: "AXButton", name: "b")]),

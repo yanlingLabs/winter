@@ -105,6 +105,13 @@ extension CUCore {
         return last >= 0 && now - last <= Self.guardianHardwareWindow
     }
 
+    /// One event the listen-only session tap saw (not a type-21 process notification): the user's input only when
+    /// `CUHardwareInput` says so — the window server's own events around an activation or a desktop change are not.
+    func noteTapEvent(type: CGEventType, sourcePid: Int64, userData: Int64, now: TimeInterval) {
+        let kind = CUHardwareInput.classify(type: type, sourcePid: sourcePid, userData: userData)
+        if kind != .none { noteHardwareInput(now: now, move: kind == .move) }
+    }
+
     /// The listen-only tap (or the gesture monitor) saw a hardware-origin event (source pid 0, not ours). `move`:
     /// only the pointer moved — input for the guardian's attribution, but never an ACTION a desktop visit counts.
     func noteHardwareInput(now: TimeInterval, move: Bool = false) {
@@ -160,9 +167,10 @@ extension CUCore {
                 guard let self else { return }
                 // A gesture has no event of its own (hardware); anything else must come from no process and not be
                 // the helper's own (another app's synthetic input is not the user's).
+                // The monitor only sees what real input delivers to other apps, so a gesture's begin/end counts here.
                 let kind = event.cgEvent.map {
                     CUHardwareInput.classify(type: $0.type, sourcePid: $0.getIntegerValueField(.eventSourceUnixProcessID),
-                                             userData: $0.getIntegerValueField(.eventSourceUserData))
+                                             userData: $0.getIntegerValueField(.eventSourceUserData), markers: true)
                 } ?? (event.type == .mouseMoved ? .move : .action)
                 guard kind != .none else { return }
                 self.noteHardwareInput(now: self.clock.nowSeconds(), move: kind == .move)
@@ -245,8 +253,17 @@ extension CUCore {
                                       suspect: guardianSuspect(pid, now: now))
         guardianLock.lock()
         let verdict = guardianCore.handle(activation, now: now)
+        let reason = guardianCore.lastReason
         guardianLock.unlock()
-        guard case .theft(let restore, let thief, let repeatOffender) = verdict else { return }
+        guard case .theft(let restore, let thief, let repeatOffender) = verdict else {
+            // An app the agent just acted on came forward and was left alone: say why (which attribution fired).
+            if activation.suspect {
+                let hid = secondsSinceUserInput
+                let tap = guardianLock.withLock { lastHardwareInputAt }
+                CULog.guardian.notice("\(self.appName(pid), privacy: .public) came to the front soon after the agent acted on it — left alone: \(reason, privacy: .public) (HID input \(hid < 1e6 ? String(format: "%.2f s", hid) : "never", privacy: .public) ago, tap input \(tap >= 0 ? String(format: "%.2f s", now - tap) : "never", privacy: .public) ago, synthetic \(synthetic, privacy: .public))")
+            }
+            return
+        }
         dispatchRestore(restore, thief: thief, repeatOffender: repeatOffender, cause: "\(appName(thief)) came to the front")
     }
 
@@ -393,11 +410,11 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
     guard let refcon, let core = Unmanaged<CUCPSTapContext>.fromOpaque(refcon).takeUnretainedValue().core else {
         return Unmanaged.passUnretained(event)
     }
-    // Hardware-origin input (no source process, not ours): the user's own — a pointer move told apart.
+    // Hardware-origin input (no source process, not ours, a type a person makes): the user's own — a pointer move
+    // told apart.
     if type.rawValue != CUFocusTaps.processNotificationType {
-        let kind = CUHardwareInput.classify(type: type, sourcePid: event.getIntegerValueField(.eventSourceUnixProcessID),
-                                            userData: event.getIntegerValueField(.eventSourceUserData))
-        if kind != .none { core.noteHardwareInput(now: core.clock.nowSeconds(), move: kind == .move) }
+        core.noteTapEvent(type: type, sourcePid: event.getIntegerValueField(.eventSourceUnixProcessID),
+                          userData: event.getIntegerValueField(.eventSourceUserData), now: core.clock.nowSeconds())
     }
     if type == .leftMouseDown {
         core.onPhysicalClick(at: event.location, userData: event.getIntegerValueField(.eventSourceUserData),
@@ -414,18 +431,27 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
 
 /// What one input event is to the guardian. Pure.
 enum CUHardwareInput: Equatable {
-    /// Not the user's: a process posted it (synthetic), or the helper did (its stamp).
+    /// Not the user's: a process posted it (synthetic), the helper did (its stamp), or it is no input at all.
     case none
     /// The pointer moved, and nothing else.
     case move
     /// A click, a key, a scroll, a drag, a gesture.
     case action
 
-    static func classify(type: CGEventType, sourcePid: Int64, userData: Int64) -> CUHardwareInput {
+    /// The event types a person makes: buttons, drags, keys, scrolls, the tablet, and trackpad gestures (gesture,
+    /// magnify, swipe, rotate, smart magnify, pressure, direct touch). A WHITELIST: the window server puts other
+    /// events on the session with no source process whenever an app activates or the desktop changes — mouse
+    /// entered/exited (8, 9), AppKit-defined (13), and the gesture begin/end markers (19, 20) — measured live on
+    /// macOS 26 with no input at all (the live gate, 2026-10-10: counted as the user's, they made an app that
+    /// activated itself a second after the agent's click "the user's switch", never undone).
+    static let userTypes: Set<UInt32> = [1, 2, 3, 4, 6, 7, 10, 11, 12, 18, 22, 23, 24, 25, 26, 27, 29, 30, 31, 32, 34, 37]
+    /// The gesture begin/end markers: the user's only where the window server never puts them on its own — the
+    /// global gesture monitor, which sees what real input delivers to other apps (a swipe between desktops).
+    static let gestureMarkers: Set<UInt32> = [19, 20]
+
+    static func classify(type: CGEventType, sourcePid: Int64, userData: Int64, markers: Bool = false) -> CUHardwareInput {
         guard sourcePid == 0, !CUEventStamp.isOurs(userData) else { return .none }
-        switch type {
-        case .mouseMoved, .null, .tapDisabledByTimeout, .tapDisabledByUserInput: return type == .mouseMoved ? .move : .none
-        default: return .action
-        }
+        if type == .mouseMoved { return .move }
+        return userTypes.contains(type.rawValue) || (markers && gestureMarkers.contains(type.rawValue)) ? .action : .none
     }
 }

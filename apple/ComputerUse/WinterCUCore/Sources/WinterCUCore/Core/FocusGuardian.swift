@@ -171,42 +171,52 @@ public struct CUFocusGuardianCore: Sendable {
         if let space { view.space = space }
     }
 
+    /// Why the last `handle` decided as it did, in a few words (the live log names it for an activation of an app the
+    /// agent had just acted on that was NOT undone — the next live run can then say which attribution fired).
+    public private(set) var lastReason = ""
+
     /// Decide what one activation means and update the tracked view.
     public mutating func handle(_ a: CUActivation, now: TimeInterval) -> CUGuardianVerdict {
-        guard active else { return .ignore }
+        guard active else { lastReason = "not guarding"; return .ignore }
         // A desktop visit: the target coming forward (and the user's app coming back after) is the visit's own.
         // Nothing is undone or adopted; the user's input is only noted.
         if visiting(now: now) {
             if a.hadRecentUserInput, !a.fromSyntheticEvent { visitSawUserInput = true }
+            lastReason = "a desktop visit"
             return .ignore
         }
         // An app the agent never touched: the user's choice, always — it becomes the user's app and is never undone.
         if !a.suspect {
             view = CUGuardedView(app: a.app, space: a.space ?? view.space)
             thefts[a.app] = nil
+            lastReason = "nothing the agent did could have caused it"
             return .userSwitch
         }
         // The user clicked into this app's window: theirs, whatever the timing.
         if claimed(a.app, now: now) {
             view = CUGuardedView(app: a.app, space: a.space ?? view.space)
+            lastReason = "the user clicked into it"
             return .userSwitch
         }
         // The user's own switch: physical input just before it, and not one of our synthetic events.
         if a.hadRecentUserInput, !a.fromSyntheticEvent {
             view = CUGuardedView(app: a.app, space: a.space ?? view.space)
+            lastReason = "the user's input just before it"
             return .userSwitch
         }
         // The consented foreground rung for this app, within its deadline.
         if let e = exemptApp, e == a.app, now < exemptUntil {
             view = CUGuardedView(app: a.app, space: a.space ?? view.space)
+            lastReason = "the consented foreground"
             return .userSwitch
         }
         // Already the user's app and Space: nothing moved.
-        if a.app == view.app, a.space == nil || a.space == view.space { return .ignore }
+        if a.app == view.app, a.space == nil || a.space == view.space { lastReason = "already the user's app"; return .ignore }
         // Theft, whatever the app.
         var times = (thefts[a.app] ?? []).filter { now - $0 < Self.repeatWindow }
         times.append(now)
         thefts[a.app] = times
+        lastReason = "theft"
         return .theft(restore: view, thief: a.app, repeatOffender: times.count >= Self.repeatCount)
     }
 

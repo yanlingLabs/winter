@@ -10,10 +10,13 @@
 //       [7] text field "Card number" value=<redacted>
 //
 // Two spaces per level; past 300 lines what lies out of view folds first (a whole-tab, non-full state), then the
-// largest subtrees, the focus path last. A diff compares facets per ref and falls back to the full tree when more
-// than half the elements changed.
+// largest subtrees, the focus path last. A `full: true` state is everything the page runtime read, up to
+// `FULL_STATE_LINE_CAP` (its own read budget), and says where it was cut when it had to fold anyway (as the helper's
+// does). A diff compares facets per ref and falls back to the full tree when more than half the elements changed.
 
 export const STATE_LINE_CAP = 300;
+/** A `full: true` state's hard cap: the page runtime's default read budget (`snapshot`'s `maxNodes`). */
+export const FULL_STATE_LINE_CAP = 4_000;
 const VALUE_CAP = 200;
 const URL_CAP = 200;
 
@@ -135,8 +138,10 @@ function descendantCount(n: TabNode): number {
   return c;
 }
 
-/** The indented body of `roots`, folded to `lineCap` (the helper's algorithm). */
-export function bodyLines(roots: readonly TabNode[], focusedRef: number | undefined, viewportFirst: boolean, lineCap = STATE_LINE_CAP): string[] {
+/** The indented body of `roots`, folded to `lineCap` (the helper's algorithm). `whole` (`full: true`): a state that
+ *  still had to fold ends with a line saying so. */
+export function bodyLines(roots: readonly TabNode[], focusedRef: number | undefined, viewportFirst: boolean, lineCap = STATE_LINE_CAP,
+                          whole = false): string[] {
   interface Item { node: TabNode; parent?: number; depth: number; descendants: number; outOfView: boolean }
   const items: Item[] = [];
   const add = (n: TabNode, parent: number | undefined, depth: number, parentOff: boolean): void => {
@@ -191,6 +196,7 @@ export function bodyLines(roots: readonly TabNode[], focusedRef: number | undefi
   };
   let total = recount();
   if (viewportFirst && total > lineCap && elidable.size > 0) { eliding = true; total = recount(); }
+  const preFolded = new Set(collapsed);
   while (total > lineCap) {
     let best: number | undefined;
     const size = (i: number): number => (eliding ? shown[i]! : items[i]!.descendants);
@@ -230,12 +236,22 @@ export function bodyLines(roots: readonly TabNode[], focusedRef: number | undefi
     else if (it.node.unread !== undefined && it.node.unread > 0) text += ` ${collapseMarker(it.node.unread, it.node.ref)}`;
     out.push(text);
   }
+  const cut = [...collapsed].filter((i) => !preFolded.has(i) && !hiddenAt[i]);
+  if (whole && (cut.length > 0 || eliding)) {
+    const folded = cut.reduce((n, i) => n + descendantCount(items[i]!.node), 0) + [...outOfViewCount.values()].reduce((a, b) => a + b, 0);
+    out.push(wholeCutMarker(lineCap, folded));
+  }
   return out;
 }
 
-/** The full state's text. */
-export function fullState(h: TabHeader, roots: readonly TabNode[], viewportFirst: boolean, lineCap = STATE_LINE_CAP): string {
-  return [...headLines(h), ...bodyLines(roots, h.focusedRef, viewportFirst, lineCap)].join("\n");
+/** The last line of a `full: true` state that still had to fold (the helper's wording). */
+export function wholeCutMarker(cap: number, folded: number): string {
+  return `… the full state is cut at ${cap.toLocaleString("en-US")} lines: ${folded.toLocaleString("en-US")} elements are folded behind the "more" markers above — read each with state({within})`;
+}
+
+/** The full state's text. `whole` (`full: true`): folded only past `FULL_STATE_LINE_CAP`, and said when it is. */
+export function fullState(h: TabHeader, roots: readonly TabNode[], viewportFirst: boolean, lineCap = STATE_LINE_CAP, whole = false): string {
+  return [...headLines(h), ...bodyLines(roots, h.focusedRef, viewportFirst, whole ? Math.max(lineCap, FULL_STATE_LINE_CAP) : lineCap, whole)].join("\n");
 }
 
 // ── snapshots and diffs ─────────────────────────────────────────────────────────────────────────

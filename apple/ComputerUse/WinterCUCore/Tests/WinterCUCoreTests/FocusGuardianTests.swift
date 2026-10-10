@@ -100,6 +100,103 @@ final class FocusGuardianTests: XCTestCase {
         XCTAssertTrue(notes.contains { $0.contains("tried to come to the front; you were put back") }, "\(notes)")
     }
 
+    // MARK: the live gate 2026-10-10 — a delayed self-activation the window server "marks"
+
+    /// A clock the test moves by hand.
+    final class HandClock: CUClock, @unchecked Sendable {
+        private let lock = NSLock()
+        private var ms: Double
+        init(_ start: Double = 100_000) { ms = start }
+        func nowMs() -> Double { lock.withLock { ms } }
+        func advance(ms d: Double) { lock.withLock { ms += d } }
+        func sleep(ms d: Double) async throws { advance(ms: d) }
+    }
+
+    /// What the session tap saw, measured on macOS 26 with nobody touching anything: when an app activates (and when
+    /// the desktop changes) the window server puts these on the session with NO source process — mouse
+    /// entered/exited, AppKit-defined, the gesture begin/end markers — plus the type-21 process notifications.
+    static let windowServerMarks: [UInt32] = [8, 9, 13, 13, 19, 20]
+
+    private func delayedStealWorld() -> (CUCore, FakeSystem, HandClock) {
+        let clock = HandClock()
+        let sys = FakeSystem()
+        sys.running = [1, 500]; sys.front = 1; sys.space = 100
+        let core = CUCore(events: nil, clock: clock, skyLight: .none, poster: RecordingPoster(), ax: FakeAX(), sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        core.registerForTesting(CUTarget(id: "t1", sessionId: "s", pid: 500, bundleId: "dev.cu-live.fixture", appName: "Winter CU Fixture",
+                                         isChromium: false, mirror: false, windowID: 77, windowTitle: "Fixture Canvas"), windowElement: nil)
+        core.secondsSinceUserInputOverride = { 5 }  // the HID counters stayed quiet (measured: nothing under 0.4 s)
+        core.guardianTailSchedule = { _, _ in nil }
+        core.noteGuardianPrivatePath(true)
+        core.scriptActivity(sessionId: "s", active: true)
+        return (core, sys, clock)
+    }
+
+    func testADelayedSelfActivationIsUndoneThoughTheWindowServerMarksIt() {
+        let (core, sys, clock) = delayedStealWorld()
+        defer { core.stopGuardian() }
+        XCTAssertTrue(core.guardianRunning)
+        core.noteGuardianActed(500)  // the agent's click on the canvas ended
+        // 1.364 s later (the live run's timing) the fixture activates itself; the tap sees the window server's marks
+        // at the same moment as the activation.
+        clock.advance(ms: 1_364)
+        for t in Self.windowServerMarks {
+            core.noteTapEvent(type: CGEventType(rawValue: t)!, sourcePid: 0, userData: 0, now: clock.nowSeconds())
+        }
+        sys.front = 500
+        core.onActivation(pid: 500)
+        XCTAssertEqual(sys.activated.last, 1, "the user's app put back at once — not taken for the user's own switch")
+        XCTAssertTrue(core.takeGuardianNotes().contains { $0.contains("tried to come to the front; you were put back") })
+        XCTAssertEqual(core.guardianLock.withLock { core.guardianCore.view.app }, 1, "the thief never became the user's app")
+    }
+
+    func testTheUsersRealInputStillMakesItTheirs() {
+        let (core, sys, clock) = delayedStealWorld()
+        defer { core.stopGuardian() }
+        core.noteGuardianActed(500)
+        clock.advance(ms: 1_000)
+        // A real click (no source process) a moment before the activation: the user's.
+        core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: clock.nowSeconds())
+        clock.advance(ms: 200)
+        sys.front = 500
+        core.onActivation(pid: 500)
+        XCTAssertTrue(sys.activated.isEmpty, "the user's own switch is respected")
+        // The helper's own stamped click, or another process's event, is never the user's.
+        let (core2, sys2, clock2) = delayedStealWorld()
+        defer { core2.stopGuardian() }
+        core2.noteGuardianActed(500)
+        clock2.advance(ms: 900)
+        core2.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: CUEventStamp.value, now: clock2.nowSeconds())
+        core2.noteTapEvent(type: .leftMouseDown, sourcePid: 4242, userData: 0, now: clock2.nowSeconds())
+        sys2.front = 500
+        core2.onActivation(pid: 500)
+        XCTAssertEqual(sys2.activated.last, 1)
+    }
+
+    func testTheCausalWindowStillBoundsWhatIsTheAgents() {
+        let (core, sys, clock) = delayedStealWorld()
+        defer { core.stopGuardian() }
+        core.noteGuardianActed(500)
+        clock.advance(ms: CUCore.guardianCausalWindow * 1000 + 100)  // past it: nothing the agent did, the user's
+        sys.front = 500
+        core.onActivation(pid: 500)
+        XCTAssertTrue(sys.activated.isEmpty)
+    }
+
+    func testTheWindowServersOwnEventsAreNotInput() {
+        for t in Self.windowServerMarks {
+            XCTAssertEqual(CUHardwareInput.classify(type: CGEventType(rawValue: t)!, sourcePid: 0, userData: 0), .none, "type \(t)")
+        }
+        // A person's input still is.
+        for t: UInt32 in [1, 2, 3, 4, 6, 7, 10, 11, 12, 22, 25, 26, 27, 29, 30, 31] {
+            XCTAssertEqual(CUHardwareInput.classify(type: CGEventType(rawValue: t)!, sourcePid: 0, userData: 0), .action, "type \(t)")
+        }
+        XCTAssertEqual(CUHardwareInput.classify(type: .mouseMoved, sourcePid: 0, userData: 0), .move)
+        // The global gesture monitor sees only what real input delivers to other apps: a swipe's begin/end counts there.
+        XCTAssertEqual(CUHardwareInput.classify(type: CGEventType(rawValue: 19)!, sourcePid: 0, userData: 0, markers: true), .action)
+        XCTAssertEqual(CUHardwareInput.classify(type: CGEventType(rawValue: 13)!, sourcePid: 0, userData: 0, markers: true), .none)
+    }
+
     func testAUserActivationIsLeftAloneLive() async throws {
         let sys = FakeSystem()
         sys.running = [1, 2203]; sys.front = 1; sys.space = 100
@@ -398,6 +495,23 @@ final class FocusGuardianTests: XCTestCase {
         let notes = core.takeGuardianNotes()
         XCTAssertEqual(notes.count, 1)
         XCTAssertTrue(notes.first?.hasSuffix("tried to come to the front; you were put back") ?? false, notes.first ?? "")
+    }
+
+    func testARefusedActivationIsRetriedAsTheAppMadeFrontmost() {
+        // macOS refuses the background helper's activation outright (cooperative activation); AXFrontmost holds.
+        let sys = FakeSystem()
+        sys.running = [500, 800]; sys.front = 800; sys.space = 100
+        sys.activationRefused = [500]
+        let ax = FakeAX()
+        ax.onSet = { w in if w == "500:\(kAXFrontmostAttribute)" { sys.front = 500 } }
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: ax, sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        core.restoreDeadlineMs = 400
+        core.restoreRetryMs = 40
+        core.guardianRestore(CUGuardedView(app: 500, space: 100), thief: 800, repeatOffender: false, cause: "test")
+        XCTAssertEqual(sys.frontmostPid(), 500, "put back")
+        XCTAssertTrue(ax.written.contains("500:\(kAXFrontmostAttribute)"))
+        XCTAssertTrue(core.takeGuardianNotes().first?.hasSuffix("tried to come to the front; you were put back") ?? false)
     }
 
     func testTheRestoreGivesUpAtTheDeadline() {

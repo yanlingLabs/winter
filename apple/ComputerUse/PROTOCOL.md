@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.9.0` (the contents of [`VERSION`](VERSION))
+Helper version: `1.9.1` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -196,7 +196,12 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 - `snapshot`: `text` is the window's accessibility state with numbered refs. With `since` (a previous
   `snapshotId` of the same scope) and not `full`, the answer is a diff when at most half of it changed
   (`isDiff: true`). `within` scopes it to one ref. `settle` first waits for 150 ms of quiet, up to `maxMs`.
-  A window with no accessibility answers a one-paragraph `text` instead.
+  A window with no accessibility answers a one-paragraph `text` instead. A state is folded to 300 lines (`full`:
+  everything the read saw — the read stops at 2,500 elements — and, past that cap, a last line saying where it was
+  cut), folded parts showing `(n more — state({within:N}))`: a whole-window, non-full state first folds what is out
+  of view; then the window's chrome outside a web page, then subtrees inside the page, then the focus's path, then
+  the page itself (never folded wholesale while anything else can be). Only an outline row is ever `collapsed` (and
+  keeps its sub-rows folded); WebKit's blanket `AXDisclosing = 0` is not read as collapsed.
 - `find`: `query` is a string or `{role?, name?, text?}`. A window with no accessibility answers `[]`. `page` is
   the window's page number (as the state header says it); `note` says when the page changed since the last
   whole-window `snapshot`, or the read was cut short.
@@ -401,13 +406,19 @@ never back and forth between their view and the window's, never held there to th
 - **Open.** The first `target.act` / `target.screenshot` with `desktopVisit: true` whose background attempt needs the
   window's desktop (or a live shot that needs it) opens the session's visit — one at a time, helper-wide. The user's
   place is recorded: the active Space, the front app (when it can't be read, nothing moves: `refused`,
-  `front_unknown`) and that app's focused window. The WINDOW is brought forward: with the private path, to the front
-  by its id and made key (the window server switches to its Space — even when the app has other windows on the
-  user's desktop, and for a capture-only window), its element raised as well; without it, the app activated and the
-  element raised (a window with no element can't be reached: `unsupported`, nothing moved). The visit arrives when
-  the window is on screen AND the desktop changed (about 1.5 s at most), then waits for a painted frame (about 1 s at
-  most). A window that never comes on screen: the user is brought back and the request fails `unsupported` ("macOS
-  did not show <App>'s desktop — nothing was done there") with `data.visit` (the closed visit's report).
+  `front_unknown`) and that app's focused window. The WINDOW is brought forward — measured on macOS 26.6 with the
+  app also having a window on the user's desktop: the window's element made main and raised, then the app made
+  frontmost over accessibility (`AXFrontmost`), takes macOS to the window's desktop (activating the app alone, or
+  bringing the window to the front by its id, keeps it on the user's). The element is the target's own, or — for a
+  window bound capture-only — found at the visit by its id (macOS exposes one once the window has been shown on its
+  desktop; with the private path, by remote token). With no element the app alone is brought forward, which reaches
+  the window's desktop only when the app has no window on the user's: otherwise `unsupported`, nothing moved. A Mac
+  set not to follow an app to its desktop (Desktop & Dock: "When switching to an application, switch to a Space with
+  open windows for the application" off — `com.apple.dock` `workspaces-auto-swoosh`) is never visited: `unsupported`,
+  nothing moved. The visit arrives when the window is on screen AND the desktop changed (about 1.5 s at most; the
+  window is brought forward once more halfway), then waits for a painted frame (about 1 s at most). A window that
+  never comes on screen: the user is brought back and the request fails `unsupported` ("macOS did not show <App>'s
+  desktop — nothing was done there") with `data.visit` (the closed visit's report).
 - **While open.** Every primitive of that session on a window of the visited desktop runs there, with no further
   switch — acts (`inVisit: true`), screenshots (a live one is an on-screen capture), and reads and waits too, which
   keep it open. A primitive that does not need the visited desktop runs as ever and does not close it. One that needs
@@ -420,13 +431,17 @@ never back and forth between their view and the window's, never held there to th
   started since; the session's `script.active` `false`, a `cancel` of a request that ran in it, Esc, `session.ended`,
   `visit.close`; a primitive needing another desktop (above); the user moving by themselves; the safety cap (60 s with
   nothing running in it; while a primitive runs, at least its `visitMaxMs`).
-- **The return**: under `SLSDisableUpdate`, the user's recorded window brought to the front by id (private path)
-  and raised, their app activated and retried within the restore deadline, then VERIFIED (Space and front app as
-  recorded); not back → one more attempt; still not back → `returned: false`, a `detail`, and a fault log. The user
+- **The return**: the user's recorded window raised and their app made frontmost over accessibility (under
+  `SLSDisableUpdate` when the visit never left their desktop), their app activated and retried within the restore
+  deadline, then VERIFIED (Space and front app as recorded); not back → one more attempt; still not back →
+  `returned: false`, a `detail`, and a fault log. No event ever reaches the user's window (a key-window record
+  arrives as a mouse down and up). The user
   moved by themselves ONLY when the guardian saw an activation or a Space change during the visit that a hardware
   ACTION after the visit began (and after the agent's own latest cause) backed — a click, a key, a scroll, a gesture
   from no process and not the helper's own; never a pointer move alone, never the HID idle state (it counts the
-  helper's own events) — and they are now neither on the window's desktop nor back where they were: then the visit
+  helper's own events), never the events the window server itself puts on the session when an app activates or the
+  desktop changes (mouse entered/exited, AppKit-defined, the gesture begin/end markers) — and they are now neither on
+  the window's desktop nor back where they were: then the visit
   closes at once and they are left there (`userMoved: true`), their new place adopted. A visit that never arrived
   always brings them back.
 - **Reports.** Each closed visit — `{visitId, targetId, app, why, actions, ms, returned, userMoved?, detail?}`:
@@ -681,3 +696,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.7.0 | Additive — desktop visits (§4.10): `target.act` takes `desktopVisit` and `visitMaxMs`, `target.screenshot` takes `live`, `desktopVisit` and `visitMaxMs`, both results carry `inVisit`; ONE open visit per stretch of work (closed a grace after its last primitive, at the script's end, a cancel, Esc, the session's end, another desktop needed, the user's own move, or the cap), the user brought back by window id; the daemon-only `visit.close` (each closed visit's report once) and the `desktopVisited` notification; the error `needs_desktop_visit` (`why: act \| live`) — an act that would need the user moved to another desktop (rung 4 off this desktop even with `allowForeground` or a held app; `needs_foreground` / `window_elsewhere` off this desktop) now fails with it instead of moving them, and never while the session's visit is open; `refused` gains `front_unknown`; errors of primitives in a visit carry `data.inVisit`; `budget.maxBytes` (re-encode the same capture down a quality ladder); the daemon-only `prompt.desktopVisit` panel (§4.11, never captured; its countdown runs to the card's `expiresAt`); `target.foreground` never holds a window on another desktop and ignores `moveDesktop`; the off-desktop bind detail names the live screenshot and the visit instead of `requestForeground`. The daemon requires helper ≥ 1.7.0 (§10.1). |
 | 1 | 1.8.0 | Additive — app adapters: `target.scriptingCommands` (§4.7: the bound app's dictionary commands, structured, with event codes, enumerators and `bundleVersion`; hidden, refused and JavaScript commands left out; a dynamic dictionary left unread); `target.bind` results carry `app.path` and `app.version`; AppleScript refuses the Chromium family's `execute … javascript` (`CrSu/ExJa`) everywhere and, per run, every JavaScript door the bound app's dictionary declares, and its source check refuses any `javascript:` URL literal; the live-test-only `test.automation` (§9). The daemon still requires ≥ 1.7.0 and uses `scriptingCommands` only from a helper ≥ 1.8.0 (its version at `hello`). |
 | 1 | 1.9.0 | No wire change: the bundle carries `winter-browser-host` (`Contents/MacOS`), the native-messaging host behind Winter for Chrome — its own protocol is [`WinterBrowserHost/PROTOCOL.md`](WinterBrowserHost/PROTOCOL.md). |
+| 1 | 1.9.1 | No wire change — the live gate's fixes: a web page's state is never one folded line (WebKit's `AXDisclosing = 0` on every element no longer reads as collapsed; `full` has its own hard cap and says where it cut; a page's content folds last); a desktop visit raises the window's element and makes its app frontmost over accessibility (the by-id front and the key-window records are gone: they never switched desktops on macOS 26 and reached the user's window as a click), finds a capture-only window's element at the visit, refuses before anything moves when it can't get there, and returns the same way; the guardian counts only input a person makes (the window server's own events at an activation or a desktop change made a delayed self-activation "the user's switch"). |
