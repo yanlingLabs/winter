@@ -126,7 +126,8 @@ daemon. A first message that is not `host.hello` is answered `protocol_mismatch`
 | chromium | `org.chromium.Chromium` |
 
 The browser app is what Winter's per-app approval and access settings name: one grant covers the browser as an app and
-its tabs.
+its tabs. The table is the engine's own (`packages/core/src/computer-use/browser/families.ts`); the host server reads it,
+and a repo test keeps this list equal to it.
 
 ### 3.5 The relay
 

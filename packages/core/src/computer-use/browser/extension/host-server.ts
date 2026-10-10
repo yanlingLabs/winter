@@ -24,7 +24,7 @@ import { processSatisfiesRequirement } from "../../helper-verify";
 import type { BackendRegistry } from "../transport";
 import { ExtensionTransport, type ExtensionTimeouts } from "./extension-transport";
 import { browserHostRequirementFor, EXTENSION_IDS, extensionIdFromOrigin } from "./extension-ids";
-import { familyForBundleId, type FamilyInfo } from "./families";
+import { familyForBundleId, type FamilyInfo } from "../families";
 import {
   BROWSER_HOST_PROTOCOL, EXTENSION_PROTOCOL, HOST_TO_DAEMON_MAX_LINE, RPC_ERROR, RPC_INVALID_PARAMS, RPC_METHOD_NOT_FOUND,
   type ExtensionHelloResult, type HostHelloResult,
