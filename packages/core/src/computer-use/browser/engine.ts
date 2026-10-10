@@ -93,8 +93,9 @@ export interface BrowserListRow { id: string; name: string; isDefault: boolean; 
 /** At most this many tabs held (a live built-in browser, an attached debugger) per session and in all; past it the
  *  least recently used is let go (still open: its next use takes it again). */
 export const HOLDS_PER_SESSION = 8;
-/** Navigation in a user's browser leaves only tabs Winter opened: the user's own tab's page could ask "leave this
- *  page?" and lose their work (the controller's ruling; Winter's built-in browser hides its dialogs, so it is exempt). */
+/** Navigation in a user's browser leaves only tabs Winter opened and still owns: the user's own tab — or one handed to
+ *  them with `keep()` — could ask "leave this page?" and lose their work (the controller's ruling; Winter's built-in
+ *  browser hides its dialogs, so it is exempt). */
 const NAVIGATE_PRIMITIVES: ReadonlySet<string> = new Set(["goto", "back", "forward", "reload"]);
 export const USER_TAB_NAVIGATION = "this is the user's own tab — navigating it away could raise a leave-page prompt and lose their work; open the page in a new tab with browsers.open(url)";
 /** How long a closed tab's teardown is kept for a `rekey` (a navigation's answer follows its "closed" at once). */
@@ -200,7 +201,7 @@ export class BrowserEngine {
       scope.live();
       const facts = scope.sessionFacts();
       if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
-      if (NAVIGATE_PRIMITIVES.has(primitive) && b.kind === "user" && this.familyOf(b.backend) !== "winter") throw new AutomationFailure("NotAllowed", USER_TAB_NAVIGATION);
+      if (NAVIGATE_PRIMITIVES.has(primitive) && this.familyOf(b.backend) !== "winter" && this.usersTab(scope.sessionId, b)) throw new AutomationFailure("NotAllowed", USER_TAB_NAVIGATION);
       const act = !OBSERVE_PRIMITIVES.has(primitive);
       if (b.bundleId !== undefined) {
         const app = this.appRef(b.backend, b.bundleId);
@@ -577,6 +578,11 @@ export class BrowserEngine {
     if (b === undefined) throw new AutomationFailure("TargetLost", "that tab is no longer bound (the runtime restarted) — bind it again with browsers.tab()");
     if (b.lost !== undefined) throw new AutomationFailure("TargetLost", lostSentence(b));
     return b;
+  }
+
+  /** The user's tab: one Winter did not open, or one it handed over with `keep()`. */
+  private usersTab(sessionId: string, b: Binding): boolean {
+    return b.kind === "user" || this.sessions.get(sessionId)?.agentTabs.get(tabKeyOf(b.backend, b.tabKey))?.kept === true;
   }
 
   private lostIfGone(sessionId: string, b: Binding, err: unknown): unknown {

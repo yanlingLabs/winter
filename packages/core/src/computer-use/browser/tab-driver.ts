@@ -69,6 +69,8 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, Ma
 const bad = (message: string): Error => Object.assign(new TypeError(message), { name: "TypeError" });
 const stale = (ref: number): AutomationFailure => new AutomationFailure("StaleRef", `[${ref}] is gone — call state()`);
 
+export const HOLD_CEILING_SENTENCE = "too many built-in browser tabs are in use right now — close some with tab.close()";
+
 /** A transport failure as the model's error kind. */
 export function transportFailure(err: unknown, browserName: string): Error {
   if (!(err instanceof TransportError)) return err instanceof Error ? err : new Error(String(err));
@@ -84,7 +86,10 @@ export function transportFailure(err: unknown, browserName: string): Error {
     case "tab_gone": return new AutomationFailure("TargetLost", "the tab was closed, crashed or stopped — open it again with browsers.open() or bind another with browsers.tab()");
     case "attach_refused": return new AutomationFailure("Refused", "that tab can't be controlled (a browser-internal page, a store page, or another debugger is attached)");
     case "timeout": return new AutomationFailure("TargetBusy", "the browser did not answer in time — the page may be busy; try again in a moment", true);
-    case "not_allowed": return new Error(`the browser refused that request (${err.message})`);
+    case "not_allowed":
+      // Winter.app's ceiling on held built-in tabs (`tab.ensure` refused: "… already holds 24 tabs for automation …").
+      if (err.data.holdCeiling === true || /already holds \d+ tabs/i.test(err.message)) return new AutomationFailure("TargetBusy", HOLD_CEILING_SENTENCE);
+      return new Error(`the browser refused that request (${err.message})`);
     case "cdp_error": {
       if (err.data.navigated === true) return new AutomationFailure("StaleRef", "the page navigated meanwhile — call state() to read it again");
       // -32603 from Winter's app: the browser's answer was too large for the link, or not valid JSON.

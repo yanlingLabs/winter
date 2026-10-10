@@ -11,6 +11,7 @@ import { parseCombo } from "../../src/computer-use/browser/input";
 import { BrowserBackendRegistry } from "../../src/computer-use/browser/registry";
 import { checkUploadFiles, stageUploads, uploadStagingRoot } from "../../src/computer-use/browser/upload-paths";
 import { AutomationFailure } from "../../src/computer-use/errors";
+import { TransportError } from "../../src/computer-use/browser/transport";
 import type { TabHandle } from "../../src/computer-use/worker/bridge";
 import { FakeCdpTransport, type FakePage } from "./browser-fake-transport";
 import { harness } from "./browser-harness";
@@ -756,4 +757,52 @@ describe("lane D §5.3: leaving a page that may ask \"leave this page?\"", () =>
       expect(h.chrome.tabs.get("777")!.closed).toBe(true);
     });
   }
+});
+
+describe("the controller's follow-ups", () => {
+  test("a tab handed over with keep() is the user's: goto/back/forward/reload are refused like a user's own tab; a handoff() tab still navigates", async () => {
+    const h = harness();
+    const r = h.run();
+    const kept = await h.engine.global(r.scope, "browsers.open", { url: "https://k.example/", browser: "chrome" }) as TabHandle;
+    const handed = await h.engine.global(r.scope, "browsers.open", { url: "https://h.example/", browser: "chrome" }) as TabHandle;
+    await h.engine.primitive(r.scope, kept.targetId, "keep", {});
+    await h.engine.primitive(r.scope, handed.targetId, "handoff", {});
+    const n = h.chrome.sent.length;
+    for (const [p, a] of [["goto", { url: "https://v.example/" }], ["back", {}], ["forward", {}], ["reload", {}]] as const) {
+      const e = await failure(h.engine.primitive(r.scope, kept.targetId, p, a as Record<string, unknown>));
+      expect(kind(e)).toBe("NotAllowed");
+      expect(e.message).toBe("this is the user's own tab — navigating it away could raise a leave-page prompt and lose their work; open the page in a new tab with browsers.open(url)");
+    }
+    expect(h.chrome.sent.slice(n).some((x) => /^Page\.(navigate|reload|navigateToHistoryEntry|getNavigationHistory)$/.test(x.method))).toBe(false);
+    await h.engine.primitive(r.scope, kept.targetId, "state", {});
+    await h.engine.primitive(r.scope, handed.targetId, "goto", { url: "https://v.example/" });
+    // Winter's own browser hides its dialogs: a kept built-in tab still navigates.
+    const w = await h.engine.global(r.scope, "browsers.open", { url: "https://w.example/" }) as TabHandle;
+    await h.engine.primitive(r.scope, w.targetId, "keep", {});
+    await h.engine.primitive(r.scope, w.targetId, "goto", { url: "https://x.example/" });
+  });
+
+  test("the built-in browser's hold ceiling, from a new tab or a re-attach, is TargetBusy saying to close tabs", async () => {
+    const h = harness();
+    const r = h.run();
+    const t = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/" }) as TabHandle;
+    const CEILING = new TransportError("not_allowed", "Winter's built-in browser already holds 24 tabs for automation — release one first");
+    const createTab = h.winter.createTab.bind(h.winter);
+    h.winter.createTab = async () => { throw CEILING; };
+    const e = await failure(h.engine.global(r.scope, "browsers.open", { url: "https://b.example/" }));
+    expect(kind(e)).toBe("TargetBusy");
+    expect(e.message).toBe("too many built-in browser tabs are in use right now — close some with tab.close()");
+    h.winter.createTab = createTab;
+    r.end();
+    h.engine.turnEnded("s1"); // the hold goes; its next use takes it again — refused at the ceiling
+    await tick(10);
+    h.winter.attach = async () => { throw CEILING; };
+    const r2 = h.run();
+    const e2 = await failure(h.engine.primitive(r2.scope, t.targetId, "state", {}));
+    expect(kind(e2)).toBe("TargetBusy");
+    expect(e2.message).toBe("too many built-in browser tabs are in use right now — close some with tab.close()");
+    // The tab is not lost: once there is room, it works.
+    delete (h.winter as { attach?: unknown }).attach;
+    await h.engine.primitive(r2.scope, t.targetId, "state", {});
+  });
 });

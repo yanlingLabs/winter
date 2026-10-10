@@ -119,10 +119,19 @@ export class CefTransport implements CdpTransport {
 
   async createTab(opts: { sessionId: string; sessionTitle?: string; url: string; tabKey?: string }): Promise<TransportTab> {
     if (opts.tabKey === undefined) throw new TransportError("not_allowed", "a built-in tab is minted by the daemon first");
-    const r = await this.command("tab.ensure", { sessionId: opts.sessionId, tabId: opts.tabKey, url: opts.url }, this.timeouts.ensure) as { url?: string; title?: string };
+    const r = await this.ensure({ sessionId: opts.sessionId, tabId: opts.tabKey, url: opts.url }) as { url?: string; title?: string };
     this.agent.add(opts.tabKey);
     this.tabSession.set(opts.tabKey, opts.sessionId);
     return { tabKey: opts.tabKey, url: typeof r?.url === "string" ? r.url : opts.url, title: typeof r?.title === "string" ? r.title : "", active: false, agent: true, sessionId: opts.sessionId };
+  }
+
+  /** `tab.ensure`: a hold on a built-in tab. The app's only `not_allowed` for it is its ceiling on held tabs — said so
+   *  in the error's data (`holdCeiling`), for the engine's sentence. */
+  private async ensure(params: Record<string, unknown>): Promise<unknown> {
+    try { return await this.command("tab.ensure", params, this.timeouts.ensure); } catch (err) {
+      if (err instanceof TransportError && err.code === "not_allowed") throw new TransportError("not_allowed", err.message, { ...err.data, holdCeiling: true });
+      throw err;
+    }
   }
 
   async closeTab(tabKey: string): Promise<void> {
@@ -148,7 +157,7 @@ export class CefTransport implements CdpTransport {
 
   async attach(tabKey: string, opts: { sessionId: string }): Promise<{ viewport: [w: number, h: number]; dpr: number }> {
     const url = this.opts.tabUrl?.(opts.sessionId, tabKey);
-    const r = await this.command("tab.ensure", { sessionId: opts.sessionId, tabId: tabKey, ...(url === undefined ? {} : { url }) }, this.timeouts.ensure) as { viewport?: [number, number]; dpr?: number };
+    const r = await this.ensure({ sessionId: opts.sessionId, tabId: tabKey, ...(url === undefined ? {} : { url }) }) as { viewport?: [number, number]; dpr?: number };
     this.tabSession.set(tabKey, opts.sessionId);
     const vp = Array.isArray(r?.viewport) && r.viewport.length === 2 ? r.viewport : [0, 0];
     return { viewport: [Number(vp[0]) || 0, Number(vp[1]) || 0], dpr: typeof r?.dpr === "number" && r.dpr > 0 ? r.dpr : 1 };

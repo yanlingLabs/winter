@@ -12,6 +12,8 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { BROWSER_LINK_PROTOCOL, BrowserLink, BrowserLinkRpcError } from "../../src/computer-use/browser/cef-link/rpc";
 import { BrowserBackendRegistry } from "../../src/computer-use/browser/registry";
+import { transportFailure } from "../../src/computer-use/browser/tab-driver";
+import { AutomationFailure } from "../../src/computer-use/errors";
 import { TransportError, type CdpEvent } from "../../src/computer-use/browser/transport";
 import { createComputerUseRuntime } from "../../src/computer-use/wiring";
 import { REMOTE_ALLOWED_METHODS, startIpcServer } from "../../src/ipc/server";
@@ -85,6 +87,27 @@ describe("the browser link (daemon side)", () => {
     const ev = await t.subscribe("tab-1", ["Network.responseReceived"]).then(() => undefined, (x: unknown) => x);
     expect(ev).toMatchObject({ code: "not_allowed" });
     expect(a.notes.length).toBe(before);
+  });
+
+  test("the app's ceiling on held built-in tabs (tab.ensure refused not_allowed) reads as a clear TargetBusy, from attach and from a new tab", async () => {
+    const registry = new BrowserBackendRegistry();
+    const link = new BrowserLink({ registry });
+    const a = app(link);
+    const { linkId } = a.call(METHODS.browserLinkAttach, { protocol: 1, appVersion: "x", pid: 1 }) as { linkId: string };
+    const t = registry.get("winter")!;
+    const CEILING = "Winter's built-in browser already holds 24 tabs for automation — release one first";
+    for (const start of [() => t.attach("tab-25", { sessionId: "s1" }), () => t.createTab({ sessionId: "s1", url: "https://a.example/", tabKey: "tab-26" })]) {
+      const p = start();
+      expect(a.last().params.op).toBe("tab.ensure");
+      a.call(METHODS.browserLinkResult, { linkId, cmdId: a.last().params.cmdId, ok: false, error: { code: "not_allowed", message: CEILING } });
+      const e = await p.then(() => undefined, (x: unknown) => x);
+      expect(e).toMatchObject({ code: "not_allowed", data: { holdCeiling: true } });
+      const m = transportFailure(e, "Winter's browser") as AutomationFailure;
+      expect(m.kind).toBe("TargetBusy");
+      expect(m.message).toBe("too many built-in browser tabs are in use right now — close some with tab.close()");
+    }
+    // Any other not_allowed stays the browser's refusal.
+    expect(transportFailure(new TransportError("not_allowed", "Network.getResponseBody is not on the allowlist"), "x")).not.toBeInstanceOf(AutomationFailure);
   });
 
   test("a command over 1 MiB is refused; a command nobody answers times out", async () => {
