@@ -13,11 +13,13 @@ The user selected the following behavior after the initial research:
 - Standalone Cowork has one durable workspace per conversation.
 - Introduce the workspace portion of Projects: a Project owns a reusable workspace. This does not approve unrelated Project UI, collaboration, or organization features.
 - Project conversations may execute concurrently against the same workspace and share Project memory. Their logical transcripts remain separate; this is not a confidentiality boundary between agents with access to the same shared files.
+- Same-Project conversations can use SendMessage to coordinate. Concurrent edits follow ordinary shared-filesystem/Git behavior, with agents choosing whether to use worktrees; no additional Cowork locking/conflict-management layer is requested.
+- Resource handling should be automatic, without assigning RAM or CPU/GPU cores manually per VM. Actual memory return and guest resource ceilings must be established honestly; the updated specification makes reclaim a feasibility gate.
 - Changes to granted writable Mac folders take effect directly, rather than going through a staged-copy/apply flow.
 - Prefer stopping and restarting a quiescent guest with files and agent state retained. Subagent history and identity must survive so `SendMessage` can logically continue a prior child after restart; retaining arbitrary process RAM is not the requested mechanism.
 - Avoid a new host process for each Cowork session, preferably by placing VM control inside the existing daemon. The feasibility boundary between in-process control and Apple-managed VM execution is described below; a helper process per conversation is not the selected design.
 
-These settle product direction, not implementation completion. Remaining decisions include the VM backend and isolation layout, shared-file/Git conflict handling, and schedule target semantics. The [working specification](../cowork-spec.md) records accepted decisions; architecture selection remains open while the options are compared.
+These settle product direction, not implementation completion. Remaining decisions include the VM backend and isolation layout, demonstrated resource behavior, and schedule target semantics. The [working specification](../cowork-spec.md) records accepted decisions and proposed implementation contracts.
 
 ## Documented external behavior
 
@@ -113,7 +115,7 @@ For repository-backed work, connecting GitHub authorizes account access but is n
 
 Each repo in a multi-repo workspace needs its own remote, base ref, current branch, dirty state, and publication authority. Cloning selected repositories does not implicitly authorize every repository accessible to the account. Git commit, branch push, PR creation, and merge are separate actions; the eventual product's permission policy should state which are pre-authorized. This development session's PR permission is not a default policy for future Cowork users.
 
-The user explicitly selected concurrent writes within a shared Project. Conflict handling must account for those conversations and external editors; unrelated workspaces sharing writable grants need their own explicit policy. Existing directory “locks” mean the assignment cannot change after writing; they are not cross-process writer locks. Grant revocation must remain possible independently of preserving the historical directory record. [Directory model](../../packages/core/src/sessions/dirs.ts)
+The user explicitly selected concurrent writes within a shared Project with ordinary filesystem/Git semantics. Agents coordinate through SendMessage and choose worktrees; Winter adds no custom file/Git/memory locking layer. Unrelated workspaces sharing writable grants need their own explicit access policy. Existing directory “locks” mean the assignment cannot change after writing; they are not cross-process writer locks. Grant revocation must remain possible independently of preserving the historical directory record. [Directory model](../../packages/core/src/sessions/dirs.ts)
 
 ### Activity and VM power
 
@@ -185,15 +187,17 @@ Guest paths and host capabilities require separate authority. Filesystem/shell w
 | Execution location | Winter loop and subagents in a local Linux ARM64 guest | User direction; Linux choice proposed |
 | VM ownership | Prefer native VM controller inside the existing daemon; avoid a Winter helper per conversation | User requirement; Apple backing-process constraint unresolved |
 | VM technology | Evaluate Containerization before building all VZ device/image plumbing directly | Proposed; no runtime validation yet |
-| Workspace | Per-conversation for standalone Cowork; reusable workspace for Projects, with concurrent conversations | Accepted; shared-file/Git conflict handling remains open |
+| Workspace | Per-conversation for standalone Cowork; reusable workspace for Projects, with concurrent conversations | Accepted; normal shared-filesystem/Git behavior, agent-selected worktrees |
+| Project messaging | Same-Project conversations can coordinate through SendMessage, including resumable recipients | Accepted feature; durable host routing/receipt contract proposed |
 | Access | Direct writes to explicitly granted folders, or selected repos cloned into guest storage | Accepted; no ambient home/SSH sharing remains proposed enforcement |
 | Memory and temp | Shared Project MEMDIR; private logical transcripts; persistent conversation scratch and disposable OS tmp proposed | Project memory sharing accepted; scratch/retention details open |
 | Resource release | Quiescent cold stop, retained files and durable parent/child continuation | Accepted direction; SDK prerequisite merged, release and Winter integration pending |
+| Resource sharing | Automatic CPU/RAM management with no manual per-VM carving; no assumed Linux GPU compute passthrough | User direction; real host-memory reclaim requires validation |
 | Scheduling | Durable host authority, VM start on demand, occurrence deduplication while Project conversations may overlap | Proposed |
 | Host tools | Explicit narrow capabilities, no automatic guest-to-host shell fallback | Proposed |
 | Git publication | Session branches; separate commit/push/PR/merge authority | Proposed |
 
-The next discussion compares VM backends, controller placement and guest-sharing layouts before selecting one, then resolves shared-file/Git conflict behavior and schedule targets. Direct host-folder writes, workspace ownership, concurrent Project conversations and shared Project memory are settled. The working specification must retain the distinction between accepted requirements, proposed defaults and implementation gates.
+The next decision is whether the proposed backend meets automatic-resource requirements, then finalizing the remaining lifecycle/schedule contracts. Direct host-folder writes, workspace ownership, concurrent Project conversations, shared memory, peer messaging and ordinary edit/worktree behavior are settled. The working specification retains the distinction between accepted requirements, proposed defaults and implementation gates.
 
 ## Research limits and later validation
 

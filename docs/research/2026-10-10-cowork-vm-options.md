@@ -50,7 +50,7 @@ One Project VM is now a first-class candidate because concurrent conversations a
 
 Do not independently mount the same ordinary writable block filesystem in several guests. A Project spanning multiple guests needs a single authoritative filesystem service or validated shared host directories. VZ directory sharing is a relevant primitive, but cross-guest coherence, locking, case sensitivity and Git behavior still need experiments. [Apple shared directories](https://developer.apple.com/documentation/virtualization/shared-directories)
 
-Concurrency also means no automatic branch switch whenever a Project conversation starts. A shared checkout keeps its current branch and dirty state; branch/worktree operations and conflicting writes need a separate product contract. No workspace-wide conversation queue is assumed.
+Concurrency also means no automatic branch switch whenever a Project conversation starts. A shared checkout keeps its current branch and dirty state. The user's 2026-10-11 decision is ordinary shared-filesystem/Git behavior: agents coordinate through SendMessage and choose worktrees themselves. No Cowork-specific conflict manager, Git mutation lock, memory transaction service or workspace-wide conversation queue is assumed.
 
 A bounded pool/admission policy applies to any layout. Pooling controls how many guests may run; it does not by itself provide isolation or make a writable disk safe to share.
 
@@ -68,6 +68,8 @@ Containerization's documented floor is Apple silicon/macOS 26. Direct VZ has bro
 - Apple's `container machine` defaults described in the original research include broad home sharing and SSH forwarding. Do not adopt those as Winter's selected-folder boundary. A library integration can define its own grants. [Machine guide](https://github.com/apple/container/blob/1.5.0/docs/container-machine.md)
 
 ## What the research does and does not establish
+
+Resource clarification, 2026-10-11: the user wants automatic capacity sharing rather than assigning CPU/RAM/GPU per VM. vCPUs share the Mac's physical scheduler, and VZ guest RAM reserves virtual address space with demand-backed physical pages. Returning guest-freed pages is a separate issue: current Apple container documentation says this is not automatic. VZ ballooning plus Containerization extension hooks provide an integration candidate, not demonstrated reclaim. A common Linux VM shares one guest memory pool but does not itself guarantee returning that memory to macOS. The [working spec's resource contract](../cowork-spec.md#resource-policy-and-product-surfaces) replaces the earlier fixed-allocation proposal. [Apple resource scheduling](https://github.com/apple/container/blob/f70ecbb926d925818a34917529e304b1177ce98c/docs/resource-usage.md), [memory size](https://developer.apple.com/documentation/virtualization/vzvirtualmachineconfiguration/memorysize), [current reclaim limitation](https://github.com/apple/container/blob/f70ecbb926d925818a34917529e304b1177ce98c/docs/technical-overview.md#releasing-container-memory-to-macos)
 
 The principal native local candidates remain Containerization and direct VZ, without selecting between them. Shared-helper placement, per-Project guest allocation, and nested microVMs must be compared separately. Podman and UTM add examples of existing managers; they do not constitute new hypervisor families. Remote execution is shown as a scope change.
 
