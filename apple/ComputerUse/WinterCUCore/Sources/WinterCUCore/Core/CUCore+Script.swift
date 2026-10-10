@@ -51,7 +51,7 @@ extension CUCore {
 
     public func targetAppleScript(_ p: TargetAppleScriptParams) async throws -> TargetAppleScriptResult {
         let t = try target(p.targetId)
-        try ensureAlive(t)
+        try await ensureAlive(t)
         guard (p.language ?? "applescript").lowercased() == "applescript" else {
             throw CUError(code: "refused",
                           message: "JavaScript for Automation isn't run: its Objective-C bridge runs Cocoa inside Winter's helper, where no Apple Event check can see it — write the script in AppleScript",
@@ -106,7 +106,7 @@ extension CUCore {
 
     public func targetScriptingDictionary(_ p: TargetScriptingDictionaryParams) async throws -> TargetScriptingDictionaryResult {
         let t = try target(p.targetId)
-        try ensureAlive(t)
+        try await ensureAlive(t)
         let model: CUScriptingDictionary.Model?
         if let o = scriptingDictionaryOverride { model = o(t) } else {
             model = NSRunningApplication(processIdentifier: t.pid)?.bundleURL.flatMap { CUScriptingDictionary.model(appURL: $0) }
@@ -121,7 +121,7 @@ extension CUCore {
     /// must be asked for it) is left unread — reading it would send it an Apple Event, and this runs at every bind.
     public func targetScriptingCommands(_ p: TargetScriptingCommandsParams) async throws -> TargetScriptingCommandsResult {
         let t = try target(p.targetId)
-        try ensureAlive(t)
+        try await ensureAlive(t)
         let url = NSRunningApplication(processIdentifier: t.pid)?.bundleURL
         let bundleVersion = url.flatMap { Bundle(url: $0)?.infoDictionary?["CFBundleVersion"] as? String }
         let model: CUScriptingDictionary.Model?

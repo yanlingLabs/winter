@@ -15,7 +15,7 @@ import { PAGE_RUNTIME_SOURCE } from "../../src/computer-use/browser/page-runtime
 import { BrowserBackendRegistry } from "../../src/computer-use/browser/registry";
 import { fitsBudget, imageSize, scaleFor, toCss } from "../../src/computer-use/browser/scale";
 import { ruleAllowsSite, siteCardSummary, siteRow } from "../../src/computer-use/browser/site-policy";
-import { bodyLines, diffState, FULL_STATE_LINE_CAP, fullState, makeSnapshot, nodeLine, type TabNode } from "../../src/computer-use/browser/state-format";
+import { bodyLines, diffState, FULL_STATE_BYTE_CAP, FULL_STATE_LINE_CAP, fullState, makeSnapshot, nodeLine, printedState, type TabNode } from "../../src/computer-use/browser/state-format";
 import { checkUploadPaths, UPLOAD_MAX_FILES } from "../../src/computer-use/browser/upload-paths";
 import { computerV2Description } from "../../src/computer-use/description";
 import { AutomationFailure } from "../../src/computer-use/errors";
@@ -134,6 +134,18 @@ describe("the tab state format", () => {
     expect(FULL_STATE_LINE_CAP).toBe(4_000);
   });
 
+  test("full: true stays inside its byte cap: a long list keeps its head, its tail folds behind one marker, the cut line last", () => {
+    const items = Array.from({ length: 1_500 }, (_, i) => node(1_000 + i, "listitem", { name: `A fairly long result title number ${i}` }));
+    const roots = [node(1, "main", { children: [node(2, "heading", { name: "Results" }), node(3, "list", { children: items })] })];
+    const text = fullState({ title: "T", url: "u" }, roots, false, undefined, true);
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(FULL_STATE_BYTE_CAP);
+    expect(Buffer.byteLength(text, "utf8")).toBeGreaterThan(30 * 1024);
+    expect(text).toContain("result title number 100\"");
+    expect(text).not.toContain("result title number 1499\"");
+    expect(text).toMatch(/\n\s+… \(\d+ more — state\(\{within:3\}\)\)/);
+    expect(text.split("\n").at(-1)).toMatch(/^… the full state is cut at 48 KB: \d+ elements are folded/);
+  });
+
   test("diffs: + added, ~ changed facets, - removed; over half changed is reported for the full fallback", () => {
     const a = makeSnapshot("s1", [node(1, "main", { children: [node(2, "text field", { name: "Coupon", value: "", showEmptyValue: true }), node(3, "button", { name: "Old" })] })]);
     const b = makeSnapshot("s2", [node(1, "main", { children: [node(2, "text field", { name: "Coupon", value: "SAVE10" }), node(4, "button", { name: "New" })] })]);
@@ -142,6 +154,43 @@ describe("the tab state format", () => {
     expect(d.changedRatio).toBe(3 / 4);
     const same = diffState({ title: "T", url: "u" }, a, makeSnapshot("s3", [node(1, "main", { children: [node(2, "text field", { name: "Coupon", value: "", showEmptyValue: true }), node(3, "button", { name: "Old" })] })]));
     expect(same.text.split("\n")[1]).toBe("(no changes)");
+  });
+});
+
+describe("diffs against a folded print (review of round 2, MEDIUM)", () => {
+  // 400 rows: those past `firstInView + 20` are off screen. A whole-tab print is folded viewport-first.
+  const page = (firstInView: number, v7 = "a"): TabNode[] => [node(1, "main", { children: [node(3, "list", { name: "List", children:
+    Array.from({ length: 400 }, (_, i) => node(100 + i, "text field", { name: `Row ${i}`, value: i === 7 ? v7 : "x", ...(i >= firstInView && i < firstInView + 20 ? {} : { off: true }) })) })] })];
+  const h = { title: "T", url: "u" };
+  const printed = (id: string, roots: TabNode[]) => { const p = printedState(h, roots, true); return makeSnapshot(id, roots, undefined, p.shown); };
+
+  test("content scrolled into view after a folded bind is surfaced with its context, never \"(no changes)\"", () => {
+    const base = printed("s1", page(0));
+    expect(base.shown!.has(100)).toBe(true);
+    expect(base.shown!.has(160)).toBe(false);
+    const nowRoots = page(50);
+    const now = printed("s2", nowRoots);
+    const d = diffState(h, base, now, undefined, printedState(h, nowRoots, true).shown);
+    expect(d.text).not.toContain("(no changes)");
+    expect(d.text).toContain('+ [160] text field "Row 60" value="x" — now shown, in [3] list "List"');
+    // Once printed it counts as seen: the same view again is "(no changes)".
+    now.shown = d.shown;
+    const again = diffState(h, now, printed("s3", page(50)), undefined, printedState(h, page(50), true).shown);
+    expect(again.text.split("\n")[1]).toBe("(no changes)");
+  });
+
+  test("a change under a fold prints with the element's line and its context", () => {
+    const base = printed("s1", page(50));
+    expect(base.shown!.has(107)).toBe(false);
+    const nowRoots = page(50, "b");
+    const d = diffState(h, base, printed("s2", nowRoots), undefined, printedState(h, nowRoots, true).shown);
+    expect(d.text).toContain('~ [107] value "a" → "b" — [107] text field "Row 7" value="b", in [3] list "List"');
+  });
+
+  test("a snapshot made without a print keeps the old behaviour", () => {
+    const a = makeSnapshot("a", [node(1, "main", { children: [node(2, "button", { name: "Send" })] })]);
+    const d = diffState(h, a, makeSnapshot("b", [node(1, "main", { children: [node(2, "button", { name: "Send" })] })]), undefined, new Set([1, 2]));
+    expect(d.text.split("\n")[1]).toBe("(no changes)");
   });
 });
 

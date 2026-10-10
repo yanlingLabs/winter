@@ -96,7 +96,11 @@ describe("ComputerV2: binding, state and the diff base", () => {
     expect(text(r1)).toContain('<screen-data id="');
     expect(text(r1)).toContain('Notes — window "Notes window"');
     const bound = w.fake.calls("target.snapshot")[0]!;
-    expect(bound).toMatchObject({ full: true, settle: { maxMs: 1500 } });
+    expect(bound).toMatchObject({ settle: { maxMs: 1500 } });
+    // The ORDINARY state (viewport first, folded to its line cap) — never `full`, which for a big window outgrows the
+    // result's own 64 KiB cap; `full` is the model's to ask for.
+    expect(bound.full).toBeUndefined();
+    expect(bound.since).toBeUndefined();
     expect(typeof bound.callId).toBe("string");
 
     const r2 = await w.run("await notes.state()");

@@ -207,6 +207,57 @@ public struct CUSkyLight: @unchecked Sendable {
         return a == 0 && b == 0
     }
 
+    /// Where the make-key records say the "click" is, in global points AND in window points: far outside every screen
+    /// and every window, so no view is hit — and FINITE. yabai fills these 16 bytes with 0xFF (NaN), but an app that
+    /// converts an event's `locationInWindow` to `Int` in a `sendEvent` override or an event monitor traps on NaN
+    /// (Swift's `Int(Double.nan)`): measured on 2026-10-10, a probe app doing that crashed on the 0xFF records and
+    /// took these unharmed, with the same key-window switch (and no view mouseDown).
+    static let makeKeyLocation = CGPoint(x: -32_000, y: -32_000)
+
+    /// yabai's make-key-window records: a synthesized left mouse down and up (event types 1 and 2) for the window,
+    /// with the command modifier (0x10 at 0x3A — flags 0x100000; a ⌘-click is the one that leaves a background
+    /// window where it is), at `makeKeyLocation` (doubles: the record's location at 0x10, its window location at
+    /// 0x20). The app makes the window its key window — what a click on it does, without the click.
+    static func makeKeyRecords(windowID: UInt32) -> [[UInt8]] {
+        [UInt8(0x01), UInt8(0x02)].map { type in
+            var buf = [UInt8](repeating: 0, count: 0xF8)
+            buf[0x04] = 0xF8
+            buf[0x08] = type
+            buf[0x3A] = 0x10
+            func put(_ v: CGFloat, at offset: Int) {
+                withUnsafeBytes(of: Double(v).bitPattern.littleEndian) { bytes in
+                    for (i, b) in bytes.enumerated() { buf[offset + i] = b }
+                }
+            }
+            for base in [0x10, 0x20] {
+                put(makeKeyLocation.x, at: base)
+                put(makeKeyLocation.y, at: base + 8)
+            }
+            withUnsafeBytes(of: windowID.littleEndian) { bytes in
+                for (i, b) in bytes.enumerated() { buf[0x3C + i] = b }
+            }
+            return buf
+        }
+    }
+
+    /// Makes `windowID` its app's KEY window (AppKit's own, not the system's key focus): the make-key records,
+    /// posted to the app alone. Live (2026-10-10, a WebKit host app in the background): the app takes it only
+    /// while it believes it is active and holds no key window — the focus record or the synthetic activation
+    /// first, and the app deactivated before when ANOTHER of its windows is key. Nothing is raised, nothing
+    /// activates, the user's key focus stays where it is (all measured). False when a symbol is missing.
+    @discardableResult
+    func makeKeyWindow(pid: pid_t, windowID: UInt32) -> Bool {
+        guard let postEventRecordToFn, let getProcessForPIDFn else { return false }
+        var target = [UInt8](repeating: 0, count: 8)
+        guard target.withUnsafeMutableBytes({ getProcessForPIDFn(pid, $0.baseAddress!) }) == 0 else { return false }
+        var ok = true
+        for record in Self.makeKeyRecords(windowID: windowID) {
+            let r = target.withUnsafeBytes { psn in record.withUnsafeBufferPointer { postEventRecordToFn(psn.baseAddress!, $0.baseAddress!) } }
+            ok = ok && r == 0
+        }
+        return ok
+    }
+
     /// Undoes `focusWithoutRaise`: the target window loses key focus and the user's previous key window
     /// (`previousWindowID` of `previousPid`) gets it back, so their typing goes where it went before.
     @discardableResult

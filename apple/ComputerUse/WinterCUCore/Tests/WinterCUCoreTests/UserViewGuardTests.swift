@@ -19,7 +19,7 @@ final class UserViewGuardTests: XCTestCase {
     var target: CUTarget!
 
     override func setUp() {
-        FocusSPI.calls = []
+        FocusSPI.reset()
         FocusSPI.frontPid = 1
         FocusSPI.onFocus = nil
     }
@@ -171,7 +171,7 @@ final class UserViewGuardTests: XCTestCase {
         XCTAssertTrue(r.detail?.contains("Safari activated itself — the user's app was put back (key focus without raise (focus records) is no longer used)") ?? false,
                       r.detail ?? "")
         XCTAssertTrue(ax.performed.contains("\(token(newItem)):AXPress"), "the command still ran, over AX")
-        FocusSPI.calls = []
+        FocusSPI.reset()
         ax.put(newItem, [kAXEnabledAttribute: false])
         _ = try? await act(.menu(CUMenuAction(path: ["File", "New Tab"])))
         XCTAssertTrue(FocusSPI.calls.isEmpty, "retired for the helper's life")

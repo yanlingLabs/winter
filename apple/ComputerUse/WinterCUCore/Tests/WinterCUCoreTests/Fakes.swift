@@ -146,7 +146,15 @@ final class FakeFocusEnforcer: CUFocusEnforcing, @unchecked Sendable {
     func enforce(windowID: UInt32) -> Bool { enforced.append(windowID); return result }
     /// The activations posted whatever the target was believed to be (a menu command's validation).
     private(set) var forced: [UInt32] = []
-    func forceActivation(windowID: UInt32) -> Bool { forced.append(windowID); return true }
+    func forceActivation(windowID: UInt32) -> Bool {
+        forced.append(windowID); FocusSPI.order.append("activate \(windowID)"); onForce?(); return true
+    }
+    /// The synthetic deactivations posted (another window of the app was key).
+    private(set) var deactivated = 0
+    func deactivate() -> Bool { deactivated += 1; FocusSPI.order.append("deactivate"); onDeactivate?(); return true }
+    /// Hooks: the fake world changes as an app might react (the user bringing it forward meanwhile).
+    var onForce: (() -> Void)?
+    var onDeactivate: (() -> Void)?
     func teardown() { tornDown += 1 }
 }
 
@@ -253,7 +261,12 @@ final class FakeSystem: CUSystemBackend {
     /// Windows on no Space at all (closed but still listed); others answer `onSpace` (nil = unknown).
     var noSpaceWindows: Set<UInt32> = []
     var onSpace: Bool? = nil
-    func windowOnAnySpace(_ id: UInt32) -> Bool? { noSpaceWindows.contains(id) ? false : onSpace }
+    /// When set, answers `windowOnAnySpace` instead (a test plays a window's Space over successive readings).
+    var onSpaceReading: ((UInt32) -> Bool?)?
+    func windowOnAnySpace(_ id: UInt32) -> Bool? {
+        if let r = onSpaceReading { return r(id) }
+        return noSpaceWindows.contains(id) ? false : onSpace
+    }
     /// Content processes (Safari's WebContent), each with the app it serves.
     var contentProcesses: [pid_t: pid_t] = [:]
     func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { contentProcesses[pid] == appPid }

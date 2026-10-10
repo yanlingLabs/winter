@@ -36,6 +36,67 @@ final class StateDiffTests: XCTestCase {
         XCTAssertEqual(d.changedRatio, 3.0 / 8.0, accuracy: 1e-9)
     }
 
+    // MARK: what the model was shown (review of round 2, MEDIUM)
+
+    /// A window 600 pt tall whose scroll area holds 120 rows of 20 pt, scrolled down by `offset`; row 7's value `v7`.
+    private func page(offset: Double, v7: String = "a") -> [CUNode] {
+        let rows = (0..<120).map { i in
+            CUNode(ref: 100 + i, role: "AXTextField", name: "Row \(i)", value: i == 7 ? v7 : "x",
+                   frame: CGRect(x: 10, y: 50 + Double(i) * 20 - offset, width: 300, height: 18))
+        }
+        return [CUNode(ref: 1, role: "AXWindow", name: "Doc", frame: CGRect(x: 0, y: 0, width: 400, height: 600), children: [
+            CUNode(ref: 2, role: "AXScrollArea", frame: CGRect(x: 0, y: 40, width: 400, height: 560), children: [
+                CUNode(ref: 3, role: "AXGroup", name: "List", frame: CGRect(x: 0, y: 50 - offset, width: 400, height: 2400), children: rows),
+            ]),
+        ])]
+    }
+
+    private func printedSnap(_ id: String, _ roots: [CUNode], _ f: CUStateFormatter) -> (CUSnapshot, Set<Int>) {
+        let h = CUStateHeader(appName: "Doc", windowTitle: "Doc", focusedRef: nil, settle: nil)
+        let p = f.printed(header: h, roots: roots, viewportFirst: true)
+        return (CUSnapshot(id: id, scope: nil, header: h, roots: roots, formatter: f, shown: p.shown), p.shown)
+    }
+
+    func testContentScrolledIntoViewIsSurfacedNotNoChanges() {
+        let f = CUStateFormatter(lineCap: 40)
+        let (base, baseShown) = printedSnap("s1", page(offset: 0), f)
+        XCTAssertTrue(baseShown.contains(100) && !baseShown.contains(150), "the base showed the top rows only")
+        let (now, nowShown) = printedSnap("s2", page(offset: 1000), f)  // scrolled: rows 48… are in view now
+        let d = CUStateDiff.compute(old: base, new: now, shownNow: nowShown)
+        XCTAssertTrue(d.added.isEmpty && d.removed.isEmpty && d.modified.isEmpty, "nothing changed")
+        XCTAssertFalse(d.isEmpty, "but rows came into view")
+        XCTAssertTrue(d.surfaced.contains(150))
+        let text = d.render(header: now.header, new: now, includeWindowTitle: false, formatter: f, seen: base.shown)
+        XCTAssertFalse(text.contains("(no changes)"), text)
+        XCTAssertTrue(text.contains("+ [150] text field \"Row 50\" value=\"x\" — now shown, in [3] group \"List\""), text)
+        // Once printed, they count as seen: the same view again is "(no changes)".
+        var seenNow = now
+        seenNow.shown = d.shownAfter(old: base, new: now)
+        let (again, againShown) = printedSnap("s3", page(offset: 1000), f)
+        let d2 = CUStateDiff.compute(old: seenNow, new: again, shownNow: againShown)
+        XCTAssertTrue(d2.isEmpty)
+    }
+
+    func testAChangeUnderAFoldPrintsWithItsContext() {
+        let f = CUStateFormatter(lineCap: 40)
+        let (base, _) = printedSnap("s1", page(offset: 1000), f)  // row 7 out of view: never shown
+        XCTAssertFalse(base.shown?.contains(107) ?? true)
+        let (now, nowShown) = printedSnap("s2", page(offset: 1000, v7: "b"), f)
+        let d = CUStateDiff.compute(old: base, new: now, shownNow: nowShown)
+        XCTAssertEqual(d.modified, [107])
+        XCTAssertEqual(d.unseen, [107])
+        let text = d.render(header: now.header, new: now, includeWindowTitle: false, formatter: f, seen: base.shown)
+        XCTAssertTrue(text.contains("~ [107] value \"a\" → \"b\" — [107] text field \"Row 7\" value=\"b\", in [3] group \"List\""), text)
+    }
+
+    func testASnapshotWithNoPrintKeepsTheOldBehaviour() {
+        let a = snap("a", [CUNode(ref: 5, role: "AXButton", name: "Send")])
+        let b = snap("b", [CUNode(ref: 5, role: "AXButton", name: "Send")])
+        XCTAssertNil(a.shown)
+        let d = CUStateDiff.compute(old: a, new: b, shownNow: [1, 5])
+        XCTAssertTrue(d.isEmpty, "no shown set on the base: everything counts as seen")
+    }
+
     func testFacetChangesAreJoinedInOrder() {
         let old = snap("a", [CUNode(ref: 5, role: "AXButton", name: "Send", states: .disabled, actions: ["AXPress"])])
         let new = snap("b", [CUNode(ref: 5, role: "AXButton", name: "Send now", states: [], actions: ["AXPress", "AXShowMenu"])])

@@ -545,8 +545,8 @@ final class DesktopVisitTests: XCTestCase {
         world()
         _ = try await click(visit: true)
         _ = try await close()
-        XCTAssertEqual(sys.frontedWindows.last.map { "\($0.pid):\($0.windowID):\($0.raised):\($0.main)" }, "1:500:true:false",
-                       "the user's recorded window raised (never made main), their app made frontmost")
+        XCTAssertEqual(sys.frontedWindows.last.map { "\($0.pid):\($0.windowID):\($0.raised):\($0.main)" }, "1:500:true:true",
+                       "the user's recorded window raised and made main again, their app made frontmost")
         XCTAssertTrue(poster.entries.allSatisfy { $0.pid != user }, "no event — no key-window record — ever reaches the user's app")
         XCTAssertEqual(userView, usersPlace)
     }
@@ -580,6 +580,147 @@ final class DesktopVisitTests: XCTestCase {
         XCTAssertEqual(tries, 2)
         _ = try await close()
         XCTAssertEqual(userView, usersPlace)
+    }
+
+    // MARK: review of round 1 — late switches, the user's own window, an anchorless return
+
+    func testASwitchThatLandsAfterTheArrivalDeadlineIsStillBroughtBack() async throws {
+        world()
+        core.visitArriveMs = 150
+        core.visitLateSwitchMs = 1000
+        let lock = NSLock()
+        var calls = 0
+        sys.onFrontWindow = { [unowned self] p, wid, _ in
+            if p == pid, wid == 77 {
+                // A busy app answers its AX calls late: the switch lands ~350 ms on, past the deadline (once).
+                let first = lock.withLock { calls += 1; return calls == 1 }
+                if first {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) { [unowned self] in sys.space = 2; sys.front = pid }
+                }
+            }
+            if p == user { show(1) }
+        }
+        let e = await expect("unsupported") { _ = try await self.click(visit: true) }
+        XCTAssertTrue(e?.message.contains("macOS did not show App's desktop") ?? false, e?.message ?? "")
+        guard case .object(let v)? = e?.data?["visit"] else { return XCTFail("no visit on the error") }
+        XCTAssertEqual(v["returned"], .bool(true))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(userView, usersPlace, "the late switch was watched for and undone, never left standing")
+        XCTAssertTrue(fronted.contains("1:500"), "brought back by the user's own window")
+    }
+
+    /// Review of round 2 (MEDIUM): the late-switch watch undid ANY change of the user's view for 1.2 s after a
+    /// never-arrived visit's return — a ⌘-Tab of their own included. Their move is left alone and adopted.
+    func testTheUserMovingDuringTheLateSwitchWatchIsLeftAlone() async throws {
+        world()
+        core.visitArriveMs = 150
+        core.visitLateSwitchMs = 1000
+        let mail: pid_t = 4242
+        let lock = NSLock()
+        var returned = false
+        sys.onFrontWindow = { [unowned self] p, _, _ in
+            guard p == user else { return }
+            show(1)
+            let first = lock.withLock { () -> Bool in defer { returned = true }; return !returned }
+            if first {
+                // 200 ms after being brought back the user ⌘-Tabs to Mail (a key: a hardware action).
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { [unowned self] in
+                    core.noteHardwareInput(now: core.clock.nowSeconds())
+                    sys.front = mail
+                }
+            }
+        }
+        let e = await expect("unsupported") { _ = try await self.click(visit: true) }
+        guard case .object(let v)? = e?.data?["visit"] else { return XCTFail("no visit on the error") }
+        XCTAssertEqual(v["userMoved"], .bool(true))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(userView, CUUserView(space: 1, front: mail), "left where they went")
+        XCTAssertEqual(fronted.filter { $0.hasPrefix("\(user):") }.count, 1, "brought back once, never again over their own move")
+    }
+
+    func testOnlyTheTargetsOwnLateSwitchIsUndone() {
+        let before = CUUserView(space: 1, front: 1)
+        XCTAssertTrue(CUCore.lateSwitchIsTheTarget(CUUserView(space: 2, front: pid), before: before, targetPid: pid,
+                                                   targetWindowOnScreen: true, userActed: false))
+        XCTAssertTrue(CUCore.lateSwitchIsTheTarget(CUUserView(space: 2, front: 1), before: before, targetPid: pid,
+                                                   targetWindowOnScreen: true, userActed: false), "its window's desktop shown")
+        XCTAssertFalse(CUCore.lateSwitchIsTheTarget(CUUserView(space: 1, front: 4242), before: before, targetPid: pid,
+                                                    targetWindowOnScreen: false, userActed: false), "another app: not the target's switch")
+        XCTAssertFalse(CUCore.lateSwitchIsTheTarget(CUUserView(space: 2, front: pid), before: before, targetPid: pid,
+                                                    targetWindowOnScreen: true, userActed: true), "the user acted: theirs")
+    }
+
+    /// Review of round 2 (LOW): a recorded window of the user's that closed, or a newer one they opened during the
+    /// visit, made the visit read "not back" and the return raise the OLD window over the new one.
+    func testTheReturnNeverRaisesAClosedWindowOrOneOverTheUsersNewerWindow() async throws {
+        world()
+        _ = try await click(visit: true)
+        XCTAssertTrue(isOpen)
+        ax.dead.insert(AXIdentity(element: userWindow))  // the window the user was in closed meanwhile
+        ax.drop(ax.application(user), kAXFocusedWindowAttribute)
+        var closed = try await close()
+        var report = try XCTUnwrap(closed.first)
+        XCTAssertTrue(report.returned, report.detail ?? "")
+        XCTAssertEqual(userView, usersPlace)
+        XCTAssertEqual(fronted.filter { $0.hasPrefix("\(user):") }, ["\(user):0"], "their app brought back, no dead window raised, once")
+
+        world()
+        _ = try await click(visit: true)
+        let newer = fakeElement(96_102)
+        ax.add(newer, role: kAXWindowRole, title: "New", frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+        ax.windowIDs[AXIdentity(element: newer)] = 502
+        ax.put(ax.application(user), [kAXFocusedWindowAttribute: newer])  // a window the user's app opened meanwhile
+        closed = try await close()
+        report = try XCTUnwrap(closed.first)
+        XCTAssertTrue(report.returned, report.detail ?? "")
+        XCTAssertEqual(fronted.filter { $0.hasPrefix("\(user):") }, ["\(user):0"], "the old window never raised over the new one")
+        XCTAssertFalse(ax.performed.contains("\(AXIdentity(element: userWindow)):AXRaise"))
+    }
+
+    func testTheReturnPutsTheUsersOwnWindowBackWhenTheirAppIsTheTarget() async throws {
+        world()
+        // The user is in the TARGET app, in its window 66 on their desktop; the visit is to its window 77 elsewhere.
+        let mine = fakeElement(96_066)
+        ax.add(mine, role: kAXWindowRole, title: "Mine too", frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+        ax.windowIDs[AXIdentity(element: mine)] = 66
+        sys.windows[66] = FakeSystem.window(66, pid: pid, CGRect(x: 0, y: 0, width: 400, height: 300))
+        sys.front = pid
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: mine])
+        let before = CUUserView(space: 1, front: pid)
+        sys.onActivate = { _ in }  // activating the app alone moves nothing (it has a window on each desktop)
+        sys.onFrontWindow = { [unowned self] p, wid, _ in
+            guard p == pid else { return }
+            if wid == 77 { show(2); ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window]) }
+            // The app's own window becomes its focused one again (and its desktop shows) only when it is made main.
+            if wid == 66, sys.frontedWindows.last?.main == true { show(1); ax.put(ax.application(pid), [kAXFocusedWindowAttribute: mine]) }
+        }
+        _ = try await click(visit: true)
+        XCTAssertEqual(userView, CUUserView(space: 2, front: pid))
+        let closed = try await close()
+        let report = try XCTUnwrap(closed.first)
+        XCTAssertTrue(report.returned, report.detail ?? "")
+        XCTAssertEqual(userView, before)
+        XCTAssertEqual(ax.element(ax.application(pid), kAXFocusedWindowAttribute).flatMap { ax.windowID($0) }, 66,
+                       "back in the window they were in, not merely in the app")
+        XCTAssertEqual(sys.frontedWindows.last.map { "\($0.pid):\($0.windowID):\($0.main)" }, "\(pid):66:true")
+    }
+
+    func testAVisitWithNothingToAnchorTheReturnIsRefusedWhenTheUsersAppHasWindowsElsewhere() async throws {
+        world()
+        ax.drop(ax.application(user), kAXFocusedWindowAttribute)  // Finder showing only the Desktop, say
+        var elsewhere = FakeSystem.window(501, pid: user, CGRect(x: 0, y: 0, width: 400, height: 300))
+        elsewhere.onScreen = false
+        sys.windows[501] = elsewhere
+        sys.onSpace = true
+        let e = await expect("unsupported") { _ = try await self.click(visit: true) }
+        XCTAssertTrue(e?.message.contains("nothing was moved") ?? false, e?.message ?? "")
+        XCTAssertTrue(sys.activated.isEmpty && sys.frontedWindows.isEmpty, "nothing was moved")
+        XCTAssertEqual(userView, usersPlace)
+        XCTAssertFalse(isOpen)
+        // No window of the user's app anywhere else: the visit goes ahead.
+        sys.windows[501] = nil
+        _ = try await click(visit: true)
+        XCTAssertTrue(isOpen)
     }
 
     /// Fix 8b: with the user's front app unreadable there is nowhere to bring them back — so nothing moves.

@@ -89,6 +89,35 @@ final class InputTests: XCTestCase {
         XCTAssertEqual(CUSkyLight.focusRecord(windowID: 1, focus: false)[0x8A], 0x02)
     }
 
+    func testMakeKeyRecordLayout() {
+        let records = CUSkyLight.makeKeyRecords(windowID: 0x1122_3344)
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.map { $0[0x08] }, [0x01, 0x02], "a synthesized mouse down, then up")
+        for r in records {
+            XCTAssertEqual(r.count, 0xF8)
+            XCTAssertEqual(r[0x04], 0xF8)
+            XCTAssertEqual(r[0x3A], 0x10, "the command modifier")
+            XCTAssertEqual(Array(r[0x3C...0x3F]), [0x44, 0x33, 0x22, 0x11], "window id little-endian")
+            XCTAssertEqual(r[0x8A], 0x00, "not a focus record")
+            // The location — global (0x10) and in the window (0x20) — is FINITE: an app converting it to Int traps on
+            // NaN (yabai's 0xFF fill); and far outside every screen and window, so no view is hit.
+            for base in [0x10, 0x20] {
+                for at in [base, base + 8] {
+                    let v = Double(bitPattern: r[at..<at + 8].enumerated().reduce(UInt64(0)) { $0 | UInt64($1.element) << (8 * $1.offset) })
+                    XCTAssertTrue(v.isFinite, "offset \(at) is \(v)")
+                    XCTAssertLessThanOrEqual(v, -30_000, "offset \(at): outside any screen arrangement and any window")
+                    XCTAssertNotNil(Int(exactly: v), "an app's Int(location) must not trap")
+                }
+            }
+            XCTAssertFalse(r[0x10..<0x30].contains(0xFF) && r[0x10..<0x30].allSatisfy { $0 == 0xFF }, "never the NaN fill")
+        }
+        XCTAssertEqual(CUSkyLight.makeKeyLocation, CGPoint(x: -32_000, y: -32_000))
+    }
+
+    func testMakeKeyIsNotPostedWithoutTheSymbols() {
+        XCTAssertFalse(CUSkyLight.none.makeKeyWindow(pid: 42, windowID: 7))
+    }
+
     // MARK: event sequences
 
     final class Recorder: CUEventPoster, @unchecked Sendable {

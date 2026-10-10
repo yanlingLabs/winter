@@ -270,18 +270,36 @@ final class StateFormatterTests: XCTestCase {
     }
 
     func testAFullStateIsTheWholeTreeUpToItsHardCapAndSaysWhereItIsCut() {
-        // 400 sections: ~1,700 lines. A non-full state folds to 300; a full one shows everything (the reader's own
-        // budget is the hard cap).
+        // 400 sections: ~1,700 lines. A non-full state folds to 300; a full one shows everything within its caps.
         let window = webWindow(marked: false, sections: 400)
-        let lines = f.body(roots: [window], focusedRef: nil, whole: true)
+        let roomy = CUStateFormatter(fullByteCap: 1 << 20)
+        let lines = roomy.body(roots: [window], focusedRef: nil, whole: true)
         XCTAssertEqual(lines.count, 1 + window.descendantCount, "every element, one line each")
         XCTAssertTrue(lines.contains { $0.contains("Paragraph 400") })
         XCTAssertLessThanOrEqual(f.body(roots: [window], focusedRef: nil).count, 300)
-        // Past the hard cap: folded the same way, and the last line says so.
-        let capped = CUStateFormatter(lineCap: 50, fullLineCap: 200).body(roots: [window], focusedRef: nil, whole: true)
+        // Past the line cap: folded the same way, and the last line says so.
+        let capped = CUStateFormatter(lineCap: 50, fullLineCap: 200, fullByteCap: 1 << 20).body(roots: [window], focusedRef: nil, whole: true)
         XCTAssertLessThanOrEqual(capped.count, 201)
         XCTAssertTrue(capped.last?.hasPrefix("… the full state is cut at 200 lines: ") ?? false, capped.last ?? "")
         XCTAssertTrue(capped.contains { $0.contains("text field \"First\"") }, "the page is still not folded wholesale")
+    }
+
+    func testAFullStateFitsItsByteCapSoItsCutLineSurvivesTheResultCap() {
+        // The same ~1,700-line page is over 48 KB: the default full state folds to fit and says so on its last line —
+        // the daemon's 64 KiB result cap never cuts it mid-tree.
+        let window = webWindow(marked: false, sections: 400)
+        let header = CUStateHeader(appName: "Winter CU Fixture", windowTitle: "Fixture Web", focusedRef: nil, settle: nil)
+        let text = f.full(header: header, roots: [window], whole: true)
+        XCTAssertLessThanOrEqual(text.utf8.count, CUStateFormatter.defaultFullByteCap, "\(text.utf8.count) bytes")
+        XCTAssertGreaterThan(text.utf8.count, 30 * 1024, "as much as fits, not a token amount")
+        let last = text.split(separator: "\n").last.map(String.init) ?? ""
+        XCTAssertTrue(last.hasPrefix("… the full state is cut at 48 KB: "), last)
+        XCTAssertNotNil(text.range(of: #"text field ["\u201C]First["\u201D]"#, options: .regularExpression), "the page's top survives")
+        XCTAssertTrue(text.contains("Paragraph 100"), "the long list's head is kept")
+        XCTAssertFalse(text.contains("Paragraph 400"), "its tail is folded…")
+        XCTAssertNotNil(text.range(of: #"\n\s+… \(\d+ more — state\(\{within:\d+\}\)\)"#, options: .regularExpression), "…behind one marker line")
+        // A small page is not cut at all.
+        XCTAssertFalse(f.full(header: header, roots: [webWindow()], whole: true).contains("the full state is cut"))
     }
 
     func testIndentationIsTwoSpacesPerLevel() {

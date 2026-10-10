@@ -44,9 +44,10 @@ extension CUCore {
         // Held in front for this script (the user agreed): the foreground rung needs no second asking.
         var p = p
         if holdsForeground(t) { p.allowForeground = true }
-        try ensureAlive(t)
+        // The call's cancel first: a window watched through a transition (`ensureAlive`) is waited for under it.
         let token = cancels.begin(p.callId)
         defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         try token.check()
         noteGuardianPrivatePath(p.privatePath)
         noteGuardianActed(t.pid)
@@ -375,9 +376,37 @@ extension CUCore {
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
         let synth = self.synth(p)
         let windowFor = self.windowFor(t)
-        return try runEvents(p, t, d, focus: false, token) { route, check in
+        // A WebKit page (not Chromium) never takes a synthetic pointer's hover: measured on 2026-10-10, posted
+        // moves reached its window — and a plain AppKit view's tracking areas in the same state — but no
+        // mouseenter reached the page, in the background or with its app in front and the window key. Watched
+        // here, so the answer says when nothing appeared instead of leaving the model to look.
+        let webKit = d.rung == .processEvents && !t.isChromium && t.accessible
+            && (a.ref.flatMap { try? element($0, in: t) } ?? elementAt(pt, in: t)).map(isWebContent) == true
+        let before = webKit ? webElementCount(t) : nil
+        let out = try runEvents(p, t, d, focus: false, token) { route, check in
             try synth.hover(pid: t.pid, windowFor: windowFor, at: pt, route: route, dwellMs: ms, check: check)
-        }.noting(rested)
+        }
+        if let before, let after = webElementCount(t), after == before {
+            CULog.act.notice("hover in \(t.appName, privacy: .public): nothing new appeared in the page (\(before, privacy: .public) elements)")
+            return out.noting("the pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms, and nothing new appeared in the page — \(t.appName)'s web page takes no hover from a pointer that isn't the real one: if the menu or item also opens on a click, click it; else app.requestForeground(reason) for a real hover")
+        }
+        return out.noting(rested)
+    }
+
+    /// How many elements accessibility shows in the bound window's web page — the cheap "did anything appear"
+    /// fingerprint around a hover. Nil when it has none, or when the walk was cut short (`hoverFingerprintMaxNodes`,
+    /// or 200 ms): a capped count is the same before and after whatever appeared, so it proves nothing either way.
+    func webElementCount(_ t: CUTarget, maxMs: Double = 200) -> Int? {
+        guard let win = try? windowElement(t), let area = firstWebArea(win) else { return nil }
+        let deadline = clock.nowMs() + maxMs
+        var queue = [area]
+        var next = 0
+        while next < queue.count {
+            guard next < hoverFingerprintMaxNodes, clock.nowMs() < deadline else { return nil }
+            queue.append(contentsOf: ax.elements(queue[next], kAXChildrenAttribute))
+            next += 1
+        }
+        return next
     }
 
     /// An AX action or write that timed out may still run later: never follow it with events (that would do
@@ -479,6 +508,9 @@ extension CUCore {
         let synth = self.synth(p)
         let windowFor = self.windowFor(t)
         let event = announced ? nil : CursorEvent(kind: "press", point: pt, count: count, button: button.rawValue)
+        // Pid events in the background: the window made its app's key window first, so the click is not taken
+        // as the one that makes it key.
+        if d.rung == .processEvents { keyForClick(t, privatePath: p.privatePath, clickWindow: windowFor(pt)) }
         return try runEvents(p, t, d, focus: true, token, cursor: event) { route, check in
             try synth.click(pid: t.pid, windowFor: windowFor, at: pt, button: button, count: count, flags: flags,
                             route: route, check: check)
@@ -1423,8 +1455,9 @@ extension CUCore {
         let route: CURoute = elsewhere && t.isChromium && skyLight.isAvailable ? .skyLight : .publicPid
         var s = synth
         s.windowSPI = t.privatePath
-        postSyntheticActivation(t, privatePath: t.privatePath)
-        try? s.click(pid: t.pid, windowFor: windowFor(t), at: c, button: .left, count: 1, flags: [], route: route)
+        let windowFor = self.windowFor(t)
+        if !keyForClick(t, privatePath: t.privatePath, clickWindow: windowFor(c)) { postSyntheticActivation(t, privatePath: t.privatePath) }
+        try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
         return true
     }
@@ -1572,7 +1605,7 @@ extension CUCore {
         // Key IN ITS APP (the app's focused window): in the background the system-wide key focus is the user's
         // app, always, so it can't tell whether the click only made the window key.
         let wasKey = boundWindowIsKeyInApp(t)
-        postSyntheticActivation(t, privatePath: t.privatePath)
+        if !keyForClick(t, privatePath: t.privatePath, clickWindow: windowFor(c)) { postSyntheticActivation(t, privatePath: t.privatePath) }
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
         let clicked = waitFocused(e, t, web: web)

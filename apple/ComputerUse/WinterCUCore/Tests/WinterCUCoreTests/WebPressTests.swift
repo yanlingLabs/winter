@@ -156,6 +156,49 @@ final class WebPressTests: XCTestCase {
         // Allowed under click-only access, like a click.
     }
 
+    /// Live (2026-10-10): a WebKit page took no hover from the synthetic pointer — in the background, and with its
+    /// app in front and the window key — and the answer said "state() shows what appeared". Watched: nothing new
+    /// in the page is said, with what does work.
+    func testAHoverThatRevealsNothingInAWebPageSaysSo() async throws {
+        world()
+        let r = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+            action: .hover(CUHoverAction(ref: ref(button), ms: 50)), access: .click, allowForeground: false, privatePath: false))
+        let d = r.detail ?? ""
+        XCTAssertTrue(d.contains("the pointer rested on [\(ref(button))] \u{201C}Close\u{201D} for 50 ms, and nothing new appeared in the page"), d)
+        XCTAssertTrue(d.contains("app.requestForeground(reason)"), d)
+        XCTAssertFalse(d.contains("state() shows what appeared"), d)
+    }
+
+    /// Review of round 2 (LOW): a page past the walk's cap counted the same before and after, so "nothing new
+    /// appeared" was claimed whatever the hover did. A cut walk claims nothing.
+    func testAHoverOverAPageTooBigToCountClaimsNothing() async throws {
+        world()
+        core.hoverFingerprintMaxNodes = 2  // the page has more elements than that
+        XCTAssertNil(core.webElementCount(target))
+        core.hoverFingerprintMaxNodes = 4000
+        XCTAssertEqual(core.webElementCount(target), 3, "the web area, the panel, the button")
+        core.hoverFingerprintMaxNodes = 2
+        let r = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+            action: .hover(CUHoverAction(ref: ref(button), ms: 50)), access: .click, allowForeground: false, privatePath: false))
+        XCTAssertFalse(r.detail?.contains("nothing new appeared") ?? true, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("state() shows what appeared") ?? false, r.detail ?? "")
+    }
+
+    func testAHoverThatRevealsSomethingKeepsItsAnswer() async throws {
+        world()
+        let item = fakeElement(96_010)
+        poster.onPost = { [unowned self] e in
+            guard e.type == .mouseMoved, e.location == CGPoint(x: 560, y: 120) else { return }
+            ax.add(item, role: kAXMenuItemRole, title: "Hidden Item", frame: CGRect(x: 540, y: 140, width: 80, height: 20),
+                   extra: [kAXParentAttribute: panel])
+            ax.put(panel, [kAXChildrenAttribute: [button, item]])
+        }
+        let r = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+            action: .hover(CUHoverAction(ref: ref(button), ms: 50)), access: .click, allowForeground: false, privatePath: false))
+        XCTAssertTrue(r.detail?.contains("state() shows what appeared") ?? false, r.detail ?? "")
+        XCTAssertFalse(r.detail?.contains("nothing new appeared") ?? true)
+    }
+
     // MARK: a conservative fallback
 
     func testAPressWhoseEffectOnlyShowsInPixelsIsNeverClickedAsWell() async throws {

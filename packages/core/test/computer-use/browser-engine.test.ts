@@ -66,6 +66,63 @@ describe("browsers.list / open / tabs / tab", () => {
     expect(h.engine.owns("s2", handle.targetId)).toBe(false);
   });
 
+  test("open and tab print the ordinary state of a big page (folded to its line cap); full: true is the model's to ask for", async () => {
+    const h = harness();
+    const big: FakePage = {
+      url: "https://big.example/list", title: "Big list",
+      nodes: [{ id: 1, role: "main", children: [
+        { id: 2, role: "heading", name: "Results", level: 1 },
+        { id: 3, role: "list", name: "Results", children: Array.from({ length: 600 }, (_, i) => ({ id: 100 + i, role: "listitem", name: `Result number ${i}` })) },
+      ] }],
+    };
+    h.winter.pages[big.url] = big;
+    const r = h.run();
+    const handle = await h.engine.global(r.scope, "browsers.open", { url: big.url }) as TabHandle;
+    const opened = r.text();
+    expect(opened).toContain('heading "Results"');
+    expect(opened.split("\n").length).toBeLessThan(330);
+    expect(opened).not.toContain("Result number 599");
+    const full = await h.engine.primitive(r.scope, handle.targetId, "state", { full: true }) as string;
+    expect(full).toContain("Result number 599");
+    expect(full).not.toContain("the full state is cut");
+    // A tab bound with browsers.tab (the first bind, `engine.ts`'s other print): the ordinary state too, asserted —
+    // the bind line, the page's head, folded to the line cap.
+    h.chrome.addTab(big, { tabKey: "500" });
+    const r2 = h.run("s2");
+    const bound = await h.engine.global(r2.scope, "browsers.tab", { tab: "chrome:500" }) as TabHandle;
+    expect(bound).toMatchObject({ id: "chrome:500", browser: "chrome" });
+    const text = r2.text();
+    expect(text).toContain("bound chrome:500 in Google Chrome");
+    expect(text).toContain('heading "Results"');
+    expect(text).toContain('[3] list "Results" (600 more — state({within:3}))');
+    expect(text).not.toContain("Result number");
+    expect(text.split("\n").length).toBeLessThan(330);
+  });
+
+  // Review of round 2 (MEDIUM): the bind's FOLDED print is the diff base; the diff compared every element the read saw, so a
+  // scroll that brought folded rows into view answered "(no changes)", and a change under a fold had no context.
+  test("a scroll after a folded bind surfaces the rows that came into view; a change under a fold prints with its context", async () => {
+    const h = harness();
+    const rows = (first: number, v300 = "a"): FakePage["nodes"] => Array.from({ length: 400 }, (_, i) => ({
+      id: 100 + i, role: "text field", name: `Row ${i}`, value: i === 300 ? v300 : "x", ...(i >= first && i < first + 20 ? {} : { off: true as const }),
+    }));
+    const page: FakePage = { url: "https://rows.example/", title: "Rows", nodes: [{ id: 1, role: "main", children: [{ id: 3, role: "list", name: "List", children: rows(0) }] }] };
+    const tab = h.chrome.addTab(page, { tabKey: "600" });
+    const r = h.run();
+    const handle = await h.engine.global(r.scope, "browsers.tab", { tab: "chrome:600" }) as TabHandle;
+    expect(r.text()).toContain('"Row 0"');
+    expect(r.text()).not.toContain('"Row 60"');
+    tab.page.nodes[0]!.children![0]!.children = rows(50);  // scrolled: rows 50… in view
+    const after = await h.engine.primitive(r.scope, handle.targetId, "state", {}) as string;
+    expect(after).not.toContain("(no changes)");
+    expect(after).toMatch(/\+ \[\d+\] text field "Row 60" value="x" — now shown, in \[\d+\] list "List"/);
+    const again = await h.engine.primitive(r.scope, handle.targetId, "state", {}) as string;
+    expect(again).toContain("(no changes)");
+    tab.page.nodes[0]!.children![0]!.children = rows(50, "b");  // row 300 — never shown, out of view — changes
+    const changed = await h.engine.primitive(r.scope, handle.targetId, "state", {}) as string;
+    expect(changed).toMatch(/~ \[\d+\] value "a" → "b" — \[\d+\] text field "Row 300" value="b", in \[\d+\] list "List"/);
+  });
+
   test("open: a non-http(s) URL is NotAllowed before anything opens; about:blank mints a tab with no url, shown as about:blank", async () => {
     const h = harness();
     const r = h.run();

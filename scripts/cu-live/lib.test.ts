@@ -316,17 +316,27 @@ describe("the scenarios", () => {
     expect(DOCS_BIG_PASTE.length).toBe(3_000);
     expect(DOCS_BIG_PASTE.split("\n").length).toBeGreaterThan(20);
     const ev = (ev: string, o: Record<string, unknown>): FixtureEvent => ({ t: 5, role: "main", ev, ...o });
-    const judge = (name: string, facts: Record<string, unknown>, events: FixtureEvent[], output = "", state?: Record<string, unknown>): boolean =>
-      docs.find((s) => s.name.startsWith(name))!.verify({ output, isError: false, facts, events, since: 0, probe: [], metrics: [], shots: [], ...(state === undefined ? {} : { state }) }).every((c) => c.ok);
+    const judge = (name: string, facts: Record<string, unknown>, events: FixtureEvent[], output = "", state?: Record<string, unknown>,
+                   metrics: Array<Record<string, unknown>> = []): boolean =>
+      docs.find((s) => s.name.startsWith(name))!.verify({ output, isError: false, facts, events, since: 0, probe: [], metrics, shots: [], ...(state === undefined ? {} : { state }) }).every((c) => c.ok);
     // 1. typing: focus in the hidden input, the exact text, the receiver named, "can't be read back".
     const typed = [ev("docs.focus", { id: "doc" }), ev("docs.text", { text: DOCS_TEXT })];
     expect(judge("Docs: type", {}, typed, "sent 40 characters to [9] text area \"Document content\"; received: unverifiable — it can't be read back here")).toBe(true);
     expect(judge("Docs: type", {}, typed, "sent 40 characters to [9] text area")).toBe(false);
-    // 2. the Close button: a click it ignored must be followed by a said fallback; the panel closed.
+    // 2. the Close button: the panel closed. WebKit's accessibility press is itself a mousedown + mouseup + an (ignored)
+    // click, so ONE press passes with no fallback said; a second press is the helper's click and must be said.
     const closed = [ev("docs.mouse", { id: "find-close", phase: "down" }), ev("docs.mouse", { id: "find-close", phase: "up" }), ev("docs.panel", { open: false })];
+    const pressed = [ev("docs.mouse", { id: "find-close", phase: "down" }), ev("docs.mouse", { id: "find-close", phase: "up" }), ev("docs.click", { id: "find-close", ignored: true })];
     expect(judge("Docs: press", {}, closed, "", { docs: { panelOpen: false } })).toBe(true);
-    expect(judge("Docs: press", {}, [ev("docs.click", { id: "find-close", ignored: true }), ...closed], "", { docs: { panelOpen: false } })).toBe(false);
-    expect(judge("Docs: press", {}, [ev("docs.click", { id: "find-close", ignored: true }), ...closed], "the AX press did nothing — clicked instead", { docs: { panelOpen: false } })).toBe(true);
+    expect(judge("Docs: press", {}, [ev("docs.click", { id: "find-close", ignored: true }), ...closed], "", { docs: { panelOpen: false } })).toBe(true);
+    expect(judge("Docs: press", {}, [...pressed, ...closed], "", { docs: { panelOpen: false } })).toBe(false);
+    expect(judge("Docs: press", {}, [...pressed, ...closed], "the AX press did nothing — clicked instead", { docs: { panelOpen: false } })).toBe(true);
+    // ONE press that was the helper's click (the AX press produced no mousedown; the click's rung is an event rung):
+    // the sentence is required — the case the check exists for.
+    const viaClick = [{ primitive: "click", rung: 2 }];
+    expect(judge("Docs: press", {}, closed, "", { docs: { panelOpen: false } }, viaClick)).toBe(false);
+    expect(judge("Docs: press", {}, closed, "the accessibility press did nothing; clicked it instead", { docs: { panelOpen: false } }, viaClick)).toBe(true);
+    expect(judge("Docs: press", {}, closed, "", { docs: { panelOpen: false } }, [{ primitive: "click", rung: 1 }])).toBe(true);
     // 3./4. refusals: the reason, and nothing pasted.
     const titleFocus = [ev("docs.focus", { id: "title" })];
     expect(judge("Docs: paste with no into, multi-line", { refused: "Refused: wrong_field_shape — the title takes one line" }, titleFocus)).toBe(true);
