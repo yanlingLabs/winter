@@ -61,6 +61,11 @@ export class AgentBook {
     await this.save();
   }
 
+  /** Every agent tab's id. */
+  tabIds(): number[] {
+    return [...this.tabs.keys()];
+  }
+
   /** The session an agent tab belongs to, or undefined for the user's tabs. */
   sessionOfTab(tabId: number): string | undefined {
     return this.tabs.get(tabId);

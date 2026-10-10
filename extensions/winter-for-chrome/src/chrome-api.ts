@@ -13,6 +13,8 @@ export interface ChromeTab {
   /** -1 when the tab is in no group. */
   groupId: number;
   status?: "loading" | "complete" | "unloaded";
+  /** Its page was unloaded to save memory (`tabs.discard`); it loads again when shown or navigated. */
+  discarded?: boolean;
   incognito: boolean;
 }
 
@@ -70,6 +72,8 @@ export interface ChromeApi {
     group(p: { tabIds: number[]; groupId?: number; createProperties?: { windowId: number } }): Promise<number>;
     ungroup(tabIds: number[]): Promise<void>;
     onRemoved: ChromeEvent<(tabId: number) => void>;
+    /** The user (never Winter) made a tab the active one of its window. */
+    onActivated: ChromeEvent<(info: { tabId: number; windowId: number }) => void>;
   };
   tabGroups: {
     get(groupId: number): Promise<ChromeTabGroup>;

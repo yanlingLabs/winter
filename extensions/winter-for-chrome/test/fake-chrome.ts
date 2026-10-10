@@ -82,6 +82,7 @@ export class FakeChrome implements ChromeApi {
   readonly debuggerOnEvent = event<(source: DebuggerTarget, method: string, params?: Record<string, unknown>) => void>();
   readonly debuggerOnDetach = event<(source: DebuggerTarget, reason: string) => void>();
   readonly tabsOnRemoved = event<(tabId: number) => void>();
+  readonly tabsOnActivated = event<(info: { tabId: number; windowId: number }) => void>();
   readonly groupsOnRemoved = event<(group: { id: number }) => void>();
   readonly runtimeOnMessage = event<(message: unknown, sender: MessageSender, sendResponse: (r: unknown) => void) => boolean | undefined>();
   readonly actionOnClicked = event<(tab: ChromeTab) => void>();
@@ -98,6 +99,16 @@ export class FakeChrome implements ChromeApi {
   groupFails = false;
   /** The browser will not discard tabs. */
   discardFails = false;
+  /** How a discard treats an attached debugger. Measured (Chrome for Testing 156): the session lives on ("keeps"); an
+   *  older or other browser may end it ("ends") or replace the tab outright, under a new id ("new-id"). */
+  discardMode: "keeps" | "ends" | "new-id" = "keeps";
+  /** The discarded page's stand-in document reports its load (it does, measured). */
+  standInLoads = true;
+  /** When a discard ends the session, the browser says so (`debugger.onDetach`). */
+  detachEventOnDiscard = true;
+  /** Every discard, debugger event and top-level navigation command, in order (what the daemon would see, and when). */
+  timeline: string[] = [];
+  private loader = 0;
 
   constructor() {
     this.addWindow({ id: 1, incognito: false });
@@ -161,8 +172,36 @@ export class FakeChrome implements ChromeApi {
       if (t.active) throw new Error("Cannot discard the active tab.");
       // The page is unloaded without beforeunload: nothing is left to ask "leave this page?".
       this.beforeunload.delete(tabId);
-      this.attachedDebuggers.delete(tabId);
-      return { ...t, discarded: true };
+      this.timeline.push(`discard ${tabId}`);
+      const attached = this.attachedDebuggers.has(tabId);
+      if (this.discardMode === "new-id") {
+        this.tabs_.delete(tabId);
+        const replaced = this.addTab({ ...t, id: undefined, discarded: true, status: "unloaded" });
+        if (attached) {
+          this.attachedDebuggers.delete(tabId);
+          this.pageEnabled.delete(tabId);
+          if (this.detachEventOnDiscard) setTimeout(() => { for (const l of this.debuggerOnDetach.listeners) l({ tabId }, "target_closed"); }, 0);
+        }
+        return { ...replaced };
+      }
+      t.discarded = true;
+      t.status = "unloaded";
+      if (attached && this.discardMode === "ends") {
+        this.attachedDebuggers.delete(tabId);
+        this.pageEnabled.delete(tabId);
+        if (this.detachEventOnDiscard) setTimeout(() => { for (const l of this.debuggerOnDetach.listeners) l({ tabId }, "target_closed"); }, 0);
+      } else if (attached) {
+        // The session lives on: the old document's contexts end and a stand-in document loads (no frameNavigated) —
+        // just after the discard answers.
+        setTimeout(() => {
+          this.emitCdp(tabId, "Runtime.executionContextsCleared");
+          if (this.pageEnabled.has(tabId) && this.standInLoads) {
+            this.emitCdp(tabId, "Page.domContentEventFired", { timestamp: 1 });
+            this.emitCdp(tabId, "Page.loadEventFired", { timestamp: 1 });
+          }
+        }, 0);
+      }
+      return { ...t };
     },
     group: async (p: { tabIds: number[]; groupId?: number; createProperties?: { windowId: number } }) => {
       this.record("tabs.group", p);
@@ -183,6 +222,7 @@ export class FakeChrome implements ChromeApi {
       this.pruneGroups();
     },
     onRemoved: this.tabsOnRemoved,
+    onActivated: this.tabsOnActivated,
   };
 
   tabGroups = {
@@ -228,19 +268,36 @@ export class FakeChrome implements ChromeApi {
       this.record("debugger.sendCommand", target, method, params);
       if (target.tabId === undefined || !this.attachedDebuggers.has(target.tabId)) throw new Error(`Debugger is not attached to the tab with id: ${target.tabId}.`);
       if (method === "Page.enable" && target.sessionId === undefined) this.pageEnabled.add(target.tabId);
-      if (method === "Page.navigate" && target.sessionId === undefined) {
-        // Leaving the page by a navigation: its prompt (if any) comes over CDP, in the background; nothing is activated.
-        const tab = this.tabOr(target.tabId);
-        const url = String(params?.url ?? "");
-        const go = () => { tab.url = url; tab.status = "complete"; this.beforeunload.delete(target.tabId!); };
-        if (this.beforeunload.has(target.tabId) && this.pageEnabled.has(target.tabId)) {
+      if (["Page.navigate", "Page.reload", "Page.navigateToHistoryEntry"].includes(method) && target.sessionId === undefined) {
+        // Leaving the page: its "leave this page?" (if any) brings the tab FORWARD — the measured behaviour, whatever
+        // asks — then comes over CDP when Page events are on, else as a native dialog in the user's browser.
+        const tabId = target.tabId;
+        const tab = this.tabOr(tabId);
+        this.timeline.push(`${method} ${tabId}`);
+        const loaderId = `L${++this.loader}`;
+        const go = () => {
+          if (method === "Page.navigate") tab.url = String(params?.url ?? "");
+          tab.status = "complete";
+          tab.discarded = false;
+          this.beforeunload.delete(tabId);
+          setTimeout(() => {
+            if (!this.pageEnabled.has(tabId) || !this.attachedDebuggers.has(tabId)) return;
+            this.emitCdp(tabId, "Page.frameNavigated", { frame: { id: "F", loaderId, url: tab.url }, type: "Navigation" });
+            this.emitCdp(tabId, "Page.loadEventFired", { timestamp: 2 });
+          }, 0);
+          return method === "Page.navigate" ? { frameId: "F", loaderId } : {};
+        };
+        if (this.beforeunload.has(tabId)) {
+          for (const t of this.tabs_.values()) if (t.windowId === tab.windowId) t.active = t.id === tabId;
+          this.activatedForPrompt.push(tabId);
+          for (const l of this.tabsOnActivated.listeners) l({ tabId, windowId: tab.windowId });
+          if (!this.pageEnabled.has(tabId)) { this.nativeDialogs.push(tabId); return new Promise(() => undefined); }
           return new Promise((resolve) => {
-            this.pendingDialogs.set(target.tabId!, () => { go(); resolve({ frameId: "F", loaderId: "L" }); });
-            this.emitCdp(target.tabId!, "Page.javascriptDialogOpening", { url: tab.url, message: "", type: "beforeunload", hasBrowserHandler: true });
+            this.pendingDialogs.set(tabId, () => resolve(go()));
+            this.emitCdp(tabId, "Page.javascriptDialogOpening", { url: tab.url, message: "", type: "beforeunload", hasBrowserHandler: true });
           });
         }
-        go();
-        return { frameId: "F", loaderId: "L" };
+        return go();
       }
       if (method === "Page.handleJavaScriptDialog") {
         const pending = this.pendingDialogs.get(target.tabId);
@@ -307,6 +364,7 @@ export class FakeChrome implements ChromeApi {
   // ── browser-side events ──────────────────────────────────────────────────────────────────────────────────────────
 
   emitCdp(tabId: number, method: string, params: Record<string, unknown> = {}, sessionId?: string): void {
+    if (sessionId === undefined) this.timeline.push(`event ${method} ${tabId}`);
     for (const l of this.debuggerOnEvent.listeners) l(sessionId === undefined ? { tabId } : { tabId, sessionId }, method, params);
   }
   async userCancelsInfobar(tabId: number): Promise<void> {
@@ -322,6 +380,13 @@ export class FakeChrome implements ChromeApi {
     if (had) for (const l of this.debuggerOnDetach.listeners) l({ tabId }, "target_closed");
     for (const l of this.tabsOnRemoved.listeners) l(tabId);
     this.pruneGroups();
+    await flush();
+  }
+  /** The user switches to a tab. */
+  async userActivates(tabId: number): Promise<void> {
+    const tab = this.tabOr(tabId);
+    for (const t of this.tabs_.values()) if (t.windowId === tab.windowId) t.active = t.id === tabId;
+    for (const l of this.tabsOnActivated.listeners) l({ tabId, windowId: tab.windowId });
     await flush();
   }
   /** The user pins a tab: Chrome takes a pinned tab out of its group. */

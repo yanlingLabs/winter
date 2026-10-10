@@ -15,6 +15,12 @@
 //    browser will not discard it (the active tab: already in front) does it fall back to holding the debugger with Page
 //    events on and accepting that agent tab's own prompt. It ungroups the tab first, so a group's last tab leaves no
 //    group behind.
+//  - The same prompt stands in the way of a NAVIGATION (`Page.navigate`, `Page.reload`, `Page.navigateToHistoryEntry`)
+//    of a background agent tab whose page may raise it — one Winter typed or clicked into (any `Input.*`), or the user
+//    visited, since its document loaded. Such a navigation first discards the page too, then runs exactly as asked on
+//    the SAME debugger session (a discard keeps it — measured), so the daemon gets the browser's own answer and events.
+//    The active tab, the user's own tabs, a page with no input since it loaded, and a subframe's navigation go to the
+//    browser unchanged.
 //  - Stop is the toolbar button: while any tab is driven, a click on it stops Winter there.
 import type { ChromeApi, ChromeTab, Clock, DebuggerTarget } from "./chrome-api";
 import { realClock } from "./chrome-api";
@@ -39,6 +45,16 @@ export const IDLE_DETACH_MS = 5 * 60 * 1000;
 export const CLOSE_TIMEOUT_MS = 10_000;
 /** How long the start waits to learn whether the browser itself just started (`runtime.onStartup`). */
 export const LAUNCH_HINT_MS = 3_000;
+/** How long a navigation waits for a discarded page's stand-in document to finish loading before it runs (so none of
+ *  the stand-in's events can arrive after the new page's), and for a debugger session a discard ended to report so. */
+export const DISCARD_SETTLE_MS = 1_000;
+/** The top-level commands that leave the tab's document — the ones a "leave this page?" prompt can hold up. */
+const LEAVING_METHODS = new Set(["Page.navigate", "Page.reload", "Page.navigateToHistoryEntry"]);
+const NOT_ATTACHED = /not attached to the tab/i;
+/** `leaveWithoutPrompt`'s "not for me": the command goes to the browser as it is. */
+const AS_IS = Symbol("as is");
+/** The answer when the browser ended the debugger session to navigate (the daemon reads `data.navigated`). */
+export const NAVIGATED_IN_NEW_SESSION = "the page was navigated, but the browser started a new debugging session for it — read the page again";
 const DEBUGGER_PROTOCOL_VERSION = "1.3";
 const ATTACHED_KEY = "winterAttached";
 const ALIVE_KEY = "winterAlive";
@@ -52,6 +68,8 @@ interface Attached {
   subscribed: Set<string>;
   idle?: unknown;
   overlay: boolean;
+  /** The daemon turned Page events on in the tab's own session (`Page.enable`). */
+  pageEvents: boolean;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -80,6 +98,15 @@ export class ExtensionController {
   private readonly removedWaiters = new Map<number, () => void>();
   private launch: LaunchKind | undefined;
   private launchWaiter: ((k: LaunchKind) => void) | undefined;
+  /** Agent tabs whose page may ask "leave this page?": Winter sent it input, or the user visited it, since its document
+   *  loaded. Cleared by the tab's next cross-document load. After a worker start, every agent tab (it cannot know). */
+  private readonly mayPrompt = new Set<number>();
+  /** Each window's active tab, as `tabs.onActivated` last said. */
+  private readonly activeIn = new Map<number, number>();
+  /** A navigation waiting for a discarded page's stand-in document to load (`Page.loadEventFired`). */
+  private readonly settleWaiters = new Map<number, () => void>();
+  /** A navigation waiting for the browser to report the debugger session a discard ended (`debugger.onDetach`). */
+  private readonly detachWaiters = new Map<number, () => void>();
 
   constructor(private readonly chrome: ChromeApi, private readonly opts: ControllerOptions) {
     this.book = new AgentBook(chrome);
@@ -103,6 +130,7 @@ export class ExtensionController {
     this.chrome.debugger.onEvent.addListener((source, method, params) => this.onDebuggerEvent(source, method, params));
     this.chrome.debugger.onDetach.addListener((source, reason) => { void this.onDebuggerDetach(source, reason); });
     this.chrome.tabs.onRemoved.addListener((tabId) => this.onTabRemoved(tabId));
+    this.chrome.tabs.onActivated.addListener((info) => this.onActivated(info));
     this.chrome.tabGroups.onRemoved.addListener((group) => { void this.book.dropGroup(group.id); });
     this.chrome.action.onClicked.addListener(() => this.stopDriven());
 
@@ -114,6 +142,8 @@ export class ExtensionController {
     const kind = alive ? undefined : await this.launchKind();
     if (kind === "startup") await this.book.clear();
     else await this.book.load();
+    // What happened in a tab while no worker ran is unknown: leaving any agent tab may ask, until it next loads.
+    for (const tabId of this.book.tabIds()) this.mayPrompt.add(tabId);
     await this.chrome.storage.session.set({ [ALIVE_KEY]: true });
     await this.recoverAttached();
   }
@@ -321,7 +351,7 @@ export class ExtensionController {
     if (!this.attached.has(tabId) && attachRefusal(tab.url ?? tab.pendingUrl, this.chrome.runtimeId) === undefined) {
       try {
         await this.chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
-        this.attached.set(tabId, { tabId, guard: new TabGuard(), subscribed: new Set(), overlay: false });
+        this.attached.set(tabId, { tabId, guard: new TabGuard(), subscribed: new Set(), overlay: false, pageEvents: false });
         await this.saveAttached();
       } catch { /* another debugger, or the tab is going: removed all the same */ }
     }
@@ -359,7 +389,7 @@ export class ExtensionController {
           ? "another debugger is already attached to this tab (DevTools or another extension)"
           : `the browser would not let Winter control this tab: ${message}`);
       }
-      this.attached.set(tabId, { tabId, guard: new TabGuard(), subscribed: new Set(), overlay: false });
+      this.attached.set(tabId, { tabId, guard: new TabGuard(), subscribed: new Set(), overlay: false, pageEvents: false });
       this.goneSent.delete(tabId);
       await this.saveAttached();
       try {
@@ -431,6 +461,12 @@ export class ExtensionController {
     if (decision.kind === "refuse") throw new ExtensionError("not_allowed", decision.reason, { method });
     this.touch(tabId);
     if (decision.kind === "answer") return decision.result;
+    // Input gives the page a user gesture: from now until its next load, leaving it may ask "leave this page?".
+    if (method.startsWith("Input.")) this.mayPrompt.add(tabId);
+    if (LEAVING_METHODS.has(method) && cdpSessionId === undefined && cdpParams.frameId === undefined) {
+      const left = await this.leaveWithoutPrompt(tabId, a, method, cdpParams);
+      if (left !== AS_IS) return left;
+    }
     const target: DebuggerTarget = cdpSessionId === undefined ? { tabId } : { tabId, sessionId: cdpSessionId };
     let result: unknown;
     try {
@@ -439,7 +475,124 @@ export class ExtensionController {
       throw this.cdpError(tabId, err);
     }
     a.guard.observeResult(method, cdpParams, result, cdpSessionId);
+    if (cdpSessionId === undefined && (method === "Page.enable" || method === "Page.disable")) a.pageEvents = method === "Page.enable";
     return result ?? {};
+  }
+
+  // ── leaving a page that may ask "leave this page?" ──────────────────────────────────────────────────────────────
+
+  /**
+   * A top-level navigation of a BACKGROUND agent tab whose page may ask "leave this page?": the browser would bring the
+   * tab forward to show that prompt, whatever raised it (measured) — so the page is discarded first (it unloads with no
+   * beforeunload), and the command then runs exactly as asked on the same debugger session, which a discard keeps
+   * (measured): the daemon gets the browser's own answer and the browser's own events — the discard's (the old
+   * document's frames and contexts end, a stand-in document loads, no `Page.frameNavigated`) and then the navigation's.
+   * `AS_IS` for everything else, and when the browser will not discard the tab.
+   */
+  private async leaveWithoutPrompt(tabId: number, a: Attached, method: string, params: Record<string, unknown>): Promise<unknown> {
+    if (!this.mayPrompt.has(tabId) || this.book.sessionOfTab(tabId) === undefined) return AS_IS;
+    let tab: ChromeTab;
+    try { tab = await this.chrome.tabs.get(tabId); } catch { return AS_IS; }
+    // In front already: a prompt shows where the user is looking, and the daemon answers it.
+    if (tab.active) return AS_IS;
+    let discarded: ChromeTab | undefined;
+    try { discarded = await this.chrome.tabs.discard(tabId); } catch { discarded = undefined; }
+    if (discarded?.id === undefined) return AS_IS;
+    this.mayPrompt.delete(tabId);
+    if (discarded.id !== tabId) return await this.leaveReplacedTab(tabId, discarded.id, a, method, params);
+    // The stand-in document's events come right after the discard: let them all arrive before the navigation's.
+    if (a.pageEvents && this.attached.get(tabId) === a) await this.settle(this.settleWaiters, tabId);
+    if (this.attached.get(tabId) === a) {
+      try {
+        const result = await this.chrome.debugger.sendCommand({ tabId }, method, params);
+        a.guard.observeResult(method, params, result);
+        return result ?? {};
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!NOT_ATTACHED.test(message)) throw this.cdpError(tabId, err);
+      }
+    }
+    return await this.leaveInNewSession(tabId, a, method, params);
+  }
+
+  /** Resolves when `waiters`' entry for the tab is called, or after DISCARD_SETTLE_MS. */
+  private settle(waiters: Map<number, () => void>, tabId: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const done = (): void => {
+        this.clock.clearTimeout(timer);
+        if (waiters.get(tabId) === done) waiters.delete(tabId);
+        resolve();
+      };
+      const timer = this.clock.setTimeout(done, DISCARD_SETTLE_MS);
+      waiters.set(tabId, done);
+    });
+  }
+
+  /**
+   * The discard ended the tab's debugger session (Chrome keeps it; another Chromium browser may not): the daemon is told
+   * the debugger detached (as for any detach), the tab is attached again and the command runs there — and the answer is
+   * `cdp_error` with `data.navigated: true`: the navigation happened, but its events went to a session the daemon no
+   * longer follows, so it reads the page again.
+   */
+  private async leaveInNewSession(tabId: number, a: Attached, method: string, params: Record<string, unknown>): Promise<never> {
+    // Its own onDetach reports it to the daemon; else it is reported here.
+    if (this.attached.get(tabId) === a) await this.settle(this.detachWaiters, tabId);
+    if (this.attached.get(tabId) === a) {
+      this.forgetAttached(tabId, a);
+      this.opts.notify("debugger.detached", { tabKey: String(tabId), reason: "target_closed" });
+    }
+    try {
+      await this.chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
+    } catch (err) {
+      throw new ExtensionError("attach_refused", `the page was unloaded to navigate it, but the browser would not let Winter control the tab again: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    this.attached.set(tabId, { tabId, guard: new TabGuard(), subscribed: new Set(), overlay: false, pageEvents: false });
+    this.goneSent.delete(tabId);
+    await this.saveAttached();
+    try { await this.chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true }); } catch { /* best effort */ }
+    this.touch(tabId);
+    try {
+      await this.chrome.debugger.sendCommand({ tabId }, method, params);
+    } catch (err) {
+      throw this.cdpError(tabId, err);
+    }
+    throw new ExtensionError("cdp_error", NAVIGATED_IN_NEW_SESSION, { navigated: true, cdpMessage: NAVIGATED_IN_NEW_SESSION });
+  }
+
+  /**
+   * The browser gave the discarded tab a new id (older Chromium browsers do): to the daemon the old tab is gone; the new
+   * one is the same session's agent tab. The navigation is still made there (the debugger held only for it), and the
+   * answer is `tab_gone` naming the new tab (`data.tabKey`, `data.navigated`).
+   */
+  private async leaveReplacedTab(oldId: number, newId: number, a: Attached, method: string, params: Record<string, unknown>): Promise<never> {
+    const sessionId = this.book.sessionOfTab(oldId);
+    await this.book.dropTab(oldId);
+    if (sessionId !== undefined) await this.book.addTab(newId, sessionId);
+    this.forgetAttached(oldId, a);
+    try { await this.chrome.debugger.detach({ tabId: oldId }); } catch { /* went with the old tab */ }
+    this.gone(oldId, "closed");
+    let navigated = false;
+    try {
+      await this.chrome.debugger.attach({ tabId: newId }, DEBUGGER_PROTOCOL_VERSION);
+      try {
+        await this.chrome.debugger.sendCommand({ tabId: newId }, method, params);
+        navigated = true;
+      } finally {
+        try { await this.chrome.debugger.detach({ tabId: newId }); } catch { /* best effort */ }
+      }
+    } catch { /* left unloaded: it loads when next attached or shown */ }
+    throw new ExtensionError("tab_gone", navigated
+      ? `the browser replaced the tab to navigate it — it is tab ${newId} now; bind that one`
+      : `the browser replaced the tab — it is tab ${newId} now (not navigated); bind that one`, { navigated, tabKey: String(newId) });
+  }
+
+  /** Drop the record of an attachment that ended (the browser's doing, not a detach of ours). */
+  private forgetAttached(tabId: number, a: Attached): void {
+    if (this.attached.get(tabId) !== a) return;
+    this.attached.delete(tabId);
+    if (a.idle !== undefined) this.clock.clearTimeout(a.idle);
+    if (a.overlay) this.drivenChanged();
+    void this.saveAttached();
   }
 
   /** chrome.debugger's failure as a typed error: a protocol error's JSON becomes cdpCode/cdpMessage. */
@@ -503,6 +656,13 @@ export class ExtensionController {
       return;
     }
     a.guard.observeEvent(method, params, source.sessionId);
+    if (source.sessionId === undefined) {
+      if (method === "Page.loadEventFired") this.settleWaiters.get(tabId)?.();
+      // A new document in the tab: no gesture yet, so leaving it cannot ask (a page restored from the back/forward
+      // cache keeps whatever it had, so that one does not count).
+      const frame = isRecord(params?.frame) ? params.frame : undefined;
+      if (method === "Page.frameNavigated" && frame !== undefined && frame.parentId === undefined && params?.type === "Navigation") this.mayPrompt.delete(tabId);
+    }
     const tabKey = String(tabId);
     if (a.subscribed.has(method) && isAllowedEvent(method)) {
       this.opts.notify("cdp.event", {
@@ -517,6 +677,11 @@ export class ExtensionController {
 
   private async onDebuggerDetach(source: DebuggerTarget, reason: string): Promise<void> {
     const tabId = source.tabId;
+    if (tabId !== undefined) {
+      // A navigation waiting on this session stops waiting: nothing more comes from it.
+      this.settleWaiters.get(tabId)?.();
+      this.detachWaiters.get(tabId)?.();
+    }
     if (tabId === undefined || !this.attached.has(tabId)) return; // not ours, or detached by us
     const a = this.attached.get(tabId)!;
     this.attached.delete(tabId);
@@ -545,9 +710,21 @@ export class ExtensionController {
       if (a.overlay) this.drivenChanged();
     }
     void this.book.dropTab(tabId);
+    this.mayPrompt.delete(tabId);
+    this.settleWaiters.get(tabId)?.();
     this.removedWaiters.get(tabId)?.();
     this.removedWaiters.delete(tabId);
     this.gone(tabId, "closed");
+  }
+
+  /** The user made `info.tabId` active. Winter never does: an agent tab the user visited may have their gesture — until
+   *  it next loads, leaving it may ask "leave this page?", as after Winter's own input. */
+  private onActivated(info: { tabId: number; windowId: number }): void {
+    const before = this.activeIn.get(info.windowId);
+    this.activeIn.set(info.windowId, info.tabId);
+    for (const tabId of [before, info.tabId]) {
+      if (tabId !== undefined && this.book.sessionOfTab(tabId) !== undefined) this.mayPrompt.add(tabId);
+    }
   }
 
   private gone(tabId: number, reason: "closed" | "crashed"): void {

@@ -24,6 +24,7 @@ const api: ChromeApi = {
     group: (p) => chrome.tabs.group(p),
     ungroup: (tabIds) => chrome.tabs.ungroup(tabIds),
     onRemoved: chrome.tabs.onRemoved,
+    onActivated: chrome.tabs.onActivated,
   },
   tabGroups: {
     get: (groupId) => chrome.tabGroups.get(groupId),

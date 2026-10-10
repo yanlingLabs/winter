@@ -165,7 +165,7 @@ On `host.status { daemon: "connected" }` the extension sends:
 | `tabs.keep` | `{ tabKey }` | `{}` — hands an agent tab to the user for good: no longer an agent tab, out of its Winter group, never closed by Winter |
 | `debugger.attach` | `{ tabKey }` | `{ viewport: [w, h], dpr }` — idempotent; the CSS viewport and the device pixel ratio from `Page.getLayoutMetrics` |
 | `debugger.detach` | `{ tabKey }` | `{}` — idempotent; never closes the tab |
-| `cdp.send` | `{ tabKey, method, params, cdpSessionId? }` | `{ result }` — `cdpSessionId` addresses a flattened child target (an out-of-process iframe) |
+| `cdp.send` | `{ tabKey, method, params, cdpSessionId? }` | `{ result }` — `cdpSessionId` addresses a flattened child target (an out-of-process iframe). A top-level `Page.navigate` / `Page.reload` / `Page.navigateToHistoryEntry` of a background agent tab whose page may ask "leave this page?" first DISCARDS the page, then runs as asked (§5.3) |
 | `cdp.subscribe` | `{ tabKey, events }` | `{}` — replaces the tab's forwarded set (a subset of the allowlist's events) |
 | `overlay` | `{ tabKey, active, cursor?: { x, y, kind } }` | `{}` — best effort (§7.4) |
 | `ping` | `{}` | `{}` |
@@ -207,6 +207,38 @@ when it next needs the tab. Only a tab really closed or crashed is reported gone
   root).
 - An idle or `target_closed` detach arrives as `Inspector.detached` (§5.2): attach again. `canceled_by_user` is
   `detached_by_user`.
+- **Leaving a page that may ask "leave this page?"** The browser brings a tab forward to show that prompt, whatever
+  raises it — a close, `Page.navigate`, `Page.reload` or a history move — even when the prompt is reported and answered
+  over CDP (measured, Chrome for Testing 156). So for a top-level `Page.navigate` (no `frameId`), `Page.reload` or
+  `Page.navigateToHistoryEntry` of an AGENT tab that is NOT the active tab and whose page may ask — Winter sent it any
+  `Input.*`, or the user made it the active tab, since its last cross-document load (`Page.frameNavigated` of the top
+  frame with `type: "Navigation"`; a page restored from the back/forward cache keeps its state; after a service-worker
+  start every agent tab counts) — the extension first discards the page (`chrome.tabs.discard`: it unloads with no
+  `beforeunload`), waits for the discarded page's stand-in document to load (at most 1 s), and then sends the engine's
+  own command, unchanged, on the SAME debugger session. A discard keeps the session (measured: no detach, the enabled
+  domains and auto-attach stay on, history entry ids are unchanged), so the engine gets the browser's own answer
+  (`{ frameId, loaderId }` for `Page.navigate`) and the browser's own events, in this order:
+  1. the discard's: `Page.frameDetached` and `Target.detachedFromTarget` for the old subframes and their sessions,
+     `Runtime.executionContextsCleared`, a main-world `Runtime.executionContextCreated`, and a stand-in document's
+     `Page.lifecycleEvent` init/DOMContentLoaded/load/networkIdle, `Page.domContentEventFired` and `Page.loadEventFired`
+     — carrying the OLD document's loaderId, with NO `Page.frameNavigated`;
+  2. then the navigation's own, as for any navigation: `Page.frameNavigated` (`type: "Navigation"`, the answer's
+     loaderId), its contexts, its lifecycle, newly auto-attached subframe sessions.
+
+  The engine needs nothing new for this: its world ends with `executionContextsCleared`, a navigation counts only from a
+  `Page.frameNavigated`, and a DOMContentLoaded counts only for the committed loaderId — the stand-in's events are all
+  in before the command is sent. Unchanged, straight to the browser: the active tab (the prompt shows where the user
+  already is; the engine answers it), the user's own tabs (their prompt protects the user's unsaved work), a page with no
+  input since it loaded, a subframe's navigation (`frameId`, or a child session), and a tab the browser will not
+  discard. Two answers exist only for browsers that behave otherwise (not seen on Chrome for Testing 156):
+  - the discard ENDED the debugger session: the engine gets `debugger.detached { reason: "target_closed" }` (so
+    `Inspector.detached`), the extension attaches again and runs the command there, and the call fails `cdp_error` with
+    `data: { navigated: true, cdpMessage: "the page was navigated, but the browser started a new debugging session for
+    it — read the page again" }`: navigated, the events went to a session the engine no longer follows — treat it as
+    navigated and read the page again;
+  - the browser gave the discarded tab a NEW id: the old `tabKey` is `tab.gone { reason: "closed" }`, the new tab is the
+    same session's agent tab, the navigation is made there, and the call fails `tab_gone` with
+    `data: { navigated, tabKey: "<new>" }`.
 
 ### 5.4 Errors
 
@@ -299,7 +331,11 @@ holds is answered `{}` without being sent.
 
 Measured on Chrome for Testing 156 (the opt-in e2e, `scripts/browser-e2e/extension/`): the flat child session of a
 cross-site iframe, input, focus emulation and screenshots in a background tab, and `DOM.setFileInputFiles` through
-`chrome.debugger` (allowed for the unpacked dev build).
+`chrome.debugger` (allowed for the unpacked dev build). Also measured there: a page with a `beforeunload` handler and a
+user gesture brings its background tab forward for a close, `Page.navigate` and `Page.reload` alike; `chrome.tabs.discard`
+keeps the tab's id and its `chrome.debugger` session; a discarded tab navigates, reloads and moves in its history over
+CDP with no prompt and nothing activated — while `chrome.tabs.goBack`/`goForward` fail on it ("Cannot find a next page
+in history").
 
 ## 8. Host manifests
 

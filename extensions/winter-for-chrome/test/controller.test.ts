@@ -3,7 +3,7 @@
 // guard on every command, events, detaches, the idle detach, what survives a worker restart, an update and a browser
 // restart, the overlay and the toolbar Stop — and never once moving the user's view.
 import { beforeEach, describe, expect, test } from "bun:test";
-import { ExtensionController, ExtensionError, type LaunchKind } from "../src/controller";
+import { DISCARD_SETTLE_MS, ExtensionController, ExtensionError, NAVIGATED_IN_NEW_SESSION, type LaunchKind } from "../src/controller";
 import { FakeChrome, flush, ManualClock } from "./fake-chrome";
 
 let chrome: FakeChrome;
@@ -453,4 +453,186 @@ test("unknown methods are refused as such", async () => {
   await expect(c.handle("tabs.activate", { tabKey: "101" })).rejects.toThrow();
   await expect(c.handle("windows.focus", {})).rejects.toThrow();
   expect(chrome.viewMovingCalls()).toEqual([]);
+});
+
+describe("leaving a page that may ask \"leave this page?\"", () => {
+  const LEAVING = [
+    ["Page.navigate", { url: "https://example.com/next" }],
+    ["Page.reload", { ignoreCache: false }],
+    ["Page.navigateToHistoryEntry", { entryId: 3 }],
+  ] as const;
+  const send = (tabId: number, method: string, params: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) =>
+    c.handle("cdp.send", { tabKey: String(tabId), method, params, ...extra });
+  /** An agent tab the daemon drives: attached, Page and Runtime on, its events subscribed. */
+  async function drivenTab(): Promise<number> {
+    const tab = await open("s_1", "Fix the build", "https://example.com/form");
+    await c.handle("debugger.attach", { tabKey: tab.tabKey });
+    await send(Number(tab.tabKey), "Page.enable");
+    await send(Number(tab.tabKey), "Runtime.enable");
+    await c.handle("cdp.subscribe", { tabKey: tab.tabKey, events: ["Page.frameNavigated", "Page.loadEventFired", "Page.domContentEventFired", "Runtime.executionContextsCleared", "Page.javascriptDialogOpening"] });
+    return Number(tab.tabKey);
+  }
+  /** Winter types into the page — which (like this fixture's page) asks "leave this page?" once it has a gesture. */
+  async function typeInto(tabId: number): Promise<void> {
+    await send(tabId, "Input.insertText", { text: "a draft" });
+    chrome.beforeunload.add(tabId);
+  }
+  const sentCommands = (tabId: number, method: string) => chrome.calls.filter((x) => x.api === "debugger.sendCommand" && (x.args[0] as { tabId: number }).tabId === tabId && x.args[1] === method);
+  const discards = () => chrome.calls.filter((x) => x.api === "tabs.discard").map((x) => x.args[0]);
+  const forwarded = (tabId: number) => notes.filter((n) => n.method === "cdp.event" && n.params.tabKey === String(tabId)).map((n) => n.params.method);
+
+  test("after Winter's input, a background agent tab is discarded first, then navigated as asked on the SAME session — nothing comes forward, and the answer and events are the browser's own", async () => {
+    for (const [method, params] of LEAVING) {
+      const before = chrome.activeTabs();
+      const id = await drivenTab();
+      await typeInto(id);
+      chrome.timeline = [];
+      notes = [];
+      const answer = await send(id, method, params) as { result: Record<string, unknown> };
+      await flush();
+      expect({ method, answer: answer.result }).toEqual({ method, answer: method === "Page.navigate" ? { frameId: "F", loaderId: expect.stringMatching(/^L\d+$/) } : {} });
+      // Nothing asked, nothing came forward.
+      expect(chrome.activatedForPrompt).toEqual([]);
+      expect(chrome.nativeDialogs).toEqual([]);
+      expect(chrome.activeTabs()).toEqual(before);
+      expect(chrome.viewMovingCalls()).toEqual([]);
+      // Discarded, then the command — on the same session (attached once), after the stand-in document loaded.
+      expect(chrome.timeline).toEqual([
+        `discard ${id}`,
+        `event Runtime.executionContextsCleared ${id}`, `event Page.domContentEventFired ${id}`, `event Page.loadEventFired ${id}`,
+        `${method} ${id}`,
+        `event Page.frameNavigated ${id}`, `event Page.loadEventFired ${id}`,
+      ]);
+      expect(chrome.calls.filter((x) => x.api === "debugger.attach" && (x.args[0] as { tabId: number }).tabId === id)).toHaveLength(1);
+      expect(sentCommands(id, method)).toHaveLength(1);
+      expect(sentCommands(id, method)[0]!.args[2]).toEqual(params);
+      // The daemon saw exactly that, and no detach.
+      expect(forwarded(id)).toEqual(["Runtime.executionContextsCleared", "Page.domContentEventFired", "Page.loadEventFired", "Page.frameNavigated", "Page.loadEventFired"]);
+      expect(notes.filter((n) => n.method !== "cdp.event")).toEqual([]);
+      expect(c.attachedTabs()).toContain(id);
+    }
+  });
+
+  test("the command waits for the stand-in document's load — at most a second — so none of its events can follow the new page's", async () => {
+    chrome.standInLoads = false;
+    const id = await drivenTab();
+    await typeInto(id);
+    const pending = send(id, "Page.reload");
+    await flush();
+    expect(discards()).toEqual([id]);
+    expect(sentCommands(id, "Page.reload")).toHaveLength(0);
+    await clock.advance(DISCARD_SETTLE_MS);
+    await pending;
+    expect(sentCommands(id, "Page.reload")).toHaveLength(1);
+    expect(chrome.activatedForPrompt).toEqual([]);
+    // Without Page events there is nothing the daemon could see out of order: no wait at all.
+    const quiet = await open();
+    await c.handle("debugger.attach", { tabKey: quiet.tabKey });
+    await send(Number(quiet.tabKey), "Input.insertText", { text: "x" });
+    await send(Number(quiet.tabKey), "Page.reload");
+    expect(sentCommands(Number(quiet.tabKey), "Page.reload")).toHaveLength(1);
+  });
+
+  test("goes to the browser as it is: a page with no input since it loaded, the active tab, a user's tab, a subframe's navigation, a refused discard", async () => {
+    // No input: leaving cannot ask.
+    const clean = await drivenTab();
+    await send(clean, "Page.navigate", { url: "https://example.com/next" });
+    // The tab the user is looking at: a prompt shows where they already are (and the daemon answers it).
+    const shown = await drivenTab();
+    await send(shown, "Input.insertText", { text: "x" });
+    await chrome.userActivates(shown);
+    await send(shown, "Page.reload");
+    await chrome.userActivates(100);
+    // A user's own tab, driven and typed into: its prompt protects the user's own unsaved work.
+    await c.handle("debugger.attach", { tabKey: "101" });
+    await send(101, "Input.insertText", { text: "x" });
+    await send(101, "Page.navigate", { url: "https://example.com/next" });
+    // A subframe: by frameId, or in a child session.
+    const framed = await drivenTab();
+    await send(framed, "Input.insertText", { text: "x" });
+    await send(framed, "Page.navigate", { url: "https://example.com/next", frameId: "CHILD" });
+    await send(framed, "Page.navigate", { url: "https://example.com/next" }, { cdpSessionId: "S1" });
+    expect(discards()).toEqual([]);
+    // A tab the browser will not discard: the command goes on all the same.
+    chrome.discardFails = true;
+    await send(framed, "Page.reload");
+    expect(discards()).toEqual([framed]);
+    expect(sentCommands(framed, "Page.reload")).toHaveLength(1);
+  });
+
+  test("may ask: after Winter's input or the user's visit, until the next document; a page restored from the back/forward cache keeps it; after a worker start, every agent tab", async () => {
+    // The user visited the agent tab, then went back to theirs: they may have typed there.
+    const visited = await drivenTab();
+    await chrome.userActivates(visited);
+    await chrome.userActivates(100);
+    await send(visited, "Page.reload");
+    expect(discards()).toEqual([visited]);
+    // A new document clears it…
+    const typed = await drivenTab();
+    await send(typed, "Input.insertText", { text: "x" });
+    chrome.emitCdp(typed, "Page.frameNavigated", { frame: { id: "F", loaderId: "N1", url: "https://example.com/other" }, type: "Navigation" });
+    chrome.emitCdp(typed, "Page.frameNavigated", { frame: { id: "C", parentId: "F", loaderId: "N2", url: "https://ads.example/" }, type: "Navigation" });
+    await send(typed, "Page.reload");
+    expect(discards()).toEqual([visited]);
+    // …but a page brought back from the back/forward cache keeps whatever gesture it had.
+    await send(typed, "Input.insertText", { text: "x" });
+    chrome.emitCdp(typed, "Page.frameNavigated", { frame: { id: "F", loaderId: "N3", url: "https://example.com/form" }, type: "BackForwardCacheRestore" });
+    await send(typed, "Page.reload");
+    expect(discards()).toEqual([visited, typed]);
+    // A new worker cannot know what happened while none ran: every agent tab may ask.
+    const later = await drivenTab();
+    const next = await make({ launch: null });
+    await next.handle("debugger.attach", { tabKey: String(later) });
+    await next.handle("cdp.send", { tabKey: String(later), method: "Page.reload", params: {} });
+    expect(discards()).toEqual([visited, typed, later]);
+  });
+
+  test("a browser that ends the debugger session with the discard: one detach reported, attached again, navigated — answered cdp_error with data.navigated", async () => {
+    chrome.discardMode = "ends";
+    const id = await drivenTab();
+    await typeInto(id);
+    notes = [];
+    let error: ExtensionError | undefined;
+    try { await send(id, "Page.navigate", { url: "https://example.com/next" }); } catch (err) { error = err as ExtensionError; }
+    expect(error?.code).toBe("cdp_error");
+    expect(error?.data).toEqual({ navigated: true, cdpMessage: NAVIGATED_IN_NEW_SESSION });
+    expect(notes.filter((n) => n.method === "debugger.detached")).toEqual([{ method: "debugger.detached", params: { tabKey: String(id), reason: "target_closed" } }]);
+    expect(chrome.calls.filter((x) => x.api === "debugger.attach" && (x.args[0] as { tabId: number }).tabId === id)).toHaveLength(2);
+    expect(sentCommands(id, "Page.navigate")).toHaveLength(1);
+    expect(chrome.tabs_.get(id)!.url).toBe("https://example.com/next");
+    expect(c.attachedTabs()).toContain(id);
+    expect(chrome.activatedForPrompt).toEqual([]);
+    // The daemon attaching again finds it attached; the new session's guard knows no world yet.
+    expect(await code(c.handle("debugger.attach", { tabKey: String(id) }))).toBe("ok");
+    expect(await code(send(id, "Runtime.evaluate", { contextId: 1, expression: "1" }))).toBe("not_allowed");
+    // A browser that never says the session ended: reported here, after a second.
+    chrome.detachEventOnDiscard = false;
+    const quiet = await drivenTab();
+    await typeInto(quiet);
+    notes = [];
+    const pending = code(send(quiet, "Page.reload"));
+    await flush();
+    await clock.advance(DISCARD_SETTLE_MS); // no stand-in load comes (the session is gone)…
+    await clock.advance(DISCARD_SETTLE_MS); // …and no word that it ended
+    expect(await pending).toBe("cdp_error");
+    expect(notes.filter((n) => n.method === "debugger.detached")).toEqual([{ method: "debugger.detached", params: { tabKey: String(quiet), reason: "target_closed" } }]);
+  });
+
+  test("a browser that replaces the discarded tab (a new id): the old tab is gone, the new one is the session's, navigated there — answered tab_gone naming it", async () => {
+    chrome.discardMode = "new-id";
+    const id = await drivenTab();
+    await typeInto(id);
+    notes = [];
+    let error: ExtensionError | undefined;
+    try { await send(id, "Page.navigate", { url: "https://example.com/next" }); } catch (err) { error = err as ExtensionError; }
+    const replaced = [...chrome.tabs_.values()].find((t) => t.url === "https://example.com/next")!;
+    expect(replaced.id).not.toBe(id);
+    expect(error?.code).toBe("tab_gone");
+    expect(error?.data).toEqual({ navigated: true, tabKey: String(replaced.id) });
+    expect(notes.filter((n) => n.method === "tab.gone")).toEqual([{ method: "tab.gone", params: { tabKey: String(id), reason: "closed" } }]);
+    expect(await agents()).toEqual([[String(replaced.id), "s_1"]]);
+    expect(c.attachedTabs()).toEqual([]);
+    expect(chrome.attachedDebuggers.has(replaced.id!)).toBe(false);
+    expect(chrome.activatedForPrompt).toEqual([]);
+  });
 });
