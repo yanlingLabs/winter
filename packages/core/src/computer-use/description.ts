@@ -56,7 +56,7 @@ export function computerV2Description(input: ComputerV2DescriptionInput): string
     `  drag(from: ${target}, to: ${target}): Promise<void>;`,
     "  select(ref: Ref, text: string, o?: { before?: string; after?: string; caret?: \"start\" | \"end\" }): Promise<void>;",
     "  action(ref: Ref, name: string): Promise<void>;   // another accessibility action that state() lists for the element",
-    "  menu(path: string[]): Promise<void>;             // [\"File\", \"Export…\"]",
+    "  menu(path: string[]): Promise<void>;             // [\"File\", \"Export…\"] — the app's menu bar; a menu only a web page has (its own File/Tools… bar) is opened in the page with real clicks",
     "  requestForeground(reason: string): Promise<boolean>; // asks the user (a card naming your reason) to let this app come to the front until the script ends; acts then land as they do for a person, and the front goes back after",
     `  hover(t: ${target}, o?: { ms?: number }): Promise<void>; // the pointer rests there (default 600 ms; never your cursor) so hover-only menus, tooltips and buttons appear — then state() shows them`,
     "  windows(): Promise<{ id: number; title: string; focused: boolean }[]>;",

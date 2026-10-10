@@ -2638,6 +2638,8 @@ extension CUCore {
         // Finder's Open (File › Open, or Open on the selection) opens the selected items in the background
         // (NSWorkspace activates:false), never a Finder open event that would bring the opener to the front.
         if let open = try finderOpenRoute(a.path, p, t) { return open }
+        // A web app's own menu bar, inside the page (the app's menu bar has no such menu): real clicks, verified.
+        if let page = try pageMenuIfNotInMenuBar(a, t, token) { return page }
         let key = a.path.map(CUMenuWalker.normalize).joined(separator: "\u{1F}")
         if p.allowForeground {
             return try inForeground(t) {

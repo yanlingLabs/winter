@@ -230,6 +230,10 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   route is). The page's title now; refs read before it are gone, and no `focusNow`/`focusLost` is sent with it
   (that read named the old page). A tab the act opened in the window's own tab bar is said in `detail`
   ("a new tab opened in …"), whether or not it is the one showing.
+- `menu` walks the app's menu bar; when that has no `path[0]` and the bound window's page has its own menu bar
+  (an `AXMenuBar` in its web area) that does, each level is opened with a window-targeted click and verified by
+  the menu it shows, and the last item clicked and verified by its menu closing (`detail` says which). A page menu
+  that does not open is `unsupported`; a missing item is `invalid_params` naming what the page's menu has.
 - `type` and `paste` with no `into` refuse (`refused`) a focus that is not a text field (`focus_not_editable`),
   and several lines or more than 200 characters for a single-line field or for a browser's own field outside the
   page (`wrong_field_shape`); the message names the focus (and the page's editable element).
