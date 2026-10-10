@@ -5,7 +5,7 @@
 // and nothing but `bun run verify:embedded` would otherwise notice it breaking. This pins it cheaply.
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { COMPILED_EMBEDDED_WORKER_ENTRY } from "../../core/src/runtime-sdk/embedded";
@@ -83,3 +83,41 @@ describe("compile:core carries the embedded Worker entry (WS-23)", () => {
     }
   }, 120_000);
 });
+
+// The daemon seeds the skills Winter ships (`computer-use`) into `<home>/sdk/skills` from text EMBEDDED in the
+// binary (`core/src/migration/builtin-skills.ts`, a bun text import). A compiled `winter-core` has no
+// `packages/core/skills/` to read — `import.meta.url` there is a virtual path — so the proof is a real
+// `bun build --compile` of that module, run from a directory that holds no repo.
+describe("compile:core carries the skills it seeds (the managed copy of computer-use)", () => {
+  const CORE_DIR = join(CLI_DIR, "..", "core");
+  const SEED_MODULE = join(CORE_DIR, "src", "migration", "builtin-skills.ts");
+
+  test("the seeding module reads no path at run time: the text arrives by import, never by import.meta, __dirname or a skills/ directory", () => {
+    const code = readFileSync(SEED_MODULE, "utf8").split("\n").filter((l) => !l.trimStart().startsWith("//")).join("\n");
+    expect(code).toMatch(/import computerUseSkill from "\.\.\/\.\.\/skills\/computer-use\/SKILL\.md" with \{ type: "text" \};/);
+    expect(code).not.toMatch(/import\.meta|__dirname|__filename|process\.cwd|readdirSync/);
+  });
+
+  test("a compiled binary seeds the exact bytes of packages/core/skills/computer-use/SKILL.md into a fresh home, from a directory with no repo", () => {
+    const out = mkdtempSync(join(tmpdir(), "winter-seed-compile-"));
+    const elsewhere = mkdtempSync(join(tmpdir(), "winter-seed-cwd-"));
+    try {
+      const entry = join(out, "entry.ts");
+      writeFileSync(entry, `import { seedBuiltinSkills } from ${JSON.stringify(SEED_MODULE)};\nconsole.log(JSON.stringify(seedBuiltinSkills(process.argv[2]!)));\n`);
+      const bin = join(out, "seeder");
+      const build = spawnSync(process.execPath, ["build", "--compile", "--no-compile-autoload-bunfig", "--no-compile-autoload-dotenv", entry, "--outfile", bin], { cwd: CLI_DIR, encoding: "utf8", timeout: 100_000 });
+      expect([build.status, (build.stderr ?? "").includes("error")]).toEqual([0, false]);
+      const home = join(out, "home");
+      const run = spawnSync(bin, [home], { cwd: elsewhere, encoding: "utf8", timeout: 30_000 });
+      expect([run.status, run.stderr.trim()]).toEqual([0, ""]);
+      expect(JSON.parse(run.stdout.trim())).toEqual({ skills: { "computer-use": "seeded" } });
+      const seeded = readFileSync(join(home, "sdk", "skills", "computer-use", "SKILL.md"), "utf8");
+      expect(seeded).toBe(readFileSync(join(CORE_DIR, "skills", "computer-use", "SKILL.md"), "utf8"));
+      expect(seeded.startsWith("---\nname: computer-use\n")).toBe(true);
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  }, 150_000);
+});
+
