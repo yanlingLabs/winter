@@ -421,6 +421,15 @@ describe("ComputerV2: the desktop switch end to end", () => {
     expect(w.fake.calls("target.act").map((a) => [a.allowForeground, a.desktopVisit])).toEqual([[false, undefined], [true, undefined], [true, true]]);
   }, 30_000);
 
+  macOnly("a helper that asks again after the allowance: NeedsForeground (never a bare Error), and no second prompt", async () => {
+    const w = world({ policy: "bypass", answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "switch") });
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("needs_desktop_visit", "still elsewhere", { why: "act" }); };
+    const r = await w.run("const notes = await apps.open('Notes')\ntry { await notes.click(14) } catch (e) { print(e.name, e.message) }");
+    expect(text(r)).toContain("NeedsForeground Notes's window is on another desktop and this needs it on screen");
+    expect(cardsOf(w.events)).toHaveLength(1);
+    expect(w.fake.calls("target.act").map((a) => a.desktopVisit)).toEqual([undefined, true]);
+  }, 30_000);
+
   macOnly("view-only apps never get the prompt for an act, but may for a live read", async () => {
     const w = world({ policy: "bypass", apps: { "com.apple.Notes": { access: "view" } }, answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "switch") });
     w.fake.handlers["target.act"] = visitingAct();

@@ -1244,6 +1244,8 @@ export class ComputerV2Service {
           return { kind: "NoWindow", message: `${prefix}${said}${next}`, untrusted: true };
         }
         case "needs_foreground": return { kind: "NeedsForeground", message: `${name} needs the foreground for that — try an element ref, or ask the user` };
+        // The desktop switch: one that escaped the ladder (asked again after the user allowed it) — never a bare Error.
+        case "needs_desktop_visit": return { kind: "NeedsForeground", message: `${name}'s window is on another desktop and this needs it on screen, which Winter could not arrange — keep to what works from here, or ask the user to bring the window to this desktop` };
         case "not_allowed": return { kind: "NotAllowed", message: typeof data.reason === "string" ? `not allowed: ${data.reason}` : `not allowed in ${name}` };
         case "refused": {
           // The helper's own sentence is KEPT — it says what it actually saw (the live gate: VS Code's "can't tell
