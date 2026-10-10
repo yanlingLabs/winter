@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 import os
 import WinterProtocol
 @testable import WinterKit
@@ -96,10 +97,13 @@ final class PairingSheetModelTests: XCTestCase {
     /// Bounded, condition-based wait for cross-task assertions (the model's event/countdown loops
     /// run as separate `Task`s) — never a fixed real-time sleep; gives up loudly via the caller's
     /// own assertion once `timeout` elapses instead of hanging the suite on a regression.
-    private func waitUntil(timeout: TimeInterval = 2, _ predicate: @escaping () -> Bool) async {
+    private func waitUntil(timeout: TimeInterval = 10, _ predicate: @escaping () -> Bool) async {
+        // The deadline is only the bound on how long a REGRESSION may hang the suite; a passing run leaves as soon as the
+        // condition holds. Sleeping between looks (rather than spinning on `yield`) leaves the cores to the tasks being
+        // waited for.
         let deadline = Date().addingTimeInterval(timeout)
         while !predicate(), Date() < deadline {
-            await Task.yield()
+            try? await Task.sleep(nanoseconds: 1_000_000)
         }
     }
 
@@ -137,7 +141,14 @@ final class PairingSheetModelTests: XCTestCase {
         h.clock.value += 5
         await h.ticker.tick()
 
-        await waitUntil { h.beginCount.value == 2 }
+        // Wait for the RESULT — the sheet showing a different offer — not for `beginPairing` to have been called: the
+        // model sets `state` only after that call returns, so `beginCount == 2` is true while the sheet still shows
+        // the first QR.
+        await waitUntil {
+            if case .showingQR(let payload, _) = h.model.state { return payload != firstPayload }
+            return false
+        }
+        XCTAssertEqual(h.beginCount.value, 2, "exactly one fresh offer was minted")
         guard case .showingQR(let secondPayload, let secondsLeft) = h.model.state else {
             return XCTFail("expected showingQR after auto-regenerate, got \(h.model.state)")
         }
@@ -236,11 +247,23 @@ final class PairingSheetModelTests: XCTestCase {
             return false
         }
 
+        // Watch every state the sheet passes through, then send the stale "expired" followed by an event that DOES
+        // change the state. The reducer takes events strictly in order, so once the sheet shows the second one the
+        // first has been handled — and the states in between say whether it was ignored. (Waiting a fixed number of
+        // scheduler turns for "nothing happened" proves nothing on a machine that is slow to schedule the reducer.)
+        let seen = Box<[PairingSheetModel.State]>([])
+        let watch = h.model.$state.sink { seen.value.append($0) }
+        defer { watch.cancel() }
+        let record = PairRecord(
+            phoneEndpointID: "phone-1", label: "Test iPhone", createdAt: 1_000,
+            caps: ["sessions"], pairingEpoch: 1, lastSeenAt: 1_000
+        )
         h.eventsContinuation.yield(.failed(reason: "expired"))
-        await drain()
+        h.eventsContinuation.yield(.completed(record: record))
+        await waitUntil { h.model.state == .done(record) }
 
         XCTAssertEqual(
-            h.model.state, .confirming(words: words, label: ""),
+            seen.value, [.confirming(words: words, label: ""), .done(record)],
             "a stale 'expired' arriving while already confirming a NEWER request must be ignored, not kill the live prompt"
         )
     }
