@@ -97,6 +97,8 @@ public final class CUCore: @unchecked Sendable {
             blipReadMs = 0
             blipKeySettleMs = 0
             blipPasteHoldMs = 0
+            blipDrainMs = 0
+            returnLoadWatchMs = 0
             keyTapInstaller = CUNoKeyTapInstaller()  // no real tap from a unit test: no blip unless a test fakes one
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
         }
@@ -548,6 +550,13 @@ public final class CUCore: @unchecked Sendable {
     var blipPasteHoldMs: Double = 180
     /// How long keys wait after a keyboard blip begins, for the app to take the key focus. 0 in test cores.
     var blipKeySettleMs: Double = 50
+    /// How long a keyboard blip still holds the window key after its last key, for the app to take the keys from
+    /// its queue: a key it takes after the blip ended goes to whatever window is key then (live: a Return reached
+    /// no field). 0 in test cores.
+    var blipDrainMs: Double = 120
+    /// How long after a Return in a field outside the page (a browser's address field) the page is watched for
+    /// the load it should start. 0 in test cores.
+    var returnLoadWatchMs: Double = 1_500
 
     /// Apps whose `AXFocused` write was seen to activate them (move the user's view): their fields use the
     /// press route first thereafter, for the helper's lifetime. Keyed by bundle id, else app name.

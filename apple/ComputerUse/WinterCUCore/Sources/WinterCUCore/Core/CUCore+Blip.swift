@@ -190,7 +190,7 @@ final class CUKeyBlips {
         }
         if settled { return }
         if let b = blip, !b.isEnded, core.clock.nowMs() - b.begunMs < core.blipBurstMs { return }
-        blip?.end("its burst was spent")
+        if let b = blip, !b.isEnded { drain(); b.end("its burst was spent") }
         blip = nil
         guard core.needsKeyBlip(p, t) else {
             if bursts == 0 { CULog.act.notice("keys in \(self.t.appName, privacy: .public): the window holds the key focus — no focus blip") }
@@ -208,7 +208,12 @@ final class CUKeyBlips {
     }
 
     func end() {
-        blip?.end()
+        if let b = blip, !b.isEnded { drain(); b.end() }
         blip = nil
+    }
+
+    /// The keys just posted are still in the app's queue: held key a moment longer, so they reach this window.
+    private func drain() {
+        if core.blipDrainMs > 0 { usleep(useconds_t(core.blipDrainMs * 1000)) }
     }
 }

@@ -821,6 +821,11 @@ extension CUCore {
             } else {
                 e = try requireTypableFocus(t, g)
             }
+            // Never into another window of the app (live: an insert went to the user's window's address field).
+            if let e, t.accessible, let win = try? windowElement(t), inBoundWindow(e, t, win) == false {
+                CULog.act.notice("type in \(t.appName, privacy: .public): the focus is in another of its windows — refused")
+                throw CUError.refused(.focusUnknown, "the focus in \(t.appName) is in another of its windows, not the bound one, so nothing was typed — click the field in the bound window first, or pass { into }")
+            }
             try guardUnnamedTarget(e, wf, text: text, t)
         }
         try CUFloorScan.checkTypedIntoSavePanel(e, text: text, pid: t.pid, ax: ax)
@@ -1626,6 +1631,10 @@ extension CUCore {
         let keyPid = keyboardTarget(t, focused: e)
         let blips = CUKeyBlips(self, p, t, why: "keys")
         defer { blips.end() }
+        // Return in a field outside the page (below): the page as it was before the key.
+        let returnInChrome = chord.key == .named(.returnKey) && chord.modifiers.isEmpty && t.accessible
+            && e.map { !isWebContent($0) && editableElement($0) } == true
+        let pageBeforeReturn = returnInChrome ? pageSignature(t) : nil
         for _ in 0..<rep {
             try token.check()
             if textual { try requireTypableFocus(t, g) }
@@ -1634,8 +1643,32 @@ extension CUCore {
         // A chord that is a menu command went to the app's menu, not to an element (its detail says which item).
         switch plan {
         case .menuItem, .blipMenuItem: return out
-        default: return receiving(e, t, out)
+        default: break
         }
+        // Return in a field outside the page (a browser's address or search field): it should load a page. Watched
+        // briefly; when nothing loaded, said — never a silent success (live: Return reached no field, and the
+        // result read as done).
+        if let before = pageBeforeReturn {
+            blips.end()
+            let loaded = waitForPageChange(from: before, t, ms: returnLoadWatchMs)
+            if !loaded {
+                let now = pageSignature(t)
+                let page = now?.title.flatMap { $0.isEmpty ? nil : $0 } ?? now?.url ?? "the same page"
+                CULog.act.notice("key in \(t.appName, privacy: .public): Return in a field outside the page — no page change")
+                out = out.noting("the page did not change after Return (still \u{201C}\(page.prefix(80))\u{201D}) — the field may not hold what you typed, or the page is slow: check state(), or waitFor({ title }) if it is loading")
+            }
+        }
+        return receiving(e, t, out)
+    }
+
+    /// Polls the bound window's page until it is another than `before` (an anchor jump aside), up to `ms`.
+    func waitForPageChange(from before: PageSignature, _ t: CUTarget, ms: Double) -> Bool {
+        let deadline = clock.nowMs() + ms
+        repeat {
+            if let now = pageSignature(t), !Self.isSamePage(before, now) { return true }
+            if clock.nowMs() >= deadline { return false }
+            usleep(100_000)
+        } while true
     }
 
     static func producesText(_ c: CUKeyChord) -> Bool {
@@ -1749,6 +1782,13 @@ extension CUCore {
         switch plan {
         case .menuItem(let element, let title):
             aimMenuCommands(at: t)
+            // A menu command acts on the app's MAIN window: if that is still another of its windows (the user's,
+            // perhaps), pressing it would act there (live: Open Location went to another window). Checked after
+            // aiming; nothing is done when it is not the bound one.
+            if let other = mainWindowElsewhere(t) {
+                CULog.act.notice("key in \(t.appName, privacy: .public): the menu item “\(title, privacy: .public)” would act on another window — not pressed")
+                throw CUError.unsupported("\(t.appName)'s menu command “\(title)” acts on its main window, which is another of its windows\(other.isEmpty ? "" : " (\u{201C}\(other)\u{201D})"), and the bound window could not be made main — nothing was done; click what you need in the bound window (state() shows it), or app.requestForeground(reason)")
+            }
             do {
                 try ax.perform(element, kAXPressAction)
             } catch let error where Self.deliveryUncertain(error) {
@@ -2794,6 +2834,16 @@ extension CUCore {
     /// need not be the bound one when the app is in the background: Finder's Go › Downloads opened a NEW window
     /// instead of moving the bound one. Making the bound window the app's main window first points them at it.
     func aimMenuCommands(at t: CUTarget) { makeBoundWindowMain(t) }
+
+    /// The title of the app's main window when it is provably ANOTHER window than the bound one ("" when it has
+    /// none); nil when it is the bound one, or can't be told.
+    func mainWindowElsewhere(_ t: CUTarget) -> String? {
+        guard t.accessible, let w = try? windowElement(t) else { return nil }
+        if ax.bool(w, kAXMainAttribute) == true { return nil }
+        guard let main = ax.element(ax.application(t.pid), kAXMainWindowAttribute) else { return nil }
+        if let id = ax.windowID(main) { return id == t.windowID ? nil : (ax.string(main, kAXTitleAttribute) ?? "") }
+        return CFEqual(main, w) ? nil : (ax.string(main, kAXTitleAttribute) ?? "")
+    }
 
     // MARK: rungs 2–4
 

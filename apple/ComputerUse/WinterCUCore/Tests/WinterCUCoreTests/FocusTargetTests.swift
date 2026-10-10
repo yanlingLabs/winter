@@ -131,7 +131,7 @@ final class FocusTargetTests: XCTestCase {
         ax.put(hidden, [kAXValueAttribute: ""])
         let r = try await act(.type(CUTypeAction(text: "one\ntwo")))
         XCTAssertFalse(poster.keyDowns.contains { $0.flags.contains(.maskCommand) }, "no ⌘V")
-        XCTAssertEqual(poster.keyDowns.map(\.unicode).filter { !$0.isEmpty }.joined(), "onetwo")
+        XCTAssertEqual(poster.keyDowns.map(\.unicode).filter { !$0.isEmpty && $0.unicodeScalars.allSatisfy { $0.value >= 0x20 } }.joined(), "onetwo")
         XCTAssertTrue(r.detail?.contains("received: unverifiable") ?? false, r.detail ?? "")
         XCTAssertFalse(r.detail?.contains("none of it") ?? true)
     }

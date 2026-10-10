@@ -182,7 +182,7 @@ final class BackgroundPasteTests: XCTestCase {
         XCTAssertTrue(ax.performed.isEmpty, "no Edit › Paste")
         XCTAssertFalse(poster.keyDowns.contains { $0.flags.contains(.maskCommand) }, "no ⌘V")
         XCTAssertEqual(poster.keyDowns.map(\.keycode).filter { $0 == Int64(kVK_Return) }.count, 1, "the newline is Return")
-        XCTAssertEqual(poster.keyDowns.map(\.unicode).filter { !$0.isEmpty }.joined(), "onetwo")
+        XCTAssertEqual(poster.keyDowns.map(\.unicode).filter { !$0.isEmpty && $0.unicodeScalars.allSatisfy { $0.value >= 0x20 } }.joined(), "onetwo")
         XCTAssertTrue(r.detail?.contains("received: unverifiable") ?? false, r.detail ?? "")
     }
 
@@ -192,6 +192,23 @@ final class BackgroundPasteTests: XCTestCase {
         XCTAssertTrue(r.detail?.hasPrefix("as a paste (more than 200 characters go as a paste; this field can't be read back)") ?? false, r.detail ?? "")
         XCTAssertTrue(r.detail?.contains("unconfirmed") ?? false, r.detail ?? "")
         XCTAssertFalse(r.detail?.contains("reads them back") ?? true, "never claims a read-back it can't do")
+    }
+
+    func testAKeyboardBlipHoldsTheWindowKeyUntilTheAppHasTakenItsKeys() throws {
+        world()
+        core.blipDrainMs = 60
+        let p = TargetActParams(targetId: "t1", sessionId: "s", callId: "c", action: .key(CUKeyAction(combo: "return")),
+                                access: .full, allowForeground: false, privatePath: true)
+        let blips = CUKeyBlips(core, p, target, why: "keys")
+        try blips.before()
+        XCTAssertTrue(installer.isInstalled, "a blip began")
+        let start = Date()
+        blips.end()
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 0.055, "held key while the app takes its queued keys")
+        XCTAssertFalse(installer.isInstalled, "then ended")
+        let none = Date()
+        blips.end()
+        XCTAssertLessThan(Date().timeIntervalSince(none), 0.02, "no blip: nothing to drain")
     }
 
     func testAnInputTargetThatChangedSaysTheKeysArrived() async throws {

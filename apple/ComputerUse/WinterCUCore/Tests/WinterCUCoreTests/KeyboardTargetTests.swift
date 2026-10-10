@@ -512,6 +512,74 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertTrue(r.detail?.contains("received: unverifiable (only whitespace") ?? false, r.detail ?? "")
     }
 
+    func testAMenuCommandThatWouldActOnAnotherWindowIsNotPressed() async throws {
+        safari(fieldOwner: pid)
+        // The user's own window of the same app stays its main window: the bound one can't be made main.
+        let users = fakeElement(93_097)
+        ax.add(users, role: kAXWindowRole, title: "The user's page", frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        ax.windowIDs[AXIdentity(element: users)] = 88
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [window, users], kAXMainWindowAttribute: users])
+        let bar = fakeElement(93_098), fileItem = fakeElement(93_099), fileMenu = fakeElement(93_100), open = fakeElement(93_101)
+        ax.put(ax.application(pid), [kAXMenuBarAttribute: bar])
+        let appleItem = fakeElement(93_105)
+        ax.add(appleItem, role: "AXMenuBarItem", title: "Apple")
+        ax.put(bar, [kAXChildrenAttribute: [appleItem, fileItem]])
+        ax.add(fileItem, role: "AXMenuBarItem", title: "File", extra: [kAXChildrenAttribute: [fileMenu]])
+        ax.add(fileMenu, role: kAXMenuRole, extra: [kAXChildrenAttribute: [open]])
+        ax.add(open, role: kAXMenuItemRole, title: "Open Location…", extra: [kAXMenuItemCmdCharAttribute: "L", kAXMenuItemCmdModifiersAttribute: 0])
+        ax.setActions(open, [kAXPressAction])
+        ax.ignoresWrites = ["\(token(window)):AXMain"]
+        do {
+            let r = try await act(.key(CUKeyAction(combo: "cmd+l")))
+            XCTFail("pressed on another window: \(r.detail ?? "") \(ax.performed) \(ax.written)")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "unsupported")
+            XCTAssertTrue(e.message.contains("“Open Location…” acts on its main window, which is another of its windows (“The user's page”)"), e.message)
+        }
+        XCTAssertFalse(ax.performed.contains("\(token(open)):AXPress"), "nothing pressed")
+        // Once the bound window is main, the command is pressed.
+        ax.put(ax.application(pid), [kAXMainWindowAttribute: window])
+        _ = try await act(.key(CUKeyAction(combo: "cmd+l")))
+        XCTAssertTrue(ax.performed.contains("\(token(open)):AXPress"))
+    }
+
+    func testTypingNeverGoesIntoAnotherWindowsFocus() async throws {
+        safari(fieldOwner: pid)
+        let users = fakeElement(93_102), usersField = fakeElement(93_103)
+        ax.add(users, role: kAXWindowRole, title: "The user's page", frame: CGRect(x: 0, y: 0, width: 800, height: 600),
+               extra: [kAXChildrenAttribute: [usersField]])
+        ax.windowIDs[AXIdentity(element: users)] = 88
+        ax.add(usersField, role: kAXTextFieldRole, title: "Address", frame: CGRect(x: 10, y: 10, width: 300, height: 20),
+               extra: [kAXWindowAttribute: users, kAXParentAttribute: users, kAXValueAttribute: "example.test"])
+        ax.makeSettable(usersField, kAXSelectedTextAttribute)
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [window, users], kAXFocusedWindowAttribute: users])
+        ax.focus(pid: pid, on: usersField)  // the app's focus: the user's window
+        ax.put(window, [kAXFocusedUIElementAttribute: AXUIElement?.none as Any])
+        _ = try? await act(.type(CUTypeAction(text: "https://example.com")))
+        XCTAssertFalse(ax.written.contains("\(token(usersField)):\(kAXSelectedTextAttribute)"), "never inserted into the user's window")
+        XCTAssertEqual(ax.string(usersField, kAXValueAttribute), "example.test")
+    }
+
+    func testReturnInAFieldOutsideThePageThatLoadsNothingSaysSo() async throws {
+        safari(fieldOwner: pid)
+        let address = fakeElement(93_104)
+        ax.add(address, role: kAXTextFieldRole, title: "Address", frame: CGRect(x: 100, y: 10, width: 400, height: 20),
+               extra: [kAXParentAttribute: window, kAXWindowAttribute: window, kAXValueAttribute: "https://example.com"])
+        let kids = ax.elements(window, kAXChildrenAttribute)
+        ax.put(window, [kAXChildrenAttribute: [address] + kids])
+        ax.focus(pid: pid, on: address)
+        let r = try await act(.key(CUKeyAction(combo: "return")))
+        XCTAssertTrue(r.detail?.contains("the page did not change after Return") ?? false, r.detail ?? "")
+        // A Return that loads a page says nothing of the kind (the page line says it changed).
+        let web = ax.elements(window, kAXChildrenAttribute).first { ax.string($0, kAXRoleAttribute) == "AXWebArea" }!
+        poster.onPost = { [unowned self] e in
+            if e.type == .keyUp { ax.put(web, ["AXURL": URL(string: "https://example.com/")! as CFURL, kAXTitleAttribute: "Example"]) }
+        }
+        let loaded = try await act(.key(CUKeyAction(combo: "return")))
+        XCTAssertFalse(loaded.detail?.contains("did not change") ?? false, loaded.detail ?? "")
+        XCTAssertNotNil(loaded.pageNow)
+    }
+
     func testATabMovesTheFocusOnPurpose() async throws {
         safari(fieldOwner: pid)
         let search = searchHasFocus()

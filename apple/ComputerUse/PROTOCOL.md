@@ -242,6 +242,12 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   route is). The page's title now; refs read before it are gone, and no `focusNow`/`focusLost` is sent with it
   (that read named the old page). A tab the act opened in the window's own tab bar is said in `detail`
   ("a new tab opened in …"), whether or not it is the one showing.
+- A `key` chord that is a menu command (⌘L → Open Location…) is pressed only when the bound window is the
+  app's main window after aiming (a menu command acts on the main window, which can be another of its windows —
+  the user's); otherwise `unsupported`, nothing done. A `type`/`paste` with no `into` never goes into a focus
+  that is provably in another window of the app. `Return` in a text field outside the page (a browser's address
+  field) watches the page for a load; when none starts, its `detail` says so.
+- A keyboard focus blip holds the window key a moment after its last key (the app takes queued keys then).
 - `menu` walks the app's menu bar; when that has no `path[0]` and the bound window's page has its own menu bar
   (an `AXMenuBar` in its web area) that does, each level is opened with a window-targeted click and verified by
   the menu it shows, and the last item clicked and verified by its menu closing (`detail` says which). A page menu
