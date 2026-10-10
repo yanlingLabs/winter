@@ -96,6 +96,7 @@ public final class CUCore: @unchecked Sendable {
             selectionHoldMs = 0
             blipReadMs = 0
             blipKeySettleMs = 0
+            blipPasteHoldMs = 0
             keyTapInstaller = CUNoKeyTapInstaller()  // no real tap from a unit test: no blip unless a test fakes one
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
         }
@@ -526,9 +527,14 @@ public final class CUCore: @unchecked Sendable {
     static let blipFrontWaitMs: Double = 150
     /// How long a command is read for inside one blip. 0 in test cores (one read).
     var blipReadMs: Double = 120
-    /// A keyboard blip's burst: keys go out until this long after the blip began, then the blip ends and a
-    /// fresh one begins (each ends within `blipDeadlineMs`).
-    var blipBurstMs: Double = 180
+    /// A keyboard blip's bound and burst: ONE blip per act of typing (fewer, longer — live, a blip every ~4
+    /// characters cost ~200 ms each), keys going out until `blipBurstMs` after it began; a longer act takes a
+    /// fresh blip per burst. The tap comes off by the bound whatever happens.
+    var keyBlipBoundMs: Double = 1_500
+    var blipBurstMs: Double = 1_300
+    /// How long a paste blip holds the window key after Edit › Paste / ⌘V, for the page to take it (34 ms was
+    /// too short live). 0 in test cores.
+    var blipPasteHoldMs: Double = 180
     /// How long keys wait after a keyboard blip begins, for the app to take the key focus. 0 in test cores.
     var blipKeySettleMs: Double = 50
 

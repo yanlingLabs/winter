@@ -106,7 +106,7 @@ final class BackgroundPasteTests: XCTestCase {
         XCTAssertTrue(poster.keyDowns.isEmpty, "no keys typed")
         XCTAssertEqual(installer.removed, installer.installed.count)
         XCTAssertTrue(r.detail?.contains("pasted through Browser's Edit › Paste") ?? false, r.detail ?? "")
-        XCTAssertTrue(r.detail?.contains("pasted, unconfirmed") ?? false, "nothing to read it back by: \(r.detail ?? "")")
+        XCTAssertTrue(r.detail?.contains("unconfirmed") ?? false, "nothing to read it back by: \(r.detail ?? "")")
         XCTAssertEqual(sys.frontmostPid(), 1)
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(pb.readString(), "user's own", "the clipboard restored")
@@ -125,7 +125,7 @@ final class BackgroundPasteTests: XCTestCase {
         XCTAssertTrue(during.first?.flags.contains(.maskCommand) ?? false)
         XCTAssertEqual(during.first?.tap, true, "inside the blip")
         XCTAssertEqual(poster.entries.first { $0.type == .keyDown }?.pid, pid, "to the app itself, which handles key equivalents")
-        XCTAssertEqual(installer.installed.count, 2, "the blip and its retry")
+        XCTAssertEqual(installer.installed.count, 1, "one blip, held while the page takes it")
         XCTAssertTrue(r.detail?.contains("pasted with ⌘V") ?? false, r.detail ?? "")
     }
 

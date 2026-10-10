@@ -196,25 +196,62 @@ struct CUPasteSequence {
 
 /// Polls for evidence that an edit landed (spec I6/I9): the element's value differs from `before`, or a
 /// value-change notification from the pid arrived after `since`. Pure apart from the injected readers.
+/// Proof that an edit landed: the element's CONTENT, normalized the same way before and after (zero-width filler
+/// stripped, whitespace runs folded), changed AND now holds the text the edit put in. Never a raw value that merely
+/// differs (a canvas editor's filler can flicker), a moved caret, or a bare value-changed notification — live, each
+/// of those "verified" pastes that never landed.
 struct CUEditEvidence {
     var readValue: () -> String?
-    var lastValueChangeMs: () -> Double?
     var nowMs: () -> Double
     var sleepMs: (Double) -> Void
 
-    /// The selected range, as text, when the element has one (a paste moves the caret).
-    var readSelection: () -> String? = { nil }
-
-    /// Waits up to `capMs`. A notification counts once the app has been quiet on it for `quietMs`.
-    func wait(before: String?, selectionBefore: String? = nil, since: Double, capMs: Double, pollMs: Double = 25,
-              quietMs: Double = 60) -> Bool {
+    /// Waits up to `capMs` for the proof. `expect`: the text put in (its first `probeLength` normalized characters
+    /// must appear); nil when unknown (then only a real content change counts).
+    func wait(before: String?, expect: String?, capMs: Double, pollMs: Double = 25) -> Bool {
         let start = nowMs()
+        let was = Self.normalized(before ?? "")
+        let probe = expect.map { String(Self.normalized($0).prefix(Self.probeLength)) }
+        if let probe, probe.isEmpty { return false }  // nothing to look for: no proof possible
         while true {
-            if let v = readValue(), v != before { return true }
-            if let s = readSelection(), let b = selectionBefore, s != b { return true }
-            if let n = lastValueChangeMs(), n > since, nowMs() - n >= quietMs { return true }
+            if let v = readValue() {
+                let now = Self.normalized(v)
+                // Changed, and (when known) the text put in appears once more than it did before.
+                if now != was, probe.map({ Self.occurrences(of: $0, in: now) > Self.occurrences(of: $0, in: was) }) ?? true {
+                    return true
+                }
+            }
             if nowMs() - start >= capMs { return false }
             sleepMs(pollMs)
         }
+    }
+
+    static let probeLength = 32
+
+    static func occurrences(of needle: String, in hay: String) -> Int {
+        guard !needle.isEmpty else { return 0 }
+        var n = 0
+        var range = hay.startIndex..<hay.endIndex
+        while let r = hay.range(of: needle, range: range) {
+            n += 1
+            range = r.upperBound..<hay.endIndex
+        }
+        return n
+    }
+
+    /// Zero-width and filler characters removed, whitespace runs folded to one space, trimmed.
+    static func normalized(_ s: String) -> String {
+        let filler: Set<Unicode.Scalar> = ["\u{200B}", "\u{200C}", "\u{200D}", "\u{FEFF}", "\u{2060}", "\u{00AD}"]
+        var out = ""
+        var space = false
+        for u in s.unicodeScalars where !filler.contains(u) {
+            if CharacterSet.whitespacesAndNewlines.contains(u) || u == "\u{00A0}" {
+                space = true
+            } else {
+                if space, !out.isEmpty { out.append(" ") }
+                space = false
+                out.unicodeScalars.append(u)
+            }
+        }
+        return out
     }
 }

@@ -878,7 +878,7 @@ extension CUCore {
                     // Before EVERY character: not cancelled, still running, and focus still on a typable,
                     // non-sensitive field — a tab or return may just have moved it to a password field.
                     try token.check()
-                    blips.before()
+                    try blips.before()
                     guard sys.appRunning(t.pid) else { throw CUError.targetLost("\(t.appName) quit while typing", reason: .appQuit) }
                     if sent > 0, chars[sent - 1] == "\t" || chars[sent - 1].isNewline { g.focusMayHaveMoved = true }
                     try requireTypableFocus(t, g)
@@ -1414,15 +1414,12 @@ extension CUCore {
     }
 
     /// Polls for evidence that an edit landed: the value changed, or a value-change notification arrived.
-    func waitForEdit(_ t: CUTarget, _ e: AXUIElement?, before: String?, selectionBefore: String? = nil, since: Double,
-                     capMs: Double) -> Bool {
-        let ax = self.ax, monitor = self.monitor, clock = self.clock
-        var evidence = CUEditEvidence(readValue: { e.flatMap { ax.string($0, kAXValueAttribute) } },
-                                      lastValueChangeMs: { monitor.lastValueChangeMs(pid: t.pid) },
+    func waitForEdit(_ t: CUTarget, _ e: AXUIElement?, before: String?, expect: String?, capMs: Double) -> Bool {
+        let ax = self.ax, clock = self.clock
+        let evidence = CUEditEvidence(readValue: { e.flatMap { ax.string($0, kAXValueAttribute) } },
                                       nowMs: { clock.nowMs() },
                                       sleepMs: { usleep(useconds_t($0 * 1000)) })
-        evidence.readSelection = { e.flatMap { Self.selectionText(ax, $0) } }
-        return evidence.wait(before: before, selectionBefore: selectionBefore, since: since, capMs: capMs)
+        return evidence.wait(before: before, expect: expect, capMs: capMs)
     }
 
     /// An element's selected range as text ("12+0"), when it has one.
@@ -1436,12 +1433,12 @@ extension CUCore {
                            _ token: CUCancellation.Token, _ g: TypingFocus) throws -> ActOutcome {
         try token.check()
         let focus = try requireTypableFocus(t, g)
-        let before = focus.flatMap { ax.string($0, kAXValueAttribute) }.flatMap { Self.showsText($0) ? $0 : nil }
-        let selectionBefore = focus.flatMap { Self.selectionText(ax, $0) }
-        // Confirmable only where the focused element shows its value or selection. A web or canvas editor
-        // (Google Docs) shows neither — its body reads as zero-width characters whatever it holds: waiting
-        // for evidence that never comes was pure delay.
-        let confirmable = before != nil || selectionBefore != nil
+        // Confirmable only where the focused element shows its text: then the proof is that text, normalized
+        // before and after, now holding what was pasted. A web or canvas editor that shows only zero-width filler
+        // (whatever it holds) can't be read back: no waiting for proof that never comes — "unconfirmed".
+        let before = focus.flatMap { ax.string($0, kAXValueAttribute) }
+        let confirmable = before.map { Self.showsText($0) } ?? false
+        let expect = CUPasteSequence.plain(text: text, format: format)
         // Web content takes a paste late, if at all (Docs' title took none from the background): a short look
         // at the value, then the answer — unconfirmed, the clipboard restored once the page has had time.
         let web = isWebContent(focus) || (focus.map { keyboardTarget(t, focused: $0) != t.pid } ?? false)
@@ -1457,7 +1454,8 @@ extension CUCore {
             // Restore only once the paste visibly happened (or 1.5 s passed): an app that reads the
             // clipboard late must not get the user's own contents instead.
             waitForEvidence: {
-                self.waitForEdit(t, focus, before: before, selectionBefore: selectionBefore, since: since, capMs: web ? 400 : 1500)
+                _ = since
+                return self.waitForEdit(t, focus, before: before, expect: expect, capMs: web ? 800 : 1500)
             })
         // An earlier unconfirmed paste's restore still pending: its saved clipboard is the user's (what is on the
         // clipboard now is Winter's text), unless the user copied something since.
@@ -1474,12 +1472,14 @@ extension CUCore {
         case .leftAlone:
             o.detail = [o.detail, "the clipboard changed meanwhile, so it was not restored"].compactMap { $0 }.joined(separator: "; ")
         case .restored(let evidence) where !evidence:
-            o.detail = [o.detail, "the paste was not confirmed within 1.5 s"].compactMap { $0 }.joined(separator: "; ")
+            o.detail = [o.detail, "unconfirmed — the field does not show the pasted text (within 1.5 s); check state() before pasting again"].compactMap { $0 }.joined(separator: "; ")
+        case .restored:
+            o.detail = [o.detail, "the field shows the pasted text"].compactMap { $0 }.joined(separator: "; ")
         case .unconfirmed:
-            o.detail = [o.detail, "pasted, unconfirmed: the paste was sent but is not in the field yet — check the state; the clipboard is restored once \(t.appName) has had time to read it"]
+            o.detail = [o.detail, "unconfirmed — the field does not show the pasted text yet; check state() before pasting again; the clipboard is restored once \(t.appName) has had time to read it"]
                 .compactMap { $0 }.joined(separator: "; ")
         case .deferred:
-            o.detail = [o.detail, "pasted, unconfirmed: \(t.appName) doesn't show its text to accessibility here, so the paste can't be read back — check the state; the clipboard is restored once \(t.appName) has had time to read it"]
+            o.detail = [o.detail, "unconfirmed — can't be read back: \(t.appName) doesn't show this editor's text to accessibility; check something the app shows (a word count) or a screenshot before pasting again; the clipboard is restored once \(t.appName) has had time to read it"]
                 .compactMap { $0 }.joined(separator: "; ")
         default: break
         }
@@ -1670,7 +1670,7 @@ extension CUCore {
             let keys = blips ?? CUKeyBlips(self, p, t, why: "keys")
             defer { if blips == nil { keys.end() } }
             return try runEvents(p, t, d, focus: true, token) { route, _ in
-                keys.before()
+                try keys.before()
                 return synth.key(pid: pid, code: code, flags: flags, route: route)
             }
         case .emulated(let command, let f, let fallback):
@@ -1733,7 +1733,7 @@ extension CUCore {
             let synth = self.synth(p)
             let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
             _ = try runEvents(p, t, d, focus: true, token) { route, _ in
-                keys.before()
+                try keys.before()
                 return synth.key(pid: keyPid, code: CUKeyCodes.code(for: .delete), flags: [], route: route)
             }
             return ActOutcome(rung: .accessibility, detail: "\(note) the selected text was copied (as plain text) and deleted")
@@ -1773,7 +1773,7 @@ extension CUCore {
             let started = clock.nowMs()
             let typed = try typingProgress(text.count, sent: { sent }, t) {
                 try runEvents(p, t, d, focus: true, token) { route, _ in
-                    try synth.type(pid: keyPid, text: text, route: route, between: { try token.check(); keys.before() },
+                    try synth.type(pid: keyPid, text: text, route: route, between: { try token.check(); try keys.before() },
                                    posted: { sent = $0 })
                 }
             }
@@ -1789,33 +1789,48 @@ extension CUCore {
     /// still reads disabled, ⌘V to the app while its window holds the key focus (the key equivalent is validated
     /// as it is handled). The detail for the result, or nil when no blip could run.
     private func pasteInBlip(_ item: (element: AXUIElement, title: String), _ p: TargetActParams, _ t: CUTarget) throws -> String? {
-        for attempt in 1...2 {
-            guard let blip = beginBlip(p, t, why: "“\(item.title)” (try \(attempt))") else { return nil }
-            defer { blip.end() }
-            activateForMenu(p, t)
-            let until = clock.nowMs() + blipReadMs
-            repeat {
-                if ax.bool(item.element, kAXEnabledAttribute) == true {
-                    CULog.act.notice("paste in \(t.appName, privacy: .public): Edit › \(item.title, privacy: .public) enabled in the focus blip (try \(attempt, privacy: .public)) — pressed")
-                    do {
-                        try ax.perform(item.element, kAXPressAction)
-                    } catch let error where Self.deliveryUncertain(error) {
-                        throw busyAfterSend(t)
-                    }
-                    return "pasted through \(t.appName)'s Edit › \(item.title) with its window key for a moment (your app kept the front)"
-                }
-                if clock.nowMs() >= until || blip.isEnded { break }
-                usleep(20_000)
-            } while true
-            if attempt == 2, !blip.isEnded {
-                CULog.act.notice("paste in \(t.appName, privacy: .public): Edit › \(item.title, privacy: .public) still disabled in the focus blip — ⌘V while its window holds the key focus")
-                synth(p).key(pid: t.pid, code: CUKeyCodes.code(for: Character("v")) ?? 9, flags: .maskCommand,
-                             route: skyLight.isAvailable ? .skyLight : .publicPid)
-                return "pasted with ⌘V while \(t.appName)'s window held the key focus for a moment (your app kept the front)"
-            }
-            CULog.act.notice("paste in \(t.appName, privacy: .public): Edit › \(item.title, privacy: .public) still disabled in the focus blip (try \(attempt, privacy: .public))")
+        // ONE blip, long enough for the page to take the paste: the window takes the key focus, then Edit › Paste
+        // if it validates, else ⌘V (yesterday's only body paste that landed came by ⌘V) — and the window stays key
+        // for `blipPasteHoldMs` while the page reads the clipboard. A desktop switch meanwhile stops it.
+        let bound = blipKeySettleMs + blipReadMs + blipPasteHoldMs + 150
+        guard let blip = beginBlip(p, t, why: "“\(item.title)”", boundMs: max(Self.blipDeadlineMs, bound)) else { return nil }
+        defer { blip.end() }
+        if blipKeySettleMs > 0 { usleep(useconds_t(blipKeySettleMs * 1000)) }
+        activateForMenu(p, t)
+        var how: String
+        let until = clock.nowMs() + blipReadMs
+        var enabled = ax.bool(item.element, kAXEnabledAttribute) == true
+        while !enabled, clock.nowMs() < until, !blip.isEnded {
+            usleep(20_000)
+            enabled = ax.bool(item.element, kAXEnabledAttribute) == true
         }
-        return nil
+        if enabled {
+            CULog.act.notice("paste in \(t.appName, privacy: .public): Edit › \(item.title, privacy: .public) enabled in the focus blip — pressed")
+            do {
+                try ax.perform(item.element, kAXPressAction)
+            } catch let error where Self.deliveryUncertain(error) {
+                throw busyAfterSend(t)
+            }
+            how = "pasted through \(t.appName)'s Edit › \(item.title) with its window key for a moment (your app kept the front)"
+        } else {
+            CULog.act.notice("paste in \(t.appName, privacy: .public): Edit › \(item.title, privacy: .public) disabled in the focus blip — ⌘V while its window holds the key focus")
+            synth(p).key(pid: t.pid, code: CUKeyCodes.code(for: Character("v")) ?? 9, flags: .maskCommand,
+                         route: skyLight.isAvailable ? .skyLight : .publicPid)
+            how = "pasted with ⌘V while \(t.appName)'s window held the key focus for a moment (your app kept the front)"
+        }
+        // Held while the page takes it; a desktop switch stops it at once.
+        let hold = clock.nowMs() + blipPasteHoldMs
+        repeat {
+            if let space = blip.space, let now = sys.activeSpace(), now != space {
+                blip.end("the desktop began to switch")
+                CULog.act.fault("paste in \(t.appName, privacy: .public): macOS began switching desktops during the paste blip — stopped")
+                throw CUError.uncertain("macOS began switching desktops during the paste into \(t.appName), so it was stopped (the user's desktop is being put back); the paste may have landed — check state() before pasting again")
+            }
+            if clock.nowMs() >= hold || blip.isEnded { break }
+            usleep(15_000)
+        } while true
+
+        return how
     }
 
     /// Runs a typing loop. An error after some characters went out says how many (`data.typed`, `data.total`,

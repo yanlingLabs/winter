@@ -403,10 +403,40 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         XCTAssertEqual(installer.installed, [pid], "one blip for the burst")
         XCTAssertEqual(installer.removed, 1)
         XCTAssertEqual(Array(FocusSPI.calls.suffix(2)), ["defocus pid 5252 window 77", "focus pid 1 window 31"], "handed back")
-        XCTAssertTrue(scheduled.allSatisfy { $0.ms <= 250 }, "the hard deadline")
+        XCTAssertTrue(scheduled.allSatisfy { $0.ms <= 1_500 }, "the hard bound of a keyboard blip")
         XCTAssertFalse(FocusSPI.calls.contains { $0.hasPrefix("front ") })
         XCTAssertEqual(sys.frontmostPid(), 1)
         XCTAssertTrue(sys.activated.isEmpty)
+    }
+
+    func testADesktopSwitchDuringATypingBlipStopsTheAct() async throws {
+        finder(focusedField: true)
+        sys.space = 100
+        poster.onPost = { [unowned self] e in if e.type == .keyUp { sys.space = 200 } }  // macOS began switching
+        do {
+            try await act(.type(CUTypeAction(text: "abc")))
+            XCTFail("stopped")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "busy")
+            XCTAssertEqual(e.data?["uncertain"], .bool(true))
+            XCTAssertTrue(e.message.contains("macOS began switching desktops"), e.message)
+            XCTAssertTrue(e.message.contains("1 of 3 characters had been typed"), e.message)
+        }
+        XCTAssertEqual(poster.keyDowns.count, 1, "nothing more was sent")
+        XCTAssertEqual(installer.removed, installer.installed.count)
+    }
+
+    func testTheTimerRemovesTheTapAtTheBoundEvenIfTheActIsStillGoing() async throws {
+        finder(trashEnabled: false)
+        var removedByTimer: Int?
+        FocusSPI.onFocus = { [unowned self] in
+            guard FocusSPI.calls.last == "focus pid \(pid) window 77", let bound = scheduled.last else { return }
+            bound.work()  // the bound arrives while the act is still inside the blip
+            removedByTimer = installer.removed
+        }
+        _ = try? await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
+        XCTAssertEqual(removedByTimer, 1, "the tap came off at the bound")
+        XCTAssertEqual(installer.removed, installer.installed.count, "and never twice")
     }
 
     func testAKeyRepeatedIsOneBurst() async throws {
@@ -527,7 +557,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         let start = Date()
         let r = try await act(.paste(CUPasteAction(text: "report text")))
         XCTAssertLessThan(Date().timeIntervalSince(start), 1.0, "no 1.5 s wait for evidence that never comes")
-        XCTAssertTrue(r.detail?.contains("pasted, unconfirmed") ?? false, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("unconfirmed — can't be read back") ?? false, r.detail ?? "")
         XCTAssertEqual(pb.readString(), "report text", "the target can still read it")
         try await Task.sleep(nanoseconds: 400_000_000)
         XCTAssertEqual(pb.readString(), "user's own", "and the user's clipboard came back")
@@ -550,7 +580,7 @@ final class FocusMenusFoldPasteTests: XCTestCase {
             if e.type == .keyDown, e.keycode == 9 { ax.put(field, [kAXValueAttribute: "hello world"]) }
         }
         let r = try await act(.paste(CUPasteAction(text: " world")))
-        XCTAssertFalse(r.detail?.contains("pasted, unconfirmed") ?? false)
+        XCTAssertFalse(r.detail?.contains("unconfirmed") ?? false)
         XCTAssertEqual(pb.readString(), "user's own", "restored right after the evidence")
     }
 

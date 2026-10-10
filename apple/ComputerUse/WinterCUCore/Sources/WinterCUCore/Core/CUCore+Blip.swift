@@ -19,12 +19,18 @@ import Foundation
 /// after it began, on every path.
 final class CUFocusBlip {
     let begunMs: Double
+    /// Its bound: the tap is removed and the focus handed back by then, whatever happens.
+    let boundMs: Double
+    /// The desktop the user was on when it began: a switch while it lasts stops the act.
+    let space: UInt64?
     private let lock = NSLock()
     private var ended = false
     private let finish: (String) -> Void
 
-    init(begunMs: Double, finish: @escaping (String) -> Void) {
+    init(begunMs: Double, boundMs: Double, space: UInt64?, finish: @escaping (String) -> Void) {
         self.begunMs = begunMs
+        self.boundMs = boundMs
+        self.space = space
         self.finish = finish
     }
 
@@ -44,7 +50,7 @@ extension CUCore {
     /// Starts a blip for `why`: the reroute tap first, then the focus records. Nil — with the reason logged —
     /// when it can't run: the private path off, the app already in front, no tap, or the focus records
     /// unavailable or retired (the user-view guard undid them once).
-    func beginBlip(_ p: TargetActParams, _ t: CUTarget, why: String) -> CUFocusBlip? {
+    func beginBlip(_ p: TargetActParams, _ t: CUTarget, why: String, boundMs: Double = CUCore.blipDeadlineMs) -> CUFocusBlip? {
         let app = t.appName
         guard p.privatePath, let user = sys.frontmostPid(), user != t.pid else {
             CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used (private path off, or the app is in front)")
@@ -62,11 +68,21 @@ extension CUCore {
             return nil
         }
         let space = sys.activeSpace()
-        let blip = CUFocusBlip(begunMs: start) { [self] reason in
+        // The tap's removal, bounded: by the act's end, or at the bound by the timer — never later (an overrun is a
+        // fault in the log).
+        let removeTap = { [self] (why: String) -> Int in
+            let held = clock.nowMs() - start
+            let n = reroute.end()
+            if held > boundMs + 30 {
+                CULog.act.fault("focus blip in \(app, privacy: .public): the keyboard reroute stayed \(Int(held), privacy: .public) ms, over its \(Int(boundMs), privacy: .public) ms bound (\(why, privacy: .public))")
+            }
+            return n
+        }
+        let blip = CUFocusBlip(begunMs: start, boundMs: boundMs, space: space) { [self] reason in
             undo()  // the user's key window handed back
             // The user's app must hold the key focus and the front again within `blipFrontWaitMs` (and before the
-            // deadline); the tap stays until then, so a key typed meanwhile still goes to them.
-            let until = min(clock.nowMs() + Self.blipFrontWaitMs, start + Self.blipDeadlineMs)
+            // bound); the tap stays until then, so a key typed meanwhile still goes to them.
+            let until = min(clock.nowMs() + Self.blipFrontWaitMs, start + boundMs)
             let back = { [self] in keyFocusPidForTarget(t) != t.pid && sys.frontmostPid() == user }
             while clock.nowMs() < until, !back() { usleep(10_000) }
             // Not back yet: hand it back once more (the first focus record can be lost while the app is busy),
@@ -75,10 +91,11 @@ extension CUCore {
             if !back() {
                 undo()
                 handedBackTwice = true
-                let again = clock.nowMs() + 60
+                let again = min(clock.nowMs() + 60, start + boundMs)
                 while clock.nowMs() < again, !back() { usleep(10_000) }
             }
             noteGuardianActed(t.pid)  // the blip's end is a cause: an activation right after it may be its doing
+            let rerouted = removeTap(reason)
             // Still not back (the front elsewhere, or the keys still going to the target): the guardian restores
             // the user's app, which takes its key focus back with it.
             let front = sys.frontmostPid() == user
@@ -88,10 +105,13 @@ extension CUCore {
                 guardianRestore(CUGuardedView(app: user, space: space), thief: t.pid, repeatOffender: false,
                                 cause: front ? "the focus blip left the key focus with the target" : "the focus blip did not hand the front back")
             }
-            let rerouted = reroute.end()
             CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): ended (\(reason, privacy: .public)) after \(Int(self.clock.nowMs() - start), privacy: .public) ms; \(rerouted, privacy: .public) key event(s) rerouted to the user's app; the user's app back (front and keys): \(front && keys ? "yes" : "no — the guardian restored it", privacy: .public)")
         }
-        blipSchedule(max(0, Self.blipDeadlineMs - (clock.nowMs() - start))) { [weak blip] in blip?.end("its deadline") }
+        // The bound, enforced by the timer: the blip ends AND the tap comes off, whatever the act is doing.
+        blipSchedule(max(0, boundMs - (clock.nowMs() - start))) { [weak blip] in
+            blip?.end("its bound")
+            _ = removeTap("its bound")
+        }
         CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): begun, the keyboard reroute on")
         return blip
     }
@@ -159,8 +179,15 @@ final class CUKeyBlips {
         self.why = why
     }
 
-    /// Before a key, or a run of keys.
-    func before() {
+    /// Before a key, or a run of keys. Throws (stopping the act) when the user's desktop began to switch while the
+    /// blip lasted: nothing more is sent.
+    func before() throws {
+        if let b = blip, let space = b.space, let now = core.sys.activeSpace(), now != space {
+            b.end("the desktop began to switch")
+            blip = nil
+            CULog.act.fault("keys in \(self.t.appName, privacy: .public): macOS began switching desktops during the focus blip — stopped")
+            throw CUError.uncertain("macOS began switching desktops while keys were going to \(t.appName), so the typing was stopped (the user's desktop is being put back) — check state() to see what landed")
+        }
         if settled { return }
         if let b = blip, !b.isEnded, core.clock.nowMs() - b.begunMs < core.blipBurstMs { return }
         blip?.end("its burst was spent")
@@ -170,7 +197,7 @@ final class CUKeyBlips {
             settled = bursts == 0
             return
         }
-        guard let b = core.beginBlip(p, t, why: "\(why) (burst \(bursts + 1))") else {
+        guard let b = core.beginBlip(p, t, why: "\(why) (burst \(bursts + 1))", boundMs: core.keyBlipBoundMs) else {
             settled = true
             return
         }

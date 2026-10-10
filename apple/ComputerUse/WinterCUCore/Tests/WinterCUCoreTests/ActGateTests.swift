@@ -311,7 +311,7 @@ final class ActGateTests: XCTestCase {
         }
         let r = try await act(.paste(CUPasteAction(text: " pasted")))
         XCTAssertEqual(r.rung, 2)
-        XCTAssertNil(r.detail, "confirmed and restored")
+        XCTAssertEqual(r.detail, "the field shows the pasted text", "confirmed and restored")
         XCTAssertEqual(pb.readString(), "user's own")
         XCTAssertEqual(poster.keyDowns.first?.flags.contains(.maskCommand), true)
     }
