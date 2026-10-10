@@ -4,7 +4,7 @@ import {
   BROWSER_COMMAND_ACTIONS, OFFICE_COMMAND_ACTIONS, PANEL_COMMAND_ARGS_MAX_JSON_BYTES,
 } from "../src/events";
 import {
-  HelloParams, HelloResult, PROTOCOL_VERSION,
+  DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, HelloParams, HelloResult, IMAGE_FILE_EXTENSIONS, PROTOCOL_VERSION,
   PanelCommandResultParams, PANEL_COMMAND_RESULT_MAX_LENGTH, PANEL_COMMAND_IMAGE_B64_MAX_LENGTH,
 } from "../src/methods";
 
@@ -482,6 +482,18 @@ describe("hello method schemas", () => {
     const p = { protocolVersion: PROTOCOL_VERSION, role: "harness", token: "t", clientName: "test" } as const;
     expect(HelloParams.parse(p).role).toBe("harness");
     expect(HelloResult.parse({ ok: true, serverVersion: "0.0.1", protocolVersion: PROTOCOL_VERSION }).ok).toBe(true);
+  });
+
+  // Review finding (version skew): `features` is optional — an older daemon's hello has none — and names what the daemon can do.
+  test("hello's features are optional, and the original-image-path feature has its one name", () => {
+    expect(HelloResult.parse({ ok: true, serverVersion: "0.0.1", protocolVersion: PROTOCOL_VERSION }).features).toBeUndefined();
+    expect(HelloResult.parse({ ok: true, serverVersion: "0.0.1", protocolVersion: PROTOCOL_VERSION, features: [DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS] }).features).toEqual(["image-original-paths"]);
+    expect(() => HelloResult.parse({ ok: true, serverVersion: "0.0.1", protocolVersion: PROTOCOL_VERSION, features: "image-original-paths" })).toThrow();
+  });
+
+  // The runtime Read tool opens an image by EXTENSION alone (`IMAGE_MIME` in its tools/impl/read.ts): this is that list, exactly.
+  test("IMAGE_FILE_EXTENSIONS is the Read tool's own list of image extensions", () => {
+    expect([...IMAGE_FILE_EXTENSIONS]).toEqual([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic"]);
   });
 
   test("unknown role rejected", () => {

@@ -4,6 +4,38 @@ import WinterProtocol
 public actor WinterClient {
     public static let protocolVersion = 0
 
+    /// The longest NDJSON line the daemon accepts on an authenticated connection — `NDJSON_MAX_LINE_BYTES` (8 MiB,
+    /// `packages/protocol/src/ndjson.ts`), newline included. A longer request does not fail: the daemon ENDS the
+    /// connection. So a request is measured here, ENCODED, before it is sent.
+    public static let maxRequestLineBytes = 8 * 1024 * 1024
+
+    /// `session.stageImage`'s longest `dataBase64` — `STAGE_IMAGE_B64_MAX_LENGTH` (the line cap less 256 KiB of
+    /// headroom, in whole 4-character groups). Mirrored by hand; the protocol constant is the source.
+    public static let stageImageMaxBase64Length = (maxRequestLineBytes - 256 * 1024) / 4 * 4
+
+    /// What the daemon said it can do in its `hello` answer (`features`); empty from a daemon that predates the
+    /// field. Re-read on every (re)connect.
+    public private(set) var daemonFeatures: Set<String> = []
+
+    /// `hello.features`' name for "`images` accepts the user's ORIGINAL image file by its own path"
+    /// (`DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS`).
+    public static let featureImageOriginalPaths = "image-original-paths"
+
+    /// Whether this daemon takes a FILE attachment's own path in `session.send`/`steer`'s `images`. False from a
+    /// daemon that did not announce it: the composer then puts the path in the text instead, as it always did
+    /// for an older daemon (which drops `images`, or refuses a path it did not stage).
+    public var supportsOriginalImagePaths: Bool { daemonFeatures.contains(Self.featureImageOriginalPaths) }
+
+    /// One request, encoded exactly as it goes on the wire: compact JSON, and — the part that matters — slashes
+    /// NOT escaped. `JSONEncoder` writes every `/` as `\/` by default, and base64 is full of them: a 5.76 MB
+    /// white TIFF (all 0xFF bytes, so all slashes) encoded to a 15.36 MB line and the daemon dropped the
+    /// connection. A strict-JSON decoder reads `/` and `\/` alike, so nothing else changes.
+    static func encodeLine(_ value: JSONValue) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        return try encoder.encode(value)
+    }
+
     private let makeTransport: @Sendable () -> WinterTransport
     private let token: String
     private let clientName: String
@@ -152,12 +184,18 @@ public actor WinterClient {
         decoder = LineDecoder()
         try await t.open()
         startPump(t)
-        _ = try await request("protocol.hello", params: .object([
+        let hello = try await request("protocol.hello", params: .object([
             "protocolVersion": .number(Double(Self.protocolVersion)),
             "role": .string(role),
             "token": .string(token),
             "clientName": .string(clientName),
         ]))
+        // An older daemon sends no `features`: it then has none, and a feature-gated path falls back.
+        if case .array(let names)? = hello["features"] {
+            daemonFeatures = Set(names.compactMap { $0.stringValue })
+        } else {
+            daemonFeatures = []
+        }
         everConnected = true
     }
 
@@ -302,7 +340,12 @@ public actor WinterClient {
         // `{}` is inert for every handler that ignores params (verified live on session.list).
         obj["params"] = params ?? .object([:])
         if let commandId { obj["commandId"] = .string(commandId) }
-        let data = try JSONEncoder().encode(JSONValue.object(obj))
+        let data = try Self.encodeLine(JSONValue.object(obj))
+        // Budget the ENCODED line (plus its newline) before anything is sent: past the daemon's line cap it would
+        // not answer an error, it would end the connection — taking every other request on it down too.
+        guard data.count + 1 <= Self.maxRequestLineBytes else {
+            throw RpcError(code: -6, message: "request too large to send: \(method) (\(data.count + 1) bytes; the daemon takes at most \(Self.maxRequestLineBytes))")
+        }
         // timeout watchdog: resumes the continuation with an error if the response never lands
         let timeout = requestTimeout
         let sleep = self.sleep
