@@ -57,7 +57,7 @@ describe("the backend registry", () => {
   });
 });
 
-describe("shouldCloseAgentTab (the user's ruling: ChatGPT's rule)", () => {
+describe("shouldCloseAgentTab (the user's ruling)", () => {
   const user = { family: "chrome" as const };
   test("turn end closes an unmarked agent tab; keep and handoff survive it", () => {
     expect(shouldCloseAgentTab({ ...user, event: "turn-ended", kept: false })).toBe(true);
