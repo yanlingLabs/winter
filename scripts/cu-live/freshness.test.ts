@@ -152,12 +152,12 @@ describe("Safari's WebKit preferences: recorded, set NO, restored exactly", () =
 import { mkdtempSync, existsSync as fileExists, writeFileSync as writeFile, rmSync as removeAll } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
-import { measureFixtureVariant, measureSafariWithPrefs, restoreSafariPrefsIfInterrupted, safariPrefsBackupPath, type FreshDeps } from "./freshness-run";
+import { measureFixtureVariant, measureSafari, measureSafariWithPrefs, restoreSafariPrefsIfInterrupted, safariPrefsBackupPath, type FreshDeps } from "./freshness-run";
 
 /** Fake plumbing: records every call; `defaults` answers from a fake Safari plist; Safari "runs" until quit. */
-function fakeDeps(prefs: Record<string, { type: string; value: string }>, extra: Partial<FreshDeps> = {}) {
+function fakeDeps(prefs: Record<string, { type: string; value: string }>, extra: Partial<FreshDeps> = {}, safariRunningAtStart = false) {
   const calls: string[] = [];
-  let safariUp = true;
+  let safariUp = safariRunningAtStart;
   let windowsCalls = 0;
   const safariWindowIds = new Set<number>([1]);
   const outDir = mkdtempSync(joinPath(tmpdir(), "cu-fresh-test-"));
@@ -184,7 +184,7 @@ function fakeDeps(prefs: Record<string, { type: string; value: string }>, extra:
     events: () => [],
     returnUser: async () => { calls.push("returnUser"); },
     turn: async (code) => {
-      if (code.includes("Quit Safari")) { calls.push("quit Safari"); safariUp = false; return { output: "", isError: false, facts: {} }; }
+      if (code.includes("Quit Safari")) { calls.push("quit Safari"); safariUp = false; safariWindowIds.clear(); safariWindowIds.add(1); return { output: "", isError: false, facts: {} }; }
       calls.push("turn");
       if (code.includes(`"New Window"`)) { safariWindowIds.add(2); return { output: "", isError: false, facts: { made: true, id: 2 } }; }
       if (code.includes(`"confirm"`)) return { output: "", isError: false, facts: { navigated: true, field: "smart search field" } };
@@ -205,7 +205,7 @@ function fakeDeps(prefs: Record<string, { type: string; value: string }>, extra:
 }
 
 describe("the Safari preference mode, end to end on fake plumbing", () => {
-  test("record → quit → write NO → relaunch → measure → quit → restore EXACTLY (absent deleted) → relaunch; backup removed", async () => {
+  test("Safari not running: record → write NO → launch its own Safari → measure → quit it → restore EXACTLY (absent deleted); nothing relaunched; backup removed", async () => {
     const { SAFARI_PREF_KEYS: K } = await import("./freshness");
     const prefs: Record<string, { type: string; value: string }> = { [K[1]]: { type: "boolean", value: "1" } };
     const { d, calls, outDir } = fakeDeps(prefs);
@@ -217,27 +217,54 @@ describe("the Safari preference mode, end to end on fake plumbing", () => {
     expect(calls.filter((c) => c === "turn").length).toBe(5);
     // Never a URL handed to Safari from outside: that lands in the user's last active window.
     expect(calls.some((c) => c.startsWith("open -g -a Safari file:"))).toBe(false);
-    const q1 = calls.indexOf("quit Safari"), w1 = calls.findIndex((c) => c.startsWith("defaults write") && c.endsWith("-bool NO"));
-    const relaunch1 = calls.indexOf("open -g -a Safari");
-    expect(q1).toBeGreaterThan(-1);
-    expect(w1).toBeGreaterThan(q1);           // written only once Safari has quit
-    expect(relaunch1).toBeGreaterThan(w1);
-    expect(calls.filter((c) => c === "quit Safari").length).toBe(2);
+    const w1 = calls.findIndex((c) => c.startsWith("defaults write") && c.endsWith("-bool NO"));
+    const launch = calls.indexOf("open -g -a Safari");
+    const quit = calls.indexOf("quit Safari");
+    const restore = calls.findIndex((c) => c.startsWith("defaults delete"));
+    expect(w1).toBeGreaterThan(-1);
+    expect(launch).toBeGreaterThan(w1);       // its own Safari launched only with the keys written
+    expect(quit).toBeGreaterThan(launch);
+    expect(restore).toBeGreaterThan(quit);    // restored only once its Safari has quit
+    expect(calls.filter((c) => c === "quit Safari").length).toBe(1);
+    expect(calls.filter((c) => c === "open -g -a Safari").length).toBe(1); // nothing relaunched
     // Restored exactly: the absent keys deleted, the present one back to YES (a bool).
     expect(prefs).toEqual({ [K[1]]: { type: "boolean", value: "1" } });
-    expect(calls.at(-1)).toBe("open -g -a Safari");
     expect(fileExists(safariPrefsBackupPath(outDir))).toBe(false);
     removeAll(outDir, { recursive: true, force: true });
   });
 
-  test("a backup an interrupted run left is restored first, then removed", async () => {
+  test("a running Safari (the user's) is never quit: both Safari legs refuse and change nothing", async () => {
+    const { SAFARI_PREF_KEYS: K } = await import("./freshness");
+    const prefs: Record<string, { type: string; value: string }> = { [K[1]]: { type: "boolean", value: "1" } };
+    const { d, calls, outDir } = fakeDeps(prefs, {}, true);
+    const r = await measureSafariWithPrefs(d, outDir, "x");
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("quit Safari first");
+    const plain = await measureSafari(d, "y");
+    expect(plain.ok).toBe(false);
+    expect(plain.error).toContain("quit Safari first");
+    expect(calls.some((c) => c.startsWith("defaults write") || c.startsWith("defaults delete") || c === "quit Safari" || c === "turn" || c.startsWith("open"))).toBe(false);
+    expect(prefs).toEqual({ [K[1]]: { type: "boolean", value: "1" } });
+    removeAll(outDir, { recursive: true, force: true });
+  });
+
+  test("a backup an interrupted run left is restored first (Safari not running), then removed — never by quitting a running Safari", async () => {
     const { SAFARI_PREF_KEYS: K } = await import("./freshness");
     const prefs: Record<string, { type: string; value: string }> = { [K[0]]: { type: "boolean", value: "0" }, [K[1]]: { type: "boolean", value: "0" }, [K[2]]: { type: "boolean", value: "0" } };
+    const backupOriginals = { [K[0]]: { present: false }, [K[1]]: { present: false }, [K[2]]: { present: true, type: "int", value: "2" } };
+    // While Safari runs: nothing restored, nothing quit, the backup kept.
+    const running = fakeDeps({ ...prefs }, {}, true);
+    writeFile(safariPrefsBackupPath(running.outDir), JSON.stringify({ domain: "/U/S", originals: backupOriginals }));
+    expect((await restoreSafariPrefsIfInterrupted(running.d, running.outDir))[0]).toContain("Safari is running");
+    expect(running.calls.some((c) => c === "quit Safari" || c.startsWith("defaults delete"))).toBe(false);
+    expect(fileExists(safariPrefsBackupPath(running.outDir))).toBe(true);
+    removeAll(running.outDir, { recursive: true, force: true });
+    // Safari not running: restored exactly, the backup removed, nothing launched.
     const { d, calls, outDir } = fakeDeps(prefs);
-    writeFile(safariPrefsBackupPath(outDir), JSON.stringify({ domain: "/U/S", originals: { [K[0]]: { present: false }, [K[1]]: { present: false }, [K[2]]: { present: true, type: "int", value: "2" } } }));
+    writeFile(safariPrefsBackupPath(outDir), JSON.stringify({ domain: "/U/S", originals: backupOriginals }));
     expect(await restoreSafariPrefsIfInterrupted(d, outDir)).toEqual([]);
     expect(prefs).toEqual({ [K[2]]: { type: "integer", value: "2" } });
-    expect(calls.indexOf("quit Safari")).toBeLessThan(calls.findIndex((c) => c.startsWith("defaults delete")));
+    expect(calls.some((c) => c === "quit Safari" || c.startsWith("open"))).toBe(false);
     expect(fileExists(safariPrefsBackupPath(outDir))).toBe(false);
     removeAll(outDir, { recursive: true, force: true });
   });

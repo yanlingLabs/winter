@@ -37,7 +37,8 @@ WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live   # the LIVE ComputerV2 suite (script
                                      # the 100 ms wall-clock counter — on another Space, (a1) default and (a2)
                                      # _setWindowOcclusionDetectionEnabled:NO, sampled stream OFF 10 s → ON 20 s → OFF 10 s
                                      # through the live-test helper's test.capture/test.stream; --safari-freshness adds a
-                                     # NEW Safari window, --safari-webkit-prefs (+ --yes-restart-safari) wraps it in three
+                                     # Safari window (only while Safari is NOT running: the run launches its own Safari and
+                                     # quits it — a relaunch need not restore the user's windows), --safari-webkit-prefs (+ --yes-restart-safari) wraps it in three
                                      # WebKitPreferences keys set NO and restored exactly; report, not assert:
                                      # out/cu-live/freshness.json, --freshness-copy-to <dir>), a
                                      # SECOND dev-helper instance on a temp home (open -n --env WINTER_CU_HOME), a

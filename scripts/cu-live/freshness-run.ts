@@ -206,6 +206,16 @@ export async function measureSafari(d: FreshDeps, variant: string): Promise<Vari
   let windowId: number | undefined;
   let fullScreen = false;
   let result: VariantResult;
+  // Only a Safari of the test's own: a running Safari holds the user's windows, and neither a URL handed in from
+  // outside (it tabs into their last active window) nor a quit (a relaunch need not bring their windows back — it
+  // did not on the dev Mac, and two runs cost a user's window) may touch them.
+  if (safariRunning(d)) {
+    return { ...base, error: "Safari is running — quit Safari first: this measurement launches a Safari of its own and quits it at the end, so it never touches windows you use" };
+  }
+  d.sh("open", ["-g", "-a", "Safari"]);
+  const up = await waitFor("Safari to launch", 20_000, () => (safariRunning(d) ? true : undefined)).catch(() => false);
+  if (!up) return { ...base, error: "Safari did not launch" };
+  await (d.sleep ?? sleep)(3_000);
   try {
     const before = safariWindows(d);
     const made = await d.turn(`
@@ -274,14 +284,15 @@ try { report({ open: (await sfApp.windows()).some((w) => w.id === ${id}) }); } c
       open = typeof check?.facts.open === "boolean" ? check.facts.open : undefined;
       d.log(`freshness ${variant}: closing the test's Safari window ${id} (try ${attempt}): ${JSON.stringify(c.facts)}${c.isError ? ` — ${c.output.slice(-200)}` : ""}${/exit full screen: [^\n<]*/.exec(c.output) ? ` (${/exit full screen: [^\n<]*/.exec(c.output)![0]})` : ""}; still in Safari's window list: ${open === undefined ? `unknown (${JSON.stringify(check?.facts ?? {})})` : open}`);
     }
-    if (open !== false) {
-      const left = open === true
-        ? `the test's Safari window ${id} is still open (a Start Page or the test page) — close it by hand`
-        : `could not confirm the test's Safari window ${id} closed — check Safari for an extra window`;
-      d.log(`freshness ${variant}: ${left}`);
-      result = { ...result, ok: false, error: [result.error, left].filter(Boolean).join("; ") };
-    }
+    if (open !== false) d.log(`freshness ${variant}: the test's Safari window ${id} did not close by its buttons — quitting the test's Safari takes it`);
     await d.returnUser().catch(() => undefined);
+  }
+  // The Safari this measurement launched goes with it: every window in it was the test's.
+  await quitSafari(d).catch(() => undefined);
+  if (safariRunning(d)) {
+    const left = "the Safari this measurement launched is still running — quit it by hand";
+    d.log(`freshness ${variant}: ${left}`);
+    result = { ...result, ok: false, error: [result.error, left].filter(Boolean).join("; ") };
   }
   return result;
 }
@@ -290,11 +301,12 @@ try { report({ open: (await sfApp.windows()).some((w) => w.id === ${id}) }); } c
 
 export const SAFARI_PREFS_WARNING = [
   "",
-  "  !!! --safari-webkit-prefs QUITS AND RELAUNCHES SAFARI — twice — and temporarily sets three of its WebKit",
-  "  !!! preferences (WebKitPreferences.hiddenPageDOMTimerThrottlingEnabled, …AutoIncreases,",
+  "  !!! --safari-webkit-prefs temporarily sets three of Safari's WebKit preferences",
+  "  !!! (WebKitPreferences.hiddenPageDOMTimerThrottlingEnabled, …AutoIncreases,",
   "  !!! WebKitPreferences.pageVisibilityBasedProcessSuppressionEnabled) to NO. The originals (absent included) are",
-  "  !!! recorded first and restored exactly afterwards; Safari restores its windows on relaunch.",
-  "  !!! Pass --yes-restart-safari to go ahead.",
+  "  !!! recorded first and restored exactly afterwards. It runs only while Safari is NOT running: it launches a",
+  "  !!! Safari of its own with the keys set and quits it at the end — it never quits a Safari you use (a relaunch",
+  "  !!! need not bring your windows back). Pass --yes-restart-safari to go ahead.",
   "",
 ].join("\n");
 
@@ -337,17 +349,23 @@ export async function restoreSafariPrefsIfInterrupted(d: FreshDeps, outDir: stri
   if (!existsSync(backup)) return [];
   const { domain, originals } = JSON.parse(readFileSync(backup, "utf8")) as { domain: string; originals: Record<string, PrefOriginal> };
   d.log("an earlier --safari-webkit-prefs run was interrupted: restoring Safari's original preferences first…");
-  await quitSafari(d);
+  // Safari writes its preferences back when it quits: restore only while it is not running — and never quit a
+  // Safari the user may be using to get there.
+  if (safariRunning(d)) return [`Safari is running — quit it, then run again to restore the preferences from ${backup}`];
   const failed = runDefaults(d, safariPrefsPlan(domain, originals).restore);
   if (failed.length === 0) rmSync(backup);
-  d.sh("open", ["-g", "-a", "Safari"]);
-  await (d.sleep ?? sleep)(5_000);
   return failed;
 }
 
-/** The Safari measurement inside the preference change: record → quit → write NO → relaunch → measure → quit → restore → relaunch. */
+/**
+ * The Safari measurement inside the preference change, with Safari NOT running from start to end: record → write NO
+ * → (measureSafari launches its own Safari, measures, quits it) → restore. Nothing is relaunched.
+ */
 export async function measureSafariWithPrefs(d: FreshDeps, outDir: string, variant: string): Promise<VariantResult> {
   const domain = join(homedir(), SAFARI_PREFS_DOMAIN);
+  if (safariRunning(d)) {
+    return { variant, ok: false, error: "Safari is running — quit Safari first: the preference run launches a Safari of its own and quits it at the end, so it never touches windows you use; nothing was changed", notes: [], occlusion: [], captures: 0, cells: [] };
+  }
   const failedEarlier = await restoreSafariPrefsIfInterrupted(d, outDir);
   if (failedEarlier.length > 0) return { variant, ok: false, error: `an earlier run's preferences could not be restored: ${failedEarlier.join("; ")}`, notes: [], occlusion: [], captures: 0, cells: [] };
   let originals: Record<string, PrefOriginal>;
@@ -359,21 +377,17 @@ export async function measureSafariWithPrefs(d: FreshDeps, outDir: string, varia
   d.log(`Safari's originals recorded (${safariPrefsBackupPath(outDir)}): ${JSON.stringify(originals)}`);
   let result: VariantResult;
   try {
-    await quitSafari(d);
     const failed = runDefaults(d, plan.apply);
     if (failed.length > 0) throw new Error(failed.join("; "));
-    d.sh("open", ["-g", "-a", "Safari"]);
-    await (d.sleep ?? sleep)(6_000); // its windows come back
-    result = await measureSafari(d, variant);
+    result = await measureSafari(d, variant); // launches its own Safari and quits it
     result.notes.push(`with ${SAFARI_PREF_KEYS.join(", ")} = NO`);
   } catch (err) {
     result = { variant, ok: false, error: err instanceof Error ? err.message : String(err), notes: [], occlusion: [], captures: 0, cells: [] };
   } finally {
-    await quitSafari(d).catch(() => undefined);
-    const failed = runDefaults(d, plan.restore);
+    await quitSafari(d).catch(() => undefined); // the test's own, should measureSafari have left it running
+    const failed = safariRunning(d) ? ["the test's Safari is still running"] : runDefaults(d, plan.restore);
     if (failed.length === 0) rmSync(safariPrefsBackupPath(outDir), { force: true });
     else d.log(`!!! Safari's preferences were NOT fully restored (${failed.join("; ")}); the backup stays at ${safariPrefsBackupPath(outDir)} and the next --safari-webkit-prefs run restores it first`);
-    d.sh("open", ["-g", "-a", "Safari"]);
   }
   return result!;
 }

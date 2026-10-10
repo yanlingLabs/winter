@@ -15,8 +15,9 @@
  *            postpones the run and the wait starts over). From a full-screen app's Space any run moves the user to a regular desktop
  *            and returns them to that app and Space at the end (an abort too).
  *            --no-done-window (CI: no end-of-run completion window; else it shows after the cleanup, 30 min at most),
- *            --safari-freshness (also measure a NEW Safari window in full screen), --safari-webkit-prefs (the same with
- *            three Safari WebKitPreferences keys NO: quits/relaunches Safari, needs --yes-restart-safari),
+ *            --safari-freshness (also measure a Safari window in full screen — only while Safari is NOT running: the test
+ *            launches its own and quits it), --safari-webkit-prefs (the same with three Safari WebKitPreferences keys NO,
+ *            restored exactly; needs --yes-restart-safari),
  *            --freshness-copy-to <dir> (or $CU_LIVE_FRESHNESS_COPY_DIR): also copy freshness.json there,
  *            --helper-app <path to "Winter Computer Use Dev.app"> (else $WINTER_COMPUTER_USE_APP, else dist/dev/)
  *

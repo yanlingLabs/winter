@@ -204,7 +204,7 @@ export function describeFreshnessPlan(o: { safari: boolean; safariPrefs: boolean
     "fixture (a1) default WKWebView and (a2) _setWindowOcclusionDetectionEnabled:NO: the Fresh window to another Space, stream OFF 10 s → ON 20 s → OFF 10 s, a SkyLight still every 500 ms (+ the SCStream frame while ON), four regions (native, DOM, canvas, CSS)",
   ];
   if (o.safari) {
-    lines.push(`Safari${o.safariPrefs ? " with the three WebKitPreferences keys set NO (Safari quit + relaunched before and after, originals restored exactly)" : ""}: a NEW window of the test's own (File › New Window), fresh.html loaded through ITS OWN address field (value set + confirm, no keys, never a URL handed to Safari) and its title checked, full screen by its own button, the same three phases, then out of full screen and only that window closed (verified)`);
+    lines.push(`Safari (only while Safari is NOT running: the test launches its own and quits it at the end)${o.safariPrefs ? " with the three WebKitPreferences keys set NO (written while Safari is not running, originals restored exactly after its quit)" : ""}: a NEW window of the test's own (File › New Window), fresh.html loaded through ITS OWN address field (value set + confirm, no keys, never a URL handed to Safari) and its title checked, full screen by its own button, the same three phases, then out of full screen and only that window closed (verified)`);
   }
   return lines;
 }
