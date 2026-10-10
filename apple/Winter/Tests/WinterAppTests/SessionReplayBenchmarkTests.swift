@@ -181,6 +181,73 @@ enum SyntheticSession {
     }
 }
 
+extension SyntheticSession {
+    /// A session of several COMPLETED turns, each the shape of the live gate's: `calls` computer_v2 calls (results of
+    /// 4–37 KB), a reasoning block before each, a short reply after most. `s_c90699692f1f` — the session a detached
+    /// window froze on — had 3 turns, 85 calls, 88 reasoning blocks and 68 replies; the scaling benchmark asks for
+    /// ten and a hundred times that. Generated text only. The events are numbered from 1 and end with `turn_completed`.
+    static func completedTurns(_ turns: Int, callsPerTurn: Int = 28, seed: UInt64 = 11) -> [[String: Any]] {
+        var rng = Rng(state: seed)
+        let start = 1_791_496_518_000.0
+        var events: [[String: Any]] = []
+        var seq = 1
+        var clock = 0.0
+        func add(_ type: String, _ fields: [String: Any]) {
+            clock += 40
+            var e: [String: Any] = ["type": type, "seq": seq, "sessionId": sessionId, "ts": start + clock, "threadId": "main"]
+            e.merge(fields) { _, new in new }
+            events.append(e)
+            seq += 1
+        }
+        for turn in 0..<turns {
+            add("user_message", ["text": "Turn \(turn): " + prose(&rng, bytes: 600 + rng.pick(1_200)), "clientName": "cli"])
+            add("turn_started", [:])
+            for i in 0..<callsPerTurn {
+                let id = "t\(turn)_\(i)"
+                let reasoningBytes = rng.pick(10) == 0 ? 6_000 + rng.pick(5_300) : 800 + rng.pick(2_200)
+                add("thinking_block", ["blockId": "b\(id)", "kind": "summary", "title": "Working through step \(i)",
+                                       "text": "**Working through step \(i)**\n\n" + prose(&rng, bytes: reasoningBytes), "durationMs": 900])
+                add("tool_call", ["callId": "call_\(id)", "name": "computer_v2",
+                                  "argsJson": "{\"code\":\"const app = await apps.open(\\\"Safari\\\");\\nawait app.click(\(rng.pick(60)));\\nreturn await app.state();\"}"])
+                let resultBytes = rng.pick(7) == 0 ? 20_000 + rng.pick(17_000) : 4_000 + rng.pick(11_000)
+                add("tool_result", ["callId": "call_\(id)", "output": screenText(&rng, bytes: resultBytes, app: "Safari"), "isError": false])
+                if rng.pick(4) != 0 { add("assistant_message", ["text": prose(&rng, bytes: 120 + rng.pick(300))]) }
+            }
+            add("assistant_message", ["text": prose(&rng, bytes: 300)])
+            add("turn_completed", ["stopReason": "end_turn", "inputTokens": 1, "outputTokens": 1])
+        }
+        return events
+    }
+
+    /// The events of one more turn, as they stream into a window that already holds `after` events: a user message,
+    /// the turn start, then `chunks` reply chunks (and a reasoning block's) — each a separate publish.
+    static func streamingTurn(after seq: Int, chunks: Int, chunkBytes: Int = 24) -> [[String: Any]] {
+        var rng = Rng(state: 99)
+        let start = 1_791_496_518_000.0 + 10_000_000
+        var out: [[String: Any]] = []
+        var next = seq + 1
+        func add(_ type: String, _ fields: [String: Any]) {
+            var e: [String: Any] = ["type": type, "seq": next, "sessionId": sessionId, "ts": start + Double(next), "threadId": "main"]
+            e.merge(fields) { _, new in new }
+            out.append(e)
+        }
+        add("user_message", ["text": "A question from a reviewer: " + prose(&rng, bytes: 300), "clientName": "cli"])
+        next += 1
+        add("turn_started", [:])
+        next += 1
+        let seqNow = next
+        add("thinking_delta", ["blockId": "live", "kind": "summary", "phase": "start", "seq": seqNow])
+        for i in 0..<chunks {
+            if i % 3 == 0 {
+                add("thinking_delta", ["blockId": "live", "kind": "summary", "phase": "delta", "text": prose(&rng, bytes: chunkBytes), "seq": seqNow])
+            } else {
+                add("assistant_delta", ["delta": prose(&rng, bytes: chunkBytes), "seq": seqNow])
+            }
+        }
+        return out
+    }
+}
+
 /// Runs a script through the real feed and window content, and says how far behind it ran.
 @MainActor
 final class ReplayRun {

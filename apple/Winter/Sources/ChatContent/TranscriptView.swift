@@ -34,6 +34,9 @@ struct TranscriptView: View {
     var bottomOverlayInset: CGFloat = 0
     @State private var nearBottom = true
     @State private var showLatestPill = false
+    /// The first exchange the transcript holds, once it is longer than `cellWindow`; nil until the window has been
+    /// pinned (`firstExchange(of:)`).
+    @State private var windowStartExchange: Int?
     /// Follows the bottom on the display's clock (`TranscriptAutoFollow`) — the smooth glide that
     /// replaced a `scrollTo` animation per streamed chunk.
     @State private var follower = TranscriptFollower()
@@ -50,7 +53,7 @@ struct TranscriptView: View {
     var body: some View {
         // The reader lets the follower make its far moves through SwiftUI (`TranscriptFollower.farJump`).
         ScrollViewReader { proxy in
-            transcriptScroll
+            transcriptScroll(proxy: proxy)
                 .onAppear {
                     follower.onLanded = onLanded
                     follower.farJump = { [layoutMemo] in
@@ -73,10 +76,13 @@ struct TranscriptView: View {
     ///
     /// Spacing is each cell's own top gap rather than the stack's: 14 pt separates exchanges, 10 pt separates the
     /// cells of one.
-    private func cellSpecs(_ transcript: [Exchange], streaming: String?, cards: TranscriptCardState) -> [TranscriptCellSpec] {
+    ///
+    /// Only the exchanges from `first` on are built: the transcript holds its newest few hundred cells, never all of a
+    /// long session's (`firstExchange(of:)`), so what a publish costs does not grow with how long the session has run.
+    private func cellSpecs(_ transcript: [Exchange], from first: Int, streaming: String?, cards: TranscriptCardState) -> [TranscriptCellSpec] {
         var specs: [TranscriptCellSpec] = []
         var known: Set<TranscriptLayoutMemo.Key> = []
-        for (index, exchange) in transcript.enumerated() {
+        for (index, exchange) in transcript.enumerated() where index >= first {
             let isLast = index == transcript.count - 1
             // Live only for the newest exchange (mac-chat-parity Task 2). That is not quite the same as "every in-flight
             // call lives here": a main-thread steer's `user_message` is persisted at SEND time, so it can open a NEW
@@ -145,11 +151,73 @@ struct TranscriptView: View {
         }
     }
 
-    private var transcriptScroll: some View {
+    /// The newest cells the transcript holds, in whole exchanges (an exchange is never cut: a turn of two hundred calls
+    /// is one), and about how many more "Show earlier" adds.
+    static let cellWindow = 80
+
+    /// The first exchange held: the pinned one, else far enough back from the end to hold `cellWindow` cells. Walking
+    /// back touches only the tail's layouts (`TranscriptLayoutMemo` answers each from its stamp).
+    private func firstExchange(of transcript: [Exchange]) -> Int {
+        if let pinned = windowStartExchange, pinned < transcript.count { return pinned }
+        return Self.exchangeIndex(holding: Self.cellWindow, endingBefore: transcript.count) { index in
+            // The prompt, and one cell per timeline entry.
+            1 + layoutMemo.layout(for: transcript[index], style: toolRowStyle).entries.count
+        }
+    }
+
+    /// PURE: how far back from `end` to reach for `cells` cells, given each exchange's cell count.
+    static func exchangeIndex(holding cells: Int, endingBefore end: Int, cellCount: (Int) -> Int) -> Int {
+        var held = 0
+        var index = end
+        while index > 0, held < cells {
+            index -= 1
+            held += cellCount(index)
+        }
+        return index
+    }
+
+    /// Holds the window where it is, so exchanges arriving at the bottom do not push the oldest out from under a reader
+    /// who has scrolled up to it. A reader at the bottom (following) is the one case it moves on: what it drops is far
+    /// above them.
+    private func pinWindow() {
+        windowStartExchange = adapter.transcript.count > 0 ? firstExchange(of: adapter.transcript) : nil
+    }
+
+    /// "Show earlier": another `cellWindow` cells above the first exchange held, the reader left where they were.
+    private func revealEarlier(first: Int, anchor: Int, proxy: ScrollViewProxy) {
+        let transcript = adapter.transcript
+        windowStartExchange = Self.exchangeIndex(holding: Self.cellWindow, endingBefore: first) { index in
+            1 + layoutMemo.layout(for: transcript[index], style: toolRowStyle).entries.count
+        }
+        DispatchQueue.main.async { proxy.scrollTo(anchor, anchor: .top) }
+    }
+
+    private func earlierRow(first: Int, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(first == 1 ? "Show 1 earlier turn" : "Show \(first) earlier turns")
+                .font(Typography.caption(.medium))
+                .foregroundStyle(tint.opacity(0.85))
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(Capsule().fill(Theme.controlSurface))
+                .overlay(Capsule().strokeBorder(Theme.hairlineElevated, lineWidth: shellSidebarHairlineWidth))
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+        .padding(.bottom, 14)
+    }
+
+    private func transcriptScroll(proxy: ScrollViewProxy) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 let cards = TranscriptCardState(wiring: cardWiring, drafts: adapter.pendingCardDrafts)
-                let specs = cellSpecs(adapter.transcript, streaming: adapter.liveStreamingText, cards: cards)
+                let first = firstExchange(of: adapter.transcript)
+                #if DEBUG
+                let _ = { transcriptFirstExchangeHeld = first }()
+                #endif
+                let specs = cellSpecs(adapter.transcript, from: first, streaming: adapter.liveStreamingText, cards: cards)
+                if first > 0, let anchor = specs.first?.id {
+                    earlierRow(first: first) { revealEarlier(first: first, anchor: anchor, proxy: proxy) }
+                }
                 ForEach(specs) { spec in
                     TranscriptCell(
                         exchangeIndex: spec.exchangeIndex,
@@ -192,13 +260,16 @@ struct TranscriptView: View {
             // fold, `SessionFeed.finishReplay`) lands at its bottom at once, never glides down it —
             // through SwiftUI's own scroll-to-row, once the rows exist (`TranscriptFollower.farJump`).
             if old == 0 && new > 0 {
+                pinWindow()
                 follower.restartAtBottom()
                 DispatchQueue.main.async { follower.farJump?() }
             } else if new > old {
+                if follower.isFollowing { windowStartExchange = nil }
                 follow()
             }
             // A reset (another session's history coming in) opens at the bottom again, all closed.
             if new == 0 && old > 0 {
+                windowStartExchange = nil
                 follower.restartAtBottom()
                 expansion.removeAll()
             }
@@ -222,9 +293,17 @@ struct TranscriptView: View {
         }
         .onAppear {
             follower.onFollowingChanged = { following in
-                if following { showLatestPill = false }
+                if following {
+                    showLatestPill = false
+                    windowStartExchange = nil // back at the bottom: the window is the tail again
+                } else {
+                    pinWindow() // scrolled away: the exchange being read stays in the window whatever arrives
+                }
             }
             if !seededExpansion.isEmpty { expansion.open(seededExpansion) }
+            // A window opened onto a transcript that is already there (a shared feed that was attached first) has no
+            // empty-to-full change to pin the window at.
+            if windowStartExchange == nil, !adapter.transcript.isEmpty { pinWindow() }
         }
     }
 
@@ -392,6 +471,15 @@ private struct TranscriptCellSpec: Identifiable {
     let topGap: CGFloat
 }
 
+#if DEBUG
+/// The first exchange the transcript held at its last layout (the scaling benchmark reads where the window is).
+nonisolated(unsafe) var transcriptFirstExchangeHeld = 0
+
+/// How many times any transcript cell's body has run in this process: the scaling benchmark counts the cells that exist
+/// (a cell built once runs its body once; an unchanged one is skipped by `.equatable()`).
+nonisolated(unsafe) var transcriptCellBodyEvaluations = 0
+#endif
+
 /// One cell of the transcript. Which tool runs and pills are open is NOT this cell's state: it reads and toggles the
 /// transcript's one `TranscriptExpansion` (`TranscriptView.expansion`), keyed by item identity — a run's
 /// `toolRunExpansionKey` (its first `callId`, NOT its position: the reducer's drop-oldest activity cap shifts positions
@@ -436,6 +524,9 @@ private struct TranscriptCell: View {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = { transcriptCellBodyEvaluations += 1 }()
+        #endif
         switch content {
         case .prompt(let text, let envelope):
             TranscriptUserBubble(text: text, tint: tint, envelope: envelope)

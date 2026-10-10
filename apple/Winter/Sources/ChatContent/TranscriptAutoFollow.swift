@@ -23,6 +23,19 @@ func transcriptFollowStep(current: CGFloat, target: CGFloat, dt: CFTimeInterval,
 /// How close to the bottom counts as "at the bottom" — where following resumes by itself.
 let transcriptFollowResumeDistance: CGFloat = 40
 
+#if DEBUG
+/// What the followers have done in this process (the scaling benchmark reads these a second at a time after the last event
+/// of a turn: a healthy transcript goes quiet at once).
+struct TranscriptFollowStats {
+    var steps = 0
+    var applies = 0
+    var nudgesFromFrame = 0
+    var nudgesOther = 0
+    var boundsChanges = 0
+}
+nonisolated(unsafe) var transcriptFollowStats = TranscriptFollowStats()
+#endif
+
 // MARK: - The follower
 
 /// Keeps a transcript's scroll view at its bottom while the user is there, scrolling it on the
@@ -87,6 +100,9 @@ final class TranscriptFollower: NSObject {
         if let document = scrollView.documentView {
             document.postsFrameChangedNotifications = true
             observers.append(center.addObserver(forName: NSView.frameDidChangeNotification, object: document, queue: .main) { [weak self] _ in
+                #if DEBUG
+                transcriptFollowStats.nudgesFromFrame += 1
+                #endif
                 MainActor.assumeIsolated { self?.nudge() }
             })
         }
@@ -113,6 +129,9 @@ final class TranscriptFollower: NSObject {
 
     /// The content may have grown: start gliding if following.
     func nudge() {
+        #if DEBUG
+        transcriptFollowStats.nudgesOther += 1
+        #endif
         guard isFollowing, let link else { return }
         settledFrames = 0
         if link.isPaused { lastTimestamp = nil; link.isPaused = false }
@@ -160,6 +179,9 @@ final class TranscriptFollower: NSObject {
     }
 
     private func boundsChanged() {
+        #if DEBUG
+        transcriptFollowStats.boundsChanges += 1
+        #endif
         guard !applying, let scrollView else { return }
         let distance = abs(bottomOffset(of: scrollView) - scrollView.contentView.bounds.origin.y)
         if distance <= transcriptFollowResumeDistance {
@@ -170,6 +192,9 @@ final class TranscriptFollower: NSObject {
     }
 
     @objc private func step(_ link: CADisplayLink) {
+        #if DEBUG
+        transcriptFollowStats.steps += 1
+        #endif
         guard isFollowing, let scrollView else { link.isPaused = true; return }
         let now = link.timestamp
         let dt = lastTimestamp.map { now - $0 } ?? (1.0 / 60.0)
@@ -227,6 +252,9 @@ final class TranscriptFollower: NSObject {
     }
 
     private func apply(_ y: CGFloat, in scrollView: NSScrollView) {
+        #if DEBUG
+        transcriptFollowStats.applies += 1
+        #endif
         let clip = scrollView.contentView
         applying = true
         clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
