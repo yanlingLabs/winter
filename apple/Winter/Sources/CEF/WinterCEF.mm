@@ -38,7 +38,9 @@
 // each answers exactly as CEF's default would.
 #include "include/cef_dialog_handler.h"
 #include "include/cef_download_handler.h"
+#include "include/cef_focus_handler.h"
 #include "include/cef_jsdialog_handler.h"
+#include "include/cef_keyboard_handler.h"
 #include "include/cef_permission_handler.h"
 // editor-plumbing Task 2 — the `winter-editor://` scheme. `cef_resource_handler.h` and
 // `cef_response.h` both arrive transitively through `cef_scheme.h`; named because this file
@@ -773,6 +775,14 @@ bool AutomationHoldsJSDialogs(uint32_t flags) { return (flags & WinterCEFAutomat
 bool AutomationDeniesPermissions(uint32_t flags) { return (flags & WinterCEFAutomationDeniesPermissions) != 0; }
 bool AutomationCancelsFileChooser(uint32_t flags) { return (flags & WinterCEFAutomationCancelsFileChooser) != 0; }
 bool AutomationCancelsDownloads(uint32_t flags) { return (flags & WinterCEFAutomationCancelsDownloads) != 0; }
+bool AutomationSuppressesContextMenus(uint32_t flags) {
+  return (flags & WinterCEFAutomationSuppressesContextMenus) != 0;
+}
+bool AutomationSwallowsUnhandledKeys(uint32_t flags) {
+  return (flags & WinterCEFAutomationSwallowsUnhandledKeys) != 0;
+}
+bool AutomationRefusesFocus(uint32_t flags) { return (flags & WinterCEFAutomationRefusesFocus) != 0; }
+bool AutomationExitsFullscreen(uint32_t flags) { return (flags & WinterCEFAutomationExitsFullscreen) != 0; }
 
 /// Take a JS dialog as a held, never-shown custom dialog — or answer `false` to leave it to CEF's
 /// default, which is what every tab the link does not hold gets. NOT `suppress_message`: a suppressed
@@ -1598,7 +1608,9 @@ class WinterClient : public CefClient,
                     public CefJSDialogHandler,
                     public CefPermissionHandler,
                     public CefDialogHandler,
-                    public CefDownloadHandler {
+                    public CefDownloadHandler,
+                    public CefKeyboardHandler,
+                    public CefFocusHandler {
  public:
   /// **ONE CLIENT PER BROWSER**, holding the in-flight record for the creation it was made for and
   /// the tab that creation belongs to. See `CreateBrowserNow` for why the client — rather than a
@@ -1729,6 +1741,8 @@ class WinterClient : public CefClient,
   CefRefPtr<CefPermissionHandler> GetPermissionHandler() override { return this; }
   CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
+  CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+  CefRefPtr<CefFocusHandler> GetFocusHandler() override { return this; }
 
   bool OnJSDialog(CefRefPtr<CefBrowser> browser,
                   const CefString &origin_url,
@@ -1827,6 +1841,50 @@ class WinterClient : public CefClient,
       return false;
     }
     return true;
+  }
+
+  /// A key the page left unhandled. On macOS CEF hands such an event to the app's MAIN MENU (its
+  /// key equivalents) — and CDP-dispatched keys carry a synthesized `NSEvent`, so an agent's ⌘N, ⌘,
+  /// or ⌘Q would act on Winter itself, and its ⌘V or ⌘A on whichever Winter field holds the focus.
+  /// For a held tab the event stops here. (Editing on macOS is the engine's to do with CDP's own
+  /// `commands`, inside the page — never through Winter's Edit menu.)
+  bool OnKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent &event, CefEventHandle os_event) override {
+    CEF_REQUIRE_UI_THREAD();
+    WinterCEFTabBridge *tab = Tab();
+    return tab != nil && AutomationSwallowsUnhandledKeys(tab.automationNativeUI);
+  }
+
+  /// The browser asking to take the keyboard focus — after a navigation, or for the page's own
+  /// `window.focus()`. A held tab never takes it: the user's focus stays where they left it, in
+  /// Winter's composer or anywhere else. (A click into a page the user can see does not come here;
+  /// AppKit gives it focus directly.)
+  bool OnSetFocus(CefRefPtr<CefBrowser> browser, FocusSource source) override {
+    CEF_REQUIRE_UI_THREAD();
+    WinterCEFTabBridge *tab = Tab();
+    if (tab == nil || !AutomationRefusesFocus(tab.automationNativeUI)) {
+      return false;
+    }
+    Log("focus-refused (an automated tab, source=%d)", static_cast<int>(source));
+    return true;
+  }
+
+  /// The page entered fullscreen. Alloy style makes no native transition of its own (the client
+  /// would have to), so nothing native happens either way; a held tab is simply taken back out, so
+  /// the page does not lay itself out as if it filled a screen. Deferred one turn: this callback
+  /// runs inside the transition it reports.
+  void OnFullscreenModeChange(CefRefPtr<CefBrowser> browser, bool fullscreen) override {
+    CEF_REQUIRE_UI_THREAD();
+    WinterCEFTabBridge *tab = Tab();
+    if (!fullscreen || !browser || tab == nil || !AutomationExitsFullscreen(tab.automationNativeUI)) {
+      return;
+    }
+    Log("fullscreen-exited (an automated tab)");
+    CefRefPtr<CefBrowser> target = browser;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (target->IsValid() && target->GetHost()) {
+        target->GetHost()->ExitFullscreen(true);
+      }
+    });
   }
 
   /// **A popup becomes a PANEL TAB — and CEF still never creates a window.** Those are two separate
@@ -2413,6 +2471,15 @@ class WinterClient : public CefClient,
                            CefRefPtr<CefContextMenuParams> params,
                            CefRefPtr<CefMenuModel> model) override {
     CEF_REQUIRE_UI_THREAD();
+
+    // ComputerV2 Phase 2: a held tab shows no context menu at all — an agent's right-click would
+    // otherwise open a native menu on the user's screen and run its modal tracking loop on the main
+    // thread. "The |model| can be cleared to show no context menu" (`cef_context_menu_handler.h`).
+    if (WinterCEFTabBridge *tab = Tab(); tab != nil && AutomationSuppressesContextMenus(tab.automationNativeUI)) {
+      model->Clear();
+      Log("context-menu-suppressed (an automated tab)");
+      return;
+    }
 
     // The log literal is the needle `CEFRuntimeTests
     // .testViewPageSourceIsREMOVEDFromTheMenuBecauseItDoesNothingOnMacOS` scans the built product
@@ -3565,7 +3632,9 @@ BOOL WinterCEFClientInstallsTheAutomationHandlers(void) {
   // framework symbol.
   CefRefPtr<CefClient> client = new WinterClient(nil, nil);
   return client->GetJSDialogHandler() != nullptr && client->GetPermissionHandler() != nullptr &&
-         client->GetDialogHandler() != nullptr && client->GetDownloadHandler() != nullptr;
+         client->GetDialogHandler() != nullptr && client->GetDownloadHandler() != nullptr &&
+         client->GetKeyboardHandler() != nullptr && client->GetFocusHandler() != nullptr &&
+         client->GetContextMenuHandler() != nullptr && client->GetDisplayHandler() != nullptr;
 }
 
 NSString *WinterCEFAutomationDecisionsForFlags(uint32_t flags) {
@@ -3577,6 +3646,10 @@ NSString *WinterCEFAutomationDecisionsForFlags(uint32_t flags) {
     AutomationDeniesPermissions(flags) ? @"media=deny" : @"media=default",
     AutomationCancelsFileChooser(flags) ? @"filechooser=cancel" : @"filechooser=default",
     AutomationCancelsDownloads(flags) ? @"download=refuse" : @"download=default",
+    AutomationSuppressesContextMenus(flags) ? @"contextmenu=none" : @"contextmenu=default",
+    AutomationSwallowsUnhandledKeys(flags) ? @"unhandledkeys=swallow" : @"unhandledkeys=default",
+    AutomationRefusesFocus(flags) ? @"focus=refuse" : @"focus=default",
+    AutomationExitsFullscreen(flags) ? @"fullscreen=exit" : @"fullscreen=default",
   ] componentsJoinedByString:@";"];
 }
 

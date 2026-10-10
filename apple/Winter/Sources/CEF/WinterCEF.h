@@ -399,6 +399,19 @@ typedef NS_OPTIONS(uint32_t, WinterCEFAutomationNativeUI) {
   WinterCEFAutomationCancelsFileChooser = 1u << 2,
   /// Downloads: refused at `CanDownload`.
   WinterCEFAutomationCancelsDownloads = 1u << 3,
+  /// No native context menu: the menu model is cleared, which CEF documents as "show no context menu".
+  /// A native menu would run a modal tracking loop on the main thread, on the user's screen.
+  WinterCEFAutomationSuppressesContextMenus = 1u << 4,
+  /// A key event the page leaves unhandled stops at the tab (`CefKeyboardHandler::OnKeyEvent`). On
+  /// macOS CEF otherwise hands it to the app's MAIN MENU, where ⌘N, ⌘, or ⌘Q would act on Winter
+  /// itself and ⌘V/⌘A on whichever Winter field holds the keyboard focus.
+  WinterCEFAutomationSwallowsUnhandledKeys = 1u << 5,
+  /// The browser's own focus requests (`CefFocusHandler::OnSetFocus` — a navigation, `window.focus()`)
+  /// are cancelled, so the user's keyboard focus stays where they left it.
+  WinterCEFAutomationRefusesFocus = 1u << 6,
+  /// Page fullscreen is exited at once. Alloy style never makes the window fullscreen by itself; this
+  /// only keeps the page from laying itself out as if it were.
+  WinterCEFAutomationExitsFullscreen = 1u << 7,
 };
 
 /// Set the flags for `parent`'s tab (they live on the tab, so they hold before its browser exists).
@@ -420,8 +433,15 @@ typedef NS_ENUM(int, WinterCEFHeldDialogAction) {
 /// Resolve the dialog `parent`'s tab is holding, if any. Returns whether there was one.
 BOOL WinterCEFResolveHeldDialog(NSView *parent, WinterCEFHeldDialogAction action, const char *promptText);
 
-/// **Test seam.** YES when the browser client INSTALLS the four handlers the automation flags work
-/// through (`CefJSDialogHandler`, `CefPermissionHandler`, `CefDialogHandler`, `CefDownloadHandler`) —
+/// **What no flag can reach, said plainly.** In this windowed (Alloy, native-view) embed on macOS, CEF
+/// offers no client handler for: a `<select>`'s popup menu (an `NSMenu` Chromium runs itself), the
+/// date/time pickers (a popup widget window), the color chooser, or `window.print()`'s print panel
+/// (`CefPrintHandler` is Linux-only). Those are kept away from a held tab by the engine, which
+/// refuses the input that opens them; they are live-gate drills, not something this layer can stop.
+///
+/// **Test seam.** YES when the browser client INSTALLS the six handlers the automation flags work
+/// through (`CefJSDialogHandler`, `CefPermissionHandler`, `CefDialogHandler`, `CefDownloadHandler`,
+/// `CefKeyboardHandler`, `CefFocusHandler`; context menus and fullscreen ride handlers it already had) —
 /// asked through `CefClient` exactly as CEF asks, like `WinterCEFClientInstallsTheClickAndMenuHandlers`:
 /// deleting a getter would leave every override in the binary and the flags dead. Safe with CEF down.
 BOOL WinterCEFClientInstallsTheAutomationHandlers(void);

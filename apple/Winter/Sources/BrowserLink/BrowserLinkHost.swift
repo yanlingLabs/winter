@@ -40,6 +40,13 @@ final class BrowserLinkHost: BrowserLinkHandler {
     static let ensurePollInterval: TimeInterval = 0.05
     static let ensureDeadline: TimeInterval = 15
 
+    /// **The most tabs the link may hold at once — a ceiling, never a queue.** Each hold is a live
+    /// renderer the lifecycle engine may not stop (rule H), so an unbounded number would be unbounded
+    /// renderers. The daemon keeps its own, tighter caps; this is the app's own floor under them, and
+    /// it equals the engine's count backstop (`BrowserLifecycleEngine.maxLiveBackstop`), since a hold
+    /// is exactly a live tab nothing else may take back. A hold past it is refused, typed.
+    static let maxHeldTabs = BrowserLifecycleEngine.maxLiveBackstop
+
     /// The methods whose result the gate must read (contexts and objects they mint or release).
     static let worldMethods: Set<String> = ["Page.createIsolatedWorld", "Runtime.evaluate", "Runtime.callFunctionOn",
                                             "DOM.resolveNode", "Runtime.releaseObject", "Runtime.releaseObjectGroup"]
@@ -128,6 +135,11 @@ final class BrowserLinkHost: BrowserLinkHandler {
 
     private func ensure(sessionId: String, tabId: String, url: String?, reply: BrowserLinkReplier) {
         let isNewHold = gates[tabId] == nil
+        if isNewHold, gates.count >= Self.maxHeldTabs {
+            reply(.failure(code: .notAllowed,
+                           message: "Winter's built-in browser already holds \(Self.maxHeldTabs) tabs for automation — release one first"))
+            return
+        }
         runtime.hold(tabId: tabId, sessionId: sessionId, url: url)
         if isNewHold || !runtime.isLive(tabId: tabId) { replan() }
         guard let container = runtime.container(forTabId: tabId) else {
@@ -302,6 +314,12 @@ final class BrowserLinkHost: BrowserLinkHandler {
                 _ = driver.resolveHeldDialog(container, .drop, nil)
             }
             if Self.worldMethods.contains(method) {
+                // Decoded here (the gate reads it), so bounded here: `okRaw` is checked off the main
+                // thread by the link, a decoded result would not be.
+                guard BrowserLinkProtocol.resultFits(bytes: payload.utf8.count) else {
+                    reply(BrowserLinkProtocol.resultTooLarge(bytes: payload.utf8.count))
+                    return
+                }
                 let result = Self.decode(payload) ?? .object([:])
                 gates[tabId]?.noteResult(method: method, params: params, cdpSessionId: cdpSessionId, result: result)
                 reply(.ok(.object(["result": result])))

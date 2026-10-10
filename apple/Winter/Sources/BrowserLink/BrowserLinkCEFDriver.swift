@@ -54,18 +54,24 @@ struct BrowserLinkCEFDriver {
 
 /// ComputerV2 Phase 2 — **which native UI a tab may show**, as the flags `WinterCEF.mm`'s handlers read.
 ///
-/// While the browser link holds a tab, NOTHING native comes out of it: no JavaScript dialog window, no
-/// permission prompt, no file chooser, no download prompt. Those would put Winter's UI in front of the
-/// user — the one thing an automated tab must never do (it would take their focus and their view) —
-/// and they would block a script on a window no one is looking at. Instead, every kind is answered
-/// where the agent can see and act on it:
+/// While the browser link holds a tab, NOTHING native comes out of it that CEF lets this app answer:
+/// no JavaScript dialog window, no permission prompt, no file chooser, no download prompt, no context
+/// menu, no key reaching Winter's own menu bar, no focus taken from the user, no fullscreen. Each of
+/// those would put Winter's UI in front of the user, take their keyboard focus, or act on Winter
+/// itself — and a modal one would block the main thread on a window no one is looking at. Instead:
 ///
 ///  * a JS dialog is HELD (never shown) and the engine reads it over CDP (`Page.javascriptDialogOpening`)
 ///    and answers it (`Page.handleJavaScriptDialog`);
-///  * a permission request is denied;
-///  * a file chooser is cancelled (the engine intercepts it over CDP first and uploads by
-///    `DOM.setFileInputFiles`);
-///  * a download is refused (downloads are a later phase).
+///  * a permission request is denied; a file chooser is cancelled (the engine intercepts it over CDP
+///    first and uploads by `DOM.setFileInputFiles`); a download is refused;
+///  * a context menu is emptied, so none opens;
+///  * a key the page leaves unhandled stops at the tab instead of reaching the main menu (where an
+///    agent's ⌘N or ⌘Q would act on Winter, and its ⌘V on whichever Winter field is focused);
+///  * the browser's own focus requests are refused; page fullscreen is exited.
+///
+/// **What CEF gives no handler for in this windowed embed on macOS** — a `<select>`'s popup menu,
+/// the date/time pickers, the color chooser, the print panel — is outside this list, and is stopped
+/// at the source by the engine, which refuses the input that opens them (see `WinterCEF.h`).
 ///
 /// A tab the link does not hold gets none of it: every handler then gives CEF's own default, exactly as
 /// before the link existed.
@@ -73,7 +79,8 @@ enum BrowserNativeUIPolicy {
     static func flags(held: Bool) -> UInt32 {
         guard held else { return 0 }
         let all: WinterCEFAutomationNativeUI = [.holdsJSDialogs, .deniesPermissions, .cancelsFileChooser,
-                                                .cancelsDownloads]
+                                                .cancelsDownloads, .suppressesContextMenus, .swallowsUnhandledKeys,
+                                                .refusesFocus, .exitsFullscreen]
         return all.rawValue
     }
 }

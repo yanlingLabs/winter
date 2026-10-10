@@ -268,6 +268,40 @@ final class BrowserLinkHostTests: XCTestCase {
         XCTAssertTrue(link.log.contains("reload"))
     }
 
+    // MARK: - A ceiling on holds
+
+    /// Each hold is a renderer the engine may not stop, so their number has a ceiling — a hold past it
+    /// is refused, typed, and releasing one makes room again.
+    func testHoldsPastTheCeilingAreRefused() {
+        for i in 0..<BrowserLinkHost.maxHeldTabs { ensureLive("t\(i)", session: "s") }
+        XCTAssertEqual(host.heldTabIds.count, BrowserLinkHost.maxHeldTabs)
+        let refused = run(.tabEnsure(sessionId: "s", tabId: "one-too-many", url: nil))
+        XCTAssertEqual(failureCode(refused), .notAllowed)
+        XCTAssertFalse(runtime.isLive(tabId: "one-too-many"), "no renderer for a refused hold")
+        XCTAssertNil(runtime.holds["one-too-many"])
+        // An existing hold is still ensured at the ceiling…
+        guard case .ok = run(.tabEnsure(sessionId: "s", tabId: "t0", url: nil)).value else { return XCTFail() }
+        // …and a release makes room.
+        _ = run(.tabRelease(tabId: "t0"))
+        ensureLive("one-too-many", session: "s")
+        XCTAssertEqual(host.heldTabIds.count, BrowserLinkHost.maxHeldTabs)
+    }
+
+    /// A result the gate must decode (a world method's) is bounded too, before it is decoded: a page
+    /// whose text runs to megabytes must not make a line the daemon drops.
+    func testAnOversizedWorldResultIsRefusedNotSent() {
+        ensureLive()
+        let world = run(.cdpSend(tabId: "t1", method: "Page.createIsolatedWorld",
+                                 params: .object(["frameId": .string("F"), "worldName": .string("winter")]), cdpSessionId: nil))
+        link.answer(.OK, #"{"executionContextId":4}"#)
+        guard case .ok = world.value else { return XCTFail() }
+        let big = run(.cdpSend(tabId: "t1", method: "Runtime.evaluate", params: .object(["contextId": .number(4)]), cdpSessionId: nil))
+        link.answer(.OK, #"{"result":{"type":"string","value":""# + String(repeating: "a", count: BrowserLinkProtocol.resultLineCap) + #""}}"#)
+        guard case .failure(let code, _, let data) = big.value else { return XCTFail("an over-cap result must not be sent") }
+        XCTAssertEqual(code, .cdpError)
+        XCTAssertEqual(data?["cdpCode"]?.intValue, -32603)
+    }
+
     // MARK: - tabs.live
 
     func testTabsLiveListsEveryLiveBrowserAndWhichAreHeld() {
@@ -324,12 +358,19 @@ final class BrowserLinkHostTests: XCTestCase {
                                  params: .object(["frameId": .string("F1"), "worldName": .string("winter")]), cdpSessionId: nil))
         link.answer(.OK, #"{"executionContextId":41}"#)
         XCTAssertEqual(world.value, .ok(.object(["result": .object(["executionContextId": .number(41)])])))
-        // …so an evaluate there passes, and one in a context reported only by an event passes too.
+        // …so an evaluate there passes, and so does one in the winter world of a new document in the
+        // frame the link made its world in (reported only by an event).
         _ = run(.cdpSend(tabId: "t1", method: "Runtime.evaluate", params: .object(["contextId": .number(41)]), cdpSessionId: nil))
         XCTAssertEqual(link.cdp.count, 1)
         link.eventObservers[ObjectIdentifier(container)]?("Runtime.executionContextCreated",
-                                                         Data(#"{"context":{"id":52,"name":"winter","uniqueId":"x"}}"#.utf8), nil)
+                                                         Data(#"{"context":{"id":52,"name":"winter","uniqueId":"x","auxData":{"frameId":"F1"}}}"#.utf8), nil)
         _ = run(.cdpSend(tabId: "t1", method: "Runtime.evaluate", params: .object(["contextId": .number(52)]), cdpSessionId: nil))
+        XCTAssertEqual(link.cdp.count, 2)
+        // A world merely NAMED "winter" in a frame the link never made one in is someone else's.
+        link.eventObservers[ObjectIdentifier(container)]?("Runtime.executionContextCreated",
+                                                         Data(#"{"context":{"id":53,"name":"winter","uniqueId":"y","auxData":{"frameId":"F2"}}}"#.utf8), nil)
+        let foreign = run(.cdpSend(tabId: "t1", method: "Runtime.evaluate", params: .object(["contextId": .number(53)]), cdpSessionId: nil))
+        XCTAssertEqual(failureCode(foreign), .notAllowed)
         XCTAssertEqual(link.cdp.count, 2)
         // The page's own world stays out of reach.
         link.eventObservers[ObjectIdentifier(container)]?("Runtime.executionContextCreated",
@@ -427,17 +468,37 @@ final class BrowserLinkHostTests: XCTestCase {
     // MARK: - No native UI
 
     func testAHeldTabSuppressesEveryKindOfNativeUIAndAnUnheldOneNone() {
-        let all: WinterCEFAutomationNativeUI = [.holdsJSDialogs, .deniesPermissions, .cancelsFileChooser, .cancelsDownloads]
+        let all: WinterCEFAutomationNativeUI = [.holdsJSDialogs, .deniesPermissions, .cancelsFileChooser, .cancelsDownloads,
+                                                .suppressesContextMenus, .swallowsUnhandledKeys, .refusesFocus, .exitsFullscreen]
         XCTAssertEqual(BrowserNativeUIPolicy.flags(held: true), all.rawValue)
         XCTAssertEqual(BrowserNativeUIPolicy.flags(held: false), 0)
         // And the decisions WinterCEF.mm's handlers make from those flags — computed by the very
         // functions the handlers call.
         XCTAssertEqual(WinterCEFAutomationDecisionsForFlags(BrowserNativeUIPolicy.flags(held: true)),
-                       "jsdialog=held;beforeunload=held;permission=deny;media=deny;filechooser=cancel;download=refuse")
+                       "jsdialog=held;beforeunload=held;permission=deny;media=deny;filechooser=cancel;download=refuse;"
+                       + "contextmenu=none;unhandledkeys=swallow;focus=refuse;fullscreen=exit")
         XCTAssertEqual(WinterCEFAutomationDecisionsForFlags(BrowserNativeUIPolicy.flags(held: false)),
-                       "jsdialog=default;beforeunload=default;permission=default;media=default;filechooser=default;download=default")
+                       "jsdialog=default;beforeunload=default;permission=default;media=default;filechooser=default;"
+                       + "download=default;contextmenu=default;unhandledkeys=default;focus=default;fullscreen=default")
         XCTAssertTrue(WinterCEFClientInstallsTheAutomationHandlers(),
                       "a deleted getter would leave every override in the binary and the flags dead")
+    }
+
+    /// Every flag is its own: dropping any one kind from the held set shows up as that kind alone
+    /// answering "default".
+    func testEachNativeUIFlagDecidesExactlyItsOwnKind() {
+        let kinds: [(WinterCEFAutomationNativeUI, String)] = [
+            (.holdsJSDialogs, "jsdialog=held"), (.deniesPermissions, "permission=deny"),
+            (.cancelsFileChooser, "filechooser=cancel"), (.cancelsDownloads, "download=refuse"),
+            (.suppressesContextMenus, "contextmenu=none"), (.swallowsUnhandledKeys, "unhandledkeys=swallow"),
+            (.refusesFocus, "focus=refuse"), (.exitsFullscreen, "fullscreen=exit"),
+        ]
+        for (flag, decision) in kinds {
+            let alone: String = WinterCEFAutomationDecisionsForFlags(flag.rawValue) ?? ""
+            XCTAssertTrue(alone.contains(decision), "\(decision) from its own flag")
+            let without: String = WinterCEFAutomationDecisionsForFlags(BrowserNativeUIPolicy.flags(held: true) & ~flag.rawValue) ?? ""
+            XCTAssertFalse(without.contains(decision), "\(decision) without its flag")
+        }
     }
 }
 
