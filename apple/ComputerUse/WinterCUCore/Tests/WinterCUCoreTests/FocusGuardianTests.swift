@@ -150,7 +150,8 @@ final class FocusGuardianTests: XCTestCase {
         core.onActivation(pid: 77)  // the user switched to Terminal
         XCTAssertTrue(sys.activated.isEmpty, "never pulled back")
         XCTAssertTrue(core.takeGuardianNotes().isEmpty)
-        // The bound target's own activation is still caught.
+        // The bound target's own activation right after an act on it is still caught.
+        core.noteGuardianActed(500)
         sys.front = 500
         core.onActivation(pid: 500)
         XCTAssertEqual(sys.activated.last, 77, "put back to the user's CURRENT app")
@@ -175,6 +176,7 @@ final class FocusGuardianTests: XCTestCase {
         core.scriptActivity(sessionId: "s", active: true)
         core.scriptActivity(sessionId: "s", active: false)
         XCTAssertTrue(core.guardianRunning, "the tail: a late activation is still caught")
+        core.noteGuardianActed(500)
         sys.front = 500
         core.onActivation(pid: 500)
         XCTAssertEqual(sys.activated.last, 1)
@@ -204,16 +206,67 @@ final class FocusGuardianTests: XCTestCase {
         XCTAssertTrue(core.takeGuardianNotes().isEmpty)
     }
 
-    func testAppsTheAgentOpenedOrActedOnAreSuspectsTheRestAreNot() {
+    func testOnlyAChangeSoonAfterItsCauseIsTheAgents() {
         let (core, _, _) = guardWorld()
         let now = core.clock.nowSeconds()
-        XCTAssertTrue(core.guardianSuspect(500, now: now), "a bound target's app")
-        XCTAssertFalse(core.guardianSuspect(77, now: now))
+        XCTAssertFalse(core.guardianSuspect(500, now: now), "a bound target's app with nothing done to it: not a suspect")
+        core.noteGuardianActed(500)
+        XCTAssertTrue(core.guardianSuspect(500, now: now + 0.5), "0.5 s after an act on it")
+        XCTAssertFalse(core.guardianSuspect(500, now: now + 5), "5 s after: the user's")
         core.noteGuardianOpened(77)
-        XCTAssertTrue(core.guardianSuspect(77, now: now), "a document was opened in it")
-        core.noteGuardianActed(88)
-        XCTAssertTrue(core.guardianSuspect(88, now: now + 1))
-        XCTAssertFalse(core.guardianSuspect(88, now: now + CUCore.guardianActedWindow + 1), "only for a few seconds after the act")
+        XCTAssertTrue(core.guardianSuspect(77, now: now + 1), "a document opened in it a second ago")
+        XCTAssertTrue(core.guardianSpaceChangeCaused(now: now + 1))
+        XCTAssertFalse(core.guardianSpaceChangeCaused(now: now + 3))
+    }
+
+    func testAnActivationLongAfterTheLastActIsTheUsersOneRightAfterItIsUndone() {
+        let (core, sys, _) = guardWorld()
+        core.noteGuardianPrivatePath(true)
+        core.scriptActivity(sessionId: "s", active: true)
+        defer { core.stopGuardian() }
+        core.guardianCauses[500] = core.clock.nowSeconds() - 5  // the last act on it, 5 s ago
+        sys.front = 500
+        core.onActivation(pid: 500)
+        XCTAssertTrue(sys.activated.isEmpty, "the user went there")
+        sys.front = 1
+        core.onActivation(pid: 1)
+        core.noteGuardianActed(500)  // now an act on it, and it comes forward at once
+        sys.front = 500
+        core.onActivation(pid: 500)
+        XCTAssertEqual(sys.activated.last, 1, "undone")
+    }
+
+    func testAUserSwipeToTheTargetsSpaceMidScriptIsNeverUndoneAndBecomesTheirPlace() {
+        let (core, sys, _) = guardWorld()
+        core.noteGuardianPrivatePath(true)
+        core.scriptActivity(sessionId: "s", active: true)
+        defer { core.stopGuardian() }
+        core.guardianCauses[500] = core.clock.nowSeconds() - 4
+        core.guardianLastCause = core.clock.nowSeconds() - 4
+        // The user swipes to the target's desktop to watch: a Space change and the target in front, no input seen.
+        sys.space = 300
+        sys.front = 500
+        core.onSpaceChange()
+        core.onActivation(pid: 500)
+        XCTAssertTrue(sys.activated.isEmpty, "never pulled back")
+        XCTAssertEqual(sys.space, 300)
+        // Later, an app the agent just acted on takes the front: the user is put back where THEY went.
+        core.noteGuardianActed(77)
+        sys.front = 77
+        core.onActivation(pid: 77)
+        XCTAssertEqual(sys.activated.last, 500, "to the user's new place, not where the script started")
+    }
+
+    func testASwipeRightAfterAnActIsStillTheUsersWithHardwareInput() {
+        let (core, sys, _) = guardWorld()
+        core.noteGuardianPrivatePath(true)
+        core.scriptActivity(sessionId: "s", active: true)
+        defer { core.stopGuardian() }
+        core.noteGuardianActed(500)
+        core.noteHardwareInput(now: core.clock.nowSeconds())  // the swipe's own gesture events
+        sys.space = 300
+        core.onSpaceChange()
+        XCTAssertTrue(sys.activated.isEmpty)
     }
 
     // MARK: the user's own click into the agent's app (a listen-only left-mouse-down observer)
@@ -275,6 +328,7 @@ final class FocusGuardianTests: XCTestCase {
     func testAHelperStampedClickIsIgnoredAndTheActivationIsStillPutBack() {
         let (core, sys) = clickWorld()
         defer { core.stopGuardian() }
+        core.noteGuardianActed(500)  // the click was ours, just now
         XCTAssertNil(core.onPhysicalClick(at: CGPoint(x: 100, y: 100), userData: CUEventStamp.value, now: 10))
         sys.front = 500
         core.onActivation(pid: 500)

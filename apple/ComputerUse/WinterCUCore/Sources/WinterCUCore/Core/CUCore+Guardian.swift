@@ -9,10 +9,13 @@ import Foundation
 /// previous app" each time they switched to Terminal, the app they were working in):
 /// - it runs only while the agent is acting — from a script's start (`script.active`) to its end plus a short
 ///   tail for delayed activations — never merely because targets are bound;
-/// - only an app the agent touched can be a thief: a bound target's, one a document was opened in during the
-///   script, or one acted on in the last few seconds. Any other app coming forward is the user's choice, always.
+/// - CAUSALITY, not identity: an activation or a Space change counts as the agent's only when it comes within
+///   `guardianCausalWindow` after something the agent did that could cause it — an act on that app, a focus blip
+///   ending, a document opened or an app launched (live: the user swiping to Safari's desktop to watch the agent
+///   was pulled back, Safari being a bound app). Anything else is the user's, whatever the app.
 /// And any hardware input in the last second (trackpad gestures, Mission Control, ⌘Tab, the Dock) makes an
-/// activation or Space switch the user's. Gated by the private-path setting; off, the per-action user-view guard
+/// activation or Space switch the user's even inside that window; and once the user has moved somewhere, that is
+/// where a later restore returns them. Gated by the private-path setting; off, the per-action user-view guard
 /// stays the only backstop. The keyboard reroute runs only inside the focus blip (CUCore+Blip).
 extension CUCore {
     /// How long the guardian treats an activation as following one of our own synthetic events.
@@ -21,8 +24,8 @@ extension CUCore {
     static let guardianRestoreDeadlineMs: Double = 2000
     /// How long the guard outlives the last script (an app activating itself a moment after the end).
     static let guardianTail: TimeInterval = 3
-    /// How long after an act on an app its activation may still be the act's doing.
-    static let guardianActedWindow: TimeInterval = 3
+    /// How long after its cause (an act, a blip, an open or a launch) a change may still be the agent's doing.
+    static let guardianCausalWindow: TimeInterval = 1.5
     /// Hardware input this recent makes an activation or a Space switch the user's.
     static let guardianHardwareWindow: TimeInterval = 1
 
@@ -65,24 +68,28 @@ extension CUCore {
         if arm { _ = startGuardian(privatePath: true) }
     }
 
-    /// A document opened in `pid` during the script: it may come forward late — a possible thief while guarding.
-    func noteGuardianOpened(_ pid: pid_t) {
-        guardianLock.withLock { _ = guardianOpened.insert(pid) }
-    }
+    /// A document was opened in `pid`, or it was launched: a cause for it to come forward.
+    func noteGuardianOpened(_ pid: pid_t) { noteGuardianCause(pid) }
 
-    /// The agent acted on `pid`: its activation in the next `guardianActedWindow` may be the act's doing.
-    func noteGuardianActed(_ pid: pid_t) {
+    /// The agent acted on `pid` (or a focus blip on it ended): a cause for it to come forward.
+    func noteGuardianActed(_ pid: pid_t) { noteGuardianCause(pid) }
+
+    func noteGuardianCause(_ pid: pid_t) {
         let now = clock.nowSeconds()
-        guardianLock.withLock { guardianActedAt[pid] = now }
+        guardianLock.withLock {
+            guardianCauses[pid] = now
+            guardianLastCause = now
+        }
     }
 
-    /// Whether `pid` coming forward can be a theft: a bound target's app, an app a document was opened in, or one
-    /// acted on in the last `guardianActedWindow`. Anything else is the user's.
+    /// Whether `pid` coming forward now can be the agent's doing: within `guardianCausalWindow` of a cause for it.
     func guardianSuspect(_ pid: pid_t, now: TimeInterval) -> Bool {
-        if boundTargetPids().contains(pid) { return true }
-        return guardianLock.withLock {
-            guardianOpened.contains(pid) || (guardianActedAt[pid].map { now - $0 <= Self.guardianActedWindow } ?? false)
-        }
+        guardianLock.withLock { guardianCauses[pid].map { now - $0 <= Self.guardianCausalWindow } ?? false }
+    }
+
+    /// Whether a Space change now can be the agent's doing: within `guardianCausalWindow` of any cause.
+    func guardianSpaceChangeCaused(now: TimeInterval) -> Bool {
+        guardianLock.withLock { guardianLastCause >= 0 && now - guardianLastCause <= Self.guardianCausalWindow }
     }
 
     /// Recent user input: physical mouse/keys (HID state, the original 0.4 s window), or ANY hardware-origin event
@@ -108,6 +115,7 @@ extension CUCore {
         guardianCore.begin(view: CUGuardedView(app: sys.frontmostPid(), space: sys.activeSpace()))
         installGuardianObservers()
         startCPSTap()
+        startGestureMonitor()
         CULog.guardian.notice("guarding the user's view while a script runs")
         return true
     }
@@ -118,15 +126,46 @@ extension CUCore {
         guard guardianRefs > 0 else { return }
         guardianRefs = 0
         guardianCore.end()
-        guardianOpened.removeAll()
-        guardianActedAt.removeAll()
+        guardianCauses.removeAll()
+        guardianLastCause = -1
         for o in guardianObservers { NSWorkspace.shared.notificationCenter.removeObserver(o) }
         guardianObservers.removeAll()
         stopCPSTap()
+        stopGestureMonitor()
         CULog.guardian.notice("stopped guarding: no script running")
     }
 
     var guardianRunning: Bool { guardianLock.withLock { guardianRefs > 0 } }
+
+    /// The user's trackpad and Dock gestures (swipes between Spaces, Mission Control, magnify) as they happen,
+    /// through a global event monitor — the session tap does not see every gesture the system consumes. Each is
+    /// hardware input for attribution. Off in tests (`guardianLiveTapEnabled`).
+    func startGestureMonitor() {
+        guard guardianLiveTapEnabled, guardianGestureMonitor == nil else { return }
+        let mask: NSEvent.EventTypeMask = [.gesture, .swipe, .magnify, .rotate, .beginGesture, .endGesture, .smartMagnify,
+                                           .pressure, .directTouch, .scrollWheel, .mouseMoved, .leftMouseDown, .rightMouseDown,
+                                           .otherMouseDown, .keyDown, .flagsChanged]
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let monitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
+                guard let self else { return }
+                self.noteHardwareInput(now: self.clock.nowSeconds())
+            }
+            let stale = self.guardianLock.withLock { () -> Bool in
+                if self.guardianRefs == 0 { return true }
+                self.guardianGestureMonitor = monitor
+                return false
+            }
+            if stale, let monitor { NSEvent.removeMonitor(monitor) }
+        }
+    }
+
+    /// Called with `guardianLock` held (from `stopGuardian`).
+    func stopGestureMonitor() {
+        guard let monitor = guardianGestureMonitor else { return }
+        guardianGestureMonitor = nil
+        DispatchQueue.main.async { NSEvent.removeMonitor(monitor) }
+    }
 
     /// The consented foreground rung takes the front for one action: exempt that app briefly.
     func guardianExempt(_ pid: pid_t) {
@@ -195,8 +234,11 @@ extension CUCore {
     func onSpaceChange() {
         let now = clock.nowSeconds()
         let userInput = userInputRecent(now: now)
+        let caused = guardianSpaceChangeCaused(now: now)
+        let front = sys.frontmostPid()
         guardianLock.lock()
-        let restore = guardianCore.handleSpaceChange(to: sys.activeSpace(), hadRecentUserInput: userInput, now: now)
+        let restore = guardianCore.handleSpaceChange(to: sys.activeSpace(), front: front, hadRecentUserInput: userInput,
+                                                     caused: caused, now: now)
         guardianLock.unlock()
         guard let restore else { return }
         dispatchRestore(restore, thief: restore.app ?? 0, repeatOffender: false, cause: "the desktop changed")
