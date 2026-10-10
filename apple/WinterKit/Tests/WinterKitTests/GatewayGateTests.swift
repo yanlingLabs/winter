@@ -100,7 +100,7 @@ final class GatewayGateTests: XCTestCase {
         })
         return Gateway(
             listener: listener,
-            daemonFactory: { WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: remoteToken, clientName: "iphone-gateway") },
+            daemonFactory: { WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: remoteToken, clientName: "iphone-gateway", requestTimeout: RealDaemon.requestTimeout) },
             hostID: "host-test",
             directory: directory
         )
@@ -171,7 +171,7 @@ final class GatewayGateTests: XCTestCase {
     /// `collectUntilTurnsSettle`'s doc comment), and exactly the content a phone should see for this
     /// seed (`crossesRemoteGate` + no harness noise), in order.
     func seedTwoMessages(socketPath: String, harnessToken: String) async throws -> (sid: String, afterHarnessAttach: Int, seqM2: Int, content: [SessionEvent]) {
-        let harness = WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: harnessToken, clientName: "seed")
+        let harness = WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: harnessToken, clientName: "seed", requestTimeout: RealDaemon.requestTimeout)
         try await harness.connect(role: "harness")
         // `session.dispatch {}` (empty object, NOT nil — SessionDispatchParams is z.object({})).
         let sid = try await harness.request("session.dispatch", params: .object([:]))["sessionId"]!.stringValue!
@@ -271,7 +271,7 @@ final class GatewayGateTests: XCTestCase {
         let socketPath = daemon.socketPath, remoteToken = daemon.remoteToken
 
         // A live harness that stays attached, so it can produce a new event mid-handshake.
-        let live = WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: daemon.harnessToken, clientName: "live")
+        let live = WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: daemon.harnessToken, clientName: "live", requestTimeout: RealDaemon.requestTimeout)
         try await live.connect(role: "harness")
         let sid = try await live.request("session.dispatch", params: .object([:]))["sessionId"]!.stringValue!
         let afterAttach = try await live.attach(sessionId: sid, fromSeq: 0)
@@ -546,7 +546,7 @@ final class GatewayGateTests: XCTestCase {
         defer { daemon.stop() }
         let socketPath = daemon.socketPath
 
-        let live = WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: daemon.harnessToken, clientName: "live")
+        let live = WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: daemon.harnessToken, clientName: "live", requestTimeout: RealDaemon.requestTimeout)
         try await live.connect(role: "harness")
         let sid = try await live.request("session.dispatch", params: .object([:]))["sessionId"]!.stringValue!
         let afterAttach = try await live.attach(sessionId: sid, fromSeq: 0)
@@ -1048,7 +1048,7 @@ final class GatewayGateTests: XCTestCase {
         let listener = LoopbackListener()
         let gateway = Gateway(
             listener: listener,
-            daemonFactory: { WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway") },
+            daemonFactory: { WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway", requestTimeout: RealDaemon.requestTimeout) },
             hostID: "host-test",
             directory: directory
         )
@@ -1149,7 +1149,7 @@ final class GatewayGateTests: XCTestCase {
         _ = try await waitForOutbound(sessionConn, count: 2) // the first replay frame, recorded then parked
 
         // A live event lands while conn A is parked: it must queue on `heldLive` behind the replay.
-        let harness = WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: "t6b-live")
+        let harness = WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: "t6b-live", requestTimeout: RealDaemon.requestTimeout)
         try await harness.connect(role: "harness")
         _ = try await harness.attach(sessionId: seeded.sid, fromSeq: seeded.seqM2)
         let seqM3 = try await harness.send(sessionId: seeded.sid, text: "m3")

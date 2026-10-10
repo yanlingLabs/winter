@@ -72,7 +72,7 @@ final class PairingE2ETests: XCTestCase {
                 return listener
             },
             makeDaemonFactory: {
-                WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway")
+                WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway", requestTimeout: RealDaemon.requestTimeout)
             }
         )
         // Force-starts (even at zero paired devices) so the listener is bound before the caller
