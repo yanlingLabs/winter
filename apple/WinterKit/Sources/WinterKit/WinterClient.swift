@@ -35,15 +35,40 @@ public actor WinterClient {
     // exit path (defer), so a later, genuinely-new disconnect can still trigger reconnection.
     var reconnecting = false
 
+    /// The client's event stream. **It has exactly ONE consumer** (the feed's reader, the Gateway's pump, a probe's
+    /// loop): an `AsyncStream` hands each element to whichever consumer asks first, so a second `for await` over this
+    /// property steals events from the first — and cancelling ANY consumer's task while it waits on `next()` cancels
+    /// the stream for all of them, which ends the first one's loop for good. A caller that wants a few kinds of event
+    /// beside the reader takes its own stream from `observe(where:)`.
     public nonisolated let events: AsyncStream<WinterEvent>
     nonisolated let eventsCont: AsyncStream<WinterEvent>.Continuation // internal: Task 9's reconnect extension yields states
     /// How many events the stream holds that its consumer has not taken yet (a hang report's "backlog").
-    public nonisolated let traffic = EventTraffic()
+    public nonisolated let traffic: EventTraffic
+    /// The side streams `observe(where:)` has handed out.
+    nonisolated let observers = EventObservers()
 
-    /// Every event reaches the stream through here, so `traffic` sees each one.
+    /// Every event reaches the stream through here, so `traffic` sees each one — and only the ones the stream took:
+    /// a yield onto a stream that has ended (a deliberate `close()` is followed by the pump's own `.closed`, which
+    /// becomes a `.connection(.disconnected)` AFTER the stream finished) is handed back to `traffic`, because nothing
+    /// will ever take it off. The note goes in BEFORE the yield, never after: once the element is on the stream the
+    /// consumer may take it at any moment, and a count that arrives late is a count that never balances.
     nonisolated func emit(_ event: WinterEvent) {
-        traffic.noteYielded()
-        eventsCont.yield(event)
+        let ticket = traffic.noteYielded()
+        switch eventsCont.yield(event) {
+        case .enqueued:
+            break
+        default: // .terminated (the stream is over) or .dropped (a bounded buffer let it go): never to be taken
+            if let ticket { traffic.undo(ticket) }
+        }
+        observers.broadcast(event)
+    }
+
+    /// A stream of the events `include` accepts, apart from `events` and without taking anything from it: it sees
+    /// every event the client emits from now on (an earlier one is not replayed), so a caller that must not miss an
+    /// event asks BEFORE it sends the request that makes the daemon emit it. It ends when the client is closed, and
+    /// cancelling or dropping it affects nothing else.
+    public nonisolated func observe(where include: @escaping @Sendable (WinterEvent) -> Bool) -> AsyncStream<WinterEvent> {
+        observers.add(include)
     }
 
     // Attach/resync state (used by Task 8/9): the session this client is attached to and the
@@ -77,9 +102,17 @@ public actor WinterClient {
         self.token = token
         self.clientName = clientName
         self.requestTimeout = requestTimeout
+        let traffic = EventTraffic()
         var c: AsyncStream<WinterEvent>.Continuation!
         self.events = AsyncStream { c = $0 }
+        // A stream that is CANCELLED (its consumer's task was cancelled while it read, which cancels the stream for every
+        // consumer) takes nothing more, and what it still held is left behind for a reader that is no longer there:
+        // whatever `traffic` still counts as waiting never will be taken.
+        c.onTermination = { [traffic] termination in
+            if case .cancelled = termination { traffic.retire() }
+        }
         self.eventsCont = c
+        self.traffic = traffic
     }
 
     /// Open the transport, start the read pump, authenticate. Throws on transport or hello failure.
@@ -118,6 +151,7 @@ public actor WinterClient {
         transport?.close()
         transport = nil
         eventsCont.finish() // deliberate close: the event stream ENDS — consumers' for-await loops exit
+        observers.finishAll()
     }
 
     private func startPump(_ t: WinterTransport) {
@@ -404,50 +438,130 @@ extension SessionEvent {
 /// Counts the events a client has put on its stream and the ones its consumer has taken off it, so the
 /// difference — the backlog a slow consumer has built up — and how long the oldest has waited can be read from
 /// any thread. (An `AsyncStream` does not say how many elements it is holding.)
+///
+/// The count balances only if every note is matched by a take or by an `undo`/`retire`: `noteYielded` before the
+/// yield, `undo` when the stream did not take the element, `retire` when the consumer is gone for good.
 public final class EventTraffic: @unchecked Sendable {
     /// Past this many timestamps held, the older half is dropped: a client whose events nobody counts off (the
     /// Gateway's, the phone's) must not grow this forever. A diagnostic, so `backlog` then reads as a floor.
     static let cap = 65_536
 
+    /// One `noteYielded`, so `undo` can take back exactly that note and no other.
+    struct Ticket: Equatable, Sendable { fileprivate let id: UInt64 }
+    private struct Entry { let id: UInt64; let at: TimeInterval }
+
     private let lock = NSLock()
-    private var times: [TimeInterval] = []
+    private var entries: [Entry] = []
     private var head = 0
+    private var nextId: UInt64 = 0
+    private var retired = false
     private let clock: @Sendable () -> TimeInterval
 
     public init(clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) { self.clock = clock }
 
-    func noteYielded() {
+    /// An event is about to go onto the stream. Nil once the traffic is retired (nothing is counted any more).
+    @discardableResult
+    func noteYielded() -> Ticket? {
         lock.lock(); defer { lock.unlock() }
-        times.append(clock())
-        if times.count - head > Self.cap {
-            times.removeFirst(times.count - Self.cap / 2)
+        guard !retired else { return nil }
+        nextId += 1
+        entries.append(Entry(id: nextId, at: clock()))
+        if entries.count - head > Self.cap {
+            entries.removeFirst(entries.count - Self.cap / 2)
             head = 0
         }
+        return Ticket(id: nextId)
     }
+
+    /// The stream did not take the event `ticket` was noted for (it had ended, or let it go): take the note back. Only
+    /// that note — the consumer takes from the other end, so this never costs it one of its own — and nothing at all
+    /// if it is no longer held (retired, or trimmed past `cap`).
+    func undo(_ ticket: Ticket) {
+        lock.lock(); defer { lock.unlock() }
+        var i = entries.count - 1
+        while i >= head {
+            if entries[i].id == ticket.id { entries.remove(at: i); return }
+            i -= 1
+        }
+    }
+
+    /// The consumer is gone for good — its loop ended, or the stream was cancelled under it — so what is still counted
+    /// as waiting never will be taken: forget it, and count nothing more. A hang report then reads 0, not the stale
+    /// remains of a stream nobody reads.
+    public func retire() {
+        lock.lock(); defer { lock.unlock() }
+        retired = true
+        entries.removeAll()
+        head = 0
+    }
+
+    public var isRetired: Bool { lock.lock(); defer { lock.unlock() }; return retired }
 
     /// The consumer took one event off the stream. Returns how long that event had been waiting on it, in seconds
     /// (0 when nothing was counted as waiting).
     @discardableResult
     public func noteConsumed() -> TimeInterval {
         lock.lock(); defer { lock.unlock() }
-        guard head < times.count else { return 0 }
-        let waited = max(clock() - times[head], 0)
+        guard head < entries.count else { return 0 }
+        let waited = max(clock() - entries[head].at, 0)
         head += 1
-        if head == times.count { times.removeAll(keepingCapacity: true); head = 0 }
-        else if head > 4096 { times.removeFirst(head); head = 0 }
+        if head == entries.count { entries.removeAll(keepingCapacity: true); head = 0 }
+        else if head > 4096 { entries.removeFirst(head); head = 0 }
         return waited
     }
 
     /// Events on the stream not yet taken (a floor, once `cap` has been passed).
-    public var backlog: Int { lock.lock(); defer { lock.unlock() }; return times.count - head }
+    public var backlog: Int { lock.lock(); defer { lock.unlock() }; return entries.count - head }
 
     /// How long the oldest event not yet taken has been waiting, in seconds (0 when none is).
     public var oldestAge: TimeInterval {
         lock.lock(); defer { lock.unlock() }
-        guard head < times.count else { return 0 }
-        return max(clock() - times[head], 0)
+        guard head < entries.count else { return 0 }
+        return max(clock() - entries[head].at, 0)
     }
 
     /// Timestamps held (tests: bounded however many events nobody counts off).
-    var storedCount: Int { lock.lock(); defer { lock.unlock() }; return times.count }
+    var storedCount: Int { lock.lock(); defer { lock.unlock() }; return entries.count }
+}
+
+/// The side streams of `WinterClient.observe(where:)`: each gets the events its filter accepts, independently of the
+/// client's own `events` stream (and of each other), so a second reader of the client's events never has to be a second
+/// consumer of that one stream.
+final class EventObservers: @unchecked Sendable {
+    private struct Observer { let include: @Sendable (WinterEvent) -> Bool; let continuation: AsyncStream<WinterEvent>.Continuation }
+
+    private let lock = NSLock()
+    private var observers: [Int: Observer] = [:]
+    private var nextId = 0
+    private var finished = false
+
+    func add(_ include: @escaping @Sendable (WinterEvent) -> Bool) -> AsyncStream<WinterEvent> {
+        var continuation: AsyncStream<WinterEvent>.Continuation!
+        let stream = AsyncStream<WinterEvent> { continuation = $0 }
+        lock.lock()
+        if finished { lock.unlock(); continuation.finish(); return stream }
+        nextId += 1
+        let id = nextId
+        observers[id] = Observer(include: include, continuation: continuation)
+        lock.unlock()
+        continuation.onTermination = { [weak self] _ in self?.remove(id) }
+        return stream
+    }
+
+    func broadcast(_ event: WinterEvent) {
+        lock.lock(); let current = observers; lock.unlock()
+        for (id, observer) in current where observer.include(event) {
+            if case .terminated = observer.continuation.yield(event) { remove(id) }
+        }
+    }
+
+    /// The client closed: every side stream ends, and none is handed out afterwards that would not.
+    func finishAll() {
+        lock.lock(); finished = true; let all = observers; observers = [:]; lock.unlock()
+        for observer in all.values { observer.continuation.finish() }
+    }
+
+    private func remove(_ id: Int) {
+        lock.lock(); observers[id] = nil; lock.unlock()
+    }
 }

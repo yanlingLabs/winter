@@ -153,17 +153,31 @@ public final class LiveAnthropicAuthClient: AnthropicAuthClient, Sendable {
         }
     }
 
-    /// Consumes `WinterClient.events` for the two typed transient cases the generated protocol now
-    /// carries (`SessionEvent.providerLoginProgress`/`.providerLoginFinished`) — both are
-    /// TRANSIENT (`$system`-scoped, never persisted/replayed), so `WinterClient.route()` yields
-    /// them on `.session(...)` unconditionally, bypassing the per-session seq/attach gate entirely
-    /// (`WinterClient.swift`'s own doc comment on that path). `provider` is checked defensively
-    /// even though "anthropic" is the only value either case can carry today (P10a-6's own doc:
-    /// `{provider, kind}` on every param is deliberately wide for a later provider/kind).
+    /// Watches the client for the two typed transient cases the generated protocol now carries
+    /// (`SessionEvent.providerLoginProgress`/`.providerLoginFinished`) — both are TRANSIENT (`$system`-scoped,
+    /// never persisted/replayed), so `WinterClient.route()` yields them on `.session(...)` unconditionally,
+    /// bypassing the per-session seq/attach gate entirely (`WinterClient.swift`'s own doc comment on that path).
+    /// `provider` is checked defensively even though "anthropic" is the only value either case can carry today
+    /// (P10a-6's own doc: `{provider, kind}` on every param is deliberately wide for a later provider/kind).
+    ///
+    /// **Through `WinterClient.observe(where:)`, never `client.events`.** This client is the app's MAIN feed client
+    /// (`AppModel.client`), whose `events` already has its one consumer — the feed's reader. A second `for await` over
+    /// `events` took every other event away from that reader (a transcript missing events), and the task being
+    /// cancelled when the sign-in sheet closed ended the stream for the reader too: the orb's feed went silent for the
+    /// rest of the app's life. The side stream is created HERE, before the first `await` of any caller, so the
+    /// "subscribe before `login()`" ordering `AnthropicLoginSheetModel.start()` relies on holds by construction.
     public func loginUpdates() -> AsyncStream<AnthropicLoginEvent> {
-        AsyncStream { continuation in
+        let source = client.observe { event in
+            guard case .session(let session) = event else { return false }
+            switch session {
+            case .providerLoginProgress(let v): return v.provider == "anthropic"
+            case .providerLoginFinished(let v): return v.provider == "anthropic"
+            default: return false
+            }
+        }
+        return AsyncStream { continuation in
             let task = Task {
-                for await ev in client.events {
+                for await ev in source {
                     guard case .session(let event) = ev else { continue }
                     switch event {
                     case .providerLoginProgress(let v) where v.provider == "anthropic":
