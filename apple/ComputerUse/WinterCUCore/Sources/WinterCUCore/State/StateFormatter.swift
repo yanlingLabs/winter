@@ -177,9 +177,14 @@ public struct CUStateFormatter: Sendable {
     /// `whole` (the model asked for `full: true`): the cap is `fullLineCap`, and a state that had to fold anyway
     /// ends with a line saying so.
     public func full(header h: CUStateHeader, roots: [CUNode], viewportFirst: Bool = false, whole: Bool = false) -> String {
-        var lines = [header(h)]
-        lines.append(contentsOf: body(roots: roots, focusedRef: h.focusedRef, viewportFirst: viewportFirst, whole: whole))
-        return lines.joined(separator: "\n")
+        printed(header: h, roots: roots, viewportFirst: viewportFirst, whole: whole).text
+    }
+
+    /// `full`, with the refs whose own line it prints (what the model sees of it: folded and out-of-view elements are
+    /// not), so a later diff can surface what it had not shown.
+    public func printed(header h: CUStateHeader, roots: [CUNode], viewportFirst: Bool = false, whole: Bool = false) -> (text: String, shown: Set<Int>) {
+        let b = bodyAndShown(roots: roots, focusedRef: h.focusedRef, viewportFirst: viewportFirst, whole: whole)
+        return (([header(h)] + b.lines).joined(separator: "\n"), b.shown)
     }
 
     static func outOfViewMarker(count: Int, ref: Int) -> String {
@@ -206,6 +211,10 @@ public struct CUStateFormatter: Sendable {
 
     /// The indented lines of `roots`, folded to `lineCap` (`fullLineCap` when `whole`).
     public func body(roots: [CUNode], focusedRef: Int?, viewportFirst: Bool = false, whole: Bool = false) -> [String] {
+        bodyAndShown(roots: roots, focusedRef: focusedRef, viewportFirst: viewportFirst, whole: whole).lines
+    }
+
+    func bodyAndShown(roots: [CUNode], focusedRef: Int?, viewportFirst: Bool = false, whole: Bool = false) -> (lines: [String], shown: Set<Int>) {
         let cap = whole ? fullLineCap : lineCap
         let byteCap = whole ? fullByteCap : Int.max
         // Flatten into an indexable list with parent links and depths, and whether each element lies outside
@@ -403,6 +412,6 @@ public struct CUStateFormatter: Sendable {
             let byLines = items.count > cap
             out.append(Self.wholeCutMarker(cap: cap, folded: folded, kb: byLines ? nil : byteCap / 1024))
         }
-        return out
+        return (out, Set(items.indices.filter { !hidden[$0] }.map { items[$0].node.ref }))
     }
 }

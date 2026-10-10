@@ -99,6 +99,30 @@ describe("browsers.list / open / tabs / tab", () => {
     expect(text.split("\n").length).toBeLessThan(330);
   });
 
+  // Review of round 2 (MEDIUM): the bind's FOLDED print is the diff base; the diff compared every element the read saw, so a
+  // scroll that brought folded rows into view answered "(no changes)", and a change under a fold had no context.
+  test("a scroll after a folded bind surfaces the rows that came into view; a change under a fold prints with its context", async () => {
+    const h = harness();
+    const rows = (first: number, v300 = "a"): FakePage["nodes"] => Array.from({ length: 400 }, (_, i) => ({
+      id: 100 + i, role: "text field", name: `Row ${i}`, value: i === 300 ? v300 : "x", ...(i >= first && i < first + 20 ? {} : { off: true as const }),
+    }));
+    const page: FakePage = { url: "https://rows.example/", title: "Rows", nodes: [{ id: 1, role: "main", children: [{ id: 3, role: "list", name: "List", children: rows(0) }] }] };
+    const tab = h.chrome.addTab(page, { tabKey: "600" });
+    const r = h.run();
+    const handle = await h.engine.global(r.scope, "browsers.tab", { tab: "chrome:600" }) as TabHandle;
+    expect(r.text()).toContain('"Row 0"');
+    expect(r.text()).not.toContain('"Row 60"');
+    tab.page.nodes[0]!.children![0]!.children = rows(50);  // scrolled: rows 50… in view
+    const after = await h.engine.primitive(r.scope, handle.targetId, "state", {}) as string;
+    expect(after).not.toContain("(no changes)");
+    expect(after).toMatch(/\+ \[\d+\] text field "Row 60" value="x" — now shown, in \[\d+\] list "List"/);
+    const again = await h.engine.primitive(r.scope, handle.targetId, "state", {}) as string;
+    expect(again).toContain("(no changes)");
+    tab.page.nodes[0]!.children![0]!.children = rows(50, "b");  // row 300 — never shown, out of view — changes
+    const changed = await h.engine.primitive(r.scope, handle.targetId, "state", {}) as string;
+    expect(changed).toMatch(/~ \[\d+\] value "a" → "b" — \[\d+\] text field "Row 300" value="b", in \[\d+\] list "List"/);
+  });
+
   test("open: a non-http(s) URL is NotAllowed before anything opens; about:blank mints a tab with no url, shown as about:blank", async () => {
     const h = harness();
     const r = h.run();

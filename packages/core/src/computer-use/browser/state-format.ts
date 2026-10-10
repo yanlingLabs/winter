@@ -146,6 +146,13 @@ function descendantCount(n: TabNode): number {
  *  line saying so. */
 export function bodyLines(roots: readonly TabNode[], focusedRef: number | undefined, viewportFirst: boolean, lineCap = STATE_LINE_CAP,
                           whole = false, byteCap = FULL_STATE_BYTE_CAP): string[] {
+  return bodyAndShown(roots, focusedRef, viewportFirst, lineCap, whole, byteCap).lines;
+}
+
+/** `bodyLines`, with the refs whose own line it prints — what the model sees of the tree (folded and out-of-view
+ *  elements are not), so a later diff can surface what it had not shown. */
+export function bodyAndShown(roots: readonly TabNode[], focusedRef: number | undefined, viewportFirst: boolean, lineCap = STATE_LINE_CAP,
+                             whole = false, byteCap = FULL_STATE_BYTE_CAP): { lines: string[]; shown: Set<number> } {
   interface Item { node: TabNode; parent?: number; depth: number; descendants: number; outOfView: boolean; bytes: number; childIndex: number }
   const items: Item[] = [];
   const childrenOf = new Map<number, number[]>();
@@ -294,7 +301,9 @@ export function bodyLines(roots: readonly TabNode[], focusedRef: number | undefi
       + [...tailCount.values()].reduce((a, b) => a + b, 0);
     out.push(wholeCutMarker(lineCap, folded, items.length > lineCap ? undefined : Math.floor(byteCap / 1024)));
   }
-  return out;
+  const shownRefs = new Set<number>();
+  for (let i = 0; i < items.length; i++) if (!hiddenAt[i]) shownRefs.add(items[i]!.node.ref);
+  return { lines: out, shown: shownRefs };
 }
 
 function utf8Length(s: string): number { return Buffer.byteLength(s, "utf8"); }
@@ -307,7 +316,14 @@ export function wholeCutMarker(cap: number, folded: number, kb?: number): string
 
 /** The full state's text. `whole` (`full: true`): folded only past `FULL_STATE_LINE_CAP`, and said when it is. */
 export function fullState(h: TabHeader, roots: readonly TabNode[], viewportFirst: boolean, lineCap = STATE_LINE_CAP, whole = false): string {
-  return [...headLines(h), ...bodyLines(roots, h.focusedRef, viewportFirst, whole ? Math.max(lineCap, FULL_STATE_LINE_CAP) : lineCap, whole)].join("\n");
+  return printedState(h, roots, viewportFirst, lineCap, whole).text;
+}
+
+/** `fullState`, with the refs its print shows (kept with the snapshot: a later diff surfaces what it had folded). */
+export function printedState(h: TabHeader, roots: readonly TabNode[], viewportFirst: boolean, lineCap = STATE_LINE_CAP,
+                             whole = false): { text: string; shown: Set<number> } {
+  const b = bodyAndShown(roots, h.focusedRef, viewportFirst, whole ? Math.max(lineCap, FULL_STATE_LINE_CAP) : lineCap, whole);
+  return { text: [...headLines(h), ...b.lines].join("\n"), shown: b.shown };
 }
 
 // ── snapshots and diffs ─────────────────────────────────────────────────────────────────────────
@@ -320,11 +336,21 @@ export interface TabSnapshot {
   scope?: number;
   facets: Map<number, Facets>;
   order: number[];
+  /** Each ref's parent ref: the context a diff line gives an element the model has not seen. */
+  parents: Map<number, number>;
+  /** The refs whose own line the model has SEEN for this snapshot (its folded print's lines, or a diff's lines on top of
+   *  what its base had shown). Absent: everything in it. */
+  shown?: Set<number>;
 }
 
-export function makeSnapshot(id: string, roots: readonly TabNode[], scope?: number): TabSnapshot {
+export function makeSnapshot(id: string, roots: readonly TabNode[], scope?: number, shown?: Set<number>): TabSnapshot {
   const facets = new Map<number, Facets>();
   const order: number[] = [];
+  const parents = new Map<number, number>();
+  const link = (n: TabNode): void => {
+    for (const c of n.children) { if (!parents.has(c.ref)) parents.set(c.ref, n.ref); link(c); }
+  };
+  for (const r of roots) link(r);
   const visit = (n: TabNode): void => {
     if (!facets.has(n.ref)) {
       order.push(n.ref);
@@ -338,13 +364,26 @@ export function makeSnapshot(id: string, roots: readonly TabNode[], scope?: numb
     for (const c of n.children) visit(c);
   };
   for (const r of roots) visit(r);
-  return { id, ...(scope === undefined ? {} : { scope }), facets, order };
+  return { id, ...(scope === undefined ? {} : { scope }), facets, order, parents, ...(shown === undefined ? {} : { shown }) };
 }
 
-export interface TabDiff { text: string; changedRatio: number }
+/** `shown`: what the model has seen once the diff is printed (the base's shown refs still there, plus its lines). */
+export interface TabDiff { text: string; changedRatio: number; shown?: Set<number> }
 
-/** The diff of `next` against `old`, or the change ratio alone when it is over half (the caller prints the full tree). */
-export function diffState(h: TabHeader, old: TabSnapshot, next: TabSnapshot, lineCap = STATE_LINE_CAP): TabDiff {
+/** `in [p] role "name"` for the nearest ancestor of `ref` the model has seen; undefined when none is known. */
+function seenContext(ref: number, next: TabSnapshot, seen: Set<number> | undefined): string | undefined {
+  for (let p = next.parents.get(ref); p !== undefined; p = next.parents.get(p)) {
+    const f = next.facets.get(p);
+    if ((seen === undefined || seen.has(p)) && f !== undefined) return `in [${p}] ${f.role}${f.name === undefined ? "" : ` ${f.name}`}`;
+  }
+  return undefined;
+}
+
+/** The diff of `next` against `old`, or the change ratio alone when it is over half (the caller prints the full tree).
+ *  `shownNow`: the refs the state would show now (its folded print): with the base's own `shown`, what the model had not
+ *  seen and sees now — scrolled into view, out of a fold — is surfaced as `+` lines with their context, and a change it
+ *  had not seen is printed with the element's line and context (the helper's rules). */
+export function diffState(h: TabHeader, old: TabSnapshot, next: TabSnapshot, lineCap = STATE_LINE_CAP, shownNow?: Set<number>): TabDiff {
   const added: number[] = [];
   const modified: Array<{ ref: number; changes: string[] }> = [];
   for (const ref of next.order) {
@@ -362,12 +401,18 @@ export function diffState(h: TabHeader, old: TabSnapshot, next: TabSnapshot, lin
   }
   const nextRefs = new Set(next.order);
   const removed = old.order.filter((r) => !nextRefs.has(r));
+  const seen = old.shown;
+  const modifiedRefs = new Set(modified.map((m) => m.ref));
+  const surfaced = seen === undefined || shownNow === undefined ? []
+    : next.order.filter((r) => shownNow.has(r) && old.facets.has(r) && !seen.has(r) && !modifiedRefs.has(r));
   const union = new Set([...old.order, ...next.order]).size;
-  const changed = added.length + removed.length + modified.length;
+  const changed = added.length + removed.length + modified.length + surfaced.length;
   const changedRatio = union === 0 ? 0 : Math.min(1, changed / union);
+  const withContext = (r: number): string => { const c = seenContext(r, next, seen); return c === undefined ? "" : `, ${c}`; };
   let body: string[] = [
     ...added.map((r) => `+ ${next.facets.get(r)!.line}`),
-    ...modified.map((m) => `~ [${m.ref}] ${m.changes.join("; ")}`),
+    ...surfaced.map((r) => `+ ${next.facets.get(r)!.line} — now shown${withContext(r)}`),
+    ...modified.map((m) => `~ [${m.ref}] ${m.changes.join("; ")}${seen !== undefined && !seen.has(m.ref) ? ` — ${next.facets.get(m.ref)!.line}${withContext(m.ref)}` : ""}`),
     ...removed.map((r) => `- [${r}]`),
   ];
   if (body.length === 0) body = ["(no changes)"];
@@ -375,5 +420,7 @@ export function diffState(h: TabHeader, old: TabSnapshot, next: TabSnapshot, lin
     const more = body.length - lineCap;
     body = [...body.slice(0, lineCap), `… (${more} more changes — state({full:true}))`];
   }
-  return { text: [...headLines(h), ...body].join("\n"), changedRatio };
+  const shown = seen === undefined ? undefined
+    : new Set([...seen].filter((r) => nextRefs.has(r)).concat(added, surfaced, [...modifiedRefs]));
+  return { text: [...headLines(h), ...body].join("\n"), changedRatio, ...(shown === undefined ? {} : { shown }) };
 }

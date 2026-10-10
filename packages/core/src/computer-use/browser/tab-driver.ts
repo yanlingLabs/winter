@@ -20,7 +20,7 @@ import {
   PAGE_RUNTIME_CALL, type RtCheck, type RtClassify, type RtCondition, type RtFindQuery, type RtFound, type RtHit, type RtNode, type RtPoint, type RtSnapshot,
 } from "./page-runtime/protocol";
 import { fitsBudget, imageSize, outputSize, scaleFor, toCss, type CssRect, type ShotFrame } from "./scale";
-import { diffState, fullState, makeSnapshot, type TabDialogLine, type TabHeader, type TabNode, type TabSnapshot } from "./state-format";
+import { diffState, fullState, makeSnapshot, printedState, type TabDialogLine, type TabHeader, type TabNode, type TabSnapshot } from "./state-format";
 import { TransportError, type CdpEvent, type CdpTransport } from "./transport";
 
 /** The events the engine follows on every tab (a subset of `CDP_ALLOWED_EVENTS`). */
@@ -817,15 +817,21 @@ export class TabDriver {
     }
     const tree = await this.readTree(o.within);
     const header = this.header(settle, tree.focusedRef, tree.unread, o.within !== undefined);
-    const snap = makeSnapshot(id, tree.roots, o.within);
     // A whole-tab, non-full state folds what is out of view first; `full` is everything the read saw (its cap said).
-    let text = fullState(header, tree.roots, o.within === undefined && o.full !== true, undefined, o.full === true);
+    // What the print shows is kept with the snapshot: a later diff surfaces what it had folded.
+    const printed = printedState(header, tree.roots, o.within === undefined && o.full !== true, undefined, o.full === true);
+    const snap = makeSnapshot(id, tree.roots, o.within, printed.shown);
+    let text = printed.text;
     let isDiff = false;
     if (o.since !== undefined && o.full !== true) {
       const old = this.snapshots.find((s) => s.id === o.since);
       if (old !== undefined && old.scope === o.within) {
-        const d = diffState(header, old, snap);
-        if (d.changedRatio <= 0.5) { text = d.text; isDiff = true; }
+        const d = diffState(header, old, snap, undefined, printed.shown);
+        if (d.changedRatio <= 0.5) {
+          text = d.text;
+          isDiff = true;
+          if (d.shown !== undefined) snap.shown = d.shown; else delete snap.shown;
+        }
       }
     }
     this.snapshots.push(snap);

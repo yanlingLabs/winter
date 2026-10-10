@@ -660,6 +660,8 @@ public final class CUCore: @unchecked Sendable {
 
     /// The window's tree for the off-desktop hit test; replaceable by tests (the live reader walks real AX).
     var treeReadOverride: ((CUTarget) -> [CUNode])?
+    /// The whole window's tree for `state()` (`observe`), replaceable by tests: the live reader walks real AX.
+    var stateReadOverride: ((CUTarget) -> [CUNode])?
 
     /// How long a moved window or an opened document's window may take to appear (shortened by tests).
     var windowWaitMs: Double = 3000
@@ -819,20 +821,23 @@ public final class CUCore: @unchecked Sendable {
             let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note,
                                        caret: obs.caret, focusText: obs.focusText, page: page,
                                        stateNumber: Int(sid.components(separatedBy: ".s").last ?? ""), unread: obs.unread)
-            let snap = CUSnapshot(id: sid, scope: within, header: header, roots: obs.roots, formatter: formatter)
             // A whole-window, non-full state folds what is out of view first; `within` and `full` don't. A `full`
             // state is everything the read saw, up to the formatter's hard cap (its last line says when it was cut).
-            var text = formatter.full(header: header, roots: obs.roots, viewportFirst: within == nil && p.full != true,
-                                      whole: p.full == true)
+            // What the print shows is kept with the snapshot: a later diff surfaces what it had folded.
+            let printed = formatter.printed(header: header, roots: obs.roots, viewportFirst: within == nil && p.full != true,
+                                            whole: p.full == true)
+            var snap = CUSnapshot(id: sid, scope: within, header: header, roots: obs.roots, formatter: formatter, shown: printed.shown)
+            var text = printed.text
             var isDiff = false
             var ratio = 1.0
             if let since = p.since, p.full != true, gone == nil, let old = t.snapshot(since), old.scope == within {
-                let d = CUStateDiff.compute(old: old, new: snap)
+                let d = CUStateDiff.compute(old: old, new: snap, shownNow: printed.shown)
                 ratio = d.changedRatio
                 if ratio <= 0.5 {
                     isDiff = true
                     text = d.render(header: header, new: snap, includeWindowTitle: old.header.windowTitle != obs.title,
-                                    formatter: formatter)
+                                    formatter: formatter, seen: old.shown)
+                    snap.shown = d.shownAfter(old: old, new: snap)
                 }
             }
             // A menu command or a click may open a window the target is not bound to (Finder's Go › Downloads
@@ -1699,6 +1704,11 @@ public final class CUCore: @unchecked Sendable {
     func observe(_ t: CUTarget, within: Int?, maxNodes: Int = AXTreeReader.defaultMaxNodes) throws -> Observation {
         CUUserInputGuard.waitForQuiet()
         let win = try windowElement(t)
+        if within == nil, let read = stateReadOverride {
+            let roots = read(t)
+            guard !roots.isEmpty else { throw CUError.busy("\(t.appName) did not answer — it may be busy; retry") }
+            return Observation(roots: roots, focusedRef: nil, title: ax.string(win, kAXTitleAttribute) ?? t.windowTitle)
+        }
         let app = AX.app(t.pid)
         var rootElements: [AXUIElement]
         if let within {
