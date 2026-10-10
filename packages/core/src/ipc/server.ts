@@ -14,7 +14,7 @@ import {
   ApprovalListParams,
   SessionAddDirParams, SessionSetCwdParams, TrustDirParams,
   BgListParams, BgPeekParams, BgKillParams, BgKillAllParams,
-  SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams, McpEnableParams, McpDisableParams,
+  SessionSteerParams, SessionInterruptParams, SessionMirrorParams, SessionCompactParams, SkillsListParams, McpListParams, McpEnableParams, McpDisableParams,
   McpAddParams, McpRemoveParams, McpRenameParams, McpGetParams,
   McpLoginParams, McpLoginStatusParams, McpLogoutParams, McpSetClientSecretParams, McpClientSecretIssuerParams,
   McpToolsParams, McpSetToolPermissionParams,
@@ -127,7 +127,7 @@ import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
-import { DEFAULT_PROVIDER, pinsFor, addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, computerUseLegacyComputerFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
+import { DEFAULT_PROVIDER, pinsFor, addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, computerUseLegacyComputerFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, computerUseMirrorFrom, type McpServerSettingsEntry } from "../settings";
 import { addMcpServerInScope, mcpServerInScope, McpRenameRefusal, removeMcpServerForgettingPermissions, renameMcpServerCarryingSettings, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../runtime-sdk/run-home-input";
@@ -787,6 +787,11 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   METHODS.credentialList,
   METHODS.credentialSet,
   METHODS.credentialRemove,
+  // ComputerV2 Phase 1b (the phone mirror): the phone asks to watch the live mirror of the session it is
+  // attached to. The daemon only GATES it (assertRemoteMayUseSession + the attachment + the user's mirror
+  // setting); Winter.app's Gateway special-cases it like `session.attach` and relays the frames it already
+  // shows on its own wire kind — never through this socket, the session log, history or the event stream.
+  METHODS.sessionMirror,
 ]);
 
 /** The session `mode`s a remote (iPhone) client may target at all — every other mode is Mac-local
@@ -2386,6 +2391,31 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
         if (!opts.engine) return { ok: true, wasRunning: false };
         return { ok: true, ...opts.engine.interrupt(p.sessionId) };
+      }
+      case METHODS.sessionMirror: {
+        // ComputerV2 Phase 1b: the GATE for the phone mirror. Frames never come here — the Gateway relays Winter.app's
+        // own mirror of the session (its helper view subscription, which the watch holds open with pictures) — so
+        // this answers only "may this caller watch this session's mirror, and is the mirror on at all". The phone
+        // renews its watch through here every 10 s, so turning the setting off ends a running watch at the next
+        // renewal. `watch: false` is never refused: stopping must always work.
+        const p = parseParams(SessionMirrorParams, params);
+        if (!p.watch) return { ok: true, mirror: false };
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        try { opts.store.meta(p.sessionId); } catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
+        // Only the session this connection is attached to — the phone's Gateway connection follows its attach,
+        // so a mirror can never be watched for a session the phone is not looking at.
+        if (!socket.data.hubClient || hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
+          throw new RpcFailure(ERR.NOT_FOUND, "attach to the session first");
+        }
+        // Chat has no computer use: answered off at once, so a chat screen never makes Winter.app open anything.
+        if ((opts.store.meta(p.sessionId).mode ?? "code") === "chat") return { ok: true, mirror: false };
+        // Fail CLOSED (review decision): settings that cannot be read are no consent to stream the screen.
+        const settings = liveSettingsFor(opts);
+        if (settings === undefined) {
+          console.error(`session.mirror for ${p.sessionId}: the settings could not be read — the phone mirror stays off`);
+          return { ok: true, mirror: false };
+        }
+        return { ok: true, mirror: computerUseEnabledFrom(settings) && computerUseMirrorFrom(settings) };
       }
       case METHODS.sessionCompact: {
         const p = parseParams(SessionCompactParams, params);
