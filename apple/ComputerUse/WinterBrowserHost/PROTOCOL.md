@@ -154,8 +154,8 @@ On `host.status { daemon: "connected" }` the extension sends:
 | --- | --- | --- |
 | `tabs.list` | `{}` | `{ tabs: Tab[] }` — every tab of the browser profile, never a private window's |
 | `tabs.create` | `{ url, sessionId, sessionTitle }` | `{ tab: Tab }` — `chrome.tabs.create({ active: false })` in the session's group "Winter · <title>" (created in the window the user used last, never a private one); `url` is http(s) or `about:blank` |
-| `tabs.close` | `{ tabKey }` | `{}` — only a tab in a Winter group (`not_allowed` otherwise) |
-| `tabs.keep` | `{ tabKey }` | `{}` — takes the tab out of its Winter group: it is the user's from then on |
+| `tabs.close` | `{ tabKey }` | `{}` — only an agent tab (`not_allowed` otherwise); taken out of its group first, so a group's last tab leaves no group (nor a saved group) behind |
+| `tabs.keep` | `{ tabKey }` | `{}` — hands an agent tab to the user for good: no longer an agent tab, out of its Winter group, never closed by Winter |
 | `debugger.attach` | `{ tabKey }` | `{ viewport: [w, h], dpr }` — idempotent; the CSS viewport and the device pixel ratio from `Page.getLayoutMetrics` |
 | `debugger.detach` | `{ tabKey }` | `{}` — idempotent; never closes the tab |
 | `cdp.send` | `{ tabKey, method, params, cdpSessionId? }` | `{ result }` — `cdpSessionId` addresses a flattened child target (an out-of-process iframe) |
@@ -163,8 +163,15 @@ On `host.status { daemon: "connected" }` the extension sends:
 | `overlay` | `{ tabKey, active, cursor?: { x, y, kind } }` | `{}` — best effort (§7.4) |
 | `ping` | `{}` | `{}` |
 
-`Tab` is `{ tabKey, url, title, active, agent, sessionId? }`: `tabKey` the `chrome.tabs` id as a string, `agent` true for
-a tab in a Winter group, `sessionId` that group's Winter session.
+`Tab` is `{ tabKey, url, title, active, agent, sessionId? }`: `tabKey` the `chrome.tabs` id as a string; `agent` true for
+a tab `tabs.create` opened, by tab id — Chrome's own pin (which takes a tab out of its group) or a drag changes nothing,
+only `tabs.keep` does; `sessionId` its Winter session. A tab the user drags into a Winter group stays the user's.
+
+**Which agent tabs close, and when, is the engine's decision** (at its session's turn end unless marked; the user's
+ruling): the extension only carries out `tabs.close` and `tabs.keep`, and never closes anything by itself. Agent tabs and
+groups are remembered in `chrome.storage.session` — across service-worker and daemon restarts, so the `tabs.list` the
+engine makes at the next registration reports every agent tab with its session; not across a browser restart, after
+which Winter knows none of its old tabs and they are the user's.
 
 ### 5.2 Extension → daemon (notifications)
 
@@ -178,7 +185,17 @@ a tab in a Winter group, `sessionId` that group's Winter session.
 The daemon reads `canceled_by_user` as the user taking the tab back ("the user stopped Winter from controlling this tab"),
 and the other two as a tab that can be attached again.
 
-### 5.3 Errors
+### 5.3 Notes for the engine
+
+- An `Input.*` event that runs a handler which opens a JavaScript dialog is answered only once the dialog is handled: send
+  it without waiting, handle `Page.javascriptDialogOpening` with `Page.handleJavaScriptDialog`, then collect its answer.
+- The overlay's one element is `<winter-agent-overlay>` (light DOM, under `documentElement`; pointer events pass through
+  it except over the Stop button). A page-runtime tree walk should skip it; its arrival and departure are the only DOM
+  mutations the overlay causes (cursor moves happen inside its closed shadow root).
+- `debugger.detached { reason: "idle" | "target_closed" }` leaves a tab that `debugger.attach` can make drivable again
+  (the transport reports it as `stopped`); `canceled_by_user` is the user taking the tab back (`detached_by_user`).
+
+### 5.4 Errors
 
 JSON-RPC errors (`code: -32000`) whose `data.code` is one of `disconnected`, `tab_gone`, `attach_refused`, `not_allowed`,
 `cdp_error` (with `data.cdpCode` / `data.cdpMessage` when the browser answered one), `timeout`. An unknown method is
@@ -246,6 +263,10 @@ without being sent.
 | An open `runtime.connectNative` port keeps an MV3 service worker alive | Chrome 105 | |
 
 `minimum_chrome_version` is **125**, the later of the two; no `alarms` keepalive is needed.
+
+Measured on Chrome for Testing 156 (the opt-in e2e, `scripts/browser-e2e/extension/`): the flat child session of a
+cross-site iframe, input, focus emulation and screenshots in a background tab, and `DOM.setFileInputFiles` through
+`chrome.debugger` (allowed for the unpacked dev build).
 
 ## 8. Host manifests
 
