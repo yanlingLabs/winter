@@ -54,8 +54,10 @@ final class FakePhoneConformanceTests: XCTestCase {
     }
 
     private func tempStoreDir() -> URL {
-        FileManager.default.temporaryDirectory
+        let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("winter-fake-phone-conformance-\(UUID().uuidString)", isDirectory: true)
+        removeAtTeardown(dir)
+        return dir
     }
 
     /// Captures the `IrohListener` `RemoteHost.start()` binds via the `#if DEBUG` `makeListener`

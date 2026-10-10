@@ -31,9 +31,11 @@ final class PairingRouterTests: XCTestCase {
     }
 
     private func tempStoreURL() -> URL {
-        FileManager.default.temporaryDirectory
+        let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("winter-pairing-router-tests-\(UUID().uuidString)", isDirectory: true)
             .appendingPathComponent("paired-devices.json")
+        removeAtTeardown(url.deletingLastPathComponent())
+        return url
     }
 
     /// The phone-side half of a real ceremony request (mirrors `PairingManagerTests`' own

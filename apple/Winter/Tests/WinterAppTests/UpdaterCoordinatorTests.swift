@@ -175,6 +175,7 @@ final class UpdaterCoordinatorTests: XCTestCase {
     func testReadChannelFromSettingsFile() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
         setenv("WINTER_HOME", dir.path, 1)
         defer { unsetenv("WINTER_HOME") }
         try #"{"schemaVersion":2,"updates":{"channel":"beta"}}"#

@@ -18,8 +18,10 @@ final class RemoteHostTests: XCTestCase {
     }
 
     private func tempStoreDir() -> URL {
-        FileManager.default.temporaryDirectory
+        let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("winter-remote-host-tests-\(UUID().uuidString)", isDirectory: true)
+        removeAtTeardown(dir)
+        return dir
     }
 
     @MainActor
