@@ -20,11 +20,11 @@ import { AUTOMATION_ERROR_KINDS, AutomationFailure, isAutomationFailure } from "
 import { isAppPath, isBundleIdShaped, isDocumentTarget, systemAppResolver, type AppResolver } from "./app-resolve";
 import type { HelperClient } from "./helper-client";
 import { FOREGROUND_LOCK_KEY, LOCK_WAIT_MS, TargetLocks } from "./locks";
-import { ACT_PRIMITIVES, cardReason, desktopVisitActReason, newRunGrants, type AppRef, type ComputerPolicy, type DesktopVisitOutcome, type RunGrants } from "./policy";
+import { ACT_PRIMITIVES, cardName, cardReason, desktopVisitActReason, newRunGrants, type AppRef, type ComputerPolicy, type DesktopVisitOutcome, type RunGrants } from "./policy";
 import { typingEstimateMs, typingFit } from "./typing-estimate";
 import {
   HelperRpcError, HelperUnavailableError, WINTER_OWN_BUNDLE_IDS,
-  type ActAction, type ActResult, type AppAtResult, type AppleScriptResult, type AppsListResult, type DesktopVisitReport, type FindResult, type HelperNotification,
+  type ActAction, type ActResult, type AppAtResult, type AppleScriptResult, type AppsListResult, type DesktopVisitClosed, type FindResult, type HelperNotification,
   type ScreenWindowsResult, type ScreenshotResult, type ScriptingDictionaryResult, type SnapshotResult, type TargetBindResult, type TargetUseWindowResult, type TargetWindowsResult,
   type WaitForResult, type WaitIdleResult,
 } from "./protocol";
@@ -55,6 +55,11 @@ export const BUSY_RETRY_MS = 200;
 export interface ScriptInput { code: string; timeoutMs?: number; reset?: boolean; title?: string }
 /** The longest `reason` a live screenshot may give (it is shown to the user on the desktop-switch prompt). */
 export const LIVE_REASON_MAX = 200;
+/** How long a primitive's part of an open desktop visit may take, before its own typing estimate (`visitMaxMs`): the
+ *  helper's guardian keeps the visit as the agent's own at least this long while the primitive is in flight. */
+export const VISIT_BASE_MAX_MS = 10_000;
+/** The end-of-run `visit.close` (it returns the user, verified, retried once): bounded. */
+export const VISIT_CLOSE_TIMEOUT_MS = 8_000;
 export interface ScriptCall {
   sessionId: string;
   /** The session's model tag (the screenshot budget). */
@@ -113,6 +118,9 @@ interface SessionState {
   /** The runtime has read screen content since its last reset or restart: EVERY call's text is fenced until
    *  then — a value read in one call and printed in a later one stays data (the controller's ruling, review I1). */
   tainted: boolean;
+  /** The helper reported a desktop visit of this session closing (`desktopVisited`): the next run's end claims its
+   *  report with `visit.close`, even if that run makes no visit itself (one that closed after its run ended). */
+  visitHint: boolean;
 }
 
 /** A timer that stops counting while a card waits for a human. */
@@ -173,6 +181,23 @@ interface RunCtx {
   visits: Map<string, boolean>;
   /** A desktop-switch prompt already on screen per app (concurrent primitives of one script share it). */
   visitPrompts: Map<string, Promise<DesktopVisitOutcome>>;
+  /**
+   * THE OPEN VISIT (user ruling 2026-10-10, 5d): the run sent a primitive with `desktopVisit: true`, so a visit may be
+   * OPEN in the helper — it stays open across the primitives that need it and closes a moment after the last one (or
+   * at the script's end). At the run's end the daemon closes it (`visit.close`) and says every visit made, in one
+   * line each. `visitApp` is the app of the latest such request (for a "may still be there" notice).
+   */
+  visitTouched: boolean;
+  visitApp?: string;
+  /** Requests carrying `desktopVisit: true` in flight: the visit's foreground lock is never released under one. */
+  visitRequestsInFlight: number;
+  /** This run holds the screen's foreground lock for an open visit (released when the helper reports the visit
+   *  closed with no such request in flight, or at the run's end). */
+  visitLock: boolean;
+  /** The helper went away while a visit may have been open: said once, loudly. */
+  visitStrandedNoticed: boolean;
+  /** Visits whose reports this run claimed (`visit.close`) — the audit line's count. */
+  visitsClaimed: number;
   /** The last primitive the script called ("type in Safari"), for a timeout's words. */
   lastPrimitive?: string;
   sessionId: string;
@@ -209,9 +234,11 @@ interface RunCtx {
 }
 
 const isRef = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
-/** A helper visit report (`DesktopVisitReport`) as it arrives in an error's `data` — checked, never assumed. */
-const isVisitReport = (v: unknown): v is DesktopVisitReport =>
-  v !== null && typeof v === "object" && typeof (v as { ms?: unknown }).ms === "number" && typeof (v as { returned?: unknown }).returned === "boolean";
+/** A closed visit's report as `visit.close` hands it over — checked, never assumed. */
+const isClosedVisit = (v: unknown): v is DesktopVisitClosed =>
+  v !== null && typeof v === "object" && typeof (v as { ms?: unknown }).ms === "number" && typeof (v as { returned?: unknown }).returned === "boolean"
+  && typeof (v as { targetId?: unknown }).targetId === "string" && typeof (v as { app?: unknown }).app === "string"
+  && typeof (v as { visitId?: unknown }).visitId === "string" && typeof (v as { actions?: unknown }).actions === "number";
 /** A desktop-switch answer's scope within a run: the app, by bundle id AND pid (a relaunched app asks again). */
 const visitKey = (t: { bundleId: string; pid: number }): string => `${t.bundleId}:${t.pid}`;
 const isPoint = (v: unknown): v is [number, number] => Array.isArray(v) && v.length === 2 && v.every((n) => typeof n === "number" && Number.isFinite(n));
@@ -238,7 +265,7 @@ export class ComputerV2Service {
   private stateFor(sessionId: string): SessionState {
     let s = this.sessions.get(sessionId);
     if (s === undefined) {
-      s = { hadWorker: false, chain: Promise.resolve(), targets: new Map(), images: new Map(), lastTargetShot: new Map(), pending: 0, tainted: false };
+      s = { hadWorker: false, chain: Promise.resolve(), targets: new Map(), images: new Map(), lastTargetShot: new Map(), pending: 0, tainted: false, visitHint: false };
       this.sessions.set(sessionId, s);
     }
     return s;
@@ -312,6 +339,7 @@ export class ComputerV2Service {
       abort: new AbortController(), timer, locks: new Map(), acted: new Set(), chains: new Map(), primitives: new Map(),
       apps: new Set(), timedOut: false, ended: false, bound: new Set(), daemonSentences: new Set(), textInFlight: new Set(),
       focusLines: new Map(), extensions: [], foreground: new Set(), visits: new Map(), visitPrompts: new Map(),
+      visitTouched: false, visitRequestsInFlight: 0, visitLock: false, visitStrandedNoticed: false, visitsClaimed: 0,
     };
     ctxRef.ctx = ctx;
     state.active = ctx;
@@ -356,6 +384,9 @@ export class ComputerV2Service {
       builder.text(ctx.focusLines.size === 1 ? `focus: ${line}` : `focus in ${app}: ${line}`, { screen: true });
     }
     if (ctx.killTimer !== undefined) clearTimeout(ctx.killTimer);
+    // THE OPEN VISIT closes with the script at the latest (5d (b)): the user returned and every visit of this run said
+    // — BEFORE the locks go (the screen's foreground lock covers the whole visit).
+    if (ctx.visitTouched || state.visitHint) await this.closeVisits(ctx, state);
     // ENDED first, then abort, then drain: a primitive still in flight (one the script never awaited) sees
     // `ended` after its next await and can neither take a lock nor keep one (review C1).
     ctx.ended = true;
@@ -393,7 +424,7 @@ export class ComputerV2Service {
     }
     this.deps.audit?.({
       kind: "automation", sessionId, apps: [...ctx.apps], primitives: Object.fromEntries(ctx.primitives),
-      durationMs: this.now() - started, outcome: outcomeWord,
+      durationMs: this.now() - started, outcome: outcomeWord, ...(ctx.visitsClaimed > 0 ? { desktopVisits: ctx.visitsClaimed } : {}),
     });
     return builder.build(error === undefined ? {} : { error });
   }
@@ -434,12 +465,6 @@ export class ComputerV2Service {
       const value = await this.dispatch(ctx, msg, metric);
       ctx.worker.reply(msg.id, { ok: true, ...(value === undefined ? {} : { value }) });
     } catch (err) {
-      // A request that failed DURING or AFTER a desktop visit (helper 1.7.0's `data.visit`): the user was still moved —
-      // said and counted like any visit (the ruling: every switch is counted), a failed return loudest of all.
-      if (err instanceof HelperRpcError && isVisitReport(err.data.visit)) {
-        const t = msg.target === undefined ? undefined : ctx.state.targets.get(msg.target);
-        if (t !== undefined) this.noteVisit(ctx, t, err.data.visit, metric);
-      }
       const wire = this.toWire(ctx, err, msg);
       metric.error = wire.kind;
       // The helper's own code (`unsupported`, `window_elsewhere`, …): `Error` alone says nothing in the metrics.
@@ -767,25 +792,24 @@ export class ComputerV2Service {
     if (!ctx.call.vision) throw new AutomationFailure("NotAllowed", NO_VISION);
   }
 
-  /** One screenshot, at the budget for this session's model, re-taken at a lower quality while over 3 MiB. `extra`
-   *  adds params per attempt (a live shot's `desktopVisit`, once the user allowed it); every desktop visit an attempt
-   *  made is returned (a re-take is another visit — each one is said). */
+  /** One screenshot, at the budget for this session's model: the helper re-encodes the one capture under the byte cap
+   *  (`maxBytes`), and a result still over it is re-taken at a lower quality — never one taken in a desktop visit
+   *  (`inVisit`): one primitive, one capture there. `extra` adds params per attempt (a live shot's `desktopVisit`). */
   private async shoot(ctx: RunCtx, method: string, params: Record<string, unknown>, metric: PrimitiveMetric,
-    extra?: () => Record<string, unknown>): Promise<ScreenshotResult & { bytes: number; visits: DesktopVisitReport[] }> {
+    extra?: () => Record<string, unknown>): Promise<ScreenshotResult & { bytes: number }> {
     const maxDim = computerUseScreenshotMaxDimFrom(this.deps.settings());
     let quality: number = SCREENSHOT_QUALITY;
-    const visits: DesktopVisitReport[] = [];
     for (;;) {
-      const res = await this.helperCall<ScreenshotResult>(ctx, method, { ...params, ...(extra?.() ?? {}), budget: screenshotBudgetFor(ctx.call.model, maxDim, quality) }, metric);
-      if (res.visit !== undefined) visits.push(res.visit);
+      const res = await this.helperCall<ScreenshotResult>(ctx, method, { ...params, ...(extra?.() ?? {}), budget: { ...screenshotBudgetFor(ctx.call.model, maxDim, quality), maxBytes: SCREENSHOT_BYTE_CAP } }, metric);
+      if (res.inVisit === true) metric.inVisit = true;
       const bytes = Math.floor((res.imageBase64.length * 3) / 4);
       const next = nextScreenshotQuality(quality);
-      if (bytes <= SCREENSHOT_BYTE_CAP || next === undefined) {
+      if (bytes <= SCREENSHOT_BYTE_CAP || next === undefined || res.inVisit === true) {
         metric.imageBytes = bytes;
         if (this.deps.screenshotSink !== undefined) {
           try { this.deps.screenshotSink({ sessionId: ctx.sessionId, primitive: method, mime: res.mime ?? "image/jpeg", base64: res.imageBase64 }); } catch { /* a test sink never fails a shot */ }
         }
-        return { ...res, bytes, visits };
+        return { ...res, bytes };
       }
       quality = next;
     }
@@ -816,7 +840,6 @@ export class ComputerV2Service {
     const settle = args.settle !== false && ctx.acted.has(t.targetId) ? { maxMs: SETTLE_CAP_MS } : undefined;
     const params = { targetId: t.targetId, callId: ctx.callId, ...(region === undefined ? {} : { region }), ...(settle === undefined ? {} : { settle }), ...(live ? { live: true } : {}) };
     const res = live ? await this.liveShot(ctx, t, params, reason!, metric) : await this.shoot(ctx, "target.screenshot", params, metric);
-    for (const v of res.visits) this.noteVisit(ctx, t, v, metric);
     ctx.state.lastTargetShot.set(t.targetId, res.shotId);
     const handle = this.keepImage(ctx, res);
     // What the image is when it is not an ordinary capture ("captured …'s window on another desktop …") — said
@@ -1009,25 +1032,32 @@ export class ComputerV2Service {
     const actTimeout = action.kind === "type" || action.kind === "paste" ? this.fitTyping(ctx, action.kind, action.text) : undefined;
     const app: AppRef = { bundleId: t.bundleId, name: t.name };
     const key = visitKey(t);
-    // Held in front for this run (`requestForeground`): the foreground needs no second asking.
+    // The longest this primitive's part of an open visit may take (the helper's guardian keeps the visit the agent's
+    // own that long while it is in flight): the base, plus a long type/paste's own estimate.
+    const visitMaxMs = VISIT_BASE_MAX_MS + (action.kind === "type" || action.kind === "paste" ? typingEstimateMs(action.kind, action.text) : 0);
+    // Held in front for this run (`requestForeground`): the foreground needs no second asking. A DESKTOP-VISIT
+    // allowance never stands in for it (the review's blocker 1): the helper takes the front INSIDE a visit by itself,
+    // and on the user's own desktop the rung-4 card and the attended check keep their own rules.
     let allowForeground = ctx.foreground.has(t.targetId);
     let releaseForeground: (() => void) | undefined;
     let res: ActResult | undefined;
     try {
       for (let attempt = 0; res === undefined; attempt++) {
         // The user allowed a desktop visit for this app in this run: the helper still tries the background first and
-        // visits only when it must — under the screen's one foreground lock, like rung 4.
+        // visits only when it must, leaving the visit OPEN for the next primitive that needs it — under the screen's
+        // one foreground lock, held for the whole open visit.
         const visit = ctx.visits.get(key) === true;
-        if (visit && releaseForeground === undefined) releaseForeground = await this.takeForeground(ctx);
+        if (visit) await this.ensureVisitLock(ctx, t);
+        if (visit) ctx.visitRequestsInFlight++;
         try {
-          res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground: allowForeground || visit, ...(visit ? { desktopVisit: true } : {}) }, metric, actTimeout);
+          res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground, ...(visit ? { desktopVisit: true, visitMaxMs } : {}) }, metric, actTimeout);
         } catch (err) {
+          if (visit && err instanceof HelperUnavailableError) this.noteVisitStranded(ctx, t.name);
           if (!(err instanceof HelperRpcError) || attempt >= 2) throw err;
           if (err.code === "needs_desktop_visit" && !visit) {
             // No way to do it without moving the user to the window's desktop: ask (every policy), then visit.
-            if (!(await this.desktopVisitAllowed(ctx, t, desktopVisitActReason(app, primitive, ctx.title), metric))) {
-              throw new AutomationFailure("NeedsForeground", `the user refused to be moved to ${t.name}'s desktop for this ${primitive} — don't retry it; keep to what works from here (element refs, state()), or ask the user to bring ${t.name}'s window to this desktop`);
-            }
+            const outcome = await this.desktopVisitAllowed(ctx, t, desktopVisitActReason(app, primitive, ctx.title), metric);
+            if (!outcome.allowed) throw desktopVisitDenied(t.name, outcome);
             continue;
           }
           if (err.code === "needs_foreground" && !allowForeground) {
@@ -1043,12 +1073,14 @@ export class ComputerV2Service {
             continue;
           }
           throw err;
+        } finally {
+          if (visit) ctx.visitRequestsInFlight--;
         }
       }
     } finally { releaseForeground?.(); }
     ctx.acted.add(t.targetId);
     metric.rung = res.rung;
-    this.noteVisit(ctx, t, res.visit, metric);
+    if (res.inVisit === true) metric.inVisit = true;
     // What the act did, in the helper's words: for keyboard input, FIRST where it went (so the model never has
     // to guess), then the helper's detail (an unconfirmed paste, an editor that hides its text, a view put back).
     // Element names come from the screen: inside the fence.
@@ -1079,12 +1111,20 @@ export class ComputerV2Service {
    * THE DESKTOP SWITCH (the ruling, 2026-10-10): may this primitive move the user to `t`'s desktop for a moment?
    * Asked once per app (bundle id + pid) per run — every policy, the session's card and the helper's on-screen panel,
    * no answer within a minute allows — and the answer kept for the rest of the run: an allowance needs no second
-   * prompt, a refusal is not asked again. Concurrent primitives of one script share the prompt on screen.
+   * prompt. A PERSON's refusal holds beyond the run, until the user's next message (5a): no prompt meanwhile.
+   * Concurrent primitives of one script share the prompt on screen.
    */
-  private async desktopVisitAllowed(ctx: RunCtx, t: TargetInfo, reason: string, metric: PrimitiveMetric): Promise<boolean> {
+  private async desktopVisitAllowed(ctx: RunCtx, t: TargetInfo, reason: string, metric: PrimitiveMetric): Promise<DesktopVisitOutcome> {
     const key = visitKey(t);
+    if (this.deps.policy.desktopRefused(ctx.sessionId, t.bundleId)) {
+      metric.visitAnswer = "held-refusal";
+      return { allowed: false, answer: "refuse", via: "none" };
+    }
     const known = ctx.visits.get(key);
-    if (known !== undefined) { metric.visitAnswer = known ? "run-allowance" : "run-refusal"; return known; }
+    if (known !== undefined) {
+      metric.visitAnswer = known ? "run-allowance" : "run-refusal";
+      return { allowed: known, answer: known ? "allow" : "refuse", via: "none" };
+    }
     let prompt = ctx.visitPrompts.get(key);
     if (prompt === undefined) {
       prompt = this.deps.policy.askDesktopVisit(ctx.grants, { bundleId: t.bundleId, name: t.name }, reason, ctx.abort.signal)
@@ -1094,59 +1134,93 @@ export class ComputerV2Service {
     const outcome = await prompt;
     metric.visitAnswer = outcome.answer;
     metric.visitVia = outcome.via;
-    if (outcome.answer !== "aborted") ctx.visits.set(key, outcome.allowed);
+    if (outcome.answer !== "aborted" && outcome.answer !== "unavailable") ctx.visits.set(key, outcome.allowed);
     this.live(ctx);
-    return outcome.allowed;
+    return outcome;
   }
 
-  /** A `live: true` window shot: the helper takes it from here when it can (on screen, or a still it proved live);
-   *  when only the window's desktop has it, the user is asked, and the shot is retaken with the visit allowed. */
-  private async liveShot(ctx: RunCtx, t: TargetInfo, params: Record<string, unknown>, reason: string, metric: PrimitiveMetric): Promise<ScreenshotResult & { bytes: number; visits: DesktopVisitReport[] }> {
+  /** A `live: true` window shot: the helper takes it from here when it can (on screen, a still it proved live, or the
+   *  window already on screen in an open visit); when only the window's desktop has it, the user is asked, and the shot
+   *  is retaken with the visit allowed. */
+  private async liveShot(ctx: RunCtx, t: TargetInfo, params: Record<string, unknown>, reason: string, metric: PrimitiveMetric): Promise<ScreenshotResult & { bytes: number }> {
     const key = visitKey(t);
-    const visitParams = (): Record<string, unknown> => (ctx.visits.get(key) === true ? { desktopVisit: true } : {});
-    let release: (() => void) | undefined;
-    try {
-      if (ctx.visits.get(key) === true) release = await this.takeForeground(ctx);
+    const visitParams = (): Record<string, unknown> => (ctx.visits.get(key) === true ? { desktopVisit: true, visitMaxMs: VISIT_BASE_MAX_MS } : {});
+    const attempt = async (): Promise<ScreenshotResult & { bytes: number }> => {
+      const visit = ctx.visits.get(key) === true;
+      if (visit) { await this.ensureVisitLock(ctx, t); ctx.visitRequestsInFlight++; }
       try {
         return await this.shoot(ctx, "target.screenshot", params, metric, visitParams);
       } catch (err) {
-        if (!(err instanceof HelperRpcError) || err.code !== "needs_desktop_visit" || ctx.visits.get(key) === true) throw err;
+        if (visit && err instanceof HelperUnavailableError) this.noteVisitStranded(ctx, t.name);
+        throw err;
+      } finally {
+        if (visit) ctx.visitRequestsInFlight--;
       }
-      if (!(await this.desktopVisitAllowed(ctx, t, reason, metric))) {
-        throw new AutomationFailure("NeedsForeground", `the user refused to be moved to ${t.name}'s desktop for a live picture — don't ask again in this script; read it with state() or find() (they are live there), use the last screenshot (its first line says how fresh it is), or ask the user`);
-      }
-      release ??= await this.takeForeground(ctx);
-      return await this.shoot(ctx, "target.screenshot", params, metric, visitParams);
-    } finally { release?.(); }
+    };
+    try {
+      return await attempt();
+    } catch (err) {
+      if (!(err instanceof HelperRpcError) || err.code !== "needs_desktop_visit" || ctx.visits.get(key) === true) throw err;
+    }
+    const outcome = await this.desktopVisitAllowed(ctx, t, reason, metric);
+    if (!outcome.allowed) throw desktopVisitDenied(t.name, outcome);
+    return await attempt();
+  }
+
+  /** The screen's foreground lock for an OPEN visit (5d): taken before the first request that may open one and held
+   *  until the helper reports the visit closed (with no such request in flight) or the run ends — another session's
+   *  visit, rung 4 or whole-screen shot waits, bounded, as for any foreground use. */
+  private async ensureVisitLock(ctx: RunCtx, t: TargetInfo): Promise<void> {
+    ctx.visitTouched = true;
+    ctx.visitApp = t.name;
+    if (ctx.locks.has(FOREGROUND_LOCK_KEY)) return;
+    const release = await this.locks.acquire(FOREGROUND_LOCK_KEY, { runId: ctx.runId, sessionId: ctx.sessionId }, {
+      waitMs: Math.min(LOCK_WAIT_MS, Math.max(500, ctx.timer.left() - 500)), signal: ctx.abort.signal, label: "The screen's foreground",
+    });
+    if (ctx.ended || ctx.cancelled !== undefined) { release(); this.live(ctx); }
+    if (ctx.locks.has(FOREGROUND_LOCK_KEY)) { release(); return; }
+    ctx.locks.set(FOREGROUND_LOCK_KEY, release);
+    ctx.visitLock = true;
   }
 
   /**
-   * One desktop visit, said in the result and counted in telemetry: an unfenced daemon line ("moved the user to
-   * Safari's desktop for 420 ms and back"), or — when the user could not be brought back — a loud notice at the top
-   * and a log line. The helper's own detail goes to the log only (the result keeps to the daemon's words).
+   * The run's end (5d (b)): close the session's open visit — the user returned, verified — and say EVERY visit this
+   * session made that is not yet said, one line each: "moved the user to Safari's desktop for 2.4 s (5 actions) and
+   * back", or, when they could not be brought back, a loud notice at the top. The helper hands each report over once.
+   * Never launches the helper: a helper that is gone took any open visit with it (said loudly, below).
    */
-  private noteVisit(ctx: RunCtx, t: TargetInfo, v: DesktopVisitReport | undefined, metric: PrimitiveMetric): void {
-    if (v === undefined) return;
-    const ms = Number.isFinite(v.ms) ? Math.max(0, Math.round(v.ms)) : 0;
-    const prior = metric.visit;
-    metric.visit = {
-      count: (prior?.count ?? 0) + 1, ms: (prior?.ms ?? 0) + ms,
-      returned: (prior?.returned ?? true) && (v.returned === true || v.userMoved === true),
-      ...(v.userMoved === true || prior?.userMoved === true ? { userMoved: true } : {}),
-    };
-    const said = helperDetail(v.detail, 300);
-    if (v.userMoved === true) {
-      ctx.builder.daemonLine(`moved the user to ${t.name}'s desktop for a moment; they took over during it, so Winter left them where they went`);
-      this.log(`computer-use: desktop visit to ${t.bundleId} for ${ctx.sessionId}: ${ms} ms, the user took over${said === undefined ? "" : ` (${said})`}`);
+  private async closeVisits(ctx: RunCtx, state: SessionState): Promise<void> {
+    state.visitHint = false;
+    if (!this.deps.helper.connected) {
+      if (ctx.visitTouched) this.noteVisitStranded(ctx, ctx.visitApp ?? "the app");
       return;
     }
-    if (v.returned === true) {
-      ctx.builder.daemonLine(`moved the user to ${t.name}'s desktop for ${ms} ms and back`);
-      this.log(`computer-use: desktop visit to ${t.bundleId} for ${ctx.sessionId}: ${ms} ms, returned`);
+    let res: { visits?: unknown };
+    try {
+      res = await this.deps.helper.request<{ visits?: unknown }>("visit.close", { sessionId: ctx.sessionId }, { timeoutMs: VISIT_CLOSE_TIMEOUT_MS });
+    } catch (err) {
+      if (ctx.visitTouched) this.noteVisitStranded(ctx, ctx.visitApp ?? "the app");
+      this.log(`computer-use: visit.close for ${ctx.sessionId} failed (${err instanceof Error ? err.message : "error"})`);
       return;
     }
-    ctx.builder.notice(`Winter moved the user to ${t.name}'s desktop and could NOT bring them back to their own. Tell the user now, and do nothing more in ${t.name} until they are back on their desktop.`);
-    this.log(`computer-use: WARNING desktop visit to ${t.bundleId} for ${ctx.sessionId}: the user was NOT returned after ${ms} ms${said === undefined ? "" : ` (${said})`}`);
+    for (const v of Array.isArray(res?.visits) ? res.visits : []) {
+      if (!isClosedVisit(v)) continue;
+      ctx.visitsClaimed++;
+      const name = ctx.state.targets.get(v.targetId)?.name ?? cardName(v.app);
+      const said = visitLine(name, v);
+      if (said.line !== undefined) ctx.builder.daemonLine(said.line);
+      if (said.notice !== undefined) ctx.builder.notice(said.notice);
+      this.log(`computer-use: ${v.returned === true || v.userMoved === true ? "" : "WARNING "}desktop visit ${v.visitId} to ${name} for ${ctx.sessionId}: ${Math.round(v.ms)} ms, ${v.actions} action(s), ${v.userMoved === true ? "the user took over" : v.returned === true ? "returned" : "the user was NOT returned"}`);
+    }
+  }
+
+  /** The helper went away while a visit may have been open: the user may still be on that desktop. Said once per run,
+   *  loudly, and logged. */
+  private noteVisitStranded(ctx: RunCtx, app: string): void {
+    if (ctx.visitStrandedNoticed) return;
+    ctx.visitStrandedNoticed = true;
+    ctx.builder.notice(`Winter Computer Use stopped while the user may have been on ${app}'s desktop — the user may still be on ${app}'s desktop. Tell them now, and check before acting there again.`);
+    this.log(`computer-use: WARNING the helper went away during a desktop visit to ${app} for ${ctx.sessionId} — the user may still be on its desktop`);
   }
 
   private async screenScreenshot(ctx: RunCtx, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<ImageHandle> {
@@ -1386,11 +1460,39 @@ export class ComputerV2Service {
         return;
       case "permissionsChanged":
         return; // the client keeps the latest; `computerUse.status` reads it
+      case "desktopVisited": {
+        // ONE metrics entry per desktop visit (5d) — however it ended, a cancelled request's included (its answer was
+        // the helper's `cancelled`, before the visit's report existed). The result's line comes from `visit.close`.
+        const p = n.params;
+        if (p === undefined || typeof p.sessionId !== "string" || typeof p.ms !== "number") return;
+        this.deps.telemetry?.primitive({
+          ts: this.now(), sessionId: p.sessionId, callId: typeof p.callId === "string" ? p.callId : "", primitive: "desktop.visit", ms: Math.round(p.ms), helperMs: 0,
+          visit: { actions: typeof p.actions === "number" ? p.actions : 0, ms: Math.round(p.ms), returned: p.returned === true && p.userMoved !== true, ...(p.userMoved === true ? { userMoved: true } : {}) },
+          ...(p.why === "act" || p.why === "live" ? { visitWhy: p.why } : {}),
+        });
+        const state = this.sessions.get(p.sessionId);
+        if (state === undefined) return;
+        state.visitHint = true;
+        // The visit is closed: the run that held the screen's foreground lock for it lets it go (unless a request that
+        // may open the next one is in flight, or the run holds the front itself).
+        const ctx = state.active;
+        if (ctx !== undefined && ctx.visitLock && ctx.visitRequestsInFlight === 0 && ctx.foreground.size === 0) {
+          ctx.locks.get(FOREGROUND_LOCK_KEY)?.();
+          ctx.locks.delete(FOREGROUND_LOCK_KEY);
+          ctx.visitLock = false;
+        }
+        return;
+      }
     }
   }
 
-  /** The helper connection closed: every target it held is gone (`TargetLost` on next use). */
+  /** The helper connection closed: every target it held is gone (`TargetLost` on next use) — and a run that may have
+   *  had a desktop visit open says loudly that the user may still be on that desktop. */
   helperDisconnected(): void {
+    for (const state of this.sessions.values()) {
+      const ctx = state.active;
+      if (ctx !== undefined && !ctx.ended && ctx.visitTouched) this.noteVisitStranded(ctx, ctx.visitApp ?? "the app");
+    }
     for (const [sessionId, state] of this.sessions) {
       for (const t of state.targets.values()) t.lost = "helper_restart";
       this.diffBases.clearSession(sessionId);
@@ -1558,4 +1660,28 @@ function refusedWords(reason: string, name: string): string {
     case "save_path": return "that save location is protected (shell startup files, ~/.ssh, LaunchAgents) — choose another";
     default: return `${name} refused that action${reason ? ` (${reason})` : ""}`;
   }
+}
+
+/** The failure of a primitive the user did not let visit its window's desktop — a person's refusal (held until their
+ *  next message), or a prompt that could not be shown (never worded as a refusal). */
+function desktopVisitDenied(app: string, outcome: DesktopVisitOutcome): AutomationFailure {
+  if (outcome.answer === "unavailable") {
+    return new AutomationFailure("NeedsForeground", `the desktop-switch prompt could not be shown, so ${app}'s window was not visited — try again in a moment; if it keeps failing, ask the user to bring the window to this desktop`);
+  }
+  return new AutomationFailure("NeedsForeground", `the user refused to be moved to ${app}'s desktop — ask them in your reply if it is needed`);
+}
+
+/** "420 ms", "2.4 s". */
+function visitDuration(ms: number): string {
+  const n = Math.max(0, Math.round(ms));
+  return n < 1_000 ? `${n} ms` : `${(n / 1_000).toFixed(1)} s`;
+}
+
+/** The result's words for one closed desktop visit: a daemon line ("moved the user to Safari's desktop for 2.4 s
+ *  (5 actions) and back"), or — when the user could not be brought back — a loud notice. */
+export function visitLine(app: string, v: { ms: number; actions: number; returned: boolean; userMoved?: boolean }): { line?: string; notice?: string } {
+  const what = `${app}'s desktop for ${visitDuration(v.ms)} (${v.actions} action${v.actions === 1 ? "" : "s"})`;
+  if (v.userMoved === true) return { line: `moved the user to ${what}; they took over during it, so Winter left them where they went` };
+  if (v.returned) return { line: `moved the user to ${what} and back` };
+  return { notice: `Winter moved the user to ${app}'s desktop and could NOT bring them back to their own. Tell the user now, and do nothing more in ${app} until they are back on their desktop.` };
 }

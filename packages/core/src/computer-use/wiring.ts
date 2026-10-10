@@ -10,7 +10,7 @@ import type { ApprovalBroker } from "../agent/approvals";
 import type { WinterProfile } from "../profile";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { runningTurnOrigin } from "../sessions/turn-origins";
+import { isHumanTurnOrigin, runningTurnOrigin } from "../sessions/turn-origins";
 import {
   computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseLegacyComputerFrom, computerUseMirrorFrom,
   computerUsePrivateEventPathFrom, loadSettings, saveSettings, setComputerUseApp, setComputerUseFlags, type ComputerUseAccess, type Settings,
@@ -99,6 +99,17 @@ export interface ComputerUseRuntime {
 }
 
 const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
+
+/**
+ * THE DESKTOP SWITCH, refused (user ruling 2026-10-10, 5a): the session whose desktop-switch refusals an event lifts —
+ * a HUMAN-origin `user_message` (never `messaging`, `dispatch` or `dispatch-wake`, nor the projector's own echo); the
+ * policy then lifts that session's refusals and those of the dispatch children it coordinates.
+ */
+export function desktopRefusalLiftFor(event: SessionEvent): string | undefined {
+  if (event.type !== "user_message") return undefined;
+  const clientName = (event as { clientName?: string }).clientName;
+  return isHumanTurnOrigin(clientName ?? "session") ? event.sessionId : undefined;
+}
 
 /**
  * The desktop-switch ruling (2026-10-10): the prompt's ON-SCREEN half — the helper's panel on the user's current
@@ -270,6 +281,9 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     settings,
     observe(event) {
       diffBases.observe(event);
+      // 5a: the USER's next message lifts the session's desktop-switch refusals (and its dispatch children's).
+      const lift = desktopRefusalLiftFor(event);
+      if (lift !== undefined) policy.liftDesktopRefusals(lift);
       if (event.type === "turn_completed") {
         const threadId = (event as { threadId?: string }).threadId;
         if (threadId === undefined || threadId === "main") svc.turnEnded(event.sessionId);

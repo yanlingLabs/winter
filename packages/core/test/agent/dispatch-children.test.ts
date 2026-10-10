@@ -300,6 +300,9 @@ describe("child_update progression and the relay", () => {
     expect(copies[0]).toMatchObject({ childSessionId: child, onTimeout: "allow", expiresAt: 61_000, options: [{ id: "switch", label: "Switch now" }] });
     expect(copies[1]).toMatchObject({ childSessionId: child, approved: true, by: "timeout" });
     expect(t.childUpdates().map((e) => e.status)).toEqual(["running", "awaiting_approval", "running"]);
+    // Nobody watching: the notification says it goes ahead on silence — never "needs your approval" (8c).
+    const notes = t.dispatchLog().filter((e) => e.type === "notification_requested").map((e) => (e as { message: string }).message);
+    expect(notes).toEqual(["switching in 1 min unless you refuse"]);
   });
 
   test("a card raised on a SUBAGENT thread inside the child is mirrored on the coordinator's MAIN thread (the Mac shows only main-thread cards)", async () => {

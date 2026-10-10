@@ -182,16 +182,18 @@ export interface ScreenshotResult {
   pointsWidth?: number; pointsHeight?: number;
   /** `target.screenshot`: what the image is when it is not a live capture, e.g. captured from another desktop. */
   detail?: string;
-  /** helper 1.7.0: a `live: true` shot that needed the user moved to the window's desktop for a moment. */
-  visit?: DesktopVisitReport;
+  /** helper 1.7.0: the shot was taken inside an OPEN desktop visit (5d) — it opened it, or ran in it. */
+  inVisit?: boolean;
 }
 /**
- * helper 1.7.0: one desktop VISIT (the desktop-switch ruling) — the user was moved to the bound window's desktop for
- * exactly one primitive and back. `ms`: from the switch to back (or to the end); `returned`: the user's Space and
- * front app were verified back; `userMoved`: the user took over during it (hardware input), so the helper left them
- * where they went; `detail`: the helper's own words when there is more to say.
+ * helper 1.7.0: one CLOSED desktop visit (the desktop-switch ruling, 5d: one OPEN visit per stretch of work) as
+ * `visit.close` hands it over, once. `actions`: how many primitives ran in it; `ms`: the total time the user was away;
+ * `returned`: their Space and front app were verified back; `userMoved`: they took over during it (hardware input),
+ * so the helper left them where they went; `detail`: the helper's own words when there is more to say.
  */
-export interface DesktopVisitReport { ms: number; returned: boolean; userMoved?: boolean; detail?: string }
+export interface DesktopVisitClosed {
+  visitId: string; targetId: string; app: string; why?: "act" | "live"; actions: number; ms: number; returned: boolean; userMoved?: boolean; detail?: string;
+}
 /** `prompt.desktopVisit` (helper 1.7.0): the helper's on-screen prompt answered — or ran out (`expired`). */
 export interface DesktopVisitPromptResult { answer: "switch" | "refuse" | "expired" }
 /** `input` (type, paste, key, setValue; helper 1.2.0): the element that received the input, e.g. `[14] text area "Comment"`;
@@ -202,8 +204,8 @@ export interface ActResult {
   focusNow?: string; focusLost?: boolean;
   /** helper 1.4.0: the act changed the bound window's page (a link navigated, a tab switched) — its title now. */
   pageNow?: string;
-  /** helper 1.7.0: the act needed the user moved to the window's desktop for a moment (`desktopVisit: true`). */
-  visit?: DesktopVisitReport;
+  /** helper 1.7.0: the act ran inside an OPEN desktop visit (it opened it, or ran in it). */
+  inVisit?: boolean;
 }
 /** `target.applescript`: the script's result as AppleScript displays it (null: none). */
 export interface AppleScriptResult { result: string | null; detail?: string }
@@ -238,9 +240,10 @@ export type HelperNotification =
   | { method: "escPressed"; params: { sessionIds: string[] } }
   | { method: "targetLost"; params: { targetId: string; reason: TargetLostReason } }
   | { method: "permissionsChanged"; params: { permissions: HelperPermissions } }
-  /** helper 1.7.0: after EVERY desktop visit (success, a failed primitive, a cancelled request — whose answer the
-   *  dispatcher sends before the visit's report exists): how long the user was away and whether they are back. */
-  | { method: "desktopVisited"; params: { sessionId: string; callId?: string; targetId: string; app: string; why: "act" | "live"; ms: number; returned: boolean; userMoved?: boolean } };
+  /** helper 1.7.0: at EVERY desktop visit's close (however it ended — a cancelled request's included, whose answer
+   *  the dispatcher sends before the visit's report exists): how many primitives ran in it, how long the user was
+   *  away and whether they are back. */
+  | { method: "desktopVisited"; params: { visitId?: string; sessionId: string; callId?: string; targetId?: string; app?: string; why?: "act" | "live"; actions?: number; ms: number; returned: boolean; userMoved?: boolean } };
 
 /** One request line is at most 1 MiB; one response line at most 16 MiB (images). */
 export const HELPER_MAX_REQUEST_LINE = 1024 * 1024;
