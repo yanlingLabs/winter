@@ -447,6 +447,68 @@ async function main(): Promise<void> {
       await noteActive(`after the leave test (${variant})`);
     }
 
+    // Leaving such a page by NAVIGATING (goto, reload, back) in a background agent tab Winter typed into: the extension
+    // discards it first, then runs the engine's own command on the same debugger session. Nothing comes forward (the
+    // browser's own activation events are counted in the service worker), and the engine sees what it waits for: a
+    // top-frame commit — for goto, of the answer's loaderId — then that document's DOMContentLoaded; the discard's own
+    // events (a stand-in document's load, no commit) come before the commit.
+    await browserCdp.inWorker("(globalThis.__winterE2EActivations = [], chrome.tabs.onActivated.addListener((i) => globalThis.__winterE2EActivations.push(i.tabId)), true)");
+    const nav = await transport.createTab({ sessionId: "s_nav", sessionTitle: "Leave by navigating", url: `${base}/bu.html` });
+    await sleep(800);
+    await transport.attach(nav.tabKey, { sessionId: "s_nav" });
+    const navEvents: CdpEvent[] = [];
+    transport.onEvent((e) => {
+      if (e.tabKey !== nav.tabKey) return;
+      navEvents.push(e);
+      // As the engine does while it navigates: a "leave this page?" that does come up is accepted (so a run without the
+      // discard fails on what came forward, not on a hang).
+      if (e.method === "Page.javascriptDialogOpening" && e.params.type === "beforeunload") void transport.send(nav.tabKey, "Page.handleJavaScriptDialog", { accept: true }).catch(() => undefined);
+    });
+    await transport.subscribe(nav.tabKey, ["Page.frameNavigated", "Page.lifecycleEvent", "Page.loadEventFired", "Runtime.executionContextsCleared", "Page.javascriptDialogOpening"]);
+    await transport.send(nav.tabKey, "Page.enable");
+    await transport.send(nav.tabKey, "Page.setLifecycleEventsEnabled", { enabled: true });
+    await transport.send(nav.tabKey, "Runtime.enable");
+    type Frame = { id: string; parentId?: string; loaderId: string; url: string };
+    const isTopCommit = (e: CdpEvent) => e.method === "Page.frameNavigated" && e.cdpSessionId === undefined && (e.params.frame as Frame).parentId === undefined;
+    const leave = async (what: string, method: string, params: Record<string, unknown>, typed: boolean, expectUrl: string) => {
+      if (typed) {
+        for (const type of ["mousePressed", "mouseReleased"]) await transport.send(nav.tabKey, "Input.dispatchMouseEvent", { type, x: 20, y: 20, button: "left", clickCount: 1 });
+        await transport.send(nav.tabKey, "Input.insertText", { text: "a draft" });
+      }
+      const mark = navEvents.length;
+      const answer = await transport.send<{ frameId?: string; loaderId?: string }>(nav.tabKey, method, params);
+      const after = () => navEvents.slice(mark);
+      const commit = await waitFor(() => after().find((e) => isTopCommit(e) && (method !== "Page.navigate" || (e.params.frame as Frame).loaderId === answer.loaderId)), 10_000);
+      const loaderId = commit === undefined ? undefined : (commit.params.frame as Frame).loaderId;
+      const dcl = await waitFor(() => after().find((e) => e.method === "Page.lifecycleEvent" && e.params.name === "DOMContentLoaded" && e.params.loaderId === loaderId), 10_000);
+      const seen = after();
+      const commitAt = commit === undefined ? -1 : seen.indexOf(commit);
+      const beforeCommit = seen.slice(0, Math.max(0, commitAt)).map((e) => e.method);
+      check(commit !== undefined && dcl !== undefined && (method !== "Page.navigate" || (typeof answer.loaderId === "string" && answer.frameId !== undefined)),
+        `${what}: the engine sees a navigation — ${method === "Page.navigate" ? "the answer's loaderId commits" : "a top-frame commit"}, then that document's DOMContentLoaded`, { answer, seen: seen.map((e) => e.method).slice(0, 20) });
+      if (typed) {
+        check(beforeCommit.includes("Runtime.executionContextsCleared") && beforeCommit.includes("Page.loadEventFired"),
+          `${what}: …the page was discarded first — its stand-in document's events came before the commit`, beforeCommit);
+      } else {
+        check(!beforeCommit.includes("Page.loadEventFired"), `${what}: …a page with no input since it loaded is navigated as it is (not discarded)`, beforeCommit);
+      }
+      check(!seen.some((e) => e.method === "Page.javascriptDialogOpening"), `${what}: …no "leave this page?" was raised`);
+      const now = (await transport.listTabs()).find((x) => x.tabKey === nav.tabKey);
+      check(now?.url === expectUrl && now.agent && !now.active, `${what}: …the tab is at ${expectUrl.replace(base, "")}, still Winter's, still in the background`, now);
+      const activations = await browserCdp.inWorker<number[]>("globalThis.__winterE2EActivations");
+      const active = (await transport.listTabs()).filter((x) => x.active).map((x) => x.tabKey);
+      check((activations ?? []).length === 0 && JSON.stringify(active) === JSON.stringify([userTab!.tabKey]), `${what}: …nothing came forward: no tab was activated, the user's is still the active one`, { activations, active });
+      await noteActive(`after ${what}`);
+    };
+    await leave("goto after typing", "Page.navigate", { url: `${base}/bu.html?step=2` }, true, `${base}/bu.html?step=2`);
+    await leave("reload after typing", "Page.reload", {}, true, `${base}/bu.html?step=2`);
+    const history = await transport.send<{ currentIndex: number; entries: { id: number; url: string }[] }>(nav.tabKey, "Page.getNavigationHistory");
+    const back = history.entries[history.currentIndex - 1];
+    check(back?.url === `${base}/bu.html`, "the history survived the discards: one entry back is the first page", history.entries.map((x) => x.url.replace(base, "")));
+    await leave("back after typing", "Page.navigateToHistoryEntry", { entryId: back?.id ?? -1 }, true, `${base}/bu.html`);
+    await leave("goto without input", "Page.navigate", { url: `${base}/frame.html` }, false, `${base}/frame.html`);
+    check(await code(transport.closeTab(nav.tabKey)) === "ok" && !(await groupTitles()).includes("Winter · Leave by navigating"), "the navigated agent tab closes, and its group goes with it", await groupTitles());
+
     // The service worker restarts (stopped through DevTools — `chrome.runtime.reload()` of this command-line-loaded
     // build does not come back in Chrome for Testing — then woken by a tab event): it reconnects on its own, still knows
     // which tabs are Winter's, and has let go of the debugger and overlay its predecessor held.
