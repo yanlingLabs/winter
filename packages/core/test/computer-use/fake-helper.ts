@@ -27,6 +27,9 @@ export class FakeHelper {
     { name: "1Password", bundleId: "com.1password.1password", pid: 504, running: true },
     { name: "Keychain Access", bundleId: "com.apple.keychainaccess", pid: 505, running: true },
   ];
+  /** The on-screen desktop-switch prompts shown (`prompt.desktopVisit`, helper 1.7.0): `answer` clicks a button
+   *  (or runs the countdown out); `closed` once the daemon cancelled it (the card was answered first). */
+  readonly prompts: Array<{ params: Record<string, unknown>; answer(a: "switch" | "refuse" | "expired"): void; closed: boolean; cancel(): void }> = [];
   private nextTarget = 1;
   private nextSnap = 1;
   private nextShot = 1;
@@ -135,8 +138,20 @@ export class FakeHelper {
       case "target.waitFor": return { met: true, waitedMs: 12 };
       case "target.windows": return { windows: [{ id: 7, title: "w", focused: true }] };
       case "target.useWindow": return { window: { id: 8, title: "other", frame: [0, 0, 1, 1] } };
-      case "target.release":
+      case "prompt.desktopVisit":
+        return await new Promise((resolve, reject) => {
+          const entry = {
+            params, closed: false,
+            answer: (a: "switch" | "refuse" | "expired") => { if (!entry.closed) { entry.closed = true; resolve({ answer: a }); } },
+            cancel: () => { if (!entry.closed) { entry.closed = true; reject(new FakeHelperError("cancelled", "cancelled")); } },
+          };
+          this.prompts.push(entry);
+        });
       case "cancel":
+        // `cancel {callId}` stops that call's in-flight requests (here: an on-screen prompt the daemon closed).
+        for (const p of this.prompts) if (!p.closed && p.params.callId === params.callId) p.cancel();
+        return {};
+      case "target.release":
       case "turn.ended":
       case "session.ended":
       case "script.active":

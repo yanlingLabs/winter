@@ -60,7 +60,10 @@ export type HelperErrorCode =
   | "protocol_mismatch" | "home_mismatch" | "permission_missing" | "target_lost" | "stale_ref" | "needs_foreground"
   | "not_allowed" | "refused" | "wait_timeout" | "cancelled" | "invalid_params" | "unsupported" | "busy"
   // The app runs, but its window is on another Space / in full screen, or it has no open window (→ `NoWindow`).
-  | "window_elsewhere" | "no_window";
+  | "window_elsewhere" | "no_window"
+  // helper 1.7.0 (the desktop-switch ruling, 2026-10-10): the act, or a LIVE picture, needs the user moved to the
+  // window's desktop for a moment — the helper never does that without `desktopVisit: true` (`data.why`).
+  | "needs_desktop_visit";
 
 /** A helper's JSON-RPC error, by its `data.code`. */
 export class HelperRpcError extends Error {
@@ -145,7 +148,18 @@ export interface ScreenshotResult {
   pointsWidth?: number; pointsHeight?: number;
   /** `target.screenshot`: what the image is when it is not a live capture, e.g. captured from another desktop. */
   detail?: string;
+  /** helper 1.7.0: a `live: true` shot that needed the user moved to the window's desktop for a moment. */
+  visit?: DesktopVisitReport;
 }
+/**
+ * helper 1.7.0: one desktop VISIT (the desktop-switch ruling) — the user was moved to the bound window's desktop for
+ * exactly one primitive and back. `ms`: from the switch to back (or to the end); `returned`: the user's Space and
+ * front app were verified back; `userMoved`: the user took over during it (hardware input), so the helper left them
+ * where they went; `detail`: the helper's own words when there is more to say.
+ */
+export interface DesktopVisitReport { ms: number; returned: boolean; userMoved?: boolean; detail?: string }
+/** `prompt.desktopVisit` (helper 1.7.0): the helper's on-screen prompt answered — or ran out (`expired`). */
+export interface DesktopVisitPromptResult { answer: "switch" | "refuse" | "expired" }
 /** `input` (type, paste, key, setValue; helper 1.2.0): the element that received the input, e.g. `[14] text area "Comment"`;
  *  `inputUnknown`: the app reported no focused element. */
 export interface ActResult {
@@ -154,6 +168,8 @@ export interface ActResult {
   focusNow?: string; focusLost?: boolean;
   /** helper 1.4.0: the act changed the bound window's page (a link navigated, a tab switched) — its title now. */
   pageNow?: string;
+  /** helper 1.7.0: the act needed the user moved to the window's desktop for a moment (`desktopVisit: true`). */
+  visit?: DesktopVisitReport;
 }
 /** `target.applescript`: the script's result as AppleScript displays it (null: none). */
 export interface AppleScriptResult { result: string | null; detail?: string }

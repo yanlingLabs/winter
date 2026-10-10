@@ -17,8 +17,8 @@ import {
 } from "../settings";
 import { DiffBases } from "./diff-base";
 import { HelperClient, type HelperLauncher, type HelperTransport, type HelperVerifier } from "./helper-client";
-import { ComputerPolicy, DEFAULT_APP_EXCEPTIONS, defaultAppException } from "./policy";
-import { HelperRpcError, HelperUnavailableError, type HelperPermissions } from "./protocol";
+import { ComputerPolicy, DEFAULT_APP_EXCEPTIONS, defaultAppException, type DesktopVisitPanel } from "./policy";
+import { HelperRpcError, HelperUnavailableError, type DesktopVisitPromptResult, type HelperPermissions } from "./protocol";
 import { RecentApps } from "./recent-apps";
 import { ComputerV2Service } from "./service";
 import { AutomationTelemetry } from "./telemetry";
@@ -100,6 +100,27 @@ export interface ComputerUseRuntime {
 
 const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 
+/**
+ * The desktop-switch ruling (2026-10-10): the prompt's ON-SCREEN half — the helper's panel on the user's current
+ * desktop (`prompt.desktopVisit`), with its own call id so closing it never cancels the script's other helper work.
+ * Closing it (the session's card was answered first) is the helper's `cancel`. Any failure — an older helper, the
+ * helper gone — reads as no answer: the card alone asks.
+ */
+export function helperDesktopPanel(helper: Pick<HelperClient, "request">, log: (line: string) => void): DesktopVisitPanel {
+  return {
+    show(p) {
+      const abort = new AbortController();
+      const answer = helper.request<DesktopVisitPromptResult>("prompt.desktopVisit", { ...p, callId: p.promptId }, {
+        signal: abort.signal, callId: p.promptId, timeoutMs: p.timeoutMs + 15_000,
+      }).then((r) => (r?.answer === "switch" || r?.answer === "refuse" || r?.answer === "expired" ? r.answer : undefined), (err) => {
+        if (!(err instanceof HelperRpcError && err.code === "cancelled")) log(`computer-use: the on-screen desktop-switch prompt was not shown (${err instanceof Error ? err.message : "error"})`);
+        return undefined;
+      });
+      return { answer, close: () => abort.abort() };
+    },
+  };
+}
+
 export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): ComputerUseRuntime {
   const log = (line: string): void => deps.log?.(line);
   let written: { basis: Settings | null | undefined; next: Settings } | undefined;
@@ -156,6 +177,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       try { if (deps.store.meta(sessionId).mode === "dispatch") return false; } catch { return false; }
       return deps.hub.attachedHarnesses(sessionId).some((h) => h.role !== "remote" && h.clientName !== "iphone-gateway");
     },
+    desktopPanel: helperDesktopPanel(helper, log),
     log,
   });
 

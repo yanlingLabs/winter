@@ -21,6 +21,17 @@ export interface PrimitiveMetric {
   error?: string;
   /** The helper's error code behind it (`unsupported`, `window_elsewhere`, …), when the helper refused. */
   errorCode?: string;
+  /**
+   * THE DESKTOP SWITCH (the ruling, 2026-10-10 — every switch is counted): the visits this primitive made to its
+   * window's desktop (`count`, their total `ms`, whether the user was back after every one — `returned` — and
+   * whether they took over during one — `userMoved`).
+   */
+  visit?: { count: number; ms: number; returned: boolean; userMoved?: boolean };
+  /** How the run's desktop-switch prompt ended for this primitive: a person's `allow`/`refuse`, `timeout-allow`
+   *  (no answer within the minute), `aborted`, or the run's earlier answer reused (`run-allowance`/`run-refusal`). */
+  visitAnswer?: "allow" | "refuse" | "timeout-allow" | "aborted" | "run-allowance" | "run-refusal";
+  /** Where a person answered it: the session's `card`, the helper's on-screen `panel`; or `timeout`, `none`. */
+  visitVia?: "card" | "panel" | "timeout" | "none";
 }
 
 export const AUTOMATION_METRICS_MAX_BYTES = 8 * 1024 * 1024;

@@ -327,24 +327,25 @@ describe("ComputerV2: the policy, through a script", () => {
     expect(text(r)).toContain("Notes is in front until this script ends; then the front goes back to the user's app");
     expect(cards(w.events).map((c) => c.summary)).toEqual([
       "Allow Winter to use Notes (com.apple.Notes)?",
-      "Winter asks to bring Notes (com.apple.Notes) to the front and keep it there until this step ends (if its window is on another desktop, you are taken there): the editor takes no keys in the background",
+      "Winter asks to bring Notes (com.apple.Notes) to the front and keep it there until this step ends: the editor takes no keys in the background",
     ]);
-    expect(w.fake.calls("target.foreground")).toEqual([{ targetId: expect.any(String), moveDesktop: true }]);
+    // The desktop-switch ruling: a hold is on the user's own desktop only — nothing asks the helper to move desktops.
+    expect(w.fake.calls("target.foreground")).toEqual([{ targetId: expect.any(String) }]);
     expect(w.fake.calls("target.act").map((a) => a.allowForeground)).toEqual([true, true]);
     // The next run starts without it: asked again.
     await w.run("await notes.click(14)");
     expect(w.fake.calls("target.act").at(-1)!.allowForeground).toBe(false);
   }, 30_000);
 
-  macOnly("requestForeground under bypass asks no card, and never lets a window on another desktop take the user there", async () => {
+  macOnly("requestForeground under bypass asks no card, and a window on another desktop is never held in front (the helper says where to go instead)", async () => {
     const w = world({ policy: "bypass" });
-    w.fake.handlers["target.foreground"] = (p) => (p.moveDesktop === true ? { front: true }
-      : { front: false, detail: "Notes's window is on another desktop, and bringing it forward would take the user there — not done without the user's say (this session asks no card); ask the user to show the window, or keep to what works in the background" });
+    w.fake.handlers["target.foreground"] = (p) => (p.moveDesktop !== undefined ? { front: true }
+      : { front: false, detail: "Notes's window is on another desktop: requestForeground holds an app in front only on the user's own desktop — an act that needs the window on screen asks the user for a brief visit by itself, and screenshot({ live: true, reason }) takes a live picture" });
     const r = await w.run("const notes = await apps.open('Notes')\nprint(String(await notes.requestForeground('to type')))");
     expect(cards(w.events)).toEqual([]);
-    expect(w.fake.calls("target.foreground")[0]).toMatchObject({ moveDesktop: false });
+    expect(w.fake.calls("target.foreground")[0]!.moveDesktop).toBeUndefined();
     expect(text(r)).toContain("false");
-    expect(text(r)).toContain("not done without the user's say");
+    expect(text(r)).toContain("only on the user's own desktop");
   }, 30_000);
 
   macOnly("requestForeground declined: false, nothing brought forward, and a line saying what to do instead", async () => {
