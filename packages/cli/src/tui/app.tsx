@@ -116,7 +116,7 @@ import { PendingCards, type AnswerPayload } from "./pending-cards";
 import { theme } from "./theme";
 import { loadSafeHighlighter } from "./highlight-guard";
 import type { Highlighter } from "./markdown";
-import { makeDeltaCoalescer, type EventBridge } from "./event-bridge";
+import { makeDeltaCoalescer, type EventBridge, type TimerFns } from "./event-bridge";
 import type { parsePlanResponse } from "../plan-response";
 import { answerElicitation, elicitationAnswerNote, openInBrowser } from "../elicitation";
 import { runCommand, type CommandCtx } from "./commands";
@@ -202,6 +202,10 @@ export interface AppProps {
   /** Code-mode image input: the clipboard's image bytes, or `null` when it holds none. Injectable so
    *  tests never read the real clipboard; production runs `osascript` (`images.ts`). */
   readClipboardImage?: () => Promise<Uint8Array | null>;
+  /** The delta coalescer's timer seam (`makeDeltaCoalescer`): production leaves it unset and gets the real
+   *  `setTimeout`; a test passes a hand-driven clock so "how many deltas share a window" never depends on how
+   *  fast the machine runs. */
+  coalesceTimers?: TimerFns;
 }
 
 // Re-exported from the zero-dep `./policy-order` module (SP-policies): main.ts's cycler imports the
@@ -444,7 +448,7 @@ export function App({
   client, bridge, sessionId, cwd, initialPolicy, version, model,
   effort, sessionModelOverride, sessionEffortOverride, initialActivity,
   now = Date.now, onExitRequest, resumeTargetSeq, copyText = copyToClipboard, openFile = openLocalFile,
-  readClipboardImage = readClipboardImageDefault,
+  readClipboardImage = readClipboardImageDefault, coalesceTimers,
 }: AppProps) {
   const [state, dispatch] = useReducer(
     (s: TuiState, e: AppEvent) => reduce(s, e, now()),
@@ -736,13 +740,13 @@ export function App({
   // banner a window early is strictly more honest than a window late. Cleanup disposes the
   // coalescer (flushes, cancels the timer) BEFORE unsubscribing replaces the handler.
   useEffect(() => {
-    const coalescer = makeDeltaCoalescer(dispatch);
+    const coalescer = makeDeltaCoalescer(dispatch, coalesceTimers);
     const unsubscribe = bridge.subscribe((e) => {
       coalescer.push(e);
       if (resumeTargetSeq !== undefined && e.seq >= resumeTargetSeq) setResuming(false);
     });
     return () => { unsubscribe(); coalescer.dispose(); };
-  }, [bridge, resumeTargetSeq]);
+  }, [bridge, resumeTargetSeq, coalesceTimers]);
 
   // Ticking clock so elapsed/spinner chrome advances between real events (legacy 120ms tick twin).
   useEffect(() => {
