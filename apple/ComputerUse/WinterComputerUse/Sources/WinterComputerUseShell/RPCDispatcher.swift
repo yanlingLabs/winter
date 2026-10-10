@@ -124,6 +124,14 @@ public final class RPCDispatcher: @unchecked Sendable {
             core.scriptActivity(sessionId: p.sessionId, active: p.active)
             return AnyEncodable(EmptyResult())
         }
+        // The desktop-switch prompt (a long request: it answers when the user clicks, or `expired`); `cancel
+        // {callId}` — the prompt's own id — closes it.
+        routes["prompt.desktopVisit"] = { [coordinator] params, _ in
+            let p = try RPCDispatcher.decode(PromptDesktopVisitParams.self, params)
+            try p.validate()
+            let answer = try await coordinator.askDesktopVisit(p)
+            return AnyEncodable(PromptDesktopVisitResult(answer: answer.rawValue))
+        }
         routes["turn.ended"] = { [core, coordinator] params, _ in
             let p = try RPCDispatcher.decode(TurnEndedParams.self, params)
             await coordinator.turnEnded(sessionId: try RPCDispatcher.sessionId(params))
@@ -176,6 +184,40 @@ public final class RPCDispatcher: @unchecked Sendable {
         guard let id = params?["sessionId"]?.stringValue, !id.isEmpty else { throw RPCError.invalidParams("params.sessionId is required") }
         return id
     }
+}
+
+/// `prompt.desktopVisit` — the shell's own method (the desktop-switch prompt is drawn by the presentation layer).
+/// `callId` equals `promptId`: it is what the daemon's `cancel` names.
+public struct PromptDesktopVisitParams: Codable, Equatable, Sendable {
+    public var promptId: String
+    public var callId: String
+    public var sessionId: String
+    public var app: String
+    public var bundleId: String
+    public var reason: String
+    public var timeoutMs: Int
+
+    public init(promptId: String, callId: String, sessionId: String, app: String, bundleId: String, reason: String, timeoutMs: Int) {
+        self.promptId = promptId
+        self.callId = callId
+        self.sessionId = sessionId
+        self.app = app
+        self.bundleId = bundleId
+        self.reason = reason
+        self.timeoutMs = timeoutMs
+    }
+
+    func validate() throws {
+        guard !promptId.isEmpty else { throw RPCError.invalidParams("params.promptId is required") }
+        guard callId == promptId else { throw RPCError.invalidParams("params.callId must equal params.promptId") }
+        guard !sessionId.isEmpty else { throw RPCError.invalidParams("params.sessionId is required") }
+        guard timeoutMs > 0 else { throw RPCError.invalidParams("params.timeoutMs must be positive") }
+    }
+}
+
+/// `{answer: "switch" | "refuse" | "expired"}`.
+public struct PromptDesktopVisitResult: Codable, Equatable, Sendable {
+    public var answer: String
 }
 
 /// `script.active` — the shell's own method (the Esc tap's arming), so its params live here.

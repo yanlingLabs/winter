@@ -33,6 +33,7 @@ public struct CUSkyLight: @unchecked Sendable {
     typealias GetKeyFocus = @convention(c) (UnsafeMutableRawPointer) -> Int32
     typealias ReleaseKeyFocus = @convention(c) (Int32) -> Int32
     typealias ProcessPID = @convention(c) (UnsafeRawPointer, UnsafeMutablePointer<pid_t>) -> Int32
+    typealias SetFrontProcessWithOptions = @convention(c) (UnsafeRawPointer, UInt32, UInt32) -> Int32
 
     var postToPidFn: PostToPid?
     var setIntFieldFn: SetIntField?
@@ -56,6 +57,7 @@ public struct CUSkyLight: @unchecked Sendable {
     var getKeyFocusFn: GetKeyFocus?
     var releaseKeyFocusFn: ReleaseKeyFocus?
     var processPIDFn: ProcessPID?
+    var setFrontProcessWithOptionsFn: SetFrontProcessWithOptions?
 
     /// `SLEventPostToPid` resolved: rung 3 is possible.
     public var isAvailable: Bool { postToPidFn != nil }
@@ -65,6 +67,10 @@ public struct CUSkyLight: @unchecked Sendable {
     public var canFocusWithoutRaise: Bool {
         postEventRecordToFn != nil && getFrontProcessFn != nil && getProcessForPIDFn != nil
     }
+
+    /// A specific window can be brought to the front by id (`_SLPSSetFrontProcessWithOptions`), taking the user to
+    /// the Space it is on — a desktop visit's way there and back.
+    public var canFrontWindow: Bool { setFrontProcessWithOptionsFn != nil && getProcessForPIDFn != nil }
 
     /// A window can be captured wherever it is (`SLSHWCaptureWindowListInRect`, or the list call).
     public var canCaptureWindows: Bool { mainConnectionFn != nil && (captureInRectFn != nil || captureListFn != nil) }
@@ -103,6 +109,7 @@ public struct CUSkyLight: @unchecked Sendable {
         s.getKeyFocusFn = fn("CPSGetKeyFocusProcess", GetKeyFocus.self)
         s.releaseKeyFocusFn = fn("CPSReleaseKeyFocusWithID", ReleaseKeyFocus.self)
         s.processPIDFn = fn("GetProcessPID", ProcessPID.self)
+        s.setFrontProcessWithOptionsFn = fn("_SLPSSetFrontProcessWithOptions", SetFrontProcessWithOptions.self)
         return s
     }
 
@@ -222,6 +229,44 @@ public struct CUSkyLight: @unchecked Sendable {
         let a = target.withUnsafeBytes { psn in defocus.withUnsafeBufferPointer { postEventRecordToFn(psn.baseAddress!, $0.baseAddress!) } }
         let b = prev.withUnsafeBytes { psn in focus.withUnsafeBufferPointer { postEventRecordToFn(psn.baseAddress!, $0.baseAddress!) } }
         return a == 0 && b == 0
+    }
+
+    // MARK: a specific window to the front (a desktop visit)
+
+    /// `kCPSUserGenerated`: the front-process change is treated as the user's own, so the window server switches to
+    /// the Space the window is on (the way window managers focus a window on another Space).
+    static let cpsUserGenerated: UInt32 = 0x200
+
+    /// The 248-byte record that makes a window its process's key window (posted twice, phases 1 and 2).
+    static func keyWindowRecord(windowID: UInt32, phase: UInt8) -> [UInt8] {
+        var buf = [UInt8](repeating: 0, count: 0xF8)
+        buf[0x04] = 0xF8
+        buf[0x08] = phase
+        buf[0x3A] = 0x10
+        withUnsafeBytes(of: windowID.littleEndian) { bytes in
+            for (i, b) in bytes.enumerated() { buf[0x3C + i] = b }
+        }
+        for i in 0x20..<0x30 { buf[i] = 0xFF }
+        return buf
+    }
+
+    /// Brings `pid`'s window `windowID` to the front BY ID and makes it key: the window server takes the user to the
+    /// Space it is on — even when the app has other windows on the current desktop (activating the app would then
+    /// stay here), and for a window accessibility never exposed (nothing to raise). Only a desktop visit the user
+    /// allowed calls it. False when the symbols are missing or the call failed.
+    @discardableResult
+    func frontWindow(pid: pid_t, windowID: UInt32) -> Bool {
+        guard let setFrontProcessWithOptionsFn, let getProcessForPIDFn else { return false }
+        var psn = [UInt8](repeating: 0, count: 8)
+        guard psn.withUnsafeMutableBytes({ getProcessForPIDFn(pid, $0.baseAddress!) }) == 0 else { return false }
+        let fronted = psn.withUnsafeBytes { setFrontProcessWithOptionsFn($0.baseAddress!, windowID, Self.cpsUserGenerated) } == 0
+        if let postEventRecordToFn {
+            for phase: UInt8 in [0x01, 0x02] {
+                let record = Self.keyWindowRecord(windowID: windowID, phase: phase)
+                _ = psn.withUnsafeBytes { p in record.withUnsafeBufferPointer { postEventRecordToFn(p.baseAddress!, $0.baseAddress!) } }
+            }
+        }
+        return fronted
     }
 
     // MARK: what the user is looking at

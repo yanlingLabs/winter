@@ -221,7 +221,8 @@ extension CUCore {
 
     func onActivation(pid: pid_t) {
         let now = clock.nowSeconds()
-        let userInput = userInputRecent(now: now)
+        // During a desktop visit only input AFTER it began is the user's (never the click that allowed it).
+        let userInput = visitInput(now: now) ?? userInputRecent(now: now)
         let synthetic = now - lastSyntheticActivationAt < Self.guardianSyntheticWindow
         let activation = CUActivation(app: pid, space: sys.activeSpace(), hadRecentUserInput: userInput, fromSyntheticEvent: synthetic,
                                       suspect: guardianSuspect(pid, now: now))
@@ -234,7 +235,7 @@ extension CUCore {
 
     func onSpaceChange() {
         let now = clock.nowSeconds()
-        let userInput = userInputRecent(now: now)
+        let userInput = visitInput(now: now) ?? userInputRecent(now: now)
         let caused = guardianSpaceChangeCaused(now: now)
         let front = sys.frontmostPid()
         guardianLock.lock()

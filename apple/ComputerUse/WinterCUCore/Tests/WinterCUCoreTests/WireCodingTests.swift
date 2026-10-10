@@ -41,6 +41,31 @@ final class WireCodingTests: XCTestCase {
         }
     }
 
+    /// 1.7.0 (desktop visits): the new params decode, are absent when not sent, and the results carry `visit`
+    /// only when one happened.
+    func testDesktopVisitFields() throws {
+        let act = try decode(TargetActParams.self, #"{"targetId":"t1","sessionId":"s","callId":"c","action":{"kind":"menu","path":["File"]},"access":"full","allowForeground":true,"privatePath":true,"desktopVisit":true}"#)
+        XCTAssertEqual(act.desktopVisit, true)
+        let old = try decode(TargetActParams.self, #"{"targetId":"t1","sessionId":"s","callId":"c","action":{"kind":"menu","path":["File"]},"access":"full","allowForeground":false,"privatePath":true}"#)
+        XCTAssertNil(old.desktopVisit, "an older daemon never asks for a visit")
+        XCTAssertNil(try json(old)["desktopVisit"])
+        let shot = try decode(TargetScreenshotParams.self, #"{"targetId":"t1","budget":{"maxLongEdge":800,"quality":0.7},"live":true,"desktopVisit":false}"#)
+        XCTAssertEqual(shot.live, true)
+        XCTAssertEqual(shot.desktopVisit, false)
+        let plain = try json(TargetActResult(rung: 2))
+        XCTAssertNil(plain["visit"], "no visit, no key")
+        let visited = try json(TargetActResult(rung: 4, visit: CUVisitReport(ms: 420, returned: true)))
+        XCTAssertEqual(visited["visit"] as? [String: AnyHashable], ["ms": 420, "returned": true])
+        let moved = try json(TargetScreenshotResult(imageBase64: "", mime: "image/jpeg", width: 1, height: 1, shotId: "t1.i1",
+                                                    settled: true, waitedMs: 0,
+                                                    visit: CUVisitReport(ms: 900, returned: false, userMoved: true, detail: "left there")))
+        XCTAssertEqual(moved["visit"] as? [String: AnyHashable], ["ms": 900, "returned": false, "userMoved": true, "detail": "left there"])
+        let e = CUError.needsDesktopVisit("Safari", why: .live)
+        XCTAssertEqual(e.code, "needs_desktop_visit")
+        XCTAssertEqual(e.data, ["why": .string("live")])
+        XCTAssertFalse(e.message.contains("\""), "no screen text: only the app's name")
+    }
+
     func testUnknownActionKindIsRejected() {
         XCTAssertThrowsError(try decode(CUAction.self, #"{"kind":"teleport"}"#))
     }

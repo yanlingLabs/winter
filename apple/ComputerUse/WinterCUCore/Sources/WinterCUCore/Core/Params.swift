@@ -292,13 +292,37 @@ public struct TargetScreenshotParams: Codable, Sendable, Equatable {
     public var settle: CUSettleOption?
     /// Optional extension (see `TargetSnapshotParams.callId`).
     public var callId: String?
+    /// The model needs what is on screen NOW. A window on screen is captured as ever; a window on another
+    /// desktop is taken from the window server first, and returned when that picture is known live (it changed
+    /// since the last one); otherwise it needs a moment on its desktop (`needs_desktop_visit`, `why: "live"`).
+    public var live: Bool?
+    /// The user allowed a brief visit to the window's desktop for this (the daemon's desktop-switch prompt).
+    public var desktopVisit: Bool?
     public init(targetId: String, region: [Double]? = nil, budget: CUImageBudget, settle: CUSettleOption? = nil,
-                callId: String? = nil) {
+                callId: String? = nil, live: Bool? = nil, desktopVisit: Bool? = nil) {
         self.targetId = targetId
         self.region = region
         self.budget = budget
         self.settle = settle
         self.callId = callId
+        self.live = live
+        self.desktopVisit = desktopVisit
+    }
+}
+
+/// What a brief visit to a window's desktop cost the user: how long they were away (from the switch to back),
+/// whether they were brought back, and whether they moved somewhere themselves during it (then Winter left them
+/// there). Present on a `target.act` / `target.screenshot` result only when a visit happened.
+public struct CUVisitReport: Codable, Sendable, Equatable {
+    public var ms: Int
+    public var returned: Bool
+    public var userMoved: Bool?
+    public var detail: String?
+    public init(ms: Int, returned: Bool, userMoved: Bool? = nil, detail: String? = nil) {
+        self.ms = ms
+        self.returned = returned
+        self.userMoved = userMoved
+        self.detail = detail
     }
 }
 public struct TargetScreenshotResult: Codable, Sendable, Equatable {
@@ -314,8 +338,10 @@ public struct TargetScreenshotResult: Codable, Sendable, Equatable {
     public var pointsHeight: Double?
     /// What was done to take it (e.g. the window was moved here from another Space).
     public var detail: String?
+    /// The user was taken to the window's desktop for this capture (a `live` shot after their say).
+    public var visit: CUVisitReport?
     public init(imageBase64: String, mime: String, width: Int, height: Int, shotId: String, settled: Bool, waitedMs: Int,
-                pointsWidth: Double? = nil, pointsHeight: Double? = nil, detail: String? = nil) {
+                pointsWidth: Double? = nil, pointsHeight: Double? = nil, detail: String? = nil, visit: CUVisitReport? = nil) {
         self.imageBase64 = imageBase64
         self.mime = mime
         self.width = width
@@ -326,6 +352,7 @@ public struct TargetScreenshotResult: Codable, Sendable, Equatable {
         self.pointsWidth = pointsWidth
         self.pointsHeight = pointsHeight
         self.detail = detail
+        self.visit = visit
     }
 }
 
@@ -334,11 +361,11 @@ public struct TargetScreenshotResult: Codable, Sendable, Equatable {
 public enum CUAccess: String, Codable, Sendable { case full, click }
 
 /// `target.foreground`: the user agreed (the daemon's card) that the app may come to the front and stay there
-/// until the session's script ends (`script.active` false).
+/// until the session's script ends (`script.active` false) — on the user's own desktop only.
 public struct TargetForegroundParams: Codable, Sendable, Equatable {
     public var targetId: String
-    /// The user answered a card for this (not a session that asks none): a window on another desktop may be
-    /// brought forward, taking the user there. Without it, such a window is not.
+    /// Accepted and IGNORED since helper 1.7.0: a window on another desktop is never held in front (that would
+    /// keep the user there); an act that needs it on screen asks for a brief visit instead (`desktopVisit`).
     public var moveDesktop: Bool?
     public init(targetId: String, moveDesktop: Bool? = nil) { self.targetId = targetId; self.moveDesktop = moveDesktop }
 }
@@ -357,8 +384,12 @@ public struct TargetActParams: Codable, Sendable, Equatable {
     public var access: CUAccess
     public var allowForeground: Bool
     public var privatePath: Bool
+    /// The user allowed a brief visit to the window's desktop for this app (the daemon's desktop-switch prompt).
+    /// The act is still tried in the background first; only when that needs the window on screen and it is on
+    /// another desktop is it done once more inside a visit (the foreground implied there).
+    public var desktopVisit: Bool?
     public init(targetId: String, sessionId: String, callId: String, action: CUAction, access: CUAccess,
-                allowForeground: Bool, privatePath: Bool) {
+                allowForeground: Bool, privatePath: Bool, desktopVisit: Bool? = nil) {
         self.targetId = targetId
         self.sessionId = sessionId
         self.callId = callId
@@ -366,6 +397,7 @@ public struct TargetActParams: Codable, Sendable, Equatable {
         self.access = access
         self.allowForeground = allowForeground
         self.privatePath = privatePath
+        self.desktopVisit = desktopVisit
     }
 }
 public struct TargetActResult: Codable, Sendable, Equatable {
@@ -381,8 +413,10 @@ public struct TargetActResult: Codable, Sendable, Equatable {
     public var focusLost: Bool?
     /// The act changed the bound window's page (a link navigated, a tab switched): its title now.
     public var pageNow: String?
+    /// The user was taken to the window's desktop for this act (after their say) — and back.
+    public var visit: CUVisitReport?
     public init(rung: Int, detail: String? = nil, input: String? = nil, inputUnknown: Bool? = nil,
-                focusNow: String? = nil, focusLost: Bool? = nil, pageNow: String? = nil) {
+                focusNow: String? = nil, focusLost: Bool? = nil, pageNow: String? = nil, visit: CUVisitReport? = nil) {
         self.rung = rung
         self.detail = detail
         self.input = input
@@ -390,6 +424,7 @@ public struct TargetActResult: Codable, Sendable, Equatable {
         self.focusNow = focusNow
         self.focusLost = focusLost
         self.pageNow = pageNow
+        self.visit = visit
     }
 }
 

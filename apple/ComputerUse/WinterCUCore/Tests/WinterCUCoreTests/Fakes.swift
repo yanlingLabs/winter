@@ -225,6 +225,18 @@ final class FakeSystem: CUSystemBackend {
     /// Runs on every activation (after `front` is set): a test moves the Space back as macOS would.
     var onActivate: ((pid_t) -> Void)?
     func activate(pid: pid_t) -> Bool { activated.append(pid); front = pid; onActivate?(pid); return true }
+    /// Windows brought to the front by id (a desktop visit, there and back), in order.
+    private(set) var frontedWindows: [(pid: pid_t, windowID: UInt32)] = []
+    /// Whether the by-id call works; on success the app is front and `onFrontWindow` runs (a test moves the Space).
+    var frontWindowWorks = true
+    var onFrontWindow: ((pid_t, UInt32) -> Void)?
+    func frontWindow(pid: pid_t, windowID: UInt32) -> Bool {
+        frontedWindows.append((pid, windowID))
+        guard frontWindowWorks else { return false }
+        front = pid
+        onFrontWindow?(pid, windowID)
+        return true
+    }
     var stageManager = false
     func stageManagerEnabled() -> Bool { stageManager }
     /// Windows on no Space at all (closed but still listed); others answer `onSpace` (nil = unknown).

@@ -102,6 +102,10 @@ public final class CUCore: @unchecked Sendable {
             holdReleaseSchedule = { _, _ in }  // no real timer from a unit test: a test that wants it captures it
             keyTapInstaller = CUNoKeyTapInstaller()  // no real tap from a unit test: no blip unless a test fakes one
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
+            visitArriveMs = 0
+            visitFreshMaxMs = 0
+            visitFreshStableMs = 0
+            visitNoProbeWaitMs = 0
         }
     }
 
@@ -353,7 +357,7 @@ public final class CUCore: @unchecked Sendable {
 
     /// What working a window on another desktop costs (said at bind). Pure.
     static func offDesktopCosts(_ app: String) -> String {
-        "\(app)'s window is not on this desktop, so it is worked in the background: a click is sent but can't be seen landing, keys reach it through a brief focus switch, and it may not redraw (a screenshot can be older than what was done) — if what you do there does not land, app.requestForeground(reason) asks the user to let \(app) come to the front for the rest of the script"
+        "\(app)'s window is not on this desktop, so it is worked in the background: a click is sent but can't be seen landing, keys reach it through a brief focus switch, and it may not redraw (each screenshot says how fresh it is) — screenshot({ live: true, reason }) gets what is on screen now, and an action that can't land from here asks the user to let Winter take them to its desktop for a moment (and back)"
     }
 
     /// The live effects behind `CUWindowResolver` (run on the pid queue).
@@ -471,6 +475,23 @@ public final class CUCore: @unchecked Sendable {
     var holdReleaseSchedule: (TimeInterval, @escaping @Sendable () -> Void) -> Void = { seconds, work in
         DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: work)
     }
+    // Desktop visits (CUCore+Visit): the user agreed to be taken to a window's desktop for ONE primitive and
+    // brought back right after. One at a time, helper-wide.
+    let visitGate = CUVisitGate()
+    let visitLock = NSLock()
+    /// The target being visited now, and when the visit began (the guardian and the per-act guard read them).
+    var visitingTargetId: String?
+    var visitStartedAt: TimeInterval = -1
+    /// How long a visit waits for the window to come on screen, how long at most for a fresh frame, how long an
+    /// unchanged picture must stay so to count as painted, how often it is sampled, and how long it waits when no
+    /// frame can be sampled. 0 in test cores (one look each, no waiting).
+    var visitArriveMs: Double = 1500
+    var visitFreshMaxMs: Double = 1000
+    var visitFreshStableMs: Double = 300
+    var visitFrameIntervalMs: Double = 50
+    var visitNoProbeWaitMs: Double = 250
+    /// A digest of the window's picture now (the fresh-frame wait); replaceable by tests.
+    var visitFrameDigestOverride: ((CUTarget) -> Int?)?
     var guardianRefs = 0
     var guardianObservers: [NSObjectProtocol] = []
     var pendingGuardianNotes: [String] = []
@@ -889,6 +910,26 @@ public final class CUCore: @unchecked Sendable {
         var detail: String?
         var taken: CUCapturedImage?
         var privateTried = false
+        // LIVE (the model needs what is on screen now) of a window on ANOTHER DESKTOP: the window server's picture
+        // first, kept when it is known live; else a brief visit to its desktop, only with the user's say.
+        if p.live == true, sys.window(id: t.windowID)?.onScreen == false,
+           try await queues.run(t.pid, { [self] in isOffThisDesktop(t) }) {
+            if t.privatePath, let shot = try await offScreenShot(t, region, p.budget) {
+                privateTried = true
+                let note = try await offScreenNote(t, shot)
+                if note.hasPrefix("live:") {
+                    CULog.act.notice("live screenshot of \(t.appName, privacy: .public): the window server's picture is live — no visit")
+                    return try await screenshotResult(t, shot, settled: settled, waited: waited, detail: note)
+                }
+            }
+            guard p.desktopVisit == true else {
+                CULog.act.notice("live screenshot of \(t.appName, privacy: .public): its picture there is not known live — needs the user's say for a desktop visit")
+                throw CUError.needsDesktopVisit(t.appName, why: .live)
+            }
+            let (img, visit) = try await liveShotInVisit(t, region, p.budget, token)
+            let said = "captured \(t.appName)'s window on its own desktop, just now (live)"
+            return try await screenshotResult(t, img, settled: settled, waited: waited, detail: said, visit: visit)
+        }
         // Not on screen (another Space, full screen elsewhere, minimized, hidden): ScreenCaptureKit refuses such
         // a window or returns nothing, so the private path goes straight to the window server's own image of it
         // (off screen → the SkyLight capture). Nothing is moved, raised or focused.
@@ -921,13 +962,44 @@ public final class CUCore: @unchecked Sendable {
                 detail = try await offScreenNote(t, shot)
             }
         }
+        return try await screenshotResult(t, img, settled: settled, waited: waited, detail: detail)
+    }
+
+    /// A window picture registered as the target's latest shot (a click's point maps onto it), as the result.
+    func screenshotResult(_ t: CUTarget, _ img: CUCapturedImage, settled: Bool, waited: Int, detail: String?,
+                          visit: CUVisitReport? = nil) async throws -> TargetScreenshotResult {
         let shot = try await queues.run(t.pid) {
             t.registerShot(anchor: .window(windowID: t.windowID, regionOrigin: img.pointsRect.origin),
                            imageWidth: img.width, imageHeight: img.height, points: img.pointsRect.size)
         }
         return TargetScreenshotResult(imageBase64: img.jpeg.base64EncodedString(), mime: "image/jpeg", width: img.width,
                                       height: img.height, shotId: shot.id, settled: settled, waitedMs: waited,
-                                      pointsWidth: img.pointsRect.width, pointsHeight: img.pointsRect.height, detail: detail)
+                                      pointsWidth: img.pointsRect.width, pointsHeight: img.pointsRect.height, detail: detail,
+                                      visit: visit)
+    }
+
+    /// A LIVE picture of a window on another desktop, inside a visit (the user allowed it): there, on screen and
+    /// painted, captured, and the user brought back — on every exit path. One visit at a time, helper-wide.
+    func liveShotInVisit(_ t: CUTarget, _ region: CGRect?, _ budget: CUImageBudget,
+                         _ token: CUCancellation.Token) async throws -> (CUCapturedImage, CUVisitReport) {
+        await visitGate.acquire()
+        defer { visitGate.release() }
+        try token.check()
+        let state = try await queues.run(t.pid) { [self] in try visitArrive(t, why: .live, privatePath: t.privatePath) }
+        let captured: Result<CUCapturedImage, Error>
+        do {
+            try token.check()
+            captured = .success(try await captureWindow(t.windowID, region, budget))
+        } catch {
+            captured = .failure(error)
+        }
+        // Back at once, whatever happened — the pid queue never throws for the return.
+        let report = (try? await queues.run(t.pid) { [self] in visitReturn(state, t) })
+            ?? visitReturn(state, t)
+        switch captured {
+        case .success(let img): return (img, report)
+        case .failure(let error): throw Self.withVisit(error, report, app: t.appName)
+        }
     }
 
     /// Window capture; replaceable by tests (nothing there may touch ScreenCaptureKit).

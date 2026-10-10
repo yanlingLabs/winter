@@ -2,7 +2,7 @@ import ApplicationServices
 import Foundation
 
 /// `target.foreground` (the script's `app.requestForeground(reason)`, after the user's card): the app comes to the
-/// front and stays there until the session's script ends — then the front goes back to the app that had it, if the
+/// front — on the user's own desktop only — and stays there until the session's script ends — then the front goes back to the app that had it, if the
 /// held app still has it (a switch the user made meanwhile is left alone). Acts meanwhile run with the app in
 /// front, so they land the way they do for a person; the user-view guard and the Focus Guardian leave it alone.
 extension CUCore {
@@ -21,11 +21,12 @@ extension CUCore {
         let t = try target(p.targetId)
         try ensureAlive(t)
         return try await queues.run(t.pid) { [self] in
-            // A window on another desktop: bringing it forward takes the user there. Only on the user's own say (a
-            // card they answered — `moveDesktop`), never by itself.
-            if p.moveDesktop != true, isOffThisDesktop(t) {
-                CULog.act.notice("foreground in \(t.appName, privacy: .public): its window is on another desktop — not brought forward without the user's say")
-                return TargetForegroundResult(front: false, detail: "\(t.appName)'s window is on another desktop, and bringing it forward would take the user there — not done without the user's say (this session asks no card); ask the user to show the window, or keep to what works in the background")
+            // A window on another desktop: holding it in front would keep the user there until the script ends — never
+            // (user ruling 2026-10-10; `moveDesktop` is ignored since 1.7.0). What needs the window on screen asks for
+            // a brief visit by itself, and the user is brought back right after.
+            if isOffThisDesktop(t) {
+                CULog.act.notice("foreground in \(t.appName, privacy: .public): its window is on another desktop — not held in front there")
+                return TargetForegroundResult(front: false, detail: Self.foregroundElsewhere(t.appName))
             }
             let previous = sys.frontmostPid()
             let first = holdLock.withLock { () -> Bool in
@@ -53,6 +54,11 @@ extension CUCore {
             return TargetForegroundResult(front: front, detail: front ? nil
                 : "macOS did not bring \(t.appName) to the front (it may be busy, or on a desktop it can't leave) — nothing was done in front")
         }
+    }
+
+    /// Why `requestForeground` does nothing for a window on another desktop, and what to do instead. Pure.
+    static func foregroundElsewhere(_ app: String) -> String {
+        "\(app)'s window is on another desktop, and requestForeground holds an app in front only on the user's own desktop (it would keep the user there) — an action that needs the window on screen asks the user for a brief visit by itself and brings them back right after, and screenshot({ live: true, reason }) gets what is on screen there now"
     }
 
     /// Whether `t` is held in front for its session's script.
