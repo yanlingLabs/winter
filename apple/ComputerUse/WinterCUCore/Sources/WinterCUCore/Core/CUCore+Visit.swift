@@ -61,6 +61,10 @@ extension CUCore {
         /// by then that app's focused window can be the target's, when the user's app IS the target app).
         let before: CUUserView
         let userWindow: AXUIElement?
+        /// That window's id, to bring it back BY ID (the user's app may have windows on several Spaces).
+        let userWindowID: CGWindowID?
+        /// The private path is on: the window is brought forward (and the user's back) by id.
+        let privatePath: Bool
         let startedMs: Double
         let startedAt: TimeInterval
         /// Where the visit took the user (the window's desktop), once it arrived.
@@ -91,11 +95,23 @@ extension CUCore {
 
     /// Takes the user to `t`'s desktop and waits until its window is on screen and has painted. Runs on the
     /// target's pid queue. If the window never comes on screen, the user is brought back and it throws.
-    func visitArrive(_ t: CUTarget, why: CUError.DesktopVisitWhy) throws -> VisitState {
+    ///
+    /// The WINDOW is brought forward, not merely its app: activating an app that has other windows on the user's
+    /// desktop activates it right here and never switches Spaces, and a capture-only window has no element to
+    /// raise. So with the private path on, the window goes to the front BY ID (the window server then switches to
+    /// its Space) and is made key, its element raised as well when there is one; with it off, the app is activated
+    /// and the element raised — and a window with no element can't be reached at all (typed, nothing moved).
+    func visitArrive(_ t: CUTarget, why: CUError.DesktopVisitWhy, privatePath: Bool) throws -> VisitState {
+        let element = t.accessible ? (try? windowElement(t)) : nil
+        guard privatePath || element != nil else {
+            CULog.act.notice("visit (\(why.rawValue, privacy: .public)): \(t.appName, privacy: .public)'s window has no element and the private path is off — not reachable, nothing moved")
+            throw CUError.unsupported("\(t.appName)'s window can't be brought forward on its desktop with the private event path off (Settings → Computer Use) — nothing was moved")
+        }
         let before = userView()
         let userWindow = before.front.flatMap { ax.element(ax.application($0), kAXFocusedWindowAttribute) }
         var s = VisitState(targetId: t.id, pid: t.pid, windowID: t.windowID, appName: t.appName, why: why, before: before,
-                           userWindow: userWindow, startedMs: clock.nowMs(), startedAt: clock.nowSeconds())
+                           userWindow: userWindow, userWindowID: userWindow.flatMap { ax.windowID($0) }, privatePath: privatePath,
+                           startedMs: clock.nowMs(), startedAt: clock.nowSeconds())
         visitLock.withLock {
             visitingTargetId = t.id
             visitStartedAt = s.startedAt
@@ -103,16 +119,23 @@ extension CUCore {
         guardianLock.withLock { guardianCore.beginVisit(app: t.pid, now: s.startedAt) }
         CULog.act.notice("visit (\(why.rawValue, privacy: .public)): taking the user to \(t.appName, privacy: .public)'s desktop for window \(t.windowID, privacy: .public)")
         noteSyntheticActivation()
-        let window = try? windowElement(t)
-        if let window { try? ax.perform(window, kAXRaiseAction) }
-        _ = sys.activate(pid: t.pid)
-        if let window { try? ax.perform(window, kAXRaiseAction) }
-        // The window on screen (its desktop came forward), bounded.
+        let byId = privatePath && sys.frontWindow(pid: t.pid, windowID: t.windowID)
+        if let element { try? ax.perform(element, kAXRaiseAction) }
+        if !byId, let element {
+            _ = sys.activate(pid: t.pid)
+            try? ax.perform(element, kAXRaiseAction)
+        }
+        // The window on screen AND the desktop changed (when it can be read), bounded.
+        let arrivedNow = { [self] () -> Bool in
+            guard sys.window(id: t.windowID)?.onScreen == true else { return false }
+            guard let was = before.space, let now = sys.activeSpace() else { return true }
+            return now != was
+        }
         let deadline = clock.nowMs() + visitArriveMs
-        var arrived = sys.window(id: t.windowID)?.onScreen == true
+        var arrived = arrivedNow()
         while !arrived, clock.nowMs() < deadline {
             usleep(20_000)
-            arrived = sys.window(id: t.windowID)?.onScreen == true
+            arrived = arrivedNow()
         }
         guard arrived else {
             let report = visitReturn(s, t)
@@ -219,12 +242,15 @@ extension CUCore {
             : "Winter could not bring the user back from \(s.appName)'s desktop — they may still be there")
     }
 
-    /// One return attempt under `SLSDisableUpdate` (the switch back is not drawn as a flash): the recorded window
-    /// raised, the user's app re-activated and retried within the restore deadline. Returns the view it ends on.
+    /// One return attempt under `SLSDisableUpdate` (the switch back is not drawn as a flash): with the private path,
+    /// the user's recorded window brought to the front BY ID (their app may have windows on several Spaces); then the
+    /// recorded window raised and the user's app re-activated, retried within the restore deadline. Returns the view
+    /// it ends on.
     private func returnOnce(_ s: VisitState, user: pid_t, window: AXUIElement?) -> CUUserView {
         noteSyntheticActivation()
         let cid = skyLight.disableUpdate()
         defer { if let cid { skyLight.reenableUpdate(cid) } }
+        if s.privatePath, let wid = s.userWindowID { _ = sys.frontWindow(pid: user, windowID: wid) }
         return restoreUserView(s.before, user: user, window: window)
     }
 
@@ -232,9 +258,9 @@ extension CUCore {
 
     /// Runs `body` — exactly ONE primitive — inside a visit to `t`'s desktop (on its pid queue). The user is
     /// brought back on every exit path; a failure carries the visit in its `data.visit`.
-    func inDesktopVisit<T>(_ t: CUTarget, why: CUError.DesktopVisitWhy, token: CUCancellation.Token?,
+    func inDesktopVisit<T>(_ t: CUTarget, why: CUError.DesktopVisitWhy, privatePath: Bool, token: CUCancellation.Token?,
                            _ body: () throws -> T) throws -> (T, CUVisitReport) {
-        let s = try visitArrive(t, why: why)
+        let s = try visitArrive(t, why: why, privatePath: privatePath)
         let result: Result<T, Error>
         do {
             try token?.check()

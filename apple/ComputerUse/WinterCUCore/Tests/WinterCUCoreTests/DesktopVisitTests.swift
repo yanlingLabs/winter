@@ -26,7 +26,7 @@ final class DesktopVisitTests: XCTestCase {
 
     private let frame = CGRect(x: 100, y: 100, width: 800, height: 600)
 
-    private func world(bundle: String = "org.blenderfoundation.blender", privatePath: Bool = true) {
+    private func world(bundle: String = "org.blenderfoundation.blender", privatePath: Bool = true, accessible: Bool = true) {
         ax = FakeAX()
         ax.put(ax.application(pid), [kAXWindowsAttribute: [AXUIElement]()])  // not in this desktop's AX list
         ax.add(window, role: kAXWindowRole, title: "Doc", frame: frame)
@@ -37,6 +37,7 @@ final class DesktopVisitTests: XCTestCase {
         ax.setActions(button, [kAXPressAction])
         ax.add(userWindow, role: kAXWindowRole, title: "Mine", frame: CGRect(x: 0, y: 0, width: 400, height: 300))
         ax.put(ax.application(user), [kAXFocusedWindowAttribute: userWindow])
+        ax.windowIDs[AXIdentity(element: userWindow)] = 500
 
         sys = FakeSystem()
         sys.running = [pid, user]
@@ -51,13 +52,18 @@ final class DesktopVisitTests: XCTestCase {
             if activated == pid, arrives { onTargetsDesktop(true) }
             if activated == user, returns { onTargetsDesktop(false) }
         }
+        // The private path brings ONE window forward by id: the window server goes to its Space.
+        sys.onFrontWindow = { [unowned self] p, wid in
+            if p == pid, wid == 77, arrives { onTargetsDesktop(true) }
+            if p == user, wid == 500, returns { onTargetsDesktop(false) }
+        }
 
         poster = RecordingPoster()
         core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: poster, ax: ax, sys: sys,
                       pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
         core.secondsSinceUserInputOverride = { 1_000 }  // no physical input unless a test says so
         target = CUTarget(id: "t1", sessionId: "s", pid: pid, bundleId: bundle, appName: "App", isChromium: false,
-                          mirror: false, windowID: 77, windowTitle: "Doc", privatePath: privatePath)
+                          mirror: false, windowID: 77, windowTitle: "Doc", privatePath: privatePath, accessible: accessible)
         core.registerForTesting(target, windowElement: window)
         target.refs.beginGeneration()
         // A point hits no element (the hit test reads this tree): pointer input, not an AX press.
@@ -330,7 +336,9 @@ final class DesktopVisitTests: XCTestCase {
         XCTAssertTrue(visit.returned)
         XCTAssertTrue(r.detail?.contains("on its own desktop, just now (live)") ?? false, r.detail ?? "")
         XCTAssertEqual(userView, usersPlace)
-        XCTAssertEqual(sys.activated, [pid, user])
+        // There and back BY WINDOW ID (the private path): the bound window, then the user's own window.
+        XCTAssertEqual(sys.frontedWindows.map { "\($0.pid):\($0.windowID)" }, ["6060:77", "1:500"])
+        XCTAssertFalse(sys.activated.contains(pid), "the app was never merely activated")
         // The shot maps clicks like any window shot.
         XCTAssertNoThrow(try target.shot(r.shotId))
     }
@@ -432,3 +440,69 @@ extension DesktopVisitTests {
         XCTAssertTrue(core.takeGuardianNotes().isEmpty, "no theft was noted")
     }
 }
+
+extension DesktopVisitTests {
+    /// The app has another window on the user's own desktop: activating it would activate it right here and never
+    /// switch Spaces. The visit brings the BOUND window forward by id, and still reaches it.
+    func testTheVisitTargetsTheBoundWindowEvenWhenTheAppHasAWindowHere() async throws {
+        world()
+        sys.onActivate = { [unowned self] activated in
+            // macOS activates the app in place (its other window is here): no Space switch for the app.
+            if activated == user, returns { onTargetsDesktop(false) }
+        }
+        let r = try await click(shot(), visit: true, privatePath: true)
+        XCTAssertEqual(r.rung, 4)
+        XCTAssertEqual(r.visit?.returned, true)
+        XCTAssertEqual(sys.frontedWindows.first.map { "\($0.pid):\($0.windowID)" }, "6060:77", "the bound window, by id")
+        XCTAssertEqual(sys.frontedWindows.last.map { "\($0.pid):\($0.windowID)" }, "1:500", "and back to the user's own window, by id")
+        XCTAssertEqual(userView, usersPlace)
+    }
+
+    /// Activation alone (the private path off) that never leaves the user's desktop: the visit does not arrive,
+    /// nothing is done, and the user is put back.
+    func testWithThePrivatePathOffAnAppActivatedInPlaceNeverArrives() async throws {
+        world(privatePath: false)
+        sys.onActivate = { [unowned self] activated in
+            if activated == user, returns { onTargetsDesktop(false) }
+        }
+        core.privateCaptureOverride = { _, _ in nil }
+        core.windowCaptureOverride = { _, _, _ in XCTFail("nothing captured"); throw CUError.cancelled }
+        let e = await expect("unsupported") { _ = try await self.core.targetScreenshot(self.liveParams(visit: true)) }
+        XCTAssertTrue(e?.message.contains("macOS did not show App's desktop") ?? false, e?.message ?? "")
+        XCTAssertTrue(sys.frontedWindows.isEmpty, "no private call with the private path off")
+        XCTAssertEqual(userView, usersPlace)
+    }
+
+    /// A capture-only window (accessibility never exposed it) has nothing to raise: only the by-id route reaches it.
+    func testACaptureOnlyWindowIsVisitedByIdAndRefusedWithoutThePrivatePath() async throws {
+        world(accessible: false)
+        core.privateCaptureOverride = { _, _ in nil }
+        core.windowCaptureOverride = { [unowned self] _, _, _ in
+            XCTAssertTrue(sys.windows[77]?.onScreen == true)
+            return image()
+        }
+        let r = try await core.targetScreenshot(liveParams(visit: true))
+        XCTAssertEqual(r.visit?.returned, true)
+        XCTAssertEqual(sys.frontedWindows.first.map { "\($0.pid):\($0.windowID)" }, "6060:77")
+
+        world(privatePath: false, accessible: false)
+        let e = await expect("unsupported") { _ = try await self.core.targetScreenshot(self.liveParams(visit: true)) }
+        XCTAssertTrue(e?.message.contains("can't be brought forward on its desktop with the private event path off") ?? false, e?.message ?? "")
+        XCTAssertTrue(sys.activated.isEmpty && sys.frontedWindows.isEmpty, "nothing was moved")
+        XCTAssertNil(core.visitStart())
+    }
+
+    /// The window on screen is not enough: the desktop must have changed too (else it is not the visit's doing).
+    func testArrivalNeedsTheDesktopToChange() async throws {
+        world()
+        sys.onFrontWindow = { [unowned self] p, wid in
+            if p == pid, wid == 77 { sys.windows[77]?.onScreen = true }  // on screen, but no Space switch
+            if p == user, wid == 500 { onTargetsDesktop(false) }
+        }
+        core.windowCaptureOverride = { _, _, _ in XCTFail("not there"); throw CUError.cancelled }
+        core.privateCaptureOverride = { _, _ in nil }
+        await expect("unsupported") { _ = try await self.core.targetScreenshot(self.liveParams(visit: true)) }
+        XCTAssertEqual(userView, usersPlace)
+    }
+}
+

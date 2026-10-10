@@ -985,7 +985,7 @@ public final class CUCore: @unchecked Sendable {
         await visitGate.acquire()
         defer { visitGate.release() }
         try token.check()
-        let state = try await queues.run(t.pid) { [self] in try visitArrive(t, why: .live) }
+        let state = try await queues.run(t.pid) { [self] in try visitArrive(t, why: .live, privatePath: t.privatePath) }
         let captured: Result<CUCapturedImage, Error>
         do {
             try token.check()

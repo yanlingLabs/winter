@@ -73,7 +73,7 @@ extension CUCore {
             inner.allowForeground = true
             (outcome, visit) = try await queues.run(t.pid) { [self] () -> (ActOutcome, CUVisitReport) in
                 // `actOnce` shows and logs its own failure; a visit that never arrived logs its own too.
-                try inDesktopVisit(t, why: .act, token: token) { try actOnce(inner, t, token, inVisit: true) }
+                try inDesktopVisit(t, why: .act, privatePath: p.privatePath, token: token) { try actOnce(inner, t, token, inVisit: true) }
             }
         }
         if let paths = outcome.pendingOpen {
