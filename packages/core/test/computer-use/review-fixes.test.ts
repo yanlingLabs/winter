@@ -103,7 +103,9 @@ describe("C1: no lock outlives its script", () => {
     const w = world();
     w.fake.handlers["target.bind"] = async () => { await Bun.sleep(400); return { targetId: "late", app: { name: "Notes", bundleId: "com.apple.Notes", pid: 501 }, window: { id: 1, title: "w", frame: [0, 0, 1, 1] } }; };
     await w.run("apps.open('Notes')");
-    await Bun.sleep(1_000);
+    // The late answer lands ~400 ms on and is released then: poll for it (a fixed sleep flaked under a loaded suite).
+    const released = (): boolean => w.fake.calls("target.release").some((c) => (c as { targetId?: string }).targetId === "late");
+    for (const until = Date.now() + 10_000; !released() && Date.now() < until;) await Bun.sleep(25);
     expect(w.fake.calls("target.release")).toContainEqual({ targetId: "late" });
     expect(w.svc.locks.holder("com.apple.Notes:501")).toBeUndefined();
   }, 30_000);
