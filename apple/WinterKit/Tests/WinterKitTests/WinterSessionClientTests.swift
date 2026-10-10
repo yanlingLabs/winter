@@ -1381,4 +1381,123 @@ final class WinterSessionClientTests: XCTestCase {
         XCTAssertEqual(conn.outbound.count, 2, "secondWindowMs: .max must mean 'never' — exactly one ping, ever")
         XCTAssertFalse(conn.isClosed, "a config that never reaches its second window must never close")
     }
+
+    // MARK: - ComputerV2 Phase 1b: the mirror channel
+
+    /// A mirror update arrives on `mirror`, never on `events`, and touches no cursor: it is no session event.
+    func testAMirrorUpdateRidesItsOwnChannelAndNeverTouchesTheCursor() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors)
+        conn.enqueueInbound(helloAckFrame(verdicts: [.upToDate(sessionID: "s1", highWatermark: 4)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 4)])
+        try cursors.advance(host: "mac-host", session: "s1", stream: "s1", to: 4)
+        let (events, eventsTask) = drain(client.events)
+        let (mirror, mirrorTask) = drain(client.mirror)
+        defer { eventsTask.cancel(); mirrorTask.cancel() }
+
+        let show = MirrorUpdate.show(app: "Safari", windowSize: CGSize(width: 1200, height: 800), others: 1, live: true)
+        conn.enqueueInbound(serverFrame(kind: .mirror, sessionID: "s1", payload: MirrorWire.encode(show)))
+        conn.enqueueInbound(serverFrame(kind: .mirror, sessionID: "s1", payload: Data(#"{"type":"from-the-future"}"#.utf8)))
+        conn.enqueueInbound(serverFrame(kind: .mirror, sessionID: "s1", payload: MirrorWire.encode(.clear)))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 5))
+        try await waitUntil({ mirror.items.count == 2 && events.items.count == 1 }, "mirror + one event")
+        XCTAssertEqual(mirror.items, [MirrorEnvelope(sessionID: "s1", update: show), MirrorEnvelope(sessionID: "s1", update: .clear)],
+                       "an update this client cannot read is dropped; the rest arrive in order")
+        XCTAssertEqual(events.items.map(\.seq), [5], "only the session event reached `events`")
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 5)
+    }
+
+    /// `watchMirror` is a plain rpc, `session.mirror {sessionId, watch}`, answered with the daemon's `mirror` flag.
+    func testWatchMirrorAsksTheMacAndReturnsWhetherTheMirrorIsOn() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        async let on = client.watchMirror(sessionID: "s1", watch: true)
+        let out = try await waitOutbound(conn, count: 2)
+        let request = outboundPayload(decodeOutbound(out[1]))
+        XCTAssertEqual(request["method"]?.stringValue, "session.mirror")
+        XCTAssertEqual(request["params"]?["sessionId"]?.stringValue, "s1")
+        XCTAssertEqual(request["params"]?["watch"], .bool(true))
+        let id = request["id"]?.intValue ?? -1
+        conn.enqueueInbound(rpcResponseFrame(id: id, result: .object(["ok": .bool(true), "mirror": .bool(true)])))
+        let result = try await on
+        XCTAssertTrue(result)
+    }
+
+    /// Review finding 1: mirror updates arrive on the SIDE stream, and each picture is acknowledged at once on the
+    /// session stream (`mirrorAck {seq}`) — the Mac's bound on unacknowledged pictures follows the phone's reads.
+    func testSideStreamPicturesReachTheMirrorAndAreAcknowledgedOnTheSessionStream() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+        let (mirror, task) = drain(client.mirror)
+        defer { task.cancel() }
+        let picture = MirrorFrame(seq: 7, jpeg: Data([1, 2, 3]), width: 4, height: 3, windowSize: CGSize(width: 40, height: 30))
+        conn.enqueueSideInbound(serverFrame(kind: .mirror, sessionID: "s1", payload: MirrorWire.encode(.frame(picture))))
+        try await waitUntil({ mirror.items.count == 1 }, "the picture")
+        XCTAssertEqual(mirror.items.first, MirrorEnvelope(sessionID: "s1", update: .frame(picture)))
+        let out = try await waitOutbound(conn, count: 2)
+        let ack = decodeOutbound(out[1])
+        XCTAssertEqual(ack.kind, .mirrorAck)
+        XCTAssertEqual(ack.sessionID, "s1")
+        XCTAssertEqual(outboundPayload(ack)["seq"]?.intValue, 7)
+        XCTAssertNil(ack.seq)
+        XCTAssertTrue(conn.sideWritten.isEmpty, "the phone writes nothing on the side stream: acks ride the session stream")
+    }
+
+    /// Review finding 8: a consumer that fell behind never loses a control update — the bounded buffer that dropped
+    /// the OLDEST updates (a `show` included) is gone; pictures between controls collapse to the newest.
+    func testAStalledConsumerNeverLosesAShow() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+        func send(_ u: MirrorUpdate) { conn.enqueueSideInbound(serverFrame(kind: .mirror, sessionID: "s1", payload: MirrorWire.encode(u))) }
+        let notes = MirrorUpdate.show(app: "Notes", windowSize: .zero, others: 0, live: true)
+        let mail = MirrorUpdate.show(app: "Mail", windowSize: .zero, others: 0, live: true)
+        send(notes)
+        for i in 1...60 { send(.frame(MirrorFrame(seq: i, jpeg: Data([1]), width: 1, height: 1, windowSize: .zero))) }
+        send(mail)
+        for i in 61...120 { send(.frame(MirrorFrame(seq: i, jpeg: Data([1]), width: 1, height: 1, windowSize: .zero))) }
+        // Nothing consumed yet: wait for every frame to be acknowledged (= handled by the client).
+        try await waitUntil({ conn.outbound.count >= 1 + 120 }, "all pictures handled")
+        let (mirror, task) = drain(client.mirror)
+        defer { task.cancel() }
+        try await waitUntil({ mirror.items.contains { $0.update == mail } && mirror.items.last.map { if case .frame(let f) = $0.update { return f.seq == 120 }; return false } == true }, "drained")
+        let shows = mirror.items.filter { if case .show = $0.update { return true }; return false }.map(\.update)
+        XCTAssertEqual(shows, [notes, mail], "both shows arrive, in order")
+    }
+
+    /// Review finding 4: the Mac's clock, read off the envelopes the Gateway stamps — a countdown to a Mac deadline is
+    /// drawn against it rather than this phone's own clock.
+    func testTheMacsClockOffsetIsReadOffTheEnvelopes() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = WinterSessionClient(conn: conn, hostID: "mac-host", epoch: epoch, cursors: InMemoryCursorStore(),
+                                         clientInstanceID: "phone-under-test", clock: { 1_000_000 }, idgen: { UUID().uuidString })
+        let none = await client.macClockOffset()
+        XCTAssertNil(none)
+        let ack = WireEnvelope(v: 1, pairingEpoch: epoch, hostID: "mac-host", sessionID: nil, streamID: nil, seq: nil, kind: .helloAck,
+                               timestamp: 1_004_500, payload: try JSONEncoder().encode(ServerHello(chosenVersion: 1, hostID: "mac-host", verdicts: [])))
+        conn.enqueueInbound(try WireFrame.encode(ack))
+        _ = try await client.handshake(resumes: [])
+        let offset = await client.macClockOffset()
+        XCTAssertEqual(offset, 4_500, "the Mac runs 4.5 s ahead of this phone")
+    }
+
+    /// The mirror channel ends with the connection, like every other stream.
+    func testTheMirrorChannelFinishesWhenTheConnectionCloses() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+        let ended = Sink<Bool>()
+        let task = Task { for await _ in client.mirror {}; ended.append(true) }
+        defer { task.cancel() }
+        conn.close()
+        try await waitUntil({ ended.items == [true] }, "mirror stream finished")
+    }
 }

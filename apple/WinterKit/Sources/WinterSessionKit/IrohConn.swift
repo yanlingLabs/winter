@@ -55,6 +55,14 @@ public final class IrohConn: RemoteConn, @unchecked Sendable {
     /// `openBi()`/`send()` had already returned successfully). `nil` for the accept side (default),
     /// where `IrohListener` already retains the endpoint separately.
     private let ownedEndpoint: Endpoint?
+    /// ComputerV2 Phase 1b: the SIDE channel — every unidirectional stream the peer opens is read into
+    /// `sideInbound` (the phone mirror's stream from the Mac), and `sendSide` writes on one this side opens lazily at
+    /// a LOWER priority than the session stream (`SideSender`). QUIC streams are flow-controlled and scheduled
+    /// independently, so a picture queued there never sits ahead of an event or an rpc reply on the session stream.
+    public let sideInbound: AsyncStream<Data>
+    private let sideInboundCont: AsyncStream<Data>.Continuation
+    private let sideAcceptTask: Task<Void, Never>
+    private let sideSender: SideSender
 
     /// Purely-synchronous close bookkeeping (no `await` inside the critical section — G6).
     private let closed = OSAllocatedUnfairLock(initialState: false)
@@ -86,11 +94,49 @@ public final class IrohConn: RemoteConn, @unchecked Sendable {
         self.readTask = Task {
             await IrohConn.readLoop(recv: recv, cont: cont, maxBytes: maxFrameBytes)
         }
+        var sc: AsyncStream<Data>.Continuation!
+        self.sideInbound = AsyncStream { sc = $0 }
+        self.sideInboundCont = sc
+        let sideCont = sc!
+        self.sideSender = SideSender(connection: connection)
+        self.sideAcceptTask = Task {
+            await IrohConn.acceptSideStreams(connection: connection, cont: sideCont, maxBytes: maxFrameBytes)
+        }
     }
 
     public func send(_ frame: Data) async {
         guard !closed.withLock({ $0 }) else { return }
         await writer.write(LengthPrefix.wrap(frame))
+    }
+
+    /// ComputerV2 Phase 1b: one frame on the side channel (see `sideInbound`). `false` when the side stream could not
+    /// be opened or has failed — the caller falls back to `send`.
+    public func sendSide(_ frame: Data) async -> Bool {
+        guard !closed.withLock({ $0 }) else { return true }
+        return await sideSender.write(LengthPrefix.wrap(frame))
+    }
+
+    /// Reads every unidirectional stream the peer opens, each de-framed into `sideInbound`, until the connection ends.
+    private static func acceptSideStreams(connection: Connection, cont: AsyncStream<Data>.Continuation, maxBytes: Int) async {
+        await withTaskGroup(of: Void.self) { group in
+            while !Task.isCancelled {
+                guard let recv = try? await connection.acceptUni() else { break }
+                group.addTask {
+                    var buffer = Data()
+                    do {
+                        while !Task.isCancelled {
+                            while let frame = try LengthPrefix.unwrap(&buffer, maxBytes: maxBytes) { cont.yield(frame) }
+                            let chunk = try await recv.read(sizeLimit: 16 * 1024)
+                            if chunk.isEmpty { break }
+                            buffer.append(chunk)
+                        }
+                    } catch {
+                        // Stream reset / connection closed / oversize frame: this side stream ends.
+                    }
+                }
+            }
+        }
+        cont.finish()
     }
 
     public func close() {
@@ -102,6 +148,8 @@ public final class IrohConn: RemoteConn, @unchecked Sendable {
         guard first else { return }
         readTask.cancel()
         inboundCont.finish()
+        sideAcceptTask.cancel()
+        sideInboundCont.finish()
         // Task 4 fix (found by the E2E's scenario F): `Connection.close(errorCode:reason:)` is an
         // ABRUPT reset, not a graceful shutdown — calling it right after a `send()` (e.g. a
         // "pairing revoked" error frame written just before closing a revoked/rejected phone) can
@@ -163,6 +211,43 @@ public final class IrohConn: RemoteConn, @unchecked Sendable {
             // Stream reset / connection closed / oversize frame → fall through to finish.
         }
         cont.finish()
+    }
+}
+
+/// ComputerV2 Phase 1b: the side channel's sender — opens ONE unidirectional stream on first use, at priority -1
+/// (below the session stream's default 0: QUIC sends higher-priority stream data first), and serializes writes on it.
+/// A stream that cannot be opened or written makes every later write answer `false`.
+private actor SideSender {
+    private let connection: Connection
+    private var opening: Task<SendStream?, Never>?
+    private var failed = false
+    private var tail: Task<Bool, Never>?
+
+    init(connection: Connection) { self.connection = connection }
+
+    func write(_ bytes: Data) async -> Bool {
+        guard !failed else { return false }
+        if opening == nil {
+            let connection = self.connection
+            opening = Task {
+                guard let stream = try? await connection.openUni() else { return nil }
+                try? await stream.setPriority(p: -1)
+                return stream
+            }
+        }
+        guard let stream = await opening?.value else {
+            failed = true
+            return false
+        }
+        let prev = tail
+        let current = Task<Bool, Never> {
+            _ = await prev?.value
+            do { try await stream.writeAll(buf: bytes); return true } catch { return false }
+        }
+        tail = current
+        let ok = await current.value
+        if !ok { failed = true }
+        return ok
     }
 }
 

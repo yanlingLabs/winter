@@ -46,6 +46,20 @@ public enum WireKind: String, Codable, Sendable {
     /// EITHER inbound frame proves the path (liveness = any inbound frame, so no capability
     /// negotiation is needed). The daemon never sees these.
     case ping, pong
+    /// ComputerV2 Phase 1b (the phone mirror): one update of the live mirror of a session the phone asked to watch
+    /// (`session.mirror {watch: true}`) — gateway → phone only, its payload a `WinterSessionKit.MirrorWire` JSON
+    /// object. It never carries a `seq` or a `streamID`, so nothing cursor- or replay-related ever sees it, and it is
+    /// sent only to a phone that asked: an older phone (which never asks) would not decode this kind and would drop
+    /// the frame without affecting anything else.
+    ///
+    /// Mirror updates ride their OWN lower-priority QUIC stream beside the session stream (`RemoteConn.sendSide`), so a
+    /// picture never sits ahead of an event, an approval or an rpc reply.
+    case mirror
+    /// ComputerV2 Phase 1b: phone → gateway, on the session stream — "I have received mirror picture `seq`"
+    /// (payload `{"seq": n}`, the envelope's `sessionID` the watched session). The Gateway keeps at most
+    /// `MirrorWire.maxUnackedPictures` pictures unacknowledged, so a link (or a phone) that falls behind holds only the
+    /// newest picture back instead of a queue of stale ones. Never sent by a phone that did not ask to watch.
+    case mirrorAck
 }
 
 public enum WireError: Error, Equatable {
