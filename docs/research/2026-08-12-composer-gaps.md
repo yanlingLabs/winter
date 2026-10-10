@@ -1,5 +1,9 @@
 # Composer gaps on the Mac shell — research (2026-08-12)
 
+> Historical research from 2026-08-12, not a current implementation checklist. References to
+> Cowork describe a UI preview, not a working session mode. Its current availability and shared
+> groundwork are recorded in the [Cowork implementation map](../cowork-status.md).
+
 Read-only research. No code changed, nothing launched. Scope: the **composer and its surrounding
 chrome** on the Mac's ChatGPT-style shell. The transcript/cards/tool-rows comparison is a sibling
 document.

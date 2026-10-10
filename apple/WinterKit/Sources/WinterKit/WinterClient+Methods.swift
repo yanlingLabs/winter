@@ -679,7 +679,7 @@ extension WinterClient {
     /// this wrapper doesn't have.
     ///
     /// **`nil` and `[]` are DIFFERENT answers and the difference is load-bearing.** The daemon
-    /// populates `dirs` only for rows that PARTICIPATE in working directories (code + cowork +
+    /// populates `dirs` only for rows that PARTICIPATE in working directories (code + reserved cowork +
     /// absent-means-code — `session.list`'s own `participatesInActivity` gate, ipc/server.ts), so:
     ///   * `nil` — this session has no working-directory concept at all (chat/dispatch), or the
     ///     daemon predates the field. A picker must be ABSENT, not empty.
@@ -688,6 +688,8 @@ extension WinterClient {
     ///     adopt door.
     /// Collapsing the two (`?? []`) is how a chat window grows a folder menu whose every tap comes
     /// back `DIRS_MODE_REFUSAL`.
+    /// Cowork recognition here is groundwork for synthetic/future rows, not a supported daemon
+    /// mode: `session.create` excludes it and `SpawnSession` rejects its reserved argument.
     ///
     /// `cwd` is the ALIAS of `dirs[0]?.path` for a participating row — the daemon overwrites it at
     /// `session.list` time from the dirs set, because `session.setDirs` deliberately never touches
@@ -696,7 +698,8 @@ extension WinterClient {
     /// app-shell Task 2: `activity` appended LAST, same purely-additive precedent as `dirs` above —
     /// raw-JSON-decoded beside `cwd`/`dirs` rather than through a `Codable` row type this wrapper
     /// doesn't have. Mirrors `SessionListResult.activity` (methods.ts) field-for-field: one of
-    /// `"active"|"background"|"idle"|"archived"` for a participating (code/cowork) row, `nil` for
+    /// `"active"|"background"|"idle"|"archived"` for a participating Code row (plus reserved Cowork
+    /// handling for synthetic/future rows; Cowork creation and execution are unimplemented), `nil` for
     /// every chat/dispatch row AND for a daemon predating the field — the SAME absent-is-a-real-value
     /// discipline `dirs` documents above, decoded the identical way (`s["activity"]?.stringValue`:
     /// `nil` for a missing key or a non-string value, never a guessed default). Kept a plain `String`
@@ -707,7 +710,8 @@ extension WinterClient {
     ///
     /// `archived` is the session's stored flag for EVERY mode — not new to the wire (`store.list()`
     /// has selected it since session-activity-hygiene T3), only newly declared and newly read here.
-    /// It is the same fact `activity == "archived"` carries for a code/cowork row and the ONLY way
+    /// It is the same fact `activity == "archived"` carries for a participating row (Code today,
+    /// with reserved Cowork handling as above) and the ONLY way
     /// to learn it for a chat/dispatch one, where the label does not exist. Absent means NOT
     /// archived — the daemon writes NULL, never 0 — so absence is a real answer for every daemon.
     ///
@@ -1003,7 +1007,7 @@ extension WinterClient {
     ///
     /// **Every refusal is a thrown `RpcError` carrying the daemon's own wording, and that wording is
     /// meant to be SHOWN.** `set-dirs.ts` owns the refusal matrix and names each rule in its own
-    /// sentence — "working directories apply to code and cowork sessions only" (chat/dispatch),
+    /// sentence — "working directories apply to code sessions only" (chat/dispatch),
     /// "that directory is locked for this session" (the first-write lock), "that directory can never
     /// be a working directory" (the dirGrant denylist), and the remove-primary refusal that names
     /// `setPrimary` as the way out. Surfacing them VERBATIM is what makes a refusal teachable; a
@@ -1045,8 +1049,8 @@ extension WinterClient {
     ///
     /// **Every refusal is a thrown `RpcError` carrying the daemon's own sentence, and that sentence
     /// is meant to be SHOWN** — the `setDirs` precedent, and the same reasoning: `set-activity.ts`
-    /// writes one per rule and each names the rule it enforced ("activity states apply to code and
-    /// cowork sessions only", "session is archived — resume it first", "stop or background it
+    /// writes one per rule and each names the rule it enforced ("activity states apply to code
+    /// sessions only"; "session is archived — resume it first"; "stop or background it
     /// first"). A client-side "couldn't change that" erases exactly the sentence that teaches the
     /// rule. An unknown session throws NOT_FOUND, same precedent as `setPolicy`/`setModel`.
     public func setActivity(sessionId: String, activity: String?) async throws -> String? {

@@ -454,7 +454,7 @@ describeWithWinterBinary("(B) session_spawn on the real winter binary", (bin) =>
     expect(stopped!.output).toContain("stopped session");
     await until(() => h.daemon!.winter.get(busyId)?.turnRunning === false || undefined, 30_000, "the second child's stop");
     expect(refused!.isError).toBe(true);
-    expect(refused!.output).toContain("only code and Cowork sessions");
+    expect(refused!.output).toContain("only code sessions can currently be messaged or stopped");
   }, 180_000);
 
   test("(8) a TERMINAL that attaches to a turn it did not start and detaches leaves it running; a human-started turn still aborts", async () => {

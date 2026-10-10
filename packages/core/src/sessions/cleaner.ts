@@ -323,8 +323,8 @@ export class SessionCleaner {
     // this independence is load-bearing rather than defensive duplication.
     //
     // `activityFor` answers `undefined` on its FIRST line for every mode outside {code, cowork}
-    // (activity.ts's `participatesInActivity`) and discards these three inputs entirely. Deriving
-    // the rail from it alone therefore left CHAT sessions with no liveness protection at all: chat
+    // (code plus reserved Cowork groundwork in `participatesInActivity`) and discards these inputs.
+    // Deriving the rail from it alone therefore left CHAT sessions with no liveness protection: chat
     // has no filesystem tools, so `hasFileWrite` can never fire for one; the title rail is vacuous;
     // and a Mac-minted chat id is `s_<hex>`, so the phone rail does not apply — leaving only
     // `judged`, `fork` and the 24h gate. A chat window left open across a weekend (attached, alive,
@@ -332,15 +332,15 @@ export class SessionCleaner {
     // under the open window — with no `session_deleted` event to tell the client.
     //
     // "No lifecycle STATE" is not "no liveness". A session someone is looking at, or that is doing
-    // work right now, is never junk, whatever its mode calls itself. Redundant for code/cowork by
-    // construction (any of these three already derives `active` or `background` there), so this
+    // work right now, is never junk, whatever its mode calls itself. Redundant for participating
+    // rows by construction (any of these three already derives `active` or `background` there), so this
     // strictly ADDS protection and can regress nothing.
     if (attachedCount > 0 || turnRunning || bgWork) return "activity";
 
     // The DERIVED state adds what the raw signals cannot say: the STORED flags. `backgrounded` and
     // `archived` rail a session with nothing attached and nothing running — the "keep it, I'll come
-    // back to it" bits — and only code/cowork carry them (`session.setActivity` refuses every other
-    // mode, ipc/server.ts). `undefined` here still means "this mode has no lifecycle", which after
+    // back to it" bits — supported today on Code, with Cowork reserved (`session.setActivity` refuses
+    // other modes, ipc/server.ts). `undefined` here still means "this mode has no lifecycle", which after
     // the liveness check above is correctly NOT a rail: a genuinely idle chat is exactly the
     // abandoned-New-Chat case the cleaner exists for.
     const activity = activityFor(row, {

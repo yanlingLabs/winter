@@ -1,5 +1,6 @@
 /** `winter agents` (session-activity-hygiene T9) — the live roster of BACKGROUND and ACTIVE
- *  code/cowork sessions, and the four verbs that move them through the lifecycle T1-T8 built.
+ *  code sessions today, and the four verbs that move them through the lifecycle T1-T8 built.
+ *  The daemon's lifecycle predicate reserves Cowork; no supported creation path supplies that mode.
  *
  *  **It never attaches.** Two independent reasons, both load-bearing:
  *
@@ -64,7 +65,7 @@ export const AGENTS_POLL_MS = 2000;
 /** The two states the roster shows. `idle`/`archived` sessions are not "agents you have running", and
  *  a session with no `activity` at all does not participate in the lifecycle (chat/dispatch) — the
  *  roster reads the daemon's derived value rather than keeping a mode allowlist of its own, which is
- *  what makes `cowork` work here the day it ships without a line changing. */
+ *  future-compatible groundwork for a mode such as `cowork`, not evidence that Cowork has shipped. */
 const ROSTER_ACTIVITIES: ReadonlySet<string> = new Set(["background", "active"]);
 
 /** Just the fields the roster reads off a `session.list` row (a structural subset of
