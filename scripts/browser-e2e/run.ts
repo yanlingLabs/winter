@@ -110,6 +110,7 @@ function scope(runId: string) {
     sessionId: "e2e", runId, callId: "cv2_e2e", vision: true, signal: abort.signal,
     live: () => {}, timeLeft: () => 60_000, clampWait: (ms) => Math.min(ms, 60_000),
     lock: async (key, label) => { if (!held.has(key)) held.set(key, await locks.acquire(key, { runId, sessionId: "e2e" }, { label })); },
+    lockRun: (key) => locks.holder(key)?.runId,
     authorize: async () => {}, sessionPolicy: () => facts.policy, sessionFacts: () => facts,
     siteCard: async () => ({ approved: false }), persistentlyAllowed: () => true, granted: () => true,
     builder, keepImage: (img) => ({ image: "img", width: img.width, height: img.height }), lastTargetShot, acted, diffBases, metric,
@@ -319,6 +320,74 @@ await check("a new document: earlier refs are StaleRef; the header says new page
 await check("goto: a load failure is an Error with the browser's net error", async () => {
   const e = await failsWith(P("goto", { url: "http://127.0.0.1:1/" }), "Error");
   expect(/net::ERR_/.test(e.message), "the net error", e.message);
+});
+
+await check("native pickers never open: a select, date, time, color (and its label) and file input refuse pointer and keys; setValue/upload instead", async () => {
+  await P("goto", { url: `${BASE}/pickers.html` });
+  const s = await P("state", { full: true, emit: false }) as string;
+  const country = refOf(s, /pop up button "Country"/);
+  const e1 = await failsWith(P("click", { target: country }), "Refused");
+  expect(/^\[\d+\] opens a pop-up menu when pressed or keyed — use setValue\(ref, value\) instead$/.test(e1.message), "the select's refusal", e1.message);
+  for (const combo of ["space", "return", "alt+down", "down"]) await failsWith(P("key", { combo, into: country }), "Refused");
+  const toppings = refOf(s, /list box "Toppings"/);
+  await failsWith(P("click", { target: toppings }), "Refused");
+  const arrival = refOf(s, /text field "Arrival"/);
+  const e2 = await failsWith(P("click", { target: arrival }), "Refused");
+  expect(e2.message.includes("opens a date picker"), "the date input's refusal", e2.message);
+  await failsWith(P("type", { text: "2026-10-10", into: arrival }), "Refused");
+  await failsWith(P("click", { target: refOf(s, /text field "At"/) }), "Refused");
+  const colour = refOf(s, /button "Colour"/);
+  const e3 = await failsWith(P("click", { target: colour }), "Refused");
+  expect(e3.message.includes("opens a color picker"), "the color input's refusal", e3.message);
+  const e4 = await failsWith(P("click", { target: refOf(s, /file input "Attachment"/) }), "Refused");
+  expect(e4.message.includes("opens a file chooser") && e4.message.includes("use upload(ref, paths) instead"), "the file input's refusal names upload()", e4.message);
+  // The colour's label sits at a known place (CSS 600–800 × 20–60): pressing it would open the colour picker too.
+  const img = await P("screenshot", { emit: false }) as { width: number; height: number };
+  const e5 = await failsWith(P("click", { target: [Math.round(700 * img.width / 1200), Math.round(40 * img.height / 800)] }), "Refused");
+  expect(e5.message.startsWith("that control opens a color picker"), "a pixel press on the label", e5.message);
+  // setValue is the way: by visible text, by value, several lines for a multiple select; a date in its shape.
+  await P("setValue", { ref: country, value: "Japan" });
+  let after = await P("state", { full: true, emit: false }) as string;
+  expect(/pop up button "Country" value="Japan"/.test(after) && after.includes("country changed to jp"), "the select took Japan, the page saw change", after);
+  await P("setValue", { ref: country, value: "br" });
+  await P("setValue", { ref: toppings, value: "Cheese\nOlives" });
+  after = await P("state", { full: true, emit: false }) as string;
+  expect(after.includes("toppings changed to Cheese+Olives"), "the multiple select took two", after);
+  await P("setValue", { ref: arrival, value: "2026-10-10" });
+  after = await P("state", { full: true, emit: false }) as string;
+  expect(/text field "Arrival" value="2026-10-10"/.test(after) && after.includes("arrival changed to 2026-10-10"), "the date took its value", after);
+  const bad = await failsWith(P("setValue", { ref: arrival, value: "next tuesday" }), "Error");
+  expect(bad.message.includes("takes a value like YYYY-MM-DD"), "a date's shape", bad.message);
+  await P("setValue", { ref: colour, value: "#ff0000" });
+  after = await P("state", { full: true, emit: false }) as string;
+  expect(after.includes("colour changed to #ff0000"), "the colour took its value", after);
+});
+
+await check("a text leaf is pressed where its text is drawn; a right-click never opens the browser's own menu", async () => {
+  const s = await P("state", { full: true, emit: false }) as string;
+  await P("click", { target: refOf(s, /text "Press this text"/) });
+  let after = await P("state", { full: true, emit: false }) as string;
+  expect(after.includes("div pressed"), "the text's element got the click", after);
+  await P("click", { target: refOf(after, /text "Right-click here"/), button: "right" });
+  await P("waitFor", { cond: { text: "menu prevented" }, timeoutMs: 3_000 });
+  after = await P("state", { full: true, emit: false }) as string;
+  expect(after.includes("menu prevented: true"), "the contextmenu event was prevented", after);
+});
+
+await check("editing keys carry their macOS commands: cmd+z undoes typing, cmd+shift+z redoes it, alt+backspace deletes a word", async () => {
+  const s = await P("state", { full: true, emit: false }) as string;
+  const notes = refOf(s, /text field "Notes"/);
+  await P("type", { text: "hello world", into: notes });
+  await P("key", { combo: "alt+backspace", into: notes });
+  let after = await P("state", { full: true, emit: false }) as string;
+  expect(/text field "Notes" value="hello "/.test(after), "alt+backspace deleted the word", after);
+  await P("key", { combo: "cmd+z", into: notes });
+  after = await P("state", { full: true, emit: false }) as string;
+  expect(/text field "Notes" value="hello world"/.test(after), "cmd+z undid the deletion", after);
+  await P("key", { combo: "cmd+shift+z", into: notes });
+  after = await P("state", { full: true, emit: false }) as string;
+  expect(/text field "Notes" value="hello "/.test(after), "cmd+shift+z redid it", after);
+  await failsWith(P("key", { combo: "cmd+v", into: notes }), "Refused");
 });
 
 await check("the engine never sent a method outside the allowlist, and the transport refused nothing", async () => {

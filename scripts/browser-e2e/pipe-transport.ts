@@ -12,7 +12,12 @@ import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_NETWORK_EVENT_PARAMS, CDP_
 import { TransportError, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportTab } from "../../packages/core/src/computer-use/browser/transport";
 
 interface Pending { resolve(v: unknown): void; reject(e: Error): void; timer: ReturnType<typeof setTimeout> }
-interface Tab { tabKey: string; targetId: string; session?: string; events: Set<string>; winterCtx: Set<string>; winterObjects: Set<string>; children: Set<string>; sessionId?: string; agent: boolean }
+interface Tab {
+  tabKey: string; targetId: string; session?: string; events: Set<string>;
+  /** "winter" worlds this transport itself created (`<session>:<contextId>`), and their unique ids when reported. */
+  winterCtx: Set<string>; winterUnique: Map<string, string>;
+  winterObjects: Set<string>; children: Set<string>; sessionId?: string; agent: boolean;
+}
 
 export class PipeTransport implements CdpTransport {
   readonly family: BrowserFamily;
@@ -110,9 +115,20 @@ export class PipeTransport implements CdpTransport {
       tab.children.add(params.sessionId);
       this.bySession.set(params.sessionId, tab);
     }
+    // A world counts as "winter" only when this transport made it (its own createIsolatedWorld answered that id) —
+    // never by its name. Its creation event adds the unique id; its destruction ends it.
     if (method === "Runtime.executionContextCreated") {
-      const c = params.context as { id: number; name?: string };
-      if (c.name === CDP_WORLD_NAME) tab.winterCtx.add(`${sessKey}:${c.id}`);
+      const c = params.context as { id: number; uniqueId?: string };
+      if (tab.winterCtx.has(`${sessKey}:${c.id}`) && typeof c.uniqueId === "string") tab.winterUnique.set(c.uniqueId, `${sessKey}:${c.id}`);
+    }
+    if (method === "Runtime.executionContextDestroyed") {
+      const unique = typeof params.executionContextUniqueId === "string" ? params.executionContextUniqueId : undefined;
+      const key = unique !== undefined ? tab.winterUnique.get(unique) : `${sessKey}:${String(params.executionContextId)}`;
+      if (key !== undefined) tab.winterCtx.delete(key);
+      if (unique !== undefined) tab.winterUnique.delete(unique);
+    }
+    if (method === "Runtime.executionContextsCleared") {
+      for (const k of [...tab.winterCtx]) if (k.startsWith(`${sessKey}:`)) tab.winterCtx.delete(k);
     }
     if (method === "Inspector.targetCrashed") for (const l of [...this.goneListeners]) l(tab.tabKey, "crashed");
     if (!tab.events.has(method) || !CDP_ALLOWED_EVENTS.includes(method)) return;
@@ -132,7 +148,7 @@ export class PipeTransport implements CdpTransport {
   async createTab(opts: { sessionId: string; url: string; tabKey?: string }): Promise<TransportTab> {
     const r = await this.raw<{ targetId: string }>("Target.createTarget", { url: opts.url, background: true });
     const tabKey = opts.tabKey ?? `t${this.nextTab++}`;
-    this.tabs.set(tabKey, { tabKey, targetId: r.targetId, events: new Set(), winterCtx: new Set(), winterObjects: new Set(), children: new Set(), sessionId: opts.sessionId, agent: true });
+    this.tabs.set(tabKey, { tabKey, targetId: r.targetId, events: new Set(), winterCtx: new Set(), winterUnique: new Map(), winterObjects: new Set(), children: new Set(), sessionId: opts.sessionId, agent: true });
     return { tabKey, url: opts.url, title: "", active: false, agent: true, sessionId: opts.sessionId };
   }
 
@@ -170,6 +186,7 @@ export class PipeTransport implements CdpTransport {
     const s = t.session;
     delete t.session;
     t.winterCtx.clear();
+    t.winterUnique.clear();
     t.winterObjects.clear();
     t.events.clear();
     try { await this.raw("Target.detachFromTarget", { sessionId: s }); } catch { /* gone */ }
@@ -187,10 +204,17 @@ export class PipeTransport implements CdpTransport {
     const sessKey = opts.cdpSessionId ?? "";
     if (opts.cdpSessionId !== undefined && !t.children.has(opts.cdpSessionId)) refuse("an unknown child session");
     const winterCtx = (id: unknown): boolean => t.winterCtx.has(`${sessKey}:${String(id)}`);
+    const winterUnique = (u: unknown): boolean => typeof u === "string" && t.winterUnique.has(u);
     switch (method) {
-      case "Runtime.evaluate": if (!winterCtx(params.contextId)) refuse("outside the winter world"); break;
+      case "Page.reload": if (params.scriptToEvaluateOnLoad !== undefined) refuse("a script to evaluate on load runs in the page's own world"); break;
+      case "Page.navigate": {
+        const url = typeof params.url === "string" ? params.url : "";
+        if (url !== "about:blank" && !/^https?:/i.test(url)) refuse("only http(s) and about:blank navigations");
+        break;
+      }
+      case "Runtime.evaluate": if (!(winterCtx(params.contextId) || winterUnique(params.uniqueContextId))) refuse("outside the winter world"); break;
       case "Runtime.callFunctionOn":
-        if (!(winterCtx(params.executionContextId) || (typeof params.objectId === "string" && t.winterObjects.has(params.objectId)))) refuse("outside the winter world");
+        if (!(winterCtx(params.executionContextId) || winterUnique(params.uniqueContextId) || (typeof params.objectId === "string" && t.winterObjects.has(params.objectId)))) refuse("outside the winter world");
         break;
       case "DOM.resolveNode": if (!winterCtx(params.executionContextId)) refuse("outside the winter world"); break;
       case "Page.createIsolatedWorld": if (params.worldName !== CDP_WORLD_NAME || params.grantUniveralAccess === true) refuse("a world other than winter"); break;
@@ -198,6 +222,8 @@ export class PipeTransport implements CdpTransport {
     }
     if (t.session === undefined) throw new TransportError("cdp_error", "not attached", { cdpMessage: "not attached" });
     const res = await this.raw<Record<string, unknown>>(method, params, opts.cdpSessionId ?? t.session, opts.timeoutMs ?? (method === "Page.captureScreenshot" ? 20_000 : 15_000));
+    // The world this transport just made is "winter" (by the id it answered, not by any name).
+    if (method === "Page.createIsolatedWorld" && typeof res.executionContextId === "number") t.winterCtx.add(`${sessKey}:${res.executionContextId}`);
     // Object ids minted in the winter world may be used again (the world rule's second half).
     const minted = (res.result as { objectId?: string } | undefined)?.objectId ?? (res.object as { objectId?: string } | undefined)?.objectId;
     if (typeof minted === "string" && (method === "Runtime.callFunctionOn" || method === "Runtime.evaluate" || method === "DOM.resolveNode")) t.winterObjects.add(minted);

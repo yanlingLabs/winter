@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Pickers</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; }
+  #colour-label { position: fixed; left: 600px; top: 20px; width: 200px; height: 40px; display: block; background: #eee; }
+</style></head>
+<body>
+<main>
+  <h1>Pickers</h1>
+  <select id="country" aria-label="Country"><option value="fr">France</option><option value="jp">Japan</option><option value="br">Brazil</option></select>
+  <select id="toppings" aria-label="Toppings" multiple size="3"><option>Cheese</option><option>Ham</option><option>Olives</option></select>
+  <label>Arrival <input id="arrival" type="date"></label>
+  <label>At <input id="at" type="time"></label>
+  <input id="colour" type="color" aria-label="Colour" value="#000000">
+  <label for="colour" id="colour-label">Pick a colour</label>
+  <label>Attachment <input id="attach" type="file"></label>
+  <p id="events">no events</p>
+  <div id="clicky" onclick="this.textContent = 'div pressed'">Press this text</div>
+  <p id="menu-target">Right-click here</p>
+  <p id="menu-result">no menu yet</p>
+  <label>Notes <input id="notes" type="text" value=""></label>
+</main>
+<script>
+const log = (s) => { document.getElementById("events").textContent = s; };
+for (const id of ["country", "toppings", "arrival", "colour"]) {
+  document.getElementById(id).addEventListener("change", (e) => log(id + " changed to " + (e.target.multiple ? [...e.target.selectedOptions].map((o) => o.text).join("+") : e.target.value)));
+}
+// Whether the browser's own context menu would have opened: read after the event has gone through every listener.
+document.addEventListener("contextmenu", (e) => setTimeout(() => { document.getElementById("menu-result").textContent = "menu prevented: " + e.defaultPrevented; }, 0));
+</script>
+</body>
+</html>
