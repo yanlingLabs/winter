@@ -92,14 +92,30 @@ export class DraftImages {
     return this.referencedIn(text).map((n) => [n, this.images.get(n)!]);
   }
 
-  /** Puts a refused draft's attachments back under their own numbers (the placeholders in the text
-   *  handed back to the composer still name them). A number the draft has since reused is left alone;
-   *  the counter stays past every restored number. */
-  restore(entries: ReadonlyArray<[number, DraftImage]>): void {
+  /**
+   * Puts a refused draft's attachments back, and answers the text to hand the composer. The placeholders in
+   * `text` name the attachments by number, and the user may have attached something NEW under a number the
+   * refused draft used while the send was in flight (the counter restarts at #1 once a draft's attachments are
+   * cleared): handing the text back unchanged would then bind its `[Image #1]` to the wrong image. So an
+   * attachment whose number is taken again comes back under a FRESH number — past every number in use here and
+   * in `text`, so it collides with nothing — and that number is written into the returned text in place of
+   * the old one. An attachment whose number is free keeps it. (`text` is the refused draft only; the caller
+   * leaves whatever the user typed since alone.)
+   */
+  restore(entries: ReadonlyArray<[number, DraftImage]>, text: string): string {
+    const renumbered = new Map<number, string>();
     for (const [n, image] of entries) {
-      if (!this.images.has(n)) this.images.set(n, image);
-      this.next = Math.max(this.next, n + 1);
+      if (!this.images.has(n)) {
+        this.images.set(n, image);
+        this.next = Math.max(this.next, n + 1);
+        continue;
+      }
+      const fresh = Math.max(this.next, ...[...this.images.keys(), ...referencedImageNumbers(text)].map((k) => k + 1));
+      this.images.set(fresh, image);
+      this.next = fresh + 1;
+      renumbered.set(n, imageToken(fresh));
     }
+    return renumbered.size === 0 ? text : substituteImageTokens(text, renumbered);
   }
 }
 
@@ -127,13 +143,17 @@ export interface StagedDraft {
  * refusal rejects with the daemon's own error, and nothing is sent by the caller. A draft referencing
  * more than `USER_MESSAGE_IMAGES_MAX` images is refused before anything is staged — the daemon would
  * refuse the send anyway, after the files were written. `imagesOnSend` says whether the daemon takes
- * `images`: false only when a stage answer said it does not (a draft of files alone stages nothing and
- * so cannot ask — it assumes a daemon that, being able to take an original path at all, takes `images`).
+ * `images`: false when a stage answer said it does not, or — for a FILE, which stages nothing and so cannot
+ * ask — when the daemon's hello did not announce original-path support (`opts.originalPaths`).
  */
 export async function stageDraftImages(
   text: string,
   images: DraftImages,
   stage: (image: Extract<DraftImage, { kind: "data" }>) => Promise<StagedImage>,
+  /** `originalPaths: false` — the daemon did not say (in its hello) that it takes an original file's path in
+   *  `images`: a FILE attachment then goes into the text instead, with the staged ones (an older daemon either
+   *  drops `images` silently or refuses a path it did not stage). Absent = it does. */
+  opts: { originalPaths?: boolean } = {},
 ): Promise<StagedDraft> {
   const refs: UserMessageImageRef[] = [];
   let imagesOnSend = true;
@@ -141,7 +161,11 @@ export async function stageDraftImages(
   if (referenced.length > USER_MESSAGE_IMAGES_MAX) throw new Error(USER_MESSAGE_IMAGES_MAX_MESSAGE);
   for (const n of referenced) {
     const image = images.get(n)!;
-    if (image.kind === "file") { refs.push({ n, path: image.path }); continue; }
+    if (image.kind === "file") {
+      refs.push({ n, path: image.path });
+      if (opts.originalPaths === false) imagesOnSend = false;
+      continue;
+    }
     const staged = await stage(image);
     refs.push({ n, path: staged.path });
     if (staged.imagesOnSend !== true) imagesOnSend = false;

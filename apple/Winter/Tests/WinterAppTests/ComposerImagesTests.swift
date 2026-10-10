@@ -271,18 +271,210 @@ final class ComposerImagesTests: XCTestCase {
         XCTAssertEqual(composerImages(from: board)?.first?.imageData, nil, "no bytes ride along")
     }
 
-    func testEverySupportedFileTypeIsAFileAttachmentWhateverItIsCalled() throws {
+    func testEveryFileTypeReadOpensByNameIsAFileAttachmentAndTheBytesMustBeAnImage() throws {
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let heic = Data([0, 0, 0, 24]) + Data("ftypheic".utf8) + Data(count: 4)
         let cases: [(String, Data)] = [("a.png", png), ("b.jpg", jpeg), ("c.gif", Data("GIF89a..".utf8)), ("d.heic", heic),
                                        ("e.tiff", Data([0x49, 0x49, 0x2A, 0x00, 8, 0, 0, 0])), ("f.bmp", Data("BM".utf8) + Data(count: 6)),
-                                       ("renamed.jpeg", png)] // a PNG named .jpeg: the BYTES decide
+                                       ("g.tif", Data([0x49, 0x49, 0x2A, 0x00, 8, 0, 0, 0])), ("h.webp", Data("RIFF\u{0}\u{0}\u{0}\u{0}WEBPVP8 ".utf8)),
+                                       ("UPPER.PNG", png), ("Mixed.JpEg", jpeg),
+                                       ("renamed.jpeg", png)] // a PNG named .jpeg: Read opens it by the NAME; it sniffs the bytes itself
         for (name, bytes) in cases {
             let url = dir.appendingPathComponent(name)
             try bytes.write(to: url)
             XCTAssertEqual(composerImage(fromFile: url), ComposerImage.file(path: url.path), name)
         }
+    }
+
+    // MARK: - Review findings (2026-10-10)
+
+    /// Finding 1: the runtime's Read tool opens an image by the EXTENSION of the path the model types, never by content
+    /// (`IMAGE_EXTS`), so only these names can ride as their own path. The daemon refuses every other spelling.
+    func testOnlyTheNamesReadOpensAsImagesCanRideAsAPath() {
+        func url(_ name: String) -> URL { URL(fileURLWithPath: "/Users/me/\(name)") }
+        for name in ["a.png", "a.jpg", "a.jpeg", "a.gif", "a.webp", "a.bmp", "a.tiff", "a.tif", "a.heic", "A.PNG", "a.HeIc"] {
+            XCTAssertTrue(composerURLIsImage(url(name)), name)
+        }
+        for name in ["a.dng", "a.nef", "a.cr2", "a.arw", "a.heif", "a.hif", "a.heics", "a.jpe", "a.jfif", "a.svg", "a.pdf", "a", "a.png.txt", "a."] {
+            XCTAssertFalse(composerURLIsImage(url(name)), name)
+        }
+        XCTAssertEqual(composerReadImageExtensions, ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "heic"])
+        // The cheap pre-check that decides "is this paste an image at all" is wider: other image types by name, and no name.
+        for name in ["a.dng", "a.heif", "a.jpe", "a.png", "no-extension"] { XCTAssertTrue(composerURLMayBeImage(url(name)), name) }
+        for name in ["notes.txt", "a.pdf", "a.zip"] { XCTAssertFalse(composerURLMayBeImage(url(name)), name) }
+        XCTAssertFalse(composerURLMayBeImage(URL(string: "https://example.com/a.png")!))
+    }
+
+    private func generatedJPEG() -> Data {
+        let png = generatedPNG(width: 32, height: 24, noise: false)
+        let source = CGImageSourceCreateWithData(png as CFData, nil)!
+        return composerEncode(CGImageSourceCreateImageAtIndex(source, 0, nil)!, as: .jpeg, quality: 0.9)!
+    }
+
+    /// Any other image file is read HERE and staged as DATA: raw when its bytes are already a type Read takes (not a
+    /// TIFF — which is what a camera RAW is) and fit a request; decoded and converted to PNG otherwise.
+    func testImageFilesReadCannotOpenByNameAreStagedAsData() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func write(_ name: String, _ bytes: Data) throws -> URL { let u = dir.appendingPathComponent(name); try bytes.write(to: u); return u }
+
+        let jpegBytes = generatedJPEG()
+        XCTAssertEqual(composerImage(fromFile: try write("photo.jpe", jpegBytes)), ComposerImage(data: jpegBytes, mediaType: "image/jpeg"), "a .jpe is raw JPEG data — Read cannot open the name")
+        XCTAssertEqual(composerImage(fromFile: try write("photo.jfif", jpegBytes)), ComposerImage(data: jpegBytes, mediaType: "image/jpeg"))
+        let pngBytes = generatedPNG(width: 16, height: 16, noise: false)
+        XCTAssertEqual(composerImage(fromFile: try write("no-extension", pngBytes)), ComposerImage(data: pngBytes, mediaType: "image/png"), "no extension: raw PNG data")
+        let heif = Data([0, 0, 0, 24]) + Data("ftypmif1".utf8) + Data(count: 4)
+        XCTAssertEqual(composerImage(fromFile: try write("shot.heif", heif)), ComposerImage(data: heif, mediaType: "image/heic"))
+        XCTAssertEqual(composerImage(fromFile: try write("shot.heics", heif)), ComposerImage(data: heif, mediaType: "image/heic"))
+
+        // A camera RAW is TIFF-structured: it is decoded and converted to PNG, never staged as the RAW it is.
+        let raw = tinyTIFF()
+        for name in ["IMG_0001.dng", "DSC_0001.NEF", "IMG_0002.cr2", "A7.arw"] {
+            let image = composerImage(fromFile: try write(name, raw))
+            XCTAssertEqual(image?.imageData?.mediaType, "image/png", name)
+            XCTAssertEqual(image?.imageData.flatMap { composerImageMediaType(of: $0.data) }, "image/png", name)
+            XCTAssertNil(image?.filePath, name)
+        }
+        // …and what Read does open by name is still a path, whatever its case.
+        XCTAssertEqual(composerImage(fromFile: try write("SHOT.PNG", pngBytes)), ComposerImage.file(path: dir.appendingPathComponent("SHOT.PNG").path))
+        // Not an image at all, by any name: AppKit's paste.
+        XCTAssertNil(composerImage(fromFile: try write("README", Data("plain text".utf8))))
+        XCTAssertNil(composerImage(fromFile: try write("logo.svg", Data(#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>"#.utf8))))
+    }
+
+    /// A drag of a camera RAW is an attachment (DATA), not handed back to AppKit to type its path.
+    func testDraggingOtherImageFilesGivesStagedDataNotPaths() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dng = dir.appendingPathComponent("IMG_0001.dng")
+        try tinyTIFF().write(to: dng)
+        let readme = dir.appendingPathComponent("README")
+        try Data("plain text".utf8).write(to: readme)
+        let board = privateBoard()
+        defer { board.releaseGlobally() }
+        board.clearContents()
+        board.writeObjects([dng as NSURL])
+        XCTAssertTrue(composerPasteboardMayHaveImage(board))
+        let images = composerImages(from: board)
+        XCTAssertEqual(images?.count, 1)
+        XCTAssertEqual(images?.first?.imageData?.mediaType, "image/png")
+        // An extension-less non-image may pass the cheap check, but its bytes hand the paste back to AppKit.
+        board.clearContents()
+        board.writeObjects([readme as NSURL])
+        XCTAssertNil(composerImages(from: board))
+    }
+
+    private func rpcFailure(_ code: String, n: Int? = nil, message: String = "refused") -> RpcError {
+        var data: [String: JSONValue] = ["code": .string(code)]
+        if let n { data["n"] = .number(Double(n)) }
+        return RpcError(code: -32602, message: message, data: .object(data))
+    }
+
+    /// Finding 7: the daemon could not read an ORIGINAL file (macOS keeps its folder from the daemon; a temporary
+    /// screenshot path went away) — this app, which holds the drag's access, reads the bytes, stages them and sends
+    /// again, transparently.
+    func testAnUnreadableFileIsReadByTheAppAndStagedInItsPlace() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let shot = dir.appendingPathComponent("shot.png")
+        let bytes = generatedPNG(width: 16, height: 16, noise: false)
+        try bytes.write(to: shot)
+        let a = adapter(mode: "code")
+        XCTAssertEqual(a.composerImageIntake.attach(.file(path: shot.path)), "[Image #1]")
+        let outgoing = ComposerOutgoing(text: "look [Image #1]", images: [SessionEvent.UserMessageImageRef(n: 1, path: shot.path)])
+        var sends: [ComposerOutgoing] = []
+        var staged: [ComposerImageData] = []
+        let ok = await a.composerSend(outgoing, send: { out in
+            sends.append(out)
+            if out.images.first?.path == shot.path { throw self.rpcFailure("image_file_unreadable", n: 1, message: "[Image #1] could not be read") }
+        }, stage: { data in staged.append(data); return StagedImage(path: "/t/image_1.png", imagesOnSend: true) })
+        XCTAssertTrue(ok)
+        XCTAssertEqual(sends, [outgoing, ComposerOutgoing(text: "look [Image #1]", images: [SessionEvent.UserMessageImageRef(n: 1, path: "/t/image_1.png")])])
+        XCTAssertEqual(staged, [ComposerImageData(data: bytes, mediaType: "image/png")], "the file's own bytes, raw")
+        XCTAssertNil(a.composerNotice, "transparent — nothing to tell the user")
+    }
+
+    func testEveryUnreadableFileOfADraftIsStagedAndNothingElseIsRetried() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let one = dir.appendingPathComponent("one.png"), two = dir.appendingPathComponent("two.png"), fine = dir.appendingPathComponent("fine.png")
+        for url in [one, two, fine] { try generatedPNG(width: 8, height: 8, noise: false).write(to: url) }
+        let a = adapter(mode: "code")
+        for url in [one, fine, two] { _ = a.composerImageIntake.attach(.file(path: url.path)) }
+        let outgoing = ComposerOutgoing(text: "[Image #1] [Image #2] [Image #3]", images: [
+            SessionEvent.UserMessageImageRef(n: 1, path: one.path), SessionEvent.UserMessageImageRef(n: 2, path: fine.path), SessionEvent.UserMessageImageRef(n: 3, path: two.path),
+        ])
+        var sends: [ComposerOutgoing] = []
+        var k = 0
+        let ok = await a.composerSend(outgoing, send: { out in
+            sends.append(out)
+            // The daemon names the FIRST unreadable ref each time.
+            for ref in out.images where ref.path == one.path || ref.path == two.path { throw self.rpcFailure("image_file_unreadable", n: ref.n) }
+        }, stage: { _ in k += 1; return StagedImage(path: "/t/image_\(k).png", imagesOnSend: true) })
+        XCTAssertTrue(ok)
+        XCTAssertEqual(sends.count, 3)
+        XCTAssertEqual(sends.last?.images.map(\.path), ["/t/image_1.png", fine.path, "/t/image_2.png"], "the readable file kept its own path")
+    }
+
+    func testAFileTheAppCannotReadEitherKeepsTheDraftAndSaysWhy() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let shot = dir.appendingPathComponent("shot.png")
+        try generatedPNG(width: 8, height: 8, noise: false).write(to: shot)
+        let a = adapter(mode: "code")
+        _ = a.composerImageIntake.attach(.file(path: shot.path))
+        try FileManager.default.removeItem(at: shot) // gone before the send
+        let outgoing = ComposerOutgoing(text: "[Image #1]", images: [SessionEvent.UserMessageImageRef(n: 1, path: shot.path)])
+        var sends = 0
+        let ok = await a.composerSend(outgoing, send: { _ in sends += 1; throw self.rpcFailure("image_file_unreadable", n: 1, message: "[Image #1] could not be read — check Files & Folders") },
+                                      stage: { _ in XCTFail("nothing to stage"); return StagedImage(path: "", imagesOnSend: true) })
+        XCTAssertFalse(ok)
+        XCTAssertEqual(sends, 1)
+        XCTAssertEqual(a.composerNotice, "[Image #1] could not be read — check Files & Folders")
+        XCTAssertFalse(a.composerImages.isEmpty, "the attachment stays in the draft")
+    }
+
+    func testOtherRefusalsAreNotRetriedAndTheirSentenceIsShownOnlyWhenImagesRodeAlong() async {
+        let a = adapter(mode: "code")
+        _ = a.composerImageIntake.attach(ComposerImage(data: png, mediaType: "image/png"))
+        let withImages = ComposerOutgoing(text: "[Image #1]", images: [SessionEvent.UserMessageImageRef(n: 1, path: "/t/image_1.png")])
+        var sends = 0
+        var ok = await a.composerSend(withImages, send: { _ in sends += 1; throw self.rpcFailure("image_input_unsupported", message: "The selected model doesn't support images") },
+                                      stage: { _ in XCTFail("not an unreadable file"); return StagedImage(path: "", imagesOnSend: true) })
+        XCTAssertFalse(ok)
+        XCTAssertEqual(sends, 1)
+        XCTAssertEqual(a.composerNotice, "The selected model doesn't support images")
+        // A transport failure is not a daemon sentence.
+        a.composerNotice = nil
+        ok = await a.composerSend(withImages, send: { _ in throw URLError(.notConnectedToInternet) }, stage: { _ in StagedImage(path: "", imagesOnSend: true) })
+        XCTAssertFalse(ok)
+        XCTAssertEqual(a.composerNotice, "couldn't send — try again")
+        // A message with no images keeps failing quietly, as it always did.
+        a.composerNotice = nil
+        ok = await a.composerSend(ComposerOutgoing(text: "hi", images: []), send: { _ in throw self.rpcFailure("whatever") }, stage: { _ in StagedImage(path: "", imagesOnSend: true) })
+        XCTAssertFalse(ok)
+        XCTAssertNil(a.composerNotice)
+    }
+
+    /// Finding 6: the hello did not announce original-path support (an older daemon) — a FILE goes into the text, not `images`.
+    func testAnOlderDaemonIsSentAFilesPathInTheText() async throws {
+        var draft = ComposerImageDraft()
+        _ = draft.add(.file(path: "/Users/me/My Shot.png"))
+        let older = try await resolveComposerImages("see [Image #1]", draft: draft, originalPaths: false) { _ in XCTFail("a file is never staged"); return StagedImage(path: "", imagesOnSend: true) }
+        XCTAssertEqual(older, ComposerOutgoing(text: "see /Users/me/My Shot.png", images: []))
+        let current = try await resolveComposerImages("see [Image #1]", draft: draft, originalPaths: true) { _ in StagedImage(path: "", imagesOnSend: true) }
+        XCTAssertEqual(current, ComposerOutgoing(text: "see [Image #1]", images: [SessionEvent.UserMessageImageRef(n: 1, path: "/Users/me/My Shot.png")]))
+        // Data alone does not depend on the capability: its path is one the daemon staged.
+        var data = ComposerImageDraft()
+        _ = data.add(ComposerImage(data: png, mediaType: "image/png"))
+        let staged = try await resolveComposerImages("[Image #1]", draft: data, originalPaths: false) { _ in StagedImage(path: "/t/image_1.png", imagesOnSend: true) }
+        XCTAssertEqual(staged.images.count, 1)
+        // The adapter's door passes the capability through.
+        let a = adapter(mode: "code")
+        a.composerImages = draft
+        let viaAdapter = await a.composerTextForSend("see [Image #1]", originalPaths: false) { _ in StagedImage(path: "", imagesOnSend: true) }
+        XCTAssertEqual(viaAdapter, ComposerOutgoing(text: "see /Users/me/My Shot.png", images: []))
     }
 
     func testFilesThatAreNotImagesByTheirBytesAreNotAttachments() throws {

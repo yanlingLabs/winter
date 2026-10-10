@@ -42,6 +42,8 @@ function fakeClient(opts: {
   stageImage?: (sessionId: string, mediaType: string, dataBase64: string) => Promise<{ path: string; imagesOnSend?: boolean }>;
   /** Answers `send` itself (a refusal, say); the call is recorded either way. */
   send?: (...args: unknown[]) => Promise<unknown>;
+  /** The daemon's hello announcement of original-path `images` support (a real client always answers). */
+  supportsOriginalImagePaths?: () => boolean;
 } = {}) {
   const calls: { method: string; args: unknown[] }[] = [];
   const rec = (method: string) => (...args: unknown[]) => {
@@ -54,6 +56,7 @@ function fakeClient(opts: {
       ? (...args: unknown[]) => { calls.push({ method: "send", args }); return opts.send!(...args); }
       : rec("send"),
     steer: rec("steer"),
+    ...(opts.supportsOriginalImagePaths ? { supportsOriginalImagePaths: opts.supportsOriginalImagePaths } : {}),
     interrupt: rec("interrupt"),
     setModel: rec("setModel"),
     setPolicy: rec("setPolicy"),
@@ -2596,6 +2599,68 @@ describe("App — code-mode image input", () => {
     await until(() => callsOf(client, "sendToThread").length > 0, "the child-view message to go out");
     expect(client.calls.find((c) => c.method === "sendToThread")?.args).toEqual(["s1", "th_1", "look /tmp/winter-session-s1/images/image_1.png"]);
     expect(client.calls.some((c) => c.method === "send" || c.method === "steer")).toBe(false);
+  });
+
+  // The exact sequence of review finding 4: send #1 → attach a NEW #1 while that send is in flight → the send is refused.
+  // The refused text used to come back as "[Image #1]" with the NEW image bound to it (the old one was not restored).
+  test("a refused send hands back the OLD image under a fresh number even though a new image took #1 in the meantime", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
+    const a = join(dir, "old.png");
+    const b = join(dir, "new.png");
+    writeFileSync(a, PNG);
+    writeFileSync(b, PNG);
+    try {
+      let refuse!: (e: Error) => void;
+      let first = true;
+      const client = fakeClient({
+        request: syncConfig(true),
+        send: () => { if (first) { first = false; return new Promise((_, r) => { refuse = r; }); } return Promise.resolve(1); },
+      });
+      const { stdin, lastFrame } = render(<App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} />);
+      await wait();
+      stdin.write("old ");
+      await wait();
+      stdin.write(a);
+      await until(() => plain(lastFrame()).includes("old [Image #1]"), "the first path to become [Image #1]");
+      stdin.write("\r");
+      await until(() => callsOf(client, "send").length === 1, "the first send to be in flight");
+      expect(callsOf(client, "send")[0]!.args).toEqual(["s1", "old [Image #1]", [{ n: 1, path: a }]]);
+      // While it is in flight the user attaches another image: the composer is empty and the counter restarted → #1 again.
+      stdin.write("new ");
+      await wait();
+      stdin.write(b);
+      await until(() => plain(lastFrame()).includes("new [Image #1]"), "the second path to become [Image #1] too");
+      refuse(new Error("The selected model doesn't support images"));
+      await until(() => plain(lastFrame()).includes("message not sent"), "the refusal note");
+      await until(() => plain(lastFrame()).includes("old [Image #2]") && plain(lastFrame()).includes("new [Image #1]"), "the refused draft to come back renumbered, beside the new one");
+      expect(plain(lastFrame())).not.toContain("old [Image #1]"); // it must not claim #1
+      stdin.write("\r");
+      await until(() => callsOf(client, "send").length === 2, "the retry to be sent");
+      const [, text, images] = callsOf(client, "send")[1]!.args as [string, string, Array<{ n: number; path: string }>];
+      expect(text).toBe("old [Image #2]\nnew [Image #1]");
+      // Each placeholder names ITS OWN file.
+      expect([...images].sort((x, y) => x.n - y.n)).toEqual([{ n: 1, path: b }, { n: 2, path: a }]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }, 30_000);
+
+  test("a daemon that did not announce original-path support gets the file's path substituted into the text", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
+    const path = join(dir, "My Shot.png");
+    writeFileSync(path, PNG);
+    try {
+      const client = fakeClient({ request: syncConfig(true), supportsOriginalImagePaths: () => false });
+      const { stdin, lastFrame } = render(<App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} />);
+      await wait();
+      stdin.write("see ");
+      await wait();
+      stdin.write(path.replace(/ /g, "\\ "));
+      await until(() => plain(lastFrame()).includes("see [Image #1]"), "the path to become [Image #1]");
+      stdin.write("\r");
+      await until(() => callsOf(client, "send").length > 0, "the draft to be sent");
+      expect(callsOf(client, "stageImage")).toEqual([]);
+      // No `images` (an older daemon would drop or refuse it): the path rides in the text, as it always did.
+      expect(callsOf(client, "send")[0]!.args).toEqual(["s1", `see ${path}`]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   test("a child view's message naming an ORIGINAL file gets that file's own path in the text", async () => {

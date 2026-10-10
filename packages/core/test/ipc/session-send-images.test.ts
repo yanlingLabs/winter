@@ -7,11 +7,11 @@
 // and present in the text, a code session, a local caller, a model that reads images.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, openSync, closeSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  ConnWriter, ERR, IMAGE_FILE_MAX_BYTES, IMAGE_FILE_TOO_LARGE_MESSAGE, IMAGE_INPUT_UNSUPPORTED, IMAGE_REFERENCE_INVALID, IMAGE_SESSION_NOT_CODE, IMAGE_SESSION_NO_MODEL,
+  ConnWriter, DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, ERR, HelloResult, IMAGE_FILE_MAX_BYTES, IMAGE_FILE_TOO_LARGE_MESSAGE, IMAGE_FILE_UNREADABLE, IMAGE_INPUT_UNSUPPORTED, IMAGE_REFERENCE_INVALID, IMAGE_SESSION_NOT_CODE, IMAGE_SESSION_NO_MODEL,
   IMAGE_TOO_LARGE, IMAGE_TYPE_UNSUPPORTED, LineDecoder, METHODS, PROTOCOL_VERSION, SessionEvent,
   USER_MESSAGE_IMAGES_MAX, encodeLine, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
@@ -204,20 +204,128 @@ describe("session.send / session.steer — images (code-mode image input)", () =
     c.close();
   });
 
-  test("every type the Read tool prepares is accepted (png/jpeg/gif/webp/heic/tiff/bmp), whatever the file is called", async () => {
+  test("every type the Read tool prepares is accepted (png/jpeg/gif/webp/heic/tiff/bmp) under the extension Read opens it by, in any case", async () => {
     const { c, sid } = await staged();
     const dir = userDir();
     const files: Array<[string, Uint8Array]> = [
-      ["a.png", PNG], ["b.jpg", new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16])], ["c.gif", new Uint8Array([...Buffer.from("GIF89a"), 1, 0, 1, 0])],
+      ["a.png", PNG], ["b.jpg", new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16])], ["b2.jpeg", new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16])],
+      ["c.gif", new Uint8Array([...Buffer.from("GIF89a"), 1, 0, 1, 0])],
       ["d.webp", new Uint8Array([...Buffer.from("RIFF"), 4, 0, 0, 0, ...Buffer.from("WEBPVP8 ")])],
       ["e.heic", new Uint8Array([0, 0, 0, 24, ...Buffer.from("ftypheic"), 0, 0, 0, 0])],
-      ["f.tiff", new Uint8Array([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0])], ["g.bmp", new Uint8Array([...Buffer.from("BM"), 0, 0, 0, 0, 0, 0])],
-      ["no-extension", PNG],
+      ["f.tiff", new Uint8Array([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0])], ["f2.tif", new Uint8Array([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0])],
+      ["g.bmp", new Uint8Array([...Buffer.from("BM"), 0, 0, 0, 0, 0, 0])],
+      ["UPPER.PNG", PNG], ["Mixed.JpEg", new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16])],
+      // The extension decides, not what the bytes are: a PNG called .jpg is Read's problem (it sniffs it), and is accepted.
+      ["png-bytes.jpg", PNG],
     ];
     for (const [name, bytes] of files) {
       writeFileSync(join(dir, name), bytes);
       const res = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: join(dir, name) }] });
       expect({ name, error: res.error }).toEqual({ name, error: undefined });
+    }
+    c.close();
+  });
+
+  // The runtime Read tool opens a file as an image by the EXTENSION of the path the model types
+  // (`extname(resolve(path))`, lowercased — `IMAGE_EXTS` in its tools/impl/read.ts) and by nothing else: any
+  // other extension falls through to its plain-text reader and hands the model binary junk. A real PNG called
+  // `shot.dng` therefore must not be accepted as a path.
+  test("Read decides by EXTENSION: an image file whose spelled extension Read does not open is refused, whatever its bytes are", async () => {
+    const { store, c, sid } = await staged();
+    const dir = userDir();
+    const names = ["shot.dng", "shot.nef", "shot.cr2", "shot.arw", "shot.heif", "shot.hif", "shot.heics", "shot.jpe", "shot.jfif", "no-extension", "shot.png.txt", "shot.", ".png", "shot.pngx", "shot.svg"];
+    for (const name of names) writeFileSync(join(dir, name), PNG_FILE); // real PNG bytes in every one
+    const before = store.read(sid).length;
+    for (const name of names) {
+      for (const method of [METHODS.sessionSend, METHODS.sessionSteer]) {
+        const res = await c.request(method, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: join(dir, name) }] });
+        expect({ name, method, code: res.error?.data?.code }).toEqual({ name, method, code: IMAGE_TYPE_UNSUPPORTED });
+        expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+        expect(res.error.data.n).toBe(1);
+        for (const secret of [join(dir, name), "SECRETNAME", dir]) expect(JSON.stringify(res.error)).not.toContain(secret);
+      }
+    }
+    expect(store.read(sid).length).toBe(before);
+
+    // The extension is judged AS SPELLED: Read never follows a link to choose its reader.
+    writeFileSync(join(dir, "real.png"), PNG_FILE);
+    writeFileSync(join(dir, "x.dng"), PNG_FILE);
+    symlinkSync(join(dir, "x.dng"), join(dir, "link.png"));    // spelled .png, target .dng: fine
+    symlinkSync(join(dir, "real.png"), join(dir, "alias.dng")); // spelled .dng, target .png: refused
+    const ok = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: join(dir, "link.png") }] });
+    expect(ok.error).toBeUndefined();
+    const refused = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: join(dir, "alias.dng") }] });
+    expect(refused.error.data.code).toBe(IMAGE_TYPE_UNSUPPORTED);
+    c.close();
+  });
+
+  // Same standard as the elicitation cards (`url-elicitation.ts`): control and direction-changing characters
+  // are refused, here refused rather than stripped (a stripped path names a different file). Leading or
+  // trailing whitespace is refused too: Read trims the path the model types, so it names another file.
+  test("a path with a control, line-separator or bidi character, or surrounding whitespace is refused typed — files that really exist, no echo", async () => {
+    const { store, c, sid } = await staged();
+    const dir = userDir();
+    const names: Array<[string, string]> = [
+      ["newline", "a\nb.png"], ["tab", "a\tb.png"], ["escape", "a\u001bb.png"], ["DEL", "a\u007fb.png"], ["C1 NEL", "a\u0085b.png"], ["C1 CSI", "a\u009bb.png"],
+      ["LINE SEPARATOR", "a\u2028b.png"], ["PARAGRAPH SEPARATOR", "a\u2029b.png"],
+      ["LRM", "a\u200eb.png"], ["RLM", "a\u200fb.png"],
+      ["RLO", "gnp.\u202etxt.png"], ["LRE", "a\u202ab.png"], ["PDF", "a\u202cb.png"],
+      ["LRI", "a\u2066b.png"], ["RLI", "a\u2067b.png"], ["FSI", "a\u2068b.png"], ["PDI", "a\u2069b.png"],
+      ["leading newline", "\nlead2.png"],
+    ];
+    for (const [, name] of names) writeFileSync(join(dir, name), PNG_FILE);
+    const before = store.read(sid).length;
+    for (const [label, name] of names) {
+      for (const method of [METHODS.sessionSend, METHODS.sessionSteer]) {
+        const res = await c.request(method, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: join(dir, name) }] });
+        expect({ label, method, code: res.error?.data?.code }).toEqual({ label, method, code: IMAGE_REFERENCE_INVALID });
+        expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+        const wire = JSON.stringify(res.error);
+        for (const secret of [name, join(dir, name), "SECRETNAME"]) expect({ label, leaked: wire.includes(secret) }).toEqual({ label, leaked: false });
+      }
+    }
+    // Whitespace around the WHOLE path: Read trims the path the model types, so it would open another file.
+    for (const path of [` ${join(dir, "a.png")}`, `${join(dir, "a.png")} `, `${join(dir, "a.png")}\u00a0`, `\u3000${join(dir, "a.png")}`]) {
+      const res = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path }] });
+      expect({ path: JSON.stringify(path.replace(dir, "<dir>")), refused: res.error !== undefined }).toEqual({ path: JSON.stringify(path.replace(dir, "<dir>")), refused: true });
+    }
+    // A NUL cannot be in a file name at all; the daemon still refuses it before touching the disk.
+    const nul = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: `${dir}/a\u0000b.png` }] });
+    expect(nul.error.data.code).toBe(IMAGE_REFERENCE_INVALID);
+    expect(store.read(sid).length).toBe(before);
+    // Ordinary non-ASCII is fine (accents, CJK, emoji, a space inside).
+    for (const name of ["Écran 2026-10-10 à 14.02.png", "写真.png", "shot 🎉.png"]) {
+      writeFileSync(join(dir, name), PNG_FILE);
+      const ok = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: join(dir, name) }] });
+      expect({ name, error: ok.error }).toEqual({ name, error: undefined });
+    }
+    c.close();
+  });
+
+  test("a file the daemon cannot read AT ALL is image_file_unreadable, naming the placeholder — a vanished file, a withheld file, a withheld folder", async () => {
+    const { store, c, sid } = await staged();
+    const dir = userDir();
+    writeFileSync(join(dir, "locked.png"), PNG_FILE);
+    mkdirSync(join(dir, "vault"));
+    writeFileSync(join(dir, "vault", "inside.png"), PNG_FILE);
+    chmodSync(join(dir, "locked.png"), 0o000);
+    chmodSync(join(dir, "vault"), 0o000);
+    try {
+      const before = store.read(sid).length;
+      for (const [label, path] of [["missing", join(dir, "gone.png")], ["no read permission", join(dir, "locked.png")], ["folder withheld", join(dir, "vault", "inside.png")]] as const) {
+        for (const method of [METHODS.sessionSend, METHODS.sessionSteer]) {
+          const res = await c.request(method, { sessionId: sid, text: "x [Image #3]", images: [{ n: 3, path }] });
+          expect({ label, method, code: res.error?.data?.code, n: res.error?.data?.n }).toEqual({ label, method, code: IMAGE_FILE_UNREADABLE, n: 3 });
+          expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+          expect(res.error.message).toContain("[Image #3]");
+          expect(res.error.message).toContain("Files & Folders"); // says what to check
+          for (const secret of [path, "SECRETNAME", dir]) expect(JSON.stringify(res.error)).not.toContain(secret);
+        }
+      }
+      expect(store.read(sid).length).toBe(before);
+    } finally {
+      chmodSync(join(dir, "vault"), 0o700);
+      chmodSync(join(dir, "locked.png"), 0o600);
     }
     c.close();
   });
@@ -261,7 +369,7 @@ describe("session.send / session.steer — images (code-mode image input)", () =
     const cases: Array<[string, string, string]> = [
       ["not an image", join(dir, "notes.png"), IMAGE_TYPE_UNSUPPORTED],
       ["empty", join(dir, "empty.png"), IMAGE_TYPE_UNSUPPORTED],
-      ["missing", join(dir, "missing.png"), IMAGE_REFERENCE_INVALID],
+      ["missing", join(dir, "missing.png"), IMAGE_FILE_UNREADABLE],
       ["directory", join(dir, "folder.png"), IMAGE_REFERENCE_INVALID],
       ["fifo", fifo, IMAGE_REFERENCE_INVALID],
       ["over 64 MiB", big, IMAGE_TOO_LARGE],
@@ -319,17 +427,26 @@ describe("session.send / session.steer — images (code-mode image input)", () =
     // generated config files and their backups/. Each file holds real PNG bytes.
     const staging = join(realpathSync(tmpdir()), `claude-resume-${crypto.randomUUID()}`);
     cleanup.push(staging);
+    // Every entry is a `.png`-spelled path (Read opens an image by extension), so only the DENY rule — never the
+    // extension rule — can be what refuses it. The generated config files themselves are `.json`/dotfiles and so
+    // are never image paths at all; they are reached through a `.png`-spelled symlink, which the RESOLVED check catches.
     const denied: Array<[string, string]> = [
       ["run", plant(home, "run/pic.png")],
       ["runtimes", plant(home, "runtimes/bin/winter.png")],
+      ["run folder backups", plant(home, "cache/runs/abc/backups/shot.png")],
+      ["staging backups", plant(staging, "backups/shot.png")],
+    ];
+    const config: Array<[string, string]> = [
       ["sdk/.winter.json", plant(home, "sdk/.winter.json")],
       ["run folder .winter.json", plant(home, "cache/runs/abc/.winter.json")],
       ["run folder .claude.json", plant(home, "cache/runs/abc/.claude.json")],
       ["run folder .credentials.json", plant(home, "cache/runs/abc/.credentials.json")],
-      ["run folder backups", plant(home, "cache/runs/abc/backups/.claude.json.backup.1")],
       ["staging .claude.json", plant(staging, ".claude.json")],
-      ["staging backups", plant(staging, "backups/.claude.json.backup.2")],
     ];
+    config.forEach(([label, target], i) => {
+      symlinkSync(target, join(dir, `cfg-${i}.png`));
+      denied.push([`${label} via a .png-spelled link`, join(dir, `cfg-${i}.png`)]);
+    });
     mkdirSync(join(home, "outputs"), { recursive: true });
     symlinkSync(join(home, "run", "pic.png"), join(dir, "into-run.png"));
     symlinkSync(join(home, "runtimes"), join(dir, "runtimes-dir"));
@@ -337,6 +454,11 @@ describe("session.send / session.steer — images (code-mode image input)", () =
     denied.push(["symlink through a dir into runtimes", join(dir, "runtimes-dir", "bin", "winter.png")]);
     denied.push(["run, spelled with ..", `${home}/outputs/../run/pic.png`]);
     denied.push(["run, upper-cased (a case-insensitive volume)", `${home}/RUN/pic.png`]);
+    // …and the config files named directly are refused too (by extension — they are not image paths).
+    for (const [label, path] of config) {
+      const res = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path }] });
+      expect({ label, refused: res.error !== undefined }).toEqual({ label, refused: true });
+    }
     for (const [label, path] of denied) {
       for (const method of [METHODS.sessionSend, METHODS.sessionSteer]) {
         const res = await c.request(method, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path }] });
@@ -347,6 +469,19 @@ describe("session.send / session.steer — images (code-mode image input)", () =
       }
     }
     c.close();
+  });
+
+  // Version skew: a client holding a FILE stages nothing, so it cannot learn from `stageImage` whether the daemon
+  // takes an original path in `images`. The hello answer says so, before anything is sent.
+  test("hello announces that this daemon takes original image paths in images; an older daemon's answer (no features) still parses", async () => {
+    const { socketPath, tokens } = await staged();
+    const probe = await TestClient.connect(socketPath);
+    const hello = await probe.hello(tokens.harness, "probe");
+    expect(hello.result.features).toContain(DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS);
+    expect(DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS).toBe("image-original-paths");
+    expect(HelloResult.parse(hello.result).features).toEqual([DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS]);
+    expect(HelloResult.parse({ ok: true, serverVersion: "0.0.1", protocolVersion: PROTOCOL_VERSION }).features).toBeUndefined();
+    probe.close();
   });
 
   test("a daemon with no home wired cannot apply the home rule (the production daemon always has one)", async () => {

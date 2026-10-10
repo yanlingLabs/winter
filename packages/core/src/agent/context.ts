@@ -44,13 +44,15 @@ export const ULTRA_DELEGATION_INSTRUCTION = [
 ].join("\n\n");
 
 /** Code-mode image paths (2026-10-10, "raw image paths"): the ONE standing line that tells a code
- *  session's model what an image path in the user's message is. A staged copy (clipboard data the
- *  daemon wrote into the session's temp folder) is the session's to keep or move; any other image path
- *  is the user's own file, which must stay where it is. STATIC on purpose — no session id, no path, no
- *  per-message state — so it never breaks the prompt cache. Added by `assemble()` to every prompt that
- *  keeps the base slot (code, dispatch children), never to chat's or a dispatch coordinator's. */
+ *  session's model what an image path in the user's message is. A STAGED copy (clipboard data the daemon
+ *  wrote) always has the fixed shape `<temp>/winter-session-<id>/images/image_<k>.<ext>` (`stage-image.ts`),
+ *  and the session's own temp folder is where the model may keep or move things; any other image path is the
+ *  user's own file, which must stay where it is. The line names that SHAPE rather than "this session's temp
+ *  folder", which the prompt never states and the model cannot tell from `$TMPDIR` — and it stays STATIC: no
+ *  session id, no path, no per-message state, so it never moves the cached prefix. Added by `assemble()` to
+ *  every prompt that keeps the base slot (code, dispatch children), never to chat's or a dispatch coordinator's. */
 export const IMAGE_PATH_GUIDANCE =
-  "An image path in the user's message under this session's temp folder is a staged copy you may move to keep; any other image path is the user's own file — read or copy it, never move, rename or edit it unless the user asks.";
+  "An image path in the user's message that sits inside a `winter-session-…/images/` folder is a staged copy you may move to keep; any other image path is the user's own file — read or copy it, never move, rename or edit it unless the user asks.";
 
 const TRUNC = "\n[…truncated]";
 

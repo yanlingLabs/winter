@@ -54,7 +54,7 @@ describe("TUI image placeholders", () => {
     expect(d.add(data(PNG, "image/png"), "recalled [Image #1] and [Image #4]")).toBe(5);
   });
 
-  test("a refused send hands its attachments back under their own numbers (snapshot → clear → restore)", () => {
+  test("a refused send hands its attachments back: under their own numbers when free, under FRESH ones (rewritten in the text) when the user has reused them", () => {
     const d = new DraftImages();
     d.add(file("/Users/me/a.png"));
     d.add(data(PNG, "image/png"));
@@ -64,13 +64,32 @@ describe("TUI image placeholders", () => {
     expect(held.map(([n]) => n)).toEqual([3, 1]);
     d.clearBefore(d.mark());
     expect(d.referencedIn(text)).toEqual([]);
-    // Meanwhile the user attached something new — it starts from #1 again.
+    // Meanwhile the user attached something new — the counter had restarted, so it is #1 again.
     expect(d.add(file("/Users/me/new.png"))).toBe(1);
-    d.restore(held);
-    // A number the new draft reused is left alone; the other comes back, and the counter stays past it.
+    const back = d.restore(held, text);
+    // #3 was free and keeps its number; #1 was TAKEN by new.png, so a.png comes back as #4 (past every number
+    // in use here and in the text) and the handed-back text says so — "[Image #1]" must never mean new.png.
+    expect(back).toBe("[Image #3] and [Image #4]");
     expect(d.get(1)).toEqual(file("/Users/me/new.png"));
     expect(d.get(3)).toEqual(file("/Users/me/c.png"));
-    expect(d.add(file("/Users/me/after.png"))).toBe(4);
+    expect(d.get(4)).toEqual(file("/Users/me/a.png"));
+    expect(d.add(file("/Users/me/after.png"))).toBe(5);
+  });
+
+  test("restore leaves the text untouched when nothing collides, and renumbers every occurrence of a taken number", () => {
+    const d = new DraftImages();
+    d.add(file("/a.png"));
+    const held = d.snapshot("[Image #1] twice [Image #1] and [Image #01]");
+    d.clearBefore(d.mark());
+    expect(d.restore(held, "[Image #1]")).toBe("[Image #1]");
+    expect(d.get(1)).toEqual(file("/a.png"));
+    // Taken again: every spelling of #1 follows the attachment to its new number.
+    const d2 = new DraftImages();
+    d2.add(file("/a.png"));
+    const held2 = d2.snapshot("[Image #1] twice [Image #1] and [Image #01]");
+    d2.clearBefore(d2.mark());
+    d2.add(file("/new.png"));
+    expect(d2.restore(held2, "[Image #1] twice [Image #1] and [Image #01]")).toBe("[Image #2] twice [Image #2] and [Image #2]");
   });
 
   test("a FILE is its own path — nothing staged; DATA is staged; the text keeps the placeholders, images names the paths", async () => {
@@ -91,7 +110,24 @@ describe("TUI image placeholders", () => {
     await expect(stageDraftImages("[Image #3]", d, () => Promise.reject(new Error("nope")))).rejects.toThrow("nope");
   });
 
-  test("a draft of only FILES stages nothing at all and assumes a daemon that takes images", async () => {
+  test("a daemon that did not announce original-path support (an older one) gets a FILE's path in the text, not in images", async () => {
+    const d = new DraftImages();
+    d.add(file("/Users/me/My Shot.png"));
+    const out = await stageDraftImages("see [Image #1]", d, () => Promise.reject(new Error("a file is never staged")), { originalPaths: false });
+    expect(out.imagesOnSend).toBe(false);
+    expect(out.modelText).toBe("see /Users/me/My Shot.png");
+    // Announced (or not asked): images carries it.
+    const yes = await stageDraftImages("see [Image #1]", d, () => Promise.reject(new Error("never")), { originalPaths: true });
+    expect(yes.imagesOnSend).toBe(true);
+    expect(yes.images).toEqual([{ n: 1, path: "/Users/me/My Shot.png" }]);
+    // Clipboard DATA alone does not need the capability: its path is one the daemon staged.
+    const data1 = new DraftImages();
+    data1.add(data(PNG, "image/png"));
+    const staged = await stageDraftImages("[Image #1]", data1, async () => ({ path: "/t/image_1.png", imagesOnSend: true }), { originalPaths: false });
+    expect(staged.imagesOnSend).toBe(true);
+  });
+
+  test("a draft of only FILES stages nothing at all", async () => {
     const d = new DraftImages();
     d.add(file("/a.png"));
     d.add(file("/b.heic"));

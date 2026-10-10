@@ -12,7 +12,7 @@ import { join } from "node:path";
 import {
   ConnWriter, ERR, IMAGE_DATA_INVALID, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE, IMAGE_STAGE_FAILED, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED, LineDecoder, METHODS, PROTOCOL_VERSION,
-  NDJSON_MAX_LINE_BYTES, STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_LINE_HEADROOM_BYTES, STAGE_IMAGE_MAX_BYTES, STAGE_IMAGE_MEDIA_TYPES, encodeLine, type WritableSocket,
+  IMAGE_FILE_EXTENSIONS, NDJSON_MAX_LINE_BYTES, STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_LINE_HEADROOM_BYTES, STAGE_IMAGE_MAX_BYTES, STAGE_IMAGE_MEDIA_TYPES, encodeLine, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
@@ -125,6 +125,20 @@ describe("session.stageImage (code-mode image input)", () => {
     expect(realpathSync(res.result.path)).toBe(res.result.path);
     expect(new Uint8Array(readFileSync(res.result.path))).toEqual(PNG);
     expect(lstatSync(res.result.path).mode & 0o777).toBe(0o600);
+    c.close();
+  });
+
+  // The prompt's one static line tells the model a staged copy "sits inside a `winter-session-…/images/` folder" — so every
+  // staged path, whatever the type, must really have that shape.
+  test("every staged path has the shape the prompt line names: …/winter-session-<id>/images/image_<k>.<ext>", async () => {
+    const { store, c } = await boot();
+    const sid = store.createSession("global", { model: IMAGE_TAG });
+    for (const [mediaType, bytes] of [["image/png", PNG], ["image/jpeg", JPEG], ["image/heic", HEIC], ["image/tiff", TIFF]] as const) {
+      const res = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType, dataBase64: b64(bytes) });
+      expect(res.result.path).toMatch(/\/winter-session-[A-Za-z0-9_-]+\/images\/image_\d+\.(png|jpg|gif|webp|heic|tiff|bmp)$/);
+      // …and the extension is one the Read tool opens as an image (it dispatches on the extension alone).
+      expect(IMAGE_FILE_EXTENSIONS as readonly string[]).toContain(`.${res.result.path.split(".").pop()}`);
+    }
     c.close();
   });
 

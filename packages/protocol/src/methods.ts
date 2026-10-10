@@ -33,7 +33,16 @@ export const HelloResult = z.object({
   ok: z.literal(true),
   serverVersion: z.string(),
   protocolVersion: z.number().int(),
+  /** Optional capabilities this daemon has, by name (e.g. `DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS`) — absent from a daemon that
+   *  predates the field, which then has none. A client asks BEFORE it relies on one, so a newer client
+   *  against an older daemon falls back instead of sending what would be silently dropped or refused. */
+  features: z.array(z.string()).optional(),
 });
+/** `hello`'s `features`: `session.send`/`steer`'s `images` accepts the user's ORIGINAL image file by its
+ *  own absolute path (2026-10-10, "raw image paths"), not only a path `session.stageImage` wrote. A
+ *  client holding a FILE attachment sends it as a path only when the daemon says so; otherwise it
+ *  substitutes the path into the message text, as it always did for an older daemon. */
+export const DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS = "image-original-paths";
 
 /** The phone transport's hard per-frame ceiling, mirroring Swift's `maxFrameBytes` default
  *  (`IrohListener.swift` / `IrohDialer.swift`). An oversized frame does NOT produce an error — the
@@ -349,11 +358,14 @@ export const SessionHistoryResult = z.object({
  *      temp `images/` folder (no symlink), named `image_<k>.<ext>`; or
  *    - the user's ORIGINAL file — an absolute path that resolves (`realpath`, a symlink is fine) to a
  *      regular file of at most `IMAGE_FILE_MAX_BYTES`, whose MAGIC BYTES are an image type the runtime
- *      Read tool can prepare (png/jpeg/gif/webp/heic/tiff/bmp), and that the Read tool itself may read
+ *      Read tool can prepare (png/jpeg/gif/webp/heic/tiff/bmp) AND whose path, as spelled, ends in one of
+ *      `IMAGE_FILE_EXTENSIONS` (Read opens an image by extension alone), and that the Read tool itself may read
  *      (not under `<home>/run` or `<home>/runtimes`, and not a runtime's generated config — `sdk/.winter.json`,
  *      a run folder's or staging root's `.winter.json`/`.claude.json`/`.credentials.json` and `backups/**`;
  *      the rest of the home, `outputs/` included, is fine). It is never copied or downscaled; the
- *      runtime's Read tool prepares it for the model.
+ *      runtime's Read tool prepares it for the model. A path with a control or direction-changing
+ *      character, or leading/trailing whitespace (Read trims it), is refused. A file the daemon cannot
+ *      read answers `image_file_unreadable`.
  *  `n` is unique and `[Image #n]` appears in `text`; a non-code session refuses
  *  `image_session_not_code`, a non-local caller `image_reference_invalid`. Omitted (or empty) = no
  *  images. The array length is checked by the handler (typed), not here. */
@@ -575,6 +587,14 @@ export const STAGE_IMAGE_MAX_BYTES = (STAGE_IMAGE_B64_MAX_LENGTH / 4) * 3;
  *  `IMAGE_MAX_INPUT_BYTES` (64 MiB), the most it will prepare (shrink, and re-encode if it must).
  *  Keep the two equal. */
 export const IMAGE_FILE_MAX_BYTES = 64 * 1024 * 1024;
+/** The extensions the runtime Read tool opens as an image — `IMAGE_MIME`'s keys in its `tools/impl/read.ts`.
+ *  Read decides by the EXTENSION OF THE PATH THE MODEL TYPES (`extname(resolve(path))`, lowercased; a symlink
+ *  is not followed for it), never by content: any other extension falls through to its plain-text reader and
+ *  hands the model binary junk. So an original image file is accepted by `session.send` only under one of
+ *  these (`image_type_unsupported` otherwise), and a client attaches a file as its own path only under one
+ *  of these — every other image file is converted and staged instead (a staged name is chosen by the
+ *  daemon and always ends in one of them). Keep equal to the runtime's list. */
+export const IMAGE_FILE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic"] as const;
 /** The long edge a client downscales a clipboard image to, ONLY when its raw bytes do not fit
  *  `STAGE_IMAGE_MAX_BYTES` — the same size the runtime Read tool shrinks to (`IMAGE_MAX_LONG_EDGE`),
  *  Anthropic's documented size above which the service downscales anyway. */
@@ -601,6 +621,12 @@ export const IMAGE_STAGE_FAILED = "image_stage_failed";
  *  caller other than a local client. Nothing is appended. (An original file that is not an image,
  *  or is past `IMAGE_FILE_MAX_BYTES`, answers `image_type_unsupported` / `image_too_large`.) */
 export const IMAGE_REFERENCE_INVALID = "image_reference_invalid";
+/** `session.send`/`session.steer`'s `images` refusal for an original file the daemon could not read at all
+ *  (it vanished, or macOS withheld it from the daemon — a TCC-protected folder). `data.n` names the
+ *  `[Image #n]`. A client that CAN read the file itself (the Mac app, which holds the drag's access) reads
+ *  the bytes, stages them, and retries; the terminal client reports the message, which names the folder
+ *  access that may be missing. */
+export const IMAGE_FILE_UNREADABLE = "image_file_unreadable";
 export const SessionStageImageParams = z.object({
   sessionId: z.string().min(1),
   mediaType: z.enum(STAGE_IMAGE_MEDIA_TYPES),

@@ -128,19 +128,23 @@ func composerImage(fromImageData data: Data) -> ComposerImage? {
 /// onto white). What comes back may still exceed the cap only when nothing fits; the attach gate then
 /// refuses it with `composerImageTooLargeMessage`. `nil` when the bytes are not an image at all.
 func composerDownscaledImage(fromImageData data: Data) -> ComposerImage? {
-    guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0 else { return nil }
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+    return composerDownscaledImage(from: source, keepsJPEG: composerImageMediaType(of: data) == "image/jpeg")
+}
+
+/// `composerDownscaledImage` over an ImageIO source (a file read in place, or data in memory).
+func composerDownscaledImage(from source: CGImageSource, keepsJPEG: Bool) -> ComposerImage? {
+    guard CGImageSourceGetCount(source) > 0 else { return nil }
     let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
     let width = (props?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
     let height = (props?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
     let longEdge = max(width, height)
-    let sniffed = composerImageMediaType(of: data)
     let options: [CFString: Any] = [
         kCGImageSourceCreateThumbnailFromImageAlways: true,
         kCGImageSourceCreateThumbnailWithTransform: true,
         kCGImageSourceThumbnailMaxPixelSize: longEdge > 0 ? min(longEdge, composerImageMaxLongEdge) : composerImageMaxLongEdge,
     ]
     guard let rendered = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
-    let keepsJPEG = sniffed == "image/jpeg"
     var last: ComposerImage?
     if !keepsJPEG, let png = composerEncode(rendered, as: .png, quality: nil) {
         last = ComposerImage(data: png, mediaType: "image/png")
@@ -163,19 +167,72 @@ func composerRegularFileSize(_ path: String) -> Int? {
     return Int(info.st_size)
 }
 
-/// An image FILE as an attachment: its ORIGINAL path, with nothing read beyond its first 12 bytes — a
-/// plain file whose magic bytes are one of the seven types (never its name: an SVG or a corrupt file
-/// hands the whole paste back to AppKit, which types the path). `nil` otherwise. The size is the attach
-/// gate's business (`composerImageFileMaxBytes`).
+/// The extensions the runtime Read tool opens as an image — `IMAGE_FILE_EXTENSIONS` (protocol), the keys of
+/// `IMAGE_MIME` in the runtime's `tools/impl/read.ts`. Read dispatches on the EXTENSION of the path the model
+/// types (`extname(resolve(path))`, lowercased; a symlink is not followed) and on nothing else: a
+/// `shot.dng` or an extension-less file reaches the model as binary text however perfect an image it is. Keep
+/// equal to the daemon's list (the daemon refuses any other spelling).
+let composerReadImageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "heic"]
+
+/// Whether a file URL is one the Read tool opens as an image BY ITS NAME — the only kind that can ride as its own
+/// ORIGINAL path. (Every other image file is read here and STAGED instead: `composerImage(fromFile:)`.)
+func composerURLIsImage(_ url: URL) -> Bool {
+    url.isFileURL && composerReadImageExtensions.contains(url.pathExtension.lowercased())
+}
+
+/// Whether a file URL MAY be an image the composer can take: one Read opens by name, or another image type by
+/// its extension (a camera RAW, a `.heif`, a `.jpe`), or a file with no extension at all (its bytes decide, in
+/// `composerImages(from:)`). Names only — never bytes — so a drag's per-mouse-move check stays cheap.
+func composerURLMayBeImage(_ url: URL) -> Bool {
+    guard url.isFileURL else { return false }
+    if composerURLIsImage(url) || url.pathExtension.isEmpty { return true }
+    guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
+    return type.conforms(to: .image)
+}
+
+/// An image FILE as an attachment, decided by its first 12 bytes and its name — never by reading it whole unless
+/// it has to be staged:
+///   - a plain file the Read tool opens as an image BY NAME (`composerURLIsImage`) whose bytes are an image: its
+///     ORIGINAL path, nothing read beyond the header, never copied or staged (the size is the attach gate's
+///     business, `composerImageFileMaxBytes`);
+///   - any other image file — a camera RAW (`.dng` `.nef` `.cr2` `.arw`), a `.heif` / `.hif` / `.heics` / `.jpe` /
+///     `.jfif`, a file with no extension — which Read could not open as it is named: its bytes are read HERE (the
+///     app has the drag's access) and staged as DATA. Bytes that already are a type Read takes, other than a TIFF
+///     (which is what a camera RAW is), and fit one request go raw; the rest are decoded through ImageIO and
+///     converted, exactly as before (`composerDownscaledImage`);
+///   - anything ImageIO cannot read either (an SVG, a corrupt file, text): `nil`, so the whole paste goes back to
+///     AppKit, which types the path.
 func composerImage(fromFile url: URL) -> ComposerImage? {
     // A file-REFERENCE url (`/.file/id=…`, which some apps put on a pasteboard) is turned into its path first.
     let path = (url as NSURL).filePathURL?.path ?? url.path
-    guard composerRegularFileSize(path) != nil,
-          let handle = FileHandle(forReadingAtPath: path) else { return nil }
-    defer { try? handle.close() }
-    guard let header = try? handle.read(upToCount: 12), composerImageMediaType(of: header) != nil else { return nil }
-    return ComposerImage.file(path: path)
+    guard composerRegularFileSize(path) != nil, let handle = FileHandle(forReadingAtPath: path) else { return nil }
+    let header = (try? handle.read(upToCount: 12)) ?? Data()
+    try? handle.close()
+    if composerImageMediaType(of: header) != nil, composerURLIsImage(URL(fileURLWithPath: path)) { return ComposerImage.file(path: path) }
+    return composerStagedImage(fromFileAt: path)
 }
+
+/// An image file read HERE and turned into DATA to stage — whatever it is called. Bytes that already are a type
+/// Read takes, other than a TIFF (which is what a camera RAW is), and fit one request go RAW; anything else is
+/// decoded through ImageIO and converted (`composerDownscaledImage`). Also the Mac's fallback for an ORIGINAL file
+/// the daemon could not read (`FieldStateAdapter.composerSend`): this app, unlike the daemon, holds the drag's
+/// access to the folder. `nil` when it cannot be read or is no image.
+func composerStagedImage(fromFileAt path: String) -> ComposerImage? {
+    guard let size = composerRegularFileSize(path), let handle = FileHandle(forReadingAtPath: path) else { return nil }
+    let header = (try? handle.read(upToCount: 12)) ?? Data()
+    try? handle.close()
+    let sniffed = composerImageMediaType(of: header)
+    let rawOK: Set<String> = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/heic", "image/bmp"]
+    if let sniffed, rawOK.contains(sniffed), size <= composerImageMaxBytes,
+       let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe) {
+        return ComposerImage(data: data, mediaType: sniffed)
+    }
+    guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else { return nil }
+    return composerDownscaledImage(from: source, keepsJPEG: sniffed == "image/jpeg")
+}
+
+/// The daemon's typed `data.code` for an original file it could not read at all (`IMAGE_FILE_UNREADABLE`).
+let composerImageFileUnreadableCode = "image_file_unreadable"
 
 /// One CGImage encoded as `type` through ImageIO.
 func composerEncode(_ image: CGImage, as type: UTType, quality: Double?) -> Data? {
@@ -199,13 +256,6 @@ private func composerFlattenedOnWhite(_ image: CGImage) -> CGImage? {
     context.fill(rect)
     context.draw(image, in: rect)
     return context.makeImage()
-}
-
-/// Whether a file URL names an image by its type — the gate for treating a pasted/dropped file as an
-/// attachment rather than letting AppKit insert its path.
-func composerURLIsImage(_ url: URL) -> Bool {
-    guard url.isFileURL, let type = UTType(filenameExtension: url.pathExtension) else { return false }
-    return type.conforms(to: .image)
 }
 
 /// Whether a pasteboard string is TEXT the user meant to paste — anything but a lone URL. Office and
@@ -234,7 +284,7 @@ private func composerImageSource(on pasteboard: NSPasteboard) -> ComposerImageSo
         // File URLs decide alone: a Finder copy puts the file's ICON beside its URL, and reading image
         // data there would attach an icon. Any non-image file hands the whole paste back to AppKit
         // (it inserts paths, exactly as before).
-        return urls.allSatisfy(composerURLIsImage) ? .files(urls) : nil
+        return urls.allSatisfy(composerURLMayBeImage) ? .files(urls) : nil
     }
     if let text = pasteboard.string(forType: .string), composerStringIsPastedText(text) { return nil }
     if let type = pasteboard.availableType(from: [.png, .tiff]) { return .data(type) }
@@ -346,12 +396,12 @@ struct ComposerOutgoing: Equatable {
 /// **The one submit-time helper** every code-mode submit site goes through: resolve each attachment the
 /// text still references into the path the model is given, in order. A FILE is its own path — nothing is
 /// staged; DATA is staged raw (`stage` is `session.stageImage` for that session). When every stage
-/// answered `imagesOnSend` (trivially so when nothing was staged — a draft of files alone assumes a daemon
-/// that, being able to take an original path at all, takes `images`), the text goes as written
-/// (placeholders kept) with `images` naming each path; otherwise (an older daemon) each placeholder is
-/// replaced by its path in the text and `images` is empty. The first refusal throws — the caller sends
-/// nothing. A text with no live placeholder comes back unchanged, with no images, and stages nothing.
-func resolveComposerImages(_ text: String, draft: ComposerImageDraft,
+/// answered `imagesOnSend` — and, if any attachment is a FILE, the daemon announced it takes original paths
+/// (`originalPaths`: the hello's `image-original-paths`) — the text goes as written (placeholders kept) with
+/// `images` naming each path; otherwise (an older daemon) each placeholder is replaced by its path in the text
+/// and `images` is empty. The first refusal throws — the caller sends nothing. A text with no live placeholder
+/// comes back unchanged, with no images, and stages nothing.
+func resolveComposerImages(_ text: String, draft: ComposerImageDraft, originalPaths: Bool = true,
                            stage: (ComposerImageData) async throws -> StagedImage) async throws -> ComposerOutgoing {
     var refs: [SessionEvent.UserMessageImageRef] = []
     var imagesOnSend = true
@@ -364,6 +414,9 @@ func resolveComposerImages(_ text: String, draft: ComposerImageDraft,
         switch image {
         case .file(let path):
             refs.append(SessionEvent.UserMessageImageRef(n: n, path: path))
+            // A file stages nothing, so it cannot learn from `stageImage` whether the daemon takes an original
+            // path: the hello announcement says (`originalPaths`). An older daemon is sent the text instead.
+            if !originalPaths { imagesOnSend = false }
         case .data(let data):
             let staged = try await stage(data)
             refs.append(SessionEvent.UserMessageImageRef(n: n, path: staged.path))

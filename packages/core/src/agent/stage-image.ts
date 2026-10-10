@@ -22,9 +22,9 @@
 // agent could already write, and the file is unlinked; nothing is ever WRITTEN there.
 // The bytes are never logged, and no refusal message carries any of them.
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import {
-  IMAGE_DATA_INVALID, IMAGE_FILE_MAX_BYTES, IMAGE_FILE_TOO_LARGE_MESSAGE, IMAGE_REFERENCE_INVALID, IMAGE_STAGE_FAILED, USER_MESSAGE_IMAGES_MAX, USER_MESSAGE_IMAGES_MAX_MESSAGE, type UserMessageImageRef, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
+  IMAGE_DATA_INVALID, IMAGE_FILE_EXTENSIONS, IMAGE_FILE_MAX_BYTES, IMAGE_FILE_TOO_LARGE_MESSAGE, IMAGE_FILE_UNREADABLE, IMAGE_REFERENCE_INVALID, IMAGE_STAGE_FAILED, USER_MESSAGE_IMAGES_MAX, USER_MESSAGE_IMAGES_MAX_MESSAGE, type UserMessageImageRef, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
   STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, type STAGE_IMAGE_MEDIA_TYPES,
 } from "@yanlinglabs/winter-protocol";
 import { sandboxConfigFor } from "../runtime-sdk/mode-options";
@@ -37,7 +37,9 @@ export type StageImageMediaType = (typeof STAGE_IMAGE_MEDIA_TYPES)[number];
 /** A typed `session.stageImage` refusal — `code` is the wire's `data.code`; `internal` marks a
  *  daemon-side failure (`ERR.INTERNAL`) rather than the caller's input (`ERR.INVALID_PARAMS`). */
 export class StageImageRefusal extends Error {
-  constructor(public readonly code: string, message: string, public readonly internal = false) {
+  /** `n`: the `[Image #n]` a send-side refusal is about (`validateImageRefs`), carried in the wire error's
+   *  `data.n` so a client can act on that one attachment (the Mac stages an unreadable file itself). */
+  constructor(public readonly code: string, message: string, public readonly internal = false, public readonly n?: number) {
     super(message);
     this.name = "StageImageRefusal";
   }
@@ -293,27 +295,58 @@ function readDeniedByRuntime(path: string, home: string): boolean {
   return false;
 }
 
+/** Characters no original path may carry: C0 controls, DEL and the C1 controls, the line/paragraph
+ *  separators, the directional marks and the bidi embedding/override/isolate controls (U+200E/200F,
+ *  U+202A–202E, U+2066–2069) — the set the elicitation cards already refuse to show (`url-elicitation.ts`'s
+ *  `BIDI_CONTROLS`, here refused rather than stripped, since a stripped path names a different file). */
+const UNSAFE_PATH_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+
+const FILE_EXTENSIONS: ReadonlySet<string> = new Set(IMAGE_FILE_EXTENSIONS);
+
 /**
  * The ORIGINAL-file half of `validateImageRefs`: the user's own image file, named by its absolute path.
  * Never copied, never rewritten — the path is stored and handed to the model as the client spelled it.
- * It must be an absolute path whose `realpath` (a symlink is fine — the TARGET is judged) is a REGULAR
- * file that the runtime's Read tool itself may read (not in its read-deny set, `readDeniedByRuntime` — the
- * path as spelled AND the resolved one), whose first bytes are an image type the Read tool can prepare, and
- * that weighs at most `IMAGE_FILE_MAX_BYTES`. Only a
- * dozen header bytes are read — never the file — and the descriptor is the one that is `fstat`ed, so a
- * file swapped for a FIFO or a link after the resolve is refused rather than followed or waited on.
- * Every refusal names the placeholder, never the path.
+ *
+ * The path as SPELLED must be absolute, free of control and direction-changing characters (and of leading or
+ * trailing whitespace, which Read trims off the path the model types) and end in an extension the runtime's
+ * Read tool opens as an image (`IMAGE_FILE_EXTENSIONS`): Read dispatches on `extname(resolve(path))`, never on
+ * content, so `shot.dng` or a name with no extension would reach the model as binary text. The extension is
+ * judged AS SPELLED — a symlink `link.png → x.dng` is fine, `a.dng → real.png` is not, because Read does not
+ * follow the link to pick the reader. Its `realpath` (a symlink is fine — the TARGET is judged) is then a
+ * REGULAR file that the Read tool itself may read (not in its read-deny set, `readDeniedByRuntime` — the path
+ * as spelled AND the resolved one), whose first bytes are an image type the Read tool can prepare, and that
+ * weighs at most `IMAGE_FILE_MAX_BYTES`. Only a dozen header bytes are read — never the file — and the
+ * descriptor is the one that is `fstat`ed, so a file swapped for a FIFO or a link after the resolve is refused
+ * rather than followed or waited on. A file that cannot be resolved, opened or read at all is
+ * `image_file_unreadable` (carrying `n`). Every refusal names the placeholder, never the path.
  */
 function checkOriginalImage(ref: UserMessageImageRef, home: string | undefined): void {
-  const invalid = (why: string): never => { throw new StageImageRefusal(IMAGE_REFERENCE_INVALID, `[Image #${ref.n}] ${why}`); };
-  if (!isAbsolute(ref.path) || ref.path.includes("\0")) invalid("is not an absolute path to an image file");
+  const invalid = (why: string): never => { throw new StageImageRefusal(IMAGE_REFERENCE_INVALID, `[Image #${ref.n}] ${why}`, false, ref.n); };
+  const unreadable = (): never => {
+    throw new StageImageRefusal(
+      IMAGE_FILE_UNREADABLE,
+      `[Image #${ref.n}] could not be read — it may have moved, or macOS may be keeping its folder from Winter (System Settings ▸ Privacy & Security ▸ Files & Folders)`,
+      false, ref.n,
+    );
+  };
+  if (!isAbsolute(ref.path)) invalid("is not an absolute path to an image file");
+  if (UNSAFE_PATH_CHARS.test(ref.path)) invalid("has a path with control or direction-changing characters");
+  if (ref.path !== ref.path.trim()) invalid("has a path with leading or trailing whitespace, which the Read tool trims away");
+  const spelled = resolve(ref.path);
+  if (!FILE_EXTENSIONS.has(extname(spelled).toLowerCase())) {
+    throw new StageImageRefusal(
+      IMAGE_TYPE_UNSUPPORTED,
+      `[Image #${ref.n}] must end in ${IMAGE_FILE_EXTENSIONS.join(", ")} for the Read tool to open it as an image — copy or convert it first`,
+      false, ref.n,
+    );
+  }
   const denied = "is one of Winter's own run, runtime or configuration files, which sessions cannot read";
-  if (home !== undefined && readDeniedByRuntime(resolve(ref.path), home)) invalid(denied);
+  if (home !== undefined && readDeniedByRuntime(spelled, home)) invalid(denied);
   let real: string;
-  try { real = realpathSync(ref.path); } catch { return invalid("is not an image file that exists"); }
+  try { real = realpathSync(ref.path); } catch { return unreadable(); }
   if (home !== undefined && readDeniedByRuntime(real, home)) invalid(denied);
   let fd: number;
-  try { fd = openSync(real, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW); } catch { return invalid("is not an image file that can be read"); }
+  try { fd = openSync(real, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW); } catch { return unreadable(); }
   try {
     const st = fstatSync(fd);
     if (!st.isFile()) invalid("is not a regular image file");
@@ -325,11 +358,11 @@ function checkOriginalImage(ref: UserMessageImageRef, home: string | undefined):
         if (n === 0) break;
         filled += n;
       }
-    } catch { invalid("is not an image file that can be read"); }
+    } catch { unreadable(); }
     if (sniffImageMediaType(header.subarray(0, filled)) === undefined) {
-      throw new StageImageRefusal(IMAGE_TYPE_UNSUPPORTED, `[Image #${ref.n}] is not an image: ${IMAGE_TYPES_MESSAGE}`);
+      throw new StageImageRefusal(IMAGE_TYPE_UNSUPPORTED, `[Image #${ref.n}] is not an image: ${IMAGE_TYPES_MESSAGE}`, false, ref.n);
     }
-    if (st.size > IMAGE_FILE_MAX_BYTES) throw new StageImageRefusal(IMAGE_TOO_LARGE, IMAGE_FILE_TOO_LARGE_MESSAGE);
+    if (st.size > IMAGE_FILE_MAX_BYTES) throw new StageImageRefusal(IMAGE_TOO_LARGE, IMAGE_FILE_TOO_LARGE_MESSAGE, false, ref.n);
   } finally {
     try { closeSync(fd); } catch { /* already closed */ }
   }

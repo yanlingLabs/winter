@@ -145,6 +145,9 @@ export interface AppClient {
    *  `imagesOnSend` when the daemon takes `images` on send/steer), rejects with the daemon's refusal
    *  (its message is what the note shows). */
   stageImage(sessionId: string, mediaType: string, dataBase64: string): Promise<StagedImage>;
+  /** Whether the daemon announced (hello `features`) that it takes the user's ORIGINAL image file by path in
+   *  `images`. Absent on a fake or a client that cannot tell: treated as yes (the real client always answers). */
+  supportsOriginalImagePaths?(): boolean;
 }
 
 /** Phase 3d T2 — everything the reducer's `dispatch` can be fed: every real wire `SessionEvent`
@@ -1143,9 +1146,10 @@ export function App({
       // The text goes back WITH its `[Image #n]` placeholders, so the attachments they name come back
       // too (a refused file, or a model switched to a text-only one since the attach, must not turn
       // the placeholders into dead text).
-      draftImagesRef.current.restore(held);
+      // …under fresh numbers where the user has meanwhile attached something under the same one.
+      const handedBack = draftImagesRef.current.restore(held, staged.text);
       const current = composerStateRef.current.text;
-      injectIntoComposer("replace", current.length === 0 ? staged.text : `${staged.text}\n${current}`);
+      injectIntoComposer("replace", current.length === 0 ? handedBack : `${handedBack}\n${current}`);
     });
   };
   const submitQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -1159,7 +1163,11 @@ export function App({
       if (hasImages) {
         try {
           // A file is its own path (nothing staged); only clipboard DATA goes through `session.stageImage`, raw.
-          outgoing = await stageDraftImages(text, images, (image) => client.stageImage(sessionId, image.mediaType, Buffer.from(image.bytes).toString("base64")));
+          outgoing = await stageDraftImages(
+            text, images,
+            (image) => client.stageImage(sessionId, image.mediaType, Buffer.from(image.bytes).toString("base64")),
+            { originalPaths: client.supportsOriginalImagePaths?.() ?? true },
+          );
         } catch (err: unknown) {
           appendNote(err instanceof Error ? err.message : String(err));
           // Hand the refused draft back WITHOUT losing whatever was typed since: it goes first,

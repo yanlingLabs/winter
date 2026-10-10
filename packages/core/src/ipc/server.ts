@@ -8,7 +8,7 @@ import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
   HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
   ComputerUseStatusParams, ComputerUseRequestPermissionParams, ComputerUseAppsListParams, ComputerUseAppsSetParams, ComputerUseSetSettingsParams,
-  SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
+  DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, SessionStageImageParams, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE, IMAGE_REFERENCE_INVALID, type UserMessageImageRef,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE,
   SessionHistoryParams,
   ApprovalListParams,
@@ -1224,7 +1224,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     try {
       return validateImageRefs(sessionId, text, images, { winterHome: opts.winterHome });
     } catch (err) {
-      if (err instanceof StageImageRefusal) throw new RpcFailure(err.internal ? ERR.INTERNAL : ERR.INVALID_PARAMS, err.message, { code: err.code });
+      if (err instanceof StageImageRefusal) throw new RpcFailure(err.internal ? ERR.INTERNAL : ERR.INVALID_PARAMS, err.message, { code: err.code, ...(err.n === undefined ? {} : { n: err.n }) });
       throw new RpcFailure(ERR.INTERNAL, "could not check the message's images", { code: IMAGE_REFERENCE_INVALID });
     }
   }
@@ -2056,7 +2056,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       if (socket.data.helloTimer) { clearTimeout(socket.data.helloTimer); socket.data.helloTimer = null; }
       socket.data.decoder = new LineDecoder(); // authed: default 8 MiB line cap
       if (p.role === "harness") harnessConns.add(socket.data);
-      return { ok: true, serverVersion: opts.serverVersion, protocolVersion: PROTOCOL_VERSION };
+      // `features`: what this daemon can do that a client must know BEFORE it relies on it (an older daemon
+      // omits the field, and the client then falls back).
+      return { ok: true, serverVersion: opts.serverVersion, protocolVersion: PROTOCOL_VERSION, features: [DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS] };
     }
 
     if (socket.data.authedRole === null) throw new RpcFailure(ERR.UNAUTHORIZED, "hello required first");

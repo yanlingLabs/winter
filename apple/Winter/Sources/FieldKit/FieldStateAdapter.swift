@@ -1154,13 +1154,13 @@ final class FieldStateAdapter: ObservableObject {
     /// sends its text literally and drops its attachments, silently — images are a code-session
     /// feature, and a refusal there would only block the message. A row not loaded yet is left to
     /// the daemon.
-    func composerTextForSend(_ text: String, stage: (ComposerImageData) async throws -> StagedImage) async -> ComposerOutgoing? {
+    func composerTextForSend(_ text: String, originalPaths: Bool = true, stage: (ComposerImageData) async throws -> StagedImage) async -> ComposerOutgoing? {
         if let row = currentSessionRow(), !composerImageInputEnabled(row: row) {
             composerImages = ComposerImageDraft()
             return ComposerOutgoing(text: text, images: [])
         }
         do {
-            return try await resolveComposerImages(text, draft: composerImages, stage: stage)
+            return try await resolveComposerImages(text, draft: composerImages, originalPaths: originalPaths, stage: stage)
         } catch let error as RpcError {
             composerNotice = error.message
         } catch let refusal as ComposerImagesRefusal {
@@ -1169,6 +1169,53 @@ final class FieldStateAdapter: ObservableObject {
             composerNotice = "couldn't reach the daemon — try again"
         }
         return nil
+    }
+
+    /// **Every code-mode submit site's SEND** (after `composerTextForSend`): sends `outgoing` through `send`, and
+    /// — one fallback — when the daemon answers `image_file_unreadable` for a FILE attachment (a folder macOS
+    /// keeps from the daemon, a temporary screenshot path that has since gone), reads that file HERE (this app
+    /// holds the drag's access), stages its bytes (`stage`), swaps the placeholder's path for the staged one and
+    /// sends again — transparently, once per such file. Answers whether the message went. On any other
+    /// refusal, or a file this app cannot read either, nothing more is tried: the daemon's own sentence goes on
+    /// the notice line when the message carried images, and the draft stays in the composer.
+    func composerSend(_ outgoing: ComposerOutgoing,
+                      send: (ComposerOutgoing) async throws -> Void,
+                      stage: (ComposerImageData) async throws -> StagedImage) async -> Bool {
+        var current = outgoing
+        var staged = Set<Int>()
+        while true {
+            do {
+                try await send(current)
+                return true
+            } catch let error as RpcError {
+                guard error.data?["code"]?.stringValue == composerImageFileUnreadableCode,
+                      let n = error.data?["n"]?.intValue, !staged.contains(n),
+                      let index = current.images.firstIndex(where: { $0.n == n }),
+                      case .file(let path)? = composerImages.images[n], path == current.images[index].path,
+                      let image = composerStagedImage(fromFileAt: path),
+                      case .data(let data) = image
+                else {
+                    if !current.images.isEmpty { composerNotice = error.message }
+                    return false
+                }
+                do {
+                    let result = try await stage(data)
+                    current = ComposerOutgoing(text: current.text, images: current.images.enumerated().map { i, ref in
+                        i == index ? SessionEvent.UserMessageImageRef(n: ref.n, path: result.path) : ref
+                    })
+                    staged.insert(n)
+                } catch let stageError as RpcError {
+                    composerNotice = stageError.message
+                    return false
+                } catch {
+                    composerNotice = "couldn't reach the daemon — try again"
+                    return false
+                }
+            } catch {
+                if !current.images.isEmpty { composerNotice = "couldn't send — try again" }
+                return false
+            }
+        }
     }
 
     /// A sent draft's attachments go with it, and so does any notice about it.

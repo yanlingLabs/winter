@@ -851,6 +851,11 @@ extension WinterClient {
     /// `image_input_unsupported` carries exactly "The selected model doesn't support images". Local
     /// clients only (never remote-allowlisted). The bytes are never logged.
     public func stageImage(sessionId: String, mediaType: String, data: Data) async throws -> StagedImage {
+        // The daemon's own cap, checked here first so a too-big image is a typed refusal on the caller's side
+        // instead of a request line the daemon cannot take (`request` also measures the ENCODED line itself).
+        guard (data.count + 2) / 3 * 4 <= Self.stageImageMaxBase64Length else {
+            throw RpcError(code: -32602, message: "The image is too large to attach", data: .object(["code": .string("image_too_large")]))
+        }
         let r = try await request("session.stageImage", params: obj([
             "sessionId": .string(sessionId), "mediaType": .string(mediaType),
             "dataBase64": .string(data.base64EncodedString()),

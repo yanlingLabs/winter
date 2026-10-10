@@ -196,7 +196,7 @@ describe("winterSystemPromptFor — the engine's composed instructions, per mode
 // ------------------------------------------------------------------------------------------------
 
 describe("code-mode image-path guidance", () => {
-  const LINE = "An image path in the user's message under this session's temp folder is a staged copy you may move to keep; any other image path is the user's own file — read or copy it, never move, rename or edit it unless the user asks.";
+  const LINE = "An image path in the user's message that sits inside a `winter-session-…/images/` folder is a staged copy you may move to keep; any other image path is the user's own file — read or copy it, never move, rename or edit it unless the user asks.";
 
   test("the line is exactly the ruled sentence", () => {
     expect(IMAGE_PATH_GUIDANCE).toBe(LINE);
@@ -228,7 +228,10 @@ describe("code-mode image-path guidance", () => {
     const a = winterSystemPromptFor(w.assembler, { mode: "code", primary: w.cwd, cwd: w.cwd });
     expect(a).toContain("PIRATE_STYLE_BODY"); // the style replaced the base slot…
     expect(a).toContain(LINE);                // …and the line, which is not part of the base, survived
-    expect(LINE).not.toMatch(/\$\{|s_[0-9a-f]{6}|\/tmp|winter-session/);
+    // …and it names the staged FOLDER SHAPE — the one thing the daemon guarantees about a staged copy —
+    // while carrying no concrete session id or path.
+    expect(LINE).toContain("`winter-session-…/images/`");
+    expect(LINE).not.toMatch(/\$\{|s_[0-9a-f]{6}|\/tmp|winter-session-[0-9a-z_]/);
   });
 });
 

@@ -1,6 +1,6 @@
 import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, SessionEvent,
-  SessionCreateResult, SessionAttachResult, SessionSendResult, SessionStageImageResult, SessionListResult,
+  DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, HelloResult, SessionCreateResult, SessionAttachResult, SessionSendResult, SessionStageImageResult, SessionListResult,
   SessionAddDirResult, SessionSetCwdResult, TrustDirResult,
   BgListResult, BgPeekResult, BgKillResult, BgKillAllResult,
   SessionSteerResult, SessionInterruptResult, SessionCompactResult, SkillsListResult,
@@ -78,6 +78,9 @@ export class WinterClient {
   private socket!: Awaited<ReturnType<typeof Bun.connect>>;
   private writer!: ConnWriter;
   private timeoutMs: number;
+  /** What the daemon said it can do in its `hello` answer (`HelloResult.features`) — empty from a daemon that
+   *  predates the field. Asked BEFORE a client relies on a capability (`supportsOriginalImagePaths`). */
+  private features = new Set<string>();
 
   private constructor(timeoutMs = 5000) {
     this.timeoutMs = timeoutMs;
@@ -124,13 +127,23 @@ export class WinterClient {
     // (a max-size `session.stageImage` is ~8 MB), and at 4 MiB the writer would end this socket on
     // the request itself.
     client.writer = new ConnWriter(client.socket as unknown as WritableSocket, 16 * 1024 * 1024);
-    await client.request(METHODS.hello, {
+    const hello = await client.request(METHODS.hello, {
       protocolVersion: PROTOCOL_VERSION,
       role: opts.role ?? "harness",
       token: opts.token,
       clientName: opts.clientName,
     });
+    const parsed = HelloResult.safeParse(hello);
+    client.features = new Set(parsed.success ? (parsed.data.features ?? []) : []);
     return client;
+  }
+
+  /** Whether this daemon takes the user's ORIGINAL image file by its own path in `session.send`/`steer`'s
+   *  `images` (not only a path `session.stageImage` wrote). False from a daemon whose hello did not say so:
+   *  the client then substitutes the path into the message text, as it always did for an older daemon (an
+   *  older daemon either drops `images` silently or refuses a path it did not stage). */
+  supportsOriginalImagePaths(): boolean {
+    return this.features.has(DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS);
   }
 
   request(method: string, params?: unknown): Promise<any> {
