@@ -162,17 +162,27 @@ describe("host.hello", () => {
     }
   });
 
-  test("the family names are lane B's (\"Brave\", not \"Brave Browser\"), and a Chrome for Testing registers as Google Chrome", async () => {
+  test("a browser registers under its family's id but its CHANNEL's own name (lane B's table): Brave, Chrome Beta, Edge Dev, Chrome for Testing", async () => {
     const { registry } = start();
-    const t = await connect();
-    await t.request("h1", "host.hello", hostHello({ browserBundleId: "com.brave.Browser" }));
-    const r = await t.request("e1", "hello", { protocol: EXTENSION_PROTOCOL, extensionVersion: "1.0.0", instanceId: INSTANCE });
-    expect(r).toMatchObject({ result: { backend: { id: "brave", name: "Brave" } } });
-    const u = await connect();
-    await u.request("h1", "host.hello", hostHello({ browserBundleId: "com.google.chrome.for.testing" }));
-    const s2 = await u.request("e1", "hello", { protocol: EXTENSION_PROTOCOL, extensionVersion: "1.0.0", instanceId: "0b8f2b7e-1111-4c4c-8888-000000000009" });
-    expect(s2).toMatchObject({ result: { backend: { id: "chrome", name: "Google Chrome" } } });
-    expect(registry.list().find((b) => b.id === "chrome")?.bundleId).toBe("com.google.chrome.for.testing");
+    const cases = [
+      { bundleId: "com.brave.Browser", id: "brave", name: "Brave" },
+      { bundleId: "com.google.Chrome.beta", id: "chrome", name: "Google Chrome Beta" },
+      { bundleId: "com.microsoft.edgemac.Dev", id: "edge", name: "Microsoft Edge Dev" },
+      { bundleId: "COM.GOOGLE.CHROME.FOR.TESTING", id: "chrome#2", name: "Google Chrome for Testing (2)" },
+    ];
+    for (const [i, k] of cases.entries()) {
+      const t = await connect();
+      await t.request("h1", "host.hello", hostHello({ browserBundleId: k.bundleId }));
+      const r = await t.request("e1", "hello", { protocol: EXTENSION_PROTOCOL, extensionVersion: "1.0.0", instanceId: `0b8f2b7e-1111-4c4c-8888-00000000001${i}` });
+      expect({ bundleId: k.bundleId, r }).toMatchObject({ bundleId: k.bundleId, r: { result: { backend: { id: k.id, name: k.name } } } });
+      // The family and the bundle id the host reported are what the registry keeps (the per-app grant's key).
+      expect(registry.list().find((b) => b.id === k.id)).toMatchObject({ family: k.id.split("#")[0], bundleId: k.bundleId });
+    }
+    // A channel's name reaches the "update" sentence too.
+    const old = await connect();
+    await old.request("h1", "host.hello", hostHello({ browserBundleId: "com.microsoft.edgemac.Canary" }));
+    await old.request("e1", "hello", { protocol: EXTENSION_PROTOCOL - 1, extensionVersion: "0.9.0", instanceId: "0b8f2b7e-1111-4c4c-8888-000000000020" });
+    expect(registry.unavailable.at(-1)).toMatchObject({ family: "edge", name: "Microsoft Edge Canary", bundleId: "com.microsoft.edgemac.Canary" });
   });
 
   test("no host.hello in time → closed", async () => {

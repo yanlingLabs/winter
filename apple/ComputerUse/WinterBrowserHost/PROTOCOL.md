@@ -126,7 +126,8 @@ daemon. A first message that is not `host.hello` is answered `protocol_mismatch`
 | chromium | `org.chromium.Chromium` |
 
 The browser app is what Winter's per-app approval and access settings name: one grant covers the browser as an app and
-its tabs.
+its tabs. The table is the engine's own (`packages/core/src/computer-use/browser/families.ts`); the host server reads it,
+and a repo test keeps this list equal to it.
 
 ### 3.5 The relay
 
@@ -152,6 +153,8 @@ On `host.status { daemon: "connected" }` the extension sends:
 - **Registration:** one transport per `instanceId`. The engine's registry gives an instance the same backend id for the
   daemon's lifetime, across reconnects (an MV3 service worker restarts often), so `chrome:418` stays valid; only a
   different instance of the same family gets `#2`, `#3`, … A second connection from the same instance retires the first.
+  The id is the FAMILY's; the name is the browser app's own channel ("Google Chrome Beta", "Microsoft Edge Dev", "Google
+  Chrome for Testing" — the engine's `browserForBundleId`), what the model and the per-app card show.
 
 ## 5. Messages after `hello`
 

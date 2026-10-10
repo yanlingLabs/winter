@@ -21,10 +21,10 @@ import { chmodSync, rmSync } from "node:fs";
 import { ConnWriter, encodeLine, LineDecoder } from "@yanlinglabs/winter-protocol";
 import type { WinterProfile } from "../../../profile";
 import { processSatisfiesRequirement } from "../../helper-verify";
-import type { BackendRegistry } from "../transport";
+import type { BackendRegistry, BrowserFamily } from "../transport";
 import { ExtensionTransport, type ExtensionTimeouts } from "./extension-transport";
 import { browserHostRequirementFor, EXTENSION_IDS, extensionIdFromOrigin } from "./extension-ids";
-import { familyForBundleId, type FamilyInfo } from "./families";
+import { browserForBundleId } from "../families";
 import {
   BROWSER_HOST_PROTOCOL, EXTENSION_PROTOCOL, HOST_TO_DAEMON_MAX_LINE, RPC_ERROR, RPC_INVALID_PARAMS, RPC_METHOD_NOT_FOUND,
   type ExtensionHelloResult, type HostHelloResult,
@@ -52,7 +52,9 @@ export interface BrowserHostServerOptions {
 }
 
 interface HostFacts {
-  app: FamilyInfo;
+  /** The browser app: its family (the backend id's stem) and its CHANNEL's own name ("Google Chrome Beta"), which the
+   *  model and the per-app card show. */
+  app: { family: BrowserFamily; name: string };
   bundleId: string;
   extensionId: string;
   hostPid: number;
@@ -243,7 +245,7 @@ export class BrowserHostServer {
     if (extensionId === undefined || !this.allowedIds.has(extensionId)) {
       throw new Refusal(RPC_ERROR, "that extension is not Winter for Chrome", { code: "not_allowed", reason: "origin" });
     }
-    const app = typeof browserBundleId === "string" ? familyForBundleId(browserBundleId) : undefined;
+    const app = typeof browserBundleId === "string" ? browserForBundleId(browserBundleId) : undefined;
     if (app === undefined || app.family === "winter" || typeof browserBundleId !== "string") {
       throw new Refusal(RPC_ERROR, "Winter for Chrome works in Chrome, Edge, Brave, Vivaldi, Opera, Arc and Chromium only", { code: "not_allowed", reason: "browser" });
     }
@@ -251,7 +253,7 @@ export class BrowserHostServer {
       throw new Refusal(RPC_ERROR, "the native host is not Winter's", { code: "not_allowed", reason: "signature" });
     }
     if (!this.opts.enabled()) throw new Refusal(RPC_ERROR, "Computer Use is turned off in Winter's settings", { code: "disabled" });
-    conn.host = { app, bundleId: browserBundleId, extensionId, hostPid, browserPid: typeof browserPid === "number" ? browserPid : 0 };
+    conn.host = { app: { family: app.family, name: app.name }, bundleId: browserBundleId, extensionId, hostPid, browserPid: typeof browserPid === "number" ? browserPid : 0 };
     this.log(`connection ${conn.n}: host verified (${app.name}, pid ${hostPid})`);
     return { protocol: BROWSER_HOST_PROTOCOL, daemonVersion: this.opts.daemonVersion };
   }
