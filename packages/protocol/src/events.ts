@@ -215,6 +215,12 @@ export const ApprovalRequestedEvent = ThreadBase.extend({
   // additive: a reviewer-escalation/grant/worktree card (no rule-worthy shape) or an older
   // persisted event omits it; clients that don't render options still see a valid approval card.
   options: z.array(ApprovalOption).optional(),
+  // ComputerV2's desktop-switch prompt (user ruling 2026-10-10): what the daemon does when nobody
+  // answers by `expiresAt`. Absent (every other card, and every older persisted event) means "deny"
+  // — the broker's fail-closed rule. "allow" marks a card that DEFAULT-ALLOWS: a client renders its
+  // countdown as "… in N s unless you refuse", and its `approval_resolved` then carries
+  // `approved: true, by: "timeout"` — the user gave no answer, never "Approved" by a person.
+  onTimeout: z.enum(["allow", "deny"]).optional(),
 });
 export const ApprovalResolvedEvent = ThreadBase.extend({
   type: z.literal("approval_resolved"), callId: z.string().min(1), approved: z.boolean(), by: z.string().min(1),

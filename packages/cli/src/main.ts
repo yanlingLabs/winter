@@ -59,7 +59,7 @@ import { mountAgents } from "./tui/agents-view";
 import { MEMORY_USAGE, formatDeleted, formatFactDetail, parseMemoryArgs, runMemoryRoute } from "./memory-cli";
 import { formatOptionLines, isOtherChoice, parseQuestionAnswer } from "./questions";
 import { parsePlanResponse } from "./plan-response";
-import { ShellCardQueue } from "./shell-cards";
+import { ShellCardQueue, approvalPromptLine, approvalResolvedHow } from "./shell-cards";
 import { legacyFilesDoctorLine, sdkHomeDoctorSection } from "./doctor-legacy-files";
 import { makeEventBridge, type EventBridge } from "./tui/event-bridge";
 
@@ -769,7 +769,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     }
     else if (e.type === "approval_requested") {
       // Printed when it is this card's turn (the raw key listener yields stdin to the y/N reader then).
-      cards.raiseApproval(e.callId, `approve ${e.toolName}? ${DIM}${e.summary}${RESET} [y/N] `);
+      cards.raiseApproval(e.callId, approvalPromptLine(e, (t) => `${DIM}${t}${RESET}`));
     } else if (e.type === "approval_resolved") {
       // Finding 2: the approval may have been resolved WITHOUT this stdin reader ever seeing a
       // "y\n" — another attached window answered it, or the server-side broker timed it out. If
@@ -780,7 +780,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       // resolved-elsewhere approval leaves `pending` and the suspended raw listener stuck for the
       // rest of the turn, and the next typed line gets consumed answering the stale entry instead
       // of whatever it was actually meant for.
-      cards.resolved(e.callId);
+      cards.resolved(e.callId, approvalResolvedHow(e));
     } else if (e.type === "directory_added") emit(`${DIM}+ dir ${e.path}${e.persisted ? " (remembered)" : ""}${RESET}\n`);
     else if (e.type === "bg_task_started") emit(`${DIM}▶ bg ${e.taskId} started: ${e.command.slice(0, 80)}${RESET}\n`);
     else if (e.type === "bg_task_output") emit(`${DIM}${e.chunk}${RESET}`);

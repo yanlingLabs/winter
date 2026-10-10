@@ -389,6 +389,9 @@ export const PendingApprovalSchema = z.object({
   // SP-approvals T4: mirrors ApprovalRequestedEvent.options field-for-field (same
   // ApprovalBroker-stored meta backs both) — see that field's own doc comment in events.ts.
   options: z.array(ApprovalOption).optional(),
+  // Mirrors ApprovalRequestedEvent.onTimeout (events.ts): "allow" for a card that default-allows at
+  // `expiresAt` (ComputerV2's desktop-switch prompt); absent = the fail-closed deny.
+  onTimeout: z.enum(["allow", "deny"]).optional(),
 });
 export const ApprovalListResult = z.object({ pending: z.array(PendingApprovalSchema) });
 

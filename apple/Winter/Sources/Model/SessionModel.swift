@@ -86,7 +86,10 @@ enum PendingInteraction: Equatable {
     /// with none (an unclassified tool, a grant/worktree card, or a reviewer escalation — see that
     /// field's own doc). All three default `nil` so existing construction/pattern-match call sites
     /// written before any of them existed stay untouched.
-    case approval(callId: String, toolName: String, summary: String, reviewerReason: String? = nil, childSessionId: String? = nil, options: [SessionEvent.ApprovalOption]? = nil)
+    /// `defaultAllowAt` (ComputerV2's desktop switch, 2026-10-10): the epoch-ms deadline of a card that
+    /// DEFAULT-ALLOWS (`onTimeout: "allow"` + `expiresAt`) — the card shows its countdown; `nil` on every
+    /// card that fails closed.
+    case approval(callId: String, toolName: String, summary: String, reviewerReason: String? = nil, childSessionId: String? = nil, options: [SessionEvent.ApprovalOption]? = nil, defaultAllowAt: Int? = nil)
     case question(callId: String, questions: [SessionEvent.Question], childSessionId: String? = nil)
     case plan(callId: String, plan: String)
     /// WS-27: an MCP server's URL-mode elicitation — "open this link". `callId` is the wire's
@@ -96,7 +99,7 @@ enum PendingInteraction: Equatable {
 
     var callId: String {
         switch self {
-        case .approval(let callId, _, _, _, _, _): return callId
+        case .approval(let callId, _, _, _, _, _, _): return callId
         case .question(let callId, _, _): return callId
         case .plan(let callId, _): return callId
         case .urlElicitation(let callId, _, _, _, _, _): return callId
@@ -122,7 +125,8 @@ struct InteractionRecord: Equatable {
     /// `PendingInteraction`'s cases minus `callId`/`childSessionId`, which are stored once on the
     /// record rather than per-case.
     enum Ask: Equatable {
-        case approval(toolName: String, summary: String, reviewerReason: String? = nil, options: [SessionEvent.ApprovalOption]? = nil)
+        /// `defaultAllowAt`: see `PendingInteraction.approval` — a card that default-allows at that deadline.
+        case approval(toolName: String, summary: String, reviewerReason: String? = nil, options: [SessionEvent.ApprovalOption]? = nil, defaultAllowAt: Int? = nil)
         case question(questions: [SessionEvent.Question])
         case plan(plan: String)
         /// WS-27: `elicitation_requested` — an MCP server asked the user to open a link.
@@ -197,7 +201,7 @@ struct InteractionRecord: Equatable {
     /// line) and by anything that wants a bare label for an interaction.
     var summary: String {
         switch ask {
-        case .approval(_, let summary, _, _): return summary
+        case .approval(_, let summary, _, _, _): return summary
         case .question(let questions): return questions.first?.question ?? "question"
         case .plan: return "plan presented"
         case .urlElicitation(let serverName, _, let host, _, _): return "\(serverName) asks to open \(host)"
@@ -911,10 +915,12 @@ enum SessionReducer {
                 s.status = .toolRunning(name: running)
             }
         case .approvalRequested(let v) where v.threadId == mainThread:
-            appendPending(.approval(callId: v.callId, toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, childSessionId: v.childSessionId, options: v.options), to: &s)
+            // ComputerV2's desktop switch (2026-10-10): a card whose deadline ALLOWS carries it, for its countdown.
+            let defaultAllowAt = v.onTimeout == "allow" ? v.expiresAt : nil
+            appendPending(.approval(callId: v.callId, toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, childSessionId: v.childSessionId, options: v.options, defaultAllowAt: defaultAllowAt), to: &s)
             appendInteraction(InteractionRecord(
                 callId: v.callId,
-                ask: .approval(toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, options: v.options),
+                ask: .approval(toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, options: v.options, defaultAllowAt: defaultAllowAt),
                 childSessionId: v.childSessionId
             ), to: &s)
         case .questionAsked(let v) where v.threadId == mainThread:
