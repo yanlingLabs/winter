@@ -33,8 +33,11 @@ public final class CUCore: @unchecked Sendable {
         var s = CUEventSynth(poster: poster, skyLight: skyLight)
         let sys = self.sys
         s.windowOrigin = { sys.window(id: $0)?.frame.origin }
+        s.pointerMemory = pointerMemory
         return s
     }
+    /// Where the synthetic pointer last was in each window (the hover path's start).
+    let pointerMemory = CUPointerMemory()
 
     /// The synth for one act: the window SPIs only while the private event path is on.
     func synth(_ p: TargetActParams) -> CUEventSynth {

@@ -358,6 +358,26 @@ report({ item: item.name });`,
     verify: (ctx) => [ok(ctx), check("the context menu item ran", has(ctx.events, ctx.since, "context", (e) => e.item === "Canvas Red"))],
   },
   {
+    // Hover-only UI: a menu that opens on mouseenter (hover(), then its item), and a button that acts only once the
+    // pointer has entered it (a click arrives by the hover path; an accessibility press alone would not arm it).
+    name: "hover: a hover-revealed menu, and a button armed by the pointer entering it", group: "click",
+    before: [{ role: "main", cmd: "reset" }],
+    code: `
+const web = await webWin();
+const trigger = await pick(web, "Hover Menu", "button");
+await web.hover(trigger.ref, { ms: 600 });
+const item = await pick(web, "Hidden Item");
+await web.click(item.ref);
+const armed = await pick(web, "Armed Button", "button");
+await web.click(armed.ref);
+report({ ok: true });`,
+    verify: (ctx) => [ok(ctx),
+      check("hover() opened the menu", has(ctx.events, ctx.since, "web.hover", () => true)),
+      check("its hidden item was clicked", eventsSince(ctx.events, ctx.since, "web.hoveritem").length === 1),
+      check("the armed button acted exactly once", eventsSince(ctx.events, ctx.since, "web.armed").length === 1,
+        JSON.stringify(eventsSince(ctx.events, ctx.since, "web.armed")))],
+  },
+  {
     // Google Docs' widgets act on a real mouse press: an accessibility press is ignored, and the helper must notice
     // (nothing changed) and click the element instead — pressing it exactly once.
     name: "a web button that ignores accessibility presses (acts on a real mouse press)", group: "click",

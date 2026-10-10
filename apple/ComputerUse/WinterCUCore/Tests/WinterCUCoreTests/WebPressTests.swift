@@ -85,6 +85,8 @@ final class WebPressTests: XCTestCase {
         let r = try await click(button)
         XCTAssertTrue(ax.performed.contains("\(token(button)):AXPress"))
         XCTAssertEqual(mouseDowns, 1, "one window-targeted click")
+        XCTAssertEqual(poster.entries.prefix(4).map(\.type), [.mouseMoved, .mouseMoved, .mouseMoved, .leftMouseDown], "arriving by the hover path")
+        XCTAssertTrue(sys.warpedTo.isEmpty, "the user's cursor never moved")
         XCTAssertEqual(poster.entries.first { $0.type == .leftMouseDown }?.location, CGPoint(x: 560, y: 120), "at its centre")
         XCTAssertTrue(r.detail?.hasPrefix("the accessibility press did nothing; clicked it instead") ?? false, r.detail ?? "")
     }
@@ -128,6 +130,19 @@ final class WebPressTests: XCTestCase {
         let r = try await click(native)
         XCTAssertNil(r.detail)
         XCTAssertEqual(mouseDowns, 0)
+    }
+
+    func testHoverRestsOnTheElementWithoutTheUsersCursor() async throws {
+        world()
+        let r = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+            action: .hover(CUHoverAction(ref: ref(button), ms: 50)), access: .click, allowForeground: false, privatePath: false))
+        XCTAssertEqual(poster.entries.map(\.type), [.mouseMoved, .mouseMoved, .mouseMoved], "no press, no click")
+        XCTAssertEqual(poster.entries.last?.location, CGPoint(x: 560, y: 120), "resting on its centre")
+        XCTAssertTrue(poster.entries.allSatisfy { $0.route != .hid }, "window-targeted only")
+        XCTAssertTrue(sys.warpedTo.isEmpty)
+        XCTAssertTrue(ax.performed.isEmpty)
+        XCTAssertTrue(r.detail?.contains("the pointer rested on [\(ref(button))] \u{201C}Close\u{201D} for 50 ms") ?? false, r.detail ?? "")
+        // Allowed under click-only access, like a click.
     }
 
     func testEvidenceSeesTheElementGoneHiddenOrChanged() {

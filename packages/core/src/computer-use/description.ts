@@ -56,6 +56,7 @@ export function computerV2Description(input: ComputerV2DescriptionInput): string
     "  select(ref: Ref, text: string, o?: { before?: string; after?: string; caret?: \"start\" | \"end\" }): Promise<void>;",
     "  action(ref: Ref, name: string): Promise<void>;   // another accessibility action that state() lists for the element",
     "  menu(path: string[]): Promise<void>;             // [\"File\", \"Export…\"]",
+    `  hover(t: ${target}, o?: { ms?: number }): Promise<void>; // the pointer rests there (default 600 ms; never your cursor) so hover-only menus, tooltips and buttons appear — then state() shows them`,
     "  windows(): Promise<{ id: number; title: string; focused: boolean }[]>;",
     "  useWindow(w: string | number): Promise<void>;   // switch the bound window",
     "  waitFor(c: { text?: string; ref?: Ref; gone?: Ref | string; title?: string }, o?: { timeoutMs?: number }): Promise<Waited>; // throws WaitTimeout",

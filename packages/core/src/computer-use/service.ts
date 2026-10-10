@@ -861,6 +861,11 @@ export class ComputerV2Service {
       case "action":
         if (!isRef(a.ref) || typeof a.name !== "string" || a.name.length === 0) throw bad("action() takes an element ref and an action name");
         return { kind: "action", ref: a.ref, name: a.name };
+      case "hover": {
+        const target = pointTarget(a.target, "hover()");
+        const ms = typeof a.ms === "number" && Number.isFinite(a.ms) ? { ms: Math.max(0, Math.min(5_000, Math.round(a.ms))) } : {};
+        return { kind: "hover", ...target, ...shotFor(target.point !== undefined), ...ms };
+      }
       case "menu":
         if (!Array.isArray(a.path) || a.path.length === 0 || !a.path.every((p) => typeof p === "string")) throw bad("menu() takes a path such as [\"File\", \"Export…\"]");
         return { kind: "menu", path: a.path as string[] };

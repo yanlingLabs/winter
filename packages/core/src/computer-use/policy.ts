@@ -47,9 +47,9 @@ import { WINTER_OWN_BUNDLE_IDS } from "./protocol";
 export const COMPUTER_V2_TOOL_NAME = "ComputerV2";
 
 /** The primitives that ACT on an app (everything else observes). */
-export const ACT_PRIMITIVES: ReadonlySet<string> = new Set(["click", "setValue", "type", "paste", "key", "scroll", "drag", "select", "action", "menu", "applescript"]);
+export const ACT_PRIMITIVES: ReadonlySet<string> = new Set(["click", "setValue", "type", "paste", "key", "scroll", "drag", "select", "action", "menu", "hover", "applescript"]);
 /** What a `click`-only app still permits (R17): clicks, scrolls and accessibility actions. */
-export const CLICK_ONLY_PRIMITIVES: ReadonlySet<string> = new Set(["click", "scroll", "action"]);
+export const CLICK_ONLY_PRIMITIVES: ReadonlySet<string> = new Set(["click", "scroll", "action", "hover"]);
 
 /** The system's authentication surfaces — refused as targets (spec §13.3; the helper refuses them too). */
 export const AUTH_DIALOG_BUNDLE_IDS: ReadonlySet<string> = new Set([

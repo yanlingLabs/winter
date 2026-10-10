@@ -841,3 +841,21 @@ describe("ComputerV2: a page that changed under an act", () => {
     expect(text(r)).toContain('the page changed (now "Results — Search") — refs from before it are gone; call state()');
   }, 30_000);
 });
+
+describe("ComputerV2: hover", () => {
+  macOnly("app.hover(ref, { ms }) sends a hover act and prints what the helper says", async () => {
+    const w = world();
+    w.fake.handlers["target.act"] = () => ({ rung: 2, detail: "the pointer rested on [14] “Menu” for 300 ms (window-targeted — the user's cursor did not move); state() shows what appeared" });
+    const r = await w.run("const notes = await apps.open('Notes')\nawait notes.hover(14, { ms: 300 })");
+    expect(r.isError).toBe(false);
+    expect(w.fake.calls("target.act")[0]).toMatchObject({ action: { kind: "hover", ref: 14, ms: 300 } });
+    expect(text(r)).toContain("the pointer rested on [14] “Menu” for 300 ms");
+  }, 30_000);
+
+  macOnly("a hover is allowed where the user set click only", async () => {
+    const w = world({ apps: { "com.apple.Notes": { access: "click" } } });
+    const r = await w.run("const notes = await apps.open('Notes')\nawait notes.hover(14)");
+    expect(r.isError).toBe(false);
+    expect(w.fake.calls("target.act")[0]).toMatchObject({ action: { kind: "hover", ref: 14 }, access: "click" });
+  }, 30_000);
+});

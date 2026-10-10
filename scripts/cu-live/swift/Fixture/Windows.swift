@@ -350,6 +350,12 @@ final class WebController: NSObject, WKScriptMessageHandler, WKNavigationDelegat
             fixture.emit("web.link", [("href", .str(body["href"] as? String ?? ""))])
         case "closure":
             fixture.emit("web.closure", [("count", .num(number("count") ?? 0))])
+        case "hover":
+            fixture.emit("web.hover", [("id", .str(body["id"] as? String ?? ""))])
+        case "hoveritem":
+            fixture.emit("web.hoveritem", [])
+        case "armed":
+            fixture.emit("web.armed", [])
         case "scroll":
             guard let y = number("y") else { return }
             offerScroll(y)

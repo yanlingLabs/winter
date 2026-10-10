@@ -176,7 +176,7 @@ final class CursorEventsTests: XCTestCase {
         try await act(.click(CUClickAction(ref: ref(ok))))
         let events = await drained()
         XCTAssertEqual(events.map(\.kind), ["target", "press"])
-        XCTAssertEqual(poster.entries.map(\.type), [.leftMouseDown, .leftMouseUp])
+        XCTAssertEqual(poster.entries.filter { $0.type != .mouseMoved }.map(\.type), [.leftMouseDown, .leftMouseUp])
     }
 
     // MARK: text and keys
