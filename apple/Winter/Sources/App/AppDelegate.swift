@@ -1037,6 +1037,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // identity. `setenv(…, 0)` never overwrites an explicit env, so tests/power users still win.
         // Placed AFTER the unit-test guard so the xctest host launch never stamps `~/.winter-dev`.
         AppProfile.bootstrapEnvironment()
+        // Winter for Chrome: every browser's native-messaging manifest points at THIS bundle's host (Release only — the
+        // dev manifest is `bun run dev:helper`'s; BrowserExtension/BrowserHostManifest.swift).
+        #if !DEBUG
+        BrowserHostManifest.writeForThisApp { NSLog("%@", $0) }
+        #endif
         _ = boot()
         #if DEBUG
         // panel-cef Task 6a: the window half of the panel smoke door (`ShellRootView`'s `.onAppear`

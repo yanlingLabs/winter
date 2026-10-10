@@ -62,6 +62,7 @@ struct SettingsComputerUseSection: View {
                 }
                 SettingsRowNote(settingsComputerUseAppsFootnote)
                     .padding(.horizontal, SettingsChrome.rowHorizontalPadding)
+                SettingsBrowsersGroup(status: status)
                 if let actionError = model.actionError {
                     SettingsGroup {
                         SettingsNoteRow(actionError, isError: true)
