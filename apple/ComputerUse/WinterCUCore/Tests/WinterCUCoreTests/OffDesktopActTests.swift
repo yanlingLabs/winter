@@ -359,6 +359,48 @@ final class OffDesktopActTests: XCTestCase {
         }
     }
 
+    // MARK: a window in a full-screen transition reads as on no Space for a moment (the live gate, 2026-10-10)
+
+    /// A capture-only target (its cached "window" is the application element), its window re-entering full screen:
+    /// off screen, on NO Space and not in the app's list for a few readings, then on its new Space.
+    private func transitionWorld(readingsOnNoSpace: Int?) -> NSLock {
+        world()
+        target.accessible = false
+        core.registerForTesting(target, windowElement: ax.application(pid))
+        core.windowGoneSettleMs = 800
+        let lock = NSLock()
+        var reads = 0
+        sys.onSpaceReading = { _ in
+            lock.withLock {
+                reads += 1
+                guard let n = readingsOnNoSpace else { return false }  // on no Space for good: closed
+                return reads > n
+            }
+        }
+        return lock
+    }
+
+    func testAWindowOnNoSpaceForAMomentIsKept() async throws {
+        _ = transitionWorld(readingsOnNoSpace: 3)
+        core.windowMaybeClosed(pid: pid)  // the transition's destroyed-element notification
+        XCTAssertNotNil(try? core.target("t1"), "a full-screen transition is not a closed window")
+        XCTAssertFalse(core.windowGone(target), "on its Space again")
+    }
+
+    func testAWindowOnNoSpaceForGoodIsLostAfterTheSettle() async throws {
+        _ = transitionWorld(readingsOnNoSpace: nil)
+        let t0 = Date()
+        core.windowMaybeClosed(pid: pid)
+        XCTAssertNil(try? core.target("t1"), "closed but still allocated: lost")
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(t0), 0.75, "only after the window was watched for the settle")
+        // A window that leaves the server's listing during the watch is gone at once.
+        _ = transitionWorld(readingsOnNoSpace: nil)
+        sys.onSpaceReading = { [unowned self] _ in sys.windows[77] = nil; return false }
+        let t1 = Date()
+        XCTAssertTrue(core.windowGone(target))
+        XCTAssertLessThan(Date().timeIntervalSince(t1), 0.6)
+    }
+
     // MARK: Why a target is lost (`data.reason`, and the `targetLost` notification's)
 
     @MainActor final class LostRecorder: CUCoreEvents {

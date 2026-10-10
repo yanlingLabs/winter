@@ -253,7 +253,12 @@ final class FakeSystem: CUSystemBackend {
     /// Windows on no Space at all (closed but still listed); others answer `onSpace` (nil = unknown).
     var noSpaceWindows: Set<UInt32> = []
     var onSpace: Bool? = nil
-    func windowOnAnySpace(_ id: UInt32) -> Bool? { noSpaceWindows.contains(id) ? false : onSpace }
+    /// When set, answers `windowOnAnySpace` instead (a test plays a window's Space over successive readings).
+    var onSpaceReading: ((UInt32) -> Bool?)?
+    func windowOnAnySpace(_ id: UInt32) -> Bool? {
+        if let r = onSpaceReading { return r(id) }
+        return noSpaceWindows.contains(id) ? false : onSpace
+    }
     /// Content processes (Safari's WebContent), each with the app it serves.
     var contentProcesses: [pid_t: pid_t] = [:]
     func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool { contentProcesses[pid] == appPid }

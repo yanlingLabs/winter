@@ -106,6 +106,8 @@ public final class CUCore: @unchecked Sendable {
             visitFreshMaxMs = 0
             visitFreshStableMs = 0
             visitNoProbeWaitMs = 0
+            windowGoneSettleMs = 0  // one reading decides, as before: a test that wants the watch sets it
+            windowCheckSync = true
         }
     }
 
@@ -503,6 +505,11 @@ public final class CUCore: @unchecked Sendable {
     /// unchanged picture must stay so to count as painted, how often it is sampled, and how long it waits when no
     /// frame can be sampled. 0 in test cores (one look each, no waiting).
     var visitArriveMs: Double = 1500
+    /// How long a window read as closed while the server still lists it is watched before it counts as gone
+    /// (`windowGone`): a full-screen transition reads like that for a moment.
+    var windowGoneSettleMs: Double = 1500
+    /// The destroyed-element check runs inline (tests) instead of off the notification's thread.
+    var windowCheckSync = false
     var visitFreshMaxMs: Double = 1000
     var visitFreshStableMs: Double = 300
     var visitFrameIntervalMs: Double = 50
@@ -1418,9 +1425,29 @@ public final class CUCore: @unchecked Sendable {
     /// One lookup can miss a window that is changing Space (a live run lost Safari's target while the user
     /// switched desktops, and the rebind found the very same window). A CLOSED window the app keeps allocated
     /// stays in the server's listing, off screen: it counts as gone when it is on no Space at all and the app
-    /// doesn't list it (a minimized window or a hidden app's is listed; one on another Space is on a Space).
+    /// doesn't list it (a minimized window or a hidden app's is listed; one on another Space is on a Space) — and
+    /// still reads so for `windowGoneSettleMs`: a window in the middle of a full-screen transition reads exactly
+    /// like that for a moment (the live gate, 2026-10-10: a capture-only target, its window re-entering full screen,
+    /// was declared closed on one such reading and the very same window was bound again two seconds later).
     func windowGone(_ t: CUTarget) -> Bool {
         guard let w = liveServerWindow(t) else { return true }
+        guard unreachableNow(t, w) else { return false }
+        let deadline = clock.nowMs() + windowGoneSettleMs
+        while clock.nowMs() < deadline {
+            usleep(useconds_t(min(100, windowGoneSettleMs) * 1000))
+            // Gone from the server's listing meanwhile: closed for good.
+            guard let now = sys.window(id: t.windowID) ?? sys.windows(pid: t.pid).first(where: { $0.id == t.windowID }) else { return true }
+            if !unreachableNow(t, now) {
+                CULog.bind.notice("\(t.appName, privacy: .public)'s window \(t.windowID, privacy: .public) read as on no Space for a moment (a full-screen or Space transition) — kept")
+                return false
+            }
+        }
+        return true
+    }
+
+    /// One reading: the server lists the window off screen and on NO Space, no element answers for its id, and the
+    /// app does not list it.
+    func unreachableNow(_ t: CUTarget, _ w: CUWindowServerWindow) -> Bool {
         guard !w.onScreen, sys.windowOnAnySpace(w.id) == false else { return false }
         // A window whose element still answers for its id is reachable, whatever its Space reads (live: Chrome's
         // window, right after going full screen, read as on no Space and was taken for closed).
@@ -1458,17 +1485,20 @@ public final class CUCore: @unchecked Sendable {
     }
 
     /// Called for every destroyed-element notification, so it is debounced to one window-list check per
-    /// pid per 250 ms.
-    private func windowMaybeClosed(pid: pid_t) {
+    /// pid per 250 ms. The check may watch a window for `windowGoneSettleMs`, so it runs off the notification's
+    /// own thread (`windowCheckSync` keeps it inline for tests).
+    func windowMaybeClosed(pid: pid_t) {
         let now = clock.nowMs()
         lock.lock()
         if let last = lastDestroyCheck[pid], now - last < 250 { lock.unlock(); return }
         lastDestroyCheck[pid] = now
         let affected = targets.values.filter { $0.pid == pid }
         lock.unlock()
-        for t in affected where windowGone(t) {
-            lose(t, reason: .windowClosed)
+        let check = { [weak self] in
+            guard let self else { return }
+            for t in affected where self.windowGone(t) { self.lose(t, reason: .windowClosed) }
         }
+        if windowCheckSync { check() } else { DispatchQueue.global(qos: .utility).async(execute: check) }
     }
 
     /// Bind-time floors: Winter itself, and the auth/system dialogs.
