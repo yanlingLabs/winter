@@ -1341,6 +1341,7 @@ export class ComputerV2Service {
       sessionFacts: () => this.deps.policy.sessionFacts(ctx.sessionId),
       siteCard: (summary) => this.deps.policy.siteCard(ctx.grants, summary, ctx.abort.signal),
       persistentlyAllowed: (bundleId) => this.deps.policy.persistentlyAllowed(ctx.sessionId, bundleId),
+      granted: (bundleId) => this.deps.policy.persistentlyAllowed(ctx.sessionId, bundleId) || ctx.grants.once.has(bundleId),
       builder: ctx.builder,
       keepImage: (img) => this.keepImage(ctx, { ...img, shotId: "" } as ScreenshotResult),
       lastTargetShot: ctx.state.lastTargetShot,

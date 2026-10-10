@@ -90,7 +90,7 @@ export function computerV2Description(input: ComputerV2DescriptionInput): string
     "  upload(ref: Ref, paths: string | string[]): Promise<void>;  // files from this session's working directory into a file input",
     "  keep(): Promise<void>;                 // hand this tab to the user: it leaves Winter's group and Winter never closes it",
     "  handoff(): Promise<void>;   // keep this tab (yours, still in Winter's group) for your next turn only — call it again each turn you still need it",
-    "  close(): Promise<void>;                // only a tab you opened",
+    "  close(): Promise<void>;                // only a tab you opened and still own (not one you kept)",
     "}",
     "declare const apps: {",
     "  list(o?: Quiet): Promise<{ name: string; bundleId: string; running: boolean }[]>;",

@@ -184,6 +184,52 @@ describe("browsers.list / open / tabs / tab", () => {
     expect((e as AutomationFailure).kind).toBe("NotAllowed");
   });
 
+  test("listing a user's browser needs its per-app consent, as a bind: the card under ask; declined is NotAllowed", async () => {
+    const yes = harness({ policy: "ask", answer: () => "once" });
+    yes.chrome.addTab({ url: "https://u.example/", title: "U", nodes: [] }, { tabKey: "5" });
+    const rows = await yes.engine.global(yes.run().scope, "browsers.tabs", { browser: "chrome" }) as Array<{ id: string }>;
+    expect(rows.map((x) => x.id)).toEqual(["chrome:5"]);
+    expect(yes.cards.map((c) => c.summary)).toEqual(["Allow Winter to use Google Chrome (com.google.Chrome)?"]);
+    const no = harness({ policy: "ask", answer: () => false });
+    const e = await failure(no.engine.global(no.run().scope, "browsers.tabs", { browser: "chrome" }));
+    expect((e as AutomationFailure).kind).toBe("NotAllowed");
+    // plan may show the card too: listing is an observation, exactly like a bind.
+    const plan = harness({ policy: "plan", answer: () => "once" });
+    plan.chrome.addTab({ url: "https://u.example/", title: "U", nodes: [] }, { tabKey: "5" });
+    expect(await plan.engine.global(plan.run().scope, "browsers.tabs", { browser: "chrome" })).toHaveLength(1);
+    expect(plan.cards).toHaveLength(1);
+  });
+
+  test("under dont-ask only an Always-allow grant lists a user's browser", async () => {
+    const no = harness({ policy: "dont-ask" });
+    const e = await failure(no.engine.global(no.run().scope, "browsers.tabs", { browser: "chrome" }));
+    expect((e as AutomationFailure).kind).toBe("NotAllowed");
+    expect(no.cards).toEqual([]);
+    const always = harness({ policy: "dont-ask", apps: { "com.google.Chrome": { grant: "always" } } });
+    always.chrome.addTab({ url: "https://u.example/", title: "U", nodes: [] }, { tabKey: "5" });
+    expect(await always.engine.global(always.run().scope, "browsers.tabs", { browser: "chrome" })).toHaveLength(1);
+  });
+
+  test("with no browser named: the built-in tabs plus the user's browsers already allowed this session; the rest are left out and said so, with no card", async () => {
+    const h = harness({ policy: "ask", answer: () => "session" });
+    h.chrome.addTab({ url: "https://u.example/", title: "U", nodes: [] }, { tabKey: "5" });
+    const r = h.run();
+    await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/" });
+    const first = await h.engine.global(r.scope, "browsers.tabs", {}) as Array<{ id: string }>;
+    expect(first.map((x) => x.id)).toEqual(["winter:w1"]);
+    expect(h.cards).toEqual([]);
+    expect(r.text()).toContain("1 browser left out: Google Chrome (chrome) — not allowed in this session yet — name one with { browser } to ask the user");
+    const nf = await failure(h.engine.global(r.scope, "browsers.tab", { tab: { url: "https://u.example/" } }));
+    expect((nf as AutomationFailure).kind).toBe("TargetLost");
+    expect(nf.message).toContain("1 browser was not searched");
+    // Allowed for the session (its card answered), the default listing includes it.
+    await h.engine.global(r.scope, "browsers.tabs", { browser: "chrome" });
+    const r2 = h.run();
+    const after = await h.engine.global(r2.scope, "browsers.tabs", {}) as Array<{ id: string }>;
+    expect(after.map((x) => x.id)).toEqual(["winter:w1", "chrome:5"]);
+    expect(h.cards).toHaveLength(1);
+  });
+
   test("tab (winter): only this session's strip can be bound", async () => {
     const h = harness();
     h.winter.addTab({ url: "https://x.example/", title: "X", nodes: [] }, { tabKey: "foreign", sessionId: "s2" });
@@ -533,6 +579,10 @@ describe("lifecycle", () => {
     const handed = await h.engine.global(r.scope, "browsers.open", { url: "https://h.example/", browser: "chrome" }) as TabHandle;
     await h.engine.primitive(r.scope, kept.targetId, "keep", {});
     await h.engine.primitive(r.scope, handed.targetId, "handoff", {});
+    // A kept tab is the user's now: close() refuses it.
+    const refused = await failure(h.engine.primitive(r.scope, kept.targetId, "close", {}));
+    expect((refused as AutomationFailure).kind).toBe("NotAllowed");
+    expect(refused.message).toBe("that tab is the user's now — Winter never closes it");
     r.end();
     const tab = (t: TabHandle) => h.chrome.tabs.get(t.id.split(":")[1]!)!;
     expect(tab(kept).kept).toBe(true);

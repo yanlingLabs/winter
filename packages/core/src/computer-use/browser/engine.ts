@@ -578,23 +578,45 @@ export class BrowserEngine {
     }
     const transport = this.deps.registry.get(backend);
     if (transport === undefined || !transport.connected) throw this.unavailable(backend);
+    // Listing a user's browser reads every tab's title and URL: it needs that browser's per-app consent, the same as
+    // binding it (the card under the asking policies; only "Always allow" under dont-ask).
     const bundleId = this.bundleIdOf(backend);
-    if (bundleId !== undefined) await scope.authorize(this.appRef(backend, bundleId), { kind: "observe" });
+    if (bundleId !== undefined) await scope.authorize(this.appRef(backend, bundleId), { kind: "bind" });
     let tabs: TransportTab[];
     try { tabs = await transport.listTabs(); } catch (err) { throw transportFailure(err, this.browserName(backend)); }
     return tabs.map((t) => ({ id: `${backend}:${t.tabKey}`, browser: backend, url: t.url, title: t.title, active: t.active, yours: s.agentTabs.has(tabKeyOf(backend, t.tabKey)) }));
   }
 
+  /**
+   * The backends a call with no `{ browser }` reads: the built-in browser, and each connected user's browser this
+   * session already allowed (no card is raised for one it did not); the rest are named in `leftOut`.
+   */
+  private defaultBackends(scope: TabRunScope): { ids: BackendId[]; leftOut: string[] } {
+    const ids: BackendId[] = [];
+    const leftOut: string[] = [];
+    for (const r of this.listRows()) {
+      if (familyOfBackendId(r.id) === "winter") { ids.push(r.id); continue; }
+      if (!r.connected) continue;
+      const bundleId = this.bundleIdOf(r.id);
+      if (bundleId !== undefined && !scope.granted(bundleId)) { leftOut.push(`${r.name} (${r.id}) — not allowed in this session yet`); continue; }
+      ids.push(r.id);
+    }
+    return { ids, leftOut };
+  }
+
   private async tabs(scope: TabRunScope, args: Record<string, unknown>): Promise<unknown> {
-    const backends = args.browser === undefined
-      ? this.listRows().filter((r) => r.id === "winter" || r.connected).map((r) => r.id)
-      : [this.backendFor(args.browser)];
+    const chosen = args.browser === undefined ? this.defaultBackends(scope) : { ids: [this.backendFor(args.browser)], leftOut: [] as string[] };
+    const leftOut = [...chosen.leftOut];
     const rows: Array<{ id: string; browser: string; url: string; title: string; active: boolean; yours: boolean }> = [];
-    for (const b of backends) {
+    for (const b of chosen.ids) {
       try { rows.push(...await this.tabRows(scope, b)); } catch (err) {
         if (args.browser !== undefined || !skippable(err)) throw err;
+        leftOut.push(`${this.browserName(b)} (${b}) — ${err instanceof AutomationFailure && err.kind === "NotAllowed" ? "not allowed" : "can't be reached"}`);
       }
       scope.live();
+    }
+    if (leftOut.length > 0) {
+      scope.builder.daemonLine(`${leftOut.length} browser${leftOut.length === 1 ? "" : "s"} left out: ${leftOut.join("; ")} — name one with { browser } to ask the user`);
     }
     scope.builder.markScreenRead();
     if (args.emit !== false) {
@@ -623,19 +645,21 @@ export class BrowserEngine {
       url = hit.url;
     } else if (t !== null && typeof t === "object" && typeof (t as { url?: unknown }).url === "string") {
       const want = stripFragment((t as { url: string }).url.trim());
-      const backends = args.browser === undefined
-        ? this.listRows().filter((r) => r.id === "winter" || r.connected).map((r) => r.id)
-        : [this.backendFor(args.browser)];
+      const chosen = args.browser === undefined ? this.defaultBackends(scope) : { ids: [this.backendFor(args.browser)], leftOut: [] as string[] };
       const hits: Array<{ id: string; url: string; backend: string }> = [];
-      for (const b of backends) {
+      let skipped = chosen.leftOut.length;
+      for (const b of chosen.ids) {
         let rows;
         try { rows = await this.tabRows(scope, b); } catch (err) {
           if (args.browser !== undefined || !skippable(err)) throw err;
+          skipped++;
           continue;
         }
         for (const r of rows) if (stripFragment(r.url) === want) hits.push({ id: r.id, url: r.url, backend: b });
       }
-      if (hits.length === 0) throw new AutomationFailure("TargetLost", "no open tab has that URL — browsers.tabs() lists them");
+      if (hits.length === 0) {
+        throw new AutomationFailure("TargetLost", `no open tab has that URL — browsers.tabs() lists them${skipped === 0 ? "" : ` (${skipped} browser${skipped === 1 ? " was" : "s were"} not searched: not allowed in this session yet — name one with { browser })`}`);
+      }
       if (hits.length > 1) throw bad(`several tabs have that URL: ${hits.map((h) => h.id).join(", ")} — pass one id`);
       backend = hits[0]!.backend;
       tabKey = hits[0]!.id.slice(backend.length + 1);
@@ -931,6 +955,9 @@ export class BrowserEngine {
       }
       case "close": {
         if (b.kind !== "agent") throw new AutomationFailure("NotAllowed", "that tab is the user's — Winter never closes a tab it did not open");
+        if (this.session(sid).agentTabs.get(tabKeyOf(b.backend, b.tabKey))?.kept === true) {
+          throw new AutomationFailure("NotAllowed", "that tab is the user's now — Winter never closes it");
+        }
         driver.agentNavigating = true;
         try { await driver.transport.closeTab(b.tabKey); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
         if (this.familyOf(b.backend) === "winter") {

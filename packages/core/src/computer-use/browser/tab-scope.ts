@@ -39,6 +39,9 @@ export interface TabRunScope {
   siteCard(summary: string): Promise<{ approved: boolean; optionId?: string }>;
   /** Did the user allow this app for longer than this run (session/always grant, or bypass)? */
   persistentlyAllowed(bundleId: string): boolean;
+  /** Is the app already allowed for this session — so using it raises no card now (a session/always grant, bypass,
+   *  or an "Allow once" this run got)? */
+  granted(bundleId: string): boolean;
   readonly builder: ResultBuilder;
   /** Store an image in the session's image store (the bytes stay in the daemon) and hand back its handle. */
   keepImage(img: { imageBase64: string; mime: string; width: number; height: number }): ImageHandle;

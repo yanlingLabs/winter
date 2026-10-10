@@ -111,7 +111,7 @@ function scope(runId: string) {
     live: () => {}, timeLeft: () => 60_000, clampWait: (ms) => Math.min(ms, 60_000),
     lock: async (key, label) => { if (!held.has(key)) held.set(key, await locks.acquire(key, { runId, sessionId: "e2e" }, { label })); },
     authorize: async () => {}, sessionPolicy: () => facts.policy, sessionFacts: () => facts,
-    siteCard: async () => ({ approved: false }), persistentlyAllowed: () => true,
+    siteCard: async () => ({ approved: false }), persistentlyAllowed: () => true, granted: () => true,
     builder, keepImage: (img) => ({ image: "img", width: img.width, height: img.height }), lastTargetShot, acted, diffBases, metric,
     noteSite: () => {}, noteBrowser: () => {}, trusted: () => {},
   };

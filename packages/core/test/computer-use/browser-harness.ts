@@ -112,6 +112,7 @@ export function harness(o: HarnessOpts = {}) {
       sessionFacts: () => facts,
       siteCard: (summary) => policy.siteCard(grants, summary, abort.signal),
       persistentlyAllowed: (b) => policy.persistentlyAllowed(sessionId, b),
+      granted: (b) => policy.persistentlyAllowed(sessionId, b) || grants.once.has(b),
       builder, lastTargetShot, acted, diffBases, metric,
       keepImage: (img) => { const id = `img${images.size + 1}`; images.set(id, { data: img.imageBase64 }); return { image: id, width: img.width, height: img.height }; },
       noteSite: (h) => sites.add(h), noteBrowser: (b) => browsers.add(b), trusted: () => {},
