@@ -704,8 +704,8 @@ describe("daemon IPC", () => {
 
 
 
-  test("skills.list returns only the shipped builtin when no user/project skills are installed", async () => {
-    await boot(); // no provider → default temp home has no user/project skills
+  test("skills.list returns the seeded computer-use copy (user tier) and the shipped builtin when no user/project skills are installed", async () => {
+    await boot(); // no provider → default temp home has no user/project skills of its own
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "no-skills");
     const { result } = await c.request(METHODS.skillsList, {});
@@ -715,7 +715,13 @@ describe("daemon IPC", () => {
     // Lane B (2026-09-22): + the truthful session-availability pair. WS-21 (R.1 ruling 3): the linked
     // router stages the user, self and trusted-project tiers into a run folder, never the builtin one, so
     // the builtin still cannot load — and the note says why on this build.
-    expect(result.skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.stringContaining("aren't staged into a session's run folder") }]);
+    // `computer-use` is the one Winter-shipped skill a session CAN load: every boot seeds a managed copy into
+    // the user tier (`migration/builtin-skills.ts`), and that user-tier copy shadows the same-named builtin
+    // listing — so it is listed once, as the copy sessions load.
+    expect(result.skills).toEqual([
+      { name: "computer-use", description: expect.any(String), source: "user", path: expect.stringContaining(join("sdk", "skills", "computer-use")), loadsInSessions: true },
+      { name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.stringContaining("aren't staged into a session's run folder") },
+    ]);
     c.close();
   });
 
@@ -733,8 +739,9 @@ describe("daemon IPC", () => {
     await c.hello(harnessToken, "skills-lister");
     const { result } = await c.request(METHODS.skillsList, {});
     expect(result.ok).toBe(true);
-    // greet (user) + the always-present writing-skills builtin.
-    expect(result.skills).toHaveLength(2);
+    // greet (user) + the seeded computer-use copy (user) + the always-present writing-skills builtin.
+    expect(result.skills).toHaveLength(3);
+    expect(result.skills.find((s: { name: string }) => s.name === "computer-use")).toMatchObject({ source: "user", loadsInSessions: true });
     expect(result.skills.find((s: { name: string }) => s.name === "greet")).toMatchObject({ name: "greet", description: "Say hi", source: "user" });
     expect(result.skills.find((s: { name: string }) => s.name === "writing-skills")).toMatchObject({ source: "builtin" });
     c.close();
