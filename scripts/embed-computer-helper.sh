@@ -23,6 +23,12 @@
 #   3. Check the signature took: the recorded requirement is exactly the stated one, the identifier is
 #      right, the hardened runtime flag is set, and the entitlements are exactly that one.
 #
+# Before step 2, the nested Contents/MacOS/winter-browser-host (Winter for Chrome's native-messaging host, its own
+# xcodegen tool target) is signed with ITS OWN identity — com.winter.browserhost, the hardened runtime, a secure
+# timestamp, NO entitlements, its stated requirement (identifier + team) that the daemon checks the host's process
+# against — and checked the same way. Nested code must be signed before its bundle, and never by a --deep re-sign,
+# which would give it the helper's identifier.
+#
 # Env (Xcode's, read like project.yml's other postCompileScripts): BUILT_PRODUCTS_DIR, CONTENTS_FOLDER_PATH,
 # CONFIGURATION, EXPANDED_CODE_SIGN_IDENTITY, DEVELOPMENT_TEAM.
 #
@@ -40,6 +46,9 @@ IDENTIFIER="com.winter.computeruse"
 TEAM="${DEVELOPMENT_TEAM:-37N77U9RSZ}"
 REQUIREMENT="identifier \"${IDENTIFIER}\" and anchor apple generic and certificate leaf[subject.OU] = \"${TEAM}\""
 ENTITLEMENT="com.apple.security.automation.apple-events"
+HOST_NAME="winter-browser-host"
+HOST_IDENTIFIER="com.winter.browserhost"
+HOST_REQUIREMENT="identifier \"${HOST_IDENTIFIER}\" and anchor apple generic and certificate leaf[subject.OU] = \"${TEAM}\""
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENTITLEMENTS_FILE="${REPO}/apple/ComputerUse/WinterComputerUse/Support/WinterComputerUse.entitlements"
 HELPER_VERSION="$(tr -d '[:space:]' < "${REPO}/apple/ComputerUse/VERSION")"
@@ -62,10 +71,36 @@ if [ "${BUILT_VERSION}" != "${HELPER_VERSION}" ]; then
   exit 1
 fi
 
+if [ ! -f "${SRC}/Contents/MacOS/${HOST_NAME}" ]; then
+  echo "error: the built helper has no Contents/MacOS/${HOST_NAME} — is the WinterBrowserHost target (and the helper's \"Embed winter-browser-host\" phase) in this build?" >&2
+  exit 1
+fi
+
 mkdir -p "${DEST_DIR}"
 # rm first: ditto merges into an existing bundle, so a file dropped from the helper would otherwise linger.
 rm -rf "${DEST}"
 ditto "${SRC}" "${DEST}"
+
+HOST="${DEST}/Contents/MacOS/${HOST_NAME}"
+codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier "${HOST_IDENTIFIER}" --options runtime --timestamp \
+  "-r=designated => ${HOST_REQUIREMENT}" "${HOST}"
+HOST_RECORDED="$(codesign -d -r- "${HOST}" 2>&1 | sed -n 's/^designated => //p')"
+if [ "${HOST_RECORDED}" != "${HOST_REQUIREMENT}" ]; then
+  echo "error: ${HOST_NAME}'s designated requirement did not take:" >&2
+  echo "  stated:   ${HOST_REQUIREMENT}" >&2
+  echo "  recorded: ${HOST_RECORDED}" >&2
+  exit 1
+fi
+HOST_DVV="$(codesign -dvv "${HOST}" 2>&1 || true)"
+if ! echo "${HOST_DVV}" | grep -q "^Identifier=${HOST_IDENTIFIER}$" || ! echo "${HOST_DVV}" | grep -Eq "^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*runtime"; then
+  echo "error: ${HOST_NAME} is not signed as ${HOST_IDENTIFIER} with the hardened runtime:" >&2
+  echo "${HOST_DVV}" >&2
+  exit 1
+fi
+if codesign -d --entitlements - --xml "${HOST}" 2>/dev/null | grep -q "<key>"; then
+  echo "error: ${HOST_NAME} must carry no entitlements" >&2
+  exit 1
+fi
 
 codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier "${IDENTIFIER}" --options runtime --timestamp \
   --entitlements "${ENTITLEMENTS_FILE}" "-r=designated => ${REQUIREMENT}" "${DEST}"
@@ -96,4 +131,4 @@ if [ "${KEYS}" != "<key>${ENTITLEMENT}</key>" ]; then
   exit 1
 fi
 
-echo "Winter Computer Use embedded at Contents/Helpers and signed (Identifier=${IDENTIFIER}, stated designated requirement, hardened runtime, the Apple Events entitlement only)"
+echo "Winter Computer Use embedded at Contents/Helpers and signed (Identifier=${IDENTIFIER}, stated designated requirement, hardened runtime, the Apple Events entitlement only; ${HOST_NAME} as ${HOST_IDENTIFIER}, no entitlements)"

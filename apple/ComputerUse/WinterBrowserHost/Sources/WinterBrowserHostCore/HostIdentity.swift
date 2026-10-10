@@ -7,12 +7,12 @@ public enum HostProfile: String, Sendable, Equatable {
     case dist
     /// Inside `com.winter.computeruse.dev` (`bun run dev:helper`'s build in `dist/dev/`): serves `~/.winter-dev`.
     case dev
-    /// A test build (`WINTER_CU_TEST_BUILD`), inside the test helper or standalone: serves the home it is given.
+    /// A test build (the test-build compilation condition), inside the test helper or standalone: serves the home it is given.
     case test
 }
 
 /// What a test build's `main.swift` read from its environment. A dev or release binary never constructs one: the code
-/// that reads those variables compiles only under `WINTER_CU_TEST_BUILD`, and no variable name appears in this library.
+/// that reads those variables compiles only under the test-build condition, in `Tool/main.swift`; no variable name appears here.
 public struct HostTestHooks: Sendable, Equatable {
     /// The home to serve instead of the profile's (honoured only when the host is not inside an installed Winter.app).
     public var home: String?

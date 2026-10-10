@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HELPER, HELPER_EMBED_RELATIVE, helperRequirement, readHelperVersion } from "./computer-helper-lib";
+import { BROWSER_HOST, BROWSER_HOST_EXECUTABLE, HELPER, HELPER_EMBED_RELATIVE, helperRequirement, readHelperVersion } from "./computer-helper-lib";
 
 const SCRIPT = join(import.meta.dir, "embed-computer-helper.sh");
 const temps: string[] = [];
@@ -18,12 +18,13 @@ afterEach(() => {
 
 /** A built-products dir holding a minimal "Winter Computer Use.app" with `bundleId` at `version` (default: the
  *  helper's own, apple/ComputerUse/VERSION). */
-function builtProducts(bundleId: string, version: string = readHelperVersion()): string {
+function builtProducts(bundleId: string, version: string = readHelperVersion(), withHost = true): string {
   const dir = mkdtempSync(join(tmpdir(), "embed-cu-"));
   temps.push(dir);
   const app = join(dir, `${HELPER.dist.name}.app`, "Contents");
   mkdirSync(join(app, "MacOS"), { recursive: true });
   copyFileSync("/usr/bin/true", join(app, "MacOS", HELPER.dist.name));
+  if (withHost) copyFileSync("/usr/bin/true", join(app, "MacOS", BROWSER_HOST_EXECUTABLE));
   writeFileSync(
     join(app, "Info.plist"),
     `<?xml version="1.0" encoding="UTF-8"?>
@@ -78,6 +79,36 @@ describe("embed-computer-helper.sh (the 'Embed Winter Computer Use' postCompileS
     const ents = spawnSync("codesign", ["-d", "--entitlements", "-", "--xml", dest], { encoding: "utf8" }).stdout;
     expect([...ents.matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1])).toEqual(["com.apple.security.automation.apple-events"]);
     expect(r.stdout).toContain("Winter Computer Use embedded at Contents/Helpers");
+  });
+
+  test("Release: winter-browser-host is signed with its OWN identity first — identifier, stated requirement, hardened runtime, no entitlements — and the helper's seal records it under that requirement", () => {
+    const dir = builtProducts(HELPER.dist.identifier);
+    const r = embed(dir);
+    if (r.status !== 0) throw new Error(`exit ${r.status}:\n${r.stderr}\n${r.stdout}`);
+    const dest = join(dir, "Winter.app", HELPER_EMBED_RELATIVE);
+    const host = join(dest, "Contents", "MacOS", BROWSER_HOST_EXECUTABLE);
+    const dr = spawnSync("codesign", ["-d", "-r-", host], { encoding: "utf8" });
+    expect(`${dr.stdout}${dr.stderr}`).toContain(`designated => ${helperRequirement(BROWSER_HOST.dist.identifier, "37N77U9RSZ")}`);
+    const dvv = spawnSync("codesign", ["-dvv", host], { encoding: "utf8" }).stderr;
+    expect(dvv).toMatch(/^Identifier=com\.winter\.browserhost$/m);
+    expect(dvv).toMatch(/^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*runtime/m);
+    expect(spawnSync("codesign", ["-d", "--entitlements", "-", "--xml", host], { encoding: "utf8" }).stdout).not.toContain("<key>");
+    // Its own signature is intact after the helper's (signed first, never re-signed by it)…
+    expect(spawnSync("codesign", ["--verify", "--strict", host], { encoding: "utf8" }).status).toBe(0);
+    // …and the helper's seal records it as nested code under the host's stated requirement. (A strict --deep verify of
+    // this ad-hoc fixture fails exactly there: an ad-hoc host cannot satisfy a team requirement; release.ts verifies the
+    // real artifact, signed by Winter's team.)
+    const sealed = spawnSync("plutil", ["-extract", `files2.MacOS/${BROWSER_HOST_EXECUTABLE}.requirement`, "raw", "-o", "-",
+      join(dest, "Contents", "_CodeSignature", "CodeResources")], { encoding: "utf8" });
+    expect(sealed.stdout.trim()).toBe(helperRequirement(BROWSER_HOST.dist.identifier, "37N77U9RSZ"));
+  });
+
+  test("refuses a helper built without winter-browser-host", () => {
+    const dir = builtProducts(HELPER.dist.identifier, readHelperVersion(), false);
+    const r = embed(dir);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("has no Contents/MacOS/winter-browser-host");
+    expect(existsSync(join(dir, "Winter.app", HELPER_EMBED_RELATIVE))).toBe(false);
   });
 
   test("a re-embed replaces the old copy rather than merging into it", () => {
