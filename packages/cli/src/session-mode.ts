@@ -1,6 +1,7 @@
 // Plan-immunity Task 2 (mode×surface matrix, ledger .superpowers/sdd/2026-07-28-plan-immunity/
-// progress.md, USER DIRECTIVE 2026-07-28): code = TUI + macOS app + iOS app; chat/cowork = apps
-// only; dispatch = apps + orb. The TUI/CLI is CODE-ONLY. `mode` is absent on every pre-existing
+// progress.md, USER DIRECTIVE 2026-07-28): code = TUI + macOS app + iOS app; chat = apps
+// only; dispatch = apps + orb. Cowork was planned as app-only but is not available today.
+// The TUI/CLI is CODE-ONLY. `mode` is absent on every pre-existing
 // session and every plain `session.create` call that doesn't pass one (the R-slice convention:
 // absent = code) — `isCodeMode` below is the one predicate every surface in this package uses so
 // that convention is never re-derived ad hoc.
@@ -36,13 +37,13 @@ export function filterCodeSessions<T extends { mode?: string }>(rows: T[]): T[] 
 }
 
 /** `winter sessions`' inventory tag — "" for code, the spec's exact wording for chat/dispatch, and
- *  a generic "<mode> — app only" for cowork or any future/unknown mode so a new mode never falls
- *  through to a blank or stale-sounding marker. */
+ *  a generic "<mode> — app only" for any future/unknown mode so a new mode never falls through
+ *  to a blank marker. A synthetic cowork row tests this fallback; it does not establish availability. */
 export function sessionModeMarker(mode?: string): string {
   if (isCodeMode(mode)) return "";
   const m = mode as string;
   if (m === "dispatch") return " [dispatch — orb/app only]";
-  return ` [${m} — app only]`; // chat, cowork, and any future/unknown mode
+  return ` [${m} — app only]`; // chat and any future/unknown mode (including synthetic cowork rows)
 }
 
 /** Winter Phase 8d (Task 4.3): `winter sessions`' runtime tag — "" when absent (an engine-era row,
@@ -57,12 +58,12 @@ export function sessionRuntimeMarker(runtimeKind?: string): string {
 }
 
 /** Attach/send/watch/resume refusal text — distinct per mode (chat/dispatch get the spec's exact
- *  wording), with a generic apps-only fallback covering cowork and any future/unknown mode so this
- *  never needs a new branch as new modes are added. */
+ *  wording), with a generic apps-only fallback for any future/unknown mode. Cowork appears only
+ *  as a synthetic fallback fixture today; this text is not a promise that the app supports it. */
 export function nonCodeRefusalMessage(mode: string): string {
   if (mode === "chat") return "chat sessions live in the Winter app";
   if (mode === "dispatch") return "dispatch lives in the orb and the app";
-  return `${mode} sessions are app-only`; // cowork, and any future/unknown mode
+  return `${mode} sessions are app-only`; // future/unknown modes, including synthetic cowork rows
 }
 
 /** Shared gate for the CLI's direct-attach surfaces (send/watch/resume's existingSessionId path):

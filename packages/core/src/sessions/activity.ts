@@ -54,7 +54,8 @@ export interface ActivitySignals {
   autoBackground?: boolean;
 }
 
-/** The modes that HAVE a lifecycle (spec §1: "Code and cowork participate fully"). Absent mode is
+/** The lifecycle participation allowlist: code today, plus reserved Cowork groundwork from spec §1.
+ *  Absent mode is
  *  code by the standing convention (`isCodeMode`, packages/cli/src/session-mode.ts; `sync.ts`) —
  *  every session minted before `mode` existed, and every plain `session.create`, is a code session.
  *
@@ -62,9 +63,9 @@ export interface ActivitySignals {
  *  label: from T5 on, `active` means "abort the running turn when the last harness detaches". A
  *  mode that ships later must opt into a turn-killing lifecycle deliberately — inheriting it by
  *  omission is the failure that costs a user work. `"cowork"` is listed even though no session can
- *  carry it yet (SessionStore's own column type stops at code/dispatch/chat), on the same
- *  precedent as engine.ts's `isChatOrCowork`: the predicate is already right the day cowork ships,
- *  with no gating logic to revisit. */
+ *  carry it through a supported creation path yet (SessionStore.createSession and the protocol stop
+ *  at code/dispatch/chat). Synthetic rows can exercise this predicate; they do not implement a
+ *  Cowork runtime, prompt, or surface. Future Cowork integration must still define those. */
 const ACTIVITY_MODES: ReadonlySet<string> = new Set(["code", "cowork"]);
 
 export function participatesInActivity(mode?: string): boolean {

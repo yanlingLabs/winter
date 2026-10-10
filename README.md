@@ -197,6 +197,9 @@ bun src/main.ts                # open the terminal UI (in another terminal)
 Building the Mac app, running the tests and keeping a dev copy apart from your everyday one are all
 covered in **[CONTRIBUTING.md](CONTRIBUTING.md)**. Read it before your first build.
 
+The [Cowork implementation map](docs/cowork-status.md) distinguishes existing shared infrastructure
+from the unavailable Cowork mode and its remaining work.
+
 Issues and pull requests are welcome. Open an issue first for anything big, send security reports
 through [SECURITY.md](SECURITY.md) rather than a public issue, and bring ideas and questions to
 [Discussions](https://github.com/yanlingLabs/winter/discussions).
