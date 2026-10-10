@@ -6,10 +6,13 @@ import Foundation
 // `<this Winter.app>/Contents/Helpers/Winter Computer Use.app/Contents/MacOS/winter-browser-host` — this app's own bundle
 // path, never a versioned one, so an update in place keeps every browser pointed at the current host.
 //
-// The rules (the same as `bun run dev:helper`'s TS writer for the dev manifest): written atomically, only when the
-// content differs, only into a browser whose support directory already exists (Winter never creates a browser's
-// directory), and nothing is ever deleted. While the store ids do not exist yet it writes nothing at all: a manifest no
-// extension may use would only be noise. The Debug app writes nothing (the dev manifest is `dev:helper`'s).
+// The rules (the same as `bun run dev:helper`'s TS writer for the dev manifest, whose text it matches byte for byte):
+// written atomically, only when the content differs, only into a browser whose support directory already exists (Winter
+// never creates a browser's directory), and nothing is ever deleted. While the store ids do not exist yet it writes
+// nothing at all: a manifest no extension may use would only be noise. The Debug app writes nothing (the dev manifest is
+// `dev:helper`'s). And only an INSTALLED Winter writes: one running from `/Applications` or `~/Applications`, never a
+// copy launched from a disk image, a download folder, a build directory or an App Translocation mount — every browser
+// would otherwise be pointed at a host that is gone once that copy is.
 // -----------------------------------------------------------------------------------------------
 
 enum BrowserHostManifest {
@@ -100,11 +103,27 @@ enum BrowserHostManifest {
         }
     }
 
+    /// Is the app at `appPath` an installed Winter — directly or below `/Applications` or `<userHome>/Applications`, with
+    /// symlinks resolved, and not an App Translocation copy (macOS runs a quarantined app from a randomised read-only
+    /// mount until it is moved)?
+    static func isInstalledLocation(appPath: String, userHome: String) -> Bool {
+        let resolved = URL(fileURLWithPath: appPath).standardizedFileURL.resolvingSymlinksInPath().path
+        guard !resolved.contains("/AppTranslocation/") else { return false }
+        let roots = ["/Applications", (userHome as NSString).appendingPathComponent("Applications")]
+            .map { URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath().path }
+        return roots.contains { root in resolved.hasPrefix(root + "/") && resolved.hasSuffix(".app") }
+    }
+
     /// Release launch: this app's manifests into the user's Application Support, off the main thread. Only the dist
-    /// identity writes (a Debug build is compiled without the call; this guards a misbuilt one).
+    /// identity writes (a Debug build is compiled without the call; this guards a misbuilt one), and only when it runs
+    /// from where it is installed.
     static func writeForThisApp(log: @escaping (String) -> Void = { _ in }) {
         guard Bundle.main.bundleIdentifier == "com.winter.app" else { return }
         let appPath = Bundle.main.bundlePath
+        guard isInstalledLocation(appPath: appPath, userHome: NSHomeDirectory()) else {
+            log("Winter for Chrome: not writing host manifests — this Winter is not running from /Applications or ~/Applications")
+            return
+        }
         DispatchQueue.global(qos: .utility).async {
             let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.path
             guard let support else { return }
@@ -124,6 +143,8 @@ enum BrowserHostManifest {
             case "\n": out += "\\n"
             case "\r": out += "\\r"
             case "\t": out += "\\t"
+            case "\u{8}": out += "\\b"
+            case "\u{C}": out += "\\f"
             default:
                 if scalar.value < 0x20 { out += String(format: "\\u%04x", scalar.value) } else { out.unicodeScalars.append(scalar) }
             }
