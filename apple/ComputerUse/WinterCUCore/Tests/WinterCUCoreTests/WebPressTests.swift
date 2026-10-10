@@ -169,6 +169,21 @@ final class WebPressTests: XCTestCase {
         XCTAssertFalse(d.contains("state() shows what appeared"), d)
     }
 
+    /// Review of round 2 (LOW): a page past the walk's cap counted the same before and after, so "nothing new
+    /// appeared" was claimed whatever the hover did. A cut walk claims nothing.
+    func testAHoverOverAPageTooBigToCountClaimsNothing() async throws {
+        world()
+        core.hoverFingerprintMaxNodes = 2  // the page has more elements than that
+        XCTAssertNil(core.webElementCount(target))
+        core.hoverFingerprintMaxNodes = 4000
+        XCTAssertEqual(core.webElementCount(target), 3, "the web area, the panel, the button")
+        core.hoverFingerprintMaxNodes = 2
+        let r = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
+            action: .hover(CUHoverAction(ref: ref(button), ms: 50)), access: .click, allowForeground: false, privatePath: false))
+        XCTAssertFalse(r.detail?.contains("nothing new appeared") ?? true, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("state() shows what appeared") ?? false, r.detail ?? "")
+    }
+
     func testAHoverThatRevealsSomethingKeepsItsAnswer() async throws {
         world()
         let item = fakeElement(96_010)

@@ -153,7 +153,10 @@ export function bodyLines(roots: readonly TabNode[], focusedRef: number | undefi
     const idx = items.length;
     const bytes = whole ? depth * 2 + utf8Length(nodeLine(n)) + 1 : 0;
     items.push({ node: n, ...(parent === undefined ? {} : { parent }), depth, descendants: 0, outOfView: parent !== undefined && n.off === true && !parentOff, bytes, childIndex });
-    if (parent !== undefined) childrenOf.set(parent, [...(childrenOf.get(parent) ?? []), idx]);
+    if (parent !== undefined) {
+      const siblings = childrenOf.get(parent);
+      if (siblings) siblings.push(idx); else childrenOf.set(parent, [idx]);
+    }
     n.children.forEach((c, k) => add(c, idx, depth + 1, n.off === true, k));
   };
   roots.forEach((r, k) => add(r, undefined, 0, false, k));

@@ -392,19 +392,20 @@ extension CUCore {
         return out.noting(rested)
     }
 
-    /// How many elements accessibility shows in the bound window's web pages (bounded walk), nil when it has none:
-    /// the cheap "did anything appear" fingerprint around a hover.
-    func webElementCount(_ t: CUTarget, maxNodes: Int = 4000, maxMs: Double = 200) -> Int? {
+    /// How many elements accessibility shows in the bound window's web page — the cheap "did anything appear"
+    /// fingerprint around a hover. Nil when it has none, or when the walk was cut short (`hoverFingerprintMaxNodes`,
+    /// or 200 ms): a capped count is the same before and after whatever appeared, so it proves nothing either way.
+    func webElementCount(_ t: CUTarget, maxMs: Double = 200) -> Int? {
         guard let win = try? windowElement(t), let area = firstWebArea(win) else { return nil }
         let deadline = clock.nowMs() + maxMs
         var queue = [area]
-        var n = 0
-        while !queue.isEmpty, n < maxNodes, clock.nowMs() < deadline {
-            let e = queue.removeFirst()
-            n += 1
-            queue.append(contentsOf: ax.elements(e, kAXChildrenAttribute))
+        var next = 0
+        while next < queue.count {
+            guard next < hoverFingerprintMaxNodes, clock.nowMs() < deadline else { return nil }
+            queue.append(contentsOf: ax.elements(queue[next], kAXChildrenAttribute))
+            next += 1
         }
-        return n
+        return next
     }
 
     /// An AX action or write that timed out may still run later: never follow it with events (that would do

@@ -517,6 +517,8 @@ public final class CUCore: @unchecked Sendable {
     /// The pause between the synthetic deactivation and the make-key records (`releaseOtherKeyWindow`); 0 in
     /// test cores.
     var keySwitchGapMs: Double = 30
+    /// The most elements a hover's "did anything appear" walk counts; past it the walk proves nothing (nil).
+    var hoverFingerprintMaxNodes = 4000
     var visitFreshMaxMs: Double = 1000
     var visitFreshStableMs: Double = 300
     var visitFrameIntervalMs: Double = 50

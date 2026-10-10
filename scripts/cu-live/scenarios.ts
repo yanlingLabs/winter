@@ -818,14 +818,16 @@ report({ pressed: close.ref });`,
       const fellBack = /did nothing|clicked (it )?instead|click(ed)? with the pointer|mouse (down|events)/i.test(ctx.output);
       const mouse = docsEvents(ctx, "mouse").filter((e) => e.id === "find-close").map((e) => e.phase);
       // WebKit's accessibility press is itself a mousedown + mouseup + click (the button's ignored `click` is logged
-      // either way): the press worked when the button got ONE press; a second one is the helper's click, which the
-      // result must say.
+      // either way), so the press log alone can't tell. The helper clicked instead when the click's own rung (its
+      // metric) is an event rung (2+) — or the button got a second press; then the result must say so.
       const presses = mouse.filter((p) => p === "down").length;
+      const clickRung = ctx.metrics.filter((m) => m.primitive === "click").map((m) => Number(m.rung)).find((r) => Number.isFinite(r));
+      const clickedInstead = presses >= 2 || (clickRung !== undefined && clickRung >= 2);
       return [ok(ctx),
         check("the panel closed (fixture log)", docsEvents(ctx, "panel").some((e) => e.open === false) && docsState(ctx).panelOpen === false, JSON.stringify(docsEvents(ctx, "panel"))),
         check("the button got a mousedown and a mouseup", mouse.includes("down") && mouse.includes("up"), JSON.stringify(mouse)),
-        check("the result says the AX press did nothing and it clicked instead (or the AX press itself worked)", presses <= 1 || fellBack,
-          `${presses} presses; ${ctx.output.slice(0, 260)}`)];
+        check("the result says the AX press did nothing and it clicked instead (or the AX press itself worked)", !clickedInstead || fellBack,
+          `${presses} presses, click rung ${String(clickRung)}; ${ctx.output.slice(0, 240)}`)];
     },
   },
   {

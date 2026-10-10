@@ -82,12 +82,21 @@ describe("browsers.list / open / tabs / tab", () => {
     expect(opened).toContain('heading "Results"');
     expect(opened.split("\n").length).toBeLessThan(330);
     expect(opened).not.toContain("Result number 599");
-    // The same tab bound afresh in another session: the ordinary state too.
-    const r2 = h.run("s2");
-    await h.engine.global(r2.scope, "browsers.tab", { id: handle.id }).catch(() => undefined);
     const full = await h.engine.primitive(r.scope, handle.targetId, "state", { full: true }) as string;
     expect(full).toContain("Result number 599");
     expect(full).not.toContain("the full state is cut");
+    // A tab bound with browsers.tab (the first bind, `engine.ts`'s other print): the ordinary state too, asserted —
+    // the bind line, the page's head, folded to the line cap.
+    h.chrome.addTab(big, { tabKey: "500" });
+    const r2 = h.run("s2");
+    const bound = await h.engine.global(r2.scope, "browsers.tab", { tab: "chrome:500" }) as TabHandle;
+    expect(bound).toMatchObject({ id: "chrome:500", browser: "chrome" });
+    const text = r2.text();
+    expect(text).toContain("bound chrome:500 in Google Chrome");
+    expect(text).toContain('heading "Results"');
+    expect(text).toContain('[3] list "Results" (600 more — state({within:3}))');
+    expect(text).not.toContain("Result number");
+    expect(text.split("\n").length).toBeLessThan(330);
   });
 
   test("open: a non-http(s) URL is NotAllowed before anything opens; about:blank mints a tab with no url, shown as about:blank", async () => {
