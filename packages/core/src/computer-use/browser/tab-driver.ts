@@ -111,6 +111,9 @@ export class TabDriver {
   fileChooser?: { frameId: string; mode: string };
 
   private attached = false;
+  /** Times the debugger was let go while the tab lived (an idle detach, `stopped`, a command's `tab_gone`): a
+   *  navigation in flight across one is finished by attaching again (`navigation`). */
+  private detaches = 0;
   private attaching?: Promise<void>;
   private releasing?: Promise<void>;
   /** When a primitive last used this tab (the hold cap releases the least recently used), and how many are using it
@@ -124,6 +127,8 @@ export class TabDriver {
   private readonly frames = new Map<string, FrameRec>();
   private topFrameId?: string;
   private readonly childSetups = new Map<string, Promise<void>>();
+  /** CDP sessions ("" = the tab's own) where Runtime is enabled: a world is made and used only in one (a world rule). */
+  private readonly runtimeOn = new Set<string>();
   private nextRef = 1;
   private readonly refByKey = new Map<string, number>();
   private readonly refInfo = new Map<number, { rtId: string; id: number }>();
@@ -178,7 +183,7 @@ export class TabDriver {
       if (err instanceof AutomationFailure) throw err;
       // `tab_gone` from a command is not proof the tab closed (an extension's debugger can be let go while the tab
       // lives): attach again on the next primitive — that attach failing is what loses the tab.
-      if (err instanceof TransportError && err.code === "tab_gone") { this.attached = false; this.resetDocumentState(true); }
+      if (err instanceof TransportError && err.code === "tab_gone") { this.attached = false; this.detaches++; this.resetDocumentState(true); }
       throw transportFailure(err, this.browserName);
     }
   }
@@ -214,7 +219,9 @@ export class TabDriver {
 
   // ── attach / detach ────────────────────────────────────────────────────────────────────────────
 
-  async ensureAttached(sessionId: string): Promise<void> {
+  /** `transient`: the tab may be between documents (the browser navigating it by itself) — a `tab_gone` from the attach
+   *  is `TabBetween`, not the tab lost. */
+  async ensureAttached(sessionId: string, o: { transient?: boolean } = {}): Promise<void> {
     if (this.gone !== undefined) throw this.lost();
     if (this.releasing !== undefined) await this.releasing;
     this.holders.add(sessionId);
@@ -223,7 +230,11 @@ export class TabDriver {
     this.attaching ??= (async () => {
       let info: { viewport: [number, number]; dpr: number };
       try { info = await this.transport.attach(this.tabKey, { sessionId }); } catch (err) {
-        if (err instanceof TransportError && err.code === "tab_gone") { this.gone ??= "closed"; throw this.lost(); }
+        if (err instanceof TransportError && err.code === "tab_gone") {
+          if (o.transient === true) throw new TabBetween();
+          this.gone ??= "closed";
+          throw this.lost();
+        }
         throw transportFailure(err, this.browserName);
       }
       this.viewport = info.viewport;
@@ -266,6 +277,7 @@ export class TabDriver {
     await this.send("Page.enable", {}, session);
     await this.send("Page.setLifecycleEventsEnabled", { enabled: true }, session).catch(() => undefined);
     await this.send("Runtime.enable", {}, session);
+    this.runtimeOn.add(session ?? "");
     // Only request timing is read (idle detection); nothing needs a body, so the browser buffers none.
     await this.send("Network.enable", { maxTotalBufferSize: 0, maxResourceBufferSize: 0, maxPostDataSize: 0 }, session).catch(() => undefined);
     await this.send("Page.setInterceptFileChooserDialog", { enabled: true }, session).catch(() => undefined);
@@ -425,6 +437,7 @@ export class TabDriver {
         const info = (p.targetInfo ?? {}) as { targetId?: string; type?: string };
         if (child === undefined || info.type !== "iframe" || typeof info.targetId !== "string") break;
         const rec = this.frames.get(info.targetId) ?? { frameId: info.targetId, url: "" };
+        this.runtimeOn.delete(child); // a fresh session: nothing is enabled in it yet
         rec.session = child;
         delete rec.ctx;
         this.forgetRuntime(rec);
@@ -439,6 +452,7 @@ export class TabDriver {
       }
       case "Target.detachedFromTarget": {
         const child = typeof p.sessionId === "string" ? p.sessionId : undefined;
+        if (child !== undefined) this.runtimeOn.delete(child);
         for (const rec of this.frames.values()) if (child !== undefined && rec.session === child) { delete rec.ctx; this.forgetRuntime(rec); }
         break;
       }
@@ -448,7 +462,7 @@ export class TabDriver {
       case "Inspector.detached":
         // The tab's debugger was let go (idle, or the target swapped) while the tab lives: attach again on the next
         // primitive; its world, and so every ref, will be new.
-        if (session === undefined) { this.attached = false; this.holders.clear(); this.resetDocumentState(true); }
+        if (session === undefined) { this.attached = false; this.detaches++; this.holders.clear(); this.resetDocumentState(true); }
         break;
       default:
         break;
@@ -461,6 +475,7 @@ export class TabDriver {
       // The tab's browser was stopped or its debugger let go (the app parked it; the extension idled out): the tab
       // itself may live on — the next primitive attaches again; its document (and so every ref) is new.
       this.attached = false;
+      this.detaches++;
       this.holders.clear();
       this.resetDocumentState(true);
     } else {
@@ -521,6 +536,7 @@ export class TabDriver {
     for (const rec of this.frames.values()) { delete rec.ctx; this.forgetRuntime(rec); }
     this.frames.clear();
     this.childSetups.clear();
+    this.runtimeOn.clear();
     this.seenUnique.clear();
     this.topFrameId = undefined;
     this.inflight.clear();
@@ -542,6 +558,16 @@ export class TabDriver {
     if (rec.installing !== undefined) { await rec.installing; return; }
     rec.installing = (async () => {
       const session = rec.session;
+      // Runtime first, in the frame's own session: an out-of-process frame's session may still be being set up.
+      if (!this.runtimeOn.has(session ?? "")) {
+        const setup = session === undefined ? undefined : this.childSetups.get(session);
+        if (setup !== undefined) await setup;
+        if (!this.runtimeOn.has(session ?? "")) {
+          await this.send("Runtime.enable", {}, session);
+          this.runtimeOn.add(session ?? "");
+        }
+        if (rec.session !== session) throw new Error("the frame's execution context was destroyed (it moved to another process)");
+      }
       if (rec.ctx === undefined) {
         const r = await this.send<{ executionContextId: number }>("Page.createIsolatedWorld", { frameId: rec.frameId, worldName: "winter" }, session);
         if (rec.session !== session) throw new Error("the frame's execution context was destroyed (it moved to another process)");
@@ -1122,39 +1148,94 @@ export class TabDriver {
 
   // ── navigation ─────────────────────────────────────────────────────────────────────────────────
 
-  /** `Page.navigate` and wait for the new page (commit + DOMContentLoaded, at most 10 s). `false`: still loading. */
-  async goto(url: string, signal?: AbortSignal): Promise<boolean> {
-    const before = this.navSeq;
-    const r = await this.send<{ loaderId?: string; errorText?: string }>("Page.navigate", { url });
-    if (typeof r.errorText === "string" && r.errorText.length > 0) throw new Error(`${r.errorText} — the page could not be loaded`);
-    if (r.loaderId === undefined) return await this.waitUntil(() => this.navSeq > before, 2_000, signal) || true;
-    return await this.waitLoaded(() => this.lastCommitLoader === r.loaderId && this.navSeq > before, signal);
+  /** `Page.navigate` and wait for the new page (commit + DOMContentLoaded, at most 10 s). `false`: still loading.
+   *  `sessionId`: the navigation may be carried out by the browser itself across a detach (`navigation`). */
+  async goto(url: string, signal?: AbortSignal, sessionId?: string): Promise<boolean> {
+    const from = this.url;
+    return await this.navigation(sessionId, (now) => sameDocUrl(now, url) || !sameDocUrl(now, from), signal, async (d0) => {
+      const before = this.navSeq;
+      const r = await this.send<{ loaderId?: string; errorText?: string }>("Page.navigate", { url });
+      if (typeof r.errorText === "string" && r.errorText.length > 0) throw new Error(`${r.errorText} — the page could not be loaded`);
+      if (r.loaderId === undefined) return await this.waitUntil(() => this.navSeq > before || this.detaches !== d0, 2_000, signal) || true;
+      return await this.waitLoaded(() => this.lastCommitLoader === r.loaderId && this.navSeq > before, d0, signal);
+    });
   }
 
-  private async waitLoaded(committed: () => boolean, signal?: AbortSignal): Promise<boolean> {
+  private async waitLoaded(committed: () => boolean, d0: number, signal?: AbortSignal): Promise<boolean> {
     const deadline = this.now() + NAVIGATION_WAIT_MS;
-    const ok = await this.waitUntil(() => committed() || this.dialog !== undefined || this.gone !== undefined, NAVIGATION_WAIT_MS, signal);
+    const detached = (): boolean => this.detaches !== d0;
+    const ok = await this.waitUntil(() => committed() || this.dialog !== undefined || this.gone !== undefined || detached(), NAVIGATION_WAIT_MS, signal);
     if (this.gone !== undefined) throw this.lost();
+    if (detached()) return false;
     if (!ok) return false;
     if (this.dialog !== undefined) return true;
     if (this.lastCommitType === "BackForwardCacheRestore" || this.lastCommitType === "sameDocument") return true;
     const loader = this.lastCommitLoader;
-    return await this.waitUntil(() => (loader !== undefined && this.dclLoader === loader) || this.dialog !== undefined || this.gone !== undefined, Math.max(0, deadline - this.now()), signal);
+    return await this.waitUntil(() => (loader !== undefined && this.dclLoader === loader) || this.dialog !== undefined || this.gone !== undefined || detached(), Math.max(0, deadline - this.now()), signal);
   }
 
-  async history(step: -1 | 1, signal?: AbortSignal): Promise<boolean> {
-    const h = await this.send<{ currentIndex: number; entries: Array<{ id: number }> }>("Page.getNavigationHistory");
+  async history(step: -1 | 1, signal?: AbortSignal, sessionId?: string): Promise<boolean> {
+    const h = await this.send<{ currentIndex: number; entries: Array<{ id: number; url?: string }> }>("Page.getNavigationHistory");
     const entry = h.entries[h.currentIndex + step];
     if (entry === undefined) throw new Error(step < 0 ? "no page to go back to" : "no page to go forward to");
-    const before = this.navSeq;
-    await this.send("Page.navigateToHistoryEntry", { entryId: entry.id });
-    return await this.waitLoaded(() => this.navSeq > before, signal);
+    const from = this.url;
+    const want = entry.url;
+    return await this.navigation(sessionId, (now) => (want !== undefined && sameDocUrl(now, want)) || !sameDocUrl(now, from), signal, async (d0) => {
+      const before = this.navSeq;
+      await this.send("Page.navigateToHistoryEntry", { entryId: entry.id });
+      return await this.waitLoaded(() => this.navSeq > before, d0, signal);
+    });
   }
 
-  async reload(signal?: AbortSignal): Promise<boolean> {
-    const before = this.navSeq;
-    await this.send("Page.reload", {});
-    return await this.waitLoaded(() => this.navSeq > before, signal);
+  async reload(signal?: AbortSignal, sessionId?: string): Promise<boolean> {
+    return await this.navigation(sessionId, undefined, signal, async (d0) => {
+      const before = this.navSeq;
+      await this.send("Page.reload", {});
+      return await this.waitLoaded(() => this.navSeq > before, d0, signal);
+    });
+  }
+
+  /**
+   * One navigation. The browser may carry it out BY ITSELF and let the debugger go meanwhile (Winter for Chrome
+   * navigates an agent tab with a `beforeunload` page through the tabs API, so the dialog never brings it to the front):
+   * a detach during the navigation — or the navigate refused because the tab let go — is not the tab lost. The tab is
+   * attached again (a fresh world: every ref is new), the new document awaited, and its URL checked (`arrived`: where it
+   * was sent, or at least not where it was). `false`: still loading after 10 s.
+   */
+  private async navigation(sessionId: string | undefined, arrived: ((url: string) => boolean) | undefined, signal: AbortSignal | undefined, go: (d0: number) => Promise<boolean>): Promise<boolean> {
+    const d0 = this.detaches;
+    try {
+      const loaded = await go(d0);
+      if (this.detaches === d0) return loaded;
+    } catch (err) {
+      if (this.detaches === d0 || sessionId === undefined || this.gone !== undefined) throw err;
+    }
+    if (sessionId === undefined) return false;
+    return await this.reattachAfterNavigation(sessionId, arrived, signal);
+  }
+
+  private async reattachAfterNavigation(sessionId: string, arrived: ((url: string) => boolean) | undefined, signal: AbortSignal | undefined): Promise<boolean> {
+    const deadline = this.now() + NAVIGATION_WAIT_MS;
+    // The tab may be between documents for a moment: its attach is retried until the navigation's deadline.
+    for (;;) {
+      try { await this.ensureAttached(sessionId, { transient: true }); break; } catch (err) {
+        if (!(err instanceof TabBetween)) throw err;
+        if (this.now() >= deadline || signal?.aborted === true) { this.gone ??= "closed"; throw this.lost(); }
+        await this.waitUntil(() => false, 100, signal);
+      }
+    }
+    for (;;) {
+      if (this.gone !== undefined) throw this.lost();
+      if (this.dialog !== undefined) return true;
+      try {
+        const q = await this.quietInfo();
+        if (q.readyState !== "loading" && (arrived === undefined || arrived(q.url))) return true;
+      } catch (err) {
+        if (!isContextGone(err) && !(err instanceof AutomationFailure && err.kind !== "TargetLost")) throw err;
+      }
+      if (this.now() >= deadline || signal?.aborted === true) return false;
+      await this.waitUntil(() => false, 100, signal);
+    }
   }
 
   /** After a tab was opened: wait (at most 10 s) until its document is the one asked for and has loaded. */
@@ -1213,6 +1294,15 @@ export class TabDriver {
 }
 
 interface FrameTreeNode { frame: { id: string; parentId?: string; url: string; urlFragment?: string }; childFrames?: FrameTreeNode[] }
+
+/** An attach refused while the tab is between documents (`ensureAttached`'s `transient`): try again shortly. */
+class TabBetween extends Error {}
+
+/** Two URLs name the same document (the fragment and a trailing slash aside). */
+function sameDocUrl(a: string, b: string): boolean {
+  const norm = (u: string): string => { const h = u.indexOf("#"); const base = h < 0 ? u : u.slice(0, h); return base.endsWith("/") ? base.slice(0, -1) : base; };
+  return norm(a) === norm(b);
+}
 
 /** Stop a sequence of input events between two of them when the run was cancelled. */
 function stopIfAborted(signal: AbortSignal | undefined): void {

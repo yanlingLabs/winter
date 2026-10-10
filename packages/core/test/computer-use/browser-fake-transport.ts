@@ -44,6 +44,15 @@ export class FakeTab {
   attached = false;
   subscribed: readonly string[] = [];
   readonly contexts = new Map<string, Ctx>();
+  /** Winter worlds that ended (their document went): answered "Cannot find context with specified id". */
+  readonly endedContexts = new Set<string>();
+  /** CDP sessions ("" = the tab's own) with Runtime enabled: a world is made and used only there. */
+  readonly runtimeOn = new Set<string>();
+  /** The browser navigates this tab BY ITSELF (Winter for Chrome's discard + navigate for a `beforeunload` page): a
+   *  navigation command lets the debugger go — "resolve": it answers first, "reject": it fails `tab_gone`. */
+  navigateByDetach?: "resolve" | "reject";
+  /** An attach is refused (`tab_gone`) until this time — the tab between documents. */
+  betweenUntil = 0;
   readonly winterObjects = new Set<string>();
   values = new Map<string, string>();
   focused: string | undefined;
@@ -83,6 +92,8 @@ export class FakeCdpTransport implements CdpTransport {
   /** Every `Input.*` command takes this long to answer (a slow page) — or what `inputDelay` says for it. */
   inputDelayMs = 0;
   inputDelay?: (method: string, params: Record<string, unknown>) => number;
+  /** Any command's answer delayed (ms), by method and CDP session. */
+  commandDelay?: (method: string, session?: string) => number;
   /** Called with every command the fake accepts, before it is answered. */
   onSend?: (method: string, params: Record<string, unknown>, session?: string) => void;
 
@@ -119,6 +130,7 @@ export class FakeCdpTransport implements CdpTransport {
   }
   async attach(tabKey: string, opts: { sessionId: string }): Promise<{ viewport: [number, number]; dpr: number }> {
     const t = this.tab(tabKey);
+    if (Date.now() < t.betweenUntil) throw new TransportError("tab_gone", "the tab is between documents");
     t.attached = true;
     t.holders.add(opts.sessionId);
     return { viewport: [1200, 800], dpr: 2 };
@@ -129,6 +141,8 @@ export class FakeCdpTransport implements CdpTransport {
     t.attached = false;
     t.holders.clear();
     t.contexts.clear();
+    t.endedContexts.clear();
+    t.runtimeOn.clear();
     t.winterObjects.clear();
   }
   async subscribe(tabKey: string, events: readonly string[]): Promise<void> {
@@ -148,6 +162,15 @@ export class FakeCdpTransport implements CdpTransport {
     for (const l of [...this.gone]) l(tabKey, reason);
   }
   pressStop(tabKey: string): void { for (const l of [...this.stops]) l(tabKey); }
+  /** An out-of-process frame's target is attached afresh (it moved process): a new session, nothing enabled in it. */
+  reattachChild(tabKey: string, frameId: string): void {
+    const t = this.tabs.get(tabKey)!;
+    const session = `S-${frameId}`;
+    t.runtimeOn.delete(session);
+    for (const k of [...t.contexts.keys()]) if (k.startsWith(`${session}:`)) t.contexts.delete(k);
+    const f = t.page.frames?.find((x) => x.frameId === frameId);
+    this.emit(t, "Target.attachedToTarget", { sessionId: session, targetInfo: { targetId: frameId, type: "iframe", url: f?.url ?? "" }, waitingForDebugger: false });
+  }
   /** The debugger is let go while the tab lives (the extension idled out): a top-level `Inspector.detached`. */
   detachIdle(tabKey: string): void {
     const t = this.tabs.get(tabKey);
@@ -156,7 +179,25 @@ export class FakeCdpTransport implements CdpTransport {
     t.attached = false;
     t.holders.clear();
     t.contexts.clear();
+    t.endedContexts.clear();
+    t.runtimeOn.clear();
     t.winterObjects.clear();
+  }
+
+  /** The extension's own navigation of a `beforeunload` tab: a synthetic top-level `Inspector.detached`, the debugger
+   *  let go, the new document loaded while nobody is attached. */
+  private navigateDetached(t: FakeTab, url: string): void {
+    this.emit(t, "Inspector.detached", { reason: "navigated" });
+    t.attached = false;
+    t.holders.clear();
+    t.contexts.clear();
+    t.endedContexts.clear();
+    t.runtimeOn.clear();
+    t.winterObjects.clear();
+    t.doc++;
+    t.page = this.page(url);
+    t.values.clear();
+    t.dialog = undefined;
   }
 
   emit(tab: FakeTab, method: string, params: Record<string, unknown>, session?: string): void {
@@ -184,6 +225,7 @@ export class FakeCdpTransport implements CdpTransport {
     for (const [k, c] of [...t.contexts]) {
       if (c.frameId === "top" || c.session === undefined) {
         t.contexts.delete(k);
+        t.endedContexts.add(k);
         this.emit(t, "Runtime.executionContextDestroyed", { executionContextId: Number(k.split(":")[1]) });
       }
     }
@@ -213,14 +255,31 @@ export class FakeCdpTransport implements CdpTransport {
     const session = opts.cdpSessionId;
     this.sent.push({ tabKey, method, params, ...(session === undefined ? {} : { session }) });
     this.onSend?.(method, params, session);
-    const delay = method.startsWith("Input.") ? this.inputDelay?.(method, params) ?? this.inputDelayMs : 0;
+    const delay = (method.startsWith("Input.") ? this.inputDelay?.(method, params) ?? this.inputDelayMs : 0) + (this.commandDelay?.(method, session) ?? 0);
     if (delay > 0) await new Promise((res) => setTimeout(res, delay));
     const ctxKey = (id: unknown): string => `${session ?? ""}:${String(id)}`;
     const r = (v: unknown): T => v as T;
+    // The ratified world rules: Runtime is enabled in a session before a world is made or used there; an ENDED world is
+    // answered in Chrome's own words (the engine retries in a fresh one).
+    const runtimeOn = (): void => { if (!t.runtimeOn.has(session ?? "")) throw new TransportError("not_allowed", `${method}: Runtime is not enabled in this session`); };
+    const ended = (id: unknown): void => {
+      if (t.endedContexts.has(ctxKey(id))) throw new TransportError("cdp_error", "Cannot find context with specified id", { cdpCode: -32000, cdpMessage: "Cannot find context with specified id" });
+    };
+    if (method === "Runtime.evaluate" || (method === "Runtime.callFunctionOn" && typeof params.objectId !== "string") || method === "Page.createIsolatedWorld") runtimeOn();
+    if (method === "Runtime.evaluate") ended(params.contextId);
+    if ((method === "Runtime.callFunctionOn" && typeof params.objectId !== "string") || method === "DOM.resolveNode") ended(params.executionContextId);
+    const detachNavigate = (url: string): T => {
+      const how = t.navigateByDetach!;
+      this.navigateDetached(t, url);
+      if (how === "reject") throw new TransportError("tab_gone", "the debugger was let go for a navigation");
+      return r({ frameId: "top", loaderId: `L${t.doc}` });
+    };
     switch (method) {
-      case "Page.enable": case "Runtime.enable": case "Network.enable": case "Page.setLifecycleEventsEnabled":
+      case "Runtime.enable": t.runtimeOn.add(session ?? ""); return r({});
+      case "Runtime.disable": t.runtimeOn.delete(session ?? ""); return r({});
+      case "Page.enable": case "Network.enable": case "Page.setLifecycleEventsEnabled":
       case "Page.setInterceptFileChooserDialog": case "Emulation.setFocusEmulationEnabled": case "Runtime.releaseObject":
-      case "Page.disable": case "Runtime.disable": case "Network.disable":
+      case "Page.disable": case "Network.disable":
         return r({});
       case "Target.getTargetInfo":
         return r({ targetInfo: { targetId: "top", type: "page", url: t.page.url, title: t.page.title, attached: true } });
@@ -309,6 +368,7 @@ export class FakeCdpTransport implements CdpTransport {
         t.history = t.history.slice(0, t.historyIndex + 1);
         t.history.push(url);
         t.historyIndex = t.history.length - 1;
+        if (t.navigateByDetach !== undefined) return detachNavigate(url);
         if (t.beforeUnload) {
           t.pendingNav = url;
           t.dialog = { type: "beforeunload", message: "" };
@@ -321,11 +381,13 @@ export class FakeCdpTransport implements CdpTransport {
       case "Page.navigateToHistoryEntry": {
         const i = Number(params.entryId) - 1;
         t.historyIndex = i;
+        if (t.navigateByDetach !== undefined) return detachNavigate(t.history[i]!);
         queueMicrotask(() => this.commit(t, t.history[i]!));
         return r({});
       }
       case "Page.reload":
         if (params.scriptToEvaluateOnLoad !== undefined) throw new TransportError("not_allowed", "Page.reload with scriptToEvaluateOnLoad");
+        if (t.navigateByDetach !== undefined) return detachNavigate(t.page.url);
         queueMicrotask(() => this.commit(t, t.page.url));
         return r({});
       case "Page.handleJavaScriptDialog":

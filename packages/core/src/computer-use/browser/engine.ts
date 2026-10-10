@@ -991,11 +991,11 @@ export class BrowserEngine {
         if (url !== "about:blank") await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, url, this.browserName(b.backend), this.cwdOf(sid));
         scope.live();
         noteSiteOf(scope, url);
-        return await this.navigate(scope, b, driver, () => driver.goto(url, scope.signal));
+        return await this.navigate(scope, b, driver, () => driver.goto(url, scope.signal, scope.sessionId));
       }
-      case "back": return await this.navigate(scope, b, driver, () => driver.history(-1, scope.signal));
-      case "forward": return await this.navigate(scope, b, driver, () => driver.history(1, scope.signal));
-      case "reload": return await this.navigate(scope, b, driver, () => driver.reload(scope.signal));
+      case "back": return await this.navigate(scope, b, driver, () => driver.history(-1, scope.signal, scope.sessionId));
+      case "forward": return await this.navigate(scope, b, driver, () => driver.history(1, scope.signal, scope.sessionId));
+      case "reload": return await this.navigate(scope, b, driver, () => driver.reload(scope.signal, scope.sessionId));
       case "url": {
         // While a page dialog is open the page is paused: the engine's own tracked URL answers.
         if (driver.dialog === undefined) { try { await driver.quietInfo(); } catch { /* the last committed URL */ } }

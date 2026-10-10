@@ -14,8 +14,10 @@ import { TransportError, type BrowserFamily, type CdpEvent, type CdpTransport, t
 interface Pending { resolve(v: unknown): void; reject(e: Error): void; timer: ReturnType<typeof setTimeout> }
 interface Tab {
   tabKey: string; targetId: string; session?: string; events: Set<string>;
-  /** "winter" worlds this transport itself created (`<session>:<contextId>`), and their unique ids when reported. */
-  winterCtx: Set<string>; winterUnique: Map<string, string>;
+  /** "winter" worlds this transport itself created (`<session>:<contextId>`), and their unique ids when reported; the
+   *  frame each was made in; the ones that ENDED (destroyed, cleared, or their frame navigated to a new document); the
+   *  sessions with Runtime enabled (a world is made and used only there). */
+  winterCtx: Set<string>; winterUnique: Map<string, string>; ctxFrame: Map<string, string>; endedCtx: Set<string>; runtimeOn: Set<string>;
   winterObjects: Set<string>; children: Set<string>; sessionId?: string; agent: boolean;
 }
 
@@ -121,14 +123,19 @@ export class PipeTransport implements CdpTransport {
       const c = params.context as { id: number; uniqueId?: string };
       if (tab.winterCtx.has(`${sessKey}:${c.id}`) && typeof c.uniqueId === "string") tab.winterUnique.set(c.uniqueId, `${sessKey}:${c.id}`);
     }
+    const end = (key: string): void => { if (tab.winterCtx.delete(key)) tab.endedCtx.add(key); tab.ctxFrame.delete(key); };
     if (method === "Runtime.executionContextDestroyed") {
       const unique = typeof params.executionContextUniqueId === "string" ? params.executionContextUniqueId : undefined;
       const key = unique !== undefined ? tab.winterUnique.get(unique) : `${sessKey}:${String(params.executionContextId)}`;
-      if (key !== undefined) tab.winterCtx.delete(key);
-      if (unique !== undefined) tab.winterUnique.delete(unique);
+      if (key !== undefined) end(key);
     }
     if (method === "Runtime.executionContextsCleared") {
-      for (const k of [...tab.winterCtx]) if (k.startsWith(`${sessKey}:`)) tab.winterCtx.delete(k);
+      for (const k of [...tab.winterCtx]) if (k.startsWith(`${sessKey}:`)) end(k);
+    }
+    // A cross-document navigation of a world's frame ends that world.
+    if (method === "Page.frameNavigated") {
+      const frameId = (params.frame as { id?: string } | undefined)?.id;
+      for (const [k, f] of [...tab.ctxFrame]) if (f === frameId && k.startsWith(`${sessKey}:`)) end(k);
     }
     if (method === "Inspector.targetCrashed") for (const l of [...this.goneListeners]) l(tab.tabKey, "crashed");
     if (!tab.events.has(method) || !CDP_ALLOWED_EVENTS.includes(method)) return;
@@ -148,7 +155,7 @@ export class PipeTransport implements CdpTransport {
   async createTab(opts: { sessionId: string; url: string; tabKey?: string }): Promise<TransportTab> {
     const r = await this.raw<{ targetId: string }>("Target.createTarget", { url: opts.url, background: true });
     const tabKey = opts.tabKey ?? `t${this.nextTab++}`;
-    this.tabs.set(tabKey, { tabKey, targetId: r.targetId, events: new Set(), winterCtx: new Set(), winterUnique: new Map(), winterObjects: new Set(), children: new Set(), sessionId: opts.sessionId, agent: true });
+    this.tabs.set(tabKey, { tabKey, targetId: r.targetId, events: new Set(), winterCtx: new Set(), winterUnique: new Map(), ctxFrame: new Map(), endedCtx: new Set(), runtimeOn: new Set(), winterObjects: new Set(), children: new Set(), sessionId: opts.sessionId, agent: true });
     return { tabKey, url: opts.url, title: "", active: false, agent: true, sessionId: opts.sessionId };
   }
 
@@ -187,6 +194,9 @@ export class PipeTransport implements CdpTransport {
     delete t.session;
     t.winterCtx.clear();
     t.winterUnique.clear();
+    t.ctxFrame.clear();
+    t.endedCtx.clear();
+    t.runtimeOn.clear();
     t.winterObjects.clear();
     t.events.clear();
     try { await this.raw("Target.detachFromTarget", { sessionId: s }); } catch { /* gone */ }
@@ -203,8 +213,13 @@ export class PipeTransport implements CdpTransport {
     if (!CDP_ALLOWED_METHODS.includes(method)) refuse("not on the allowlist");
     const sessKey = opts.cdpSessionId ?? "";
     if (opts.cdpSessionId !== undefined && !t.children.has(opts.cdpSessionId)) refuse("an unknown child session");
-    const winterCtx = (id: unknown): boolean => t.winterCtx.has(`${sessKey}:${String(id)}`);
+    // An ENDED winter world is answered in Chrome's own words, so the engine retries in a fresh one.
+    const ended = (id: unknown): void => {
+      if (t.endedCtx.has(`${sessKey}:${String(id)}`)) throw new TransportError("cdp_error", "Cannot find context with specified id", { cdpCode: -32000, cdpMessage: "Cannot find context with specified id" });
+    };
+    const winterCtx = (id: unknown): boolean => { ended(id); return t.winterCtx.has(`${sessKey}:${String(id)}`); };
     const winterUnique = (u: unknown): boolean => typeof u === "string" && t.winterUnique.has(u);
+    const runtimeOn = (): void => { if (!t.runtimeOn.has(sessKey)) refuse("Runtime is not enabled in this session"); };
     switch (method) {
       case "Page.reload": if (params.scriptToEvaluateOnLoad !== undefined) refuse("a script to evaluate on load runs in the page's own world"); break;
       case "Page.navigate": {
@@ -212,18 +227,30 @@ export class PipeTransport implements CdpTransport {
         if (url !== "about:blank" && !/^https?:/i.test(url)) refuse("only http(s) and about:blank navigations");
         break;
       }
-      case "Runtime.evaluate": if (!(winterCtx(params.contextId) || winterUnique(params.uniqueContextId))) refuse("outside the winter world"); break;
+      case "Runtime.evaluate": runtimeOn(); if (!(winterCtx(params.contextId) || winterUnique(params.uniqueContextId))) refuse("outside the winter world"); break;
       case "Runtime.callFunctionOn":
-        if (!(winterCtx(params.executionContextId) || winterUnique(params.uniqueContextId) || (typeof params.objectId === "string" && t.winterObjects.has(params.objectId)))) refuse("outside the winter world");
+        runtimeOn();
+        if (typeof params.objectId === "string" && t.winterObjects.has(params.objectId)) break;
+        if (!(winterCtx(params.executionContextId) || winterUnique(params.uniqueContextId))) refuse("outside the winter world");
         break;
       case "DOM.resolveNode": if (!winterCtx(params.executionContextId)) refuse("outside the winter world"); break;
-      case "Page.createIsolatedWorld": if (params.worldName !== CDP_WORLD_NAME || params.grantUniveralAccess === true) refuse("a world other than winter"); break;
+      case "Page.createIsolatedWorld":
+        runtimeOn();
+        if (params.worldName !== CDP_WORLD_NAME || params.grantUniveralAccess === true) refuse("a world other than winter");
+        break;
       default: break;
     }
     if (t.session === undefined) throw new TransportError("cdp_error", "not attached", { cdpMessage: "not attached" });
     const res = await this.raw<Record<string, unknown>>(method, params, opts.cdpSessionId ?? t.session, opts.timeoutMs ?? (method === "Page.captureScreenshot" ? 20_000 : 15_000));
     // The world this transport just made is "winter" (by the id it answered, not by any name).
-    if (method === "Page.createIsolatedWorld" && typeof res.executionContextId === "number") t.winterCtx.add(`${sessKey}:${res.executionContextId}`);
+    if (method === "Page.createIsolatedWorld" && typeof res.executionContextId === "number") {
+      const key = `${sessKey}:${res.executionContextId}`;
+      t.winterCtx.add(key);
+      t.endedCtx.delete(key);
+      t.ctxFrame.set(key, String(params.frameId));
+    }
+    if (method === "Runtime.enable") t.runtimeOn.add(sessKey);
+    if (method === "Runtime.disable") t.runtimeOn.delete(sessKey);
     // Object ids minted in the winter world may be used again (the world rule's second half).
     const minted = (res.result as { objectId?: string } | undefined)?.objectId ?? (res.object as { objectId?: string } | undefined)?.objectId;
     if (typeof minted === "string" && (method === "Runtime.callFunctionOn" || method === "Runtime.evaluate" || method === "DOM.resolveNode")) t.winterObjects.add(minted);

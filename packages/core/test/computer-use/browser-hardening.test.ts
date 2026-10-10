@@ -575,3 +575,101 @@ describe("lane D: idle detaches and families", () => {
     expect(e.message).toContain("crashed");
   });
 });
+
+describe("lane D: a navigation the browser carries out across a detach", () => {
+  const PAGES = (t: FakeCdpTransport): void => {
+    t.pages["https://a.example/"] = { url: "https://a.example/", title: "A", nodes: [{ id: 1, role: "button", name: "On A" }] };
+    t.pages["https://b.example/"] = { url: "https://b.example/", title: "B", nodes: [{ id: 1, role: "button", name: "On B" }] };
+  };
+  for (const how of ["resolve", "reject"] as const) {
+    test(`goto, back and reload succeed when the debugger is let go for the navigation (the command ${how === "resolve" ? "answers" : "fails tab_gone"})`, async () => {
+      const h = harness();
+      PAGES(h.chrome);
+      const r = h.run();
+      const t = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "chrome" }) as TabHandle;
+      const key = t.id.split(":")[1]!;
+      const ft = h.chrome.tabs.get(key)!;
+      ft.navigateByDetach = how;
+      await h.engine.primitive(r.scope, t.targetId, "goto", { url: "https://b.example/" });
+      expect(ft.attached).toBe(true);
+      expect(await h.engine.primitive(r.scope, t.targetId, "url", {})).toBe("https://b.example/");
+      const s = await h.engine.primitive(r.scope, t.targetId, "state", {}) as string;
+      expect(s).toContain('button "On B"');
+      expect(s.split("\n")[0]).toContain(" · new page");
+      await h.engine.primitive(r.scope, t.targetId, "back", {});
+      expect(await h.engine.primitive(r.scope, t.targetId, "url", {})).toBe("https://a.example/");
+      await h.engine.primitive(r.scope, t.targetId, "reload", {});
+      expect((await h.engine.primitive(r.scope, t.targetId, "state", { full: true }) as string)).toContain('button "On A"');
+      expect(r.text()).not.toContain("still loading");
+    });
+  }
+
+  test("the tab between documents refuses an attach for a moment: it is attached again once it can be", async () => {
+    const h = harness();
+    PAGES(h.chrome);
+    const r = h.run();
+    const t = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "chrome" }) as TabHandle;
+    const ft = h.chrome.tabs.get(t.id.split(":")[1]!)!;
+    ft.navigateByDetach = "reject";
+    h.chrome.onSend = (method) => { if (method === "Page.navigate") ft.betweenUntil = Date.now() + 250; };
+    await h.engine.primitive(r.scope, t.targetId, "goto", { url: "https://b.example/" });
+    expect(await h.engine.primitive(r.scope, t.targetId, "url", {})).toBe("https://b.example/");
+  });
+
+  test("a tab that really closed during the navigation is TargetLost; a refused navigation with no detach stays an error", async () => {
+    const h = harness();
+    PAGES(h.chrome);
+    const r = h.run();
+    const t = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "chrome" }) as TabHandle;
+    const key = t.id.split(":")[1]!;
+    const ft = h.chrome.tabs.get(key)!;
+    h.chrome.failNextNavigate = "net::ERR_NAME_NOT_RESOLVED";
+    const net = await failure(h.engine.primitive(r.scope, t.targetId, "goto", { url: "https://nope.invalid/" }));
+    expect(net.message).toContain("net::ERR_NAME_NOT_RESOLVED");
+    ft.navigateByDetach = "reject";
+    h.chrome.onSend = (method) => {
+      if (method !== "Page.navigate") return;
+      ft.betweenUntil = Date.now() + 60_000;
+      setTimeout(() => h.chrome.goneTab(key, "closed"), 50);
+    };
+    const t0 = Date.now();
+    const e = await failure(h.engine.primitive(r.scope, t.targetId, "goto", { url: "https://b.example/" }));
+    expect(kind(e)).toBe("TargetLost");
+    expect(Date.now() - t0).toBeLessThan(3_000);
+  });
+
+  test("an ENDED world is answered in Chrome's words, and the engine reads again in a fresh one", async () => {
+    const h = harness();
+    PAGES(h.chrome);
+    const r = h.run();
+    const t = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "chrome" }) as TabHandle;
+    const ft = h.chrome.tabs.get(t.id.split(":")[1]!)!;
+    // The world ends with no event the engine saw.
+    for (const [k, c] of [...ft.contexts]) if (c.frameId === "top") { ft.contexts.delete(k); ft.endedContexts.add(k); }
+    const s = await h.engine.primitive(r.scope, t.targetId, "state", { full: true }) as string;
+    expect(s).toContain('button "On A"');
+  });
+});
+
+describe("world rule: Runtime is enabled in a frame's session before its world is made", () => {
+  test("a frame attached afresh is used only once Runtime is on in its session (a key into it waits for the setup)", async () => {
+    const h = harness();
+    h.winter.pages["https://ed.example/"] = {
+      url: "https://ed.example/", title: "Editor", nodes: [{ id: 6, role: "iframe", name: "Editor", frame: true, origin: "docs.example" }],
+      frames: [{ frameId: "f1", ownerId: 6, nodes: [{ id: 1, role: "text area", name: "Body", value: "" }], editable: [1], oopif: true, url: "https://docs.example/" }],
+    };
+    const r = h.run();
+    const t = await h.engine.global(r.scope, "browsers.open", { url: "https://ed.example/" }) as TabHandle;
+    const ft = h.winter.tabs.get("w1")!;
+    ft.focused = "f1:1";
+    // The frame's target comes back in a new session whose setup is slow to enable Runtime.
+    h.winter.commandDelay = (method, session) => (session === "S-f1" && method === "Page.enable" ? 150 : 0);
+    h.winter.reattachChild("w1", "f1");
+    await h.engine.primitive(r.scope, t.targetId, "type", { text: "hi" });
+    const order = h.winter.sent.filter((s) => s.session === "S-f1").map((s) => s.method);
+    const lastEnable = order.lastIndexOf("Runtime.enable");
+    const lastWorld = order.lastIndexOf("Page.createIsolatedWorld");
+    expect(lastEnable).toBeGreaterThanOrEqual(0);
+    expect(lastEnable).toBeLessThan(lastWorld);
+  });
+});
