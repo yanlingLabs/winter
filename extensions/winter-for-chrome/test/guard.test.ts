@@ -6,13 +6,20 @@ import { isAllowedEvent, isAllowedMethod, strippedParams, TabGuard } from "../sr
 const send = { kind: "send" } as const;
 const refused = (g: TabGuard, method: string, params: Record<string, unknown>, session?: string) => g.check(method, params, session).kind === "refuse";
 
-/** A guard that knows one "winter" context (7, from createIsolatedWorld) and one object minted in it. */
-function primed(): TabGuard {
+/** Runtime enabled, then a "winter" world created by THIS guard's own call (context 7, announced as unique "U7"), and
+ *  one object minted in it. */
+function primed(session?: string): TabGuard {
   const g = new TabGuard();
-  expect(g.check("Page.createIsolatedWorld", { frameId: "F", worldName: "winter" })).toEqual(send);
-  g.observeResult("Page.createIsolatedWorld", { frameId: "F", worldName: "winter" }, { executionContextId: 7 });
-  g.observeResult("Runtime.evaluate", { contextId: 7, expression: "document.body" }, { result: { type: "object", objectId: "obj-1" } });
+  enableRuntime(g, session);
+  expect(g.check("Page.createIsolatedWorld", { frameId: "F", worldName: "winter" }, session)).toEqual(send);
+  g.observeResult("Page.createIsolatedWorld", { frameId: "F", worldName: "winter" }, { executionContextId: 7 }, session);
+  g.observeEvent("Runtime.executionContextCreated", { context: { id: 7, uniqueId: "U7", name: "winter", auxData: { type: "isolated", frameId: "F", isDefault: false } } }, session);
+  g.observeResult("Runtime.evaluate", { contextId: 7, expression: "document.body" }, { result: { type: "object", objectId: "obj-1" } }, session);
   return g;
+}
+function enableRuntime(g: TabGuard, session?: string): void {
+  expect(g.check("Runtime.enable", {}, session)).toEqual(send);
+  g.observeResult("Runtime.enable", {}, {}, session);
 }
 
 describe("the allowlist", () => {
@@ -37,24 +44,94 @@ describe("the allowlist", () => {
   });
 });
 
+describe("the page's own world is never reached", () => {
+  test("Page.reload never with scriptToEvaluateOnLoad", () => {
+    const g = new TabGuard();
+    expect(g.check("Page.reload", { ignoreCache: true })).toEqual(send);
+    expect(refused(g, "Page.reload", { scriptToEvaluateOnLoad: "document.cookie" })).toBe(true);
+    expect(refused(g, "Page.reload", { ignoreCache: false, scriptToEvaluateOnLoad: "" })).toBe(true);
+  });
+
+  test("Page.navigate only to http, https or exactly about:blank", () => {
+    const g = new TabGuard();
+    for (const url of ["https://example.com/", "http://127.0.0.1:8080/x", "about:blank"]) expect(g.check("Page.navigate", { url })).toEqual(send);
+    for (const url of ["javascript:alert(document.cookie)", "JavaScript:void(0)", "file:///etc/passwd", "data:text/html,<script>1</script>", "blob:https://x/1",
+      "filesystem:https://x/temporary/a", "chrome://settings", "about:srcdoc", "view-source:https://x/", "", 5, undefined]) {
+      expect({ url, refused: refused(g, "Page.navigate", { url }) }).toEqual({ url, refused: true });
+    }
+  });
+});
+
 describe("the winter world", () => {
-  test("Runtime.evaluate runs only in a winter context", () => {
+  test("Runtime.evaluate runs only in a winter context this guard created", () => {
     const g = primed();
     expect(g.check("Runtime.evaluate", { contextId: 7, expression: "1" })).toEqual(send);
     expect(refused(g, "Runtime.evaluate", { expression: "document.cookie" })).toBe(true);
     expect(refused(g, "Runtime.evaluate", { contextId: 1, expression: "1" })).toBe(true);
-    expect(refused(g, "Runtime.evaluate", { contextId: 7, uniqueContextId: "main", expression: "1" })).toBe(true);
     expect(refused(g, "Runtime.evaluate", { contextId: "7", expression: "1" })).toBe(true);
   });
 
-  test("a context announced as the winter isolated world counts; the page's main world and look-alikes never do", () => {
+  test("a context announced with the winter name is never trusted by its name alone (another extension's world could share it)", () => {
     const g = new TabGuard();
-    g.observeEvent("Runtime.executionContextCreated", { context: { id: 1, name: "", auxData: { isDefault: true, type: "default", frameId: "F" } } });
-    g.observeEvent("Runtime.executionContextCreated", { context: { id: 2, name: "winter", auxData: { isDefault: false, type: "isolated", frameId: "F" } } });
-    g.observeEvent("Runtime.executionContextCreated", { context: { id: 3, name: "winter", auxData: { isDefault: true, type: "default", frameId: "F" } } });
-    g.observeEvent("Runtime.executionContextCreated", { context: { id: 4, name: "Winter for Chrome", auxData: { type: "isolated" } } });
-    expect(g.check("Runtime.evaluate", { contextId: 2, expression: "1" })).toEqual(send);
-    for (const id of [1, 3, 4]) expect(refused(g, "Runtime.evaluate", { contextId: id, expression: "1" })).toBe(true);
+    enableRuntime(g);
+    g.observeEvent("Runtime.executionContextCreated", { context: { id: 2, uniqueId: "U2", name: "winter", auxData: { isDefault: false, type: "isolated", frameId: "F" } } });
+    g.observeEvent("Runtime.executionContextCreated", { context: { id: 1, uniqueId: "U1", name: "", auxData: { isDefault: true, type: "default", frameId: "F" } } });
+    for (const id of [1, 2]) expect(refused(g, "Runtime.evaluate", { contextId: id, expression: "1" })).toBe(true);
+    expect(refused(g, "Runtime.evaluate", { uniqueContextId: "U2", expression: "1" })).toBe(true);
+    // …but when OUR createIsolatedWorld answers with that id (the event came first), it is ours, unique id included.
+    g.observeResult("Page.createIsolatedWorld", { frameId: "F", worldName: "winter" }, { executionContextId: 2 });
+    expect(g.check("Runtime.evaluate", { uniqueContextId: "U2", expression: "1" })).toEqual(send);
+  });
+
+  test("contexts are matched by uniqueContextId; a contextId and a uniqueContextId must name the same one", () => {
+    const g = primed();
+    expect(g.check("Runtime.evaluate", { uniqueContextId: "U7", expression: "1" })).toEqual(send);
+    expect(g.check("Runtime.evaluate", { contextId: 7, uniqueContextId: "U7", expression: "1" })).toEqual(send);
+    expect(refused(g, "Runtime.evaluate", { uniqueContextId: "U-other", expression: "1" })).toBe(true);
+    expect(refused(g, "Runtime.evaluate", { uniqueContextId: 7, expression: "1" })).toBe(true);
+    g.observeResult("Page.createIsolatedWorld", { frameId: "G", worldName: "winter" }, { executionContextId: 9 });
+    g.observeEvent("Runtime.executionContextCreated", { context: { id: 9, uniqueId: "U9", name: "winter", auxData: { type: "isolated", frameId: "G" } } });
+    expect(refused(g, "Runtime.evaluate", { contextId: 7, uniqueContextId: "U9", expression: "1" })).toBe(true);
+    expect(g.check("Runtime.callFunctionOn", { uniqueContextId: "U9", functionDeclaration: "() => 1" })).toEqual(send);
+  });
+
+  test("a contextId handed out again (a cross-process navigation) stops being winter at once", () => {
+    const g = primed();
+    g.observeEvent("Runtime.executionContextCreated", { context: { id: 7, uniqueId: "U-main", name: "", auxData: { type: "default", isDefault: true, frameId: "F" } } });
+    expect(refused(g, "Runtime.evaluate", { contextId: 7, expression: "document.cookie" })).toBe(true);
+    expect(refused(g, "Runtime.callFunctionOn", { objectId: "obj-1", functionDeclaration: "f" })).toBe(true);
+    // The same id announced as a winter-named world with ANOTHER unique id is not ours either.
+    const h = primed();
+    h.observeEvent("Runtime.executionContextCreated", { context: { id: 7, uniqueId: "U-impostor", name: "winter", auxData: { type: "isolated", frameId: "F" } } });
+    expect(refused(h, "Runtime.evaluate", { contextId: 7, expression: "1" })).toBe(true);
+  });
+
+  test("the Runtime domain must be on: no world is created, and none is used, without its events", () => {
+    const g = new TabGuard();
+    expect(refused(g, "Page.createIsolatedWorld", { frameId: "F", worldName: "winter" })).toBe(true);
+    g.observeResult("Page.createIsolatedWorld", { frameId: "F", worldName: "winter" }, { executionContextId: 3 }); // even if it got through
+    expect(refused(g, "Runtime.evaluate", { contextId: 3, expression: "1" })).toBe(true);
+    const h = primed();
+    h.observeResult("Runtime.disable", {}, {});
+    expect(refused(h, "Runtime.evaluate", { contextId: 7, expression: "1" })).toBe(true);
+    expect(refused(h, "Runtime.callFunctionOn", { objectId: "obj-1", functionDeclaration: "f" })).toBe(true);
+  });
+
+  test("a new document in the world's frame, contextsCleared, or destruction by unique id ends it", () => {
+    const g = primed();
+    g.observeEvent("Page.frameNavigated", { frame: { id: "OTHER", url: "https://x/" } });
+    expect(g.check("Runtime.evaluate", { contextId: 7, expression: "1" })).toEqual(send);
+    g.observeEvent("Page.frameNavigated", { frame: { id: "F", url: "https://x/" } });
+    expect(refused(g, "Runtime.evaluate", { contextId: 7, expression: "1" })).toBe(true);
+    const h = primed();
+    h.observeEvent("Runtime.executionContextsCleared", {});
+    expect(h.knownContexts()).toEqual([]);
+    const k = primed();
+    k.observeEvent("Runtime.executionContextDestroyed", { executionContextId: 99, executionContextUniqueId: "U7" });
+    expect(refused(k, "Runtime.evaluate", { contextId: 7, expression: "1" })).toBe(true);
+    const m = primed();
+    m.observeEvent("Runtime.executionContextDestroyed", { executionContextId: 7 });
+    expect(refused(m, "Runtime.callFunctionOn", { objectId: "obj-1", functionDeclaration: "f" })).toBe(true);
   });
 
   test("Runtime.callFunctionOn: a winter context or a winter object, and winter objects as arguments", () => {
@@ -76,6 +153,9 @@ describe("the winter world", () => {
     g.observeResult("Runtime.callFunctionOn", { executionContextId: 7, functionDeclaration: "f" }, { result: { value: 1 }, exceptionDetails: { exception: { objectId: "err-1" } } });
     expect(g.check("Runtime.callFunctionOn", { objectId: "obj-2", functionDeclaration: "f" })).toEqual(send);
     expect(g.check("Runtime.callFunctionOn", { objectId: "err-1", functionDeclaration: "f" })).toEqual(send);
+    // A result from a context that is not ours mints nothing.
+    g.observeResult("Runtime.evaluate", { contextId: 1, expression: "document" }, { result: { objectId: "page-doc" } });
+    expect(refused(g, "Runtime.callFunctionOn", { objectId: "page-doc", functionDeclaration: "f" })).toBe(true);
   });
 
   test("DOM.resolveNode resolves only into the winter world, and its object is the winter world's", () => {
@@ -89,6 +169,7 @@ describe("the winter world", () => {
 
   test("Page.createIsolatedWorld only as \"winter\", never with universal access", () => {
     const g = new TabGuard();
+    enableRuntime(g);
     expect(refused(g, "Page.createIsolatedWorld", { frameId: "F", worldName: "other" })).toBe(true);
     expect(refused(g, "Page.createIsolatedWorld", { frameId: "F" })).toBe(true);
     expect(refused(g, "Page.createIsolatedWorld", { frameId: "F", worldName: "winter", grantUniveralAccess: true })).toBe(true);
@@ -113,25 +194,16 @@ describe("the winter world", () => {
     expect(refused(g, "Runtime.callFunctionOn", { objectId: "obj-1", functionDeclaration: "f" })).toBe(true);
   });
 
-  test("a destroyed context takes its objects with it; contextsCleared clears the session", () => {
-    const g = primed();
-    g.observeEvent("Runtime.executionContextDestroyed", { executionContextId: 7 });
-    expect(refused(g, "Runtime.evaluate", { contextId: 7, expression: "1" })).toBe(true);
-    expect(refused(g, "Runtime.callFunctionOn", { objectId: "obj-1", functionDeclaration: "f" })).toBe(true);
-    const h = primed();
-    h.observeEvent("Runtime.executionContextsCleared", {});
-    expect(h.knownContexts()).toEqual([]);
-  });
-
   test("contexts are per CDP session: an out-of-process iframe's are its own", () => {
     const g = primed();
-    g.observeEvent("Runtime.executionContextCreated", { context: { id: 7, name: "", auxData: { type: "default" } } }, "S1");
+    enableRuntime(g, "S1");
+    g.observeEvent("Runtime.executionContextCreated", { context: { id: 7, uniqueId: "S1-main", name: "", auxData: { type: "default" } } }, "S1");
     expect(refused(g, "Runtime.evaluate", { contextId: 7, expression: "1" }, "S1")).toBe(true);
+    expect(g.check("Runtime.evaluate", { contextId: 7, expression: "1" })).toEqual(send); // the tab's own session is unaffected
     g.observeResult("Page.createIsolatedWorld", { frameId: "C", worldName: "winter" }, { executionContextId: 3 }, "S1");
     expect(g.check("Runtime.evaluate", { contextId: 3, expression: "1" }, "S1")).toEqual(send);
     expect(refused(g, "Runtime.evaluate", { contextId: 3, expression: "1" })).toBe(true);
     g.observeEvent("Target.detachedFromTarget", { sessionId: "S1" });
     expect(refused(g, "Runtime.evaluate", { contextId: 3, expression: "1" }, "S1")).toBe(true);
-    expect(g.check("Runtime.evaluate", { contextId: 7, expression: "1" })).toEqual(send);
   });
 });

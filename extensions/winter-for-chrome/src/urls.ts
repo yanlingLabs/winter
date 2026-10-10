@@ -1,6 +1,9 @@
 // Winter for Chrome — which pages it never attaches to, and which URLs it opens.
 
-const BROWSER_SCHEMES = ["chrome:", "edge:", "brave:", "vivaldi:", "opera:", "arc:", "chrome-extension:", "chrome-untrusted:", "devtools:", "view-source:", "chrome-search:", "chrome-native:", "about:"];
+/** Pages Winter never drives: the browser's own, extensions' and DevTools' pages, and local or opaque documents —
+ *  `file:` (the user's disk), `data:`, `blob:` and `filesystem:` (content with no site of its own). */
+const BROWSER_SCHEMES = ["chrome:", "edge:", "brave:", "vivaldi:", "opera:", "arc:", "chrome-extension:", "chrome-untrusted:", "devtools:", "view-source:",
+  "chrome-search:", "chrome-native:", "about:", "file:", "data:", "blob:", "filesystem:"];
 
 /** The extension stores: a page there may act on extensions, so no debugger ever touches it. */
 const STORE_PAGES: { host: string; path?: string }[] = [
@@ -19,7 +22,10 @@ export function attachRefusal(url: string | undefined, ownId: string): string | 
   if (url.startsWith(`chrome-extension://${ownId}/`)) return "Winter does not control Winter for Chrome's own pages";
   const lower = url.toLowerCase();
   const scheme = BROWSER_SCHEMES.find((s) => lower.startsWith(s));
-  if (scheme !== undefined) return `the browser's own pages (${scheme}) cannot be controlled`;
+  if (scheme !== undefined) {
+    if (["file:", "data:", "blob:", "filesystem:"].includes(scheme)) return `${scheme} pages cannot be controlled (Winter drives web pages only)`;
+    return `the browser's own pages (${scheme}) cannot be controlled`;
+  }
   let parsed: URL;
   try {
     parsed = new URL(url);
