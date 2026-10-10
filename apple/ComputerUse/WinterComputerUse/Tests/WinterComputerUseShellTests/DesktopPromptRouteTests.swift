@@ -1,5 +1,6 @@
 import Foundation
 import WinterComputerUseShell
+import WinterCUCore
 import WinterCUPresentation
 import XCTest
 
@@ -109,5 +110,47 @@ import XCTest
                 XCTAssertEqual(RPCError.from(error).code, "invalid_params", "\(bad)")
             }
         }
+    }
+
+    func testTheCardsExpiresAtReachesThePanelAndTimeoutMsIsOnlyTheFallback() async throws {
+        let prompter = FakePrompter()
+        let rig = Rig(prompts: prompter)
+        let p = try JSONDecoder().decode(JSONValue.self, from: Data("""
+            {"promptId":"cu_e","callId":"cu_e","sessionId":"s_1","app":"Safari","bundleId":"com.apple.Safari","reason":"r",
+             "expiresAt":1760000042000}
+            """.utf8))
+        let task = Task { try await rig.dispatcher.handle(method: "prompt.desktopVisit", params: p) }
+        for _ in 0..<200 where prompter.shown.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(prompter.shown.first?.expiresAt, 1_760_000_042_000)
+        prompter.answer("cu_e", .expired)
+        let answered = try await task.value
+        XCTAssertEqual(try encode(answered)["answer"]?.stringValue, "expired")
+    }
+
+    /// Every closed desktop visit reaches the daemon (`desktopVisited`), with the spine's keys.
+    func testAClosedVisitIsAnnouncedToTheDaemon() {
+        let rig = Rig()
+        let report = CUVisitReport(visitId: "v7", targetId: "t1", app: "Safari", why: "live", actions: 2, ms: 1300, returned: true)
+        rig.coordinator.desktopVisited(CUDesktopVisitEvent(sessionId: "s_1", callId: "c9", report: report))
+        rig.coordinator.desktopVisited(CUDesktopVisitEvent(sessionId: "s_1", callId: nil,
+                                                           report: CUVisitReport(visitId: "v8", targetId: "t2", app: "Notes", why: "act",
+                                                                                 actions: 1, ms: 700, returned: false, userMoved: true)))
+        XCTAssertEqual(rig.notifications.map(\.method), ["desktopVisited", "desktopVisited"])
+        XCTAssertEqual(rig.notifications.first?.params, try! JSONDecoder().decode(JSONValue.self, from: Data("""
+            {"visitId":"v7","sessionId":"s_1","callId":"c9","targetId":"t1","app":"Safari","why":"live","actions":2,"ms":1300,"returned":true}
+            """.utf8)))
+        XCTAssertEqual(rig.notifications.last?.params["userMoved"], .bool(true))
+        XCTAssertNil(rig.notifications.last?.params["callId"])
+    }
+
+    /// Esc closes the open desktop visit at once, then tells the daemon.
+    func testEscClosesTheOpenVisitBeforeTheDaemonHears() {
+        let rig = Rig()
+        var order: [String] = []
+        rig.coordinator.onEscape = { order.append("visit closed") }
+        rig.coordinator.notify = { order.append($0.method) }
+        rig.coordinator.setScriptActive(sessionId: "s_1", active: true)
+        rig.coordinator.escapePressed()
+        XCTAssertEqual(order, ["visit closed", "escPressed"])
     }
 }

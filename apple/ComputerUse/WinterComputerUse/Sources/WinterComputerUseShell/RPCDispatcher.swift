@@ -117,6 +117,7 @@ public final class RPCDispatcher: @unchecked Sendable {
         engine("target.scriptingDictionary") { try await $0.targetScriptingDictionary($1 as TargetScriptingDictionaryParams) }
         engine("screen.screenshot") { try await $0.screenScreenshot($1 as ScreenScreenshotParams) }
         engine("screen.appAt") { try await $0.screenAppAt($1 as ScreenAppAtParams) }
+        engine("visit.close") { try await $0.visitClose($1 as VisitCloseParams) }
 
         routes["script.active"] = { [core, coordinator] params, _ in
             let p = try RPCDispatcher.decode(ScriptActiveParams.self, params)
@@ -195,9 +196,13 @@ public struct PromptDesktopVisitParams: Codable, Equatable, Sendable {
     public var app: String
     public var bundleId: String
     public var reason: String
-    public var timeoutMs: Int
+    /// The fallback countdown when there is no `expiresAt`.
+    public var timeoutMs: Int?
+    /// The session card's own deadline (epoch ms): the panel's countdown runs to it.
+    public var expiresAt: Int?
 
-    public init(promptId: String, callId: String, sessionId: String, app: String, bundleId: String, reason: String, timeoutMs: Int) {
+    public init(promptId: String, callId: String, sessionId: String, app: String, bundleId: String, reason: String,
+                timeoutMs: Int? = nil, expiresAt: Int? = nil) {
         self.promptId = promptId
         self.callId = callId
         self.sessionId = sessionId
@@ -205,13 +210,16 @@ public struct PromptDesktopVisitParams: Codable, Equatable, Sendable {
         self.bundleId = bundleId
         self.reason = reason
         self.timeoutMs = timeoutMs
+        self.expiresAt = expiresAt
     }
 
     func validate() throws {
         guard !promptId.isEmpty else { throw RPCError.invalidParams("params.promptId is required") }
         guard callId == promptId else { throw RPCError.invalidParams("params.callId must equal params.promptId") }
         guard !sessionId.isEmpty else { throw RPCError.invalidParams("params.sessionId is required") }
-        guard timeoutMs > 0 else { throw RPCError.invalidParams("params.timeoutMs must be positive") }
+        guard expiresAt != nil || (timeoutMs ?? 0) > 0 else {
+            throw RPCError.invalidParams("params.expiresAt or a positive params.timeoutMs is required")
+        }
     }
 }
 

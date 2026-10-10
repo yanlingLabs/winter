@@ -37,7 +37,9 @@ import XCTest
     private let clock = FakeClock()
     private let ticker = FakeTicker()
     private let factory = FakeFactory()
-    private lazy var prompts = CUDesktopPromptController(surfaces: factory, clock: clock, ticker: ticker)
+    /// The wall clock (epoch ms) the card's `expiresAt` is read against.
+    private var wall: Double = 1_760_000_000_000
+    private lazy var prompts = CUDesktopPromptController(surfaces: factory, clock: clock, ticker: ticker, wallMs: { [unowned self] in wall })
 
     private func request(_ id: String = "cu_1", reason: String = "to read the chart that only draws on screen",
                          timeoutMs: Int = 60_000) -> CUDesktopPromptRequest {
@@ -154,5 +156,35 @@ import XCTest
         XCTAssertEqual(factory.made["b"]!.shown.last?.slot, 0, "moved up into the free slot")
         factory.made["b"]!.onSwitch?()
         XCTAssertEqual(answers, ["a": .refuse, "b": .switchNow])
+    }
+
+    // MARK: the card's own deadline
+
+    func testTheCountdownRunsToTheCardsExpiresAt() {
+        var answers: [CUDesktopPromptAnswer] = []
+        // The card was raised 18 s ago with a 60 s deadline: 42 s left, whatever `timeoutMs` says.
+        let r = CUDesktopPromptRequest(promptId: "cu_1", sessionId: "s", app: "Safari", bundleId: "com.apple.Safari", reason: "x",
+                                       timeoutMs: 60_000, expiresAt: Int(wall) + 42_000)
+        prompts.show(r) { answers.append($0) }
+        let s = factory.made["cu_1"]!
+        XCTAssertEqual(s.shown.last?.countdown, "Switching in 42 s")
+        clock.now += 41.5
+        ticker.tick?()
+        XCTAssertEqual(s.shown.last?.countdown, "Switching in 1 s")
+        XCTAssertTrue(answers.isEmpty)
+        clock.now += 0.5
+        ticker.tick?()
+        XCTAssertEqual(s.shown.last?.countdown, "Switching…", "at the deadline it says so")
+        XCTAssertEqual(answers, [.expired])
+        XCTAssertEqual(s.closed, 1)
+    }
+
+    func testAnExpiresAtAlreadyPastExpiresAtTheFirstTick() {
+        var answers: [CUDesktopPromptAnswer] = []
+        prompts.show(CUDesktopPromptRequest(promptId: "late", sessionId: "s", app: "A", bundleId: "b", reason: "", timeoutMs: 60_000,
+                                            expiresAt: Int(wall) - 5_000)) { answers.append($0) }
+        XCTAssertEqual(factory.made["late"]!.shown.last?.countdown, "Switching…")
+        ticker.tick?()
+        XCTAssertEqual(answers, [.expired])
     }
 }

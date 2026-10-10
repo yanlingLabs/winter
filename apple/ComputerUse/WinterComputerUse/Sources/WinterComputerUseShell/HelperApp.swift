@@ -57,6 +57,8 @@ import WinterCUPresentation
                               clock: LiveViewClock())
         let coordinator = HelperCoordinator(presentation: presentation, escapeTap: escapeTap, viewHub: viewHub)
         let core = CUCore(events: coordinator)
+        // Esc closes the open desktop visit at once (the user returned), before the daemon hears it.
+        coordinator.onEscape = { [weak core] in Task { await core?.closeAllVisits() } }
         let inFlight = InFlightRegistry()
         let dispatcher = RPCDispatcher(core: core, coordinator: coordinator, viewHub: viewHub, inFlight: inFlight, liveTest: identity.liveTest,
                                        capturer: identity.liveTest ? TestCapture(home: identity.home) : nil)

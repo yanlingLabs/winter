@@ -24,15 +24,20 @@ public struct CUDesktopPromptRequest: Sendable, Equatable {
     public let bundleId: String
     /// The model's reason (the daemon's sanitized one; sanitized again here).
     public let reason: String
+    /// The fallback countdown, when there is no `expiresAt`.
     public let timeoutMs: Int
+    /// The session card's own deadline (epoch ms): the countdown runs to it.
+    public let expiresAt: Int?
 
-    public init(promptId: String, sessionId: String, app: String, bundleId: String, reason: String, timeoutMs: Int) {
+    public init(promptId: String, sessionId: String, app: String, bundleId: String, reason: String, timeoutMs: Int,
+                expiresAt: Int? = nil) {
         self.promptId = promptId
         self.sessionId = sessionId
         self.app = app
         self.bundleId = bundleId
         self.reason = reason
         self.timeoutMs = timeoutMs
+        self.expiresAt = expiresAt
     }
 }
 
@@ -56,7 +61,9 @@ public struct CUDesktopPromptModel: Sendable, Equatable {
     public let deadline: TimeInterval
     public private(set) var answer: CUDesktopPromptAnswer?
 
-    public init(_ r: CUDesktopPromptRequest, now: TimeInterval) {
+    /// `now`: the controller's (monotonic) clock; `wallMs`: the wall clock in epoch ms, against which `expiresAt` —
+    /// the card's own deadline — is turned into time left (so both doors end together).
+    public init(_ r: CUDesktopPromptRequest, now: TimeInterval, wallMs: Double = Date().timeIntervalSince1970 * 1000) {
         promptId = r.promptId
         sessionId = r.sessionId
         let app = Self.sanitize(r.app, max: Self.nameMax)
@@ -65,8 +72,13 @@ public struct CUDesktopPromptModel: Sendable, Equatable {
         let bundle = Self.sanitize(r.bundleId, max: Self.nameMax)
         appLine = bundle.isEmpty ? name : "\(name) (\(bundle))"
         reason = Self.sanitize(r.reason, max: Self.reasonMax)
-        let ms = min(max(r.timeoutMs, Self.timeoutRange.lowerBound), Self.timeoutRange.upperBound)
-        deadline = now + Double(ms) / 1000
+        let ms: Double
+        if let expiresAt = r.expiresAt {
+            ms = min(max(Double(expiresAt) - wallMs, 0), Double(Self.timeoutRange.upperBound))
+        } else {
+            ms = Double(min(max(r.timeoutMs, Self.timeoutRange.lowerBound), Self.timeoutRange.upperBound))
+        }
+        deadline = now + ms / 1000
     }
 
     /// Whole seconds left, rounded up (0 once it ran out).
@@ -148,15 +160,19 @@ public struct CUDesktopPromptModel: Sendable, Equatable {
     private let surfaces: DesktopPromptSurfaceFactory
     private let clock: CUClock
     private let ticker: CUTicker
+    /// The wall clock in epoch ms (a prompt's `expiresAt` is one).
+    private let wallMs: () -> Double
     private var prompts: [String: Live] = [:]
     private var order: [String] = []
     /// How often the countdowns are redrawn and checked.
     static let tickInterval: TimeInterval = 0.25
 
-    init(surfaces: DesktopPromptSurfaceFactory, clock: CUClock, ticker: CUTicker) {
+    init(surfaces: DesktopPromptSurfaceFactory, clock: CUClock, ticker: CUTicker,
+         wallMs: @escaping () -> Double = { Date().timeIntervalSince1970 * 1000 }) {
         self.surfaces = surfaces
         self.clock = clock
         self.ticker = ticker
+        self.wallMs = wallMs
     }
 
     /// The live controller: AppKit panels, the system clock, a run-loop ticker. Draws nothing until `show`.
@@ -170,7 +186,7 @@ public struct CUDesktopPromptModel: Sendable, Equatable {
     @discardableResult
     public func show(_ request: CUDesktopPromptRequest, onAnswer: @escaping @MainActor (CUDesktopPromptAnswer) -> Void) -> Bool {
         guard prompts[request.promptId] == nil else { return false }
-        let model = CUDesktopPromptModel(request, now: clock.now)
+        let model = CUDesktopPromptModel(request, now: clock.now, wallMs: wallMs())
         let surface = surfaces.make(model)
         let id = request.promptId
         surface.onSwitch = { [weak self] in self?.finish(id, .switchNow) }
@@ -200,6 +216,8 @@ public struct CUDesktopPromptModel: Sendable, Equatable {
             guard var live = prompts[id] else { continue }
             if live.model.tick(now: now) {
                 prompts[id] = live
+                // At the deadline: "Switching…", then the answer.
+                live.surface.show(countdown: live.model.countdown(now: now), slot: order.firstIndex(of: id) ?? 0)
                 finish(id, .expired)
             } else {
                 live.surface.show(countdown: live.model.countdown(now: now), slot: order.firstIndex(of: id) ?? 0)

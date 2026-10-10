@@ -47,10 +47,10 @@ let engineSamples: [(method: String, params: String, result: String)] = [
     ("target.snapshot", #"{"targetId":"t1","since":"snap-1","full":false,"within":41,"settle":{"maxMs":1500}}"#,
      #"{"snapshotId":"snap-2","text":"Notes — focused [14] · settled 80 ms\n+ [27] button \"Delete Note\"","isDiff":true,"changedRatio":0.1,"settled":true,"waitedMs":80}"#),
     ("target.find", #"{"targetId":"t1","query":{"role":"button","name":"Share"}}"#, #"{"elements":[{"ref":4,"role":"button","name":"Share"}]}"#),
-    ("target.screenshot", #"{"targetId":"t1","region":[0,0,100,100],"budget":{"maxLongEdge":1568,"tile":28,"maxTiles":1568,"quality":0.8},"settle":{"maxMs":1500},"live":true,"desktopVisit":true}"#,
-     #"{"imageBase64":"/9j/AA==","mime":"image/jpeg","width":100,"height":100,"shotId":"shot-1","settled":true,"waitedMs":12,"visit":{"ms":420,"returned":true}}"#),
-    ("target.act", #"{"targetId":"t1","sessionId":"s_1","callId":"c1","action":{"kind":"click","ref":3,"button":"left","count":1},"access":"full","allowForeground":false,"privatePath":true,"desktopVisit":true}"#,
-     #"{"rung":4,"visit":{"ms":510,"returned":false,"detail":"Winter could not bring the user back from Safari's desktop — they may still be there"}}"#),
+    ("target.screenshot", #"{"targetId":"t1","region":[0,0,100,100],"budget":{"maxLongEdge":1568,"tile":28,"maxTiles":1568,"quality":0.8,"maxBytes":3145728},"settle":{"maxMs":1500},"live":true,"desktopVisit":true,"visitMaxMs":30000}"#,
+     #"{"imageBase64":"/9j/AA==","mime":"image/jpeg","width":100,"height":100,"shotId":"shot-1","settled":true,"waitedMs":12,"inVisit":true}"#),
+    ("target.act", #"{"targetId":"t1","sessionId":"s_1","callId":"c1","action":{"kind":"click","ref":3,"button":"left","count":1},"access":"full","allowForeground":false,"privatePath":true,"desktopVisit":true,"visitMaxMs":45000}"#,
+     #"{"rung":4,"inVisit":true}"#),
     ("target.foreground", #"{"targetId":"t1"}"#, #"{"front":true}"#),
     ("target.waitIdle", #"{"targetId":"t1","quietMs":150,"timeoutMs":3000,"callId":"c2"}"#, #"{"settled":true,"waitedMs":150}"#),
     ("target.waitFor", #"{"targetId":"t1","cond":{"text":"Saved","gone":"Saving…"},"timeoutMs":10000}"#, #"{"met":true,"waitedMs":420}"#),
@@ -59,6 +59,8 @@ let engineSamples: [(method: String, params: String, result: String)] = [
     ("target.scriptingDictionary", #"{"targetId":"t1","search":"note"}"#, #"{"scriptable":true,"text":"Notes — scripting dictionary","truncated":false}"#),
     ("screen.screenshot", #"{"display":"all","excludeBundleIds":["com.winter.app"],"budget":{"maxLongEdge":1440,"quality":0.8}}"#,
      #"{"imageBase64":"/9j/AA==","mime":"image/jpeg","width":1440,"height":900,"shotId":"shot-2"}"#),
+    ("visit.close", #"{"sessionId":"s_1"}"#,
+     #"{"visits":[{"visitId":"v1","targetId":"t1","app":"Safari","why":"act","actions":3,"ms":2400,"returned":true}]}"#),
     ("screen.appAt", #"{"shotId":"shot-2","point":[100,200]}"#, #"{"app":"Notes","bundleId":"com.apple.Notes","windowId":77}"#),
     ("cancel", #"{"callId":"c1"}"#, "{}"),
     ("turn.ended", #"{"sessionId":"s_1"}"#, "{}"),
@@ -133,6 +135,7 @@ final class FakeCore: CoreService, @unchecked Sendable {
     func cancel(_ params: CancelParams) async throws -> CancelResult { try await answer("cancel", params) }
     func turnEnded(_ params: TurnEndedParams) async throws -> TurnEndedResult { try await answer("turn.ended", params) }
     func sessionEnded(_ params: SessionEndedParams) async throws -> SessionEndedResult { try await answer("session.ended", params) }
+    func visitClose(_ params: VisitCloseParams) async throws -> VisitCloseResult { try await answer("visit.close", params) }
 }
 
 final class Counter: @unchecked Sendable {
