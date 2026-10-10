@@ -481,3 +481,124 @@ final class BrowserLinkCEFSeamTests: XCTestCase {
         XCTAssertFalse(WinterCEFResolveHeldDialog(view, .dismiss, nil))
     }
 }
+
+/// ComputerV2 Phase 2 — **the whole app side of the link, over a scripted daemon.** The real
+/// `BrowserLinkClient` (handshake, command intake, ordered outbox) drives the real `BrowserLinkHost`
+/// (which drives a real `BrowserRuntime` through a real plan) with fake CEF on both seams. The daemon is
+/// scripted: it answers the hello and the attach, sends commands, and records what comes back.
+@MainActor
+final class BrowserLinkEndToEndTests: XCTestCase {
+
+    final class ScriptedLinkDaemon: WinterTransport, @unchecked Sendable {
+        let incoming: AsyncStream<TransportEvent>
+        private let cont: AsyncStream<TransportEvent>.Continuation
+        private let lock = NSLock()
+        private var _sent: [[String: Any]] = []
+
+        init() {
+            var c: AsyncStream<TransportEvent>.Continuation!
+            incoming = AsyncStream { c = $0 }
+            cont = c
+        }
+
+        var sent: [[String: Any]] { lock.withLock { _sent } }
+        func open() async throws {}
+        func close() { cont.finish() }
+        func feed(_ line: String) { cont.yield(.data(Data((line + "\n").utf8))) }
+
+        func send(_ data: Data) async throws {
+            guard let message = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+            lock.withLock { _sent.append(message) }
+            guard let id = message["id"] as? Int, let method = message["method"] as? String else { return }
+            switch method {
+            case "browserLink.attach":
+                feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{"linkId":"L1","protocol":1}}"#)
+            default:
+                feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{}}"#)
+            }
+        }
+
+        func command(_ cmdId: String, _ op: String, _ params: String) {
+            feed(#"{"jsonrpc":"2.0","method":"browserLink.command","params":{"linkId":"L1","cmdId":"\#(cmdId)","op":"\#(op)","params":\#(params)}}"#)
+        }
+
+        func requests(_ method: String) -> [[String: Any]] {
+            sent.filter { $0["method"] as? String == method }.compactMap { $0["params"] as? [String: Any] }
+        }
+
+        func result(_ cmdId: String) -> [String: Any]? {
+            requests("browserLink.result").first { $0["cmdId"] as? String == cmdId }
+        }
+    }
+
+    private func eventually(_ what: String, _ condition: () -> Bool) async {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition() && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(condition(), "timed out waiting for \(what)")
+    }
+
+    override func tearDown() async throws {
+        PanelWebTabModels.removeAllForTesting()
+    }
+
+    func testAScriptedDaemonDrivesABuiltInTabThroughTheLink() async throws {
+        let cef = BrowserRuntimeTests.CEFRecorder()
+        let scheduler = BrowserRuntimeTests.FakeScheduler()
+        let runtime = BrowserRuntime(driver: cef.driver, scheduler: scheduler.scheduler)
+        let linkCEF = BrowserLinkHostTests.LinkDriverRecorder()
+        // CEF "creates" the browser the moment the runtime asks for it.
+        cef.onCreate = { container, _ in linkCEF.browserIds[ObjectIdentifier(container)] = 3 }
+        let host = BrowserLinkHost(runtime: runtime, driver: linkCEF.driver)
+        let daemon = ScriptedLinkDaemon()
+        let client = BrowserLinkClient(configuration: .init(appVersion: "1.2.3", pid: 99), makeClient: { _ in
+            WinterClient(makeTransport: { daemon }, token: "tok", clientName: BrowserLinkProtocol.clientName)
+        }, handler: host)
+        host.output = client
+        client.start()
+        defer { client.stop() }
+
+        await eventually("the attach") { host.linkId == "L1" }
+        XCTAssertEqual(daemon.sent.first?["method"] as? String, "protocol.hello")
+
+        // tab.ensure for a session no shell has ever shown.
+        daemon.command("c1", "tab.ensure", #"{"sessionId":"s1","tabId":"t1","url":"https://example.com/"}"#)
+        await eventually("tab.ensure's answer") { daemon.result("c1") != nil }
+        let ensured = try XCTUnwrap(daemon.result("c1"))
+        XCTAssertEqual(ensured["ok"] as? Bool, true, "\(ensured)")
+        XCTAssertEqual(((ensured["result"] as? [String: Any])?["viewport"] as? [Int])?.count, 2)
+        XCTAssertTrue(cef.log.contains("c1 create url=https://example.com/"))
+
+        // cdp.send: refused off the allowlist (nothing reaches CEF), sent when allowed.
+        daemon.command("c2", "cdp.send", #"{"tabId":"t1","method":"Network.getCookies","params":{}}"#)
+        daemon.command("c3", "cdp.send", #"{"tabId":"t1","method":"Page.enable","params":{}}"#)
+        await eventually("the refusal, and the send reaching CEF") { daemon.result("c2") != nil && linkCEF.cdp.count == 1 }
+        XCTAssertEqual(((daemon.result("c2")?["error"]) as? [String: Any])?["code"] as? String, "not_allowed")
+        XCTAssertEqual(linkCEF.cdp.first?.method, "Page.enable")
+        linkCEF.answer(.OK, "{}")
+        await eventually("cdp.send's answer") { daemon.result("c3") != nil }
+        XCTAssertEqual(daemon.result("c3")?["ok"] as? Bool, true)
+
+        // An event leaves once subscribed — before the result of a command answered after it.
+        daemon.command("c4", "cdp.subscribe", #"{"tabId":"t1","events":["Page.loadEventFired"]}"#)
+        await eventually("the subscribe") { daemon.result("c4") != nil }
+        let container = try XCTUnwrap(runtime.container(forTabId: "t1"))
+        linkCEF.eventObservers[ObjectIdentifier(container)]?("Page.loadEventFired", Data(#"{"timestamp":5}"#.utf8), nil)
+        daemon.command("c5", "tabs.live", "{}")
+        await eventually("the event batch and tabs.live") { !daemon.requests("browserLink.events").isEmpty && daemon.result("c5") != nil }
+        let methods = daemon.sent.compactMap { $0["method"] as? String }
+        XCTAssertLessThan(methods.firstIndex(of: "browserLink.events") ?? .max,
+                          methods.lastIndex(of: "browserLink.result") ?? -1)
+        let event = ((daemon.requests("browserLink.events").first?["events"] as? [[String: Any]])?.first) ?? [:]
+        XCTAssertEqual(event["tabId"] as? String, "t1")
+        XCTAssertEqual(event["method"] as? String, "Page.loadEventFired")
+
+        // tab.close: the browser goes by the runtime's hardened stop.
+        daemon.command("c6", "tab.close", #"{"tabId":"t1"}"#)
+        await eventually("the close") { daemon.result("c6") != nil }
+        XCTAssertFalse(runtime.isLive(tabId: "t1"))
+        XCTAssertTrue(cef.log.contains("c1 close"))
+        XCTAssertTrue(daemon.requests("browserLink.tabGone").isEmpty)
+    }
+}
