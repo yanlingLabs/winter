@@ -7,16 +7,31 @@ final class CDPTabGateTests: XCTestCase {
 
     private func obj(_ pairs: [String: JSONValue]) -> JSONValue { .object(pairs) }
 
-    /// A gate that has seen a `"winter"` world created as context 7 (unique id "u7") on the tab's own
-    /// session, and a main-world context 1.
+    /// A context the browser reports, as `Runtime.executionContextCreated` carries it.
+    private func created(_ id: Int, name: String, unique: String? = nil, frame: String? = "F",
+                         session: String? = nil, into gate: CDPTabGate) {
+        var context: [String: JSONValue] = ["id": .number(Double(id)), "name": .string(name)]
+        if let unique { context["uniqueId"] = .string(unique) }
+        if let frame { context["auxData"] = obj(["frameId": .string(frame), "isDefault": .bool(name.isEmpty)]) }
+        gate.noteEvent(method: "Runtime.executionContextCreated", params: obj(["context": .object(context)]),
+                       cdpSessionId: session)
+    }
+
+    /// This link's own `Page.createIsolatedWorld` in `frame`, answered with context `id`.
+    private func made(_ id: Int, frame: String = "F", session: String? = nil, into gate: CDPTabGate) {
+        gate.noteResult(method: "Page.createIsolatedWorld",
+                        params: obj(["frameId": .string(frame), "worldName": .string("winter")]), cdpSessionId: session,
+                        result: obj(["executionContextId": .number(Double(id))]))
+    }
+
+    /// A gate whose link made a `"winter"` world as context 7 (unique id "u7") in frame F on the tab's
+    /// own session — announced, as the browser does, before the call that made it answered — beside the
+    /// page's main-world context 1.
     private func gateWithWinterWorld() -> CDPTabGate {
         let gate = CDPTabGate()
-        gate.noteEvent(method: "Runtime.executionContextCreated",
-                       params: obj(["context": obj(["id": .number(7), "name": .string("winter"), "uniqueId": .string("u7")])]),
-                       cdpSessionId: nil)
-        gate.noteEvent(method: "Runtime.executionContextCreated",
-                       params: obj(["context": obj(["id": .number(1), "name": .string(""), "uniqueId": .string("u1")])]),
-                       cdpSessionId: nil)
+        created(1, name: "", unique: "u1", into: gate)
+        created(7, name: "winter", unique: "u7", into: gate)
+        made(7, into: gate)
         return gate
     }
 
@@ -153,8 +168,7 @@ final class CDPTabGateTests: XCTestCase {
 
     func testAChildSessionHasItsOwnWorlds() {
         let gate = CDPTabGate()
-        gate.noteEvent(method: "Runtime.executionContextCreated",
-                       params: obj(["context": obj(["id": .number(3), "name": .string("winter")])]), cdpSessionId: "S1")
+        made(3, frame: "OOPIF", session: "S1", into: gate)
         XCTAssertNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(3)]), cdpSessionId: "S1"))
         XCTAssertNotNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(3)]), cdpSessionId: nil))
         // The child detaching takes its worlds with it.
@@ -192,5 +206,114 @@ final class CDPTabGateTests: XCTestCase {
         XCTAssertEqual(CDPTabGate.strippedNetworkParams(full),
                        obj(["requestId": .string("r1"), "timestamp": .number(12.5), "type": .string("Document")]))
         XCTAssertEqual(CDPTabGate.strippedNetworkParams(.string("x")), obj([:]))
+    }
+
+    // MARK: - The amended world rules (cdp-allowlist.ts, f0853b5a)
+
+    func testAReloadCarryingAScriptIsRefused() {
+        let gate = CDPTabGate()
+        XCTAssertNil(gate.check(method: "Page.reload", params: obj([:]), cdpSessionId: nil))
+        XCTAssertNil(gate.check(method: "Page.reload", params: obj(["ignoreCache": .bool(true)]), cdpSessionId: nil))
+        XCTAssertNotNil(gate.check(method: "Page.reload",
+                                   params: obj(["scriptToEvaluateOnLoad": .string("document.cookie")]), cdpSessionId: nil))
+        XCTAssertNotNil(gate.check(method: "Page.reload", params: obj(["scriptToEvaluateOnLoad": .string("")]),
+                                   cdpSessionId: nil), "carrying the key at all")
+    }
+
+    /// A cross-process navigation hands a process-local id out again: the winter world was 7, and now
+    /// the page's own world is 7. No "destroyed" event reached the gate in between — the unique ids are
+    /// what tell the two apart.
+    func testAReusedContextIdIsWinterOnlyWhileItsLatestContextIs() {
+        let gate = CDPTabGate()
+        created(7, name: "winter", unique: "A", into: gate)
+        made(7, into: gate)
+        gate.noteResult(method: "Runtime.evaluate", params: obj(["contextId": .number(7)]), cdpSessionId: nil,
+                        result: obj(["result": obj(["objectId": .string("o1")])]))
+        XCTAssertNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(7)]), cdpSessionId: nil))
+        XCTAssertNil(gate.check(method: "Runtime.evaluate", params: obj(["uniqueContextId": .string("A")]), cdpSessionId: nil))
+
+        created(7, name: "", unique: "B", into: gate)
+        XCTAssertNotNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(7)]), cdpSessionId: nil),
+                        "7 is the page's own world now")
+        XCTAssertNotNil(gate.check(method: "Runtime.evaluate", params: obj(["uniqueContextId": .string("A")]), cdpSessionId: nil))
+        XCTAssertNotNil(gate.check(method: "Runtime.callFunctionOn",
+                                   params: obj(["functionDeclaration": .string("f"), "objectId": .string("o1")]), cdpSessionId: nil),
+                        "objects of the old world go with it")
+        XCTAssertNotNil(gate.check(method: "DOM.resolveNode", params: obj(["executionContextId": .number(7)]), cdpSessionId: nil))
+    }
+
+    /// The other order: a NEW winter world (this link's, in a frame it made one in) takes the id, and
+    /// only then does the OLD context's "destroyed" arrive. Matched by unique id, it takes nothing.
+    func testALateDestroyOfAnOlderContextLeavesTheNewWinterWorld() {
+        let gate = CDPTabGate()
+        created(7, name: "winter", unique: "A", into: gate)
+        made(7, into: gate)
+        created(7, name: "winter", unique: "C", into: gate)
+        gate.noteEvent(method: "Runtime.executionContextDestroyed",
+                       params: obj(["executionContextId": .number(7), "executionContextUniqueId": .string("A")]),
+                       cdpSessionId: nil)
+        XCTAssertNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(7)]), cdpSessionId: nil))
+        XCTAssertNil(gate.check(method: "Runtime.evaluate", params: obj(["uniqueContextId": .string("C")]), cdpSessionId: nil))
+        XCTAssertNotNil(gate.check(method: "Runtime.evaluate", params: obj(["uniqueContextId": .string("A")]), cdpSessionId: nil))
+
+        gate.noteEvent(method: "Runtime.executionContextDestroyed",
+                       params: obj(["executionContextId": .number(7), "executionContextUniqueId": .string("C")]),
+                       cdpSessionId: nil)
+        XCTAssertNotNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(7)]), cdpSessionId: nil))
+    }
+
+    // MARK: - A winter world is one this link made (cdp-allowlist.ts, f64d0a77)
+
+    /// Another extension's — or a page's — world can carry the same name. The name alone never counts.
+    func testANameAloneNeverMakesAWinterWorld() {
+        let gate = CDPTabGate()
+        created(5, name: "winter", unique: "X", frame: "G", into: gate)
+        created(6, name: "winter", unique: "Y", frame: nil, into: gate)
+        XCTAssertNotNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(5)]), cdpSessionId: nil))
+        XCTAssertNotNil(gate.check(method: "Runtime.evaluate", params: obj(["uniqueContextId": .string("X")]), cdpSessionId: nil))
+        XCTAssertNotNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(6)]), cdpSessionId: nil))
+        XCTAssertNotNil(gate.check(method: "DOM.resolveNode", params: obj(["executionContextId": .number(5)]), cdpSessionId: nil))
+        // …and a world this link made in frame F does not lend its standing to frame G.
+        made(9, frame: "F", into: gate)
+        created(10, name: "winter", unique: "Z", frame: "G", into: gate)
+        XCTAssertNotNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(10)]), cdpSessionId: nil))
+    }
+
+    /// The browser announces a world's context before it answers the call that made it: the
+    /// announcement waits as a candidate, and the answer confirms it — unique id included.
+    func testAWorldAnnouncedBeforeItsAnswerIsConfirmedByIt() {
+        let gate = CDPTabGate()
+        created(8, name: "winter", unique: "U8", frame: "F", into: gate)
+        XCTAssertNotNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(8)]), cdpSessionId: nil),
+                        "not this link's until its own call answers")
+        made(8, frame: "F", into: gate)
+        XCTAssertNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(8)]), cdpSessionId: nil))
+        XCTAssertNil(gate.check(method: "Runtime.evaluate", params: obj(["uniqueContextId": .string("U8")]), cdpSessionId: nil))
+    }
+
+    /// A new document in a frame this link made a world in: the browser's winter-named context there
+    /// is that world again; the frame going away ends that.
+    func testAWinterContextInAFrameTheLinkMadeOneInCounts() {
+        let gate = gateWithWinterWorld()
+        gate.noteEvent(method: "Runtime.executionContextsCleared", params: obj([:]), cdpSessionId: nil)
+        XCTAssertNotNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(7)]), cdpSessionId: nil))
+        created(12, name: "winter", unique: "u12", frame: "F", into: gate)
+        XCTAssertNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(12)]), cdpSessionId: nil))
+
+        gate.noteEvent(method: "Page.frameDetached", params: obj(["frameId": .string("F")]), cdpSessionId: nil)
+        created(13, name: "winter", unique: "u13", frame: "F", into: gate)
+        XCTAssertNotNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(13)]), cdpSessionId: nil))
+    }
+
+    /// An isolated world made by `Page.createIsolatedWorld` is winter at once, whatever unique id the
+    /// browser last reported under its number for some other context.
+    func testACreatedWorldIsWinterEvenOverAStaleUniqueId() {
+        let gate = CDPTabGate()
+        gate.noteEvent(method: "Runtime.executionContextCreated",
+                       params: obj(["context": obj(["id": .number(9), "name": .string(""), "uniqueId": .string("P")])]),
+                       cdpSessionId: nil)
+        gate.noteResult(method: "Page.createIsolatedWorld", params: obj(["worldName": .string("winter")]), cdpSessionId: nil,
+                        result: obj(["executionContextId": .number(9)]))
+        XCTAssertNil(gate.check(method: "Runtime.evaluate", params: obj(["contextId": .number(9)]), cdpSessionId: nil))
     }
 }
