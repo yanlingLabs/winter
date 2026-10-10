@@ -41,6 +41,7 @@ import { SDK_COMPAT_LINKS, SDK_PERSISTENT_ENTRIES, canonicalCwd, sdkHomeFor } fr
 import { downgradeRuntimeStateToV6, openRuntimeStateDb } from "../runtime-state/db";
 import { RuntimeLeases, type LeaseProbe } from "../runtime-state/leases";
 import { RuntimeSessionRecords } from "../runtime-state/records";
+import { claudeResumeStagingPresent, type ClaudeResumeLister } from "../runtime-state/claude-resume-scan";
 import { moveTranscriptFiles, transcriptEntriesOf } from "../runtime-state/transcript-rekey";
 import type { RecoveryReport, RecoveryTranscriptOutcome } from "@yanlinglabs/winter-runtime-sdk";
 import { normalizeRecoveryReport, quarantinedBackendSessions } from "../runtime-sdk/run-home-support";
@@ -210,12 +211,17 @@ export interface MigrationCDeps {
   probe?: LeaseProbe;
   /** Where claude staging roots live (`WINTER_CLAUDE_RESUME_SCAN_ROOT`, else `os.tmpdir()`) — round 4. */
   claudeResumeScanRoot?: string;
+  /** The `claude-resume-*` listing seam (`listClaudeResumeStaging` by default); a test spies on it. */
+  listClaudeResumeStaging?: ClaudeResumeLister;
 }
 
 /** Round 4: does the scan root hold any claude staging root (`claude-resume-*`)? The daemon's boot sweep may
- *  still have one to reconcile — at the key 0.116 wrote — so phase 2's re-key must wait for it. */
-function stagingRootsPresent(scanRoot: string): boolean {
-  try { return readdirSync(scanRoot, { withFileTypes: true }).some((e) => e.isDirectory() && e.name.startsWith("claude-resume-")); } catch { return false; }
+ *  still have one to reconcile — at the key 0.116 wrote — so phase 2's re-key must wait for it.
+ *  2026-10-10: the listing is the shared, bounded one, and a home whose recovery pass has already listed the
+ *  scan root (`<home>/migration/claude-resume-scan.json`) answers from the marker's pending paths instead —
+ *  the per-user temp folder is never re-listed (it can hold hundreds of thousands of entries). */
+function stagingRootsPresent(home: string, scanRoot: string, list?: ClaudeResumeLister): boolean {
+  return claudeResumeStagingPresent(home, scanRoot.replace(/\/+$/, "") || "/", list);
 }
 
 /** The retired official leg's working-copy roots phase 2 reconciles (never recorded in runtime-state;
@@ -664,9 +670,12 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
   // official working copy AND (round 4) no claude staging root: the daemon's boot sweep reconciles those
   // BEFORE phase 2, because phase 2 re-keys transcripts and a staging copy swept after that would be
   // appended into an orphan at the old key. Otherwise the daemon's late site finishes it, sweep first.
+  // Lazy on purpose (2026-10-10): with a router door the answer is not needed, and the staging check is
+  // the one that may have to list the temp folder.
+  if (deps.reconcile !== undefined) return finishMigrationC(home, deps);
   const scanRoot = deps.claudeResumeScanRoot ?? (process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || tmpdir());
-  const nothingToReconcile = !officialRoots(home).some((r) => existsSync(r) && !isSymlink(r) && hasFiles(r)) && !stagingRootsPresent(scanRoot);
-  if (deps.reconcile !== undefined || nothingToReconcile) return finishMigrationC(home, deps);
+  const nothingToReconcile = !officialRoots(home).some((r) => existsSync(r) && !isSymlink(r) && hasFiles(r)) && !stagingRootsPresent(home, scanRoot, deps.listClaudeResumeStaging);
+  if (nothingToReconcile) return finishMigrationC(home, deps);
   return m;
 }
 
@@ -712,7 +721,7 @@ function markQuarantinedSessions(home: string, backendIds: readonly string[]): s
  * the new layout no longer reads, and mark the migration done. Idempotent; a root the router cannot
  * reconcile is recorded `failed` and still archived (a move — nothing is lost).
  */
-export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, "log" | "now" | "reconcile" | "claudeResumeScanRoot">): Promise<MigrationCManifest> {
+export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, "log" | "now" | "reconcile" | "claudeResumeScanRoot" | "listClaudeResumeStaging">): Promise<MigrationCManifest> {
   const now = deps.now ?? (() => new Date());
   const state = migrationCState(home);
   if (state.kind !== "parsed" || state.manifest.status !== "phase1-complete") {
@@ -764,7 +773,7 @@ export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, 
     // sweeps only through the door), and a staging copy swept at the OLD key after this re-key becomes an
     // orphan — so, like an official working copy with no door, a staging root refuses phase 2 here.
     const scanRoot = deps.claudeResumeScanRoot ?? (process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || tmpdir());
-    if (deps.reconcile === undefined && stagingRootsPresent(scanRoot)) {
+    if (deps.reconcile === undefined && stagingRootsPresent(home, scanRoot, deps.listClaudeResumeStaging)) {
       throw new MigrationCRefused("sdk_home_migration_refused", `${scanRoot} holds a claude staging root and no router can reconcile it here — the transcripts are not re-keyed before it is; the next daemon boot with a working router finishes Migration C`);
     }
     const detail = rekeyTranscripts(home, m, deps.log);

@@ -12,7 +12,12 @@
 //   3. staging roots   stale, unclaimed `claude-resume-*` directories (step 8's narrow sweep, deferred
 //                      here on a run-home build so it runs only after the reconcile — spec §3.8) — and,
 //                      whatever their age, those this home's directory rows name as a crashed official
-//                      resume's observed root (round 3: a resume's working copy is there, not in its run folder)
+//                      resume's observed root (round 3: a resume's working copy is there, not in its run folder).
+//                      ONE LISTING PER HOME (2026-10-10, `claude-resume-scan.ts`): finding the stale ones
+//                      means listing the per-user temp folder — 6.4 s on a folder with ~878,000 entries,
+//                      for directories nothing creates any more — so that listing is bounded and runs
+//                      only until the home's marker covers the scan root; afterwards this pass takes
+//                      the directory rows' roots and the marker's `pending` paths BY PATH, no listing.
 //
 //   clean | appended → deleted (`rm -rf`: links inside are removed, their targets untouched)
 //   quarantined      → the ROOT is left in place, KEPT and recorded in `run_root_quarantine` (never
@@ -40,7 +45,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeStateDb } from "./db";
 import { RuntimeSessionRecords } from "./records";
-import { CLAUDE_RESUME_PREFIX, CLAUDE_RESUME_STALE_MS } from "./recovery";
+import {
+  CLAUDE_RESUME_PREFIX,
+  CLAUDE_RESUME_STALE_MS,
+  listClaudeResumeStaging,
+  readClaudeResumeScanMarker,
+  recordClaudeResumeScan,
+  updateClaudeResumeScanPending,
+  type ClaudeResumeLister,
+} from "./claude-resume-scan";
 import type { RecoveryReport } from "@yanlinglabs/winter-runtime-sdk";
 import { normalizeRecoveryReport, quarantinedBackendSessions } from "../runtime-sdk/run-home-support";
 
@@ -57,6 +70,9 @@ export interface RootRecoveryDeps {
   isLive?: (dir: string) => boolean;
   /** The staging scan root: `WINTER_CLAUDE_RESUME_SCAN_ROOT` in tests, else `os.tmpdir()`. */
   claudeResumeScanRoot?: string;
+  /** The `claude-resume-*` listing (`listClaudeResumeStaging` by default) — called at most once per
+   *  home and scan root; a test passes a spy to prove a later boot lists nothing. */
+  listClaudeResumeStaging?: ClaudeResumeLister;
   log?: (line: string) => void;
   now?: () => string;
 }
@@ -65,6 +81,10 @@ export interface RootRecoveryReport {
   recorded: { clean: number; appended: number; quarantined: number; failed: number; missing: number; kept: number; skipped: number };
   runFolders: { clean: number; appended: number; quarantined: number; failed: number; skipped: number; refused: number; noWorkingCopy: number };
   staging: { removed: number; quarantined: number; failed: number };
+  /** How step 3 found its candidates: `listed` (the one-time bounded listing finished), `listed-partial`
+   *  (its budget ran out — recorded, not retried), `marker` (by path only — no listing), `unreadable`
+   *  (the listing failed; no marker, a later boot tries again). */
+  stagingScan: "listed" | "listed-partial" | "marker" | "unreadable";
   /** Every root quarantined by THIS pass. */
   quarantinedRoots: string[];
   /** Review I6: the Winter sessions marked `repair-required` because one of their transcripts (a
@@ -99,6 +119,7 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
     recorded: { clean: 0, appended: 0, quarantined: 0, failed: 0, missing: 0, kept: 0, skipped: 0 },
     runFolders: { clean: 0, appended: 0, quarantined: 0, failed: 0, skipped: 0, refused: 0, noWorkingCopy: 0 },
     staging: { removed: 0, quarantined: 0, failed: 0 },
+    stagingScan: "marker",
     quarantinedRoots: [],
     sessionsMarked: [],
   };
@@ -107,6 +128,7 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
   const runsDir = join(deps.home, "cache", "runs");
   const isRunFolder = (p: string): boolean => p.startsWith(`${runsDir}/`) && !p.slice(runsDir.length + 1).includes("/");
   const scanRoot = deps.claudeResumeScanRoot ?? tmpdir();
+  const scanRootNorm = scanRoot.replace(/\/+$/, "") || "/";
   const isStagingRoot = (p: string): boolean => p.startsWith(`${scanRoot.replace(/\/+$/, "")}/${CLAUDE_RESUME_PREFIX}`) && !p.slice(scanRoot.replace(/\/+$/, "").length + 1).includes("/");
 
   const records = new RuntimeSessionRecords(deps.rs);
@@ -239,26 +261,46 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
       } catch { /* one unreadable row costs itself */ }
     }
   } catch { /* bounded: no rows read means the age rule alone, as before */ }
-  let staging: string[] = [];
-  try {
-    staging = readdirSync(scanRoot, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && e.name.startsWith(CLAUDE_RESUME_PREFIX))
-      .map((e) => join(scanRoot, e.name));
-  } catch { staging = []; }
-  for (const dir of staging.sort()) {
-    if (handled.has(dir) || known.has(dir)) continue;
-    if ([...claimed].some((root) => root === dir || root.startsWith(`${dir}/`))) continue;
+  // WHERE THE CANDIDATES COME FROM. The directory rows' roots (`recordedStaging`) and the marker's `pending`
+  // paths are taken BY PATH — no listing. The listing of the temp folder runs only while the home's marker
+  // does not cover this scan root (once per home), bounded; see `claude-resume-scan.ts`.
+  const marker = readClaudeResumeScanMarker(deps.home);
+  const covered = marker?.roots.includes(scanRootNorm) === true;
+  const byPath = new Set<string>(recordedStaging);
+  for (const p of marker?.pending ?? []) if (isStagingRoot(p)) byPath.add(p);
+  let listing: ReturnType<ClaudeResumeLister> | undefined;
+  const staging = new Set<string>([...byPath].filter(isRealDir));
+  if (!covered) {
+    try {
+      listing = (deps.listClaudeResumeStaging ?? listClaudeResumeStaging)(scanRootNorm);
+      for (const name of listing.names) staging.add(join(scanRootNorm, name));
+      report.stagingScan = listing.complete ? "listed" : "listed-partial";
+      if (!listing.complete) log(`run-root recovery: the temp folder listing stopped after ${listing.entries} entries (budget) — claude staging roots beyond them are not swept; this is not retried`);
+    } catch {
+      report.stagingScan = "unreadable"; // an unreadable root says nothing about its contents: no marker, a later boot tries again
+    }
+  }
+  const stillPending: string[] = [];
+  for (const dir of [...staging].sort()) {
+    if (handled.has(dir) || known.has(dir)) continue; // handled above, or quarantined: never revisited
+    // A root some live generation names, or one still younger than the stale rule, is not ours to touch YET:
+    // it stays a candidate BY PATH (the marker's `pending`), so the 24 h rule keeps meaning what it meant
+    // when every boot re-listed the folder.
+    if ([...claimed].some((root) => root === dir || root.startsWith(`${dir}/`))) { stillPending.push(dir); continue; }
     let ageMs: number;
     try { ageMs = Date.now() - statSync(dir).mtimeMs; } catch { continue; }
-    if (ageMs < CLAUDE_RESUME_STALE_MS && !recordedStaging.has(dir)) continue;
+    if (ageMs < CLAUDE_RESUME_STALE_MS && !recordedStaging.has(dir)) { stillPending.push(dir); continue; }
     try {
       const outcome = await reconcileRoot(dir);
       if (outcome === "quarantined") { report.staging.quarantined++; quarantine(dir); continue; }
-      if (remove(dir)) report.staging.removed++;
+      if (remove(dir)) report.staging.removed++; else stillPending.push(dir);
     } catch {
       report.staging.failed++;
+      stillPending.push(dir);
     }
   }
+  if (covered) updateClaudeResumeScanPending(deps.home, scanRootNorm, stillPending);
+  else if (listing !== undefined) recordClaudeResumeScan(deps.home, scanRootNorm, { complete: listing.complete, entries: listing.entries, found: listing.names.length, pending: stillPending }, now);
   return report;
 }
 
@@ -270,6 +312,7 @@ export function rootRecoveryDetail(r: RootRecoveryReport): Record<string, number
     runFoldersClean: r.runFolders.clean, runFoldersAppended: r.runFolders.appended, runFoldersQuarantined: r.runFolders.quarantined,
     runFoldersFailed: r.runFolders.failed, runFoldersSkipped: r.runFolders.skipped, runFoldersRefused: r.runFolders.refused, runFoldersNoWorkingCopy: r.runFolders.noWorkingCopy,
     stagingRemoved: r.staging.removed, stagingQuarantined: r.staging.quarantined, stagingFailed: r.staging.failed,
+    stagingScan: r.stagingScan,
     quarantinedRoots: r.quarantinedRoots,
   };
 }
