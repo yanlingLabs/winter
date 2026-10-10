@@ -121,6 +121,8 @@ function wrapFixture(binary: string, app: { name: string; bundleId: string }): s
   }
   if (app.bundleId === FIXTURE_DONE.bundleId) must(run("plutil", ["-replace", "LSUIElement", "-bool", "true", plist]), "plutil LSUIElement");
   for (const f of readdirSync(WEB_DIR)) copyFileSync(join(WEB_DIR, f), join(bundle, "Contents", "Resources", f));
+  // The fixture's scripting dictionary (the adapters group's `app.dict.*`), named by OSAScriptingDefinition.
+  for (const f of readdirSync(join(SWIFT_DIR, "Fixture")).filter((n) => n.endsWith(".sdef"))) copyFileSync(join(SWIFT_DIR, "Fixture", f), join(bundle, "Contents", "Resources", f));
   must(run("codesign", ["--force", "--sign", "-", "--timestamp=none", bundle]), `codesign ${app.name}`);
   return bundle;
 }
