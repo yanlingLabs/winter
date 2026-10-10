@@ -3,6 +3,24 @@ import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+/** Reads `stream` until `needle` has appeared (true) or the stream ends / `deadlineMs` passes (false). */
+async function readUntil(stream: ReadableStream<Uint8Array>, needle: string, deadlineMs: number): Promise<boolean> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let seen = "";
+  const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), deadlineMs));
+  try {
+    while (true) {
+      const next = await Promise.race([reader.read(), timeout]);
+      if (next === "timeout" || next.done) return false;
+      seen += decoder.decode(next.value, { stream: true });
+      if (seen.includes(needle)) return true;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 /**
  * Whole-branch review repro: a SIGTERM'd `daemon run` must leave NO stale socket file — otherwise
  * the app's DaemonSupervisor sees the leftover file on the next launch and goes `.connectOnly`,
@@ -24,6 +42,11 @@ describe("daemon run SIGTERM socket cleanup", () => {
     const shutdown = async () => { await daemon.stop(); process.exit(0); };
     process.on("SIGTERM", shutdown);
     process.on("SIGINT", shutdown);
+    // The handshake: printed only once BOTH handlers are installed. The socket file appears a moment BEFORE
+    // startDaemon() returns and the handlers are registered after it, so "the socket exists" is not "SIGTERM
+    // is handled": a signal in that gap hits the default disposition and kills the process with the socket
+    // still on disk (a CI flake on a loaded runner). The test waits for this line, never for the file.
+    console.log("WINTER_TEST_SHUTDOWN_HANDLERS_READY");
   `;
 
   test("SIGTERM leaves NO stale socket file (the reviewer's exact repro, now passing)", async () => {
@@ -38,16 +61,17 @@ describe("daemon run SIGTERM socket cleanup", () => {
       stderr: "pipe",
     });
 
-    // Wait for the daemon to come up and create its socket.
-    const deadline = Date.now() + 15_000;
-    while (!existsSync(socketPath) && Date.now() < deadline) {
-      await Bun.sleep(50);
-    }
+    // Keep stderr drained so a chatty boot can never fill its pipe and block the child.
+    void new Response(proc.stderr).arrayBuffer();
+
+    // Wait for the daemon's own "handlers installed" line (a condition, not a sleep; the deadline only bounds a hang).
+    const ready = await readUntil(proc.stdout, "WINTER_TEST_SHUTDOWN_HANDLERS_READY", 25_000);
+    expect(ready).toBe(true);
     expect(existsSync(socketPath)).toBe(true); // the daemon started and created the socket
 
     proc.kill("SIGTERM");
-    await proc.exited;
+    expect(await proc.exited).toBe(0); // the handler ran to its `process.exit(0)` — not killed by the signal
 
     expect(existsSync(socketPath)).toBe(false); // graceful stop unlinked the socket — no stale file
-  }, 30_000);
+  }, 40_000);
 });
