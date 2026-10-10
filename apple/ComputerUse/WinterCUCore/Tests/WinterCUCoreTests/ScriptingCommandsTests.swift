@@ -142,6 +142,22 @@ final class ScriptingCommandsTests: XCTestCase {
         XCTAssertEqual(verdict("Brws", "Snip"), .allow, "without the app's dictionary it is just the bound app's event")
     }
 
+    func testAJavaScriptURLLiteralIsRefusedInAnyApp() {
+        let safari = CUAppleScriptPolicy.BoundApp(name: "Safari", bundleId: "com.apple.Safari", path: nil)
+        for literal in ["javascript:alert(1)", "JavaScript:void(0)", "  javascript:x", "java\tscript:x", "java\nscript:x", "JAVA SCRIPT :x", "\u{0}javascript:x"] {
+            let source = "tell application id \"com.apple.Safari\" to set URL of current tab of window id 7 to \"\(literal.replacingOccurrences(of: "\"", with: "\\\""))\""
+            XCTAssertThrowsError(try CUAppleScriptPolicy.checkSource(source, bound: safari), literal) { error in
+                XCTAssertTrue((error as? CUError)?.message.contains("javascript: URL") ?? false, "\(error)")
+            }
+        }
+        // Other URLs, and the word anywhere but at a literal's start, are fine.
+        for literal in ["https://example.com/javascript:not-a-scheme", "file:///tmp/javascript.html", "about javascript: tips"] {
+            XCTAssertNoThrow(try CUAppleScriptPolicy.checkSource("tell application id \"com.apple.Safari\" to set URL of current tab of window id 7 to \"\(literal)\"", bound: safari), literal)
+        }
+        let mail = CUAppleScriptPolicy.BoundApp(name: "Mail", bundleId: "com.apple.mail", path: nil)
+        XCTAssertThrowsError(try CUAppleScriptPolicy.checkSource("tell application id \"com.apple.mail\" to set x to \"javascript:1\"", bound: mail), "any app")
+    }
+
     // MARK: the door on a bound target
 
     let pid: pid_t = 6262

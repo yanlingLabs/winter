@@ -43,6 +43,12 @@ public enum CUAppleScriptPolicy {
         for (phrase, why) in bridges where text.contains(phrase) {
             throw CUError.notAllowed("applescript", "the script was not run: \(why)")
         }
+        // A `javascript:` URL runs JavaScript in a page in ANY browser it is handed to (Safari's `URL of tab`, a
+        // Chromium `URL` …): refused as a literal, the way a browser reads a scheme — case aside, whitespace and control
+        // characters ignored.
+        for literal in strings where isJavaScriptURL(literal) {
+            throw CUError.notAllowed("applescript", "the script was not run: it holds a javascript: URL, which would run JavaScript in a page — read the page with state() or find()")
+        }
         // Every application specifier must be a literal naming the bound app: naming another launches it.
         let pattern = #"\b(?:application|app)\b\s*(id\s+)?(\S+)"#
         let regex = try! NSRegularExpression(pattern: pattern)
@@ -62,6 +68,13 @@ public enum CUAppleScriptPolicy {
                 throw CUError.notAllowed("applescript", "the script was not run: it names \(byId ? "the app id " : "")“\(named)”, but only the bound app, \(bound.name), may be scripted (naming an app launches it)")
             }
         }
+    }
+
+    /// Does this string literal begin with the `javascript:` scheme, read as a browser reads it (case-insensitive, every
+    /// whitespace and control character dropped)?
+    static func isJavaScriptURL(_ literal: String) -> Bool {
+        let kept = literal.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) && !CharacterSet.controlCharacters.contains($0) }
+        return String(String.UnicodeScalarView(kept)).lowercased().hasPrefix("javascript:")
     }
 
     /// Whether a literal names the bound app: its bundle id (for `application id`), else its name (with or
