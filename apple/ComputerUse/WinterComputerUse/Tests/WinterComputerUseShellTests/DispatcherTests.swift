@@ -66,12 +66,29 @@ final class DispatcherTests: XCTestCase {
         XCTAssertFalse(bare.methods.contains("test.capture"))
     }
 
-    func testTestCaptureWritesOnlyPNGsInsideTheHome() {
-        XCTAssertEqual(TestCapture.allowedPath("/tmp/h/run/a.png", home: "/tmp/h"), "/tmp/h/run/a.png")
-        XCTAssertNil(TestCapture.allowedPath("/tmp/h/../x.png", home: "/tmp/h"))
-        XCTAssertNil(TestCapture.allowedPath("/tmp/hh/a.png", home: "/tmp/h"))
-        XCTAssertNil(TestCapture.allowedPath("/tmp/h/a.txt", home: "/tmp/h"))
-        XCTAssertNil(TestCapture.allowedPath("relative.png", home: "/tmp/h"))
+    func testTestCaptureWritesOnlyPNGsInsideTheHome() throws {
+        // A real home under the temp dir, named the way a live run names it: `/var/…` while the helper's home is
+        // its realpath `/private/var/…` — the spelling that refused every capture of the first freshness run.
+        let fm = FileManager.default
+        let base = (NSTemporaryDirectory() as NSString).appendingPathComponent("cu-capture-guard-\(UUID().uuidString)")
+        let other = base + "-hh"
+        try fm.createDirectory(atPath: base + "/run", withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: other, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(atPath: base); try? fm.removeItem(atPath: other) }
+        let home = try XCTUnwrap(HelperIdentity.canonicalPath(base))
+        let unresolved = base.hasPrefix("/private/") ? String(base.dropFirst("/private".count)) : base
+        XCTAssertEqual(TestCapture.allowedPath(unresolved + "/run/a.png", home: home), home + "/run/a.png")
+        XCTAssertEqual(TestCapture.allowedPath(home + "/a.png", home: home), home + "/a.png")
+        XCTAssertNil(TestCapture.allowedPath(home + "/../x.png", home: home))
+        XCTAssertNil(TestCapture.allowedPath(other + "/a.png", home: home))
+        XCTAssertNil(TestCapture.allowedPath(home + "/missing/a.png", home: home))
+        XCTAssertNil(TestCapture.allowedPath(home + "/a.txt", home: home))
+        XCTAssertNil(TestCapture.allowedPath("relative.png", home: home))
+        // A symlink inside the home that points out of it: refused, as is a link planted at the file's own name.
+        try fm.createSymbolicLink(atPath: home + "/out", withDestinationPath: other)
+        XCTAssertNil(TestCapture.allowedPath(home + "/out/a.png", home: home))
+        try fm.createSymbolicLink(atPath: home + "/run/b.png", withDestinationPath: other + "/b.png")
+        XCTAssertNil(TestCapture.allowedPath(home + "/run/b.png", home: home))
     }
 
     func testTestCaptureCropsInWindowPoints() throws {

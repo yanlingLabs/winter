@@ -54,6 +54,29 @@ export interface VariantResult {
   cells: CellResult[];
   /** The user's front app / Space changed while the sampler ran: the measurement may have been disturbed. */
   disturbed?: string;
+  /** What the sampler and the decoder actually produced — so a table of "no captures" says why. */
+  pipeline?: PipelineSummary;
+}
+
+export interface PipelineSummary {
+  capturesOk: number;
+  capturesFailed: number;
+  /** Each distinct capture error (its JSON), with how often it came back. */
+  captureErrors: Array<{ error: string; count: number }>;
+  streamEvents: Array<{ on: boolean; ok: boolean; error?: string }>;
+  decodeLines: number;
+  decodedWithSentinel: number;
+  decodeFailures: Array<{ error: string; count: number }>;
+  /** The decoder's own exit status / stderr when a batch did not exit 0. */
+  decoderProblems: string[];
+  /** The sampler's raw stdout, kept beside the PNGs. */
+  samplerLog: string;
+}
+
+function tally(values: readonly string[]): Array<{ error: string; count: number }> {
+  const m = new Map<string, number>();
+  for (const v of values) m.set(v, (m.get(v) ?? 0) + 1);
+  return [...m.entries()].sort((a, b) => b[1] - a[1]).map(([error, count]) => ({ error, count }));
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -69,25 +92,43 @@ async function waitFor<T>(what: string, ms: number, probe: () => T | undefined):
 }
 
 /** Sample, decode, analyze — the shared tail of every variant. */
-async function measure(d: FreshDeps, variant: string, windowId: number, layout: FreshLayout, rect: [number, number, number, number], since: number): Promise<Pick<VariantResult, "captures" | "cells" | "disturbed" | "notes">> {
+async function measure(d: FreshDeps, variant: string, windowId: number, layout: FreshLayout, rect: [number, number, number, number], since: number): Promise<Pick<VariantResult, "captures" | "cells" | "disturbed" | "notes" | "pipeline">> {
   const dir = join(d.home, "fresh", variant.replace(/[^a-z0-9]+/gi, "-"));
   mkdirSync(dir, { recursive: true });
+  // The captures are named by the temp dir's `/var/…` spelling, not its realpath `/private/var/…`: helper ≤ 1.5.1
+  // compared after NSURL standardizing, which drops `/private` only from a path that already exists — the home,
+  // never a PNG not written yet — and so refused every capture. Later helpers compare realpaths; both accept this.
+  const samplerDir = dir.replace(/^\/private\/(var|tmp)\//, "/$1/");
   const t0 = Date.now();
-  const lines = await d.sample({ windowId, dir, phases: FRESH_PHASES, intervalMs: 500, rect, fps: 10 });
+  const lines = await d.sample({ windowId, dir: samplerDir, phases: FRESH_PHASES, intervalMs: 500, rect, fps: 10 });
   const t1 = Date.now();
+  const samplerLog = join(dir, "sampler.jsonl");
+  writeFileSync(samplerLog, `${lines.join("\n")}\n`);
   const parsed = lines.flatMap((l) => { try { return [JSON.parse(l) as Record<string, unknown>]; } catch { return []; } });
   const done = parsed.find((p) => "done" in p);
   if (done?.done !== true) throw new Error(`the sampler did not finish: ${JSON.stringify(done ?? lines.slice(-2))}`);
   const captures = parsed.filter((p) => p.event === "capture") as unknown as CaptureRecord[];
-  const notes = parsed.filter((p) => p.event === "stream" && p.ok !== true).map((p) => `stream ${p.on ? "start" : "stop"} failed: ${JSON.stringify(p.error)}`);
+  const streams = parsed.filter((p) => p.event === "stream").map((p) => ({ on: p.on === true, ok: p.ok === true, ...(p.ok === true ? {} : { error: JSON.stringify(p.error) }) }));
+  const notes = streams.filter((s) => !s.ok).map((s) => `stream ${s.on ? "start" : "stop"} failed: ${s.error}`);
   const files = captures.filter((c) => c.ok).map((c) => c.file);
+  const failed = captures.filter((c) => !c.ok).map((c) => JSON.stringify((c as unknown as { error?: unknown }).error ?? "no error given"));
   const layoutPath = join(dir, "layout.json");
   writeFileSync(layoutPath, JSON.stringify(layout));
   const decodes: DecodeLine[] = [];
+  const decoderProblems: string[] = [];
   for (let i = 0; i < files.length; i += 40) {
     const r = d.sh(d.tool, ["fresh-decode", layoutPath, ...files.slice(i, i + 40)]);
+    if (r.status !== 0) decoderProblems.push(`batch ${i / 40}: exit ${r.status} ${r.stderr.trim().slice(0, 300)}`);
     for (const l of r.stdout.split("\n")) { try { if (l.trim()) decodes.push(JSON.parse(l) as DecodeLine); } catch { /* skip */ } }
   }
+  const pipeline: PipelineSummary = {
+    capturesOk: files.length, capturesFailed: failed.length, captureErrors: tally(failed), streamEvents: streams,
+    decodeLines: decodes.length, decodedWithSentinel: decodes.filter((x) => x.ok).length,
+    decodeFailures: tally(decodes.filter((x) => !x.ok).map((x) => x.error ?? "no error given")), decoderProblems, samplerLog,
+  };
+  if (failed.length > 0) notes.push(`${failed.length} of ${captures.length} captures failed — ${pipeline.captureErrors.slice(0, 3).map((e) => `${e.error} ×${e.count}`).join("; ")}`);
+  if (files.length > 0 && decodes.length === 0) notes.push(`the decoder printed nothing for ${files.length} captures${decoderProblems.length > 0 ? ` (${decoderProblems[0]})` : ""}`);
+  d.log(`freshness ${variant}: captures ok ${files.length}, failed ${failed.length}; decoded ${pipeline.decodedWithSentinel}/${decodes.length}${failed.length > 0 ? ` — first error ${pipeline.captureErrors[0]!.error}` : ""}`);
   const ticks: TickRecord[] = d.events().filter((e) => e.ev === "fresh.tick" && e.t >= since).map((e) => ({
     t: e.t, ...(typeof e.native === "number" ? { native: e.native } : {}), ...(typeof e.dom === "number" ? { dom: e.dom } : {}), ...(typeof e.canvas === "number" ? { canvas: e.canvas } : {}),
   }));
@@ -96,6 +137,7 @@ async function measure(d: FreshDeps, variant: string, windowId: number, layout: 
     captures: captures.length,
     cells: analyzeFreshness(layout, captures, decodes, ticks),
     notes: [...notes, ...(decodes.filter((x) => !x.ok).length > 0 ? [`${decodes.filter((x) => !x.ok).length} captures had no sentinel`] : [])],
+    pipeline,
     ...(moved.length > 0 ? { disturbed: `${moved[0]!.what} at +${moved[0]!.t - t0} ms` } : {}),
   };
 }

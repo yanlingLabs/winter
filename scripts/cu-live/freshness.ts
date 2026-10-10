@@ -95,10 +95,13 @@ const median = (xs: readonly number[]): number | null => {
  * Fresh: the region changed in at least half the captures that decoded and its median lag is within a second;
  * stale: at most one distinct image; between them, partly fresh. (Report, don't assert: the verdict is data.)
  */
-export function verdictOf(images: number, unique: number, lagMedianMs: number | null): Verdict {
+export function verdictOf(images: number, unique: number, lagMedianMs: number | null, distinctStates?: number): Verdict {
   if (images === 0) return "no captures";
   if (unique <= 1) return "stale";
-  if (unique >= Math.max(2, images / 2) && lagMedianMs !== null && Math.abs(lagMedianMs) <= 1_000) return "fresh";
+  // A slot region can only show `distinctStates` different images (the css band's 16 slots): having shown them
+  // all is as fresh as it can look, however many captures were taken.
+  const needed = Math.max(2, Math.min(images / 2, distinctStates ?? Number.POSITIVE_INFINITY));
+  if (unique >= needed && lagMedianMs !== null && Math.abs(lagMedianMs) <= 1_000) return "fresh";
   return "partly fresh";
 }
 
@@ -136,7 +139,7 @@ export function analyzeFreshness(layout: FreshLayout, captures: readonly Capture
         region: r.name, phase, source, captures: mine.length, images, decoded, unique: hashes.size,
         lagMedianMs, lagMaxMs: lags.length === 0 ? null : Math.max(...lags),
         renderLagMedianMs: median(tickLags),
-        verdict: verdictOf(images, hashes.size, lagMedianMs),
+        verdict: verdictOf(images, hashes.size, lagMedianMs, r.kind === "slot" ? r.cells : undefined),
       });
     }
   }

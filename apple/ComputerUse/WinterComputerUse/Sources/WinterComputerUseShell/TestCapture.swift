@@ -72,12 +72,21 @@ public final class TestCapture: TestCapturing, @unchecked Sendable {
 
     public init(home: String) { self.home = home }
 
-    /// A PNG path inside `home` (after resolving `..`), or nil.
+    /// A PNG path inside `home`, or nil: the file's PARENT must exist and resolve (realpath — `..`, symlinks,
+    /// `/var` vs `/private/var`) to `home` or below it, and the file itself must not be a symlink. Returned in
+    /// its resolved spelling. (NSURL standardizing is not enough: it drops `/private` only from a path that
+    /// EXISTS, so an existing home and a PNG not written yet never compared equal.)
     public static func allowedPath(_ path: String, home: String) -> String? {
         guard path.hasPrefix("/"), path.hasSuffix(".png") else { return nil }
-        let resolved = URL(fileURLWithPath: path).standardizedFileURL.path
-        let root = URL(fileURLWithPath: home).standardizedFileURL.path
-        return resolved.hasPrefix(root + "/") ? resolved : nil
+        let name = (path as NSString).lastPathComponent
+        guard name.count > 4, !name.hasPrefix(".") else { return nil }
+        guard let root = HelperIdentity.canonicalPath(home),
+              let parent = HelperIdentity.canonicalPath((path as NSString).deletingLastPathComponent),
+              parent == root || parent.hasPrefix(root + "/") else { return nil }
+        let resolved = parent + "/" + name
+        var st = stat()
+        if lstat(resolved, &st) == 0, (st.st_mode & S_IFMT) == S_IFLNK { return nil }
+        return resolved
     }
 
     /// The part of an image under `rect` (window points, top-left), the image being the whole window at

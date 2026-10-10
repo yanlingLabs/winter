@@ -446,6 +446,11 @@ class Aborted extends Error {
 function freshnessRows(variants: readonly VariantResult[]): ScenarioResult[] {
   return variants.flatMap((v): ScenarioResult[] => {
     if (!v.ok) return [{ name: `freshness ${v.variant}: measurement`, group: "freshness", status: "fail", ms: 0, checks: [check("the measurement completed", false, v.error)] }];
+    // A sampler that ran but produced no usable image measured nothing: that is a failed measurement, not data.
+    if (v.cells.every((c) => c.images === 0)) {
+      return [{ name: `freshness ${v.variant}: measurement`, group: "freshness", status: "fail", ms: 0,
+        checks: [check("at least one capture decoded", false, v.notes.join(" | ") || `captures ${v.captures}, none decoded`)] }];
+    }
     const regions = [...new Set(v.cells.map((c) => c.region))];
     return regions.map((r) => ({
       name: `freshness ${v.variant}: ${r}`, group: "freshness", status: "pass" as const, ms: 0, checks: [check("measured", true)],

@@ -54,6 +54,10 @@ describe("the per-phase verdicts", () => {
     expect(verdictOf(20, 4, 3_000)).toBe("partly fresh");
     expect(verdictOf(20, 15, 4_000)).toBe("partly fresh");
     expect(verdictOf(0, 0, null)).toBe("no captures");
+    // A 16-slot band that showed all 16 states over 40 captures is fresh (the live a2 css row), not partly.
+    expect(verdictOf(40, 16, 0, 16)).toBe("fresh");
+    expect(verdictOf(40, 16, 0)).toBe("partly fresh");
+    expect(verdictOf(40, 6, 0, 16)).toBe("partly fresh");
   });
 
   test("analyzeFreshness: per phase × source × region, from the sampler's records, the tool's lines and the ticks", () => {
