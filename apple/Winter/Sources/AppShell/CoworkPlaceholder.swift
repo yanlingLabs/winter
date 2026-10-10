@@ -2,10 +2,10 @@ import SwiftUI
 
 /// app-shell T5: Cowork's Coming-soon surface — iOS's own actual pattern
 /// (`norma-ios/Winter/App/ComingSoonView.swift`): a `ContentUnavailableView` with an icon + one
-/// sentence, no list and no create door, because there is nothing behind it to list or create —
-/// `session_spawn` pre-flight-rejects the cowork mode entirely (design spec §"Cowork": "NOT an empty
-/// list — the mode is not wire-expressible yet"), so a list would promise a capability that fails on
-/// first use, and a "New" button would be a dead one. The "Soon" chip lives on the SIDEBAR row
+/// sentence, no list and no create door: `session.create` excludes Cowork and `SpawnSession`
+/// pre-flight-rejects its reserved `cowork` argument. Lifecycle/output helpers can recognize
+/// synthetic Cowork rows, but do not make a Cowork session creatable. A list or "New" button here
+/// would promise an unavailable capability. The "Soon" chip lives on the SIDEBAR row
 /// (`ShellSidebar.modeRow`, shipped T1, T1-review-verified) — this view is the landing half of that
 /// same honesty, not a second place the chip needs re-rendering.
 ///

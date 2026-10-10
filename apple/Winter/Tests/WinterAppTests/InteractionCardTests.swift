@@ -116,6 +116,20 @@ final class InteractionCardTests: XCTestCase {
                        "no answer before the deadline — resolved by timeout")
     }
 
+    /// ComputerV2's desktop switch (2026-10-10): a default-ALLOW card that ran out is allowed on the wire
+    /// (`{approved:true, by:"timeout"}`) — but by nobody. It must never freeze as the user's "Approved", nor wear
+    /// the green reserved for an affirmative grant; and an answer from the on-screen prompt says where it came from.
+    func testATimeoutAllowIsNotAUserApproval() {
+        let label = outcomeLabel(.approval(approved: true, by: "timeout"))
+        XCTAssertEqual(label.text, "Allowed — no answer in time")
+        XCTAssertFalse(label.isAffirmative)
+        XCTAssertEqual(interactionProvenance(.approval(approved: true, by: "timeout")), "no answer before the deadline — it went ahead")
+        XCTAssertEqual(interactionProvenance(.approval(approved: false, by: "desktop-prompt")), "answered on the on-screen prompt")
+        XCTAssertEqual(outcomeLabel(.approval(approved: false, by: "desktop-prompt")).text, "Denied")
+        XCTAssertEqual(cardTitle(.approval(toolName: "ComputerV2", summary: "x", defaultAllowAt: 1)), "Heads up — ComputerV2")
+        XCTAssertEqual(cardTitle(.approval(toolName: "bash", summary: "x")), "Approval needed — bash")
+    }
+
     func testResolvedPlanDistinguishesApproveAutoAcceptAndChanges() {
         XCTAssertEqual(outcomeLabel(.plan(approved: true, autoAccept: false, feedback: nil, by: "orb")).text, "Approved")
         XCTAssertEqual(outcomeLabel(.plan(approved: true, autoAccept: true, feedback: nil, by: "orb")).text,

@@ -764,8 +764,8 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   // working-directories T3: the phone mutates a remote-driven CODE session's working-directory set
   // — the WRITE half of `dirs`, the `session.list` row field this task also adds. Same bare-
   // sessionId shape as `session.setActivity` just above, so the same assertRemoteMayUseSession
-  // guard applies below (refusing dispatch/chat by MODE — cowork, the dirs-participation
-  // allowlist's other member, is Mac-local-only and never reaches this guard at all); the setter's
+  // guard applies below (refusing dispatch/chat by MODE — a synthetic cowork row exercises the
+  // reserved participation member and is refused by the remote gate before the setter); the setter's
   // own participation check is a SECOND, narrower gate on top of that.
   METHODS.sessionSetDirs,
   // WS-19 (W19-10, ruling R-10b-12): the phone manages the MAC's provider credentials — list, add,

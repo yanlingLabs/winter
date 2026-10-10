@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.6.0` (the contents of [`VERSION`](VERSION))
+Helper version: `1.7.0` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -189,7 +189,7 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 | --- | --- | --- |
 | `target.snapshot` | `{targetId, since?, full?, within?, settle?: {maxMs}, callId?}` | `{snapshotId, text, isDiff, changedRatio, settled, waitedMs}` |
 | `target.find` | `{targetId, query}` | `{elements: [{ref, role, name?, value?, states?}], page?, note?}` |
-| `target.screenshot` | `{targetId, region?, budget, settle?: {maxMs}, callId?}` | `{imageBase64, mime: "image/jpeg", width, height, shotId, settled, waitedMs, pointsWidth?, pointsHeight?, detail?}` |
+| `target.screenshot` | `{targetId, region?, budget, settle?: {maxMs}, callId?, live?, desktopVisit?, visitMaxMs?}` | `{imageBase64, mime: "image/jpeg", width, height, shotId, settled, waitedMs, pointsWidth?, pointsHeight?, detail?, inVisit?}` |
 | `screen.screenshot` | `{display?, displayId?, excludeBundleIds: [string], budget}` | `{imageBase64, mime: "image/jpeg", width, height, shotId, detail?}` |
 | `screen.appAt` | `{shotId, point}` | `{app, bundleId, windowId}` |
 
@@ -204,8 +204,21 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   in-page `#fragment` aside — or, with none, its title changes; absent when it shows no web page), `state N`
   (the snapshot's number), and, when the read stopped at its budget, `read cut short: at least N elements not
   read (the "more" markers show where)`.
-- `budget`: `{maxLongEdge, tile?, maxTiles?, quality}` (JPEG quality 0…1). `region` is in window points.
+- `budget`: `{maxLongEdge, tile?, maxTiles?, quality, maxBytes?}` (JPEG quality 0…1). With `maxBytes` (on
+  `target.screenshot` and `screen.screenshot`), an encoding over it is encoded again from the SAME captured image, at
+  the next lower quality of 0.8, 0.6, 0.45, 0.3 (only those below `quality`): the first that fits is returned, else the
+  last — a picture is captured once. `region` is in window points.
   `pointsWidth`/`pointsHeight` are the captured area in window points (a click's point is in image pixels).
+- `live: true` (the model needs what is on screen NOW): a window on screen is captured as ever; a minimized or
+  hidden window (not on another desktop) takes the ordinary path. A window ON ANOTHER DESKTOP is first taken from
+  the window server; when that picture is `live` (it changed since the previous one) it is returned, with no visit.
+  Otherwise, without `desktopVisit: true` the request fails `needs_desktop_visit` (`why: "live"`) and nothing is
+  moved; with it, the picture is taken in a DESKTOP VISIT (§4.10), the result carrying `inVisit: true` and a `detail`
+  saying it was captured on the window's own desktop. A live shot of a window on the session's OPEN visit's desktop
+  is an ordinary on-screen capture there (`inVisit: true`). When a visit closes, the off-screen picture of each window
+  that ran in it is taken again (the way its last off-screen or live shot was) as the baseline its next one is judged
+  by — a later live shot is served with no visit when the window server's copy changed since, and needs the desktop
+  again when it did not.
 - `screen.screenshot`: `display` is an index into the active displays (0 = main) or `"all"`; `displayId`
   (a `CGDirectDisplayID`) wins over it. `shotId`s are `screen.i<N>`; the last 16 are remembered. `detail` says
   where Winter's own windows are in the image (image pixels): a picture of an app inside one is Winter's live
@@ -219,9 +232,19 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 
 ### 4.5 Actions
 
-`target.act` — `{targetId, sessionId, callId, action, access, allowForeground, privatePath}` →
-`{rung, detail?, input?, inputUnknown?, focusNow?, focusLost?, pageNow?}`.
+`target.act` — `{targetId, sessionId, callId, action, access, allowForeground, privatePath, desktopVisit?, visitMaxMs?}` →
+`{rung, detail?, input?, inputUnknown?, focusNow?, focusLost?, pageNow?, inVisit?}`.
 
+- The helper NEVER takes the user to another desktop (Space) unless the request carries `desktopVisit: true` (the
+  user's say, from the daemon's desktop-switch prompt). An act that can't land from this desktop while its window is
+  on another one — rung 4 would bring it forward (even with `allowForeground`, even for an app held by
+  `target.foreground`), it `needs_foreground`, or the window can't be reached there (`window_elsewhere`) — fails
+  `needs_desktop_visit` (`why: "act"`; its message keeps what could not be done). With `desktopVisit: true` the act
+  is STILL tried in the background first (the daemon sends it on every later act of a run once the user allowed the
+  app); only when that attempt hits one of the above is it done again in a DESKTOP VISIT (§4.10), with
+  `allowForeground` implied there. `inVisit: true` when the act ran inside (or opened) a visit. `visitMaxMs` (with
+  `desktopVisit` only): how long that primitive may keep the visit — the guardian's visit mode covers at least it,
+  clamped to 10…330 s.
 - `callId` is required (it is what `cancel` names). `access` is `"full"` or `"click"`; with `"click"` only
   `click`, `scroll` and `action` are allowed, anything else is `not_allowed` (`reason: "click_only"`).
 - `rung` is how the action got through: `1` accessibility, `2` events posted to the app's pid, `3` the
@@ -288,14 +311,17 @@ Errors include `stale_ref` (`ref`), `needs_foreground`, `window_elsewhere`, `ref
 happened; never retried), `cancelled`, `unsupported`.
 
 `target.foreground` — `{targetId, moveDesktop?}` → `{front, detail?}`: the user agreed (the daemon's card, the script's
-`requestForeground(reason)`) that the app may come to the front and stay there until the session's script ends.
-The helper brings it forward and holds it: its acts then run as with `allowForeground: true`, the user-view guard
-and the Focus Guardian leave it alone, and at `script.active` `false` (or `session.ended`) the front goes back to
-the app that had it — if the held app still has it (a switch the user made meanwhile is left alone). `front:
-false` (with `detail`) when macOS did not bring it forward — or when its window is on another desktop and
-`moveDesktop` is not `true` (the daemon sets it only after a card the user answered): bringing it forward would
-take the user there. A hold whose script end is never heard is released after 330 s. A window on another desktop is bound with a `detail`
-that says what working it there costs and names this way out.
+`requestForeground(reason)`) that the app may come to the front and stay there until the session's script ends —
+on the user's OWN desktop only. The helper brings it forward and holds it: its acts then run as with
+`allowForeground: true`, the user-view guard and the Focus Guardian leave it alone, and at `script.active` `false`
+(or `session.ended`) the front goes back to the app that had it — if the held app still has it (a switch the user
+made meanwhile is left alone). `front: false` (with `detail`) when macOS did not bring it forward, or when its window
+is on another desktop: holding it in front there would keep the user there until the script ends, so it is never
+done — the `detail` says that an act needing the window on screen asks for a brief visit by itself (and brings the
+user back) and that `screenshot({ live: true, reason })` gets a live picture. `moveDesktop` is accepted and ignored
+since 1.7.0. A held app whose window later goes to another desktop is not followed there (`needs_desktop_visit`). A
+hold whose script end is never heard is released after 330 s. A window on another desktop is bound with a `detail`
+that says what working it there costs and names the ways out (a live screenshot, a visit asked for by an act).
 
 ### 4.6 Waits
 
@@ -349,6 +375,78 @@ clamped to 64…2560 (pixels). A connection that subscribes with `frames: true` 
 that session before) is sent each bound target's last frame at once. Closing the connection ends its
 subscriptions.
 
+### 4.10 Desktop visits
+
+User rulings 2026-10-10: when an act can't land, or a live picture can't be had, without taking the user to the
+window's desktop, the user is asked (§4.11 and the session's card), and — allowed, or unanswered in time — the helper
+takes them there ONCE for the whole stretch of work that needs it, and brings them back right after the last of it:
+never back and forth between their view and the window's, never held there to the script's end. Never otherwise.
+
+- **Open.** The first `target.act` / `target.screenshot` with `desktopVisit: true` whose background attempt needs the
+  window's desktop (or a live shot that needs it) opens the session's visit — one at a time, helper-wide. The user's
+  place is recorded: the active Space, the front app (when it can't be read, nothing moves: `refused`,
+  `front_unknown`) and that app's focused window. The WINDOW is brought forward: with the private path, to the front
+  by its id and made key (the window server switches to its Space — even when the app has other windows on the
+  user's desktop, and for a capture-only window), its element raised as well; without it, the app activated and the
+  element raised (a window with no element can't be reached: `unsupported`, nothing moved). The visit arrives when
+  the window is on screen AND the desktop changed (about 1.5 s at most), then waits for a painted frame (about 1 s at
+  most). A window that never comes on screen: the user is brought back and the request fails `unsupported` ("macOS
+  did not show <App>'s desktop — nothing was done there") with `data.visit` (the closed visit's report).
+- **While open.** Every primitive of that session on a window of the visited desktop runs there, with no further
+  switch — acts (`inVisit: true`), screenshots (a live one is an on-screen capture), and reads and waits too, which
+  keep it open. A primitive that does not need the visited desktop runs as ever and does not close it. One that needs
+  ANOTHER desktop — the user's own, or a third — first closes the visit (the user returned), then runs where the user
+  is: on the user's own desktop it simply runs (no `needs_desktop_visit`, no prompt); a third desktop opens a new
+  visit with `desktopVisit: true`, else fails `needs_desktop_visit`. `needs_desktop_visit` is never answered while the
+  session's visit is open: it is closed first. A failure inside the visit leaves it open; its error carries
+  `data.inVisit: true` (a Swift cancellation is answered as `cancelled` with it).
+- **Close**, at the first of: `visitCloseGraceMs` (1000 ms) after the last primitive that ran in it finished, with none
+  started since; the session's `script.active` `false`, a `cancel` of a request that ran in it, Esc, `session.ended`,
+  `visit.close`; a primitive needing another desktop (above); the user moving by themselves; the safety cap (60 s with
+  nothing running in it; while a primitive runs, at least its `visitMaxMs`).
+- **The return**: under `SLSDisableUpdate`, the user's recorded window brought to the front by id (private path)
+  and raised, their app activated and retried within the restore deadline, then VERIFIED (Space and front app as
+  recorded); not back → one more attempt; still not back → `returned: false`, a `detail`, and a fault log. The user
+  moved by themselves ONLY when the guardian saw an activation or a Space change during the visit that a hardware
+  ACTION after the visit began (and after the agent's own latest cause) backed — a click, a key, a scroll, a gesture
+  from no process and not the helper's own; never a pointer move alone, never the HID idle state (it counts the
+  helper's own events) — and they are now neither on the window's desktop nor back where they were: then the visit
+  closes at once and they are left there (`userMoved: true`), their new place adopted. A visit that never arrived
+  always brings them back.
+- **Reports.** Each closed visit — `{visitId, targetId, app, why, actions, ms, returned, userMoved?, detail?}`:
+  `visitId` helper-unique (`v<N>`), `why` what opened it (`act` | `live`), `actions` how many primitives ran in it,
+  `ms` how long the user was away — is kept for its session until `visit.close` returns it (each exactly once; at most
+  the last 32), and is announced at once with the `desktopVisited` notification (§7.1).
+
+While a visit is open the Focus Guardian treats it as the agent's own: the switch there and back are neither undone
+nor adopted (input is only noted), so a failed return can still be put right by it.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `visit.close` | `{sessionId}` | `{visits: [{visitId, targetId, app, why, actions, ms, returned, userMoved?, detail?}]}` |
+
+Daemon only. Closes the session's open visit, if any (the user returned — bounded by the restore deadlines), and
+returns every closed, not yet claimed visit report of the session, each exactly once; an empty list when there are
+none. It never fails for "nothing open".
+
+### 4.11 The desktop-switch prompt
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `prompt.desktopVisit` | `{promptId, callId, sessionId, app, bundleId, reason, expiresAt?, timeoutMs?}` | `{answer: "switch" \| "refuse" \| "expired"}` |
+
+Daemon only. `callId` must equal `promptId` (the daemon gives every prompt its own id, so `cancel {callId}` reaches
+only it). The helper shows a panel on the user's CURRENT desktop — a non-activating panel that is never key, never in
+a capture or a mirror frame (`sharingType = .none`), on every Space (a full-screen app's included), above ordinary
+windows at the top centre of the user's screen — naming the app and its bundle id, the reason (one sanitized line, at
+most 200 characters), "Winter will bring you back right after.", a countdown ("Switching in 42 s") and two buttons,
+"Don't switch" and "Switch now". The countdown runs to `expiresAt` (epoch ms — the session card's own deadline, so
+both doors end together), else for `timeoutMs` (clamped to 1 s…10 min); one of the two is required. It answers when
+the user clicks (`switch` / `refuse`) or `expired` when the countdown runs out (the panel says "Switching…") — the daemon is the authority on the outcome and treats `expired` as its
+own timeout. `cancel {callId}` (the session's card was answered first), or the connection closing, closes the panel at
+once and the request is answered `cancelled`. Several prompts (several sessions) stack, each answering its own id; a
+second request for an open `promptId` is `invalid_params`.
+
 ## 5. Errors
 
 Every error is a JSON-RPC error object whose `data.code` is the code to branch on; `message` is one
@@ -372,13 +470,14 @@ failure are `unsupported`; a Swift task cancellation is `cancelled`.
 | `target_lost` | `reason`: `app_quit` \| `window_closed` \| `helper_restart` \| `unknown` | the target is gone; `reason` is what the helper observed (below) |
 | `stale_ref` | `ref` | the element is gone — snapshot again |
 | `needs_foreground` | — | the app accepts this input only in the foreground |
+| `needs_desktop_visit` | `why`: `act` \| `live` | the act can't land, or a live picture can't be had, without taking the user to the window's desktop, and the request carried no `desktopVisit: true` — nothing was moved (§4.5, §4.4, §4.10) |
 | `window_elsewhere` | — | the window is on another Space / in full screen and could not be reached |
 | `no_window` | — | the app runs but has no open window |
 | `refused` | `reason` (§6) | a floor refused it |
 | `wait_timeout` | `seen`, `waitedMs` | `waitFor` ran out |
 | `cancelled` | `typed?`, `total?` | `cancel`, or the connection closed; a type or paste stopped while typing keys says how many of its characters had gone out (`typed` of `total`): the field is partly filled |
 | `invalid_params` | — | bad params, an unknown shot, an oversize line or result |
-| `unsupported` | `axError?` | unknown method, an element that does not support it, an internal failure |
+| `unsupported` | `axError?`, `visit?` | unknown method, an element that does not support it, an internal failure (or a desktop visit whose window never came on screen: `visit` is its report) |
 | `busy` | `retryable` (default `true`), `uncertain?`, `axError?` | retry, unless `uncertain: true` (then `retryable: false`: it may have happened) |
 
 `target_lost` reasons — what the helper observed, so a client never calls a closed window a quit app:
@@ -395,7 +494,11 @@ daemon words each one ("Notes quit — open it again with apps.open()", "Notes's
 useWindow to pick another", …) and reads an absent `reason` (an older helper) as `unknown`.
 
 `refused` reasons: `secure_field`, `auth_dialog`, `privacy_pane`, `winter_itself`, `save_path`,
-`focus_unknown`, `focus_not_placed`, `focus_not_editable`, `wrong_field_shape`, `focus_moved`, `applescript`, `automation_denied`.
+`focus_unknown`, `focus_not_placed`, `focus_not_editable`, `wrong_field_shape`, `focus_moved`, `front_unknown`, `applescript`,
+`automation_denied`. `front_unknown`: a desktop visit was not made because the app the user is in can't be read — they
+could not have been brought back; nothing was moved.
+
+Any error of a primitive that ran inside a desktop visit carries `data.inVisit: true`.
 `focus_moved` stops a `type` whose focus left the field partway (`data.typed` / `data.total` say how far it got).
 
 ## 6. Floors
@@ -416,6 +519,7 @@ Notifications are `{"jsonrpc":"2.0","method":…,"params":…}` lines with no `i
 | `escPressed` | `{sessionIds: [string]}` | the user pressed Esc while scripts ran; the ids of every session marked active by `script.active` (sorted) |
 | `targetLost` | `{targetId, reason: "app_quit" \| "window_closed" \| "helper_restart" \| "unknown"}` | a bound target's app quit or its window closed (§5's reasons; the helper itself sends `app_quit` and `window_closed` here) |
 | `permissionsChanged` | `{permissions: {accessibility, screenRecording}}` | a grant changed (each change once) |
+| `desktopVisited` | `{visitId, sessionId, callId?, targetId, app, why, actions, ms, returned, userMoved?}` | a desktop visit CLOSED (§4.10), whatever its outcome — the work done, a failed primitive, a cancelled request, a window that never came on screen; `callId` is the request that opened it |
 
 They go to every ready `daemon` connection, never to Winter.app.
 
@@ -517,6 +621,10 @@ Both clients send their protocol number in `hello` and compare the helper's answ
 result, or `data.expected` of a `protocol_mismatch` refusal. A helper protocol lower than the client's means
 the helper is too old; higher, too new. Either way the fix is the same — Winter and its helper ship together.
 
+- **The daemon** also requires helper **1.7.0** or later (`HELPER_MIN_VERSION` in
+  `packages/core/src/computer-use/protocol.ts`, compared with `hello`'s `helperVersion`): an older helper — one that
+  would take the user to another desktop without asking — is closed and relaunched once (the app was updated under
+  a running helper), then refused typed (`helper_unavailable`, "… update Winter").
 - **The daemon** refuses typed: `HelperProtocolMismatchError`, a `helper_unavailable` with
   `reason: "protocol_mismatch"`, not retryable, its message "Winter Computer Use is too old for this Winter …
   — update Winter" (or "too new"). The mismatch is also reported in Settings → Computer Use through
@@ -551,4 +659,5 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.5.0 | The `hover` action (§4.5); every window-targeted click now arrives by a short path of window-targeted moves (hover), never moving the user's cursor — additive (an older helper refuses `hover` as an unknown kind). |
 | 1 | 1.5.1 | No wire change: a press on web content that accessibility shows no effect of is followed by a click only when that is safe (pixels unchanged on screen, a readable state for a toggle, never off screen unless the app is learned, never a name that may act unseen); otherwise its `detail` says so. |
 | 1 | 1.6.0 | Additive: `target.foreground` (§4.5; the script's `requestForeground`); `refused` gains `focus_moved` (a `type` stopped when the focus left the field, `data.typed`/`data.total`); `screen.screenshot` results carry `detail` (Winter's own windows in the image); `target.find` results carry `page` and `note`; a snapshot header ends with `page N · state N` (and a cut-short read); `type` details begin `received: …` or `as a paste (…)`; a gone `within` ref says "the page changed" only when it did; off-screen window shots begin with a freshness label; `pageNow` ignores an in-page `#fragment` jump and comes without `focusNow`; a chord's menu item is pressed only when the bound window is main, and only in the focus blip while another window is key; `target.foreground` brings a window on another desktop forward only with `moveDesktop`; `menu` falls back to the page's own menu bar. The live-test-only `test.capture` route's path guard compares realpaths of the parent (no wire change). |
+| 1 | 1.7.0 | Additive — desktop visits (§4.10): `target.act` takes `desktopVisit` and `visitMaxMs`, `target.screenshot` takes `live`, `desktopVisit` and `visitMaxMs`, both results carry `inVisit`; ONE open visit per stretch of work (closed a grace after its last primitive, at the script's end, a cancel, Esc, the session's end, another desktop needed, the user's own move, or the cap), the user brought back by window id; the daemon-only `visit.close` (each closed visit's report once) and the `desktopVisited` notification; the error `needs_desktop_visit` (`why: act \| live`) — an act that would need the user moved to another desktop (rung 4 off this desktop even with `allowForeground` or a held app; `needs_foreground` / `window_elsewhere` off this desktop) now fails with it instead of moving them, and never while the session's visit is open; `refused` gains `front_unknown`; errors of primitives in a visit carry `data.inVisit`; `budget.maxBytes` (re-encode the same capture down a quality ladder); the daemon-only `prompt.desktopVisit` panel (§4.11, never captured; its countdown runs to the card's `expiresAt`); `target.foreground` never holds a window on another desktop and ignores `moveDesktop`; the off-desktop bind detail names the live screenshot and the visit instead of `requestForeground`. The daemon requires helper ≥ 1.7.0 (§10.1). |
 | 1 | 1.9.0 | No wire change: the bundle carries `winter-browser-host` (`Contents/MacOS`), the native-messaging host behind Winter for Chrome — its own protocol is [`WinterBrowserHost/PROTOCOL.md`](WinterBrowserHost/PROTOCOL.md). |

@@ -129,6 +129,14 @@ final class CUTarget: @unchecked Sendable {
         return before
     }
 
+    /// The region and budget of the last off-screen or live shot of the window: a desktop visit's return takes the
+    /// window's next baseline picture the same way, so the digests compare.
+    private var _lastStill: (region: CGRect?, budget: CUImageBudget)?
+    var lastStill: (region: CGRect?, budget: CUImageBudget)? {
+        get { lock.lock(); defer { lock.unlock() }; return _lastStill }
+        set { lock.lock(); _lastStill = newValue; lock.unlock() }
+    }
+
     /// Actions an app listed for an element but refused (`AXOpen` on Finder's icons), by role: hidden from
     /// state when `action()` has no equivalent to fall back on. Pid-queue only.
     private(set) var refusedActions: [String: Set<String>] = [:]

@@ -80,6 +80,9 @@ protocol CUSystemBackend: AnyObject {
     func activeSpace() -> UInt64?
     /// Activates an app. Only the consented foreground rung and the restores of the user's own app call it.
     func activate(pid: pid_t) -> Bool
+    /// Brings ONE window to the front by id (private; the window server takes the user to its Space) and makes it
+    /// key. Only a desktop visit — there and back — calls it, and only with the private path on.
+    func frontWindow(pid: pid_t, windowID: UInt32) -> Bool
     /// `pid` is a content process serving part of `appPid`'s UI — Safari's WebContent, an XPC service — not a
     /// regular app of its own (nor this helper): key events for what it shows go to it.
     func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool
@@ -119,6 +122,9 @@ final class CULiveSystem: CUSystemBackend {
     func activate(pid: pid_t) -> Bool {
         guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
         return DispatchQueue.main.sync { app.activate() }
+    }
+    func frontWindow(pid: pid_t, windowID: UInt32) -> Bool {
+        CUSkyLight.system.frontWindow(pid: pid, windowID: windowID)
     }
     func stageManagerEnabled() -> Bool {
         UserDefaults(suiteName: "com.apple.WindowManager")?.bool(forKey: "GloballyEnabled") ?? false

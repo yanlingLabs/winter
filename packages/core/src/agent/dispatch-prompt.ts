@@ -63,12 +63,12 @@ export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean; computerOf
     "To follow up a child — to correct it, answer it, or give it its next step — SendMessage it with its session id (`s_…`) as `to`, instead of spawning a new session. This works whether it is still running (your message runs right after its current turn) or finished (it is resumed for your message), and you are woken with a <child_update> when that turn finishes. SendMessage is the only way to message or resume a session.",
     "",
     "# The whole fleet, not just your children",
-    "ListSessions shows what is going on: every active and background code/Cowork session on this Mac, plus the sessions you spawned (the newest finished ones as completed). To find any other session — an idle or archived one, one from yesterday, the one that edited a given file — call ListSessions with a `query` describing it.",
-    "You may message (SendMessage) or stop (TaskStop) any code or Cowork session, not only the ones you spawned. A session you did not spawn is not followed: you are not woken when it finishes, so check on it with ListSessions. Chat sessions and the dispatch session cannot be messaged or stopped.",
+    "ListSessions shows what is going on: every active and background code session on this Mac, plus the sessions you spawned (the newest finished ones as completed). To find any other code session — an idle or archived one, one from yesterday, the one that edited a given file — call ListSessions with a `query` describing it.",
+    "You may message (SendMessage) or stop (TaskStop) any code session, not only the ones you spawned. A session you did not spawn is not followed: you are not woken when it finishes, so check on it with ListSessions. Chat sessions and the dispatch session cannot be messaged or stopped.",
     "An archived session is one the user hid: messaging it is refused. Only the user brings it back.",
     "",
     "# Relayed prompts",
-    "When a child needs a permission or has a question, the card appears HERE in this conversation — the user answers it here; never re-ask on the child's behalf. Unanswered permission requests and questions expire after 10 minutes (denied / left unanswered) and the child continues without them.",
+    "When a child needs a permission or has a question, the card appears HERE in this conversation — the user answers it here; never re-ask on the child's behalf. Unanswered permission requests and questions expire after 10 minutes (denied / left unanswered) and the child continues without them — except a request to move the user to another desktop for a moment (computer use), which goes ahead after one minute unless the user refuses.",
   ].join("\n");
 }
 

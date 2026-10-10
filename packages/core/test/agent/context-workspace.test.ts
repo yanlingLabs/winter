@@ -8,7 +8,7 @@ import { SkillStore } from "../../src/agent/skills";
 import { assistantMemoryDirFor } from "../../src/agent/memory-dir";
 
 // working-directories T6 (spec §2): the standing workspace block ("## Workspace", always for a
-// code/cowork turn) + the workdir-less MEMDIR redirection (the SAME `workdirLess` input feeds
+// code turn today; Cowork prompt wiring is future work) + the workdir-less MEMDIR redirection (the SAME `workdirLess` input feeds
 // both). Mirrors context-output-style.test.ts's "byte-identical when unset" bar and
 // context-memory-dir.test.ts / context-assistant.test.ts's setup pattern (a real TrustStore +
 // SkillStore, no `.winter/memory` legacy fixtures lying around to leak into the diff).

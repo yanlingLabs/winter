@@ -60,6 +60,21 @@ export function focusViolations(samples: readonly MonitorSample[], from: number,
   return out;
 }
 
+/** The stretches in [from, to] during which the user was away from their app or Space (consecutive violating samples
+ *  are one excursion) — the desktop switch's "ONE visit, not back and forth" is counted on these. */
+export function excursions(samples: readonly MonitorSample[], from: number, to: number, base: FocusBaseline): Array<{ start: number; end: number }> {
+  const bad = new Set(focusViolations(samples, from, to, base).map((v) => v.t));
+  const out: Array<{ start: number; end: number }> = [];
+  let open: { start: number; end: number } | undefined;
+  for (const s of samples) {
+    if (s.t < from || s.t > to) continue;
+    if (bad.has(s.t)) {
+      if (open === undefined) { open = { start: s.t, end: s.t }; out.push(open); } else open.end = s.t;
+    } else open = undefined;
+  }
+  return out;
+}
+
 /**
  * When the USER's input happened in [from, to]: the hardware-only tap's count grew between two samples and its
  * last event falls in the window (an increase whose events all came before `from` is not this window's). Only

@@ -45,11 +45,13 @@ func listOutputFiles(home: String, sessionId: String, fileManager: FileManager =
     return files.sorted { $0.path < $1.path }
 }
 
-/// Whether the outputs box participates for a session's mode — code/cowork only, the SAME domain
-/// `session.setActivity` enforces daemon-side (`participatesInActivity`,
+/// Whether the outputs box participates for a session's mode — Code plus reserved Cowork handling,
+/// the SAME domain `session.setActivity` enforces daemon-side (`participatesInActivity`,
 /// packages/core/src/sessions/activity.ts: `ACTIVITY_MODES = new Set(["code", "cowork"])`,
 /// `mode ?? "code"` for an absent value): chat/dispatch sessions carry no fs tools and therefore
-/// never populate `$OUTDIR`. `ShellSessionHost` gates its `outputFiles` refresh on this directly
+/// never populate `$OUTDIR`. The Cowork branch is reserved groundwork for synthetic/future rows;
+/// it does not enable Cowork creation or execution. `ShellSessionHost` gates its `outputFiles`
+/// refresh on this directly
 /// (never populating the field at all for an ineligible session), so this is the ONE place the rule
 /// lives — the view never has to re-derive it.
 func outputsBoxEligible(mode: String?) -> Bool {
@@ -59,8 +61,9 @@ func outputsBoxEligible(mode: String?) -> Bool {
 
 // MARK: - The box itself
 
-/// code/cowork session views' outputs list (spec §3). COLLAPSED/ABSENT when empty — never a hollow
-/// box (the pinned rule): the caller gates on `!files.isEmpty` before mounting this at all, the same
+/// Code session views' outputs list, with reserved Cowork eligibility (spec §3). COLLAPSED/ABSENT
+/// when empty — never a hollow box (the pinned rule): the caller gates on `!files.isEmpty` before
+/// mounting this at all, the same
 /// "caller already gates" convention `WindowContentView`'s `pinnedTasksSection`/`subagentSection`
 /// callers use for their own empty-hiding sections.
 struct OutputsBox: View {

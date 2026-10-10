@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { processSatisfiesRequirement } from "../../src/computer-use/helper-verify";
-import { HELPER_PROTOCOL, HelperProtocolMismatchError, HelperRpcError, HelperUnavailableError, helperAppNameFor, helperAppPathFor, helperBundleIdFor, helperProtocolMismatchMessage, helperRequirementFor, helperSocketPath } from "../../src/computer-use/protocol";
+import { HELPER_MIN_VERSION, HELPER_PROTOCOL, HelperOutdatedError, helperVersionAtLeast, HelperProtocolMismatchError, HelperRpcError, HelperUnavailableError, helperAppNameFor, helperAppPathFor, helperBundleIdFor, helperProtocolMismatchMessage, helperRequirementFor, helperSocketPath } from "../../src/computer-use/protocol";
 import type { HelperNotification } from "../../src/computer-use/protocol";
 import { FakeHelper, FakeHelperError } from "./fake-helper";
 
@@ -27,6 +27,59 @@ function client(fake: FakeHelper, extra: Partial<ConstructorParameters<typeof He
   return { c, notes, disconnects: () => disconnects };
 }
 
+describe("the helper client: the minimum helper version (the desktop-switch ruling)", () => {
+  test("helperVersionAtLeast: by the first three numbers; unreadable is never enough", () => {
+    expect(HELPER_MIN_VERSION).toBe("1.7.0");
+    expect(helperVersionAtLeast("1.7.0")).toBe(true);
+    expect(helperVersionAtLeast("1.7.1")).toBe(true);
+    expect(helperVersionAtLeast("1.10.0")).toBe(true);
+    expect(helperVersionAtLeast("2.0")).toBe(true);
+    expect(helperVersionAtLeast("1.7.0-test")).toBe(true);
+    expect(helperVersionAtLeast("1.6.9")).toBe(false);
+    expect(helperVersionAtLeast("1.6.0")).toBe(false);
+    expect(helperVersionAtLeast("garbage")).toBe(false);
+    expect(helperVersionAtLeast(undefined)).toBe(false);
+  });
+
+  test("an OUTDATED helper is ended and its current version launched — once — then used", async () => {
+    const fake = new FakeHelper();
+    fake.helperVersion = "1.6.0";
+    fake.onTerminate = () => { fake.helperVersion = "1.7.0"; }; // the update's helper starts next
+    const { c } = client(fake, { terminate: fake.terminate });
+    await c.request("apps.list", {});
+    expect(fake.terminated).toEqual([fake.pid]);
+    expect(fake.launched).toHaveLength(1);
+    expect(c.version).toBe("1.7.0");
+  });
+
+  test("still outdated after the relaunch: a typed, non-retryable refusal that says to update; never a second kill", async () => {
+    const fake = new FakeHelper();
+    fake.helperVersion = "1.6.0";
+    const { c } = client(fake, { terminate: fake.terminate });
+    let err: unknown;
+    try { await c.request("apps.list", {}); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(HelperOutdatedError);
+    expect(err).toBeInstanceOf(HelperUnavailableError);
+    expect((err as HelperOutdatedError).retryable).toBe(false);
+    expect((err as Error).message).toContain("1.6.0 is older than this Winter needs (1.7.0 or later) — update Winter");
+    expect(fake.terminated).toHaveLength(1);
+    expect(c.connected).toBe(false);
+    // Settings → Computer Use shows the same "update Winter" state.
+    const st = await c.status();
+    expect(st.protocolMismatch?.message).toContain("update Winter");
+    expect(st.version).toBe("1.6.0");
+  });
+
+  test("status() alone never ends an outdated helper (it launches and kills nothing)", async () => {
+    const fake = new FakeHelper();
+    fake.helperVersion = "1.5.1";
+    const { c } = client(fake, { terminate: fake.terminate });
+    const st = await c.status();
+    expect(fake.terminated).toEqual([]);
+    expect(st.protocolMismatch?.message).toContain("1.5.1 is older");
+  });
+});
+
 describe("the helper client", () => {
   test("identities: per-profile bundle id, a stated DR with Winter's team, the socket under run/", () => {
     expect(helperBundleIdFor("dist")).toBe("com.winter.computeruse");
@@ -43,7 +96,7 @@ describe("the helper client", () => {
     expect(fake.requests[0]).toMatchObject({ method: "hello", params: { protocol: 1, client: "daemon" } });
     expect(typeof fake.requests[0]!.params.home).toBe("string");
     expect(c.connected).toBe(true);
-    expect(c.version).toBe("1.0-test");
+    expect(c.version).toBe("1.7.0");
   });
 
   test("the helper app's path: dist inside Winter.app's Helpers, dev beside the dev daemon, an env override", () => {
@@ -130,7 +183,7 @@ describe("the helper client", () => {
       const err = (await client(fake).c.ensure().catch((e: unknown) => e)) as HelperProtocolMismatchError;
       expect(err).toBeInstanceOf(HelperProtocolMismatchError);
       expect(err.mismatch.helperProtocol).toBe(2);
-      expect(err.mismatch.helperVersion).toBe("1.0-test");
+      expect(err.mismatch.helperVersion).toBe("1.7.0");
       expect(helperProtocolMismatchMessage(undefined)).toBe("Winter Computer Use speaks a different helper protocol than this Winter (1) — update Winter");
       const unreadable = new FakeHelper();
       unreadable.handlers.hello = () => { throw new FakeHelperError("protocol_mismatch", "the first request must be hello"); };
@@ -217,7 +270,7 @@ describe("the helper client", () => {
     expect(fake.launched).toEqual([]);
     fake.running = true;
     const st2 = await c.status();
-    expect(st2).toEqual({ installed: true, running: true, version: "1.0-test", permissions: { accessibility: true, screenRecording: false } });
+    expect(st2).toEqual({ installed: true, running: true, version: "1.7.0", permissions: { accessibility: true, screenRecording: false } });
   });
 });
 

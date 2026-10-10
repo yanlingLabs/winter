@@ -10,6 +10,28 @@ import type { WinterProfile } from "../profile";
 /** The helper protocol this daemon speaks — `apple/ComputerUse/PROTOCOL.md`'s "Protocol version", the helper's
  *  `RPCWire.protocolVersion` and WinterKit's `ComputerUseHelperProtocol.version` (a repo test keeps them equal). */
 export const HELPER_PROTOCOL = 1;
+/**
+ * The oldest helper this daemon works with (apple/ComputerUse/PROTOCOL.md, "Compatibility"): 1.7.0 is the first that
+ * never moves the user to another desktop without the desktop-switch prompt (`needs_desktop_visit`). An older helper
+ * — one still running after an update, or a dev helper not rebuilt — is closed and relaunched once, then refused
+ * typed (`HelperOutdatedError`): it would move desktops without asking.
+ */
+export const HELPER_MIN_VERSION = "1.7.0";
+
+/** `version` ≥ `minimum`, by the first three numeric parts (a pre-release tag after them is ignored); an unreadable
+ *  version is never enough. */
+export function helperVersionAtLeast(version: unknown, minimum: string = HELPER_MIN_VERSION): boolean {
+  const parts = (v: string): number[] | undefined => {
+    const m = /^(\d+)\.(\d+)(?:\.(\d+))?/.exec(v.trim());
+    return m === null ? undefined : [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)];
+  };
+  if (typeof version !== "string") return false;
+  const have = parts(version);
+  const need = parts(minimum);
+  if (have === undefined || need === undefined) return false;
+  for (let i = 0; i < 3; i++) if (have[i]! !== need[i]!) return have[i]! > need[i]!;
+  return true;
+}
 
 /** The helper's bundle id per profile: dist `com.winter.computeruse`, dev `com.winter.computeruse.dev`. */
 export function helperBundleIdFor(profile: WinterProfile): string {
@@ -60,7 +82,10 @@ export type HelperErrorCode =
   | "protocol_mismatch" | "home_mismatch" | "permission_missing" | "target_lost" | "stale_ref" | "needs_foreground"
   | "not_allowed" | "refused" | "wait_timeout" | "cancelled" | "invalid_params" | "unsupported" | "busy"
   // The app runs, but its window is on another Space / in full screen, or it has no open window (→ `NoWindow`).
-  | "window_elsewhere" | "no_window";
+  | "window_elsewhere" | "no_window"
+  // helper 1.7.0 (the desktop-switch ruling, 2026-10-10): the act, or a LIVE picture, needs the user moved to the
+  // window's desktop for a moment — the helper never does that without `desktopVisit: true` (`data.why`).
+  | "needs_desktop_visit";
 
 /** A helper's JSON-RPC error, by its `data.code`. */
 export class HelperRpcError extends Error {
@@ -116,6 +141,16 @@ export class HelperProtocolMismatchError extends HelperUnavailableError {
   }
 }
 
+/** The running helper is older than `HELPER_MIN_VERSION` and a relaunch did not bring a newer one: unusable until
+ *  Winter (and so its helper) is updated — never retried. */
+export class HelperOutdatedError extends HelperUnavailableError {
+  readonly reason = "outdated" as const;
+  constructor(readonly helperVersion: string | undefined, readonly minimum: string = HELPER_MIN_VERSION) {
+    super(`Winter Computer Use ${helperVersion ?? "(unknown version)"} is older than this Winter needs (${minimum} or later) — update Winter, or quit Winter Computer Use so its current version starts`, false);
+    this.name = "HelperOutdatedError";
+  }
+}
+
 export type Rect = [x: number, y: number, w: number, h: number];
 
 export interface HelloResult { protocol: number; helperVersion: string; pid: number }
@@ -138,14 +173,29 @@ export interface FindResult {
   /** The page changed since the last state(), or the read was cut short (helper 1.6.0+). */
   note?: string;
 }
-export interface ScreenshotBudget { maxLongEdge: number; tile?: number; maxTiles?: number; quality: number }
+/** `maxBytes` (helper 1.7.0): an encoded JPEG over it is re-encoded from the SAME capture at the next lower quality
+ *  (0.8 → 0.6 → 0.45 → 0.3), so a live shot's one desktop visit is never repeated for its size. */
+export interface ScreenshotBudget { maxLongEdge: number; tile?: number; maxTiles?: number; quality: number; maxBytes?: number }
 export interface ScreenshotResult {
   imageBase64: string; mime: "image/jpeg"; width: number; height: number; shotId: string; settled?: boolean; waitedMs?: number;
   /** The captured area's size in window POINTS (clicks take image pixels, which differ on a Retina display). */
   pointsWidth?: number; pointsHeight?: number;
   /** `target.screenshot`: what the image is when it is not a live capture, e.g. captured from another desktop. */
   detail?: string;
+  /** helper 1.7.0: the shot was taken inside an OPEN desktop visit (5d) — it opened it, or ran in it. */
+  inVisit?: boolean;
 }
+/**
+ * helper 1.7.0: one CLOSED desktop visit (the desktop-switch ruling, 5d: one OPEN visit per stretch of work) as
+ * `visit.close` hands it over, once. `actions`: how many primitives ran in it; `ms`: the total time the user was away;
+ * `returned`: their Space and front app were verified back; `userMoved`: they took over during it (hardware input),
+ * so the helper left them where they went; `detail`: the helper's own words when there is more to say.
+ */
+export interface DesktopVisitClosed {
+  visitId: string; targetId: string; app: string; why?: "act" | "live"; actions: number; ms: number; returned: boolean; userMoved?: boolean; detail?: string;
+}
+/** `prompt.desktopVisit` (helper 1.7.0): the helper's on-screen prompt answered — or ran out (`expired`). */
+export interface DesktopVisitPromptResult { answer: "switch" | "refuse" | "expired" }
 /** `input` (type, paste, key, setValue; helper 1.2.0): the element that received the input, e.g. `[14] text area "Comment"`;
  *  `inputUnknown`: the app reported no focused element. */
 export interface ActResult {
@@ -154,6 +204,8 @@ export interface ActResult {
   focusNow?: string; focusLost?: boolean;
   /** helper 1.4.0: the act changed the bound window's page (a link navigated, a tab switched) — its title now. */
   pageNow?: string;
+  /** helper 1.7.0: the act ran inside an OPEN desktop visit (it opened it, or ran in it). */
+  inVisit?: boolean;
 }
 /** `target.applescript`: the script's result as AppleScript displays it (null: none). */
 export interface AppleScriptResult { result: string | null; detail?: string }
@@ -187,7 +239,11 @@ export type TargetLostReason = "app_quit" | "window_closed" | "helper_restart" |
 export type HelperNotification =
   | { method: "escPressed"; params: { sessionIds: string[] } }
   | { method: "targetLost"; params: { targetId: string; reason: TargetLostReason } }
-  | { method: "permissionsChanged"; params: { permissions: HelperPermissions } };
+  | { method: "permissionsChanged"; params: { permissions: HelperPermissions } }
+  /** helper 1.7.0: at EVERY desktop visit's close (however it ended — a cancelled request's included, whose answer
+   *  the dispatcher sends before the visit's report exists): how many primitives ran in it, how long the user was
+   *  away and whether they are back. */
+  | { method: "desktopVisited"; params: { visitId?: string; sessionId: string; callId?: string; targetId?: string; app?: string; why?: "act" | "live"; actions?: number; ms: number; returned: boolean; userMoved?: boolean } };
 
 /** One request line is at most 1 MiB; one response line at most 16 MiB (images). */
 export const HELPER_MAX_REQUEST_LINE = 1024 * 1024;

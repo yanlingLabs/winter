@@ -10,7 +10,7 @@ import type { ApprovalBroker } from "../agent/approvals";
 import type { WinterProfile } from "../profile";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { runningTurnOrigin } from "../sessions/turn-origins";
+import { isHumanTurnOrigin, runningTurnOrigin } from "../sessions/turn-origins";
 import {
   computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseLegacyComputerFrom, computerUseMirrorFrom,
   computerUsePrivateEventPathFrom, loadSettings, saveSettings, setComputerUseApp, setComputerUseFlags, type ComputerUseAccess, type Settings,
@@ -18,8 +18,8 @@ import {
 import type { BackendRegistry } from "./browser/transport";
 import { DiffBases } from "./diff-base";
 import { HelperClient, type HelperLauncher, type HelperTransport, type HelperVerifier } from "./helper-client";
-import { ComputerPolicy, DEFAULT_APP_EXCEPTIONS, defaultAppException } from "./policy";
-import { HelperRpcError, HelperUnavailableError, type HelperPermissions } from "./protocol";
+import { ComputerPolicy, DEFAULT_APP_EXCEPTIONS, defaultAppException, type DesktopVisitPanel } from "./policy";
+import { HelperRpcError, HelperUnavailableError, type DesktopVisitPromptResult, type HelperPermissions } from "./protocol";
 import { RecentApps } from "./recent-apps";
 import { ComputerV2Service } from "./service";
 import { AutomationTelemetry } from "./telemetry";
@@ -105,6 +105,38 @@ export interface ComputerUseRuntime {
 
 const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 
+/**
+ * THE DESKTOP SWITCH, refused (user ruling 2026-10-10, 5a): the session whose desktop-switch refusals an event lifts —
+ * a HUMAN-origin `user_message` (never `messaging`, `dispatch` or `dispatch-wake`, nor the projector's own echo); the
+ * policy then lifts that session's refusals and those of the dispatch children it coordinates.
+ */
+export function desktopRefusalLiftFor(event: SessionEvent): string | undefined {
+  if (event.type !== "user_message") return undefined;
+  const clientName = (event as { clientName?: string }).clientName;
+  return isHumanTurnOrigin(clientName ?? "session") ? event.sessionId : undefined;
+}
+
+/**
+ * The desktop-switch ruling (2026-10-10): the prompt's ON-SCREEN half — the helper's panel on the user's current
+ * desktop (`prompt.desktopVisit`), with its own call id so closing it never cancels the script's other helper work.
+ * Closing it (the session's card was answered first) is the helper's `cancel`. Any failure — an older helper, the
+ * helper gone — reads as no answer: the card alone asks.
+ */
+export function helperDesktopPanel(helper: Pick<HelperClient, "request">, log: (line: string) => void): DesktopVisitPanel {
+  return {
+    show(p) {
+      const abort = new AbortController();
+      const answer = helper.request<DesktopVisitPromptResult>("prompt.desktopVisit", { ...p, callId: p.promptId }, {
+        signal: abort.signal, callId: p.promptId, timeoutMs: p.timeoutMs + 15_000,
+      }).then((r) => (r?.answer === "switch" || r?.answer === "refuse" || r?.answer === "expired" ? r.answer : undefined), (err) => {
+        if (!(err instanceof HelperRpcError && err.code === "cancelled")) log(`computer-use: the on-screen desktop-switch prompt was not shown (${err instanceof Error ? err.message : "error"})`);
+        return undefined;
+      });
+      return { answer, close: () => abort.abort() };
+    },
+  };
+}
+
 export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): ComputerUseRuntime {
   const log = (line: string): void => deps.log?.(line);
   let written: { basis: Settings | null | undefined; next: Settings } | undefined;
@@ -161,6 +193,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       try { if (deps.store.meta(sessionId).mode === "dispatch") return false; } catch { return false; }
       return deps.hub.attachedHarnesses(sessionId).some((h) => h.role !== "remote" && h.clientName !== "iphone-gateway");
     },
+    desktopPanel: helperDesktopPanel(helper, log),
     log,
   });
 
@@ -253,6 +286,9 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     settings,
     observe(event) {
       diffBases.observe(event);
+      // 5a: the USER's next message lifts the session's desktop-switch refusals (and its dispatch children's).
+      const lift = desktopRefusalLiftFor(event);
+      if (lift !== undefined) policy.liftDesktopRefusals(lift);
       if (event.type === "turn_completed") {
         const threadId = (event as { threadId?: string }).threadId;
         if (threadId === undefined || threadId === "main") svc.turnEnded(event.sessionId);

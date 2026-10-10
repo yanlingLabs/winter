@@ -53,8 +53,9 @@ export class ShellCardQueue {
     this.pump();
   }
 
-  /** The card was resolved (here or elsewhere): a waiting one is dropped; the one on screen gives way. */
-  resolved(callId: string): void {
+  /** The card was resolved (here or elsewhere): a waiting one is dropped; the one on screen gives way — saying
+   *  `how` when it was not a person elsewhere (a default-allow card that ran out: "no answer in time — allowed"). */
+  resolved(callId: string, how?: string): void {
     const at = this.waiting.findIndex((c) => c.callId === callId);
     if (at !== -1) {
       this.waiting.splice(at, 1);
@@ -63,7 +64,7 @@ export class ShellCardQueue {
     const active = this.active;
     if (active === undefined || active.callId !== callId) return;
     if (active.kind === "approval" && !this.answering) {
-      this.deps.emit(`\n${this.dimmed("(answered elsewhere)")}\n`);
+      this.deps.emit(`\n${this.dimmed(`(${how ?? "answered elsewhere"})`)}\n`);
       this.finish(active);
       return;
     }
@@ -128,4 +129,19 @@ export class ShellCardQueue {
   private dimmed(text: string): string {
     return this.deps.dim !== undefined ? this.deps.dim(text) : text;
   }
+}
+
+/**
+ * The plain shell's approval prompt line. A card that DEFAULT-ALLOWS at its deadline (`onTimeout: "allow"` —
+ * ComputerV2's desktop switch, 2026-10-10) says what silence does and what the keys mean; "y" still allows and
+ * anything else refuses (only silence allows). Every other card keeps `approve <tool>? <summary> [y/N] `.
+ */
+export function approvalPromptLine(e: { toolName: string; summary: string; onTimeout?: string }, dim: (s: string) => string): string {
+  if (e.onTimeout === "allow") return `${e.toolName}: ${dim(e.summary)} [y = switch now, n = don't switch; no answer within a minute switches] `;
+  return `approve ${e.toolName}? ${dim(e.summary)} [y/N] `;
+}
+
+/** How a card on screen ended when no person answered it here: a default-allow card that ran out. */
+export function approvalResolvedHow(e: { approved?: boolean; by?: string }): string | undefined {
+  return e.approved === true && e.by === "timeout" ? "no answer in time — allowed" : undefined;
 }

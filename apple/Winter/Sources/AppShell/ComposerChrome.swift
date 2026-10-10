@@ -468,10 +468,10 @@ struct ComposerPolicyChip: View {
 
 /// **Cowork's composer is a named slot, not a built one.**
 ///
-/// Cowork has no daemon mode at all: `SessionMode.isAvailable == false`
-/// (`ShellNavigation.swift:47-52`), `session_spawn` pre-flight-rejects it, and a live session can
-/// therefore never be cowork — this chrome is reachable only from the new-chat page, whose segment
-/// can be moved to Cowork so the design is visible while `newChatSendBlockedReason` refuses to send.
+/// `SessionMode.isAvailable == false`, `session.create` excludes Cowork, and `SpawnSession`
+/// pre-flight-rejects its reserved argument. Supported create paths cannot produce a live Cowork
+/// session; string-based row/chrome handling remains future-compatible. The new-chat page lets
+/// its segment preview this design while `newChatSendBlockedReason` refuses to send.
 ///
 /// So it renders exactly what it rendered before this task — the two unwired chips and the
 /// announcement — and nothing more. Whoever ships cowork edits this one type: the strip's content,

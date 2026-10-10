@@ -44,8 +44,9 @@ extension CUCore {
     /// for the next act that succeeds.
     func guardingUserView(_ p: TargetActParams, _ t: CUTarget, _ body: () throws -> ActOutcome) throws -> ActOutcome {
         let seq = t.beginAct()
-        // Held in front for this script (the user agreed): the app being in front is no view moved.
-        if holdsForeground(t) { t.consentedForeground = true }
+        // Held in front for this script, or inside a desktop visit (the user agreed to either): the app being in
+        // front is no view moved.
+        if holdsForeground(t) || isVisiting(t) { t.consentedForeground = true }
         let before = userView()
         let route = { (o: ActOutcome?) in "\(Self.actionName(p.action)) (\(o.map { Self.routeName($0.rung) } ?? "failed"))" }
         let outcome: ActOutcome
@@ -116,10 +117,12 @@ extension CUCore {
     /// the app is not front, polling every 30 ms, until the view is back or `restoreDeadlineMs` (2 s) passes.
     /// Never on the main queue: the guardian dispatches it, and the per-act guard runs on the target's pid
     /// queue. Returns the view it ends on.
+    /// `window`: the user's window to raise — recorded BEFORE something took them away (a desktop visit), since by
+    /// now the app's focused window can be another one (the target's, when the user's app is the target app).
     @discardableResult
-    func restoreUserView(_ before: CUUserView, user: pid_t) -> CUUserView {
+    func restoreUserView(_ before: CUUserView, user: pid_t, window recorded: AXUIElement? = nil) -> CUUserView {
         if before.space != nil, userView().space != before.space,
-           let window = ax.element(ax.application(user), kAXFocusedWindowAttribute) {
+           let window = recorded ?? ax.element(ax.application(user), kAXFocusedWindowAttribute) {
             try? ax.perform(window, kAXRaiseAction)
         }
         _ = sys.activate(pid: user)

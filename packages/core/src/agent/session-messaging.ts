@@ -13,8 +13,9 @@
 // USER RULINGS (2026-10-02), binding:
 //   - SendMessage is the ONE tool that messages a session and resumes it; ManageSession is gone from
 //     Dispatch. TaskStop stops a session's running turn (by `s_…` id) the way it stops a subagent.
-//   - TARGETS are code and Cowork sessions only (`participatesInActivity` — the modes with a lifecycle,
-//     which already names `cowork`). Chat and dispatch sessions are refused, typed.
+//   - Supported TARGETS are code sessions. `participatesInActivity` also reserves `cowork` for
+//     future lifecycle integration; Cowork has no supported creation path today. Chat and dispatch
+//     sessions are refused, typed.
 //   - SENDERS are whoever has the tool. Chat does not (its allowed list dropped SendMessage, ListAgents and
 //     ReadNotifications), and a chat caller is refused here too, defensively.
 //   - A message runs at the TARGET's own approval policy, with no card for the message itself — a session
@@ -74,8 +75,8 @@ export const DELIVERY_DEDUPE_MAX = 500;
 
 /** The refusal a chat session gets (it has no SendMessage; defensive). */
 export const CHAT_SENDER_REFUSAL = "a chat session cannot message or stop other Winter sessions";
-/** The refusal for a chat or dispatch TARGET (user ruling: only code and Cowork sessions). */
-export const TARGET_MODE_REFUSAL = "only code and Cowork sessions can be messaged or stopped — not chat sessions or the dispatch session";
+/** The refusal for a chat or dispatch TARGET. The predicate also reserves future Cowork support. */
+export const TARGET_MODE_REFUSAL = "only code sessions can currently be messaged or stopped; chat and dispatch targets are unsupported";
 
 /** The slice of a session's live driver this file uses (`LegSession`). */
 export interface MessagingDriverHandle {
@@ -173,7 +174,8 @@ export class SessionMessaging {
     };
   }
 
-  /** The target checks every door shares: a session id, known, not the caller, code/Cowork. */
+  /** The target checks every door shares: a session id, known, not the caller, lifecycle-participating
+   *  (code today; the predicate also reserves cowork). */
   private resolveTarget(callerSessionId: string, to: string): { id: string; meta: Meta } | { answer: { status: "refused" | "not_found"; reason: string } } {
     const id = sessionIdFromAddress(to);
     if (id === undefined) {
@@ -332,7 +334,8 @@ export class SessionMessaging {
     }
   }
 
-  /** ListAgents' session rows for `callerSessionId`: the RUNNING code/Cowork peers (see the header), never itself. */
+  /** ListAgents' session rows for `callerSessionId`: the RUNNING code peers today (plus reserved
+   *  cowork-shaped rows if injected; see the header), never itself. */
   list(callerSessionId: string): HostMessageListAnswer {
     let caller: { mode?: string };
     try { caller = this.deps.store.meta(callerSessionId); } catch { return { sessions: [] }; }

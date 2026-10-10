@@ -280,6 +280,12 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         /// `ApprovalOption`'s own doc comment above. Optional/additive — decode only, absent for a
         /// reviewer-escalation/grant/worktree card or an older-shaped payload.
         public let options: [ApprovalOption]?
+        /// ComputerV2's desktop-switch prompt (2026-10-10): what happens when nobody answers by
+        /// `expiresAt` — `"allow"` for a card that DEFAULT-ALLOWS (render its countdown as "… in N s
+        /// unless you refuse"; its `approval_resolved` is then `approved: true, by: "timeout"`, the user
+        /// gave no answer). Absent (every other card, every older payload) = the fail-closed deny.
+        /// Optional/additive — decode only.
+        public let onTimeout: String?
     }
 
     public struct ApprovalResolved: Codable, Equatable, Sendable {
@@ -950,8 +956,10 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let error: String
     }
 
-    /// session-activity-hygiene T4: a code/cowork session's derived lifecycle state, pushed live
-    /// whenever it actually CHANGES so an open UI flips without re-polling `session.list`.
+    /// session-activity-hygiene T4: a Code session's derived lifecycle state, pushed live whenever
+    /// it actually CHANGES so an open UI flips without re-polling `session.list`. The participation
+    /// predicate also reserves Cowork for synthetic/future rows; Cowork creation and execution
+    /// are not implemented.
     ///
     /// TRANSIENT (see `transientTypes` at the bottom of this file): broadcast-only, never in the
     /// session log, and stamped with the store's current `lastSeq` — so it must be exempted from

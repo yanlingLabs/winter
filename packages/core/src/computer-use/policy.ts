@@ -33,6 +33,16 @@
 // reversing the earlier controller ruling): rung 4 is allowed at once, attended or not. `dont-ask` (which never
 // cards) and `plan` (which never acts) refuse it. The app restrictions, the default exceptions and the floors
 // still hold under `bypass` — they are checked before any action reaches rung 4.
+//
+// THE DESKTOP SWITCH (user ruling 2026-10-10): when an act, or a LIVE picture (`screenshot({ live: true, reason })`),
+// cannot be had without moving the user to the window's desktop (Space) — the helper says so (`needs_desktop_visit`)
+// only after every background route — EVERY policy (plan, dont-ask, ask, accept-edits, auto, bypass; a Dispatch
+// coordinator too) asks first, in two places at once: the session's card (`approval_requested` with
+// `onTimeout: "allow"`) and the helper's own on-screen panel on the user's current desktop. The first answer from
+// either resolves both. It lasts `DESKTOP_VISIT_PROMPT_MS` (60 s): refused → `NeedsForeground`; no answer →
+// ALLOWED (default-allow, attended or not; the resolution says `by: "timeout"`). A dispatch child's card rides the
+// mirror like its other cards. The floors and the app's effective access still apply first (a `deny` app is never
+// bound; a `view`/`click` app never reaches the act that would need it — a live read under `view` may ask).
 import { randomBytes } from "node:crypto";
 import type { ApprovalOption, NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -133,16 +143,83 @@ export const APP_CARD_OPTIONS: readonly ApprovalOption[] = [
   { id: "always", label: "Always allow" },
 ];
 export const FOREGROUND_CARD_OPTIONS: readonly ApprovalOption[] = [{ id: "once", label: "Allow once" }];
+/** The desktop-switch card's one option — its primary button ("Switch now"; the deny reads "Don't switch"). A
+ *  refusal is the plain `approved: false`, never an option (clients answer every option `approved: true`). */
+export const DESKTOP_VISIT_OPTION_ID = "switch";
+export const DESKTOP_VISIT_CARD_OPTIONS: readonly ApprovalOption[] = [{ id: DESKTOP_VISIT_OPTION_ID, label: "Switch now" }];
+/** How long the desktop-switch prompt waits before it ALLOWS (the ruling: one minute). */
+export const DESKTOP_VISIT_PROMPT_MS = 60_000;
+/** After the prompt's deadline, how long an answer already on its way (a click racing the countdown) still counts
+ *  as the user's before the daemon's own timer allows. The card and the panel show the deadline itself. */
+export const DESKTOP_VISIT_GRACE_MS = 1_000;
+/** The `by` of a desktop-switch card answered on the helper's on-screen panel. */
+export const DESKTOP_PROMPT_BY = "desktop-prompt";
 
 /** "Allow Winter to use Notes (com.apple.Notes)?" — the bundle id is part of the question (the ruling). */
 export function appCardSummary(app: AppRef): string {
-  return `Allow Winter to use ${app.name} (${app.bundleId})?`;
+  return `Allow Winter to use ${cardName(app.name)} (${app.bundleId})?`;
 }
 
-/** The rung-4 card's question; with a `reason` (the script's `requestForeground`), for the rest of the script. */
+/** An app's NAME as a card shows it: it comes from the app's own bundle, so it is cleaned like the model's reason —
+ *  one line, no control or bidirectional-override characters, at most 80 characters. */
+export function cardName(name: string): string {
+  const line = name.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim();
+  const capped = line.length <= 80 ? line : `${line.slice(0, 79)}…`;
+  return capped.length > 0 ? capped : "this app";
+}
+
+/** The rung-4 card's question; with a `reason` (the script's `requestForeground`), for the rest of the script. Both
+ *  are about THIS desktop: a window on another one is the desktop-switch prompt's (`desktopVisitCardSummary`). */
 export function foregroundCardSummary(app: AppRef, reason?: string): string {
-  if (reason === undefined) return `Winter needs to bring ${app.name} (${app.bundleId}) to the front and use your mouse for a moment`;
-  return `Winter asks to bring ${app.name} (${app.bundleId}) to the front and keep it there until this step ends (if its window is on another desktop, you are taken there): ${reason}`;
+  const name = cardName(app.name);
+  if (reason === undefined) return `Winter needs to bring ${name} (${app.bundleId}) to the front and use your mouse for a moment`;
+  return `Winter asks to bring ${name} (${app.bundleId}) to the front and keep it there until this step ends: ${reason}`;
+}
+
+/** What needs the visit: an act (the primitive), or a live picture. */
+export type DesktopVisitPurpose = { kind: "act"; primitive: string } | { kind: "live" };
+
+/** The desktop-switch question. It names the app, its bundle id (a look-alike cannot borrow a trusted name), the
+ *  KIND of thing needed and the reason — never screen text (a window title or an element name is data, and a
+ *  permission prompt is the last place for it). `reason` is already one sanitized line (`cardReason`). */
+export function desktopVisitCardSummary(app: AppRef, reason: string): string {
+  const name = cardName(app.name);
+  return `Switch to ${name}'s desktop for a moment? ${name} (${app.bundleId}) — ${reason}. `
+    + "Winter brings you back right after; with no answer within a minute, it switches.";
+}
+
+/** The words an act's prompt gives as its reason: what it does and where (the script's `title`, when it has one, is
+ *  the model's own words for the step). One line, at most 200 characters. */
+export function desktopVisitActReason(app: AppRef, primitive: string, title?: string): string {
+  const verb = ACT_VERBS[primitive] ?? "act";
+  const why = title === undefined || title.trim().length === 0 ? "" : ` (${title})`;
+  return cardReason(`to ${verb} in ${cardName(app.name)}, which it accepts only with its window on screen${why}`);
+}
+
+const ACT_VERBS: Readonly<Record<string, string>> = {
+  click: "click", setValue: "set a value", type: "type", paste: "paste", key: "press keys", scroll: "scroll", drag: "drag",
+  select: "select text", action: "use a control", menu: "choose a menu command", hover: "point at something",
+};
+
+/**
+ * How a desktop-switch prompt ended: `allow`/`refuse` — a person answered (`via`: the session's `card`, or the
+ * helper's on-screen `panel`); `timeout-allow` — nobody answered within the minute (allowed); `aborted` — the call was
+ * cancelled (an interrupt, Esc); `unavailable` — the card could not be raised, so nobody was asked (never worded as
+ * a refusal). `allowed` is the verdict.
+ */
+export interface DesktopVisitOutcome {
+  allowed: boolean;
+  answer: "allow" | "refuse" | "timeout-allow" | "aborted" | "unavailable";
+  via: "card" | "panel" | "timeout" | "none";
+}
+
+/** The helper's on-screen half of the prompt (`prompt.desktopVisit`, wired in `wiring.ts`). `answer` settles with
+ *  the panel's answer — `undefined` when it closed without one (cancelled, or the helper could not show it). */
+export interface DesktopVisitPanel {
+  show(p: { promptId: string; sessionId: string; app: string; bundleId: string; reason: string; timeoutMs: number; expiresAt: number }): {
+    answer: Promise<"switch" | "refuse" | "expired" | undefined>;
+    close(): void;
+  };
 }
 
 /** The model's reason as a card shows it: one line, no control characters, at most 200 characters. */
@@ -171,6 +248,12 @@ export interface ComputerPolicyDeps {
   /** Is someone at the Mac looking at THIS session — a Mac window or a terminal attached to it? The phone does
    *  not count, and neither does the Dispatch pill alone (`wiring.ts`). */
   attended(sessionId: string): boolean;
+  /** The helper's on-screen desktop-switch panel; absent → the card alone asks (tests, a helper not reachable). */
+  desktopPanel?: DesktopVisitPanel;
+  /** TEST SEAM: the desktop-switch prompt's wait (default `DESKTOP_VISIT_PROMPT_MS`, the ruling's minute). */
+  desktopVisitPromptMs?: number;
+  /** TEST SEAM: the grace past it (default `DESKTOP_VISIT_GRACE_MS`). */
+  desktopVisitGraceMs?: number;
   now?(): number;
   log?(line: string): void;
 }
@@ -195,6 +278,14 @@ export function newRunGrants(sessionId: string, onCardWait?: (waiting: boolean) 
 export class ComputerPolicy {
   /** "Allow for this session" grants, in memory, per session. */
   private readonly sessionGrants = new Map<string, Set<string>>();
+  /**
+   * THE DESKTOP SWITCH, refused (user ruling 2026-10-10, 5a): a person's "Don't switch" for an app holds for that app
+   * in that session until the USER next sends the session a message (a human-origin `user_message` — never
+   * `messaging`, `dispatch` or `dispatch-wake`); for a dispatch child, the user's next message to the child OR to its
+   * coordinator lifts it. A timeout-allow is not a refusal. In memory only: a daemon restart forgets them (fine —
+   * the next visit simply asks again). Session id → bundle id → the coordinator whose message also lifts it.
+   */
+  private readonly desktopRefusals = new Map<string, Map<string, { coordinator?: string }>>();
 
   constructor(private readonly deps: ComputerPolicyDeps) {}
 
@@ -213,7 +304,35 @@ export class ComputerPolicy {
 
   /** The session is GONE (deleted, or the daemon stops): its "Allow for this session" grants go with it. A
    *  worker's idle end does not call this — the grants live as long as the session. */
-  clearSession(sessionId: string): void { this.sessionGrants.delete(sessionId); }
+  clearSession(sessionId: string): void {
+    this.sessionGrants.delete(sessionId);
+    this.desktopRefusals.delete(sessionId);
+  }
+
+  /** The user refused (a person's "Don't switch", on the card or the on-screen panel) to be moved to `bundleId`'s
+   *  desktop in this session: held until their next message (`liftDesktopRefusals`). */
+  noteDesktopRefusal(sessionId: string, bundleId: string): void {
+    let facts: SessionFacts | undefined;
+    try { facts = this.deps.session(sessionId); } catch { facts = undefined; }
+    let m = this.desktopRefusals.get(sessionId);
+    if (m === undefined) { m = new Map(); this.desktopRefusals.set(sessionId, m); }
+    m.set(bundleId, facts?.origin === "dispatch-child" && facts.parentSessionId !== undefined ? { coordinator: facts.parentSessionId } : {});
+  }
+
+  /** Does a refusal still hold for this app in this session? */
+  desktopRefused(sessionId: string, bundleId: string): boolean {
+    return this.desktopRefusals.get(sessionId)?.has(bundleId) === true;
+  }
+
+  /** The user sent `sessionId` a message (a HUMAN-origin one — the caller decides): every desktop-switch refusal of
+   *  that session lifts, and every one of a dispatch child whose coordinator it is. */
+  liftDesktopRefusals(sessionId: string): void {
+    this.desktopRefusals.delete(sessionId);
+    for (const [child, m] of this.desktopRefusals) {
+      for (const [bundleId, r] of m) if (r.coordinator === sessionId) m.delete(bundleId);
+      if (m.size === 0) this.desktopRefusals.delete(child);
+    }
+  }
 
   /** The user removed an app's "Always allow": no session keeps the grant its card left behind either. */
   forgetGrant(bundleId: string): void {
@@ -354,13 +473,9 @@ export class ComputerPolicy {
 
   /**
    * RUNG 4: may Winter bring the app to the front and use the real pointer for this action? `false` means
-   * "refuse with `NeedsForeground`" (the caller words it).
+   * "refuse with `NeedsForeground`" (the caller words it). On THIS desktop only — a window on another desktop is
+   * `askDesktopVisit`'s.
    */
-  /** Whether the foreground is granted by a card the user answers (false under `bypass`, which asks none). */
-  foregroundAsksTheUser(run: RunGrants): boolean {
-    return this.deps.session(run.sessionId).policy !== "bypass";
-  }
-
   async allowForeground(run: RunGrants, app: AppRef, signal?: AbortSignal, reason?: string): Promise<boolean> {
     const facts = this.deps.session(run.sessionId);
     // `dont-ask` never cards and `plan` never acts; chat has no computer use.
@@ -370,6 +485,81 @@ export class ComputerPolicy {
     if (!this.deps.attended(run.sessionId)) return false;
     const res = await this.card(run, foregroundCardSummary(app, reason === undefined ? undefined : cardReason(reason)), FOREGROUND_CARD_OPTIONS, signal);
     return res.approved;
+  }
+
+  /**
+   * THE DESKTOP SWITCH (the ruling, 2026-10-10): may Winter move the user to `app`'s desktop for a moment? Asked under
+   * EVERY policy — the session's card and the helper's on-screen panel at once, the first answer resolving both —
+   * for `DESKTOP_VISIT_PROMPT_MS`; no answer ALLOWS. Chat has no computer use. The caller has already applied the
+   * floors and the app's access (`authorize`), and scopes the answer to the script run.
+   */
+  async askDesktopVisit(run: RunGrants, app: AppRef, reason: string, signal?: AbortSignal): Promise<DesktopVisitOutcome> {
+    const facts = this.deps.session(run.sessionId);
+    if (facts.policy === "chat" || facts.mode === "chat") return { allowed: false, answer: "refuse", via: "none" };
+    this.checkFloors(app);
+    if (signal?.aborted) return { allowed: false, answer: "aborted", via: "none" };
+    const { sessionId } = run;
+    const callId = `cu_${randomBytes(6).toString("hex")}`;
+    const summary = desktopVisitCardSummary(app, reason);
+    const issuedAt = (this.deps.now ?? Date.now)();
+    const promptMs = this.deps.desktopVisitPromptMs ?? DESKTOP_VISIT_PROMPT_MS;
+    const expiresAt = issuedAt + promptMs;
+    const options = DESKTOP_VISIT_CARD_OPTIONS.map((o) => ({ ...o }));
+    // Wait before emit (the append is synchronous): an answer can never arrive before the broker knows the card.
+    // The broker's own clock runs a grace past the deadline the card and the panel show: an answer racing the
+    // countdown still counts as the user's; past it, no answer allows.
+    const waiting = this.deps.approvals.wait(sessionId, callId, promptMs + (this.deps.desktopVisitGraceMs ?? DESKTOP_VISIT_GRACE_MS), {
+      toolName: COMPUTER_V2_TOOL_NAME, summary, issuedAt, expiresAt, options, onTimeout: "allow",
+    });
+    try {
+      this.deps.emit(sessionId, {
+        type: "approval_requested", sessionId, threadId: "main", callId, toolName: COMPUTER_V2_TOOL_NAME, summary, issuedAt, expiresAt,
+        options, onTimeout: "allow",
+      } as NewSessionEvent);
+    } catch (err) {
+      this.deps.approvals.resolve(sessionId, callId, false, "emit-failure");
+      await waiting;
+      this.deps.log?.(`computer-use: could not raise the desktop-switch card for ${sessionId}: ${err instanceof Error ? err.message : "error"}`);
+      return { allowed: false, answer: "unavailable", via: "none" };
+    }
+    // The helper's on-screen panel on the user's current desktop: its answer resolves the card (first wins — the
+    // broker ignores a second); the card's resolution, from anywhere, closes the panel.
+    let panel: ReturnType<DesktopVisitPanel["show"]> | undefined;
+    try {
+      // The panel counts down to the card's own deadline (absolute), never from when it happens to appear.
+      panel = this.deps.desktopPanel?.show({ promptId: callId, sessionId, app: cardName(app.name), bundleId: app.bundleId, reason, timeoutMs: promptMs, expiresAt });
+    } catch (err) {
+      this.deps.log?.(`computer-use: the on-screen desktop-switch prompt could not be shown (${err instanceof Error ? err.message : "error"}) — the card alone asks`);
+    }
+    void panel?.answer.then((a) => {
+      if (a === "switch") this.deps.approvals.resolve(sessionId, callId, true, DESKTOP_PROMPT_BY, DESKTOP_VISIT_OPTION_ID);
+      else if (a === "refuse") this.deps.approvals.resolve(sessionId, callId, false, DESKTOP_PROMPT_BY);
+      // `expired` (the panel's countdown reached the deadline) decides nothing: the daemon's own clock does, after
+      // its grace — a card answer racing the deadline still wins.
+    }, () => { /* the panel failed: the card still asks */ });
+    const onAbort = (): void => { this.deps.approvals.resolve(sessionId, callId, false, "aborted"); };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    // The prompt never counts against the script's timeout (the card rule).
+    run.onCardWait?.(true);
+    let res: { approved: boolean; by: string; optionId?: string };
+    try {
+      res = await waiting;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+      run.onCardWait?.(false);
+      try { panel?.close(); } catch { /* already gone */ }
+    }
+    try {
+      this.deps.emit(sessionId, { type: "approval_resolved", sessionId, threadId: "main", callId, approved: res.approved, by: res.by } as NewSessionEvent);
+    } catch { /* the outcome stands */ }
+    let outcome: DesktopVisitOutcome;
+    if (res.by === "timeout") outcome = { allowed: res.approved, answer: res.approved ? "timeout-allow" : "refuse", via: "timeout" };
+    else if (res.by === "aborted" || res.by === "emit-failure" || res.by === "superseded") outcome = { allowed: false, answer: "aborted", via: "none" };
+    else outcome = { allowed: res.approved, answer: res.approved ? "allow" : "refuse", via: res.by === DESKTOP_PROMPT_BY ? "panel" : "card" };
+    // A PERSON's "Don't switch" holds until their next message (5a); a timeout-allow, an abort or a failure never does.
+    if (outcome.answer === "refuse" && (outcome.via === "card" || outcome.via === "panel")) this.noteDesktopRefusal(sessionId, app.bundleId);
+    this.deps.log?.(`computer-use: desktop switch to ${app.bundleId} for ${sessionId}: ${outcome.answer} (${outcome.via})`);
+    return outcome;
   }
 
   /** Raise one daemon-side approval card and wait for it (wait-before-emit, like `buildLeasePolicy`). */
