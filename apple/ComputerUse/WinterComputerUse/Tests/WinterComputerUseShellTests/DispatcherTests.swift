@@ -26,7 +26,7 @@ final class DispatcherTests: XCTestCase {
 
     func testTheDispatcherAnswersExactlyTheHelperRPCMethodsBesidesHello() async {
         let rig = await Rig()
-        let expected = Set(engineSamples.map(\.method) + ["script.active", "view.subscribe", "view.unsubscribe"])
+        let expected = Set(engineSamples.map(\.method) + ["script.active", "view.subscribe", "view.unsubscribe", "prompt.desktopVisit"])
         XCTAssertEqual(Set(rig.dispatcher.methods), expected)
     }
 

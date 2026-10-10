@@ -57,11 +57,15 @@ public enum HelperNotification: Equatable, Sendable {
     private var armed = false
     private var bound: [BoundTarget: (appName: String, mirror: Bool)] = [:]
     private var lastPermissions: (accessibility: Bool, screenRecording: Bool)?
+    /// The desktop-switch prompts on screen (`prompt.desktopVisit`), and the requests waiting on each.
+    private let prompts: CUDesktopPrompting
+    private var promptWaiters: [String: CheckedContinuation<CUDesktopPromptAnswer, Error>] = [:]
 
-    public init(presentation: CUPresentation, escapeTap: CUEscapeTap, viewHub: ViewHub) {
+    public init(presentation: CUPresentation, escapeTap: CUEscapeTap, viewHub: ViewHub, prompts: CUDesktopPrompting? = nil) {
         self.presentation = presentation
         self.escapeTap = escapeTap
         self.viewHub = viewHub
+        self.prompts = prompts ?? CUDesktopPromptController.live()
         // No floating mirror in the helper any more (the mirror lives in Winter.app's window). Off as well as
         // never asked for: the presentation layer re-shows a mirror on a cursor event for a target whose mirror
         // was once requested, and this switch is what guarantees it never does.
@@ -122,6 +126,47 @@ public enum HelperNotification: Equatable, Sendable {
         presentation.sessionEnded(sessionId: sessionId)
         viewHub.sessionEnded(sessionId: sessionId)
         refreshIdle()
+    }
+
+    // MARK: The desktop-switch prompt
+
+    /// `prompt.desktopVisit`: shows the prompt on the user's current desktop and answers when they click, or
+    /// `expired` when its countdown runs out. Cancelling the request (the daemon's `cancel {callId}` — its card
+    /// was answered first —, or the connection closing) closes the panel at once.
+    public func askDesktopVisit(_ p: PromptDesktopVisitParams) async throws -> CUDesktopPromptAnswer {
+        let id = p.promptId
+        let request = CUDesktopPromptRequest(promptId: id, sessionId: p.sessionId, app: p.app, bundleId: p.bundleId,
+                                             reason: p.reason, timeoutMs: p.timeoutMs)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<CUDesktopPromptAnswer, Error>) in
+                guard promptWaiters[id] == nil else {
+                    c.resume(throwing: RPCError.invalidParams("a desktop prompt \(id) is already open"))
+                    return
+                }
+                if Task.isCancelled {
+                    c.resume(throwing: CancellationError())
+                    return
+                }
+                promptWaiters[id] = c
+                prompts.show(request) { [weak self] answer in self?.finishPrompt(id, .success(answer)) }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.cancelPrompt(id) }
+        }
+    }
+
+    /// The prompts waiting for an answer now (tests).
+    public var openPromptIds: [String] { promptWaiters.keys.sorted() }
+
+    private func cancelPrompt(_ id: String) {
+        guard promptWaiters[id] != nil else { return }
+        prompts.close(promptId: id)
+        finishPrompt(id, .failure(CancellationError()))
+    }
+
+    private func finishPrompt(_ id: String, _ result: Result<CUDesktopPromptAnswer, Error>) {
+        guard let c = promptWaiters.removeValue(forKey: id) else { return }
+        c.resume(with: result)
     }
 
     // MARK: Esc

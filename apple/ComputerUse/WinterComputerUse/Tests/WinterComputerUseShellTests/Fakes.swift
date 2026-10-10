@@ -47,10 +47,10 @@ let engineSamples: [(method: String, params: String, result: String)] = [
     ("target.snapshot", #"{"targetId":"t1","since":"snap-1","full":false,"within":41,"settle":{"maxMs":1500}}"#,
      #"{"snapshotId":"snap-2","text":"Notes — focused [14] · settled 80 ms\n+ [27] button \"Delete Note\"","isDiff":true,"changedRatio":0.1,"settled":true,"waitedMs":80}"#),
     ("target.find", #"{"targetId":"t1","query":{"role":"button","name":"Share"}}"#, #"{"elements":[{"ref":4,"role":"button","name":"Share"}]}"#),
-    ("target.screenshot", #"{"targetId":"t1","region":[0,0,100,100],"budget":{"maxLongEdge":1568,"tile":28,"maxTiles":1568,"quality":0.8},"settle":{"maxMs":1500}}"#,
-     #"{"imageBase64":"/9j/AA==","mime":"image/jpeg","width":100,"height":100,"shotId":"shot-1","settled":true,"waitedMs":12}"#),
-    ("target.act", #"{"targetId":"t1","sessionId":"s_1","callId":"c1","action":{"kind":"click","ref":3,"button":"left","count":1},"access":"full","allowForeground":false,"privatePath":true}"#,
-     #"{"rung":1}"#),
+    ("target.screenshot", #"{"targetId":"t1","region":[0,0,100,100],"budget":{"maxLongEdge":1568,"tile":28,"maxTiles":1568,"quality":0.8},"settle":{"maxMs":1500},"live":true,"desktopVisit":true}"#,
+     #"{"imageBase64":"/9j/AA==","mime":"image/jpeg","width":100,"height":100,"shotId":"shot-1","settled":true,"waitedMs":12,"visit":{"ms":420,"returned":true}}"#),
+    ("target.act", #"{"targetId":"t1","sessionId":"s_1","callId":"c1","action":{"kind":"click","ref":3,"button":"left","count":1},"access":"full","allowForeground":false,"privatePath":true,"desktopVisit":true}"#,
+     #"{"rung":4,"visit":{"ms":510,"returned":false,"detail":"Winter could not bring the user back from Safari's desktop — they may still be there"}}"#),
     ("target.foreground", #"{"targetId":"t1"}"#, #"{"front":true}"#),
     ("target.waitIdle", #"{"targetId":"t1","quietMs":150,"timeoutMs":3000,"callId":"c2"}"#, #"{"settled":true,"waitedMs":150}"#),
     ("target.waitFor", #"{"targetId":"t1","cond":{"text":"Saved","gone":"Saving…"},"timeoutMs":10000}"#, #"{"met":true,"waitedMs":420}"#),
@@ -311,9 +311,9 @@ extension FakeIdleScheduler: ViewClock {}
     let dispatcher: RPCDispatcher
     var notifications: [HelperNotification] = []
 
-    init() {
+    init(prompts: CUDesktopPrompting? = nil) {
         viewHub = ViewHub(capture: capture, geometry: geometry, snapshotter: snapshotter, clock: clock)
-        coordinator = HelperCoordinator(presentation: presentation, escapeTap: tap, viewHub: viewHub)
+        coordinator = HelperCoordinator(presentation: presentation, escapeTap: tap, viewHub: viewHub, prompts: prompts ?? FakePrompter())
         dispatcher = RPCDispatcher(core: core, coordinator: coordinator, viewHub: viewHub, inFlight: inFlight)
         coordinator.notify = { [weak self] in self?.notifications.append($0) }
         let sink = sink
@@ -405,5 +405,30 @@ final class LineClient {
     func hello(home: String, id: Int = 1) -> JSONValue? {
         send(id: id, method: "hello", params: "{\"protocol\":1,\"client\":\"daemon\",\"home\":\"\(home)\"}")
         return response(id: id)
+    }
+}
+
+/// The desktop-switch prompts, recorded: what was shown (with each one's answer door) and what was closed.
+@MainActor final class FakePrompter: CUDesktopPrompting {
+    var shown: [CUDesktopPromptRequest] = []
+    var closed: [String] = []
+    private var answers: [String: @MainActor (CUDesktopPromptAnswer) -> Void] = [:]
+
+    @discardableResult
+    func show(_ request: CUDesktopPromptRequest, onAnswer: @escaping @MainActor (CUDesktopPromptAnswer) -> Void) -> Bool {
+        guard answers[request.promptId] == nil else { return false }
+        shown.append(request)
+        answers[request.promptId] = onAnswer
+        return true
+    }
+
+    func close(promptId: String) {
+        guard answers.removeValue(forKey: promptId) != nil else { return }
+        closed.append(promptId)
+    }
+
+    /// The user clicks (or the countdown ends) on that prompt.
+    func answer(_ promptId: String, _ a: CUDesktopPromptAnswer) {
+        answers.removeValue(forKey: promptId)?(a)
     }
 }

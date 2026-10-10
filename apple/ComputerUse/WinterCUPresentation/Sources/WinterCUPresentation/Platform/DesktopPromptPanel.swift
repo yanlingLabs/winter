@@ -101,6 +101,8 @@ final class FirstClickButton: NSButton {
             buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
         ])
         panel.contentView = effect
+        // Its window name (the window list's), so a reader of the list can tell this panel from the helper's others.
+        panel.title = model.title
         panel.setAccessibilityLabel(model.title)
     }
 
@@ -119,6 +121,8 @@ final class FirstClickButton: NSButton {
         }
     }
 
+    /// Closed, not merely hidden: the window leaves the window list's on-screen set at once, and goes with this
+    /// object (the controller drops it).
     func close() {
         shown = false
         panel.orderOut(nil)
