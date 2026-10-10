@@ -102,11 +102,22 @@ final class FocusTargetTests: XCTestCase {
         XCTAssertNil(f.elsewhere)
     }
 
+    func testTheKeyboardPathAndTheStateNameTheSameFocus() {
+        // The app answers for its key window (another window's field); the bound window's page holds its own focus.
+        // One resolver: what type() checks is what state() says, never the other window's field.
+        world(boundIsKey: false, pageFocus: docArea)
+        ax.focus(pid: pid, on: otherField)
+        let keys = core.reportedFocus(target)
+        let state = core.windowFocus(target, fresh: true).element
+        XCTAssertTrue(keys.map { CFEqual($0, docArea) } ?? false, "not the other window's field")
+        XCTAssertTrue(keys.flatMap { k in state.map { CFEqual(k, $0) } } ?? false)
+    }
+
     func testAHiddenZeroSizeInputIsNamedAsThePagesInputOnAnySite() async throws {
         world(boundIsKey: false, pageFocus: hidden)
         ax.focus(pid: pid, on: otherField)
         let f = core.windowFocus(target)
-        XCTAssertEqual(f.hiddenInput, "the page's hidden text input (it types into the document)")
+        XCTAssertEqual(f.element.flatMap { core.hiddenInputWords($0, target) }, "the page's hidden text input (it types into the document)")
         let r = try await act(.type(CUTypeAction(text: "hello")))
         XCTAssertEqual(r.input, "the page's hidden text input (it types into the document)")
         XCTAssertTrue(r.detail?.contains("can't be read back here") ?? false, r.detail ?? "")

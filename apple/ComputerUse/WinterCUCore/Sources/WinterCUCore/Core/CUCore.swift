@@ -1387,7 +1387,7 @@ public final class CUCore: @unchecked Sendable {
         var focusText: String?
         let wf = windowFocus(t, fresh: true)
         if let f = wf.element {
-            if let hidden = wf.hiddenInput {
+            if let hidden = hiddenInputWords(f, t) {
                 focusText = "focused: \(hidden)"
             } else if let r = t.refs.existingRef(for: AXIdentity(element: f)), roots.contains(where: { $0.find(ref: r) != nil }) {
                 focusedRef = r

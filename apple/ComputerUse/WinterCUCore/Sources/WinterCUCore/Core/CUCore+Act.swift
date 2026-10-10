@@ -659,11 +659,12 @@ extension CUCore {
         init(explicit: AXUIElement? = nil) { self.explicit = explicit }
     }
 
-    /// The focus the app reports, else the one the bound window reports.
+    /// The ONE focus resolver every keyboard path uses: the bound window's own focus (`windowFocus` — an app
+    /// answers its focused element for its KEY window only, so an app-global read could name another window's
+    /// field: live, find() and type() disagreed). A capture-only window has no tree of its own: the app's answer.
     func reportedFocus(_ t: CUTarget) -> AXUIElement? {
-        if let f = ax.focusedElement(pid: t.pid) { return f }
-        if let w = try? windowElement(t), let f = ax.element(w, kAXFocusedUIElementAttribute) { return f }
-        return nil
+        guard t.accessible else { return ax.focusedElement(pid: t.pid) }
+        return windowFocus(t, fresh: true).element
     }
 
     /// Where typed text goes, or a refusal (C1). A focus the app or window reports is refused only when it is
