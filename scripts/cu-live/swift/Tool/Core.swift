@@ -54,12 +54,15 @@ struct Sample: Equatable {
     /// The user's hardware input (`HardwareInput`, monitor only): events counted since the tap started, the last
     /// one's time, the tap's start, and whether keys are watched too.
     var hardware: (count: Int, lastMs: Int?, startedMs: Int, keys: Bool)? = nil
+    /// Whether the screen is usable at all (`SessionState`, monitor only): locked, and on the console.
+    var session: SessionState.Reading? = nil
 
     static func == (a: Sample, b: Sample) -> Bool {
         a.t == b.t && a.front == b.front && a.frontPid == b.frontPid && a.space == b.space && a.hidIdleMs == b.hidIdleMs
             && a.mouse?.x == b.mouse?.x && a.mouse?.y == b.mouse?.y && a.spaceType == b.spaceType
             && a.hardware?.count == b.hardware?.count && a.hardware?.lastMs == b.hardware?.lastMs
             && a.hardware?.startedMs == b.hardware?.startedMs && a.hardware?.keys == b.hardware?.keys
+            && a.session == b.session
     }
 
     /// `{"t","front","frontPid","space","hidIdleMs"[,"mouse":[x,y]]}` — the key order the rig's parser and a human both expect.
@@ -68,7 +71,8 @@ struct Sample: Equatable {
             + "\"space\":\(JSONOut.optional(space)),\"hidIdleMs\":\(JSONOut.optional(hidIdleMs))"
             + (mouse.map { ",\"mouse\":[\($0.x),\($0.y)]" } ?? "")
             + (spaceType.map { ",\"spaceType\":\($0)" } ?? "")
-            + (hardware.map { ",\"hw\":\($0.count),\"hwLast\":\(JSONOut.optional($0.lastMs)),\"hwStart\":\($0.startedMs),\"hwKeys\":\($0.keys)" } ?? "") + "}"
+            + (hardware.map { ",\"hw\":\($0.count),\"hwLast\":\(JSONOut.optional($0.lastMs)),\"hwStart\":\($0.startedMs),\"hwKeys\":\($0.keys)" } ?? "")
+            + (session.map { ",\"locked\":\($0.locked),\"onConsole\":\($0.onConsole)" } ?? "") + "}"
     }
 }
 
@@ -77,6 +81,7 @@ struct Sample: Equatable {
 enum ToolCommand: Equatable {
     case monitor(intervalMs: Int)
     case front
+    case session
     case imageStats(path: String)
     case freshDecode(layout: String, files: [String])
     case windows(owner: String)
@@ -95,6 +100,7 @@ enum ArgParser {
     usage:
       cu-live-tool monitor [--interval-ms 20]    one JSON line per interval (and per app activation) until stdin EOF / SIGTERM
       cu-live-tool front                         one JSON line (with the active Space's type), then exit
+      cu-live-tool session                       {"locked":<bool>,"onConsole":<bool>} (CGSessionCopyCurrentDictionary), then exit — a locked screen is no place for a live run
       cu-live-tool image-stats <file>            one JSON line about a JPEG/PNG: size, luma, blank, sentinel pixels (exit 2 + {"error"} if undecodable)
       cu-live-tool fresh-decode <layout.json> <png>…  per capture of the Fresh window: each region's band hash and cell lumas
       cu-live-tool windows <owner name>          one JSON line per window of that app (id, layer, onScreen, bounds) — no titles, no grant needed
@@ -116,6 +122,8 @@ enum ArgParser {
             return rest.isEmpty ? .success(.selfTest) : .failure(UsageError("self-test takes no arguments"))
         case "front":
             return rest.isEmpty ? .success(.front) : .failure(UsageError("front takes no arguments"))
+        case "session":
+            return rest.isEmpty ? .success(.session) : .failure(UsageError("session takes no arguments"))
         case "image-stats":
             return rest.count == 1 ? .success(.imageStats(path: rest[0])) : .failure(UsageError("image-stats takes exactly one file"))
         case "windows":

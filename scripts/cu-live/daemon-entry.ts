@@ -14,7 +14,8 @@
 // Every screenshot the helper returns is also written to `<home>/cu-live-shots/` (the test seam
 // `ComputerUseInjection.screenshotSink`) so the runner can judge its pixels.
 //
-// On start it prints ONE JSON line `{"ready":true,"socket":…,"pid":…}`; SIGTERM/SIGINT stop it cleanly.
+// On start it prints ONE JSON line `{"ready":true,"socket":…,"pid":…}`; SIGTERM/SIGINT stop it cleanly, and so does
+// its stdin closing (the runner holds the pipe, so a runner that dies — a SIGKILL included — takes it along).
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -133,4 +134,10 @@ if (import.meta.main) {
   };
   process.on("SIGTERM", () => { void stop(); });
   process.on("SIGINT", () => { void stop(); });
+  // The runner keeps our stdin open and closes it to stop us (as it does the monitor's), and the pipe closes when the
+  // runner dies in ANY way — a SIGKILL included — so a runner that could not clean up never leaves this daemon behind.
+  void (async () => {
+    try { for await (const _chunk of Bun.stdin.stream()) { /* nothing is ever sent */ } } catch { /* a closed pipe is the answer */ }
+    void stop();
+  })();
 }

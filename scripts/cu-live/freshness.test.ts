@@ -307,3 +307,67 @@ describe("a fixture variant on fake plumbing", () => {
     expect(calls.filter((c) => c === "returnUser").length).toBe(2);
   });
 });
+
+describe("a stop (signal, real input, a lock) in the middle of a measurement", () => {
+  /** The runner's stop checks, faked: once `stopped`, any call outside a `shield` throws the stop, as `stopCheck` does. */
+  class Stop extends Error {}
+  function stoppable(d: FreshDeps) {
+    const state = { stopped: false, shielded: false };
+    const gate = <A extends unknown[], R>(f: (...a: A) => Promise<R>) => async (...a: A): Promise<R> => {
+      if (state.stopped && !state.shielded) throw new Stop("stopped by SIGINT");
+      return f(...a);
+    };
+    d.post = gate(d.post);
+    d.turn = gate(d.turn);
+    d.shield = async (fn) => { const was = state.shielded; state.shielded = true; try { return await fn(); } finally { state.shielded = was; } };
+    d.isAbort = (e) => e instanceof Stop;
+    return state;
+  }
+
+  test("the preference mode: the test's own Safari is still quit and the preferences still restored EXACTLY, then the stop is rethrown", async () => {
+    const { SAFARI_PREF_KEYS: K } = await import("./freshness");
+    const prefs: Record<string, { type: string; value: string }> = { [K[1]]: { type: "boolean", value: "1" } };
+    const { d, calls, outDir } = fakeDeps(prefs);
+    const state = stoppable(d);
+    // The stop lands when the window is about to go full screen (the turn after the page loaded).
+    const inner = d.turn;
+    d.turn = async (code) => {
+      if (code.includes("full screen button") && !code.includes("close button")) state.stopped = true;
+      return inner(code);
+    };
+    await expect(measureSafariWithPrefs(d, outDir, "Safari, WebKitPreferences NO")).rejects.toBeInstanceOf(Stop);
+    expect(calls.filter((c) => c === "quit Safari").length).toBe(1);               // the Safari this run launched is gone
+    expect(calls.filter((c) => c === "open -g -a Safari").length).toBe(1);
+    expect(prefs).toEqual({ [K[1]]: { type: "boolean", value: "1" } });            // restored exactly (absent keys deleted)
+    expect(fileExists(safariPrefsBackupPath(outDir))).toBe(false);                 // nothing left for the next run to restore
+    removeAll(outDir, { recursive: true, force: true });
+  });
+
+  test("a fixture variant: the Fresh window is stopped and the user returned (shielded), then the stop is rethrown", async () => {
+    const t = Date.now() + 60_000;
+    const events = [
+      { t: t + 1, role: "main", ev: "fresh.ready", window: 777 },
+      { t: t + 3, role: "main", ev: "fresh.offspace", method: "fullscreen" },
+    ];
+    const posted: string[] = [];
+    const { d, calls } = fakeDeps({}, {
+      events: () => events,
+      post: async (cmd) => { posted.push(cmd); return undefined; },
+    });
+    const state = stoppable(d);
+    d.sample = async () => { state.stopped = true; throw new Stop("stopped by SIGTERM"); };
+    await expect(measureFixtureVariant(d, "a1", true)).rejects.toBeInstanceOf(Stop);
+    expect(posted).toEqual(["freshStart", "freshOffspace", "freshStop"]);   // freshStop ran although the stop was pending
+    expect(calls.filter((c) => c === "returnUser").length).toBe(2);
+  });
+
+  test("an ordinary failure is still a failed variant, not a rethrow", async () => {
+    const t = Date.now() + 60_000;
+    const { d } = fakeDeps({}, { events: () => [{ t: t + 1, role: "main", ev: "fresh.ready", window: 7 }, { t: t + 3, role: "main", ev: "fresh.offspace", method: "x" }] });
+    stoppable(d);
+    d.sample = async () => { throw new Error("the sampler broke"); };
+    const r = await measureFixtureVariant(d, "a1", true);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("the sampler broke");
+  });
+});
