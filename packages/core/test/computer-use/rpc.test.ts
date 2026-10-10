@@ -92,7 +92,7 @@ describe("computerUse.* (local-only RPCs)", () => {
     expect(fake.launched).toEqual([]);
     fake.running = true;
     const r2 = await c.request(METHODS.computerUseStatus, {});
-    expect(r2.result.helper).toEqual({ installed: true, running: true, version: "1.0-test", permissions: { accessibility: true, screenRecording: false } });
+    expect(r2.result.helper).toEqual({ installed: true, running: true, version: "1.7.0", permissions: { accessibility: true, screenRecording: false } });
     c.close();
   });
 

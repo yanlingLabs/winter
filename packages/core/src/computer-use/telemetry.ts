@@ -21,6 +21,22 @@ export interface PrimitiveMetric {
   error?: string;
   /** The helper's error code behind it (`unsupported`, `window_elsewhere`, …), when the helper refused. */
   errorCode?: string;
+  /**
+   * THE DESKTOP SWITCH (the ruling, 2026-10-10 — every switch is counted): on a `desktop.visit` line, ONE closed
+   * visit (5d: one open visit per stretch of work) — how many primitives ran in it (`actions`), the total time the user
+   * was away (`ms`), whether they were verified back (`returned`; false when they took over, `userMoved`).
+   */
+  visit?: { actions: number; ms: number; returned: boolean; userMoved?: boolean };
+  /** What first needed the visit (`desktop.visit` lines). */
+  visitWhy?: "act" | "live";
+  /** The primitive ran inside an open desktop visit. */
+  inVisit?: boolean;
+  /** How the run's desktop-switch prompt ended for this primitive: a person's `allow`/`refuse`, `timeout-allow` (no
+   *  answer within the minute), `aborted`, `unavailable` (the prompt could not be shown), the run's earlier answer
+   *  reused (`run-allowance`/`run-refusal`), or a refusal still holding from before (`held-refusal`, 5a). */
+  visitAnswer?: "allow" | "refuse" | "timeout-allow" | "aborted" | "unavailable" | "run-allowance" | "run-refusal" | "held-refusal";
+  /** Where a person answered it: the session's `card`, the helper's on-screen `panel`; or `timeout`, `none`. */
+  visitVia?: "card" | "panel" | "timeout" | "none";
   /** A browser tab's primitive: the backend id it ran on ("winter", "chrome", …) and the engine's own time, ms. */
   backend?: string;
   engineMs?: number;

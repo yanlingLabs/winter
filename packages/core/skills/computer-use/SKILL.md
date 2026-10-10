@@ -181,7 +181,9 @@ if (landed.length === 0) {
 }
 ```
 
-`requestForeground(reason)` asks the user (a card shows your reason) to let the app come forward until the script ends. It returns `true` when the app is there, `false` if the user said no: then stay with what works in the background, or ask them to do the step.
+`requestForeground(reason)` asks the user (a card shows your reason) to let the app come forward until the script ends — on the user's OWN desktop only. It returns `true` when the app is there, `false` if the user said no, or when the window is on another desktop: Winter never keeps the user there. Then stay with what works in the background, or ask them to do the step.
+
+An act that can only be done with the window on screen asks the user by itself (a prompt on their screen and a card; no answer within a minute allows it), moves them to that desktop while the steps that need it run back to back, and brings them back a moment after the last one — the result says "moved the user to … and back". So do those steps together. If the user refuses, the act fails with `NeedsForeground` and is not asked again until they write to you: ask them in your reply.
 
 Screenshots of such a window start with how fresh they are: `freshness unknown` (the first one), `live` (it changed since the last one), `stale since N s ago` (nothing changed although you acted: the app is not redrawing it, so do not trust the picture), `likely current`. `NoWindow` means the window is on another Space, in full screen or not open: ask the user to bring it here, or open a document with `apps.open(path or URL)`.
 
@@ -207,6 +209,7 @@ await notes.screenshot({ region: [0, 0, 400, 300] });
 - `screenshot()` already shows its image. Only an image read with `{ emit: false }` needs `show()`. `region` is a part of the window, in more detail.
 - A point is pixels in this app's LATEST screenshot: take one first. Prefer refs; use points only where state lists no elements.
 - `await screen.screenshot()` looks at the whole screen (look only). `await screen.appAt(x, y)` binds the app under a point of the latest `screen.screenshot()`.
+- A window on another desktop may not redraw there: its screenshot's first line says how fresh it is. Only when it is stale and you need what is on screen NOW: `await app.screenshot({ live: true, reason: 'what you need to see' })` — it may ask the user to be moved there for a moment (your reason is shown) and brings them back. `state()` and `find` read such a window live: prefer them.
 
 ## 8. Catching errors
 
@@ -240,7 +243,7 @@ try {
 | `StaleRef` | The element is gone. `state({ full: true })`, pick a fresh ref. |
 | `Uncertain` | The action was sent but not confirmed: it may have happened. `state()` first; never repeat it blindly (a second send, delete or pay is the danger). |
 | `TargetBusy` | The app is busy with another script or session. Wait a moment, try once more, then tell the user. |
-| `NeedsForeground` | Try an element ref or another route, or `requestForeground(reason)`. |
+| `NeedsForeground` | Try an element ref or another route, or `requestForeground(reason)` (an app on the user's own desktop). If it says the user refused to be moved to the window's desktop: do not retry, ask them in your reply. |
 | `Refused` | A safety floor (a password field, another app's text). Stop and ask the user. |
 | `NotAllowed` | Policy or the user's setting. Do not retry; tell the user. |
 | `TargetLost` | The window or app closed. Bind it again with `apps.open`. |

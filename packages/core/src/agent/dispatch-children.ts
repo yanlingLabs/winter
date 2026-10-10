@@ -553,7 +553,8 @@ export class DispatchChildren {
         // Relayed whoever started the turn (ruling 4); only a followed turn's status moves.
         this.mirrorAsk(c, e);
         if (c.turnOpen) this.setStatus(e.sessionId, c, "awaiting_approval");
-        this.notifyUnattended(c, "needs your approval", e.sessionId);
+        // A card that goes ahead on silence (ComputerV2's desktop switch) is not waiting for an approval.
+        this.notifyUnattended(c, (e as { onTimeout?: string }).onTimeout === "allow" ? "switching in 1 min unless you refuse" : "needs your approval", e.sessionId);
         return;
       case "question_asked":
         this.mirrorAsk(c, e);

@@ -115,7 +115,8 @@ export const RUNTIME_HOST_TOOL_PAIRS: ReadonlyArray<readonly [runtime: string, h
  *
  * P8b-28: these four are allowed SILENTLY in every mode that has them (chat no longer has SendMessage,
  * ListAgents or ReadNotifications — user ruling 2026-10-02). Since agent SDK 0.0.39 a silent SendMessage can
- * resume and drive ANOTHER code/Cowork session at that session's own policy — a deliberate user decision
+ * resume and drive ANOTHER code session at that session's own policy — a deliberate user decision
+ * (the host predicate also reserves future Cowork participation; Cowork itself is unavailable today)
  * (the reviewer's HIGH #1 policy-escalation finding, accepted), see `agent/gate.ts`. Two of them (`SendMessage`, `ListAgents`)
  * also have host names in the pair table above, and both of those land in `gate.ts`'s `READ_ONLY`
  * — so the gate would allow them anyway. `ReadNotifications` and `advisor` have NO host

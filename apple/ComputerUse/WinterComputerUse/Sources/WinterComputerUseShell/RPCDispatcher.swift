@@ -117,12 +117,21 @@ public final class RPCDispatcher: @unchecked Sendable {
         engine("target.scriptingDictionary") { try await $0.targetScriptingDictionary($1 as TargetScriptingDictionaryParams) }
         engine("screen.screenshot") { try await $0.screenScreenshot($1 as ScreenScreenshotParams) }
         engine("screen.appAt") { try await $0.screenAppAt($1 as ScreenAppAtParams) }
+        engine("visit.close") { try await $0.visitClose($1 as VisitCloseParams) }
 
         routes["script.active"] = { [core, coordinator] params, _ in
             let p = try RPCDispatcher.decode(ScriptActiveParams.self, params)
             await coordinator.setScriptActive(sessionId: p.sessionId, active: p.active)
             core.scriptActivity(sessionId: p.sessionId, active: p.active)
             return AnyEncodable(EmptyResult())
+        }
+        // The desktop-switch prompt (a long request: it answers when the user clicks, or `expired`); `cancel
+        // {callId}` — the prompt's own id — closes it.
+        routes["prompt.desktopVisit"] = { [coordinator] params, _ in
+            let p = try RPCDispatcher.decode(PromptDesktopVisitParams.self, params)
+            try p.validate()
+            let answer = try await coordinator.askDesktopVisit(p)
+            return AnyEncodable(PromptDesktopVisitResult(answer: answer.rawValue))
         }
         routes["turn.ended"] = { [core, coordinator] params, _ in
             let p = try RPCDispatcher.decode(TurnEndedParams.self, params)
@@ -176,6 +185,47 @@ public final class RPCDispatcher: @unchecked Sendable {
         guard let id = params?["sessionId"]?.stringValue, !id.isEmpty else { throw RPCError.invalidParams("params.sessionId is required") }
         return id
     }
+}
+
+/// `prompt.desktopVisit` — the shell's own method (the desktop-switch prompt is drawn by the presentation layer).
+/// `callId` equals `promptId`: it is what the daemon's `cancel` names.
+public struct PromptDesktopVisitParams: Codable, Equatable, Sendable {
+    public var promptId: String
+    public var callId: String
+    public var sessionId: String
+    public var app: String
+    public var bundleId: String
+    public var reason: String
+    /// The fallback countdown when there is no `expiresAt`.
+    public var timeoutMs: Int?
+    /// The session card's own deadline (epoch ms): the panel's countdown runs to it.
+    public var expiresAt: Int?
+
+    public init(promptId: String, callId: String, sessionId: String, app: String, bundleId: String, reason: String,
+                timeoutMs: Int? = nil, expiresAt: Int? = nil) {
+        self.promptId = promptId
+        self.callId = callId
+        self.sessionId = sessionId
+        self.app = app
+        self.bundleId = bundleId
+        self.reason = reason
+        self.timeoutMs = timeoutMs
+        self.expiresAt = expiresAt
+    }
+
+    func validate() throws {
+        guard !promptId.isEmpty else { throw RPCError.invalidParams("params.promptId is required") }
+        guard callId == promptId else { throw RPCError.invalidParams("params.callId must equal params.promptId") }
+        guard !sessionId.isEmpty else { throw RPCError.invalidParams("params.sessionId is required") }
+        guard expiresAt != nil || (timeoutMs ?? 0) > 0 else {
+            throw RPCError.invalidParams("params.expiresAt or a positive params.timeoutMs is required")
+        }
+    }
+}
+
+/// `{answer: "switch" | "refuse" | "expired"}`.
+public struct PromptDesktopVisitResult: Codable, Equatable, Sendable {
+    public var answer: String
 }
 
 /// `script.active` — the shell's own method (the Esc tap's arming), so its params live here.

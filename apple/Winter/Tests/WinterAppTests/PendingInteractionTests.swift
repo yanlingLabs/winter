@@ -45,13 +45,33 @@ final class PendingInteractionTests: XCTestCase {
         ev(#"{"type":"agent_error","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"main","message":"\#(message)"}"#)
     }
 
+    /// ComputerV2's desktop switch (2026-10-10): a card whose deadline ALLOWS (`onTimeout: "allow"`) carries that
+    /// deadline into the pending card and the transcript record (its countdown); every other card carries none,
+    /// even with an `expiresAt` (that one fails closed).
+    func testDefaultAllowCardCarriesItsDeadline() {
+        var s = OrbSessionState()
+        s = SessionReducer.reduce(s, turnStarted())
+        s = SessionReducer.reduce(s, ev(#"{"type":"approval_requested","seq":4,"sessionId":"s","ts":0,"threadId":"main","callId":"cu_1","toolName":"ComputerV2","summary":"Switch?","issuedAt":1000,"expiresAt":61000,"options":[{"id":"switch","label":"Switch now"}],"onTimeout":"allow"}"#))
+        guard case .approval(_, _, _, _, _, let options, let defaultAllowAt) = s.pendingInteractions[0] else { return XCTFail("expected .approval") }
+        XCTAssertEqual(defaultAllowAt, 61000)
+        XCTAssertEqual(options?.first?.id, "switch")
+        let record = s.exchanges.flatMap { $0.activity.compactMap(\.interactionRecord) }.first
+        XCTAssertEqual(record?.ask, .approval(toolName: "ComputerV2", summary: "Switch?", options: options, defaultAllowAt: 61000))
+
+        var plain = OrbSessionState()
+        plain = SessionReducer.reduce(plain, turnStarted())
+        plain = SessionReducer.reduce(plain, ev(#"{"type":"approval_requested","seq":4,"sessionId":"s","ts":0,"threadId":"main","callId":"a1","toolName":"bash","summary":"rm","issuedAt":1000,"expiresAt":61000}"#))
+        guard case .approval(_, _, _, _, _, _, let none) = plain.pendingInteractions[0] else { return XCTFail("expected .approval") }
+        XCTAssertNil(none)
+    }
+
     func testApprovalRequestAppendsTypedItem() {
         var s = OrbSessionState()
         s = SessionReducer.reduce(s, turnStarted())
         s = SessionReducer.reduce(s, approvalRequested(callId: "a1", toolName: "bash", summary: "rm -rf x"))
         XCTAssertEqual(s.pendingInteractions, [.approval(callId: "a1", toolName: "bash", summary: "rm -rf x")])
         // No reviewerReason on the wire event -> nil (default), matching a pre-5e-T5 event shape.
-        guard case .approval(_, _, _, let reviewerReason, _, _) = s.pendingInteractions[0] else { return XCTFail("expected .approval") }
+        guard case .approval(_, _, _, let reviewerReason, _, _, _) = s.pendingInteractions[0] else { return XCTFail("expected .approval") }
         XCTAssertNil(reviewerReason)
     }
 

@@ -64,16 +64,18 @@ function stateOf(row: SessionRow, activity: Activity | undefined): string {
  * `manage_session` was REMOVED from Dispatch the same day (stop a session's turn with `TaskStop`, message or
  * resume one with `SendMessage`).
  *
- *   * DEFAULT — what is going on now: every ACTIVE and every BACKGROUND code/Cowork session (the
+ *   * DEFAULT — what is going on now: every ACTIVE and every BACKGROUND code session (the
  *     `session.list` derivation), plus Dispatch's own spawned sessions — an inactive one shows as
  *     `completed`, and only the newest four of those. Idle and archived sessions are not listed; their
  *     count is.
  *   * `query` — free-form ("the session that edited ~/projects/winter/config.toml", "the login fix from
  *     yesterday"): interpreted by `sessions/session-query.ts` (dates, paths against the files a session
- *     EDITED and its cwd, words against title / first message / cwd) across ALL code/Cowork sessions,
+ *     EDITED and its cwd, words against title / first message / cwd) across ALL code sessions,
  *     the hidden ones included; the closest matches first, with why each matched.
  *
  * Chat and dispatch sessions never appear: they do not participate in the lifecycle at all.
+ * The shared participation predicate reserves `cowork`, but no supported creation path supplies it;
+ * this is future groundwork, not an available Cowork session surface.
  */
 export function registerListSessionsTools(r: ToolRegistry, deps: ListSessionsDeps): void {
   for (const def of listSessionsToolDefs(deps)) r.register(def);
@@ -89,7 +91,7 @@ export function listSessionsToolDefs(deps: ListSessionsDeps): ToolDefinition[] {
     modes: ["dispatch"],
     deferred: true,
     description: [
-      "List the work sessions on this Mac — code and Cowork sessions only (chat and the dispatch session itself never appear).",
+      "List the code sessions on this Mac (chat and the dispatch session itself never appear).",
       `With no arguments: what is going on now — every active and background session, plus the sessions you spawned (an inactive one shows as "completed"; only the newest ${LIST_SESSIONS_RECENT_COMPLETED_CHILDREN} of those). Idle and archived sessions are counted, not listed.`,
       "Each row: session id, state, mode, how long a running turn has been going, working directory, title, transcript file.",
       `query: find a session by what you remember, across ALL sessions (idle and archived included) — words from its title or first message, when it ran ("yesterday", "last week", "monday", "2026-09-30"), its directory, or a file it edited ("the session that edited ~/projects/winter/config.toml", or just the path). The ${LIST_SESSIONS_QUERY_MAX_ROWS} closest matches come back first, each with why it matched.`,

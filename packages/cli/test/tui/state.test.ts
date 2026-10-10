@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { initialState, reduce, type TuiState } from "../../src/tui/state";
+import { approvalResolvedNote, initialState, reduce, type TuiState } from "../../src/tui/state";
 
 const T0 = 1_700_000_000_000;
 
@@ -504,6 +504,20 @@ describe("state.ts — pending cards (f)", () => {
       summary: "rm -rf tmp/",
       reviewerReason: "recursive delete outside the session cwd",
     });
+  });
+
+  test("a default-allow card (ComputerV2's desktop switch) keeps its countdown; a timeout ALLOW is never noted as a person's approval", () => {
+    let s = initialState();
+    s = reduce(s, { type: "approval_requested", threadId: "main", callId: "cu_1", toolName: "ComputerV2", summary: "Switch?", expiresAt: T0 + 60_000, onTimeout: "allow", options: [{ id: "switch", label: "Switch now" }] }, T0);
+    expect(s.pending).toMatchObject({ kind: "approval", callId: "cu_1", expiresAt: T0 + 60_000, onTimeout: "allow" });
+    s = reduce(s, { type: "approval_resolved", threadId: "main", callId: "cu_1", approved: true, by: "timeout" }, T0 + 60_000);
+    expect(s.committed).toContainEqual({ kind: "note", text: "allowed ComputerV2 — no answer in time" });
+    // An ordinary card has neither field.
+    s = reduce(s, { type: "approval_requested", threadId: "main", callId: "c2", toolName: "bash", summary: "ls", expiresAt: T0 + 9 }, T0);
+    expect(Object.prototype.hasOwnProperty.call(s.pending!, "onTimeout")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(s.pending!, "expiresAt")).toBe(false);
+    expect(approvalResolvedNote("ComputerV2", false, "desktop-prompt")).toBe("denied ComputerV2 (on the on-screen prompt)");
+    expect(approvalResolvedNote("bash", false, "timeout")).toBe("denied bash");
   });
 
   test("approval_resolved(denied) commits a denied note", () => {

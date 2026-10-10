@@ -46,7 +46,11 @@ extension CUCore {
                 tailFrom = true
             }
         }
-        if !active { releaseHeldForeground(sessionId: sessionId) }
+        if !active {
+            releaseHeldForeground(sessionId: sessionId)
+            // The script ended: its open desktop visit closes now (the user returned).
+            Task { [weak self] in _ = await self?.closeVisit(of: sessionId, reason: .scriptEnded) }
+        }
         if arm { _ = startGuardian(privatePath: true) }
         if tailFrom {
             let work = guardianTailSchedule(Self.guardianTail) { [weak self] in self?.endGuardIfIdle() }
@@ -101,9 +105,13 @@ extension CUCore {
         return last >= 0 && now - last <= Self.guardianHardwareWindow
     }
 
-    /// The listen-only tap saw a hardware-origin event (source pid 0, not ours).
-    func noteHardwareInput(now: TimeInterval) {
-        guardianLock.withLock { lastHardwareInputAt = now }
+    /// The listen-only tap (or the gesture monitor) saw a hardware-origin event (source pid 0, not ours). `move`:
+    /// only the pointer moved — input for the guardian's attribution, but never an ACTION a desktop visit counts.
+    func noteHardwareInput(now: TimeInterval, move: Bool = false) {
+        guardianLock.withLock {
+            lastHardwareInputAt = now
+            if !move { lastHardwareActionAt = now }
+        }
     }
 
     /// Starts guarding (private path only). Idempotent; returns whether it is running.
@@ -148,9 +156,16 @@ extension CUCore {
                                            .otherMouseDown, .keyDown, .flagsChanged]
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let monitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
+            let monitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
                 guard let self else { return }
-                self.noteHardwareInput(now: self.clock.nowSeconds())
+                // A gesture has no event of its own (hardware); anything else must come from no process and not be
+                // the helper's own (another app's synthetic input is not the user's).
+                let kind = event.cgEvent.map {
+                    CUHardwareInput.classify(type: $0.type, sourcePid: $0.getIntegerValueField(.eventSourceUnixProcessID),
+                                             userData: $0.getIntegerValueField(.eventSourceUserData))
+                } ?? (event.type == .mouseMoved ? .move : .action)
+                guard kind != .none else { return }
+                self.noteHardwareInput(now: self.clock.nowSeconds(), move: kind == .move)
             }
             let stale = self.guardianLock.withLock { () -> Bool in
                 if self.guardianRefs == 0 { return true }
@@ -221,7 +236,10 @@ extension CUCore {
 
     func onActivation(pid: pid_t) {
         let now = clock.nowSeconds()
-        let userInput = userInputRecent(now: now)
+        // During a desktop visit only input AFTER it began is the user's (never the click that allowed it).
+        let visit = visitInput(now: now)
+        let userInput = visit ?? userInputRecent(now: now)
+        if visit == true { noteVisitUserMove() }
         let synthetic = now - lastSyntheticActivationAt < Self.guardianSyntheticWindow
         let activation = CUActivation(app: pid, space: sys.activeSpace(), hadRecentUserInput: userInput, fromSyntheticEvent: synthetic,
                                       suspect: guardianSuspect(pid, now: now))
@@ -234,7 +252,9 @@ extension CUCore {
 
     func onSpaceChange() {
         let now = clock.nowSeconds()
-        let userInput = userInputRecent(now: now)
+        let visit = visitInput(now: now)
+        let userInput = visit ?? userInputRecent(now: now)
+        if visit == true { noteVisitUserMove() }
         let caused = guardianSpaceChangeCaused(now: now)
         let front = sys.frontmostPid()
         guardianLock.lock()
@@ -373,10 +393,11 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
     guard let refcon, let core = Unmanaged<CUCPSTapContext>.fromOpaque(refcon).takeUnretainedValue().core else {
         return Unmanaged.passUnretained(event)
     }
-    // Hardware-origin input (no source process, not ours): the user's own, whatever its type.
-    if type.rawValue != CUFocusTaps.processNotificationType, event.getIntegerValueField(.eventSourceUnixProcessID) == 0,
-       !CUEventStamp.isOurs(event.getIntegerValueField(.eventSourceUserData)) {
-        core.noteHardwareInput(now: core.clock.nowSeconds())
+    // Hardware-origin input (no source process, not ours): the user's own — a pointer move told apart.
+    if type.rawValue != CUFocusTaps.processNotificationType {
+        let kind = CUHardwareInput.classify(type: type, sourcePid: event.getIntegerValueField(.eventSourceUnixProcessID),
+                                            userData: event.getIntegerValueField(.eventSourceUserData))
+        if kind != .none { core.noteHardwareInput(now: core.clock.nowSeconds(), move: kind == .move) }
     }
     if type == .leftMouseDown {
         core.onPhysicalClick(at: event.location, userData: event.getIntegerValueField(.eventSourceUserData),
@@ -389,4 +410,22 @@ private let cpsTapCallback: CGEventTapCallBack = { _, type, event, refcon in
                            subjectPID: pid_t(f(CUFocusField.subjectPID)), theftID: Int32(truncatingIfNeeded: f(CUFocusField.theftID)),
                            now: core.clock.nowSeconds())
     return Unmanaged.passUnretained(event)
+}
+
+/// What one input event is to the guardian. Pure.
+enum CUHardwareInput: Equatable {
+    /// Not the user's: a process posted it (synthetic), or the helper did (its stamp).
+    case none
+    /// The pointer moved, and nothing else.
+    case move
+    /// A click, a key, a scroll, a drag, a gesture.
+    case action
+
+    static func classify(type: CGEventType, sourcePid: Int64, userData: Int64) -> CUHardwareInput {
+        guard sourcePid == 0, !CUEventStamp.isOurs(userData) else { return .none }
+        switch type {
+        case .mouseMoved, .null, .tapDisabledByTimeout, .tapDisabledByUserInput: return type == .mouseMoved ? .move : .none
+        default: return .action
+        }
+    }
 }

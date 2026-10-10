@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { render } from "ink-testing-library";
 import { Text } from "ink";
-import { PendingCards, capReviewerReason } from "../../src/tui/pending-cards";
+import { PendingCards, capReviewerReason, defaultAllowLine, secondsLeft } from "../../src/tui/pending-cards";
 import type { PendingCard } from "../../src/tui/state";
 import { theme } from "../../src/tui/theme";
 
@@ -656,5 +656,42 @@ describe("PendingCards — elicitation", () => {
       await wait();
       expect(calls).toEqual([["el_1", open, "linear.app"]]);
     }
+  });
+});
+
+describe("PendingCards — a card that default-ALLOWS (ComputerV2's desktop switch, 2026-10-10)", () => {
+  const card: PendingCard = {
+    kind: "approval", callId: "cu_1", toolName: "ComputerV2", summary: "Switch to Safari's desktop for a moment? Safari (com.apple.Safari) — to read the chart.",
+    options: [{ id: "switch", label: "Switch now" }], expiresAt: Date.now() + 42_500, onTimeout: "allow",
+  };
+
+  test("renders the question, a live countdown of what silence does, and switch / don't-switch keys", async () => {
+    const fresh: PendingCard = { ...card, expiresAt: Date.now() + 42_500 } as PendingCard;
+    const { lastFrame } = render(<PendingCards pending={fresh} onApprove={() => {}} onAnswer={() => {}} onPlan={() => {}} />);
+    await wait();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Switch to Safari's desktop for a moment?");
+    expect(frame).toMatch(/no answer in 4[23] s: it switches/);
+    expect(frame).toContain("[y] switch now  [n] don't switch");
+    expect(frame).not.toContain("[1]");
+  });
+
+  test("'y' switches (a plain approve); anything else — Enter included — refuses: only silence allows", async () => {
+    for (const [keys, yes] of [["y", true], ["n", false], ["", false], ["yes", false]] as const) {
+      const calls: Array<[string, boolean, string | undefined]> = [];
+      const { stdin } = render(<PendingCards pending={card} onApprove={(id, ok, opt) => calls.push([id, ok, opt])} onAnswer={() => {}} onPlan={() => {}} />);
+      await wait();
+      if (keys.length > 0) { stdin.write(keys); await wait(); }
+      stdin.write("\r");
+      await wait();
+      expect(calls).toEqual([["cu_1", yes, undefined]]);
+    }
+  });
+
+  test("the countdown words", () => {
+    expect(defaultAllowLine(10_000, 0)).toBe("no answer in 10 s: it switches");
+    expect(defaultAllowLine(10_000, 9_001)).toBe("no answer in 1 s: it switches");
+    expect(defaultAllowLine(10_000, 10_000)).toBe("no answer: switching");
+    expect(secondsLeft(10_000, 20_000)).toBe(0);
   });
 });
