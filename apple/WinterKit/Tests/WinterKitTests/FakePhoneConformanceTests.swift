@@ -96,7 +96,7 @@ final class FakePhoneConformanceTests: XCTestCase {
                 return listener
             },
             makeDaemonFactory: {
-                WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway")
+                WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway", requestTimeout: RealDaemon.requestTimeout)
             }
         )
         // Force-starts (even at zero paired devices) so the listener is bound before pairing.
@@ -155,7 +155,7 @@ final class FakePhoneConformanceTests: XCTestCase {
     // that confirm the underlying events genuinely happened.
 
     private func harnessClient(_ daemon: RealDaemon, name: String) async throws -> WinterClient {
-        let c = WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: name)
+        let c = WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: name, requestTimeout: RealDaemon.requestTimeout)
         try await c.connect(role: "harness")
         return c
     }

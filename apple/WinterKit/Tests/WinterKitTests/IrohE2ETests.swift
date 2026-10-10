@@ -49,7 +49,7 @@ final class IrohE2ETests: XCTestCase {
         let gateway = Gateway(
             listener: listener,
             daemonFactory: {
-                WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway")
+                WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway", requestTimeout: RealDaemon.requestTimeout)
             },
             hostID: "host-e2e",
             directory: directory
@@ -70,7 +70,7 @@ final class IrohE2ETests: XCTestCase {
     /// A harness-role `WinterClient` connected to `daemon` — used to seed/verify session state from
     /// a principal OTHER than the phone (mirrors `GatewayGateTests`' own `seedTwoMessages` helper).
     private func harnessClient(_ daemon: RealDaemon, name: String) async throws -> WinterClient {
-        let c = WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: name)
+        let c = WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: name, requestTimeout: RealDaemon.requestTimeout)
         try await c.connect(role: "harness")
         return c
     }

@@ -39,6 +39,12 @@ enum RealDaemonError: Error, CustomStringConvertible {
 /// exercise the gateway's daemon-facing bridge client against REAL `hub.attach` semantics instead
 /// of a scripted/fake `WinterTransport`.
 struct RealDaemon {
+    /// The request timeout for a `WinterClient` talking to a REAL daemon in these tests. Nothing in them is about the
+    /// timeout, and the default 5 s is shorter than a freshly booted daemon can take to answer `session.dispatch`
+    /// when the suite shares the machine with other test runs — a request that has not been answered by then is a
+    /// busy box, not a bug. A request still fails when the daemon never answers; it just takes longer to say so.
+    static let requestTimeout: Duration = .seconds(30)
+
     let socketPath: String
     let harnessToken: String
     let remoteToken: String
@@ -272,9 +278,13 @@ struct RealDaemon {
     /// (`testStartCleansUpOnBadOutput`'s own `.badOutput("not-json")` expectation) — or throws
     /// `.processExitedEarly` if it printed nothing decodable at all, exactly as before. Requires an
     /// actual `\n` to have arrived per line (not just non-empty content) so a partial write
-    /// mid-flush is never mistaken for a complete line. 20s deadline: `startDaemon` boots a full
-    /// agent-less core (sessions store, hub, IPC server, routine scheduler, ...) — a couple of
-    /// seconds on a warm machine, generous headroom for CI.
+    /// mid-flush is never mistaken for a complete line. The wait is bounded by PROGRESS, not by one
+    /// wall-clock number: `startDaemon` boots a full agent-less core (sessions store, hub, IPC server,
+    /// routine scheduler, ...) — a couple of seconds on a warm machine, but 10-25 s when the suite shares the
+    /// box with other test runs (a fixed 20 s deadline failed three e2e tests in one such run). So it gives
+    /// up when the process has written nothing new to stdout or stderr for `stallSeconds` (a hung boot), or
+    /// at `ceilingSeconds` regardless (a boot that logs forever); a slow boot that keeps narrating is
+    /// waited for. A passing run leaves the moment the hello line lands.
     ///
     /// Winter Phase 9a (P9a-11, Lane K): the "DIFFERENT, deeper failure class" this fix's own
     /// commit message carried forward (`CancellationError()`/`IrohError ConnectionLost
@@ -329,11 +339,21 @@ struct RealDaemon {
     /// Responses endpoint from its own `bun -e` process and points the daemon's `openai` provider at
     /// it, so the real adapter streams the scenario through a real Winter-leg turn.
     private static func waitForFirstLine(
-        process: Process, stdoutPath: String, stderrPath: String, timeoutSeconds: Double = 20
+        process: Process, stdoutPath: String, stderrPath: String, stallSeconds: Double = 30, ceilingSeconds: Double = 120
     ) async throws -> String {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        let ceiling = Date().addingTimeInterval(ceilingSeconds)
+        var lastOutputSize = -1
+        var lastProgress = Date()
+        func outputSize() -> Int {
+            [stdoutPath, stderrPath].reduce(0) { total, path in
+                total + ((try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0)
+            }
+        }
         var skipped: [String] = []
-        while Date() < deadline {
+        while Date() < ceiling {
+            let size = outputSize()
+            if size != lastOutputSize { lastOutputSize = size; lastProgress = Date() }
+            if Date().timeIntervalSince(lastProgress) > stallSeconds { break }
             if let data = FileManager.default.contents(atPath: stdoutPath),
                let text = String(data: data, encoding: .utf8) {
                 // `dropLast()`: splitting "a\nb\n" by "\n" yields ["a", "b", ""] (a trailing empty
@@ -434,7 +454,8 @@ final class RealDaemonTests: XCTestCase {
         let client = WinterClient(
             makeTransport: { UnixSocketTransport(path: daemon.socketPath) },
             token: daemon.harnessToken,
-            clientName: "real-daemon-self-test"
+            clientName: "real-daemon-self-test",
+            requestTimeout: RealDaemon.requestTimeout
         )
         // A successful return IS the hello-succeeded signal (WinterClient.connect's own contract).
         try await client.connect(role: "harness")

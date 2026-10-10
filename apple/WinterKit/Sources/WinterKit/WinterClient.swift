@@ -8,6 +8,11 @@ public actor WinterClient {
     private let token: String
     private let clientName: String
     private let requestTimeout: Duration
+    /// How a request's timeout passes. Production sleeps for real; a test hands in a clock it releases by hand, so the
+    /// timeout path never depends on how long the test happens to take to get a request onto the wire. (`init` takes it
+    /// as an optional, not a default-argument closure: Swift 6.3.1 miscompiles a default `async` closure here — every
+    /// request then died with "freed pointer was not the last allocation".)
+    private let sleep: @Sendable (Duration) async throws -> Void
 
     // internal (not private): WinterClient+Reconnect.swift needs to close a stale transport when a
     // deliberate close() lands mid-reconnect (Task 9 review fix 2).
@@ -109,12 +114,14 @@ public actor WinterClient {
         makeTransport: @escaping @Sendable () -> WinterTransport,
         token: String,
         clientName: String,
-        requestTimeout: Duration = .seconds(5)
+        requestTimeout: Duration = .seconds(5),
+        sleep: (@Sendable (Duration) async throws -> Void)? = nil
     ) {
         self.makeTransport = makeTransport
         self.token = token
         self.clientName = clientName
         self.requestTimeout = requestTimeout
+        self.sleep = sleep ?? { duration in try await Task.sleep(for: duration) }
         let traffic = EventTraffic()
         var c: AsyncStream<WinterEvent>.Continuation!
         self.events = AsyncStream { c = $0 }
@@ -166,6 +173,13 @@ public actor WinterClient {
         eventsCont.finish() // deliberate close: the event stream ENDS — consumers' for-await loops exit
         observers.finishAll()
         notificationObservers.finishAll()
+    }
+
+    /// Test seam: returns once the read pump has ended — the transport's `incoming` stream finished — so every
+    /// transport event it was going to turn into a client event (a deliberate `close()` is followed by the
+    /// transport's own `.closed`, which becomes a `.connection(.disconnected)`) has been handled. Nothing else says when.
+    func pumpFinishedForTesting() async {
+        await pumpTask?.value
     }
 
     private func startPump(_ t: WinterTransport) {
@@ -291,8 +305,9 @@ public actor WinterClient {
         let data = try JSONEncoder().encode(JSONValue.object(obj))
         // timeout watchdog: resumes the continuation with an error if the response never lands
         let timeout = requestTimeout
+        let sleep = self.sleep
         let watchdog = Task { [weak self] in
-            try? await Task.sleep(for: timeout)
+            try? await sleep(timeout)
             await self?.timeOut(id: id, method: method)
         }
         defer { watchdog.cancel() }

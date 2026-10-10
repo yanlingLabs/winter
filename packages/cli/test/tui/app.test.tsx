@@ -16,16 +16,19 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanup, render } from "ink-testing-library";
+import { settle, until, wait as settledWait } from "../helpers/settle";
 import { METHODS } from "@yanlinglabs/winter-protocol";
 import { CORE_VERSION } from "@yanlinglabs/winter-core";
 import { App, bottomBarRows } from "../../src/tui/app";
-import { makeEventBridge } from "../../src/tui/event-bridge";
+import { DELTA_COALESCE_MS, makeEventBridge } from "../../src/tui/event-bridge";
 import type { AgentRow } from "../../src/tui/state";
 import type { TaskRow } from "../../src/task-display";
 
 // useInput / effects wire on the tick after render() returns — a short wait after render and after
-// each push/keystroke keeps assertions deterministic.
-const wait = (ms = 25) => new Promise((r) => setTimeout(r, ms));
+// each push/keystroke keeps assertions deterministic. `wait` is a real pause PLUS a `settle` (see
+// helpers/settle.ts: a wall-clock timer alone races React's queued work on a loaded machine); `until` waits for a
+// condition instead of a duration.
+const wait = (ms = 25) => settledWait(ms);
 
 afterEach(cleanup);
 
@@ -1822,20 +1825,49 @@ describe("bottomBarLayout — the composer+chrome slot never exceeds 50% of term
 // ever rendered counts the renders the burst caused (the ticking clock re-renders the SAME fold
 // state, so it can't inflate the count; only a delta dispatch can mint a NEW state).
 describe("App — delta coalescing (TUI renderer T4)", () => {
+  // The window is a hand-driven clock (`coalesceTimers`), so how many deltas share a window is decided by the
+  // test, never by how fast the machine happens to run: a real-time version of this paced 12 deltas with
+  // `wait(1)` and asserted "≤3 states", which a loaded runner turned into one window PER delta.
+  const manualTimers = () => {
+    const armed: { id: number; fn: () => void; ms: number }[] = [];
+    let seq = 0;
+    return {
+      armedCount: () => armed.length,
+      lastMs: () => armed[armed.length - 1]?.ms,
+      set: (fn: () => void, ms: number) => { const id = ++seq; armed.push({ id, fn, ms }); return id; },
+      clear: (id: unknown) => { const i = armed.findIndex((t) => t.id === id); if (i >= 0) armed.splice(i, 1); },
+      /** The window elapses: every armed timer fires. */
+      elapse: () => { for (const t of armed.splice(0)) t.fn(); },
+    };
+  };
+
   test("a rapid delta burst folds to a handful of rendered states — never one render per delta", async () => {
     const bridge = makeEventBridge();
     const client = fakeClient();
-    const { frames, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+    const timers = manualTimers();
+    const { frames, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} coalesceTimers={timers} />);
     await wait(); // subscribe effect
     bridge.push(ev({ type: "user_message", threadId: "main", text: "go" }));
     bridge.push(ev({ type: "turn_started", threadId: "main" }));
     await wait();
     const N = 12;
-    for (let i = 0; i < N; i++) {
-      bridge.push(ev({ type: "assistant_delta", threadId: "main", delta: `«${i}»` }));
-      await wait(1); // macrotask spacing — each delta arrives as its own task, like the wire
-    }
-    await wait(40); // let the trailing-edge window(s) flush
+    const push = async (from: number, to: number) => {
+      for (let i = from; i < to; i++) {
+        bridge.push(ev({ type: "assistant_delta", threadId: "main", delta: `«${i}»` }));
+        await settle(); // each delta arrives as its own task, like the wire — the window has not elapsed
+      }
+    };
+    await push(0, N / 2);
+    expect(timers.armedCount()).toBe(1); // six deltas, ONE timer: the first of the window arms it
+    expect(timers.lastMs()).toBe(DELTA_COALESCE_MS);
+    expect(lastFrame() ?? "").not.toContain("«0»"); // held back until the window elapses
+    timers.elapse(); // window 1 flushes: one merged dispatch
+    await settle();
+    expect(lastFrame() ?? "").toContain(`«${N / 2 - 1}»`);
+    await push(N / 2, N);
+    expect(timers.armedCount()).toBe(1); // a new window, a new timer
+    timers.elapse(); // window 2 flushes
+    await settle();
     expect(lastFrame() ?? "").toContain(`«${N - 1}»`); // the full burst landed — nothing dropped
     // For each frame: the highest «i» visible = which fold state that render showed.
     const states = new Set<number>();
@@ -1844,8 +1876,18 @@ describe("App — delta coalescing (TUI renderer T4)", () => {
         if (f.includes(`«${i}»`)) { states.add(i); break; }
       }
     }
-    expect(states.size).toBeGreaterThan(0);
-    expect(states.size).toBeLessThanOrEqual(3); // 12 deltas ⇒ ≤3 rendered fold states (≈1-2 windows)
+    expect([...states].sort((a, b) => a - b)).toEqual([N / 2 - 1, N - 1]); // 12 deltas ⇒ exactly the two windows' states
+  });
+
+  test("with the real timers the trailing flush delivers the deltas by itself", async () => {
+    const bridge = makeEventBridge();
+    const { lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
+    await wait();
+    bridge.push(ev({ type: "user_message", threadId: "main", text: "go" }));
+    bridge.push(ev({ type: "turn_started", threadId: "main" }));
+    await wait();
+    for (let i = 0; i < 5; i++) bridge.push(ev({ type: "assistant_delta", threadId: "main", delta: `«${i}»` }));
+    await until(() => (lastFrame() ?? "").includes("«4»"), "the coalescer's own timer to flush the burst");
   });
 });
 
@@ -2158,13 +2200,18 @@ describe("App — shift+tab policy switch reports a bypass crossing", () => {
 // and `images` names each staged path (the daemon gives the model the paths) — or, to a daemon whose
 // stage result lacks `imagesOnSend`, with the paths substituted into the text as before.
 describe("App — code-mode image input", () => {
-  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  // 24 bytes: signature + IHDR header + width 1 + height 1. With the dimensions stated the image is within the 1568 px
+  // attach cap, so `prepareDraftImage` returns it untouched at once. (The old 16-byte fixture stated none, which sent
+  // every attach through a real `/usr/bin/sips` subprocess — whose latency is whatever the machine's load makes it,
+  // and the fixed waits below raced it. Resizing is `images.test.ts`'s business, not this file's.)
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1]);
   const TAG = "codex-oauth/gpt-5.6-sol";
   const syncConfig = (supportsImages: boolean) => (method: string) =>
     method === METHODS.syncConfig
       ? { models: [{ id: TAG, providerId: "codex-oauth", displayName: "GPT-5.6 Sol", efforts: [], supportsImages }] }
       : {};
   const plain = (frame: string | undefined) => (frame ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+  const callsOf = (client: ReturnType<typeof fakeClient>, method: string) => client.calls.filter((c) => c.method === method);
 
   test("a pasted image path becomes [Image #1]; Enter stages it and sends the placeholder plus its path in images", async () => {
     const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
@@ -2178,10 +2225,9 @@ describe("App — code-mode image input", () => {
       await wait();
       // Terminal.app drags a file in as its shell-escaped path.
       stdin.write(path.replace(/ /g, "\\ "));
-      await wait(60);
-      expect(plain(lastFrame())).toContain("look at [Image #1]");
+      await until(() => plain(lastFrame()).includes("look at [Image #1]"), "the pasted path to become [Image #1]");
       stdin.write("\r");
-      await wait(60);
+      await until(() => callsOf(client, "send").length > 0, "the draft to be staged and sent");
       const stage = client.calls.find((c) => c.method === "stageImage");
       expect(stage?.args).toEqual(["s1", "image/png", Buffer.from(PNG).toString("base64")]);
       expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "look at [Image #1]", [{ n: 1, path: "/tmp/winter-session-s1/images/image_1.png" }]]);
@@ -2190,22 +2236,22 @@ describe("App — code-mode image input", () => {
 
   test("ctrl+v attaches the clipboard's image; an empty clipboard inserts nothing", async () => {
     let clip: Uint8Array | null = PNG;
+    let reads = 0; // the clipboard reader's calls: the barrier for "ctrl+v was handled" when nothing is inserted
     const client = fakeClient({ request: syncConfig(true) });
     const { stdin, lastFrame } = render(
-      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(clip)} />,
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => { reads++; return Promise.resolve(clip); }} />,
     );
     await wait();
     stdin.write("\x16");
-    await wait(60);
-    expect(plain(lastFrame())).toContain("[Image #1]");
+    await until(() => plain(lastFrame()).includes("[Image #1]"), "the clipboard image to become [Image #1]");
     clip = null;
     stdin.write("\x16");
-    await wait(60);
+    await until(() => reads === 2, "the second ctrl+v to read the (empty) clipboard");
+    await wait(); // the empty read's continuation has run: nothing was inserted
     expect(plain(lastFrame())).not.toContain("[Image #2]");
     clip = PNG;
     stdin.write("\x16");
-    await wait(60);
-    expect(plain(lastFrame())).toContain("[Image #1][Image #2]");
+    await until(() => plain(lastFrame()).includes("[Image #1][Image #2]"), "the third ctrl+v to add [Image #2]");
   });
 
   test("a model without image input refuses at attach time with the exact message, and attaches nothing", async () => {
@@ -2215,13 +2261,12 @@ describe("App — code-mode image input", () => {
     );
     await wait();
     stdin.write("\x16");
-    await wait(60);
-    expect(plain(lastFrame())).toContain("The selected model doesn't support images");
+    await until(() => plain(lastFrame()).includes("The selected model doesn't support images"), "the attach refusal note");
     expect(plain(lastFrame())).not.toContain("[Image #1]");
     stdin.write("hi");
-    await wait();
+    await until(() => plain(lastFrame()).includes("hi"), "the typed text");
     stdin.write("\r");
-    await wait(60);
+    await until(() => callsOf(client, "send").length > 0, "the plain message to be sent");
     expect(client.calls.some((c) => c.method === "stageImage")).toBe(false);
     expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "hi"]);
   });
@@ -2238,9 +2283,10 @@ describe("App — code-mode image input", () => {
     stdin.write("see ");
     await wait();
     stdin.write("\x16");
-    await wait(60);
+    await until(() => plain(lastFrame()).includes("see [Image #1]"), "the clipboard image to become [Image #1]");
     stdin.write("\r");
-    await wait(80);
+    await until(() => callsOf(client, "stageImage").length > 0 && plain(lastFrame()).includes("The selected model doesn't support images"), "the staging refusal note");
+    await wait();
     expect(client.calls.some((c) => c.method === "send")).toBe(false);
     const frame = plain(lastFrame());
     expect(frame).toContain("The selected model doesn't support images");
@@ -2260,13 +2306,13 @@ describe("App — code-mode image input", () => {
     stdin.write("first ");
     await wait();
     stdin.write("\x16");
-    await wait(60);
+    await until(() => plain(lastFrame()).includes("first [Image #1]"), "the clipboard image to become [Image #1]");
     stdin.write("\r");
-    await wait(40);
+    await until(() => callsOf(client, "stageImage").length > 0, "the draft to start staging"); // `reject` is set once staging began
     stdin.write("second");
-    await wait(40);
+    await until(() => plain(lastFrame()).includes("second"), "the new text typed while the first draft stages");
     reject(new Error("The selected model doesn't support images"));
-    await wait(80);
+    await until(() => plain(lastFrame()).includes("first [Image #1]") && plain(lastFrame()).includes("second"), "the refused draft to come back beside the new one");
     const frame = plain(lastFrame());
     expect(frame).toContain("first [Image #1]");
     expect(frame).toContain("second");
@@ -2279,23 +2325,23 @@ describe("App — code-mode image input", () => {
       request: syncConfig(true),
       stageImage: () => new Promise<{ path: string; imagesOnSend?: boolean }>((r) => { resolve = r; }),
     });
-    const { stdin } = render(
+    const { stdin, lastFrame } = render(
       <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
     );
     await wait();
     stdin.write("one ");
     await wait();
     stdin.write("\x16");
-    await wait(60);
+    await until(() => plain(lastFrame()).includes("one [Image #1]"), "the clipboard image to become [Image #1]");
     stdin.write("\r");
-    await wait(40);
+    await until(() => callsOf(client, "stageImage").length > 0, "the image draft to start staging"); // `resolve` is set now
     stdin.write("two");
-    await wait();
+    await until(() => plain(lastFrame()).includes("two"), "the second draft's text");
     stdin.write("\r");
-    await wait(40);
+    await wait(40); // the Enter has been handled (a loop-turn barrier); nothing may be sent while the first draft stages
     expect(client.calls.filter((c) => c.method === "send")).toEqual([]); // "two" waits its turn
     resolve({ path: "/t/image_1.png", imagesOnSend: true });
-    await wait(60);
+    await until(() => callsOf(client, "send").length === 2, "both drafts to go out, in order");
     expect(client.calls.filter((c) => c.method === "send").map((c) => c.args.slice(1))).toEqual([
       ["one [Image #1]", [{ n: 1, path: "/t/image_1.png" }]],
       ["two"],
@@ -2313,11 +2359,11 @@ describe("App — code-mode image input", () => {
       stdin.write("see ");
       await wait();
       stdin.write(path);
-      await wait(80);
-      expect(plain(lastFrame())).toContain("The selected model doesn't support images");
+      await until(() => plain(lastFrame()).includes("The selected model doesn't support images"), "the attach refusal note");
+      await wait(); // the path is typed in the same continuation as the note: let it render
       expect(plain(lastFrame())).not.toContain("[Image #");
       stdin.write("\r");
-      await wait(60);
+      await until(() => callsOf(client, "send").length > 0, "the message to be sent");
       expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", `see ${path}`]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -2331,10 +2377,9 @@ describe("App — code-mode image input", () => {
     stdin.write("old [Image #1] ");
     await wait();
     stdin.write("\x16");
-    await wait(60);
-    expect(plain(lastFrame())).toContain("old [Image #1] [Image #2]");
+    await until(() => plain(lastFrame()).includes("old [Image #1] [Image #2]"), "the new attachment to be numbered #2");
     stdin.write("\r");
-    await wait(60);
+    await until(() => callsOf(client, "send").length > 0, "the message to be sent");
     // #1 was never attached in THIS draft, so it stays literal and is not named; only #2 is staged.
     expect(client.calls.filter((c) => c.method === "stageImage").length).toBe(1);
     expect(client.calls.find((c) => c.method === "send")?.args.slice(1)).toEqual(["old [Image #1] [Image #2]", [{ n: 2, path: "/tmp/winter-session-s1/images/image_1.png" }]]);
@@ -2351,8 +2396,7 @@ describe("App — code-mode image input", () => {
     );
     await wait();
     stdin.write("\x16");
-    await wait(60);
-    expect(plain(lastFrame())).toContain("[Image #1]");
+    await until(() => plain(lastFrame()).includes("[Image #1]"), "the attach to go through");
   });
 
   test("an applied placeholder never replays when a pending card unmounts and remounts the composer", async () => {
@@ -2363,19 +2407,17 @@ describe("App — code-mode image input", () => {
     );
     await wait();
     stdin.write("\x16");
-    await wait(60);
-    expect(plain(lastFrame())).toContain("[Image #1]");
+    await until(() => plain(lastFrame()).includes("[Image #1]"), "the clipboard image to become [Image #1]");
     stdin.write("x");
-    await wait();
+    await until(() => plain(lastFrame()).includes("[Image #1]x"), "the typed character");
     stdin.write("\r");
-    await wait(60);
+    await until(() => callsOf(client, "send").length > 0, "the message to be sent");
     expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "[Image #1]x", [{ n: 1, path: "/tmp/winter-session-s1/images/image_1.png" }]]);
     bridge.push(ev({ type: "approval_requested", callId: "c1", toolName: "bash", summary: "ls" }));
-    await wait();
-    expect(plain(lastFrame())).toContain("approve bash?");
+    await until(() => plain(lastFrame()).includes("approve bash?"), "the approval card");
     bridge.push(ev({ type: "approval_resolved", callId: "c1", approved: true }));
-    await wait(60);
-    expect(plain(lastFrame())).toContain("❯");
+    await until(() => plain(lastFrame()).includes("❯"), "the composer to come back");
+    await wait(); // let the remounted composer finish rendering before the negative check
     expect(plain(lastFrame())).not.toContain("[Image #");
   });
 
@@ -2384,23 +2426,23 @@ describe("App — code-mode image input", () => {
       request: syncConfig(true),
       stageImage: (sid) => Promise.resolve({ path: `/tmp/winter-session-${sid}/images/image_1.png` }),
     });
-    const { stdin } = render(
+    const { stdin, lastFrame } = render(
       <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
     );
     await wait();
     stdin.write("see ");
     await wait();
     stdin.write("\x16");
-    await wait(60);
+    await until(() => plain(lastFrame()).includes("see [Image #1]"), "the clipboard image to become [Image #1]");
     stdin.write("\r");
-    await wait(60);
+    await until(() => callsOf(client, "send").length > 0, "the message to be sent");
     expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "see /tmp/winter-session-s1/images/image_1.png"]);
   });
 
   test("a steer into a running turn carries the placeholder and images too", async () => {
     const bridge = makeEventBridge();
     const client = fakeClient({ request: syncConfig(true) });
-    const { stdin } = render(
+    const { stdin, lastFrame } = render(
       <App client={client} bridge={bridge} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
     );
     await wait();
@@ -2409,9 +2451,9 @@ describe("App — code-mode image input", () => {
     stdin.write("also ");
     await wait();
     stdin.write("\x16");
-    await wait(60);
+    await until(() => plain(lastFrame()).includes("also [Image #1]"), "the clipboard image to become [Image #1]");
     stdin.write("\r");
-    await wait(60);
+    await until(() => callsOf(client, "steer").length > 0, "the steer to go out");
     expect(client.calls.some((c) => c.method === "send")).toBe(false);
     expect(client.calls.find((c) => c.method === "steer")?.args).toEqual(["s1", "also [Image #1]", [{ n: 1, path: "/tmp/winter-session-s1/images/image_1.png" }]]);
   });
@@ -2419,7 +2461,7 @@ describe("App — code-mode image input", () => {
   test("a child view's message (thread.send has no images door) is sent with the paths in the text", async () => {
     const bridge = makeEventBridge();
     const client = fakeClient({ request: syncConfig(true) });
-    const { stdin } = render(
+    const { stdin, lastFrame } = render(
       <App client={client} bridge={bridge} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
     );
     await wait();
@@ -2431,11 +2473,11 @@ describe("App — code-mode image input", () => {
     stdin.write("\r"); // open th_1's child view
     await wait();
     stdin.write("look ");
-    await wait();
+    await until(() => plain(lastFrame()).includes("look "), "the text typed into the child view's composer");
     stdin.write("\x16");
-    await wait(60);
+    await until(() => plain(lastFrame()).includes("look [Image #1]"), "the clipboard image to become [Image #1]");
     stdin.write("\r");
-    await wait(60);
+    await until(() => callsOf(client, "sendToThread").length > 0, "the child-view message to go out");
     expect(client.calls.find((c) => c.method === "sendToThread")?.args).toEqual(["s1", "th_1", "look /tmp/winter-session-s1/images/image_1.png"]);
     expect(client.calls.some((c) => c.method === "send" || c.method === "steer")).toBe(false);
   });
@@ -2451,19 +2493,18 @@ describe("App — code-mode image input", () => {
       );
       await wait();
       stdin.write("\x16");
-      await wait(60);
-      expect(plain(lastFrame())).toContain("[Image #1]");
+      await until(() => plain(lastFrame()).includes("[Image #1]"), "the clipboard image to become [Image #1]");
       // ctrl+w deletes the placeholder word-by-word; clear it outright with backspaces instead.
       for (let i = 0; i < "[Image #1]".length; i++) stdin.write("\x7f");
-      await wait(40);
+      await until(() => !plain(lastFrame()).includes("[Image #"), "the placeholder to be deleted");
       // (A draft STARTING with "/" is a slash command, so the path follows a word.)
       stdin.write("see ");
       await wait();
       stdin.write(fake);
-      await wait(60);
+      await wait(60); // the paste is read, sniffed and typed in one continuation (no subprocess): let it render
       expect(plain(lastFrame())).not.toContain("[Image #");
       stdin.write("\r");
-      await wait(60);
+      await until(() => callsOf(client, "send").length > 0, "the message to be sent");
       expect(client.calls.some((c) => c.method === "stageImage")).toBe(false);
       expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", `see ${fake}`]);
     } finally { rmSync(dir, { recursive: true, force: true }); }

@@ -186,6 +186,9 @@ public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
     private let socketExists: @Sendable (String) -> Bool
     private let makeTransport: @Sendable (String) -> WinterTransport
     private let requestTimeout: Duration
+    /// How a request's timeout passes (see `WinterClient`, which also says why `init` takes it as an optional): real
+    /// time in production, a clock the test releases by hand in a test.
+    private let sleep: @Sendable (Duration) async throws -> Void
 
     private var transport: WinterTransport?
     private var pump: Task<Void, Never>?
@@ -201,7 +204,8 @@ public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
     public init(home: String,
                 socketExists: @escaping @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
                 makeTransport: @escaping @Sendable (String) -> WinterTransport = { UnixSocketTransport(path: $0) },
-                requestTimeout: Duration = .seconds(5)) {
+                requestTimeout: Duration = .seconds(5),
+                sleep: (@Sendable (Duration) async throws -> Void)? = nil) {
         let box = mailbox
         events = AsyncStream<HelperViewEvent>(unfolding: { await box.next() })
         self.home = home
@@ -209,6 +213,7 @@ public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
         self.socketExists = socketExists
         self.makeTransport = makeTransport
         self.requestTimeout = requestTimeout
+        self.sleep = sleep ?? { duration in try await Task.sleep(for: duration) }
     }
 
     // MARK: - Connection
@@ -278,8 +283,9 @@ public actor LiveComputerUseHelperClient: ComputerUseHelperClient {
             "jsonrpc": .string("2.0"), "id": .number(Double(id)), "method": .string(method), "params": .object(params),
         ])) + Data([0x0a])
         let timeout = requestTimeout
+        let sleep = self.sleep
         let watchdog = Task { [weak self] in
-            try? await Task.sleep(for: timeout)
+            try? await sleep(timeout)
             await self?.timeOut(id: id)
         }
         defer { watchdog.cancel() }
