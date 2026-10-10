@@ -3,7 +3,7 @@
 // late result is dropped by its `cmdId`. The app enforces the CDP allowlist with its own Swift copy, and so does this
 // transport, before anything is written (both layers). One transport per link: a second attach (or a relaunched app)
 // gets a new one, and the engine's tab drivers start over on it.
-import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS } from "../cdp-allowlist";
+import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS, CDP_NETWORK_EVENT_PARAMS } from "../cdp-allowlist";
 import { TransportError, type CdpEvent, type CdpTransport, type TransportErrorCode, type TransportTab } from "../transport";
 
 export const BROWSER_LINK_PROTOCOL = 1;
@@ -88,7 +88,9 @@ export class CefTransport implements CdpTransport {
   /** `browserLink.events`: forward each allowlisted event to the engine. */
   dispatch(e: { tabId: string; method: string; params: Record<string, unknown>; cdpSessionId?: string }): void {
     if (!CDP_ALLOWED_EVENTS.includes(e.method)) return;
-    const ev: CdpEvent = { tabKey: e.tabId, method: e.method, params: e.params, ...(e.cdpSessionId === undefined ? {} : { cdpSessionId: e.cdpSessionId }) };
+    // The app strips Network events already; so does this side (no header, URL or body ever reaches the engine).
+    const params = e.method.startsWith("Network.") ? Object.fromEntries(Object.entries(e.params).filter(([k]) => CDP_NETWORK_EVENT_PARAMS.includes(k))) : e.params;
+    const ev: CdpEvent = { tabKey: e.tabId, method: e.method, params, ...(e.cdpSessionId === undefined ? {} : { cdpSessionId: e.cdpSessionId }) };
     for (const l of [...this.events]) {
       try { l(ev); } catch (err) { this.opts.log?.(`computer-use: a browser event listener failed (${err instanceof Error ? err.message : "error"})`); }
     }
