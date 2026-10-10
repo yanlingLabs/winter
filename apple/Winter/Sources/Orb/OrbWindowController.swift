@@ -1745,7 +1745,7 @@ func cardKeyAction(
     guard composerDraft.isEmpty else { return nil }
     guard let topmost, let chars, let ch = chars.lowercased().first else { return nil }
     switch topmost {
-    case .approval(let callId, _, _, _, let childSessionId, _):
+    case .approval(let callId, _, _, _, let childSessionId, _, _):
         if ch == "y" { return .approve(callId, childSessionId) }
         if ch == "n" { return .deny(callId, childSessionId) }
         return nil

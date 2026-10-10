@@ -43,10 +43,10 @@ func pendingInteractionRecords(
 /// The transcript-shaped record of a live pending interaction — same payload, no outcome.
 func interactionRecord(for interaction: PendingInteraction) -> InteractionRecord {
     switch interaction {
-    case .approval(let callId, let toolName, let summary, let reviewerReason, let childSessionId, let options):
+    case .approval(let callId, let toolName, let summary, let reviewerReason, let childSessionId, let options, let defaultAllowAt):
         return InteractionRecord(callId: callId,
                                  ask: .approval(toolName: toolName, summary: summary,
-                                                reviewerReason: reviewerReason, options: options),
+                                                reviewerReason: reviewerReason, options: options, defaultAllowAt: defaultAllowAt),
                                  childSessionId: childSessionId)
     case .question(let callId, let questions, let childSessionId):
         return InteractionRecord(callId: callId, ask: .question(questions: questions), childSessionId: childSessionId)
