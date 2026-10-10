@@ -471,6 +471,9 @@ async function main(): Promise<void> {
     for (const h of homes) rmSync(h, { recursive: true, force: true });
     // Running an app's binary registers it with LaunchServices; the test flavor must leave no record behind.
     run(LSREGISTER, ["-u", join(VERIFY_DIR, `${HELPER.test.name}.app`)]);
+    // Running the dev binary registered it too: a dev helper verified elsewhere (--dev-helper) must not stay a second
+    // registered com.winter.computeruse.dev.
+    if (devHelperApp !== DEV_HELPER_APP) run(LSREGISTER, ["-u", devHelperApp]);
     rmSync(VERIFY_DIR, { recursive: true, force: true });
   }
 }
