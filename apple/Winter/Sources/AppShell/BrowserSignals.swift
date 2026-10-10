@@ -455,7 +455,7 @@ final class BrowserSignalsCoordinator {
 ///
 /// `BrowserSignalsCoordinator` is built the first time the app window is summoned, and Winter is a
 /// menu-bar app: it can run for days without that ever happening, and the browser link must still
-/// work (spec: "works with no window open"). Until a coordinator exists, the link plans through here.
+/// work with no window ever opened. Until a coordinator exists, the link plans through here.
 ///
 /// The world it describes is the honest one: no session is shown, attached or listed by this app, so
 /// the only tabs it knows are the holds. Rule H creates and keeps those; the belt stops any other
