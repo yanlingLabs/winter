@@ -82,9 +82,12 @@ final class DesktopVisitTests: XCTestCase {
                 show(spaceOf[wid]!)
             }
         }
-        // The private path brings ONE window forward by id: the window server goes to its Space.
-        sys.onFrontWindow = { [unowned self] p, wid in
-            if p == user, wid == 500 { if returns { show(1) } } else if arrives, let space = spaceOf[wid] { show(space) }
+        // macOS 26 (measured 2026-10-10): a window's element raised, then its app made frontmost, takes macOS to the
+        // window's desktop; the app alone gets there only when it has no window on the user's desktop.
+        sys.onFrontWindow = { [unowned self] p, wid, raised in
+            if p == user { if returns { show(1) } } else if arrives, let space = spaceOf[wid], raised || !appHasWindowOnScreen(p) {
+                show(space)
+            }
         }
 
         poster = RecordingPoster()
@@ -113,6 +116,11 @@ final class DesktopVisitTests: XCTestCase {
             [CUNode(ref: t.refs.ref(for: AXIdentity(element: t.id == "t1" ? window : t.id == "t2" ? window2 : window3)),
                     role: kAXWindowRole, frame: frame)]
         }
+    }
+
+    /// An app with a window on screen (on the user's desktop) besides its bound one.
+    private func appHasWindowOnScreen(_ p: pid_t) -> Bool {
+        sys.windows.values.contains { $0.pid == p && $0.onScreen && spaceOf[$0.id] == nil }
     }
 
     /// macOS showing desktop `space`: its windows on screen and in their apps' AX lists, the others not.
@@ -447,27 +455,38 @@ final class DesktopVisitTests: XCTestCase {
             // macOS activates the app in place (its other window is here): no Space switch for the app.
             if activated == user, returns { show(1) }
         }
+        sys.windows[66] = FakeSystem.window(66, pid: pid, CGRect(x: 0, y: 0, width: 400, height: 300))  // its window here
         let r = try await click(visit: true)
         XCTAssertEqual(r.rung, 4)
-        XCTAssertEqual(fronted.first, "6060:77", "the bound window, by id")
+        XCTAssertEqual(fronted.first, "6060:77", "the bound window")
+        XCTAssertEqual(sys.frontedWindows.first?.raised, true, "its element raised (the app alone would stay here)")
+        XCTAssertEqual(sys.frontedWindows.first?.main, true)
         _ = try await close()
-        XCTAssertEqual(fronted.last, "1:500", "and back to the user's own window, by id")
+        XCTAssertEqual(fronted.last, "1:500", "and back to the user's own window")
         XCTAssertEqual(userView, usersPlace)
     }
 
-    func testWithThePrivatePathOffAnAppActivatedInPlaceNeverArrives() async throws {
+    func testWithThePrivatePathOffTheWindowIsStillBroughtForwardOverAccessibility() async throws {
         world(privatePath: false)
-        sys.onActivate = { [unowned self] activated in if activated == user, returns { show(1) } }
         core.privateCaptureOverride = { _, _ in nil }
-        core.windowCaptureOverride = { _, _, _ in XCTFail("nothing captured"); throw CUError.cancelled }
-        let e = await expect("unsupported") { _ = try await self.core.targetScreenshot(self.liveParams(visit: true)) }
-        XCTAssertTrue(e?.message.contains("macOS did not show App's desktop") ?? false, e?.message ?? "")
-        XCTAssertTrue(sys.frontedWindows.isEmpty, "no private call with the private path off")
+        core.windowCaptureOverride = { [unowned self] _, _, _ in
+            XCTAssertEqual(sys.space, 2)
+            return image()
+        }
+        let r = try await core.targetScreenshot(liveParams(visit: true))
+        XCTAssertEqual(r.inVisit, true, "no private call is needed: the element raised, the app made frontmost")
+        XCTAssertEqual(sys.frontedWindows.first?.raised, true)
+        _ = try await close()
         XCTAssertEqual(userView, usersPlace)
     }
 
-    func testACaptureOnlyWindowIsVisitedByIdAndRefusedWithoutThePrivatePath() async throws {
+    /// The live gate (2026-10-10): the Offspace window bound capture-only earlier, shown on its desktop since — its
+    /// element is found now and raised (bringing the app forward alone would keep the user on their own desktop:
+    /// the app has a window there).
+    func testACaptureOnlyWindowIsRaisedByTheElementFoundNow() async throws {
         world(accessible: false)
+        ax.remoteWindows[77] = window  // macOS exposes it now (by remote token, off this desktop)
+        sys.windows[66] = FakeSystem.window(66, pid: pid, CGRect(x: 0, y: 0, width: 400, height: 300))  // its window here
         core.privateCaptureOverride = { _, _ in nil }
         core.windowCaptureOverride = { [unowned self] _, _, _ in
             XCTAssertTrue(sys.windows[77]?.onScreen == true)
@@ -475,25 +494,91 @@ final class DesktopVisitTests: XCTestCase {
         }
         let r = try await core.targetScreenshot(liveParams(visit: true))
         XCTAssertEqual(r.inVisit, true)
-        XCTAssertEqual(fronted.first, "6060:77")
+        XCTAssertEqual(sys.frontedWindows.first.map { "\($0.pid):\($0.windowID):\($0.raised):\($0.main)" }, "6060:77:true:true",
+                       "the window's own element, made main and raised")
         _ = try await close()
+        XCTAssertEqual(userView, usersPlace)
+    }
 
-        world(privatePath: false, accessible: false)
+    func testACaptureOnlyWindowWithNoElementIsReachedOnlyWhenItsAppHasNoWindowHere() async throws {
+        // No element anywhere, and the app has no window on the user's desktop: the app alone takes macOS there.
+        world(accessible: false)
+        core.privateCaptureOverride = { _, _ in nil }
+        core.windowCaptureOverride = { [unowned self] _, _, _ in image() }
+        let r = try await core.targetScreenshot(liveParams(visit: true))
+        XCTAssertEqual(r.inVisit, true)
+        XCTAssertEqual(sys.frontedWindows.first?.raised, false, "nothing to raise: the app alone")
+        _ = try await close()
+        XCTAssertEqual(userView, usersPlace)
+
+        // With a window of the app on the user's desktop it would stay here: refused before anything moves.
+        world(accessible: false)
+        core.windowCaptureOverride = { [unowned self] _, _, _ in image() }
+        sys.windows[66] = FakeSystem.window(66, pid: pid, CGRect(x: 0, y: 0, width: 400, height: 300))
         let e = await expect("unsupported") { _ = try await self.core.targetScreenshot(self.liveParams(visit: true)) }
-        XCTAssertTrue(e?.message.contains("can't be brought forward on its desktop with the private event path off") ?? false, e?.message ?? "")
+        XCTAssertTrue(e?.message.contains("can't be brought forward on its desktop") ?? false, e?.message ?? "")
+        XCTAssertTrue(e?.message.contains("nothing was moved") ?? false)
         XCTAssertTrue(sys.activated.isEmpty && sys.frontedWindows.isEmpty, "nothing was moved")
+        XCTAssertEqual(userView, usersPlace)
         XCTAssertFalse(isOpen)
+        // The gate was given back.
+        sys.windows[66] = nil
+        _ = try await core.targetScreenshot(liveParams(visit: true))
+        XCTAssertTrue(isOpen)
+    }
+
+    func testAMacThatDoesNotFollowAnAppToItsDesktopIsNeverVisited() async throws {
+        world()
+        sys.followsActivation = false
+        let e = await expect("unsupported") { _ = try await self.click(visit: true) }
+        XCTAssertTrue(e?.message.contains("Desktop & Dock") ?? false, e?.message ?? "")
+        XCTAssertTrue(sys.activated.isEmpty && sys.frontedWindows.isEmpty, "nothing was moved")
+        XCTAssertEqual(userView, usersPlace)
+        XCTAssertFalse(isOpen)
+        // Unreadable is not "off".
+        sys.followsActivation = nil
+        _ = try await click(visit: true)
+        XCTAssertTrue(isOpen)
+    }
+
+    func testTheWayBackRaisesTheUsersWindowAndPostsNothingIntoIt() async throws {
+        world()
+        _ = try await click(visit: true)
+        _ = try await close()
+        XCTAssertEqual(sys.frontedWindows.last.map { "\($0.pid):\($0.windowID):\($0.raised):\($0.main)" }, "1:500:true:false",
+                       "the user's recorded window raised (never made main), their app made frontmost")
+        XCTAssertTrue(poster.entries.allSatisfy { $0.pid != user }, "no event — no key-window record — ever reaches the user's app")
+        XCTAssertEqual(userView, usersPlace)
     }
 
     func testArrivalNeedsTheDesktopToChange() async throws {
         world()
-        sys.onFrontWindow = { [unowned self] p, wid in
+        core.visitArriveMs = 200
+        sys.onFrontWindow = { [unowned self] p, wid, _ in
             if p == pid, wid == 77 { sys.windows[77]?.onScreen = true }  // on screen, but no Space switch
             if p == user, wid == 500 { show(1) }
         }
         core.windowCaptureOverride = { _, _, _ in XCTFail("not there"); throw CUError.cancelled }
         core.privateCaptureOverride = { _, _ in nil }
         await expect("unsupported") { _ = try await self.core.targetScreenshot(self.liveParams(visit: true)) }
+        XCTAssertEqual(userView, usersPlace)
+        XCTAssertEqual(fronted.filter { $0 == "6060:77" }.count, 2, "brought forward once more halfway, then given up")
+    }
+
+    func testASecondBringForwardHalfwayIsWhatGetsThere() async throws {
+        world()
+        core.visitArriveMs = 400
+        var tries = 0
+        sys.onFrontWindow = { [unowned self] p, wid, _ in
+            if p == pid, wid == 77 { tries += 1; if tries == 2 { show(2) } }  // the first one leaves the app here
+            if p == user { show(1) }
+        }
+        core.privateCaptureOverride = { _, _ in nil }
+        core.windowCaptureOverride = { [unowned self] _, _, _ in image() }
+        let r = try await core.targetScreenshot(liveParams(visit: true))
+        XCTAssertEqual(r.inVisit, true)
+        XCTAssertEqual(tries, 2)
+        _ = try await close()
         XCTAssertEqual(userView, usersPlace)
     }
 
@@ -584,7 +669,7 @@ final class DesktopVisitTests: XCTestCase {
         arrives = false
         XCTAssertTrue(core.startGuardian(privatePath: true))
         defer { core.stopGuardian() }
-        sys.onFrontWindow = { [unowned self] p, wid in
+        sys.onFrontWindow = { [unowned self] p, wid, _ in
             if p == pid, wid == 77 {
                 core.noteHardwareInput(now: core.clock.nowSeconds() + 0.01)
                 sys.space = 3
