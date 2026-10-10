@@ -148,12 +148,14 @@ final class LineDecoderPerformanceTests: XCTestCase {
         for (label, maxChunk) in [("1 KB chunks", 1024), ("16 KB chunks", 16 * 1024), ("64 KB chunks", 64 * 1024)] {
             let pieces = chunks(data, maxChunk: maxChunk)
             var legacyCount = 0, count = 0
-            let before = fastest(of: 3) {
+            // The old decoder is run once: it is only here to be compared against (these per-size numbers are printed,
+            // not asserted), and at 1 KB chunks one run is already several seconds.
+            let before = cpuTime {
                 let legacy = LegacyLineDecoder()
                 legacyCount = 0
                 for piece in pieces { legacyCount += legacy.push(piece).count }
             }
-            let after = try fastest(of: 3) {
+            let after = try fastest(of: 5) {
                 let decoder = LineDecoder(maxLine: 16 * 1024 * 1024)
                 count = 0
                 for piece in pieces { count += try decoder.pushData(piece).count }
