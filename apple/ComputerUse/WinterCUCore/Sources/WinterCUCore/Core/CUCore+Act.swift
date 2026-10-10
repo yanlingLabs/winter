@@ -26,6 +26,8 @@ extension CUCore {
         /// (`focusLost`: the app reports none now).
         var focusNow: String? = nil
         var focusLost = false
+        /// The act changed the bound window's page: its title now (or URL).
+        var pageNow: String? = nil
 
         /// Puts `note` (what was done to reach the window) in front of the rung's own detail.
         func noting(_ note: String?) -> ActOutcome {
@@ -63,9 +65,11 @@ extension CUCore {
                 try saveFloorBeforeAct(p, t)
                 do {
                     let focusBefore = t.accessible ? focusBeforeAct(t) : nil
+                    let pageBefore = pageBeforeAct(t)
                     var o = try guardingUserView(p, t) { try perform(p, on: t, token: token) }
                     t.lastActionMs = clock.nowMs()
                     if let focusBefore { o = noteFocusChange(from: focusBefore, t, o) }
+                    o = notePageChange(from: pageBefore, t, o)
                     return o
                 } catch let e as CUError where e.code == "stale_element" {
                     if let ref = Self.primaryRef(p.action) { t.refs.forget(ref); throw CUError.staleRef(ref) }
@@ -98,7 +102,7 @@ extension CUCore {
             : (notes + [outcome.detail].compactMap { $0 }).joined(separator: "; ")
         return TargetActResult(rung: outcome.rung.rawValue, detail: detail, input: outcome.input,
                                inputUnknown: outcome.inputUnknown ? true : nil, focusNow: outcome.focusNow,
-                               focusLost: outcome.focusLost ? true : nil)
+                               focusLost: outcome.focusLost ? true : nil, pageNow: outcome.pageNow)
     }
 
     /// The focus before an act: the one read after the last act when that is recent (one read per act), else a
@@ -2292,6 +2296,8 @@ extension CUCore {
         var frame: CGRect?
         /// The children of its parent and grandparent: a structural change near it (a panel closed, a list grew).
         var near: [AXIdentity]
+        /// The page (URL, window title): a link that navigates changes it before its element goes away.
+        var page: PageSignature?
     }
 
     func webPressEvidence(_ e: AXUIElement, _ t: CUTarget) -> WebPressEvidence {
@@ -2303,7 +2309,7 @@ extension CUCore {
                                 alive: ax.isAlive(e), value: ax.string(e, kAXValueAttribute),
                                 selected: ax.bool(e, kAXSelectedAttribute), expanded: ax.bool(e, kAXExpandedAttribute),
                                 title: ax.string(e, kAXTitleAttribute) ?? ax.string(e, kAXDescriptionAttribute),
-                                frame: ax.frame(e), near: near)
+                                frame: ax.frame(e), near: near, page: pageSignature(t))
     }
 
     /// Whether anything changed since `before`, watched for up to `webPressWatchMs` (the element gone or moved or

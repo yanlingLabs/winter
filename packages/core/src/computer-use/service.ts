@@ -922,6 +922,9 @@ export class ComputerV2Service {
     // Element names come from the screen: inside the fence.
     const line = actLine(primitive, action, res);
     if (line !== undefined) ctx.builder.text(line, { screen: true });
+    // A link navigated or a tab switched: the refs read before are gone (live: `state({ within })` on one of them).
+    const page = pageLine(res);
+    if (page !== undefined) ctx.builder.text(page, { screen: true });
     // Where the focus went when the act moved it (⌘R into the address bar, a click into another field): the LAST
     // change per target, said once at the end of the script — twenty acts can't flood the result.
     const focus = focusLine(res);
@@ -1201,6 +1204,13 @@ const ERROR_MESSAGE_CAP = 4_096;
  * TRUSTED (shown outside the fence) only when its message is one the daemon itself sent in this call.
  */
 /** A bind's or useWindow's `detail` from the helper, as one short line (or nothing). */
+/** `the page changed (now "<title>") — refs from before it are gone; call state()`, when the act changed the page. */
+export function pageLine(res: ActResult): string | undefined {
+  if (typeof res.pageNow !== "string" || res.pageNow.trim().length === 0) return undefined;
+  const title = res.pageNow.replace(/\s+/g, " ").trim().slice(0, 160);
+  return `the page changed (now "${title}") — refs from before it are gone; call state()`;
+}
+
 /** `now [226] text field "smart search field"`, or `unknown (the app reports none)`; nothing when the act did not
  *  move the focus. */
 export function focusLine(res: ActResult): string | undefined {

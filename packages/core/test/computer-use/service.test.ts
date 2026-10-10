@@ -13,7 +13,7 @@ import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { ComputerPolicy, type SessionFacts } from "../../src/computer-use/policy";
 import { RecentApps } from "../../src/computer-use/recent-apps";
-import { ComputerV2Service, actLine, focusLine, targetLostMessage, type ScriptResult } from "../../src/computer-use/service";
+import { ComputerV2Service, actLine, focusLine, pageLine, targetLostMessage, type ScriptResult } from "../../src/computer-use/service";
 import { AutomationTelemetry } from "../../src/computer-use/telemetry";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
 import type { Settings } from "../../src/settings";
@@ -825,5 +825,19 @@ describe("ComputerV2: where the focus went after an act", () => {
     expect(out).not.toContain('[9] text field "Name"');
     expect(out.match(/focus: now/g)?.length).toBe(1);
     expect(out.indexOf("focus: now")).toBeGreaterThan(out.indexOf("done"));
+  }, 30_000);
+});
+
+describe("ComputerV2: a page that changed under an act", () => {
+  test("says so with its title, and that refs from before are gone", () => {
+    expect(pageLine({ rung: 1, pageNow: "Page Two" })).toBe('the page changed (now "Page Two") — refs from before it are gone; call state()');
+    expect(pageLine({ rung: 1 })).toBeUndefined();
+  });
+
+  macOnly("the line follows the act, inside the fence", async () => {
+    const w = world();
+    w.fake.handlers["target.act"] = () => ({ rung: 1, pageNow: "Results — Search" });
+    const r = await w.run("const notes = await apps.open('Notes')\nawait notes.click(14)");
+    expect(text(r)).toContain('the page changed (now "Results — Search") — refs from before it are gone; call state()');
   }, 30_000);
 });

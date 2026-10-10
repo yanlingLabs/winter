@@ -357,14 +357,17 @@ public struct TargetActResult: Codable, Sendable, Equatable {
     public var focusNow: String?
     /// The focus was known before the act and the app reports none now.
     public var focusLost: Bool?
+    /// The act changed the bound window's page (a link navigated, a tab switched): its title now.
+    public var pageNow: String?
     public init(rung: Int, detail: String? = nil, input: String? = nil, inputUnknown: Bool? = nil,
-                focusNow: String? = nil, focusLost: Bool? = nil) {
+                focusNow: String? = nil, focusLost: Bool? = nil, pageNow: String? = nil) {
         self.rung = rung
         self.detail = detail
         self.input = input
         self.inputUnknown = inputUnknown
         self.focusNow = focusNow
         self.focusLost = focusLost
+        self.pageNow = pageNow
     }
 }
 

@@ -88,6 +88,15 @@ final class CUTarget: @unchecked Sendable {
     /// The bound window's focus as last read (`CUCore.windowFocus`): the act it was read in, when, and what.
     /// Pid-queue only.
     var focusCache: (act: Int, atMs: Double, focus: CUCore.WindowFocus)?
+    /// The page (web area URL, window title) read after the last act, and when: the next act's "before".
+    /// Pid-queue only.
+    var pageAfterLastAct: (atMs: Double, page: CUCore.PageSignature?)?
+    /// The bound window's web area as last found, the window title then, and how long a window found to hold none
+    /// is not walked again. Pid-queue only.
+    var webArea: AXUIElement?
+    var webAreaWindowTitle: String?
+    var noWebAreaUntil: Double?
+
     /// The focus read after the last act, and when: the next act's "before". Pid-queue only.
     var focusAfterLastAct: (atMs: Double, focus: CUCore.WindowFocus)?
 
