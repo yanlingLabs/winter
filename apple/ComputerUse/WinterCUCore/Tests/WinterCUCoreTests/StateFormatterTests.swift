@@ -50,8 +50,8 @@ final class StateFormatterTests: XCTestCase {
     func testTheHeaderSaysWhereTypedTextGoes() {
         XCTAssertEqual(f.header(CUStateHeader(appName: "Notes", windowTitle: nil, focusedRef: 14, settle: .settled(ms: 80), caret: "caret 12/40")),
                        "Notes — focused [14] · caret 12/40 · settled 80 ms")
-        XCTAssertEqual(f.header(CUStateHeader(appName: "Docs", windowTitle: nil, focusedRef: nil, settle: nil, focusUnknown: true)),
-                       "Docs — focus unknown — click the field first, or pass { into }")
+        // No focus reported: the header says nothing (a keyboard act that needs one says so).
+        XCTAssertEqual(f.header(CUStateHeader(appName: "Docs", windowTitle: nil, focusedRef: nil, settle: nil)), "Docs")
         XCTAssertEqual(f.header(CUStateHeader(appName: "Safari", windowTitle: nil, focusedRef: nil, settle: nil,
                                               focusText: "focused: the page's hidden text input (it types into the document)")),
                        "Safari — focused: the page's hidden text input (it types into the document)")

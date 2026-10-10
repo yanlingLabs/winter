@@ -22,20 +22,16 @@ public struct CUStateHeader: Sendable, Equatable {
     /// Where typed text goes in the focused element — "caret 12/40" or `selected 3–9 ("hello")` — when its text
     /// can be read; never for a secure field (`CUStateFormatter.caretNote`).
     public var caret: String?
-    /// The app reports no focused element at all (a canvas editor, some Electron views): said, so the model
-    /// does not type into the unknown.
-    public var focusUnknown: Bool
     /// What the focus is when it is not an element of the tree shown (a web page's hidden input, another window).
     public var focusText: String?
 
     public init(appName: String, windowTitle: String?, focusedRef: Int?, settle: CUSettleNote?,
-                caret: String? = nil, focusUnknown: Bool = false, focusText: String? = nil) {
+                caret: String? = nil, focusText: String? = nil) {
         self.appName = appName
         self.windowTitle = windowTitle
         self.focusedRef = focusedRef
         self.settle = settle
         self.caret = caret
-        self.focusUnknown = focusUnknown
         self.focusText = focusText
     }
 }
@@ -69,9 +65,8 @@ public struct CUStateFormatter: Sendable {
             if let c = h.caret { parts.append(c) }
         } else if let text = h.focusText {
             parts.append(text)
-        } else if h.focusUnknown {
-            parts.append("focus unknown — click the field first, or pass { into }")
         }
+        // No focus the app reports: nothing said here — a keyboard act that needs one says so (`focus_unknown`).
         if let s = h.settle { parts.append(s.text) }
         return parts.isEmpty ? h.appName : "\(h.appName) — " + parts.joined(separator: " · ")
     }

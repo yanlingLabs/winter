@@ -104,6 +104,23 @@ describe("ComputerV2: binding, state and the diff base", () => {
     expect(text(r2)).toContain('~ [14] value "a" → "b"');
   }, 30_000);
 
+  macOnly("binding the same window again prints what changed, not the whole tree", async () => {
+    const w = world();
+    w.fake.handlers["target.bind"] = () => ({ targetId: "t1", app: { name: "Notes", bundleId: "com.apple.Notes", pid: 501 }, window: { id: 7, title: "Notes window", frame: [0, 0, 800, 600] } });
+    w.fake.handlers["target.snapshot"] = (p) => {
+      const isDiff = p.since !== undefined && p.full !== true;
+      return { snapshotId: isDiff ? "snap2" : "snap1", isDiff, changedRatio: isDiff ? 0 : 1, settled: true, waitedMs: 0,
+        text: isDiff ? "Notes — focused [14]\n(no changes)" : 'Notes — window "Notes window"\n[1] window "Notes window"\n  [14] text area value="a" (focused)' };
+    };
+    await w.run("const notes = await apps.open('Notes')");
+    const r = await w.run("const again = await apps.open('Notes')");
+    expect(w.fake.calls("target.snapshot")[1]).toMatchObject({ since: "snap1" });
+    expect(w.fake.calls("target.snapshot")[1]!.full).toBeUndefined();
+    expect(text(r)).toContain("Notes was already bound to this window — the same handle");
+    expect(text(r)).toContain("(no changes)");
+    expect(text(r)).not.toContain("[1] window");
+  }, 30_000);
+
   macOnly("an emit:false read does not advance the base; {full:true} omits since; within never becomes the base", async () => {
     const w = world();
     await w.run("const notes = await apps.open('Notes')");

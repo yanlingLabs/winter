@@ -664,7 +664,12 @@ export class ComputerV2Service {
     }
     ctx.apps.add(app.name);
     this.deps.recentApps?.note(app.bundleId, app.name);
-    const snap = await this.helperCall<SnapshotResult>(ctx, "target.snapshot", { targetId: info.targetId, full: true, settle: { maxMs: SETTLE_CAP_MS }, callId: ctx.callId }, metric);
+    // The same window bound again (the helper hands back the same target): what changed since its last printed
+    // state, not the whole tree once more (live: re-binding in every script cost ~13 KB a call).
+    const base = this.diffBases.get(ctx.sessionId, info.targetId);
+    const snap = await this.helperCall<SnapshotResult>(ctx, "target.snapshot", {
+      targetId: info.targetId, ...(base === undefined ? { full: true } : { since: base }), settle: { maxMs: SETTLE_CAP_MS }, callId: ctx.callId,
+    }, metric);
     this.live(ctx);
     metric.settleMs = snap.waitedMs;
     metric.settleExit = snap.settled ? "quiet" : "cap";
@@ -672,6 +677,9 @@ export class ComputerV2Service {
     // outside the fence — the helper's fixed wording, not screen text.
     const detail = helperDetail(res.detail);
     if (detail !== undefined) ctx.builder.daemonLine(detail);
+    if (base !== undefined && snap.isDiff === true) {
+      ctx.builder.daemonLine(`${app.name} was already bound to this window — the same handle; what changed since its last state follows (keep the handle in a top-level const: it lasts between calls)`);
+    }
     ctx.builder.text(snap.text, { screen: true });
     this.diffBases.set(ctx.sessionId, info.targetId, snap.snapshotId);
     return { targetId: info.targetId, name: app.name, bundleId: app.bundleId };

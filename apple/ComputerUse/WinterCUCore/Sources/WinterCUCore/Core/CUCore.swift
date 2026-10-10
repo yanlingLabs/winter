@@ -713,7 +713,7 @@ public final class CUCore: @unchecked Sendable {
                 obs = try observe(t, within: nil)
             }
             let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note,
-                                       caret: obs.caret, focusUnknown: obs.focusUnknown, focusText: obs.focusText)
+                                       caret: obs.caret, focusText: obs.focusText)
             let snap = CUSnapshot(id: t.nextSnapshotId(), scope: within, header: header, roots: obs.roots, formatter: formatter)
             // A whole-window, non-full state folds what is out of view first; `within` and `full` don't.
             var text = formatter.full(header: header, roots: obs.roots, viewportFirst: within == nil && p.full != true)
@@ -1349,7 +1349,6 @@ public final class CUCore: @unchecked Sendable {
         var focusedRef: Int?
         var title: String
         var caret: String? = nil
-        var focusUnknown = false
         var focusText: String? = nil
     }
 
@@ -1403,8 +1402,7 @@ public final class CUCore: @unchecked Sendable {
             focusText = "focus in another of \(t.appName)'s windows — click the field first, or pass { into }"
         }
         let title = AX.string(win, kAXTitleAttribute) ?? t.windowTitle
-        return Observation(roots: roots, focusedRef: focusedRef, title: title, caret: caret,
-                           focusUnknown: wf.element == nil && wf.elsewhere == nil, focusText: focusText)
+        return Observation(roots: roots, focusedRef: focusedRef, title: title, caret: caret, focusText: focusText)
     }
 
     /// Actions the app listed but refused and `action()` has no pointer equivalent for: state stops listing
