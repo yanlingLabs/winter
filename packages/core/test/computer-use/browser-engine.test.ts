@@ -66,6 +66,30 @@ describe("browsers.list / open / tabs / tab", () => {
     expect(h.engine.owns("s2", handle.targetId)).toBe(false);
   });
 
+  test("open and tab print the ordinary state of a big page (folded to its line cap); full: true is the model's to ask for", async () => {
+    const h = harness();
+    const big: FakePage = {
+      url: "https://big.example/list", title: "Big list",
+      nodes: [{ id: 1, role: "main", children: [
+        { id: 2, role: "heading", name: "Results", level: 1 },
+        { id: 3, role: "list", name: "Results", children: Array.from({ length: 600 }, (_, i) => ({ id: 100 + i, role: "listitem", name: `Result number ${i}` })) },
+      ] }],
+    };
+    h.winter.pages[big.url] = big;
+    const r = h.run();
+    const handle = await h.engine.global(r.scope, "browsers.open", { url: big.url }) as TabHandle;
+    const opened = r.text();
+    expect(opened).toContain('heading "Results"');
+    expect(opened.split("\n").length).toBeLessThan(330);
+    expect(opened).not.toContain("Result number 599");
+    // The same tab bound afresh in another session: the ordinary state too.
+    const r2 = h.run("s2");
+    await h.engine.global(r2.scope, "browsers.tab", { id: handle.id }).catch(() => undefined);
+    const full = await h.engine.primitive(r.scope, handle.targetId, "state", { full: true }) as string;
+    expect(full).toContain("Result number 599");
+    expect(full).not.toContain("the full state is cut");
+  });
+
   test("open: a non-http(s) URL is NotAllowed before anything opens; about:blank mints a tab with no url, shown as about:blank", async () => {
     const h = harness();
     const r = h.run();

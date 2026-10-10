@@ -15,8 +15,10 @@
 // does). A diff compares facets per ref and falls back to the full tree when more than half the elements changed.
 
 export const STATE_LINE_CAP = 300;
-/** A `full: true` state's hard cap: the page runtime's default read budget (`snapshot`'s `maxNodes`). */
+/** A `full: true` state's hard cap: the page runtime's default read budget (`snapshot`'s `maxNodes`)… */
 export const FULL_STATE_LINE_CAP = 4_000;
+/** …and in bytes: a ComputerV2 result's text is cut at 64 KiB, and a full state's own cut line must survive it. */
+export const FULL_STATE_BYTE_CAP = 48 * 1024;
 const VALUE_CAP = 200;
 const URL_CAP = 200;
 
@@ -138,18 +140,23 @@ function descendantCount(n: TabNode): number {
   return c;
 }
 
-/** The indented body of `roots`, folded to `lineCap` (the helper's algorithm). `whole` (`full: true`): a state that
- *  still had to fold ends with a line saying so. */
+/** The indented body of `roots`, folded to `lineCap` (the helper's algorithm). `whole` (`full: true`): also held to
+ *  `byteCap` (UTF-8, its lines and newlines) so its cut line survives the result's own cap, folded to keep as much
+ *  as fits (a long list keeps its head, its tail behind one marker), and a state that still had to fold ends with a
+ *  line saying so. */
 export function bodyLines(roots: readonly TabNode[], focusedRef: number | undefined, viewportFirst: boolean, lineCap = STATE_LINE_CAP,
-                          whole = false): string[] {
-  interface Item { node: TabNode; parent?: number; depth: number; descendants: number; outOfView: boolean }
+                          whole = false, byteCap = FULL_STATE_BYTE_CAP): string[] {
+  interface Item { node: TabNode; parent?: number; depth: number; descendants: number; outOfView: boolean; bytes: number; childIndex: number }
   const items: Item[] = [];
-  const add = (n: TabNode, parent: number | undefined, depth: number, parentOff: boolean): void => {
+  const childrenOf = new Map<number, number[]>();
+  const add = (n: TabNode, parent: number | undefined, depth: number, parentOff: boolean, childIndex: number): void => {
     const idx = items.length;
-    items.push({ node: n, ...(parent === undefined ? {} : { parent }), depth, descendants: 0, outOfView: parent !== undefined && n.off === true && !parentOff });
-    for (const c of n.children) add(c, idx, depth + 1, n.off === true);
+    const bytes = whole ? depth * 2 + utf8Length(nodeLine(n)) + 1 : 0;
+    items.push({ node: n, ...(parent === undefined ? {} : { parent }), depth, descendants: 0, outOfView: parent !== undefined && n.off === true && !parentOff, bytes, childIndex });
+    if (parent !== undefined) childrenOf.set(parent, [...(childrenOf.get(parent) ?? []), idx]);
+    n.children.forEach((c, k) => add(c, idx, depth + 1, n.off === true, k));
   };
-  for (const r of roots) add(r, undefined, 0, false);
+  roots.forEach((r, k) => add(r, undefined, 0, false, k));
   for (let i = items.length - 1; i >= 0; i--) {
     const p = items[i]!.parent;
     if (p !== undefined) items[p]!.descendants += 1 + items[i]!.descendants;
@@ -173,42 +180,74 @@ export function bodyLines(roots: readonly TabNode[], focusedRef: number | undefi
   let eliding = false;
   const hiddenAt: boolean[] = new Array(items.length).fill(false);
   const shown: number[] = new Array(items.length).fill(0);
+  const shownBytes: number[] = new Array(items.length).fill(0);
   const summaries = new Set<number>();
+  // A full state's tail cut: from this child on, a parent's children are folded behind one marker line.
+  const tailFrom = new Map<number, number>();
+  const liveTails = (): number => [...tailFrom.keys()].filter((p) => !hiddenAt[p] && !collapsed.has(p)).length;
+  let bytes = 0;
   const recount = (): number => {
     let lines = 0;
+    bytes = 0;
     summaries.clear();
     for (let i = 0; i < items.length; i++) {
       const p = items[i]!.parent;
-      hiddenAt[i] = p === undefined ? false : hiddenAt[p]! || collapsed.has(p);
+      hiddenAt[i] = p === undefined ? false : hiddenAt[p]! || collapsed.has(p) || (tailFrom.has(p) && items[i]!.childIndex >= tailFrom.get(p)!);
       if (eliding && elidable.has(i) && !hiddenAt[i]) {
         hiddenAt[i] = true;
         if (p !== undefined) summaries.add(p);
       }
-      if (!hiddenAt[i]) lines += 1;
+      if (!hiddenAt[i]) { lines += 1; bytes += items[i]!.bytes + (collapsed.has(i) ? 60 : 0); }
     }
+    bytes += (summaries.size + liveTails()) * 90;
     shown.fill(0);
+    shownBytes.fill(0);
     for (let i = items.length - 1; i >= 0; i--) {
       if (hiddenAt[i]) continue;
       const p = items[i]!.parent;
-      if (p !== undefined) shown[p]! += 1 + shown[i]!;
+      if (p !== undefined) { shown[p]! += 1 + shown[i]!; shownBytes[p]! += items[i]!.bytes + shownBytes[i]!; }
     }
-    return lines + summaries.size;
+    return lines + summaries.size + liveTails();
   };
   let total = recount();
   if (viewportFirst && total > lineCap && elidable.size > 0) { eliding = true; total = recount(); }
   const preFolded = new Set(collapsed);
-  while (total > lineCap) {
+  const bodyBytes = whole ? byteCap - 512 : Number.POSITIVE_INFINITY;
+  while (total > lineCap || bytes > bodyBytes) {
     let best: number | undefined;
     const size = (i: number): number => (eliding ? shown[i]! : items[i]!.descendants);
+    // Only the byte cap binds: weighed in bytes, and a fold that hides less than its marker costs is none.
+    const byBytes = total <= lineCap;
+    const weight = (i: number): number => (byBytes ? shownBytes[i]! : size(i));
+    const over = byBytes ? bytes - bodyBytes : total - lineCap;
+    const fitting = whole ? 4 * over : Number.POSITIVE_INFINITY;
+    const minWeight = byBytes ? 150 : 1;
     for (let pass = 0; pass < 3 && best === undefined; pass++) {
+      let smallestEnough: number | undefined;
       for (let i = 0; i < items.length; i++) {
-        if (size(i) <= 0 || collapsed.has(i) || hiddenAt[i]) continue;
+        if (size(i) <= 0 || weight(i) < minWeight || collapsed.has(i) || hiddenAt[i]) continue;
         if (pass < 2 && items[i]!.parent === undefined) continue;
         if (pass === 0 && focusPath.has(i)) continue;
-        if (best === undefined || size(i) > size(best)) best = i;
+        if (weight(i) <= fitting) { if (best === undefined || weight(i) > weight(best)) best = i; }
+        else if (smallestEnough === undefined || weight(i) < weight(smallestEnough)) smallestEnough = i;
       }
+      if (best === undefined) best = smallestEnough;
     }
     if (best === undefined) break;
+    const kids = (childrenOf.get(best) ?? []).filter((k) => !hiddenAt[k]);
+    if (whole && weight(best) * 4 > over * 5 && kids.length > 1) {
+      // The only subtree big enough is far bigger than what is over (a long list): its head stays, its tail folds.
+      let hid = 0;
+      let from = kids.length;
+      while (from > 1 && hid < over + (byBytes ? 90 : 1)) {
+        from -= 1;
+        const k = kids[from]!;
+        hid += byBytes ? items[k]!.bytes + shownBytes[k]! : 1 + shown[k]!;
+      }
+      tailFrom.set(best, items[kids[from]!]!.childIndex);
+      total = recount();
+      continue;
+    }
     collapsed.add(best);
     total = recount();
   }
@@ -219,7 +258,13 @@ export function bodyLines(roots: readonly TabNode[], focusedRef: number | undefi
       if (p !== undefined && summaries.has(p)) outOfViewCount.set(p, (outOfViewCount.get(p) ?? 0) + 1 + descendantCount(items[i]!.node));
     }
   }
+  const tailCount = new Map<number, number>();
+  for (const [p, from] of tailFrom) {
+    if (hiddenAt[p] || collapsed.has(p)) continue;
+    tailCount.set(p, (childrenOf.get(p) ?? []).filter((k) => items[k]!.childIndex >= from).reduce((n, k) => n + 1 + descendantCount(items[k]!.node), 0));
+  }
   const marked = new Set<number>();
+  const tailMarked = new Set<number>();
   const out: string[] = [];
   for (let i = 0; i < items.length; i++) {
     const it = items[i]!;
@@ -229,6 +274,10 @@ export function bodyLines(roots: readonly TabNode[], focusedRef: number | undefi
         marked.add(p);
         out.push(`${"  ".repeat(it.depth)}${outOfViewMarker(outOfViewCount.get(p) ?? 0, items[p]!.node.ref)}`);
       }
+      if (p !== undefined && tailCount.has(p) && it.childIndex === tailFrom.get(p) && !tailMarked.has(p)) {
+        tailMarked.add(p);
+        out.push(`${"  ".repeat(it.depth)}… ${collapseMarker(tailCount.get(p)!, items[p]!.node.ref)}`);
+      }
       continue;
     }
     let text = `${"  ".repeat(it.depth)}${nodeLine(it.node)}`;
@@ -237,16 +286,20 @@ export function bodyLines(roots: readonly TabNode[], focusedRef: number | undefi
     out.push(text);
   }
   const cut = [...collapsed].filter((i) => !preFolded.has(i) && !hiddenAt[i]);
-  if (whole && (cut.length > 0 || eliding)) {
-    const folded = cut.reduce((n, i) => n + descendantCount(items[i]!.node), 0) + [...outOfViewCount.values()].reduce((a, b) => a + b, 0);
-    out.push(wholeCutMarker(lineCap, folded));
+  if (whole && (cut.length > 0 || eliding || tailCount.size > 0)) {
+    const folded = cut.reduce((n, i) => n + descendantCount(items[i]!.node), 0) + [...outOfViewCount.values()].reduce((a, b) => a + b, 0)
+      + [...tailCount.values()].reduce((a, b) => a + b, 0);
+    out.push(wholeCutMarker(lineCap, folded, items.length > lineCap ? undefined : Math.floor(byteCap / 1024)));
   }
   return out;
 }
 
-/** The last line of a `full: true` state that still had to fold (the helper's wording). */
-export function wholeCutMarker(cap: number, folded: number): string {
-  return `… the full state is cut at ${cap.toLocaleString("en-US")} lines: ${folded.toLocaleString("en-US")} elements are folded behind the "more" markers above — read each with state({within})`;
+function utf8Length(s: string): number { return Buffer.byteLength(s, "utf8"); }
+
+/** The last line of a `full: true` state that still had to fold: at its line cap, or at its byte cap (`kb`) — the
+ *  helper's wording. */
+export function wholeCutMarker(cap: number, folded: number, kb?: number): string {
+  return `… the full state is cut at ${kb === undefined ? `${cap.toLocaleString("en-US")} lines` : `${kb} KB`}: ${folded.toLocaleString("en-US")} elements are folded behind the "more" markers above — read each with state({within})`;
 }
 
 /** The full state's text. `whole` (`full: true`): folded only past `FULL_STATE_LINE_CAP`, and said when it is. */

@@ -772,9 +772,11 @@ export class ComputerV2Service {
     this.deps.recentApps?.note(app.bundleId, app.name);
     // The same window bound again (the helper hands back the same target): what changed since its last printed
     // state, not the whole tree once more (live: re-binding in every script cost ~13 KB a call).
+    // A first bind prints the ORDINARY state (viewport first, folded to its line cap), never `full`: a full state is
+    // everything the read saw, which for a big window outgrows the result's own cap — it is the model's to ask for.
     const base = this.diffBases.get(ctx.sessionId, info.targetId);
     const snap = await this.helperCall<SnapshotResult>(ctx, "target.snapshot", {
-      targetId: info.targetId, ...(base === undefined ? { full: true } : { since: base }), settle: { maxMs: SETTLE_CAP_MS }, callId: ctx.callId,
+      targetId: info.targetId, ...(base === undefined ? {} : { since: base }), settle: { maxMs: SETTLE_CAP_MS }, callId: ctx.callId,
     }, metric);
     this.live(ctx);
     metric.settleMs = snap.waitedMs;

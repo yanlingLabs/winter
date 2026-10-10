@@ -697,8 +697,9 @@ export class BrowserEngine {
     if (!loaded) scope.builder.daemonLine("still loading after 10 s");
     // Where the tab LANDED (a redirect) meets the dangerous-domain floor before anything of it is printed.
     await this.siteFloor(scope, this.binding(scope.sessionId, handle.targetId), driver);
-    // The goto rule: the new page settles (frames still loading, late content) before its state is printed.
-    await this.printState(scope, handle.targetId, driver, { full: true, settle: true });
+    // The goto rule: the new page settles (frames still loading, late content) before its state is printed — the
+    // ordinary state (viewport first, folded), never `full`, which is the model's to ask for.
+    await this.printState(scope, handle.targetId, driver, { settle: true });
     return handle;
   }
 
@@ -818,7 +819,7 @@ export class BrowserEngine {
     }
     scope.builder.daemonLine(`bound ${backend}:${tabKey.slice(0, 60)} in ${this.browserName(backend)}`);
     await this.siteFloor(scope, this.binding(scope.sessionId, handle.targetId), driver);
-    await this.printState(scope, handle.targetId, driver, { full: true });
+    await this.printState(scope, handle.targetId, driver, {});
     return handle;
   }
 

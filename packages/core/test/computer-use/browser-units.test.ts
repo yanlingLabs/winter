@@ -15,7 +15,7 @@ import { PAGE_RUNTIME_SOURCE } from "../../src/computer-use/browser/page-runtime
 import { BrowserBackendRegistry } from "../../src/computer-use/browser/registry";
 import { fitsBudget, imageSize, scaleFor, toCss } from "../../src/computer-use/browser/scale";
 import { ruleAllowsSite, siteCardSummary, siteRow } from "../../src/computer-use/browser/site-policy";
-import { bodyLines, diffState, FULL_STATE_LINE_CAP, fullState, makeSnapshot, nodeLine, type TabNode } from "../../src/computer-use/browser/state-format";
+import { bodyLines, diffState, FULL_STATE_BYTE_CAP, FULL_STATE_LINE_CAP, fullState, makeSnapshot, nodeLine, type TabNode } from "../../src/computer-use/browser/state-format";
 import { checkUploadPaths, UPLOAD_MAX_FILES } from "../../src/computer-use/browser/upload-paths";
 import { computerV2Description } from "../../src/computer-use/description";
 import { AutomationFailure } from "../../src/computer-use/errors";
@@ -132,6 +132,18 @@ describe("the tab state format", () => {
     const capped = bodyLines(roots, undefined, false, 50, true);
     expect(capped.at(-1)).toBe('… the full state is cut at 50 lines: 400 elements are folded behind the "more" markers above — read each with state({within})');
     expect(FULL_STATE_LINE_CAP).toBe(4_000);
+  });
+
+  test("full: true stays inside its byte cap: a long list keeps its head, its tail folds behind one marker, the cut line last", () => {
+    const items = Array.from({ length: 1_500 }, (_, i) => node(1_000 + i, "listitem", { name: `A fairly long result title number ${i}` }));
+    const roots = [node(1, "main", { children: [node(2, "heading", { name: "Results" }), node(3, "list", { children: items })] })];
+    const text = fullState({ title: "T", url: "u" }, roots, false, undefined, true);
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(FULL_STATE_BYTE_CAP);
+    expect(Buffer.byteLength(text, "utf8")).toBeGreaterThan(30 * 1024);
+    expect(text).toContain("result title number 100\"");
+    expect(text).not.toContain("result title number 1499\"");
+    expect(text).toMatch(/\n\s+… \(\d+ more — state\(\{within:3\}\)\)/);
+    expect(text.split("\n").at(-1)).toMatch(/^… the full state is cut at 48 KB: \d+ elements are folded/);
   });
 
   test("diffs: + added, ~ changed facets, - removed; over half changed is reported for the full fallback", () => {

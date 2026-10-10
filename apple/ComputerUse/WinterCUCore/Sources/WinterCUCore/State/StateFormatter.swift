@@ -67,13 +67,20 @@ public struct CUStateFormatter: Sendable {
     /// `AXTreeReader.defaultMaxNodes` elements, so a full state is not folded at all in practice; when it is, its
     /// last line says so.
     public var fullLineCap: Int
+    /// …and in bytes (UTF-8, its lines and their newlines): the daemon cuts a ComputerV2 result's text at 64 KiB, so a
+    /// full state stays well inside it — its own cut line must survive (a state cut mid-tree by the result's cap
+    /// blanks every later print of that script).
+    public var fullByteCap: Int
     public var valueCap: Int
 
     public static let defaultFullLineCap = AXTreeReader.defaultMaxNodes
+    public static let defaultFullByteCap = 48 * 1024
 
-    public init(lineCap: Int = 300, fullLineCap: Int = CUStateFormatter.defaultFullLineCap, valueCap: Int = 200) {
+    public init(lineCap: Int = 300, fullLineCap: Int = CUStateFormatter.defaultFullLineCap,
+                fullByteCap: Int = CUStateFormatter.defaultFullByteCap, valueCap: Int = 200) {
         self.lineCap = max(1, lineCap)
         self.fullLineCap = max(self.lineCap, fullLineCap)
+        self.fullByteCap = max(1024, fullByteCap)
         self.valueCap = valueCap
     }
 
@@ -179,10 +186,11 @@ public struct CUStateFormatter: Sendable {
         "… \(count) more out of view — scroll, or state({within:\(ref)})"
     }
 
-    /// The last line of a `full: true` state that still had to fold.
-    static func wholeCutMarker(cap: Int, folded: Int) -> String {
-        "… the full state is cut at \(cap.formatted(.number.grouping(.automatic).locale(Locale(identifier: "en_US")))) lines: "
-            + "\(folded.formatted(.number.grouping(.automatic).locale(Locale(identifier: "en_US")))) elements are folded behind the \"more\" markers above — read each with state({within})"
+    /// The last line of a `full: true` state that still had to fold: at its line cap, or at its byte cap (`kb`).
+    static func wholeCutMarker(cap: Int, folded: Int, kb: Int? = nil) -> String {
+        let n = { (v: Int) in v.formatted(.number.grouping(.automatic).locale(Locale(identifier: "en_US"))) }
+        return "… the full state is cut at \(kb.map { "\($0) KB" } ?? "\(n(cap)) lines"): "
+            + "\(n(folded)) elements are folded behind the \"more\" markers above — read each with state({within})"
     }
 
     /// A collapsed element whose own children are what it discloses — sub-rows (an outline row's nested rows, a
@@ -199,22 +207,29 @@ public struct CUStateFormatter: Sendable {
     /// The indented lines of `roots`, folded to `lineCap` (`fullLineCap` when `whole`).
     public func body(roots: [CUNode], focusedRef: Int?, viewportFirst: Bool = false, whole: Bool = false) -> [String] {
         let cap = whole ? fullLineCap : lineCap
+        let byteCap = whole ? fullByteCap : Int.max
         // Flatten into an indexable list with parent links and depths, and whether each element lies outside
         // the visible rect it is clipped to (the window at the top, narrowed by every scroll area below it).
-        struct Item { var node: CUNode; var parent: Int?; var depth: Int; var visibleDescendants: Int; var outOfView: Bool }
+        struct Item { var node: CUNode; var parent: Int?; var depth: Int; var visibleDescendants: Int; var outOfView: Bool; var bytes: Int
+                      var childIndex: Int }
         var items: [Item] = []
-        func add(_ n: CUNode, parent: Int?, depth: Int, clip: CGRect?) {
+        var childrenOf: [Int: [Int]] = [:]
+        func add(_ n: CUNode, parent: Int?, depth: Int, clip: CGRect?, childIndex: Int) {
             let idx = items.count
             let framed = n.frame.flatMap { $0.width > 0 && $0.height > 0 ? $0 : nil }
             let out = parent != nil && clip != nil && framed != nil && !framed!.intersects(clip!)
-            items.append(Item(node: n, parent: parent, depth: depth, visibleDescendants: 0, outOfView: out))
+            // Its line's size (indentation, newline): the byte cap counts only when `whole`.
+            let bytes = whole ? depth * 2 + line(n).utf8.count + 1 : 0
+            items.append(Item(node: n, parent: parent, depth: depth, visibleDescendants: 0, outOfView: out, bytes: bytes,
+                              childIndex: childIndex))
+            if let parent { childrenOf[parent, default: []].append(idx) }
             var childClip = clip
             if let f = framed {
                 if parent == nil { childClip = f } else if n.role == "AXScrollArea" { childClip = clip.map { $0.intersection(f) } ?? f }
             }
-            for c in n.children { add(c, parent: idx, depth: depth + 1, clip: childClip) }
+            for (k, c) in n.children.enumerated() { add(c, parent: idx, depth: depth + 1, clip: childClip, childIndex: k) }
         }
-        for r in roots { add(r, parent: nil, depth: 0, clip: nil) }
+        for (k, r) in roots.enumerated() { add(r, parent: nil, depth: 0, clip: nil, childIndex: k) }
         // Descendant counts, bottom-up (children always follow their parent in `items`).
         for i in stride(from: items.count - 1, through: 0, by: -1) {
             if let p = items[i].parent { items[p].visibleDescendants += 1 + items[i].visibleDescendants }
@@ -254,23 +269,39 @@ public struct CUStateFormatter: Sendable {
         // one forward pass works. `shown[i]`: i's descendants still shown.
         var hidden = [Bool](repeating: false, count: items.count)
         var shown = [Int](repeating: 0, count: items.count)
+        // The bytes of each element's shown descendants (a `full` state's byte budget folds by them).
+        var shownBytes = [Int](repeating: 0, count: items.count)
         var summaries = Set<Int>()
+        // A `full` state's tail cut: from this child on, a parent's children are folded behind one marker line.
+        var tailFrom: [Int: Int] = [:]
+        // The shown lines' bytes, a marker counted at its longest (60 bytes per folded line, 90 per marker line).
+        var bytes = 0
         func recount() -> Int {
             var lines = 0
+            bytes = 0
             summaries.removeAll()
             for i in items.indices {
-                if let p = items[i].parent { hidden[i] = hidden[p] || collapsed.contains(p) } else { hidden[i] = false }
+                if let p = items[i].parent {
+                    hidden[i] = hidden[p] || collapsed.contains(p) || tailFrom[p].map { items[i].childIndex >= $0 } == true
+                } else { hidden[i] = false }
                 if eliding, elidable.contains(i), !hidden[i] {
                     hidden[i] = true
                     if let p = items[i].parent { summaries.insert(p) }
                 }
-                if !hidden[i] { lines += 1 }
+                if !hidden[i] {
+                    lines += 1
+                    bytes += items[i].bytes + (collapsed.contains(i) ? 60 : 0)
+                }
             }
-            for i in items.indices { shown[i] = 0 }
+            bytes += (summaries.count + tailFrom.keys.filter { !hidden[$0] && !collapsed.contains($0) }.count) * 90
+            for i in items.indices { shown[i] = 0; shownBytes[i] = 0 }
             for i in stride(from: items.count - 1, through: 0, by: -1) where !hidden[i] {
-                if let p = items[i].parent { shown[p] += 1 + shown[i] }
+                if let p = items[i].parent {
+                    shown[p] += 1 + shown[i]
+                    shownBytes[p] += items[i].bytes + shownBytes[i]
+                }
             }
-            return lines + summaries.count
+            return lines + summaries.count + tailFrom.keys.filter { !hidden[$0] && !collapsed.contains($0) }.count
         }
         var total = recount()
         if viewportFirst, total > cap, !elidable.isEmpty {
@@ -278,22 +309,52 @@ public struct CUStateFormatter: Sendable {
             total = recount()
         }
         let preFolded = collapsed
-        while total > cap {
+        // The byte cap leaves room for the header and the cut line itself.
+        let bodyBytes = byteCap == Int.max ? Int.max : byteCap - 512
+        while total > cap || bytes > bodyBytes {
             // Largest subtree first, in tiers: the chrome outside the page, then inside the page, then the focus
-            // path, then the page itself, roots last of all.
+            // path, then the page itself, roots last of all. A `full` state keeps as much as fits: the largest
+            // subtree no bigger than a few times what is over (in lines), so a long list is folded in parts, not
+            // wholesale for a few kilobytes too many.
             var best: Int?
             func size(_ i: Int) -> Int { eliding ? shown[i] : items[i].visibleDescendants }
+            // Only the byte cap binds: weighed in bytes, and a fold that hides less than its marker costs is none.
+            let byBytes = total <= cap
+            func weight(_ i: Int) -> Int { byBytes ? shownBytes[i] : size(i) }
+            let over = byBytes ? bytes - bodyBytes : total - cap
+            let fitting = whole ? 4 * over : Int.max
+            let minWeight = byBytes ? 150 : 1
             for pass in 0..<5 {
-                for i in items.indices where size(i) > 0 && !collapsed.contains(i) && !hidden[i] {
+                var smallestEnough: Int?
+                for i in items.indices where size(i) > 0 && weight(i) >= minWeight && !collapsed.contains(i) && !hidden[i] {
                     if pass < 4, items[i].parent == nil { continue }
                     if pass < 3, contentPath.contains(i) { continue }
                     if pass < 2, focusPath.contains(i) { continue }
                     if pass == 0, inContent[i] { continue }
-                    if best == nil || size(i) > size(best!) { best = i }
+                    if weight(i) <= fitting {
+                        if best == nil || weight(i) > weight(best!) { best = i }
+                    } else if smallestEnough == nil || weight(i) < weight(smallestEnough!) {
+                        smallestEnough = i
+                    }
                 }
+                if best == nil { best = smallestEnough }
                 if best != nil { break }
             }
             guard let b = best else { break }
+            // A `full` state whose chosen subtree is clearly bigger than what is over (a long list): its first children
+            // stay, the rest is folded behind one marker — as much as fits, not the list wholesale.
+            if whole, weight(b) * 4 > over * 5, let kids = childrenOf[b]?.filter({ !hidden[$0] }), kids.count > 1 {
+                var hid = 0
+                var from = kids.count
+                while from > 1, hid < over + (byBytes ? 90 : 1) {
+                    from -= 1
+                    let k = kids[from]
+                    hid += byBytes ? items[k].bytes + shownBytes[k] : 1 + shown[k]
+                }
+                tailFrom[b] = items[kids[from]].childIndex
+                total = recount()
+                continue
+            }
             collapsed.insert(b)
             total = recount()
         }
@@ -305,7 +366,13 @@ public struct CUStateFormatter: Sendable {
         if eliding {
             for i in elidable { if let p = items[i].parent, summaries.contains(p) { outOfViewCount[p, default: 0] += 1 + items[i].node.descendantCount } }
         }
+        // What each tail cut folded (its children from the cut on, with everything under them).
+        var tailCount: [Int: Int] = [:]
+        for (p, from) in tailFrom where !hidden[p] && !collapsed.contains(p) {
+            tailCount[p] = (childrenOf[p] ?? []).filter { items[$0].childIndex >= from }.reduce(0) { $0 + 1 + items[$1].node.descendantCount }
+        }
         var marked = Set<Int>()
+        var tailMarked = Set<Int>()
         var out: [String] = []
         for i in items.indices {
             if hidden[i] {
@@ -313,6 +380,10 @@ public struct CUStateFormatter: Sendable {
                     marked.insert(p)
                     out.append(String(repeating: "  ", count: items[i].depth)
                                + Self.outOfViewMarker(count: outOfViewCount[p] ?? 0, ref: items[p].node.ref))
+                }
+                if let p = items[i].parent, let n = tailCount[p], let from = tailFrom[p], items[i].childIndex == from, !tailMarked.contains(p) {
+                    tailMarked.insert(p)
+                    out.append(String(repeating: "  ", count: items[i].depth) + "… " + Self.collapseMarker(count: n, ref: items[p].node.ref))
                 }
                 continue
             }
@@ -325,10 +396,12 @@ public struct CUStateFormatter: Sendable {
             }
             out.append(text)
         }
-        if whole, !cutBy.isEmpty || eliding {
+        if whole, !cutBy.isEmpty || eliding || !tailCount.isEmpty {
             let folded = cutBy.filter { !hidden[$0] }.reduce(0) { $0 + items[$1].node.descendantCount }
-                + outOfViewCount.values.reduce(0, +)
-            out.append(Self.wholeCutMarker(cap: cap, folded: folded))
+                + outOfViewCount.values.reduce(0, +) + tailCount.values.reduce(0, +)
+            // Which cap cut it: the lines, unless the lines would have fit.
+            let byLines = items.count > cap
+            out.append(Self.wholeCutMarker(cap: cap, folded: folded, kb: byLines ? nil : byteCap / 1024))
         }
         return out
     }
