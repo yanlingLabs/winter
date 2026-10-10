@@ -349,8 +349,11 @@ export const SessionHistoryResult = z.object({
  *      temp `images/` folder (no symlink), named `image_<k>.<ext>`; or
  *    - the user's ORIGINAL file — an absolute path that resolves (`realpath`, a symlink is fine) to a
  *      regular file of at most `IMAGE_FILE_MAX_BYTES`, whose MAGIC BYTES are an image type the runtime
- *      Read tool can prepare (png/jpeg/gif/webp/heic/tiff/bmp), and that is not under the daemon's
- *      home. It is never copied or downscaled; the runtime's Read tool prepares it for the model.
+ *      Read tool can prepare (png/jpeg/gif/webp/heic/tiff/bmp), and that the Read tool itself may read
+ *      (not under `<home>/run` or `<home>/runtimes`, and not a runtime's generated config — `sdk/.winter.json`,
+ *      a run folder's or staging root's `.winter.json`/`.claude.json`/`.credentials.json` and `backups/**`;
+ *      the rest of the home, `outputs/` included, is fine). It is never copied or downscaled; the
+ *      runtime's Read tool prepares it for the model.
  *  `n` is unique and `[Image #n]` appears in `text`; a non-code session refuses
  *  `image_session_not_code`, a non-local caller `image_reference_invalid`. Omitted (or empty) = no
  *  images. The array length is checked by the handler (typed), not here. */
@@ -593,8 +596,8 @@ export const IMAGE_TYPE_UNSUPPORTED = "image_type_unsupported";
 export const IMAGE_TYPE_MISMATCH = "image_type_mismatch";
 export const IMAGE_STAGE_FAILED = "image_stage_failed";
 /** `session.send`/`session.steer`'s `images` refusal: an entry that is neither a file this session
- *  staged nor a readable original image file (relative, missing, not a regular file, under the
- *  daemon's home), a repeated `n`, an `n` with no `[Image #n]` in the text, too many entries, or a
+ *  staged nor a readable original image file (relative, missing, not a regular file, in the Read
+ *  tool's read-deny set), a repeated `n`, an `n` with no `[Image #n]` in the text, too many entries, or a
  *  caller other than a local client. Nothing is appended. (An original file that is not an image,
  *  or is past `IMAGE_FILE_MAX_BYTES`, answers `image_type_unsupported` / `image_too_large`.) */
 export const IMAGE_REFERENCE_INVALID = "image_reference_invalid";

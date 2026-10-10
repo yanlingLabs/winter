@@ -15,7 +15,7 @@ import WinterProtocol
 //   - a FILE (a Finder drag, a dropped file, a file copied in Finder): the ORIGINAL file's path. It is
 //     never read beyond its first few bytes, never copied and never staged — the path itself rides in
 //     `images`, and the daemon checks it (an absolute path to a regular image file of at most 64 MiB,
-//     outside its home);
+//     that the runtime's Read tool may itself read — Winter's own run/runtime/config files are not);
 //   - DATA with no file (a screenshot or image on the clipboard): the RAW bytes, written by
 //     `session.stageImage` into the session's own temp directory at submit. Only an image whose bytes
 //     cannot fit one request line (`composerImageMaxBytes`) is downscaled, and only that one.

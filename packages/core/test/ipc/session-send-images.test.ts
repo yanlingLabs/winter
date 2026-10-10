@@ -3,7 +3,7 @@
 // only the model is given the paths (winter-session.test.ts covers the push). Every entry is checked
 // before anything is appended: the file is either one `session.stageImage` wrote for THIS session or
 // (2026-10-10, raw image paths) the user's ORIGINAL image file — an absolute path resolving to a regular
-// file of at most 64 MiB, an image by its magic bytes, outside the daemon's home — and `n` is unique
+// file of at most 64 MiB, an image by its magic bytes, outside the Read tool's read-deny set — and `n` is unique
 // and present in the text, a code session, a local caller, a model that reads images.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
@@ -178,7 +178,7 @@ describe("session.send / session.steer — images (code-mode image input)", () =
 
   // ---- raw image paths (2026-10-10): the user's ORIGINAL file --------------------------------------
 
-  /** A scratch folder OUTSIDE the daemon's home, with a distinctive name no error may echo. */
+  /** A scratch folder OUTSIDE the daemon's home (so no home rule is in play), with a distinctive name no error may echo. */
   function userDir(): string {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-userpics-SECRETNAME-")));
     cleanup.push(dir);
@@ -243,7 +243,7 @@ describe("session.send / session.steer — images (code-mode image input)", () =
   });
 
   test("an original that is not an absolute path to a real, regular, small image refuses typed — and no refusal echoes the path", async () => {
-    const { store, c, sid, home } = await staged("code", true);
+    const { store, c, sid } = await staged();
     const dir = userDir();
     writeFileSync(join(dir, "notes.png"), "this is text with an image extension");
     writeFileSync(join(dir, "empty.png"), "");
@@ -258,11 +258,6 @@ describe("session.send / session.steer — images (code-mode image input)", () =
     truncateSync(exact, IMAGE_FILE_MAX_BYTES);
     const fifo = join(dir, "pipe.png");
     execFileSync("/usr/bin/mkfifo", [fifo]);
-    // Inside the daemon's home — read-denied areas and the rest of its state.
-    mkdirSync(join(home, "runtimes"), { recursive: true });
-    writeFileSync(join(home, "runtimes", "shot.png"), PNG_FILE);
-    writeFileSync(join(home, "shot.png"), PNG_FILE);
-    symlinkSync(join(home, "shot.png"), join(dir, "into-home.png"));
     const cases: Array<[string, string, string]> = [
       ["not an image", join(dir, "notes.png"), IMAGE_TYPE_UNSUPPORTED],
       ["empty", join(dir, "empty.png"), IMAGE_TYPE_UNSUPPORTED],
@@ -272,10 +267,6 @@ describe("session.send / session.steer — images (code-mode image input)", () =
       ["over 64 MiB", big, IMAGE_TOO_LARGE],
       ["relative", "pics/shot.png", IMAGE_REFERENCE_INVALID],
       ["dot-relative", "./shot.png", IMAGE_REFERENCE_INVALID],
-      ["home: run-less file", join(home, "shot.png"), IMAGE_REFERENCE_INVALID],
-      ["home: runtimes", join(home, "runtimes", "shot.png"), IMAGE_REFERENCE_INVALID],
-      ["home: spelled with ..", `${dir}/../${home.split("/").pop()}/shot.png`, IMAGE_REFERENCE_INVALID],
-      ["symlink into home", join(dir, "into-home.png"), IMAGE_REFERENCE_INVALID],
     ];
     const before = store.read(sid).length;
     for (const [label, path, code] of cases) {
@@ -284,7 +275,7 @@ describe("session.send / session.steer — images (code-mode image input)", () =
         expect({ label, method, code: res.error?.data?.code }).toEqual({ label, method, code });
         expect(res.error.code).toBe(ERR.INVALID_PARAMS);
         const wire = JSON.stringify(res.error);
-        for (const secret of [path, "SECRETNAME", dir, home, tmpBase]) expect({ label, leaked: wire.includes(secret) }).toEqual({ label, leaked: false });
+        for (const secret of [path, "SECRETNAME", dir, tmpBase]) expect({ label, leaked: wire.includes(secret) }).toEqual({ label, leaked: false });
       }
     }
     expect(store.read(sid).length).toBe(before);
@@ -292,6 +283,69 @@ describe("session.send / session.steer — images (code-mode image input)", () =
     const over = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: big }] });
     expect(over.error.message).toBe(IMAGE_FILE_TOO_LARGE_MESSAGE);
     expect((await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: exact }] })).error).toBeUndefined();
+    c.close();
+  });
+
+  /** An image file named `rel` under `root`, holding real PNG bytes — so only the DENY rule, never the
+   *  sniff, can be what refuses it. */
+  function plant(root: string, rel: string): string {
+    const path = join(root, rel);
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, PNG_FILE);
+    return path;
+  }
+
+  test("only the Read tool's own read-deny set is refused under the home: outputs/ and the rest of it are fine", async () => {
+    const { c, sid, home } = await staged("code", true);
+    const dir = userDir();
+    // The agent's outbox and other ordinary places under the home — a drag out of the outputs box works.
+    const allowed = [
+      plant(home, "outputs/s_abc123/chart.png"),
+      plant(home, "shot.png"),
+      plant(home, "memory/_assistant/diagram.png"),
+      plant(home, "sdk/projects/-Users-me-repo/memory/pic.png"),
+      plant(home, "cache/screenshots/one.png"), // under cache/, but not a run folder's generated config
+      plant(home, "run-notes/pic.png"), // a sibling that merely STARTS with "run"
+      plant(home, "runtimes-old/pic.png"), // …and one that starts with "runtimes"
+    ];
+    symlinkSync(allowed[0]!, join(dir, "outbox-link.png"));
+    allowed.push(join(dir, "outbox-link.png"), `${dir}/../${home.split("/").pop()}/outputs/s_abc123/chart.png`);
+    for (const path of allowed) {
+      const res = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path }] });
+      expect({ path: path.replace(home, "<home>"), error: res.error }).toEqual({ path: path.replace(home, "<home>"), error: undefined });
+    }
+
+    // The read-deny set: <home>/run, <home>/runtimes, sdk/.winter.json, a run folder's or staging root's
+    // generated config files and their backups/. Each file holds real PNG bytes.
+    const staging = join(realpathSync(tmpdir()), `claude-resume-${crypto.randomUUID()}`);
+    cleanup.push(staging);
+    const denied: Array<[string, string]> = [
+      ["run", plant(home, "run/pic.png")],
+      ["runtimes", plant(home, "runtimes/bin/winter.png")],
+      ["sdk/.winter.json", plant(home, "sdk/.winter.json")],
+      ["run folder .winter.json", plant(home, "cache/runs/abc/.winter.json")],
+      ["run folder .claude.json", plant(home, "cache/runs/abc/.claude.json")],
+      ["run folder .credentials.json", plant(home, "cache/runs/abc/.credentials.json")],
+      ["run folder backups", plant(home, "cache/runs/abc/backups/.claude.json.backup.1")],
+      ["staging .claude.json", plant(staging, ".claude.json")],
+      ["staging backups", plant(staging, "backups/.claude.json.backup.2")],
+    ];
+    mkdirSync(join(home, "outputs"), { recursive: true });
+    symlinkSync(join(home, "run", "pic.png"), join(dir, "into-run.png"));
+    symlinkSync(join(home, "runtimes"), join(dir, "runtimes-dir"));
+    denied.push(["symlink into run", join(dir, "into-run.png")]);
+    denied.push(["symlink through a dir into runtimes", join(dir, "runtimes-dir", "bin", "winter.png")]);
+    denied.push(["run, spelled with ..", `${home}/outputs/../run/pic.png`]);
+    denied.push(["run, upper-cased (a case-insensitive volume)", `${home}/RUN/pic.png`]);
+    for (const [label, path] of denied) {
+      for (const method of [METHODS.sessionSend, METHODS.sessionSteer]) {
+        const res = await c.request(method, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path }] });
+        expect({ label, method, code: res.error?.data?.code }).toEqual({ label, method, code: IMAGE_REFERENCE_INVALID });
+        expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+        const wire = JSON.stringify(res.error);
+        for (const secret of [path, home, dir, staging]) expect({ label, leaked: wire.includes(secret) }).toEqual({ label, leaked: false });
+      }
+    }
     c.close();
   });
 

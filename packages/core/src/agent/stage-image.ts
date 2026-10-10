@@ -27,6 +27,8 @@ import {
   IMAGE_DATA_INVALID, IMAGE_FILE_MAX_BYTES, IMAGE_FILE_TOO_LARGE_MESSAGE, IMAGE_REFERENCE_INVALID, IMAGE_STAGE_FAILED, USER_MESSAGE_IMAGES_MAX, USER_MESSAGE_IMAGES_MAX_MESSAGE, type UserMessageImageRef, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
   STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, type STAGE_IMAGE_MEDIA_TYPES,
 } from "@yanlinglabs/winter-protocol";
+import { sandboxConfigFor } from "../runtime-sdk/mode-options";
+import { protectedReadDenial } from "../runtime-sdk/protected-paths";
 import { imageTokenNumbers } from "../sessions/model-text";
 import { sessionTmpDirPath } from "./session-tmp";
 
@@ -257,40 +259,59 @@ export function stageSessionImage(
 
 /** What `validateImageRefs` needs to know beyond the session. */
 export interface ImageRefContext {
-  /** The daemon's `<WINTER_HOME>`: no original image may live under it (its `run/` and `runtimes/`
-   *  are read-denied to the agent, and the rest is the daemon's own state). Absent (a server built
-   *  without one — most tests): the home rule cannot be applied and is skipped. */
+  /** The daemon's `<WINTER_HOME>`, which locates the paths the runtime's Read tool is itself denied
+   *  (`readDeniedByRuntime`). Absent (a server built without one — most tests): that rule cannot be
+   *  applied and is skipped. */
   winterHome?: string | undefined;
 }
 
-/** `home` and its realpath (when it resolves), each as a prefix an original file must not sit under. */
-function homePrefixes(home: string | undefined): string[] {
-  if (home === undefined || home === "") return [];
+/** `home` and, when it differs, its realpath — the spellings a path under it can arrive in. */
+function homeSpellings(home: string): string[] {
   const out = new Set<string>([resolve(home)]);
   try { out.add(realpathSync(home)); } catch { /* a home that does not exist yet has only its spelling */ }
   return [...out];
 }
 
-const underPrefix = (path: string, prefix: string): boolean => path === prefix || path.startsWith(prefix.endsWith(sep) ? prefix : prefix + sep);
+/**
+ * Whether the runtime's own Read tool refuses `path` — the read-DENY set, reused from where it is defined
+ * rather than listed again: the Bash sandbox's literal `denyRead` (`sandboxConfigFor`: `<home>/run`,
+ * `<home>/runtimes`, `sdk/.winter.json`) and the path-fence hook's read row (`protectedReadDenial`: a run
+ * folder's or a `claude-resume-*` staging root's generated `.winter.json` / `.claude.json` /
+ * `.credentials.json` and their `backups/**`, and `sdk/.winter.json` again). Nothing else under the home is
+ * refused: `<home>/outputs/<session>/…`, the agent's own outbox, is an ordinary place to drag an image from.
+ * Compared case-folded, like the hook, and for every spelling of the home.
+ */
+function readDeniedByRuntime(path: string, home: string): boolean {
+  const lower = path.toLowerCase();
+  for (const h of homeSpellings(home)) {
+    if (protectedReadDenial("Read", { file_path: path }, { home: h }) !== undefined) return true;
+    for (const denied of sandboxConfigFor(h).filesystem?.denyRead ?? []) {
+      const d = resolve(denied).toLowerCase();
+      if (lower === d || lower.startsWith(`${d}/`)) return true;
+    }
+  }
+  return false;
+}
 
 /**
  * The ORIGINAL-file half of `validateImageRefs`: the user's own image file, named by its absolute path.
  * Never copied, never rewritten — the path is stored and handed to the model as the client spelled it.
  * It must be an absolute path whose `realpath` (a symlink is fine — the TARGET is judged) is a REGULAR
- * file, outside the daemon's home (the path as spelled AND the resolved one), whose first bytes are an
- * image type the runtime's Read tool can prepare, and that weighs at most `IMAGE_FILE_MAX_BYTES`. Only a
+ * file that the runtime's Read tool itself may read (not in its read-deny set, `readDeniedByRuntime` — the
+ * path as spelled AND the resolved one), whose first bytes are an image type the Read tool can prepare, and
+ * that weighs at most `IMAGE_FILE_MAX_BYTES`. Only a
  * dozen header bytes are read — never the file — and the descriptor is the one that is `fstat`ed, so a
  * file swapped for a FIFO or a link after the resolve is refused rather than followed or waited on.
  * Every refusal names the placeholder, never the path.
  */
-function checkOriginalImage(ref: UserMessageImageRef, prefixes: readonly string[]): void {
+function checkOriginalImage(ref: UserMessageImageRef, home: string | undefined): void {
   const invalid = (why: string): never => { throw new StageImageRefusal(IMAGE_REFERENCE_INVALID, `[Image #${ref.n}] ${why}`); };
   if (!isAbsolute(ref.path) || ref.path.includes("\0")) invalid("is not an absolute path to an image file");
-  const spelled = resolve(ref.path);
-  if (prefixes.some((p) => underPrefix(spelled, p))) invalid("is inside Winter's own data folder, which sessions cannot read — copy it somewhere else first");
+  const denied = "is one of Winter's own run, runtime or configuration files, which sessions cannot read";
+  if (home !== undefined && readDeniedByRuntime(resolve(ref.path), home)) invalid(denied);
   let real: string;
   try { real = realpathSync(ref.path); } catch { return invalid("is not an image file that exists"); }
-  if (prefixes.some((p) => underPrefix(real, p))) invalid("is inside Winter's own data folder, which sessions cannot read — copy it somewhere else first");
+  if (home !== undefined && readDeniedByRuntime(real, home)) invalid(denied);
   let fd: number;
   try { fd = openSync(real, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW); } catch { return invalid("is not an image file that can be read"); }
   try {
@@ -348,10 +369,9 @@ export function validateImageRefs(
   try { stagedRoot = sessionRootOf(sessionTmpDirPath(sessionId)); } catch { stagedRoot = undefined; }
   const stagedDir = stagedRoot === undefined ? undefined : join(stagedRoot, "images");
   let stagedDirsChecked = false;
-  const prefixes = homePrefixes(ctx.winterHome);
   for (const ref of images) {
     const staged = stagedDir !== undefined && dirname(ref.path) === stagedDir && NAME_RE.test(basename(ref.path));
-    if (!staged) { checkOriginalImage(ref, prefixes); continue; }
+    if (!staged) { checkOriginalImage(ref, ctx.winterHome === "" ? undefined : ctx.winterHome); continue; }
     const notStaged = `[Image #${ref.n}] is not an image staged for this session`;
     if (!stagedDirsChecked) {
       try {

@@ -1190,7 +1190,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    * only a local client can stage (`session.stageImage` is harness-only) or name a file on this Mac,
    * so a remote `images` is never one it could have meant. A non-code session refuses
    * `image_session_not_code`; every entry is then held to `validateImageRefs` (a file this session
-   * staged, or the user's own image file outside the daemon's home; `n` unique and in `text`).
+   * staged, or the user's own image file that the Read tool may itself read; `n` unique and in `text`).
    */
   /**
    * The model-capability BACKSTOP for code-mode images: the session's CURRENT model, by the same

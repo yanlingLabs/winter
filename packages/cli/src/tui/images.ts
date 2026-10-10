@@ -6,7 +6,8 @@
  *  default:
  *    - a FILE (a pasted or dragged path, a file copied in Finder): the ORIGINAL file's absolute path.
  *      Nothing is staged; the path itself goes in `images`, and the daemon checks it (a regular image
- *      file, at most 64 MiB, outside its home). The runtime's Read tool prepares the file for the model.
+ *      file, at most 64 MiB, one the runtime's Read tool may itself read). The Read tool prepares the file
+ *      for the model.
  *    - DATA with no file (a clipboard image): the RAW bytes, written by `session.stageImage` into the
  *      session's temp directory at submit. Only an image whose bytes cannot fit one request line is
  *      downscaled (`prepareDraftImage`), and only that one.
