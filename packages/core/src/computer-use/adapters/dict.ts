@@ -8,7 +8,7 @@
 //     (an object reference — the app's own classes are specifiers too, and so is `type`), an enumeration, `any`, or a
 //     list of those. Any other required type (a record, a date, …) means no wrapper; `help("dict")` says "use
 //     applescript()". An optional parameter of another type is simply not offered.
-//   - DROPPED: hidden commands (the helper drops them), `run`, `reopen`, `activate`, `launch`, and every command the
+//   - DROPPED: hidden commands (the helper drops them), `run`, `reopen`, `activate`, `launch`, `quit`, `print`, and every command the
 //     helper refuses anyway (a JavaScript door, `open location`, Standard Additions) — never offered, never failing late.
 //   - THE SOURCE: `tell application id "<bundleId>"` / `<terminology> <direct> <label value>…` / `end tell`, values
 //     marshalled here: strings escaped (newline, return and tab joined in as variables set before the `tell`, where no
@@ -47,8 +47,9 @@ export interface DictInfo {
 }
 
 export const DICT_NAME = /^[a-z][A-Za-z0-9]{0,47}$/;
-/** Never wrapped: they would bring the app forward (or run it), which no script may do. */
-const DROPPED_NAMES = new Set(["run", "reopen", "activate", "launch"]);
+/** Never wrapped: they would bring the app forward (or run it), which no script may do — and `quit` (the user's app, and
+ *  its unsaved work, gone) and `print` (paper, or a print dialog in front of the user). */
+export const DROPPED_NAMES: ReadonlySet<string> = new Set(["run", "reopen", "activate", "launch", "quit", "print"]);
 /** The helper's refused events (`CUAppleScriptPolicy.refusedAnywhere` / `refusedClasses`), mirrored so a command it would
  *  refuse is never offered — the helper stays the check. */
 const REFUSED_EVENT_KEYS = new Set([

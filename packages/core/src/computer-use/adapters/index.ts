@@ -374,10 +374,11 @@ export class AppAdapters {
       openDocument: async (path, opener) => {
         needs("open a document", "full");
         const h = await scope.openDocument(path, opener);
-        return { name: h.name, bundleId: h.bundleId };
+        return { name: h.name, bundleId: h.bundleId, handle: h };
       },
       print: (text) => scope.builder.text(text, { screen: true }),
       say: (text) => scope.builder.daemonLine(text),
+      notice: (text) => scope.builder.notice(text),
       clampWait: (ms) => scope.clampWait(ms),
       sleep: (ms) => abortableSleep(ms, scope.signal),
     };

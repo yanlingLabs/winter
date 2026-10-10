@@ -1343,6 +1343,7 @@ export class ComputerV2Service {
         text: (text, o) => ctx.builder.text(text, o),
         daemonLine: (text) => ctx.builder.daemonLine(text),
         guide: (text) => ctx.builder.guide(text),
+        notice: (text) => ctx.builder.notice(text),
         markScreenRead: () => ctx.builder.markScreenRead(),
       },
       clampWait: (ms) => this.clampWait(ctx, ms),

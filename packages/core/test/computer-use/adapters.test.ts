@@ -3,7 +3,7 @@
 // unwrappable parameters, the listing), delivery (dedupe, compaction), the policy's `access` on an act, the worker's
 // `extras`/`dict` Proxies, and every built-in adapter's AppleScript held to the helper's own source rules.
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
@@ -14,7 +14,7 @@ import { AdapterDelivery } from "../../src/computer-use/adapters/delivery";
 import {
   asNumber, asString, buildDictSource, camelName, checkRef, DICT_LISTING_CAP, dictListing, generateDict, parseDictType,
 } from "../../src/computer-use/adapters/dict";
-import { trashRefusal } from "../../src/computer-use/adapters/apps/finder";
+import { mountFor, parseMounts, trashDialogReason, trashRefusal } from "../../src/computer-use/adapters/apps/finder";
 import { noteHtml } from "../../src/computer-use/adapters/apps/notes";
 import { CHROMIUM_BUNDLE_IDS } from "../../src/computer-use/adapters/apps/chromium";
 import {
@@ -26,6 +26,7 @@ import { ComputerPolicy, newRunGrants, type SessionFacts } from "../../src/compu
 import type { ScriptingCommandsResult } from "../../src/computer-use/protocol";
 import type { WorkerToHost } from "../../src/computer-use/worker/bridge";
 import { createAutomationRuntime, type AutomationRuntime } from "../../src/computer-use/worker/runtime";
+import { referenceProblems } from "./adapter-refs";
 import type { Settings } from "../../src/settings";
 
 const noop = async (): Promise<unknown> => undefined;
@@ -434,32 +435,20 @@ function sourceProblems(source: string, bundleId: string): string[] {
     if (m[1] === undefined || lit === null || strings[Number(lit[1])]?.toLowerCase() !== bundleId.toLowerCase()) problems.push(`names an app other than application id "${bundleId}": ${m[0]}`);
   }
   if ((text.match(/\btell application id\b/g) ?? []).length !== 1) problems.push("not exactly one tell block");
-  // Never the app's FRONT window or document (the user's may be in front): only the bound window, by its id — Finder's
-  // one exception compares its frontmost window's id with the bound one before reading its selection.
-  for (const front of ["front window", "front document", "document 1", "workspace document 1", "first window", "last window", "active tab"]) {
-    if (text.includes(front)) problems.push(`addresses "${front}"`);
-  }
-  if (/(?<!finder )\bwindow 1\b/.test(text)) problems.push("addresses window 1");
   return problems;
 }
 
 /** The bound window's id the unit scopes report. */
 const BOUND_WINDOW = 4242;
-/** The extras that work in a window (and so must name the bound one), by bundle id. */
-const WINDOWED: Record<string, readonly string[]> = {
-  "com.apple.finder": ["reveal", "selection"],
-  "com.apple.Safari": ["tabs", "currentURL", "pageText", "openURL"],
-  "com.apple.dt.Xcode": ["schemes", "build", "buildStatus"],
-};
-
-/** Every AppleScript an extra runs, with plausible arguments, against a scope that answers with `result`. */
-async function scriptsOf(bundleId: string, def: ExtraDef, args: unknown[], result: string | null): Promise<string[]> {
+/** Every AppleScript an extra runs, with the given arguments, against a scope that answers with `answer` (a value, or
+ *  one per script). */
+async function scriptsOf(bundleId: string, def: ExtraDef, args: unknown[], answer: string | null | ((src: string, i: number) => string | null)): Promise<string[]> {
   const sources: string[] = [];
   const scope: AdapterScope = {
     app: { name: "App", bundleId, pid: 1 }, signal: new AbortController().signal, window: () => BOUND_WINDOW,
-    applescript: async (src) => { sources.push(src); return result; },
+    applescript: async (src) => { sources.push(src); return typeof answer === "function" ? answer(src, sources.length - 1) : answer; },
     find: async () => [], snapshot: async () => "", act: async () => ({ rung: 1 }), waitFor: async () => ({ waitedMs: 0 }),
-    openDocument: async () => ({ name: "TextEdit", bundleId: "com.apple.TextEdit" }), print: () => {}, say: () => {},
+    openDocument: async () => ({ name: "TextEdit", bundleId: "com.apple.TextEdit" }), print: () => {}, say: () => {}, notice: () => {},
     clampWait: (ms) => Math.min(ms, 2_000), sleep: async () => true,
   };
   await def.run(scope, args);
@@ -470,28 +459,80 @@ describe("the built-in adapters' AppleScript", () => {
   const dir = mkdtempSync(join(tmpdir(), "winter-adapters-"));
   const file = join(dir, "a file \"quoted\".txt");
   writeFileSync(file, "x");
-  const ARGS: Record<string, unknown[]> = {
-    reveal: [file], trash: [[file]], openWith: [file, "TextEdit"],
-    pageText: [{ tab: 2 }], openURL: ["https://example.com/a?b=1"], openWindow: ["https://example.com/own"],
-    messages: [{ mailbox: "Archive", unread: true, limit: 5 }], compose: [{ to: ["a@example.com"], cc: "c@example.com", subject: "Hi \"there\"", body: "line 1\nline 2\ttab" }],
-    list: [{ folder: "Work", limit: 3 }], read: ["x-coredata://ABC-123/ICNote/p42"], search: ["groceries"], create: [{ title: "T", body: "one\ntwo", folder: "Work" }],
-    build: [{ waitMs: 0 }], buildStatus: [],
-  };
-  for (const adapter of BUILTIN_ADAPTERS) {
-    for (const def of adapter.extras) {
-      const bundleId = adapter.bundleIds[0]!;
-      test(`${bundleId} ${def.name}: only application id "${bundleId}", no refused door, never the front window`, async () => {
-        const answer = def.name === "build" ? "WS:App" : def.name === "openWindow" ? "WINDOW:77" : def.name === "reveal" ? "SELECTED" : "1\t2";
-        const sources = await scriptsOf(bundleId, def, ARGS[def.name] ?? [], answer);
-        if (def.name === "openWith") { expect(sources).toEqual([]); return; }
-        expect(sources.length).toBeGreaterThan(0);
-        for (const s of sources) {
-          expect(sourceProblems(s, bundleId)).toEqual([]);
-          if ((WINDOWED[bundleId] ?? []).includes(def.name)) expect(s).toContain(`window id ${BOUND_WINDOW}`);
-        }
-      });
-    }
+  /**
+   * EVERY branch of every extra: its arguments, the workspaces it names, and what the fake app answers (per script).
+   * Each generated script is held to the helper's source rules AND to the positive reference check: every window,
+   * document and tab it touches is the bound window (window id BOUND_WINDOW) or an object the agent named.
+   */
+  const build = (src: string): string => (src.includes("set r to build d") ? "WS:App\tsar-1" : "App\tsucceeded\ttrue\t\n");
+  const BRANCHES: Array<{ bundleId: string; extra: string; args: unknown[]; answer?: string | ((src: string) => string); workspaces?: string[] }> = [
+    { bundleId: "com.apple.finder", extra: "reveal", args: [file], answer: "SELECTED" },
+    { bundleId: "com.apple.finder", extra: "selection", args: [], answer: "SEL:file:///tmp/a.txt\n" },
+    { bundleId: "com.apple.finder", extra: "trash", args: [[file]] },
+    { bundleId: "com.apple.Safari", extra: "tabs", args: [] },
+    { bundleId: "com.apple.Safari", extra: "currentURL", args: [], answer: "URL:https://x.test/" },
+    { bundleId: "com.apple.Safari", extra: "pageText", args: [] },
+    { bundleId: "com.apple.Safari", extra: "pageText", args: [{ tab: 2 }] },
+    { bundleId: "com.apple.Safari", extra: "openURL", args: ["https://example.com/a?b=1"], answer: "TAB:3" },
+    { bundleId: "com.apple.Safari", extra: "openURL", args: ["https://example.com/a", { newTab: false }], answer: "TAB:1" },
+    { bundleId: "com.apple.Safari", extra: "openWindow", args: ["https://example.com/own"], answer: "WINDOW:77\tfalse" },
+    { bundleId: "com.apple.mail", extra: "messages", args: [] },
+    { bundleId: "com.apple.mail", extra: "messages", args: [{ unread: true }] },
+    { bundleId: "com.apple.mail", extra: "messages", args: [{ mailbox: "Archive", limit: 5 }] },
+    { bundleId: "com.apple.mail", extra: "unreadCount", args: [], answer: "3" },
+    { bundleId: "com.apple.mail", extra: "compose", args: [{ to: ["a@example.com"], cc: "c@example.com", subject: "Hi \"there\"", body: "line 1\nline 2\ttab" }], answer: "12" },
+    { bundleId: "com.apple.Notes", extra: "list", args: [] },
+    { bundleId: "com.apple.Notes", extra: "list", args: [{ folder: "Work", limit: 3 }] },
+    { bundleId: "com.apple.Notes", extra: "read", args: ["x-coredata://ABC-123/ICNote/p42"] },
+    { bundleId: "com.apple.Notes", extra: "search", args: ["groceries"] },
+    { bundleId: "com.apple.Notes", extra: "create", args: [{ title: "T", body: "one\ntwo" }] },
+    { bundleId: "com.apple.Notes", extra: "create", args: [{ title: "T", body: "one", folder: "Work" }] },
+    { bundleId: "com.apple.dt.Xcode", extra: "schemes", args: [] },
+    { bundleId: "com.apple.dt.Xcode", extra: "build", args: [{ waitMs: 5_000 }], answer: build },
+    { bundleId: "com.apple.dt.Xcode", extra: "build", args: [{ workspace: "App", waitMs: 5_000 }], answer: build, workspaces: ["App"] },
+    { bundleId: "com.apple.dt.Xcode", extra: "buildStatus", args: [], answer: "App\tsucceeded\ttrue\t\n" },
+    { bundleId: "com.apple.dt.Xcode", extra: "buildStatus", args: [{ id: "sar-1" }], answer: "App\tsucceeded\ttrue\t\n" },
+    { bundleId: "com.apple.dt.Xcode", extra: "buildStatus", args: [{ workspace: "App" }], answer: "App\tsucceeded\ttrue\t\n", workspaces: ["App"] },
+  ];
+
+  test("the branch table covers every extra of every built-in adapter", () => {
+    const covered = new Set(BRANCHES.map((b) => `${b.bundleId} ${b.extra}`));
+    for (const a of BUILTIN_ADAPTERS) for (const e of a.extras) if (e.name !== "openWith") expect(covered).toContain(`${a.bundleIds[0]} ${e.name}`);
+  });
+
+  for (const b of BRANCHES) {
+    test(`${b.bundleId} ${b.extra}(${JSON.stringify(b.args).slice(1, -1).slice(0, 60)}): the source rules, and every reference bound or named`, async () => {
+      const def = BUILTIN_ADAPTERS.find((a) => a.bundleIds.includes(b.bundleId))!.extras.find((e) => e.name === b.extra)!;
+      const sources = await scriptsOf(b.bundleId, def, b.args, b.answer ?? "1\t2\t3\t4");
+      expect(sources.length).toBeGreaterThan(0);
+      for (const src of sources) {
+        expect(sourceProblems(src, b.bundleId)).toEqual([]);
+        expect(referenceProblems(src, BOUND_WINDOW, { workspaces: b.workspaces ?? [] })).toEqual([]);
+      }
+    });
   }
+
+  test("openWith runs no AppleScript (the service's background document open)", async () => {
+    const def = BUILTIN_ADAPTERS[0]!.extras.find((e) => e.name === "openWith")!;
+    expect(await scriptsOf("com.apple.finder", def, [file, "TextEdit"], null)).toEqual([]);
+  });
+
+  test("the positive check flags every reference that is not the bound window or a named object", () => {
+    const ok = `tell application id "com.apple.Safari"\nset w to window id ${BOUND_WINDOW}\nset ct to current tab of w\nreturn URL of ct\nend tell`;
+    expect(referenceProblems(ok, BOUND_WINDOW)).toEqual([]);
+    for (const bad of [
+      'tell application id "com.apple.Safari" to return URL of current tab of front window',
+      'tell application id "com.apple.Safari" to return URL of front document',
+      'tell application id "com.apple.Safari" to return URL of document 1',
+      'tell application id "com.apple.Safari" to return URL of tab 1 of window 1',
+      `tell application id "com.apple.Safari" to return URL of current tab of window id 999`,
+      'tell application id "com.apple.dt.Xcode" to build workspace document 1',
+      'tell application id "com.apple.dt.Xcode" to build workspace document "Other"',
+      'tell application id "com.apple.finder" to return selection',
+      'tell application id "com.apple.finder" to reveal (POSIX file "/tmp/x" as alias)\nreturn target of Finder window 1',
+      "tell application id \"com.apple.Safari\"\nset w to window 1\nreturn URL of current tab of w\nend tell",
+    ]) expect(referenceProblems(bad, BOUND_WINDOW, { workspaces: ["App"] }).length).toBeGreaterThan(0);
+  });
 
   test("the mirror catches what the helper refuses", () => {
     expect(sourceProblems('tell application "Terminal"\nend tell', "x.y").length).toBeGreaterThan(0);
@@ -524,7 +565,7 @@ describe("the built-in adapters' AppleScript", () => {
     const scope = (result: string): AdapterScope => ({
       app: { name: "Safari", bundleId: "com.apple.Safari", pid: 1 }, signal: new AbortController().signal,
       applescript: async () => result, find: async () => [], snapshot: async () => "", act: async () => ({ rung: 1 }),
-      waitFor: async () => ({ waitedMs: 0 }), openDocument: async () => ({ name: "", bundleId: "" }), print: () => {}, say: () => {},
+      waitFor: async () => ({ waitedMs: 0 }), openDocument: async () => ({ name: "", bundleId: "" }), print: () => {}, say: () => {}, notice: () => {},
       clampWait: (ms) => ms, sleep: async () => true, window: () => BOUND_WINDOW,
     });
     value = await safari.extras.find((e) => e.name === "tabs")!.run(scope("1\ttrue\thttps://a.test/\tA\ttitle\n2\tfalse\t\t\n"), []);
@@ -557,7 +598,7 @@ describe("browser and window extras act on the BOUND window only", () => {
     signal: new AbortController().signal, window: () => BOUND_WINDOW,
     applescript: async (src) => { sources.push(src); return answer; },
     find: async () => [], snapshot: async () => "", act: async () => ({ rung: 1 }), waitFor: async () => ({ waitedMs: 0 }),
-    openDocument: async () => ({ name: "", bundleId: "" }), print: () => {}, say: () => {}, clampWait: (ms) => ms, sleep: async () => true,
+    openDocument: async () => ({ name: "", bundleId: "" }), print: () => {}, say: () => {}, notice: () => {}, clampWait: (ms) => ms, sleep: async () => true,
   });
   const kind = async (p: Promise<unknown>): Promise<string> => {
     try { await p; return "ok"; } catch (e) { return e instanceof AutomationFailure ? `${e.kind}: ${e.message}` : `${(e as Error).name}: ${(e as Error).message}`; }
@@ -570,7 +611,7 @@ describe("browser and window extras act on the BOUND window only", () => {
       sessionId: "s1", callId: "c1", signal: new AbortController().signal, primitive: "extra", metric: { ts: 0, sessionId: "s1", callId: "c1", primitive: "extra", ms: 0, helperMs: 0 },
       privatePath: true, helperVersion: () => "1.7.0", helper: async () => { throw new Error("no"); }, authorize: async () => {},
       applescript: async (_t: unknown, src: string) => { scripts.push(src); return { result: null }; }, openDocument: async () => { throw new Error("no"); },
-      builder: { text: () => {}, daemonLine: () => {}, guide: () => {}, markScreenRead: () => {} },
+      builder: { text: () => {}, daemonLine: () => {}, guide: () => {}, notice: () => {}, markScreenRead: () => {} },
       clampWait: (ms: number) => ms, acted: () => {}, log: () => {},
     };
     const safari = { targetId: "t1", bundleId: "com.apple.Safari", name: "Safari", pid: 1 }; // no windowId
@@ -635,5 +676,153 @@ describe("browser and window extras act on the BOUND window only", () => {
     await byName("com.apple.dt.Xcode", "buildStatus").run(scopeAnswering("com.apple.dt.Xcode", "App\tsucceeded\ttrue\t\n", sources), [{ workspace: "App" }]);
     expect(sources[0]).toContain('set d to workspace document "App"');
     expect(sources[0]).not.toContain("window id");
+  });
+});
+
+// ── the review's findings ────────────────────────────────────────────────────────────────────────────────────
+
+describe("review fixes", () => {
+  const def = (bundleId: string, name: string): ExtraDef => BUILTIN_ADAPTERS.find((a) => a.bundleIds.includes(bundleId))!.extras.find((e) => e.name === name)!;
+  const failure = async (p: Promise<unknown>): Promise<string> => {
+    try { await p; return "ok"; } catch (e) { return e instanceof AutomationFailure ? `${e.kind}: ${e.message}` : `${(e as Error).name}: ${(e as Error).message}`; }
+  };
+
+  test("trash: a symbolic link is refused (Finder would trash what it points to) — and nothing runs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-trash-link-"));
+    const target = join(dir, "Precious");
+    mkdirSync(target);
+    const link = join(dir, "link-to-precious");
+    symlinkSync(target, link);
+    const sources: string[] = [];
+    expect(await failure(scriptsOf("com.apple.finder", def("com.apple.finder", "trash"), [link], (src) => { sources.push(src); return null; })))
+      .toContain("Refused: " + link + " is a symbolic link");
+    expect(sources).toEqual([]);
+  });
+
+  test("trash: the floor is weighed on the REAL path, case-insensitively (a link in the path, a mixed-case spelling)", async () => {
+    const home = "/Users/someone";
+    for (const p of ["/SYSTEM/Library", "/system", "/USERS", "/Users/SOMEONE", "/users/someone/documents", `${home}/DeskTop`, `${home}/.SSH/id_rsa`, `${home}/library/keychains/login.keychain-db`, "/Private/Etc/hosts"]) {
+      expect(trashRefusal(p, home)).toBeDefined();
+    }
+    expect(trashRefusal(`${home}/documents/old.txt`, home)).toBeUndefined();
+    // A path whose parent is a link to a refused folder: refused once resolved (the extra resolves before the floor).
+    const dir = mkdtempSync(join(tmpdir(), "winter-trash-real-"));
+    const fakeHome = join(dir, "home");
+    mkdirSync(join(fakeHome, "Documents"), { recursive: true });
+    symlinkSync(fakeHome, join(dir, "via"));
+    const { realpathSync } = await import("node:fs");
+    expect(trashRefusal(realpathSync(join(dir, "via", "Documents")), realpathSync(fakeHome))).toBeDefined();
+  });
+
+  test("trash: refused where Finder would ask (a password, another user's item in a sticky folder, a network volume)", () => {
+    const local = "/dev/disk3s1 on / (apfs, local, journaled)\n//me@nas/share on /Volumes/share (smbfs, nodev, nosuid, mounted by me)\n/dev/disk5s1 on /Volumes/USB Stick (msdos, local, nodev, nosuid)\n";
+    const mounts = parseMounts(local);
+    expect(mountFor("/Users/x/a.txt", mounts)?.flags).toContain("local");
+    expect(mountFor("/Volumes/share/a.txt", mounts)?.flags).not.toContain("local");
+    expect(mountFor("/Volumes/USB Stick/a.txt", mounts)?.point).toBe("/Volumes/USB Stick");
+    const ok = { writable: () => true, stat: () => ({ mode: 0o40755, uid: 501 }), uid: 501, mounts: () => local };
+    expect(trashDialogReason("/Users/x/a.txt", { uid: 501 }, ok)).toBeUndefined();
+    expect(trashDialogReason("/Users/x/a.txt", { uid: 501 }, { ...ok, writable: () => false })).toContain("administrator's password");
+    expect(trashDialogReason("/private/tmp/a.txt", { uid: 0 }, { ...ok, stat: () => ({ mode: 0o41777, uid: 0 }) })).toContain("another user");
+    expect(trashDialogReason("/private/tmp/a.txt", { uid: 501 }, { ...ok, stat: () => ({ mode: 0o41777, uid: 0 }) })).toBeUndefined();
+    expect(trashDialogReason("/Volumes/share/a.txt", { uid: 501 }, ok)).toContain("not local");
+    expect(trashDialogReason("/Volumes/USB Stick/a.txt", { uid: 501 }, ok)).toBeUndefined();
+  });
+
+  test("Safari openWindow: frontmost checked right before the window is made and right after; a late switch is reported", async () => {
+    const sources: string[] = [];
+    const notices: string[] = [];
+    const scope: AdapterScope = {
+      app: { name: "Safari", bundleId: "com.apple.Safari", pid: 1 }, signal: new AbortController().signal, window: () => BOUND_WINDOW,
+      applescript: async (src) => { sources.push(src); return "WINDOW:108006\ttrue"; },
+      find: async () => [], snapshot: async () => "", act: async () => ({ rung: 1 }), waitFor: async () => ({ waitedMs: 0 }),
+      openDocument: async () => ({ name: "", bundleId: "" }), print: () => {}, say: () => {}, notice: (t) => notices.push(t),
+      clampWait: (ms) => ms, sleep: async () => true,
+    };
+    expect(await def("com.apple.Safari", "openWindow").run(scope, ["https://x.test"])).toEqual({ window: 108006, frontmostAfter: true });
+    expect(notices[0]).toContain("may now have their keyboard focus");
+    const src = sources[0]!;
+    const make = src.indexOf("make new document");
+    expect(src.lastIndexOf('if frontmost then return "FRONTMOST"', make)).toBeGreaterThan(src.indexOf("set before to id of every window"));
+    expect(src.indexOf("set frontAfter to frontmost")).toBeGreaterThan(make);
+    const block = BUILTIN_ADAPTERS[1]!.guide!.text + def("com.apple.Safari", "openWindow").summary + (def("com.apple.Safari", "openWindow").doc ?? "");
+    expect(block).not.toMatch(/background/i);
+    expect(BUILTIN_ADAPTERS[1]!.guide!.text).toContain("prefer Winter's built-in browser (browsers.open)");
+  });
+
+  test("Safari openURL: the current tab is put back ONLY when Safari itself moved to the new tab", async () => {
+    const sources: string[] = [];
+    await scriptsOf("com.apple.Safari", def("com.apple.Safari", "openURL"), ["https://x.test"], (src) => { sources.push(src); return "TAB:3"; });
+    expect(sources[0]).toContain("if (index of current tab of w) = n and ci is not n then set current tab of w to tab ci of w");
+    expect(sources[0]).not.toMatch(/^\s*set current tab of w to tab ci of w$/m);
+  });
+
+  test("Xcode build: keeps the result its own build returned and polls THAT one by id — never the last result", async () => {
+    const sources: string[] = [];
+    let polls = 0;
+    const out = await scriptsOf("com.apple.dt.Xcode", def("com.apple.dt.Xcode", "build"), [{ waitMs: 5_000 }], (src) => {
+      sources.push(src);
+      if (src.includes("set r to build d")) return "WS:App\tsar-7";
+      polls++;
+      return polls < 3 ? "App\trunning\tfalse\t\n" : "App\tsucceeded\ttrue\t\n";
+    });
+    expect(out.length).toBe(4);
+    expect(sources[0]).toContain("set r to build d");
+    expect(sources[0]).toContain("my winterText(id of r)");
+    for (const poll of sources.slice(1)) {
+      expect(poll).toContain('set r to scheme action result id "sar-7" of d');
+      expect(poll).not.toContain("last scheme action result");
+    }
+    const r = await def("com.apple.dt.Xcode", "build").run({
+      app: { name: "Xcode", bundleId: "com.apple.dt.Xcode", pid: 1 }, signal: new AbortController().signal, window: () => BOUND_WINDOW,
+      applescript: async (src) => (src.includes("set r to build d") ? "WS:App\tsar-8" : "REPLACED"),
+      find: async () => [], snapshot: async () => "", act: async () => ({ rung: 1 }), waitFor: async () => ({ waitedMs: 0 }),
+      openDocument: async () => ({ name: "", bundleId: "" }), print: () => {}, say: () => {}, notice: () => {}, clampWait: (ms) => ms, sleep: async () => true,
+    }, [{ waitMs: 5_000 }]);
+    expect(r).toMatchObject({ id: "sar-8", status: "replaced", completed: true });
+  });
+
+  test("Mail compose: the hidden message is saved, then closed with saving yes (never ask)", async () => {
+    const sources = await scriptsOf("com.apple.mail", def("com.apple.mail", "compose"), [{ to: "a@example.com", subject: "s", body: "b" }], "12");
+    const src = sources[0]!;
+    expect(src).toContain("visible:false");
+    expect(src.indexOf("close m saving yes")).toBeGreaterThan(src.indexOf("save m"));
+    expect(src).not.toContain("saving ask");
+    expect(src).not.toMatch(/\bsend\b/);
+  });
+
+  test("Finder selection: refused unless the selection is PROVEN the bound window's (frontmost, not the Desktop folder, the insertion location its folder)", async () => {
+    const sources: string[] = [];
+    for (const [answer, words] of [["DESKTOP", "shows the Desktop folder"], ["NOTFOCUSED", "the user's focus in Finder is elsewhere"], ["UNPROVEN", "could not prove"], ["NOTFRONT", "frontmost window only"]] as const) {
+      expect(await failure(def("com.apple.finder", "selection").run({
+        app: { name: "Finder", bundleId: "com.apple.finder", pid: 1 }, signal: new AbortController().signal, window: () => BOUND_WINDOW,
+        applescript: async (src) => { sources.push(src); return answer; },
+        find: async () => [], snapshot: async () => "", act: async () => ({ rung: 1 }), waitFor: async () => ({ waitedMs: 0 }),
+        openDocument: async () => ({ name: "", bundleId: "" }), print: () => {}, say: () => {}, notice: () => {}, clampWait: (ms) => ms, sleep: async () => true,
+      }, []))).toContain(`NoWindow: `);
+      expect(await failure(def("com.apple.finder", "selection").run({
+        app: { name: "Finder", bundleId: "com.apple.finder", pid: 1 }, signal: new AbortController().signal, window: () => BOUND_WINDOW,
+        applescript: async () => answer, find: async () => [], snapshot: async () => "", act: async () => ({ rung: 1 }), waitFor: async () => ({ waitedMs: 0 }),
+        openDocument: async () => ({ name: "", bundleId: "" }), print: () => {}, say: () => {}, notice: () => {}, clampWait: (ms) => ms, sleep: async () => true,
+      }, []))).toContain(words);
+    }
+    const src = sources[0]!;
+    const read = src.indexOf("(get selection)");
+    for (const proof of [`if (id of Finder window 1) is not ${BOUND_WINDOW} then return "NOTFRONT"`, "if boundURL is desktopURL then return \"DESKTOP\"", "if insertionURL is not boundURL then return \"NOTFOCUSED\""]) {
+      expect(src.indexOf(proof)).toBeGreaterThan(0);
+      expect(src.indexOf(proof)).toBeLessThan(read);
+    }
+  });
+
+  test("the dictionary never offers quit or print (nor run, reopen, activate, launch); close, reply and forward stay", () => {
+    const info = generateDict({ scriptable: true, commands: [
+      { name: "quit", suite: "Standard", eventCode: "aevtquit", params: [] },
+      { name: "print", suite: "Standard", eventCode: "aevtpdoc", direct: { type: "specifier", optional: false }, params: [] },
+      { name: "close", suite: "Standard", eventCode: "coreclos", direct: { type: "specifier", optional: false }, params: [] },
+      { name: "reply", suite: "Mail", eventCode: "emalrpms", direct: { type: "message", optional: false }, params: [] },
+      { name: "forward", suite: "Mail", eventCode: "emalfwms", direct: { type: "message", optional: false }, params: [] },
+    ] });
+    expect(info.commands.map((c) => c.name)).toEqual(["close", "reply", "forward"]);
+    expect(info.unwrapped).toEqual([]);
   });
 });

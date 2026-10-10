@@ -3,7 +3,8 @@
 // (the helper refuses it anywhere). Every extra addresses the bound window by its id (`window id <it>`: Safari's
 // scripting id of a window IS its window-server id), NEVER Safari's front window — the user's own window may be in front.
 // A bound window Safari cannot find, or one that is not a browser window, is `NoWindow`; nothing falls back.
-// `openWindow(url)` makes the agent a window of its own (found by the one new id), so its tabs never land in the user's.
+// `openWindow(url)` makes a window of the agent's own (found by the one new id) for when the user wants Safari itself —
+// the agent's own browsing belongs in Winter's built-in browser (`browsers.open`).
 import { AutomationFailure } from "../../errors";
 import { SAFARI_GUIDE } from "../guides/safari";
 import type { AdapterScope, AppAdapter } from "../types";
@@ -41,7 +42,7 @@ const TAB_ROW = "my winterText(URL of t) & winterTAB & my winterText(name of t)"
 
 export const safariAdapter: AppAdapter = {
   bundleIds: ["com.apple.Safari", "com.apple.SafariTechnologyPreview"],
-  guide: { id: "safari@2", text: SAFARI_GUIDE },
+  guide: { id: "safari@3", text: SAFARI_GUIDE },
   extras: [
     {
       name: "tabs", access: "view",
@@ -97,7 +98,7 @@ export const safariAdapter: AppAdapter = {
       name: "openURL", access: "full",
       signature: "openURL(url: string, o?: { newTab?: boolean }): Promise<{ tab: number }>",
       summary: "opens a URL in a new tab of the bound window, its current tab kept (newTab: false: in that tab)",
-      doc: "http, https or file URLs, in the BOUND window: by default a new tab at its end, the window's current tab kept as it was; { newTab: false } loads the URL in the current tab instead (its page is replaced). Returns the tab's index. For pages of your own, openWindow(url) first.",
+      doc: "http, https or file URLs, in the BOUND window: by default a new tab at its end, the window's current tab kept as it was; { newTab: false } loads the URL in the current tab instead (its page is replaced). Returns the tab's index. Your own browsing belongs in browsers.open; a Safari window of your own is openWindow(url).",
       async run(scope, args) {
         const url = urlArg(args[0], "openURL(url)");
         const o = optsArg(args[1], "openURL(url, o)", ["newTab"]);
@@ -111,8 +112,9 @@ export const safariAdapter: AppAdapter = {
               "set ci to index of ct",
               `make new tab at end of tabs of w with properties {URL:${u}}`,
               "set n to count of tabs of w",
-              // The window's current tab stays current, whether or not Safari switched to the new one.
-              "set current tab of w to tab ci of w",
+              // Put the current tab back ONLY when Safari itself moved to the new tab — a switch the user made meanwhile
+              // (to any other tab) is never undone.
+              "if (index of current tab of w) = n and ci is not n then set current tab of w to tab ci of w",
               "return \"TAB:\" & (n as text)",
             ]),
         ]), { timeoutMs: 15_000 }));
@@ -123,30 +125,39 @@ export const safariAdapter: AppAdapter = {
     },
     {
       name: "openWindow", access: "full",
-      signature: "openWindow(url: string): Promise<{ window: number }>",
-      summary: "opens a URL in a NEW Safari window of your own, in the background; bind it by the id it returns",
-      doc: "Makes a new Safari window showing the URL (http, https or file) and returns its id — bind it with apps.open(\"Safari\", { window: id }) and work there, never in the user's windows. Refused while Safari is the app the user is using (a new window would take their keyboard focus).",
+      signature: "openWindow(url: string): Promise<{ window: number; frontmostAfter?: true }>",
+      summary: "opens a URL in a NEW Safari window of your own (when the user wants Safari); bind it by the id it returns",
+      doc: "For when the user wants the work done in Safari itself — your own browsing belongs in browsers.open. Makes a new Safari window showing the URL (http, https or file) and returns its id: bind it with apps.open(\"Safari\", { window: id }) and work there, never in the user's windows. Refused while Safari is the app the user is using (a new window would take their keyboard focus); frontmostAfter: true when Safari became it meanwhile — tell the user.",
       async run(scope, args) {
         const u = text(urlArg(args[0], "openWindow(url)"));
         const result = await scope.applescript(appScript(scope.app.bundleId, [
           "if frontmost then return \"FRONTMOST\"",
           "set before to id of every window",
+          // Again right before the window is made (the user may have switched to Safari meanwhile), and once after.
+          "if frontmost then return \"FRONTMOST\"",
           `make new document with properties {URL:${u}}`,
+          "set frontAfter to frontmost",
           "set after to id of every window",
           "set fresh to {}",
           "repeat with i in after",
           "  if before does not contain (contents of i) then set end of fresh to (contents of i)",
           "end repeat",
           "if (count of fresh) is not 1 then return \"AMBIGUOUS\"",
-          "return \"WINDOW:\" & ((item 1 of fresh) as text)",
+          "return \"WINDOW:\" & ((item 1 of fresh) as text) & winterTAB & (frontAfter as text)",
         ]), { timeoutMs: 15_000 });
-        const r = (result ?? "").trim();
+        const [head, frontAfter] = (result ?? "").trim().split("\t");
+        const r = head ?? "";
         if (r === "FRONTMOST") throw new AutomationFailure("NeedsForeground", `${scope.app.name} is the app the user is using right now, and a new window would take their keyboard focus — ask the user, or work in the bound window. Nothing was done.`);
         const id = Number(r.replace(/^WINDOW:/, ""));
         if (!r.startsWith("WINDOW:") || !Number.isInteger(id) || id <= 0) {
           throw new AutomationFailure("NoWindow", `a new ${scope.app.name} window was made, but Winter could not tell which one it is (another window appeared at the same moment) — bind it by its title with apps.open("${scope.app.name}", { window: "<title>" })`);
         }
-        scope.say(`opened a new ${scope.app.name} window of your own (id ${id}) in the background — bind it with apps.open("${scope.app.name}", { window: ${id} })`);
+        if (frontAfter?.trim() === "true") {
+          // The user switched to Safari while the window was being made: it may now hold their keyboard focus.
+          scope.notice(`${scope.app.name} became the app the user is using while Winter made its new window (id ${id}) — that window may now have their keyboard focus. Tell the user, and don't type in ${scope.app.name} until they have answered.`);
+          return { window: id, frontmostAfter: true as const };
+        }
+        scope.say(`opened a new ${scope.app.name} window of your own (id ${id}) — bind it with apps.open("${scope.app.name}", { window: ${id} })`);
         return { window: id };
       },
     },

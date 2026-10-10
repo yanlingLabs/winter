@@ -38,14 +38,25 @@ function noWorkspace(scope: AdapterScope, result: string | null, name: string | 
   if (r === "NOWORKSPACE") throw new AutomationFailure("NoWindow", `Xcode has no open workspace named ${JSON.stringify(name ?? "")} — schemes() lists the open ones. Nothing was done.`);
 }
 
-interface BuildState { workspace: string; status: string; completed: boolean; error?: string; errors: string[] }
+interface BuildState { workspace: string; id?: string; status: string; completed: boolean; error?: string; errors: string[]; replaced?: true }
 
-/** One read of the workspace's last scheme action result. */
-async function readResult(scope: AdapterScope, workspace: string | undefined): Promise<BuildState | undefined> {
+/** A scheme action result's id as Xcode gives it. */
+function resultId(v: unknown, what: string): string {
+  const id = stringArg(v, what, 200).trim();
+  if (!/^[A-Za-z0-9._:-]+$/.test(id)) throw Object.assign(new TypeError(`${what} takes a build id from build()`), { name: "TypeError" });
+  return id;
+}
+
+/**
+ * One read of a scheme action result: THE one `id` names (the result `build` returned — Xcode keeps each until a newer
+ * action replaces it, then that id is gone: `replaced`), or, with no id, the workspace's last one.
+ */
+async function readResult(scope: AdapterScope, workspace: string | undefined, id?: string): Promise<BuildState | undefined> {
   const result = await scope.applescript(appScript(scope.app.bundleId, [
     ...workspaceLines(scope, workspace),
-    "set r to last scheme action result of d",
-    "if r is missing value then return my winterText(name of d)",
+    ...(id === undefined
+      ? ["set r to last scheme action result of d", "if r is missing value then return my winterText(name of d)"]
+      : ["try", `  set r to scheme action result id ${text(id)} of d`, "on error", "  return \"REPLACED\"", "end try"]),
     "set out to my winterText(name of d) & winterTAB & ((status of r) as text) & winterTAB & ((completed of r) as text) & winterTAB & my winterText(error message of r) & winterLF",
     "set k to 0",
     "repeat with e in (build errors of r)",
@@ -56,23 +67,25 @@ async function readResult(scope: AdapterScope, workspace: string | undefined): P
     "return out",
   ], { handlers: ["text"] }), { timeoutMs: 15_000 });
   noWorkspace(scope, result, workspace);
+  if ((result ?? "").trim() === "REPLACED") return { workspace: workspace ?? "", ...(id === undefined ? {} : { id }), status: "replaced", completed: true, errors: [], replaced: true };
   const lines = rows(result, 2);
   const head = (result ?? "").split(/\r?\n|\r/)[0]?.split("\t") ?? [];
   if (head.length < 4) return undefined;
   return {
-    workspace: head[0] ?? "", status: head[1] ?? "", completed: (head[2] ?? "").trim() === "true",
+    workspace: head[0] ?? "", ...(id === undefined ? {} : { id }), status: head[1] ?? "", completed: (head[2] ?? "").trim() === "true",
     ...(head[3] !== undefined && head[3].length > 0 ? { error: head.slice(3).join("\t").slice(0, 2_000) } : {}),
     errors: lines.filter((r) => r[0] === "E").map((r) => (r[1] ?? "").slice(0, 500)),
   };
 }
 
 const shape = (s: BuildState): Record<string, unknown> => ({
-  workspace: s.workspace, status: s.status, completed: s.completed, ...(s.error === undefined ? {} : { error: s.error }), errors: s.errors,
+  workspace: s.workspace, ...(s.id === undefined ? {} : { id: s.id }), status: s.status, completed: s.completed,
+  ...(s.error === undefined ? {} : { error: s.error }), errors: s.errors,
 });
 
 export const xcodeAdapter: AppAdapter = {
   bundleIds: ["com.apple.dt.Xcode"],
-  guide: { id: "xcode@2", text: XCODE_GUIDE },
+  guide: { id: "xcode@3", text: XCODE_GUIDE },
   extras: [
     {
       name: "schemes", access: "view",
@@ -111,41 +124,46 @@ export const xcodeAdapter: AppAdapter = {
     },
     {
       name: "build", access: "full",
-      signature: "build(o?: { workspace?: string; waitMs?: number }): Promise<{ workspace: string; status: string; completed: boolean; error?: string; errors: string[] }>",
+      signature: "build(o?: { workspace?: string; waitMs?: number }): Promise<{ workspace: string; id: string; status: string; completed: boolean; error?: string; errors: string[] }>",
       summary: "builds the bound window's workspace (or a named one) — its active scheme — and waits",
-      doc: "Xcode's build command on the BOUND window's workspace (or { workspace } by name), for its active scheme and run destination. Waits up to { waitMs } (default: the script's time left) polling the result; completed: false means it is still building — call buildStatus() later. errors: the first 20 build error messages.",
+      doc: "Xcode's build command on the BOUND window's workspace (or { workspace } by name), for its active scheme and run destination. Waits up to { waitMs } (default: the script's time left) polling THIS build's own result; completed: false means it is still building — call buildStatus({ id }) later. status \"replaced\": a newer action replaced it. errors: the first 20 build error messages.",
       async run(scope, args) {
         const o = optsArg(args[0], "build()", ["workspace", "waitMs"]);
         const workspace = o.workspace === undefined ? undefined : stringArg(o.workspace, "build({ workspace })", 300);
         const waitMs = scope.clampWait(o.waitMs === undefined ? 300_000 : intArg(o.waitMs, "build({ waitMs })", 0, 300_000));
         const started = await scope.applescript(appScript(scope.app.bundleId, [
           ...workspaceLines(scope, workspace),
-          "build d",
-          "return \"WS:\" & my winterText(name of d)",
+          // Keep THIS build's own result, by its id: never "the last result", which a later action replaces.
+          "set r to build d",
+          "return \"WS:\" & my winterText(name of d) & winterTAB & my winterText(id of r)",
         ], { handlers: ["text"] }), { timeoutMs: 15_000 });
         noWorkspace(scope, started, workspace);
-        const name = (started ?? "").replace(/^WS:/, "").trim();
+        const [wsPart, idPart] = (started ?? "").trim().split("\t");
+        const name = (wsPart ?? "").replace(/^WS:/, "").trim();
+        const id = (idPart ?? "").trim();
+        if (!/^[A-Za-z0-9._:-]+$/.test(id)) throw new Error("Xcode started the build but gave no result id to follow — read it with buildStatus()");
         scope.say(`started a build of ${workspace === undefined ? "the bound window's workspace" : "the named workspace"} (its active scheme)`);
         const deadline = Date.now() + Math.max(0, waitMs - 1_500);
-        // Polled the same way it was started: the bound window's workspace, or the named one.
-        let state = await readResult(scope, workspace);
+        // Polled the same way it was started (the bound window's workspace, or the named one) — and by its own id.
+        let state = await readResult(scope, workspace, id);
         while (state !== undefined && !state.completed && Date.now() < deadline) {
           if (!(await scope.sleep(1_000))) break;
-          state = await readResult(scope, workspace);
+          state = await readResult(scope, workspace, id);
         }
-        if (state === undefined) return { workspace: name, status: "not yet started", completed: false, errors: [] };
-        if (!state.completed) scope.say("the build is still running — call buildStatus() in a later step");
+        if (state === undefined) return { workspace: name, id, status: "not yet started", completed: false, errors: [] };
+        if (!state.completed) scope.say(`the build is still running — call buildStatus({ id: ${JSON.stringify(id)} }) in a later step`);
         return shape(state);
       },
     },
     {
       name: "buildStatus", access: "view",
-      signature: "buildStatus(o?: { workspace?: string }): Promise<{ workspace: string; status: string; completed: boolean; error?: string; errors: string[] } | null>",
-      summary: "the last build's result for the bound window's workspace (or a named one)",
+      signature: "buildStatus(o?: { id?: string; workspace?: string }): Promise<{ workspace: string; id?: string; status: string; completed: boolean; error?: string; errors: string[] } | null>",
+      summary: "a build's result — { id } from build(), else the last one — for the bound window's workspace (or a named one)",
+      doc: "{ id } (from build()) reads THAT build's result (status \"replaced\" once a newer action replaced it); without one, the workspace's last action result.",
       async run(scope, args) {
-        const o = optsArg(args[0], "buildStatus()", ["workspace"]);
+        const o = optsArg(args[0], "buildStatus()", ["id", "workspace"]);
         const workspace = o.workspace === undefined ? undefined : stringArg(o.workspace, "buildStatus({ workspace })", 300);
-        const state = await readResult(scope, workspace);
+        const state = await readResult(scope, workspace, o.id === undefined ? undefined : resultId(o.id, "buildStatus({ id })"));
         return state === undefined ? null : shape(state);
       },
     },

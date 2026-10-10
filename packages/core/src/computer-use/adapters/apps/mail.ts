@@ -86,7 +86,7 @@ export const mailAdapter: AppAdapter = {
       name: "compose", access: "full",
       signature: "compose(o: { to: string | string[]; cc?: string | string[]; subject: string; body: string }): Promise<{ draft: true; id: number }>",
       summary: "saves a new message to Drafts — no window, never sent",
-      doc: "Makes an outgoing message with no window, adds the recipients, saves it to Drafts and leaves it there: it is never sent (sending is the user's step). Plain-text body.",
+      doc: "Makes an outgoing message with no window, adds the recipients, saves it to Drafts and closes it (the draft stays in Drafts): it is never sent (sending is the user's step). Plain-text body.",
       async run(scope, args) {
         const o = optsArg(args[0], "compose()", ["to", "cc", "subject", "body"]);
         const to = addresses(o.to, "compose({ to })", true);
@@ -99,8 +99,12 @@ export const mailAdapter: AppAdapter = {
           ...to.map((a) => `  make new to recipient at end of to recipients with properties {address:${text(a)}}`),
           ...cc.map((a) => `  make new cc recipient at end of cc recipients with properties {address:${text(a)}}`),
           "end tell",
+          "set mid to id of m",
           "save m",
-          "return id of m",
+          // Close the hidden message so it doesn't linger: an outgoing message responds to `close` (Mail's sdef), and
+          // `saving yes` keeps the draft — never `ask`, which would put a dialog in front of the user.
+          "close m saving yes",
+          "return mid",
         ]), { timeoutMs: 20_000 });
         scope.say("saved the message to Mail's Drafts (no window, not sent)");
         return { draft: true as const, id: Number((result ?? "").trim()) || 0 };

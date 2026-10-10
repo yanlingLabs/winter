@@ -82,6 +82,8 @@ export interface AdapterRunScope {
     text(text: string, o?: { screen?: boolean }): void;
     daemonLine(text: string): void;
     guide(text: string): void;
+    /** A daemon notice, shown before the script's output (loud: something the user must be told). */
+    notice(text: string): void;
     markScreenRead(): void;
   };
   clampWait(ms: number): number;
@@ -111,12 +113,15 @@ export interface AdapterScope {
   snapshot(o?: { within?: number }): Promise<string>;
   act(action: ActAction): Promise<ActResult>;
   waitFor(cond: { text?: string; ref?: number; gone?: number | string; title?: string }, timeoutMs: number): Promise<{ waitedMs: number }>;
-  /** A document opened in the background (`apps.open(path, { app })`): the opener's name and bundle id. */
-  openDocument(path: string, opener?: string): Promise<{ name: string; bundleId: string }>;
+  /** A document opened in the background (`apps.open(path, { app })`): the opener's name and bundle id, and the handle of
+   *  its window the service bound (return it as `{ $app: handle }` and the worker hands the script an App). */
+  openDocument(path: string, opener?: string): Promise<{ name: string; bundleId: string; handle?: AppHandle }>;
   /** Text read from the app, printed in place: DATA, inside the fence. */
   print(text: string): void;
   /** Winter's own words, printed in place outside the fence (never app text). */
   say(text: string): void;
+  /** Winter's own words the model must not miss: a notice before the script's output. */
+  notice(text: string): void;
   clampWait(ms: number): number;
   /** Sleep, unless the run is cancelled first (`false` then). */
   sleep(ms: number): Promise<boolean>;

@@ -124,7 +124,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     const listed = new Set(names.filter((n) => typeof n === "string" && n.length > 0));
     const fns = Object.create(null) as Record<string, (...args: unknown[]) => Promise<unknown>>;
     for (const n of listed) {
-      Object.defineProperty(fns, n, { value: (...args: unknown[]) => call(kind, targetId, { name: n, args }), enumerable: true });
+      Object.defineProperty(fns, n, { value: (...args: unknown[]) => call(kind, targetId, { name: n, args }).then(kind === "extra" ? reviveApps : (v) => v), enumerable: true });
     }
     Object.freeze(fns);
     const own = (k: PropertyKey): k is string => typeof k === "string" && listed.has(k);
@@ -138,6 +138,19 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       deleteProperty: () => false,
       setPrototypeOf: () => false,
     });
+  };
+  /** An extra's result: each `{ $app: handle }` in it (an app window the extra bound, e.g. openWith's opener) becomes
+   *  an App. The daemon checks the target id on every call made through it. */
+  const reviveApps = (v: unknown, depth = 0): unknown => {
+    if (depth > 4 || v === null || typeof v !== "object") return v;
+    if (Array.isArray(v)) return v.map((x) => reviveApps(x, depth + 1));
+    const o = v as Record<string, unknown>;
+    const h = o.$app as Partial<AppHandle> | undefined;
+    if (Object.keys(o).length === 1 && h !== null && typeof h === "object" && typeof h.targetId === "string" && typeof h.name === "string" && typeof h.bundleId === "string") {
+      return toApp(h);
+    }
+    for (const k of Object.keys(o)) o[k] = reviveApps(o[k], depth + 1);
+    return o;
   };
   class App {
     constructor(h: AppHandle) {
