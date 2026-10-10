@@ -502,6 +502,7 @@ export function installStopHandler(deps: StopHandlerDeps): StopState {
       }
       requested = signal;
       deps.log(`${signal} received — stopping the run and cleaning up (exit ${STOP_EXIT_CODES[signal]}; a hard exit follows in ${STOP_HARD_EXIT_MS / 1000} s)`);
+      // Not unref'd on purpose: every path of the runner ends in process.exit, and this is the bound if one never does.
       deps.setTimeout(() => {
         deps.log(`the cleanup did not finish in ${STOP_HARD_EXIT_MS / 1000} s — killing what the run still owns and exiting`);
         try { deps.onHardExit?.(); } catch { /* best effort */ }

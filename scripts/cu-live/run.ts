@@ -1499,7 +1499,15 @@ async function main(): Promise<void> {
     log,
     onHardExit: killOwned,
   });
-  const built = buildAll(log);
+  let built: Built;
+  try {
+    built = buildAll(log);
+  } catch (err) {
+    // The build is all spawnSync: a signal lands after it returns (or, from a terminal, kills the compiler with it).
+    // Nothing exists yet to clean up — leave with the signal's code rather than the build's.
+    if (stop.requested !== undefined) { log(`stopped during the build (${stop.requested})`); process.exit(stop.exitCode); }
+    throw err;
+  }
   const startedAt = Date.now();
   const results: ScenarioResult[] = [];
   try {
@@ -1533,7 +1541,8 @@ async function main(): Promise<void> {
   // A live run always leaves a report (out/cu-live/last-run.json unless --report says where) — the completion
   // window names it. A run that was stopped (an abort row, or a signal) says so in the report itself.
   const report = o.report ?? (o.dryRun ? undefined : join(OUT_DIR, "last-run.json"));
-  const aborted = results.some((r) => r.group === "run" && r.name === "ABORTED") || stop.requested !== undefined;
+  // "aborted" is what the completion window shows too: a signal, or a run row (ABORTED, setup, error) other than the cleanup failed.
+  const aborted = doneWindowModel(results, 0, 0, "").status === "aborted" || stop.requested !== undefined;
   if (report !== undefined) writeFileSync(report, `${JSON.stringify({ aborted, ...(stop.requested === undefined ? {} : { signal: stop.requested }), results, outputs: Object.fromEntries(failedOutputs) }, null, 2)}\n`);
   // After the cleanup (liveRun has returned): the completion window, so the user knows the run ended. Never during
   // the run, never for a dry run, never with --no-done-window (CI).
