@@ -165,6 +165,8 @@ interface RunCtx {
   /** Targets the user let come to the front for the rest of this run (`requestForeground`): their acts take
    *  the foreground with no second card. */
   foreground: Set<string>;
+  /** The last primitive the script called ("type in Safari"), for a timeout's words. */
+  lastPrimitive?: string;
   sessionId: string;
   runId: string;
   callId: string;
@@ -281,7 +283,12 @@ export class ComputerV2Service {
     // The timer and the grants reference each other (a card pauses the timer): built in two steps.
     const ctxRef: { ctx?: RunCtx } = {};
     const timer = new PausableTimer(timeoutMs, () => {
-      if (ctxRef.ctx) { ctxRef.ctx.timedOut = true; this.cancel(ctxRef.ctx, timeoutMessage(timeoutMs, ctxRef.ctx.timer.budget, ctxRef.ctx.extensions)); }
+      if (ctxRef.ctx) {
+        const c = ctxRef.ctx;
+        c.timedOut = true;
+        const calls = [...c.primitives.entries()].reduce((n, [k, v]) => (k === "timeLeft" ? n : n + v), 0);
+        this.cancel(c, timeoutMessage(timeoutMs, c.timer.budget, c.extensions, { calls, ...(c.lastPrimitive === undefined ? {} : { last: c.lastPrimitive }) }));
+      }
     }, () => this.now());
     const grants = newRunGrants(sessionId, (waiting) => (waiting ? timer.pause() : timer.resume()));
     const ctx: RunCtx = {
@@ -429,7 +436,12 @@ export class ComputerV2Service {
     this.live(ctx);
     const args = (msg.args ?? {}) as Record<string, unknown>;
     ctx.primitives.set(msg.primitive, (ctx.primitives.get(msg.primitive) ?? 0) + 1);
+    if (msg.primitive !== "timeLeft") {
+      const on = msg.target === undefined ? undefined : ctx.state.targets.get(msg.target)?.name;
+      ctx.lastPrimitive = `${msg.primitive}()${on === undefined ? "" : ` in ${on}`}`;
+    }
     switch (msg.primitive) {
+      case "timeLeft": return Math.max(0, Math.floor(ctx.timer.left()));
       case "apps.list": return await this.appsList(ctx, args, metric);
       case "apps.open": {
         const target = str(args.app)?.trim();
@@ -1260,13 +1272,24 @@ const ERROR_MESSAGE_CAP = 4_096;
 /** A bind's or useWindow's `detail` from the helper, as one short line (or nothing). */
 /** The words of a run's timeout: its EFFECTIVE deadline, and — when it was extended — from what and why
  *  ("the script timed out after 72 s; extended from 30 s for typing 3,000 characters"). */
-export function timeoutMessage(timeoutMs: number, budgetMs: number, extensions: ReadonlyArray<{ primitive: "type" | "paste"; chars: number }>): string {
-  if (extensions.length === 0 || budgetMs <= timeoutMs) return `the script timed out after ${timeoutMs} ms`;
+export function timeoutMessage(timeoutMs: number, budgetMs: number, extensions: ReadonlyArray<{ primitive: "type" | "paste"; chars: number }>,
+  progress?: { calls: number; last?: string }): string {
   const s = (ms: number): string => `${Math.round(ms / 1000)} s`;
-  const chars = extensions.reduce((n, e) => n + e.chars, 0).toLocaleString("en-US");
-  const what = extensions.every((e) => e.primitive === "paste") ? "pasting" : extensions.every((e) => e.primitive === "type") ? "typing" : "typing and pasting";
-  const why = extensions.length === 1 ? `${what} ${chars} characters` : `${what} ${chars} characters in ${extensions.length} calls`;
-  return `the script timed out after ${s(budgetMs)}; extended from ${s(timeoutMs)} for ${why}`;
+  let head: string;
+  if (extensions.length === 0 || budgetMs <= timeoutMs) {
+    head = `the script timed out after ${timeoutMs} ms`;
+  } else {
+    const chars = extensions.reduce((n, e) => n + e.chars, 0).toLocaleString("en-US");
+    const what = extensions.every((e) => e.primitive === "paste") ? "pasting" : extensions.every((e) => e.primitive === "type") ? "typing" : "typing and pasting";
+    const why = extensions.length === 1 ? `${what} ${chars} characters` : `${what} ${chars} characters in ${extensions.length} calls`;
+    head = `the script timed out after ${s(budgetMs)}; extended from ${s(timeoutMs)} for ${why}`;
+  }
+  if (progress === undefined) return head;
+  // How far it got, and what to do about it: the model saw only "timed out" before (live: a 72 s loop).
+  const done = progress.calls === 1 ? "1 call had run" : `${progress.calls.toLocaleString("en-US")} calls had run`;
+  const suggest = Math.min(SCRIPT_TIMEOUT_MAX_MS, Math.max(timeoutMs * 2, budgetMs + 30_000));
+  return `${head} — ${done}${progress.last === undefined ? "" : `, the last ${progress.last}`}; `
+    + `for longer work pass timeoutMs (e.g. ${suggest}, at most ${SCRIPT_TIMEOUT_MAX_MS}), split it across calls, or have a loop check timeLeft()`;
 }
 
 /** `the page changed (now "<title>") — refs from before it are gone; call state()`, when the act changed the page. */

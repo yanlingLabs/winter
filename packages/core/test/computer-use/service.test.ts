@@ -921,6 +921,22 @@ describe("ComputerV2: a timeout after the deadline was extended", () => {
       .toBe("the script timed out after 90 s; extended from 30 s for typing and pasting 3,000 characters in 2 calls");
   });
 
+  test("says how far the script got and what to do", () => {
+    expect(timeoutMessage(30_000, 30_000, [], { calls: 41, last: "type() in Safari" }))
+      .toBe("the script timed out after 30000 ms — 41 calls had run, the last type() in Safari; for longer work pass timeoutMs (e.g. 60000, at most 300000), split it across calls, or have a loop check timeLeft()");
+    expect(timeoutMessage(30_000, 72_000, [{ primitive: "type", chars: 3000 }], { calls: 1 }))
+      .toBe("the script timed out after 72 s; extended from 30 s for typing 3,000 characters — 1 call had run; for longer work pass timeoutMs (e.g. 102000, at most 300000), split it across calls, or have a loop check timeLeft()");
+  });
+
+  macOnly("timeLeft() is the run's time left; a timed-out loop says how far it got", async () => {
+    const w = world();
+    const r = await w.run("const left = await timeLeft()\nprint(typeof left, left > 0 && left <= 5000)", { timeoutMs: 5_000 });
+    expect(text(r)).toContain("number true");
+    const looped = await w.run("const notes = await apps.open('Notes')\nwhile (true) { await notes.state({ emit: false }); await sleep(50) }", { timeoutMs: 1_000 });
+    expect(looped.isError).toBe(true);
+    expect(text(looped)).toMatch(/timed out after 1000 ms — \d+ calls had run, the last (state|apps\.open)\(\)( in Notes)?; for longer work pass timeoutMs/);
+  }, 30_000);
+
   macOnly("a run cancelled at its extended deadline says so", async () => {
     const w = world();
     w.fake.handlers["target.act"] = (params) => (params.action as { kind: string }).kind === "paste" ? new Promise(() => {}) : { rung: 1 };

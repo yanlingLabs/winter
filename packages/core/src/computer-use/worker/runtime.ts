@@ -212,7 +212,9 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
 
   // The API, by the names a script sees. Passed as PARAMETERS of the script function (so a script cannot
   // reassign them for the next call — though a top-level declaration of the same name shadows one, by choice).
-  const API: Record<string, unknown> = { apps, screen, print, show, sleep, App, Image, AutomationError, ...errorClasses };
+  /** The ms this run has left (its deadline, as extended, minus what has run; a card's wait does not count). */
+  const timeLeft = (): Promise<unknown> => call("timeLeft", undefined, {});
+  const API: Record<string, unknown> = { apps, screen, print, show, sleep, timeLeft, App, Image, AutomationError, ...errorClasses };
   const API_NAMES = Object.keys(API);
   const PARAMS = ["__scope", "__store", ...API_NAMES, ...SHADOWED];
 
