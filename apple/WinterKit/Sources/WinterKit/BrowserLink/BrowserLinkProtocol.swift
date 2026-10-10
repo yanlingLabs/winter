@@ -77,6 +77,32 @@ public enum BrowserLinkProtocol {
     /// Room left in `resultLineCap` for the envelope around a result's payload, and for JSON escaping.
     public static let resultEnvelopeAllowance = 256 * 1024
 
+    /// **Every line the link sends must stay far under `resultLineCap`** — the daemon drops the whole
+    /// connection on one oversized line, so a page that could make one (a 10 MB frame name, a giant
+    /// URL) could cut the built-in browser off for every session. Events are bounded three ways:
+    /// a string in an event's params is cut to `eventStringMaxBytes` (marked as cut); an event still
+    /// over `eventMaxBytes` is dropped, logged by method only; and a batch is sent before it would pass
+    /// `eventBatchMaxBytes`.
+    public static let eventStringMaxBytes = 4 * 1024
+    public static let eventMaxBytes = 256 * 1024
+    public static let eventBatchMaxBytes = 4 * 1024 * 1024
+
+    /// A failed result's message is cut to this (UTF-8 bytes, marker included well inside the daemon's
+    /// 4,096-character limit on it).
+    public static let failureMessageMaxBytes = 2 * 1024
+
+    /// Whether a result payload of `bytes` fits one line the daemon accepts, with room for its envelope.
+    public static func resultFits(bytes: Int) -> Bool {
+        bytes + resultEnvelopeAllowance <= resultLineCap
+    }
+
+    /// The answer for a result that does not fit — never sent as is (see `resultFits`).
+    public static func resultTooLarge(bytes: Int) -> BrowserLinkReply {
+        .failure(code: .cdpError,
+                 message: "the browser's answer (\(bytes) bytes) is over the browser link's \(resultLineCap / (1024 * 1024)) MiB line cap",
+                 data: .object(["cdpCode": .number(-32603), "cdpMessage": .string("result too large for the browser link")]))
+    }
+
     /// The link reconnects on this backoff, doubling from the first to the second.
     public static let reconnectBackoffInitial: Duration = .seconds(1)
     public static let reconnectBackoffMax: Duration = .seconds(30)

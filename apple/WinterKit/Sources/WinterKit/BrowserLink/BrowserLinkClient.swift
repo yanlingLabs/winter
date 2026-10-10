@@ -52,6 +52,11 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
         public var backoffMax: Duration = BrowserLinkProtocol.reconnectBackoffMax
         public var flushWindow: Duration = BrowserLinkProtocol.eventFlushWindow
         public var batchMax: Int = BrowserLinkProtocol.eventBatchMax
+        /// The byte bounds on events (`BrowserLinkProtocol.event*Bytes`) — configurable only so a test
+        /// can reach them without megabytes of fixture.
+        public var eventStringMaxBytes: Int = BrowserLinkProtocol.eventStringMaxBytes
+        public var eventMaxBytes: Int = BrowserLinkProtocol.eventMaxBytes
+        public var batchMaxBytes: Int = BrowserLinkProtocol.eventBatchMaxBytes
         /// Every wait the link makes. Injected so a test can run a reconnect without waiting a second.
         public var sleep: @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) }
         public var log: @Sendable (String) -> Void = { _ in }
@@ -295,18 +300,23 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
         while !Task.isCancelled {
             guard let head = await outbox.waitForHead() else { return }
             if case .event = head {
-                var batch = outbox.takeEvents(max: configuration.batchMax)
+                var batch = outbox.takeEvents(max: configuration.batchMax, maxBytes: configuration.batchMaxBytes)
                 guard let start = batch.first?.at else { continue }
+                var bytes = batch.reduce(0) { $0 + $1.event.params.count }
                 // Hold the batch open for more events — but never past the window, never past the
-                // cap, and never once something that is NOT an event is queued behind it (a result
-                // waits for nothing).
-                while batch.count < configuration.batchMax, !outbox.headIsNonEvent {
+                // caps (count and bytes), and never once something that is NOT an event is queued
+                // behind it (a result waits for nothing).
+                while batch.count < configuration.batchMax, bytes < configuration.batchMaxBytes, !outbox.headIsNonEvent {
                     let remaining = configuration.flushWindow - (ContinuousClock.now - start)
                     if remaining <= .zero { break }
                     let seen = outbox.pushCount
                     await outbox.waitForPush(after: seen, timeout: remaining, sleep: configuration.sleep)
                     if Task.isCancelled { return }
-                    batch += outbox.takeEvents(max: configuration.batchMax - batch.count)
+                    let more = outbox.takeEvents(max: configuration.batchMax - batch.count,
+                                                 maxBytes: configuration.batchMaxBytes - bytes, atLeastOne: false)
+                    if more.isEmpty, !outbox.headIsNonEvent, outbox.hasEventAtHead { break } // the next one would not fit
+                    batch += more
+                    bytes += more.reduce(0) { $0 + $1.event.params.count }
                 }
                 await send(events: batch)
             } else if let item = outbox.takeFirst() {
@@ -317,19 +327,37 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
 
     private func send(events batch: [BrowserLinkOutbox.QueuedEvent]) async {
         guard let (client, linkId) = currentConnection else { return }
-        let events: [JSONValue] = batch.compactMap { queued in
-            guard queued.linkId == linkId else { return nil }
+        let encoder = JSONEncoder()
+        // Every event is bounded before it leaves (`BrowserLinkProtocol.eventStringMaxBytes`,
+        // `eventMaxBytes`), and the batch goes in as many requests as it takes to keep each under
+        // `batchMaxBytes` — a page must never be able to make a line the daemon would drop.
+        var chunks: [[JSONValue]] = [[]]
+        var chunkBytes = 0
+        for queued in batch where queued.linkId == linkId {
             let event = queued.event
             var params = (try? JSONDecoder().decode(JSONValue.self, from: event.params)) ?? .object([:])
             if case .object = params {} else { params = .object([:]) }
             if event.strip { params = CDPTabGate.strippedNetworkParams(params) }
+            params = BrowserLinkEventLimits.truncatingLongStrings(params, maxBytes: configuration.eventStringMaxBytes)
             var entry: [String: JSONValue] = ["tabId": .string(event.tabId), "method": .string(event.method), "params": params]
             if let session = event.cdpSessionId { entry["cdpSessionId"] = .string(session) }
-            return .object(entry)
+            let value = JSONValue.object(entry)
+            let size = (try? encoder.encode(value).count) ?? Int.max
+            guard size <= configuration.eventMaxBytes else {
+                configuration.log("browser link: dropped one \(event.method) event over \(configuration.eventMaxBytes / 1024) KiB")
+                continue
+            }
+            if chunkBytes + size > configuration.batchMaxBytes, !(chunks.last?.isEmpty ?? true) {
+                chunks.append([])
+                chunkBytes = 0
+            }
+            chunks[chunks.count - 1].append(value)
+            chunkBytes += size + 1
         }
-        guard !events.isEmpty else { return }
-        await request(client, BrowserLinkProtocol.Method.events,
-                      ["linkId": .string(linkId), "events": .array(events)])
+        for events in chunks where !events.isEmpty {
+            await request(client, BrowserLinkProtocol.Method.events,
+                          ["linkId": .string(linkId), "events": .array(events)])
+        }
     }
 
     private func send(_ item: BrowserLinkOutbox.Item) async {
@@ -346,7 +374,13 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
                 break // resolve never returns it
             case .failure(let code, let message, let data):
                 params["ok"] = .bool(false)
-                var error: [String: JSONValue] = ["code": .string(code.rawValue), "message": .string(message)]
+                // The daemon reads at most `failureMessageMaxBytes` of a message (its schema refuses
+                // more, and a refused result would leave the command to time out) — and a message can
+                // carry the browser's own words about a page.
+                var error: [String: JSONValue] = [
+                    "code": .string(code.rawValue),
+                    "message": .string(BrowserLinkEventLimits.truncated(message, maxBytes: BrowserLinkProtocol.failureMessageMaxBytes)),
+                ]
                 if let data { error["data"] = data }
                 params["error"] = .object(error)
             }
@@ -365,10 +399,8 @@ public final class BrowserLinkClient: BrowserLinkOutput, @unchecked Sendable {
     static func resolve(_ reply: BrowserLinkReply) -> BrowserLinkReply {
         guard case .okRaw(let key, let json) = reply else { return reply }
         let bytes = json.utf8.count
-        if bytes + BrowserLinkProtocol.resultEnvelopeAllowance > BrowserLinkProtocol.resultLineCap {
-            return .failure(code: .cdpError,
-                            message: "the browser's answer (\(bytes) bytes) is over the browser link's \(BrowserLinkProtocol.resultLineCap / (1024 * 1024)) MiB line cap",
-                            data: .object(["cdpCode": .number(-32603), "cdpMessage": .string("result too large for the browser link")]))
+        if !BrowserLinkProtocol.resultFits(bytes: bytes) {
+            return BrowserLinkProtocol.resultTooLarge(bytes: bytes)
         }
         guard let value = try? JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)) else {
             return .failure(code: .cdpError, message: "the browser's answer was not JSON",
@@ -581,15 +613,29 @@ final class BrowserLinkOutbox: @unchecked Sendable {
         }
     }
 
-    /// The events at the head of the queue, up to `max`, stopping at the first thing that is not one.
-    func takeEvents(max: Int) -> [QueuedEvent] {
+    /// The events at the head of the queue, up to `max` of them and `maxBytes` of params, stopping at
+    /// the first thing that is not an event. A batch's FIRST take is `atLeastOne` (an event larger
+    /// than the whole budget still leaves — alone, and bounded when it is sent); a batch's later takes
+    /// are not, so a full batch goes out rather than growing past its budget.
+    func takeEvents(max: Int, maxBytes: Int = .max, atLeastOne: Bool = true) -> [QueuedEvent] {
         lock.withLock {
             var taken: [QueuedEvent] = []
+            var bytes = 0
             while taken.count < max, head < items.count, case .event(let linkId, let event, let at) = items[head] {
+                if (!taken.isEmpty || !atLeastOne), bytes + event.params.count > maxBytes { break }
                 taken.append(QueuedEvent(linkId: linkId, event: event, at: at))
+                bytes += event.params.count
                 advance(by: 1)
             }
             return taken
+        }
+    }
+
+    var hasEventAtHead: Bool {
+        lock.withLock {
+            guard head < items.count else { return false }
+            if case .event = items[head] { return true }
+            return false
         }
     }
 
@@ -603,5 +649,41 @@ final class BrowserLinkOutbox: @unchecked Sendable {
             items.removeFirst(head)
             head = 0
         }
+    }
+}
+
+/// The cut that keeps one event's strings bounded (`BrowserLinkProtocol.eventStringMaxBytes`).
+enum BrowserLinkEventLimits {
+    /// The marker a cut string ends with — so the engine (and the model) can tell a cut value from a
+    /// short one.
+    static func marker(originalBytes: Int) -> String { "…[cut by Winter: \(originalBytes) bytes]" }
+
+    /// `value` with every string longer than `maxBytes` (UTF-8) cut to at most `maxBytes`, on a
+    /// character boundary, and marked. Keys are left alone; only values are cut.
+    static func truncatingLongStrings(_ value: JSONValue, maxBytes: Int) -> JSONValue {
+        switch value {
+        case .string(let text):
+            return .string(truncated(text, maxBytes: maxBytes))
+        case .array(let items):
+            return .array(items.map { truncatingLongStrings($0, maxBytes: maxBytes) })
+        case .object(let fields):
+            return .object(fields.mapValues { truncatingLongStrings($0, maxBytes: maxBytes) })
+        default:
+            return value
+        }
+    }
+
+    static func truncated(_ text: String, maxBytes: Int) -> String {
+        let total = text.utf8.count
+        guard total > maxBytes else { return text }
+        var kept = String.UnicodeScalarView()
+        var bytes = 0
+        for scalar in text.unicodeScalars {
+            let size = String(scalar).utf8.count
+            if bytes + size > maxBytes { break }
+            kept.append(scalar)
+            bytes += size
+        }
+        return String(kept) + marker(originalBytes: total)
     }
 }

@@ -424,6 +424,102 @@ final class BrowserLinkClientTests: XCTestCase {
         XCTAssertNil(link.linkId)
     }
 
+    // MARK: - Bounded events (a hostile page must not make a line the daemon drops)
+
+    func testALongStringInAnEventIsCutAndMarked() async throws {
+        let daemon = FakeLinkDaemon(attach: .link("L1"))
+        let handler = FakeLinkHandler()
+        let link = makeLink(Daemons([daemon]), handler: handler) { config in config.eventStringMaxBytes = 64 }
+        link.start()
+        await eventually("attached") { handler.attached == ["L1"] }
+        let name = String(repeating: "n", count: 10_000)
+        link.emitEvent(tabId: "t1", method: "Page.frameNavigated",
+                       params: Data(#"{"frame":{"id":"F","name":"\#(name)","url":"https://ok.example/"}}"#.utf8),
+                       cdpSessionId: nil, stripNetworkParams: false)
+        await eventually("a batch") { !daemon.requests("browserLink.events").isEmpty }
+        let frame = (((daemon.requests("browserLink.events").first?["params"] as? [String: Any])?["events"] as? [[String: Any]])?
+            .first?["params"] as? [String: Any])?["frame"] as? [String: Any]
+        let cut = try XCTUnwrap(frame?["name"] as? String)
+        XCTAssertTrue(cut.hasPrefix(String(repeating: "n", count: 64)))
+        XCTAssertTrue(cut.hasSuffix(BrowserLinkEventLimits.marker(originalBytes: 10_000)), cut)
+        XCTAssertEqual(frame?["url"] as? String, "https://ok.example/", "short strings are untouched")
+    }
+
+    func testAnEventStillTooLargeIsDroppedAndLoggedByMethodOnly() async throws {
+        let daemon = FakeLinkDaemon(attach: .link("L1"))
+        let handler = FakeLinkHandler()
+        let logs = LogBox()
+        let link = makeLink(Daemons([daemon]), handler: handler) { config in
+            config.eventMaxBytes = 4096
+            config.log = { line in logs.append(line) }
+        }
+        link.start()
+        await eventually("attached") { handler.attached == ["L1"] }
+        // Many short strings: nothing to cut, still over the cap.
+        let many = (0..<1000).map { #""secret\#($0)""# }.joined(separator: ",")
+        link.emitEvent(tabId: "t1", method: "Page.frameAttached", params: Data(#"{"stack":[\#(many)]}"#.utf8),
+                       cdpSessionId: nil, stripNetworkParams: false)
+        link.emitEvent(tabId: "t1", method: "Page.loadEventFired", params: Data(#"{"timestamp":1}"#.utf8),
+                       cdpSessionId: nil, stripNetworkParams: false)
+        await eventually("the small one") { !daemon.requests("browserLink.events").isEmpty }
+        let methods = daemon.requests("browserLink.events")
+            .flatMap { (($0["params"] as? [String: Any])?["events"] as? [[String: Any]]) ?? [] }
+            .compactMap { $0["method"] as? String }
+        XCTAssertEqual(methods, ["Page.loadEventFired"])
+        XCTAssertTrue(logs.lines.contains { $0.contains("dropped one Page.frameAttached event") })
+        XCTAssertFalse(logs.lines.contains { $0.contains("secret") }, "the method only, never the content")
+    }
+
+    func testABatchIsSplitBeforeItPassesItsByteBudget() async throws {
+        let daemon = FakeLinkDaemon(attach: .link("L1"))
+        let handler = FakeLinkHandler()
+        let link = makeLink(Daemons([daemon]), handler: handler) { config in
+            config.batchMaxBytes = 8 * 1024
+            config.eventStringMaxBytes = 1024
+        }
+        link.start()
+        await eventually("attached") { handler.attached == ["L1"] }
+        let filler = String(repeating: "x", count: 900)
+        for i in 0..<40 {
+            link.emitEvent(tabId: "t1", method: "Page.lifecycleEvent", params: Data(#"{"name":"\#(filler)\#(i)"}"#.utf8),
+                           cdpSessionId: nil, stripNetworkParams: false)
+        }
+        await eventually("all 40") {
+            daemon.requests("browserLink.events").reduce(0) { $0 + ((($1["params"] as? [String: Any])?["events"] as? [Any])?.count ?? 0) } == 40
+        }
+        let lines = daemon.sent.filter { $0.contains(#""method":"browserLink.events""#) }
+        XCTAssertGreaterThan(lines.count, 1)
+        for line in lines { XCTAssertLessThan(line.utf8.count, 8 * 1024 + 1024, "every batch line stays near its budget") }
+        // Still in order.
+        let names = daemon.requests("browserLink.events")
+            .flatMap { (($0["params"] as? [String: Any])?["events"] as? [[String: Any]]) ?? [] }
+            .compactMap { ($0["params"] as? [String: Any])?["name"] as? String }
+        XCTAssertEqual(names, (0..<40).map { "\(filler)\($0)" })
+    }
+
+    func testAFailureMessageIsCutToWhatTheDaemonAccepts() async throws {
+        let daemon = FakeLinkDaemon(attach: .link("L1"))
+        let handler = FakeLinkHandler()
+        handler.answer = { _ in .failure(code: .cdpError, message: String(repeating: "m", count: 50_000)) }
+        makeLink(Daemons([daemon]), handler: handler).start()
+        await eventually("attached") { handler.attached == ["L1"] }
+        daemon.command(linkId: "L1", cmdId: "c1", op: "tabs.live")
+        await eventually("the failure") { !daemon.requests("browserLink.result").isEmpty }
+        let error = (daemon.requests("browserLink.result").first?["params"] as? [String: Any])?["error"] as? [String: Any]
+        let message = try XCTUnwrap(error?["message"] as? String)
+        XCTAssertLessThanOrEqual(message.count, 4096)
+        XCTAssertTrue(message.hasSuffix(BrowserLinkEventLimits.marker(originalBytes: 50_000)))
+    }
+
+    func testACutKeepsWholeCharacters() {
+        let text = String(repeating: "é", count: 10)   // 2 bytes each
+        let cut = BrowserLinkEventLimits.truncated(text, maxBytes: 5)
+        XCTAssertEqual(cut, "éé" + BrowserLinkEventLimits.marker(originalBytes: 20))
+        XCTAssertEqual(BrowserLinkEventLimits.truncated("short", maxBytes: 5), "short")
+        XCTAssertEqual(BrowserLinkEventLimits.truncatingLongStrings(.object(["k": .array([.string("abcdef"), .number(1)])]), maxBytes: 3),
+                       .object(["k": .array([.string("abc" + BrowserLinkEventLimits.marker(originalBytes: 6)), .number(1)])]))
+    }
+
     // MARK: - Pure pieces
 
     func testAReplierAnswersOnce() async {
