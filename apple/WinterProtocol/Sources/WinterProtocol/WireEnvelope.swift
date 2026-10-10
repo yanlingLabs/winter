@@ -46,6 +46,12 @@ public enum WireKind: String, Codable, Sendable {
     /// EITHER inbound frame proves the path (liveness = any inbound frame, so no capability
     /// negotiation is needed). The daemon never sees these.
     case ping, pong
+    /// ComputerV2 Phase 1b (the phone mirror): one update of the live mirror of a session the phone asked to watch
+    /// (`session.mirror {watch: true}`) — gateway → phone only, its payload a `WinterSessionKit.MirrorWire` JSON
+    /// object. It never carries a `seq` or a `streamID`, so nothing cursor- or replay-related ever sees it, and it is
+    /// sent only to a phone that asked: an older phone (which never asks) would not decode this kind and would drop
+    /// the frame without affecting anything else.
+    case mirror
 }
 
 public enum WireError: Error, Equatable {

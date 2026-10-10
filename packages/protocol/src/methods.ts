@@ -587,6 +587,16 @@ export const SessionSteerResult = z.object({ ok: z.literal(true), injected: z.bo
 export const SessionInterruptParams = z.object({ sessionId: z.string() });
 export const SessionInterruptResult = z.object({ ok: z.literal(true), wasRunning: z.boolean() });
 
+/** ComputerV2 Phase 1b (the phone mirror): the paired phone asks to watch, or stops watching, the live mirror of
+ *  the session it is attached to. The daemon is only the GATE — the frames never pass through it, nor through the
+ *  session log, history or the remote event stream: Winter.app's Gateway relays the mirror Winter.app already shows
+ *  (its own helper view subscription, never a new capture) straight to the phone over its own wire kind. A
+ *  `watch: true` needs the caller attached to `sessionId` (the remote mode gate applies too); `mirror` reports
+ *  whether the user's settings allow the mirror at all (`computerUse.enabled` and `computerUse.mirror`), so a
+ *  phone can stop asking. `watch: false` is always answered `mirror: false`. */
+export const SessionMirrorParams = z.object({ sessionId: z.string(), watch: z.boolean() });
+export const SessionMirrorResult = z.object({ ok: z.literal(true), mirror: z.boolean() });
+
 /** 2026-10-07: on the Winter leg `session.compact` asks the SESSION to compact -- it sends `/compact
  *  [instructions]` through the session's own driver (queued behind a running turn, resuming an idle
  *  session), which the runtime runs as its built-in command. It returns at once with `requested: true`
@@ -3131,6 +3141,7 @@ export const METHODS = {
   bgKillAll: "bg.killAll",
   sessionSteer: "session.steer",
   sessionInterrupt: "session.interrupt",
+  sessionMirror: "session.mirror",
   sessionCompact: "session.compact",
   skillsList: "skills.list",
   skillsRead: "skills.read",

@@ -1381,4 +1381,62 @@ final class WinterSessionClientTests: XCTestCase {
         XCTAssertEqual(conn.outbound.count, 2, "secondWindowMs: .max must mean 'never' — exactly one ping, ever")
         XCTAssertFalse(conn.isClosed, "a config that never reaches its second window must never close")
     }
+
+    // MARK: - ComputerV2 Phase 1b: the mirror channel
+
+    /// A mirror update arrives on `mirror`, never on `events`, and touches no cursor: it is no session event.
+    func testAMirrorUpdateRidesItsOwnChannelAndNeverTouchesTheCursor() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors)
+        conn.enqueueInbound(helloAckFrame(verdicts: [.upToDate(sessionID: "s1", highWatermark: 4)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 4)])
+        try cursors.advance(host: "mac-host", session: "s1", stream: "s1", to: 4)
+        let (events, eventsTask) = drain(client.events)
+        let (mirror, mirrorTask) = drain(client.mirror)
+        defer { eventsTask.cancel(); mirrorTask.cancel() }
+
+        let show = MirrorUpdate.show(app: "Safari", windowSize: CGSize(width: 1200, height: 800), others: 1, live: true)
+        conn.enqueueInbound(serverFrame(kind: .mirror, sessionID: "s1", payload: MirrorWire.encode(show)))
+        conn.enqueueInbound(serverFrame(kind: .mirror, sessionID: "s1", payload: Data(#"{"type":"from-the-future"}"#.utf8)))
+        conn.enqueueInbound(serverFrame(kind: .mirror, sessionID: "s1", payload: MirrorWire.encode(.clear)))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 5))
+        try await waitUntil({ mirror.items.count == 2 && events.items.count == 1 }, "mirror + one event")
+        XCTAssertEqual(mirror.items, [MirrorEnvelope(sessionID: "s1", update: show), MirrorEnvelope(sessionID: "s1", update: .clear)],
+                       "an update this client cannot read is dropped; the rest arrive in order")
+        XCTAssertEqual(events.items.map(\.seq), [5], "only the session event reached `events`")
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 5)
+    }
+
+    /// `watchMirror` is a plain rpc, `session.mirror {sessionId, watch}`, answered with the daemon's `mirror` flag.
+    func testWatchMirrorAsksTheMacAndReturnsWhetherTheMirrorIsOn() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        async let on = client.watchMirror(sessionID: "s1", watch: true)
+        let out = try await waitOutbound(conn, count: 2)
+        let request = outboundPayload(decodeOutbound(out[1]))
+        XCTAssertEqual(request["method"]?.stringValue, "session.mirror")
+        XCTAssertEqual(request["params"]?["sessionId"]?.stringValue, "s1")
+        XCTAssertEqual(request["params"]?["watch"], .bool(true))
+        let id = request["id"]?.intValue ?? -1
+        conn.enqueueInbound(rpcResponseFrame(id: id, result: .object(["ok": .bool(true), "mirror": .bool(true)])))
+        let result = try await on
+        XCTAssertTrue(result)
+    }
+
+    /// The mirror channel ends with the connection, like every other stream.
+    func testTheMirrorChannelFinishesWhenTheConnectionCloses() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+        let ended = Sink<Bool>()
+        let task = Task { for await _ in client.mirror {}; ended.append(true) }
+        defer { task.cancel() }
+        conn.close()
+        try await waitUntil({ ended.items == [true] }, "mirror stream finished")
+    }
 }

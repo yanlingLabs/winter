@@ -98,6 +98,10 @@ public actor Gateway {
         "session.setDirs",
         // WS-19: the phone lists/adds/removes the Mac's provider credentials.
         "credential.list", "credential.set", "credential.remove",
+        // ComputerV2 Phase 1b: the phone watches the live mirror of the session it is attached to.
+        // Special-cased below (`handleMirror`) like `session.attach`: relayed to the daemon for the gate, then
+        // served from Winter.app's own mirror on `WireKind.mirror` — never through the daemon.
+        "session.mirror",
     ]
 
     /// Session-map cap (SP2b Task 4) — see `evictIfNeeded()`.
@@ -138,6 +142,16 @@ public actor Gateway {
     /// `clientInstanceID`s at all.
     private var peerToClients: [String: Set<String>] = [:]
 
+    /// ComputerV2 Phase 1b: Winter.app's own mirror, relayed to a phone that asks (`session.mirror`). `nil` (every
+    /// construction that predates the phone mirror, every test that does not exercise it) answers every watch
+    /// `mirror: false` after the daemon's gate.
+    private let mirrorSource: RemoteMirrorSource?
+    /// How long a watch lives without a renewal (`MirrorWire.lease` in production; short in tests).
+    private let mirrorLease: TimeInterval
+    /// How a mirror update's envelope is written to the phone — `conn.send` in production. A seam so a test can
+    /// observe the bytes or hold a write.
+    private let makeMirrorRelay: @Sendable (@escaping RemoteMirrorRelay.Send) -> RemoteMirrorRelay
+
     /// `RemoteHost` (the composition root) constructs the real thing:
     /// `Gateway(listener: PairingRouter(...), daemonFactory: { WinterClient(makeTransport: {
     /// UnixSocketTransport(...) }, token: try KeychainToken.readRemoteToken(), clientName:
@@ -149,7 +163,10 @@ public actor Gateway {
         hostID: String,
         directory: any PairingDirectory,
         rateLimit: (perSec: Int, burst: Int) = (perSec: 50, burst: 200),
-        now: @escaping @Sendable () -> TimeInterval = { Date().timeIntervalSince1970 }
+        now: @escaping @Sendable () -> TimeInterval = { Date().timeIntervalSince1970 },
+        mirrorSource: RemoteMirrorSource? = nil,
+        mirrorLease: TimeInterval = MirrorWire.lease,
+        makeMirrorRelay: @escaping @Sendable (@escaping RemoteMirrorRelay.Send) -> RemoteMirrorRelay = { RemoteMirrorRelay(send: $0) }
     ) {
         self.listener = listener
         self.daemonFactory = daemonFactory
@@ -157,6 +174,9 @@ public actor Gateway {
         self.directory = directory
         self.rateLimit = rateLimit
         self.now = now
+        self.mirrorSource = mirrorSource
+        self.mirrorLease = mirrorLease
+        self.makeMirrorRelay = makeMirrorRelay
     }
 
     public func run() async {
@@ -319,6 +339,8 @@ public actor Gateway {
             // belong. A hello with NO resumes leaves both pointers exactly where they were.
             session.liveConn = conn
             session.liveConnGeneration = myGeneration
+            // ComputerV2 Phase 1b: a mirror watch belongs to the attach it was asked on.
+            await stopMirrorIfDetached(session)
         }
 
         let serverHello = ServerHello(chosenVersion: 1, hostID: hostID, verdicts: verdicts)
@@ -344,6 +366,8 @@ public actor Gateway {
             session.liveConn = nil
             session.liveConnGeneration = 0
         }
+        // ComputerV2 Phase 1b: the mirror goes with the connection it was sent on.
+        if session.mirror?.connGeneration == myGeneration { await stopMirror(session) }
     }
 
     private func phoneSession(for clientInstanceID: String) async -> PhoneSession {
@@ -417,6 +441,7 @@ public actor Gateway {
                 peerToClients[peer] = clients.isEmpty ? nil : clients
             }
             stale.pumpTask?.cancel()
+            await stopMirror(stale)
             #if DEBUG
             // Test-only synchronization hook (see `setEvictionGateForTesting`): parking here holds
             // eviction exactly inside the suspension window the re-entrancy test races a same-id
@@ -462,6 +487,7 @@ public actor Gateway {
         guard let session = sessions[clientInstanceID] else { return }
         session.revoked = true
         session.pumpTask?.cancel()
+        await stopMirror(session)
         await session.daemonClient.close()
         // T6b: close EVERY open connection this phone holds, not just the newest one. A phone
         // genuinely runs two at a time (the iOS pool's shell conn alongside a session's own), and
@@ -803,6 +829,12 @@ public actor Gateway {
             return
         }
 
+        // ComputerV2 Phase 1b: `session.mirror` is special-cased too — the daemon gates it, the Gateway serves it.
+        if rpc.method == "session.mirror" {
+            await handleMirror(rpc, envelope: envelope, conn: conn, generation: generation, session: session)
+            return
+        }
+
         // `session.attach` is special-cased to go through the SAME resume/replay machinery as a
         // hello-time `ClientHello.resumes` entry, rather than a bare passthrough — a live
         // re-attach still needs the gateway to know which session is now "live" for event
@@ -833,6 +865,8 @@ public actor Gateway {
             session.liveSessionID = sessionId
             session.liveConn = conn
             session.liveConnGeneration = generation
+            // ComputerV2 Phase 1b: an attach elsewhere ends a mirror watch tied to the previous one.
+            await stopMirrorIfDetached(session)
             for event in buffered {
                 await sendEventFrame(conn, epoch: session.epoch, event: event)
             }
@@ -855,6 +889,130 @@ public actor Gateway {
             await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: -1, message: "\(error)")
         }
     }
+
+    // MARK: - ComputerV2 Phase 1b: the phone mirror
+
+    /// `session.mirror {sessionId, watch}` — the phone starts or stops watching the live mirror of the session it is
+    /// attached to. The DAEMON is the gate (the remote mode gate, the attachment, the user's `computerUse` settings)
+    /// and answers the rpc; the GATEWAY serves the mirror, from Winter.app's own (`mirrorSource`), on this connection
+    /// as `WireKind.mirror` envelopes. Nothing of the mirror ever reaches the daemon or the session's event stream.
+    ///
+    /// - `watch: false` stops this phone's watch FIRST, whatever the daemon then says — stopping must always work.
+    /// - `watch: true` needs this connection to hold the phone's attach to `sessionId` (`liveConn`/`liveSessionID`):
+    ///   the mirror follows the attach. A repeat on the same attach RENEWS the watch's lease; a watch not renewed
+    ///   within `mirrorLease` lapses (a suspended phone that never said stop).
+    private func handleMirror(_ rpc: ParsedRpcRequest, envelope: WireEnvelope, conn: RemoteConn, generation: Int, session: PhoneSession) async {
+        let sessionId = rpc.params?["sessionId"]?.stringValue
+        let watch = rpc.params?["watch"]?.boolValue
+        if watch == false, let current = session.mirror, sessionId == nil || current.sessionId == sessionId {
+            await stopMirror(session)
+        }
+        if watch == true, let sessionId {
+            guard session.liveSessionID == sessionId, session.liveConnGeneration == generation else {
+                await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: -32004, message: "attach to the session first")
+                return
+            }
+        }
+        let result: JSONValue
+        do {
+            result = try await session.daemonClient.request(rpc.method, params: rpc.params, commandId: rpc.commandId)
+        } catch let e as RpcError {
+            await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: e.code, message: e.message, data: e.data)
+            return
+        } catch {
+            await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: -1, message: "\(error)")
+            return
+        }
+        guard watch == true, let sessionId else {
+            await sendRpcResult(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, streamID: envelope.streamID, result: result)
+            return
+        }
+        // The daemon answered while this actor was free: re-check that the attach this watch belongs to still holds.
+        let attached = !session.revoked && session.liveSessionID == sessionId && session.liveConnGeneration == generation
+            && session.openConns[generation] != nil
+        let allowed = result["mirror"]?.boolValue == true
+        guard attached, allowed, let source = mirrorSource else {
+            if session.mirror?.sessionId == sessionId { await stopMirror(session) }
+            await sendRpcResult(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, streamID: envelope.streamID,
+                                result: .object(["ok": .bool(true), "mirror": .bool(false)]))
+            return
+        }
+        if let current = session.mirror, current.sessionId == sessionId, current.connGeneration == generation {
+            current.leaseUntil = now() + mirrorLease // a renewal
+        } else {
+            await stopMirror(session)
+            await startMirror(session, sessionId: sessionId, conn: conn, generation: generation, source: source)
+        }
+        await sendRpcResult(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, streamID: envelope.streamID, result: result)
+    }
+
+    private func startMirror(_ session: PhoneSession, sessionId: String, conn: RemoteConn, generation: Int, source: RemoteMirrorSource) async {
+        session.mirrorToken += 1
+        let token = session.mirrorToken
+        let epoch = session.epoch
+        let hostID = self.hostID
+        let relay = makeMirrorRelay { update in
+            let envelope = WireEnvelope(
+                v: 1, pairingEpoch: epoch, hostID: hostID, sessionID: sessionId, streamID: nil, seq: nil,
+                kind: .mirror, timestamp: Int(Date().timeIntervalSince1970 * 1000), payload: MirrorWire.encode(update))
+            // Never an oversized frame: the phone's transport would drop the connection for it.
+            guard let frame = try? WireFrame.encode(envelope), frame.count <= MirrorWire.maxEnvelopeBytes else { return }
+            await conn.send(frame)
+        }
+        let state = MirrorWatchState(sessionId: sessionId, connGeneration: generation, token: token, relay: relay, leaseUntil: now() + mirrorLease)
+        session.mirror = state
+        let lease = mirrorLease
+        state.leaseTask = Task { [weak self] in
+            let check = max(min(lease / 3, 5), 0.01)
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(check * 1_000_000_000))
+                guard let self, await self.mirrorLeaseRunsOn(session, token: token) else { return }
+            }
+        }
+        let watch = await source.watch(sessionId: sessionId, deliver: { relay.push($0) })
+        // The watch may have ended while the source was asked (a stop, a detach, a newer watch).
+        if session.mirror?.token == token {
+            session.mirror?.watch = watch
+        } else {
+            await source.unwatch(watch)
+        }
+    }
+
+    /// The lease check: `false` once the watch has ended or lapsed (and is stopped here).
+    private func mirrorLeaseRunsOn(_ session: PhoneSession, token: Int) async -> Bool {
+        guard let current = session.mirror, current.token == token else { return false }
+        guard now() <= current.leaseUntil else {
+            await stopMirror(session)
+            return false
+        }
+        return true
+    }
+
+    /// Ends the phone's mirror watch, if any. Synchronous state first (so nothing re-enters a half-stopped watch),
+    /// then the source is told.
+    private func stopMirror(_ session: PhoneSession) async {
+        guard let current = session.mirror else { return }
+        session.mirror = nil
+        current.leaseTask?.cancel()
+        current.relay.stop()
+        if let watch = current.watch { await mirrorSource?.unwatch(watch) }
+    }
+
+    /// The phone's attach moved (another session, or another connection): a watch tied to the old one ends.
+    private func stopMirrorIfDetached(_ session: PhoneSession) async {
+        guard let current = session.mirror else { return }
+        if current.sessionId != session.liveSessionID || current.connGeneration != session.liveConnGeneration {
+            await stopMirror(session)
+        }
+    }
+
+    #if DEBUG
+    /// Test-only (`@testable`): the phone's current mirror watch, as `(sessionId, connGeneration)`.
+    func mirrorWatchForTesting(_ clientInstanceID: String) -> (sessionId: String, connGeneration: Int)? {
+        guard let m = sessions[clientInstanceID]?.mirror else { return nil }
+        return (m.sessionId, m.connGeneration)
+    }
+    #endif
 
     // MARK: - JSON-RPC payload parsing
 
@@ -1066,6 +1224,11 @@ private final class PhoneSession: @unchecked Sendable {
     /// epoch. Default `1` is a placeholder overwritten before this session is ever used for I/O —
     /// `handle` always sets it immediately after `phoneSession(for:)` returns, before any send.
     var epoch = 1
+    /// ComputerV2 Phase 1b: this phone's watch of a session's live mirror (`session.mirror`), if any — at most one;
+    /// it follows the attach (`liveConn`/`liveSessionID`) it was asked on, and ends with it.
+    var mirror: MirrorWatchState?
+    /// Bumped per started watch, so a late source answer or lease check can tell its watch from a newer one.
+    var mirrorToken = 0
     /// SP2b Task 4: wall-clock time (from `Gateway`'s injected `now()`) of the last frame this
     /// session either received (`handle`'s hello, `handleLiveFrame`) — the eviction cursor
     /// `evictIfNeeded()` sorts disconnected sessions by, oldest first.
@@ -1075,6 +1238,26 @@ private final class PhoneSession: @unchecked Sendable {
         self.clientInstanceID = clientInstanceID
         self.daemonClient = daemonClient
         self.rateLimiter = rateLimiter
+    }
+}
+
+/// ComputerV2 Phase 1b: one phone's watch of one session's mirror — see `Gateway.handleMirror`. Gateway-actor state
+/// only, like `PhoneSession` itself.
+private final class MirrorWatchState: @unchecked Sendable {
+    let sessionId: String
+    let connGeneration: Int
+    let token: Int
+    let relay: RemoteMirrorRelay
+    var leaseUntil: TimeInterval
+    var watch: RemoteMirrorWatch?
+    var leaseTask: Task<Void, Never>?
+
+    init(sessionId: String, connGeneration: Int, token: Int, relay: RemoteMirrorRelay, leaseUntil: TimeInterval) {
+        self.sessionId = sessionId
+        self.connGeneration = connGeneration
+        self.token = token
+        self.relay = relay
+        self.leaseUntil = leaseUntil
     }
 }
 

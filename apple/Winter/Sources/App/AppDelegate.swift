@@ -100,8 +100,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) lazy var mirrorCoordinator: MirrorCoordinator? = {
         guard !Self.isRunningUnitTests else { return nil }
         return MirrorCoordinator(client: LiveComputerUseHelperClient(home: AppProfile.winterHome),
-                                 log: { OrbDebug.log("mirror: \($0)") })
+                                 log: { OrbDebug.log("mirror: \($0)") },
+                                 remote: remoteMirrorHub)
     }()
+    /// ComputerV2 Phase 1b: the phone mirror's source — every session's mirror sink is teed to it, and the paired
+    /// phone's Gateway relays from it (`RemoteAccessCoordinator`). It holds no connection and starts nothing: it
+    /// only shares what `mirrorCoordinator` already shows. Nil under the unit-test host, like the coordinator.
+    private(set) lazy var remoteMirrorHub: RemoteMirrorHub? = Self.isRunningUnitTests ? nil : RemoteMirrorHub()
     /// browser-runtime T5: the browser lifecycle's assembly point (`BrowserSignals.swift`) —
     /// constructed once, beside the shell's own `ShellSessionHost`, and held for the app's life
     /// because it owns the Combine subscriptions that provoke a re-plan. `nil` until the shell is
@@ -1287,7 +1292,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // SP2b T5: constructing the coordinator does no I/O of its own (its `RemoteHost` is a
         // `lazy var`, untouched until a pairing window is actually requested) — safe
         // unconditionally, same posture as `HelperClient()`/`LoginItemController` above.
-        remoteAccessCoordinator = RemoteAccessCoordinator()
+        remoteAccessCoordinator = RemoteAccessCoordinator(mirrorSource: remoteMirrorHub)
 
         // Autostart follow-up (CN combined-review Important 2): start the remote listener NOW if
         // this Mac already has ≥1 paired device — `RemoteHost.startIfNeeded()`'s own gate

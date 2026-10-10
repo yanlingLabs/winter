@@ -323,14 +323,27 @@ final class MirrorCoordinator: ObservableObject {
     private let sleep: @Sendable (Duration) async -> Void
     private let log: (String) -> Void
     private let focus: MirrorFocus
+    /// ComputerV2 Phase 1b: the phone mirror's source. Every session's sink is teed to it, so a paired phone can be
+    /// shown exactly what this coordinator's mirror shows — and NOTHING here changes for it: a phone watching never
+    /// adds a session to `desiredSessions`, never turns `wantsFrames` on, never connects the helper. `nil` in tests
+    /// that do not exercise the phone, and under the unit-test host.
+    private let remote: RemoteMirrorHub?
 
     private(set) var windows: [String: MirrorWindow] = [:]
     /// The windows that show the mirror right now — what the panels watch.
     @Published private(set) var eligibleWindowIds: Set<String> = []
     private var states: [String: MirrorSessionState] = [:]
 
-    /// The sessions subscribed on the helper right now, and whether each asked for frames.
-    private var appliedFrames: [String: Bool] = [:]
+    /// The sessions subscribed on the helper right now, and whether each asked for frames. Every change of a
+    /// session's frames flag is told to the phone mirror's hub (pictures flow to a phone only while they flow here).
+    private var appliedFrames: [String: Bool] = [:] {
+        didSet {
+            guard let remote else { return }
+            for id in Set(oldValue.keys).union(appliedFrames.keys) where (oldValue[id] == true) != (appliedFrames[id] == true) {
+                remote.framesChanged(id, live: appliedFrames[id] == true)
+            }
+        }
+    }
     var applied: Set<String> { Set(appliedFrames.keys) }
     /// Whether the session is subscribed WITH frames right now (tests).
     func isReceivingFrames(sessionId: String) -> Bool { appliedFrames[sessionId] == true }
@@ -353,8 +366,10 @@ final class MirrorCoordinator: ObservableObject {
          makeSink: @escaping @MainActor (String) -> any MirrorSink = { _ in CUMirrorModel() },
          sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
          log: @escaping (String) -> Void = { _ in },
-         now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+         now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         remote: RemoteMirrorHub? = nil) {
         self.client = client
+        self.remote = remote
         self.makeSink = makeSink
         self.sleep = sleep
         self.log = log
@@ -410,7 +425,9 @@ final class MirrorCoordinator: ObservableObject {
     /// A session's mirror state, made on first ask so a panel can watch it before anything is subscribed.
     func state(for sessionId: String) -> MirrorSessionState {
         if let existing = states[sessionId] { return existing }
-        let created = MirrorSessionState(sessionId: sessionId, sink: makeSink(sessionId), focus: focus)
+        let own = makeSink(sessionId)
+        let sink: any MirrorSink = remote.map { RemoteTeeSink(primary: own, sessionId: sessionId, hub: $0) } ?? own
+        let created = MirrorSessionState(sessionId: sessionId, sink: sink, focus: focus)
         states[sessionId] = created
         // The mirror coming up, going down or changing hands is what a window must re-read to know which session's
         // mirror to show. Nothing else (frames, cursors, a size) reaches here, and nothing needs a new subscription.

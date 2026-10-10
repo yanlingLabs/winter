@@ -113,10 +113,16 @@ public actor WinterSessionClient {
     /// T8 watches this for a health warning. Deliberately separate from `gaps`: a gap demands a
     /// snapshot resume, a persist failure does not (re-handshaking would not fix a full disk).
     public nonisolated let persistErrors: AsyncStream<CursorPersistFailure>
+    /// ComputerV2 Phase 1b: the live mirror of a session this phone asked to watch (`watchMirror`) — a SEPARATE
+    /// channel from `events` by design: a mirror update is no session event, has no `seq`, never touches a cursor
+    /// and is never cached. Bounded to the newest 32 (a consumer that fell behind wants the newest picture, not a
+    /// backlog). Finishes when the connection closes, like the other streams.
+    public nonisolated let mirror: AsyncStream<MirrorEnvelope>
 
     private let eventsCont: AsyncStream<SessionEnvelope>.Continuation
     private let gapsCont: AsyncStream<GapSignal>.Continuation
     private let persistErrorsCont: AsyncStream<CursorPersistFailure>.Continuation
+    private let mirrorCont: AsyncStream<MirrorEnvelope>.Continuation
 
     // MARK: - Read-loop-owned mutable state
 
@@ -206,6 +212,9 @@ public actor WinterSessionClient {
         var pc: AsyncStream<CursorPersistFailure>.Continuation!
         self.persistErrors = AsyncStream { pc = $0 }
         self.persistErrorsCont = pc
+        var mc: AsyncStream<MirrorEnvelope>.Continuation!
+        self.mirror = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { mc = $0 }
+        self.mirrorCont = mc
     }
 
     // MARK: - Handshake
@@ -354,6 +363,20 @@ public actor WinterSessionClient {
         let result = try await rpcCall(method: "approval.respond", params: params, commandID: a.commandID)
         if result["alreadyResolved"]?.boolValue == true { return .resolvedElsewhere }
         return .hostAccepted
+    }
+
+    /// ComputerV2 Phase 1b: asks the Mac to start (`watch: true`) or stop (`watch: false`) relaying the live mirror
+    /// of `sessionID` — the session this connection is attached to — onto `mirror`. Returns whether the mirror is
+    /// on at all (the user's `computerUse` settings): `false` means nothing will come, so the caller stops asking.
+    /// A watch lapses on the Mac unless renewed within `MirrorWire.lease`; renew by calling this again with
+    /// `watch: true` every `MirrorWire.renewEvery`. Throws like any rpc (an older Mac answers that the method is not
+    /// allowed — the caller simply shows no mirror).
+    public func watchMirror(sessionID: String, watch: Bool) async throws -> Bool {
+        let result = try await rpcCall(
+            method: "session.mirror",
+            params: .object(["sessionId": .string(sessionID), "watch": .bool(watch)]),
+            commandID: idgen())
+        return result["mirror"]?.boolValue ?? false
     }
 
     /// Queries the host's currently-pending approvals for a session (live STATE, not reconstructed
@@ -520,6 +543,7 @@ public actor WinterSessionClient {
             case .hello, .rpcRequest: break // phone→host kinds; never inbound
             case .ping: break // the host never pings the phone today; inert if it ever did
             case .pong: break // arrival already counted above (liveness); never surfaces on `events`
+            case .mirror: handleMirror(env)
             }
             return
         }
@@ -549,6 +573,14 @@ public actor WinterSessionClient {
         eventsCont.finish()
         gapsCont.finish()
         persistErrorsCont.finish()
+        mirrorCont.finish()
+    }
+
+    /// ComputerV2 Phase 1b: a mirror update rides its own channel — never `events`, never the cursor. An update
+    /// that does not decode (or names no session) is dropped; the mirror simply waits for the next.
+    private func handleMirror(_ env: WireEnvelope) {
+        guard let session = env.sessionID, let update = MirrorWire.decode(env.payload) else { return }
+        mirrorCont.yield(MirrorEnvelope(sessionID: session, update: update))
     }
 
     // MARK: - Response correlation
