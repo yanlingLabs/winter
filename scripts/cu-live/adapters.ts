@@ -199,17 +199,22 @@ async function closeMade(app, made) {
 }`;
   out.push(
     gated({
-      name: "adapters: Finder reveal + selection of a temp file, in the background", group: "adapters", timeoutMs: 45_000,
+      name: "adapters: Finder reveal + selection of a temp file — only in a window Finder made for the run", group: "adapters", timeoutMs: 45_000,
       verify: (ctx) => skipped(ctx) ? [ok(ctx)] : [ok(ctx),
-        check("selection() returned the revealed file", Array.isArray(ctx.facts.selected) && (ctx.facts.selected as string[]).includes(docs.reveal), JSON.stringify(ctx.facts.selected)),
-        check("the window this run made was closed again", ctx.facts.closed === "closed" || String(ctx.facts.closed).startsWith("left as it was"), String(ctx.facts.closed))],
+        check("reveal() worked in the bound (new) window", ctx.facts.revealed === true || ctx.facts.revealed === false, JSON.stringify(ctx.facts)),
+        check("selection() returned the revealed file (or said the bound window is not Finder's frontmost)", (Array.isArray(ctx.facts.selected) && (ctx.facts.selected as string[]).includes(docs.reveal)) || String(ctx.facts.selected).startsWith("NoWindow"), JSON.stringify(ctx.facts.selected)),
+        check("the window this run made was closed again", ctx.facts.closed === "closed", String(ctx.facts.closed))],
     }, o.door, "com.apple.finder", "Finder", `${finderWindows}${closeMade}
 const before = (await finderWindows()).length;
 const fd = await apps.open(${JSON.stringify(docs.folder)});
-await fd.extras.reveal(${JSON.stringify(docs.reveal)});
-const selected = await fd.extras.selection();
-const made = (await finderWindows()).length > before;
-report({ selected, closed: await closeMade(fd, made) });`),
+// Only a window Finder made for this run is worked in: a folder shown in one of the user's windows (a tab) is left alone.
+if ((await finderWindows()).length <= before) report({ skipped: "Finder showed the folder in a window it already had (maybe the user's) — no extra was used there" });
+else {
+  const r = await fd.extras.reveal(${JSON.stringify(docs.reveal)});
+  let selected;
+  try { selected = await fd.extras.selection(); } catch (e) { selected = e.name + ": " + e.message; }
+  report({ revealed: r.selected, selected, closed: await closeMade(fd, true) });
+}`),
     gated({
       name: "adapters: Finder trash (a file this run made) + openWith TextEdit, in the background", group: "adapters", timeoutMs: 45_000,
       verify: (ctx) => skipped(ctx) ? [ok(ctx)] : [ok(ctx),
@@ -226,25 +231,32 @@ const te = await apps.open("com.apple.TextEdit", { window: "adapters-open.txt" }
 const teClosed = await closeMade(te, true);
 report({ trashed: t.trashed, opened: o.opened, teClosed, closed: await closeMade(fd, (await finderWindows()).length > before) });`),
     gated({
-      name: "adapters: Safari openURL (a temp page, new tab), pageText, tabs; the tab closed through dict.close({ ref })", group: "adapters", timeoutMs: 45_000,
+      name: "adapters: Safari in a window of its OWN (openWindow, bound by id): openURL, pageText, tabs, closed by id", group: "adapters", timeoutMs: 60_000,
       verify: (ctx) => skipped(ctx) ? [ok(ctx)] : [ok(ctx),
-        check("openURL() said where the new tab is", typeof ctx.facts.window === "number" && typeof ctx.facts.tab === "number", JSON.stringify(ctx.facts)),
-        check("the window's current tab stayed the user's page", ctx.facts.currentKept === true, JSON.stringify(ctx.facts)),
+        check("openWindow() gave the run its own window, bound by that id", typeof ctx.facts.own === "number" && ctx.facts.boundOwn === true, JSON.stringify(ctx.facts)),
+        check("openURL() added a tab to THAT window, its current tab kept", typeof ctx.facts.tab === "number" && ctx.facts.currentKept === true, JSON.stringify(ctx.facts)),
         check("pageText() read the new tab's text", ctx.facts.text === true, JSON.stringify(ctx.facts)),
-        check("tabs() listed it", ctx.facts.listed === true),
-        check("the tab was closed again", ctx.facts.closed === true, JSON.stringify(ctx.facts))],
+        check("tabs() listed the own window's two tabs", ctx.facts.listed === true, JSON.stringify(ctx.facts)),
+        check("the own window was closed again (by its id)", ctx.facts.closed === true, JSON.stringify(ctx.facts))],
     }, o.door, "com.apple.Safari", "Safari", `
-const sf = await apps.open("com.apple.Safari", { window: ${JSON.stringify(SAFARI_PAGE)} });
+// Safari's scripting is reached through the run's page window (bound by its title, read only: no extra acts in it);
+// everything else happens in a NEW window the run makes and binds by its exact id.
+const anchor = await apps.open("com.apple.Safari", { window: ${JSON.stringify(SAFARI_PAGE)} });
+const { window: own } = await anchor.extras.openWindow(${JSON.stringify(`file://${o.realDir}/page.html`)});
+const sf = await apps.open("com.apple.Safari", { window: own });
+const boundOwn = (await sf.windows()).some((w) => w.id === own);
 const where = await sf.extras.openURL(${JSON.stringify(`file://${o.realDir}/page2.html`)});
 let text = "";
 const t0 = Date.now();
-while (!text.includes(${JSON.stringify(SAFARI_PAGE2)}) && Date.now() - t0 < 8000) { text = await sf.extras.pageText(where); if (!text.includes(${JSON.stringify(SAFARI_PAGE2)})) await sleep(250); }
+while (!text.includes(${JSON.stringify(SAFARI_PAGE2)}) && Date.now() - t0 < 8000) { text = await sf.extras.pageText({ tab: where.tab }); if (!text.includes(${JSON.stringify(SAFARI_PAGE2)})) await sleep(250); }
 const tabs = await sf.extras.tabs();
-const mine = tabs.find((t) => t.window === where.window && t.tab === where.tab);
-const current = tabs.find((t) => t.window === where.window && t.current);
-await sf.dict.close({ ref: "tab " + where.tab + " of window id " + where.window });
-const left = (await sf.extras.tabs()).filter((t) => t.url.endsWith("page2.html") && t.window === where.window);
-report({ window: where.window, tab: where.tab, text: text.includes(${JSON.stringify(SAFARI_PAGE2)}), listed: mine !== undefined && mine.url.endsWith("page2.html"), currentKept: current !== undefined && current.tab !== where.tab, closed: left.length === 0 });`),
+const mine = tabs.find((t) => t.tab === where.tab);
+const current = tabs.find((t) => t.current);
+// Close what the run made, by exact references: its extra tab, then its own window.
+await sf.dict.close({ ref: "tab " + where.tab + " of window id " + own });
+await sf.dict.close({ ref: "window id " + own });
+const left = await anchor.applescript('tell application id "com.apple.Safari" to return (exists window id ' + own + ') as text', { emit: false });
+report({ own, boundOwn, tab: where.tab, text: text.includes(${JSON.stringify(SAFARI_PAGE2)}), listed: tabs.length === 2 && mine !== undefined && mine.url.endsWith("page2.html"), currentKept: current !== undefined && current.tab !== where.tab, closed: left.result === "false" });`),
   );
   return out;
 }

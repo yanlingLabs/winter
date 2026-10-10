@@ -52,14 +52,17 @@ describe("the adapter table", () => {
     const r = new AdapterRegistry();
     const classes = (bundleId: string): Record<string, string> => Object.fromEntries(r.find(bundleId)!.extras.map((e) => [e.name, e.access]));
     expect(classes("com.apple.finder")).toEqual({ reveal: "click", selection: "view", trash: "full", openWith: "full" });
-    expect(classes("com.apple.Safari")).toEqual({ tabs: "view", currentURL: "view", pageText: "view", openURL: "full" });
+    expect(classes("com.apple.Safari")).toEqual({ tabs: "view", currentURL: "view", pageText: "view", openURL: "full", openWindow: "full" });
     expect(r.find("com.apple.SafariTechnologyPreview")).toBe(r.find("com.apple.Safari"));
     expect(classes("com.apple.mail")).toEqual({ messages: "view", unreadCount: "view", compose: "full" });
     expect(classes("com.apple.Notes")).toEqual({ list: "view", read: "view", search: "view", create: "full" });
     expect(classes("com.apple.dt.Xcode")).toMatchObject({ schemes: "view", build: "full" });
+    // The Chromium family: a guide and NO extras — its scripting cannot name the bound window exactly, and Winter never
+    // guesses which window to act in.
     for (const id of ["com.google.Chrome", "com.microsoft.edgemac", "com.brave.Browser", "com.vivaldi.Vivaldi", "com.operasoftware.Opera", "company.thebrowser.Browser", "org.chromium.Chromium"]) {
       expect(CHROMIUM_BUNDLE_IDS).toContain(id as never);
-      expect(classes(id)).toEqual({ tabs: "view", openURL: "full" });
+      expect(classes(id)).toEqual({});
+      expect(r.find(id)?.guide?.id).toBe("chromium@2");
     }
     // Bundle ids are matched exactly (case aside), never by display name.
     expect(r.find("Finder")).toBeUndefined();
@@ -431,14 +434,29 @@ function sourceProblems(source: string, bundleId: string): string[] {
     if (m[1] === undefined || lit === null || strings[Number(lit[1])]?.toLowerCase() !== bundleId.toLowerCase()) problems.push(`names an app other than application id "${bundleId}": ${m[0]}`);
   }
   if ((text.match(/\btell application id\b/g) ?? []).length !== 1) problems.push("not exactly one tell block");
+  // Never the app's FRONT window or document (the user's may be in front): only the bound window, by its id — Finder's
+  // one exception compares its frontmost window's id with the bound one before reading its selection.
+  for (const front of ["front window", "front document", "document 1", "workspace document 1", "first window", "last window", "active tab"]) {
+    if (text.includes(front)) problems.push(`addresses "${front}"`);
+  }
+  if (/(?<!finder )\bwindow 1\b/.test(text)) problems.push("addresses window 1");
   return problems;
 }
+
+/** The bound window's id the unit scopes report. */
+const BOUND_WINDOW = 4242;
+/** The extras that work in a window (and so must name the bound one), by bundle id. */
+const WINDOWED: Record<string, readonly string[]> = {
+  "com.apple.finder": ["reveal", "selection"],
+  "com.apple.Safari": ["tabs", "currentURL", "pageText", "openURL"],
+  "com.apple.dt.Xcode": ["schemes", "build", "buildStatus"],
+};
 
 /** Every AppleScript an extra runs, with plausible arguments, against a scope that answers with `result`. */
 async function scriptsOf(bundleId: string, def: ExtraDef, args: unknown[], result: string | null): Promise<string[]> {
   const sources: string[] = [];
   const scope: AdapterScope = {
-    app: { name: "App", bundleId, pid: 1 }, signal: new AbortController().signal,
+    app: { name: "App", bundleId, pid: 1 }, signal: new AbortController().signal, window: () => BOUND_WINDOW,
     applescript: async (src) => { sources.push(src); return result; },
     find: async () => [], snapshot: async () => "", act: async () => ({ rung: 1 }), waitFor: async () => ({ waitedMs: 0 }),
     openDocument: async () => ({ name: "TextEdit", bundleId: "com.apple.TextEdit" }), print: () => {}, say: () => {},
@@ -454,19 +472,23 @@ describe("the built-in adapters' AppleScript", () => {
   writeFileSync(file, "x");
   const ARGS: Record<string, unknown[]> = {
     reveal: [file], trash: [[file]], openWith: [file, "TextEdit"],
-    pageText: [{ window: 7, tab: 2 }], openURL: ["https://example.com/a?b=1"],
+    pageText: [{ tab: 2 }], openURL: ["https://example.com/a?b=1"], openWindow: ["https://example.com/own"],
     messages: [{ mailbox: "Archive", unread: true, limit: 5 }], compose: [{ to: ["a@example.com"], cc: "c@example.com", subject: "Hi \"there\"", body: "line 1\nline 2\ttab" }],
     list: [{ folder: "Work", limit: 3 }], read: ["x-coredata://ABC-123/ICNote/p42"], search: ["groceries"], create: [{ title: "T", body: "one\ntwo", folder: "Work" }],
-    build: [{ workspace: "App", waitMs: 0 }], buildStatus: [{ workspace: "App" }],
+    build: [{ waitMs: 0 }], buildStatus: [],
   };
   for (const adapter of BUILTIN_ADAPTERS) {
     for (const def of adapter.extras) {
       const bundleId = adapter.bundleIds[0]!;
-      test(`${bundleId} ${def.name}: only application id "${bundleId}", no refused door`, async () => {
-        const sources = await scriptsOf(bundleId, def, ARGS[def.name] ?? [], def.name === "build" ? "App" : "1\t2");
+      test(`${bundleId} ${def.name}: only application id "${bundleId}", no refused door, never the front window`, async () => {
+        const answer = def.name === "build" ? "WS:App" : def.name === "openWindow" ? "WINDOW:77" : def.name === "reveal" ? "SELECTED" : "1\t2";
+        const sources = await scriptsOf(bundleId, def, ARGS[def.name] ?? [], answer);
         if (def.name === "openWith") { expect(sources).toEqual([]); return; }
         expect(sources.length).toBeGreaterThan(0);
-        for (const s of sources) expect(sourceProblems(s, bundleId)).toEqual([]);
+        for (const s of sources) {
+          expect(sourceProblems(s, bundleId)).toEqual([]);
+          if ((WINDOWED[bundleId] ?? []).includes(def.name)) expect(s).toContain(`window id ${BOUND_WINDOW}`);
+        }
       });
     }
   }
@@ -492,7 +514,7 @@ describe("the built-in adapters' AppleScript", () => {
     await expect(scriptsOf("com.apple.finder", finder.extras.find((e) => e.name === "trash")!, [["/System"]], null)).rejects.toThrow("doesn't trash");
     const safari = BUILTIN_ADAPTERS[1]!;
     await expect(scriptsOf("com.apple.Safari", safari.extras.find((e) => e.name === "openURL")!, ["javascript:alert(1)"], null)).rejects.toThrow("http, https and file");
-    await expect(scriptsOf("com.apple.Safari", safari.extras.find((e) => e.name === "pageText")!, [{ tab: 2 }], null)).rejects.toThrow("needs its { window }");
+    await expect(scriptsOf("com.apple.Safari", safari.extras.find((e) => e.name === "pageText")!, [{ window: 2 }], null)).rejects.toThrow('no option "window"');
     await expect(scriptsOf("com.apple.Safari", safari.extras.find((e) => e.name === "openURL")!, ["https://x.test", { newTab: "yes" }], null)).rejects.toThrow("true or false");
   });
 
@@ -503,17 +525,17 @@ describe("the built-in adapters' AppleScript", () => {
       app: { name: "Safari", bundleId: "com.apple.Safari", pid: 1 }, signal: new AbortController().signal,
       applescript: async () => result, find: async () => [], snapshot: async () => "", act: async () => ({ rung: 1 }),
       waitFor: async () => ({ waitedMs: 0 }), openDocument: async () => ({ name: "", bundleId: "" }), print: () => {}, say: () => {},
-      clampWait: (ms) => ms, sleep: async () => true,
+      clampWait: (ms) => ms, sleep: async () => true, window: () => BOUND_WINDOW,
     });
-    value = await safari.extras.find((e) => e.name === "tabs")!.run(scope("41\t1\ttrue\thttps://a.test/\tA\ttitle\n41\t2\tfalse\t\t\n"), []);
+    value = await safari.extras.find((e) => e.name === "tabs")!.run(scope("1\ttrue\thttps://a.test/\tA\ttitle\n2\tfalse\t\t\n"), []);
     expect(value).toEqual([
-      { window: 41, tab: 1, current: true, url: "https://a.test/", title: "A\ttitle" },
-      { window: 41, tab: 2, current: false, url: "", title: "" },
+      { tab: 1, current: true, url: "https://a.test/", title: "A\ttitle" },
+      { tab: 2, current: false, url: "", title: "" },
     ]);
     const finder = BUILTIN_ADAPTERS[0]!;
     value = await finder.extras.find((e) => e.name === "selection")!.run({ ...scope("file:///tmp/a%20b.txt\nfile:///Users/x/Folder/\nnot a url\n"), app: { name: "Finder", bundleId: "com.apple.finder", pid: 1 } }, []);
     expect(value).toEqual(["/tmp/a b.txt", "/Users/x/Folder"]);
-    await expect(safari.extras.find((e) => e.name === "openURL")!.run(scope("NOWINDOW"), ["https://x.test"])).rejects.toThrow("no browser window");
+    await expect(safari.extras.find((e) => e.name === "openURL")!.run(scope("NOWINDOW"), ["https://x.test"])).rejects.toThrow("no window with the bound window's id");
   });
 });
 
@@ -523,5 +545,95 @@ describe("AppAdapters wiring", () => {
     const a = new AppAdapters({ extra: [own] });
     expect(a.registry.find("dev.example.fixture")).toBe(own);
     expect(a.registry.find("com.apple.finder")).toBeDefined();
+  });
+});
+
+// ── the bound window, never the front one ────────────────────────────────────────────────────────────────────
+
+describe("browser and window extras act on the BOUND window only", () => {
+  const byName = (bundleId: string, name: string): ExtraDef => BUILTIN_ADAPTERS.find((a) => a.bundleIds.includes(bundleId))!.extras.find((e) => e.name === name)!;
+  const scopeAnswering = (bundleId: string, answer: string | null, sources: string[] = []): AdapterScope => ({
+    app: { name: bundleId === "com.apple.finder" ? "Finder" : bundleId === "com.apple.dt.Xcode" ? "Xcode" : "Safari", bundleId, pid: 1 },
+    signal: new AbortController().signal, window: () => BOUND_WINDOW,
+    applescript: async (src) => { sources.push(src); return answer; },
+    find: async () => [], snapshot: async () => "", act: async () => ({ rung: 1 }), waitFor: async () => ({ waitedMs: 0 }),
+    openDocument: async () => ({ name: "", bundleId: "" }), print: () => {}, say: () => {}, clampWait: (ms) => ms, sleep: async () => true,
+  });
+  const kind = async (p: Promise<unknown>): Promise<string> => {
+    try { await p; return "ok"; } catch (e) { return e instanceof AutomationFailure ? `${e.kind}: ${e.message}` : `${(e as Error).name}: ${(e as Error).message}`; }
+  };
+
+  test("a target with no known bound window: NoWindow before any AppleScript runs (the daemon's own scope)", async () => {
+    const adapters = new AppAdapters();
+    const scripts: string[] = [];
+    const scope = {
+      sessionId: "s1", callId: "c1", signal: new AbortController().signal, primitive: "extra", metric: { ts: 0, sessionId: "s1", callId: "c1", primitive: "extra", ms: 0, helperMs: 0 },
+      privatePath: true, helperVersion: () => "1.7.0", helper: async () => { throw new Error("no"); }, authorize: async () => {},
+      applescript: async (_t: unknown, src: string) => { scripts.push(src); return { result: null }; }, openDocument: async () => { throw new Error("no"); },
+      builder: { text: () => {}, daemonLine: () => {}, guide: () => {}, markScreenRead: () => {} },
+      clampWait: (ms: number) => ms, acted: () => {}, log: () => {},
+    };
+    const safari = { targetId: "t1", bundleId: "com.apple.Safari", name: "Safari", pid: 1 }; // no windowId
+    for (const name of ["tabs", "currentURL", "pageText", "openURL"]) {
+      const r = await kind(adapters.primitive(scope, safari, "extra", { name, args: name === "openURL" ? ["https://x.test"] : [] }));
+      expect(r).toContain("NoWindow: Winter doesn't know which Safari window is bound");
+    }
+    expect(await kind(adapters.primitive(scope, { ...safari, targetId: "t2", bundleId: "com.apple.finder", name: "Finder" }, "extra", { name: "selection", args: [] }))).toContain("NoWindow");
+    expect(await kind(adapters.primitive(scope, { ...safari, targetId: "t3", bundleId: "com.apple.dt.Xcode", name: "Xcode" }, "extra", { name: "build", args: [] }))).toContain("NoWindow");
+    expect(scripts).toEqual([]);
+    // With the bound id known, the script names THAT window.
+    await adapters.primitive(scope, { ...safari, targetId: "t4", windowId: 108006 }, "extra", { name: "currentURL", args: [] });
+    expect(scripts.at(-1)).toContain("window id 108006");
+  });
+
+  test("Safari: a bound window Safari can't find, or one that isn't a browser window, is NoWindow — nothing falls back", async () => {
+    for (const name of ["tabs", "currentURL", "pageText", "openURL"]) {
+      const args = name === "openURL" ? ["https://x.test"] : [];
+      expect(await kind(byName("com.apple.Safari", name).run(scopeAnswering("com.apple.Safari", "NOWINDOW"), args))).toContain("NoWindow: Safari has no window with the bound window's id");
+      expect(await kind(byName("com.apple.Safari", name).run(scopeAnswering("com.apple.Safari", "NOTBROWSER"), args))).toContain("NoWindow: the bound Safari window is not a browser window");
+    }
+    // The script checks the bound window exists and is a browser window BEFORE it reads or changes anything.
+    const sources: string[] = [];
+    await byName("com.apple.Safari", "openURL").run(scopeAnswering("com.apple.Safari", "TAB:3", sources), ["https://x.test"]);
+    const src = sources[0]!;
+    expect(src.indexOf(`if not (exists window id ${BOUND_WINDOW}) then return "NOWINDOW"`)).toBeGreaterThan(0);
+    expect(src.indexOf("return \"NOTBROWSER\"")).toBeLessThan(src.indexOf("make new tab"));
+    expect(src).toContain(`set current tab of w to tab ci of w`);
+  });
+
+  test("Safari openWindow: the agent's own window, found by its one new id; refused while Safari is the user's app", async () => {
+    const own = byName("com.apple.Safari", "openWindow");
+    expect(await own.run(scopeAnswering("com.apple.Safari", "WINDOW:108006"), ["file:///tmp/p.html"])).toEqual({ window: 108006 });
+    expect(await kind(own.run(scopeAnswering("com.apple.Safari", "FRONTMOST"), ["file:///tmp/p.html"]))).toContain("NeedsForeground: Safari is the app the user is using");
+    expect(await kind(own.run(scopeAnswering("com.apple.Safari", "AMBIGUOUS"), ["file:///tmp/p.html"]))).toContain("NoWindow: a new Safari window was made, but Winter could not tell which one");
+    const sources: string[] = [];
+    await own.run(scopeAnswering("com.apple.Safari", "WINDOW:1", sources), ["https://x.test"]);
+    expect(sources[0]).toContain("set before to id of every window");
+    expect(sources[0]).toContain("make new document with properties {URL:\"https://x.test\"}");
+    expect(sources[0]).toContain("if (count of fresh) is not 1 then return \"AMBIGUOUS\"");
+  });
+
+  test("Finder: selection() only when the bound window is Finder's frontmost; reveal() shows the folder in the bound window, selecting only then", async () => {
+    expect(await kind(byName("com.apple.finder", "selection").run(scopeAnswering("com.apple.finder", "NOTFRONT"), []))).toContain("NoWindow: Finder's scripting reads the selection of its frontmost window only");
+    expect(await kind(byName("com.apple.finder", "selection").run(scopeAnswering("com.apple.finder", "NOWINDOW"), []))).toContain("NoWindow: Finder has no window with the bound window's id");
+    const dir = mkdtempSync(join(tmpdir(), "winter-adapters-reveal-"));
+    const file = join(dir, "x.txt");
+    writeFileSync(file, "x");
+    const sources: string[] = [];
+    expect(await byName("com.apple.finder", "reveal").run(scopeAnswering("com.apple.finder", "SHOWN", sources), [file])).toEqual({ selected: false });
+    expect(await byName("com.apple.finder", "reveal").run(scopeAnswering("com.apple.finder", "SELECTED"), [file])).toEqual({ selected: true });
+    expect(sources[0]).toContain(`set target of Finder window id ${BOUND_WINDOW} to ((POSIX file ${JSON.stringify(dir)}) as alias)`);
+    expect(sources[0]).toContain(`if (id of Finder window 1) is not ${BOUND_WINDOW} then return "SHOWN"`);
+    expect(sources[0]!.indexOf("return \"SHOWN\"")).toBeLessThan(sources[0]!.indexOf("select ("));
+  });
+
+  test("Xcode: the bound window's own workspace (or one named); none there is NoWindow", async () => {
+    const build = byName("com.apple.dt.Xcode", "build");
+    expect(await kind(build.run(scopeAnswering("com.apple.dt.Xcode", "NOTWORKSPACE"), [{ waitMs: 0 }]))).toContain("NoWindow: the bound Xcode window shows no workspace");
+    expect(await kind(build.run(scopeAnswering("com.apple.dt.Xcode", "NOWORKSPACE"), [{ workspace: "Gone", waitMs: 0 }]))).toContain('no open workspace named "Gone"');
+    const sources: string[] = [];
+    await byName("com.apple.dt.Xcode", "buildStatus").run(scopeAnswering("com.apple.dt.Xcode", "App\tsucceeded\ttrue\t\n", sources), [{ workspace: "App" }]);
+    expect(sources[0]).toContain('set d to workspace document "App"');
+    expect(sources[0]).not.toContain("window id");
   });
 });

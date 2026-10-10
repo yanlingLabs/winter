@@ -151,7 +151,9 @@ export class AppAdapters {
 
   /** `app.extras.<name>(…)`, `app.dict.<name>(…)`, `app.help(…)`. */
   async primitive(scope: AdapterRunScope, t: AdapterTarget, primitive: string, args: Record<string, unknown>): Promise<unknown> {
-    const b = this.sessions.get(scope.sessionId)?.get(t.targetId) ?? this.remember(scope.sessionId, await this.resolve(scope, t));
+    const known = this.sessions.get(scope.sessionId)?.get(t.targetId) ?? this.remember(scope.sessionId, await this.resolve(scope, t));
+    // The target as the service knows it NOW (a `useWindow` since the bind changed the bound window).
+    const b: Bound = { ...known, target: t };
     switch (primitive) {
       case "help": return this.help(scope, b, args);
       case "extra": return await this.extra(scope, b, args);
@@ -343,6 +345,12 @@ export class AppAdapters {
     return {
       app: { name: t.name, bundleId: t.bundleId, pid: t.pid },
       signal: scope.signal,
+      window: () => {
+        if (typeof t.windowId !== "number" || !Number.isInteger(t.windowId) || t.windowId <= 0) {
+          throw new AutomationFailure("NoWindow", `Winter doesn't know which ${t.name} window is bound, so nothing was done — bind the window again (apps.open, or useWindow)`);
+        }
+        return t.windowId;
+      },
       applescript: async (source, o) => (await scope.applescript(t, source, o)).result,
       find: async (query) => (await scope.helper<FindResult>("target.find", { targetId: t.targetId, query })).elements,
       snapshot: async (o) => (await scope.helper<SnapshotResult>("target.snapshot", {

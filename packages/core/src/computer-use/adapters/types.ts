@@ -47,6 +47,8 @@ export interface AdapterTarget {
   /** helper 1.8.0's `app.path` / `app.version` (`CFBundleShortVersionString`) at bind. */
   appPath?: string;
   appVersion?: string;
+  /** The BOUND window's window-server id (from the bind, and the latest `useWindow`). */
+  windowId?: number;
 }
 
 export type AuthPurpose = { kind: "bind" } | { kind: "observe" } | { kind: "act"; primitive: string; access?: "click" | "full" };
@@ -96,6 +98,12 @@ export interface AdapterRunScope {
 export interface AdapterScope {
   readonly app: { name: string; bundleId: string; pid: number };
   readonly signal: AbortSignal;
+  /**
+   * The BOUND window's id — what every extra that works on "a window" or "the current tab/document" must address
+   * (`window id <it>` in AppleScript, for an app whose scripting window id is that same window-server id). Never the
+   * app's front window: the user's own window may be in front. Throws `NoWindow` when Winter does not know it.
+   */
+  window(): number;
   /** Winter's own AppleScript against this app; its result as AppleScript displays it. */
   applescript(source: string, o?: { timeoutMs?: number }): Promise<string | null>;
   find(query: string | { role?: string; name?: string; text?: string }): Promise<FindResult["elements"]>;

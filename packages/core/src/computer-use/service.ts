@@ -102,7 +102,9 @@ export interface ComputerV2ServiceDeps {
   adapters?: AppAdapters;
 }
 
-interface TargetInfo { targetId: string; bundleId: string; name: string; pid: number; lost?: string; appPath?: string; appVersion?: string }
+/** `windowId`: the bound window (its window-server id), from the bind and every `useWindow` — what an app adapter's
+ *  extras address, never the app's front window. */
+interface TargetInfo { targetId: string; bundleId: string; name: string; pid: number; lost?: string; appPath?: string; appVersion?: string; windowId?: number }
 interface StoredImage { data: string; mime: string; width: number; height: number }
 
 interface SessionState {
@@ -548,6 +550,8 @@ export class ComputerV2Service {
         const w = args.window;
         if (typeof w !== "string" && typeof w !== "number") throw bad("useWindow() takes a window title or id");
         const res = await this.helperCall<TargetUseWindowResult>(ctx, "target.useWindow", { targetId, window: w }, metric);
+        // The bound window is now this one (app adapters address it); unknown when the helper did not say.
+        if (typeof res?.window?.id === "number" && res.window.id > 0) t.windowId = res.window.id; else delete t.windowId;
         this.diffBases.clearTarget(ctx.sessionId, targetId); // a different window: the next state() is full
         ctx.state.lastTargetShot.delete(targetId);
         const detail = helperDetail(res?.detail);
@@ -721,6 +725,7 @@ export class ComputerV2Service {
     const appPath = typeof res.app.path === "string" && res.app.path.length > 0 ? res.app.path : known.path;
     const info: TargetInfo = {
       targetId: res.targetId, bundleId: app.bundleId, name: app.name, pid: res.app.pid,
+      ...(typeof res.window?.id === "number" && res.window.id > 0 ? { windowId: res.window.id } : {}),
       ...(appPath === undefined ? {} : { appPath }), ...(typeof res.app.version === "string" && res.app.version.length > 0 ? { appVersion: res.app.version } : {}),
     };
     try {

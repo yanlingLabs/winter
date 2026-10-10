@@ -1,11 +1,18 @@
 // Finder (`com.apple.finder`): reveal, the selection, the Trash and "open with" — the file work Finder's own UI does only
-// with Finder in front (its Move to Trash item stays disabled in the background), done through its dictionary (reveal,
-// selection, delete) and, for `openWith`, the service's background document open (the opener gets its own card).
+// with Finder in front (its Move to Trash item stays disabled in the background), done through its dictionary and, for
+// `openWith`, the service's background document open (the opener gets its own card).
+//
+// The window an extra works in is the BOUND one (`Finder window id <it>` — a Finder window's scripting id is its
+// window-server id), never Finder's front window, which may be the user's. Finder's `selection` describes only its
+// frontmost window, so `selection()` reads it — and `reveal()` selects — only when the bound window IS Finder's
+// frontmost window; otherwise selection() refuses and reveal() only shows the folder. `trash` and `openWith` act on the
+// paths the agent named, never on a window.
 import { existsSync, lstatSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { AutomationFailure } from "../../errors";
 import type { AppAdapter } from "../types";
+import { dirname } from "node:path";
 import { appScript, pathArg, posixFile, stringArg } from "./common";
 import { FINDER_GUIDE } from "../guides/finder";
 
@@ -23,6 +30,10 @@ export function trashRefusal(path: string, home: string = homedir()): string | u
   return undefined;
 }
 
+function notBound(app: string): AutomationFailure {
+  return new AutomationFailure("NoWindow", `${app} has no window with the bound window's id — it may have closed, or it is not a Finder window; bind a Finder window again (apps.open with a folder path). Nothing was done.`);
+}
+
 function existing(path: string, what: string): void {
   let ok = false;
   try { lstatSync(path); ok = true; } catch { ok = existsSync(path); }
@@ -32,36 +43,53 @@ function existing(path: string, what: string): void {
 
 export const finderAdapter: AppAdapter = {
   bundleIds: ["com.apple.finder"],
-  guide: { id: "finder@1", text: FINDER_GUIDE },
+  guide: { id: "finder@2", text: FINDER_GUIDE },
   extras: [
     {
       name: "reveal", access: "click",
-      signature: "reveal(path: string): Promise<void>",
-      summary: "selects the item in a Finder window, in the background",
-      doc: "Finder's own reveal: it shows the item's folder in a Finder window and selects the item, without bringing Finder forward. The path must exist.",
+      signature: "reveal(path: string): Promise<{ selected: boolean }>",
+      summary: "shows the item's folder in the bound Finder window and selects the item, in the background",
+      doc: "The BOUND Finder window shows the item's folder; the item is selected when the bound window is Finder's frontmost window (Finder's selection is that window's) — selected: false otherwise, and the folder is shown all the same. The path must exist. Finder stays in the background.",
       async run(scope, args) {
         const path = pathArg(args[0], "reveal(path)");
         existing(path, "reveal(path)");
-        await scope.applescript(appScript(scope.app.bundleId, [`reveal (${posixFile(path)} as alias)`]));
-        scope.say("revealed the item in a Finder window (Finder stays in the background)");
-        return undefined;
+        const w = scope.window();
+        const result = await scope.applescript(appScript(scope.app.bundleId, [
+          `if not (exists Finder window id ${w}) then return "NOWINDOW"`,
+          `set target of Finder window id ${w} to (${posixFile(dirname(path))} as alias)`,
+          `if (id of Finder window 1) is not ${w} then return "SHOWN"`,
+          `select (${posixFile(path)} as alias)`,
+          "return \"SELECTED\"",
+        ]));
+        const r = (result ?? "").trim();
+        if (r === "NOWINDOW") throw notBound(scope.app.name);
+        const selected = r === "SELECTED";
+        scope.say(selected ? "the bound Finder window shows the item's folder, the item selected (Finder stays in the background)"
+          : "the bound Finder window shows the item's folder; the item is not selected (the bound window is not Finder's frontmost) — click it there if needed");
+        return { selected };
       },
     },
     {
       name: "selection", access: "view",
       signature: "selection(): Promise<string[]>",
-      summary: "POSIX paths selected in Finder's front window",
-      doc: "What is selected in Finder's frontmost window (or on the desktop), as POSIX paths; [] when nothing is. Read-only.",
+      summary: "POSIX paths selected in the bound Finder window (when it is Finder's frontmost)",
+      doc: "What is selected in the BOUND window, as POSIX paths; [] when nothing is. Finder's selection describes its frontmost window only, so this refuses (NoWindow) when the bound window is behind another Finder window — read the selection with state() then. Read-only.",
       async run(scope) {
+        const w = scope.window();
         const result = await scope.applescript(appScript(scope.app.bundleId, [
-          "set out to \"\"",
+          `if not (exists Finder window id ${w}) then return "NOWINDOW"`,
+          `if (id of Finder window 1) is not ${w} then return "NOTFRONT"`,
+          "set out to \"SEL:\"",
           "repeat with i in (get selection)",
           "  set out to out & (URL of i) & winterLF",
           "end repeat",
           "return out",
         ]));
+        const r = (result ?? "").trim();
+        if (r === "NOWINDOW") throw notBound(scope.app.name);
+        if (r === "NOTFRONT") throw new AutomationFailure("NoWindow", "Finder's scripting reads the selection of its frontmost window only, and the bound window is behind another Finder window — read what is selected with state() (selected items are marked), or reveal() an item in the bound window");
         const paths: string[] = [];
-        for (const line of (result ?? "").split(/\r?\n|\r/)) {
+        for (const line of (result ?? "").replace(/^SEL:/, "").split(/\r?\n|\r/)) {
           const url = line.trim();
           if (!url.startsWith("file://")) continue;
           try { paths.push(fileURLToPath(url).replace(/(.)\/$/, "$1")); } catch { /* not a file URL */ }

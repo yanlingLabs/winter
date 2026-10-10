@@ -62,8 +62,14 @@ describe("the adapters group", () => {
     for (const s of all) void s.code;
     expect(new Set(seen)).toEqual(new Set(["dev.cu-live.fixture", "com.apple.finder", "com.apple.Safari"]));
     const safari = all.find((s) => s.name.includes("Safari"))!;
-    expect(safari.code).toContain("sf.dict.close({ ref:");
+    // Its OWN window, made and bound by exact id; nothing acts in the page window it reached Safari through.
+    expect(safari.code).toContain("anchor.extras.openWindow(");
+    expect(safari.code).toContain('apps.open("com.apple.Safari", { window: own })');
     expect(safari.code).toContain("sf.extras.openURL(");
+    expect(safari.code).toContain('sf.dict.close({ ref: "window id " + own })');
+    expect(safari.code).not.toMatch(/anchor\.extras\.(openURL|pageText|tabs|currentURL)|front window|window 1\b/);
+    const reveal = all.find((s) => s.name.includes("reveal"))!;
+    expect(reveal.code).toContain("no extra was used there");
     const trash = all.find((s) => s.name.includes("trash"))!;
     expect(trash.code).toContain("trash-me.txt");
   });

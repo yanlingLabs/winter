@@ -64,6 +64,7 @@ function world(opts: WorldOpts = {}) {
   const fake = new FakeHelper();
   fake.helperVersion = opts.helperVersion ?? "1.8.0";
   fake.apps.push({ name: "Finder", bundleId: "com.apple.finder", pid: 600, running: true });
+  fake.apps.push({ name: "Safari", bundleId: "com.apple.Safari", pid: 601, running: true });
   const scripts: string[] = [];
   let appleScriptResult: string | null = null;
   fake.handlers["target.applescript"] = (p) => { scripts.push(String(p.source)); return { result: appleScriptResult }; };
@@ -127,12 +128,12 @@ describe("adapters: what a bind prints", () => {
     const out = unfenced(r);
     expect(out).toContain([
       "Finder extras — on this app's handle: .extras.<name>(…); .help() shows them again",
-      "  reveal(path: string): Promise<void> · click — selects the item in a Finder window, in the background",
-      "  selection(): Promise<string[]> · view — POSIX paths selected in Finder's front window",
+      "  reveal(path: string): Promise<{ selected: boolean }> · click — shows the item's folder in the bound Finder window and selects the item, in the background",
+      "  selection(): Promise<string[]> · view — POSIX paths selected in the bound Finder window (when it is Finder's frontmost)",
       "  trash(paths: string | string[]): Promise<{ trashed: number }> · full — moves the items to the Trash",
       "  openWith(path: string, app: string): Promise<{ opened: string }> · full — opens a file in another app, in the background",
       "Finder dictionary: 3 commands — .dict.<name>(…), run like applescript(); .help(\"dict\") lists them",
-      "Guide finder@1:",
+      "Guide finder@2:",
     ].join("\n"));
     // The block comes before the state, which is fenced.
     expect(fenceStart(r)).toBeGreaterThan(0);
@@ -146,8 +147,8 @@ describe("adapters: what a bind prints", () => {
     const w = world();
     await w.run("const f = await apps.open('Finder')");
     const again = await w.run("const g = await apps.open('Finder')\nprint(Object.keys(g.extras).length)");
-    expect(unfenced(again)).toContain("(Finder: extras, dictionary commands and guide finder@1 were shown earlier — .help() shows them again)");
-    expect(unfenced(again)).not.toContain("Guide finder@1:");
+    expect(unfenced(again)).toContain("(Finder: extras, dictionary commands and guide finder@2 were shown earlier — .help() shows them again)");
+    expect(unfenced(again)).not.toContain("Guide finder@2:");
     expect(fenced(again)).toContain("4");
     // One scriptingCommands per running app (bundle id + pid), not per bind.
     expect(w.fake.calls("target.scriptingCommands")).toHaveLength(1);
@@ -155,17 +156,17 @@ describe("adapters: what a bind prints", () => {
     // A compaction of the main thread: the next primitive touching Finder prints the block first.
     w.adapters.observe({ type: "continuity_warning", sessionId: "s1", threadId: "main", warning: "compacted" } as unknown as SessionEvent);
     const after = await w.run("await f.state()");
-    expect(unfenced(after)).toContain("Guide finder@1:");
-    expect(text(after).indexOf("Guide finder@1:")).toBeLessThan(fenceStart(after));
+    expect(unfenced(after)).toContain("Guide finder@2:");
+    expect(text(after).indexOf("Guide finder@2:")).toBeLessThan(fenceStart(after));
     const once = await w.run("await f.state()");
-    expect(unfenced(once)).not.toContain("Guide finder@1:");
+    expect(unfenced(once)).not.toContain("Guide finder@2:");
 
     // A reset: bindings gone, so the next bind prints the block again.
     const reset = await w.run("const f = await apps.open('Finder')", { reset: true });
-    expect(unfenced(reset)).toContain("Guide finder@1:");
+    expect(unfenced(reset)).toContain("Guide finder@2:");
     // Another session never saw it.
     const other = await w.run("const f = await apps.open('Finder')", { sessionId: "s2" });
-    expect(unfenced(other)).toContain("Guide finder@1:");
+    expect(unfenced(other)).toContain("Guide finder@2:");
   }, 30_000);
 
   macOnly("an app with neither an adapter nor a dictionary prints nothing more, and its handle has empty extras and dict", async () => {
@@ -200,7 +201,7 @@ describe("adapters: help()", () => {
     const w = world();
     await w.run("const f = await apps.open('Finder')");
     const all = await w.run("const h = await f.help({ emit: false })\nprint(h.split('\\n')[0])\nawait f.help()");
-    expect(unfenced(all)).toContain("Guide finder@1:");
+    expect(unfenced(all)).toContain("Guide finder@2:");
     expect(fenced(all)).toContain("Finder extras — on this app's handle");
     const dict = await w.run("await f.help('dict')");
     expect(fenced(dict)).toContain("reveal(direct: ref<specifier>) — Bring the specified object(s) into view");
@@ -223,9 +224,9 @@ describe("adapters: help()", () => {
     await w.run("const f = await apps.open('Finder')");
     w.adapters.observe({ type: "continuity_warning", sessionId: "s1", warning: "compacted" } as unknown as SessionEvent);
     const r = await w.run("await f.help()");
-    expect(unfenced(r).split("Guide finder@1:").length - 1).toBe(1);
+    expect(unfenced(r).split("Guide finder@2:").length - 1).toBe(1);
     const next = await w.run("await f.state()");
-    expect(unfenced(next)).not.toContain("Guide finder@1:");
+    expect(unfenced(next)).not.toContain("Guide finder@2:");
   }, 30_000);
 });
 
@@ -242,8 +243,11 @@ describe("adapters: extras and dictionary commands", () => {
     expect(fenced(r)).toContain(`${dir}/a.txt`);
     expect(w.scripts[0]).toContain('tell application id "com.apple.finder"');
     expect(w.scripts[0]).toContain("repeat with i in (get selection)");
-    expect(w.scripts[1]).toContain(`reveal ((POSIX file ${JSON.stringify(file)}) as alias)`);
-    expect(unfenced(r)).toContain("revealed the item in a Finder window");
+    // The BOUND window (the bind's window id 7), never Finder's front window.
+    expect(w.scripts[0]).toContain('if (id of Finder window 1) is not 7 then return "NOTFRONT"');
+    expect(w.scripts[1]).toContain(`set target of Finder window id 7 to ((POSIX file ${JSON.stringify(dir)}) as alias)`);
+    expect(w.scripts[1]).toContain(`select ((POSIX file ${JSON.stringify(file)}) as alias)`);
+    expect(unfenced(r)).toContain("the bound Finder window shows the item's folder");
     const metrics = readFileSync(join(w.home, "logs", "automation-metrics.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
     expect(metrics.filter((m) => m.primitive === "extra").map((m) => m.extra)).toEqual(["selection", "reveal"]);
     // Never the arguments.
@@ -343,5 +347,77 @@ describe("adapters: access classes through a script", () => {
     const b = world({ policy: "bypass" });
     expect((await b.run("const f = await apps.open('Finder')\nawait f.dict.empty()")).isError).toBe(false);
     expect(b.events.filter((e) => e.type === "approval_requested")).toHaveLength(0);
+  }, 30_000);
+});
+
+describe("adapters: browser extras act on the BOUND window, never the front one", () => {
+  // A Safari with two windows: the user's (108001) in FRONT, and the bound one (108006). The fake runs a script the way
+  // Safari would: by the window it names — `window id N` — and records which window each script touched.
+  function safariWorld(opts: { bindWindowId?: number | null } = {}) {
+    const w = world();
+    const touched: string[] = [];
+    let current = "file:///bound/page.html";
+    w.fake.handlers["target.bind"] = (p) => {
+      const app = w.fake.apps.find((a) => a.bundleId === p.app || a.name === p.app)!;
+      w.fake.targets.set("t1", app);
+      const id = opts.bindWindowId === undefined ? 108006 : opts.bindWindowId;
+      return { targetId: "t1", app: { name: app.name, bundleId: app.bundleId, pid: app.pid, version: "26.0" }, window: { ...(id === null ? {} : { id }), title: "Bound", frame: [0, 0, 800, 600] } };
+    };
+    w.fake.handlers["target.useWindow"] = (p) => ({ window: { id: Number(p.window), title: "Other", frame: [0, 0, 1, 1] } });
+    w.fake.handlers["target.applescript"] = (p) => {
+      const src = String(p.source);
+      w.scripts.push(src);
+      if (/front window|front document|document 1|window 1\b/.test(src)) { touched.push("FRONT (the user's window)"); return { result: "file:///users/own/page.html" }; }
+      const m = /exists window id (\d+)/.exec(src);
+      if (m === null) return { result: null };
+      const id = Number(m[1]);
+      if (id !== 108006 && id !== 108007) return { result: "NOWINDOW" };
+      touched.push(String(id));
+      if (src.includes("make new tab")) return { result: "TAB:3" };
+      if (src.includes("URL of ct")) return { result: `URL:${current}` };
+      return { result: "1\ttrue\tfile:///bound/page.html\tBound page\n" };
+    };
+    return { ...w, touched, setCurrent: (u: string) => { current = u; } };
+  }
+
+  macOnly("with the user's window in front, every Safari extra names the bound window — and follows a useWindow", async () => {
+    const w = safariWorld();
+    const r = await w.run(`const sf = await apps.open("Safari")
+print(await sf.extras.currentURL())
+print(JSON.stringify(await sf.extras.tabs()))
+await sf.extras.pageText()
+print(JSON.stringify(await sf.extras.openURL("https://example.com/x")))`);
+    expect(r.isError).toBe(false);
+    expect(w.touched).toEqual(["108006", "108006", "108006", "108006"]);
+    expect(fenced(r)).toContain("file:///bound/page.html");
+    expect(fenced(r)).not.toContain("users/own");
+    for (const src of w.scripts) {
+      expect(src).toContain("window id 108006");
+      expect(src).not.toMatch(/front window|front document|document 1/);
+    }
+    // The bound window changes with useWindow: the next extra names the new one.
+    await w.run("await sf.useWindow(108007)\nawait sf.extras.currentURL()");
+    expect(w.touched.at(-1)).toBe("108007");
+    expect(w.scripts.at(-1)).toContain("window id 108007");
+  }, 30_000);
+
+  macOnly("a bound window Safari can't resolve is NoWindow (nothing falls back to the front window)", async () => {
+    const w = safariWorld();
+    await w.run('const sf = await apps.open("Safari")');
+    const r = await w.run("await sf.useWindow(5)\nawait sf.extras.openURL('https://example.com/y')");
+    expect(r.isError).toBe(true);
+    expect(text(r)).toContain("NoWindow");
+    expect(text(r)).toContain("Safari has no window with the bound window's id");
+    // No window was touched: the bound id resolved to nothing, so the script stopped before any tab was made.
+    expect(w.touched).toEqual([]);
+    expect(w.scripts.at(-1)!.indexOf('return "NOWINDOW"')).toBeLessThan(w.scripts.at(-1)!.indexOf("make new tab"));
+  }, 30_000);
+
+  macOnly("a bind whose window id the helper did not give: NoWindow, and no AppleScript runs at all", async () => {
+    const w = safariWorld({ bindWindowId: null });
+    const r = await w.run('const sf = await apps.open("Safari")\nawait sf.extras.currentURL()');
+    expect(r.isError).toBe(true);
+    expect(text(r)).toMatch(/NoWindow( \(line \d+\))?: Winter doesn't know which Safari window is bound/);
+    expect(w.scripts).toEqual([]);
   }, 30_000);
 });
