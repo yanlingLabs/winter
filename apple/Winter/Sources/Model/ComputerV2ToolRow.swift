@@ -81,8 +81,9 @@ func computerV2CleanTitle(_ title: String?) -> String? {
 /// PURE: "Notes · click, paste, state" from a script, or nil when it names no app and uses no verb.
 ///
 /// - **Apps** are the first argument of each `apps.open(…)` string literal, in first-seen order (a name,
-///   a bundle id or an `.app` path, shown as the app's name), plus "Screen" for the whole-screen
-///   members. At most two are named; the rest are counted ("Notes, Mail +1").
+///   a bundle id or an `.app` path, shown as the app's name), the host of each `browsers.open(…)` URL
+///   ("example.com"), plus "Screen" for the whole-screen members. At most two are named; the rest are
+///   counted ("Notes, Mail +1").
 /// - **Verbs** are the target API's members the script calls (`click`, `paste`, `state`, …), deduped in
 ///   first-seen order, at most four. `apps.open` itself is not a verb: it is the app part.
 /// - A script that uses verbs on an app bound by an EARLIER call (the runtime persists variables) names
@@ -118,12 +119,16 @@ func computerV2DerivedLabel(code: String) -> String? {
 private let appsOpenPattern = try! NSRegularExpression(
     pattern: #"\bapps\s*\.\s*open\s*\(\s*(?:"([^"\\\n]{1,120})"|'([^'\\\n]{1,120})'|`([^`\\\n$]{1,120})`)"#)
 
+/// `browsers.open("https://example.com/…")` — a browser tab's site, shown as its host. Bounded like `apps.open`.
+private let browsersOpenPattern = try! NSRegularExpression(
+    pattern: #"\bbrowsers\s*\.\s*open\s*\(\s*(?:"([^"\\\n]{1,300})"|'([^'\\\n]{1,300})'|`([^`\\\n$]{1,300})`)"#)
+
 /// `screen.screenshot(` / `screen.windows(` / `screen.appAt(` — the look-only whole-screen members.
 private let screenMemberPattern = try! NSRegularExpression(pattern: #"\bscreen\s*\.\s*(?:screenshot|windows|appAt)\s*\("#)
 
 /// A call of one of the target API's members. `waitForIdle` precedes `waitFor` so the longer name wins.
 private let verbPattern = try! NSRegularExpression(
-    pattern: #"\.\s*(state|find|screenshot|click|setValue|type|paste|key|scroll|drag|select|action|waitForIdle|waitFor|menu|windows|useWindow)\s*\("#)
+    pattern: #"\.\s*(state|find|screenshot|click|setValue|type|paste|key|scroll|drag|select|action|waitForIdle|waitFor|menu|windows|useWindow|hover|goto|back|forward|reload|text|upload)\s*\("#)
 
 /// PURE: the apps a script opens, in the order it opens them, as names a person would say.
 func computerV2AppNames(in code: String) -> [String] {
@@ -135,6 +140,17 @@ func computerV2AppNames(in code: String) -> [String] {
             guard range.location != NSNotFound, let swiftRange = Range(range, in: code) else { continue }
             if let name = computerV2AppDisplayName(String(code[swiftRange])) {
                 found.append((match.range.location, name))
+            }
+        }
+    }
+    for match in browsersOpenPattern.matches(in: code, range: whole) {
+        for group in 1...3 {
+            let range = match.range(at: group)
+            guard range.location != NSNotFound, let swiftRange = Range(range, in: code) else { continue }
+            let raw = String(code[swiftRange])
+            if !raw.contains("${"), let url = URL(string: raw), let host = url.host, !host.isEmpty {
+                let site = url.port.map { "\(host):\($0)" } ?? host
+                found.append((match.range.location, String(site.prefix(computerV2LabelMaxAppNameCharacters))))
             }
         }
     }

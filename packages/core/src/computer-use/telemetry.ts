@@ -37,6 +37,9 @@ export interface PrimitiveMetric {
   visitAnswer?: "allow" | "refuse" | "timeout-allow" | "aborted" | "unavailable" | "run-allowance" | "run-refusal" | "held-refusal";
   /** Where a person answered it: the session's `card`, the helper's on-screen `panel`; or `timeout`, `none`. */
   visitVia?: "card" | "panel" | "timeout" | "none";
+  /** A browser tab's primitive: the backend id it ran on ("winter", "chrome", …) and the engine's own time, ms. */
+  backend?: string;
+  engineMs?: number;
 }
 
 export const AUTOMATION_METRICS_MAX_BYTES = 8 * 1024 * 1024;

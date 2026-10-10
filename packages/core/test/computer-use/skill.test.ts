@@ -49,7 +49,8 @@ function declaredMembers(description: string, header: RegExp, end: string): Map<
   }
   return out;
 }
-const appMethods = declaredMembers(full, /^interface App \{/, "}");
+// An app's members: what every target shares (`interface Target`) and what an app adds (`interface App extends Target`).
+const appMethods = new Map([...declaredMembers(full, /^interface Target \{/, "}"), ...declaredMembers(full, /^interface App extends Target \{/, "}")]);
 const appsMembers = declaredMembers(full, /^declare const apps: \{/, "};");
 const screenMembers = declaredMembers(full, /^declare const screen: \{/, "};");
 const GLOBALS = new Set(["print", "show", "sleep", "timeLeft"]);

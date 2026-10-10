@@ -42,6 +42,14 @@ final class ComputerV2ToolRowTests: XCTestCase {
         XCTAssertEqual(computerV2Label(title: nil, code: notesScript), "Notes · click, paste, state")
     }
 
+    func testABrowserTabNamesItsSite() {
+        XCTAssertEqual(computerV2Label(title: nil, code: #"const tab = await browsers.open("https://example.com/cart"); await tab.click(3); await tab.state()"#),
+                       "example.com · click, state")
+        XCTAssertEqual(computerV2AppNames(in: #"await browsers.open('http://localhost:3000/', { browser: "chrome" })"#), ["localhost:3000"])
+        XCTAssertEqual(computerV2Verbs(in: "await tab.goto(u); await tab.text(); await tab.upload(4, 'a.pdf')"), ["goto", "text", "upload"])
+        XCTAssertEqual(computerV2AppNames(in: "await browsers.open(`https://${host}/`)"), [])
+    }
+
     func testAppNameFormsAreShownAsNames() {
         XCTAssertEqual(computerV2AppNames(in: #"await apps.open("com.apple.Notes")"#), ["Notes"])
         XCTAssertEqual(computerV2AppNames(in: #"await apps.open('/Applications/Final Cut Pro.app')"#), ["Final Cut Pro"])

@@ -40,8 +40,18 @@ export function formatArgsHead(argsJson: string): string {
 /** ComputerV2 (2026-10-08): the tool row's host name (`runtime-sdk/tool-names.ts`'s `ComputerV2` pair). */
 export const COMPUTER_V2_HOST_NAME = "computer_v2";
 
-const COMPUTER_V2_VERBS = /\.(state|find|screenshot|click|setValue|type|paste|key|scroll|drag|select|action|menu|waitFor|waitForIdle|windows|useWindow|appAt)\s*\(/g;
+const COMPUTER_V2_VERBS = /\.(state|find|screenshot|click|setValue|type|paste|key|scroll|drag|select|action|menu|waitForIdle|waitFor|windows|useWindow|appAt|hover|goto|back|forward|reload|text|upload)\s*\(/g;
 const APPS_OPEN = /apps\s*\.\s*open\s*\(\s*(["'`])((?:(?!\1)[^\\\n])+)\1/g;
+/** `browsers.open("https://example.com/…")`: the site it opens, shown as its host. */
+const BROWSERS_OPEN = /browsers\s*\.\s*open\s*\(\s*(["'`])((?:(?!\1)[^\\\n]){1,300})\1/g;
+
+function hostOf(url: string): string | undefined {
+  if (url.includes("${")) return undefined;
+  try {
+    const host = new URL(url).host;
+    return host.length === 0 ? undefined : host;
+  } catch { return undefined; }
+}
 
 /**
  * ComputerV2's row label (R10): its `title` when the model gave one; else derived from the code — the app
@@ -53,7 +63,11 @@ export function computerV2Label(argsJson: string): string {
   try { args = JSON.parse(argsJson) as typeof args; } catch { /* a partial stream: fall through */ }
   if (typeof args.title === "string" && args.title.trim().length > 0) return args.title.trim().slice(0, 80);
   const code = typeof args.code === "string" ? args.code : "";
-  const apps = [...new Set([...code.matchAll(APPS_OPEN)].map((m) => m[2]!.trim()).filter((n) => n.length > 0))];
+  // Apps and sites in the order the script opens them.
+  const apps = [...new Set([
+    ...[...code.matchAll(APPS_OPEN)].map((m) => ({ at: m.index ?? 0, name: m[2]!.trim() })),
+    ...[...code.matchAll(BROWSERS_OPEN)].map((m) => ({ at: m.index ?? 0, name: hostOf(m[2]!.trim()) ?? "" })),
+  ].sort((a, b) => a.at - b.at).map((x) => x.name).filter((n) => n.length > 0))];
   const verbs = [...new Set([...code.matchAll(COMPUTER_V2_VERBS)].map((m) => m[1]!))];
   const label = [apps.join(", "), verbs.join(", ")].filter((p) => p.length > 0).join(" · ");
   return label.length === 0 ? "Using the computer" : label.slice(0, 80);
