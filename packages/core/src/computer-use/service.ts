@@ -194,6 +194,8 @@ interface RunCtx {
   /** This run holds the screen's foreground lock for an open visit (released when the helper reports the visit
    *  closed with no such request in flight, or at the run's end). */
   visitLock: boolean;
+  /** A primitive answered `inVisit` and the helper has not reported that visit closed since: a visit is OPEN. */
+  visitOpen: boolean;
   /** The helper went away while a visit may have been open: said once, loudly. */
   visitStrandedNoticed: boolean;
   /** Visits whose reports this run claimed (`visit.close`) — the audit line's count. */
@@ -339,7 +341,7 @@ export class ComputerV2Service {
       abort: new AbortController(), timer, locks: new Map(), acted: new Set(), chains: new Map(), primitives: new Map(),
       apps: new Set(), timedOut: false, ended: false, bound: new Set(), daemonSentences: new Set(), textInFlight: new Set(),
       focusLines: new Map(), extensions: [], foreground: new Set(), visits: new Map(), visitPrompts: new Map(),
-      visitTouched: false, visitRequestsInFlight: 0, visitLock: false, visitStrandedNoticed: false, visitsClaimed: 0,
+      visitTouched: false, visitRequestsInFlight: 0, visitLock: false, visitOpen: false, visitStrandedNoticed: false, visitsClaimed: 0,
     };
     ctxRef.ctx = ctx;
     state.active = ctx;
@@ -1074,7 +1076,11 @@ export class ComputerV2Service {
           }
           throw err;
         } finally {
-          if (visit) ctx.visitRequestsInFlight--;
+          if (visit) {
+            ctx.visitRequestsInFlight--;
+            if (res?.inVisit === true) ctx.visitOpen = true;
+            this.maybeReleaseVisitLock(ctx);
+          }
         }
       }
     } finally { releaseForeground?.(); }
@@ -1148,13 +1154,19 @@ export class ComputerV2Service {
     const attempt = async (): Promise<ScreenshotResult & { bytes: number }> => {
       const visit = ctx.visits.get(key) === true;
       if (visit) { await this.ensureVisitLock(ctx, t); ctx.visitRequestsInFlight++; }
+      let shot: (ScreenshotResult & { bytes: number }) | undefined;
       try {
-        return await this.shoot(ctx, "target.screenshot", params, metric, visitParams);
+        shot = await this.shoot(ctx, "target.screenshot", params, metric, visitParams);
+        return shot;
       } catch (err) {
         if (visit && err instanceof HelperUnavailableError) this.noteVisitStranded(ctx, t.name);
         throw err;
       } finally {
-        if (visit) ctx.visitRequestsInFlight--;
+        if (visit) {
+          ctx.visitRequestsInFlight--;
+          if (shot?.inVisit === true) ctx.visitOpen = true;
+          this.maybeReleaseVisitLock(ctx);
+        }
       }
     };
     try {
@@ -1181,6 +1193,15 @@ export class ComputerV2Service {
     if (ctx.locks.has(FOREGROUND_LOCK_KEY)) { release(); return; }
     ctx.locks.set(FOREGROUND_LOCK_KEY, release);
     ctx.visitLock = true;
+  }
+
+  /** The screen's foreground lock taken for a visit goes as soon as no visit is open and none may be opening: no
+   *  request carrying `desktopVisit` in flight, and the run does not hold the front itself (`requestForeground`). */
+  private maybeReleaseVisitLock(ctx: RunCtx): void {
+    if (!ctx.visitLock || ctx.visitOpen || ctx.visitRequestsInFlight > 0 || ctx.foreground.size > 0) return;
+    ctx.locks.get(FOREGROUND_LOCK_KEY)?.();
+    ctx.locks.delete(FOREGROUND_LOCK_KEY);
+    ctx.visitLock = false;
   }
 
   /**
@@ -1476,10 +1497,9 @@ export class ComputerV2Service {
         // The visit is closed: the run that held the screen's foreground lock for it lets it go (unless a request that
         // may open the next one is in flight, or the run holds the front itself).
         const ctx = state.active;
-        if (ctx !== undefined && ctx.visitLock && ctx.visitRequestsInFlight === 0 && ctx.foreground.size === 0) {
-          ctx.locks.get(FOREGROUND_LOCK_KEY)?.();
-          ctx.locks.delete(FOREGROUND_LOCK_KEY);
-          ctx.visitLock = false;
+        if (ctx !== undefined) {
+          ctx.visitOpen = false;
+          this.maybeReleaseVisitLock(ctx);
         }
         return;
       }

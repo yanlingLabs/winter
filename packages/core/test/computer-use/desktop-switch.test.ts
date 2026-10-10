@@ -436,6 +436,27 @@ describe("ComputerV2: the desktop switch end to end", () => {
     expect(heldAfterClose).toBeNull();
   }, 30_000);
 
+  macOnly("an allowed request the helper did in the background (no visit open) does not keep the foreground lock", async () => {
+    const w = world({ policy: "bypass", answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "switch") });
+    const v = openVisits(w.fake);
+    let n = 0;
+    w.fake.handlers["target.act"] = (p) => {
+      if (++n <= 2) { v.enter(p); return { rung: 4, inVisit: true }; }
+      return { rung: 1 }; // with the allowance, but the background route worked: no visit
+    };
+    const held: unknown[] = [];
+    let finds = 0;
+    w.fake.handlers["target.find"] = async () => {
+      // The first find: the helper closes the visit (its grace) — the second: is the lock still held?
+      if (++finds === 1) { v.close(); await new Promise((res) => setTimeout(res, 20)); }
+      held.push(w.svc.locks.holder(FOREGROUND_LOCK_KEY) ?? null);
+      return { elements: [] };
+    };
+    await w.run("const notes = await apps.open('Notes')\nawait notes.click(14)\nawait notes.find('a')\nawait notes.click(15)\nawait notes.find('b')");
+    expect(w.fake.calls("target.act").map((a) => a.desktopVisit)).toEqual([undefined, true, true]);
+    expect(held).toEqual([null, null]);
+  }, 30_000);
+
   macOnly("a REFUSAL holds until the user's next message: no new prompt meanwhile, in that run and the next (5a)", async () => {
     const w = world({ policy: "auto", answer: (c, b) => b.resolve(c.sessionId, c.callId, c.onTimeout !== "allow", "orb", c.onTimeout === "allow" ? undefined : "session") });
     const v = openVisits(w.fake);
