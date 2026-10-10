@@ -104,7 +104,10 @@ const count = (haystack: string, needle: string) => haystack.split(needle).lengt
 
 describe("App (fullscreen shell)", () => {
   test("a file click opens the local target, while dragging across it only selects", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "winter-file-click-"));
+    // A SHORT path on purpose: the TUI draws the cwd on a fixed 80-column frame, and a cwd past that wraps and
+    // moves the transcript row this test clicks on. `tmpdir()` is a per-process root under the user's temp
+    // folder (`/var/folders/…/T/winter-test-XXXXXX/…`, ~90 columns once the dir name is added), so it is not used.
+    const dir = mkdtempSync("/tmp/wfc-");
     const path = join(dir, "Sushi_Story.pptx");
     writeFileSync(path, "fixture");
     try {

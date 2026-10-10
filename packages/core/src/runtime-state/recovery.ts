@@ -31,6 +31,19 @@ import type { RuntimeStateDb } from "./db";
 import { RuntimeSessionRecords, type GenerationRow, type RuntimeSessionRecord } from "./records";
 import { RuntimeLeases, type LeaseProbe, type LeaseRow, type ProcessIdentity } from "./leases";
 import { RuntimeChildren, type ChildRef, type PersistedWinterChild } from "./children";
+import {
+  CLAUDE_RESUME_PREFIX,
+  CLAUDE_RESUME_STALE_MS,
+  listClaudeResumeStaging,
+  readClaudeResumeScanMarker,
+  recordClaudeResumeScan,
+  updateClaudeResumeScanPending,
+  type ClaudeResumeLister,
+} from "./claude-resume-scan";
+
+// Kept as this module's exports (`root-recovery.ts` and tests import them from here); the definitions
+// live in `claude-resume-scan.ts`, which both recovery passes share.
+export { CLAUDE_RESUME_PREFIX, CLAUDE_RESUME_STALE_MS };
 
 /** The three states §13 step 2 calls "live": everything a previous daemon believed it was running.
  *  All three admit `unavailable` in `ALLOWED_TRANSITIONS`, which is what makes the park legal. */
@@ -104,6 +117,13 @@ export interface RecoveryDeps {
    * (router 0.0.11): today's age-and-unclaimed sweep, unchanged.
    */
   deferClaudeResumeSweep?: boolean;
+  /**
+   * The `claude-resume-*` listing (2026-10-10): `listClaudeResumeStaging` by default. The sweep lists
+   * `claudeResumeScanRoot` (the per-user temp folder, which can hold hundreds of thousands of entries)
+   * at most ONCE per home — a marker under `<home>/migration/` records it — so a test passes a spy to
+   * prove a later boot lists nothing.
+   */
+  listClaudeResumeStaging?: ClaudeResumeLister;
 }
 
 export interface RecoveryStepReport {
@@ -530,14 +550,17 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
       // is recorded in the SAME two columns the scan above already reads, under the SAME
       // `active_local_write_root`/`local_write_root` names — no second query needed.
       let claudeResumeRemoved = 0;
+      const sweep: Record<string, string | number> = deps.deferClaudeResumeSweep ? { claudeResumeSweep: "deferred" } : {};
       if (!deps.deferClaudeResumeSweep) {
         try {
-          claudeResumeRemoved = sweepClaudeResumeStaging(deps.claudeResumeScanRoot ?? tmpdir(), known);
+          const result = sweepClaudeResumeStaging(deps.home, deps.claudeResumeScanRoot ?? tmpdir(), known, deps.listClaudeResumeStaging ?? listClaudeResumeStaging, log);
+          claudeResumeRemoved = result.removed;
+          sweep.claudeResumeScan = result.listed ? (result.complete ? "listed" : "listed-partial") : "marker";
+          if (result.listed) sweep.claudeResumeEntries = result.entries;
         } catch {
           /* bounded: the staging sweep costs itself, never the rest of step 8 */
         }
       }
-      const sweep: Record<string, string> = deps.deferClaudeResumeSweep ? { claudeResumeSweep: "deferred" } : {};
       try {
         const { orphans } = await scan([...known]);
         finishStep(8, "ok", { root: scanRoot, known: known.size, orphans, deleted: 0, claudeResumeRemoved, ...sweep });
@@ -603,16 +626,6 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
   return finish();
 }
 
-/** WS-16 §10's own literal — repeated (not imported) in `runtime-sdk/mode-options.ts`'s
- *  `controlPlaneDenyRules`, which names this constant right back; the two subsystems this phase
- *  does not bridge with a shared module. */
-export const CLAUDE_RESUME_PREFIX = "claude-resume-";
-
-/** A resume genuinely in flight is never this old — every drain/timeout window the router or the
- *  official leg itself imposes is far shorter. Anything past this age under the staging root is
- *  leaked, not live. */
-export const CLAUDE_RESUME_STALE_MS = 24 * 60 * 60 * 1000;
-
 /**
  * P8d-12 (WS-16 §10): sweep `claude-resume-*` staging directories — a DOCUMENTED, NARROW EXCEPTION
  * to this file's own header rule ("step 8 reports and never deletes"). Two bounds, BOTH required,
@@ -625,45 +638,70 @@ export const CLAUDE_RESUME_STALE_MS = 24 * 60 * 60 * 1000;
  *     just above already built from `runtime_generations`/`runtime_sessions`, which is where a live
  *     `sdk-resume-staging` root is recorded.
  *
- * NAMES NEVER LEAVE THIS FUNCTION — the caller receives a bare count, matching this whole step's
- * "look and never open" discipline one deletion further: `readdirSync`/`statSync`/`rmSync` only,
+ * NAMES NEVER LEAVE THIS FUNCTION — the caller receives counts, matching this whole step's
+ * "look and never open" discipline one deletion further: `opendir`/`statSync`/`rmSync` only,
  * never a read of what is INSIDE a candidate directory. A directory that cannot be stat'd or removed
- * is left for the next boot's pass rather than treated as a failure.
+ * is left for a later boot's pass rather than treated as a failure.
+ *
+ * ONE LISTING PER HOME (2026-10-10, `claude-resume-scan.ts`): the scan root is the per-user temp
+ * folder, which test runs and long uptimes grow to hundreds of thousands of entries (a 6.4 s `readdir`
+ * on every boot, on the user's real daemon too), and nothing has created a `claude-resume-*` directory
+ * since the official leg was retired. So the listing runs only while the home's marker
+ * (`<home>/migration/claude-resume-scan.json`) does not cover this root; it is bounded, and it leaves
+ * the marker behind. Later boots take only the marker's `pending` paths (a directory that would not
+ * remove) by path — no listing. The `known`/age protections apply identically to either source.
  */
-function sweepClaudeResumeStaging(scanRoot: string, known: ReadonlySet<string>): number {
-  let entries: string[];
-  try {
-    entries = readdirSync(scanRoot, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && e.name.startsWith(CLAUDE_RESUME_PREFIX))
-      .map((e) => e.name);
-  } catch {
-    return 0; // no temp root at all — nothing to sweep
+function sweepClaudeResumeStaging(
+  home: string,
+  scanRoot: string,
+  known: ReadonlySet<string>,
+  list: ClaudeResumeLister,
+  log: (line: string) => void,
+): { removed: number; listed: boolean; complete: boolean; entries: number } {
+  const marker = readClaudeResumeScanMarker(home);
+  const covered = marker?.roots.includes(scanRoot) === true;
+  let candidates: string[];
+  let entries = 0;
+  let complete = true;
+  let found = 0;
+  if (covered) {
+    candidates = marker!.pending.filter((p) => p.startsWith(`${scanRoot}/`));
+    if (candidates.length === 0) return { removed: 0, listed: false, complete: true, entries: 0 };
+  } else {
+    const listing = list(scanRoot); // throws on an unreadable root: no marker, a later boot tries again
+    entries = listing.entries;
+    complete = listing.complete;
+    found = listing.names.length;
+    candidates = listing.names.map((name) => join(scanRoot, name));
+    if (!listing.complete) log(`runtime recovery: the temp folder listing stopped after ${entries} entries (budget) — claude staging roots beyond them are not swept; this is not retried`);
   }
   let removed = 0;
-  for (const name of entries) {
-    const path = join(scanRoot, name);
+  const pending: string[] = [];
+  for (const path of candidates) {
     // PREFIX-AWARE, exactly like `defaultTempScan`'s own `claimed` predicate just below: a known
     // root is not always the candidate directory itself — a generation's `local_write_root` can
     // name a SUBDIRECTORY of a `claude-resume-<uuid>` dir (a nested working root inside the staged
     // payload), and an exact-match check would have swept the whole dir out from under it. `known`
     // protects `path` whenever some root equals it OR sits inside it.
     const claimed = [...known].some((root) => root === path || root.startsWith(`${path}/`));
-    if (claimed) continue;
+    if (claimed) { pending.push(path); continue; } // not ours YET: stays a candidate, retried BY PATH
     let ageMs: number;
     try {
       ageMs = Date.now() - statSync(path).mtimeMs;
     } catch {
-      continue; // gone already, or unreadable — leave it for the next pass
+      continue; // gone already, or unreadable — nothing to retry by path
     }
-    if (ageMs < CLAUDE_RESUME_STALE_MS) continue;
+    if (ageMs < CLAUDE_RESUME_STALE_MS) { pending.push(path); continue; } // younger than the stale rule: same
     try {
       rmSync(path, { recursive: true, force: true });
       removed++;
     } catch {
-      /* best-effort: a directory that will not remove is left for the next pass */
+      pending.push(path); // best-effort: a directory that will not remove is retried BY PATH at a later boot
     }
   }
-  return removed;
+  if (covered) updateClaudeResumeScanPending(home, scanRoot, pending);
+  else recordClaudeResumeScan(home, scanRoot, { complete, entries, found, pending });
+  return { removed, listed: !covered, complete, entries };
 }
 
 /**

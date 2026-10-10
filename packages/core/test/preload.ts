@@ -1,3 +1,8 @@
+// FIRST import, on purpose: ESM evaluates imports in order, so this module's body — one fresh temp root for
+// this test process, `TMPDIR` pointed at it, the whole tree removed at exit — has run before anything below
+// (or any test file) can call `os.tmpdir()`. See ./per-process-tmp.ts. Every `mkdtempSync(join(tmpdir(), …))`
+// in this file therefore lands inside that root too.
+import "./per-process-tmp";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

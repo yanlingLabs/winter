@@ -32,7 +32,8 @@ import type { RecentApps } from "./recent-apps";
 import { ResultBuilder, type ResultContent, type ScriptError } from "./result";
 import type { AutomationTelemetry, PrimitiveMetric } from "./telemetry";
 import { AutomationWorker, AutomationWorkerUnavailable, type AutomationWorkerOptions, type CallMessage } from "./worker-host";
-import { APP_PRIMITIVES, BROWSER_PRIMITIVES, GLOBAL_PRIMITIVES, TAB_PRIMITIVES, type AppHandle, type ImageHandle } from "./worker/bridge";
+import { APP_PRIMITIVES, BROWSER_PRIMITIVES, EXTRA_PRIMITIVES, GLOBAL_PRIMITIVES, TAB_PRIMITIVES, type AppHandle, type ImageHandle } from "./worker/bridge";
+import type { AdapterRunScope, AppAdapters } from "./adapters";
 import type { BrowserEngine } from "./browser/engine";
 import type { TabRunScope } from "./browser/tab-scope";
 
@@ -101,9 +102,13 @@ export interface ComputerV2ServiceDeps {
    * The production daemon never sets it; the bytes otherwise never leave the daemon.
    */
   screenshotSink?(shot: { sessionId: string; primitive: string; mime: string; base64: string }): void;
+  /** App adapters (Phase 2): extras, dictionary wrappers and guides, delivered at bind (`adapters/`). */
+  adapters?: AppAdapters;
 }
 
-interface TargetInfo { targetId: string; bundleId: string; name: string; pid: number; lost?: string }
+/** `windowId`: the bound window (its window-server id), from the bind and every `useWindow` — what an app adapter's
+ *  extras address, never the app's front window. */
+interface TargetInfo { targetId: string; bundleId: string; name: string; pid: number; lost?: string; appPath?: string; appVersion?: string; windowId?: number }
 interface StoredImage { data: string; mime: string; width: number; height: number }
 
 interface SessionState {
@@ -551,7 +556,11 @@ export class ComputerV2Service {
     }
     this.live(ctx);
     await this.ensureLock(ctx, t);
+    await this.deps.adapters?.beforePrimitive(this.adapterScope(ctx, metric), t);
     switch (primitive) {
+      case "extra": case "dict": case "help":
+        if (this.deps.adapters === undefined) throw bad("this daemon has no app extras");
+        return await this.deps.adapters.primitive(this.adapterScope(ctx, metric), t, primitive, args);
       case "state": return await this.state(ctx, t, args, metric);
       case "find": return await this.find(ctx, t, args, metric);
       case "screenshot": return await this.targetScreenshot(ctx, t, args, metric);
@@ -565,6 +574,8 @@ export class ComputerV2Service {
         const w = args.window;
         if (typeof w !== "string" && typeof w !== "number") throw bad("useWindow() takes a window title or id");
         const res = await this.helperCall<TargetUseWindowResult>(ctx, "target.useWindow", { targetId, window: w }, metric);
+        // The bound window is now this one (app adapters address it); unknown when the helper did not say.
+        if (typeof res?.window?.id === "number" && res.window.id > 0) t.windowId = res.window.id; else delete t.windowId;
         this.diffBases.clearTarget(ctx.sessionId, targetId); // a different window: the next state() is full
         ctx.state.lastTargetShot.delete(targetId);
         const detail = helperDetail(res?.detail);
@@ -734,7 +745,13 @@ export class ComputerV2Service {
       privatePath: computerUsePrivateEventPathFrom(settings),
     }, metric, undefined, { afterEnd: true });
     const app: AppRef = { bundleId: res.app.bundleId, name: res.app.name };
-    const info: TargetInfo = { targetId: res.targetId, bundleId: app.bundleId, name: app.name, pid: res.app.pid };
+    // helper 1.8.0 says where the running app is and its version; an app bound by path is that path.
+    const appPath = typeof res.app.path === "string" && res.app.path.length > 0 ? res.app.path : known.path;
+    const info: TargetInfo = {
+      targetId: res.targetId, bundleId: app.bundleId, name: app.name, pid: res.app.pid,
+      ...(typeof res.window?.id === "number" && res.window.id > 0 ? { windowId: res.window.id } : {}),
+      ...(appPath === undefined ? {} : { appPath }), ...(typeof res.app.version === "string" && res.app.version.length > 0 ? { appVersion: res.app.version } : {}),
+    };
     try {
       // Bound after the script ended (the helper answered inside the cancel grace) — release it at once.
       this.live(ctx);
@@ -769,9 +786,10 @@ export class ComputerV2Service {
     if (base !== undefined && snap.isDiff === true) {
       ctx.builder.daemonLine(`${app.name} was already bound to this window — the same handle; what changed since its last state follows (keep the handle in a top-level const: it lasts between calls)`);
     }
+    const adapted = await this.deps.adapters?.onBind(this.adapterScope(ctx, metric), info);
     ctx.builder.text(snap.text, { screen: true });
     this.diffBases.set(ctx.sessionId, info.targetId, snap.snapshotId);
-    return { targetId: info.targetId, name: app.name, bundleId: app.bundleId };
+    return { targetId: info.targetId, name: app.name, bundleId: app.bundleId, ...adapted?.handle };
   }
 
   private async state(ctx: RunCtx, t: TargetInfo, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<string> {
@@ -1329,6 +1347,35 @@ export class ComputerV2Service {
     return await this.bind(ctx, { app: at.bundleId, window: at.windowId, known: { bundleId: at.bundleId, name: at.app } }, metric);
   }
 
+  /**
+   * What the app adapters get for one primitive (`adapters/`): this run's helper door (call id, busy retry, `live()`),
+   * its grants, its own AppleScript and document doors, and its result builder — nothing a script could not already
+   * reach, so the floors, the access classes and the helper's checks apply to every extra by construction.
+   */
+  private adapterScope(ctx: RunCtx, metric: PrimitiveMetric): AdapterRunScope {
+    return {
+      sessionId: ctx.sessionId, callId: ctx.callId, signal: ctx.abort.signal, primitive: metric.primitive, metric,
+      privatePath: computerUsePrivateEventPathFrom(this.deps.settings()),
+      helperVersion: () => this.deps.helper.version,
+      helper: <T,>(method: string, params: Record<string, unknown>, timeoutMs?: number) => this.helperCall<T>(ctx, method, params, metric, timeoutMs),
+      authorize: (app, purpose) => this.deps.policy.authorize(ctx.grants, app, purpose, ctx.abort.signal),
+      applescript: async (t, source, o) => await this.applescript(ctx, this.target(ctx, t.targetId), {
+        source, emit: false, ...(o?.timeoutMs === undefined ? {} : { timeoutMs: o.timeoutMs }),
+      }, metric) as { result: string | null },
+      openDocument: (target, opener) => this.openDocument(ctx, target, opener, metric),
+      builder: {
+        text: (text, o) => ctx.builder.text(text, o),
+        daemonLine: (text) => ctx.builder.daemonLine(text),
+        guide: (text) => ctx.builder.guide(text),
+        notice: (text) => ctx.builder.notice(text),
+        markScreenRead: () => ctx.builder.markScreenRead(),
+      },
+      clampWait: (ms) => this.clampWait(ctx, ms),
+      acted: (targetId) => { ctx.acted.add(targetId); },
+      log: (line) => this.log(line),
+    };
+  }
+
   /** Run `work` as one of this run's tab primitives still in flight until it settles. */
   private async trackTabWork<T>(ctx: RunCtx, work: Promise<T>): Promise<T> {
     const set = (ctx.tabWork ??= new Set());
@@ -1484,6 +1531,7 @@ export class ComputerV2Service {
     state.lastScreenShot = undefined;
     state.tainted = false;
     this.diffBases.clearSession(sessionId);
+    this.deps.adapters?.clearSession(sessionId);
   }
 
   private resetSession(sessionId: string, state: SessionState): void {
@@ -1521,6 +1569,7 @@ export class ComputerV2Service {
     if (state.idleTimer !== undefined) clearTimeout(state.idleTimer);
     state.worker?.kill();
     this.diffBases.clearSession(sessionId);
+    this.deps.adapters?.clearSession(sessionId);
     this.deps.helper.tell("session.ended", { sessionId });
     this.sessions.delete(sessionId);
   }
@@ -1618,7 +1667,7 @@ function failure(name: string, message: string): ScriptResult {
 }
 
 /** The functions a script may call — anything else from the worker is refused unrecorded (review I6). */
-const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES]);
+const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...EXTRA_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES]);
 /** A browser tab's primitives no app has (refused on an app target before the helper sees them). */
 const TAB_ONLY_PRIMITIVES: ReadonlySet<string> = new Set<string>(TAB_PRIMITIVES.filter((p) => !(APP_PRIMITIVES as readonly string[]).includes(p)));
 /** How long a run's end waits for its tab input to stop before letting the tab locks go. */

@@ -63,8 +63,10 @@ final class IrohRelayE2ETests: XCTestCase {
     }
 
     private func tempStoreDir() -> URL {
-        FileManager.default.temporaryDirectory
+        let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("winter-relay-e2e-tests-\(UUID().uuidString)", isDirectory: true)
+        removeAtTeardown(dir)
+        return dir
     }
 
     private final class ListenerBox: @unchecked Sendable {

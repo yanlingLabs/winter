@@ -283,7 +283,9 @@ describe("the Safari preference mode, end to end on fake plumbing", () => {
 
 describe("a fixture variant on fake plumbing", () => {
   test("start (a2 asks for occlusion detection off) → off-Space → return the user → sample → stop; the user returned after", async () => {
-    const t = Date.now();
+    // The variant keeps only events at or after the moment it was called (`since`). Stamp the fake events well past
+    // that moment: a few ms of delay under load used to filter them all out and hang the test on its 5 s limit.
+    const t = Date.now() + 60_000;
     const events = [
       { t: t + 1, role: "main", ev: "fresh.ready", window: 777 },
       { t: t + 2, role: "main", ev: "fresh.occlusionDetection", enabled: false, supported: true },

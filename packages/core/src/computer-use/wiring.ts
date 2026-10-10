@@ -20,6 +20,7 @@ import {
   computerUsePrivateEventPathFrom, computerUseScreenshotMaxDimFrom, loadSettings, saveSettings, setComputerUseApp, setComputerUseFlags,
   type ComputerUseAccess, type Settings,
 } from "../settings";
+import { AppAdapters, type AppAdapter } from "./adapters";
 import { systemAppResolver } from "./app-resolve";
 import { BrowserLink } from "./browser/cef-link/rpc";
 import { BrowserEngine } from "./browser/engine";
@@ -44,6 +45,8 @@ export interface ComputerUseInjection {
   idleMs?: number;
   /** The live suite's screenshot sink (`ComputerV2ServiceDeps.screenshotSink`) — never set in production. */
   screenshotSink?: (shot: { sessionId: string; primitive: string; mime: string; base64: string }) => void;
+  /** More app adapters beside the built-in ones (the live suite's fixture adapter) — never set in production. */
+  adapters?: readonly AppAdapter[];
   /** Phase 2: is a browser app installed (default: a LaunchServices lookup, never a launch)? */
   browserInstalled?: (bundleId: string) => boolean;
 }
@@ -177,6 +180,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
 
   const recentApps = new RecentApps(deps.home);
   const diffBases = new DiffBases();
+  const adapters = new AppAdapters({ ...(deps.inject?.adapters === undefined ? {} : { extra: deps.inject.adapters }), log });
   // Late-bound: the helper's notifications go to the service, which is built after the helper.
   let service: ComputerV2Service | undefined;
   const helper = new HelperClient({
@@ -259,7 +263,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
   });
 
   service = new ComputerV2Service({
-    helper, policy, settings, diffBases, recentApps, browsers,
+    helper, policy, settings, diffBases, recentApps, adapters, browsers,
     telemetry: new AutomationTelemetry(deps.home),
     ...(deps.audit === undefined ? {} : { audit: deps.audit }),
     ...(deps.interrupt === undefined ? {} : { interrupt: deps.interrupt }),
@@ -351,6 +355,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     browserLink,
     observe(event) {
       diffBases.observe(event);
+      adapters.observe(event);
       // 5a: the USER's next message lifts the session's desktop-switch refusals (and its dispatch children's).
       const lift = desktopRefusalLiftFor(event);
       if (lift !== undefined) policy.liftDesktopRefusals(lift);

@@ -40,6 +40,8 @@ export interface PrimitiveMetric {
   /** A browser tab's primitive: the backend id it ran on ("winter", "chrome", …) and the engine's own time, ms. */
   backend?: string;
   engineMs?: number;
+  /** An `extra` / `dict` primitive: the extra's or dictionary command's NAME (never its arguments). */
+  extra?: string;
 }
 
 export const AUTOMATION_METRICS_MAX_BYTES = 8 * 1024 * 1024;

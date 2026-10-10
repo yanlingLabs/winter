@@ -57,6 +57,8 @@ let engineSamples: [(method: String, params: String, result: String)] = [
     ("target.applescript", #"{"targetId":"t1","source":"tell application \"Notes\" to get name","timeoutMs":10000,"callId":"c1"}"#,
      #"{"result":"Notes"}"#),
     ("target.scriptingDictionary", #"{"targetId":"t1","search":"note"}"#, #"{"scriptable":true,"text":"Notes — scripting dictionary","truncated":false}"#),
+    ("target.scriptingCommands", #"{"targetId":"t1","search":"show"}"#,
+     #"{"scriptable":true,"bundleVersion":"4110","commands":[{"name":"show","suite":"Notes Suite","eventCode":"noteshow","description":"Show an object in the UI","direct":{"type":"account | folder | note | attachment","optional":false},"params":[{"name":"separately","type":"boolean","optional":true}]}],"truncated":false}"#),
     ("screen.screenshot", #"{"display":"all","excludeBundleIds":["com.winter.app"],"budget":{"maxLongEdge":1440,"quality":0.8}}"#,
      #"{"imageBase64":"/9j/AA==","mime":"image/jpeg","width":1440,"height":900,"shotId":"shot-2"}"#),
     ("visit.close", #"{"sessionId":"s_1"}"#,
@@ -129,6 +131,9 @@ final class FakeCore: CoreService, @unchecked Sendable {
     func targetAppleScript(_ params: TargetAppleScriptParams) async throws -> TargetAppleScriptResult { try await answer("target.applescript", params) }
     func targetScriptingDictionary(_ params: TargetScriptingDictionaryParams) async throws -> TargetScriptingDictionaryResult {
         try await answer("target.scriptingDictionary", params)
+    }
+    func targetScriptingCommands(_ params: TargetScriptingCommandsParams) async throws -> TargetScriptingCommandsResult {
+        try await answer("target.scriptingCommands", params)
     }
     func screenScreenshot(_ params: ScreenScreenshotParams) async throws -> ScreenScreenshotResult { try await answer("screen.screenshot", params) }
     func screenAppAt(_ params: ScreenAppAtParams) async throws -> ScreenAppAtResult { try await answer("screen.appAt", params) }

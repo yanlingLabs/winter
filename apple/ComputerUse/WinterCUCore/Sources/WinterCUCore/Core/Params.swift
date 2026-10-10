@@ -113,10 +113,15 @@ public struct CUBoundApp: Codable, Sendable, Equatable {
     public var name: String
     public var bundleId: String
     public var pid: Int32
-    public init(name: String, bundleId: String, pid: Int32) {
+    /// helper 1.8.0, on `target.bind`: the running bundle's path and its `CFBundleShortVersionString`.
+    public var path: String?
+    public var version: String?
+    public init(name: String, bundleId: String, pid: Int32, path: String? = nil, version: String? = nil) {
         self.name = name
         self.bundleId = bundleId
         self.pid = pid
+        self.path = path
+        self.version = version
     }
 }
 public struct CUWindowInfo: Codable, Sendable, Equatable {
@@ -654,6 +659,86 @@ public struct TargetScriptingDictionaryResult: Codable, Sendable, Equatable {
     public init(scriptable: Bool, text: String? = nil, truncated: Bool? = nil) {
         self.scriptable = scriptable
         self.text = text
+        self.truncated = truncated
+    }
+}
+
+/// `target.scriptingCommands` (helper 1.8.0): the bound app's dictionary COMMANDS, structured, for typed wrappers —
+/// read from its sdef like `target.scriptingDictionary`, never by asking the app.
+public struct TargetScriptingCommandsParams: Codable, Sendable, Equatable {
+    public var targetId: String
+    public var search: String?
+    public init(targetId: String, search: String? = nil) {
+        self.targetId = targetId
+        self.search = search
+    }
+}
+
+public struct ScriptingCommandDirect: Codable, Sendable, Equatable {
+    public var type: String
+    public var optional: Bool
+    public var description: String?
+    public init(type: String, optional: Bool, description: String? = nil) {
+        self.type = type
+        self.optional = optional
+        self.description = description
+    }
+}
+
+public struct ScriptingCommandParam: Codable, Sendable, Equatable {
+    public var name: String
+    public var type: String
+    public var optional: Bool
+    public var description: String?
+    /// The enumerators of an enumeration type (`save options` → yes, no, ask).
+    public var enumerators: [String]?
+    public init(name: String, type: String, optional: Bool, description: String? = nil, enumerators: [String]? = nil) {
+        self.name = name
+        self.type = type
+        self.optional = optional
+        self.description = description
+        self.enumerators = enumerators
+    }
+}
+
+public struct ScriptingCommandResultType: Codable, Sendable, Equatable {
+    public var type: String
+    public init(type: String) { self.type = type }
+}
+
+public struct ScriptingCommandInfo: Codable, Sendable, Equatable {
+    public var name: String
+    public var suite: String
+    /// The 8-character Apple Event code (`aevtodoc`).
+    public var eventCode: String
+    /// At most 200 characters.
+    public var description: String?
+    public var direct: ScriptingCommandDirect?
+    public var params: [ScriptingCommandParam]
+    public var result: ScriptingCommandResultType?
+    public init(name: String, suite: String, eventCode: String, description: String? = nil, direct: ScriptingCommandDirect? = nil,
+                params: [ScriptingCommandParam], result: ScriptingCommandResultType? = nil) {
+        self.name = name
+        self.suite = suite
+        self.eventCode = eventCode
+        self.description = description
+        self.direct = direct
+        self.params = params
+        self.result = result
+    }
+}
+
+public struct TargetScriptingCommandsResult: Codable, Sendable, Equatable {
+    public var scriptable: Bool
+    /// The app's `CFBundleVersion` (clients cache what they make of the list by it).
+    public var bundleVersion: String?
+    /// At most 300; hidden ones, hidden suites and the helper's refused doors left out.
+    public var commands: [ScriptingCommandInfo]
+    public var truncated: Bool?
+    public init(scriptable: Bool, bundleVersion: String? = nil, commands: [ScriptingCommandInfo] = [], truncated: Bool? = nil) {
+        self.scriptable = scriptable
+        self.bundleVersion = bundleVersion
+        self.commands = commands
         self.truncated = truncated
     }
 }

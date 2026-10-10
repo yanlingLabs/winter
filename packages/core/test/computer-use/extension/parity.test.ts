@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { WINTER_TEAM_ID } from "../../../src/auth/app-token-acl";
 import { BROWSER_HOST_IDENTIFIER, EXTENSION_IDS, extensionIdFromKey, NATIVE_HOST_NAME } from "../../../src/computer-use/browser/extension/extension-ids";
-import { BROWSER_FAMILIES } from "../../../src/computer-use/browser/extension/families";
+import { BROWSER_FAMILIES } from "../../../src/computer-use/browser/families";
 import { NATIVE_MESSAGING_BROWSER_DIRS } from "../../../src/computer-use/browser/extension/manifest";
 import { BROWSER_HOST_PROTOCOL, EXTENSION_PROTOCOL } from "../../../src/computer-use/browser/extension/protocol";
 
