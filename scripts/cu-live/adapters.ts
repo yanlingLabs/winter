@@ -261,6 +261,19 @@ report({ own, boundOwn, tab: where.tab, text: text.includes(${JSON.stringify(SAF
   return out;
 }
 
+/**
+ * The adapters' LIVE-GATE drills — by hand, with the user (they touch the user's own apps and data, so no scenario runs
+ * them). The dry run prints them.
+ */
+export const ADAPTER_LIVE_DRILLS: readonly string[] = [
+  "Safari openWindow() from a BACKGROUND Safari (another app in front): the new window must not come over the user's frontmost app; then the user's next cmd-L in Safari must land in THEIR window, not the agent's.",
+  "Mail compose(): the draft is in Drafts exactly once, no compose window ever shows, and none is left open (also after quitting and reopening Mail).",
+  "target.scriptingCommands at bind raises NO Automation prompt: bind a few older apps whose dictionary is not dynamic (no OSAScriptingDefinition = dynamic; e.g. ones with a classic suite) and watch for any prompt.",
+  "Window ids: Finder's and Xcode's scripting window id equals the bound window-server id (Safari's was checked) — reveal()/selection() and build() on a bound window that is NOT their app's frontmost act on the bound one, or refuse with NoWindow.",
+  "Finder selection(): with the desktop focused (click the desktop), selection() refuses (NoWindow) rather than return the desktop's selection; with the bound window focused, it returns that window's.",
+  "Finder trash(): a link, a file in a folder the user can't write, and a file on a network share are each refused (no password prompt, no delete-immediately dialog); a file the run made goes to the Trash quietly.",
+];
+
 /** The dry run's rows (no screen): the fixture carries its dictionary, the test adapter is valid, and the plan. */
 export function adaptersDryRun(built: Pick<Built, "fixtureMain">, o: { realApps: boolean }): ScenarioResult[] {
   const t0 = Date.now();
@@ -281,5 +294,7 @@ export function adaptersDryRun(built: Pick<Built, "fixtureMain">, o: { realApps:
     { name: "adapters: the fixture's dictionary and test adapter", group: "adapters", status: statusOf(fixture), ms: Date.now() - t0, checks: fixture },
     { name: "plan: adapters", group: "plan", status: "pass", ms: 0, checks: [check("planned", true)],
       note: `${plan.length} scenarios: ${plan.map((s) => s.name.replace(/^adapters: /, "")).join(" | ")} — every AppleScript-backed one runs only when test.automation answers granted (never asking), else it skips with a note` },
+    { name: "plan: adapters live-gate drills (by hand, with the user)", group: "plan", status: "pass", ms: 0, checks: [check("listed", true)],
+      note: ADAPTER_LIVE_DRILLS.map((d, i) => `${i + 1}. ${d}`).join(" ") },
   ];
 }

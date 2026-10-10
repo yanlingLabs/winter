@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adapterProblems } from "../../packages/core/src/computer-use/adapters/registry";
-import { adapterScenarios, automationSkip, automationStatus, FIXTURE_ADAPTER, type HelperDoor } from "./adapters";
+import { ADAPTER_LIVE_DRILLS, adapterScenarios, automationSkip, automationStatus, FIXTURE_ADAPTER, type HelperDoor } from "./adapters";
 import { scriptOf } from "./scenarios";
 
 const compiles = (code: string): void => {
@@ -78,5 +78,13 @@ describe("the adapters group", () => {
     const plan = adapterScenarios({ plan: true, realDir: "/nonexistent-cu-live-dir" });
     expect(plan.length).toBe(7);
     expect(existsSync("/nonexistent-cu-live-dir")).toBe(false);
+  });
+
+  test("the live-gate drills the review asked for are listed (and printed by the dry run)", () => {
+    const all = ADAPTER_LIVE_DRILLS.join("\n");
+    expect(all).toContain("openWindow() from a BACKGROUND Safari");
+    expect(all).toContain("next cmd-L in Safari must land in THEIR window");
+    expect(all).toContain("Mail compose(): the draft is in Drafts exactly once");
+    expect(all).toContain("scriptingCommands at bind raises NO Automation prompt");
   });
 });
