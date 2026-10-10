@@ -527,25 +527,46 @@ extension CUCore {
         }
         var back = now == s.before && userWindowBack(s)
         if !back, let user = s.before.front {
-            back = returnOnce(s, user: user, window: s.userWindow) == s.before && userWindowBack(s)
+            back = returnOnce(s, user: user) == s.before && userWindowBack(s)
             if !back {
                 // Once more, the way the guardian restores (the app's focused window, the activation retried).
                 CULog.guardian.notice("visit \(v.id, privacy: .public): not back after the first return — trying once more")
-                back = returnOnce(s, user: user, window: s.userWindow) == s.before && userWindowBack(s)
+                back = returnOnce(s, user: user) == s.before && userWindowBack(s)
             }
         }
         // A visit that never arrived: the target's raise and activation are AX calls a busy app answers late (each
         // bounded only by the messaging timeout), so its switch can still land after the deadline — even after the
         // user was put back. Watched for `visitLateSwitchMs`, and undone (at most twice) if it lands.
+        // Only THAT switch is undone: the target in front (or its window's desktop shown) with no hardware action of the
+        // user's since the return began — anything else is the user moving (⌘-Tab, a click, a swipe): left alone, and
+        // their new place adopted (the guardian is still in visit mode, so nothing else would).
         if reason == .neverArrived, let user = s.before.front {
+            let watchFrom = clock.nowSeconds()
             let until = clock.nowMs() + visitLateSwitchMs
             var undone = 0
+            var userMoved = false
             while clock.nowMs() < until, undone < 2 {
                 usleep(40_000)
-                guard userView() != s.before else { continue }
+                let now = userView()
+                guard now != s.before else { continue }
+                let acted = guardianLock.withLock { lastHardwareActionAt >= watchFrom }
+                if !Self.lateSwitchIsTheTarget(now, before: s.before, targetPid: s.pid,
+                                               targetWindowOnScreen: sys.window(id: s.windowID)?.onScreen == true, userActed: acted) {
+                    userMoved = true
+                    CULog.act.notice("visit \(v.id, privacy: .public): after the return the view changed by the user's doing (front \(now.front.map(String.init) ?? "?", privacy: .public)) — left there")
+                    guardianLock.withLock {
+                        guardianCore.endVisit()
+                        guardianCore.adoptUserView(CUGuardedView(app: now.front, space: now.space))
+                    }
+                    break
+                }
                 undone += 1
                 CULog.act.notice("visit \(v.id, privacy: .public): the switch to \(s.appName, privacy: .public)'s desktop landed after the arrival deadline — bringing the user back")
-                back = returnOnce(s, user: user, window: s.userWindow) == s.before && userWindowBack(s)
+                back = returnOnce(s, user: user) == s.before && userWindowBack(s)
+            }
+            if userMoved {
+                let ms = Int(clock.nowMs() - s.startedMs)
+                return report(ms, true, true, "the user moved somewhere else right after being brought back, so Winter left them there")
             }
             back = userView() == s.before && userWindowBack(s)
         }
@@ -578,24 +599,48 @@ extension CUCore {
     /// event into the user's window (they arrive as a click). On the user's own desktop (a visit that never left it)
     /// it runs under `SLSDisableUpdate`, so the switch back is not drawn as a flash; across desktops macOS draws
     /// the switch itself. Returns the view it ends on.
-    private func returnOnce(_ s: VisitBase, user: pid_t, window: AXUIElement?) -> CUUserView {
+    private func returnOnce(_ s: VisitBase, user: pid_t) -> CUUserView {
         noteSyntheticActivation()
         let sameDesktop = s.before.space == nil || sys.activeSpace() == s.before.space
         let cid = sameDesktop ? skyLight.disableUpdate() : nil
         defer { if let cid { skyLight.reenableUpdate(cid) } }
         // Made main again too (an AX write, never an event): when the user's app IS the target app, the visit made
-        // the target's window main, and the user's own window must be the one keys go to once they are back.
-        _ = sys.bringForward(pid: user, windowID: s.userWindowID ?? 0, window: window, makeMain: true)
-        return restoreUserView(s.before, user: user, window: window)
+        // the target's window main, and the user's own window must be the one keys go to once they are back. Never a
+        // window of theirs that closed, nor one raised over a newer window they opened meanwhile (`returnWindow`).
+        let w = returnWindow(s)
+        _ = sys.bringForward(pid: user, windowID: w.id ?? 0, window: w.element, makeMain: w.element != nil)
+        return restoreUserView(s.before, user: user, window: w.element)
     }
 
-    /// The user's app's focused window is the one they were in (when it was recorded and can be read): back means
-    /// in THAT window, not merely in that app on that desktop (the user's app may be the target app).
+    /// The window the return raises: the user's recorded one while it is still there — unless their app's focused
+    /// window now is another of theirs (not the target's bound window): a window they opened during the visit, which
+    /// a raise of the old one would cover. Nil: none is raised (their app is still brought back).
+    func returnWindow(_ s: VisitBase) -> (element: AXUIElement?, id: CGWindowID?) {
+        guard let w = s.userWindow, let id = s.userWindowID, ax.isAlive(w) else { return (nil, nil) }
+        if let user = s.before.front, let focused = ax.element(ax.application(user), kAXFocusedWindowAttribute),
+           let fid = ax.windowID(focused), fid != id, fid != s.windowID {
+            return (nil, nil)
+        }
+        return (w, id)
+    }
+
+    /// A change of the user's view after a never-arrived visit's return is the target's late switch — to be undone —
+    /// only when the TARGET came to the front (or its window's desktop is now shown) and the user made no hardware
+    /// action since the return; anything else is the user's own move. Pure.
+    static func lateSwitchIsTheTarget(_ now: CUUserView, before: CUUserView, targetPid: pid_t, targetWindowOnScreen: Bool,
+                                      userActed: Bool) -> Bool {
+        guard !userActed else { return false }
+        return now.front == targetPid || (targetWindowOnScreen && now.space != before.space)
+    }
+
+    /// Back is the user's desktop and front app (checked by the caller) — and, when their app IS the target app, its
+    /// focused window no longer the target's bound window (the visit's doing). A window of theirs that closed, or a
+    /// new one they opened during the visit, is never "not back" (that made the return fight their own window).
     func userWindowBack(_ s: VisitBase) -> Bool {
-        guard let want = s.userWindowID, let user = s.before.front,
+        guard let user = s.before.front, user == s.pid, s.userWindowID != s.windowID,
               let focused = ax.element(ax.application(user), kAXFocusedWindowAttribute), let id = ax.windowID(focused)
         else { return true }
-        return id == want
+        return id != s.windowID
     }
 
     /// `pid` has a real window that is not on screen (another desktop, full screen).
