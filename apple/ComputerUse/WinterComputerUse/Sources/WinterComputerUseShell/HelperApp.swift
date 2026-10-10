@@ -58,7 +58,8 @@ import WinterCUPresentation
         let coordinator = HelperCoordinator(presentation: presentation, escapeTap: escapeTap, viewHub: viewHub)
         let core = CUCore(events: coordinator)
         let inFlight = InFlightRegistry()
-        let dispatcher = RPCDispatcher(core: core, coordinator: coordinator, viewHub: viewHub, inFlight: inFlight, liveTest: identity.liveTest)
+        let dispatcher = RPCDispatcher(core: core, coordinator: coordinator, viewHub: viewHub, inFlight: inFlight, liveTest: identity.liveTest,
+                                       capturer: identity.liveTest ? TestCapture(home: identity.home) : nil)
         let server = HelperServer(
             configuration: .init(socketPath: identity.socketPath, home: identity.home, helperVersion: version),
             authenticator: authenticator, dispatcher: dispatcher, coordinator: coordinator, inFlight: inFlight, log: log)

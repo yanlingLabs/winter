@@ -24,6 +24,23 @@ case .success(.imageStats(let path)):
         Out.line("{\"error\":\(JSONOut.quote(error.message))}")
         exit(2)
     }
+case .success(.windows(let owner)):
+    let list = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+    for w in list where (w[kCGWindowOwnerName as String] as? String) == owner {
+        let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+        func n(_ k: String) -> Int { (b[k] as? NSNumber)?.intValue ?? 0 }
+        Out.line("{\"id\":\((w[kCGWindowNumber as String] as? NSNumber)?.intValue ?? 0),\"layer\":\((w[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0),"
+            + "\"onScreen\":\((w[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false),\"bounds\":[\(n("X")),\(n("Y")),\(n("Width")),\(n("Height"))]}")
+    }
+    exit(0)
+case .success(.freshDecode(let layoutPath, let files)):
+    // Pure ImageIO, like image-stats.
+    guard let data = FileManager.default.contents(atPath: layoutPath), let layout = try? JSONDecoder().decode(FreshLayout.self, from: data) else {
+        Out.error("cu-live-tool: fresh-decode: cannot read the layout \(layoutPath)")
+        exit(2)
+    }
+    for file in files { Out.line(FreshDecode.decode(path: file, layout: layout)) }
+    exit(0)
 case .success(.front):
     MainActor.assumeIsolated { Monitor.front() }
 case .success(.monitor(let intervalMs)):

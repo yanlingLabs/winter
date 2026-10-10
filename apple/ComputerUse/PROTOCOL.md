@@ -456,11 +456,13 @@ None of this exists in a dev or release binary; `scripts/release.ts` scans the s
 - **Live-test instance** (`bun run e2e:cu-live`): a **dev** helper whose `WINTER_CU_HOME` lies inside a
   `winter-cu-live-<…>` directory directly under the temp dir accepts the suite's test identities
   `com.winter.core.cutest` (daemon) and `com.winter.app.cutest` (app) **instead of** the dev daemon and
-  Winter Dev, and answers one extra daemon method:
+  Winter Dev, and answers these extra daemon methods:
 
 | Method | Params | Result |
 | --- | --- | --- |
 | `test.activate` | `{pid}` | `{frontmostSet, raised, frontmost}` — puts the suite's own "user's app" in front |
+| `test.capture` | `{windowId, source: "skylight"\|"stream", path, rect?: [x, y, w, h]}` | `{width, height, frameAgeMs?}` — writes one PNG (inside the instance's home only) of a window: the off-Space still path (`skylight`) or the latest frame of the test stream (`stream`); `rect` in the window's points |
+| `test.stream` | `{windowId, on, fps?}` | `{running}` — starts/stops a desktop-independent ScreenCaptureKit stream on that window (the freshness measurement) |
 
 ## 10. Compatibility and versioning
 

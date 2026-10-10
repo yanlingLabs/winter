@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { AUTOMATION_WORKER_ARG, FileSecretStore, isDefaultWinterHome, runAutomationWorker, startDaemon } from "../../packages/core/src/index";
 import { HELPER_PROTOCOL } from "../../packages/core/src/computer-use/protocol";
+import { runFreshSampler, type FreshSamplerParams } from "./fresh-sampler";
 
 if (process.argv[2] === AUTOMATION_WORKER_ARG) {
   runAutomationWorker();
@@ -93,6 +94,17 @@ if (import.meta.main) {
   // `__helper-call <socket> <home> <method> <json params>`: one call after hello — the runner's door to a live-test
   // helper's test-only methods (`test.activate`) and its `status`.
   if (process.argv[2] === "__helper-call") await peerHello(process.argv[3] ?? "", process.argv[4] ?? "", { method: process.argv[5] ?? "status", params: JSON.parse(process.argv[6] ?? "{}") as unknown });
+  // `__helper-freshness <socket> <home> <json params>`: the freshness measurement's sampler (fresh-sampler.ts) — a
+  // live-test helper's `test.capture`/`test.stream` on a fixed schedule over one connection.
+  if (process.argv[2] === "__helper-freshness") {
+    try {
+      await runFreshSampler(process.argv[3] ?? "", process.argv[4] ?? "", JSON.parse(process.argv[5] ?? "{}") as FreshSamplerParams, HELPER_PROTOCOL);
+      process.exit(0);
+    } catch (err) {
+      process.stdout.write(`${JSON.stringify({ done: false, error: err instanceof Error ? err.message : String(err) })}\n`);
+      process.exit(1);
+    }
+  }
   const home = process.env.WINTER_HOME;
   const refusal = liveHomeRefusal(home, tmpdir());
   if (refusal !== undefined) refuse(refusal);
