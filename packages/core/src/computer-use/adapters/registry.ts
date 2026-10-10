@@ -18,7 +18,7 @@ export const DOC_MAX_BYTES = 600;
 /** Names an extra may not take: `help`'s own topics, and what every object (or `await`) reads. */
 const RESERVED_EXTRA_NAMES = new Set(["dict", "then", "constructor", "toString", "toJSON", "valueOf", "hasOwnProperty"]);
 
-/** The initial adapters (spine §2.9's table). Never renamed without telling the controller. */
+/** The built-in adapters. Their extras' names and classes are a contract: never renamed or reclassed quietly. */
 export const BUILTIN_ADAPTERS: readonly AppAdapter[] = [finderAdapter, safariAdapter, mailAdapter, notesAdapter, xcodeAdapter, chromiumAdapter];
 
 /** Why this adapter table is unusable, one line per problem (empty: usable). */

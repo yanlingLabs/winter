@@ -7,7 +7,7 @@ import type { AppAdapter } from "../types";
 import { appScript, rows, text, urlArg, yes } from "./common";
 import { CHROMIUM_GUIDE } from "../guides/chromium";
 
-/** The family's bundle ids (the browsers' table in the Phase 2 spine, channels included). */
+/** The family's bundle ids (each browser's, its beta/dev/canary channels included). */
 export const CHROMIUM_BUNDLE_IDS = [
   "com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.dev", "com.google.Chrome.canary",
   "com.microsoft.edgemac", "com.microsoft.edgemac.Beta", "com.microsoft.edgemac.Dev", "com.microsoft.edgemac.Canary",

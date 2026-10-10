@@ -48,7 +48,7 @@ describe("the adapter table", () => {
     }
   });
 
-  test("the spine's initial extras exist with their classes (never renamed)", () => {
+  test("the built-in extras exist with their classes (never renamed)", () => {
     const r = new AdapterRegistry();
     const classes = (bundleId: string): Record<string, string> => Object.fromEntries(r.find(bundleId)!.extras.map((e) => [e.name, e.access]));
     expect(classes("com.apple.finder")).toEqual({ reveal: "click", selection: "view", trash: "full", openWith: "full" });

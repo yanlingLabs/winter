@@ -1,4 +1,4 @@
-// ComputerV2 Phase 2 — APP ADAPTERS, delivered at bind (the user's idea; the design spec's §21 item 4). Binding an app
+// ComputerV2 Phase 2 — APP ADAPTERS, delivered at bind (the user's idea). Binding an app
 // may print, once per session, the functions made for it (`app.extras.<name>(…)`, each with its access class), its
 // scripting dictionary's commands as typed wrappers (`app.dict.<name>(…)`, `dict.ts`) and a short guide — in the TOOL
 // RESULT only, never in the tool description (fixed per incarnation, so prompt caching is unaffected). After a
@@ -86,7 +86,7 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<boolean> {
   });
 }
 
-/** The policy purpose an extra's class asks for (spine §2.9): `view` observes; `click` and `full` act at that class. */
+/** The policy purpose an extra's class asks for: `view` observes; `click` and `full` act at that class. */
 export function purposeFor(access: ExtraAccess, primitive: string): AuthPurpose {
   return access === "view" ? { kind: "observe" } : { kind: "act", primitive, access };
 }
@@ -231,7 +231,7 @@ export class AppAdapters {
 
   // ── what is printed ────────────────────────────────────────────────────────────────────────────────────────
 
-  /** The extras block (spine §1.5's shape): the extras, the dictionary line, the guide — whichever exist. */
+  /** The extras block: the extras, the dictionary line, the guide — whichever exist, in that order. */
   block(b: Bound): string | undefined {
     const name = cardName(b.target.name);
     const lines: string[] = [];
