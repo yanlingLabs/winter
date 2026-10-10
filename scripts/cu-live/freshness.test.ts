@@ -159,6 +159,7 @@ function fakeDeps(prefs: Record<string, { type: string; value: string }>, extra:
   const calls: string[] = [];
   let safariUp = true;
   let windowsCalls = 0;
+  const safariWindowIds = new Set<number>([1]);
   const outDir = mkdtempSync(joinPath(tmpdir(), "cu-fresh-test-"));
   const d: FreshDeps = {
     tool: "/t/cu-live-tool", home: outDir, root: outDir, webDir: joinPath(import.meta.dir, "fixture-web"),
@@ -175,16 +176,20 @@ function fakeDeps(prefs: Record<string, { type: string; value: string }>, extra:
         if (verb === "write") { prefs[key!] = { type: args[3]!.slice(1) === "bool" ? "boolean" : "integer", value: args[4] === "NO" ? "0" : args[4] === "YES" ? "1" : args[4]! }; return { status: 0, stdout: "", stderr: "" }; }
         if (verb === "delete") { delete prefs[key!]; return { status: 0, stdout: "", stderr: "" }; }
       }
-      // Safari's windows: one of the user's, then (after `open -g`) a new one as well.
-      if (args[0] === "windows") { windowsCalls++; return { status: 0, stdout: windowsCalls === 1 ? '{"id":1,"layer":0}\n' : '{"id":1,"layer":0}\n{"id":2,"layer":0}\n', stderr: "" }; }
+      // Safari's windows: the user's (1), plus the test's own (2) from File › New Window until its close button.
+      if (args[0] === "windows") { windowsCalls++; return { status: 0, stdout: [...safariWindowIds].map((id) => `{"id":${id},"layer":0}\n`).join(""), stderr: "" }; }
       return { status: 0, stdout: "", stderr: "" };
     },
     post: async (cmd) => { calls.push(`post ${cmd}`); return undefined; },
     events: () => [],
     returnUser: async () => { calls.push("returnUser"); },
     turn: async (code) => {
-      if (code.includes("Quit Safari")) { calls.push("quit Safari"); safariUp = false; }
-      else calls.push("turn");
+      if (code.includes("Quit Safari")) { calls.push("quit Safari"); safariUp = false; return { output: "", isError: false, facts: {} }; }
+      calls.push("turn");
+      if (code.includes(`"New Window"`)) { safariWindowIds.add(2); return { output: "", isError: false, facts: { made: true, id: 2 } }; }
+      // The page loaded in the test's window; the fake window never goes full screen.
+      if (code.includes("full screen button") && !code.includes("close button")) return { output: "", isError: false, facts: { title: "Fixture Fresh", fullScreen: false } };
+      if (code.includes("close button")) { safariWindowIds.delete(2); return { output: "", isError: false, facts: { closed: true } }; }
       return { output: "", isError: false, facts: {} };
     },
     sample: async () => [],
@@ -205,7 +210,10 @@ describe("the Safari preference mode, end to end on fake plumbing", () => {
     const r = await measureSafariWithPrefs(d, outDir, "Safari, WebKitPreferences NO");
     expect(r.ok).toBe(false); // the fake window never goes full screen: nothing measured, but everything undone
     expect(r.error).toContain("full screen");
-    expect(calls.filter((c) => c === "turn").length).toBe(2); // the full-screen press, then closing ONLY that window
+    // File › New Window, the title check + full-screen press, then closing ONLY that window (verified gone).
+    expect(calls.filter((c) => c === "turn").length).toBe(3);
+    // The page opened only AFTER the test's own window existed (so it tabs into that window, never the user's).
+    expect(calls.findIndex((c) => c.startsWith("open -g -a Safari file:"))).toBeGreaterThan(calls.indexOf("turn"));
     const q1 = calls.indexOf("quit Safari"), w1 = calls.findIndex((c) => c.startsWith("defaults write") && c.endsWith("-bool NO"));
     const relaunch1 = calls.indexOf("open -g -a Safari");
     expect(q1).toBeGreaterThan(-1);

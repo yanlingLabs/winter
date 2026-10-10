@@ -181,7 +181,18 @@ function safariWindows(d: FreshDeps): Set<number> {
   return new Set(ids);
 }
 
-/** Safari: the page in a NEW window (never a tab of the user's), full screen by its own button, measured, undone. */
+/** The page's own title (fresh.html's <title>): how the runner knows the test's window shows the page. */
+const FRESH_PAGE_TITLE = "Fixture Fresh";
+
+/**
+ * Safari: the page in a NEW window of the test's own (never a tab of the user's), full screen by its own button,
+ * measured, undone. The window comes first (File › New Window, which works from the background), THEN `open -g`
+ * of the page — Safari opens an external URL in a new tab of its front window, which is now the test's. Before
+ * that order, `open -g` went first and tabbed the page into one of the user's windows, one tab per run.
+ * The window's title must read the page's before anything is measured; the window is closed by the SAME handle
+ * that put it in full screen (a fresh bind of a window on its own full-screen Space has no accessibility), and
+ * its closing is verified — a window left behind fails the variant loudly.
+ */
 export async function measureSafari(d: FreshDeps, variant: string): Promise<VariantResult> {
   const since = Date.now();
   const base: VariantResult = { variant, ok: false, notes: [], occlusion: [], captures: 0, cells: [] };
@@ -191,28 +202,31 @@ export async function measureSafari(d: FreshDeps, variant: string): Promise<Vari
   const url = `${pathToFileURL(join(pageDir, "fresh.html")).href}?sentinel=1`;
   let windowId: number | undefined;
   let fullScreen = false;
+  let result: VariantResult;
   try {
     const before = safariWindows(d);
-    d.sh("open", ["-g", "-a", "Safari", url]);
-    windowId = await waitFor("a new Safari window", 8_000, () => [...safariWindows(d)].find((id) => !before.has(id))).catch(() => undefined);
-    if (windowId === undefined) {
-      // Safari put it in a tab of one of the user's windows: a window of our own through File › New Window instead.
-      base.notes.push("open -g used a tab; made a new window through File › New Window");
-      await d.turn(`
-const sf = await apps.open("com.apple.Safari");
-await sf.menu(["File", "New Window"]);
+    const made = await d.turn(`
+const sfApp = await apps.open("com.apple.Safari");
+await sfApp.menu(["File", "New Window"]);
 await sleep(1500);
-const mine = (await sf.windows()).find((w) => !${JSON.stringify([...before])}.includes(w.id));
-if (!mine) report({ made: false });
-else { await sf.useWindow(mine.id); await sf.key("cmd+l"); await sf.type(${JSON.stringify(url)}); await sf.key("return"); report({ made: true, id: mine.id }); }`);
-      windowId = await waitFor("the new Safari window", 8_000, () => [...safariWindows(d)].find((id) => !before.has(id))).catch(() => undefined);
-    }
-    if (windowId === undefined) throw new Error("Safari opened no new window — not measured (the test never uses a window of yours)");
+const sfMine = (await sfApp.windows()).find((w) => !${JSON.stringify([...before])}.includes(w.id));
+report(sfMine ? { made: true, id: sfMine.id } : { made: false });`);
+    windowId = typeof made.facts.id === "number" ? made.facts.id : undefined;
+    if (windowId === undefined) throw new Error(`File › New Window made no Safari window — not measured: ${made.output.slice(-200)}`);
+    d.log(`freshness ${variant}: the test's Safari window ${windowId}; opening the page in it`);
+    d.sh("open", ["-g", "-a", "Safari", url]);
     await (d.sleep ?? sleep)(3_000); // the page loads
     const fs = await d.turn(`
-const w = await apps.open("com.apple.Safari", { window: ${windowId} });
-const b = (await w.find({ role: "full screen button" }, { emit: false }))[0];
-if (!b) report({ fullScreen: false }); else { await w.action(b.ref, "press"); report({ fullScreen: true }); }`);
+const sfFresh = await apps.open("com.apple.Safari", { window: ${windowId} });
+const sfTitle = (await sfFresh.windows()).find((w) => w.id === ${windowId})?.title ?? "";
+if (sfTitle !== ${JSON.stringify(FRESH_PAGE_TITLE)}) report({ title: sfTitle, fullScreen: false });
+else {
+  const b = (await sfFresh.find({ role: "full screen button" }, { emit: false }))[0];
+  if (!b) report({ title: sfTitle, fullScreen: false }); else { await sfFresh.action(b.ref, "press"); report({ title: sfTitle, fullScreen: true }); }
+}`);
+    if (fs.facts.title !== FRESH_PAGE_TITLE) {
+      throw new Error(`the test's Safari window shows "${String(fs.facts.title)}", not the page — the page may have opened as a tab in another Safari window (${url}); not measured`);
+    }
     if (fs.facts.fullScreen !== true) throw new Error(`could not put the Safari window in full screen: ${fs.output.slice(-200)}`);
     fullScreen = true;
     await (d.sleep ?? sleep)(2_500);
@@ -221,22 +235,32 @@ if (!b) report({ fullScreen: false }); else { await w.action(b.ref, "press"); re
     d.abortIfInput();
     const m = await measure(d, variant, windowId, PAGE_FRESH_LAYOUT, [0, 0, 760, 460], since);
     d.abortIfInput();
-    return { ...base, ok: true, windowId, placement: "full screen (its own button)", ...m, notes: [...base.notes, ...m.notes] };
+    result = { ...base, ok: true, windowId, placement: "full screen (its own button)", ...m, notes: [...base.notes, ...m.notes] };
   } catch (err) {
-    return { ...base, ...(windowId === undefined ? {} : { windowId }), error: err instanceof Error ? err.message : String(err) };
-  } finally {
-    if (windowId !== undefined) {
-      // Out of full screen, then ONLY that window closed — by its own buttons.
-      await d.turn(`
-const w = await apps.open("com.apple.Safari", { window: ${windowId} });
-${fullScreen ? `const fsb = (await w.find({ role: "full screen button" }, { emit: false }))[0];
-if (fsb) { await w.action(fsb.ref, "press"); await sleep(2500); }` : ""}
-const close = (await w.find({ role: "close button" }, { emit: false }))[0];
-if (close) { await w.action(close.ref, "press"); report({ closed: true }); } else report({ closed: false });`).catch(() => undefined);
-      await (d.sleep ?? sleep)(1_000);
-      await d.returnUser().catch(() => undefined);
-    }
+    result = { ...base, ...(windowId === undefined ? {} : { windowId }), error: err instanceof Error ? err.message : String(err) };
   }
+  if (windowId !== undefined) {
+    // Out of full screen, then ONLY that window closed — by its own buttons, through the handle that is still bound
+    // to it (`sfFresh`, else `sfApp`'s bind of the new window). Verified: a window left behind fails the variant.
+    const handle = fullScreen ? "sfFresh" : `(await apps.open("com.apple.Safari", { window: ${windowId} }))`;
+    for (let attempt = 1; attempt <= 2 && safariWindows(d).has(windowId); attempt++) {
+      const c = await d.turn(`
+const sfClose = ${handle};
+const sfFsb = ${fullScreen && attempt === 1 ? `(await sfClose.find({ role: "full screen button" }, { emit: false }))[0]` : "undefined"};
+if (sfFsb) { await sfClose.action(sfFsb.ref, "press"); await sleep(2500); }
+const sfBtn = (await sfClose.find({ role: "close button" }, { emit: false }))[0];
+if (sfBtn) { await sfClose.action(sfBtn.ref, "press"); report({ closed: true }); } else report({ closed: false });`).catch((err: unknown) => ({ output: String(err), isError: true, facts: {} }));
+      d.log(`freshness ${variant}: closing the test's Safari window ${windowId} (try ${attempt}): ${JSON.stringify(c.facts)}${c.isError ? ` — ${c.output.slice(-200)}` : ""}`);
+      await (d.sleep ?? sleep)(1_500);
+    }
+    if (safariWindows(d).has(windowId)) {
+      const left = `the test's Safari window ${windowId} is still open (a Start Page or the test page) — close it by hand`;
+      d.log(`freshness ${variant}: ${left}`);
+      result = { ...result, ok: false, error: [result.error, left].filter(Boolean).join("; ") };
+    }
+    await d.returnUser().catch(() => undefined);
+  }
+  return result;
 }
 
 // ── `--safari-webkit-prefs`: record, set NO, measure, restore exactly ─────────────────────────────────────────
