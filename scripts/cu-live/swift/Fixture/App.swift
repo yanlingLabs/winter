@@ -10,6 +10,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var web: WebController?
     private var canvas: CanvasController?
     private var offspace: OffspaceController?
+    /// The freshness measurement's window, and how it was taken off the active Space.
+    private var fresh: FreshController?
+    private var freshPlacement: SpacePlacement?
     private var docs: DocsController?
     private var user: UserController?
     private var documents: [FixtureWindow] = []
@@ -146,7 +149,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func fullscreenChanged(_ note: Notification, entered: Bool) {
         guard let window = note.object as? NSWindow else { return }
         fixture.emit("fullscreen", [("window", .str(window.title)), ("entered", .bool(entered))])
-        if !entered, placement?.method == .fullscreen { placement = nil }
+        if !entered, window === offspace?.window, placement?.method == .fullscreen { placement = nil }
+        if !entered, window === fresh?.window, freshPlacement?.method == .fullscreen { freshPlacement = nil }
         if let wait = fullscreenWait, wait.expectEntered == entered {
             fullscreenWait = nil
             wait.done(true)
@@ -342,6 +346,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 guard let self else { return }
                 done(await self.placeOffspace())
             }
+        case "freshStart":
+            // A new Fresh window on the active desktop, its regions advancing; `fresh.ready {window}` once its page loaded.
+            if fresh == nil {
+                // Variant (a2): `{occlusionDetection: false}` turns the web view's occlusion following off.
+                let detection = (command.args["occlusionDetection"] as? NSNumber)?.boolValue ?? true
+                let controller = FreshController(slot: 1, occlusionDetection: detection)
+                fresh = controller
+                controller.window.orderFront(nil)
+                controller.start()
+            }
+            done(nil)
+        case "freshOffspace":
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                done(await self.placeFresh())
+            }
+        case "freshStop":
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.restoreFresh(fullscreenTimeout: 5)
+                self.fresh?.stop()
+                self.fresh = nil
+                self.fixture.emit("fresh.stopped", [])
+                done(nil)
+            }
         case "restoreSpace":
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -421,6 +450,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if let docs { docs.state { finish(webState, $0) } } else { finish(webState, .null) }
         }
         if let web { web.state(completion: withDocs) } else { withDocs(.null) }
+    }
+
+    // MARK: The Fresh window off the active Space (the freshness measurement)
+
+    /// The Fresh window to another Space, as `offspace` takes the Offspace window: another desktop, a Space created
+    /// for it, else full screen. Logs `fresh.offspace {method, spaceId?, error?}`.
+    private func placeFresh() async -> String? {
+        guard let controller = fresh else { return "no Fresh window (freshStart first)" }
+        if let freshPlacement {
+            emitFreshPlacement(freshPlacement, failures: [])
+            return nil
+        }
+        controller.window.orderFront(nil)
+        let number = controller.window.windowNumber
+        var failures: [String] = []
+        if let skyLight = SkyLight.shared, number > 0 {
+            let result = await SpaceMover(skyLight: skyLight).place(window: UInt32(number))
+            failures = result.failures
+            if let placed = result.placement {
+                freshPlacement = placed
+                emitFreshPlacement(placed, failures: failures)
+                return nil
+            }
+        } else {
+            failures.append(SkyLight.shared == nil ? "SkyLight is not available" : "the Fresh window has no window number")
+        }
+        let entered: Bool = await withCheckedContinuation { continuation in
+            awaitFullscreen(entered: true, timeout: 5) { continuation.resume(returning: $0) }
+            controller.window.toggleFullScreen(nil)
+        }
+        guard entered else { return (["the Fresh window did not enter full screen within 5 s"] + failures).joined(separator: "; ") }
+        let placed = SpacePlacement(method: .fullscreen, spaceId: SkyLight.shared?.spaces(ofWindow: UInt32(max(number, 0)))?.first, createdSpace: nil)
+        freshPlacement = placed
+        emitFreshPlacement(placed, failures: failures)
+        return nil
+    }
+
+    private func emitFreshPlacement(_ placement: SpacePlacement, failures: [String]) {
+        var fields: [(String, JV)] = [("method", .str(placement.method.rawValue))]
+        if let id = placement.spaceId { fields.append(("spaceId", .int(Int(id)))) }
+        if !failures.isEmpty { fields.append(("error", .str(failures.joined(separator: "; ")))) }
+        fixture.emit("fresh.offspace", fields)
+    }
+
+    private func restoreFresh(fullscreenTimeout: Double) async {
+        guard let controller = fresh, let current = freshPlacement ?? (controller.isFullScreen ? SpacePlacement(method: .fullscreen, spaceId: nil, createdSpace: nil) : nil) else { return }
+        switch current.method {
+        case .fullscreen:
+            if controller.isFullScreen {
+                _ = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                    awaitFullscreen(entered: false, timeout: fullscreenTimeout) { continuation.resume(returning: $0) }
+                    controller.window.toggleFullScreen(nil)
+                }
+            }
+        case .managedSpace, .createdSpace:
+            if let skyLight = SkyLight.shared {
+                _ = await SpaceMover(skyLight: skyLight).restore(window: UInt32(max(controller.window.windowNumber, 0)), placement: current)
+            }
+        }
+        freshPlacement = nil
     }
 
     // MARK: Full screen
@@ -548,6 +637,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // Leave full screen / come back from a private Space first: terminating from inside a full-screen Space
             // can strand it, and a Space this process created must be destroyed.
             await self?.restoreOffspace(logNone: false, fullscreenTimeout: 3)
+            await self?.restoreFresh(fullscreenTimeout: 3)
             // Ack first: the process is about to go away.
             done(nil)
             NSApp.terminate(nil)

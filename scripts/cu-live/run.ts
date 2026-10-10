@@ -15,6 +15,9 @@
  *            postpones the run and the wait starts over). From a full-screen app's Space any run moves the user to a regular desktop
  *            and returns them to that app and Space at the end (an abort too).
  *            --no-done-window (CI: no end-of-run completion window; else it shows after the cleanup, 30 min at most),
+ *            --safari-freshness (also measure a NEW Safari window in full screen), --safari-webkit-prefs (the same with
+ *            three Safari WebKitPreferences keys NO: quits/relaunches Safari, needs --yes-restart-safari),
+ *            --freshness-copy-to <dir> (or $CU_LIVE_FRESHNESS_COPY_DIR): also copy freshness.json there,
  *            --helper-app <path to "Winter Computer Use Dev.app"> (else $WINTER_COMPUTER_USE_APP, else dist/dev/)
  *
  * WHAT RUNS (all isolated — nothing touches ~/.winter*, the Keychain, or the user's own daemon and helper):
@@ -41,6 +44,8 @@ import { join } from "node:path";
 import { METHODS, type SessionEvent } from "../../packages/protocol/src/index";
 import { resolvePlatformPackageWinter } from "../../packages/core/src/runtime-sdk/executable";
 import { buildAll, FIXTURE_MAIN, OUT_DIR, REPO_ROOT, type Built } from "./build";
+import { describeFreshnessPlan, freshnessTable } from "./freshness";
+import { measureFixtureVariant, measureSafari, measureSafariWithPrefs, SAFARI_PREFS_WARNING, type FreshDeps, type VariantResult } from "./freshness-run";
 import { DaemonClient } from "./client";
 import {
   parseDuration, check, computerV2Message, describeViolations, focusViolations, hardwareInputTimes, hardwareIdleMs, markerFacts, pointerMoves, promptAppeared, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, type BannerSpec, parseFrontReading, startPlan, describeStartPlan, UNATTENDED_POLL_MS, type FrontReading, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
@@ -63,10 +68,12 @@ const LIMITS = {
 const WATCH_AFTER_MS = 3_000;
 const MONITOR_INTERVAL_MS = 20;
 
-interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string; report?: string; script?: string; unattended: boolean; noDoneWindow: boolean; maxWaitMs: number; idleMs: number; countdownMs: number }
+interface Options { dryRun: boolean; realApps: boolean; only?: string; yes: boolean; keepTemp: boolean; helperApp?: string; apps?: string; report?: string; script?: string; unattended: boolean; noDoneWindow: boolean; maxWaitMs: number; idleMs: number; countdownMs: number;
+  safariFreshness: boolean; safariPrefs: boolean; yesRestartSafari: boolean; freshnessCopyTo?: string }
 
 function parseOptions(argv: string[]): Options {
-  const o: Options = { dryRun: false, realApps: false, yes: false, keepTemp: false, unattended: false, noDoneWindow: false, maxWaitMs: 3 * 3_600_000, idleMs: UNATTENDED_IDLE_MS, countdownMs: COUNTDOWN_MS };
+  const o: Options = { dryRun: false, realApps: false, yes: false, keepTemp: false, unattended: false, noDoneWindow: false, maxWaitMs: 3 * 3_600_000, idleMs: UNATTENDED_IDLE_MS, countdownMs: COUNTDOWN_MS,
+    safariFreshness: false, safariPrefs: false, yesRestartSafari: false, ...(process.env.CU_LIVE_FRESHNESS_COPY_DIR ? { freshnessCopyTo: process.env.CU_LIVE_FRESHNESS_COPY_DIR } : {}) };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--dry-run") o.dryRun = true;
@@ -79,6 +86,10 @@ function parseOptions(argv: string[]): Options {
     else if (a === "--report") o.report = argv[++i];
     else if (a === "--unattended") { o.unattended = true; o.yes = true; }
     else if (a === "--no-done-window") o.noDoneWindow = true;
+    else if (a === "--safari-freshness") o.safariFreshness = true;
+    else if (a === "--safari-webkit-prefs") { o.safariPrefs = true; o.safariFreshness = true; }
+    else if (a === "--yes-restart-safari") o.yesRestartSafari = true;
+    else if (a === "--freshness-copy-to") o.freshnessCopyTo = argv[++i];
     else if (a === "--idle-seconds" || a === "--countdown-seconds") {
       const n = Number(argv[++i]);
       if (!Number.isInteger(n) || n < 1) throw new Error(`${a} takes a whole number of seconds`);
@@ -327,6 +338,10 @@ async function dryRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   results.push(reading === undefined
     ? { name: "plan: the start", group: "plan", status: "fail", ms: 0, checks: [check("cu-live-tool front gave a reading", false)] }
     : { name: "plan: the start", group: "plan", status: "pass", ms: 0, checks: [check("cu-live-tool front gave a reading", true)], note: `${describeStartPlan(startPlan(reading))}; ${o.unattended ? `waits for ${o.idleMs / 1000} s with no HARDWARE input (a listen-only tap; synthetic events and HID tickles never count), then a ${o.countdownMs / 1000} s countdown banner any input postpones` : "starts at once"}; a "don't touch the Mac" banner for the whole run` });
+  // The freshness measurement's plan (no screen).
+  for (const line of describeFreshnessPlan({ safari: o.safariFreshness, safariPrefs: o.safariPrefs })) {
+    results.push({ name: `plan: freshness ${line.startsWith("Safari") ? "Safari" : "fixture"}`, group: "plan", status: "pass", ms: 0, checks: [check("planned", true)], note: line });
+  }
   // The generic app checks' PLAN (no screen): which apps would run, and what each would do.
   const deps = liveResolveDeps();
   for (const a of [...parseApps(o.apps), ...(o.realApps ? DEFAULT_GENERIC_APPS.map((d, i) => ({ query: d.query, key: `default${i}` })) : [])]) {
@@ -426,6 +441,21 @@ class Aborted extends Error {
   constructor(message: string, readonly reason: "input" | "prompt" = "input") { super(message); }
 }
 
+
+/** One row per variant × region (PASS when the measurement completed: the verdicts are data, not assertions). */
+function freshnessRows(variants: readonly VariantResult[]): ScenarioResult[] {
+  return variants.flatMap((v): ScenarioResult[] => {
+    if (!v.ok) return [{ name: `freshness ${v.variant}: measurement`, group: "freshness", status: "fail", ms: 0, checks: [check("the measurement completed", false, v.error)] }];
+    const regions = [...new Set(v.cells.map((c) => c.region))];
+    return regions.map((r) => ({
+      name: `freshness ${v.variant}: ${r}`, group: "freshness", status: "pass" as const, ms: 0, checks: [check("measured", true)],
+      note: [
+        ...v.cells.filter((c) => c.region === r).map((c) => `${c.phase}/${c.source} ${c.verdict} ${c.unique}/${c.images}${c.lagMedianMs === null ? "" : ` lag ${c.lagMedianMs} ms`}`),
+        ...(v.disturbed ? [`DISTURBED: ${v.disturbed}`] : []),
+      ].join(" · "),
+    }));
+  });
+}
 
 /** The `front` reading the run starts from — after the unattended idle wait (every 5 s, up to --max-wait). */
 async function waitToStart(built: Pick<Built, "tool" | "fixtureDone">, o: Options): Promise<FrontReading> {
@@ -841,6 +871,54 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     const failed = windows.filter((w) => w.result.status === "fail");
     if (failed.length > 0) attachRoutes(failed, helperPid!, runStartedAt, home);
 
+    // ── freshness: does a window on another Space keep painting, and does an SCStream change that? ───────────────
+    if (o.only === undefined || /fresh/i.test(o.only) || o.safariFreshness) {
+      const deps: FreshDeps = {
+        tool: built.tool, home, root, webDir: join(REPO_ROOT, "scripts", "cu-live", "fixture-web"), log,
+        sh: (cmd, args) => sh(cmd, args),
+        post: (cmd, args = {}, ms = 10_000) => postCommand(built.tool, f, "main", cmd, args, ms),
+        events: () => fixtureEvents(f),
+        returnUser: () => activateUser(),
+        turn: async (code) => {
+          const t = await runTurn(client!, mainSid, computerV2Message(`${PRELUDE}\n${code}`, 60_000), 120_000);
+          return { output: t.output, isError: t.isError, facts: markerFacts(t.output) };
+        },
+        sample: async (params) => {
+          const proc = Bun.spawn([built.daemon, "__helper-freshness", socket, home, JSON.stringify(params)], { env: { ...cleanEnv(), WINTER_CU_LIVE_TESTS: "1" }, stdout: "pipe", stderr: "pipe" });
+          const killer = setTimeout(() => proc.kill(), 150_000);
+          const text = await new Response(proc.stdout).text();
+          await proc.exited;
+          clearTimeout(killer);
+          return text.split("\n").filter((l) => l.trim().length > 0);
+        },
+        monitor: () => monitor!.items,
+        baseline: baseline!,
+        abortIfInput,
+      };
+      const variants: VariantResult[] = [];
+      if (o.only === undefined || /fresh/i.test(o.only)) {
+        log("freshness (a1): a default WKWebView on another Space — stream OFF 10 s → ON 20 s → OFF 10 s…");
+        variants.push(await measureFixtureVariant(deps, "a1 fixture, default WKWebView", true));
+        log("freshness (a2): the same with _setWindowOcclusionDetectionEnabled:NO…");
+        variants.push(await measureFixtureVariant(deps, "a2 fixture, occlusion detection off", false));
+      }
+      if (o.safariFreshness) {
+        log(`freshness: Safari${o.safariPrefs ? " with the three WebKitPreferences keys set NO (Safari quits and relaunches)" : ""}…`);
+        variants.push(o.safariPrefs ? await measureSafariWithPrefs(deps, OUT_DIR, "Safari, WebKitPreferences NO") : await measureSafari(deps, "Safari, default"));
+      }
+      results.push(...freshnessRows(variants));
+      const table = freshnessTable(variants.filter((v) => v.ok));
+      log(`freshness:\n${table}`);
+      const json = `${JSON.stringify({ generatedAt: new Date().toISOString(), phases: "stream OFF 10 s → ON 20 s → OFF 10 s, a still every 500 ms", variants, table }, null, 2)}\n`;
+      writeFileSync(join(OUT_DIR, "freshness.json"), json);
+      if (o.freshnessCopyTo !== undefined) {
+        mkdirSync(o.freshnessCopyTo, { recursive: true });
+        writeFileSync(join(o.freshnessCopyTo, `freshness-${new Date().toISOString().replace(/[:.]/g, "-")}.json`), json);
+        writeFileSync(join(o.freshnessCopyTo, "freshness-latest.json"), json);
+        log(`freshness.json copied to ${o.freshnessCopyTo}`);
+      }
+    }
+
     // ── performance ────────────────────────────────────────────────────────────────────────────────────────────
     if (o.only === undefined) {
       // The streaming measurement runs inside a turn that keeps working in the canvas: the helper streams a window
@@ -1166,6 +1244,10 @@ async function main(): Promise<void> {
   if (!o.dryRun && process.env.WINTER_CU_LIVE_TESTS !== "1") {
     console.error("e2e:cu-live: refusing to start — this suite takes over the screen. Set WINTER_CU_LIVE_TESTS=1 to run it (or pass --dry-run).");
     process.exit(2);
+  }
+  if (o.safariPrefs && !o.dryRun) {
+    console.error(SAFARI_PREFS_WARNING);
+    if (!o.yesRestartSafari) process.exit(2);
   }
   const built = buildAll(log);
   const startedAt = Date.now();

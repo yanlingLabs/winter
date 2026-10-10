@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture Fresh</title>
+<!--
+  The freshness measurement's page (scripts/cu-live): three continuously advancing regions, each a band of 17
+  cells 28 px wide at x 72 — the wall-clock counter floor(ms / 100) & 0xFFFF as 16 cells (MSB first, black = 1)
+  plus an odd-parity cell (FreshCode in Fresh.swift is the same rule):
+    DOM     (top 8)  — 17 divs repainted by setInterval(100);
+    canvas  (top 52) — drawn on every requestAnimationFrame;
+    CSS     (top 96) — one black cell sliding over 16 slots, animation 1.6 s steps(16), phased to the wall clock
+                       (slot = floor((ms mod 1600) / 100)).
+  The page posts its DOM and canvas values (window.webkit.messageHandlers.fresh) whenever they change.
+-->
+<style>
+  html, body { margin: 0; background: #fff; }
+  .band { position: absolute; left: 72px; height: 28px; }
+  #dom { top: 8px; display: flex; }
+  #dom div { width: 28px; height: 28px; }
+  #cv { top: 52px; width: 476px; }
+  #css { top: 96px; width: 448px; background: #fff; overflow: hidden; }
+  #blk { width: 28px; height: 28px; background: #000; animation: slide 1.6s steps(16, end) infinite; }
+  @keyframes slide { from { transform: translateX(0); } to { transform: translateX(448px); } }
+  .label { position: absolute; left: 560px; font: 12px -apple-system, sans-serif; color: #555; }
+</style>
+</head>
+<body>
+<!-- In a browser of its own (the Safari variant, ?sentinel=1) the page carries the sentinel that locates the bands;
+     in the fixture the window's native sentinel does. -->
+<div id="sentinel" style="position: absolute; left: 8px; top: 8px; width: 48px; height: 48px; background: #ff00ff; display: none"></div>
+<div id="dom" class="band"></div><span id="dom-label" class="label" style="top: 14px">dom</span>
+<canvas id="cv" class="band" height="28"></canvas><span id="cv-label" class="label" style="top: 58px">canvas</span>
+<div id="css" class="band"><div id="blk"></div></div><span class="label" style="top: 102px">css</span>
+<script>
+(function () {
+  "use strict";
+  if (/[?&]sentinel=1/.test(location.search)) document.getElementById("sentinel").style.display = "block";
+  function post(m) { try { window.webkit.messageHandlers.fresh.postMessage(m); } catch (e) { /* no native host */ } }
+  function now100() { return Math.floor(Date.now() / 100) & 0xffff; }
+  function code(v) {
+    var bits = [], ones = 0;
+    for (var i = 15; i >= 0; i--) { var b = (v >> i) & 1; bits.push(b); ones += b; }
+    bits.push(ones & 1);
+    return bits;
+  }
+  // DOM: setInterval(100)
+  var dom = document.getElementById("dom"), cells = [];
+  for (var i = 0; i < 17; i++) { var d = document.createElement("div"); dom.appendChild(d); cells.push(d); }
+  var lastDom = -1;
+  function paintDom() {
+    var v = now100();
+    code(v).forEach(function (b, i) { cells[i].style.background = b ? "#000" : "#fff"; });
+    document.getElementById("dom-label").textContent = "dom " + v;
+    if (v !== lastDom) { lastDom = v; post({ kind: "dom", value: v }); }
+  }
+  paintDom();
+  setInterval(paintDom, 100);
+  // canvas: requestAnimationFrame
+  var cv = document.getElementById("cv"), dpr = window.devicePixelRatio || 1;
+  cv.width = 476 * dpr; cv.height = 28 * dpr;
+  var g = cv.getContext("2d"), lastCanvas = -1;
+  function frame() {
+    var v = now100();
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    code(v).forEach(function (b, i) { g.fillStyle = b ? "#000" : "#fff"; g.fillRect(i * 28, 0, 28, 28); });
+    if (v !== lastCanvas) { lastCanvas = v; document.getElementById("cv-label").textContent = "canvas " + v; post({ kind: "canvas", value: v }); }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+  // CSS: phased to the wall clock
+  document.getElementById("blk").style.animationDelay = (-(Date.now() % 1600)) + "ms";
+})();
+</script>
+</body>
+</html>

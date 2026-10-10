@@ -32,7 +32,14 @@ WINTER_CU_LIVE_TESTS=1 bun run e2e:cu-live   # the LIVE ComputerV2 suite (script
                                      # ~2-3 min — fixture apps (one window moved to another Space, else full screen; a
                                      # Docs-like page, fixture-web/docs.html: a hidden off-screen input iframe drawn on
                                      # a canvas, Closure buttons that ignore click, Find and replace, an HTML menu bar,
-                                     # single-line inputs — the "docs" scenarios, written against the contract), a
+                                     # single-line inputs — the "docs" scenarios, written against the contract; and the
+                                     # FRESHNESS measurement: a Fresh window — native band, DOM/canvas/CSS bands encoding
+                                     # the 100 ms wall-clock counter — on another Space, (a1) default and (a2)
+                                     # _setWindowOcclusionDetectionEnabled:NO, sampled stream OFF 10 s → ON 20 s → OFF 10 s
+                                     # through the live-test helper's test.capture/test.stream; --safari-freshness adds a
+                                     # NEW Safari window, --safari-webkit-prefs (+ --yes-restart-safari) wraps it in three
+                                     # WebKitPreferences keys set NO and restored exactly; report, not assert:
+                                     # out/cu-live/freshness.json, --freshness-copy-to <dir>), a
                                      # SECOND dev-helper instance on a temp home (open -n --env WINTER_CU_HOME), a
                                      # file-store daemon (winter-core-live), the scripted double (no LLM); asserts the
                                      # fixture's own log, screenshot pixels (a #FF00FF sentinel), the mirror frames, and

@@ -431,6 +431,14 @@ func runFixtureSelfTest() -> Int32 {
     c.equal(fields.map { $0.0 }, ["length", "text"], "docs: every field but type, sorted")
     c.check(CommandDecoder.supported(role: "main").contains("docsOpenFind"), "docs: the panel command")
 
+    // --- the freshness code (Fixture Fresh; the runner decodes the same) -----------------------------------------
+    c.equal(FreshCode.value(atMs: 1_791_552_423_456), Int(17_915_524_234 & 0xFFFF), "fresh: the 100 ms wall-clock counter, 16 bits")
+    c.equal(FreshCode.bits(0).map { $0 ? 1 : 0 }, Array(repeating: 0, count: 17), "fresh: zero, even parity")
+    c.equal(FreshCode.bits(1).map { $0 ? 1 : 0 }, Array(repeating: 0, count: 15) + [1, 1], "fresh: one, odd parity")
+    c.equal(FreshCode.bits(0xFFFF).map { $0 ? 1 : 0 }, Array(repeating: 1, count: 16) + [0], "fresh: all ones, even parity")
+    c.equal(FreshCode.bits(0b1010_0000_0000_0001).count, 17, "fresh: 17 cells")
+    c.check(CommandDecoder.supported(role: "main").isSuperset(of: ["freshStart", "freshOffspace", "freshStop"]), "fresh: its commands")
+
     if c.failures.isEmpty {
         print("SELFTEST OK \(c.passed) checks")
         return 0

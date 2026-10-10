@@ -21,6 +21,9 @@ func runToolSelfTest() -> Int32 {
 
     // --- arguments -------------------------------------------------------------------------------------------
     check(parse(["front"]) == .front, "front")
+    check(parse(["windows", "Safari"]) == .windows(owner: "Safari"), "windows")
+    check(parse(["fresh-decode", "l.json", "a.png", "b.png"]) == .freshDecode(layout: "l.json", files: ["a.png", "b.png"]), "fresh-decode")
+    check(usageError(["fresh-decode", "l.json"]) != nil, "fresh-decode needs a capture")
     check(parse(["monitor"]) == .monitor(intervalMs: 20), "monitor default interval is 20 ms")
     check(parse(["monitor", "--interval-ms", "50"]) == .monitor(intervalMs: 50), "monitor --interval-ms 50")
     check(parse(["monitor", "--interval-ms=7"]) == .monitor(intervalMs: 7), "monitor --interval-ms=7")
@@ -90,6 +93,32 @@ func runToolSelfTest() -> Int32 {
     check(!HardwareInput.counts(type: .null, sourcePid: 0, keys: true), "hardware: other types never count")
     check(HardwareInput.mask(keys: false) & (CGEventMask(1) << CGEventMask(CGEventType.keyDown.rawValue)) == 0, "hardware: no key bit without access")
     check(HardwareInput.mask(keys: true) & (CGEventMask(1) << CGEventMask(CGEventType.keyDown.rawValue)) != 0, "hardware: the key bit with access")
+    // fresh-decode: a synthetic capture at 2 pixels per point, chrome above the content (24 px), the sentinel at
+    // content (8, 8) 48 pt, one band of 17 cells at content (72, 12) carrying 5 = 0b101 (two ones: even parity).
+    let fw = 1100, fh = 200, chrome = 24, s2 = 2.0
+    var px = [UInt8](repeating: 255, count: fw * fh * 4)
+    func paint(_ x0: Int, _ y0: Int, _ w: Int, _ h: Int, _ rgb: (UInt8, UInt8, UInt8)) {
+        for y in y0..<(y0 + h) { for x in x0..<(x0 + w) { let i = (y * fw + x) * 4; px[i] = rgb.0; px[i + 1] = rgb.1; px[i + 2] = rgb.2 } }
+    }
+    paint(16, chrome + 16, 96, 96, (255, 0, 255))
+    let band = FreshLayout.Region(name: "native", x: 72, y: 12, cell: 28, cells: 17)
+    for i in [13, 15] { paint(Int((72 + 28 * Double(i)) * s2), chrome + Int(12 * s2), 56, 56, (0, 0, 0)) }
+    let fbox = FreshDecode.sentinelBox(px, width: fw, height: fh)
+    check(fbox == PixelBox(minX: 16, minY: chrome + 16, maxX: 111, maxY: chrome + 111), "fresh-decode: the sentinel's box")
+    if let fbox, let origin = FreshDecode.locate(fbox, sentinel: .init(x: 8, y: 8, size: 48)) {
+        check(origin.scale == 2 && origin.x == 0 && origin.y == Double(chrome), "fresh-decode: origin and scale from the sentinel")
+        let lumas = FreshDecode.cellLumas(px, width: fw, height: fh, region: band, origin: origin)
+        check(lumas.count == 17 && lumas[13] < 10 && lumas[15] < 10 && lumas[14] > 245 && lumas[0] > 245, "fresh-decode: dark cells where the bits are")
+        let before = FreshDecode.bandHash(px, width: fw, height: fh, region: band, origin: origin)
+        check(before == FreshDecode.bandHash(px, width: fw, height: fh, region: band, origin: origin), "fresh-decode: the hash is stable")
+        paint(Int((72 + 28 * 3) * s2), chrome + Int(12 * s2), 56, 56, (0, 0, 0))
+        check(before != FreshDecode.bandHash(px, width: fw, height: fh, region: band, origin: origin), "fresh-decode: a flipped cell changes the hash")
+        let lineOut = FreshDecode.line(file: "\"x.png\"", pixels: px, width: fw, height: fh, layout: FreshLayout(sentinel: .init(x: 8, y: 8, size: 48), regions: [band]))
+        check(lineOut.hasPrefix("{\"file\":\"x.png\",\"ok\":true,\"scale\":2,\"regions\":{\"native\":{\"hash\":"), "fresh-decode: the JSON line")
+    } else {
+        check(false, "fresh-decode: locate")
+    }
+    check(FreshDecode.line(file: "\"y.png\"", pixels: [UInt8](repeating: 255, count: 16), width: 2, height: 2, layout: FreshLayout(sentinel: .init(x: 8, y: 8, size: 48), regions: [])).contains("no sentinel"), "fresh-decode: no sentinel")
     pointed.spaceType = 4
     check(pointed.json.hasSuffix(",\"mouse\":[10,-3],\"spaceType\":4}"), "a front sample with the Space's type")
 

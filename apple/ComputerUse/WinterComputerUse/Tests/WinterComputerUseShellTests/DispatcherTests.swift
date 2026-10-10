@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import WinterComputerUseShell
 import WinterCUCore
@@ -46,6 +47,41 @@ final class DispatcherTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(TestActivateResult.self, from: JSONEncoder().encode(result)), TestActivateResult(frontmostSet: true, raised: true, frontmost: true))
         let pids = await asked.pids
         XCTAssertEqual(pids, [42])
+    }
+
+    func testTheFreshnessCapturesExistOnlyOnALiveTestInstanceWithACapturer() async throws {
+        let rig = await Rig()
+        XCTAssertFalse(rig.dispatcher.methods.contains("test.capture"))
+        XCTAssertFalse(rig.dispatcher.methods.contains("test.stream"))
+        let live = await MainActor.run {
+            RPCDispatcher(core: rig.core, coordinator: rig.coordinator, viewHub: rig.viewHub, inFlight: rig.inFlight, liveTest: true, capturer: FakeCapture())
+        }
+        XCTAssertTrue(live.methods.contains("test.capture"))
+        let shot = try await live.handle(method: "test.capture", params: .object(["windowId": .number(7), "source": .string("stream"), "path": .string("/tmp/x.png")]))
+        XCTAssertEqual(try JSONDecoder().decode(TestCaptureResult.self, from: JSONEncoder().encode(shot)), TestCaptureResult(width: 2, height: 1, frameAgeMs: 5))
+        let on = try await live.handle(method: "test.stream", params: .object(["windowId": .number(7), "on": .bool(true)]))
+        XCTAssertEqual(try JSONDecoder().decode(TestStreamResult.self, from: JSONEncoder().encode(on)), TestStreamResult(running: true))
+        // A live-test instance without a capturer (the dispatcher's default) has the activation only.
+        let bare = await MainActor.run { RPCDispatcher(core: rig.core, coordinator: rig.coordinator, viewHub: rig.viewHub, inFlight: rig.inFlight, liveTest: true) }
+        XCTAssertFalse(bare.methods.contains("test.capture"))
+    }
+
+    func testTestCaptureWritesOnlyPNGsInsideTheHome() {
+        XCTAssertEqual(TestCapture.allowedPath("/tmp/h/run/a.png", home: "/tmp/h"), "/tmp/h/run/a.png")
+        XCTAssertNil(TestCapture.allowedPath("/tmp/h/../x.png", home: "/tmp/h"))
+        XCTAssertNil(TestCapture.allowedPath("/tmp/hh/a.png", home: "/tmp/h"))
+        XCTAssertNil(TestCapture.allowedPath("/tmp/h/a.txt", home: "/tmp/h"))
+        XCTAssertNil(TestCapture.allowedPath("relative.png", home: "/tmp/h"))
+    }
+
+    func testTestCaptureCropsInWindowPoints() throws {
+        let ctx = try XCTUnwrap(CGContext(data: nil, width: 40, height: 20, bitsPerComponent: 8, bytesPerRow: 160, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let image = try XCTUnwrap(ctx.makeImage())
+        let cropped = try XCTUnwrap(TestCapture.crop(image, rect: [2, 1, 5, 4], scale: 2))
+        XCTAssertEqual(cropped.width, 10)
+        XCTAssertEqual(cropped.height, 8)
+        XCTAssertEqual(TestCapture.crop(image, rect: nil, scale: 2)?.width, 40)
+        XCTAssertNil(TestCapture.crop(image, rect: [100, 100, 5, 5], scale: 2))
     }
 
     func testAnUnknownMethodIsUnsupported() async {
@@ -176,6 +212,11 @@ final class DispatcherTests: XCTestCase {
         let active = await rig.coordinator.activeScripts
         XCTAssertTrue(active.isEmpty)
     }
+}
+
+private struct FakeCapture: TestCapturing {
+    func capture(_ p: TestCaptureParams) async throws -> TestCaptureResult { TestCaptureResult(width: 2, height: 1, frameAgeMs: p.source == "stream" ? 5 : nil) }
+    func stream(_ p: TestStreamParams) async throws -> TestStreamResult { TestStreamResult(running: p.on) }
 }
 
 private actor ActivateLog {

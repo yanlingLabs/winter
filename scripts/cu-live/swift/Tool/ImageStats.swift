@@ -53,7 +53,7 @@ enum ImageStats {
         return .success(report)
     }
 
-    private static func bitmap(of image: CGImage, width: Int, height: Int) -> [UInt8]? {
+    static func bitmap(of image: CGImage, width: Int, height: Int) -> [UInt8]? {
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
         let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
             // sRGB, so a Display P3 screenshot is converted to the space the rule is written in (a P3-tagged

@@ -78,6 +78,8 @@ enum ToolCommand: Equatable {
     case monitor(intervalMs: Int)
     case front
     case imageStats(path: String)
+    case freshDecode(layout: String, files: [String])
+    case windows(owner: String)
     case post(run: String, role: String, cmd: String, args: String?, seq: String?)
     case selfTest
     case help
@@ -94,6 +96,8 @@ enum ArgParser {
       cu-live-tool monitor [--interval-ms 20]    one JSON line per interval (and per app activation) until stdin EOF / SIGTERM
       cu-live-tool front                         one JSON line (with the active Space's type), then exit
       cu-live-tool image-stats <file>            one JSON line about a JPEG/PNG: size, luma, blank, sentinel pixels (exit 2 + {"error"} if undecodable)
+      cu-live-tool fresh-decode <layout.json> <png>…  per capture of the Fresh window: each region's band hash and cell lumas
+      cu-live-tool windows <owner name>          one JSON line per window of that app (id, layer, onScreen, bounds) — no titles, no grant needed
       cu-live-tool post --run <id> --role <main|user> --cmd <name> [--args <json object>] [--seq <n>]
       cu-live-tool self-test
     """
@@ -114,6 +118,10 @@ enum ArgParser {
             return rest.isEmpty ? .success(.front) : .failure(UsageError("front takes no arguments"))
         case "image-stats":
             return rest.count == 1 ? .success(.imageStats(path: rest[0])) : .failure(UsageError("image-stats takes exactly one file"))
+        case "windows":
+            return rest.count == 1 ? .success(.windows(owner: rest[0])) : .failure(UsageError("windows takes exactly one owner name"))
+        case "fresh-decode":
+            return rest.count >= 2 ? .success(.freshDecode(layout: rest[0], files: Array(rest.dropFirst()))) : .failure(UsageError("fresh-decode takes a layout file and at least one capture"))
         case "monitor":
             return parseMonitor(rest)
         case "post":

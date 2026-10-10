@@ -31,7 +31,8 @@ public final class RPCDispatcher: @unchecked Sendable {
     /// `winter-cu-live-` temp home, which accepts only the live suite's test identities). Only then does it answer the
     /// TEST-ONLY `test.activate` the suite uses to put its own "user's app" in front (`activator`).
     public init(core: CoreService, coordinator: HelperCoordinator, viewHub: ViewHub, inFlight: InFlightRegistry,
-                liveTest: Bool = false, activator: (@Sendable (Int32) async -> TestActivateResult)? = nil) {
+                liveTest: Bool = false, activator: (@Sendable (Int32) async -> TestActivateResult)? = nil,
+                capturer: TestCapturing? = nil) {
         self.core = core
         self.coordinator = coordinator
         self.viewHub = viewHub
@@ -42,6 +43,16 @@ public final class RPCDispatcher: @unchecked Sendable {
             routes["test.activate"] = { params, _ in
                 let p = try RPCDispatcher.decode(TestActivateParams.self, params)
                 return AnyEncodable(await activate(p.pid))
+            }
+            // The freshness measurement's captures (TestCapture.swift): a still through the helper's own off-Space
+            // path, or the latest frame of a desktop-independent test stream.
+            if let capturer {
+                routes["test.capture"] = { params, _ in
+                    AnyEncodable(try await capturer.capture(try RPCDispatcher.decode(TestCaptureParams.self, params)))
+                }
+                routes["test.stream"] = { params, _ in
+                    AnyEncodable(try await capturer.stream(try RPCDispatcher.decode(TestStreamParams.self, params)))
+                }
             }
         }
     }
