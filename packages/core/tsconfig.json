@@ -1,1 +1,5 @@
-{ "extends": "../../tsconfig.base.json", "include": ["src", "test"] }
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["src", "test"],
+  "exclude": ["src/computer-use/browser/page-runtime/main.ts"]
+}

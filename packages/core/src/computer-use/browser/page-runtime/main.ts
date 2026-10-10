@@ -1,4 +1,3 @@
-/// <reference lib="dom" />
 // ComputerV2 Phase 2 — the PAGE RUNTIME: installed by the browser engine once per document per frame, in an isolated
 // world named "winter" (`Page.createIsolatedWorld`), never in the page's own world — the page can neither see it nor
 // reach it. Bundled by `scripts/build-page-runtime.ts` (target browser, IIFE, no minify) into the committed
@@ -11,8 +10,10 @@
 // What it never does: start I/O (no fetch, no postMessage to the page, no storage, no cookies), or take anything
 // from the daemon but its op arguments.
 import type {
-  RtCheck, RtClassify, RtCondition, RtFindQuery, RtFound, RtId, RtNode, RtPoint, RtSnapshot,
+  RtCheck, RtClassify, RtCondition, RtFindQuery, RtFound, RtHit, RtId, RtNode, RtPoint, RtSnapshot,
 } from "./protocol";
+import { looksSecret, REDACTED, redactText } from "./redact";
+import { classifyTarget, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
 
 type Any = Record<string, unknown>;
 
@@ -44,7 +45,8 @@ type Any = Record<string, unknown>;
   const prune = (): void => { for (const [k, r] of refs) if (r.deref() === undefined) refs.delete(k); };
 
   // ── the quiet-DOM watcher ───────────────────────────────────────────────────────────────────────
-  let lastMutation = performance.now() - 1e6;
+  // Installed into a page that may still be changing: quiet only after a real quiet stretch.
+  let lastMutation = performance.now();
   const waiters = new Set<() => void>();
   const observed = new WeakSet<Node>();
   const observer = new MutationObserver(() => {
@@ -58,56 +60,17 @@ type Any = Record<string, unknown>;
   };
   observe(document);
 
-  // ── secrets ─────────────────────────────────────────────────────────────────────────────────────
-  const REDACTED = "<redacted>";
-  const TOKEN_PATTERNS: RegExp[] = [
-    /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]*)?/g,   // a JWT
-    /\bsk-[A-Za-z0-9_-]{16,}/g,                                       // API secret keys
-    /\b(?:ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}/g,            // GitHub tokens
-    /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,                                // Slack tokens
-    /\bAKIA[0-9A-Z]{16}\b/g,                                          // AWS access key ids
-    /\b[0-9a-fA-F]{32,}\b/g,                                          // a long hex run
-  ];
-  const B64_RUN = /[A-Za-z0-9+/_=-]{32,}/g;
-  const tokenish = (run: string): boolean => {
-    // A base64-looking run reads as a secret only when it mixes classes and is not a path or a word chain.
-    if (!/[0-9]/.test(run) || !/[A-Z]/.test(run) || !/[a-z]/.test(run)) return false;
-    if ((run.match(/\//g) ?? []).length > 2) return false;
-    if ((run.match(/-/g) ?? []).length > 3 && !/[0-9]{3,}/.test(run)) return false;
-    return true;
-  };
-  const redactText = (s: string): string => {
-    let out = s;
-    for (const p of TOKEN_PATTERNS) out = out.replace(p, REDACTED);
-    out = out.replace(B64_RUN, (m) => (tokenish(m) ? REDACTED : m));
-    return out;
-  };
-  const looksSecret = (s: string): boolean => redactText(s) !== s;
-
-  const SECURE_AUTOCOMPLETE = new Set(["current-password", "new-password", "one-time-code", "cc-number", "cc-csc", "cc-exp", "cc-exp-month", "cc-exp-year"]);
-  const PAYMENT_HOSTS = [
-    "stripe.com", "stripe.network", "braintreegateway.com", "braintree-api.com", "adyen.com", "adyenpayments.com", "checkout.com",
-    "paypal.com", "paypalobjects.com", "squareup.com", "squarecdn.com", "recurly.com", "chargebee.com", "klarna.com", "spreedly.com",
-    "authorize.net", "worldpay.com", "globalpay.com", "pay.google.com", "payments.amazon.com", "afterpay.com", "affirm.com",
-  ];
-  const inPaymentFrame = ((): boolean => {
-    if (window.top === window) return false;
-    const host = location.hostname.toLowerCase();
-    return PAYMENT_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
-  })();
-
-  const TEXT_INPUT_TYPES = new Set(["", "text", "search", "email", "url", "tel", "number", "password", "date", "datetime-local", "month", "week", "time"]);
-  const isTextEntry = (el: Element): boolean => {
-    if (el instanceof HTMLTextAreaElement) return true;
-    if (el instanceof HTMLInputElement) return TEXT_INPUT_TYPES.has(el.type.toLowerCase());
-    return (el as HTMLElement).isContentEditable === true;
-  };
-  const isSecure = (el: Element): boolean => {
-    if (el instanceof HTMLInputElement && el.type.toLowerCase() === "password") return true;
-    const ac = (el.getAttribute("autocomplete") ?? "").toLowerCase().split(/\s+/);
-    if (ac.some((t) => SECURE_AUTOCOMPLETE.has(t))) return true;
-    return inPaymentFrame && isTextEntry(el);
-  };
+  // ── secrets and the floors (`rules.ts`, `redact.ts`) ───────────────────────────────────────────
+  const inPaymentFrame = window.top !== window && isPaymentHost(location.hostname);
+  /** The facts the rules read off an element. */
+  const factsOf = (el: Element): ElementFacts => ({
+    tag: el.tagName.toUpperCase(),
+    ...(el instanceof HTMLInputElement ? { type: el.type.toLowerCase() } : {}),
+    autocomplete: el.getAttribute("autocomplete") ?? "",
+    contentEditable: (el as HTMLElement).isContentEditable === true,
+  });
+  const isTextEntry = (el: Element): boolean => isTextEntryFacts(factsOf(el));
+  const isSecure = (el: Element): boolean => isSecureField(factsOf(el), inPaymentFrame);
 
   // ── the composed tree ───────────────────────────────────────────────────────────────────────────
   const composedChildren = (n: Node): Node[] => {
@@ -133,7 +96,9 @@ type Any = Record<string, unknown>;
     return false;
   };
 
-  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "META", "LINK", "TITLE", "SVG", "PATH", "BR", "HR", "WBR"]);
+  // Never part of the page as a reader sees it: scripts and styles — and Winter for Chrome's own overlay (the glow,
+  // the agent cursor, the Stop button it injects into a driven tab).
+  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "META", "LINK", "TITLE", "SVG", "PATH", "BR", "HR", "WBR", "WINTER-AGENT-OVERLAY"]);
   const styleOf = (el: Element): CSSStyleDeclaration | undefined => { try { return getComputedStyle(el); } catch { return undefined; } };
   /** Hidden from a reader: not rendered, hidden by ARIA, or a hidden input. `contents` boxes are walked through. */
   const hidden = (el: Element, st: CSSStyleDeclaration | undefined): boolean => {
@@ -569,11 +534,18 @@ type Any = Record<string, unknown>;
     for (const r of el.getClientRects()) if (r.width > 0 && r.height > 0) return r;
     return undefined;
   };
+  /** Winter for Chrome's own overlay (and anything in it) is never what a point hits, nor what covers an element. */
+  const isOverlay = (el: Element): boolean => {
+    for (let n: Node | null = el; n !== null; n = n.parentNode ?? (n instanceof ShadowRoot ? n.host : null)) {
+      if (n instanceof Element && n.tagName === "WINTER-AGENT-OVERLAY") return true;
+    }
+    return false;
+  };
   const deepFromPoint = (x: number, y: number): Element | null => {
-    let hit = document.elementFromPoint(x, y);
+    let hit: Element | null = document.elementsFromPoint(x, y).find((e) => !isOverlay(e)) ?? null;
     while (hit !== null && hit.shadowRoot !== null) {
-      const inner = hit.shadowRoot.elementFromPoint(x, y);
-      if (inner === null || inner === hit) break;
+      const inner: Element | undefined = hit.shadowRoot.elementsFromPoint(x, y).find((e) => !isOverlay(e));
+      if (inner === undefined || inner === hit) break;
       hit = inner;
     }
     return hit;
@@ -597,32 +569,68 @@ type Any = Record<string, unknown>;
     setTimeout(finish, 120);
     try { requestAnimationFrame(() => requestAnimationFrame(finish)); } catch { finish(); }
   });
-  const point = async (arg: { id: RtId; scroll?: boolean; settle?: boolean }): Promise<RtPoint> => {
+  /** The native window pressing `el` would open (`rules.ts`): its own, or — through a label, which forwards a press to its
+   *  control — its control's; an <option> belongs to its <select>. */
+  const pickerFor = (el: Element): { what: string; control: Element } | undefined => {
+    const own = nativePicker(factsOf(el));
+    if (own !== undefined) return { what: own, control: el };
+    const select = el.closest("select");
+    if (select !== null) return { what: nativePicker(factsOf(select))!, control: select };
+    const label = el instanceof HTMLLabelElement ? el : el.closest("label");
+    const control = label instanceof HTMLLabelElement ? label.control : null;
+    const via = control === null ? undefined : nativePicker(factsOf(control));
+    return via === undefined || control === null ? undefined : { what: via, control };
+  };
+  /** A right-click: the browser's own context menu would open as a native window on the user's screen. Unless the page
+   *  shows a menu of its own (it prevents the default), the next contextmenu event in this frame is prevented — a
+   *  one-shot listener on the window, after the page's own. */
+  const guardMenu = (): void => {
+    const onMenu = (e: Event): void => { if (!e.defaultPrevented) e.preventDefault(); };
+    addEventListener("contextmenu", onMenu, { once: true });
+    setTimeout(() => removeEventListener("contextmenu", onMenu), 3_000);
+  };
+  const point = async (arg: { id: RtId; scroll?: boolean; settle?: boolean; guardMenu?: boolean }): Promise<RtPoint> => {
     // In a child frame just brought into view, the frame paints before its point is measured and hit-tested.
     if (arg.settle === true) await nextFrame();
-    const el = elementOf(arg.id);
-    if (el === undefined) return { ok: false, reason: "gone" };
+    // A text leaf's ref is its run's first text node: it is pressed where that text is drawn, through its element.
+    const node = nodeOf(arg.id);
+    const el = node instanceof Element ? node : node instanceof Text ? node.parentElement ?? undefined : undefined;
+    if (el === undefined || node === undefined) return { ok: false, reason: "gone" };
+    const rectOf = (): DOMRect | undefined => {
+      if (!(node instanceof Text)) return visibleRect(el);
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      for (const t of range.getClientRects()) if (t.width > 0 && t.height > 0) return t;
+      return undefined;
+    };
     if (isDisabled(el)) return { ok: false, reason: "disabled" };
     const st = styleOf(el);
     if (hidden(el, st)) return { ok: false, reason: "hidden" };
-    let r = visibleRect(el);
+    let r = rectOf();
     if (r === undefined) return { ok: false, reason: "hidden" };
     if (!inViewport(r) && arg.scroll !== false) {
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" as ScrollBehavior });
       await nextFrame();
-      if (!el.isConnected) return { ok: false, reason: "gone" };
-      r = visibleRect(el);
+      if (!node.isConnected) return { ok: false, reason: "gone" };
+      r = rectOf();
       if (r === undefined) return { ok: false, reason: "hidden" };
     }
     if (!inViewport(r)) return { ok: false, reason: "offscreen" };
     const left = Math.max(r.left, 0), right = Math.min(r.right, innerWidth), top = Math.max(r.top, 0), bottom = Math.min(r.bottom, innerHeight);
     const x = (left + right) / 2, y = (top + bottom) / 2;
+    // A <select>, a date/time/color or file input (or a label for one) opens a native window when pressed: the engine
+    // refuses pointer input on it.
+    const picker = pickerFor(el)?.what;
+    const okAt = (): RtPoint => {
+      if (arg.guardMenu === true) guardMenu();
+      return { ok: true, x, y, ...(picker === undefined ? {} : { picker }) };
+    };
     const hit = deepFromPoint(x, y);
-    if (hit === null) return { ok: true, x, y };
-    if (composedContains(el, hit)) return { ok: true, x, y };
+    if (hit === null) return okAt();
+    if (composedContains(el, hit)) return okAt();
     // A label that clicks through to its control, or a control inside the element's own label.
-    if (hit instanceof HTMLLabelElement && hit.control === el) return { ok: true, x, y };
-    if (el instanceof HTMLLabelElement && el.control !== null && composedContains(el.control, hit)) return { ok: true, x, y };
+    if (hit instanceof HTMLLabelElement && hit.control === el) return okAt();
+    if (el instanceof HTMLLabelElement && el.control !== null && composedContains(el.control, hit)) return okAt();
     const by = coverOf(hit);
     const byRole = roleOf(by);
     const name = nameOf(by, byRole);
@@ -630,17 +638,32 @@ type Any = Record<string, unknown>;
   };
   const classify = (arg: { id?: RtId } | null): RtClassify => {
     let el: Element | null | undefined;
-    if (arg?.id !== undefined) {
-      el = elementOf(arg.id);
-      if (el === undefined) return { kind: "unknown" };
-    } else el = deepActive();
-    if (el === null || el === undefined) return { kind: "unknown" };
-    if (el instanceof HTMLIFrameElement || el.tagName === "FRAME") return { kind: "frame", id: idOf(el) };
-    if (el === document.body || el === document.documentElement) return { kind: "ok", editable: false };
-    if (isSecure(el)) return { kind: "secure", id: idOf(el) };
-    const role = roleOf(el);
-    const name = nameOf(el, role);
-    return { kind: "ok", editable: isTextEntry(el), id: idOf(el), ...(role === undefined ? {} : { role: roleWord(role, el) }), ...(name === undefined ? {} : { name: cap(name, 80) }) };
+    if (arg?.id !== undefined) el = elementOf(arg.id);
+    else el = deepActive();
+    // The decision is the rules' (`classifyTarget`): no element is `unknown` — fail closed.
+    const c = classifyTarget(el === null || el === undefined ? null : factsOf(el), { inPaymentFrame, isBody: el === document.body || el === document.documentElement });
+    if (el === null || el === undefined || c.kind === "unknown") return { kind: "unknown" };
+    switch (c.kind) {
+      case "frame": return { kind: "frame", id: idOf(el) };
+      case "secure": return { kind: "secure", id: idOf(el) };
+      case "picker": return { kind: "picker", id: idOf(el), what: c.what };
+      default: {
+        if (el === document.body || el === document.documentElement) return { kind: "ok", editable: false };
+        const role = roleOf(el);
+        const name = nameOf(el, role);
+        return { kind: "ok", editable: c.editable, id: idOf(el), ...(role === undefined ? {} : { role: roleWord(role, el) }), ...(name === undefined ? {} : { name: cap(redactText(name), 80) }) };
+      }
+    }
+  };
+  /** What a pixel point hits in this frame: a native picker control, or the iframe element to descend into. */
+  const hitAt = (arg: { x: number; y: number; guardMenu?: boolean }): RtHit => {
+    if (arg.guardMenu === true) guardMenu();
+    const hit = deepFromPoint(arg.x, arg.y);
+    if (hit === null) return {};
+    if (hit instanceof HTMLIFrameElement || hit.tagName === "FRAME") return { frame: idOf(hit) };
+    // The control itself, or a label that forwards the press to one.
+    const p = pickerFor(hit);
+    return p === undefined ? {} : { picker: p.what, id: idOf(p.control) };
   };
   const focus = (arg: { id: RtId }): RtClassify => {
     const el = elementOf(arg.id);
@@ -667,13 +690,21 @@ type Any = Record<string, unknown>;
     if (isSecure(el)) return { ok: false, reason: "secure_field" };
     if (isDisabled(el)) return { ok: false, reason: "disabled" };
     if (el instanceof HTMLSelectElement) {
-      const want = arg.value.trim().toLowerCase();
-      const opt = [...el.options].find((o) => collapse(o.label || o.text).toLowerCase() === want) ?? [...el.options].find((o) => o.value.toLowerCase() === want)
-        ?? [...el.options].find((o) => collapse(o.label || o.text).toLowerCase().includes(want));
-      if (opt === undefined) return { ok: false, reason: `no option "${cap(arg.value, 60)}" — the options are: ${[...el.options].slice(0, 20).map((o) => `"${cap(collapse(o.label || o.text), 40)}"`).join(", ")}` };
-      el.value = opt.value;
+      // An option by its visible text, else its value, else the text containing it. A multiple select takes one
+      // option per line and selects exactly those.
+      const wants = el.multiple ? arg.value.split("\n").map((w) => w.trim()).filter((w) => w.length > 0) : [arg.value];
+      const chosen: HTMLOptionElement[] = [];
+      for (const raw of wants) {
+        const want = raw.trim().toLowerCase();
+        const opt = [...el.options].find((o) => collapse(o.label || o.text).toLowerCase() === want) ?? [...el.options].find((o) => o.value.toLowerCase() === want)
+          ?? [...el.options].find((o) => collapse(o.label || o.text).toLowerCase().includes(want));
+        if (opt === undefined) return { ok: false, reason: `no option "${cap(raw, 60)}" — the options are: ${[...el.options].slice(0, 20).map((o) => `"${cap(collapse(o.label || o.text), 40)}"`).join(", ")}` };
+        if (opt.disabled) return { ok: false, reason: `the option "${cap(collapse(opt.label || opt.text), 60)}" is disabled` };
+        chosen.push(opt);
+      }
+      if (el.multiple) { for (const o of el.options) o.selected = chosen.includes(o); } else el.value = chosen[0]!.value;
       fire(el, "input"); fire(el, "change");
-      return { ok: true, shown: collapse(opt.label || opt.text) };
+      return { ok: true, shown: chosen.map((o) => collapse(o.label || o.text)).join(", ") };
     }
     if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")) return { ok: false, reason: "a check box or radio button takes click(), not setValue()" };
     if (el instanceof HTMLInputElement && el.type === "file") return { ok: false, reason: "a file input takes upload(ref, paths)" };
@@ -681,6 +712,13 @@ type Any = Record<string, unknown>;
     if (set !== undefined) {
       (el as HTMLElement).focus?.({ preventScroll: true });
       set(arg.value);
+      // A date/time/color input drops a value it can't read (sets ""): say the shape it takes.
+      if (el instanceof HTMLInputElement) {
+        const hint = pickerValueHint(el.type);
+        if (hint !== undefined && el.value.toLowerCase() !== arg.value.trim().toLowerCase()) {
+          return { ok: false, reason: `that ${el.type} field takes a value like ${hint}` };
+        }
+      }
       fire(el, "input"); fire(el, "change");
       return { ok: true, shown: (el as HTMLInputElement).value };
     }
@@ -840,7 +878,7 @@ type Any = Record<string, unknown>;
       case "text": return readable(a?.markdown === true);
       case "owner": return self instanceof Node ? idOf(self) : null;
       case "frameOffset": return frameOffset(a as { id: RtId; scroll?: boolean; inner?: { x: number; y: number } });
-      case "point": return point(a as { id: RtId; scroll?: boolean; settle?: boolean });
+      case "point": return point(a as { id: RtId; scroll?: boolean; settle?: boolean; guardMenu?: boolean });
       case "classify": return classify(a as { id?: RtId } | null);
       case "focus": return focus(a as { id: RtId });
       case "setValue": return setValue(a as { id: RtId; value: string });
@@ -850,6 +888,7 @@ type Any = Record<string, unknown>;
       case "element": return elementOf((a as { id: RtId }).id) ?? null;
       case "pasteEvent": return pasteEvent(a as { html?: string; text: string });
       case "quiet": return { sinceMutationMs: Math.max(0, Math.round(performance.now() - lastMutation)), url: location.href, title: document.title, readyState: document.readyState };
+      case "hitAt": return hitAt(a as { x: number; y: number; guardMenu?: boolean });
       case "waitChange": return waitChange(a as { maxMs: number });
       case "check": return check((a ?? {}) as RtCondition);
       case "alive": return ((a as { ids: RtId[] }).ids ?? []).filter((id) => elementOf(id) !== undefined);

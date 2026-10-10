@@ -50,7 +50,9 @@ export interface RtSnapshot {
 
 /** What `point` answers: where to click, or why not. Coordinates are CSS px in this frame's viewport. */
 export type RtPoint =
-  | { ok: true; x: number; y: number }
+  /** `picker`: the element (or the control a label forwards to) opens a native menu, picker or chooser window when
+   *  pressed (the engine refuses pointer input). */
+  | { ok: true; x: number; y: number; picker?: string }
   | { ok: false; reason: "gone" | "hidden" | "disabled" | "offscreen" }
   | { ok: false; reason: "covered"; by: { id: RtId; role: string; name?: string } };
 
@@ -58,8 +60,13 @@ export type RtPoint =
 export type RtClassify =
   | { kind: "ok"; editable: boolean; id?: RtId; role?: string; name?: string }
   | { kind: "secure"; id?: RtId }
+  /** A native picker control (a <select>, a date/time/color or file input): keys could open its window. */
+  | { kind: "picker"; id: RtId; what: string }
   | { kind: "frame"; id: RtId }
   | { kind: "unknown" };
+
+/** What a pixel point hits in a frame: a native picker control, or an iframe to look into (its element's id). */
+export interface RtHit { picker?: string; id?: RtId; frame?: RtId }
 
 export interface RtFindQuery { text?: string; role?: string; name?: string }
 export interface RtFound { id: RtId; role: string; name?: string; value?: string; states?: string[] }
@@ -78,7 +85,8 @@ export interface RtOps {
   owner: { arg: null; result: RtId };
   /** An iframe element's content-box origin in this frame's viewport (scrolled into view first with `scroll`). */
   frameOffset: { arg: { id: RtId; scroll?: boolean; inner?: { x: number; y: number } }; result: { x: number; y: number } | null };
-  point: { arg: { id: RtId; scroll?: boolean; settle?: boolean }; result: RtPoint };
+  /** `guardMenu`: a right-click follows — the browser's own context menu is not to open (unless the page shows its own). */
+  point: { arg: { id: RtId; scroll?: boolean; settle?: boolean; guardMenu?: boolean }; result: RtPoint };
   /** The keyboard target: `id`'s element, else the focused element. */
   classify: { arg: { id?: RtId }; result: RtClassify };
   focus: { arg: { id: RtId }; result: RtClassify };
@@ -99,6 +107,7 @@ export interface RtOps {
   check: { arg: RtCondition; result: RtCheck };
   /** Which of these ids still name a connected element. */
   alive: { arg: { ids: RtId[] }; result: RtId[] };
+  hitAt: { arg: { x: number; y: number; guardMenu?: boolean }; result: RtHit };
 }
 export type RtOp = keyof RtOps;
 
