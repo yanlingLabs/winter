@@ -146,12 +146,15 @@ public struct CUFocusGuardianCore: Sendable {
         return .theft(restore: view, thief: a.app, repeatOffender: times.count >= Self.repeatCount)
     }
 
-    /// A Space change observed on its own (no activation): the user's when it came with recent input, else a
-    /// theft to put back. Returns the restore view for a theft, nil when it was the user's.
-    public mutating func handleSpaceChange(to space: UInt64?, hadRecentUserInput: Bool, now: TimeInterval) -> CUGuardedView? {
+    /// A Space change observed on its own (no activation): a theft to put back only when the agent CAUSED it
+    /// (`caused`: within the causal window of something it did) and the user gave no input; otherwise the user's
+    /// — and the user's place is now that Space, with its front app (`front`), so a later restore returns them
+    /// there. Returns the restore view for a theft, nil when it was the user's.
+    public mutating func handleSpaceChange(to space: UInt64?, front: pid_t? = nil, hadRecentUserInput: Bool, caused: Bool = true,
+                                           now: TimeInterval) -> CUGuardedView? {
         guard active, let space, space != view.space else { return nil }
-        if hadRecentUserInput || (claimApp != nil && now <= claimUntil) {
-            view.space = space
+        if !caused || hadRecentUserInput || (claimApp != nil && now <= claimUntil) {
+            view = CUGuardedView(app: front ?? view.app, space: space)
             return nil
         }
         return view

@@ -169,6 +169,21 @@ final class FocusMenusFoldPasteTests: XCTestCase {
         XCTAssertEqual(r.detail, "Finder's window was made key for a moment to re-validate the command (your app kept the front)")
     }
 
+    func testABlipWhoseFirstHandBackIsLostHandsItBackAgainBeforeCallingItATheft() async throws {
+        finder(trashEnabled: false)
+        FocusSPI.onFocus = { [unowned self] in
+            if FocusSPI.calls.last == "focus pid \(pid) window 77" { ax.put(trash, [kAXEnabledAttribute: true]) }
+        }
+        // The window server keeps the keys with the target until the user's window is focused a SECOND time.
+        core.keyFocusPidOverride = { [unowned self] in
+            FocusSPI.calls.filter { $0 == "focus pid 1 window 31" }.count >= 2 ? 1 : pid
+        }
+        try await act(.menu(CUMenuAction(path: ["File", "Move to Trash"])))
+        XCTAssertEqual(FocusSPI.calls.filter { $0 == "focus pid 1 window 31" }.count, 2, "handed back twice")
+        XCTAssertTrue(sys.activated.isEmpty, "no guardian restore: it was back")
+        XCTAssertEqual(installer.removed, 1)
+    }
+
     func testTheBlipEndsOnAnErrorWithTheTapRemoved() async throws {
         finder(trashEnabled: false)
         FocusSPI.onFocus = { [unowned self] in ax.put(trash, [kAXEnabledAttribute: true]) }

@@ -207,6 +207,7 @@ public final class CUCore: @unchecked Sendable {
             // None new (the app showed the doc in an existing window, or none has appeared): the frontmost.
             return CUBindWait.realWindows(sys.windows(pid: app.processIdentifier)).map(\.id).first
         }()
+        noteGuardianOpened(app.processIdentifier)  // its window is up: it may activate now (a cause again)
         let bound = CUBoundApp(name: app.localizedName ?? b.bundleIdentifier ?? appURL.lastPathComponent,
                                bundleId: app.bundleIdentifier ?? "", pid: app.processIdentifier)
         return OpenDocumentsResult(app: bound, windowID: windowID)
@@ -455,10 +456,13 @@ public final class CUCore: @unchecked Sendable {
     var guardianScripts: Set<String> = []
     var guardianPrivatePath = false
     var guardianTailWork: DispatchWorkItem?
-    /// Apps that may be thieves besides the bound targets: a document was opened in them during the script
-    /// (until the guard ends), or the agent acted on them (for `guardianActedWindow` after the act).
-    var guardianOpened: Set<pid_t> = []
-    var guardianActedAt: [pid_t: TimeInterval] = [:]
+    /// When each app was last given a cause to come forward by the agent — an act on it, a focus blip ending, a
+    /// document opened or the app launched — and when anything was: a change counts as the agent's only within
+    /// `guardianCausalWindow` after its cause.
+    var guardianCauses: [pid_t: TimeInterval] = [:]
+    var guardianLastCause: TimeInterval = -1
+    /// The global monitor that sees the user's trackpad gestures (swipes between Spaces, Mission Control).
+    var guardianGestureMonitor: Any?
     /// The last hardware-origin input event (any type, trackpad gestures included) the listen-only tap saw.
     var lastHardwareInputAt: TimeInterval = -1
     /// Schedules the end of the guard's tail; tests run it by hand.

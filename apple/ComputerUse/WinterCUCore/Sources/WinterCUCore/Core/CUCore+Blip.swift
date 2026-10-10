@@ -67,11 +67,23 @@ extension CUCore {
             // The user's app must hold the key focus and the front again within `blipFrontWaitMs` (and before the
             // deadline); the tap stays until then, so a key typed meanwhile still goes to them.
             let until = min(clock.nowMs() + Self.blipFrontWaitMs, start + Self.blipDeadlineMs)
-            while clock.nowMs() < until, keyFocusPidForTarget(t) == t.pid || sys.frontmostPid() != user { usleep(10_000) }
-            // Not back (the front elsewhere, or the keys still going to the target): the guardian restores the
-            // user's app, which takes its key focus back with it.
+            let back = { [self] in keyFocusPidForTarget(t) != t.pid && sys.frontmostPid() == user }
+            while clock.nowMs() < until, !back() { usleep(10_000) }
+            // Not back yet: hand it back once more (the first focus record can be lost while the app is busy),
+            // and only then is it a theft for the guardian.
+            var handedBackTwice = false
+            if !back() {
+                undo()
+                handedBackTwice = true
+                let again = clock.nowMs() + 60
+                while clock.nowMs() < again, !back() { usleep(10_000) }
+            }
+            noteGuardianActed(t.pid)  // the blip's end is a cause: an activation right after it may be its doing
+            // Still not back (the front elsewhere, or the keys still going to the target): the guardian restores
+            // the user's app, which takes its key focus back with it.
             let front = sys.frontmostPid() == user
             let keys = keyFocusPidForTarget(t) != t.pid
+            if handedBackTwice { CULog.act.notice("focus blip in \(app, privacy: .public): the key focus was handed back a second time — back: \(front && keys ? "yes" : "no", privacy: .public)") }
             if !front || !keys {
                 guardianRestore(CUGuardedView(app: user, space: space), thief: t.pid, repeatOffender: false,
                                 cause: front ? "the focus blip left the key focus with the target" : "the focus blip did not hand the front back")
