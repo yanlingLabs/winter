@@ -771,11 +771,11 @@ describe("/dirs — the working-directories family (working-directories T7)", ()
   // like the other refusals above.
   test("/dirs add <path> — the mode refusal (chat/dispatch target) surfaces verbatim", async () => {
     const { client } = makeClient({
-      sessionSetDirs: () => { throw new Error("working directories apply to code and cowork sessions only"); },
+      sessionSetDirs: () => { throw new Error("working directories apply to code sessions only"); },
     });
     const { ctx, notes } = makeCtx(client);
     await runCommand(ctx, "/dirs add /repo");
-    expect(notes).toEqual(["/dirs failed: working directories apply to code and cowork sessions only"]);
+    expect(notes).toEqual(["/dirs failed: working directories apply to code sessions only"]);
   });
 });
 

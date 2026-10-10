@@ -31,7 +31,8 @@ func chatLandingShowsNewChatButton(hasAction: Bool, hasRows: Bool) -> Bool {
 ///
 /// Chat rows carry NO activity chip and never will: chat does not participate in the activity
 /// lifecycle at all (`ACTIVITY_MODES`, and `session.list` populates no `activity` for those rows),
-/// which is exactly why the chips T4 adds belong to the code/cowork landings and not here.
+/// which is why the chips T4 adds belong to the Code landing. Cowork has a placeholder only;
+/// its reserved lifecycle predicate does not implement a landing or an executable session.
 ///
 /// GALLERY EXTENSION POINT: the phone's own chat list is a `List` of title + relative time rows
 /// (`norma-ios`'s session list), which is what this mirrors; what does not transfer is the phone's

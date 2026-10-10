@@ -215,6 +215,12 @@ export const ApprovalRequestedEvent = ThreadBase.extend({
   // additive: a reviewer-escalation/grant/worktree card (no rule-worthy shape) or an older
   // persisted event omits it; clients that don't render options still see a valid approval card.
   options: z.array(ApprovalOption).optional(),
+  // ComputerV2's desktop-switch prompt (user ruling 2026-10-10): what the daemon does when nobody
+  // answers by `expiresAt`. Absent (every other card, and every older persisted event) means "deny"
+  // — the broker's fail-closed rule. "allow" marks a card that DEFAULT-ALLOWS: a client renders its
+  // countdown as "… in N s unless you refuse", and its `approval_resolved` then carries
+  // `approved: true, by: "timeout"` — the user gave no answer, never "Approved" by a person.
+  onTimeout: z.enum(["allow", "deny"]).optional(),
 });
 export const ApprovalResolvedEvent = ThreadBase.extend({
   type: z.literal("approval_resolved"), callId: z.string().min(1), approved: z.boolean(), by: z.string().min(1),
@@ -756,7 +762,8 @@ export const NotificationRequestedEvent = ThreadBase.extend({
   message: z.string().min(1).max(500),
 });
 
-/** session-activity-hygiene (spec §1): a code/cowork session's lifecycle state.
+/** session-activity-hygiene (spec §1): a code session's lifecycle state today. The daemon's
+ *  participation predicate also reserves cowork, which has no supported protocol/creation path.
  *
  *  A REAL lifecycle, not a cosmetic label — from T5 on, `active` carries enforcement (when the last
  *  harness detaches and the session is not backgrounded, its running turn is aborted through the
@@ -900,12 +907,11 @@ export const PanelTabNavigatedEvent = Base.extend({
  *
  *  **B2 Task 4 built that registration, and two clauses above needed correcting to stay true.**
  *
- *  (1) The spec's phrase was "code/cowork/dispatch"; the DAEMON has no such mode. `registry.ts`'s
- *  `Mode` is `code|dispatch|chat` and `engine.ts`'s `resolveMode` folds a `cowork` session into
- *  `"chat"` (deliberately — see its own comment: cowork is chat-shaped and there is no cowork slot
- *  for a per-mode seam to resolve against). So the day cowork ships, a cowork session gets CHAT's
- *  read-only browser until someone widens `Mode` — a change with its own blast radius, not made
- *  here. "code and dispatch" is what is actually enforced, so that is what this now says.
+ *  (1) The historical spec's phrase was "code/cowork/dispatch"; supported daemon and registry modes
+ *  are `code|dispatch|chat`. Cowork creation is unsupported. The retired engine's mapping to chat
+ *  no longer applies: `session-driver.ts` and `handoff.ts` narrow unknown stored modes to code.
+ *  This fallback does not implement Cowork or define its future browser policy. "code and dispatch"
+ *  is what is actually enforced for supported sessions, so that is what this now says.
  *
  *  (2) "Enforced at the tool registration" is now literal rather than a rendering convention:
  *  `browser` declares `ToolDefinition.argsByMode` (`packages/core/src/agent/tools/registry.ts`),

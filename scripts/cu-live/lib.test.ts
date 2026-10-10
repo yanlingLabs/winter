@@ -6,11 +6,11 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { liveHomeRefusal } from "./daemon-entry";
 import {
-  callLine, computerV2Message, describeViolations, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hardwareInputTimes, hardwareIdleMs, lastValue, pointerMoves, promptAppeared, PROMPT_BUNDLE_IDS, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, parseDuration, parseFrontReading, startPlan, describeStartPlan, markerFacts, MIXED_TEXT,
-  parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type FixtureEvent, type MonitorSample, type ScenarioResult,
+  callLine, computerV2Message, describeViolations, excursions, extractMarkers, doneWindowModel, doneWindowOpenArgs, focusViolations, hardwareInputTimes, hardwareIdleMs, lastValue, pointerMoves, promptAppeared, PROMPT_BUNDLE_IDS, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, parseDuration, parseFrontReading, startPlan, describeStartPlan, markerFacts, MIXED_TEXT,
+  parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { minimalPdf, REAL_APP_SCENARIOS, REAL_DIR_TOKEN, withRealDir } from "./real-apps";
-import { DOCS_DASH_TEXT, DOCS_LINES_TEXT, DOCS_SHORT_PASTE, DOCS_BIG_PASTE, DOCS_TEXT, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage } from "./scenarios";
+import { DESKTOP_VISIT_MAX_AWAY_MS, DOCS_DASH_TEXT, DOCS_LINES_TEXT, DOCS_SHORT_PASTE, DOCS_BIG_PASTE, DOCS_TEXT, LIVE_REASON, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage } from "./scenarios";
 
 const sample = (t: number, frontPid: number, space: number | null, hidIdleMs: number | null = 1000): MonitorSample => ({ t, front: `app${frontPid}`, frontPid, space, hidIdleMs });
 
@@ -304,6 +304,56 @@ describe("the scenarios", () => {
     expect(actOk("sent", [focus, { t: 2, role: "main", ev: "field.change", id: "offspace", value: "off-Space ✓ Typed" }])).toBe(true);
   });
 
+  test("the desktop switch: refused first (nothing moves), then allowed (one visit, back within the bound); judged by the prompt and the metrics", () => {
+    const refused = SCENARIOS.find((s) => s.name.startsWith("desktop switch: a live screenshot off-Space, refused"))!;
+    const allowed = SCENARIOS.find((s) => s.name.startsWith("desktop switch: two live screenshots off-Space"))!;
+    const captureOnly = SCENARIOS.find((s) => s.name.startsWith("bind off-Space (full screen, never seen here)"))!;
+    const act = SCENARIOS.find((s) => s.name.startsWith("act in the off-Space window"))!;
+    // A visit shows the window on screen (accessibility may see it after): never before the capture-only rows.
+    for (const s of [refused, allowed]) {
+      expect(SCENARIOS.indexOf(s)).toBeGreaterThan(SCENARIOS.indexOf(captureOnly));
+      expect(SCENARIOS.indexOf(s)).toBeGreaterThan(SCENARIOS.indexOf(act));
+      expect(s.code).toContain(`live: true, reason: ${JSON.stringify(LIVE_REASON)}`);
+    }
+    expect(allowed.maxExcursions).toBe(1);
+    expect(allowed.code.match(/live: true/g)).toHaveLength(2);
+    expect(refused.desktopSwitch).toEqual({ answer: "refuse", afterMs: 1_000 });
+    expect(refused.allowExcursionMs).toBeUndefined(); // refused: the strict focus check — nothing may move
+    expect(allowed.desktopSwitch?.answer).toBe("allow");
+    expect(allowed.allowExcursionMs).toBe(DESKTOP_VISIT_MAX_AWAY_MS);
+    const card = { toolName: "ComputerV2", onTimeout: "allow", issuedAt: 1_000, expiresAt: 61_000, summary: `Switch to Winter CU Fixture's desktop for a moment? Winter CU Fixture (dev.cu-live.fixture) — ${LIVE_REASON}. …` };
+    const prompt = { cards: [card], panelSeen: true, panelGone: true };
+    const ctx = (over: Record<string, unknown>) => ({ output: "", isError: false, facts: {}, events: [], since: 0, probe: [], metrics: [], shots: [], prompt, ...over });
+    const passes = (sc: typeof allowed, c: Record<string, unknown>): boolean => sc.verify(ctx(c) as never).every((x) => x.ok);
+    const shot = { file: "a.jpg", width: 800, height: 600, stddevLuma: 30, blank: false, sentinelPixels: 900 };
+    const visitLine = { primitive: "desktop.visit", visit: { actions: 2, ms: 1_400, returned: true } };
+    const allowedOk = {
+      facts: { w: 800, h: 600, w2: 800 }, shots: [shot], output: "moved the user to Winter CU Fixture's desktop for 1.4 s (2 actions) and back\n",
+      metrics: [{ primitive: "screenshot", visitAnswer: "allow", inVisit: true }, { primitive: "screenshot", inVisit: true }, visitLine],
+    };
+    expect(passes(allowed, allowedOk)).toBe(true);
+    expect(passes(allowed, { ...allowedOk, prompt: { ...prompt, panelSeen: false } })).toBe(false);
+    expect(passes(allowed, { ...allowedOk, prompt: { ...prompt, cards: [card, card] } })).toBe(false);
+    // Back and forth: two visits (two lines, two metrics entries) fail it.
+    expect(passes(allowed, { ...allowedOk, metrics: [...allowedOk.metrics, visitLine] })).toBe(false);
+    expect(passes(allowed, { ...allowedOk, output: allowedOk.output + allowedOk.output })).toBe(false);
+    expect(passes(allowed, { ...allowedOk, metrics: [allowedOk.metrics[0]!, { primitive: "desktop.visit", visit: { actions: 2, ms: 1, returned: false } }] })).toBe(false);
+    expect(passes(allowed, { ...allowedOk, output: "" })).toBe(false);
+    const refusedOk = { facts: { error: "NeedsForeground", message: "the user refused to be moved to Winter CU Fixture's desktop — ask them in your reply if it is needed" }, metrics: [{ primitive: "screenshot", visitAnswer: "refuse" }] };
+    expect(passes(refused, refusedOk)).toBe(true);
+    expect(passes(refused, { ...refusedOk, metrics: [...refusedOk.metrics, { primitive: "desktop.visit", visit: { actions: 1, ms: 1, returned: true } }] })).toBe(false);
+    expect(passes(refused, { ...refusedOk, prompt: { ...prompt, panelGone: false } })).toBe(false);
+  });
+
+  test("excursions: consecutive away samples are one trip; back and forth is two", () => {
+    const base = { frontPid: 1, space: 10 } as FocusBaseline;
+    const at = (t: number, frontPid: number, space: number) => ({ t, frontPid, space, front: "x" }) as unknown as MonitorSample;
+    const once = [at(0, 1, 10), at(20, 1, 11), at(40, 9, 11), at(60, 1, 10), at(80, 1, 10)];
+    expect(excursions(once, 0, 100, base)).toEqual([{ start: 20, end: 40 }]);
+    const twice = [...once, at(100, 1, 11), at(120, 1, 10)];
+    expect(excursions(twice, 0, 200, base)).toHaveLength(2);
+  });
+
   test("Finder: the helper opens the folder (no AppleScript, no TCC prompt); reuse or capture only is a skip", () => {
     const finder = REAL_APP_SCENARIOS.find((s) => s.name.startsWith("Finder"))!;
     expect(finder.code).toContain("await apps.open(folder)");
@@ -322,7 +372,7 @@ describe("the scenarios", () => {
   test("names are unique; every group the suite promises is covered", () => {
     expect(new Set(all.map((s) => s.name)).size).toBe(all.length);
     const groups = new Set(SCENARIOS.map((s) => s.group));
-    for (const g of ["bind", "click", "type", "scroll", "menu", "applescript", "screenshot", "guardian", "document", "card", "docs"]) expect(groups.has(g)).toBe(true);
+    for (const g of ["bind", "click", "type", "scroll", "menu", "applescript", "screenshot", "desktop-switch", "guardian", "document", "card", "docs"]) expect(groups.has(g)).toBe(true);
     // The undo scenario runs in the ask session too (its foreground card is denied there): once, once, false.
     expect(SCENARIOS.filter((s) => s.session === "ask").map((s) => s.answer)).toEqual(["once", "once", false]);
   });

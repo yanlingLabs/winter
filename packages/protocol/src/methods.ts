@@ -264,8 +264,8 @@ export const SessionListResult = z.object({
     // silently dropped a field the daemon was already putting on the socket — exactly the asymmetry
     // `cwd` above was declared to close.
     //
-    // Distinct from `activity === "archived"`, which is the same fact narrowed to code/cowork by
-    // `participatesInActivity`: this one is mode-blind, which is the point. An archived CHAT session
+    // Distinct from `activity === "archived"`, which is the same fact narrowed to code today by
+    // `participatesInActivity` (plus reserved cowork groundwork): this one is mode-blind. An archived CHAT session
     // is invisible in the label and visible here, and the Mac app's browser lifecycle reads this
     // field (`BrowserSignals.archived`) rather than the label for that reason.
     //
@@ -389,6 +389,9 @@ export const PendingApprovalSchema = z.object({
   // SP-approvals T4: mirrors ApprovalRequestedEvent.options field-for-field (same
   // ApprovalBroker-stored meta backs both) — see that field's own doc comment in events.ts.
   options: z.array(ApprovalOption).optional(),
+  // Mirrors ApprovalRequestedEvent.onTimeout (events.ts): "allow" for a card that default-allows at
+  // `expiresAt` (ComputerV2's desktop-switch prompt); absent = the fail-closed deny.
+  onTimeout: z.enum(["allow", "deny"]).optional(),
 });
 export const ApprovalListResult = z.object({ pending: z.array(PendingApprovalSchema) });
 
@@ -1371,8 +1374,8 @@ export const SessionSetEffortResult = z.object({});
 //
 // Refusals, all daemon-side (sessions/set-activity.ts, behind ipc/server.ts): an unknown session is
 // `NOT_FOUND` and takes precedence over everything below it; a chat/dispatch target is
-// `INVALID_PARAMS` ("activity states apply to code and cowork sessions only" — those modes have no
-// lifecycle at all, T2's participation allowlist); `"background"`/`"unbackground"` on an ARCHIVED
+// `INVALID_PARAMS` ("activity states apply to code sessions only" — chat
+// and dispatch have no lifecycle, while T2 reserves future cowork participation); `"background"`/`"unbackground"` on an ARCHIVED
 // session is `INVALID_PARAMS` ("session is archived — resume it first"); `"archived"` on a session
 // with a RUNNING TURN is `INVALID_PARAMS` ("stop or background it first"), because archived is a
 // flag over IDLE (spec §1.4) and archiving a live turn would strand it behind a hidden tab.

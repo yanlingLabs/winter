@@ -185,7 +185,7 @@ describe("session.setDirs (working-directories T3)", () => {
     return id;
   }
 
-  test("a COWORK session is settable (the participation allowlist is code AND cowork)", async () => {
+  test("a synthetic cowork-shaped row is settable by the reserved participation allowlist", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "dirs-setter");

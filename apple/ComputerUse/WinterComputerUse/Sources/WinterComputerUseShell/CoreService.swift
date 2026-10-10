@@ -28,6 +28,8 @@ public protocol CoreService: AnyObject {
     func cancel(_ params: CancelParams) async throws -> CancelResult
     func turnEnded(_ params: TurnEndedParams) async throws -> TurnEndedResult
     func sessionEnded(_ params: SessionEndedParams) async throws -> SessionEndedResult
+    /// `visit.close`: the session's open desktop visit closed, and its closed visits' reports, each once.
+    func visitClose(_ params: VisitCloseParams) async throws -> VisitCloseResult
     /// A session's script started or ended (`script.active`): the engine's Focus Guardian runs only meanwhile.
     func scriptActivity(sessionId: String, active: Bool)
 }

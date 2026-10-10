@@ -237,12 +237,15 @@ final class OffDesktopActTests: XCTestCase {
     func testWithThePrivatePathOffAnOffscreenWindowGetsNoEvents() async throws {
         world()
         let s = shot()
-        let e = await expect("window_elsewhere") {
+        // Nothing can reach it from here: a desktop visit could (with the user's say), so that is what it asks for.
+        let e = await expect("needs_desktop_visit") {
             try await self.core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c",
                                                            action: .click(CUClickAction(point: [500, 400], shotId: s)),
                                                            access: .full, allowForeground: false, privatePath: false))
         }
         XCTAssertTrue(e?.message.contains("the click can't be sent there with the private event path off") ?? false, e?.message ?? "")
+        XCTAssertEqual(e?.data?["why"], .string("act"))
+        XCTAssertTrue(sys.activated.isEmpty, "nobody was moved")
         // A scroll still works: Page Down to the app, no wheel.
         _ = try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c2",
                                                     action: .scroll(CUScrollAction(point: [400, 300], shotId: s, direction: .down)),

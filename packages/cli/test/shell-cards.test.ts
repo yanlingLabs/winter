@@ -2,7 +2,7 @@
 // (agent SDK 0.0.40 -- concurrent subagents, two lanes), a typed answer must always go to the card whose
 // prompt is on screen, and a question's read loop must never run beside another card's.
 import { describe, expect, test } from "bun:test";
-import { ShellCardQueue } from "../src/shell-cards";
+import { ShellCardQueue, approvalPromptLine, approvalResolvedHow } from "../src/shell-cards";
 
 function harness() {
   const out: string[] = [];
@@ -107,5 +107,23 @@ describe("ShellCardQueue", () => {
     await cards.answerApproval("y");
     expect(errors).toHaveLength(1);
     expect(out.at(-1)).toBe("B? ");
+  });
+});
+
+describe("a card that default-ALLOWS (ComputerV2's desktop switch, 2026-10-10)", () => {
+  test("its prompt says what silence does; every other card keeps approve … [y/N]", () => {
+    const dim = (s: string): string => `<${s}>`;
+    expect(approvalPromptLine({ toolName: "ComputerV2", summary: "Switch to Safari's desktop?", onTimeout: "allow" }, dim))
+      .toBe("ComputerV2: <Switch to Safari's desktop?> [y = switch now, n = don't switch; no answer within a minute switches] ");
+    expect(approvalPromptLine({ toolName: "bash", summary: "ls" }, dim)).toBe("approve bash? <ls> [y/N] ");
+  });
+
+  test("running out while on screen says it was allowed by no answer — never 'answered elsewhere'", () => {
+    const h = harness();
+    h.cards.raiseApproval("cu_1", "ComputerV2: … ");
+    h.cards.resolved("cu_1", approvalResolvedHow({ approved: true, by: "timeout" }));
+    expect(h.out.at(-1)).toContain("(no answer in time — allowed)");
+    expect(approvalResolvedHow({ approved: false, by: "timeout" })).toBeUndefined();
+    expect(approvalResolvedHow({ approved: true, by: "orb" })).toBeUndefined();
   });
 });

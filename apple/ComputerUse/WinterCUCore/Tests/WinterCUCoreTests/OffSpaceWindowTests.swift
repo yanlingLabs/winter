@@ -306,11 +306,11 @@ final class OffSpaceWindowTests: XCTestCase {
     func testWithNoWindowSetterGeometricInputElsewhereIsRefused() async throws {
         world(cached: true)
         sys.moveSucceeds = true
-        let drag = await expect("window_elsewhere") {
+        let drag = await expect("needs_desktop_visit") {
             try await self.act(.drag(CUDragAction(from: CUDragEnd(ref: self.ref(self.button)), to: CUDragEnd(ref: self.ref(self.plain)))))
         }
         XCTAssertTrue(drag?.message.contains("the drag can't be sent there with the private event path off") == true, drag?.message ?? "")
-        let modified = await expect("window_elsewhere") {
+        let modified = await expect("needs_desktop_visit") {
             try await self.act(.click(CUClickAction(ref: self.ref(self.plain), modifiers: ["cmd"])))
         }
         XCTAssertTrue(modified?.message.contains("the click can't be sent there") == true, modified?.message ?? "")

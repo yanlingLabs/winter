@@ -26,7 +26,8 @@
  *
  * **CLI/TUI surface reachability is NOT a daemon-side predicate at all** — `packages/cli/src/
  * session-mode.ts`'s own top comment states it directly ("code = TUI + macOS app + iOS app;
- * chat/cowork = apps only; dispatch = apps + orb. The TUI/CLI is CODE-ONLY") and `packages/core`
+ * chat = apps only; dispatch = apps + orb. The TUI/CLI is CODE-ONLY"). Cowork's app-only surface
+ * was planned but is unavailable today, and `packages/core`
  * has no dependency on `packages/cli` to import it from (the reverse is true). That fact is
  * therefore a literal here too, with the same citation discipline: named, sourced, and covered by
  * the same drift test.

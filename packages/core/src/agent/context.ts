@@ -117,9 +117,10 @@ function memoryProtocol(memDir: string): string {
   ].join("\n");
 }
 
-/** The standing workspace block — ALWAYS present for a code/cowork turn (never dispatch/chat,
+/** The standing workspace block — ALWAYS present for a code turn today (never dispatch/chat,
  *  which swap the base slot entirely via `basePromptOverride` and so never reach this call — see
- *  `assemble()`'s gate). TWO GENUINELY DIFFERENT BRANCHES, which is the whole point of it.
+ *  `assemble()`'s gate). Cowork has no supported creation path or dedicated prompt wiring yet.
+ *  TWO GENUINELY DIFFERENT BRANCHES, which is the whole point of it.
  *
  *  Introduced by working-directories T6 as ONE unconditional line ("anything you're handing the
  *  user goes there") plus workdir-less extras. That shape was wrong, and session `s_bfadc28c2751`
@@ -194,7 +195,7 @@ export interface MemoryContextConfig {
   /** Dreaming (Phase 7b): the _assistant bucket path — see assistantMemoryDirFor. REQUIRED (like
    *  `enabled`/`dirFor`), deliberately NOT optional: the assistant branch in `assemble()` fires
    *  INSTEAD of the project/legacy fallbacks (if/else-if chain), so an assistant-mode caller
-   *  (chat/cowork later) that forgot to wire this would silently degrade to total memory silence.
+   *  (including a future Cowork integration) that forgot to wire this would silently degrade to total memory silence.
    *  Requiring it turns that dormant edge into a compile error at the construction site. Callers
    *  that never pass `memoryBucket: "assistant"` still supply it (a stub path is fine — it's only
    *  read inside the assistant branch). */

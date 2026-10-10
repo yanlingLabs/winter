@@ -232,13 +232,14 @@ describe("SendMessage to a session", () => {
     expect(answer.reason).toContain("session_cwd_unavailable");
   });
 
-  test("a Cowork session is a valid target (the mode with a lifecycle that ships next)", async () => {
+  test("the predicate reserves Cowork participation; delivery is exercised on a supported Code session", async () => {
     const t = setup();
-    const cowork = t.store.createSession("global", { mode: "code", cwd: t.home });
-    // The store's own column stops at code/dispatch/chat today; the rule is `participatesInActivity`, which names cowork.
+    const code = t.store.createSession("global", { mode: "code", cwd: t.home });
+    // These are separate facts: the future participation predicate names cowork, while this
+    // delivery uses a Code row. It does not prove Cowork creation or runtime execution.
     const { participatesInActivity } = await import("../../src/sessions/activity");
     expect(participatesInActivity("cowork")).toBe(true);
-    expect((await t.send(t.code(), cowork)).status).toBe("resumed_and_delivered");
+    expect((await t.send(t.code(), code)).status).toBe("resumed_and_delivered");
   });
 
   test("notify_when_idle is answered as a separate refused fact beside a delivered message", async () => {

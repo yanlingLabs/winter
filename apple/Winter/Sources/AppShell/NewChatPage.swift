@@ -65,9 +65,9 @@ func newChatSendUI(_ state: ShellSessionHost.NewChatCreateState) -> NewChatSendU
 // MARK: - sidebar-chrome-2: the composer card's control rows
 
 /// The mode segmented picker's options, mirroring the reference's Chat/Cowork pair. Cowork is
-/// present but NOT selectable — it has no daemon mode at all yet (`SessionMode.isAvailable`), the
-/// same honest posture the sidebar's Cowork row takes. Shown rather than hidden on the user's
-/// call: "keep the chat/cowork picker… it's not built yet in Winter but will be later."
+/// selectable as a design preview, but `newChatSendBlockedReason` blocks sending because
+/// `SessionMode.isAvailable` is false. The sidebar likewise opens a placeholder, not a session.
+/// Historical user call: "keep the chat/cowork picker… it's not built yet in Winter but will be later."
 let newChatModeOptions: [SessionMode] = [.chat, .cowork]
 
 /// The announcement strip's resting lines — what shows when Winter has nothing to announce.
@@ -150,8 +150,8 @@ func newChatShowsCoworkControls(mode: SessionMode) -> Bool {
 ///
 /// Two independent reasons, and the ORDER matters: an empty draft is the ordinary resting state
 /// and needs no explanation, whereas a Cowork selection needs one — the mode picker can be moved
-/// to Cowork so the design is visible, but Cowork has no daemon mode at all, so sending would
-/// silently create a CHAT session instead. Refusing with a reason is the honest alternative to
+/// to Cowork so the design is visible, but `session.create` has no supported Cowork mode and this
+/// page's create door creates CHAT sessions. Refusing with a reason is the honest alternative to
 /// either hiding the mode or quietly lying about what was created.
 func newChatSendBlockedReason(draft: String, mode: SessionMode) -> String? {
     if !mode.isAvailable { return "\(mode.title) isn't built yet" }

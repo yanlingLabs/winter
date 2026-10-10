@@ -776,7 +776,7 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertEqual(pill.adapter.composerDraft, "")
         XCTAssertEqual(pill.commandNotice, dispatchPillSpawnComingSoon)
 
-        // Once Cowork windows exist, the same command runs the hook instead.
+        // A synthetic callback verifies the reserved hook; production Cowork windows are not wired.
         let wired = makePill()
         var spawned = 0
         wired.onSpawnCowork = { spawned += 1 }

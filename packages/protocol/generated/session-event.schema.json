@@ -659,6 +659,13 @@
             ],
             "additionalProperties": false
           }
+        },
+        "onTimeout": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "deny"
+          ]
         }
       },
       "required": [

@@ -63,7 +63,9 @@ public enum ApprovalState: Sendable, Equatable {
 /// `commandID` is the idempotency key (stable across retries); the wire carries it as the top-level
 /// `commandId` the daemon dedups on. `expiresAt` (epoch ms, from the `approval_requested` event or
 /// an `approval.list` entry) lets the client derive `.expired` from its own clock BEFORE sending —
-/// past the deadline, the host has already failed the approval closed (`by:"timeout"`). Optional:
+/// past the deadline, the host has already resolved it by `"timeout"` — failed closed, or, for a card
+/// whose `approval_requested.onTimeout` is `"allow"` (ComputerV2's desktop switch, 2026-10-10), ALLOWED:
+/// either way an answer sent then is too late. Optional:
 /// `nil` means "never treat as locally expired" (always send and let the host answer).
 ///
 /// `optionId` (SP-approvals T4): which `ApprovalOption` (`WinterProtocol.SessionEvent.

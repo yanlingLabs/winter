@@ -156,7 +156,11 @@ describe("WinterClient", () => {
     const skills = await client.listSkills(process.cwd()); // throws if any element fails schema validation
     // Lane B (2026-09-22): + the truthful session-availability pair (a built-in skill cannot reach a
     // session's runtime child yet) — and it must pass the VALIDATED path, which is this test's point.
-    expect(skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.any(String) }]);
+    // + the weak-model computer-use skill every boot seeds as a managed copy into sdk/skills (a user-scope skill).
+    expect(skills).toEqual([
+      { name: "computer-use", description: expect.any(String), source: "user", path: expect.stringMatching(/sdk\/skills\/computer-use\/SKILL\.md$/), loadsInSessions: true },
+      { name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.any(String) },
+    ]);
     client.close();
   });
 

@@ -50,7 +50,8 @@ export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits"
 // from child tool sets, so this can only fire if a provider ignores that) — allow it to return the
 // bridge/placeholder path cleanly rather than hang on an approval prompt.
 // USER DECISION 2026-10-02 (recorded here, not an oversight): since agent SDK 0.0.39 `SendMessage` also
-// reaches OTHER top-level code/Cowork sessions (`agent/session-messaging.ts`), resuming a finished one, and
+// reaches OTHER top-level code sessions today (`agent/session-messaging.ts`; its predicate also
+// reserves future Cowork participation), resuming a finished one, and
 // `TaskStop` stops another session's turn. Both stay allowed without a card: the message then runs at the
 // TARGET's own approval policy, so a session at `ask` can drive one at `bypass`. The reviewer flagged that
 // policy escalation (HIGH #1); the user accepted it deliberately. Each session shows its own cards in its own
