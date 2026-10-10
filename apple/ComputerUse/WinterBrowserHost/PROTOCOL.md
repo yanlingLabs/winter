@@ -153,6 +153,8 @@ On `host.status { daemon: "connected" }` the extension sends:
 - **Registration:** one transport per `instanceId`. The engine's registry gives an instance the same backend id for the
   daemon's lifetime, across reconnects (an MV3 service worker restarts often), so `chrome:418` stays valid; only a
   different instance of the same family gets `#2`, `#3`, … A second connection from the same instance retires the first.
+  The id is the FAMILY's; the name is the browser app's own channel ("Google Chrome Beta", "Microsoft Edge Dev", "Google
+  Chrome for Testing" — the engine's `browserForBundleId`), what the model and the per-app card show.
 
 ## 5. Messages after `hello`
 
