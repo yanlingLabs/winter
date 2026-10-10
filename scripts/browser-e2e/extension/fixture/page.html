@@ -1,0 +1,22 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Winter e2e page</title>
+<style>body { font: 16px sans-serif; margin: 20px; } button { font-size: 18px; padding: 10px 20px; } iframe { width: 420px; height: 120px; }</style></head>
+<body data-clicks="0">
+  <h1>Winter for Chrome e2e</h1>
+  <button id="count" onclick="document.body.dataset.clicks = String(Number(document.body.dataset.clicks) + 1)">Count</button>
+  <button id="alert" onclick="document.body.dataset.dialog = String(confirm('Leave this page?'))">Ask</button>
+  <p><label>Notes <input id="notes" type="text"></label></p>
+  <p><label>Password <input id="pw" type="password" autocomplete="current-password"></label></p>
+  <p><label>File <input id="file" type="file"></label></p>
+  <iframe id="frame" title="Cross-site frame"></iframe>
+  <script>
+    // The page itself: it tries to see the engine's world and the overlay, and records what it saw.
+    setInterval(() => {
+      const el = document.querySelector("winter-agent-overlay");
+      document.body.dataset.pageSees = [el === null ? "none" : "element", el === null ? "-" : el.shadowRoot === null ? "closed" : "open", typeof window.__winterAgentOverlay].join(",");
+    }, 100);
+    const params = new URLSearchParams(location.search);
+    if (params.get("frame")) document.getElementById("frame").src = params.get("frame");
+    fetch("/ping?n=1").catch(() => {});
+  </script>
+</body></html>
