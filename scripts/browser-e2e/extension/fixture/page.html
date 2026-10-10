@@ -9,6 +9,7 @@
   <p><label>Password <input id="pw" type="password" autocomplete="current-password"></label></p>
   <p><label>File <input id="file" type="file"></label></p>
   <iframe id="frame" title="Cross-site frame"></iframe>
+  <button id="corner" style="position:fixed;right:8px;bottom:8px;width:240px;height:60px" onclick="document.body.dataset.corner = String(Number(document.body.dataset.corner || 0) + 1)">Corner</button>
   <script>
     // The page itself: it tries to see the engine's world and the overlay, and records what it saw.
     setInterval(() => {

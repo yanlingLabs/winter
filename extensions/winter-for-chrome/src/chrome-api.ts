@@ -12,6 +12,7 @@ export interface ChromeTab {
   active: boolean;
   /** -1 when the tab is in no group. */
   groupId: number;
+  status?: "loading" | "complete" | "unloaded";
   incognito: boolean;
 }
 
@@ -64,6 +65,8 @@ export interface ChromeApi {
     query(query: Record<string, never>): Promise<ChromeTab[]>;
     create(p: { url: string; active: false; windowId: number }): Promise<ChromeTab>;
     remove(tabId: number): Promise<void>;
+    /** Unloads a background tab's page (no beforeunload: nothing can ask "leave this page?"); refused for the active tab. */
+    discard(tabId: number): Promise<ChromeTab | undefined>;
     group(p: { tabIds: number[]; groupId?: number; createProperties?: { windowId: number } }): Promise<number>;
     ungroup(tabIds: number[]): Promise<void>;
     onRemoved: ChromeEvent<(tabId: number) => void>;

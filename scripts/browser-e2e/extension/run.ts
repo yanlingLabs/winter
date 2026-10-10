@@ -87,6 +87,76 @@ class E2ERegistry implements BackendRegistry {
   onChange(l: () => void) { this.listeners.add(l); return () => { this.listeners.delete(l); }; }
 }
 
+// ── the browser's own DevTools endpoint (the temp profile's), to reach the extension's service worker ─────────────────
+
+class BrowserCdp {
+  private next = 1;
+  private readonly waiting = new Map<number, { resolve(v: any): void; reject(e: Error): void }>();
+  private constructor(private readonly ws: WebSocket) {
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(String(ev.data)) as { id?: number; result?: unknown; error?: { message: string } };
+      if (m.id === undefined) return;
+      const w = this.waiting.get(m.id);
+      this.waiting.delete(m.id);
+      if (m.error !== undefined) w?.reject(new Error(m.error.message)); else w?.resolve(m.result);
+    };
+  }
+  static async connect(profile: string): Promise<BrowserCdp> {
+    const file = join(profile, "DevToolsActivePort");
+    const text = await waitFor(() => (existsSync(file) ? readFileSync(file, "utf8") : undefined), 20_000);
+    const [port, path] = (text ?? "").trim().split("\n");
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`);
+    await new Promise<void>((resolve, reject) => { ws.onopen = () => resolve(); ws.onerror = () => reject(new Error("no DevTools endpoint")); });
+    return new BrowserCdp(ws);
+  }
+  send<T = any>(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<T> {
+    const id = this.next++;
+    this.ws.send(JSON.stringify({ id, method, params, ...(sessionId === undefined ? {} : { sessionId }) }));
+    return new Promise<T>((resolve, reject) => {
+      this.waiting.set(id, { resolve, reject });
+      setTimeout(() => { if (this.waiting.delete(id)) reject(new Error(`${method} timed out`)); }, 10_000);
+    });
+  }
+  private async worker(): Promise<{ targetId: string } | undefined> {
+    const extensionUrl = `chrome-extension://${EXTENSION_IDS.dev[0]}/`;
+    const { targetInfos } = await this.send<{ targetInfos: { targetId: string; type: string; url: string }[] }>("Target.getTargets");
+    return targetInfos.find((x) => x.type === "service_worker" && x.url.startsWith(extensionUrl));
+  }
+  /** Stops Winter for Chrome's service worker. */
+  async stopWorker(): Promise<boolean> {
+    const sw = await this.worker();
+    if (sw === undefined) return false;
+    const r = await this.send<{ success: boolean }>("Target.closeTarget", { targetId: sw.targetId });
+    return r.success;
+  }
+  /** Opens and closes a tab — in a window of its own, so closing it activates nothing in the user's window: an event the
+   *  stopped worker listens to (`tabs.onRemoved`) starts it again. */
+  async wakeWithTabEvent(): Promise<void> {
+    const { targetId } = await this.send<{ targetId: string }>("Target.createTarget", { url: "about:blank", newWindow: true, background: true });
+    await sleep(500);
+    await this.send("Target.closeTarget", { targetId });
+  }
+  /** Runs `expression` in Winter for Chrome's service worker and returns its value. */
+  async inWorker<T>(expression: string): Promise<T | undefined> {
+    const extensionUrl = `chrome-extension://${EXTENSION_IDS.dev[0]}/`;
+    let sw: { targetId: string } | undefined;
+    for (let i = 0; i < 100 && sw === undefined; i++) {
+      const { targetInfos } = await this.send<{ targetInfos: { targetId: string; type: string; url: string }[] }>("Target.getTargets");
+      sw = targetInfos.find((x) => x.type === "service_worker" && x.url.startsWith(extensionUrl));
+      if (sw === undefined) await sleep(100);
+    }
+    if (sw === undefined) throw new Error("Winter for Chrome's service worker is not running");
+    const { sessionId } = await this.send<{ sessionId: string }>("Target.attachToTarget", { targetId: sw.targetId, flatten: true });
+    try {
+      const r = await this.send<{ result: { value?: T } }>("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, sessionId);
+      return r.result.value;
+    } finally {
+      await this.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
+  }
+  close(): void { this.ws.close(); }
+}
+
 // ── building the pieces ───────────────────────────────────────────────────────────────────────────────────────────────
 
 function run(cmd: string, args: string[], opts: { cwd?: string } = {}) {
@@ -187,17 +257,19 @@ async function main(): Promise<void> {
     const chromeLog: string[] = [];
     chrome = spawn(exe, [
       "--headless=new", `--user-data-dir=${profile}`, `--load-extension=${extensionDir}`, "--no-first-run", "--no-default-browser-check",
-      "--disable-gpu", "--window-size=1200,900", "--force-device-scale-factor=2", `${base}/user.html`,
+      "--disable-gpu", "--window-size=1200,900", "--force-device-scale-factor=2", "--remote-debugging-port=0", `${base}/user.html`,
     ], {
       env: { ...process.env, WINTER_BROWSER_HOST_HOME: home, WINTER_CU_TEST_DAEMON_REQUIREMENT: bunDr },
       stdio: ["ignore", "ignore", "pipe"],
     });
     chrome.stderr?.setEncoding("utf8");
-    chrome.stderr?.on("data", (d: string) => chromeLog.push(...d.split("\n").filter((l) => l.includes("winter-browser-host"))));
+    chrome.stderr?.on("data", (d: string) => chromeLog.push(...d.split("\n").filter((l) => l.includes("winter-browser-host") || l.includes("[winter]") || /extension|service.?worker/i.test(l))));
 
     const t = await waitFor(() => { const x = registry.get("chrome"); return x?.connected === true ? x : undefined; }, 30_000);
     if (!check(t !== undefined, "the extension's hello registers a transport: chrome for Chrome for Testing (the host verified by its pid)", chromeLog.slice(-5).join(" | "))) return;
-    const transport = t!;
+    let transport = t!;
+    const browserCdp = await BrowserCdp.connect(profile);
+    const groupTitles = async () => (await browserCdp.inWorker<string[]>("chrome.tabGroups.query({}).then((gs) => gs.map((g) => g.title))")) ?? [];
     check(registry.list()[0]?.bundleId === "com.google.chrome.for.testing", "registered with the browser's bundle id", registry.list());
 
     // The user's tab is the active one, and nobody else's.
@@ -246,6 +318,11 @@ async function main(): Promise<void> {
     check(await code(raw("Network.getCookies", {})) === "not_allowed", "…and a method outside the allowlist (Network.getCookies), sent straight past the daemon");
     check(await code(raw("Storage.getCookies", {})) === "not_allowed", "…Storage.getCookies too");
     check(await code(raw("Page.addScriptToEvaluateOnNewDocument", { source: "1" })) === "not_allowed", "…and Page.addScriptToEvaluateOnNewDocument");
+    check(await code(raw("Page.reload", { scriptToEvaluateOnLoad: "document.title = 'pwned'" })) === "not_allowed", "…and Page.reload with a script for the page's own world");
+    check(await code(raw("Page.navigate", { url: "javascript:document.title='pwned'" })) === "not_allowed", "…and Page.navigate to a javascript: URL");
+    check(await code(raw("Page.navigate", { url: "file:///etc/hosts" })) === "not_allowed", "…and to a file: URL");
+    const titleAfter = await evalIn<string>("document.title");
+    check(titleAfter.result.value === "Winter e2e page", "…none of which ran", titleAfter.result.value);
 
     // Network events arrive reduced.
     const net = events.filter((e) => e.method === "Network.requestWillBeSent");
@@ -275,6 +352,13 @@ async function main(): Promise<void> {
     await sleep(300);
     const pageSaw = await evalIn<string>("document.body.dataset.pageSees");
     check(pageSaw.result.value === "element,closed,undefined", "the page sees only the overlay's element: not its shadow root, not the extension's state", pageSaw.result.value);
+    // An indicator only: a click where its pill sits reaches the page's own button underneath.
+    const corner = await evalIn<{ x: number; y: number }>("(() => { const r = document.getElementById('corner').getBoundingClientRect(); return { x: r.right - 20, y: r.bottom - 12 }; })()");
+    for (const type of ["mousePressed", "mouseReleased"]) {
+      await transport.send(tab.tabKey, "Input.dispatchMouseEvent", { type, x: corner.result.value!.x, y: corner.result.value!.y, button: "left", clickCount: 1 });
+    }
+    const cornerClicks = await evalIn<string>("document.body.dataset.corner");
+    check(cornerClicks.result.value === "1", "the overlay takes no click: a click where its pill sits reaches the page's button underneath", cornerClicks.result.value);
     transport.overlay(tab.tabKey, { active: false });
     await sleep(500);
     const removed = await evalIn<boolean>("document.querySelector('winter-agent-overlay') === null");
@@ -305,6 +389,7 @@ async function main(): Promise<void> {
     const childSession = child?.params.sessionId as string | undefined;
     facts.oopif = child === undefined ? "no out-of-process iframe target was attached" : (child.params.targetInfo as { url?: string })?.url;
     if (check(childSession !== undefined, "the cross-site iframe attaches as a flat child session", facts.oopif)) {
+      await transport.send(tab.tabKey, "Runtime.enable", {}, { cdpSessionId: childSession! });
       const childTree = await transport.send<{ frameTree: { frame: { id: string } } }>(tab.tabKey, "Page.getFrameTree", {}, { cdpSessionId: childSession! });
       const childWorld = await transport.send<{ executionContextId: number }>(tab.tabKey, "Page.createIsolatedWorld", { frameId: childTree.frameTree.frame.id, worldName: "winter" }, { cdpSessionId: childSession! });
       const inside = await evalIn<string>("document.getElementById('inside')?.textContent", childWorld.executionContextId, childSession);
@@ -333,11 +418,73 @@ async function main(): Promise<void> {
     check(await code(transport.closeTab(second.tabKey)) === "not_allowed", "…and Winter can no longer close it");
     check(await code(transport.closeTab(userTab!.tabKey)) === "not_allowed", "closeTab refuses the user's tab");
 
+    const activeTrail: string[] = [];
+    const noteActive = async (when: string) => {
+      const a = (await transport.listTabs()).filter((x) => x.active).map((x) => `${x.tabKey}=${x.url.replace(base, "")}`).join(",");
+      activeTrail.push(`${when}: ${a}`);
+    };
+    await noteActive("before the leave tests");
+    // A page that asks "leave this page?": discarded, then removed — no prompt, no dialog, nothing brought forward (the
+    // browser brings a tab forward to show that prompt, whatever raises it).
+    for (const variant of ["attached", "not attached"] as const) {
+      const bu = await transport.createTab({ sessionId: `s_bu_${variant === "attached" ? "a" : "d"}`, sessionTitle: `Leave test ${variant}`, url: `${base}/bu.html` });
+      await sleep(1000);
+      await transport.attach(bu.tabKey, { sessionId: "s_bu" });
+      for (const type of ["mousePressed", "mouseReleased"]) await transport.send(bu.tabKey, "Input.dispatchMouseEvent", { type, x: 20, y: 20, button: "left", clickCount: 1 });
+      await transport.send(bu.tabKey, "Input.insertText", { text: "x" });
+      await noteActive(`(${variant}) after the input`);
+      if (variant === "not attached") await transport.detach(bu.tabKey);
+      check((await groupTitles()).includes(`Winter · Leave test ${variant}`), `(${variant}) the agent tab sits in its session's Winter group`, await groupTitles());
+      await noteActive(`(${variant}) after reading the groups`);
+      const started = Date.now();
+      const closed = await code(transport.closeTab(bu.tabKey));
+      const ms = Date.now() - started;
+      const still = (await transport.listTabs()).some((x) => x.tabKey === bu.tabKey);
+      check(closed === "ok" && !still && ms < 5000, `(${variant}) closeTab closes a page that asks "leave this page?" — no dialog left behind (${ms} ms)`, { closed, still, ms });
+      const activeNow = (await transport.listTabs()).filter((x) => x.active).map((x) => x.tabKey);
+      check(JSON.stringify(activeNow) === JSON.stringify([userTab!.tabKey]), `(${variant}) …and nothing came forward: the user's tab is still the active one`, activeNow);
+      check(!(await groupTitles()).includes(`Winter · Leave test ${variant}`), `(${variant}) …and its group is gone with its last tab`, await groupTitles());
+      await noteActive(`after the leave test (${variant})`);
+    }
+
+    // The service worker restarts (stopped through DevTools — `chrome.runtime.reload()` of this command-line-loaded
+    // build does not come back in Chrome for Testing — then woken by a tab event): it reconnects on its own, still knows
+    // which tabs are Winter's, and has let go of the debugger and overlay its predecessor held.
+    const kept = await transport.createTab({ sessionId: "s_restart", sessionTitle: "Restart test", url: `${base}/frame.html` });
+    await sleep(800);
+    await transport.attach(kept.tabKey, { sessionId: "s_restart" });
+    transport.overlay(kept.tabKey, { active: true });
+    await sleep(500);
+    const before = transport;
+    await noteActive("before the worker restart");
+    const stopped = await browserCdp.stopWorker();
+    check(stopped, "the extension's service worker is stopped (DevTools Target.closeTarget)");
+    await waitFor(() => (before.connected ? undefined : true), 10_000);
+    await browserCdp.wakeWithTabEvent();
+    const restarted = await waitFor(() => { const x = registry.get("chrome"); return x !== undefined && x !== before && x.connected ? x : undefined; }, 30_000);
+    if (check(restarted !== undefined, "after a service-worker restart the extension reconnects on its own", chromeLog.slice(-6))) {
+      transport = restarted!;
+      await noteActive("after the worker restart");
+      const after = (await transport.listTabs()).filter((x) => x.agent).map((x) => [x.tabKey, x.sessionId]).sort();
+      check(JSON.stringify(after) === JSON.stringify([[tab.tabKey, "s_e2e"], [kept.tabKey, "s_restart"]].sort()),
+        "…still reports its agent tabs with their sessions", after);
+      // Its predecessor's debugger was let go (a debugger still held would refuse this attach), and its overlay removed.
+      check(await code(transport.attach(kept.tabKey, { sessionId: "s_restart" })) === "ok", "…has let go of the debugger its predecessor held (the tab attaches again)");
+      await transport.send(kept.tabKey, "Runtime.enable");
+      const keptTree = await transport.send<{ frameTree: { frame: { id: string } } }>(kept.tabKey, "Page.getFrameTree");
+      const keptWorld = await transport.send<{ executionContextId: number }>(kept.tabKey, "Page.createIsolatedWorld", { frameId: keptTree.frameTree.frame.id, worldName: "winter" });
+      const overlayLeft = await transport.send<{ result: { value?: boolean } }>(kept.tabKey, "Runtime.evaluate", { contextId: keptWorld.executionContextId, expression: "document.querySelector('winter-agent-overlay') !== null", returnByValue: true });
+      check(overlayLeft.result.value === false, "…and removed its predecessor's overlay", overlayLeft.result.value);
+      check(await code(transport.closeTab(kept.tabKey)) === "ok", "…and can close its agent tabs");
+      await noteActive("after closing the restart test's tab");
+    }
+
     // The daemon restarts: the extension comes back on its own and still reports its agent tabs with their sessions.
     const third = await transport.createTab({ sessionId: "s_other", sessionTitle: "Another session", url: `${base}/frame.html` });
     await daemon.stop();
     daemon = undefined;
     check(!transport.connected, "the daemon stopping disconnects the transport");
+    browserCdp.close();
     registry = new E2ERegistry();
     daemon = await boot(registry);
     const again = await waitFor(() => { const x = registry.get("chrome"); return x?.connected === true ? x : undefined; }, 30_000);
@@ -351,7 +498,7 @@ async function main(): Promise<void> {
       const left = await again!.listTabs();
       check(!left.some((x) => x.tabKey === tab.tabKey || x.tabKey === third.tabKey), "closeTab closes the agent tabs", left.map((x) => x.url));
       const user = left.find((x) => x.tabKey === userTab!.tabKey);
-      check(user?.active === true && left.filter((x) => x.active).length === 1, "the user's tab was the active one from start to end — nothing came forward", left.map((x) => [x.url, x.active]));
+      check(user?.active === true && left.filter((x) => x.active).length === 1, "the user's tab was the active one from start to end — nothing came forward", { now: left.map((x) => [x.url, x.active]), trail: activeTrail });
     }
     check(gone.length === 0 || gone.every((g) => !g.startsWith(`${userTab!.tabKey}:`)), "no tab of the user's was reported gone", gone);
   } finally {

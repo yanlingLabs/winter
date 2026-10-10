@@ -1,0 +1,9 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Leave this page?</title></head>
+<body style="margin:0;height:100vh">
+  <input id="field" style="width:300px;height:40px">
+  <script>
+    // Asks "leave this page?" once the user (here: Winter's input) has interacted with it.
+    window.addEventListener("beforeunload", (e) => { e.preventDefault(); e.returnValue = ""; });
+  </script>
+</body></html>

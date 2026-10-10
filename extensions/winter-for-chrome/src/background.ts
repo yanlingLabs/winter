@@ -20,6 +20,7 @@ const api: ChromeApi = {
     query: (q) => chrome.tabs.query(q),
     create: (p) => chrome.tabs.create(p),
     remove: (tabId) => chrome.tabs.remove(tabId),
+    discard: (tabId) => chrome.tabs.discard(tabId),
     group: (p) => chrome.tabs.group(p),
     ungroup: (tabIds) => chrome.tabs.ungroup(tabIds),
     onRemoved: chrome.tabs.onRemoved,

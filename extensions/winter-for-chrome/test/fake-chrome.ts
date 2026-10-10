@@ -91,9 +91,13 @@ export class FakeChrome implements ChromeApi {
   pageEnabled = new Set<number>();
   /** A beforeunload prompt shown as a NATIVE dialog in the user's browser (nothing handled it over CDP). */
   nativeDialogs: number[] = [];
+  /** Tabs the browser brought forward to show a close's beforeunload prompt. */
+  activatedForPrompt: number[] = [];
   private pendingDialogs = new Map<number, () => void>();
   /** Make the next tabs.group call fail. */
   groupFails = false;
+  /** The browser will not discard tabs. */
+  discardFails = false;
 
   constructor() {
     this.addWindow({ id: 1, incognito: false });
@@ -137,7 +141,10 @@ export class FakeChrome implements ChromeApi {
         void this.closeTab(tabId);
         return Promise.resolve();
       }
-      // The page asks "leave this page?": over CDP when a debugger has Page events on, else as a native dialog.
+      // A CLOSE that meets "leave this page?": the browser brings the tab forward to show the prompt (the measured
+      // behaviour), then — over CDP when a debugger has Page events on, else as a native dialog — waits for an answer.
+      for (const t of this.tabs_.values()) if (t.windowId === this.tabOr(tabId).windowId) t.active = t.id === tabId;
+      this.activatedForPrompt.push(tabId);
       return new Promise<void>((resolve) => {
         if (this.attachedDebuggers.has(tabId) && this.pageEnabled.has(tabId)) {
           this.pendingDialogs.set(tabId, () => { void this.closeTab(tabId).then(resolve); });
@@ -146,6 +153,16 @@ export class FakeChrome implements ChromeApi {
           this.nativeDialogs.push(tabId); // never resolves: the user's browser now shows a dialog
         }
       });
+    },
+    discard: async (tabId: number) => {
+      this.record("tabs.discard", tabId);
+      const t = this.tabOr(tabId);
+      if (this.discardFails) throw new Error("Cannot discard tab with id: " + tabId + ".");
+      if (t.active) throw new Error("Cannot discard the active tab.");
+      // The page is unloaded without beforeunload: nothing is left to ask "leave this page?".
+      this.beforeunload.delete(tabId);
+      this.attachedDebuggers.delete(tabId);
+      return { ...t, discarded: true };
     },
     group: async (p: { tabIds: number[]; groupId?: number; createProperties?: { windowId: number } }) => {
       this.record("tabs.group", p);
@@ -211,6 +228,20 @@ export class FakeChrome implements ChromeApi {
       this.record("debugger.sendCommand", target, method, params);
       if (target.tabId === undefined || !this.attachedDebuggers.has(target.tabId)) throw new Error(`Debugger is not attached to the tab with id: ${target.tabId}.`);
       if (method === "Page.enable" && target.sessionId === undefined) this.pageEnabled.add(target.tabId);
+      if (method === "Page.navigate" && target.sessionId === undefined) {
+        // Leaving the page by a navigation: its prompt (if any) comes over CDP, in the background; nothing is activated.
+        const tab = this.tabOr(target.tabId);
+        const url = String(params?.url ?? "");
+        const go = () => { tab.url = url; tab.status = "complete"; this.beforeunload.delete(target.tabId!); };
+        if (this.beforeunload.has(target.tabId) && this.pageEnabled.has(target.tabId)) {
+          return new Promise((resolve) => {
+            this.pendingDialogs.set(target.tabId!, () => { go(); resolve({ frameId: "F", loaderId: "L" }); });
+            this.emitCdp(target.tabId!, "Page.javascriptDialogOpening", { url: tab.url, message: "", type: "beforeunload", hasBrowserHandler: true });
+          });
+        }
+        go();
+        return { frameId: "F", loaderId: "L" };
+      }
       if (method === "Page.handleJavaScriptDialog") {
         const pending = this.pendingDialogs.get(target.tabId);
         if (pending !== undefined && params?.accept === true) {

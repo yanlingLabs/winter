@@ -169,22 +169,45 @@ describe("tabs.list, tabs.close, tabs.keep", () => {
     expect(await code(c.handle("tabs.close", { tabKey: "not-a-number" }))).toBe("tab_gone");
   });
 
-  test("a page that asks \"leave this page?\" is closed through the debugger: the prompt accepted, no native dialog left", async () => {
+  test("a page that asks \"leave this page?\" is discarded, then removed: no prompt, no native dialog, nothing brought forward", async () => {
+    const before = chrome.activeTabs();
+    const mine = await open();
+    chrome.beforeunload.add(Number(mine.tabKey));
+    await c.handle("tabs.close", { tabKey: mine.tabKey });
+    expect(chrome.tabs_.has(Number(mine.tabKey))).toBe(false);
+    const order = chrome.calls.filter((x) => ["tabs.discard", "tabs.remove"].includes(x.api)).map((x) => x.api);
+    expect(order).toEqual(["tabs.discard", "tabs.remove"]);
+    // Attached (and driven) at the time: let go of first, then the same.
+    const other = await open();
+    await c.handle("debugger.attach", { tabKey: other.tabKey });
+    await c.handle("overlay", { tabKey: other.tabKey, active: true });
+    chrome.beforeunload.add(Number(other.tabKey));
+    await c.handle("tabs.close", { tabKey: other.tabKey });
+    expect(chrome.tabs_.has(Number(other.tabKey))).toBe(false);
+    expect(chrome.nativeDialogs).toEqual([]);
+    expect(chrome.activatedForPrompt).toEqual([]);
+    expect(chrome.activeTabs()).toEqual(before);
+    expect(c.attachedTabs()).toEqual([]);
+    expect(driven.at(-1)).toBe(0);
+    expect(notes.filter((n) => n.method === "tab.gone").map((n) => n.params.tabKey)).toEqual([mine.tabKey, other.tabKey]);
+  });
+
+  test("a tab the browser will not discard falls back to the debugger: its prompt accepted over CDP, never left as a native dialog", async () => {
+    chrome.discardFails = true;
     const mine = await open();
     chrome.beforeunload.add(Number(mine.tabKey));
     await c.handle("tabs.close", { tabKey: mine.tabKey }); // not attached: the close attaches for itself
     expect(chrome.tabs_.has(Number(mine.tabKey))).toBe(false);
     expect(chrome.nativeDialogs).toEqual([]);
     expect(chrome.calls.some((x) => x.api === "debugger.sendCommand" && x.args[1] === "Page.handleJavaScriptDialog" && (x.args[2] as { accept: boolean }).accept)).toBe(true);
-    // Attached (and driven) at the time: the same.
-    const other = await open();
-    await c.handle("debugger.attach", { tabKey: other.tabKey });
-    chrome.beforeunload.add(Number(other.tabKey));
-    await c.handle("tabs.close", { tabKey: other.tabKey });
-    expect(chrome.tabs_.has(Number(other.tabKey))).toBe(false);
+    // An agent tab the user is looking at (active: not discardable) closes the same way — it is already in front.
+    chrome.discardFails = false;
+    const looked = await open();
+    for (const t of chrome.tabs_.values()) t.active = t.id === Number(looked.tabKey);
+    chrome.beforeunload.add(Number(looked.tabKey));
+    await c.handle("tabs.close", { tabKey: looked.tabKey });
+    expect(chrome.tabs_.has(Number(looked.tabKey))).toBe(false);
     expect(chrome.nativeDialogs).toEqual([]);
-    expect(c.attachedTabs()).toEqual([]);
-    expect(notes.filter((n) => n.method === "tab.gone").map((n) => n.params.tabKey)).toEqual([mine.tabKey, other.tabKey]);
   });
 
   test("a beforeunload prompt is accepted only while Winter closes ITS tab — never on a user's tab, never outside a close", async () => {

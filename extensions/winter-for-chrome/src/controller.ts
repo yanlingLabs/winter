@@ -8,9 +8,13 @@
 //  - The debugger is attached only while the daemon has the tab bound — and is detached after 5 minutes without a
 //    command, whenever the link to Winter drops, and (for any left from a previous run of the service worker) at start.
 //  - It closes only Winter's own tabs (an agent tab, by tab id — pinned or moved, until `keep()`), and only when the
-//    daemon says so: it never decides by itself that a tab should close. A close keeps the debugger attached with Page
-//    events on and accepts the page's own "leave this page?" (beforeunload) prompt for that agent tab, so no native
-//    dialog is ever left in the user's browser; it ungroups the tab first, so a group's last tab leaves no group behind.
+//    daemon says so: it never decides by itself that a tab should close. A page's "leave this page?" (beforeunload)
+//    prompt must neither be left as a native dialog nor bring anything forward — and the browser brings a tab forward to
+//    show that prompt whatever raises it (a close or a navigation; measured), then activates a neighbour once the tab is
+//    gone. So a close first DISCARDS the tab (its page unloads without beforeunload) and then removes it. Only when the
+//    browser will not discard it (the active tab: already in front) does it fall back to holding the debugger with Page
+//    events on and accepting that agent tab's own prompt. It ungroups the tab first, so a group's last tab leaves no
+//    group behind.
 //  - Stop is the toolbar button: while any tab is driven, a click on it stops Winter there.
 import type { ChromeApi, ChromeTab, Clock, DebuggerTarget } from "./chrome-api";
 import { realClock } from "./chrome-api";
@@ -270,40 +274,65 @@ export class ExtensionController {
   private async closeTab(tabId: number): Promise<void> {
     const tab = await this.getTab(tabId);
     if (this.book.sessionOfTab(tabId) === undefined) throw new ExtensionError("not_allowed", "Winter closes only the tabs it opened");
-    // Hold the debugger through the close with Page events on, so the page's "leave this page?" prompt comes to the
-    // extension (and is accepted, below) instead of opening as a native dialog in the user's browser. A page the
-    // debugger may not attach to has no such prompt for Winter to answer: it is simply removed.
-    if (!this.attached.has(tabId) && attachRefusal(tab.url ?? tab.pendingUrl, this.chrome.runtimeId) === undefined) {
-      try {
-        await this.chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
-        this.attached.set(tabId, { tabId, guard: new TabGuard(), subscribed: new Set(), overlay: false });
-        await this.saveAttached();
-      } catch { /* another debugger, or the tab is going: removed below all the same */ }
-    }
-    this.closing.add(tabId);
-    const a = this.attached.get(tabId);
-    if (a !== undefined) {
-      if (a.idle !== undefined) this.clock.clearTimeout(a.idle);
-      try { await this.chrome.debugger.sendCommand({ tabId }, "Page.enable", {}); } catch { /* best effort */ }
-    }
     // Out of its group first: closing a group's last tab would otherwise leave the browser holding the group (a saved
     // group, in browsers that save them); ungrouping the last tab removes the group with it.
     if (tab.groupId >= 0) {
       try { await this.chrome.tabs.ungroup([tabId]); } catch { /* the tab is closing anyway */ }
     }
+    // Discard first: the page unloads with no beforeunload, so nothing can ask, and nothing comes forward.
+    let closeId = tabId;
+    let discarded = false;
+    if (!tab.active) {
+      await this.detach(tabId);
+      try {
+        const d = await this.chrome.tabs.discard(tabId);
+        if (d?.id !== undefined) {
+          discarded = true;
+          if (d.id !== tabId) {
+            // An older browser hands a discarded tab a new id: it is still the same agent tab.
+            const sessionId = this.book.sessionOfTab(tabId);
+            await this.book.dropTab(tabId);
+            if (sessionId !== undefined) await this.book.addTab(d.id, sessionId);
+            closeId = d.id;
+          }
+        }
+      } catch { /* not discardable: the debugger path below */ }
+    }
+    this.closing.add(closeId);
+    if (!discarded) await this.holdForPrompt(closeId, tab);
     const removed = new Promise<boolean>((resolve) => {
-      const timer = this.clock.setTimeout(() => { this.removedWaiters.delete(tabId); resolve(false); }, this.opts.closeTimeoutMs ?? CLOSE_TIMEOUT_MS);
-      this.removedWaiters.set(tabId, () => { this.clock.clearTimeout(timer); resolve(true); });
+      const timer = this.clock.setTimeout(() => { this.removedWaiters.delete(closeId); resolve(false); }, this.opts.closeTimeoutMs ?? CLOSE_TIMEOUT_MS);
+      this.removedWaiters.set(closeId, () => { this.clock.clearTimeout(timer); resolve(true); });
     });
     // `tabs.remove` answers only once the page let itself be closed; the tab's removal (onRemoved) is what counts.
-    this.chrome.tabs.remove(tabId).catch(() => undefined);
+    this.chrome.tabs.remove(closeId).catch(() => undefined);
     const gone = await removed;
-    this.closing.delete(tabId);
+    this.closing.delete(closeId);
     if (!gone) {
       // Still there: say so, and leave nothing of Winter's on it (the debugger was only held for the close).
-      await this.detach(tabId);
+      await this.detach(closeId);
       throw new ExtensionError("timeout", "the tab did not close (the page kept it open)");
     }
+  }
+
+  /** The fallback close: the debugger held through it with Page events on, so the page's prompt — if it raises one —
+   *  comes to the extension and is accepted (`onDebuggerEvent`), never left as a native dialog. */
+  private async holdForPrompt(tabId: number, tab: ChromeTab): Promise<void> {
+    if (!this.attached.has(tabId) && attachRefusal(tab.url ?? tab.pendingUrl, this.chrome.runtimeId) === undefined) {
+      try {
+        await this.chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
+        this.attached.set(tabId, { tabId, guard: new TabGuard(), subscribed: new Set(), overlay: false });
+        await this.saveAttached();
+      } catch { /* another debugger, or the tab is going: removed all the same */ }
+    }
+    const a = this.attached.get(tabId);
+    if (a === undefined) return;
+    if (a.idle !== undefined) this.clock.clearTimeout(a.idle);
+    if (a.overlay) {
+      a.overlay = false;
+      this.drivenChanged();
+    }
+    try { await this.chrome.debugger.sendCommand({ tabId }, "Page.enable", {}); } catch { /* best effort */ }
   }
 
   /** `keep()`: the tab is the user's for good — out of the agent tabs, out of its Winter group, never closed by Winter. */
