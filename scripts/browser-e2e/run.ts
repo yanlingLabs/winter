@@ -390,6 +390,18 @@ await check("editing keys carry their macOS commands: cmd+z undoes typing, cmd+s
   await failsWith(P("key", { combo: "cmd+v", into: notes }), "Refused");
 });
 
+await check("with nothing editable focused, a key carrying a command keeps its default: the page hears it and it scrolls", async () => {
+  const s = await P("state", { full: true, emit: false }) as string;
+  // A press on plain text moves the focus off the Notes field (to the page).
+  await P("click", { target: refOf(s, /text "(Press this text|div pressed)"/) });
+  expect(!(await P("text", { emit: false }) as string).includes("scrolled down"), "the page has not scrolled yet");
+  await P("key", { combo: "down" });
+  await P("waitFor", { cond: { text: "key ArrowDown" }, timeoutMs: 3_000 });
+  await P("waitFor", { cond: { text: "scrolled down" }, timeoutMs: 3_000 });
+  await P("key", { combo: "backspace" });
+  await P("waitFor", { cond: { text: "key Backspace" }, timeoutMs: 3_000 });
+});
+
 await check("the engine never sent a method outside the allowlist, and the transport refused nothing", async () => {
   expect(transport.sent.every((m) => CDP_ALLOWED_METHODS.includes(m)), "all methods allowlisted");
   expect(transport.refused.length === 0, "nothing refused", transport.refused.join("\n"));

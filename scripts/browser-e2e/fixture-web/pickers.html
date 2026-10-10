@@ -20,12 +20,17 @@
   <p id="menu-target">Right-click here</p>
   <p id="menu-result">no menu yet</p>
   <label>Notes <input id="notes" type="text" value=""></label>
+  <p id="keylog">no key yet</p>
+  <p id="scrolled">not scrolled</p>
+  <div style="height: 3000px"></div>
 </main>
 <script>
 const log = (s) => { document.getElementById("events").textContent = s; };
 for (const id of ["country", "toppings", "arrival", "colour"]) {
   document.getElementById(id).addEventListener("change", (e) => log(id + " changed to " + (e.target.multiple ? [...e.target.selectedOptions].map((o) => o.text).join("+") : e.target.value)));
 }
+document.addEventListener("keydown", (e) => { document.getElementById("keylog").textContent = "key " + e.key; });
+addEventListener("scroll", () => { document.getElementById("scrolled").textContent = scrollY > 0 ? "scrolled down" : "at the top"; });
 // Whether the browser's own context menu would have opened: read after the event has gone through every listener.
 document.addEventListener("contextmenu", (e) => setTimeout(() => { document.getElementById("menu-result").textContent = "menu prevented: " + e.defaultPrevented; }, 0));
 </script>

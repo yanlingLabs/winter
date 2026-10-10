@@ -294,23 +294,25 @@ describe("M4: holds", () => {
     expect(h.winter.tabs.get("w1")!.attached).toBe(true);
   });
 
-  test(`past ${HOLDS_GLOBAL} in all, another session's least recently used idle tab is let go — never one another run is using`, async () => {
+  test(`past ${HOLDS_GLOBAL} in all, the least recently used IDLE tab is let go — never one another run is using, however old`, async () => {
     const h = harness();
-    for (const sid of ["a", "b"]) {
-      const r = h.run(sid);
-      for (let i = 0; i < HOLDS_PER_SESSION; i++) await h.engine.global(r.scope, "browsers.open", { url: `https://${sid}${i}.example/` });
-      if (sid === "b") {
-        // b's run is still going and holds its tabs' locks: none of them may be taken from it.
-        const c = h.run("c");
-        await h.engine.global(c.scope, "browsers.open", { url: "https://c0.example/" });
-        await tick(10);
-        const first = [...h.winter.tabs.values()];
-        expect(first[0]!.attached).toBe(false); // a's oldest (a's run ended: idle)
-        expect(first.slice(HOLDS_PER_SESSION).every((t) => t.attached)).toBe(true);
-        return;
-      }
-      r.end();
-    }
+    // b opens first (its tabs are the oldest) and its run is still going: it holds their locks.
+    const rb = h.run("b");
+    for (let i = 0; i < HOLDS_PER_SESSION; i++) await h.engine.global(rb.scope, "browsers.open", { url: `https://b${i}.example/` });
+    // a opens next; its run ends, so its tabs are idle.
+    const ra = h.run("a");
+    for (let i = 0; i < HOLDS_PER_SESSION; i++) await h.engine.global(ra.scope, "browsers.open", { url: `https://a${i}.example/` });
+    ra.end();
+    const tabs = [...h.winter.tabs.values()];
+    expect(tabs.every((t) => t.attached)).toBe(true);
+    const c = h.run("c");
+    await h.engine.global(c.scope, "browsers.open", { url: "https://c0.example/" });
+    await tick(10);
+    // b's tabs are older but locked by its running script: a's oldest goes instead.
+    expect(tabs.slice(0, HOLDS_PER_SESSION).every((t) => t.attached)).toBe(true);
+    expect(tabs[HOLDS_PER_SESSION]!.attached).toBe(false);
+    expect(tabs.slice(HOLDS_PER_SESSION + 1).every((t) => t.attached)).toBe(true);
+    expect(c.text()).toContain(`(the least recently used of more than ${HOLDS_GLOBAL} in all held tabs)`);
   });
 });
 
