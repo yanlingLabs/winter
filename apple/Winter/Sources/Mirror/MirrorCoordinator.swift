@@ -3,6 +3,7 @@ import CoreGraphics
 import Foundation
 import WinterCUPresentation
 import WinterKit
+import WinterSessionKit
 
 // -----------------------------------------------------------------------------------------------
 // The live mirror's brain: which sessions Winter.app watches through the helper, what each session's
@@ -323,30 +324,51 @@ final class MirrorCoordinator: ObservableObject {
     private let sleep: @Sendable (Duration) async -> Void
     private let log: (String) -> Void
     private let focus: MirrorFocus
-    /// ComputerV2 Phase 1b: the phone mirror's source. Every session's sink is teed to it, so a paired phone can be
-    /// shown exactly what this coordinator's mirror shows — and NOTHING here changes for it: a phone watching never
-    /// adds a session to `desiredSessions`, never turns `wantsFrames` on, never connects the helper. `nil` in tests
-    /// that do not exercise the phone, and under the unit-test host.
+    /// ComputerV2 Phase 1b: the phone mirror's source. Every session's sink is teed to it, so a paired phone is shown
+    /// exactly what this coordinator's mirror shows. `nil` in tests that do not exercise the phone, and under the
+    /// unit-test host.
     private let remote: RemoteMirrorHub?
+    /// ComputerV2 Phase 1b (controller ruling 2026-10-10): a PHONE WATCH IS A VIEWER IN ITS OWN RIGHT. While a paired
+    /// phone watches a session (`addRemoteViewer`), the session is subscribed with frames exactly as a visible window
+    /// would have it — whether or not any Winter window on the Mac shows it — through this same one helper connection.
+    /// Ref-counted beside the windows: a window closing never stops the phone's pictures, and a phone leaving never
+    /// stops a window's. Still never a launch of the helper, and still never anything that moves the user's view: the
+    /// helper's view capture only ever reads the bound window.
+    private var remoteViewers: [String: Int] = [:]
 
     private(set) var windows: [String: MirrorWindow] = [:]
     /// The windows that show the mirror right now — what the panels watch.
     @Published private(set) var eligibleWindowIds: Set<String> = []
     private var states: [String: MirrorSessionState] = [:]
 
-    /// The sessions subscribed on the helper right now, and whether each asked for frames. Every change of a
-    /// session's frames flag is told to the phone mirror's hub (pictures flow to a phone only while they flow here).
-    private var appliedFrames: [String: Bool] = [:] {
+    /// What a session's `view.subscribe` asks: frames or not, and — when only a phone wants the frames — the phone's
+    /// own caps, so the helper captures no more than the phone takes (`nil` is the helper's default, the Mac's panel).
+    struct Subscription: Equatable {
+        let frames: Bool
+        let maxFps: Int?
+        let maxWidth: Int?
+
+        static let none = Subscription(frames: false, maxFps: nil, maxWidth: nil)
+        static let mac = Subscription(frames: true, maxFps: nil, maxWidth: nil)
+        static let phone = Subscription(frames: true, maxFps: MirrorWire.activeFps, maxWidth: MirrorWire.maxLongEdge)
+    }
+
+    /// The sessions subscribed on the helper right now, and what each asked. Every change of a session's frames flag is
+    /// told to the phone mirror's hub (`live`).
+    private var appliedSubscriptions: [String: Subscription] = [:] {
         didSet {
             guard let remote else { return }
-            for id in Set(oldValue.keys).union(appliedFrames.keys) where (oldValue[id] == true) != (appliedFrames[id] == true) {
-                remote.framesChanged(id, live: appliedFrames[id] == true)
+            for id in Set(oldValue.keys).union(appliedSubscriptions.keys)
+                where (oldValue[id]?.frames == true) != (appliedSubscriptions[id]?.frames == true) {
+                remote.framesChanged(id, live: appliedSubscriptions[id]?.frames == true)
             }
         }
     }
-    var applied: Set<String> { Set(appliedFrames.keys) }
+    var applied: Set<String> { Set(appliedSubscriptions.keys) }
     /// Whether the session is subscribed WITH frames right now (tests).
-    func isReceivingFrames(sessionId: String) -> Bool { appliedFrames[sessionId] == true }
+    func isReceivingFrames(sessionId: String) -> Bool { appliedSubscriptions[sessionId]?.frames == true }
+    /// What the session is subscribed with right now (tests).
+    func appliedSubscription(sessionId: String) -> Subscription? { appliedSubscriptions[sessionId] }
     private var visibilityWatches: [String: AnyCancellable] = [:]
     private(set) var isConnected = false
     /// A protocol or home mismatch: retrying cannot fix it, so nothing retries until the wanted set empties.
@@ -374,6 +396,7 @@ final class MirrorCoordinator: ObservableObject {
         self.sleep = sleep
         self.log = log
         self.focus = MirrorFocus(clock: now)
+        remote?.coordinator = self
         eventsTask = Task { [weak self] in
             guard let events = self?.client.events else { return }
             for await event in events {
@@ -406,27 +429,65 @@ final class MirrorCoordinator: ObservableObject {
         if now != was {
             if now { eligibleWindowIds.insert(window.id) } else { eligibleWindowIds.remove(window.id) }
         }
+        refreshMacPictures()
         scheduleSync()
     }
 
     func removeWindow(id: String) {
         windows.removeValue(forKey: id)
         if eligibleWindowIds.contains(id) { eligibleWindowIds.remove(id) }
+        refreshMacPictures()
         scheduleSync()
+    }
+
+    // MARK: Phone viewers (ComputerV2 Phase 1b)
+
+    /// A paired phone started watching `sessionId` (`RemoteMirrorHub`). Each call is one viewer; pair it with
+    /// `removeRemoteViewer`.
+    func addRemoteViewer(_ sessionId: String) {
+        remoteViewers[sessionId, default: 0] += 1
+        scheduleSync()
+    }
+
+    /// A phone's watch of `sessionId` ended. The subscription it held closes once no window and no other phone wants it.
+    func removeRemoteViewer(_ sessionId: String) {
+        guard let count = remoteViewers[sessionId] else { return }
+        if count <= 1 { remoteViewers.removeValue(forKey: sessionId) } else { remoteViewers[sessionId] = count - 1 }
+        scheduleSync()
+    }
+
+    /// How many phones watch `sessionId` (tests).
+    func remoteViewerCount(_ sessionId: String) -> Int { remoteViewers[sessionId] ?? 0 }
+
+    /// Pictures reach a session's Mac panel model only while a visible eligible window shows the session: a session
+    /// subscribed only for a phone (or whose window is hidden) does not have every picture decoded for a panel nobody
+    /// sees. The panel gets the newest withheld picture the moment a window shows it again.
+    private func refreshMacPictures() {
+        for (id, state) in states {
+            (state.sink as? RemoteTeeSink)?.setPrimaryPictures(macWantsFrames(id))
+        }
     }
 
     func isEligible(windowId: String) -> Bool { eligibleWindowIds.contains(windowId) }
 
-    /// The sessions an eligible window is open on.
+    /// The sessions an eligible window is open on, and those a paired phone watches.
     var desiredSessions: Set<String> {
         MirrorRules.subscriptions(eligible: windows.values.filter { eligibleWindowIds.contains($0.id) })
+            .union(remoteViewers.keys)
     }
 
     /// A session's mirror state, made on first ask so a panel can watch it before anything is subscribed.
     func state(for sessionId: String) -> MirrorSessionState {
         if let existing = states[sessionId] { return existing }
         let own = makeSink(sessionId)
-        let sink: any MirrorSink = remote.map { RemoteTeeSink(primary: own, sessionId: sessionId, hub: $0) } ?? own
+        let sink: any MirrorSink
+        if let remote {
+            let tee = RemoteTeeSink(primary: own, sessionId: sessionId, hub: remote)
+            tee.setPrimaryPictures(macWantsFrames(sessionId))
+            sink = tee
+        } else {
+            sink = own
+        }
         let created = MirrorSessionState(sessionId: sessionId, sink: sink, focus: focus)
         states[sessionId] = created
         // The mirror coming up, going down or changing hands is what a window must re-read to know which session's
@@ -448,7 +509,7 @@ final class MirrorCoordinator: ObservableObject {
         case .cursor(let cursor): states[cursor.sessionId]?.cursor(cursor)
         case .connectionLost:
             isConnected = false
-            appliedFrames = [:]
+            appliedSubscriptions = [:]
             states.values.forEach { $0.reset() }
             if !desiredSessions.isEmpty { log("computer-use helper connection lost; will reconnect") }
             scheduleSync()
@@ -476,12 +537,12 @@ final class MirrorCoordinator: ObservableObject {
         if desired.isEmpty {
             isBlocked = false
             failureLogged = false
-            if isConnected || !appliedFrames.isEmpty {
+            if isConnected || !appliedSubscriptions.isEmpty {
                 // Say so before leaving: the helper stops capturing at the unsubscribe, not at some later close.
-                for sessionId in appliedFrames.keys { try? await client.unsubscribe(sessionId: sessionId) }
+                for sessionId in appliedSubscriptions.keys { try? await client.unsubscribe(sessionId: sessionId) }
                 await client.disconnect()
                 isConnected = false
-                appliedFrames = [:]
+                appliedSubscriptions = [:]
                 states.values.forEach { $0.reset() }
             }
             purgeUnusedStates()
@@ -493,19 +554,20 @@ final class MirrorCoordinator: ObservableObject {
         }
         for sessionId in applied.subtracting(desired) {
             try? await client.unsubscribe(sessionId: sessionId)
-            appliedFrames.removeValue(forKey: sessionId)
+            appliedSubscriptions.removeValue(forKey: sessionId)
             states[sessionId]?.reset()
         }
         for sessionId in desiredSessions {
-            // Frames while a window that can be seen watches the session, from this very first subscribe;
-            // without them (a minimized or covered window) the subscription still brings bound, released
-            // and cursor.
-            let frames = wantsFrames(sessionId)
-            guard appliedFrames[sessionId] != frames else { continue }
+            // Frames while a window that can be seen watches the session, or a paired phone does, from this very
+            // first subscribe; without them (a minimized or covered window, no phone) the subscription still brings
+            // bound, released and cursor. A change of options (a phone-only session gaining or losing its window)
+            // is a repeat subscribe, which the helper applies in place.
+            let wanted = subscription(for: sessionId)
+            guard appliedSubscriptions[sessionId] != wanted else { continue }
             do {
-                let targets = try await client.subscribe(sessionId: sessionId, frames: frames, maxFps: nil, maxWidth: nil)
-                let first = appliedFrames[sessionId] == nil
-                appliedFrames[sessionId] = frames
+                let targets = try await client.subscribe(sessionId: sessionId, frames: wanted.frames, maxFps: wanted.maxFps, maxWidth: wanted.maxWidth)
+                let first = appliedSubscriptions[sessionId] == nil
+                appliedSubscriptions[sessionId] = wanted
                 // A change of the frames flag re-sends the same bound targets; only the first is news.
                 if first { state(for: sessionId).seed(targets) }
             } catch {
@@ -513,7 +575,7 @@ final class MirrorCoordinator: ObservableObject {
                 // while it keeps failing, so a helper that refuses the same call forever is not hammered with
                 // connect → subscribe → disconnect cycles.
                 isConnected = false
-                appliedFrames = [:]
+                appliedSubscriptions = [:]
                 await client.disconnect()
                 await sleep(.seconds(failureDelay))
                 failureDelay = min(failureDelay * 2, 10)
@@ -555,9 +617,23 @@ final class MirrorCoordinator: ObservableObject {
     /// kept for every session a window watches, so a change of which one is on show never restarts a capture on
     /// the helper. A window that is minimized, ordered out or covered gets none.
     func wantsFrames(_ sessionId: String) -> Bool {
+        macWantsFrames(sessionId) || remoteViewers[sessionId] != nil
+    }
+
+    /// A visible eligible Winter window shows the session or the work of it.
+    func macWantsFrames(_ sessionId: String) -> Bool {
         windows.values.contains { window in
             eligibleWindowIds.contains(window.id) && window.isVisible && window.allSessionIds.contains(sessionId)
         }
+    }
+
+    /// What `sessionId`'s subscription should ask right now: the Mac's own options when a visible window wants
+    /// pictures (the phone's relay cuts them down for itself), the phone's caps when only a phone does, no frames when
+    /// neither does.
+    func subscription(for sessionId: String) -> Subscription {
+        if macWantsFrames(sessionId) { return .mac }
+        if remoteViewers[sessionId] != nil { return .phone }
+        return .none
     }
 
     /// The session whose mirror a window shows: among its own session and the ones it shows the work of,
@@ -575,7 +651,7 @@ final class MirrorCoordinator: ObservableObject {
     /// Drops the state of a session no window shows any more, so a long-lived app does not keep one per
     /// session it ever opened.
     private func purgeUnusedStates() {
-        let shown = Set(windows.values.flatMap(\.allSessionIds))
+        let shown = Set(windows.values.flatMap(\.allSessionIds)).union(remoteViewers.keys)
         for sessionId in states.keys where !shown.contains(sessionId) && !applied.contains(sessionId) {
             states[sessionId]?.reset()
             states.removeValue(forKey: sessionId)

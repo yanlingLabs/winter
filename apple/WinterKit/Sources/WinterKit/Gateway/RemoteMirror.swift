@@ -8,11 +8,12 @@ import WinterSessionKit
 // ComputerV2 Phase 1b — the phone mirror, Mac side.
 //
 // `RemoteMirrorSource` is what the Gateway relays from: Winter.app's own mirror (the app module's
-// `RemoteMirrorHub`, fed by the per-session mirror state its `MirrorCoordinator` already keeps). The source
-// only SHARES what that mirror receives — it never connects to the helper, never subscribes a session, never
-// asks for frames: with no Winter window on the Mac showing the session, the phone gets `clear`, and with one
-// that is hidden it gets the panel and the cursor but no pictures (`show(live: false)`). That is the
-// never-move-the-view rule applied to the phone: watching from the phone starts no capture the Mac would not run.
+// `RemoteMirrorHub`, fed by the per-session mirror state its `MirrorCoordinator` keeps). A watch is a VIEWER IN
+// ITS OWN RIGHT: while it lasts, the coordinator keeps the session subscribed with pictures over its one helper
+// connection — whether a Winter window on the Mac shows the session, hides it or is not open at all — ref-counted
+// beside the Mac's windows. The source never launches the helper, and the helper's view capture only reads the
+// bound window: nothing moves, activates or raises (the never-move-the-view rule). Its cost lasts only while a phone
+// watches.
 //
 // `RemoteMirrorRelay` is one phone's watch of one session: it takes the source's updates on any thread and sends
 // them to the phone at the phone's pace — one write in flight, only the newest picture waiting, pictures cut to
@@ -35,8 +36,8 @@ public struct RemoteMirrorWatch: Hashable, Sendable {
 /// Where the Gateway gets the mirror it relays to a phone.
 public protocol RemoteMirrorSource: AnyObject, Sendable {
     /// Starts relaying `sessionId`'s mirror to `deliver`: first the state on show now (`show` and the newest
-    /// picture, or `clear` when nothing is), then every change, until `unwatch`. Must never start a capture or a
-    /// helper connection of its own.
+    /// picture, or `clear` when nothing is), then every change, until `unwatch`. The watch counts as a viewer of the
+    /// session's mirror until then; it must never launch anything or move the user's view.
     func watch(sessionId: String, deliver: @escaping @Sendable (MirrorUpdate) -> Void) async -> RemoteMirrorWatch
     func unwatch(_ watch: RemoteMirrorWatch) async
 }

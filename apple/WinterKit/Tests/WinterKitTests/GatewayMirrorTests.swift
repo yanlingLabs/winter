@@ -207,6 +207,22 @@ final class GatewayMirrorTests: XCTestCase {
         XCTAssertTrue(mirrorUpdates(conn).isEmpty)
     }
 
+    /// The user turning `computerUse.mirror` (or computer use) off while a phone watches: the next renewal's gate says
+    /// so and the watch — with the Mac-side subscription it held — ends then.
+    func testTheSettingTurnedOffMidWatchEndsItAtTheNextRenewal() async throws {
+        let r = rig()
+        defer { r.run.cancel() }
+        let (conn, sent) = try await attachedPhone(r)
+        try await watch(r, conn, id: 1, daemonIndex: sent)
+        XCTAssertEqual(r.source.watches.count, 1)
+        try await watch(r, conn, id: 2, daemonIndex: sent + 1, mirror: false)
+        XCTAssertEqual(rpcResponses(conn).last?["result"]?["mirror"]?.boolValue, false)
+        let stopped = await until { r.source.unwatched.count == 1 }
+        XCTAssertTrue(stopped)
+        let mirrorWatch = await r.gateway.mirrorWatchForTesting("phone-m")
+        XCTAssertNil(mirrorWatch)
+    }
+
     func testAGatewayWithNoMirrorAnswersMirrorFalseAfterTheGate() async throws {
         let r = rig(mirrorSource: false)
         defer { r.run.cancel() }

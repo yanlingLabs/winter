@@ -9,9 +9,10 @@ import Foundation
 //   subscription) ──▶ RemoteMirrorHub ──▶ Gateway ──WireKind.mirror──▶ WinterSessionClient.mirror ──▶ phone
 //
 // The phone sees exactly what Winter.app's own mirror shows for the session: the same target on show, the
-// same pictures (downscaled for the transport), the same agent cursor. Nothing new is ever captured for it —
-// it rides the subscription a Winter window on the Mac already holds — and nothing of it enters the session
-// log, `session.history` or the remote event stream: a mirror update is its own wire kind with no `seq`.
+// same pictures (downscaled for the transport), the same agent cursor. A phone watch is a viewer in its own right:
+// while it lasts, Winter.app keeps the session's helper view subscription open with pictures — whether or not a
+// Winter window on the Mac shows the session — and nothing of it enters the session log, `session.history` or the
+// remote event stream: a mirror update is its own wire kind with no `seq`.
 //
 // The phone asks with `session.mirror {sessionId, watch: true}` (renewed every `renewEvery`; the Gateway
 // drops a watch not renewed within `lease`) and stops with `watch: false` — on leaving the session's screen
@@ -21,9 +22,8 @@ import Foundation
 /// One update of the phone mirror — the payload of a `WireKind.mirror` envelope.
 public enum MirrorUpdate: Sendable, Equatable {
     /// A target is on show: its app's name, its window's size in points, how many OTHER targets the session has
-    /// bound, and whether pictures are flowing on the Mac right now (`live`). `live: false` means the mirror is up
-    /// in a Winter window on the Mac but that window is hidden (minimized, covered, on another desktop), so no
-    /// pictures come until it shows again — the phone never makes the Mac capture anything by itself.
+    /// bound, and whether pictures are flowing on the Mac right now (`live`). While a phone watches they are; `false`
+    /// only while its subscription is being (re)made — the last picture stays, marked paused.
     case show(app: String, windowSize: CGSize, others: Int, live: Bool)
     /// Another target took over the panel: drop the picture and the cursor, keep the panel up.
     case reset

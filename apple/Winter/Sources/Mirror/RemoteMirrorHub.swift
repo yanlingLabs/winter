@@ -11,13 +11,18 @@ import WinterSessionKit
 //
 // The phone sees EXACTLY what Winter.app's mirror shows for a session — the same target on show (chosen by the
 // same `MirrorSessionState`), the same pictures, the same cursor — because it is fed by the very calls that draw
-// the Mac's panel. The hub never touches the helper: it does not connect, subscribe, or ask for frames, so the
-// phone watching a session starts no capture the Mac would not run (the never-move-the-view rule). A session no
-// Winter window shows has no mirror state at all, and the phone is told `clear`; a session whose window is hidden
-// keeps its panel and cursor but gets no pictures, and the phone is told `show(live: false)`.
+// the Mac's panel.
+//
+// A PHONE WATCH IS A VIEWER IN ITS OWN RIGHT (controller ruling 2026-10-10): while a phone watches, the hub registers
+// it with the coordinator (`addRemoteViewer`), which subscribes the session with frames over its one helper
+// connection exactly as a visible window would — so pictures flow whether the Mac's window on the session is visible,
+// hidden, on another Space or not open at all — and ref-counts it beside the windows. The hub never launches the
+// helper and asks for nothing but the helper's view of the bound window, which moves, activates or raises nothing:
+// the never-move-the-view rule holds. The capture's cost exists only while a phone (or a visible window) watches.
 //
 // The same exclusions hold by construction: the mirror only ever shows a target the helper bound, and binding
-// Winter itself, a denied app or an auth surface is refused before anything is bound.
+// Winter itself, a denied app or an auth surface is refused before anything is bound; with `computerUse.mirror` off
+// the helper captures nothing and the daemon refuses the phone's watch.
 // -----------------------------------------------------------------------------------------------
 
 /// What one session's mirror shows right now, kept so a phone that starts watching gets it at once.
@@ -34,8 +39,15 @@ private struct RemoteMirrorSnapshot {
 final class RemoteMirrorHub {
     private var snapshots: [String: RemoteMirrorSnapshot] = [:]
     private var watchers: [String: [UUID: @Sendable (MirrorUpdate) -> Void]] = [:]
+    /// The coordinator a phone watch is a viewer of — set by the coordinator itself when it is made with this hub.
+    weak var coordinator: MirrorCoordinator?
+    /// Makes the coordinator when a phone watches before any Winter window ever needed one (the app's lazy
+    /// `mirrorCoordinator`). `nil` in tests, which make their own.
+    var makeCoordinator: (@MainActor () -> MirrorCoordinator?)?
 
     init() {}
+
+    private var viewerHost: MirrorCoordinator? { coordinator ?? makeCoordinator?() }
 
     /// How many phones watch `sessionId` (tests).
     func watcherCount(sessionId: String) -> Int { watchers[sessionId]?.count ?? 0 }
@@ -113,6 +125,8 @@ final class RemoteMirrorHub {
 
     func addWatcher(_ watch: RemoteMirrorWatch, deliver: @escaping @Sendable (MirrorUpdate) -> Void) {
         watchers[watch.sessionId, default: [:]][watch.id] = deliver
+        // The phone is a viewer: its session is subscribed with pictures while it watches (see the file header).
+        viewerHost?.addRemoteViewer(watch.sessionId)
         // The state on show now: the panel and its newest picture, or nothing.
         if let snap = snapshots[watch.sessionId], let app = snap.app {
             deliver(.show(app: app, windowSize: snap.windowSize, others: snap.others, live: snap.live))
@@ -123,6 +137,8 @@ final class RemoteMirrorHub {
     }
 
     func removeWatcher(_ watch: RemoteMirrorWatch) {
+        guard watchers[watch.sessionId]?[watch.id] != nil else { return }
+        viewerHost?.removeRemoteViewer(watch.sessionId)
         watchers[watch.sessionId]?.removeValue(forKey: watch.id)
         if watchers[watch.sessionId]?.isEmpty == true { watchers.removeValue(forKey: watch.sessionId) }
         dropIfUnused(watch.sessionId)
@@ -153,11 +169,28 @@ extension RemoteMirrorHub: RemoteMirrorSource {
 
 /// The Mac's own mirror sink, with every call also told to the hub — so the phone is fed by the very calls that draw
 /// the Mac's panel.
+///
+/// Pictures reach the Mac's panel model only while it can be seen (`setPrimaryPictures`, from the coordinator: a
+/// visible eligible window shows the session): a session subscribed only for a phone, or whose window is hidden, does
+/// not have every picture decoded for a panel nobody sees. The newest picture held back is handed over the moment the
+/// panel can be seen again, so it never comes up grey. Everything else (the panel, the cursor, a clear) always passes.
 @MainActor
 final class RemoteTeeSink: MirrorSink {
     let primary: any MirrorSink
     let sessionId: String
     let hub: RemoteMirrorHub
+    private(set) var primaryPictures = true
+    private var withheld: (jpeg: Data, width: Int, height: Int, windowSize: CGSize)?
+
+    /// Whether pictures reach the Mac's panel model now. Turning it on hands over the newest picture held back.
+    func setPrimaryPictures(_ on: Bool) {
+        guard on != primaryPictures else { return }
+        primaryPictures = on
+        if on, let frame = withheld {
+            withheld = nil
+            primary.apply(frame: frame.jpeg, width: frame.width, height: frame.height, windowSize: frame.windowSize)
+        }
+    }
 
     init(primary: any MirrorSink, sessionId: String, hub: RemoteMirrorHub) {
         self.primary = primary
@@ -171,7 +204,11 @@ final class RemoteTeeSink: MirrorSink {
     }
 
     func apply(frame jpeg: Data, width: Int, height: Int, windowSize: CGSize) {
-        primary.apply(frame: jpeg, width: width, height: height, windowSize: windowSize)
+        if primaryPictures {
+            primary.apply(frame: jpeg, width: width, height: height, windowSize: windowSize)
+        } else {
+            withheld = (jpeg, width, height, windowSize)
+        }
         hub.apply(sessionId, frame: jpeg, width: width, height: height, windowSize: windowSize)
     }
 
@@ -186,11 +223,13 @@ final class RemoteTeeSink: MirrorSink {
     }
 
     func resetPicture() {
+        withheld = nil
         primary.resetPicture()
         hub.resetPicture(sessionId)
     }
 
     func clear() {
+        withheld = nil
         primary.clear()
         hub.clear(sessionId)
     }

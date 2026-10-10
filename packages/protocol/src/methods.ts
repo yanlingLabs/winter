@@ -589,8 +589,9 @@ export const SessionInterruptResult = z.object({ ok: z.literal(true), wasRunning
 
 /** ComputerV2 Phase 1b (the phone mirror): the paired phone asks to watch, or stops watching, the live mirror of
  *  the session it is attached to. The daemon is only the GATE — the frames never pass through it, nor through the
- *  session log, history or the remote event stream: Winter.app's Gateway relays the mirror Winter.app already shows
- *  (its own helper view subscription, never a new capture) straight to the phone over its own wire kind. A
+ *  session log, history or the remote event stream: Winter.app's Gateway relays Winter.app's own mirror of the
+ *  session (its one helper view subscription, which the watch holds open with pictures while it lasts — a viewer in
+ *  its own right, ref-counted beside the Mac's windows) straight to the phone over its own wire kind. A
  *  `watch: true` needs the caller attached to `sessionId` (the remote mode gate applies too); `mirror` reports
  *  whether the user's settings allow the mirror at all (`computerUse.enabled` and `computerUse.mirror`), so a
  *  phone can stop asking. `watch: false` is always answered `mirror: false`. */

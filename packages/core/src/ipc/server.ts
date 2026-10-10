@@ -2381,9 +2381,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         return { ok: true, ...opts.engine.interrupt(p.sessionId) };
       }
       case METHODS.sessionMirror: {
-        // ComputerV2 Phase 1b: the GATE for the phone mirror. Frames never come here — the Gateway relays what
-        // Winter.app's own mirror already receives — so this answers only "may this caller watch this session's
-        // mirror, and is the mirror on at all". `watch: false` is never refused: stopping must always work.
+        // ComputerV2 Phase 1b: the GATE for the phone mirror. Frames never come here — the Gateway relays Winter.app's
+        // own mirror of the session (its helper view subscription, which the watch holds open with pictures) — so
+        // this answers only "may this caller watch this session's mirror, and is the mirror on at all". The phone
+        // renews its watch through here every 10 s, so turning the setting off ends a running watch at the next
+        // renewal. `watch: false` is never refused: stopping must always work.
         const p = parseParams(SessionMirrorParams, params);
         if (!p.watch) return { ok: true, mirror: false };
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);

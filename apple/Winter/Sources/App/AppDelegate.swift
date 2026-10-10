@@ -104,9 +104,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                  remote: remoteMirrorHub)
     }()
     /// ComputerV2 Phase 1b: the phone mirror's source — every session's mirror sink is teed to it, and the paired
-    /// phone's Gateway relays from it (`RemoteAccessCoordinator`). It holds no connection and starts nothing: it
-    /// only shares what `mirrorCoordinator` already shows. Nil under the unit-test host, like the coordinator.
-    private(set) lazy var remoteMirrorHub: RemoteMirrorHub? = Self.isRunningUnitTests ? nil : RemoteMirrorHub()
+    /// phone's Gateway relays from it (`RemoteAccessCoordinator`). A phone watch is a viewer of `mirrorCoordinator`
+    /// (made on the phone's first watch if no window needed it yet), which subscribes the session with pictures while
+    /// the phone watches. Nil under the unit-test host, like the coordinator.
+    private(set) lazy var remoteMirrorHub: RemoteMirrorHub? = {
+        guard !Self.isRunningUnitTests else { return nil }
+        let hub = RemoteMirrorHub()
+        hub.makeCoordinator = { [weak self] in self?.mirrorCoordinator }
+        return hub
+    }()
     /// browser-runtime T5: the browser lifecycle's assembly point (`BrowserSignals.swift`) —
     /// constructed once, beside the shell's own `ShellSessionHost`, and held for the app's life
     /// because it owns the Combine subscriptions that provoke a re-plan. `nil` until the shell is
