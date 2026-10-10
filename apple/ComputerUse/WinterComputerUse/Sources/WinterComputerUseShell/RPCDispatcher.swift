@@ -29,7 +29,8 @@ public final class RPCDispatcher: @unchecked Sendable {
 
     /// `liveTest`: the helper is a live-test instance (`HelperIdentity.liveTest` — a dev helper serving a
     /// `winter-cu-live-` temp home, which accepts only the live suite's test identities). Only then does it answer the
-    /// TEST-ONLY `test.activate` the suite uses to put its own "user's app" in front (`activator`).
+    /// TEST-ONLY `test.activate` the suite uses to put its own "user's app" in front (`activator`), and `test.automation`
+    /// (whether an app may already be scripted, never asking).
     public init(core: CoreService, coordinator: HelperCoordinator, viewHub: ViewHub, inFlight: InFlightRegistry,
                 liveTest: Bool = false, activator: (@Sendable (Int32) async -> TestActivateResult)? = nil,
                 capturer: TestCapturing? = nil) {
@@ -43,6 +44,11 @@ public final class RPCDispatcher: @unchecked Sendable {
             routes["test.activate"] = { params, _ in
                 let p = try RPCDispatcher.decode(TestActivateParams.self, params)
                 return AnyEncodable(await activate(p.pid))
+            }
+            // May this helper already script an app (never asking)? The suite runs an AppleScript-backed scenario only
+            // on `granted`, so a test never raises macOS's Automation question.
+            routes["test.automation"] = { params, _ in
+                AnyEncodable(CUAutomationProbe.status(try RPCDispatcher.decode(TestAutomationParams.self, params)))
             }
             // The freshness measurement's captures (TestCapture.swift): a still through the helper's own off-Space
             // path, or the latest frame of a desktop-independent test stream.
@@ -115,6 +121,7 @@ public final class RPCDispatcher: @unchecked Sendable {
         engine("target.waitFor") { try await $0.targetWaitFor($1 as TargetWaitForParams) }
         engine("target.applescript") { try await $0.targetAppleScript($1 as TargetAppleScriptParams) }
         engine("target.scriptingDictionary") { try await $0.targetScriptingDictionary($1 as TargetScriptingDictionaryParams) }
+        engine("target.scriptingCommands") { try await $0.targetScriptingCommands($1 as TargetScriptingCommandsParams) }
         engine("screen.screenshot") { try await $0.screenScreenshot($1 as ScreenScreenshotParams) }
         engine("screen.appAt") { try await $0.screenAppAt($1 as ScreenAppAtParams) }
         engine("visit.close") { try await $0.visitClose($1 as VisitCloseParams) }

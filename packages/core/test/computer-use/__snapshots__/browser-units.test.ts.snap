@@ -16,6 +16,7 @@ exports[`the tool description snapshots, with and without vision 1`] = `
 - Some windows have no accessibility here — a game or Unity window, or a full-screen window on another Space that macOS never exposed: the bind says "capture only" and \`state()\` lists no elements. Use \`screenshot()\` and point clicks (\`click([x, y])\`), type and keys still reach the window; or ask the user to show the window once on its desktop, after which it can be read. In a background web field, ⌘Z/⇧⌘Z may need the app in front (\`NeedsForeground\`).
 - Menu commands and shortcuts act on the app's active window, which may not be the bound one while the app is in the background. When an action opens a new window, \`state()\` names it — call \`useWindow(id)\` to work in it. \`find()\` and \`state()\` mark elements that are \`disabled\`; pressing one does nothing. A menu command the app keeps disabled in the background (Finder's Move to Trash) needs a route that checks the item itself: its context menu (\`action(ref, "showMenu")\` on the selected item, then click the item in the menu \`state()\` lists first), the window's toolbar or Action menu, or its shortcut with \`key()\`. Only if those are disabled too, call \`menu()\` again — it asks the user to let the app come forward for that one command.
 - \`applescript()\` scripts the bound app through its own dictionary (Finder, Safari, Mail, Notes, Music…) — for what the UI only does with the app in front, or reads the UI hides (Safari's current URL). Look it up with \`scriptingDictionary({ search })\`, and name the app as \`application "<its name>"\`. It reaches only the bound app and never brings it forward: no \`activate\`, shell, dialogs, files, other apps or JavaScript. macOS asks the user once per app. The UI stays the first route.
+- Binding an app may print functions made for it — \`.extras.<name>(…)\`, each marked view, click or full like the app's own settings — plus its scripting dictionary's commands as \`.dict.<name>(…)\` and a short guide. They are shown once per session (again after your context is summarized); \`app.help()\` prints them any time, \`app.help("dict")\` lists the dictionary commands.
 - \`browsers.open(url)\` opens a tab in Winter's built-in browser — the default: it needs no window, and suits local dev servers and general browsing. Pass \`{ browser: "chrome" }\` (or another id \`browsers.list()\` shows as connected) when the task needs the user's own browser: their sign-ins, or a tab they already have open. Use the browser the user names. Google sign-in does not work in the built-in browser.
 - Tabs you open are yours. Tabs you open in the user's own browser close when your turn ends unless you call keep() (give it to the user) or handoff() (keep it for your next turn). Tabs you bind with \`browsers.tab()\` are the user's: never close them; they are released at the end of the turn.
 - A tab's refs belong to its page: after a navigation to a new page every earlier ref is stale. A page dialog (alert, confirm, prompt) shows at the top of \`state()\` — click its OK or Cancel before anything else.
@@ -24,6 +25,7 @@ exports[`the tool description snapshots, with and without vision 1`] = `
 type Image = unknown;                    // opaque: pass it to show()
 type Ref = number;                       // element number from state()
 type Point = [x: number, y: number];     // pixels in this target's latest screenshot
+type Value = string | number | boolean | { file: string } | { ref: string } | Value[];   // an argument of an app's dict.* command
 interface Quiet { emit?: boolean }       // emit:false → return the value without printing it
 interface Waited { waitedMs: number }
 interface Element { ref: Ref; role: string; name?: string; value?: string; states?: string[] }  // states: "disabled", "selected", "checked", …
@@ -55,6 +57,9 @@ interface App extends Target {
   useWindow(w: string | number): Promise<void>;   // switch the bound window
   applescript(source: string, o?: Quiet & { timeoutMs?: number }): Promise<{ result: string | null }>; // this app only (above)
   scriptingDictionary(o?: Quiet & { search?: string }): Promise<{ scriptable: boolean; text?: string }>;
+  readonly extras: Record<string, (...args: Value[]) => Promise<unknown>>;                    // functions made for this app — its bind lists them
+  readonly dict: Record<string, (...args: Value[]) => Promise<{ result: string | null }>>;   // its scripting dictionary's commands, run like applescript()
+  help(topic?: string, o?: Quiet & { search?: string }): Promise<string>;   // this app's extras and guide again; "dict": its dictionary commands; a name: one extra
 }
 interface Tab extends Target {
   readonly id: string;                   // "winter:…", "chrome:…" — browsers.tab(id) binds it again
@@ -110,12 +115,14 @@ exports[`the tool description snapshots, with and without vision 2`] = `
 - Some windows have no accessibility here — a game or Unity window, or a full-screen window on another Space that macOS never exposed: the bind says "capture only" and \`state()\` lists no elements, so they can't be worked by ref; ask the user to show the window once on its desktop, after which it can be read. In a background web field, ⌘Z/⇧⌘Z may need the app in front (\`NeedsForeground\`).
 - Menu commands and shortcuts act on the app's active window, which may not be the bound one while the app is in the background. When an action opens a new window, \`state()\` names it — call \`useWindow(id)\` to work in it. \`find()\` and \`state()\` mark elements that are \`disabled\`; pressing one does nothing. A menu command the app keeps disabled in the background (Finder's Move to Trash) needs a route that checks the item itself: its context menu (\`action(ref, "showMenu")\` on the selected item, then click the item in the menu \`state()\` lists first), the window's toolbar or Action menu, or its shortcut with \`key()\`. Only if those are disabled too, call \`menu()\` again — it asks the user to let the app come forward for that one command.
 - \`applescript()\` scripts the bound app through its own dictionary (Finder, Safari, Mail, Notes, Music…) — for what the UI only does with the app in front, or reads the UI hides (Safari's current URL). Look it up with \`scriptingDictionary({ search })\`, and name the app as \`application "<its name>"\`. It reaches only the bound app and never brings it forward: no \`activate\`, shell, dialogs, files, other apps or JavaScript. macOS asks the user once per app. The UI stays the first route.
+- Binding an app may print functions made for it — \`.extras.<name>(…)\`, each marked view, click or full like the app's own settings — plus its scripting dictionary's commands as \`.dict.<name>(…)\` and a short guide. They are shown once per session (again after your context is summarized); \`app.help()\` prints them any time, \`app.help("dict")\` lists the dictionary commands.
 - \`browsers.open(url)\` opens a tab in Winter's built-in browser — the default: it needs no window, and suits local dev servers and general browsing. Pass \`{ browser: "chrome" }\` (or another id \`browsers.list()\` shows as connected) when the task needs the user's own browser: their sign-ins, or a tab they already have open. Use the browser the user names. Google sign-in does not work in the built-in browser.
 - Tabs you open are yours. Tabs you open in the user's own browser close when your turn ends unless you call keep() (give it to the user) or handoff() (keep it for your next turn). Tabs you bind with \`browsers.tab()\` are the user's: never close them; they are released at the end of the turn.
 - A tab's refs belong to its page: after a navigation to a new page every earlier ref is stale. A page dialog (alert, confirm, prompt) shows at the top of \`state()\` — click its OK or Cancel before anything else.
 
 \`\`\`ts
 type Ref = number;                       // element number from state()
+type Value = string | number | boolean | { file: string } | { ref: string } | Value[];   // an argument of an app's dict.* command
 interface Quiet { emit?: boolean }       // emit:false → return the value without printing it
 interface Waited { waitedMs: number }
 interface Element { ref: Ref; role: string; name?: string; value?: string; states?: string[] }  // states: "disabled", "selected", "checked", …
@@ -144,6 +151,9 @@ interface App extends Target {
   useWindow(w: string | number): Promise<void>;   // switch the bound window
   applescript(source: string, o?: Quiet & { timeoutMs?: number }): Promise<{ result: string | null }>; // this app only (above)
   scriptingDictionary(o?: Quiet & { search?: string }): Promise<{ scriptable: boolean; text?: string }>;
+  readonly extras: Record<string, (...args: Value[]) => Promise<unknown>>;                    // functions made for this app — its bind lists them
+  readonly dict: Record<string, (...args: Value[]) => Promise<{ result: string | null }>>;   // its scripting dictionary's commands, run like applescript()
+  help(topic?: string, o?: Quiet & { search?: string }): Promise<string>;   // this app's extras and guide again; "dict": its dictionary commands; a name: one extra
 }
 interface Tab extends Target {
   readonly id: string;                   // "winter:…", "chrome:…" — browsers.tab(id) binds it again

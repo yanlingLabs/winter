@@ -56,6 +56,7 @@ import {
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, withRealDir, type RealAppsRun } from "./real-apps";
+import { adapterScenarios, adaptersDryRun } from "./adapters";
 import { expectedCardSummary, HELPER_OWNER, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage, type ImageStats, type ProbeEvent, type PromptObservation, type Scenario } from "./scenarios";
 import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, offSpacePlan, offSpaceSkipReason, onDesktopPlan, visualSkipReason, parseApps, resolveApp, restorePlan, SCRIPTS, type GenericApp, type ResolveDeps } from "./generic";
 
@@ -385,6 +386,7 @@ async function dryRun(built: Built, o: Options): Promise<ScenarioResult[]> {
   selfTest("cu-live-viewprobe self-test", built.viewProbe, ["self-test"]);
   results.push(await plumbingCheck(built));
   results.push(await peerCheck(built, o));
+  results.push(...adaptersDryRun(built, { realApps: o.realApps }));
   // The START plan (read-only, no wait): what a live run would do from where the user is now.
   const reading = parseFrontReading(sh(built.tool, ["front"]).stdout);
   results.push(reading === undefined
@@ -899,7 +901,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
     // for working out what a scenario sees. Nothing else runs.
     const scenarios: Scenario[] = o.script !== undefined
       ? [{ name: `script ${o.script}`, group: "script", code: readFileSync(o.script, "utf8"), verify: (ctx) => [check("ran", !ctx.isError, ctx.output.slice(-300))] }]
-      : [...SCENARIOS, ...(o.realApps && realApps !== undefined ? REAL_APP_SCENARIOS.map((r) => withRealDir(r, realApps!.dir)) : [])].filter((s) => o.only === undefined || o.only.toLowerCase().split("|").some((part) => s.name.toLowerCase().includes(part)));
+      : [...SCENARIOS, ...adapterScenarios({ door: (m, p) => helperCall(built, socket, home, m, p), ...(o.realApps && realApps !== undefined ? { realDir: realApps.dir } : {}) }), ...(o.realApps && realApps !== undefined ? REAL_APP_SCENARIOS.map((r) => withRealDir(r, realApps!.dir)) : [])].filter((s) => o.only === undefined || o.only.toLowerCase().split("|").some((part) => s.name.toLowerCase().includes(part)));
     for (const s of scenarios) {
       const r = await runScenario(s);
       if (o.script !== undefined) log(`script output:\n${r.output}`);

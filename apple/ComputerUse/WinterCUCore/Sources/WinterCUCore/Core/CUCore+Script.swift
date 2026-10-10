@@ -17,7 +17,26 @@ extension CUCore {
     /// Runs a checked script (replaceable by tests: nothing there may run AppleScript).
     func runAppleScript(_ source: String, _ t: CUTarget, timeoutMs: Int) throws -> String? {
         if let o = appleScriptOverride { return try o(source, t) }
-        return try CUAppleScriptRunner.run(source, bound: boundApp(t), boundPid: t.pid, timeoutMs: timeoutMs)
+        return try CUAppleScriptRunner.run(source, bound: boundApp(t), boundPid: t.pid, timeoutMs: timeoutMs,
+                                           alsoRefused: javaScriptDoorRefusals(t))
+    }
+
+    /// The bound app's own JavaScript doors, from its (static) dictionary: refused for every script run against it,
+    /// whatever their event code — a browser this helper has no fixed entry for included.
+    func javaScriptDoorRefusals(_ t: CUTarget) -> [String: String] {
+        let model: CUScriptingDictionary.Model?
+        if let o = scriptingDictionaryOverride { model = o(t) } else {
+            model = NSRunningApplication(processIdentifier: t.pid)?.bundleURL.flatMap {
+                CUScriptingDictionary.isDynamic(appURL: $0) ? nil : CUScriptingDictionary.model(appURL: $0)
+            }
+        }
+        return model.map(CUScriptingDictionary.javaScriptDoorRefusals) ?? [:]
+    }
+
+    /// A bound app's bundle path and `CFBundleShortVersionString` (helper 1.8.0's `target.bind` `app.path`/`app.version`).
+    static func bundleFacts(_ running: NSRunningApplication?) -> (path: String?, version: String?) {
+        guard let url = running?.bundleURL else { return (nil, nil) }
+        return (url.path, Bundle(url: url)?.infoDictionary?["CFBundleShortVersionString"] as? String)
     }
 
     /// May the helper send Apple Events to the app, never asking (replaceable by tests): noErr granted,
@@ -95,6 +114,31 @@ extension CUCore {
         guard let model else { return TargetScriptingDictionaryResult(scriptable: false) }
         let (text, truncated) = CUScriptingDictionary.render(model, app: t.appName, search: p.search)
         return TargetScriptingDictionaryResult(scriptable: true, text: text, truncated: truncated)
+    }
+
+    /// `target.scriptingCommands`: the bound app's dictionary commands, structured (for the daemon's typed wrappers).
+    /// Read from the app's files and cached like `target.scriptingDictionary`; an app whose dictionary is DYNAMIC (it
+    /// must be asked for it) is left unread — reading it would send it an Apple Event, and this runs at every bind.
+    public func targetScriptingCommands(_ p: TargetScriptingCommandsParams) async throws -> TargetScriptingCommandsResult {
+        let t = try target(p.targetId)
+        try ensureAlive(t)
+        let url = NSRunningApplication(processIdentifier: t.pid)?.bundleURL
+        let bundleVersion = url.flatMap { Bundle(url: $0)?.infoDictionary?["CFBundleVersion"] as? String }
+        let model: CUScriptingDictionary.Model?
+        if let o = scriptingDictionaryOverride {
+            model = o(t)
+        } else if let url {
+            if CUScriptingDictionary.isDynamic(appURL: url) {
+                CULog.act.notice("scriptingCommands for \(t.appName, privacy: .public): a dynamic dictionary — not read")
+                return TargetScriptingCommandsResult(scriptable: true, bundleVersion: bundleVersion, commands: [])
+            }
+            model = CUScriptingDictionary.model(appURL: url)
+        } else {
+            model = nil
+        }
+        guard let model else { return TargetScriptingCommandsResult(scriptable: false, bundleVersion: bundleVersion) }
+        let (commands, truncated) = CUScriptingDictionary.commands(model, search: p.search)
+        return TargetScriptingCommandsResult(scriptable: true, bundleVersion: bundleVersion, commands: commands, truncated: truncated ? true : nil)
     }
 
     // MARK: menu commands through AppleScript

@@ -166,7 +166,7 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `target.bind` | `{sessionId, app, window?, mirror: bool, privatePath?: bool}` | `{targetId, app: {name, bundleId, pid}, window: {id, title, frame}, detail?}` |
+| `target.bind` | `{sessionId, app, window?, mirror: bool, privatePath?: bool}` | `{targetId, app: {name, bundleId, pid, path?, version?}, window: {id, title, frame}, detail?}` — `path` (the running bundle's path) and `version` (its `CFBundleShortVersionString`) since 1.8.0 |
 | `target.useWindow` | `{targetId, window}` | `{window: {id, title, frame}, detail?}` |
 | `target.windows` | `{targetId}` | `{windows: [{id, title, focused}]}` — windows on other Spaces or in full screen included, `focused: false` |
 | `target.release` | `{targetId}` | `{}` — idempotent |
@@ -339,11 +339,27 @@ disappear. At the timeout `waitFor` fails `wait_timeout` with `data: {seen, wait
 | --- | --- | --- |
 | `target.applescript` | `{targetId, source, language?, timeoutMs?, callId?}` | `{result: string \| null, detail?}` |
 | `target.scriptingDictionary` | `{targetId, search?}` | `{scriptable, text?, truncated?}` |
+| `target.scriptingCommands` (1.8.0) | `{targetId, search?}` | `{scriptable, bundleVersion?, commands: [{name, suite, eventCode, description?, direct?: {type, optional, description?}, params: [{name, type, optional, description?, enumerators?}], result?: {type}}], truncated?}` |
 
 `source` is 1…64,000 bytes and may address only the bound app; `language` may only be `"applescript"`
 (the default). `timeoutMs` defaults to 10,000 and is clamped to 500…120,000 (plus 60 s when macOS will ask
 the user for Automation consent). `result` is cut at 64,000 bytes. Refusals are `refused` with
 `reason: "applescript"` (the script names another app, uses JXA, …) or `"automation_denied"`.
+
+`target.scriptingCommands` is the same dictionary, structured, for a client's typed wrappers: the same parse and
+cache as `target.scriptingDictionary` (the app's sdef, read from its bundle — the app is never asked anything; an
+app whose `OSAScriptingDefinition` is `dynamic` is left unread and answers `scriptable: true` with no commands).
+`eventCode` is the command's 8-character Apple Event code (`aevtodoc`); `bundleVersion` the app's `CFBundleVersion`;
+`enumerators` lists an enumeration type's (non-hidden) enumerators. Left out: hidden commands, commands of a hidden
+suite, every command a script could not send anyway (the refused events below, by code or class) and every
+JavaScript door (a command whose name or a parameter's name says JavaScript). At most 300 commands (`truncated`), a
+description at most 200 characters; `search` matches a command's name, description or parameter names.
+
+Refused wherever a script sends them (§6): besides Standard Additions' doors, `activate`, `run`, `reopen`, `open
+location` and Safari's `do JavaScript` (`sfri/dojs`), the Chromium family's `execute … javascript` (`CrSu/ExJa`, read
+from Google Chrome's sdef; Chromium's own dictionary, which its forks ship) — and, per run, every JavaScript door the
+BOUND app's own dictionary declares, whatever its code. The source check also refuses, in any app, a string literal that
+begins with the `javascript:` scheme as a browser reads it (case aside, whitespace and control characters ignored).
 
 ### 4.8 Lifecycle and cancellation
 
@@ -506,7 +522,9 @@ Any error of a primitive that ran inside a desktop visit carries `data.inVisit: 
 Before an action reaches an app, and per character for text input, the engine refuses (`refused`, with the
 reasons above): typing into a secure field, acting in an authentication dialog, the Privacy & Security
 settings, any Winter window, saving to a protected location, typing with the focus unreadable while the window
-holds a password or payment field, and typing when the named field could not be focused.
+holds a password or payment field, and typing when the named field could not be focused. AppleScript never runs a
+page's JavaScript: Safari's `do JavaScript`, the Chromium family's `execute … javascript` and any JavaScript door the
+bound app's dictionary declares are refused, and so is any `javascript:` URL literal (§4.7).
 
 ## 7. Notifications
 
@@ -612,6 +630,7 @@ None of this exists in a dev or release binary; `scripts/release.ts` scans the s
 | `test.activate` | `{pid}` | `{frontmostSet, raised, frontmost}` — puts the suite's own "user's app" in front |
 | `test.capture` | `{windowId, source: "skylight"\|"stream", path, rect?: [x, y, w, h]}` | `{width, height, frameAgeMs?}` — writes one PNG (inside the instance's home only) of a window: the off-Space still path (`skylight`) or the latest frame of the test stream (`stream`); `rect` in the window's points |
 | `test.stream` | `{windowId, on, fps?}` | `{running}` — starts/stops a desktop-independent ScreenCaptureKit stream on that window (the freshness measurement) |
+| `test.automation` | `{pid?, bundleId?}` | `{status: "granted" \| "would_ask" \| "denied" \| "not_running" \| "unknown", code}` — may this helper already send the app Apple Events; asked with `AEDeterminePermissionToAutomateTarget(…, askUserIfNeeded: false)`, so it NEVER raises macOS's Automation question (the suite runs an AppleScript-backed scenario only on `granted`) |
 
 ## 10. Compatibility and versioning
 
@@ -660,4 +679,5 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.5.1 | No wire change: a press on web content that accessibility shows no effect of is followed by a click only when that is safe (pixels unchanged on screen, a readable state for a toggle, never off screen unless the app is learned, never a name that may act unseen); otherwise its `detail` says so. |
 | 1 | 1.6.0 | Additive: `target.foreground` (§4.5; the script's `requestForeground`); `refused` gains `focus_moved` (a `type` stopped when the focus left the field, `data.typed`/`data.total`); `screen.screenshot` results carry `detail` (Winter's own windows in the image); `target.find` results carry `page` and `note`; a snapshot header ends with `page N · state N` (and a cut-short read); `type` details begin `received: …` or `as a paste (…)`; a gone `within` ref says "the page changed" only when it did; off-screen window shots begin with a freshness label; `pageNow` ignores an in-page `#fragment` jump and comes without `focusNow`; a chord's menu item is pressed only when the bound window is main, and only in the focus blip while another window is key; `target.foreground` brings a window on another desktop forward only with `moveDesktop`; `menu` falls back to the page's own menu bar. The live-test-only `test.capture` route's path guard compares realpaths of the parent (no wire change). |
 | 1 | 1.7.0 | Additive — desktop visits (§4.10): `target.act` takes `desktopVisit` and `visitMaxMs`, `target.screenshot` takes `live`, `desktopVisit` and `visitMaxMs`, both results carry `inVisit`; ONE open visit per stretch of work (closed a grace after its last primitive, at the script's end, a cancel, Esc, the session's end, another desktop needed, the user's own move, or the cap), the user brought back by window id; the daemon-only `visit.close` (each closed visit's report once) and the `desktopVisited` notification; the error `needs_desktop_visit` (`why: act \| live`) — an act that would need the user moved to another desktop (rung 4 off this desktop even with `allowForeground` or a held app; `needs_foreground` / `window_elsewhere` off this desktop) now fails with it instead of moving them, and never while the session's visit is open; `refused` gains `front_unknown`; errors of primitives in a visit carry `data.inVisit`; `budget.maxBytes` (re-encode the same capture down a quality ladder); the daemon-only `prompt.desktopVisit` panel (§4.11, never captured; its countdown runs to the card's `expiresAt`); `target.foreground` never holds a window on another desktop and ignores `moveDesktop`; the off-desktop bind detail names the live screenshot and the visit instead of `requestForeground`. The daemon requires helper ≥ 1.7.0 (§10.1). |
+| 1 | 1.8.0 | Additive — app adapters: `target.scriptingCommands` (§4.7: the bound app's dictionary commands, structured, with event codes, enumerators and `bundleVersion`; hidden, refused and JavaScript commands left out; a dynamic dictionary left unread); `target.bind` results carry `app.path` and `app.version`; AppleScript refuses the Chromium family's `execute … javascript` (`CrSu/ExJa`) everywhere and, per run, every JavaScript door the bound app's dictionary declares, and its source check refuses any `javascript:` URL literal; the live-test-only `test.automation` (§9). The daemon still requires ≥ 1.7.0 and uses `scriptingCommands` only from a helper ≥ 1.8.0 (its version at `hello`). |
 | 1 | 1.9.0 | No wire change: the bundle carries `winter-browser-host` (`Contents/MacOS`), the native-messaging host behind Winter for Chrome — its own protocol is [`WinterBrowserHost/PROTOCOL.md`](WinterBrowserHost/PROTOCOL.md). |

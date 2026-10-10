@@ -284,8 +284,9 @@ public final class CUCore: @unchecked Sendable {
         // with no re-resolution, no new window and no move. Only a lost target is resolved again.
         if !launched, let existing = reusableTarget(sessionId: p.sessionId, pid: pid, selector: p.window) {
             CULog.bind.notice("bind \(appName, privacy: .public): reused \(existing.id, privacy: .public) (window \(existing.windowID, privacy: .public))")
+            let facts = Self.bundleFacts(app.running)
             return TargetBindResult(targetId: existing.id,
-                                    app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid),
+                                    app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid, path: facts.path, version: facts.version),
                                     window: CUWindowInfo(id: existing.windowID, title: existing.windowTitle,
                                                          frame: cuFrame(sys.window(id: existing.windowID)?.frame ?? .zero)))
         }
@@ -348,8 +349,9 @@ public final class CUCore: @unchecked Sendable {
         // Said up front: what working a window on another desktop costs, and the way out.
         let offDesktop = sys.window(id: chosen.id)?.onScreen == false && !outcome.captureOnly
         let costs = offDesktop ? Self.offDesktopCosts(appName) : nil
+        let facts = Self.bundleFacts(app.running)
         return TargetBindResult(targetId: target.id,
-                                app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid),
+                                app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid, path: facts.path, version: facts.version),
                                 window: CUWindowInfo(id: chosen.id, title: chosen.title, frame: cuFrame(chosen.frame)),
                                 detail: [found.reopened ? "opened the app's default window" : nil, outcome.detail, costs]
                                     .compactMap { $0 }.joined(separator: "; ").nonEmptyOrNil)
