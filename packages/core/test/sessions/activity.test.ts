@@ -136,6 +136,7 @@ describe("activityFor — the exhaustive derivation table (spec §1)", () => {
   // Every participating mode gets the FULL table, not a sample: "absent = code" is a convention
   // (`sync.ts`, `session-mode.ts`'s `isCodeMode`), and a convention that only holds for the rows
   // someone happened to spot-check is how it stops holding.
+  // `cowork` is a synthetic row exercising reserved participation groundwork, not a creatable mode.
   for (const mode of [undefined, "code", "cowork"] as const) {
     test(`mode ${mode ?? "(absent → code)"} derives every combination per spec §1's priority`, () => {
       for (const key of KEYS) {

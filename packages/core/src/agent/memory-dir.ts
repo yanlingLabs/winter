@@ -244,12 +244,13 @@ export function globalMemoryDirFor(opts: MemoryDirOptions): string {
   return join(storeHomeFor(opts.winterHome), "projects", "_global", "memory");
 }
 
-/** Dreaming (Phase 7b): the shared assistant-memory bucket — `~/.winter/projects/_assistant/memory`.
- *  Reserved key like `_global` (sanitizeProjectKey can never emit a leading underscore). Loaded
- *  ONLY by assistant-mode sessions (dispatch now; chat/cowork later) via ContextAssembler's
- *  memoryBucket branch — never by cwd resolution, so code sessions structurally cannot see it.
- *  DELIBERATELY ignores the `memory.directory` relocation override: honoring it would collapse
- *  this bucket into the project bucket and leak dream memories into code sessions. */
+/** Dreaming (Phase 7b): the shared assistant-memory bucket under
+ *  `<storeHomeFor(winterHome)>/projects/_assistant/memory`. Reserved key like `_global`
+ *  (sanitizeProjectKey can never emit a leading underscore). Chat and dispatch reach it through
+ *  ContextAssembler's `memoryBucket: "assistant"` branch; a workdir-less Code session reaches the
+ *  same bucket through `workdirLess` (see runtime-sdk/system-prompt.ts). Cowork wiring is future work.
+ *  DELIBERATELY ignores the `memory.directory` relocation override to keep the shared assistant
+ *  bucket separate from ordinary project memory. */
 export function assistantMemoryDirFor(opts: { winterHome: string }): string {
   return join(storeHomeFor(opts.winterHome), "projects", "_assistant", "memory");
 }

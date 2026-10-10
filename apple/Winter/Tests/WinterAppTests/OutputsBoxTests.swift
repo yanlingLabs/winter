@@ -2,7 +2,8 @@ import XCTest
 @testable import Winter
 
 /// app-shell T8 (spec §3): the outputs box's pure plumbing — path convention, the code/cowork mode
-/// gate, and the recursive listing `ShellSessionHost`/`OutputsWatcher` both read through. All
+/// gate, and the recursive listing `ShellSessionHost`/`OutputsWatcher` both read through. The
+/// Cowork assertion covers reserved string-based eligibility, not a running Cowork session. All
 /// filesystem-touching tests use a temp directory (never `~/.winter` — the standing test rule);
 /// `OutputsWatcherTests` covers the watcher's own diffing/vanish-tolerance seam.
 final class OutputsBoxTests: XCTestCase {

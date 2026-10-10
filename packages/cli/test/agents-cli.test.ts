@@ -42,7 +42,7 @@ describe("applySessionList — which sessions the roster shows", () => {
     expect(s.rows[0]!.activity).toBe("background");
   });
 
-  test("cowork participates exactly like code — the roster reads `activity`, never a mode allowlist of its own", () => {
+  test("a synthetic cowork row exercises future roster compatibility — the roster reads `activity`", () => {
     const s = applySessionList(emptyAgentsState(), [
       row("s_cowork", { activity: "background", mode: "cowork", title: "Pairing" }),
     ], T0);

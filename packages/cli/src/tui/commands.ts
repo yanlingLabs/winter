@@ -361,7 +361,7 @@ async function runQuota(ctx: CommandCtx): Promise<void> {
  *
  *  Plan-immunity Task 2 (mode×surface matrix): the TUI is CODE-ONLY, and /sessions is the
  *  interactive resume PICKER — it feeds directly into resuming INTO this same TUI, which can only
- *  ever attach to a code session — so this HIDES chat/dispatch/cowork rows entirely
+ *  ever attach to a code session — so this HIDES chat/dispatch and future/unknown rows entirely
  *  (`filterCodeSessions`, session-mode.ts). Contrast `winter sessions` (main.ts), a plain inventory
  *  listing that MARKS non-code rows instead of hiding them — see that module's file doc for the
  *  full picker-vs-inventory distinction. */
@@ -428,7 +428,7 @@ function formatDirs(dirs: { path: string; locked: boolean }[]): string {
  *  drives `sessionSetDirs` — the typed command IS the confirm, no extra prompt — and displays the
  *  RESULT's post-write `dirs`, not an echo of the request (same "report what the write actually
  *  produced" contract `sessionSetActivity`'s `activity` follows, client.ts's own doc comment on
- *  `sessionSetDirs`). A daemon refusal (unknown session, non-code/cowork mode, locked, denylisted,
+ *  `sessionSetDirs`). A daemon refusal (unknown session, nonparticipating mode, locked, denylisted,
  *  remove-primary) is a thrown RpcFailure — deliberately left UNCAUGHT here, exactly like
  *  `runSetActivity` above, so `runCommand`'s shared catch reports it verbatim (the manage_session
  *  precedent — no re-wording; see commands.test.ts's `/archive — a daemon refusal surfaces
@@ -596,8 +596,8 @@ async function runWorkflows(ctx: CommandCtx, argText: string): Promise<void> {
  *  session-targeted headless verb in this codebase carries a client-side `checkCodeSession` gate
  *  extracted into its own route function plus a `cli-verb-gates.test.ts` case (main.ts's
  *  plan-immunity fix round), and that gate's vocabulary is NARROWER than activity participation —
- *  it hides cowork, which participates fully — so a headless `winter background <id>` would need a
- *  new gate predicate rather than the existing one. T8 (dispatch's management verbs) and T9
+ *  it would hide a future cowork row, which the participation predicate already reserves — so
+ *  such a headless surface would need its gate reviewed when Cowork ships. T8 (dispatch's management verbs) and T9
  *  (`winter agents`) are the plan's own homes for that surface.
  *
  *  `off` is how the RPC's clearing half is reachable from the shell at all; no sub-token means the

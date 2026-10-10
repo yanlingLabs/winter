@@ -3753,8 +3753,9 @@ final class ShellSessionHost: ObservableObject {
     ///
     /// SELF-HEALING: both call sites above route through this one function, so the row's eventual
     /// arrival (the directory's fold, or a refresh) makes the very next call — a hop, or a live
-    /// watcher tick — recompute eligibility fresh and the box appears for a genuine code/cowork
-    /// session, exactly as if the row had always been there.
+    /// watcher tick — recompute eligibility fresh and the box appears for a Code session, exactly
+    /// as if the row had always been there. Cowork eligibility is reserved for synthetic/future
+    /// rows; it does not enable Cowork creation or execution.
     private func outputsBoxParticipates(_ sessionId: String) -> Bool {
         guard let row = directory.rows.first(where: { $0.sessionId == sessionId }) else { return false }
         return outputsBoxEligible(mode: row.mode)
