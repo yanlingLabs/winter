@@ -71,6 +71,19 @@ public actor WinterClient {
         observers.add(include)
     }
 
+    /// The side streams `notifications(method:)` has handed out.
+    nonisolated let notificationObservers = NotificationObservers()
+
+    /// The `params` of every JSON-RPC notification named `method` the daemon sends from now on — the
+    /// non-event notifications (`browserLink.command`, `browserLink.detached`), which never become a
+    /// `WinterEvent` and so never reach `events` or `observe(where:)`. Like `observe(where:)` it sees
+    /// only what arrives after it is asked for (ask BEFORE the request that makes the daemon send
+    /// one), it ends when the client is closed, and dropping it affects nothing else. A notification
+    /// no stream asked for is dropped, exactly as every non-event line was before these existed.
+    public nonisolated func notifications(method: String) -> AsyncStream<JSONValue> {
+        notificationObservers.add(method: method)
+    }
+
     // Attach/resync state (used by Task 8/9): the session this client is attached to and the
     // last PERSISTED seq it has seen. assistant_delta is exempt (transient; carries lastSeq).
     var attachedSessionId: String?
@@ -152,6 +165,7 @@ public actor WinterClient {
         transport = nil
         eventsCont.finish() // deliberate close: the event stream ENDS — consumers' for-await loops exit
         observers.finishAll()
+        notificationObservers.finishAll()
     }
 
     private func startPump(_ t: WinterTransport) {
@@ -235,6 +249,8 @@ public actor WinterClient {
             emit(.session(e))
         case .unknownEvent(let raw):
             emit(.unknown(raw: raw))
+        case .notification(let method, let params):
+            notificationObservers.broadcast(method: method, params: params)
         case .unrecognized:
             break // non-protocol noise; ignore
         }
@@ -556,6 +572,46 @@ final class EventObservers: @unchecked Sendable {
     }
 
     /// The client closed: every side stream ends, and none is handed out afterwards that would not.
+    func finishAll() {
+        lock.lock(); finished = true; let all = observers; observers = [:]; lock.unlock()
+        for observer in all.values { observer.continuation.finish() }
+    }
+
+    private func remove(_ id: Int) {
+        lock.lock(); observers[id] = nil; lock.unlock()
+    }
+}
+
+/// The side streams of `WinterClient.notifications(method:)`: each gets the `params` of every notification with its
+/// method, independently of the event streams and of each other. Same lifetime rules as `EventObservers`.
+final class NotificationObservers: @unchecked Sendable {
+    private struct Observer { let method: String; let continuation: AsyncStream<JSONValue>.Continuation }
+
+    private let lock = NSLock()
+    private var observers: [Int: Observer] = [:]
+    private var nextId = 0
+    private var finished = false
+
+    func add(method: String) -> AsyncStream<JSONValue> {
+        var continuation: AsyncStream<JSONValue>.Continuation!
+        let stream = AsyncStream<JSONValue> { continuation = $0 }
+        lock.lock()
+        if finished { lock.unlock(); continuation.finish(); return stream }
+        nextId += 1
+        let id = nextId
+        observers[id] = Observer(method: method, continuation: continuation)
+        lock.unlock()
+        continuation.onTermination = { [weak self] _ in self?.remove(id) }
+        return stream
+    }
+
+    func broadcast(method: String, params: JSONValue) {
+        lock.lock(); let current = observers; lock.unlock()
+        for (id, observer) in current where observer.method == method {
+            if case .terminated = observer.continuation.yield(params) { remove(id) }
+        }
+    }
+
     func finishAll() {
         lock.lock(); finished = true; let all = observers; observers = [:]; lock.unlock()
         for observer in all.values { observer.continuation.finish() }
