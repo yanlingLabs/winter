@@ -253,6 +253,8 @@ describe("adapters: extras and dictionary commands", () => {
     // The BOUND window (the bind's window id 7), never Finder's front window.
     expect(w.scripts[0]).toContain('if (id of Finder window 1) is not 7 then return "NOTFRONT"');
     expect(w.scripts[0]).toContain('if insertionURL is not boundURL then return "NOTFOCUSED"');
+    // Finder refuses `URL of (insertion location)` (-1728) — the live helper showed it; it must be fetched first.
+    expect(w.scripts[0]).toContain("set insertionURL to URL of (get insertion location)");
     expect(w.scripts[1]).toContain(`set target of Finder window id 7 to ((POSIX file ${JSON.stringify(dir)}) as alias)`);
     expect(w.scripts[1]).toContain(`select ((POSIX file ${JSON.stringify(file)}) as alias)`);
     expect(unfenced(r)).toContain("the bound Finder window shows the item's folder, the item selected");
