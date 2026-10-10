@@ -9,7 +9,7 @@
 // the store, so top-level declarations persist and may be redeclared, and top-level `await` just works.
 // Sloppy mode, deliberately — `with` and block-level function hoisting need it.
 import { AUTOMATION_ERROR_KINDS, type AutomationErrorKind } from "../errors";
-import type { AppHandle, HostToWorker, ImageHandle, WorkerToHost } from "./bridge";
+import type { AppHandle, HostToWorker, ImageHandle, TabHandle, WorkerToHost } from "./bridge";
 import { prepareScript, type PreparedScript } from "./repl";
 
 export interface AutomationRuntimeDeps {
@@ -74,7 +74,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
 
   const plain = (v: unknown): unknown => {
     if (v === undefined) return undefined;
-    try { return JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? Number(x) : x instanceof App ? undefined : x))); } catch { return undefined; }
+    try { return JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? Number(x) : x instanceof App || x instanceof Tab ? undefined : x))); } catch { return undefined; }
   };
 
   const call = (primitive: string, target: string | undefined, args: Record<string, unknown> = {}): Promise<unknown> => {
@@ -145,6 +145,41 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
   }
   const toApp = (v: unknown): App => new App(v as AppHandle);
 
+  // Phase 2: a browser tab. The same targets WeakMap as `App` (its handle never crosses as a plain object), the
+  // shared `Target` methods, and the tab's own: navigation, its readable text, uploads, keep/close.
+  class Tab {
+    constructor(h: TabHandle) {
+      targets.set(this, h.targetId);
+      Object.defineProperties(this, { id: { value: h.id, enumerable: true }, browser: { value: h.browser, enumerable: true } });
+    }
+    state(o?: unknown) { return call("state", tid(this), opts(o)); }
+    find(q: unknown, o?: unknown) { return call("find", tid(this), { query: q, ...opts(o) }); }
+    screenshot(o?: unknown) { return call("screenshot", tid(this), opts(o)).then(toImage); }
+    click(t: unknown, o?: unknown) { return call("click", tid(this), { target: t, ...opts(o) }).then(nothing); }
+    setValue(ref: unknown, value: unknown) { return call("setValue", tid(this), { ref, value }).then(nothing); }
+    type(text: unknown, o?: unknown) { return call("type", tid(this), { text, ...opts(o) }).then(nothing); }
+    paste(text: unknown, o?: unknown) { return call("paste", tid(this), { text, ...opts(o) }).then(nothing); }
+    key(combo: unknown, o?: unknown) { return call("key", tid(this), { combo, ...opts(o) }).then(nothing); }
+    scroll(t: unknown, direction: unknown, pages?: unknown) { return call("scroll", tid(this), { target: t, direction, ...(pages === undefined ? {} : { pages }) }).then(nothing); }
+    drag(from: unknown, to: unknown) { return call("drag", tid(this), { from, to }).then(nothing); }
+    select(ref: unknown, text: unknown, o?: unknown) { return call("select", tid(this), { ref, text, ...opts(o) }).then(nothing); }
+    hover(t: unknown, o?: unknown) { return call("hover", tid(this), { target: t, ...opts(o) }).then(nothing); }
+    waitFor(cond: unknown, o?: unknown) { return call("waitFor", tid(this), { cond, ...opts(o) }); }
+    waitForIdle(o?: unknown) { return call("waitForIdle", tid(this), opts(o)); }
+    url() { return call("url", tid(this), {}); }
+    title() { return call("title", tid(this), {}); }
+    goto(url: unknown) { return call("goto", tid(this), { url }).then(nothing); }
+    back() { return call("back", tid(this), {}).then(nothing); }
+    forward() { return call("forward", tid(this), {}).then(nothing); }
+    reload() { return call("reload", tid(this), {}).then(nothing); }
+    text(o?: unknown) { return call("text", tid(this), opts(o)); }
+    upload(ref: unknown, paths: unknown) { return call("upload", tid(this), { ref, paths }).then(nothing); }
+    keep() { return call("keep", tid(this), {}).then(nothing); }
+    close() { return call("close", tid(this), {}).then(nothing); }
+    toString(): string { return `[Tab ${(this as unknown as { id: string }).id}]`; }
+  }
+  const toTab = (v: unknown): Tab => new Tab(v as TabHandle);
+
   const apps = Object.freeze({
     list: (o?: unknown) => call("apps.list", undefined, opts(o)),
     open: (app: unknown, o?: unknown) => {
@@ -156,6 +191,12 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       if (t.window !== undefined) extra.window = t.window;
       return call("apps.open", undefined, { app, ...extra }).then(toApp);
     },
+  });
+  const browsers = Object.freeze({
+    list: (o?: unknown) => call("browsers.list", undefined, opts(o)),
+    open: (url: unknown, o?: unknown) => call("browsers.open", undefined, { url, ...opts(o) }).then(toTab),
+    tabs: (o?: unknown) => call("browsers.tabs", undefined, opts(o)),
+    tab: (t: unknown, o?: unknown) => call("browsers.tab", undefined, { tab: t, ...opts(o) }).then(toTab),
   });
   const screen = Object.freeze({
     screenshot: (o?: unknown) => call("screen.screenshot", undefined, opts(o)).then(toImage),
@@ -170,12 +211,12 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     if (typeof v === "bigint") return `${v}n`;
     if (typeof v === "symbol") return v.toString();
     if (v instanceof Error) return `${v.name}: ${v.message}`;
-    if (v instanceof Image || v instanceof App) return String(v);
+    if (v instanceof Image || v instanceof App || v instanceof Tab) return String(v);
     const seen = new WeakSet<object>();
     try {
       const s = JSON.stringify(v, (_k, x) => {
         if (typeof x === "bigint") return `${x}n`;
-        if (x instanceof Image || x instanceof App) return String(x);
+        if (x instanceof Image || x instanceof App || x instanceof Tab) return String(x);
         if (x !== null && typeof x === "object") { if (seen.has(x)) return "[Circular]"; seen.add(x); }
         return x;
       }, 2);
@@ -214,7 +255,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
   // reassign them for the next call — though a top-level declaration of the same name shadows one, by choice).
   /** The ms this run has left (its deadline, as extended, minus what has run; a card's wait does not count). */
   const timeLeft = (): Promise<unknown> => call("timeLeft", undefined, {});
-  const API: Record<string, unknown> = { apps, screen, print, show, sleep, timeLeft, App, Image, AutomationError, ...errorClasses };
+  const API: Record<string, unknown> = { apps, browsers, screen, print, show, sleep, timeLeft, App, Tab, Image, AutomationError, ...errorClasses };
   const API_NAMES = Object.keys(API);
   const PARAMS = ["__scope", "__store", ...API_NAMES, ...SHADOWED];
 

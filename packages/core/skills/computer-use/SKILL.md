@@ -249,6 +249,7 @@ try {
 | `HelperUnavailable` | Try once more. If it keeps failing, tell the user to check Settings → Computer Use. |
 | `PermissionMissing` | Tell the user to grant the permission in Settings → Computer Use. |
 | `Cancelled` | The call was stopped or ran out of time. Look with `state()` before going on. |
+| `BrowserUnavailable` | A browser can't be reached (Winter must be running; the user's own browser needs Winter for Chrome). Tell the user. |
 
 ## 9. Loops and `timeLeft()`
 

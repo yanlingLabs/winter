@@ -19,6 +19,8 @@
     "verify:automation-worker": "bun run scripts/verify-automation-worker-compiled.ts",
     "check:idle-wakeups": "bun run scripts/check-idle-wakeups.ts",
     "e2e:cu-live": "bun run scripts/cu-live/run.ts",
+    "build:page-runtime": "bun run scripts/build-page-runtime.ts",
+    "e2e:browser": "bun run scripts/browser-e2e/run.ts",
     "verify:runtime-state": "bun run scripts/verify-runtime-state-compiled.ts",
     "verify:runtimes": "bun run scripts/verify-runtimes-compiled.ts",
     "verify:embedded": "bun run scripts/verify-embedded-compiled.ts",

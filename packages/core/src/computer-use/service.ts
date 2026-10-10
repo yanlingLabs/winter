@@ -32,7 +32,9 @@ import type { RecentApps } from "./recent-apps";
 import { ResultBuilder, type ResultContent, type ScriptError } from "./result";
 import type { AutomationTelemetry, PrimitiveMetric } from "./telemetry";
 import { AutomationWorker, AutomationWorkerUnavailable, type AutomationWorkerOptions, type CallMessage } from "./worker-host";
-import { APP_PRIMITIVES, GLOBAL_PRIMITIVES, type AppHandle, type ImageHandle } from "./worker/bridge";
+import { APP_PRIMITIVES, BROWSER_PRIMITIVES, GLOBAL_PRIMITIVES, TAB_PRIMITIVES, type AppHandle, type ImageHandle } from "./worker/bridge";
+import type { BrowserEngine } from "./browser/engine";
+import type { TabRunScope } from "./browser/tab-scope";
 
 export const SCRIPT_TIMEOUT_DEFAULT_MS = 30_000;
 export const SCRIPT_TIMEOUT_MIN_MS = 1_000;
@@ -79,6 +81,8 @@ export interface ComputerV2ServiceDeps {
   startWorker?(): Promise<AutomationWorker>;
   /** Interrupt a session's running turn, as `session.interrupt` does (the helper's Esc). */
   interrupt?(sessionId: string): void;
+  /** Phase 2: the browser engine (browser tabs as targets, the `browsers` global). Absent: `BrowserUnavailable`. */
+  browsers?: BrowserEngine;
   /** Resolves a path or an unlisted bundle id to a bundle id WITHOUT launching (`app-resolve.ts`). */
   appResolver?: AppResolver;
   idleMs?: number;
@@ -196,6 +200,9 @@ interface RunCtx {
   /** The failure sentences the daemon sent this call — a script error carrying one verbatim is the daemon's own
    *  words and is shown outside the DATA-ONLY fence. */
   daemonSentences: Set<string>;
+  /** Phase 2, for the audit line: the sites (hosts only) and browser backends this run touched. */
+  sites?: Set<string>;
+  browsers?: Set<string>;
 }
 
 const isRef = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
@@ -354,6 +361,7 @@ export class ComputerV2Service {
       this.diffBases.clearTarget(sessionId, targetId);
       this.deps.helper.tell("target.release", { targetId });
     }
+    this.deps.browsers?.runEnded(ctx.sessionId, ctx.runId);
     if (ctx.scriptActiveGen !== undefined) this.deps.helper.tell("script.active", { sessionId, active: false });
     if (state.active === ctx) state.active = undefined;
 
@@ -378,6 +386,7 @@ export class ComputerV2Service {
     this.deps.audit?.({
       kind: "automation", sessionId, apps: [...ctx.apps], primitives: Object.fromEntries(ctx.primitives),
       durationMs: this.now() - started, outcome: outcomeWord,
+      ...(ctx.sites === undefined ? {} : { sites: [...ctx.sites] }), ...(ctx.browsers === undefined ? {} : { browsers: [...ctx.browsers] }),
     });
     return builder.build(error === undefined ? {} : { error });
   }
@@ -437,11 +446,14 @@ export class ComputerV2Service {
     const args = (msg.args ?? {}) as Record<string, unknown>;
     ctx.primitives.set(msg.primitive, (ctx.primitives.get(msg.primitive) ?? 0) + 1);
     if (msg.primitive !== "timeLeft") {
-      const on = msg.target === undefined ? undefined : ctx.state.targets.get(msg.target)?.name;
+      const on = msg.target === undefined ? undefined : ctx.state.targets.get(msg.target)?.name ?? this.deps.browsers?.label(ctx.sessionId, msg.target);
       ctx.lastPrimitive = `${msg.primitive}()${on === undefined ? "" : ` in ${on}`}`;
     }
     switch (msg.primitive) {
       case "timeLeft": return Math.max(0, Math.floor(ctx.timer.left()));
+      case "browsers.list": case "browsers.open": case "browsers.tabs": case "browsers.tab":
+        if (this.deps.browsers === undefined) throw new AutomationFailure("BrowserUnavailable", "browsers are not available in this daemon");
+        return await this.deps.browsers.global(this.tabScope(ctx, metric), msg.primitive, args);
       case "apps.list": return await this.appsList(ctx, args, metric);
       case "apps.open": {
         const target = str(args.app)?.trim();
@@ -468,6 +480,7 @@ export class ComputerV2Service {
   }
 
   private async targetPrimitive(ctx: RunCtx, targetId: string, primitive: string, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<unknown> {
+    if (this.deps.browsers?.owns(ctx.sessionId, targetId) === true) return await this.deps.browsers.primitive(this.tabScope(ctx, metric), targetId, primitive, args);
     this.live(ctx);
     const t = this.target(ctx, targetId);
     const app: AppRef = { bundleId: t.bundleId, name: t.name };
@@ -1063,6 +1076,41 @@ export class ComputerV2Service {
     return await this.bind(ctx, { app: at.bundleId, window: at.windowId, known: { bundleId: at.bundleId, name: at.app } }, metric);
   }
 
+  /** What the browser engine gets for one primitive of this run (`browser/tab-scope.ts`). */
+  private tabScope(ctx: RunCtx, metric: PrimitiveMetric): TabRunScope {
+    return {
+      sessionId: ctx.sessionId, runId: ctx.runId, callId: ctx.callId, vision: ctx.call.vision,
+      ...(ctx.call.model === undefined ? {} : { model: ctx.call.model }),
+      signal: ctx.abort.signal,
+      live: () => this.live(ctx),
+      timeLeft: () => Math.max(0, Math.floor(ctx.timer.left())),
+      clampWait: (ms) => this.clampWait(ctx, ms),
+      lock: async (key, label) => {
+        if (ctx.locks.has(key)) return;
+        this.live(ctx);
+        const waitMs = Math.min(LOCK_WAIT_MS, Math.max(500, ctx.timer.left() - 500));
+        const release = await this.locks.acquire(key, { runId: ctx.runId, sessionId: ctx.sessionId }, { waitMs, signal: ctx.abort.signal, label });
+        if (ctx.ended || ctx.cancelled !== undefined) { release(); this.live(ctx); }
+        if (ctx.locks.has(key)) { release(); return; }
+        ctx.locks.set(key, release);
+      },
+      authorize: (app, purpose) => this.deps.policy.authorize(ctx.grants, app, purpose, ctx.abort.signal),
+      sessionPolicy: () => this.deps.policy.sessionFacts(ctx.sessionId).policy,
+      sessionFacts: () => this.deps.policy.sessionFacts(ctx.sessionId),
+      siteCard: (summary) => this.deps.policy.siteCard(ctx.grants, summary, ctx.abort.signal),
+      persistentlyAllowed: (bundleId) => this.deps.policy.persistentlyAllowed(ctx.sessionId, bundleId),
+      builder: ctx.builder,
+      keepImage: (img) => this.keepImage(ctx, { ...img, shotId: "" } as ScreenshotResult),
+      lastTargetShot: ctx.state.lastTargetShot,
+      acted: ctx.acted,
+      diffBases: this.diffBases,
+      metric,
+      noteSite: (host) => { (ctx.sites ??= new Set()).add(host); },
+      noteBrowser: (id) => { (ctx.browsers ??= new Set()).add(id); },
+      trusted: (sentence) => { ctx.daemonSentences.add(sentence); },
+    };
+  }
+
   // ── errors ─────────────────────────────────────────────────────────────────────────────────────
 
   /**
@@ -1165,6 +1213,7 @@ export class ComputerV2Service {
    *  is every value the old runtime read from the screen, so the session's fence taint goes with them. */
   private forgetBindings(sessionId: string, state: SessionState): void {
     for (const t of state.targets.values()) if (t.lost === undefined) this.deps.helper.tell("target.release", { targetId: t.targetId });
+    this.deps.browsers?.forgetBindings(sessionId);
     state.targets.clear();
     state.images.clear();
     state.lastTargetShot.clear();
@@ -1201,6 +1250,7 @@ export class ComputerV2Service {
    */
   endSession(sessionId: string, reason: "deleted" | "idle" | "stop" = "deleted"): void {
     if (reason !== "idle") this.deps.policy.clearSession(sessionId);
+    this.deps.browsers?.sessionEnded(sessionId, reason);
     const state = this.sessions.get(sessionId);
     if (state === undefined) return;
     if (state.active !== undefined) this.cancel(state.active, "the session ended");
@@ -1213,7 +1263,17 @@ export class ComputerV2Service {
 
   /** A main-thread turn ended: the helper fades that session's mirrors. */
   turnEnded(sessionId: string): void {
+    this.deps.browsers?.turnEnded(sessionId);
     if (this.sessions.has(sessionId)) this.deps.helper.tell("turn.ended", { sessionId });
+  }
+
+  /** Stop one session's script and its turn, as the helper's Esc does — the browser engine's door for the
+   *  extension's in-page Stop button. Only a session running a script NOW. */
+  stopScript(sessionId: string, reason: string): void {
+    const active = this.sessions.get(sessionId)?.active;
+    if (active === undefined) return;
+    this.cancel(active, reason);
+    try { this.deps.interrupt?.(sessionId); } catch { /* best effort */ }
   }
 
   /** The helper's notifications (spine §2.2). */
@@ -1255,6 +1315,7 @@ export class ComputerV2Service {
   stop(): void {
     this.stopped = true;
     for (const sessionId of [...this.sessions.keys()]) this.endSession(sessionId, "stop");
+    this.deps.browsers?.stop();
   }
 
   /** Tests and diagnostics: the session's live worker pid. */
@@ -1266,7 +1327,7 @@ function failure(name: string, message: string): ScriptResult {
 }
 
 /** The functions a script may call — anything else from the worker is refused unrecorded (review I6). */
-const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES]);
+const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES]);
 
 /** The error names a result (and the audit line) may carry: the ten kinds and JavaScript's own. */
 const KNOWN_ERROR_NAMES: ReadonlySet<string> = new Set<string>([

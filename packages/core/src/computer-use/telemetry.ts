@@ -21,6 +21,9 @@ export interface PrimitiveMetric {
   error?: string;
   /** The helper's error code behind it (`unsupported`, `window_elsewhere`, …), when the helper refused. */
   errorCode?: string;
+  /** A browser tab's primitive: the backend id it ran on ("winter", "chrome", …) and the engine's own time, ms. */
+  backend?: string;
+  engineMs?: number;
 }
 
 export const AUTOMATION_METRICS_MAX_BYTES = 8 * 1024 * 1024;

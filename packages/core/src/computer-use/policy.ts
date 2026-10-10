@@ -47,9 +47,11 @@ import { WINTER_OWN_BUNDLE_IDS } from "./protocol";
 export const COMPUTER_V2_TOOL_NAME = "ComputerV2";
 
 /** The primitives that ACT on an app (everything else observes). */
-export const ACT_PRIMITIVES: ReadonlySet<string> = new Set(["click", "setValue", "type", "paste", "key", "scroll", "drag", "select", "action", "menu", "hover", "applescript"]);
-/** What a `click`-only app still permits (R17): clicks, scrolls and accessibility actions. */
-export const CLICK_ONLY_PRIMITIVES: ReadonlySet<string> = new Set(["click", "scroll", "action", "hover"]);
+export const ACT_PRIMITIVES: ReadonlySet<string> = new Set(["click", "setValue", "type", "paste", "key", "scroll", "drag", "select", "action", "menu", "hover", "applescript",
+  "goto", "upload", "back", "forward", "reload", "keep", "close"]);
+/** What a `click`-only app still permits (R17): clicks, scrolls and accessibility actions — and, on a browser's tab,
+ *  its history moves, a reload, keeping or closing a tab Winter opened. */
+export const CLICK_ONLY_PRIMITIVES: ReadonlySet<string> = new Set(["click", "scroll", "action", "hover", "back", "forward", "reload", "keep", "close"]);
 
 /** The system's authentication surfaces — refused as targets (spec §13.3; the helper refuses them too). */
 export const AUTH_DIALOG_BUNDLE_IDS: ReadonlySet<string> = new Set([
@@ -412,4 +414,23 @@ export class ComputerPolicy {
     const machine = res.by === "timeout" || res.by === "aborted" || res.by === "emit-failure" || res.by === "superseded";
     return { approved: res.approved, ...(res.optionId === undefined ? {} : { optionId: res.optionId }), human: !machine };
   }
+
+  // ── browsers (Phase 2): the browser engine's two doors into this policy ──────────────────────────
+
+  /** The session's facts, for the browser engine (the built-in browser has no per-app card, so it applies `plan`'s
+   *  observe-only rule and the dangerous-domain floor's rows itself). */
+  sessionFacts(sessionId: string): SessionFacts { return this.deps.session(sessionId); }
+
+  /** The dangerous-domain site card (a daemon-raised card like the per-app one: `once` / `session`, relayed and
+   *  bounded for a dispatch child). The caller decides when the session's policy may ask. */
+  async siteCard(run: RunGrants, summary: string, signal?: AbortSignal): Promise<{ approved: boolean; optionId?: string; human: boolean }> {
+    return await this.card(run, summary, SITE_CARD_OPTIONS, signal);
+  }
 }
+
+/** The dangerous-domain site card's options: this call, or this session (no "always" — the escape hatch for a host
+ *  is the user's own `WebFetch(domain:…)` rule or the dangerous-domains list itself). */
+export const SITE_CARD_OPTIONS: readonly ApprovalOption[] = [
+  { id: "once", label: "Allow once" },
+  { id: "session", label: "Allow for this session" },
+];
