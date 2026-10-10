@@ -52,7 +52,7 @@ import { describeFreshnessPlan, freshnessTable } from "./freshness";
 import { measureFixtureVariant, measureSafari, measureSafariWithPrefs, SAFARI_PREFS_WARNING, type FreshDeps, type VariantResult } from "./freshness-run";
 import { DaemonClient } from "./client";
 import {
-  parseDuration, check, computerV2Message, describeViolations, focusViolations, hardwareInputTimes, hardwareIdleMs, markerFacts, pointerMoves, promptAppeared, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, type BannerSpec, parseFrontReading, startPlan, describeStartPlan, UNATTENDED_POLL_MS, type FrontReading, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
+  parseDuration, check, computerV2Message, describeViolations, excursions, focusViolations, hardwareInputTimes, hardwareIdleMs, markerFacts, pointerMoves, promptAppeared, idleGate, countdownDecision, bannerOpenArgs, COUNTDOWN_MS, UNATTENDED_IDLE_MS, type BannerSpec, parseFrontReading, startPlan, describeStartPlan, UNATTENDED_POLL_MS, type FrontReading, doneWindowModel, doneWindowOpenArgs, parseFixtureLog, parseMonitorLine, parseTopDelta,
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, withRealDir, type RealAppsRun } from "./real-apps";
@@ -870,7 +870,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           [moved.length > 0 ? `pointer moved at +${moved.map((t) => t - since).join(", +")} ms` : "", leaked.length > 0 ? `your app got ${leaked.map((e) => e.ev).join(", ")}` : ""].filter(Boolean).join("; ")));
         const focus = s.userSwitchAfterMs !== undefined
           ? { checks: [userSwitchHeld(monitor!.items, switchedAt, finderPid, t1 + WATCH_AFTER_MS)], longestAwayMs: 0 }
-          : focusChecks(monitor!.items, since, t1 + WATCH_AFTER_MS, baseline!, s.allowExcursionMs);
+          : focusChecks(monitor!.items, since, t1 + WATCH_AFTER_MS, baseline!, s.allowExcursionMs, s.maxExcursions);
         checks.push(...focus.checks);
         // Whether the deliberate self-activation REALLY took (macOS 14+ may refuse it) — else the scenario proves less.
         const steals = events.filter((e) => e.role === "main" && e.ev === "activated" && e.t >= since);
@@ -1235,7 +1235,7 @@ function userSwitchHeld(samples: readonly MonitorSample[], at: number | undefine
     pulled.length > 0 ? `front was ${pulled[0]!.front ?? "?"} at +${pulled[0]!.t - at} ms` : `${after.length} samples`);
 }
 
-function focusChecks(samples: readonly MonitorSample[], from: number, to: number, base: FocusBaseline, allowExcursionMs?: number): { checks: Check[]; longestAwayMs: number } {
+function focusChecks(samples: readonly MonitorSample[], from: number, to: number, base: FocusBaseline, allowExcursionMs?: number, maxExcursions?: number): { checks: Check[]; longestAwayMs: number } {
   const v = focusViolations(samples, from, to, base);
   const lastInWindow = samples.filter((s) => s.t >= from && s.t <= to).at(-1);
   if (allowExcursionMs === undefined) {
@@ -1255,6 +1255,10 @@ function focusChecks(samples: readonly MonitorSample[], from: number, to: number
     checks: [
       check(`any jump away from your app was undone within ${allowExcursionMs} ms`, longest <= allowExcursionMs, `away for ${longest} ms: ${describeViolations(v, from)}`),
       check("your app is frontmost again afterwards", lastInWindow === undefined || lastInWindow.frontPid === base.frontPid, `frontmost pid ${lastInWindow?.frontPid}`),
+      ...(maxExcursions === undefined ? [] : [(() => {
+        const ex = excursions(samples, from, to, base);
+        return check(`at most ${maxExcursions} trip away from your desktop (not back and forth)`, ex.length <= maxExcursions, `${ex.length}: ${ex.map((e) => `+${e.start - from}…+${e.end - from} ms`).join(", ")}`);
+      })()]),
     ],
     longestAwayMs: longest,
   };

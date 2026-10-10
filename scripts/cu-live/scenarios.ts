@@ -113,6 +113,8 @@ export interface Scenario {
    * looks for the helper's on-screen panel while it waits and after the answer (`VerifyContext.prompt`).
    */
   desktopSwitch?: { answer: "allow" | "refuse"; afterMs: number };
+  /** With `allowExcursionMs`: at most this many separate excursions (the open visit's "not back and forth", 5d). */
+  maxExcursions?: number;
   verify(ctx: VerifyContext): Check[];
 }
 
@@ -680,28 +682,35 @@ try {
     verify: (ctx) => [
       ok(ctx),
       ...promptChecks(ctx),
-      check("the screenshot failed with NeedsForeground, saying the user refused", fact(ctx, "error") === "NeedsForeground" && /refused to be moved/.test(String(fact(ctx, "message"))),
-        `${String(fact(ctx, "error"))}: ${String(fact(ctx, "message"))}`),
-      check("no visit was made (metrics)", ctx.metrics.every((m) => m.visit === undefined) && liveShotMetric(ctx)?.visitAnswer === "refuse", JSON.stringify(liveShotMetric(ctx))),
+      check("the screenshot failed with NeedsForeground, saying the user refused and to ask them", fact(ctx, "error") === "NeedsForeground"
+        && /refused to be moved to .*'s desktop — ask them in your reply/.test(String(fact(ctx, "message"))), `${String(fact(ctx, "error"))}: ${String(fact(ctx, "message"))}`),
+      check("no visit was made (metrics)", ctx.metrics.every((m) => m.primitive !== "desktop.visit") && liveShotMetric(ctx)?.visitAnswer === "refuse", JSON.stringify(liveShotMetric(ctx))),
     ],
   },
   {
-    name: "desktop switch: a live screenshot off-Space — the prompt, ONE visit, the user back on their desktop", group: "desktop-switch",
+    // 5d: two live shots back to back are ONE open visit — one switch, both captured there, one return (a moment after
+    // the second), one line and one metrics entry with 2 actions. (The refused row's "Don't switch" was lifted by this
+    // row's own turn: a message from the runner's client is a human-origin message.)
+    name: "desktop switch: two live screenshots off-Space — the prompt, ONE visit for both, the user back on their desktop", group: "desktop-switch",
     desktopSwitch: { answer: "allow", afterMs: 1_500 },
     allowExcursionMs: DESKTOP_VISIT_MAX_AWAY_MS,
+    maxExcursions: 1,
     code: `
 const off = await win("Fixture Offspace");
 await off.screenshot({ emit: false });  // a still first (see the refused row)
 const img = await off.screenshot({ emit: false, live: true, reason: ${JSON.stringify(LIVE_REASON)} });
-report({ w: img.width, h: img.height });`,
+const again = await off.screenshot({ emit: false, live: true, reason: ${JSON.stringify(LIVE_REASON)} });
+report({ w: img.width, h: img.height, w2: again.width });`,
     verify: (ctx) => {
-      const m = liveShotMetric(ctx);
-      const visit = m?.visit as { count?: number; ms?: number; returned?: boolean } | undefined;
+      const visits = ctx.metrics.filter((m) => m.primitive === "desktop.visit");
+      const visit = visits[0]?.visit as { actions?: number; ms?: number; returned?: boolean } | undefined;
       return [
         ok(ctx), ...screenshotChecks(ctx), ...promptChecks(ctx),
-        check("the result says the user was moved there and back", new RegExp(`moved the user to ${FIXTURE_APP}'s desktop for \\d+ ms and back`).test(ctx.output), ctx.output.slice(0, 400)),
-        check("ONE visit, the user verified back (metrics)", visit?.count === 1 && visit?.returned === true && m?.visitAnswer === "allow", JSON.stringify(m)),
-        check("a real size", Number(fact(ctx, "w")) > 100 && Number(fact(ctx, "h")) > 100),
+        check("the result says it in ONE line: moved there for both and back", (ctx.output.match(/moved the user to /g) ?? []).length === 1
+          && new RegExp(`moved the user to ${FIXTURE_APP}'s desktop for [\\d.]+ m?s \\(2 actions\\) and back`).test(ctx.output), ctx.output.slice(0, 400)),
+        check("ONE visit with both shots in it, the user verified back (metrics)", visits.length === 1 && visit?.actions === 2 && visit?.returned === true
+          && liveShotMetric(ctx)?.visitAnswer === "allow", JSON.stringify(visits)),
+        check("a real size", Number(fact(ctx, "w")) > 100 && Number(fact(ctx, "h")) > 100 && Number(fact(ctx, "w2")) > 100),
       ];
     },
   },
