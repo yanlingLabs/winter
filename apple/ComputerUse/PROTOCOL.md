@@ -245,8 +245,10 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 - A `key` chord that is a menu command (⌘L → Open Location…) is pressed only when the bound window is the
   app's main window after aiming (a menu command acts on the main window, which can be another of its windows —
   the user's); otherwise `unsupported`, nothing done. A `type`/`paste` with no `into` never goes into a focus
-  that is provably in another window of the app. `Return` in a text field outside the page (a browser's address
-  field) watches the page for a load; when none starts, its `detail` says so.
+  that is provably in another window of the app. While another of the app's windows is its KEY window, a chord's
+  menu item is pressed only in the focus blip (the bound window key), else `unsupported`. `Return` in a text field
+  of the window's toolbar (a browser's address field) watches the page for a load; when none starts, its `detail`
+  says so.
 - A keyboard focus blip holds the window key a moment after its last key (the app takes queued keys then).
 - `menu` walks the app's menu bar; when that has no `path[0]` and the bound window's page has its own menu bar
   (an `AXMenuBar` in its web area) that does, each level is opened with a window-targeted click and verified by
@@ -285,12 +287,14 @@ Errors include `stale_ref` (`ref`), `needs_foreground`, `window_elsewhere`, `ref
 `busy` (retryable), `busy` with `uncertain: true` (the action was sent but not confirmed — it may have
 happened; never retried), `cancelled`, `unsupported`.
 
-`target.foreground` — `{targetId}` → `{front, detail?}`: the user agreed (the daemon's card, the script's
+`target.foreground` — `{targetId, moveDesktop?}` → `{front, detail?}`: the user agreed (the daemon's card, the script's
 `requestForeground(reason)`) that the app may come to the front and stay there until the session's script ends.
 The helper brings it forward and holds it: its acts then run as with `allowForeground: true`, the user-view guard
 and the Focus Guardian leave it alone, and at `script.active` `false` (or `session.ended`) the front goes back to
 the app that had it — if the held app still has it (a switch the user made meanwhile is left alone). `front:
-false` (with `detail`) when macOS did not bring it forward. A window on another desktop is bound with a `detail`
+false` (with `detail`) when macOS did not bring it forward — or when its window is on another desktop and
+`moveDesktop` is not `true` (the daemon sets it only after a card the user answered): bringing it forward would
+take the user there. A hold whose script end is never heard is released after 330 s. A window on another desktop is bound with a `detail`
 that says what working it there costs and names this way out.
 
 ### 4.6 Waits
@@ -542,4 +546,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.4.0 | `target.act` results carry `pageNow` (§4.5); `target.snapshot` with a `within` ref that is gone answers the whole window, its text starting `[N] is gone (the page changed) — showing the whole window`, instead of `stale_ref` — additive. |
 | 1 | 1.5.0 | The `hover` action (§4.5); every window-targeted click now arrives by a short path of window-targeted moves (hover), never moving the user's cursor — additive (an older helper refuses `hover` as an unknown kind). |
 | 1 | 1.5.1 | No wire change: a press on web content that accessibility shows no effect of is followed by a click only when that is safe (pixels unchanged on screen, a readable state for a toggle, never off screen unless the app is learned, never a name that may act unseen); otherwise its `detail` says so. |
-| 1 | 1.6.0 | Additive: `target.foreground` (§4.5; the script's `requestForeground`); `refused` gains `focus_moved` (a `type` stopped when the focus left the field, `data.typed`/`data.total`); `screen.screenshot` results carry `detail` (Winter's own windows in the image); `target.find` results carry `page` and `note`; a snapshot header ends with `page N · state N` (and a cut-short read); `type` details begin `received: …` or `as a paste (…)`; a gone `within` ref says "the page changed" only when it did; off-screen window shots begin with a freshness label; `pageNow` ignores an in-page `#fragment` jump and comes without `focusNow`; a chord's menu item is pressed only when the bound window is main; `menu` falls back to the page's own menu bar. The live-test-only `test.capture` route's path guard compares realpaths of the parent (no wire change). |
+| 1 | 1.6.0 | Additive: `target.foreground` (§4.5; the script's `requestForeground`); `refused` gains `focus_moved` (a `type` stopped when the focus left the field, `data.typed`/`data.total`); `screen.screenshot` results carry `detail` (Winter's own windows in the image); `target.find` results carry `page` and `note`; a snapshot header ends with `page N · state N` (and a cut-short read); `type` details begin `received: …` or `as a paste (…)`; a gone `within` ref says "the page changed" only when it did; off-screen window shots begin with a freshness label; `pageNow` ignores an in-page `#fragment` jump and comes without `focusNow`; a chord's menu item is pressed only when the bound window is main, and only in the focus blip while another window is key; `target.foreground` brings a window on another desktop forward only with `moveDesktop`; `menu` falls back to the page's own menu bar. The live-test-only `test.capture` route's path guard compares realpaths of the parent (no wire change). |

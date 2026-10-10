@@ -377,6 +377,34 @@ final class ActGateTests: XCTestCase {
         await expect("needs_foreground") { try await self.act(.click(CUClickAction(point: [50, 60], shotId: s))) }
     }
 
+    func testAWindowOnAnotherDesktopIsNotBroughtForwardWithoutTheUsersSay() async throws {
+        world(bundle: "org.blenderfoundation.blender")
+        sys.running = [pid, 1]
+        sys.windows[77]?.onScreen = false
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [AXUIElement]()])  // not in this desktop's AX list
+        let r = try await core.targetForeground(TargetForegroundParams(targetId: "t1"))
+        XCTAssertFalse(r.front)
+        XCTAssertTrue(r.detail?.contains("would take the user there — not done without the user's say") ?? false, r.detail ?? "")
+        XCTAssertTrue(sys.activated.isEmpty, "the user stays on their desktop")
+        let asked = try await core.targetForeground(TargetForegroundParams(targetId: "t1", moveDesktop: true))
+        XCTAssertTrue(asked.front, "the user answered a card for it")
+    }
+
+    func testAHoldWhoseScriptEndIsNeverHeardIsReleasedAtItsLimit() async throws {
+        world(bundle: "org.blenderfoundation.blender")
+        sys.running = [pid, 1]
+        var release: (() -> Void)?
+        core.holdReleaseSchedule = { seconds, work in
+            XCTAssertEqual(seconds, CUCore.holdForegroundMaxSeconds)
+            release = work
+        }
+        _ = try await core.targetForeground(TargetForegroundParams(targetId: "t1"))
+        XCTAssertEqual(sys.frontmostPid(), pid)
+        release?()
+        XCTAssertEqual(sys.frontmostPid(), 1, "given back")
+        XCTAssertFalse(core.holdsForeground(target))
+    }
+
     func testAHeldAppTheUserLeftIsNotPulledBackAtTheEnd() async throws {
         world(bundle: "org.blenderfoundation.blender")
         _ = try await core.targetForeground(TargetForegroundParams(targetId: "t1"))

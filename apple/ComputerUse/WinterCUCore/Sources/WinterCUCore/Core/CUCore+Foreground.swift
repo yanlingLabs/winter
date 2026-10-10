@@ -11,6 +11,7 @@ extension CUCore {
         var pid: pid_t
         var appName: String
         var previous: pid_t?
+        var token = UUID()
     }
 
     /// The longest a hold lasts if its script's end is never heard (the daemon's longest script, with room).
@@ -20,6 +21,12 @@ extension CUCore {
         let t = try target(p.targetId)
         try ensureAlive(t)
         return try await queues.run(t.pid) { [self] in
+            // A window on another desktop: bringing it forward takes the user there. Only on the user's own say (a
+            // card they answered — `moveDesktop`), never by itself.
+            if p.moveDesktop != true, isOffThisDesktop(t) {
+                CULog.act.notice("foreground in \(t.appName, privacy: .public): its window is on another desktop — not brought forward without the user's say")
+                return TargetForegroundResult(front: false, detail: "\(t.appName)'s window is on another desktop, and bringing it forward would take the user there — not done without the user's say (this session asks no card); ask the user to show the window, or keep to what works in the background")
+            }
             let previous = sys.frontmostPid()
             let first = holdLock.withLock { () -> Bool in
                 if heldForeground[t.id] != nil { return false }
@@ -39,6 +46,10 @@ extension CUCore {
                 usleep(20_000)
             }
             CULog.act.notice("foreground in \(t.appName, privacy: .public): \(front ? "held in front" : "could not be brought forward", privacy: .public)\(first ? "" : " (already held)", privacy: .public)")
+            // Never held past the longest script, even if its end is never heard.
+            if first, let token = holdLock.withLock({ heldForeground[t.id]?.token }) {
+                holdReleaseSchedule(Self.holdForegroundMaxSeconds) { [weak self] in self?.releaseHeld(targetId: t.id, token: token) }
+            }
             return TargetForegroundResult(front: front, detail: front ? nil
                 : "macOS did not bring \(t.appName) to the front (it may be busy, or on a desktop it can't leave) — nothing was done in front")
         }
@@ -47,6 +58,26 @@ extension CUCore {
     /// Whether `t` is held in front for its session's script.
     func holdsForeground(_ t: CUTarget) -> Bool { holdLock.withLock { heldForeground[t.id] != nil } }
 
+    /// The safety release: this hold, if it is still the one held.
+    func releaseHeld(targetId: String, token: UUID) {
+        let held = holdLock.withLock { () -> HeldForeground? in
+            guard let h = heldForeground[targetId], h.token == token else { return nil }
+            heldForeground[targetId] = nil
+            return h
+        }
+        guard let h = held else { return }
+        CULog.act.fault("foreground in \(h.appName, privacy: .public): the script's end was never heard — the hold released at its limit")
+        giveBack(h)
+    }
+
+    private func giveBack(_ h: HeldForeground) {
+        guardianLock.withLock { guardianCore.endExempt(h.pid) }
+        if sys.frontmostPid() == h.pid, let prev = h.previous, sys.appRunning(prev) {
+            _ = sys.activate(pid: prev)
+            CULog.act.notice("foreground in \(h.appName, privacy: .public): the front given back")
+        }
+    }
+
     /// The session's script ended: every app held in front for it gives the front back.
     func releaseHeldForeground(sessionId: String) {
         let held = holdLock.withLock { () -> [HeldForeground] in
@@ -54,12 +85,6 @@ extension CUCore {
             for k in mine.keys { heldForeground[k] = nil }
             return Array(mine.values)
         }
-        for h in held {
-            guardianLock.withLock { guardianCore.endExempt(h.pid) }
-            if sys.frontmostPid() == h.pid, let prev = h.previous, sys.appRunning(prev) {
-                _ = sys.activate(pid: prev)
-                CULog.act.notice("foreground in \(h.appName, privacy: .public): the front given back")
-            }
-        }
+        for h in held { giveBack(h) }
     }
 }

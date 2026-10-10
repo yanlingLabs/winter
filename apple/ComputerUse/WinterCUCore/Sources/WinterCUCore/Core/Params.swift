@@ -337,7 +337,10 @@ public enum CUAccess: String, Codable, Sendable { case full, click }
 /// until the session's script ends (`script.active` false).
 public struct TargetForegroundParams: Codable, Sendable, Equatable {
     public var targetId: String
-    public init(targetId: String) { self.targetId = targetId }
+    /// The user answered a card for this (not a session that asks none): a window on another desktop may be
+    /// brought forward, taking the user there. Without it, such a window is not.
+    public var moveDesktop: Bool?
+    public init(targetId: String, moveDesktop: Bool? = nil) { self.targetId = targetId; self.moveDesktop = moveDesktop }
 }
 public struct TargetForegroundResult: Codable, Sendable, Equatable {
     /// The app is in front now.

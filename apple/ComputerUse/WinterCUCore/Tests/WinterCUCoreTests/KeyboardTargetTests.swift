@@ -562,11 +562,13 @@ final class KeyboardTargetTests: XCTestCase {
 
     func testReturnInAFieldOutsideThePageThatLoadsNothingSaysSo() async throws {
         safari(fieldOwner: pid)
-        let address = fakeElement(93_104)
+        let address = fakeElement(93_104), toolbar = fakeElement(93_106)
+        ax.add(toolbar, role: kAXToolbarRole, frame: CGRect(x: 0, y: 0, width: 900, height: 40),
+               extra: [kAXParentAttribute: window, kAXChildrenAttribute: [address]])
         ax.add(address, role: kAXTextFieldRole, title: "Address", frame: CGRect(x: 100, y: 10, width: 400, height: 20),
-               extra: [kAXParentAttribute: window, kAXWindowAttribute: window, kAXValueAttribute: "https://example.com"])
+               extra: [kAXParentAttribute: toolbar, kAXWindowAttribute: window, kAXValueAttribute: "https://example.com"])
         let kids = ax.elements(window, kAXChildrenAttribute)
-        ax.put(window, [kAXChildrenAttribute: [address] + kids])
+        ax.put(window, [kAXChildrenAttribute: [toolbar] + kids])
         ax.focus(pid: pid, on: address)
         let r = try await act(.key(CUKeyAction(combo: "return")))
         XCTAssertTrue(r.detail?.contains("the page did not change after Return") ?? false, r.detail ?? "")
@@ -578,6 +580,15 @@ final class KeyboardTargetTests: XCTestCase {
         let loaded = try await act(.key(CUKeyAction(combo: "return")))
         XCTAssertFalse(loaded.detail?.contains("did not change") ?? false, loaded.detail ?? "")
         XCTAssertNotNil(loaded.pageNow)
+        // A find bar's field (not in the toolbar): Return finds the next match — no load is watched for.
+        poster.onPost = nil
+        let findBar = fakeElement(93_107)
+        ax.add(findBar, role: kAXTextFieldRole, subrole: "AXSearchField", title: "Find", frame: CGRect(x: 100, y: 50, width: 200, height: 20),
+               extra: [kAXParentAttribute: window, kAXWindowAttribute: window, kAXValueAttribute: "fox"])
+        ax.put(window, [kAXChildrenAttribute: [findBar] + ax.elements(window, kAXChildrenAttribute)])
+        ax.focus(pid: pid, on: findBar)
+        let found = try await act(.key(CUKeyAction(combo: "return")))
+        XCTAssertFalse(found.detail?.contains("did not change") ?? false, found.detail ?? "")
     }
 
     func testATabMovesTheFocusOnPurpose() async throws {

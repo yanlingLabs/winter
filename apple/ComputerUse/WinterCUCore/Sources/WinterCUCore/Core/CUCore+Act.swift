@@ -1631,9 +1631,10 @@ extension CUCore {
         let keyPid = keyboardTarget(t, focused: e)
         let blips = CUKeyBlips(self, p, t, why: "keys")
         defer { blips.end() }
-        // Return in a field outside the page (below): the page as it was before the key.
+        // Return in a field of the window's toolbar (a browser's address field; not a find bar, where Return finds
+        // the next match): the page as it was before the key.
         let returnInChrome = chord.key == .named(.returnKey) && chord.modifiers.isEmpty && t.accessible
-            && e.map { !isWebContent($0) && editableElement($0) } == true
+            && e.map { !isWebContent($0) && editableElement($0) && inToolbar($0) } == true
         let pageBeforeReturn = returnInChrome ? pageSignature(t) : nil
         for _ in 0..<rep {
             try token.check()
@@ -1642,7 +1643,7 @@ extension CUCore {
         }
         // A chord that is a menu command went to the app's menu, not to an element (its detail says which item).
         switch plan {
-        case .menuItem, .blipMenuItem: return out
+        case .menuItem, .blipMenuItem, .keyedMenuItem: return out
         default: break
         }
         // Return in a field outside the page (a browser's address or search field): it should load a page. Watched
@@ -1655,10 +1656,23 @@ extension CUCore {
                 let now = pageSignature(t)
                 let page = now?.title.flatMap { $0.isEmpty ? nil : $0 } ?? now?.url ?? "the same page"
                 CULog.act.notice("key in \(t.appName, privacy: .public): Return in a field outside the page — no page change")
-                out = out.noting("the page did not change after Return (still \u{201C}\(page.prefix(80))\u{201D}) — the field may not hold what you typed, or the page is slow: check state(), or waitFor({ title }) if it is loading")
+                out = out.noting("the page did not change after Return (still \u{201C}\(page.prefix(80))\u{201D}) — if a page should load, check the field with state(), or waitFor({ title }) if it is slow")
             }
         }
         return receiving(e, t, out)
+    }
+
+    /// `e` lies in a toolbar (an `AXToolbar` ancestor, a few levels up).
+    func inToolbar(_ e: AXUIElement) -> Bool {
+        var cur = ax.element(e, kAXParentAttribute)
+        for _ in 0..<8 {
+            guard let c = cur else { return false }
+            let role = ax.string(c, kAXRoleAttribute)
+            if role == kAXToolbarRole { return true }
+            if role == kAXWindowRole || role == "AXWebArea" { return false }
+            cur = ax.element(c, kAXParentAttribute)
+        }
+        return false
     }
 
     /// Polls the bound window's page until it is another than `before` (an anchor jump aside), up to `ms`.
@@ -1683,6 +1697,10 @@ extension CUCore {
         /// A menu shortcut whose item reads disabled with the app in the background: re-validated in the focus
         /// blip and pressed there, else the events plan.
         case blipMenuItem(AXUIElement, title: String, fallback: ChordPlan)
+        /// A menu shortcut while ANOTHER of the app's windows is its key window: a menu action goes down the key
+        /// window's responder chain first, so it is pressed only in the focus blip (the bound window key) — never
+        /// sent where it would act on the other window.
+        case keyedMenuItem(AXUIElement, title: String)
         case events(code: CGKeyCode, flags: CGEventFlags, decision: CUInputLadder.Decision)
         /// An editing shortcut carried out over accessibility in a background web field, with the events plan to
         /// fall back on when that is not possible.
@@ -1730,6 +1748,12 @@ extension CUCore {
             let editing = editingShortcut && boundWindowIsKeyInApp(t) != true
             if !editing, t.accessible, let item = menuItem(forKey: ch, modifiers: chord.modifiers, pid: t.pid) {
                 if CUPasteMenu.isPasteTitle(item.title) { try requirePasteSafe(p, t, g) }
+                // Another of the app's windows is its key window (the user's, perhaps): the menu action would go
+                // there (live: Open Location acted on another window). Pressed only with the bound window key.
+                if boundWindowIsKeyInApp(t) == false {
+                    CULog.act.notice("key in \(t.appName, privacy: .public): the chord's menu item “\(item.title, privacy: .public)” — another window is key: pressed in the focus blip only")
+                    return .keyedMenuItem(item.element, title: item.title)
+                }
                 CULog.act.notice("key in \(t.appName, privacy: .public): the chord goes to its menu item")
                 return .menuItem(item.element, title: item.title)
             }
@@ -1795,6 +1819,22 @@ extension CUCore {
                 throw busyAfterSend(t)
             }
             return ActOutcome(rung: .accessibility, detail: "used the menu item “\(title)”")
+        case .keyedMenuItem(let element, let title):
+            aimMenuCommands(at: t)
+            let read: () throws -> AXUIElement? = { [ax] in ax.bool(element, kAXEnabledAttribute) != false ? element : nil }
+            let outcome = try pressInBlip(p, t, title: title, read: read, press: { [self] (e: AXUIElement) throws -> String? in
+                do {
+                    try ax.perform(e, kAXPressAction)
+                } catch let error where Self.deliveryUncertain(error) {
+                    throw busyAfterSend(t)
+                }
+                return nil
+            })
+            if case .pressed = outcome {
+                return ActOutcome(rung: .accessibility, detail: "used the menu item “\(title)” with \(t.appName)'s bound window key for a moment (your app kept the front)")
+            }
+            CULog.act.notice("key in \(t.appName, privacy: .public): “\(title, privacy: .public)” — the bound window could not be made key for it — not pressed")
+            throw CUError.unsupported("\(t.appName)'s menu command “\(title)” acts on its key window, which is another of its windows, and the bound window could not be made key for it — nothing was done; click what you need in the bound window (state() shows it), or app.requestForeground(reason)")
         case .blipMenuItem(let element, let title, let fallback):
             aimMenuCommands(at: t)
             let read: () throws -> AXUIElement? = { [ax] in ax.bool(element, kAXEnabledAttribute) == true ? element : nil }

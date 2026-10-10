@@ -142,7 +142,7 @@ export function appCardSummary(app: AppRef): string {
 /** The rung-4 card's question; with a `reason` (the script's `requestForeground`), for the rest of the script. */
 export function foregroundCardSummary(app: AppRef, reason?: string): string {
   if (reason === undefined) return `Winter needs to bring ${app.name} (${app.bundleId}) to the front and use your mouse for a moment`;
-  return `Winter asks to bring ${app.name} (${app.bundleId}) to the front and keep it there until this step ends: ${reason}`;
+  return `Winter asks to bring ${app.name} (${app.bundleId}) to the front and keep it there until this step ends (if its window is on another desktop, you are taken there): ${reason}`;
 }
 
 /** The model's reason as a card shows it: one line, no control characters, at most 200 characters. */
@@ -356,6 +356,11 @@ export class ComputerPolicy {
    * RUNG 4: may Winter bring the app to the front and use the real pointer for this action? `false` means
    * "refuse with `NeedsForeground`" (the caller words it).
    */
+  /** Whether the foreground is granted by a card the user answers (false under `bypass`, which asks none). */
+  foregroundAsksTheUser(run: RunGrants): boolean {
+    return this.deps.session(run.sessionId).policy !== "bypass";
+  }
+
   async allowForeground(run: RunGrants, app: AppRef, signal?: AbortSignal, reason?: string): Promise<boolean> {
     const facts = this.deps.session(run.sessionId);
     // `dont-ask` never cards and `plan` never acts; chat has no computer use.

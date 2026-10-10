@@ -943,7 +943,10 @@ export class ComputerV2Service {
       if (ctx.ended || ctx.cancelled !== undefined) { release(); this.live(ctx); }
       ctx.locks.set(FOREGROUND_LOCK_KEY, release);
     }
-    const res = await this.helperCall<{ front: boolean; detail?: string }>(ctx, "target.foreground", { targetId: t.targetId }, metric);
+    // A window on another desktop is brought forward (taking the user there) only on a card the user answered —
+    // never under `bypass`, which asks none: the helper says so instead.
+    const moveDesktop = this.deps.policy.foregroundAsksTheUser(ctx.grants);
+    const res = await this.helperCall<{ front: boolean; detail?: string }>(ctx, "target.foreground", { targetId: t.targetId, moveDesktop }, metric);
     if (!res.front) {
       const said = helperDetail(res.detail);
       ctx.builder.daemonLine(said ?? `${t.name} could not be brought to the front`);

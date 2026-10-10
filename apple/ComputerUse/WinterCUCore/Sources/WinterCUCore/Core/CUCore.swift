@@ -99,6 +99,7 @@ public final class CUCore: @unchecked Sendable {
             blipPasteHoldMs = 0
             blipDrainMs = 0
             returnLoadWatchMs = 0
+            holdReleaseSchedule = { _, _ in }  // no real timer from a unit test: a test that wants it captures it
             keyTapInstaller = CUNoKeyTapInstaller()  // no real tap from a unit test: no blip unless a test fakes one
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
         }
@@ -466,6 +467,10 @@ public final class CUCore: @unchecked Sendable {
     /// Apps held in front for a script (`target.foreground`), by target id, until the script ends.
     let holdLock = NSLock()
     var heldForeground: [String: HeldForeground] = [:]
+    /// Schedules a hold's safety release; replaceable by tests.
+    var holdReleaseSchedule: (TimeInterval, @escaping @Sendable () -> Void) -> Void = { seconds, work in
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: work)
+    }
     var guardianRefs = 0
     var guardianObservers: [NSObjectProtocol] = []
     var pendingGuardianNotes: [String] = []

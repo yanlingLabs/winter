@@ -194,6 +194,53 @@ final class BackgroundPasteTests: XCTestCase {
         XCTAssertFalse(r.detail?.contains("reads them back") ?? true, "never claims a read-back it can't do")
     }
 
+    /// Another window of the app is its key window, with a File › Open Location… (⌘L) item.
+    private func anotherWindowKey() -> AXUIElement {
+        let other = fakeElement(97_020), file = fakeElement(97_021), fileMenu = fakeElement(97_022), open = fakeElement(97_023)
+        ax.add(other, role: kAXWindowRole, title: "The user's page", frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        ax.windowIDs[AXIdentity(element: other)] = 88
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [window, other], kAXFocusedWindowAttribute: other])
+        let bar = ax.element(ax.application(pid), kAXMenuBarAttribute)!
+        ax.put(bar, [kAXChildrenAttribute: ax.elements(bar, kAXChildrenAttribute) + [file]])
+        ax.add(file, role: "AXMenuBarItem", title: "File", extra: [kAXChildrenAttribute: [fileMenu]])
+        ax.add(fileMenu, role: kAXMenuRole, extra: [kAXChildrenAttribute: [open]])
+        ax.add(open, role: kAXMenuItemRole, title: "Open Location…", extra: [kAXMenuItemCmdCharAttribute: "L", kAXMenuItemCmdModifiersAttribute: 0])
+        ax.setActions(open, [kAXPressAction])
+        return open
+    }
+
+    private func key(_ combo: String) async throws -> TargetActResult {
+        try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c", action: .key(CUKeyAction(combo: combo)),
+                                                 access: .full, allowForeground: false, privatePath: true))
+    }
+
+    func testAMenuShortcutWhileAnotherWindowIsKeyIsPressedOnlyWithTheBoundWindowKey() async throws {
+        world()
+        let open = anotherWindowKey()
+        var keyAtPress = false
+        ax.onPerform = { what in if what == "\(self.token(open)):AXPress" { keyAtPress = FocusSPI.calls.last == "focus pid \(self.pid) window 77" } }
+        let r = try await key("cmd+l")
+        XCTAssertTrue(ax.performed.contains("\(token(open)):AXPress"))
+        XCTAssertTrue(keyAtPress, "pressed inside the focus blip, the bound window key — \(FocusSPI.calls)")
+        XCTAssertTrue(r.detail?.contains("with Browser's bound window key for a moment") ?? false, r.detail ?? "")
+        XCTAssertTrue(poster.keyDowns.isEmpty, "never sent as keys, which would reach the other window")
+    }
+
+    func testAMenuShortcutWhileAnotherWindowIsKeyAndNoBlipIsRefused() async throws {
+        world()
+        let open = anotherWindowKey()
+        installer.refuse = true  // no focus blip possible
+        do {
+            _ = try await key("cmd+l")
+            XCTFail("acted on another window")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "unsupported")
+            XCTAssertTrue(e.message.contains("acts on its key window, which is another of its windows"), e.message)
+        }
+        XCTAssertFalse(ax.performed.contains("\(token(open)):AXPress"))
+        XCTAssertTrue(poster.keyDowns.isEmpty)
+    }
+
     func testAKeyboardBlipHoldsTheWindowKeyUntilTheAppHasTakenItsKeys() throws {
         world()
         core.blipDrainMs = 60
