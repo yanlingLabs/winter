@@ -160,11 +160,6 @@ export function readClaudeResumeScanMarker(home: string): ClaudeResumeScanMarker
   }
 }
 
-/** True when a listing has already covered `scanRoot` for this home. */
-export function claudeResumeScanDone(home: string, scanRoot: string): boolean {
-  return readClaudeResumeScanMarker(home)?.roots.includes(scanRoot) === true;
-}
-
 /** Record a finished (or budget-cut) listing of `scanRoot`. Atomic (temp + rename), 0600, best effort:
  *  a marker that cannot be written costs only a repeat listing at the next boot. Returns whether it landed. */
 export function recordClaudeResumeScan(
