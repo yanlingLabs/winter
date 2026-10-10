@@ -88,9 +88,13 @@ function readJsonObjectDetailed<T>(path: string): SdkFileRead<T> {
  * untouched.
  */
 export function writeJsonAtomic(path: string, value: unknown): void {
+  writeTextAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+/** The same atomic write for plain text (a managed skill file, `migration/builtin-skills.ts`): the bytes of `body`, as given. */
+export function writeTextAtomic(path: string, body: string): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-  const body = `${JSON.stringify(value, null, 2)}\n`;
   let fd: number | undefined;
   try {
     fd = openSync(tmp, "wx", 0o600);

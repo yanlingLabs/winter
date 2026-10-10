@@ -106,6 +106,7 @@ import { coldResumeRunHomeFor, createWinterSessionDrivers, sessionPermissionClas
 import { linkedRouterSupportsRunHome, linkedRunHomeBuilder, runHomeHandleOf, runHomeReportSummary } from "./runtime-sdk/run-home-support";
 import { recoverRunRoots, rootRecoveryDetail, type RootReconcile } from "./runtime-state/root-recovery";
 import { splitSettingsToSdk } from "./migration/settings-split";
+import { seedBuiltinSkills } from "./migration/builtin-skills";
 import { MigrationCRefused, finishMigrationC, isOldLayout, migrationCManifestPath, migrationCState, runMigrationC } from "./migration/migrate-c";
 import { convertLegacyPluginsForMigration } from "./plugins/convert-legacy";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrust, projectScopeTrusted, runHomeInputFor } from "./runtime-sdk/run-home-input";
@@ -711,6 +712,14 @@ export async function startDaemon(opts: {
   // keys are read from `sdk/` only since L3.2). Under the lock, before anything reads them. Once per key;
   // never throws; `settings.json` itself is never written.
   splitSettingsToSdk(home, { log: (line) => console.error(line) });
+
+  // The skills Winter ships that a child must be able to LOAD (`computer-use`): a managed copy in the user's
+  // skill tier, `sdk/skills/` — the builtin tier is staged into no run folder. Every boot, every home, after the
+  // sdk home exists and Migration C has had its turn; only where a session loads that tier at all (a build whose
+  // router applies run homes — on the old layout `sdk/` is not the skill store, and a copy there would only
+  // confuse Migration C). Never throws, never overwrites the user's own or edited copy, never re-creates a
+  // deleted one (`migration/builtin-skills.ts`).
+  if (linkedRouterSupportsRunHome()) seedBuiltinSkills(home, { log: (line) => console.error(line) });
 
   // ── The runtime spine (P8a, WS-16) ────────────────────────────────────────────────────────────
   // Open `runtimes/runtime-state.db`, run §13's twelve recovery steps, catch the §17 backfill up,

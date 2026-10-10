@@ -1,4 +1,5 @@
 import Foundation
+import os
 import WinterProtocol
 import WinterKit
 
@@ -155,6 +156,8 @@ final class SessionFeed {
         FeedRegistry.shared.register(self)
     }
 
+    private static let logger = Logger(subsystem: "com.winter.app", category: "feed")
+
     /// How far behind its daemon this feed is (`FeedLatencyMeter`): one `.notice` per 10 s while events flow.
     private let latencyReportInterval: TimeInterval
     private(set) lazy var latency = FeedLatencyMeter(
@@ -176,7 +179,9 @@ final class SessionFeed {
     /// What this feed is doing, read from the main thread: the session, whether its turn is live per the client's
     /// reducer, and how much is waiting — events on the stream, streamed chunks, a held replay, the owner's queues.
     var diagnostics: FeedDiagnostics {
-        FeedDiagnostics(sessionId: pinnedSessionId ?? focusedSessionIdProvider?(),
+        // A stopped feed folds nothing more: whatever it still holds is not waiting for anything.
+        if stopped { return FeedDiagnostics(sessionId: pinnedSessionId ?? focusedSessionIdProvider?(), turnLive: false, backlog: 0, oldestEventAge: 0) }
+        return FeedDiagnostics(sessionId: pinnedSessionId ?? focusedSessionIdProvider?(),
                         turnLive: session.state.turnRunning,
                         backlog: client.traffic.backlog + relay.count + chunks.count + (replayBuffer?.count ?? 0) + (extraBacklog?() ?? 0),
                         oldestEventAge: client.traffic.oldestAge)
@@ -195,6 +200,10 @@ final class SessionFeed {
     /// into the reducer until the stream ends. Verbatim extraction of `AppModel`'s original
     /// `start()` (AppModel.swift :33-61), generalized via the hooks above.
     func start() async {
+        // A feed that was let go before its start got to run (a surface that took a hold and dropped it within one
+        // turn) must not open a connection nobody would ever close: it would stay attached to its session, and every
+        // event the daemon sent it would land on a stream that ended with `stop()`.
+        if stopped { return }
         // The daemon may not be up yet — retry the INITIAL connect with capped backoff.
         var attempt = 0
         while true {
@@ -203,12 +212,16 @@ final class SessionFeed {
                 break
             } catch {
                 attempt += 1
+                if stopped { return }
                 onRetry?()
                 let backoff = min(0.5 * pow(2.0, Double(attempt - 1)), 10.0)
                 try? await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
-                if Task.isCancelled { return }
+                if Task.isCancelled || stopped { return }
             }
         }
+        // `stop()` may have landed while the connect was in flight, after its own `close()` had already run: that
+        // connect opened a transport no one else will close.
+        if stopped { await client.close(); return }
 
         switch mode {
         case .followFocus:
@@ -225,6 +238,9 @@ final class SessionFeed {
             attachAnswered(sessionId: sessionId, ceilingSeq: ceilingSeq)
             armReplayCeiling(ceilingSeq)
         }
+        // Let go during the attach: the feed is closed for good, so it is not "connected" to anything, and nothing
+        // reads the stream (a reader started now would only fold into a session no surface shows).
+        if stopped { await client.close(); return }
         session.markConnected() // M2: connect() success IS the connected signal
         isConnected = true
         onConnected?()
@@ -238,6 +254,10 @@ final class SessionFeed {
         let relay = self.relay
         let client = self.client
         let reader = Task.detached(priority: .userInitiated) { [weak self] in
+            // However this loop ends — the stream finished, the task cancelled by `stop()`, a return on the check below —
+            // nothing will ever take what is still on the stream, so it is no backlog: a hang report must not go on
+            // naming it (and its age) for as long as something holds this feed.
+            defer { client.traffic.retire() }
             for await event in client.events {
                 let waited = client.traffic.noteConsumed()
                 let needsDrain = relay.push(.init(event: event, at: ProcessInfo.processInfo.systemUptime, streamWait: waited))
@@ -248,6 +268,12 @@ final class SessionFeed {
         pumpTask = reader
         await reader.value
         await drain() // whatever the last batch left
+        if !stopped {
+            // Nothing but `stop()` should end this loop: the client's stream is single-consumer, so a second reader of
+            // it, or the client closed from outside, leaves a feed that is connected and hears nothing more.
+            let label = pinnedSessionId.map { String($0.prefix(10)) } ?? "orb"
+            Self.logger.fault("feed \(label, privacy: .public): the client's event stream ended without stop() — this feed receives no more events")
+        }
     }
 
     /// Folds every event the reader has handed over, in order, batch after batch, until none is waiting. One drain
@@ -275,6 +301,11 @@ final class SessionFeed {
         replayDeadline?.cancel()
         stopped = true
         pumpTask?.cancel()
+        // A stopped feed is out of the hang reports (a surface may still hold it), and what it had not folded — on the
+        // client's stream, in the relay — is never going to be: it is no backlog.
+        FeedRegistry.shared.unregister(self)
+        client.traffic.retire()
+        relay.discard()
         let waiters = attachWaiters
         attachWaiters.removeAll()
         for waiter in waiters { waiter.resume() }
@@ -503,6 +534,12 @@ final class EventRelay: @unchecked Sendable {
         entries = []
         drainRequested = false
         return taken
+    }
+
+    /// Drops everything held (the feed is stopped: nothing will fold it).
+    func discard() {
+        lock.lock(); defer { lock.unlock() }
+        entries = []
     }
 
     var count: Int { lock.lock(); defer { lock.unlock() }; return entries.count }

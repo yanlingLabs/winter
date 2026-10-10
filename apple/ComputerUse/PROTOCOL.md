@@ -637,11 +637,13 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 
 ### 10.2 Bump rules
 
-- **Protocol number:** any change a client could observe — a method added or removed, a param or result
-  field added, removed or changed in meaning, an error code or `data` field, a notification — bumps the
-  number, in every place listed at the top, together (the repo test fails until they agree).
-- A purely **additive, optional** field that every client ignores may stay on the same number, but it must be
-  listed in the changelog below.
+- **Protocol number:** bumped only for a BREAKING change — a method removed or renamed, a param or result
+  field removed or changed in meaning, a new REQUIRED param, an error code or notification whose meaning
+  changed — in every place listed at the top, together (the repo test fails until they agree).
+- **Additive changes keep the number:** a new method, a new optional param, a new result or `data` field, a
+  new error code or notification an older client never has to handle. Each is a **minor** helper version and is
+  listed in the changelog below. A client that RELIES on an addition checks the helper's version at `hello`
+  (a minimum-version constant on the client side), never the protocol number.
 - **Helper version** (`VERSION`) follows semver: **major** for a protocol bump, **minor** for an additive
   feature, **patch** for a fix with no wire change.
 
