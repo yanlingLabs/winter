@@ -1,5 +1,6 @@
 // ComputerV2 Phase 2 — keys and pointer buttons as CDP `Input.*` events. The page's own events only: nothing here
 // touches the OS pointer or the user's keyboard. Combos use Phase 1's words: "cmd+s", "return", "shift+tab".
+import { AutomationFailure } from "../errors";
 
 export const MOD_ALT = 1;
 export const MOD_CTRL = 2;
@@ -70,14 +71,36 @@ export function keyForChar(ch: string): (KeyDef & { shift: boolean }) | undefine
   return undefined;
 }
 
-/** macOS editing commands Chrome does not derive from a synthetic key event by itself. */
+/**
+ * The macOS editing commands each combo means (AppKit's standard key bindings), sent WITH the key event as
+ * `Input.dispatchKeyEvent`'s `commands`: on a Mac it is the native text system — or, in Winter's browser, the app's
+ * menu, which no longer sees a held tab's keys — that turns a key into an edit, never the page. A command runs only in
+ * an editable element (elsewhere it is not enabled, and the key's ordinary handling — scrolling, a slider — goes on).
+ * Return, Tab and Escape carry none: their default handling (submitting a form, moving the focus) is the page's own.
+ * Never copy, cut or paste: those reach the user's own clipboard (`parseCombo` refuses them).
+ */
 const MAC_COMMANDS: Record<string, string[]> = {
-  "meta+a": ["selectAll"], "meta+c": ["copy"], "meta+x": ["cut"], "meta+v": ["paste"], "meta+z": ["undo"], "meta+shift+z": ["redo"],
-  "meta+arrowleft": ["moveToBeginningOfLine"], "meta+arrowright": ["moveToEndOfLine"], "meta+arrowup": ["moveToBeginningOfDocument"],
-  "meta+arrowdown": ["moveToEndOfDocument"], "alt+arrowleft": ["moveWordLeft"], "alt+arrowright": ["moveWordRight"],
-  "meta+shift+arrowleft": ["moveToBeginningOfLineAndModifySelection"], "meta+shift+arrowright": ["moveToEndOfLineAndModifySelection"],
+  "meta+a": ["selectAll"], "meta+z": ["undo"], "meta+shift+z": ["redo"],
+  // deletion
+  "backspace": ["deleteBackward"], "shift+backspace": ["deleteBackward"], "alt+backspace": ["deleteWordBackward"],
+  "meta+backspace": ["deleteToBeginningOfLine"], "ctrl+backspace": ["deleteBackwardByDecomposingPreviousCharacter"],
+  "delete": ["deleteForward"], "alt+delete": ["deleteWordForward"], "meta+delete": ["deleteToEndOfLine"],
+  "ctrl+h": ["deleteBackward"], "ctrl+d": ["deleteForward"], "ctrl+k": ["deleteToEndOfParagraph"],
+  // the caret
+  "arrowleft": ["moveLeft"], "arrowright": ["moveRight"], "arrowup": ["moveUp"], "arrowdown": ["moveDown"],
+  "alt+arrowleft": ["moveWordLeft"], "alt+arrowright": ["moveWordRight"],
+  "alt+arrowup": ["moveBackward", "moveToBeginningOfParagraph"], "alt+arrowdown": ["moveForward", "moveToEndOfParagraph"],
+  "meta+arrowleft": ["moveToBeginningOfLine"], "meta+arrowright": ["moveToEndOfLine"],
+  "meta+arrowup": ["moveToBeginningOfDocument"], "meta+arrowdown": ["moveToEndOfDocument"],
+  "ctrl+a": ["moveToBeginningOfParagraph"], "ctrl+e": ["moveToEndOfParagraph"],
+  "ctrl+b": ["moveBackward"], "ctrl+f": ["moveForward"], "ctrl+p": ["moveUp"], "ctrl+n": ["moveDown"],
+  // the selection
   "shift+arrowleft": ["moveLeftAndModifySelection"], "shift+arrowright": ["moveRightAndModifySelection"],
-  "alt+backspace": ["deleteWordBackward"], "meta+backspace": ["deleteToBeginningOfLine"],
+  "shift+arrowup": ["moveUpAndModifySelection"], "shift+arrowdown": ["moveDownAndModifySelection"],
+  "alt+shift+arrowleft": ["moveWordLeftAndModifySelection"], "alt+shift+arrowright": ["moveWordRightAndModifySelection"],
+  "alt+shift+arrowup": ["moveParagraphBackwardAndModifySelection"], "alt+shift+arrowdown": ["moveParagraphForwardAndModifySelection"],
+  "meta+shift+arrowleft": ["moveToBeginningOfLineAndModifySelection"], "meta+shift+arrowright": ["moveToEndOfLineAndModifySelection"],
+  "meta+shift+arrowup": ["moveToBeginningOfDocumentAndModifySelection"], "meta+shift+arrowdown": ["moveToEndOfDocumentAndModifySelection"],
 };
 
 export interface KeyPress { modifiers: number; def: KeyDef; commands?: string[] }
@@ -101,6 +124,12 @@ export function parseCombo(combo: string): KeyPress {
     if (k !== undefined) { def = k; if (k.shift) modifiers |= MOD_SHIFT; }
   }
   if (def === undefined) throw Object.assign(new TypeError(`key(): "${last}" is not a key name (return, tab, escape, up, a, 1, …)`), { name: "TypeError" });
+  // Copy, cut and paste would read or write the user's own clipboard: refused, never sent.
+  const k = def.key.toLowerCase();
+  if ((modifiers & (MOD_META | MOD_CTRL)) !== 0 && (k === "c" || k === "x" || k === "v")) {
+    throw new AutomationFailure("Refused", "copy, cut and paste keys would use the user's clipboard — use paste(text) to put text in, and text() or state() to read it");
+  }
+  if ((modifiers & MOD_SHIFT) !== 0 && k === "insert") throw new AutomationFailure("Refused", "that key pastes from the user's clipboard — use paste(text)");
   const name = [modifiers & MOD_META ? "meta" : "", modifiers & MOD_CTRL ? "ctrl" : "", modifiers & MOD_ALT ? "alt" : "", modifiers & MOD_SHIFT ? "shift" : "", def.key.toLowerCase()].filter((x) => x.length > 0).join("+");
   const commands = MAC_COMMANDS[name];
   return { modifiers, def, ...(commands === undefined ? {} : { commands }) };

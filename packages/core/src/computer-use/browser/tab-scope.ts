@@ -30,6 +30,8 @@ export interface TabRunScope {
   /** Take `key` (a tab lock, `tab:<backendId>:<tabKey>`) for the rest of the run — a 30 s wait, then `TargetBusy`
    *  naming the holder. Re-entrant within the run. */
   lock(key: string, label: string): Promise<void>;
+  /** The run holding `key` (a tab lock) now — this one, another, or none. */
+  lockRun(key: string): string | undefined;
   /** The per-app policy for a user's browser (its bundle id): floors, access, the per-app card. */
   authorize(app: AppRef, purpose: TabAuthorizePurpose): Promise<void>;
   /** The session's approval policy, and its facts (mode, origin). */

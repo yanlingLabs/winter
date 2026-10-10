@@ -23,9 +23,10 @@ import { shouldCloseAgentTab } from "./lifecycle";
 import type { BrowserBackendRegistry } from "./registry";
 import { BLOCKED_TAB_PRIMITIVES, ensureSiteAllowed, listedHost, SiteApprovals, type SiteFloorDeps } from "./site-policy";
 import type { TabRunScope } from "./tab-scope";
-import { shownUrl, TabDriver, transportFailure } from "./tab-driver";
+import { redactText, redactUrl } from "./page-runtime/redact";
+import { pickerSentence, shownUrl, TabDriver, transportFailure } from "./tab-driver";
 import type { BackendId, BrowserFamily, CdpTransport, TransportTab } from "./transport";
-import { checkUploadPaths } from "./upload-paths";
+import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
 
 /** `state()`/`screenshot()` settle for at most this long after an act in the same call (Phase 1's cap). */
 const SETTLE_CAP_MS = 1_500;
@@ -88,6 +89,11 @@ interface AgentTab { backend: BackendId; tabKey: string; kept: boolean; handoff:
 
 export interface BrowserListRow { id: string; name: string; isDefault: boolean; connected: boolean; reason?: string }
 
+/** At most this many tabs held (a live built-in browser, an attached debugger) per session and in all; past it the
+ *  least recently used is let go (still open: its next use takes it again). */
+export const HOLDS_PER_SESSION = 8;
+export const HOLDS_GLOBAL = 16;
+
 const isRef = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
 const isPoint = (v: unknown): v is [number, number] => Array.isArray(v) && v.length === 2 && v.every((n) => typeof n === "number" && Number.isFinite(n));
 const bad = (message: string): Error => Object.assign(new TypeError(message), { name: "TypeError" });
@@ -97,8 +103,15 @@ const tabKeyOf = (backend: string, tabKey: string): string => `${backend}|${tabK
  *  the isolated world; `file:` is not in this phase) is refused here, before any browser sees it. */
 export function checkTabUrl(url: unknown, what: string): string {
   if (typeof url !== "string" || url.trim().length === 0) throw bad(`${what} takes a URL`);
-  const u = url.trim();
+  let u = url.trim();
   if (u === "about:blank") return u;
+  // A bare host[:port][/path] gets a scheme: http for this Mac's own servers, https for the rest.
+  const bare = /^(localhost|\[[0-9a-f:]+\]|\d{1,3}(?:\.\d{1,3}){3}|(?:[a-z0-9-]+\.)+[a-z]{2,})(:\d{1,5})?([/?#].*)?$/i.exec(u);
+  if (bare !== null) {
+    const host = bare[1]!.toLowerCase();
+    const local = host === "localhost" || host === "[::1]" || /^127\./.test(host);
+    u = `${local ? "http" : "https"}://${u}`;
+  }
   const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(u)?.[1]?.toLowerCase();
   if (scheme !== undefined && scheme !== "http" && scheme !== "https") {
     throw new AutomationFailure("NotAllowed", `${what} opens only http(s) pages and about:blank — a ${scheme}: URL is refused`);
@@ -127,6 +140,8 @@ export class BrowserEngine {
   private stopped = false;
 
   constructor(private readonly deps: BrowserEngineDeps) {
+    // Files an earlier daemon run staged for uploads go (the daemon is starting: no session can be using them).
+    clearStagedUploads(deps.home);
     this.unwatch = deps.registry.onChange(() => this.hookTransports());
     this.hookTransports();
   }
@@ -146,7 +161,7 @@ export class BrowserEngine {
   label(sessionId: string, targetId: string): string | undefined {
     const b = this.sessions.get(sessionId)?.bindings.get(targetId);
     if (b === undefined) return undefined;
-    const title = this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.title.replace(/\s+/g, " ").trim();
+    const title = this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.shownTitle.replace(/\s+/g, " ").trim();
     return title !== undefined && title.length > 0 ? `Tab "${title.slice(0, 60)}"` : `Tab ${b.backend}:${b.tabKey}`;
   }
 
@@ -186,10 +201,16 @@ export class BrowserEngine {
       const driver = this.driverFor(b.backend, b.tabKey);
       await scope.lock(`tab:${b.backend}:${b.tabKey}`, this.label(scope.sessionId, targetId) ?? "That browser tab");
       scope.live();
-      await driver.ensureAttached(scope.sessionId);
-      scope.live();
-      if (!BLOCKED_TAB_PRIMITIVES.has(primitive)) await this.siteFloor(scope, b, driver);
-      return await this.run(scope, b, driver, primitive, args);
+      this.makeRoomForHold(scope, driver);
+      driver.busy++;
+      try {
+        await driver.ensureAttached(scope.sessionId);
+        scope.live();
+        if (!BLOCKED_TAB_PRIMITIVES.has(primitive)) await this.siteFloor(scope, b, driver);
+        return await this.run(scope, b, driver, primitive, args);
+      } finally {
+        driver.busy--;
+      }
     } catch (err) {
       throw this.lostIfGone(scope.sessionId, b, err);
     } finally {
@@ -219,6 +240,12 @@ export class BrowserEngine {
     for (const b of s.bindings.values()) {
       if (b.kind !== "user" || b.lost !== undefined) continue;
       b.lost = "turn_end";
+      void this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.release(sessionId);
+    }
+    // A built-in tab's hold keeps a browser alive in Winter.app: it goes at the turn's end too (the binding stays; its
+    // next use takes the hold again — the page is re-read then, so earlier refs are stale).
+    for (const b of s.bindings.values()) {
+      if (b.lost !== undefined || this.familyOf(b.backend) !== "winter") continue;
       void this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.release(sessionId);
     }
     for (const [key, a] of [...s.agentTabs]) {
@@ -264,6 +291,7 @@ export class BrowserEngine {
 
   /** The session's computer-use runtime ended: idled out, the session deleted, or the daemon stopping. */
   sessionEnded(sessionId: string, reason: "deleted" | "idle" | "stop"): void {
+    clearStagedUploads(this.deps.home, sessionId);
     const s = this.sessions.get(sessionId);
     if (s !== undefined) {
       for (const b of s.bindings.values()) if (b.lost === undefined) void this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.release(sessionId);
@@ -370,23 +398,55 @@ export class BrowserEngine {
       if (this.sessions.get(t.sessionId)?.agentTabs.has(tabKeyOf(backend, t.tabKey)) === true) continue;
       let running = false;
       try { running = this.deps.turnRunning?.(t.sessionId) === true; } catch { running = false; }
-      if (!shouldCloseAgentTab({ event: "restart-orphan", family: this.familyOf(backend), kept: false, turnRunning: running })) continue;
+      if (!shouldCloseAgentTab({ event: "restart-orphan", family: this.familyOf(backend), kept: false, turnRunning: running })) {
+        // Its session is mid-turn: the tab becomes that session's agent tab again, so this turn's end closes it.
+        this.session(t.sessionId).agentTabs.set(tabKeyOf(backend, t.tabKey), { backend, tabKey: t.tabKey, kept: false, handoff: false });
+        continue;
+      }
       try { await transport.closeTab(t.tabKey); } catch (err) {
         this.deps.log?.(`computer-use: closing an orphaned agent tab ${backend}:${t.tabKey} failed (${err instanceof Error ? err.message : "error"})`);
       }
     }
   }
 
+  /**
+   * A tab went away. Only a real close or crash loses it — its bindings read why and it leaves the agent tabs.
+   * `stopped` (the app parked its browser; the extension's debugger idled out) keeps everything: the next primitive
+   * attaches again. The user cancelling control keeps the tab an agent tab (its turn end may still close it), but no
+   * binding of it works until it is bound again.
+   */
   private tabGone(backend: BackendId, tabKey: string, reason: string): void {
     const key = tabKeyOf(backend, tabKey);
-    this.drivers.get(key)?.onGone(reason);
+    const d = this.drivers.get(key);
+    if (reason === "stopped") { d?.onGone("stopped"); return; }
+    d?.onGone(reason);
     for (const s of this.sessions.values()) {
       const targetId = s.byTab.get(key);
       const b = targetId === undefined ? undefined : s.bindings.get(targetId);
       if (b !== undefined && b.lost === undefined) b.lost = reason;
-      s.agentTabs.delete(key);
+      if (reason === "closed" || reason === "crashed") s.agentTabs.delete(key);
     }
     this.drivers.delete(key);
+  }
+
+  /** Before taking a new hold: past the per-session or global cap, let go of the least recently used one (it stays
+   *  open; its next use takes it again) and say so. Never one a primitive is using now, nor one another run holds. */
+  private makeRoomForHold(scope: TabRunScope, driver: TabDriver): void {
+    driver.lastUsed = this.now();
+    if (driver.isAttached && driver.holders.has(scope.sessionId)) return;
+    const held = [...this.drivers.values()].filter((d) => d !== driver && d.isAttached && d.holders.size > 0);
+    const mine = held.filter((d) => d.holders.has(scope.sessionId));
+    const free = (list: TabDriver[]): TabDriver[] => list.filter((d) => {
+      if (d.busy > 0) return false;
+      const run = scope.lockRun(`tab:${d.backend}:${d.tabKey}`);
+      return run === undefined || run === scope.runId;
+    });
+    const lru = (list: TabDriver[]): TabDriver | undefined => free(list).reduce<TabDriver | undefined>((a, d) => (a === undefined || d.lastUsed < a.lastUsed ? d : a), undefined);
+    const victim = mine.length >= HOLDS_PER_SESSION ? lru(mine) : held.length >= HOLDS_GLOBAL ? lru(held) : undefined;
+    if (victim === undefined) return;
+    const cap = mine.length >= HOLDS_PER_SESSION ? `${HOLDS_PER_SESSION} in this session` : `${HOLDS_GLOBAL} in all`;
+    scope.builder.daemonLine(`let go of ${victim.backend}:${victim.tabKey} (the least recently used of more than ${cap} held tabs) — it stays open; using it again takes it back`);
+    for (const sid of [...victim.holders]) void victim.release(sid);
   }
 
   private stopPressed(backend: BackendId, tabKey: string): void {
@@ -496,7 +556,9 @@ export class BrowserEngine {
     scope.noteBrowser(backend);
     await scope.lock(`tab:${backend}:${tabKey}`, `Tab ${backend}:${tabKey}`);
     scope.live();
-    await driver.ensureAttached(scope.sessionId);
+    this.makeRoomForHold(scope, driver);
+    driver.busy++;
+    try { await driver.ensureAttached(scope.sessionId); } finally { driver.busy--; }
     scope.live();
     return { ...this.handle(b) };
   }
@@ -563,6 +625,8 @@ export class BrowserEngine {
     scope.live();
     scope.builder.daemonLine(this.familyOf(backend) === "winter" ? "opened a new tab in Winter's browser" : `opened a new tab in ${name} (in the background)`);
     if (!loaded) scope.builder.daemonLine("still loading after 10 s");
+    // Where the tab LANDED (a redirect) meets the dangerous-domain floor before anything of it is printed.
+    await this.siteFloor(scope, this.binding(scope.sessionId, handle.targetId), driver);
     // The goto rule: the new page settles (frames still loading, late content) before its state is printed.
     await this.printState(scope, handle.targetId, driver, { full: true, settle: true });
     return handle;
@@ -573,7 +637,7 @@ export class BrowserEngine {
     if (this.familyOf(backend) === "winter") {
       const fold = this.deps.winterTabs(scope.sessionId);
       return fold.tabs.map((t) => ({
-        id: `${backend}:${t.tabId}`, browser: backend, url: t.url ?? "about:blank", title: t.title ?? "",
+        id: `${backend}:${t.tabId}`, browser: backend, url: shownUrl(t.url ?? "about:blank"), title: t.title ?? "",
         active: t.tabId === fold.activeTabId, yours: s.agentTabs.has(tabKeyOf(backend, t.tabId)),
       }));
     }
@@ -610,7 +674,8 @@ export class BrowserEngine {
     const leftOut = [...chosen.leftOut];
     const rows: Array<{ id: string; browser: string; url: string; title: string; active: boolean; yours: boolean }> = [];
     for (const b of chosen.ids) {
-      try { rows.push(...await this.tabRows(scope, b)); } catch (err) {
+      // What the model reads: credentials in a URL, and token-looking text in a title, redacted.
+      try { rows.push(...(await this.tabRows(scope, b)).map((r) => ({ ...r, url: redactUrl(r.url), title: redactText(r.title) }))); } catch (err) {
         if (args.browser !== undefined || !skippable(err)) throw err;
         leftOut.push(`${this.browserName(b)} (${b}) — ${err instanceof AutomationFailure && err.kind === "NotAllowed" ? "not allowed" : "can't be reached"}`);
       }
@@ -656,7 +721,8 @@ export class BrowserEngine {
           skipped++;
           continue;
         }
-        for (const r of rows) if (stripFragment(r.url) === want) hits.push({ id: r.id, url: r.url, backend: b });
+        // The URL as the model read it (redacted) matches too.
+        for (const r of rows) if (stripFragment(r.url) === want || stripFragment(redactUrl(r.url)) === want) hits.push({ id: r.id, url: r.url, backend: b });
       }
       if (hits.length === 0) {
         throw new AutomationFailure("TargetLost", `no open tab has that URL — browsers.tabs() lists them${skipped === 0 ? "" : ` (${skipped} browser${skipped === 1 ? " was" : "s were"} not searched: not allowed in this session yet — name one with { browser })`}`);
@@ -675,10 +741,12 @@ export class BrowserEngine {
     const driver = this.driverFor(backend, tabKey);
     const base = scope.diffBases.get(scope.sessionId, handle.targetId);
     if (wasBound && base !== undefined) {
+      await this.siteFloor(scope, this.binding(scope.sessionId, handle.targetId), driver);
       await this.printState(scope, handle.targetId, driver, { since: base, quietOnDiff: true });
       return handle;
     }
     scope.builder.daemonLine(`bound ${backend}:${tabKey.slice(0, 60)} in ${this.browserName(backend)}`);
+    await this.siteFloor(scope, this.binding(scope.sessionId, handle.targetId), driver);
     await this.printState(scope, handle.targetId, driver, { full: true });
     return handle;
   }
@@ -731,11 +799,23 @@ export class BrowserEngine {
     if (!scope.vision) throw new AutomationFailure("NotAllowed", NO_VISION);
   }
 
-  private async pointOf(scope: TabRunScope, b: Binding, driver: TabDriver, v: unknown, what: string): Promise<{ x: number; y: number }> {
-    if (isRef(v)) return await driver.pointForRef(v);
+  /** Where a pointer act lands. `press`: the act presses a button there — refused on a native picker control (a
+   *  <select>, a date/time/color or file input, a label for one), whose window would open on the user's screen.
+   *  `menu`: a right-click — the browser's own context menu must not open either (the page's own may). */
+  private async pointOf(scope: TabRunScope, b: Binding, driver: TabDriver, v: unknown, what: string, press = false, menu = false): Promise<{ x: number; y: number }> {
+    if (isRef(v)) {
+      const p = await driver.pointForRef(v, menu ? { guardMenu: true } : {});
+      if (press && p.picker !== undefined) throw new AutomationFailure("Refused", pickerSentence(v, p.picker));
+      return { x: p.x, y: p.y };
+    }
     if (isPoint(v)) {
       this.requireVision(scope);
-      return driver.pointForShot(scope.lastTargetShot.get(b.targetId), v[0], v[1]);
+      const at = driver.pointForShot(scope.lastTargetShot.get(b.targetId), v[0], v[1]);
+      if (press) {
+        const picker = await driver.pickerAt(at.x, at.y, menu ? { guardMenu: true } : {});
+        if (picker !== undefined) throw new AutomationFailure("Refused", pickerSentence(undefined, picker));
+      }
+      return at;
     }
     throw bad(`${what} takes an element ref${scope.vision ? " or a [x, y] point" : ""}`);
   }
@@ -792,7 +872,7 @@ export class BrowserEngine {
           scope.acted.add(b.targetId);
           return undefined;
         }
-        const at = await this.pointOf(scope, b, driver, args.target, "click()");
+        const at = await this.pointOf(scope, b, driver, args.target, "click()", true, args.button === "right");
         scope.live();
         await driver.click(at, { button: args.button, count: args.count, modifiers: args.modifiers });
         scope.acted.add(b.targetId);
@@ -813,7 +893,7 @@ export class BrowserEngine {
         const target = await driver.keyboardTarget(isRef(args.into) ? args.into : undefined);
         if (!target.editable) throw new AutomationFailure("Refused", FOCUS_NOT_EDITABLE);
         scope.live();
-        await driver.typeText(args.text);
+        await driver.typeText(args.text, scope.signal);
         scope.acted.add(b.targetId);
         let received = "unverifiable";
         if (target.ref !== undefined) {
@@ -830,8 +910,8 @@ export class BrowserEngine {
         if (!target.editable) throw new AutomationFailure("Refused", FOCUS_NOT_EDITABLE);
         scope.live();
         let handled = false;
-        if (format === "html") handled = await driver.pasteEvent(args.text, args.text.replace(/<[^>]*>/g, ""));
-        else if (format === "markdown") handled = await driver.pasteEvent(undefined, args.text);
+        if (format === "html") handled = await driver.pasteEvent(target.frame, args.text, args.text.replace(/<[^>]*>/g, ""));
+        else if (format === "markdown") handled = await driver.pasteEvent(target.frame, undefined, args.text);
         if (!handled) await driver.insertText(args.text);
         scope.acted.add(b.targetId);
         scope.builder.text(`pasted into ${target.label ?? "the focused field"}${handled ? " (as the page's own paste)" : ""}`, { screen: true });
@@ -843,7 +923,7 @@ export class BrowserEngine {
         const repeat = typeof args.repeat === "number" && Number.isInteger(args.repeat) && args.repeat > 0 ? Math.min(args.repeat, 100) : 1;
         const target = await driver.keyboardTarget(isRef(args.into) ? args.into : undefined);
         scope.live();
-        await driver.press(press, repeat);
+        await driver.press(press, repeat, scope.signal);
         scope.acted.add(b.targetId);
         if (target.label !== undefined) scope.builder.text(`pressed ${args.combo} in ${target.label}`, { screen: true });
         return undefined;
@@ -858,9 +938,9 @@ export class BrowserEngine {
         return undefined;
       }
       case "drag": {
-        const from = await this.pointOf(scope, b, driver, args.from, "drag()");
-        const to = await this.pointOf(scope, b, driver, args.to, "drag()");
-        await driver.drag(from, to);
+        const from = await this.pointOf(scope, b, driver, args.from, "drag()", true);
+        const to = await this.pointOf(scope, b, driver, args.to, "drag()", true);
+        await driver.drag(from, to, scope.signal);
         scope.acted.add(b.targetId);
         return undefined;
       }
@@ -917,14 +997,15 @@ export class BrowserEngine {
       case "forward": return await this.navigate(scope, b, driver, () => driver.history(1, scope.signal));
       case "reload": return await this.navigate(scope, b, driver, () => driver.reload(scope.signal));
       case "url": {
-        try { await driver.quietInfo(); } catch { /* the last committed URL */ }
+        // While a page dialog is open the page is paused: the engine's own tracked URL answers.
+        if (driver.dialog === undefined) { try { await driver.quietInfo(); } catch { /* the last committed URL */ } }
         scope.builder.markScreenRead();
-        return shownUrl(driver.url);
+        return driver.shownUrl;
       }
       case "title": {
-        try { await driver.quietInfo(); } catch { /* the last title read */ }
+        if (driver.dialog === undefined) { try { await driver.quietInfo(); } catch { /* the last title read */ } }
         scope.builder.markScreenRead();
-        return driver.title;
+        return driver.shownTitle;
       }
       case "text": {
         const text = await driver.text(args.markdown === true);
@@ -936,10 +1017,13 @@ export class BrowserEngine {
         if (!isRef(args.ref)) throw bad("upload() takes a file input's ref and a path or an array of paths");
         const cwd = (() => { try { return this.deps.sessionInfo(sid).cwd; } catch { return undefined; } })();
         const roots = this.deps.uploadRoots?.(sid, cwd) ?? { denyRead: [] };
-        const files = checkUploadPaths(args.paths, { cwd, home: this.deps.home, denyRead: roots.denyRead, ...(roots.tmpDir === undefined ? {} : { tmpDir: roots.tmpDir }) });
-        await driver.upload(args.ref, files);
+        const files = checkUploadFiles(args.paths, { cwd, home: this.deps.home, denyRead: roots.denyRead, ...(roots.tmpDir === undefined ? {} : { tmpDir: roots.tmpDir }) });
+        // The browser is handed private COPIES (opened without following links, staged where the session's shell
+        // cannot write): a path swapped after the checks can't change what is uploaded.
+        const staged = stageUploads(files, this.deps.home, sid);
+        await driver.upload(args.ref, staged);
         scope.acted.add(b.targetId);
-        scope.builder.daemonLine(`uploaded ${files.length} file${files.length === 1 ? "" : "s"} into [${args.ref}]`);
+        scope.builder.daemonLine(`uploaded ${staged.length} file${staged.length === 1 ? "" : "s"} into [${args.ref}]`);
         return undefined;
       }
       case "keep": {

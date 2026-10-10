@@ -14,8 +14,10 @@ import { AutomationFailure } from "../errors";
 import type { ScreenshotBudget } from "../protocol";
 import { buttonOf, keyEvents, keyForChar, modifiersOf, parseCombo, type KeyPress } from "./input";
 import { PAGE_RUNTIME_SOURCE } from "./page-runtime/bundle.generated";
+import { redactText, redactUrl } from "./page-runtime/redact";
+import { pickerAdvice } from "./page-runtime/rules";
 import {
-  PAGE_RUNTIME_CALL, type RtCheck, type RtClassify, type RtCondition, type RtFindQuery, type RtFound, type RtNode, type RtPoint, type RtSnapshot,
+  PAGE_RUNTIME_CALL, type RtCheck, type RtClassify, type RtCondition, type RtFindQuery, type RtFound, type RtHit, type RtNode, type RtPoint, type RtSnapshot,
 } from "./page-runtime/protocol";
 import { fitsBudget, imageSize, outputSize, scaleFor, toCss, type CssRect, type ShotFrame } from "./scale";
 import { diffState, fullState, makeSnapshot, type TabDialogLine, type TabHeader, type TabNode, type TabSnapshot } from "./state-format";
@@ -50,6 +52,8 @@ interface FrameRec {
    *  id means nothing in another session: a frame that moved out of process gets a new world). */
   ctx?: number;
   ctxSession?: string;
+  /** The world's `uniqueId` when the browser reports one (a process-local context id can repeat across processes). */
+  ctxUnique?: string;
   /** The page runtime instance installed in that world. */
   rtId?: string;
   installing?: Promise<void>;
@@ -108,6 +112,13 @@ export class TabDriver {
 
   private attached = false;
   private attaching?: Promise<void>;
+  private releasing?: Promise<void>;
+  /** When a primitive last used this tab (the hold cap releases the least recently used), and how many are using it
+   *  now (never released under one). */
+  lastUsed = 0;
+  busy = 0;
+  /** The top frame's runtime at the last state: a different one means a new document even if its event was lost. */
+  private lastTopRt?: string;
   private viewport: [number, number] = [0, 0];
   private dpr = 1;
   private readonly frames = new Map<string, FrameRec>();
@@ -130,6 +141,9 @@ export class TabDriver {
   private readonly pokes = new Set<() => void>();
   private readonly shots = new Map<string, ShotFrame>();
   private shotCounter = 0;
+  /** The `uniqueId` each recently created context reported (`<session>:<id>` → uniqueId): the browser reports a world's
+   *  creation BEFORE it answers the `Page.createIsolatedWorld` that made it, so the id is matched up afterwards. */
+  private readonly seenUnique = new Map<string, string>();
 
   constructor(
     readonly backend: string,
@@ -144,11 +158,14 @@ export class TabDriver {
 
   async send<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}, session?: string, timeoutMs?: number): Promise<T> {
     if (this.gone !== undefined) throw this.lost();
+    // A page dialog pauses the page: input, and any read of the page, would be answered only once the dialog is — so
+    // nothing of the kind is sent while one is open (only the dialog's answer, navigation and closing are).
+    const pausable = method.startsWith("Input.") || method === "Runtime.callFunctionOn" || method === "Runtime.evaluate";
+    if (pausable && this.dialog !== undefined) throw new AutomationFailure("TargetBusy", this.dialogBusySentence());
     const sent = this.transport.send<T>(this.tabKey, method, params, { ...(session === undefined ? {} : { cdpSessionId: session }), ...(timeoutMs === undefined ? {} : { timeoutMs }) });
     try {
-      // A page dialog pauses the page: input that raised it, and any read of the page, are answered only once the
-      // dialog is. Stop waiting the moment one opens — input counts as delivered; a read is TargetBusy.
-      if (this.dialog === undefined && (method.startsWith("Input.") || method === "Runtime.callFunctionOn" || method === "Runtime.evaluate")) {
+      // A dialog opening while it is in flight: stop waiting at once — input counts as delivered; a read is TargetBusy.
+      if (pausable) {
         const opened = await this.raceDialog(sent);
         if (opened) {
           void sent.catch(() => undefined);
@@ -159,7 +176,9 @@ export class TabDriver {
       return await sent;
     } catch (err) {
       if (err instanceof AutomationFailure) throw err;
-      if (err instanceof TransportError && err.code === "tab_gone") this.gone ??= "closed";
+      // `tab_gone` from a command is not proof the tab closed (an extension's debugger can be let go while the tab
+      // lives): attach again on the next primitive — that attach failing is what loses the tab.
+      if (err instanceof TransportError && err.code === "tab_gone") { this.attached = false; this.resetDocumentState(true); }
       throw transportFailure(err, this.browserName);
     }
   }
@@ -197,42 +216,92 @@ export class TabDriver {
 
   async ensureAttached(sessionId: string): Promise<void> {
     if (this.gone !== undefined) throw this.lost();
+    if (this.releasing !== undefined) await this.releasing;
     this.holders.add(sessionId);
+    this.lastUsed = this.now();
     if (this.attached) return;
     this.attaching ??= (async () => {
       let info: { viewport: [number, number]; dpr: number };
-      try { info = await this.transport.attach(this.tabKey, { sessionId }); } catch (err) { throw transportFailure(err, this.browserName); }
+      try { info = await this.transport.attach(this.tabKey, { sessionId }); } catch (err) {
+        if (err instanceof TransportError && err.code === "tab_gone") { this.gone ??= "closed"; throw this.lost(); }
+        throw transportFailure(err, this.browserName);
+      }
       this.viewport = info.viewport;
       this.dpr = info.dpr > 0 ? info.dpr : 1;
       try { await this.transport.subscribe(this.tabKey, TAB_EVENTS); } catch (err) { throw transportFailure(err, this.browserName); }
       await this.enableDomains(undefined);
       // Background tabs behave as focused (focus events, :focus, caret) — never by raising anything.
       await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
-      const tree = await this.send<{ frameTree: FrameTreeNode }>("Page.getFrameTree");
-      this.loadFrameTree(tree.frameTree, undefined, undefined);
+      await this.loadTopFrame();
       this.attached = true;
     })().finally(() => { this.attaching = undefined; });
     await this.attaching;
+  }
+
+  /**
+   * The frame tree. A hostile page can make it too large to come back (Winter's app caps an answer); then the tab
+   * still works from its own target info (a page target's id IS its main frame's) and the frame events that follow.
+   */
+  private async loadTopFrame(): Promise<void> {
+    try {
+      const tree = await this.send<{ frameTree: FrameTreeNode }>("Page.getFrameTree");
+      this.loadFrameTree(tree.frameTree, undefined, undefined);
+      return;
+    } catch (err) {
+      if (err instanceof AutomationFailure && err.kind === "TargetLost") throw err;
+    }
+    try {
+      const info = await this.send<{ targetInfo?: { targetId?: string; url?: string } }>("Target.getTargetInfo");
+      const id = info.targetInfo?.targetId;
+      if (typeof id === "string" && id.length > 0) {
+        const rec = this.frames.get(id) ?? { frameId: id, url: info.targetInfo?.url ?? "" };
+        this.frames.set(id, rec);
+        this.topFrameId = id;
+        if (this.url === "") this.url = rec.url;
+      }
+    } catch { /* the next frame event names the top frame */ }
   }
 
   private async enableDomains(session: string | undefined): Promise<void> {
     await this.send("Page.enable", {}, session);
     await this.send("Page.setLifecycleEventsEnabled", { enabled: true }, session).catch(() => undefined);
     await this.send("Runtime.enable", {}, session);
-    await this.send("Network.enable", {}, session).catch(() => undefined);
+    // Only request timing is read (idle detection); nothing needs a body, so the browser buffers none.
+    await this.send("Network.enable", { maxTotalBufferSize: 0, maxResourceBufferSize: 0, maxPostDataSize: 0 }, session).catch(() => undefined);
     await this.send("Page.setInterceptFileChooserDialog", { enabled: true }, session).catch(() => undefined);
     await this.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, session).catch(() => undefined);
   }
 
-  /** Drop `sessionId`'s hold; the tab is detached when no session holds it. Never closes it. */
+  /**
+   * Drop `sessionId`'s hold; the tab is detached when no session holds it — after undoing what attaching turned on
+   * (the intercepted file chooser, focus emulation, auto-attach, the enabled domains), so the tab is left as it was.
+   * Never closes it.
+   */
   async release(sessionId: string): Promise<void> {
     this.holders.delete(sessionId);
     if (this.holders.size > 0 || !this.attached) return;
     this.attached = false;
     this.overlay(false);
     this.resetDocumentState(false);
-    try { await this.transport.detach(this.tabKey); } catch { /* the tab or the link is gone already */ }
+    this.releasing = (async () => {
+      if (this.gone === undefined) {
+        const quiet = async (method: string, params: Record<string, unknown> = {}): Promise<void> => {
+          try { await this.transport.send(this.tabKey, method, params, { timeoutMs: 2_000 }); } catch { /* best effort */ }
+        };
+        await quiet("Page.setInterceptFileChooserDialog", { enabled: false });
+        await quiet("Emulation.setFocusEmulationEnabled", { enabled: false });
+        await quiet("Target.setAutoAttach", { autoAttach: false, waitForDebuggerOnStart: false, flatten: true });
+        await quiet("Network.disable");
+        await quiet("Runtime.disable");
+        await quiet("Page.disable");
+      }
+      try { await this.transport.detach(this.tabKey); } catch { /* the tab or the link is gone already */ }
+    })().finally(() => { this.releasing = undefined; });
+    await this.releasing;
   }
+
+  /** Is the tab attached (held) now? */
+  get isAttached(): boolean { return this.attached; }
 
   /** The model is about to see this tab whole (a fresh binding): earlier navigations are not "new" to it. */
   resetPageMark(): void { this.newPage = false; }
@@ -262,8 +331,8 @@ export class TabDriver {
         const rec = this.frames.get(f.id) ?? { frameId: f.id, url: "", ...(session === undefined ? {} : { session }) };
         rec.url = `${f.url}${f.urlFragment ?? ""}`;
         if (f.parentId !== undefined) rec.parentId = f.parentId;
-        this.forgetRuntime(rec);
         delete rec.ctx;
+        this.forgetRuntime(rec);
         this.frames.set(f.id, rec);
         if (f.parentId === undefined && session === undefined) {
           this.topFrameId = f.id;
@@ -314,22 +383,29 @@ export class TabDriver {
         this.fileChooser = { frameId: String(p.frameId ?? ""), mode: String(p.mode ?? "selectSingle") };
         break;
       case "Runtime.executionContextCreated": {
-        const c = (p.context ?? {}) as { id: number; name?: string; auxData?: { frameId?: string } };
+        const c = (p.context ?? {}) as { id: number; name?: string; uniqueId?: string; auxData?: { frameId?: string } };
         const frameId = c.auxData?.frameId;
-        if (c.name === "winter" && frameId !== undefined) {
+        // A world counts as ours only by the id our own `Page.createIsolatedWorld` returned — never by its name, which
+        // another extension's world could share. Its event only adds the `uniqueId` the browser reports.
+        if (typeof c.uniqueId === "string") {
+          this.seenUnique.set(`${session ?? ""}:${c.id}`, c.uniqueId);
+          if (this.seenUnique.size > 256) this.seenUnique.delete(this.seenUnique.keys().next().value!);
+        }
+        if (frameId !== undefined && typeof c.uniqueId === "string") {
           const rec = this.frames.get(frameId);
-          if (rec !== undefined && (rec.session ?? undefined) === session && rec.ctx === undefined) {
-            rec.ctx = c.id;
-            if (session === undefined) delete rec.ctxSession;
-            else rec.ctxSession = session;
-          }
+          if (rec !== undefined && rec.ctx === c.id && (rec.ctxSession ?? undefined) === session) rec.ctxUnique = c.uniqueId;
         }
         break;
       }
       case "Runtime.executionContextDestroyed": {
+        // Matched by `uniqueId` where the browser reports one: a process-local id can repeat after a navigation.
         const id = p.executionContextId;
+        const unique = typeof p.executionContextUniqueId === "string" ? p.executionContextUniqueId : undefined;
+        const seenKey = `${session ?? ""}:${String(id)}`;
+        if (unique === undefined || this.seenUnique.get(seenKey) === unique) this.seenUnique.delete(seenKey);
         for (const rec of this.frames.values()) {
-          if (rec.ctx === id && (rec.session ?? undefined) === session) { delete rec.ctx; this.forgetRuntime(rec); }
+          const same = unique !== undefined && rec.ctxUnique !== undefined ? rec.ctxUnique === unique : rec.ctx === id && (rec.ctxSession ?? undefined) === session;
+          if (same) { delete rec.ctx; this.forgetRuntime(rec); }
         }
         break;
       }
@@ -370,7 +446,9 @@ export class TabDriver {
         this.gone ??= "crashed";
         break;
       case "Inspector.detached":
-        if (session === undefined) { this.attached = false; this.resetDocumentState(false); }
+        // The tab's debugger was let go (idle, or the target swapped) while the tab lives: attach again on the next
+        // primitive; its world, and so every ref, will be new.
+        if (session === undefined) { this.attached = false; this.holders.clear(); this.resetDocumentState(true); }
         break;
       default:
         break;
@@ -379,9 +457,21 @@ export class TabDriver {
   }
 
   onGone(reason: string): void {
-    this.gone ??= reason;
+    if (reason === "stopped") {
+      // The tab's browser was stopped or its debugger let go (the app parked it; the extension idled out): the tab
+      // itself may live on — the next primitive attaches again; its document (and so every ref) is new.
+      this.attached = false;
+      this.holders.clear();
+      this.resetDocumentState(true);
+    } else {
+      this.gone ??= reason;
+    }
     for (const poke of [...this.pokes]) poke();
   }
+
+  /** The URL and title as the model may read them: credentials in a URL, and token-looking text, redacted. */
+  get shownUrl(): string { return redactUrl(shownUrl(this.url)); }
+  get shownTitle(): string { return redactText(this.title); }
 
   private loadFrameTree(node: FrameTreeNode, parentId: string | undefined, session: string | undefined): void {
     const f = node.frame;
@@ -410,11 +500,12 @@ export class TabDriver {
     if (rec.rtId !== undefined) this.liveRts.delete(rec.rtId);
     delete rec.rtId;
     delete rec.owner;
-    if (rec.ctx === undefined) delete rec.ctxSession;
+    if (rec.ctx === undefined) { delete rec.ctxSession; delete rec.ctxUnique; }
   }
 
   /** A new top-frame document: every ref is stale, the snapshots go, the next state is full and says "new page". */
   private newTopDocument(): void {
+    this.lastTopRt = undefined;
     this.generation++;
     this.newPage = true;
     this.snapshots = [];
@@ -430,6 +521,7 @@ export class TabDriver {
     for (const rec of this.frames.values()) { delete rec.ctx; this.forgetRuntime(rec); }
     this.frames.clear();
     this.childSetups.clear();
+    this.seenUnique.clear();
     this.topFrameId = undefined;
     this.inflight.clear();
     if (newDocument) this.newTopDocument();
@@ -456,6 +548,9 @@ export class TabDriver {
         rec.ctx = r.executionContextId;
         if (session === undefined) delete rec.ctxSession;
         else rec.ctxSession = session;
+        const unique = this.seenUnique.get(`${session ?? ""}:${r.executionContextId}`);
+        if (unique !== undefined) rec.ctxUnique = unique;
+        else delete rec.ctxUnique;
       }
       const res = await this.send<{ result?: { value?: unknown }; exceptionDetails?: unknown }>("Runtime.evaluate", {
         expression: `${PAGE_RUNTIME_SOURCE}\n;globalThis.__winterRuntime.id`, contextId: rec.ctx, returnByValue: true,
@@ -587,6 +682,10 @@ export class TabDriver {
     }
     const top = this.top();
     const snap = await this.callFresh<RtSnapshot>(top, "snapshot", {});
+    // Another runtime in the top frame than at the last state: a new document, even if its navigation event never
+    // arrived (an over-size event is dropped by the transport).
+    if (this.lastTopRt !== undefined && top.rtId !== this.lastTopRt) this.newTopDocument();
+    this.lastTopRt = top.rtId;
     this.url = snap.url || this.url;
     this.title = snap.title;
     const focus: { ref?: number; frame?: { rec: FrameRec; id: number } } = {};
@@ -637,7 +736,7 @@ export class TabDriver {
     const notes: string[] = [];
     if (this.fileChooser !== undefined) notes.push("the page asked for a file — use upload(ref, paths) on its file input");
     return {
-      title: this.title, url: shownUrl(this.url),
+      title: this.shownTitle, url: this.shownUrl,
       ...(focusedRef === undefined ? {} : { focusedRef }), ...(settle === undefined ? {} : { settle }),
       ...(this.newPage && !scoped ? { newPage: true } : {}), ...(unread === undefined ? {} : { unread }),
       ...(this.dialog === undefined ? {} : { dialog: this.dialog }), ...(notes.length === 0 ? {} : { notes }),
@@ -796,10 +895,13 @@ export class TabDriver {
     if (this.dialog !== undefined) throw new AutomationFailure("TargetBusy", `${this.dialogBusySentence()} (${what} waits for it)`);
   }
 
-  /** A ref → where to click in the top frame's viewport (CSS px), after the actionability check. */
-  async pointForRef(ref: number): Promise<{ x: number; y: number }> {
+  /** A ref → where to click in the top frame's viewport (CSS px), after the actionability check; `picker` names the
+   *  native window pressing it would open (the engine refuses that). `guardMenu`: a right-click follows — the
+   *  element's frame stops the browser's own context menu from opening (unless the page shows its own). */
+  async pointForRef(ref: number, o: { guardMenu?: boolean } = {}): Promise<{ x: number; y: number; picker?: string }> {
     const { rec, id, rtId } = this.resolve(ref);
-    const p = await this.callIn<RtPoint>(rec, "point", { id, scroll: true }, { expectRt: rtId });
+    const guard = o.guardMenu === true ? { guardMenu: true } : {};
+    const p = await this.callIn<RtPoint>(rec, "point", { id, scroll: true, ...guard }, { expectRt: rtId });
     if (!p.ok) {
       switch (p.reason) {
         case "gone": throw stale(ref);
@@ -812,12 +914,34 @@ export class TabDriver {
         }
       }
     }
-    if (rec.parentId === undefined) return { x: p.x, y: p.y };
+    const picker = p.picker === undefined ? {} : { picker: p.picker };
+    if (rec.parentId === undefined) return { x: p.x, y: p.y, ...picker };
     // In a child frame: every ancestor brings this point into its view, then the frame paints where it now is
     // before the click (an out-of-process frame is hit-tested by where it last painted).
     const origin = await this.frameOrigin(rec, { x: p.x, y: p.y });
-    await this.callIn<RtPoint>(rec, "point", { id, scroll: false, settle: true }, { expectRt: rtId });
-    return { x: p.x + origin.x, y: p.y + origin.y };
+    await this.callIn<RtPoint>(rec, "point", { id, scroll: false, settle: true, ...guard }, { expectRt: rtId });
+    return { x: p.x + origin.x, y: p.y + origin.y, ...picker };
+  }
+
+  /** The native picker control at a viewport point (CSS px), looked for through the frames there — undefined when
+   *  the point hits none. Before a press at a pixel point (`guardMenu`: a right-click — every frame on the way stops
+   *  the browser's own context menu). */
+  async pickerAt(x: number, y: number, o: { guardMenu?: boolean } = {}): Promise<string | undefined> {
+    let rec = this.top();
+    let px = x, py = y;
+    for (let depth = 0; depth <= MAX_FRAME_DEPTH; depth++) {
+      const hit = await this.callFresh<RtHit>(rec, "hitAt", { x: px, y: py, ...(o.guardMenu === true ? { guardMenu: true } : {}) });
+      if (hit.picker !== undefined) return hit.picker;
+      if (hit.frame === undefined) return undefined;
+      await this.ensureOwners(rec);
+      const child = this.childFrameFor(rec, hit.frame);
+      if (child === undefined) return undefined;
+      const off = await this.callIn<{ x: number; y: number } | null>(rec, "frameOffset", { id: hit.frame });
+      if (off === null) return undefined;
+      px -= off.x; py -= off.y;
+      rec = child;
+    }
+    return undefined;
   }
 
   /** A point in a screenshot → CSS px of the viewport. */
@@ -857,20 +981,25 @@ export class TabDriver {
     await this.mouse("mouseWheel", at.x, at.y, { deltaX: dx, deltaY: dy });
   }
 
-  async drag(from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> {
+  async drag(from: { x: number; y: number }, to: { x: number; y: number }, signal?: AbortSignal): Promise<void> {
     this.overlay(true, { x: from.x, y: from.y, kind: "press" });
     await this.mouse("mouseMoved", from.x, from.y);
     await this.mouse("mousePressed", from.x, from.y, { button: "left", buttons: 1, clickCount: 1 });
     const steps = 8;
-    for (let i = 1; i <= steps; i++) {
-      await this.mouse("mouseMoved", from.x + ((to.x - from.x) * i) / steps, from.y + ((to.y - from.y) * i) / steps, { button: "left", buttons: 1 });
+    try {
+      for (let i = 1; i <= steps; i++) {
+        stopIfAborted(signal);
+        await this.mouse("mouseMoved", from.x + ((to.x - from.x) * i) / steps, from.y + ((to.y - from.y) * i) / steps, { button: "left", buttons: 1 });
+      }
+    } finally {
+      // The button is let go even when the run stops mid-drag: never leave the page holding a pressed button.
+      if (this.dialog === undefined && this.gone === undefined) await this.mouse("mouseReleased", signal?.aborted === true ? from.x : to.x, signal?.aborted === true ? from.y : to.y, { button: "left", buttons: 0, clickCount: 1 }).catch(() => undefined);
     }
-    await this.mouse("mouseReleased", to.x, to.y, { button: "left", buttons: 0, clickCount: 1 });
   }
 
   /** The keyboard's target, classified by the runtime (fails closed): `into`'s element (focused first), else the
    *  focused element, followed into child frames. */
-  async keyboardTarget(into: number | undefined): Promise<{ editable: boolean; ref?: number; label?: string }> {
+  async keyboardTarget(into: number | undefined): Promise<{ editable: boolean; ref?: number; label?: string; frame: FrameRec }> {
     let rec: FrameRec;
     let c: RtClassify;
     if (into !== undefined) {
@@ -889,16 +1018,21 @@ export class TabDriver {
       c = await this.callFresh<RtClassify>(rec, "classify", {});
     }
     if (c.kind === "secure") throw new AutomationFailure("Refused", SECURE_FIELD_SENTENCE);
+    if (c.kind === "picker") {
+      const ref = rec.rtId === undefined ? undefined : this.refFor(rec.rtId, c.id);
+      throw new AutomationFailure("Refused", pickerSentence(ref, c.what));
+    }
     if (c.kind !== "ok") throw new AutomationFailure("Refused", FOCUS_UNKNOWN_SENTENCE("this tab"));
     const ref = c.id === undefined || rec.rtId === undefined ? undefined : this.refFor(rec.rtId, c.id);
     const label = ref === undefined ? undefined : `[${ref}] ${c.role ?? "element"}${c.name === undefined ? "" : ` "${c.name}"`}`;
-    return { editable: c.editable, ...(ref === undefined ? {} : { ref }), ...(label === undefined ? {} : { label }) };
+    return { editable: c.editable, ...(ref === undefined ? {} : { ref }), ...(label === undefined ? {} : { label }), frame: rec };
   }
 
   /** Text as key presses (≤ 200 characters on one line: a page's key listeners see them), else inserted at once. */
-  async typeText(text: string): Promise<void> {
+  async typeText(text: string, signal?: AbortSignal): Promise<void> {
     if ([...text].length <= TYPE_AS_KEYS_MAX && !/[\r\n]/.test(text)) {
       for (const ch of text) {
+        stopIfAborted(signal);
         const k = keyForChar(ch);
         if (k === undefined) { await this.send("Input.insertText", { text: ch }); continue; }
         const [down, up] = keyEvents({ modifiers: k.shift ? 8 : 0, def: k });
@@ -912,9 +1046,10 @@ export class TabDriver {
 
   async insertText(text: string): Promise<void> { await this.send("Input.insertText", { text }); }
 
-  async press(p: KeyPress, repeat: number): Promise<void> {
+  async press(p: KeyPress, repeat: number, signal?: AbortSignal): Promise<void> {
     const [down, up] = keyEvents(p);
     for (let i = 0; i < repeat; i++) {
+      stopIfAborted(signal);
       await this.send("Input.dispatchKeyEvent", down);
       await this.send("Input.dispatchKeyEvent", up);
     }
@@ -929,8 +1064,9 @@ export class TabDriver {
     } catch { return null; }
   }
 
-  async pasteEvent(html: string | undefined, text: string): Promise<boolean> {
-    const r = await this.callFresh<{ handled: boolean }>(this.top(), "pasteEvent", { ...(html === undefined ? {} : { html }), text });
+  /** A synthetic paste in the frame that holds the focused field (`keyboardTarget`'s `frame`). */
+  async pasteEvent(frame: FrameRec, html: string | undefined, text: string): Promise<boolean> {
+    const r = await this.callFresh<{ handled: boolean }>(frame, "pasteEvent", { ...(html === undefined ? {} : { html }), text });
     return r.handled;
   }
 
@@ -1077,6 +1213,16 @@ export class TabDriver {
 }
 
 interface FrameTreeNode { frame: { id: string; parentId?: string; url: string; urlFragment?: string }; childFrames?: FrameTreeNode[] }
+
+/** Stop a sequence of input events between two of them when the run was cancelled. */
+function stopIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw new AutomationFailure("Cancelled", "the script was cancelled — the input stopped partway");
+}
+
+/** The refusal for pointer or keyboard input on a native picker control: its window would open on the user's screen. */
+export function pickerSentence(ref: number | undefined, what: string): string {
+  return `${ref === undefined ? "that control" : `[${ref}]`} opens ${what} when pressed or keyed — use ${pickerAdvice(what)} instead`;
+}
 
 /** A tab's URL as the model reads it: Winter's start page (a `data:` URL, loaded for about:blank) reads as about:blank. */
 export function shownUrl(url: string): string {

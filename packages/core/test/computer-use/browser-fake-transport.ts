@@ -3,7 +3,7 @@
 // only in an isolated world named "winter" whose context it SAW created), and plays the page runtime's ops
 // (`page-runtime/protocol.ts`) from the scripted page, so the engine is exercised exactly as it would drive Chromium.
 import { CDP_ALLOWED_EVENTS, CDP_ALLOWED_METHODS } from "../../src/computer-use/browser/cdp-allowlist";
-import type { RtClassify, RtNode, RtPoint } from "../../src/computer-use/browser/page-runtime/protocol";
+import type { RtClassify, RtHit, RtNode, RtPoint } from "../../src/computer-use/browser/page-runtime/protocol";
 import { TransportError, type BrowserFamily, type CdpEvent, type CdpTransport, type TransportTab } from "../../src/computer-use/browser/transport";
 
 export interface FakeFrame {
@@ -33,6 +33,8 @@ export interface FakePage {
   frames?: FakeFrame[];
   /** Mutations keep coming (never quiet). */
   busy?: boolean;
+  /** Native picker controls: id → what pressing one opens ("a pop-up menu", "a date picker"). */
+  pickers?: Record<number, string>;
 }
 
 interface Ctx { frameId: string; session?: string; winter: boolean; doc: number }
@@ -74,6 +76,15 @@ export class FakeCdpTransport implements CdpTransport {
   pages: Record<string, FakePage> = {};
   /** The next navigate fails with this net error. */
   failNextNavigate?: string;
+  /** `Page.getFrameTree` on a tab's own session fails: "too_large" (Winter's app's -32603) or "refused". */
+  failFrameTree?: "too_large" | "refused";
+  /** `Runtime.callFunctionOn`'s next answer for this op is too large for the link (-32603), once. */
+  oversizeOnce?: string;
+  /** Every `Input.*` command takes this long to answer (a slow page) — or what `inputDelay` says for it. */
+  inputDelayMs = 0;
+  inputDelay?: (method: string, params: Record<string, unknown>) => number;
+  /** Called with every command the fake accepts, before it is answered. */
+  onSend?: (method: string, params: Record<string, unknown>, session?: string) => void;
 
   constructor(readonly backend: string, readonly family: BrowserFamily) {}
 
@@ -137,6 +148,16 @@ export class FakeCdpTransport implements CdpTransport {
     for (const l of [...this.gone]) l(tabKey, reason);
   }
   pressStop(tabKey: string): void { for (const l of [...this.stops]) l(tabKey); }
+  /** The debugger is let go while the tab lives (the extension idled out): a top-level `Inspector.detached`. */
+  detachIdle(tabKey: string): void {
+    const t = this.tabs.get(tabKey);
+    if (t === undefined) return;
+    this.emit(t, "Inspector.detached", { reason: "idle" });
+    t.attached = false;
+    t.holders.clear();
+    t.contexts.clear();
+    t.winterObjects.clear();
+  }
 
   emit(tab: FakeTab, method: string, params: Record<string, unknown>, session?: string): void {
     if (!tab.subscribed.includes(method)) return;
@@ -191,12 +212,18 @@ export class FakeCdpTransport implements CdpTransport {
     if (!t.attached) throw new TransportError("cdp_error", "not attached", { cdpCode: -32000, cdpMessage: "Not attached" });
     const session = opts.cdpSessionId;
     this.sent.push({ tabKey, method, params, ...(session === undefined ? {} : { session }) });
+    this.onSend?.(method, params, session);
+    const delay = method.startsWith("Input.") ? this.inputDelay?.(method, params) ?? this.inputDelayMs : 0;
+    if (delay > 0) await new Promise((res) => setTimeout(res, delay));
     const ctxKey = (id: unknown): string => `${session ?? ""}:${String(id)}`;
     const r = (v: unknown): T => v as T;
     switch (method) {
       case "Page.enable": case "Runtime.enable": case "Network.enable": case "Page.setLifecycleEventsEnabled":
       case "Page.setInterceptFileChooserDialog": case "Emulation.setFocusEmulationEnabled": case "Runtime.releaseObject":
+      case "Page.disable": case "Runtime.disable": case "Network.disable":
         return r({});
+      case "Target.getTargetInfo":
+        return r({ targetInfo: { targetId: "top", type: "page", url: t.page.url, title: t.page.title, attached: true } });
       case "Target.setAutoAttach": {
         if (session === undefined) {
           for (const f of t.page.frames ?? []) {
@@ -207,6 +234,8 @@ export class FakeCdpTransport implements CdpTransport {
         return r({});
       }
       case "Page.getFrameTree": {
+        if (session === undefined && this.failFrameTree === "too_large") throw new TransportError("cdp_error", "too large", { cdpCode: -32603, cdpMessage: "the answer was too large for the link" });
+        if (session === undefined && this.failFrameTree === "refused") throw new TransportError("not_allowed", "Page.getFrameTree refused");
         if (session !== undefined) {
           const f = t.page.frames?.find((x) => `S-${x.frameId}` === session);
           return r({ frameTree: { frame: { id: f?.frameId ?? "?", parentId: "top", url: f?.url ?? "" } } });
@@ -218,7 +247,7 @@ export class FakeCdpTransport implements CdpTransport {
         const frameId = String(params.frameId);
         const id = this.nextCtx++;
         t.contexts.set(ctxKey(id), { frameId, ...(session === undefined ? {} : { session }), winter: true, doc: t.doc });
-        this.emit(t, "Runtime.executionContextCreated", { context: { id, name: "winter", origin: "", auxData: { frameId, isDefault: false, type: "isolated" } } }, session);
+        this.emit(t, "Runtime.executionContextCreated", { context: { id, uniqueId: `u-${id}`, name: "winter", origin: "", auxData: { frameId, isDefault: false, type: "isolated" } } }, session);
         return r({ executionContextId: id });
       }
       case "Runtime.evaluate": {
@@ -254,6 +283,7 @@ export class FakeCdpTransport implements CdpTransport {
         frameId = c.frameId;
         const args = params.arguments as Array<{ value: unknown }>;
         const op = String(args[0]!.value);
+        if (this.oversizeOnce === op) { delete this.oversizeOnce; throw new TransportError("cdp_error", "too large", { cdpCode: -32603, cdpMessage: "the answer was too large for the link" }); }
         const arg = (args[1]?.value ?? null) as Record<string, any> | null;
         if (params.returnByValue === false) {
           const objectId = `obj:${frameId}:${String(arg?.id)}`;
@@ -272,6 +302,8 @@ export class FakeCdpTransport implements CdpTransport {
         return r({});
       }
       case "Page.navigate": {
+        // The world rule: only http(s) and exactly about:blank (a javascript: URL runs in the page's world).
+        if (String(params.url) !== "about:blank" && !/^https?:/i.test(String(params.url))) throw new TransportError("not_allowed", "Page.navigate: only http(s) and about:blank");
         if (this.failNextNavigate !== undefined) { const e = this.failNextNavigate; delete this.failNextNavigate; return r({ frameId: "top", errorText: e }); }
         const url = String(params.url);
         t.history = t.history.slice(0, t.historyIndex + 1);
@@ -293,6 +325,7 @@ export class FakeCdpTransport implements CdpTransport {
         return r({});
       }
       case "Page.reload":
+        if (params.scriptToEvaluateOnLoad !== undefined) throw new TransportError("not_allowed", "Page.reload with scriptToEvaluateOnLoad");
         queueMicrotask(() => this.commit(t, t.page.url));
         return r({});
       case "Page.handleJavaScriptDialog":
@@ -352,7 +385,15 @@ export class FakeCdpTransport implements CdpTransport {
         const cov = frameId === "top" ? t.page.covered?.[n.id] : undefined;
         if (cov !== undefined) return { ok: false, reason: "covered", by: cov } satisfies RtPoint;
         if (t.page.hidden?.includes(n.id) === true) return { ok: false, reason: "hidden" } satisfies RtPoint;
-        return { ok: true, x: 10 * n.id, y: 5 * n.id } satisfies RtPoint;
+        const picker = frameId === "top" ? t.page.pickers?.[n.id] : undefined;
+        return { ok: true, x: 10 * n.id, y: 5 * n.id, ...(picker === undefined ? {} : { picker }) } satisfies RtPoint;
+      }
+      case "hitAt": {
+        // An element's point is (10·id, 5·id) — the one there, if any.
+        const n = all().find((x) => Math.abs(10 * x.id - Number(arg?.x)) < 1 && Math.abs(5 * x.id - Number(arg?.y)) < 1);
+        if (n === undefined) return {} satisfies RtHit;
+        const picker = frameId === "top" ? t.page.pickers?.[n.id] : undefined;
+        return { id: n.id, ...(picker === undefined ? {} : { picker }) } satisfies RtHit;
       }
       case "classify": case "focus": {
         const id = op === "focus" ? arg?.id : t.focused?.startsWith(`${frameId}:`) === true ? Number(t.focused.split(":")[1]) : frameId === "top" ? t.page.focused : undefined;
@@ -365,6 +406,8 @@ export class FakeCdpTransport implements CdpTransport {
         if (n === undefined) return { kind: "unknown" } satisfies RtClassify;
         if (op === "focus") t.focused = key(id);
         if (f.secure.includes(Number(id))) return { kind: "secure", id: Number(id) } satisfies RtClassify;
+        const picker = frameId === "top" ? t.page.pickers?.[Number(id)] : undefined;
+        if (picker !== undefined) return { kind: "picker", id: Number(id), what: picker } satisfies RtClassify;
         return { kind: "ok", editable: f.editable.includes(Number(id)), id: Number(id), role: n.role, ...(n.name === undefined ? {} : { name: n.name }) } satisfies RtClassify;
       }
       case "setValue": {

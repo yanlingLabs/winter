@@ -107,6 +107,7 @@ export function harness(o: HarnessOpts = {}) {
         if (held.has(key)) return;
         held.set(key, await locks.acquire(key, { runId, sessionId }, { waitMs: 200, label, signal: abort.signal }));
       },
+      lockRun: (key) => locks.holder(key)?.runId,
       authorize: (app, purpose) => policy.authorize(grants, app, purpose, abort.signal),
       sessionPolicy: () => facts.policy,
       sessionFacts: () => facts,
@@ -124,7 +125,7 @@ export function harness(o: HarnessOpts = {}) {
       engine.runEnded(sessionId, runId);
     };
     const text = (): string => builder.build().content.map((c) => (c.type === "text" ? c.text : "[image]")).join("");
-    return { scope, builder, end, text, metric, sites, browsers, grants };
+    return { scope, builder, end, text, metric, sites, browsers, grants, abort };
   };
   return { engine, registry, winter, chrome, winterReg, chromeReg, panel, closedWinter, cards, approvals, run, locks, diffBases, home, cwd, tmp, facts, stops, policy };
 }

@@ -114,6 +114,34 @@ describe("browser tabs through the ComputerV2 service", () => {
     expect(text(r2)).toContain("true that tab is the user's and was released at the end of the turn");
   }, 30_000);
 
+  macOnly("a cancelled run's key presses stop before its tab lock goes: nothing is sent after the call returns", async () => {
+    const w = world();
+    // Each key goes down slowly — slower than the worker is given to settle after a cancel — so the run ends while one
+    // is in flight: its key-up (and nothing else) follows, before the tab lock goes.
+    w.winter.inputDelay = (method, params) => (method === "Input.dispatchKeyEvent" && params.type === "rawKeyDown" ? 1_400 : 0);
+    const keys = (): string[] => w.winter.sent.filter((s) => s.method === "Input.dispatchKeyEvent").map((s) => String(s.params.type));
+    const r = await w.run("const tab = await browsers.open('https://shop.example.com/cart')\nawait tab.key('backspace', { into: 2, repeat: 50 })", { timeoutMs: 1_200 });
+    expect(r.isError).toBe(true);
+    const atReturn = keys();
+    expect(atReturn.length).toBeGreaterThan(0);
+    expect(atReturn.length).toBeLessThan(10);
+    expect(atReturn[atReturn.length - 1]).toBe("keyUp");
+    await new Promise((res) => setTimeout(res, 1_500));
+    expect(keys().length).toBe(atReturn.length);
+  }, 30_000);
+
+  macOnly("a tab's own primitive aimed at an app target is refused before policy, locks or the helper", async () => {
+    const w = world();
+    const r = await w.run([
+      "const n = await apps.open('Notes')",
+      "const tab = await browsers.open('https://shop.example.com/cart')",
+      "const T = Object.getPrototypeOf(tab)",
+      "for (const m of ['goto', 'text', 'url', 'upload', 'keep', 'close']) { try { await T[m].call(n, 'https://x.example/') } catch (e) { print(m, e.name, e.message) } }",
+    ].join("\n"));
+    const t = text(r);
+    for (const m of ["goto", "text", "url", "upload", "keep", "close"]) expect(t).toContain(`${m} TypeError ${m}() belongs to a browser tab — this target is an app`);
+  }, 30_000);
+
   macOnly("the extension's Stop button stops the script running on that tab and interrupts the turn", async () => {
     const w = world();
     w.chrome.addTab({ url: "https://u.example/", title: "U", nodes: [], busy: true }, { tabKey: "9" });

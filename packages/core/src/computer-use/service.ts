@@ -240,6 +240,8 @@ interface RunCtx {
   /** Phase 2, for the audit line: the sites (hosts only) and browser backends this run touched. */
   sites?: Set<string>;
   browsers?: Set<string>;
+  /** Phase 2: browser-tab primitives still running (the run's tab locks wait for them at its end). */
+  tabWork?: Set<Promise<unknown>>;
 }
 
 const isRef = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
@@ -400,6 +402,13 @@ export class ComputerV2Service {
     // `ended` after its next await and can neither take a lock nor keep one (review C1).
     ctx.ended = true;
     ctx.abort.abort();
+    // A browser tab's input in flight (a long type, a drag) stops at its next event once aborted: the tab lock is
+    // held until it has — another session must never interleave input with it (bounded).
+    if (ctx.tabWork !== undefined && ctx.tabWork.size > 0) {
+      let wait: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([Promise.allSettled([...ctx.tabWork]), new Promise<void>((r) => { wait = setTimeout(r, TAB_WORK_AFTER_END_MS); })]);
+      if (wait !== undefined) clearTimeout(wait);
+    }
     for (const releaseLock of ctx.locks.values()) releaseLock();
     ctx.locks.clear();
     // "Allow once" covers THIS call: a target bound on it is released now (the controller's ruling, review I3).
@@ -502,7 +511,7 @@ export class ComputerV2Service {
       case "timeLeft": return Math.max(0, Math.floor(ctx.timer.left()));
       case "browsers.list": case "browsers.open": case "browsers.tabs": case "browsers.tab":
         if (this.deps.browsers === undefined) throw new AutomationFailure("BrowserUnavailable", "browsers are not available in this daemon");
-        return await this.deps.browsers.global(this.tabScope(ctx, metric), msg.primitive, args);
+        return await this.trackTabWork(ctx, this.deps.browsers.global(this.tabScope(ctx, metric), msg.primitive, args));
       case "apps.list": return await this.appsList(ctx, args, metric);
       case "apps.open": {
         const target = str(args.app)?.trim();
@@ -529,7 +538,9 @@ export class ComputerV2Service {
   }
 
   private async targetPrimitive(ctx: RunCtx, targetId: string, primitive: string, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<unknown> {
-    if (this.deps.browsers?.owns(ctx.sessionId, targetId) === true) return await this.deps.browsers.primitive(this.tabScope(ctx, metric), targetId, primitive, args);
+    if (this.deps.browsers?.owns(ctx.sessionId, targetId) === true) return await this.trackTabWork(ctx, this.deps.browsers.primitive(this.tabScope(ctx, metric), targetId, primitive, args));
+    // A browser tab's own primitive never reaches the helper for an app target (the worker is untrusted).
+    if (TAB_ONLY_PRIMITIVES.has(primitive)) throw bad(`${primitive}() belongs to a browser tab — this target is an app`);
     this.live(ctx);
     const t = this.target(ctx, targetId);
     const app: AppRef = { bundleId: t.bundleId, name: t.name };
@@ -1318,6 +1329,13 @@ export class ComputerV2Service {
     return await this.bind(ctx, { app: at.bundleId, window: at.windowId, known: { bundleId: at.bundleId, name: at.app } }, metric);
   }
 
+  /** Run `work` as one of this run's tab primitives still in flight until it settles. */
+  private async trackTabWork<T>(ctx: RunCtx, work: Promise<T>): Promise<T> {
+    const set = (ctx.tabWork ??= new Set());
+    set.add(work);
+    try { return await work; } finally { set.delete(work); }
+  }
+
   /** What the browser engine gets for one primitive of this run (`browser/tab-scope.ts`). */
   private tabScope(ctx: RunCtx, metric: PrimitiveMetric): TabRunScope {
     return {
@@ -1336,6 +1354,7 @@ export class ComputerV2Service {
         if (ctx.locks.has(key)) { release(); return; }
         ctx.locks.set(key, release);
       },
+      lockRun: (key) => this.locks.holder(key)?.runId,
       authorize: (app, purpose) => this.deps.policy.authorize(ctx.grants, app, purpose, ctx.abort.signal),
       sessionPolicy: () => this.deps.policy.sessionFacts(ctx.sessionId).policy,
       sessionFacts: () => this.deps.policy.sessionFacts(ctx.sessionId),
@@ -1600,6 +1619,10 @@ function failure(name: string, message: string): ScriptResult {
 
 /** The functions a script may call — anything else from the worker is refused unrecorded (review I6). */
 const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES]);
+/** A browser tab's primitives no app has (refused on an app target before the helper sees them). */
+const TAB_ONLY_PRIMITIVES: ReadonlySet<string> = new Set<string>(TAB_PRIMITIVES.filter((p) => !(APP_PRIMITIVES as readonly string[]).includes(p)));
+/** How long a run's end waits for its tab input to stop before letting the tab locks go. */
+const TAB_WORK_AFTER_END_MS = 2_000;
 
 /** The error names a result (and the audit line) may carry: the ten kinds and JavaScript's own. */
 const KNOWN_ERROR_NAMES: ReadonlySet<string> = new Set<string>([
