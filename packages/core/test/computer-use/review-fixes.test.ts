@@ -101,9 +101,20 @@ describe("C1: no lock outlives its script", () => {
 
   macOnly("a bind the helper answers after the script ended is released, not kept", async () => {
     const w = world();
-    w.fake.handlers["target.bind"] = async () => { await Bun.sleep(400); return { targetId: "late", app: { name: "Notes", bundleId: "com.apple.Notes", pid: 501 }, window: { id: 1, title: "w", frame: [0, 0, 1, 1] } }; };
-    await w.run("apps.open('Notes')");
-    // The late answer lands ~400 ms on and is released then: poll for it (a fixed sleep flaked under a loaded suite).
+    // The helper holds the bind until the run has ended, so its answer is late however loaded the machine is.
+    let bindCalled = false;
+    let runEnded!: () => void;
+    const ended = new Promise<void>((resolve) => { runEnded = resolve; });
+    w.fake.handlers["target.bind"] = async () => {
+      bindCalled = true;
+      await ended;
+      return { targetId: "late", app: { name: "Notes", bundleId: "com.apple.Notes", pid: 501 }, window: { id: 1, title: "w", frame: [0, 0, 1, 1] } };
+    };
+    // Not awaited: the script ends with the bind in flight. It stays up long enough for the call to reach the helper
+    // (with no wait at all, a loaded suite ended the run before the bind was even sent — nothing to release).
+    await w.run("apps.open('Notes')\nawait sleep(1_500)");
+    expect(bindCalled).toBe(true);
+    runEnded();
     const released = (): boolean => w.fake.calls("target.release").some((c) => (c as { targetId?: string }).targetId === "late");
     for (const until = Date.now() + 10_000; !released() && Date.now() < until;) await Bun.sleep(25);
     expect(w.fake.calls("target.release")).toContainEqual({ targetId: "late" });
