@@ -382,23 +382,55 @@ final class OffDesktopActTests: XCTestCase {
 
     func testAWindowOnNoSpaceForAMomentIsKept() async throws {
         _ = transitionWorld(readingsOnNoSpace: 3)
-        core.windowMaybeClosed(pid: pid)  // the transition's destroyed-element notification
+        await core.checkWindows(pid: pid)  // the transition's destroyed-element notification
         XCTAssertNotNil(try? core.target("t1"), "a full-screen transition is not a closed window")
-        XCTAssertFalse(core.windowGone(target), "on its Space again")
+        let gone1 = try await core.windowGone(target)
+        XCTAssertFalse(gone1, "on its Space again")
     }
 
     func testAWindowOnNoSpaceForGoodIsLostAfterTheSettle() async throws {
         _ = transitionWorld(readingsOnNoSpace: nil)
         let t0 = Date()
-        core.windowMaybeClosed(pid: pid)
+        await core.checkWindows(pid: pid)
         XCTAssertNil(try? core.target("t1"), "closed but still allocated: lost")
         XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(t0), 0.75, "only after the window was watched for the settle")
         // A window that leaves the server's listing during the watch is gone at once.
         _ = transitionWorld(readingsOnNoSpace: nil)
         sys.onSpaceReading = { [unowned self] _ in sys.windows[77] = nil; return false }
         let t1 = Date()
-        XCTAssertTrue(core.windowGone(target))
+        let gone2 = try await core.windowGone(target)
+        XCTAssertTrue(gone2)
         XCTAssertLessThan(Date().timeIntervalSince(t1), 0.6)
+    }
+
+    /// Review of round 2 (LOW): the watch held a Swift-concurrency thread for up to 1.5 s, before the call's cancel was
+    /// registered, so Esc/cancel waited it out. It now suspends under the call's cancel.
+    func testTheTransitionWatchEndsOnTheCallsCancel() async throws {
+        _ = transitionWorld(readingsOnNoSpace: nil)
+        core.windowGoneSettleMs = 5_000
+        let t0 = Date()
+        Task {
+            try await Task.sleep(nanoseconds: 150_000_000)
+            _ = try await core.cancel(CancelParams(callId: "c"))
+        }
+        let e = await expect("cancelled") { try await self.act(.key(CUKeyAction(combo: "escape"))) }
+        XCTAssertNotNil(e)
+        XCTAssertLessThan(Date().timeIntervalSince(t0), 1.0, "stopped by the cancel, not after the watch")
+        XCTAssertNotNil(try? core.target("t1"), "nothing decided: the target is kept")
+    }
+
+    /// Each check may watch for the whole settle: overlapping requests for one pid run ONE watch, then at most one more.
+    func testWindowChecksForOnePidAreCoalesced() async throws {
+        let lock = transitionWorld(readingsOnNoSpace: nil)
+        var readings = 0
+        sys.onSpaceReading = { _ in lock.withLock { readings += 1 }; return false }
+        core.windowGoneSettleMs = 400
+        await withTaskGroup(of: Void.self) { g in
+            for _ in 0..<6 { g.addTask { [core] in await core!.checkWindows(pid: self.pid) } }
+        }
+        XCTAssertNil(try? core.target("t1"), "lost after the watch")
+        let n = lock.withLock { readings }
+        XCTAssertLessThan(n, 12, "one watch of ~6 readings (\(n)), not six overlapping ones")
     }
 
     // MARK: Why a target is lost (`data.reason`, and the `targetLost` notification's)
@@ -448,12 +480,14 @@ final class OffDesktopActTests: XCTestCase {
         XCTAssertEqual(CUTargetLostReason.allCases.map(\.rawValue), ["app_quit", "window_closed", "helper_restart", "unknown"])
     }
 
-    func testAWindowOnAnotherSpaceIsNotTakenForClosed() {
+    func testAWindowOnAnotherSpaceIsNotTakenForClosed() async throws {
         world()
         sys.onSpace = true  // on another Space: on a Space
-        XCTAssertFalse(core.windowGone(target))
+        let gone3 = try await core.windowGone(target)
+        XCTAssertFalse(gone3)
         sys.onSpace = nil   // unknown: never guessed closed
-        XCTAssertFalse(core.windowGone(target))
+        let gone4 = try await core.windowGone(target)
+        XCTAssertFalse(gone4)
     }
 
     func testADragElsewhereIsWindowTargetedEvents() async throws {

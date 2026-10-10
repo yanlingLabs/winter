@@ -56,6 +56,9 @@ public final class CUCore: @unchecked Sendable {
     private var observers: [NSObjectProtocol] = []
     private var logged = Set<String>()
     private var lastDestroyCheck: [pid_t: Double] = [:]
+    /// Window checks in flight per pid (`checkWindows`): one at a time; a notification during it asks for one more.
+    private var windowChecksRunning = Set<pid_t>()
+    private var windowChecksAgain = Set<pid_t>()
 
     /// `events` is held weakly (the shell owns both).
     public convenience init(events: (any CUCoreEvents)?) {
@@ -109,7 +112,6 @@ public final class CUCore: @unchecked Sendable {
             visitFreshStableMs = 0
             visitNoProbeWaitMs = 0
             windowGoneSettleMs = 0  // one reading decides, as before: a test that wants the watch sets it
-            windowCheckSync = true
         }
     }
 
@@ -512,8 +514,6 @@ public final class CUCore: @unchecked Sendable {
     /// How long a window read as closed while the server still lists it is watched before it counts as gone
     /// (`windowGone`): a full-screen transition reads like that for a moment.
     var windowGoneSettleMs: Double = 1500
-    /// The destroyed-element check runs inline (tests) instead of off the notification's thread.
-    var windowCheckSync = false
     /// The pause between the synthetic deactivation and the make-key records (`releaseOtherKeyWindow`); 0 in
     /// test cores.
     var keySwitchGapMs: Double = 30
@@ -761,9 +761,9 @@ public final class CUCore: @unchecked Sendable {
     private func targetSnapshotBody(_ p: TargetSnapshotParams) async throws -> TargetSnapshotResult {
         try requireAccessibility()
         let t = try target(p.targetId)
-        try ensureAlive(t)
         let token = cancels.begin(p.callId)
         defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         var note: CUSettleNote?
         var settled = true
         var waited = 0
@@ -873,7 +873,7 @@ public final class CUCore: @unchecked Sendable {
     private func targetFindBody(_ p: TargetFindParams) async throws -> TargetFindResult {
         try requireAccessibility()
         let t = try target(p.targetId)
-        try ensureAlive(t)
+        try await ensureAlive(t)
         guard t.accessible else { return TargetFindResult(elements: []) }  // capture-only: no AX tree to search
         let formatter = self.formatter
         return try await queues.run(t.pid) { [self] in
@@ -939,7 +939,7 @@ public final class CUCore: @unchecked Sendable {
 
     public func targetScreenshot(_ p: TargetScreenshotParams) async throws -> TargetScreenshotResult {
         let t = try target(p.targetId)
-        try ensureAlive(t)
+        try await ensureAlive(t)
         // A window on the session's visited desktop is captured there, keeping the visit open (a live shot of it is an
         // on-screen capture).
         let ran = try await inOpenVisit(t, callId: p.callId, maxMs: p.visitMaxMs) { try await screenshot(p, t) }
@@ -1160,9 +1160,9 @@ public final class CUCore: @unchecked Sendable {
 
     private func targetWaitIdleBody(_ p: TargetWaitIdleParams) async throws -> TargetWaitIdleResult {
         let t = try target(p.targetId)
-        try ensureAlive(t)
         let token = cancels.begin(p.callId)
         defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         monitor.watch(pid: t.pid)
         cursor(t, "waitBegin")
         defer { cursor(t, "waitEnd") }
@@ -1180,7 +1180,7 @@ public final class CUCore: @unchecked Sendable {
     private func targetWaitForBody(_ p: TargetWaitForParams) async throws -> TargetWaitForResult {
         try requireAccessibility()
         let t = try target(p.targetId)
-        try ensureAlive(t)
+        try await ensureAlive(t)
         let c = p.cond
         guard c.text != nil || c.ref != nil || c.gone != nil || c.title != nil else {
             throw CUError.invalidParams("waitFor needs text, ref, gone or title")
@@ -1418,13 +1418,15 @@ public final class CUCore: @unchecked Sendable {
         }
     }
 
-    /// The target's app and window still exist; otherwise it is dropped, `targetLost` fires and this throws.
-    func ensureAlive(_ t: CUTarget) throws {
+    /// The target's app and window still exist; otherwise it is dropped, `targetLost` fires and this throws. A window
+    /// watched through a transition (`windowGone`) is waited for without holding a thread, and the wait ends on the
+    /// call's cancel (`token`, Esc) or the task's.
+    func ensureAlive(_ t: CUTarget, token: CUCancellation.Token? = nil) async throws {
         if !sys.appRunning(t.pid) {
             lose(t, reason: .appQuit)
             throw CUError.targetLost("\(t.appName) quit — bind it again", reason: .appQuit)
         }
-        if windowGone(t) {
+        if try await windowGone(t, token: token) {
             lose(t, reason: .windowClosed)
             throw CUError.targetLost("the \(t.appName) window was closed — bind again or pick another window", reason: .windowClosed)
         }
@@ -1438,12 +1440,15 @@ public final class CUCore: @unchecked Sendable {
     /// still reads so for `windowGoneSettleMs`: a window in the middle of a full-screen transition reads exactly
     /// like that for a moment (the live gate, 2026-10-10: a capture-only target, its window re-entering full screen,
     /// was declared closed on one such reading and the very same window was bound again two seconds later).
-    func windowGone(_ t: CUTarget) -> Bool {
+    /// The watch suspends (the clock's sleep), never blocking a Swift-concurrency thread, and stops on a cancel.
+    func windowGone(_ t: CUTarget, token: CUCancellation.Token? = nil) async throws -> Bool {
         guard let w = liveServerWindow(t) else { return true }
         guard unreachableNow(t, w) else { return false }
         let deadline = clock.nowMs() + windowGoneSettleMs
         while clock.nowMs() < deadline {
-            usleep(useconds_t(min(100, windowGoneSettleMs) * 1000))
+            try await clock.sleep(ms: min(100, windowGoneSettleMs))
+            try token?.check()
+            try Task.checkCancellation()
             // Gone from the server's listing meanwhile: closed for good.
             guard let now = sys.window(id: t.windowID) ?? sys.windows(pid: t.pid).first(where: { $0.id == t.windowID }) else { return true }
             if !unreachableNow(t, now) {
@@ -1493,21 +1498,38 @@ public final class CUCore: @unchecked Sendable {
         emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: t.windowID) }
     }
 
-    /// Called for every destroyed-element notification, so it is debounced to one window-list check per
-    /// pid per 250 ms. The check may watch a window for `windowGoneSettleMs`, so it runs off the notification's
-    /// own thread (`windowCheckSync` keeps it inline for tests).
+    /// Called for every destroyed-element notification, so it is debounced to one window-list check per pid per
+    /// 250 ms, run off the notification's thread as a task (`checkWindows`).
     func windowMaybeClosed(pid: pid_t) {
         let now = clock.nowMs()
-        lock.lock()
-        if let last = lastDestroyCheck[pid], now - last < 250 { lock.unlock(); return }
-        lastDestroyCheck[pid] = now
-        let affected = targets.values.filter { $0.pid == pid }
-        lock.unlock()
-        let check = { [weak self] in
-            guard let self else { return }
-            for t in affected where self.windowGone(t) { self.lose(t, reason: .windowClosed) }
+        let go = lock.withLock { () -> Bool in
+            if let last = lastDestroyCheck[pid], now - last < 250 { return false }
+            lastDestroyCheck[pid] = now
+            return true
         }
-        if windowCheckSync { check() } else { DispatchQueue.global(qos: .utility).async(execute: check) }
+        guard go else { return }
+        Task.detached(priority: .utility) { [weak self] in await self?.checkWindows(pid: pid) }
+    }
+
+    /// One check of `pid`'s bound windows at a time (each may watch a window for `windowGoneSettleMs`): a request while
+    /// one runs is coalesced into ONE more run after it, never a second overlapping watch.
+    func checkWindows(pid: pid_t) async {
+        let first = lock.withLock { () -> Bool in
+            if windowChecksRunning.contains(pid) { windowChecksAgain.insert(pid); return false }
+            windowChecksRunning.insert(pid)
+            return true
+        }
+        guard first else { return }
+        while true {
+            let affected = lock.withLock { targets.values.filter { $0.pid == pid } }
+            for t in affected where (try? await windowGone(t)) == true { lose(t, reason: .windowClosed) }
+            let again = lock.withLock { () -> Bool in
+                if windowChecksAgain.remove(pid) != nil { return true }
+                windowChecksRunning.remove(pid)
+                return false
+            }
+            if !again { return }
+        }
     }
 
     /// Bind-time floors: Winter itself, and the auth/system dialogs.

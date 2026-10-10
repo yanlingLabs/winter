@@ -191,9 +191,11 @@ final class LiveGateFinderTests: XCTestCase {
     func testAWindowTheServerMissesOnceIsNotLost() async throws {
         finder()
         sys.missOnce = [77]
-        XCTAssertFalse(core.windowGone(target), "a single miss while the window changes Space")
+        let gone1 = try await core.windowGone(target)
+        XCTAssertFalse(gone1, "a single miss while the window changes Space")
         sys.windows[77] = nil
-        XCTAssertTrue(core.windowGone(target))
+        let gone2 = try await core.windowGone(target)
+        XCTAssertTrue(gone2)
     }
 
     func testFindReusesAFreshFullReadUntilSomethingHappens() async throws {

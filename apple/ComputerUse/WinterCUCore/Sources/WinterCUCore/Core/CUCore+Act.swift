@@ -44,9 +44,10 @@ extension CUCore {
         // Held in front for this script (the user agreed): the foreground rung needs no second asking.
         var p = p
         if holdsForeground(t) { p.allowForeground = true }
-        try ensureAlive(t)
+        // The call's cancel first: a window watched through a transition (`ensureAlive`) is waited for under it.
         let token = cancels.begin(p.callId)
         defer { cancels.end(p.callId) }
+        try await ensureAlive(t, token: token)
         try token.check()
         noteGuardianPrivatePath(p.privatePath)
         noteGuardianActed(t.pid)
