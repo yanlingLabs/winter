@@ -113,6 +113,13 @@ public actor WinterSessionClient {
     /// T8 watches this for a health warning. Deliberately separate from `gaps`: a gap demands a
     /// snapshot resume, a persist failure does not (re-handshaking would not fix a full disk).
     public nonisolated let persistErrors: AsyncStream<CursorPersistFailure>
+    /// ComputerV2 Phase 1b: the live mirror of a session this phone asked to watch (`watchMirror`) — a SEPARATE
+    /// channel from `events` by design: a mirror update is no session event, has no `seq`, never touches a cursor
+    /// and is never cached. It arrives on the connection's side stream (`RemoteConn.sideInbound`), and waits in a
+    /// `MirrorMailbox` for a consumer that is behind: a control update (show/reset/clear) is NEVER dropped, a picture
+    /// is replaced by a newer one, cursors are bounded. Finishes when the connection closes, like the other streams.
+    public nonisolated let mirror: AsyncStream<MirrorEnvelope>
+    private let mirrorMailbox = MirrorMailbox()
 
     private let eventsCont: AsyncStream<SessionEnvelope>.Continuation
     private let gapsCont: AsyncStream<GapSignal>.Continuation
@@ -122,6 +129,12 @@ public actor WinterSessionClient {
 
     /// The single background reader Task (sole consumer of `conn.inbound`).
     private var readLoopTask: Task<Void, Never>?
+    /// ComputerV2 Phase 1b: the reader of the connection's side stream (`conn.sideInbound`) — the phone mirror.
+    private var sideReadTask: Task<Void, Never>?
+    /// The Mac's clock minus this phone's, in ms, as last read off an envelope's `timestamp` (the Gateway stamps every
+    /// envelope with its own wall clock). `nil` until one carried a timestamp. Display-only: a countdown to a Mac
+    /// deadline (`expiresAt`) is drawn against it; nothing decides on it.
+    private var macClockOffsetMs: Int?
     private var closed = false
 
     /// KA-T3 liveness watchdog state. `lastInboundAt` is stamped from ANY inbound frame (even one
@@ -206,6 +219,8 @@ public actor WinterSessionClient {
         var pc: AsyncStream<CursorPersistFailure>.Continuation!
         self.persistErrors = AsyncStream { pc = $0 }
         self.persistErrorsCont = pc
+        let box = mirrorMailbox
+        self.mirror = AsyncStream(unfolding: { await box.next() })
     }
 
     // MARK: - Handshake
@@ -356,6 +371,24 @@ public actor WinterSessionClient {
         return .hostAccepted
     }
 
+    /// ComputerV2 Phase 1b: asks the Mac to start (`watch: true`) or stop (`watch: false`) relaying the live mirror
+    /// of `sessionID` — the session this connection is attached to — onto `mirror`. Returns whether the mirror is
+    /// on at all (the user's `computerUse` settings): `false` means nothing will come, so the caller stops asking.
+    /// A watch lapses on the Mac unless renewed within `MirrorWire.lease`; renew by calling this again with
+    /// `watch: true` every `MirrorWire.renewEvery`. Throws like any rpc (an older Mac answers that the method is not
+    /// allowed — the caller simply shows no mirror).
+    /// The Mac's clock minus this phone's, in ms (see `macClockOffsetMs`): `macDeadline - offset` is the same moment on
+    /// this phone's clock. `nil` until an envelope carried the Mac's time.
+    public func macClockOffset() -> Int? { macClockOffsetMs }
+
+    public func watchMirror(sessionID: String, watch: Bool) async throws -> Bool {
+        let result = try await rpcCall(
+            method: "session.mirror",
+            params: .object(["sessionId": .string(sessionID), "watch": .bool(watch)]),
+            commandID: idgen())
+        return result["mirror"]?.boolValue ?? false
+    }
+
     /// Queries the host's currently-pending approvals for a session (live STATE, not reconstructed
     /// from events — pending approvals age out of the retained log). Returns the `pending` array from
     /// `approval.list {sessionId}`; each element is `{callId, toolName, summary, issuedAt, expiresAt}`
@@ -449,6 +482,12 @@ public actor WinterSessionClient {
             }
             await self?.handleClose()
         }
+        let side = conn.sideInbound
+        sideReadTask = Task { [weak self] in
+            for await frame in side {
+                await self?.handleSideFrame(frame)
+            }
+        }
         startHeartbeatIfNeeded()
     }
 
@@ -512,6 +551,7 @@ public actor WinterSessionClient {
         // usable) — the gateway is the authority on framing; a corrupt inbound frame is not this
         // client's to surface.
         if let env = try? WireFrame.decode(frame, expectedEpoch: epoch) {
+            if env.timestamp > 0 { macClockOffsetMs = env.timestamp - clock() }
             switch env.kind {
             case .helloAck: handleHelloAck(env)
             case .event: handleEvent(env)
@@ -520,6 +560,8 @@ public actor WinterSessionClient {
             case .hello, .rpcRequest: break // phone→host kinds; never inbound
             case .ping: break // the host never pings the phone today; inert if it ever did
             case .pong: break // arrival already counted above (liveness); never surfaces on `events`
+            case .mirror: handleMirror(env) // a Mac without a side stream sends it on the session stream
+            case .mirrorAck: break // phone→host only; never inbound
             }
             return
         }
@@ -539,6 +581,7 @@ public actor WinterSessionClient {
         guard !closed else { return }
         closed = true
         heartbeatTask?.cancel()
+        sideReadTask?.cancel()
         let waiters = pending
         pending = [:]
         for (_, cont) in waiters { cont.resume(throwing: SessionClientError.connectionClosed) }
@@ -549,6 +592,28 @@ public actor WinterSessionClient {
         eventsCont.finish()
         gapsCont.finish()
         persistErrorsCont.finish()
+        mirrorMailbox.finish()
+    }
+
+    /// A frame on the side stream: only mirror updates travel there. It proves the path alive like any inbound frame.
+    private func handleSideFrame(_ frame: Data) {
+        lastInboundAt = clock()
+        pingsSinceInbound = 0
+        guard let env = try? WireFrame.decode(frame, expectedEpoch: epoch), env.kind == .mirror else { return }
+        handleMirror(env)
+    }
+
+    /// ComputerV2 Phase 1b: a mirror update rides its own channel — never `events`, never the cursor. A PICTURE is
+    /// acknowledged at once on the session stream (`mirrorAck {seq}`): the Mac keeps at most
+    /// `MirrorWire.maxUnackedPictures` unacknowledged, so pictures follow the link instead of queueing ahead of it. An
+    /// update that does not decode (or names no session) is dropped; the mirror simply waits for the next.
+    private func handleMirror(_ env: WireEnvelope) {
+        guard let session = env.sessionID, let update = MirrorWire.decode(env.payload) else { return }
+        if case .frame(let picture) = update,
+           let payload = try? JSONSerialization.data(withJSONObject: ["seq": picture.seq]) {
+            Task { await self.sendEnvelope(kind: .mirrorAck, sessionID: session, streamID: nil, seq: nil, payload: payload) }
+        }
+        mirrorMailbox.push(MirrorEnvelope(sessionID: session, update: update))
     }
 
     // MARK: - Response correlation

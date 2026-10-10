@@ -88,6 +88,44 @@ final class IrohListenerTests: XCTestCase {
         }
     }
 
+    /// ComputerV2 Phase 1b (review finding 1), over REAL iroh: the Mac-side connection's side channel (`sendSide`, a
+    /// unidirectional stream it opens at a lower priority) reaches the phone-side connection's `sideInbound` as whole
+    /// frames, in order — and the session stream keeps working beside it.
+    func testTheSideChannelCarriesFramesBesideTheSessionStream() async throws {
+        try await withTimeout(30) {
+            let listener = try await IrohListener.start(secret: SecretKey.generate().toBytes(), alpn: Self.alpn, relayURLs: [], bindAddr: "127.0.0.1:0")
+            defer { listener.stop() }
+            let dialer = try await Endpoint.bind(options: EndpointOptions(
+                preset: presetN0(), bindAddr: "127.0.0.1:0", secretKey: SecretKey.generate().toBytes(), relayMode: RelayMode.disabled()))
+            defer { Task { try? await dialer.close() } }
+            let connA = try await dialer.connect(addr: listener.endpointAddr, alpn: Self.alpnData)
+            let biA = try await connA.openBi()
+            let phone = IrohConn(connection: connA, bi: biA, peerID: "mac", maxFrameBytes: 1 << 20)
+            await phone.send(Data("hello".utf8)) // the phone speaks first (see IrohConn's SEND-BEFORE-RECEIVE note)
+            var connIter = listener.connections.makeAsyncIterator()
+            guard let mac = await connIter.next() else { return XCTFail("no connection") }
+            var macInbound = mac.inbound.makeAsyncIterator()
+            _ = await macInbound.next()
+
+            let pictures = (0..<5).map { i in Data(repeating: UInt8(i), count: 90_000) } // picture-sized frames
+            for picture in pictures {
+                let sent = await mac.sendSide(picture)
+                XCTAssertTrue(sent, "a real iroh connection offers the side stream")
+            }
+            await mac.send(Data("event".utf8))
+
+            var phoneMain = phone.inbound.makeAsyncIterator()
+            let event = await phoneMain.next()
+            XCTAssertEqual(event, Data("event".utf8), "the session stream carries its own frames, never a picture")
+            var phoneSide = phone.sideInbound.makeAsyncIterator()
+            for expected in pictures {
+                let got = await phoneSide.next()
+                XCTAssertEqual(got, expected, "whole frames, in order")
+            }
+            withExtendedLifetime((connA, biA, phone, mac)) {}
+        }
+    }
+
     /// A dialer negotiating a DIFFERENT ALPN must be rejected: the listener advertises only
     /// `computer.winter.rpc/1`, so the QUIC handshake fails ALPN negotiation and `connect`
     /// throws — no RemoteConn is ever emitted.
