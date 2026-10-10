@@ -218,8 +218,9 @@ describe("the tool description", () => {
       expect(v).toContain(word);
       expect(nv).not.toContain(word);
     }
-    expect(v).not.toContain("browsers");
-    expect(v).not.toContain("interface Tab");
+    // Phase 2: browser tabs share the target interface.
+    expect(v).toContain("declare const browsers: {");
+    expect(v).toContain("interface Tab extends Target {");
   });
 
   test("the Output notes say state()/screenshot()/binds already show their result, with an emit:false example", () => {

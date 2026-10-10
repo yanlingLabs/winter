@@ -70,7 +70,7 @@ describe("computerUse.* (local-only RPCs)", () => {
     fake.running = false;
     const runtime = createComputerUseRuntime({
       home, profile: "dev", settings: () => live, settingsPath, approvals: new ApprovalBroker(), hub, store,
-      launchAllowed: true, inject: { transport: fake.transport, launcher: fake.launcher, verifier: fake.verifier },
+      launchAllowed: true, inject: { transport: fake.transport, launcher: fake.launcher, verifier: fake.verifier, browserInstalled: () => false },
     });
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -85,7 +85,10 @@ describe("computerUse.* (local-only RPCs)", () => {
     const c = await TestClient.connect(socketPath);
     await c.hello(tokens.harness, "app");
     const r1 = await c.request(METHODS.computerUseStatus, {});
-    expect(r1.result).toEqual({ enabled: true, allowAllApps: true, legacyComputer: false, mirror: false, privateEventPath: true, helper: { installed: true, running: false } });
+    expect(r1.result).toEqual({
+      enabled: true, allowAllApps: true, legacyComputer: false, mirror: false, privateEventPath: true, helper: { installed: true, running: false },
+      browsers: [{ id: "winter", name: "Winter (built-in)", connected: false, reason: "Winter isn't running" }],
+    });
     expect(fake.launched).toEqual([]);
     fake.running = true;
     const r2 = await c.request(METHODS.computerUseStatus, {});
