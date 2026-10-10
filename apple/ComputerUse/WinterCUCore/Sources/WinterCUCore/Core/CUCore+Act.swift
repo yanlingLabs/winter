@@ -875,7 +875,7 @@ extension CUCore {
         // never landed, and the result said "typed"). Into a field that shows its text, a paste — and the result
         // says "sent as a paste"; into an editor that can't be read back, keys (Return for each newline), so what is
         // sent is what a person types.
-        let readable = e.flatMap { ax.string($0, kAXValueAttribute) }.map { Self.showsText($0) } ?? false
+        let readable = e.map { readsBack($0, t) } ?? false
         if text.contains("\n") || text.count > Self.typeKeysMax, readable || !text.contains("\n") {
             let lines = text.split(separator: "\n", omittingEmptySubsequences: false).count
             CULog.act.notice("type in \(t.appName, privacy: .public): \(text.count, privacy: .public) characters sent as a paste")
@@ -924,7 +924,7 @@ extension CUCore {
         // An editor that hides its text (Google Docs' canvas: its input target reads as zero-width filler, and a
         // window on another Space may not be redrawn, so a screenshot is no proof either): say so, with what the
         // input target's before/after does show — never leave the model to guess from a stale picture.
-        if let e, valueBefore.map({ !Self.showsText($0) }) ?? true {
+        if let e, !readsBack(e, t, value: valueBefore) {
             let after = ax.string(e, kAXValueAttribute)
             let moved = after != nil && after != valueBefore
             CULog.act.notice("type in \(t.appName, privacy: .public): the editor hides its text — input target \(moved ? "changed" : "unchanged", privacy: .public)")
@@ -1004,6 +1004,15 @@ extension CUCore {
 
     /// A value that shows text: not nil-like zero-width filler (Google Docs' body reads as "\u{200B}\u{200B}"
     /// whatever it holds). An empty value shows text — a paste into it changes it.
+    /// The element shows its text, so what was typed or pasted into it can be read back: it has a value that is
+    /// not only zero-width filler, and it is not a page's hidden input standing in for a document (one that
+    /// empties itself after every input reads as an empty field, but its text goes elsewhere).
+    func readsBack(_ e: AXUIElement, _ t: CUTarget, value: String?? = .none) -> Bool {
+        let v: String? = value ?? ax.string(e, kAXValueAttribute)
+        guard let v, Self.showsText(v) else { return false }
+        return hiddenInputWords(e, t) == nil
+    }
+
     static func showsText(_ value: String) -> Bool {
         value.isEmpty || value.unicodeScalars.contains { !["\u{200B}", "\u{200C}", "\u{200D}", "\u{FEFF}", "\u{2060}", "\u{00AD}"].contains($0) }
     }
@@ -1535,7 +1544,7 @@ extension CUCore {
         // before and after, now holding what was pasted. A web or canvas editor that shows only zero-width filler
         // (whatever it holds) can't be read back: no waiting for proof that never comes — "unconfirmed".
         let before = focus.flatMap { ax.string($0, kAXValueAttribute) }
-        let confirmable = before.map { Self.showsText($0) } ?? false
+        let confirmable = focus.map { readsBack($0, t, value: before) } ?? false
         let expect = CUPasteSequence.plain(text: text, format: format)
         // Web content takes a paste late, if at all (Docs' title took none from the background): a short look
         // at the value, then the answer — unconfirmed, the clipboard restored once the page has had time.
