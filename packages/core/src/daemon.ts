@@ -1272,7 +1272,9 @@ export async function startDaemon(opts: {
   // ComputerV2 Phase 2 — Winter for Chrome's door into this daemon: `<home>/run/browser.sock`, where
   // `winter-browser-host` (inside the Winter Computer Use bundle) connects for each browser profile running the extension.
   // Each verified connection becomes a transport registered in the engine's backends (`computerUseRuntime.backends`).
-  // A socket that cannot be created never fails the boot: the user's browsers then read "not connected".
+  // Built here, but it starts listening only once the daemon is fully up (beside the IPC server's "listening on"), so a
+  // boot that fails on the way leaves no listener behind. A socket that cannot be created never fails the boot: the
+  // user's browsers then read "not connected".
   const browserHostServer = new BrowserHostServer({
     socketPath: join(dirs.runDir, BROWSER_HOST_SOCKET_NAME),
     profile,
@@ -1284,11 +1286,6 @@ export async function startDaemon(opts: {
     ...(opts.browserHost?.verifyHost === undefined ? {} : { verifyHost: opts.browserHost.verifyHost }),
     log: (line) => console.error(line),
   });
-  try {
-    browserHostServer.start();
-  } catch (err) {
-    console.error(`[browser-host] could not listen on ${join(dirs.runDir, BROWSER_HOST_SOCKET_NAME)}: ${err instanceof Error ? err.message : String(err)}`);
-  }
 
   // Peripheral lease v1 (Phase 2f) — HOISTED above the `if (agentProvider)` gate (phase 5 CU): the
   // ComputerUseService (built inside the gate) needs this broker to lease screenshot/ax-read/input-
@@ -3064,6 +3061,11 @@ export async function startDaemon(opts: {
   });
 
   console.error(`winter-core ${CORE_VERSION} listening on ${dirs.socketPath}`);
+  try {
+    browserHostServer.start();
+  } catch (err) {
+    console.error(`[browser-host] could not listen on ${join(dirs.runDir, BROWSER_HOST_SOCKET_NAME)}: ${err instanceof Error ? err.message : String(err)}`);
+  }
   return {
     socketPath: dirs.socketPath,
     tokens,
