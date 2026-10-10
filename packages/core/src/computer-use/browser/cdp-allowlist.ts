@@ -36,6 +36,11 @@ export const CDP_NETWORK_EVENT_PARAMS: readonly string[] = ["requestId", "timest
  *  - `Runtime.evaluate` without a `contextId` it saw created (`Runtime.executionContextCreated`) with name "winter";
  *  - `Runtime.callFunctionOn` without such an `executionContextId` or an `objectId` it saw minted in such a context;
  *  - `DOM.resolveNode` without such an `executionContextId`;
- *  - `Page.createIsolatedWorld` with a `worldName` other than "winter", or with `grantUniveralAccess: true`.
+ *  - `Page.createIsolatedWorld` with a `worldName` other than "winter", or with `grantUniveralAccess: true`;
+ *  - `Page.reload` carrying `scriptToEvaluateOnLoad` (it runs in the page's main world);
+ *  - `Page.navigate` to any URL whose scheme is not http, https, or exactly `about:blank` (a `javascript:` URL runs
+ *    in the page's main world).
+ * Execution contexts are matched by `uniqueContextId` where the browser reports one: a process-local `contextId`
+ * can repeat after a cross-process navigation.
  */
 export const CDP_WORLD_NAME = "winter";
