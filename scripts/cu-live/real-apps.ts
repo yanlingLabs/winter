@@ -10,6 +10,7 @@ import type { Scenario, VerifyContext } from "./scenarios";
 
 export const REAL_DIR_NAME = "cu-live-real";
 const PAGE_TITLE = "CU Live Page";
+const PAGE2_TITLE = "CU Live Page Two";
 const FOLDER = "cu-live-folder";
 
 export interface RealAppsRun { dir: string; cleanup(): Promise<void> }
@@ -58,6 +59,7 @@ export function realAppsPreflight(root: string, log: (l: string) => void): RealA
   writeFileSync(join(dir, "page.html"), `<!doctype html><html><head><meta charset="utf-8"><title>${PAGE_TITLE}</title></head><body>
 <h1>${PAGE_TITLE}</h1><input id="live" aria-label="Live Input">
 <button id="go" onclick="document.title = 'Clicked: ' + document.getElementById('live').value">Live Button</button></body></html>\n`);
+  writeFileSync(join(dir, "page2.html"), `<!doctype html><html><head><meta charset="utf-8"><title>${PAGE2_TITLE}</title></head><body><h1>${PAGE2_TITLE}</h1></body></html>\n`);
   writeFileSync(join(dir, "note.txt"), "First line of the temp note.\n");
   writeFileSync(join(dir, FOLDER, "alpha.txt"), "a\n");
   writeFileSync(join(dir, FOLDER, "beta.txt"), "b\n");
@@ -113,8 +115,22 @@ const go = await pick(sf, "Live Button", "button");
 await sf.action(go.ref, "press");
 const w = await sf.waitFor({ title: "Clicked: safari ✓" }, { timeoutMs: 5000 }).then(() => true, () => false);
 report({ titled: w });
+// The bound window's OWN address field, with the window in the background: ⌘L, a URL, Return — it loads there.
+let refused = null;
+try { await sf.key("cmd+l"); } catch (e) { refused = e.name + ": " + String(e.message).slice(0, 200); }
+let loaded = false;
+if (refused === null) {
+  await sf.type("file://${REAL_DIR_TOKEN}/page2.html");
+  await sf.key("return");
+  loaded = await sf.waitFor({ title: ${JSON.stringify(PAGE2_TITLE)} }, { timeoutMs: 8000 }).then(() => true, () => false);
+}
+report({ loaded, refused });
 await closeOwn(sf);`,
-    verify: (ctx) => [okRun(ctx), check("the page saw the typed text and the click", ctx.facts.titled === true)],
+    verify: (ctx) => [okRun(ctx), check("the page saw the typed text and the click", ctx.facts.titled === true),
+      check("⌘L, a URL and Return loaded it in the bound window (the address field of the window in the background)", ctx.facts.loaded === true,
+        String(ctx.facts.refused ?? ctx.output.slice(-300))),
+      check("never a silent success: a Return that loaded nothing says so", ctx.facts.loaded === true || /did not change after Return|refused|Unsupported|Error/i.test(`${String(ctx.facts.refused ?? "")} ${ctx.output}`),
+        ctx.output.slice(-300))],
   },
   {
     name: "TextEdit: a temp note — append text", group: "real-apps", timeoutMs: 45_000,

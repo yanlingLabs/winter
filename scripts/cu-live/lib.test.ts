@@ -10,7 +10,7 @@ import {
   parseFixtureLog, parseMonitorLine, parseTopDelta, renderTable, summarizeTop, type FixtureEvent, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { minimalPdf, REAL_APP_SCENARIOS, REAL_DIR_TOKEN, withRealDir } from "./real-apps";
-import { DOCS_BIG_PASTE, DOCS_TEXT, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage } from "./scenarios";
+import { DOCS_DASH_TEXT, DOCS_LINES_TEXT, DOCS_SHORT_PASTE, DOCS_BIG_PASTE, DOCS_TEXT, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage } from "./scenarios";
 
 const sample = (t: number, frontPid: number, space: number | null, hidIdleMs: number | null = 1000): MonitorSample => ({ t, front: `app${frontPid}`, frontPid, space, hidIdleMs });
 
@@ -234,9 +234,9 @@ describe("the scenarios", () => {
     expect(usesWebPage({ code: 'const f = await win("Fixture Form");' })).toBe(false);
   });
 
-  test("the Docs-like page: seven scenarios against the contract, each judged by the page's own log", () => {
+  test("the Docs-like page: eleven scenarios against the contract, each judged by the page's own log", () => {
     const docs = SCENARIOS.filter((s) => s.group === "docs");
-    expect(docs.length).toBe(7);
+    expect(docs.length).toBe(11);
     for (const s of docs) { expect(usesDocsPage(s)).toBe(true); expect(s.before?.[0]?.cmd).toBe("reset"); }
     expect(DOCS_BIG_PASTE.length).toBe(3_000);
     expect(DOCS_BIG_PASTE.split("\n").length).toBeGreaterThan(20);
@@ -245,8 +245,8 @@ describe("the scenarios", () => {
       docs.find((s) => s.name.startsWith(name))!.verify({ output, isError: false, facts, events, since: 0, probe: [], metrics: [], shots: [], ...(state === undefined ? {} : { state }) }).every((c) => c.ok);
     // 1. typing: focus in the hidden input, the exact text, the receiver named, "can't be read back".
     const typed = [ev("docs.focus", { id: "doc" }), ev("docs.text", { text: DOCS_TEXT })];
-    expect(judge("Docs: type", {}, typed, "typed into [9] text area \"Document content\" — typed 40 characters; it can't be read back here")).toBe(true);
-    expect(judge("Docs: type", {}, typed, "typed into [9] text area")).toBe(false);
+    expect(judge("Docs: type", {}, typed, "sent 40 characters to [9] text area \"Document content\"; received: unverifiable — it can't be read back here")).toBe(true);
+    expect(judge("Docs: type", {}, typed, "sent 40 characters to [9] text area")).toBe(false);
     // 2. the Close button: a click it ignored must be followed by a said fallback; the panel closed.
     const closed = [ev("docs.mouse", { id: "find-close", phase: "down" }), ev("docs.mouse", { id: "find-close", phase: "up" }), ev("docs.panel", { open: false })];
     expect(judge("Docs: press", {}, closed, "", { docs: { panelOpen: false } })).toBe(true);
@@ -266,6 +266,20 @@ describe("the scenarios", () => {
     // 6. the big paste: the whole text, through one paste event.
     expect(judge("Docs: a 3,000", {}, [ev("docs.paste", { length: 3_000 })], "", { docs: { text: DOCS_BIG_PASTE } })).toBe(true);
     expect(judge("Docs: a 3,000", {}, [ev("docs.key", { key: "a" })], "", { docs: { text: DOCS_BIG_PASTE } })).toBe(false);
+    // 7. dashes: the whole text, no Option chord, nothing in the search input.
+    expect(judge("Docs: an em dash", {}, [ev("docs.key", { key: "—", alt: false })], "", { docs: { text: DOCS_DASH_TEXT, search: "" } })).toBe(true);
+    expect(judge("Docs: an em dash", {}, [ev("docs.shortcut", { key: "—" })], "", { docs: { text: "Plan ", search: "" } })).toBe(false);
+    expect(judge("Docs: an em dash", {}, [ev("docs.key", { key: "—", alt: true })], "", { docs: { text: DOCS_DASH_TEXT, search: "" } })).toBe(false);
+    // 8. several lines typed: the lines, no silent paste, "unverifiable".
+    expect(judge("Docs: several lines", {}, [], "sent 17 characters to the page's hidden text input; received: unverifiable — …", { docs: { text: DOCS_LINES_TEXT } })).toBe(true);
+    expect(judge("Docs: several lines", {}, [ev("docs.paste", { length: 17 })], "typed", { docs: { text: DOCS_LINES_TEXT } })).toBe(false);
+    // 9. the page's own menu: a real press opened it, the item was chosen, and the result says so.
+    const menu = [ev("docs.mouse", { id: "menu-tools", phase: "down" }), ev("docs.click", { id: "mi-word-count", ignored: false })];
+    expect(judge("Docs: a menu only the page has", {}, menu, "chose Tools › Word count from the page's own menu bar, with real clicks (its menu closed)")).toBe(true);
+    expect(judge("Docs: a menu only the page has", {}, menu.slice(1), "chose Tools › Word count from the page's own menu bar")).toBe(false);
+    // 10. a short paste into the filler-only input: arrived, and never claimed as shown.
+    expect(judge("Docs: a short paste", {}, [], "pasted into the page's hidden text input — unconfirmed — can't be read back", { docs: { text: DOCS_SHORT_PASTE } })).toBe(true);
+    expect(judge("Docs: a short paste", {}, [], "pasted into the page's hidden text input — the field shows the pasted text", { docs: { text: DOCS_SHORT_PASTE } })).toBe(false);
   });
 
   test("off-Space: never seen here → capture only (point click + keys); shown here first → a full bind", () => {

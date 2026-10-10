@@ -184,6 +184,11 @@ const PASTE_TEXT = "Pasted ✓ «text» — 2026";
 const OFFSPACE_TEXT = "off-Space ✓ Typed";
 /** Typed into the Docs-like page's hidden input: mixed case, symbols, non-ASCII, one line. */
 export const DOCS_TEXT = "Docs ✓ Typed: Mixed CASE ünï 日本 #42 (ok)";
+/** Dashes a layout types with Option (an em and an en dash): they must reach the page as text, never as chords. */
+export const DOCS_DASH_TEXT = "Plan — v2 – final";
+/** Several lines, typed (not pasted) into an editor that can't be read back. */
+export const DOCS_LINES_TEXT = "line one\nline two";
+export const DOCS_SHORT_PASTE = "filler check";
 /** Exactly 3,000 characters over many lines, for the big paste. */
 export const DOCS_BIG_PASTE = (() => {
   const lines: string[] = [];
@@ -696,7 +701,7 @@ report({ typed: true });`,
     verify: (ctx) => [ok(ctx),
       check("the click put the focus in the hidden input (fixture log)", docsEvents(ctx, "focus").some((e) => e.id === "doc"), JSON.stringify(docsEvents(ctx, "focus").slice(-3))),
       check("the exact text arrived (the page's model)", docsText(ctx) === DOCS_TEXT, JSON.stringify(docsText(ctx))),
-      check("the result names the receiver (the window's focus, or Docs' hidden input)", /typed into \S/.test(ctx.output) || /hidden input/i.test(ctx.output), ctx.output.slice(0, 300)),
+      check("the result names the receiver (the window's focus, or Docs' hidden input)", /sent [\d,]+ characters? to \S/.test(ctx.output) || /hidden (text )?input/i.test(ctx.output), ctx.output.slice(0, 300)),
       check("the result says the text can't be read back", /can'?t be read back|cannot be read back|can not be read back/i.test(ctx.output), ctx.output.slice(0, 300))],
   },
   {
@@ -805,6 +810,72 @@ report({ into: input.role });`,
         check("through a real paste: the page got a paste event of 3,000 characters, not keystrokes", pastes.some((e) => e.length === DOCS_BIG_PASTE.length) && docsEvents(ctx, "key").filter((e) => e.meta !== true).length < 20,
           `paste events ${JSON.stringify(pastes.map((e) => e.length))}, keys ${docsEvents(ctx, "key").length}`)];
     },
+  },
+  {
+    name: "Docs: an em dash typed into the doc — no Option chord the page could take as its shortcut", group: "docs",
+    before: [{ role: "main", cmd: "reset" }],
+    code: `
+const docs = await docsWin();
+const canvas = await pick(docs, "Document canvas");
+await docs.click(canvas.ref);
+await docs.type(${JSON.stringify(DOCS_DASH_TEXT)});
+await sleep(300);
+report({ typed: true });`,
+    dump: true,
+    verify: (ctx) => [ok(ctx),
+      check("the whole text arrived, dashes included (the page's model)", docsText(ctx) === DOCS_DASH_TEXT, JSON.stringify(docsText(ctx))),
+      check("no key reached the page with Option held (it would have been the page's shortcut)", docsEvents(ctx, "shortcut").length === 0 && !docsEvents(ctx, "key").some((e) => e.alt === true),
+        JSON.stringify(docsEvents(ctx, "shortcut"))),
+      check("nothing went to the search input", docsEvents(ctx, "search").length === 0 && (docsState(ctx).search === undefined || docsState(ctx).search === ""), JSON.stringify(docsState(ctx).search))],
+  },
+  {
+    name: "Docs: several lines typed into the doc — keys with Return, never a silent paste", group: "docs",
+    before: [{ role: "main", cmd: "reset" }],
+    code: `
+const docs = await docsWin();
+const canvas = await pick(docs, "Document canvas");
+await docs.click(canvas.ref);
+await docs.type(${JSON.stringify(DOCS_LINES_TEXT)});
+await sleep(300);
+report({ typed: true });`,
+    dump: true,
+    verify: (ctx) => [ok(ctx),
+      check("the lines arrived (the page's model)", docsText(ctx) === DOCS_LINES_TEXT, JSON.stringify(docsText(ctx))),
+      check("not as a paste the result did not mention", docsEvents(ctx, "paste").length === 0 || /as a paste/.test(ctx.output), `${docsEvents(ctx, "paste").length} paste events`),
+      check("the result says what the doc received can't be checked", /received: unverifiable|can'?t be read back/i.test(ctx.output), ctx.output.slice(0, 300))],
+  },
+  {
+    name: "Docs: a menu only the page has (Tools › Word count) — opened with real clicks, verified", group: "docs",
+    before: [{ role: "main", cmd: "reset" }],
+    code: `
+const docs = await docsWin();
+await docs.menu(["Tools", "Word count"]);
+report({ chose: true });`,
+    dump: true,
+    verify: (ctx) => {
+      const chosen = docsEvents(ctx, "click").filter((e) => e.id === "mi-word-count");
+      return [ok(ctx),
+        check("the page's Tools menu opened on a real mouse press (fixture log)", docsEvents(ctx, "mouse").some((e) => e.id === "menu-tools" && e.phase === "down"), JSON.stringify(docsEvents(ctx, "mouse").slice(-3))),
+        check("Word count was chosen (fixture log)", chosen.length === 1 && chosen[0]?.ignored === false, JSON.stringify(chosen)),
+        check("the result says it was the page's own menu", /page's own menu bar/.test(ctx.output), ctx.output.slice(0, 300))];
+    },
+  },
+  {
+    name: "Docs: a short paste into the filler-only document input is never claimed as shown", group: "docs",
+    before: [{ role: "main", cmd: "reset" }],
+    code: `
+const docs = await docsWin();
+const els = await docs.find("Document content", { emit: false });
+const input = els.find((e) => /text/.test(e.role) && e.role !== "static text") || els[0];
+if (!input) throw new Error("no Document content element");
+await docs.paste(${JSON.stringify(DOCS_SHORT_PASTE)}, { into: input.ref });
+await sleep(400);
+report({ into: input.role });`,
+    dump: true,
+    verify: (ctx) => [ok(ctx),
+      check("the paste arrived (the page's model)", docsText(ctx) === DOCS_SHORT_PASTE, JSON.stringify(docsText(ctx))),
+      check("never \"the field shows the pasted text\" for an input that shows only filler", !/field shows the pasted text/.test(ctx.output), ctx.output.slice(0, 300)),
+      check("said unconfirmed or can't be read back", /unconfirmed|can'?t be read back/i.test(ctx.output), ctx.output.slice(0, 300))],
   },
   // ── the per-app card (the `ask` session) ───────────────────────────────────────────────────────────────────
   {
