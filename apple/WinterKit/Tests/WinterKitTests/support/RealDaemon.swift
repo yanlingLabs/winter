@@ -50,6 +50,11 @@ struct RealDaemon {
     let remoteToken: String
     private let process: Process
     private let home: String
+    /// The spawned daemon's own `$TMPDIR` — a sibling of `home`, removed with it. The daemon makes a
+    /// `winter-session-<id>` scratch directory per session (and builtin-skill / workflow scratch) under
+    /// `os.tmpdir()`, and nothing ever removed them: tens of thousands piled up in the developer's
+    /// per-user temp folder. Pointing the child's `TMPDIR` here keeps all of it inside `stop()`'s reach.
+    private let tmpDir: String
     private let stdoutPath: String
     private let stderrPath: String
 
@@ -174,6 +179,7 @@ struct RealDaemon {
         // when it tries to actually CONNECT to that overlong path. `/tmp` is short and stable, so
         // `/tmp/winter-sp2a-<uuid>/run/core.sock` (~66 bytes) stays comfortably under the limit.
         let home = "/tmp/winter-sp2a-\(UUID().uuidString)"
+        let tmpDir = home + "-tmp"
         let stdoutPath = NSTemporaryDirectory() + "winter-sp2a-\(UUID().uuidString).stdout"
         let stderrPath = NSTemporaryDirectory() + "winter-sp2a-\(UUID().uuidString).stderr"
 
@@ -190,8 +196,18 @@ struct RealDaemon {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["bun", "-e", fixtureOverride ?? Self.fixture]
         process.currentDirectoryURL = cliPackageDir
+        // The daemon's temp folder: created now (a missing `TMPDIR` would make `os.tmpdir()` answer a
+        // path nobody can write) and removed by `stop()` / `cleanupPartial()` below.
+        do {
+            try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        } catch {
+            try? FileManager.default.removeItem(atPath: stdoutPath)
+            try? FileManager.default.removeItem(atPath: stderrPath)
+            throw RealDaemonError.setupFailed("could not create the daemon's temp directory \(tmpDir): \(error)")
+        }
         var env = ProcessInfo.processInfo.environment
         env["WINTER_HOME"] = home
+        env["TMPDIR"] = tmpDir
         // WS-19 (Lane P fix round 2, item 1A) — KEYCHAIN ISOLATION, the Swift mirror of what the TS
         // suite has pinned in `packages/core/test/preload.ts` since the test-keychain-isolation fix.
         //
@@ -224,6 +240,7 @@ struct RealDaemon {
         func cleanupPartial() {
             if process.isRunning { process.terminate(); process.waitUntilExit() }
             try? FileManager.default.removeItem(atPath: home)
+            try? FileManager.default.removeItem(atPath: tmpDir)
             try? FileManager.default.removeItem(atPath: stdoutPath)
             try? FileManager.default.removeItem(atPath: stderrPath)
         }
@@ -248,6 +265,7 @@ struct RealDaemon {
             remoteToken: out.remote,
             process: process,
             home: home,
+            tmpDir: tmpDir,
             stdoutPath: stdoutPath,
             stderrPath: stderrPath
         )
@@ -418,6 +436,7 @@ struct RealDaemon {
             }
         }
         try? FileManager.default.removeItem(atPath: home)
+        try? FileManager.default.removeItem(atPath: tmpDir)
         try? FileManager.default.removeItem(atPath: stdoutPath)
         try? FileManager.default.removeItem(atPath: stderrPath)
     }
@@ -482,6 +501,26 @@ final class RealDaemonTests: XCTestCase {
         }
         // Cleanup removes the temp home it created → count returns to baseline (no leak).
         XCTAssertEqual(winterTempDirCount(), before, "start() must remove its temp home on failure")
+    }
+
+    /// The daemon runs with its OWN `$TMPDIR` (a sibling of its home, never the developer's per-user
+    /// temp folder), and `stop()` removes it with the home — the `winter-session-<id>` scratch a daemon
+    /// makes per session used to pile up by the tens of thousands in the real one. The fixture reports
+    /// its own `process.env.TMPDIR` as the "socket path", so the test reads exactly what the child saw.
+    func testTheDaemonGetsItsOwnTempFolderAndStopRemovesIt() async throws {
+        let fixture = """
+        require("node:fs").writeFileSync(process.env.TMPDIR + "/marker", "x");
+        process.stdout.write(JSON.stringify({ socketPath: process.env.TMPDIR, harness: "h", remote: "r" }) + "\\n");
+        process.on("SIGTERM", () => process.exit(0));
+        setInterval(() => {}, 1000);
+        """
+        let daemon = try await RealDaemon.start(fixtureOverride: fixture)
+        defer { daemon.stop() }
+        let tmp = daemon.socketPath
+        XCTAssertTrue(tmp.hasPrefix("/tmp/winter-sp2a-") && tmp.hasSuffix("-tmp"), "the child's TMPDIR is the fixture's own: \(tmp)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tmp + "/marker"), "the child could write into it")
+        daemon.stop()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tmp), "stop() must remove the daemon's temp folder")
     }
 
     /// Winter Phase 8d (P8d-19, whole-branch review / Lane 1's new CI Swift job): reproduces the

@@ -31,6 +31,7 @@ import { splitTag } from "../runtime-sdk/model-tag";
 import { applyMemoryKeyMigration, memoryKeyRelocations, planMemoryKeyMigration, reconcileMemoryKeyManifest, type MemoryKeyFs } from "./migrations/memory-keys";
 import { RuntimeSessionRecords } from "./records";
 import { recoverRuntimeState, type RecoveryHooks, type RecoveryReport } from "./recovery";
+import type { ClaudeResumeLister } from "./claude-resume-scan";
 import { deleteSessionRuntimeState, pruneSinkCalls, retentionFromSettings, sweepRetention } from "./retention";
 
 /** WS-16 §16's housekeeping cadence. Hourly is deliberate: both windows are measured in DAYS, so a
@@ -76,6 +77,8 @@ export interface DaemonRuntimeStateDeps {
     hooks?: RecoveryHooks; probe?: LeaseProbe; tempScanRoot?: string; claudeResumeScanRoot?: string;
     /** WS-21: leave step 8's staging sweep to the router's late reconcile-then-delete (see `RecoveryDeps`). */
     deferClaudeResumeSweep?: boolean;
+    /** The `claude-resume-*` listing seam (see `RecoveryDeps.listClaudeResumeStaging`). */
+    listClaudeResumeStaging?: ClaudeResumeLister;
   };
   /** §17 phase 5's filesystem seam (`MemoryKeyFs`). Injectable for ONE reason: the two failures this
    *  wiring has to survive — a repair that throws, and an apply that throws after a committed move —
@@ -218,6 +221,7 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
       // test from sweeping the developer's real tmpdir.
       claudeResumeScanRoot: deps.recovery?.claudeResumeScanRoot ?? (process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || undefined),
       ...(deps.recovery?.deferClaudeResumeSweep === true ? { deferClaudeResumeSweep: true } : {}),
+      ...(deps.recovery?.listClaudeResumeStaging === undefined ? {} : { listClaudeResumeStaging: deps.recovery.listClaudeResumeStaging }),
     });
     for (const step of lastRecovery.steps) {
       if (step.outcome === "ok" || step.outcome === "skipped") continue;

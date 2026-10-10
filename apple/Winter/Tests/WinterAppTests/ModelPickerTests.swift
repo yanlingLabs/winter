@@ -963,6 +963,7 @@ final class AdvisorSettingsTests: XCTestCase {
     private func tempHome() throws -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         return dir
     }
 
