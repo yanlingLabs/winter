@@ -123,6 +123,18 @@ final class FocusTargetTests: XCTestCase {
         XCTAssertTrue(r.detail?.contains("can't be read back here") ?? false, r.detail ?? "")
     }
 
+    func testSelectAllIsNeverARangeOverAHiddenInputsOwnFiller() async throws {
+        world(boundIsKey: false, pageFocus: hidden)
+        ax.focus(pid: pid, on: otherField)
+        ax.makeSettable(hidden, kAXSelectedTextRangeAttribute)
+        _ = try? await act(.key(CUKeyAction(combo: "cmd+a")))
+        XCTAssertFalse(ax.written.contains { $0.hasSuffix(":\(kAXSelectedTextRangeAttribute)") },
+                       "a range over the proxy's filler selects nothing of the document")
+        XCTAssertTrue(poster.keyDowns.contains { $0.flags.contains(.maskCommand) }, "the real ⌘A instead")
+        XCTAssertNil(core.textLength(hidden, target))
+        XCTAssertEqual(core.textLength(docArea, target), 5)
+    }
+
     // MARK: guards for text with no `into`
 
     func testTextIntoAFocusThatIsNotEditableIsRefused() async throws {

@@ -48,7 +48,7 @@ export function computerV2Description(input: ComputerV2DescriptionInput): string
     ...(v ? ["  screenshot(o?: Quiet & { region?: [x: number, y: number, w: number, h: number] }): Promise<Image>;"] : []),
     `  click(t: ${target}, o?: { button?: "left" | "right" | "middle"; count?: 1 | 2 | 3; modifiers?: string[] }): Promise<void>;`,
     "  setValue(ref: Ref, value: string): Promise<void>;",
-    "  type(text: string, o?: { into?: Ref }): Promise<void>;",
+    "  type(text: string, o?: { into?: Ref }): Promise<void>; // keys, one per character; its line says what was sent and what the field received (verified / partly / unverifiable). More than 200 characters, or several lines, into a field that reads back go as a paste and say so; several lines into an editor that can't be read back go as keys with Return. It stops (Refused) if the focus leaves the field partway, saying how much was typed",
     "  paste(text: string, o?: { into?: Ref; format?: \"text\" | \"html\" | \"markdown\" }): Promise<void>; // long or multi-line text: paste it (seconds, not a key per character); a long type/paste extends the script's time by itself, and one that is cancelled says how many characters had gone in",
     "  key(combo: string, o?: { into?: Ref; repeat?: number }): Promise<void>;       // \"cmd+s\", \"return\", \"shift+tab\"",
     `  scroll(t: ${target}, direction: "up" | "down" | "left" | "right", pages?: number): Promise<void>;`,

@@ -172,15 +172,25 @@ final class BackgroundPasteTests: XCTestCase {
         world()
         let r = try await type("hello")
         XCTAssertEqual(poster.keyDowns.map(\.unicode).joined(), "hello")
-        XCTAssertTrue(r.detail?.contains("typed 5 characters; Browser doesn't expose this editor's text to accessibility, so it can't be read back here — check with something the app shows, such as its word count") ?? false,
+        XCTAssertTrue(r.detail?.contains("received: unverifiable — Browser doesn't expose this editor's text to accessibility, so it can't be read back here — check with something the app shows, such as its word count") ?? false,
                       r.detail ?? "")
+    }
+
+    func testSeveralLinesIntoAnEditorThatCantBeReadBackAreKeysWithReturnsNeverASilentPaste() async throws {
+        world()
+        let r = try await type("one\ntwo")
+        XCTAssertTrue(ax.performed.isEmpty, "no Edit › Paste")
+        XCTAssertFalse(poster.keyDowns.contains { $0.flags.contains(.maskCommand) }, "no ⌘V")
+        XCTAssertEqual(poster.keyDowns.map(\.keycode).filter { $0 == Int64(kVK_Return) }.count, 1, "the newline is Return")
+        XCTAssertEqual(poster.keyDowns.map(\.unicode).filter { !$0.isEmpty }.joined(), "onetwo")
+        XCTAssertTrue(r.detail?.contains("received: unverifiable") ?? false, r.detail ?? "")
     }
 
     func testAnInputTargetThatChangedSaysTheKeysArrived() async throws {
         world()
         poster.onPost = { [unowned self] e in if e.type == .keyUp { ax.put(doc, [kAXValueAttribute: "\u{200B}\u{200B}\u{200B}"]) } }
         let r = try await type("hi")
-        XCTAssertTrue(r.detail?.contains("(its input target changed, so the keys arrived)") ?? false, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("(its input target changed, so keys arrived)") ?? false, r.detail ?? "")
     }
 
     // MARK: where the input went

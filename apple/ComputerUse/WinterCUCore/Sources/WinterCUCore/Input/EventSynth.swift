@@ -326,11 +326,22 @@ struct CUEventSynth {
     static let keyBatch = 8
     static let batchYieldMs: Double = 3
 
-    /// Types `text` at the batched pace above. Each character is ITS OWN KEY — the layout's key code with
-    /// Shift/Option as needed — carrying the character as its Unicode string, so an editor that reads the key
-    /// (Google Docs' canvas) sees the key it expects and one that reads the text gets the exact character.
-    /// Only characters no key types (emoji, CJK) go as Unicode alone, a run of them in one event (in chunks of
-    /// `unicodeChunk` UTF-16 units), never one carrier key per character. Return and Tab are their keys.
+    /// The key that types `ch` PLAINLY: an ASCII character on its layout key, with Shift at most. An Option-layer
+    /// character (an em dash, "å") goes as Unicode alone with no modifier flags: a page reads Option + a key as
+    /// its own shortcut (live: a title's em dash moved the focus to the page's menu search, and the rest of the
+    /// title landed there). Non-ASCII characters go the same way — a key's code means different text on
+    /// another layout.
+    func plainStroke(_ ch: Character) -> CUKeyStroke? {
+        guard ch.isASCII, let k = stroke(ch), !k.option else { return nil }
+        return k
+    }
+
+    /// Types `text` at the batched pace above. Each plain ASCII character is ITS OWN KEY — the layout's key code
+    /// with Shift as needed — carrying the character as its Unicode string, so an editor that reads the key
+    /// (a canvas editor) sees the key it expects and one that reads the text gets the exact character.
+    /// Characters no plain key types (Option-layer, non-ASCII, emoji, CJK) go as Unicode alone with no flags, a
+    /// run of them in one event (in chunks of `unicodeChunk` UTF-16 units), never one carrier key per character.
+    /// Return and Tab are their keys.
     /// `between` runs before each character (a run: before its first) and may throw to stop. `posted` is told
     /// how many characters have gone out so far, after each key or run (a cancelled type says how far it got).
     @discardableResult
@@ -375,7 +386,7 @@ struct CUEventSynth {
                 posted?(i)
                 continue
             }
-            if let k = stroke(ch) {
+            if let k = plainStroke(ch) {
                 post(code: k.code, flags: k.flags, unicode: String(ch))
                 i += 1
                 posted?(i)
@@ -383,7 +394,7 @@ struct CUEventSynth {
             }
             // A run of characters no key types: one event per chunk, never splitting a character.
             var run = ""
-            while i < chars.count, stroke(chars[i]) == nil, !["\n", "\r", "\r\n", "\t"].contains(chars[i]),
+            while i < chars.count, plainStroke(chars[i]) == nil, !["\n", "\r", "\r\n", "\t"].contains(chars[i]),
                   run.utf16.count + String(chars[i]).utf16.count <= Self.unicodeChunk || run.isEmpty {
                 run.append(chars[i])
                 i += 1

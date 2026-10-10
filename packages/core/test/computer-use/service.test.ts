@@ -778,7 +778,13 @@ describe("ComputerV2: the record it leaves", () => {
 
 describe("ComputerV2: where keyboard input went", () => {
   test("a keyboard act names the element first, then the helper's detail", () => {
-    expect(actLine("type", { kind: "type", text: "hi" }, { rung: 1, input: '[14] text area "Comment"' })).toBe('typed into [14] text area "Comment"');
+    expect(actLine("type", { kind: "type", text: "hi" }, { rung: 1, input: '[14] text area "Comment"' })).toBe('sent 2 characters to [14] text area "Comment"');
+    expect(actLine("type", { kind: "type", text: "Decision — Models 😀" }, { rung: 2, input: "[9181] text field", detail: "received: partly (the field holds the first 9 of 19 characters; the rest differs or is missing) — check state() before typing again" }))
+      .toBe("sent 19 characters to [9181] text field; received: partly (the field holds the first 9 of 19 characters; the rest differs or is missing) — check state() before typing again");
+    expect(actLine("type", { kind: "type", text: "x" }, { rung: 1, input: "[3] text field", detail: "received: verified (the field holds it)" }))
+      .toBe("sent 1 character to [3] text field; received: verified (the field holds it)");
+    expect(actLine("type", { kind: "type", text: "a\nb" }, { rung: 1, input: "[3] text area", detail: "as a paste (several lines go as a paste into a field that reads them back); the field shows the pasted text" }))
+      .toBe("sent 3 characters to [3] text area; as a paste (several lines go as a paste into a field that reads them back); the field shows the pasted text");
     expect(actLine("paste", { kind: "paste", text: "x" }, { rung: 1, input: '[3] text area "Doc"', detail: "pasted, unconfirmed: check the state" }))
       .toBe('pasted into [3] text area "Doc" — pasted, unconfirmed: check the state');
     expect(actLine("key", { kind: "key", combo: "cmd+a" }, { rung: 2, input: "[9] text field" })).toBe("pressed cmd+a in [9] text field");
@@ -796,12 +802,12 @@ describe("ComputerV2: where keyboard input went", () => {
 
   macOnly("the line reaches the script's result, inside the fence", async () => {
     const w = world();
-    w.fake.handlers["target.act"] = () => ({ rung: 1, input: '[14] text area "Comment"', detail: "typed 5 characters; Notes doesn't expose this editor's text to accessibility, so it can't be read back here" });
+    w.fake.handlers["target.act"] = () => ({ rung: 1, input: '[14] text area "Comment"', detail: "received: unverifiable — Notes doesn't expose this editor's text to accessibility, so it can't be read back here" });
     const r = await w.run("const notes = await apps.open('Notes')\nawait notes.type('hello', { into: 14 })");
     expect(r.isError).toBe(false);
     const out = text(r);
-    expect(out).toContain('typed into [14] text area "Comment" — typed 5 characters; Notes doesn\'t expose this editor\'s text');
-    expect(out.indexOf("typed into")).toBeGreaterThan(out.indexOf("<screen-data"));
+    expect(out).toContain('sent 5 characters to [14] text area "Comment"; received: unverifiable — Notes doesn\'t expose this editor\'s text');
+    expect(out.indexOf("sent 5 characters")).toBeGreaterThan(out.indexOf("<screen-data"));
   }, 30_000);
 });
 

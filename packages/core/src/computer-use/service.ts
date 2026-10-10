@@ -1240,12 +1240,14 @@ export function focusLine(res: ActResult): string | undefined {
   return undefined;
 }
 
-/** The line an act prints: `typed into [14] text area "Comment"` (and the helper's detail after it) for keyboard
- *  input, the detail alone for any other act; nothing when there is nothing to say. */
+/** The line an act prints: `sent 5 characters to [14] text area "Comment"; received: verified` for type() —
+ *  what was SENT, then what the field RECEIVED (the helper's detail: verified / partly / unverifiable), never
+ *  "typed" for keys nobody saw land — `pasted into …` for paste(), and so on, the helper's detail after it; the
+ *  detail alone for any other act; nothing when there is nothing to say. */
 export function actLine(primitive: string, action: ActAction, res: ActResult): string | undefined {
   const detail = helperDetail(res.detail, 700);
   const input = typeof res.input === "string" ? res.input.replace(/\s+/g, " ").trim().slice(0, 200) : undefined;
-  const verb = action.kind === "type" ? "typed into"
+  const verb = action.kind === "type" ? `sent ${countCharacters(action.text)} to`
     : action.kind === "paste" ? "pasted into"
     : action.kind === "key" ? `pressed ${action.combo} in`
     : action.kind === "setValue" ? "set the value of" : undefined;
@@ -1255,7 +1257,15 @@ export function actLine(primitive: string, action: ActAction, res: ActResult): s
     head = `${primitive}: the app reports no focused element, so where it went is unknown — click the field first, or pass { into }`;
   }
   if (head === undefined) return detail;
-  return detail === undefined ? head : `${head} — ${detail}`;
+  if (detail === undefined) return head;
+  return /^(received:|as a paste)/.test(detail) ? `${head}; ${detail}` : `${head} — ${detail}`;
+}
+
+/** "1 character" / "65 characters", counted as a person reads them (grapheme clusters — the helper's own count). */
+export function countCharacters(text: string): string {
+  let n = 0;
+  for (const _ of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)) n += 1;
+  return `${n.toLocaleString("en-US")} character${n === 1 ? "" : "s"}`;
 }
 
 function helperDetail(detail: unknown, cap = 300): string | undefined {
@@ -1317,6 +1327,7 @@ function refusedWords(reason: string, name: string): string {
     case "focus_unknown": return `can't tell which field has focus in ${name}, so it could be a password field — pass \`into\` or click a text field first`;
     case "focus_not_placed": return `couldn't put the keyboard focus in that field of ${name}, so nothing was typed — use setValue(ref, text) if it takes a value, or click it first and retry`;
     case "focus_not_editable": return `the focus in ${name} is not a text field, so nothing was typed — click the field or pass { into }`;
+    case "focus_moved": return `the focus left the field partway in ${name}, so the rest was not typed — check state(), then type the rest with { into }`;
     case "wrong_field_shape": return `the text does not fit the field that has the focus in ${name} (several lines, or a long text, for a one-line field or the browser's own) — pass { into } for the field you mean`;
     case "auth_dialog": return "that is a system authentication dialog — ask the user to handle it";
     case "privacy_pane": return "System Settings' Privacy & Security panes are off limits — ask the user to change them";

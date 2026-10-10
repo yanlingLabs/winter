@@ -58,6 +58,30 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertEqual(try typed(emoji).map(\.unicode).joined(), emoji)
     }
 
+    func testOptionLayerAndNonASCIICharactersGoAsUnicodeWithNoModifiers() throws {
+        // A layout where Shift+Option+key 27 types the em dash, Option+key 0 "å", and a plain key types "ç".
+        let poster = RecordingPoster()
+        var synth = CUEventSynth(poster: poster, skyLight: .none)
+        synth.sleep = { _ in }
+        synth.stroke = { ch in
+            switch ch {
+            case "—": return CUKeyStroke(code: 27, shift: true, option: true)
+            case "å": return CUKeyStroke(code: 0, option: true)
+            case "ç": return CUKeyStroke(code: 41)
+            default: return CUKeyboardLayout.ansiStroke(for: ch)
+            }
+        }
+        try synth.type(pid: 4242, text: "A — çå b", route: .publicPid) {}
+        let downs = poster.entries.filter { $0.type == .keyDown }
+        XCTAssertEqual(downs.map(\.unicode).joined(), "A — çå b")
+        XCTAssertFalse(poster.entries.contains { $0.flags.contains(.maskAlternate) }, "never Option: a page reads it as a shortcut")
+        let dash = downs.first { $0.unicode.contains("—") }!
+        XCTAssertEqual(dash.flags.intersection([.maskShift, .maskAlternate, .maskCommand, .maskControl]), [])
+        XCTAssertEqual(dash.keycode, 0, "Unicode alone, no layout key")
+        XCTAssertEqual(downs.first { $0.unicode.contains("ç") }?.keycode, 0, "non-ASCII: no layout key either")
+        XCTAssertTrue(downs[0].flags.contains(.maskShift), "plain ASCII keeps its key and Shift")
+    }
+
     func testReturnAndTabAreTheirKeys() throws {
         let downs = try typed("a\nb\tc")
         XCTAssertEqual(downs.map(\.keycode), [Int64(kVK_ANSI_A), Int64(kVK_Return), Int64(kVK_ANSI_B), Int64(kVK_Tab), Int64(kVK_ANSI_C)])
@@ -364,7 +388,7 @@ final class KeyboardTargetTests: XCTestCase {
         let r = try await act(.type(CUTypeAction(text: "Test", into: ref(field))))
         XCTAssertTrue(ax.written.contains("\(token(field)):\(kAXSelectedTextAttribute)"), "inserted over accessibility")
         XCTAssertTrue(poster.keyDowns.isEmpty, "never typed a second time")
-        XCTAssertTrue(r.detail?.contains("so it was not typed again — check state() before typing it again") ?? false, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("received: unverifiable — inserted over accessibility, but the field can't be read back, so it was not typed again") ?? false, r.detail ?? "")
     }
 
     func testAnAccessibilityInsertCountsOnlyWhenItsTextReadsBack() async throws {
@@ -382,6 +406,82 @@ final class KeyboardTargetTests: XCTestCase {
         let ok = try await act(.type(CUTypeAction(text: "Test", into: ref(field))))
         XCTAssertEqual(ok.rung, 1)
         XCTAssertTrue(poster.entries.isEmpty)
+    }
+
+    // MARK: what was sent vs what the field received
+
+    /// The field takes the first `takes` typed characters (nil: all of them) into its value.
+    private func fieldTakes(_ takes: Int? = nil) {
+        var n = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            n += 1
+            if takes.map({ n <= $0 }) ?? true {
+                ax.put(field, [kAXValueAttribute: (ax.string(field, kAXValueAttribute) ?? "") + e.unicode])
+            }
+        }
+    }
+
+    func testTypedTextReadBackInFullIsVerified() async throws {
+        safari(fieldOwner: pid)
+        fieldTakes()
+        let r = try await act(.type(CUTypeAction(text: " v2", into: ref(field))))
+        XCTAssertEqual(ax.string(field, kAXValueAttribute), "Untitled document v2")
+        XCTAssertTrue(r.detail?.contains("received: verified") ?? false, r.detail ?? "")
+    }
+
+    func testTypedTextThatOnlyPartlyLandedSaysHowMuch() async throws {
+        safari(fieldOwner: pid)
+        fieldTakes(3)
+        let r = try await act(.type(CUTypeAction(text: " report", into: ref(field))))
+        XCTAssertTrue(r.detail?.contains("received: partly (the field holds the first 3 of 7 characters; the rest differs or is missing)") ?? false, r.detail ?? "")
+        XCTAssertFalse(r.detail?.contains("verified") ?? true)
+    }
+
+    func testTypedTextThatNeverLandedSaysNoneOfIt() async throws {
+        safari(fieldOwner: pid)
+        let r = try await act(.type(CUTypeAction(text: "abc", into: ref(field))))
+        XCTAssertTrue(r.detail?.contains("received: none of it") ?? false, r.detail ?? "")
+    }
+
+    func testTypingStopsWhenTheFocusLeavesTheField() async throws {
+        // The page takes a character as its shortcut and moves the focus to its own search box partway.
+        safari(fieldOwner: pid)
+        let search = searchHasFocus()
+        ax.focus(pid: pid, on: field)
+        var n = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyUp else { return }
+            n += 1
+            if n == 3 { ax.focus(pid: pid, on: search) }
+        }
+        do {
+            try await act(.type(CUTypeAction(text: "Title — more", into: ref(field))))
+            XCTFail("typing went on into the search box")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "refused")
+            XCTAssertEqual(e.data?["reason"], .string("focus_moved"))
+            XCTAssertTrue(e.message.hasPrefix("typed 3 of 12 characters; then the focus moved from [\(ref(field))] text field \"Rename\" to [\(ref(search))] text field \"Search\" (after \u{201C}Tit\u{201D}), so the rest was not sent"), e.message)
+            XCTAssertFalse(e.message.contains("had been typed before this"), "the counts once")
+        }
+        XCTAssertEqual(poster.keyDowns.count, 3, "nothing more went out")
+    }
+
+    func testATabMovesTheFocusOnPurpose() async throws {
+        safari(fieldOwner: pid)
+        let search = searchHasFocus()
+        ax.focus(pid: pid, on: field)
+        poster.onPost = { [unowned self] e in
+            if e.type == .keyUp, e.keycode == Int64(kVK_Tab) { ax.focus(pid: pid, on: search) }
+        }
+        _ = try await act(.type(CUTypeAction(text: "ab\tcd", into: ref(field))))
+        XCTAssertEqual(poster.keyDowns.count, 5, "all of it")
+    }
+
+    func testSeveralLinesIntoAFieldThatReadsBackGoAsAPasteAndSaySo() async throws {
+        safari(fieldOwner: pid)
+        let r = try await act(.type(CUTypeAction(text: "one\ntwo", into: ref(field))))
+        XCTAssertTrue(r.detail?.hasPrefix("as a paste (several lines go as a paste into a field that reads them back)") ?? false, r.detail ?? "")
     }
 
     /// A plain native field (not under a web area) in a content-process-free app, built directly under the

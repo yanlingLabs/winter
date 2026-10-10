@@ -659,6 +659,7 @@ extension CUCore {
         init(explicit: AXUIElement? = nil) { self.explicit = explicit }
     }
 
+    /// The focus the app reports, else the one the bound window reports.
     /// The ONE focus resolver every keyboard path uses: the bound window's own focus (`windowFocus` — an app
     /// answers its focused element for its KEY window only, so an app-global read could name another window's
     /// field: live, find() and type() disagreed). A capture-only window has no tree of its own: the app's answer.
@@ -763,7 +764,7 @@ extension CUCore {
         // Not settable: focus it, select everything, and type over it — never over another field.
         let g = TypingFocus(explicit: e)
         try placeFocus(e, t, ref: a.ref)
-        if let len = ax.string(e, kAXValueAttribute)?.utf16.count, ax.isSettable(e, kAXSelectedTextRangeAttribute),
+        if let len = textLength(e, t), ax.isSettable(e, kAXSelectedTextRangeAttribute),
            let r = AX.makeRange(location: 0, length: len) {
             try? ax.set(e, kAXSelectedTextRangeAttribute, r)
         } else {
@@ -846,22 +847,31 @@ extension CUCore {
                 CULog.act.notice("type in \(t.appName, privacy: .public): AX insert \(verdict == .landed ? "landed" : verdict == .missing ? "missing" : "unreadable", privacy: .public) (web \(web, privacy: .public))")
                 switch verdict {
                 case .landed:
-                    return ActOutcome(rung: .accessibility)
+                    return ActOutcome(rung: .accessibility, detail: "received: verified (inserted over accessibility; the field holds it)")
                 case .unreadable where !web:
-                    return ActOutcome(rung: .accessibility)  // nothing to read it back by: trusted, as before
+                    // Nothing to read it back by: not typed again, and said so.
+                    return ActOutcome(rung: .accessibility, detail: "received: unverifiable — inserted over accessibility, and the field can't be read back")
                 case .unreadable:
                     // Applied, and nothing to read it back by: typing it as well could put it in twice. Said, not
                     // repeated.
                     CULog.act.notice("type in \(t.appName, privacy: .public): the accessibility insert can't be read back — not typed again")
-                    return ActOutcome(rung: .accessibility, detail: "the text was inserted over accessibility, but the field can't be read back, so it was not typed again — check state() before typing it again")
+                    return ActOutcome(rung: .accessibility, detail: "received: unverifiable — inserted over accessibility, but the field can't be read back, so it was not typed again; check state() before typing it again")
                 default:
                     _ = since
                     CULog.act.notice("type in \(t.appName, privacy: .public): the accessibility insert did not stick — typing keys")
                 }
             }
         }
-        if text.contains("\n") || text.count > Self.typeKeysMax {
+        // Long or multi-line text: no SILENT switch to a paste (live: a 2,000-character type() became a paste that
+        // never landed, and the result said "typed"). Into a field that shows its text, a paste — and the result
+        // says "sent as a paste"; into an editor that can't be read back, keys (Return for each newline), so what is
+        // sent is what a person types.
+        let readable = e.flatMap { ax.string($0, kAXValueAttribute) }.map { Self.showsText($0) } ?? false
+        if text.contains("\n") || text.count > Self.typeKeysMax, readable || !text.contains("\n") {
+            let lines = text.split(separator: "\n", omittingEmptySubsequences: false).count
+            CULog.act.notice("type in \(t.appName, privacy: .public): \(text.count, privacy: .public) characters sent as a paste")
             return try pasteText(text, format: .text, p, t, token, g)
+                .noting("as a paste (\(lines > 1 ? "several lines go" : "more than \(Self.typeKeysMax) characters go") as a paste into a field that reads them back)")
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
         let synth = self.synth(p)
@@ -869,6 +879,9 @@ extension CUCore {
         var sent = 0
         let keyPid = keyboardTarget(t, focused: e)
         let valueBefore = e.flatMap { ax.string($0, kAXValueAttribute) }
+        // Watched for the focus leaving the field: only when it starts in it, and until a Tab (or a Return that
+        // moves it) — those move the focus on purpose.
+        var watchFocus = e.flatMap { e in reportedFocus(t).map { sameFocus($0, e) } } ?? false
         // The keys reach the app only while its window holds the key focus: the focus blip, per burst.
         let blips = CUKeyBlips(self, p, t, why: "typing")
         defer { blips.end() }
@@ -882,7 +895,17 @@ extension CUCore {
                     try blips.before()
                     guard sys.appRunning(t.pid) else { throw CUError.targetLost("\(t.appName) quit while typing", reason: .appQuit) }
                     if sent > 0, chars[sent - 1] == "\t" || chars[sent - 1].isNewline { g.focusMayHaveMoved = true }
-                    try requireTypableFocus(t, g)
+                    let now = try requireTypableFocus(t, g)
+                    // The focus left the field it was typing into (a page that takes a chord as its shortcut, a field
+                    // that commits and blurs partway): nothing more goes out — the rest would land elsewhere.
+                    if watchFocus, let e, let now, !sameFocus(now, e) {
+                        let last = sent > 0 ? chars[sent - 1] : nil
+                        if last == "\t" || last?.isNewline == true {
+                            watchFocus = false  // moved on purpose
+                        } else {
+                            throw focusMovedRefusal(from: e, to: now, chars: chars, sent: sent, t)
+                        }
+                    }
                 }, posted: { sent = $0 })
             }
         }
@@ -894,20 +917,81 @@ extension CUCore {
             let after = ax.string(e, kAXValueAttribute)
             let moved = after != nil && after != valueBefore
             CULog.act.notice("type in \(t.appName, privacy: .public): the editor hides its text — input target \(moved ? "changed" : "unchanged", privacy: .public)")
-            return typed.noting("typed \(chars.count) characters; \(t.appName) doesn't expose this editor's text to accessibility, so it can't be read back here\(moved ? " (its input target changed, so the keys arrived)" : "") — check with something the app shows, such as its word count, or a screenshot while its window is on screen")
+            return typed.noting("received: unverifiable — \(t.appName) doesn't expose this editor's text to accessibility, so it can't be read back here\(moved ? " (its input target changed, so keys arrived)" : "") — check with something the app shows, such as its word count, or a screenshot while its window is on screen")
         }
-        // Keys to a content process can't be confirmed by the route itself: read the field back when it can be.
-        if keyPid != t.pid, let e, valueBefore != nil, waitForInsert(e, text, before: valueBefore, capMs: 400) == .missing {
-            CULog.act.notice("type in \(t.appName, privacy: .public): keys to the content process \(keyPid, privacy: .public) left the field unchanged")
-            return typed.noting("the keys went to \(t.appName)'s web content process, and the field's value did not change — check the state")
+        // A field that shows its text is ALWAYS read back: what was sent vs what it now holds.
+        if let e, let before = valueBefore {
+            let received = receivedVerdict(e, typed: text, before: before, capMs: keyPid != t.pid || isWebContent(e) ? 400 : 150)
+            CULog.act.notice("type in \(t.appName, privacy: .public): sent \(chars.count, privacy: .public), received \(received.word, privacy: .public)")
+            return typed.noting("received: \(received.words)")
         }
-        return typed
+        return typed.noting("received: unverifiable (no field to read it back from)")
+    }
+
+    /// "typed N of M characters; then the focus moved to [x] (after “…”)" — the counts in the sentence itself.
+    func focusMovedRefusal(from e: AXUIElement, to now: AXUIElement, chars: [Character], sent: Int, _ t: CUTarget) -> CUError {
+        let after = sent > 0 ? String(chars[max(0, sent - 12)..<sent]) : ""
+        CULog.act.notice("type in \(t.appName, privacy: .public): the focus left the field after \(sent, privacy: .public) of \(chars.count, privacy: .public) characters")
+        var err = CUError.refused(.focusMoved, "typed \(sent) of \(chars.count) characters; then the focus moved from \(focusWords(e, t)) to \(focusWords(now, t))\(after.isEmpty ? "" : " (after \u{201C}\(after)\u{201D})"), so the rest was not sent — check state(), then type the rest with { into }")
+        var data = err.data ?? [:]
+        data["typed"] = .number(Double(sent))
+        data["total"] = .number(Double(chars.count))
+        err.data = data
+        return err
+    }
+
+    struct Received { var word: String; var words: String }
+
+    /// What a readable field received of `typed`: verified (it holds all of it, once more than before), partly (the
+    /// longest leading part of it now there, M of N), or nothing.
+    func receivedVerdict(_ e: AXUIElement, typed: String, before: String, capMs: Double) -> Received {
+        let want = CUEditEvidence.normalized(typed)
+        let was = CUEditEvidence.normalized(before)
+        let deadline = clock.nowMs() + capMs
+        var now = was
+        repeat {
+            now = CUEditEvidence.normalized(ax.string(e, kAXValueAttribute) ?? "")
+            if CUEditEvidence.occurrences(of: want, in: now) > CUEditEvidence.occurrences(of: want, in: was) {
+                return Received(word: "verified", words: "verified (the field holds it)")
+            }
+            if clock.nowMs() >= deadline { break }
+            usleep(30_000)
+        } while true
+        // The longest leading part that arrived, counted in the characters that were sent (binary search over its
+        // length; a part that is only whitespace counts as there).
+        let chars = Array(typed)
+        func arrived(_ k: Int) -> Bool {
+            let part = CUEditEvidence.normalized(String(chars[0..<k]))
+            return part.isEmpty || CUEditEvidence.occurrences(of: part, in: now) > CUEditEvidence.occurrences(of: part, in: was)
+        }
+        var lo = 0, hi = chars.count
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if arrived(mid) { lo = mid } else { hi = mid - 1 }
+        }
+        if lo > 0, CUEditEvidence.normalized(String(chars[0..<lo])).isEmpty { lo = 0 }
+        if lo == 0 { return Received(word: "nothing", words: "none of it — the field does not show it; check state() before typing again") }
+        return Received(word: "partly", words: "partly (the field holds the first \(lo) of \(chars.count) characters; the rest differs or is missing) — check state() before typing again")
+    }
+
+    /// `a` and `b` are the same element, or one lies inside the other (a contenteditable's own children).
+    func sameFocus(_ a: AXUIElement, _ b: AXUIElement) -> Bool {
+        if CFEqual(a, b) { return true }
+        for (x, y) in [(a, b), (b, a)] {
+            var cur = ax.element(x, kAXParentAttribute)
+            for _ in 0..<12 {
+                guard let c = cur else { break }
+                if CFEqual(c, y) { return true }
+                cur = ax.element(c, kAXParentAttribute)
+            }
+        }
+        return false
     }
 
     /// A value that shows text: not nil-like zero-width filler (Google Docs' body reads as "\u{200B}\u{200B}"
     /// whatever it holds). An empty value shows text — a paste into it changes it.
     static func showsText(_ value: String) -> Bool {
-        value.isEmpty || value.unicodeScalars.contains { !["\u{200B}", "\u{200C}", "\u{200D}", "\u{FEFF}", "\u{2060}"].contains($0) }
+        value.isEmpty || value.unicodeScalars.contains { !["\u{200B}", "\u{200C}", "\u{200D}", "\u{FEFF}", "\u{2060}", "\u{00AD}"].contains($0) }
     }
 
     /// Up to this many characters are typed as keys (one real key per character); longer or multi-line text is
@@ -1375,8 +1459,7 @@ extension CUCore {
         }
         // A selection write puts the caret in a text control (WebKit focuses the control it selects in) — an AX
         // write of the selection, never of AXFocused. At the end, so nothing is replaced.
-        if ax.isSettable(e, kAXSelectedTextRangeAttribute) {
-            let end = ax.string(e, kAXValueAttribute)?.utf16.count ?? 0
+        if ax.isSettable(e, kAXSelectedTextRangeAttribute), let end = textLength(e, t) {
             if let r = AX.makeRange(location: end, length: 0) {
                 let done = (try? ax.set(e, kAXSelectedTextRangeAttribute, r)) != nil
                 let placed = done && waitFocused(e, t, web: web)
@@ -1681,6 +1764,15 @@ extension CUCore {
         }
     }
 
+    /// The length of the text a field SHOWS, for a selection or caret range; nil for a page's hidden input
+    /// standing in for its document, or a value that is only zero-width filler — a range over the proxy's own
+    /// characters selects nothing of the document (the real ⌘A, or a click, does that instead).
+    func textLength(_ e: AXUIElement, _ t: CUTarget) -> Int? {
+        let value = ax.string(e, kAXValueAttribute) ?? ""
+        guard Self.showsText(value), hiddenInputWords(e, t) == nil else { return nil }
+        return value.utf16.count
+    }
+
     /// One editing shortcut over accessibility; nil when that can't be done here (the keys are sent instead).
     private func emulate(_ command: EditCommand, _ f: AXUIElement, _ p: TargetActParams, _ t: CUTarget,
                          _ token: CUCancellation.Token, keyPid: pid_t, blips: CUKeyBlips? = nil) throws -> ActOutcome? {
@@ -1719,8 +1811,8 @@ extension CUCore {
             throw CUError(code: "needs_foreground",
                           message: "\(t.appName)'s web view takes no \(command == .undo ? "⌘Z" : "⇧⌘Z") in the background, and its Edit › \(command == .undo ? "Undo" : "Redo") changed nothing — that needs \(t.appName) in front")
         case .selectAll:
-            let length = ax.string(f, kAXValueAttribute)?.utf16.count ?? 0
-            guard ax.isSettable(f, kAXSelectedTextRangeAttribute), let r = AX.makeRange(location: 0, length: length),
+            guard let length = textLength(f, t), ax.isSettable(f, kAXSelectedTextRangeAttribute),
+                  let r = AX.makeRange(location: 0, length: length),
                   (try? ax.set(f, kAXSelectedTextRangeAttribute, r)) != nil else { return nil }
             CULog.act.notice("key in \(t.appName, privacy: .public): select all over accessibility")
             return ActOutcome(rung: .accessibility, detail: "\(note) everything in the field was selected over accessibility")
@@ -1846,7 +1938,9 @@ extension CUCore {
             data["typed"] = .number(Double(n))
             data["total"] = .number(Double(total))
             e.data = data
-            if e.code != "cancelled" { e.message += " — \(n) of \(total) characters had been typed before this" }
+            if e.code != "cancelled", e.data?["reason"] != .string(CUFloorReason.focusMoved.rawValue) {
+                e.message += " — \(n) of \(total) characters had been typed before this"
+            }
             CULog.act.notice("typing in \(t.appName, privacy: .public) stopped (\(e.code, privacy: .public)) after \(n, privacy: .public) of \(total, privacy: .public) characters")
             throw e
         }

@@ -230,6 +230,13 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 - `type` and `paste` with no `into` refuse (`refused`) a focus that is not a text field (`focus_not_editable`),
   and several lines or more than 200 characters for a single-line field or for a browser's own field outside the
   page (`wrong_field_shape`); the message names the focus (and the page's editable element).
+- A `type`'s `detail` begins with what the field RECEIVED: `received: verified …` (a field that shows its text
+  holds it), `received: partly (the field holds the first M of N characters …)`, `received: none of it …`, or
+  `received: unverifiable …` (nothing reads it back). Longer or multi-line text into a field that reads back goes
+  as a paste and its `detail` begins `as a paste (…)`; multi-line text into an editor that can't be read back goes
+  as keys, a newline as Return. Plain ASCII characters are their layout's keys (Shift at most); Option-layer and
+  non-ASCII characters go as Unicode with no modifier flags. A `type` whose focus leaves the field partway stops
+  (`refused`, `focus_moved`) — a Tab, or a Return that moves the focus, moves it on purpose.
 - `action` is an object discriminated by `kind`, its fields beside it:
 
 | `kind` | Fields |
@@ -351,7 +358,8 @@ daemon words each one ("Notes quit — open it again with apps.open()", "Notes's
 useWindow to pick another", …) and reads an absent `reason` (an older helper) as `unknown`.
 
 `refused` reasons: `secure_field`, `auth_dialog`, `privacy_pane`, `winter_itself`, `save_path`,
-`focus_unknown`, `focus_not_placed`, `focus_not_editable`, `wrong_field_shape`, `applescript`, `automation_denied`.
+`focus_unknown`, `focus_not_placed`, `focus_not_editable`, `wrong_field_shape`, `focus_moved`, `applescript`, `automation_denied`.
+`focus_moved` stops a `type` whose focus left the field partway (`data.typed` / `data.total` say how far it got).
 
 ## 6. Floors
 
