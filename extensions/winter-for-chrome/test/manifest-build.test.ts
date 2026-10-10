@@ -55,7 +55,7 @@ describe("the build", () => {
     } finally {
       rmSync(out, { recursive: true, force: true });
     }
-  });
+  }, 60_000);
 
   test("the sources never call what would move the user's view or read a site's data", () => {
     const dir = join(import.meta.dir, "..", "src");

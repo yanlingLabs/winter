@@ -77,15 +77,24 @@ describe("tabs.create", () => {
     expect(await code(c.handle("tabs.create", { url: "about:blank", sessionId: "s_1", sessionTitle: "" }))).toBe("ok");
   });
 
-  test("the group book survives a worker restart, and forgets groups that are gone", async () => {
-    const tab = await open();
+  test("after a worker (or daemon) restart the listing still reports every agent tab with its session", async () => {
+    const a = await open("s_1", "One");
+    const b = await open("s_2", "Two");
     const again = await make();
     const listed = (await again.handle("tabs.list", {}) as { tabs: { tabKey: string; agent: boolean; sessionId?: string }[] }).tabs;
-    expect(listed.find((t) => t.tabKey === tab.tabKey)).toMatchObject({ agent: true, sessionId: "s_1" });
-    chrome.groups_.clear(); // the browser restarted: groups came back under new ids
+    expect(listed.filter((t) => t.agent).map((t) => [t.tabKey, t.sessionId])).toEqual([[a.tabKey, "s_1"], [b.tabKey, "s_2"]]);
+    // …and a new tab of s_1 still joins s_1's group.
+    const c2 = await again.handle("tabs.create", { url: "https://example.com/3", sessionId: "s_1", sessionTitle: "One" }) as { tab: { tabKey: string } };
+    expect(chrome.tabs_.get(Number(c2.tab.tabKey))!.groupId).toBe(chrome.tabs_.get(Number(a.tabKey))!.groupId);
+  });
+
+  test("after a browser restart Winter knows none of its old tabs: they are the user's, never closed", async () => {
+    await open();
+    chrome.restartBrowser();
     const fresh = await make();
-    const relisted = (await fresh.handle("tabs.list", {}) as { tabs: { tabKey: string; agent: boolean }[] }).tabs;
-    expect(relisted.find((t) => t.tabKey === tab.tabKey)?.agent).toBe(false);
+    const tabs = (await fresh.handle("tabs.list", {}) as { tabs: { tabKey: string; agent: boolean }[] }).tabs;
+    expect(tabs.every((t) => !t.agent)).toBe(true);
+    for (const t of tabs) expect(await code(fresh.handle("tabs.close", { tabKey: t.tabKey }))).toBe("not_allowed");
   });
 });
 
@@ -109,6 +118,38 @@ describe("tabs.list, tabs.close, tabs.keep", () => {
     expect(await code(c.handle("tabs.close", { tabKey: "not-a-number" }))).toBe("tab_gone");
   });
 
+  test("closing a group's last tab ungroups it first: no group is left behind", async () => {
+    const a = await open();
+    const b = await open();
+    const group = chrome.tabs_.get(Number(a.tabKey))!.groupId;
+    await c.handle("tabs.close", { tabKey: a.tabKey });
+    expect(chrome.groups_.has(group)).toBe(true); // b is still in it
+    await c.handle("tabs.close", { tabKey: b.tabKey });
+    expect(chrome.groups_.has(group)).toBe(false);
+    const closing = chrome.calls.filter((x) => x.api === "tabs.ungroup" || x.api === "tabs.remove").map((x) => [x.api, x.args[0]]);
+    expect(closing).toEqual([["tabs.ungroup", [Number(a.tabKey)]], ["tabs.remove", Number(a.tabKey)], ["tabs.ungroup", [Number(b.tabKey)]], ["tabs.remove", Number(b.tabKey)]]);
+    // The next tab of that session gets a fresh group.
+    const next = await open();
+    expect(chrome.groups_.has(chrome.tabs_.get(Number(next.tabKey))!.groupId)).toBe(true);
+  });
+
+  test("Chrome's own pin does not protect an agent tab: it is still Winter's, and closable", async () => {
+    const a = await open();
+    chrome.pinTab(Number(a.tabKey));
+    const tabs = (await c.handle("tabs.list", {}) as { tabs: { tabKey: string; agent: boolean; sessionId?: string }[] }).tabs;
+    expect(tabs.find((t) => t.tabKey === a.tabKey)).toMatchObject({ agent: true, sessionId: "s_1" });
+    await c.handle("tabs.close", { tabKey: a.tabKey });
+    expect(chrome.tabs_.has(Number(a.tabKey))).toBe(false);
+  });
+
+  test("a tab the user drags into a Winter group stays the user's", async () => {
+    const a = await open();
+    chrome.tabs_.get(101)!.groupId = chrome.tabs_.get(Number(a.tabKey))!.groupId;
+    const tabs = (await c.handle("tabs.list", {}) as { tabs: { tabKey: string; agent: boolean }[] }).tabs;
+    expect(tabs.find((t) => t.tabKey === "101")?.agent).toBe(false);
+    expect(await code(c.handle("tabs.close", { tabKey: "101" }))).toBe("not_allowed");
+  });
+
   test("keep() takes the tab out of the Winter group: it is the user's from then on, and never closed by Winter", async () => {
     const mine = await open();
     await c.handle("tabs.keep", { tabKey: mine.tabKey });
@@ -118,6 +159,12 @@ describe("tabs.list, tabs.close, tabs.keep", () => {
     expect(await code(c.handle("tabs.close", { tabKey: mine.tabKey }))).toBe("not_allowed");
     await c.handle("tabs.keep", { tabKey: "101" }); // a user tab: nothing to do
     expect(chrome.calls.filter((x) => x.api === "tabs.ungroup")).toHaveLength(1);
+    // A pinned agent tab is in no group: keep() only hands it over.
+    const pinned = await open();
+    chrome.pinTab(Number(pinned.tabKey));
+    await c.handle("tabs.keep", { tabKey: pinned.tabKey });
+    expect(chrome.calls.filter((x) => x.api === "tabs.ungroup")).toHaveLength(1);
+    expect(await code(c.handle("tabs.close", { tabKey: pinned.tabKey }))).toBe("not_allowed");
   });
 });
 

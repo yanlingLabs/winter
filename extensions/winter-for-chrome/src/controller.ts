@@ -7,11 +7,12 @@
 //  - It never reads a site's cookies or storage, and runs page code only in the "winter" world (the guard).
 //  - The debugger is attached only while the daemon has the tab bound — and is detached after 5 minutes without a
 //    command, and whenever the link to Winter drops.
-//  - It closes and ungroups only tabs in a Winter group, and only when the daemon says so: it never decides by itself
-//    that a tab should close.
+//  - It closes only Winter's own tabs (an agent tab, by tab id — pinned or moved, until `keep()`), and only when the
+//    daemon says so: it never decides by itself that a tab should close. Closing ungroups the tab first, so a group's
+//    last tab never leaves an empty (or a saved) group behind.
 import type { ChromeApi, ChromeTab, Clock, DebuggerTarget, MessageSender } from "./chrome-api";
 import { realClock } from "./chrome-api";
-import { GroupBook, groupTitle } from "./groups";
+import { AgentBook, groupTitle } from "./groups";
 import { isAllowedEvent, strippedParams, TabGuard } from "./guard";
 import { drawOverlay } from "./overlay";
 import type { ErrorCode, WireTab } from "./protocol";
@@ -50,14 +51,14 @@ export interface ControllerOptions {
 
 export class ExtensionController {
   private readonly attached = new Map<number, Attached>();
-  private readonly book: GroupBook;
+  private readonly book: AgentBook;
   private readonly clock: Clock;
   private readonly idleMs: number;
   /** Tabs whose `tab.gone` was sent (ids are never reused while the browser runs). */
   private readonly goneSent = new Set<number>();
 
   constructor(private readonly chrome: ChromeApi, private readonly opts: ControllerOptions) {
-    this.book = new GroupBook(chrome);
+    this.book = new AgentBook(chrome);
     this.clock = opts.clock ?? realClock;
     this.idleMs = opts.idleDetachMs ?? IDLE_DETACH_MS;
   }
@@ -67,7 +68,7 @@ export class ExtensionController {
     this.chrome.debugger.onEvent.addListener((source, method, params) => this.onDebuggerEvent(source, method, params));
     this.chrome.debugger.onDetach.addListener((source, reason) => { void this.onDebuggerDetach(source, reason); });
     this.chrome.tabs.onRemoved.addListener((tabId) => this.onTabRemoved(tabId));
-    this.chrome.tabGroups.onRemoved.addListener((group) => { void this.book.drop(group.id); });
+    this.chrome.tabGroups.onRemoved.addListener((group) => { void this.book.dropGroup(group.id); });
     await this.book.load();
   }
 
@@ -118,7 +119,7 @@ export class ExtensionController {
   }
 
   private wire(tab: ChromeTab): WireTab {
-    const sessionId = this.book.sessionOf(tab.groupId);
+    const sessionId = tab.id === undefined ? undefined : this.book.sessionOfTab(tab.id);
     return {
       tabKey: String(tab.id),
       url: tab.url ?? tab.pendingUrl ?? "",
@@ -157,7 +158,7 @@ export class ExtensionController {
       try {
         windowId = (await this.chrome.tabGroups.get(groupId)).windowId;
       } catch {
-        await this.book.drop(groupId);
+        await this.book.dropGroup(groupId);
         groupId = undefined;
       }
     }
@@ -165,13 +166,14 @@ export class ExtensionController {
     // In the BACKGROUND: the user's active tab and window never change.
     const tab = await this.chrome.tabs.create({ url, active: false, windowId });
     if (tab.id === undefined) throw new ExtensionError("cdp_error", "the browser opened no tab");
+    await this.book.addTab(tab.id, sessionId);
     if (groupId !== undefined) {
       await this.chrome.tabs.group({ tabIds: [tab.id], groupId });
     } else {
       groupId = await this.chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId } });
       const title = groupTitle(sessionTitle);
       await this.chrome.tabGroups.update(groupId, { title, color: "blue" });
-      await this.book.set(groupId, sessionId, title);
+      await this.book.addGroup(groupId, sessionId, title);
     }
     return this.wire({ ...tab, groupId });
   }
@@ -190,19 +192,28 @@ export class ExtensionController {
 
   private async closeTab(tabId: number): Promise<void> {
     const tab = await this.getTab(tabId);
-    if (this.book.sessionOf(tab.groupId) === undefined) throw new ExtensionError("not_allowed", "Winter closes only the tabs it opened");
+    if (this.book.sessionOfTab(tabId) === undefined) throw new ExtensionError("not_allowed", "Winter closes only the tabs it opened");
     await this.detach(tabId);
+    // Out of its group first: closing a group's last tab would otherwise leave the browser holding the group (a saved
+    // group, in browsers that save them); ungrouping the last tab removes the group with it.
+    if (tab.groupId >= 0) {
+      try { await this.chrome.tabs.ungroup([tabId]); } catch { /* the tab is closing anyway */ }
+    }
     try {
       await this.chrome.tabs.remove(tabId);
     } catch {
       throw new ExtensionError("tab_gone", "the tab is closed");
+    } finally {
+      await this.book.dropTab(tabId);
     }
   }
 
+  /** `keep()`: the tab is the user's for good — out of the agent tabs, out of its Winter group, never closed by Winter. */
   private async keepTab(tabId: number): Promise<void> {
     const tab = await this.getTab(tabId);
-    if (this.book.sessionOf(tab.groupId) === undefined) return; // already the user's
-    await this.chrome.tabs.ungroup([tabId]);
+    if (this.book.sessionOfTab(tabId) === undefined) return; // already the user's
+    await this.book.dropTab(tabId);
+    if (this.book.isWinterGroup(tab.groupId)) await this.chrome.tabs.ungroup([tabId]);
   }
 
   // ── the debugger ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -384,6 +395,7 @@ export class ExtensionController {
     const a = this.attached.get(tabId);
     if (a?.idle !== undefined) this.clock.clearTimeout(a.idle);
     this.attached.delete(tabId);
+    void this.book.dropTab(tabId);
     this.gone(tabId, "closed");
   }
 

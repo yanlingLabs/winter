@@ -65,6 +65,7 @@ export class FakeChrome implements ChromeApi {
   /** Tabs another debugger already holds (DevTools). */
   foreignDebuggers = new Set<number>();
   storage_: Record<string, unknown> = {};
+  sessionStorage_: Record<string, unknown> = {};
   lastFocused: number | undefined;
   lastErrorMessage: string | undefined;
   ports: FakePort[] = [];
@@ -93,7 +94,7 @@ export class FakeChrome implements ChromeApi {
 
   addWindow(w: ChromeWindow): void { this.windows_.push(w); }
   addTab(t: Partial<ChromeTab> & { windowId: number }): ChromeTab {
-    const tab: ChromeTab = { id: this.nextTab++, url: "about:blank", title: "", active: false, groupId: -1, incognito: false, ...t };
+    const tab: ChromeTab = { url: "about:blank", title: "", active: false, groupId: -1, incognito: false, ...t, id: t.id ?? this.nextTab++ };
     this.tabs_.set(tab.id!, tab);
     return tab;
   }
@@ -202,10 +203,13 @@ export class FakeChrome implements ChromeApi {
     },
   };
 
-  storage = {
-    get: async (keys: string[]) => Object.fromEntries(keys.filter((k) => k in this.storage_).map((k) => [k, JSON.parse(JSON.stringify(this.storage_[k]))])),
-    set: async (items: Record<string, unknown>) => { Object.assign(this.storage_, JSON.parse(JSON.stringify(items))); },
-  };
+  private area(store: Record<string, unknown>) {
+    return {
+      get: async (keys: string[]) => Object.fromEntries(keys.filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))])),
+      set: async (items: Record<string, unknown>) => { Object.assign(store, JSON.parse(JSON.stringify(items))); },
+    };
+  }
+  storage = { local: this.area(this.storage_), session: this.area(this.sessionStorage_) };
 
   action = {
     setBadgeText: async (p: { text: string }) => { this.record("action.setBadgeText", p); },
@@ -244,6 +248,19 @@ export class FakeChrome implements ChromeApi {
     for (const l of this.tabsOnRemoved.listeners) l(tabId);
     this.pruneGroups();
     await flush();
+  }
+  /** The user pins a tab: Chrome takes a pinned tab out of its group. */
+  pinTab(tabId: number): void {
+    this.tabOr(tabId).groupId = -1;
+    this.pruneGroups();
+  }
+  /** The browser restarted: session storage is gone, and so are the old tab and group ids. */
+  restartBrowser(): void {
+    for (const k of Object.keys(this.sessionStorage_)) delete this.sessionStorage_[k];
+    const old = [...this.tabs_.values()];
+    this.tabs_.clear();
+    this.groups_.clear();
+    for (const t of old) this.addTab({ ...t, id: undefined, groupId: -1 });
   }
   private pruneGroups(): void {
     for (const id of [...this.groups_.keys()]) {

@@ -1,63 +1,97 @@
-// Winter for Chrome — the Winter tab groups: one per Winter session ("Winter · <session title>"), group id → session id,
-// kept in `chrome.storage.local` so a service-worker restart still knows which tabs are Winter's. A tab in one of these
-// groups is an agent tab; taking it out of the group (`keep()`, or the user dragging it out) makes it the user's.
+// Winter for Chrome — which tabs are Winter's ("agent tabs") and which Winter session each belongs to.
 //
-// Group ids live as long as the browser session: after a browser restart Chrome restores groups under new ids, so the
-// old entries are pruned at load and those tabs read as the user's from then on.
+//  - Every tab `tabs.create` opens is an agent tab of its session, by TAB ID — whatever the user does to it: Chrome's
+//    own pin (which takes a tab out of its group) and dragging it elsewhere do not make it the user's. Only `keep()`
+//    (`tabs.keep`) hands it to the user for good. Winter's engine decides when an agent tab closes (at its session's
+//    turn end unless marked); the extension only carries that out.
+//  - Each session's agent tabs open in one tab group, "Winter · <session title>", group id → session id.
+//
+// Both maps live in `chrome.storage.session`: it survives a service-worker restart (and so a daemon restart, which
+// reconnects the same worker) but not a browser restart — exactly the lifetime of the tab and group ids it holds. After
+// a browser restart Winter knows none of its old tabs: any it restores are the user's from then on, never closed.
 import type { ChromeApi } from "./chrome-api";
 
-const STORAGE_KEY = "winterGroups";
+const STORAGE_KEY = "winterAgents";
 
-interface Entry { sessionId: string; title: string }
+interface Group { sessionId: string; title: string }
 
-export class GroupBook {
-  private readonly groups = new Map<number, Entry>();
+export class AgentBook {
+  private readonly groups = new Map<number, Group>();
+  private readonly tabs = new Map<number, string>();
 
   constructor(private readonly chrome: ChromeApi) {}
 
+  /** Loads the book and forgets tabs and groups that no longer exist. */
   async load(): Promise<void> {
-    const stored = (await this.chrome.storage.get([STORAGE_KEY]))[STORAGE_KEY];
+    const stored = (await this.chrome.storage.session.get([STORAGE_KEY]))[STORAGE_KEY];
     this.groups.clear();
+    this.tabs.clear();
     if (typeof stored === "object" && stored !== null) {
-      for (const [k, v] of Object.entries(stored as Record<string, unknown>)) {
-        const id = Number(k);
-        if (!Number.isInteger(id) || typeof v !== "object" || v === null) continue;
-        const { sessionId, title } = v as Record<string, unknown>;
-        if (typeof sessionId === "string") this.groups.set(id, { sessionId, title: typeof title === "string" ? title : "" });
+      const { groups, tabs } = stored as { groups?: unknown; tabs?: unknown };
+      if (typeof groups === "object" && groups !== null) {
+        for (const [k, v] of Object.entries(groups as Record<string, unknown>)) {
+          const id = Number(k);
+          const e = typeof v === "object" && v !== null ? (v as Record<string, unknown>) : {};
+          if (Number.isInteger(id) && typeof e.sessionId === "string") this.groups.set(id, { sessionId: e.sessionId, title: typeof e.title === "string" ? e.title : "" });
+        }
+      }
+      if (typeof tabs === "object" && tabs !== null) {
+        for (const [k, v] of Object.entries(tabs as Record<string, unknown>)) {
+          const id = Number(k);
+          if (Number.isInteger(id) && typeof v === "string") this.tabs.set(id, v);
+        }
       }
     }
-    let pruned = false;
+    let changed = false;
     for (const id of [...this.groups.keys()]) {
-      try {
-        await this.chrome.tabGroups.get(id);
-      } catch {
-        this.groups.delete(id);
-        pruned = true;
-      }
+      try { await this.chrome.tabGroups.get(id); } catch { this.groups.delete(id); changed = true; }
     }
-    if (pruned) await this.save();
+    for (const id of [...this.tabs.keys()]) {
+      try { await this.chrome.tabs.get(id); } catch { this.tabs.delete(id); changed = true; }
+    }
+    if (changed) await this.save();
   }
 
-  sessionOf(groupId: number): string | undefined {
-    return groupId < 0 ? undefined : this.groups.get(groupId)?.sessionId;
+  /** The session an agent tab belongs to, or undefined for the user's tabs. */
+  sessionOfTab(tabId: number): string | undefined {
+    return this.tabs.get(tabId);
   }
 
   groupFor(sessionId: string): number | undefined {
-    for (const [id, e] of this.groups) if (e.sessionId === sessionId) return id;
+    for (const [id, g] of this.groups) if (g.sessionId === sessionId) return id;
     return undefined;
   }
 
-  async set(groupId: number, sessionId: string, title: string): Promise<void> {
+  isWinterGroup(groupId: number): boolean {
+    return groupId >= 0 && this.groups.has(groupId);
+  }
+
+  async addTab(tabId: number, sessionId: string): Promise<void> {
+    this.tabs.set(tabId, sessionId);
+    await this.save();
+  }
+
+  async addGroup(groupId: number, sessionId: string, title: string): Promise<void> {
     this.groups.set(groupId, { sessionId, title });
     await this.save();
   }
 
-  async drop(groupId: number): Promise<void> {
+  /** The tab is no longer Winter's: closed, or handed to the user. */
+  async dropTab(tabId: number): Promise<void> {
+    if (this.tabs.delete(tabId)) await this.save();
+  }
+
+  async dropGroup(groupId: number): Promise<void> {
     if (this.groups.delete(groupId)) await this.save();
   }
 
   private async save(): Promise<void> {
-    await this.chrome.storage.set({ [STORAGE_KEY]: Object.fromEntries([...this.groups].map(([id, e]) => [String(id), e])) });
+    await this.chrome.storage.session.set({
+      [STORAGE_KEY]: {
+        groups: Object.fromEntries([...this.groups].map(([id, g]) => [String(id), g])),
+        tabs: Object.fromEntries([...this.tabs].map(([id, s]) => [String(id), s])),
+      },
+    });
   }
 }
 

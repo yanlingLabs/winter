@@ -33,6 +33,11 @@ export interface DebuggerTarget {
   sessionId?: string;
 }
 
+export interface StorageArea {
+  get(keys: string[]): Promise<Record<string, unknown>>;
+  set(items: Record<string, unknown>): Promise<void>;
+}
+
 export interface ChromeEvent<F extends (...args: never[]) => unknown> {
   addListener(listener: F): void;
 }
@@ -84,8 +89,10 @@ export interface ChromeApi {
     executeScript(i: { target: { tabId: number }; world: "ISOLATED"; func: (arg: never) => void; args: [unknown] }): Promise<unknown>;
   };
   storage: {
-    get(keys: string[]): Promise<Record<string, unknown>>;
-    set(items: Record<string, unknown>): Promise<void>;
+    /** `chrome.storage.local`: kept across browser restarts (the instance id). */
+    local: StorageArea;
+    /** `chrome.storage.session`: kept across service-worker restarts, cleared when the browser quits (tab and group ids). */
+    session: StorageArea;
   };
   action: {
     setBadgeText(p: { text: string }): Promise<void>;

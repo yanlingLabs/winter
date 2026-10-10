@@ -43,12 +43,12 @@ export class HostConnection {
   /** The id this browser profile keeps across worker restarts, so Winter gives it the same backend id back. */
   async instance(): Promise<string> {
     if (this.instanceId !== undefined) return this.instanceId;
-    const stored = (await this.chrome.storage.get([INSTANCE_KEY]))[INSTANCE_KEY];
+    const stored = (await this.chrome.storage.local.get([INSTANCE_KEY]))[INSTANCE_KEY];
     if (typeof stored === "string" && /^[A-Za-z0-9-]{8,64}$/.test(stored)) {
       this.instanceId = stored;
     } else {
       this.instanceId = this.chrome.randomUUID();
-      await this.chrome.storage.set({ [INSTANCE_KEY]: this.instanceId });
+      await this.chrome.storage.local.set({ [INSTANCE_KEY]: this.instanceId });
     }
     return this.instanceId;
   }

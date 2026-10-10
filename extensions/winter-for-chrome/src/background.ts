@@ -44,8 +44,8 @@ const api: ChromeApi = {
     executeScript: (i) => chrome.scripting.executeScript(i),
   },
   storage: {
-    get: (keys) => chrome.storage.local.get(keys),
-    set: (items) => chrome.storage.local.set(items),
+    local: { get: (keys) => chrome.storage.local.get(keys), set: (items) => chrome.storage.local.set(items) },
+    session: { get: (keys) => chrome.storage.session.get(keys), set: (items) => chrome.storage.session.set(items) },
   },
   action: {
     setBadgeText: (p) => chrome.action.setBadgeText(p),
