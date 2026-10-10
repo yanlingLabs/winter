@@ -58,6 +58,32 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertEqual(try typed(emoji).map(\.unicode).joined(), emoji)
     }
 
+    func testOptionLayerAndNonASCIICharactersGoAsUnicodeWithNoModifiers() throws {
+        // A layout where Shift+Option+key 27 types the em dash, Option+key 0 "å", and a plain key types "ç".
+        let poster = RecordingPoster()
+        var synth = CUEventSynth(poster: poster, skyLight: .none)
+        synth.sleep = { _ in }
+        synth.stroke = { ch in
+            switch ch {
+            case "—": return CUKeyStroke(code: 27, shift: true, option: true)
+            case "å": return CUKeyStroke(code: 0, option: true)
+            case "ç": return CUKeyStroke(code: 41)
+            default: return CUKeyboardLayout.ansiStroke(for: ch)
+            }
+        }
+        try synth.type(pid: 4242, text: "A — çå b", route: .publicPid) {}
+        let downs = poster.entries.filter { $0.type == .keyDown }
+        XCTAssertEqual(downs.map(\.unicode).joined(), "A — çå b")
+        XCTAssertFalse(poster.entries.contains { $0.flags.contains(.maskAlternate) }, "never Option: a page reads it as a shortcut")
+        let dash = downs.first { $0.unicode.contains("—") }!
+        XCTAssertEqual(dash.flags.intersection([.maskShift, .maskAlternate, .maskCommand, .maskControl]), [])
+        XCTAssertEqual(dash.keycode, 0, "Unicode alone, no layout key")
+        XCTAssertEqual(downs.first { $0.unicode.contains("ç") }?.keycode, 0, "non-ASCII: no layout key either")
+        XCTAssertTrue(downs[0].flags.contains(.maskShift), "plain ASCII keeps its key and Shift")
+        XCTAssertTrue(downs.contains { $0.unicode == "ç" } && downs.contains { $0.unicode == "å" },
+                      "a character a key types goes as its own event, never merged into a run")
+    }
+
     func testReturnAndTabAreTheirKeys() throws {
         let downs = try typed("a\nb\tc")
         XCTAssertEqual(downs.map(\.keycode), [Int64(kVK_ANSI_A), Int64(kVK_Return), Int64(kVK_ANSI_B), Int64(kVK_Tab), Int64(kVK_ANSI_C)])
@@ -364,7 +390,7 @@ final class KeyboardTargetTests: XCTestCase {
         let r = try await act(.type(CUTypeAction(text: "Test", into: ref(field))))
         XCTAssertTrue(ax.written.contains("\(token(field)):\(kAXSelectedTextAttribute)"), "inserted over accessibility")
         XCTAssertTrue(poster.keyDowns.isEmpty, "never typed a second time")
-        XCTAssertTrue(r.detail?.contains("so it was not typed again — check state() before typing it again") ?? false, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("received: unverifiable — inserted over accessibility, but the field can't be read back, so it was not typed again") ?? false, r.detail ?? "")
     }
 
     func testAnAccessibilityInsertCountsOnlyWhenItsTextReadsBack() async throws {
@@ -382,6 +408,204 @@ final class KeyboardTargetTests: XCTestCase {
         let ok = try await act(.type(CUTypeAction(text: "Test", into: ref(field))))
         XCTAssertEqual(ok.rung, 1)
         XCTAssertTrue(poster.entries.isEmpty)
+    }
+
+    // MARK: what was sent vs what the field received
+
+    /// The field takes the first `takes` typed characters (nil: all of them) into its value.
+    private func fieldTakes(_ takes: Int? = nil) {
+        var n = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyDown else { return }
+            n += 1
+            if takes.map({ n <= $0 }) ?? true {
+                ax.put(field, [kAXValueAttribute: (ax.string(field, kAXValueAttribute) ?? "") + e.unicode])
+            }
+        }
+    }
+
+    func testTypedTextReadBackInFullIsVerified() async throws {
+        safari(fieldOwner: pid)
+        fieldTakes()
+        let r = try await act(.type(CUTypeAction(text: " v2", into: ref(field))))
+        XCTAssertEqual(ax.string(field, kAXValueAttribute), "Untitled document v2")
+        XCTAssertTrue(r.detail?.contains("received: verified") ?? false, r.detail ?? "")
+    }
+
+    func testTypedTextThatOnlyPartlyLandedSaysHowMuch() async throws {
+        safari(fieldOwner: pid)
+        fieldTakes(3)
+        let r = try await act(.type(CUTypeAction(text: " report", into: ref(field))))
+        XCTAssertTrue(r.detail?.contains("received: partly (the field holds the first 3 of 7 characters; the rest differs or is missing)") ?? false, r.detail ?? "")
+        XCTAssertFalse(r.detail?.contains("verified") ?? true)
+    }
+
+    func testTypedTextThatNeverLandedSaysNoneOfIt() async throws {
+        safari(fieldOwner: pid)
+        let r = try await act(.type(CUTypeAction(text: "abc", into: ref(field))))
+        XCTAssertTrue(r.detail?.contains("received: none of it") ?? false, r.detail ?? "")
+    }
+
+    func testTypingStopsWhenTheFocusLeavesTheField() async throws {
+        // The page takes a character as its shortcut and moves the focus to its own search box partway.
+        safari(fieldOwner: pid)
+        let search = searchHasFocus()
+        ax.focus(pid: pid, on: field)
+        var n = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyUp else { return }
+            n += 1
+            if n == 3 { ax.focus(pid: pid, on: search) }
+        }
+        do {
+            try await act(.type(CUTypeAction(text: "Title — more", into: ref(field))))
+            XCTFail("typing went on into the search box")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "refused")
+            XCTAssertEqual(e.data?["reason"], .string("focus_moved"))
+            XCTAssertTrue(e.message.hasPrefix("typed 3 of 12 characters; then the focus moved from [\(ref(field))] text field \"Rename\" to [\(ref(search))] text field \"Search\" (after \u{201C}Tit\u{201D}), so the rest was not sent"), e.message)
+            XCTAssertFalse(e.message.contains("had been typed before this"), "the counts once")
+        }
+        XCTAssertEqual(poster.keyDowns.count, 3, "nothing more went out")
+    }
+
+    func testTypingWithNoIntoStopsWhenTheFocusLeavesTheField() async throws {
+        safari(fieldOwner: pid)
+        let search = searchHasFocus()
+        ax.focus(pid: pid, on: field)
+        var n = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyUp else { return }
+            n += 1
+            if n == 2 { ax.focus(pid: pid, on: search) }
+        }
+        do {
+            try await act(.type(CUTypeAction(text: "Hello")))
+            XCTFail("typing went on into the search box")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("focus_moved"))
+            XCTAssertTrue(e.message.hasPrefix("typed 2 of 5 characters"), e.message)
+        }
+        XCTAssertEqual(poster.keyDowns.count, 2)
+    }
+
+    func testAnEditorThatReReportsItsFocusedLeafIsStillTheSameField() async throws {
+        // A web editor re-reports its focused leaf (a text run) as the caret moves: the same editable element.
+        safari(fieldOwner: pid)
+        let leaf = fakeElement(93_095)
+        ax.add(leaf, role: kAXStaticTextRole, frame: CGRect(x: 22, y: 62, width: 40, height: 20),
+               extra: ["AXEditableAncestor": field!, kAXParentAttribute: fakeElement(93_096)])
+        ax.put(field, ["AXEditableAncestor": field!])
+        var n = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyUp else { return }
+            n += 1
+            if n == 2 { ax.focus(pid: pid, on: leaf) }
+        }
+        _ = try await act(.type(CUTypeAction(text: "Hello", into: ref(field))))
+        XCTAssertEqual(poster.keyDowns.count, 5, "not stopped")
+    }
+
+    func testOnlyWhitespaceTypedIsUnverifiableNotNoneOfIt() async throws {
+        safari(fieldOwner: pid)
+        let r = try await act(.type(CUTypeAction(text: " ", into: ref(field))))
+        XCTAssertTrue(r.detail?.contains("received: unverifiable (only whitespace") ?? false, r.detail ?? "")
+    }
+
+    func testAMenuCommandThatWouldActOnAnotherWindowIsNotPressed() async throws {
+        safari(fieldOwner: pid)
+        // The user's own window of the same app stays its main window: the bound one can't be made main.
+        let users = fakeElement(93_097)
+        ax.add(users, role: kAXWindowRole, title: "The user's page", frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        ax.windowIDs[AXIdentity(element: users)] = 88
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [window, users], kAXMainWindowAttribute: users])
+        let bar = fakeElement(93_098), fileItem = fakeElement(93_099), fileMenu = fakeElement(93_100), open = fakeElement(93_101)
+        ax.put(ax.application(pid), [kAXMenuBarAttribute: bar])
+        let appleItem = fakeElement(93_105)
+        ax.add(appleItem, role: "AXMenuBarItem", title: "Apple")
+        ax.put(bar, [kAXChildrenAttribute: [appleItem, fileItem]])
+        ax.add(fileItem, role: "AXMenuBarItem", title: "File", extra: [kAXChildrenAttribute: [fileMenu]])
+        ax.add(fileMenu, role: kAXMenuRole, extra: [kAXChildrenAttribute: [open]])
+        ax.add(open, role: kAXMenuItemRole, title: "Open Location…", extra: [kAXMenuItemCmdCharAttribute: "L", kAXMenuItemCmdModifiersAttribute: 0])
+        ax.setActions(open, [kAXPressAction])
+        ax.ignoresWrites = ["\(token(window)):AXMain"]
+        do {
+            let r = try await act(.key(CUKeyAction(combo: "cmd+l")))
+            XCTFail("pressed on another window: \(r.detail ?? "") \(ax.performed) \(ax.written)")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "unsupported")
+            XCTAssertTrue(e.message.contains("“Open Location…” acts on its main window, which is another of its windows (“The user's page”)"), e.message)
+        }
+        XCTAssertFalse(ax.performed.contains("\(token(open)):AXPress"), "nothing pressed")
+        // Once the bound window is main, the command is pressed.
+        ax.put(ax.application(pid), [kAXMainWindowAttribute: window])
+        _ = try await act(.key(CUKeyAction(combo: "cmd+l")))
+        XCTAssertTrue(ax.performed.contains("\(token(open)):AXPress"))
+    }
+
+    func testTypingNeverGoesIntoAnotherWindowsFocus() async throws {
+        safari(fieldOwner: pid)
+        let users = fakeElement(93_102), usersField = fakeElement(93_103)
+        ax.add(users, role: kAXWindowRole, title: "The user's page", frame: CGRect(x: 0, y: 0, width: 800, height: 600),
+               extra: [kAXChildrenAttribute: [usersField]])
+        ax.windowIDs[AXIdentity(element: users)] = 88
+        ax.add(usersField, role: kAXTextFieldRole, title: "Address", frame: CGRect(x: 10, y: 10, width: 300, height: 20),
+               extra: [kAXWindowAttribute: users, kAXParentAttribute: users, kAXValueAttribute: "example.test"])
+        ax.makeSettable(usersField, kAXSelectedTextAttribute)
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [window, users], kAXFocusedWindowAttribute: users])
+        ax.focus(pid: pid, on: usersField)  // the app's focus: the user's window
+        ax.put(window, [kAXFocusedUIElementAttribute: AXUIElement?.none as Any])
+        _ = try? await act(.type(CUTypeAction(text: "https://example.com")))
+        XCTAssertFalse(ax.written.contains("\(token(usersField)):\(kAXSelectedTextAttribute)"), "never inserted into the user's window")
+        XCTAssertEqual(ax.string(usersField, kAXValueAttribute), "example.test")
+    }
+
+    func testReturnInAFieldOutsideThePageThatLoadsNothingSaysSo() async throws {
+        safari(fieldOwner: pid)
+        let address = fakeElement(93_104), toolbar = fakeElement(93_106)
+        ax.add(toolbar, role: kAXToolbarRole, frame: CGRect(x: 0, y: 0, width: 900, height: 40),
+               extra: [kAXParentAttribute: window, kAXChildrenAttribute: [address]])
+        ax.add(address, role: kAXTextFieldRole, title: "Address", frame: CGRect(x: 100, y: 10, width: 400, height: 20),
+               extra: [kAXParentAttribute: toolbar, kAXWindowAttribute: window, kAXValueAttribute: "https://example.com"])
+        let kids = ax.elements(window, kAXChildrenAttribute)
+        ax.put(window, [kAXChildrenAttribute: [toolbar] + kids])
+        ax.focus(pid: pid, on: address)
+        let r = try await act(.key(CUKeyAction(combo: "return")))
+        XCTAssertTrue(r.detail?.contains("the page did not change after Return") ?? false, r.detail ?? "")
+        // A Return that loads a page says nothing of the kind (the page line says it changed).
+        let web = ax.elements(window, kAXChildrenAttribute).first { ax.string($0, kAXRoleAttribute) == "AXWebArea" }!
+        poster.onPost = { [unowned self] e in
+            if e.type == .keyUp { ax.put(web, ["AXURL": URL(string: "https://example.com/")! as CFURL, kAXTitleAttribute: "Example"]) }
+        }
+        let loaded = try await act(.key(CUKeyAction(combo: "return")))
+        XCTAssertFalse(loaded.detail?.contains("did not change") ?? false, loaded.detail ?? "")
+        XCTAssertNotNil(loaded.pageNow)
+        // A find bar's field (not in the toolbar): Return finds the next match — no load is watched for.
+        poster.onPost = nil
+        let findBar = fakeElement(93_107)
+        ax.add(findBar, role: kAXTextFieldRole, subrole: "AXSearchField", title: "Find", frame: CGRect(x: 100, y: 50, width: 200, height: 20),
+               extra: [kAXParentAttribute: window, kAXWindowAttribute: window, kAXValueAttribute: "fox"])
+        ax.put(window, [kAXChildrenAttribute: [findBar] + ax.elements(window, kAXChildrenAttribute)])
+        ax.focus(pid: pid, on: findBar)
+        let found = try await act(.key(CUKeyAction(combo: "return")))
+        XCTAssertFalse(found.detail?.contains("did not change") ?? false, found.detail ?? "")
+    }
+
+    func testATabMovesTheFocusOnPurpose() async throws {
+        safari(fieldOwner: pid)
+        let search = searchHasFocus()
+        ax.focus(pid: pid, on: field)
+        poster.onPost = { [unowned self] e in
+            if e.type == .keyUp, e.keycode == Int64(kVK_Tab) { ax.focus(pid: pid, on: search) }
+        }
+        _ = try await act(.type(CUTypeAction(text: "ab\tcd", into: ref(field))))
+        XCTAssertEqual(poster.keyDowns.count, 5, "all of it")
+    }
+
+    func testSeveralLinesIntoAFieldThatReadsBackGoAsAPasteAndSaySo() async throws {
+        safari(fieldOwner: pid)
+        let r = try await act(.type(CUTypeAction(text: "one\ntwo", into: ref(field))))
+        XCTAssertTrue(r.detail?.hasPrefix("as a paste (several lines go as a paste into a field that reads them back)") ?? false, r.detail ?? "")
     }
 
     /// A plain native field (not under a web area) in a content-process-free app, built directly under the

@@ -260,8 +260,14 @@ public struct CUElementSummary: Codable, Sendable, Equatable {
 }
 public struct TargetFindResult: Codable, Sendable, Equatable {
     public var elements: [CUElementSummary]
-    public init(elements: [CUElementSummary]) {
+    /// The window's page number (as state() headers say it); nil when it shows no web page.
+    public var page: Int?
+    /// The page changed since the last state(), or the read was cut short: said.
+    public var note: String?
+    public init(elements: [CUElementSummary], page: Int? = nil, note: String? = nil) {
         self.elements = elements
+        self.page = page
+        self.note = note
     }
 }
 
@@ -326,6 +332,22 @@ public struct TargetScreenshotResult: Codable, Sendable, Equatable {
 // MARK: - actions
 
 public enum CUAccess: String, Codable, Sendable { case full, click }
+
+/// `target.foreground`: the user agreed (the daemon's card) that the app may come to the front and stay there
+/// until the session's script ends (`script.active` false).
+public struct TargetForegroundParams: Codable, Sendable, Equatable {
+    public var targetId: String
+    /// The user answered a card for this (not a session that asks none): a window on another desktop may be
+    /// brought forward, taking the user there. Without it, such a window is not.
+    public var moveDesktop: Bool?
+    public init(targetId: String, moveDesktop: Bool? = nil) { self.targetId = targetId; self.moveDesktop = moveDesktop }
+}
+public struct TargetForegroundResult: Codable, Sendable, Equatable {
+    /// The app is in front now.
+    public var front: Bool
+    public var detail: String?
+    public init(front: Bool, detail: String? = nil) { self.front = front; self.detail = detail }
+}
 
 public struct TargetActParams: Codable, Sendable, Equatable {
     public var targetId: String
@@ -452,12 +474,15 @@ public struct ScreenScreenshotResult: Codable, Sendable, Equatable {
     public var width: Int
     public var height: Int
     public var shotId: String
-    public init(imageBase64: String, mime: String, width: Int, height: Int, shotId: String) {
+    /// Where Winter's own windows are in the image (a picture of an app inside one is Winter's live mirror of it).
+    public var detail: String?
+    public init(imageBase64: String, mime: String, width: Int, height: Int, shotId: String, detail: String? = nil) {
         self.imageBase64 = imageBase64
         self.mime = mime
         self.width = width
         self.height = height
         self.shotId = shotId
+        self.detail = detail
     }
 }
 

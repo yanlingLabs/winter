@@ -139,9 +139,16 @@ export function appCardSummary(app: AppRef): string {
   return `Allow Winter to use ${app.name} (${app.bundleId})?`;
 }
 
-/** The rung-4 card's question. */
-export function foregroundCardSummary(app: AppRef): string {
-  return `Winter needs to bring ${app.name} (${app.bundleId}) to the front and use your mouse for a moment`;
+/** The rung-4 card's question; with a `reason` (the script's `requestForeground`), for the rest of the script. */
+export function foregroundCardSummary(app: AppRef, reason?: string): string {
+  if (reason === undefined) return `Winter needs to bring ${app.name} (${app.bundleId}) to the front and use your mouse for a moment`;
+  return `Winter asks to bring ${app.name} (${app.bundleId}) to the front and keep it there until this step ends (if its window is on another desktop, you are taken there): ${reason}`;
+}
+
+/** The model's reason as a card shows it: one line, no control characters, at most 200 characters. */
+export function cardReason(reason: string): string {
+  const line = reason.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim();
+  return line.length <= 200 ? line : `${line.slice(0, 199)}…`;
 }
 
 export interface SessionFacts {
@@ -349,14 +356,19 @@ export class ComputerPolicy {
    * RUNG 4: may Winter bring the app to the front and use the real pointer for this action? `false` means
    * "refuse with `NeedsForeground`" (the caller words it).
    */
-  async allowForeground(run: RunGrants, app: AppRef, signal?: AbortSignal): Promise<boolean> {
+  /** Whether the foreground is granted by a card the user answers (false under `bypass`, which asks none). */
+  foregroundAsksTheUser(run: RunGrants): boolean {
+    return this.deps.session(run.sessionId).policy !== "bypass";
+  }
+
+  async allowForeground(run: RunGrants, app: AppRef, signal?: AbortSignal, reason?: string): Promise<boolean> {
     const facts = this.deps.session(run.sessionId);
     // `dont-ask` never cards and `plan` never acts; chat has no computer use.
     if (facts.policy === "dont-ask" || facts.policy === "plan" || facts.policy === "chat" || facts.mode === "chat") return false;
     // `bypass` shows no computer-use prompt at all (the user ruling): the pointer is taken at once, attended or not.
     if (facts.policy === "bypass") return true;
     if (!this.deps.attended(run.sessionId)) return false;
-    const res = await this.card(run, foregroundCardSummary(app), FOREGROUND_CARD_OPTIONS, signal);
+    const res = await this.card(run, foregroundCardSummary(app, reason === undefined ? undefined : cardReason(reason)), FOREGROUND_CARD_OPTIONS, signal);
     return res.approved;
   }
 

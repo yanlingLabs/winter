@@ -51,6 +51,7 @@ let engineSamples: [(method: String, params: String, result: String)] = [
      #"{"imageBase64":"/9j/AA==","mime":"image/jpeg","width":100,"height":100,"shotId":"shot-1","settled":true,"waitedMs":12}"#),
     ("target.act", #"{"targetId":"t1","sessionId":"s_1","callId":"c1","action":{"kind":"click","ref":3,"button":"left","count":1},"access":"full","allowForeground":false,"privatePath":true}"#,
      #"{"rung":1}"#),
+    ("target.foreground", #"{"targetId":"t1"}"#, #"{"front":true}"#),
     ("target.waitIdle", #"{"targetId":"t1","quietMs":150,"timeoutMs":3000,"callId":"c2"}"#, #"{"settled":true,"waitedMs":150}"#),
     ("target.waitFor", #"{"targetId":"t1","cond":{"text":"Saved","gone":"Saving…"},"timeoutMs":10000}"#, #"{"met":true,"waitedMs":420}"#),
     ("target.applescript", #"{"targetId":"t1","source":"tell application \"Notes\" to get name","timeoutMs":10000,"callId":"c1"}"#,
@@ -120,6 +121,7 @@ final class FakeCore: CoreService, @unchecked Sendable {
     func targetFind(_ params: TargetFindParams) async throws -> TargetFindResult { try await answer("target.find", params) }
     func targetScreenshot(_ params: TargetScreenshotParams) async throws -> TargetScreenshotResult { try await answer("target.screenshot", params) }
     func targetAct(_ params: TargetActParams) async throws -> TargetActResult { try await answer("target.act", params) }
+    func targetForeground(_ params: TargetForegroundParams) async throws -> TargetForegroundResult { try await answer("target.foreground", params) }
     func targetWaitIdle(_ params: TargetWaitIdleParams) async throws -> TargetWaitIdleResult { try await answer("target.waitIdle", params) }
     func targetWaitFor(_ params: TargetWaitForParams) async throws -> TargetWaitForResult { try await answer("target.waitFor", params) }
     func targetAppleScript(_ params: TargetAppleScriptParams) async throws -> TargetAppleScriptResult { try await answer("target.applescript", params) }

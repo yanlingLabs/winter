@@ -102,14 +102,61 @@ final class FocusTargetTests: XCTestCase {
         XCTAssertNil(f.elsewhere)
     }
 
+    func testTheKeyboardPathAndTheStateNameTheSameFocus() {
+        // The app answers for its key window (another window's field); the bound window's page holds its own focus.
+        // One resolver: what type() checks is what state() says, never the other window's field.
+        world(boundIsKey: false, pageFocus: docArea)
+        ax.focus(pid: pid, on: otherField)
+        let keys = core.reportedFocus(target)
+        let state = core.windowFocus(target, fresh: true).element
+        XCTAssertTrue(keys.map { CFEqual($0, docArea) } ?? false, "not the other window's field")
+        XCTAssertTrue(keys.flatMap { k in state.map { CFEqual(k, $0) } } ?? false)
+    }
+
     func testAHiddenZeroSizeInputIsNamedAsThePagesInputOnAnySite() async throws {
         world(boundIsKey: false, pageFocus: hidden)
         ax.focus(pid: pid, on: otherField)
         let f = core.windowFocus(target)
-        XCTAssertEqual(f.hiddenInput, "the page's hidden text input (it types into the document)")
+        XCTAssertEqual(f.element.flatMap { core.hiddenInputWords($0, target) }, "the page's hidden text input (it types into the document)")
         let r = try await act(.type(CUTypeAction(text: "hello")))
         XCTAssertEqual(r.input, "the page's hidden text input (it types into the document)")
         XCTAssertTrue(r.detail?.contains("can't be read back here") ?? false, r.detail ?? "")
+    }
+
+    func testAHiddenInputThatEmptiesItselfIsNeverReadBack() async throws {
+        // A page's hidden input that empties itself after every input reads as an empty field — its text goes to
+        // the document, so it is never "read back": several lines go as keys, and the result says unverifiable.
+        world(boundIsKey: false, pageFocus: hidden)
+        ax.focus(pid: pid, on: otherField)
+        ax.put(hidden, [kAXValueAttribute: ""])
+        let r = try await act(.type(CUTypeAction(text: "one\ntwo")))
+        XCTAssertFalse(poster.keyDowns.contains { $0.flags.contains(.maskCommand) }, "no ⌘V")
+        XCTAssertEqual(poster.keyDowns.map(\.unicode).filter { !$0.isEmpty && $0.unicodeScalars.allSatisfy { $0.value >= 0x20 } }.joined(), "onetwo")
+        XCTAssertTrue(r.detail?.contains("received: unverifiable") ?? false, r.detail ?? "")
+        XCTAssertFalse(r.detail?.contains("none of it") ?? true)
+    }
+
+    func testAClickOnThePagesHiddenInputSaysWhatWorksInstead() async throws {
+        world(boundIsKey: false, pageFocus: hidden)
+        ax.setActions(hidden, [kAXPressAction])
+        let e = await refusal(.click(CUClickAction(ref: ref(hidden))))
+        XCTAssertEqual(e?.code, "unsupported")
+        XCTAssertTrue(e?.message.contains("is the page's hidden text input (it types into the document): it has no place on screen to click — type or paste into it with type(text, { into: \(ref(hidden)) })") ?? false, e?.message ?? "")
+        XCTAssertFalse(e?.message.contains("scroll to it first") ?? true)
+        XCTAssertTrue(ax.performed.isEmpty)
+        XCTAssertTrue(poster.entries.isEmpty)
+    }
+
+    func testSelectAllIsNeverARangeOverAHiddenInputsOwnFiller() async throws {
+        world(boundIsKey: false, pageFocus: hidden)
+        ax.focus(pid: pid, on: otherField)
+        ax.makeSettable(hidden, kAXSelectedTextRangeAttribute)
+        _ = try? await act(.key(CUKeyAction(combo: "cmd+a")))
+        XCTAssertFalse(ax.written.contains { $0.hasSuffix(":\(kAXSelectedTextRangeAttribute)") },
+                       "a range over the proxy's filler selects nothing of the document")
+        XCTAssertTrue(poster.keyDowns.contains { $0.flags.contains(.maskCommand) }, "the real ⌘A instead")
+        XCTAssertNil(core.textLength(hidden, target))
+        XCTAssertEqual(core.textLength(docArea, target), 5)
     }
 
     // MARK: guards for text with no `into`

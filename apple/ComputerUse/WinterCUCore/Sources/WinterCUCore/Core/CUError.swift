@@ -169,4 +169,6 @@ public enum CUFloorReason: String, Codable, Sendable {
     /// Text with no `into` that does not fit the focused field: several lines (or a long text) for a single-line
     /// field, or for the browser's own address/search field rather than the page.
     case wrongFieldShape = "wrong_field_shape"
+    /// Typing stopped: the focus left the field it was typing into (the rest would have landed elsewhere).
+    case focusMoved = "focus_moved"
 }

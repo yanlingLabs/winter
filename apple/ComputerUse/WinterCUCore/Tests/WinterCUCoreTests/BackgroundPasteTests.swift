@@ -106,7 +106,7 @@ final class BackgroundPasteTests: XCTestCase {
         XCTAssertTrue(poster.keyDowns.isEmpty, "no keys typed")
         XCTAssertEqual(installer.removed, installer.installed.count)
         XCTAssertTrue(r.detail?.contains("pasted through Browser's Edit › Paste") ?? false, r.detail ?? "")
-        XCTAssertTrue(r.detail?.contains("pasted, unconfirmed") ?? false, "nothing to read it back by: \(r.detail ?? "")")
+        XCTAssertTrue(r.detail?.contains("unconfirmed") ?? false, "nothing to read it back by: \(r.detail ?? "")")
         XCTAssertEqual(sys.frontmostPid(), 1)
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(pb.readString(), "user's own", "the clipboard restored")
@@ -125,7 +125,7 @@ final class BackgroundPasteTests: XCTestCase {
         XCTAssertTrue(during.first?.flags.contains(.maskCommand) ?? false)
         XCTAssertEqual(during.first?.tap, true, "inside the blip")
         XCTAssertEqual(poster.entries.first { $0.type == .keyDown }?.pid, pid, "to the app itself, which handles key equivalents")
-        XCTAssertEqual(installer.installed.count, 2, "the blip and its retry")
+        XCTAssertEqual(installer.installed.count, 1, "one blip, held while the page takes it")
         XCTAssertTrue(r.detail?.contains("pasted with ⌘V") ?? false, r.detail ?? "")
     }
 
@@ -172,15 +172,97 @@ final class BackgroundPasteTests: XCTestCase {
         world()
         let r = try await type("hello")
         XCTAssertEqual(poster.keyDowns.map(\.unicode).joined(), "hello")
-        XCTAssertTrue(r.detail?.contains("typed 5 characters; Browser doesn't expose this editor's text to accessibility, so it can't be read back here — check with something the app shows, such as its word count") ?? false,
+        XCTAssertTrue(r.detail?.contains("received: unverifiable — Browser doesn't expose this editor's text to accessibility, so it can't be read back here — check with something the app shows, such as its word count") ?? false,
                       r.detail ?? "")
+    }
+
+    func testSeveralLinesIntoAnEditorThatCantBeReadBackAreKeysWithReturnsNeverASilentPaste() async throws {
+        world()
+        let r = try await type("one\ntwo")
+        XCTAssertTrue(ax.performed.isEmpty, "no Edit › Paste")
+        XCTAssertFalse(poster.keyDowns.contains { $0.flags.contains(.maskCommand) }, "no ⌘V")
+        XCTAssertEqual(poster.keyDowns.map(\.keycode).filter { $0 == Int64(kVK_Return) }.count, 1, "the newline is Return")
+        XCTAssertEqual(poster.keyDowns.map(\.unicode).filter { !$0.isEmpty && $0.unicodeScalars.allSatisfy { $0.value >= 0x20 } }.joined(), "onetwo")
+        XCTAssertTrue(r.detail?.contains("received: unverifiable") ?? false, r.detail ?? "")
+    }
+
+    func testALongLineIntoAnEditorThatCantBeReadBackIsAPasteThatSaysSo() async throws {
+        world()
+        let r = try await type(String(repeating: "word ", count: 50))  // 250 characters, one line
+        XCTAssertTrue(r.detail?.hasPrefix("as a paste (more than 200 characters go as a paste; this field can't be read back)") ?? false, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("unconfirmed") ?? false, r.detail ?? "")
+        XCTAssertFalse(r.detail?.contains("reads them back") ?? true, "never claims a read-back it can't do")
+    }
+
+    /// Another window of the app is its key window, with a File › Open Location… (⌘L) item.
+    private func anotherWindowKey() -> AXUIElement {
+        let other = fakeElement(97_020), file = fakeElement(97_021), fileMenu = fakeElement(97_022), open = fakeElement(97_023)
+        ax.add(other, role: kAXWindowRole, title: "The user's page", frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        ax.windowIDs[AXIdentity(element: other)] = 88
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [window, other], kAXFocusedWindowAttribute: other])
+        let bar = ax.element(ax.application(pid), kAXMenuBarAttribute)!
+        ax.put(bar, [kAXChildrenAttribute: ax.elements(bar, kAXChildrenAttribute) + [file]])
+        ax.add(file, role: "AXMenuBarItem", title: "File", extra: [kAXChildrenAttribute: [fileMenu]])
+        ax.add(fileMenu, role: kAXMenuRole, extra: [kAXChildrenAttribute: [open]])
+        ax.add(open, role: kAXMenuItemRole, title: "Open Location…", extra: [kAXMenuItemCmdCharAttribute: "L", kAXMenuItemCmdModifiersAttribute: 0])
+        ax.setActions(open, [kAXPressAction])
+        return open
+    }
+
+    private func key(_ combo: String) async throws -> TargetActResult {
+        try await core.targetAct(TargetActParams(targetId: "t1", sessionId: "s", callId: "c", action: .key(CUKeyAction(combo: combo)),
+                                                 access: .full, allowForeground: false, privatePath: true))
+    }
+
+    func testAMenuShortcutWhileAnotherWindowIsKeyIsPressedOnlyWithTheBoundWindowKey() async throws {
+        world()
+        let open = anotherWindowKey()
+        var keyAtPress = false
+        ax.onPerform = { what in if what == "\(self.token(open)):AXPress" { keyAtPress = FocusSPI.calls.last == "focus pid \(self.pid) window 77" } }
+        let r = try await key("cmd+l")
+        XCTAssertTrue(ax.performed.contains("\(token(open)):AXPress"))
+        XCTAssertTrue(keyAtPress, "pressed inside the focus blip, the bound window key — \(FocusSPI.calls)")
+        XCTAssertTrue(r.detail?.contains("with Browser's bound window key for a moment") ?? false, r.detail ?? "")
+        XCTAssertTrue(poster.keyDowns.isEmpty, "never sent as keys, which would reach the other window")
+    }
+
+    func testAMenuShortcutWhileAnotherWindowIsKeyAndNoBlipIsRefused() async throws {
+        world()
+        let open = anotherWindowKey()
+        installer.refuse = true  // no focus blip possible
+        do {
+            _ = try await key("cmd+l")
+            XCTFail("acted on another window")
+        } catch let e as CUError {
+            XCTAssertEqual(e.code, "unsupported")
+            XCTAssertTrue(e.message.contains("acts on its key window, which is another of its windows"), e.message)
+        }
+        XCTAssertFalse(ax.performed.contains("\(token(open)):AXPress"))
+        XCTAssertTrue(poster.keyDowns.isEmpty)
+    }
+
+    func testAKeyboardBlipHoldsTheWindowKeyUntilTheAppHasTakenItsKeys() throws {
+        world()
+        core.blipDrainMs = 60
+        let p = TargetActParams(targetId: "t1", sessionId: "s", callId: "c", action: .key(CUKeyAction(combo: "return")),
+                                access: .full, allowForeground: false, privatePath: true)
+        let blips = CUKeyBlips(core, p, target, why: "keys")
+        try blips.before()
+        XCTAssertTrue(installer.isInstalled, "a blip began")
+        let start = Date()
+        blips.end()
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 0.055, "held key while the app takes its queued keys")
+        XCTAssertFalse(installer.isInstalled, "then ended")
+        let none = Date()
+        blips.end()
+        XCTAssertLessThan(Date().timeIntervalSince(none), 0.02, "no blip: nothing to drain")
     }
 
     func testAnInputTargetThatChangedSaysTheKeysArrived() async throws {
         world()
         poster.onPost = { [unowned self] e in if e.type == .keyUp { ax.put(doc, [kAXValueAttribute: "\u{200B}\u{200B}\u{200B}"]) } }
         let r = try await type("hi")
-        XCTAssertTrue(r.detail?.contains("(its input target changed, so the keys arrived)") ?? false, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("(its input target changed, so keys arrived)") ?? false, r.detail ?? "")
     }
 
     // MARK: where the input went

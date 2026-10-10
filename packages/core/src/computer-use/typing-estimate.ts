@@ -6,18 +6,23 @@
 
 /** At most this many characters are typed as keys; longer or multi-line text is pasted (the helper's `typeKeysMax`). */
 export const TYPE_KEYS_MAX = 200;
-/** Per character typed as keys, with the helper's checks and blips — calibrate from the helper's "chars/s" log line. */
-export const PER_KEY_MS = 6;
+/** Per character typed as keys, with the helper's per-character checks and its focus blips — calibrated from the
+ *  helper's "chars/s" log line (live: 9–32 characters a second into a page in another window). */
+export const PER_KEY_MS = 40;
 /** A type's fixed cost: the accessibility insert tried first (it can wait 400 ms for a web editor), focus placement. */
 export const TYPE_FIXED_MS = 1_000;
 /** A paste's fixed cost: the clipboard, the real paste in up to two focus blips, the read-back wait (≤ 1.5 s). */
 export const PASTE_FIXED_MS = 3_000;
 
-/** The expected time (ms) of a `type` or `paste` of `text`. */
+/** The expected time (ms) of a `type` or `paste` of `text`. A multi-line `type` goes as keys (Return for each
+ *  newline) into an editor that can't be read back, and as a paste into one that can: the keys' time, the longer. */
 export function typingEstimateMs(primitive: "type" | "paste", text: string): number {
   const chars = [...text].length;
-  const asKeys = chars <= TYPE_KEYS_MAX && !/[\r\n]/.test(text);
-  if (primitive === "type") return asKeys ? TYPE_FIXED_MS + chars * PER_KEY_MS : TYPE_FIXED_MS + PASTE_FIXED_MS;
+  const multiLine = /[\r\n]/.test(text);
+  if (primitive === "type") {
+    if (multiLine) return TYPE_FIXED_MS + Math.max(PASTE_FIXED_MS, chars * PER_KEY_MS);
+    return chars <= TYPE_KEYS_MAX ? TYPE_FIXED_MS + chars * PER_KEY_MS : TYPE_FIXED_MS + PASTE_FIXED_MS;
+  }
   // A paste the helper could not do for real types short text instead.
   return PASTE_FIXED_MS + (chars <= TYPE_KEYS_MAX ? chars * PER_KEY_MS : 0);
 }

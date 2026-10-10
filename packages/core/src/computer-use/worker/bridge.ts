@@ -32,9 +32,9 @@ export type WorkerToHost =
 /** The primitives a script may call (Phase 1: apps and the whole screen; browsers are Phase 2). */
 export const APP_PRIMITIVES = [
   "state", "find", "screenshot", "click", "setValue", "type", "paste", "key", "scroll", "drag", "select",
-  "action", "menu", "hover", "windows", "useWindow", "waitFor", "waitForIdle", "applescript", "scriptingDictionary",
+  "action", "menu", "hover", "requestForeground", "windows", "useWindow", "waitFor", "waitForIdle", "applescript", "scriptingDictionary",
 ] as const;
-export const GLOBAL_PRIMITIVES = ["apps.list", "apps.open", "screen.screenshot", "screen.windows", "screen.appAt"] as const;
+export const GLOBAL_PRIMITIVES = ["apps.list", "apps.open", "screen.screenshot", "screen.windows", "screen.appAt", "timeLeft"] as const;
 export type AppPrimitive = (typeof APP_PRIMITIVES)[number];
 export type GlobalPrimitive = (typeof GLOBAL_PRIMITIVES)[number];
 export type Primitive = AppPrimitive | GlobalPrimitive;

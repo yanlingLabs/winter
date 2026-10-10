@@ -10,8 +10,12 @@
       text back through accessibility;
   (b) a toolbar of Closure-style buttons that IGNORE `click` and act only on mousedown + mouseup;
   (c) a "Find and replace" panel (Find / Replace with inputs, a Close button of the same kind);
-  (d) its own HTML menu bar (File / Edit; Edit's Select all and Delete are disabled without a selection);
-  (e) a single-line title input and a page search input.
+  (d) its own HTML menu bar (File / Edit / Tools; Edit's Select all and Delete are disabled without a selection;
+      Tools has Word count — a menu the app's own menu bar does not have); a chosen item closes its menu;
+  (e) a single-line title input and a page search input;
+  (f) Option + a key, in the title or the document, is the PAGE's shortcut: it moves the focus to the search input
+      (as a page that binds Alt shortcuts does) — so text typed with Option chords would land there;
+  (g) the hidden input holds only zero-width filler between inputs (its value never shows the text).
   Every keystroke, input, paste, mousedown/up, click, focus change and panel open/close is posted to the fixture
   (window.webkit.messageHandlers.docs), which logs it as `docs.<type>`.
 -->
@@ -43,6 +47,7 @@
   <div id="menubar" role="menubar" aria-label="Menu bar">
     <div class="menu-item" role="menuitem" id="menu-file" tabindex="0" aria-haspopup="true">File</div>
     <div class="menu-item" role="menuitem" id="menu-edit" tabindex="0" aria-haspopup="true">Edit</div>
+    <div class="menu-item" role="menuitem" id="menu-tools" tabindex="0" aria-haspopup="true">Tools</div>
   </div>
 </div>
 <div id="edit-menu" class="menu" role="menu" aria-label="Edit" hidden>
@@ -51,6 +56,10 @@
 </div>
 <div id="file-menu" class="menu" role="menu" aria-label="File" hidden>
   <div role="menuitem" id="mi-rename" tabindex="-1">Rename</div>
+</div>
+<div id="tools-menu" class="menu" role="menu" aria-label="Tools" hidden>
+  <div role="menuitem" id="mi-spelling" tabindex="-1">Spelling</div>
+  <div role="menuitem" id="mi-word-count" tabindex="-1">Word count</div>
 </div>
 <div id="toolbar" role="toolbar" aria-label="Formatting">
   <div class="goog-button" role="button" id="tb-bold" aria-label="Bold" aria-pressed="false" tabindex="0"><b>B</b></div>
@@ -109,7 +118,11 @@
     if (!b || b.getAttribute("contenteditable") !== "true") return false;
     if (fbody === b) return true;
     fbody = b;
-    fbody.addEventListener("keydown", function (e) { if (!quiet) post({ type: "key", key: e.key, code: e.code, meta: e.metaKey }); });
+    fbody.textContent = "\u200B";
+    fbody.addEventListener("keydown", function (e) {
+      if (!quiet) post({ type: "key", key: e.key, code: e.code, meta: e.metaKey, alt: e.altKey });
+      optionShortcut(e);
+    });
     fbody.addEventListener("paste", function (e) {
       var text = (e.clipboardData && e.clipboardData.getData("text/plain")) || "";
       e.preventDefault(); // Docs inserts it itself; the hidden input stays empty
@@ -119,8 +132,9 @@
     });
     fbody.addEventListener("input", function (e) {
       if (e.inputType === "deleteContentBackward") model = model.slice(0, -1);
-      else model += fbody.innerText.replace(/ /g, " ");
-      fbody.textContent = ""; // emptied after every input: the text cannot be read back from here
+      else if (e.inputType === "insertParagraph" || e.inputType === "insertLineBreak") model += "\n";
+      else model += fbody.innerText.replace(/\u200B/g, "").replace(/ /g, " ");
+      fbody.textContent = "\u200B"; // filler only after every input: the text cannot be read back from here
       if (!quiet) post({ type: "input", inputType: e.inputType || "", data: e.data === null || e.data === undefined ? null : String(e.data) });
       textChanged();
     });
@@ -174,9 +188,22 @@
     $("mi-select-all").setAttribute("aria-disabled", String(!on));
     $("mi-delete").setAttribute("aria-disabled", String(!on));
   }
+  // (f) Option + a key is the page's own shortcut: the focus goes to the search input.
+  function optionShortcut(e) {
+    if (!e.altKey || e.metaKey || e.ctrlKey) return;
+    e.preventDefault();
+    if (!quiet) post({ type: "shortcut", key: e.key, code: e.code });
+    $("page-search").focus();
+  }
+  $("title").addEventListener("keydown", optionShortcut);
+
+  function closeMenus() {
+    ["edit-menu", "file-menu", "tools-menu"].forEach(function (id) { $(id).hidden = true; });
+    document.querySelectorAll(".menu-item").forEach(function (m) { m.classList.remove("open"); });
+  }
   function toggleMenu(item, menu) {
     var open = menu.hidden;
-    ["edit-menu", "file-menu"].forEach(function (id) { $(id).hidden = true; });
+    ["edit-menu", "file-menu", "tools-menu"].forEach(function (id) { $(id).hidden = true; });
     document.querySelectorAll(".menu-item").forEach(function (m) { m.classList.remove("open"); });
     if (open) {
       var r = item.getBoundingClientRect();
@@ -187,7 +214,7 @@
     item.focus(); // a menu bar item takes the focus — not an editable element
     if (!quiet) post({ type: "menu", id: item.id, open: open });
   }
-  [["menu-edit", "edit-menu"], ["menu-file", "file-menu"]].forEach(function (pair) {
+  [["menu-edit", "edit-menu"], ["menu-file", "file-menu"], ["menu-tools", "tools-menu"]].forEach(function (pair) {
     var item = $(pair[0]), menu = $(pair[1]), viaMouse = false;
     item.addEventListener("mousedown", function (e) { e.preventDefault(); viaMouse = true; if (!quiet) post({ type: "mouse", id: item.id, phase: "down" }); toggleMenu(item, menu); });
     item.addEventListener("click", function () {
@@ -196,10 +223,11 @@
       toggleMenu(item, menu);
     });
   });
-  ["mi-select-all", "mi-delete", "mi-rename"].forEach(function (id) {
+  ["mi-select-all", "mi-delete", "mi-rename", "mi-spelling", "mi-word-count"].forEach(function (id) {
     $(id).addEventListener("click", function () {
       var disabled = $(id).getAttribute("aria-disabled") === "true";
       if (!quiet) post({ type: "click", id: id, ignored: disabled });
+      if (!disabled) closeMenus(); // a chosen item closes its menu
     });
   });
 
@@ -230,9 +258,8 @@
       $("title").value = "Untitled document";
       ["page-search", "find", "replace"].forEach(function (id) { $(id).value = ""; });
       $("find-panel").hidden = true;
-      ["edit-menu", "file-menu"].forEach(function (id) { $(id).hidden = true; });
-      document.querySelectorAll(".menu-item").forEach(function (m) { m.classList.remove("open"); });
-      if (fbody) fbody.textContent = "";
+      closeMenus();
+      if (fbody) fbody.textContent = "\u200B";
       if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
       render();
       quiet = false;

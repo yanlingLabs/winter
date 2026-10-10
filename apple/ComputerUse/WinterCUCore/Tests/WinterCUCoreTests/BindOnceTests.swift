@@ -101,6 +101,10 @@ final class BindOnceTests: XCTestCase {
         let again = try await bind()
         XCTAssertNotEqual(again.targetId, first.targetId)
         XCTAssertEqual(again.window.id, 78)
+        // Not on this desktop: what that costs is said up front, with the way out.
+        XCTAssertTrue(again.detail?.contains("Safari's window is not on this desktop, so it is worked in the background") ?? false, again.detail ?? "")
+        XCTAssertTrue(again.detail?.contains("app.requestForeground(reason)") ?? false)
+        XCTAssertFalse(first.detail?.contains("work there") ?? false, "never claims acts land there")
     }
 
     func testAWindowAXCannotReachIsBoundCaptureOnlyWithNoNewWindowEver() async throws {

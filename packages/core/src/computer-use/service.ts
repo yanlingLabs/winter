@@ -160,6 +160,13 @@ interface RunCtx {
   textInFlight: Set<Promise<void>>;
   /** The last focus change per target in this run, said once at its end. */
   focusLines: Map<string, { app: string; line: string }>;
+  /** Why the run's deadline was extended (a long type/paste each), for the timeout's words. */
+  extensions: Array<{ primitive: "type" | "paste"; chars: number }>;
+  /** Targets the user let come to the front for the rest of this run (`requestForeground`): their acts take
+   *  the foreground with no second card. */
+  foreground: Set<string>;
+  /** The last primitive the script called ("type in Safari"), for a timeout's words. */
+  lastPrimitive?: string;
   sessionId: string;
   runId: string;
   callId: string;
@@ -275,13 +282,20 @@ export class ComputerV2Service {
     const started = this.now();
     // The timer and the grants reference each other (a card pauses the timer): built in two steps.
     const ctxRef: { ctx?: RunCtx } = {};
-    const timer = new PausableTimer(timeoutMs, () => { if (ctxRef.ctx) { ctxRef.ctx.timedOut = true; this.cancel(ctxRef.ctx, `the script timed out after ${timeoutMs} ms`); } }, () => this.now());
+    const timer = new PausableTimer(timeoutMs, () => {
+      if (ctxRef.ctx) {
+        const c = ctxRef.ctx;
+        c.timedOut = true;
+        const calls = [...c.primitives.entries()].reduce((n, [k, v]) => (k === "timeLeft" ? n : n + v), 0);
+        this.cancel(c, timeoutMessage(timeoutMs, c.timer.budget, c.extensions, { calls, ...(c.lastPrimitive === undefined ? {} : { last: c.lastPrimitive }) }));
+      }
+    }, () => this.now());
     const grants = newRunGrants(sessionId, (waiting) => (waiting ? timer.pause() : timer.resume()));
     const ctx: RunCtx = {
       sessionId, runId, callId: `cv2_${randomBytes(6).toString("hex")}`, call, state, worker, builder, grants,
       abort: new AbortController(), timer, locks: new Map(), acted: new Set(), chains: new Map(), primitives: new Map(),
       apps: new Set(), timedOut: false, ended: false, bound: new Set(), daemonSentences: new Set(), textInFlight: new Set(),
-      focusLines: new Map(),
+      focusLines: new Map(), extensions: [], foreground: new Set(),
     };
     ctxRef.ctx = ctx;
     state.active = ctx;
@@ -422,7 +436,12 @@ export class ComputerV2Service {
     this.live(ctx);
     const args = (msg.args ?? {}) as Record<string, unknown>;
     ctx.primitives.set(msg.primitive, (ctx.primitives.get(msg.primitive) ?? 0) + 1);
+    if (msg.primitive !== "timeLeft") {
+      const on = msg.target === undefined ? undefined : ctx.state.targets.get(msg.target)?.name;
+      ctx.lastPrimitive = `${msg.primitive}()${on === undefined ? "" : ` in ${on}`}`;
+    }
     switch (msg.primitive) {
+      case "timeLeft": return Math.max(0, Math.floor(ctx.timer.left()));
       case "apps.list": return await this.appsList(ctx, args, metric);
       case "apps.open": {
         const target = str(args.app)?.trim();
@@ -452,7 +471,7 @@ export class ComputerV2Service {
     this.live(ctx);
     const t = this.target(ctx, targetId);
     const app: AppRef = { bundleId: t.bundleId, name: t.name };
-    if (ACT_PRIMITIVES.has(primitive)) {
+    if (ACT_PRIMITIVES.has(primitive) || primitive === "requestForeground") {
       await this.deps.policy.authorize(ctx.grants, app, { kind: "act", primitive }, ctx.abort.signal);
     } else {
       await this.deps.policy.authorize(ctx.grants, app, { kind: "observe" }, ctx.abort.signal);
@@ -463,6 +482,7 @@ export class ComputerV2Service {
       case "state": return await this.state(ctx, t, args, metric);
       case "find": return await this.find(ctx, t, args, metric);
       case "screenshot": return await this.targetScreenshot(ctx, t, args, metric);
+      case "requestForeground": return await this.requestForeground(ctx, t, args, metric);
       case "windows": {
         const res = await this.helperCall<TargetWindowsResult>(ctx, "target.windows", { targetId }, metric);
         ctx.builder.markScreenRead();
@@ -660,7 +680,12 @@ export class ComputerV2Service {
     }
     ctx.apps.add(app.name);
     this.deps.recentApps?.note(app.bundleId, app.name);
-    const snap = await this.helperCall<SnapshotResult>(ctx, "target.snapshot", { targetId: info.targetId, full: true, settle: { maxMs: SETTLE_CAP_MS }, callId: ctx.callId }, metric);
+    // The same window bound again (the helper hands back the same target): what changed since its last printed
+    // state, not the whole tree once more (live: re-binding in every script cost ~13 KB a call).
+    const base = this.diffBases.get(ctx.sessionId, info.targetId);
+    const snap = await this.helperCall<SnapshotResult>(ctx, "target.snapshot", {
+      targetId: info.targetId, ...(base === undefined ? { full: true } : { since: base }), settle: { maxMs: SETTLE_CAP_MS }, callId: ctx.callId,
+    }, metric);
     this.live(ctx);
     metric.settleMs = snap.waitedMs;
     metric.settleExit = snap.settled ? "quiet" : "cap";
@@ -668,6 +693,9 @@ export class ComputerV2Service {
     // outside the fence — the helper's fixed wording, not screen text.
     const detail = helperDetail(res.detail);
     if (detail !== undefined) ctx.builder.daemonLine(detail);
+    if (base !== undefined && snap.isDiff === true) {
+      ctx.builder.daemonLine(`${app.name} was already bound to this window — the same handle; what changed since its last state follows (keep the handle in a top-level const: it lasts between calls)`);
+    }
     ctx.builder.text(snap.text, { screen: true });
     this.diffBases.set(ctx.sessionId, info.targetId, snap.snapshotId);
     return { targetId: info.targetId, name: app.name, bundleId: app.bundleId };
@@ -703,6 +731,10 @@ export class ComputerV2Service {
     } else throw bad("find() takes text, or { role, name, text }");
     const res = await this.helperCall<FindResult>(ctx, "target.find", { targetId: t.targetId, query }, metric);
     ctx.builder.markScreenRead();
+    // The page changed since the last state(), or the read was cut short: the helper's fixed words, said even
+    // with emit:false (a model reading only the value would miss it).
+    const note = helperDetail(res.note, 400);
+    if (note !== undefined) ctx.builder.daemonLine(note);
     if (args.emit !== false) {
       ctx.builder.text(res.elements.length === 0 ? `(nothing in ${t.name} matches)` : res.elements.map(elementLine).join("\n"), { screen: true });
     }
@@ -885,9 +917,44 @@ export class ComputerV2Service {
     if (fit.kind === "refuse") throw new AutomationFailure("Refused", fit.message);
     if (fit.kind === "extend") {
       ctx.timer.extend(fit.byMs);
+      ctx.extensions.push({ primitive, chars: [...text].length });
       this.deps.log?.(`computer-use: ${primitive} of ${[...text].length} characters (~${Math.ceil(estimate / 1000)} s): the run extended by ${Math.ceil(fit.byMs / 1000)} s`);
     }
     return estimate > 60_000 ? estimate + 60_000 : undefined;
+  }
+
+  /** `app.requestForeground(reason)`: the rung-4 card, with the model's reason, for the rest of this run. On a yes
+   *  the app comes to the front (the helper holds it there until the script ends, then gives the front back) and
+   *  its acts need no second asking; on a no, nothing moves. `true` when it is in front. */
+  private async requestForeground(ctx: RunCtx, t: TargetInfo, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<boolean> {
+    const reason = args.reason;
+    if (typeof reason !== "string" || reason.trim().length === 0) throw bad("requestForeground() takes a reason: what needs the app in front, for the user");
+    if (ctx.foreground.has(t.targetId)) return true;
+    const app: AppRef = { bundleId: t.bundleId, name: t.name };
+    if (!(await this.deps.policy.allowForeground(ctx.grants, app, ctx.abort.signal, reason))) {
+      ctx.builder.daemonLine(`${t.name} may not come to the front now (the user did not allow it, or this session does not ask) — keep to what works in the background, or ask the user to do this step`);
+      return false;
+    }
+    this.live(ctx);
+    if (!ctx.locks.has(FOREGROUND_LOCK_KEY)) {
+      const release = await this.locks.acquire(FOREGROUND_LOCK_KEY, { runId: ctx.runId, sessionId: ctx.sessionId }, {
+        waitMs: Math.min(LOCK_WAIT_MS, Math.max(500, ctx.timer.left() - 500)), signal: ctx.abort.signal, label: "The screen's foreground",
+      });
+      if (ctx.ended || ctx.cancelled !== undefined) { release(); this.live(ctx); }
+      ctx.locks.set(FOREGROUND_LOCK_KEY, release);
+    }
+    // A window on another desktop is brought forward (taking the user there) only on a card the user answered —
+    // never under `bypass`, which asks none: the helper says so instead.
+    const moveDesktop = this.deps.policy.foregroundAsksTheUser(ctx.grants);
+    const res = await this.helperCall<{ front: boolean; detail?: string }>(ctx, "target.foreground", { targetId: t.targetId, moveDesktop }, metric);
+    if (!res.front) {
+      const said = helperDetail(res.detail);
+      ctx.builder.daemonLine(said ?? `${t.name} could not be brought to the front`);
+      return false;
+    }
+    ctx.foreground.add(t.targetId);
+    ctx.builder.daemonLine(`${t.name} is in front until this script ends; then the front goes back to the user's app`);
+    return true;
   }
 
   /** One action, through the input ladder; rung 4 (the foreground) only after the user agreed — or at once under `bypass`. */
@@ -903,7 +970,8 @@ export class ComputerV2Service {
     const actTimeout = action.kind === "type" || action.kind === "paste" ? this.fitTyping(ctx, action.kind, action.text) : undefined;
     let res: ActResult;
     try {
-      res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground: false }, metric, actTimeout);
+      // Held in front for this run (`requestForeground`): the foreground needs no second asking.
+      res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground: ctx.foreground.has(t.targetId) }, metric, actTimeout);
     } catch (err) {
       if (!(err instanceof HelperRpcError) || err.code !== "needs_foreground") throw err;
       const app: AppRef = { bundleId: t.bundleId, name: t.name };
@@ -954,6 +1022,9 @@ export class ComputerV2Service {
     const handle = this.keepImage(ctx, res);
     if (args.emit !== false) ctx.builder.image(res.imageBase64, res.mime ?? "image/jpeg");
     else ctx.builder.markScreenRead();
+    // Where Winter's own windows are in it (a picture of an app inside one is Winter's mirror, not the app).
+    const detail = helperDetail(res.detail, 500);
+    if (detail !== undefined) ctx.builder.daemonLine(detail);
     return handle;
   }
 
@@ -1209,6 +1280,28 @@ const ERROR_MESSAGE_CAP = 4_096;
  * TRUSTED (shown outside the fence) only when its message is one the daemon itself sent in this call.
  */
 /** A bind's or useWindow's `detail` from the helper, as one short line (or nothing). */
+/** The words of a run's timeout: its EFFECTIVE deadline, and — when it was extended — from what and why
+ *  ("the script timed out after 72 s; extended from 30 s for typing 3,000 characters"). */
+export function timeoutMessage(timeoutMs: number, budgetMs: number, extensions: ReadonlyArray<{ primitive: "type" | "paste"; chars: number }>,
+  progress?: { calls: number; last?: string }): string {
+  const s = (ms: number): string => `${Math.round(ms / 1000)} s`;
+  let head: string;
+  if (extensions.length === 0 || budgetMs <= timeoutMs) {
+    head = `the script timed out after ${timeoutMs} ms`;
+  } else {
+    const chars = extensions.reduce((n, e) => n + e.chars, 0).toLocaleString("en-US");
+    const what = extensions.every((e) => e.primitive === "paste") ? "pasting" : extensions.every((e) => e.primitive === "type") ? "typing" : "typing and pasting";
+    const why = extensions.length === 1 ? `${what} ${chars} characters` : `${what} ${chars} characters in ${extensions.length} calls`;
+    head = `the script timed out after ${s(budgetMs)}; extended from ${s(timeoutMs)} for ${why}`;
+  }
+  if (progress === undefined) return head;
+  // How far it got, and what to do about it: the model saw only "timed out" before (live: a 72 s loop).
+  const done = progress.calls === 1 ? "1 call had run" : `${progress.calls.toLocaleString("en-US")} calls had run`;
+  const suggest = Math.min(SCRIPT_TIMEOUT_MAX_MS, Math.max(timeoutMs * 2, budgetMs + 30_000));
+  return `${head} — ${done}${progress.last === undefined ? "" : `, the last ${progress.last}`}; `
+    + `for longer work pass timeoutMs (e.g. ${suggest}, at most ${SCRIPT_TIMEOUT_MAX_MS}), split it across calls, or have a loop check timeLeft()`;
+}
+
 /** `the page changed (now "<title>") — refs from before it are gone; call state()`, when the act changed the page. */
 export function pageLine(res: ActResult): string | undefined {
   if (typeof res.pageNow !== "string" || res.pageNow.trim().length === 0) return undefined;
@@ -1224,12 +1317,14 @@ export function focusLine(res: ActResult): string | undefined {
   return undefined;
 }
 
-/** The line an act prints: `typed into [14] text area "Comment"` (and the helper's detail after it) for keyboard
- *  input, the detail alone for any other act; nothing when there is nothing to say. */
+/** The line an act prints: `sent 5 characters to [14] text area "Comment"; received: verified` for type() —
+ *  what was SENT, then what the field RECEIVED (the helper's detail: verified / partly / unverifiable), never
+ *  "typed" for keys nobody saw land — `pasted into …` for paste(), and so on, the helper's detail after it; the
+ *  detail alone for any other act; nothing when there is nothing to say. */
 export function actLine(primitive: string, action: ActAction, res: ActResult): string | undefined {
   const detail = helperDetail(res.detail, 700);
   const input = typeof res.input === "string" ? res.input.replace(/\s+/g, " ").trim().slice(0, 200) : undefined;
-  const verb = action.kind === "type" ? "typed into"
+  const verb = action.kind === "type" ? `sent ${countCharacters(action.text)} to`
     : action.kind === "paste" ? "pasted into"
     : action.kind === "key" ? `pressed ${action.combo} in`
     : action.kind === "setValue" ? "set the value of" : undefined;
@@ -1239,7 +1334,15 @@ export function actLine(primitive: string, action: ActAction, res: ActResult): s
     head = `${primitive}: the app reports no focused element, so where it went is unknown — click the field first, or pass { into }`;
   }
   if (head === undefined) return detail;
-  return detail === undefined ? head : `${head} — ${detail}`;
+  if (detail === undefined) return head;
+  return /^(received:|as a paste)/.test(detail) ? `${head}; ${detail}` : `${head} — ${detail}`;
+}
+
+/** "1 character" / "65 characters", counted as a person reads them (grapheme clusters — the helper's own count). */
+export function countCharacters(text: string): string {
+  let n = 0;
+  for (const _ of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)) n += 1;
+  return `${n.toLocaleString("en-US")} character${n === 1 ? "" : "s"}`;
 }
 
 function helperDetail(detail: unknown, cap = 300): string | undefined {
@@ -1301,6 +1404,7 @@ function refusedWords(reason: string, name: string): string {
     case "focus_unknown": return `can't tell which field has focus in ${name}, so it could be a password field — pass \`into\` or click a text field first`;
     case "focus_not_placed": return `couldn't put the keyboard focus in that field of ${name}, so nothing was typed — use setValue(ref, text) if it takes a value, or click it first and retry`;
     case "focus_not_editable": return `the focus in ${name} is not a text field, so nothing was typed — click the field or pass { into }`;
+    case "focus_moved": return `the focus left the field partway in ${name}, so the rest was not typed — check state(), then type the rest with { into }`;
     case "wrong_field_shape": return `the text does not fit the field that has the focus in ${name} (several lines, or a long text, for a one-line field or the browser's own) — pass { into } for the field you mean`;
     case "auth_dialog": return "that is a system authentication dialog — ask the user to handle it";
     case "privacy_pane": return "System Settings' Privacy & Security panes are off limits — ask the user to change them";

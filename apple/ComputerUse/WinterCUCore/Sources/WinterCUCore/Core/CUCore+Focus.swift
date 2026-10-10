@@ -16,9 +16,6 @@ extension CUCore {
         var source: FocusSource?
         /// The app reports a focused element, but in another of its windows.
         var elsewhere: AXUIElement?
-        /// A web page's hidden text input standing in for its document (Google Docs draws its text on a canvas
-        /// and types through an off-screen contenteditable): its words for the model.
-        var hiddenInput: String?
     }
 
     /// The bound window's focus (`WindowFocus`), cached for the act it was read in and at most 250 ms; `fresh`
@@ -35,8 +32,13 @@ extension CUCore {
                 f.element = a
                 f.source = .app
             } else if appFocus == nil, boundWindowIsKeyInApp(t) != false {
-                // The app reports no focus for the window that is (or may be) its key window: unknown — an
-                // element still marked focused in its content would be a guess, and the floors decide on unknowns.
+                // The app reports no focus for the window that is (or may be) its key window: the window's own
+                // answer if it gives one, else unknown — an element still marked focused in its content would be a
+                // guess, and the floors decide on unknowns.
+                if let w = ax.element(win, kAXFocusedUIElementAttribute), inBoundWindow(w, t, win) != false {
+                    f.element = w
+                    f.source = .window
+                }
             } else if let w = focusedInWebAreas(of: win), inBoundWindow(w, t, win) != false {
                 // The page's own focus (the DOM focus WebKit marks): where the keys go once the window holds the
                 // key focus (the focus blip) — not where the system routes them now.
@@ -47,7 +49,6 @@ extension CUCore {
                 f.source = .window
             }
             if f.element == nil, let a = appFocus { f.elsewhere = a }
-            if let e = f.element { f.hiddenInput = hiddenInputWords(e, t) }
             CULog.act.debug("focus in \(t.appName, privacy: .public): \(f.source?.rawValue ?? (f.elsewhere != nil ? "in another window" : "none"), privacy: .public)")
         }
         t.focusCache = (t.actSeq, now, f)
@@ -143,7 +144,7 @@ extension CUCore {
     /// there). Refused, naming the focus: not editable; several lines (or more than 200 characters) for a
     /// single-line field; or for the browser's own chrome rather than the page.
     func guardUnnamedTarget(_ e: AXUIElement?, _ wf: WindowFocus, text: String, _ t: CUTarget) throws {
-        guard let e, t.accessible, wf.hiddenInput == nil else { return }  // unknown: the floors decide; a page's hidden input is its document
+        guard let e, t.accessible, hiddenInputWords(e, t) == nil else { return }  // unknown: the floors decide; a page's hidden input is its document
         guard editableElement(e) else {
             throw CUError.refused(.focusNotEditable, "the focus is \(focusWords(e, t)), not a text field — click the field or pass { into }")
         }

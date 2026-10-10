@@ -47,11 +47,18 @@ final class StateFormatterTests: XCTestCase {
                                 includeWindow: false), "Notes — focused [3] · settled 80 ms")
     }
 
+    func testTheHeaderNumbersThePageAndTheStateAndSaysAReadCutShort() {
+        XCTAssertEqual(f.header(CUStateHeader(appName: "Safari", windowTitle: "Doc", focusedRef: 4, settle: .settled(ms: 80),
+                                              page: 3, stateNumber: 12, unread: 1240)),
+                       "Safari — window \"Doc\" · focused [4] · settled 80 ms · page 3 · state 12 · read cut short: at least 1,240 elements not read (the \"more\" markers show where)")
+        XCTAssertEqual(f.header(CUStateHeader(appName: "Notes", windowTitle: nil, focusedRef: nil, settle: nil, stateNumber: 2)), "Notes — state 2")
+    }
+
     func testTheHeaderSaysWhereTypedTextGoes() {
         XCTAssertEqual(f.header(CUStateHeader(appName: "Notes", windowTitle: nil, focusedRef: 14, settle: .settled(ms: 80), caret: "caret 12/40")),
                        "Notes — focused [14] · caret 12/40 · settled 80 ms")
-        XCTAssertEqual(f.header(CUStateHeader(appName: "Docs", windowTitle: nil, focusedRef: nil, settle: nil, focusUnknown: true)),
-                       "Docs — focus unknown — click the field first, or pass { into }")
+        // No focus reported: the header says nothing (a keyboard act that needs one says so).
+        XCTAssertEqual(f.header(CUStateHeader(appName: "Docs", windowTitle: nil, focusedRef: nil, settle: nil)), "Docs")
         XCTAssertEqual(f.header(CUStateHeader(appName: "Safari", windowTitle: nil, focusedRef: nil, settle: nil,
                                               focusText: "focused: the page's hidden text input (it types into the document)")),
                        "Safari — focused: the page's hidden text input (it types into the document)")
@@ -149,6 +156,21 @@ final class StateFormatterTests: XCTestCase {
         let lines = CUStateFormatter(lineCap: 5).body(roots: [root], focusedRef: 150)
         XCTAssertLessThanOrEqual(lines.count, 5)
         XCTAssertEqual(lines[1], "  [2] group \"Big\" (31 more — state({within:2}))")
+    }
+
+    func testACollapsedElementKeepsWhatItHoldsFolded() {
+        let rows = (0..<3).map { CUNode(ref: 300 + $0, role: "AXRow", name: "child \($0)") }
+        let closed = CUNode(ref: 2, role: "AXRow", name: "Section", states: .collapsed, children: rows)
+        let open = CUNode(ref: 3, role: "AXRow", name: "Open", states: .expanded, children: [CUNode(ref: 400, role: "AXRow", name: "shown")])
+        let root = CUNode(ref: 1, role: "AXOutline", children: [closed, open])
+        let lines = f.body(roots: [root], focusedRef: nil)
+        XCTAssertTrue(lines.contains("  [2] row \"Section\" (collapsed) (3 more — state({within:2}))"), lines.joined(separator: "\n"))
+        XCTAssertFalse(lines.contains { $0.contains("child 0") })
+        XCTAssertTrue(lines.contains { $0.contains("[400] row \"shown\"") })
+        // Read with `within`, it is the root: shown open.
+        XCTAssertTrue(f.body(roots: [closed], focusedRef: nil).contains { $0.contains("child 0") })
+        // The focus inside it: open.
+        XCTAssertTrue(f.body(roots: [root], focusedRef: 301).contains { $0.contains("child 1") })
     }
 
     func testIndentationIsTwoSpacesPerLevel() {

@@ -18,6 +18,7 @@ public protocol CoreService: AnyObject {
     func targetFind(_ params: TargetFindParams) async throws -> TargetFindResult
     func targetScreenshot(_ params: TargetScreenshotParams) async throws -> TargetScreenshotResult
     func targetAct(_ params: TargetActParams) async throws -> TargetActResult
+    func targetForeground(_ params: TargetForegroundParams) async throws -> TargetForegroundResult
     func targetWaitIdle(_ params: TargetWaitIdleParams) async throws -> TargetWaitIdleResult
     func targetWaitFor(_ params: TargetWaitForParams) async throws -> TargetWaitForResult
     func targetAppleScript(_ params: TargetAppleScriptParams) async throws -> TargetAppleScriptResult

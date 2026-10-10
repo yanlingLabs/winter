@@ -100,29 +100,40 @@ final class PasteAndQueueTests: XCTestCase {
         XCTAssertFalse(CUSystemPasteboard.isPromised(PasteboardFlavorFlags(rawValue: 1)))
     }
 
-    func testEditEvidence() {
+    func testEditEvidenceIsTheTextNotAChange() {
         var now = 0.0
         var value = "a"
-        var notified: Double?
-        let ev = CUEditEvidence(readValue: { value }, lastValueChangeMs: { notified }, nowMs: { now }, sleepMs: { ms in
+        let ev = CUEditEvidence(readValue: { value }, nowMs: { now }, sleepMs: { ms in
             now += ms
-            if now >= 100 { value = "ab" }
+            if now >= 100 { value = "a hello world" }
         })
-        XCTAssertTrue(ev.wait(before: "a", since: 0, capMs: 1500))
+        XCTAssertTrue(ev.wait(before: "a", expect: "hello world", capMs: 1500), "the pasted text appeared")
         XCTAssertGreaterThanOrEqual(now, 100)
         // No change at all: gives up at the cap.
-        now = 0; value = "a"
-        let still = CUEditEvidence(readValue: { "a" }, lastValueChangeMs: { nil }, nowMs: { now }, sleepMs: { now += $0 })
-        XCTAssertFalse(still.wait(before: "a", since: 0, capMs: 150))
+        now = 0
+        let still = CUEditEvidence(readValue: { "a" }, nowMs: { now }, sleepMs: { now += $0 })
+        XCTAssertFalse(still.wait(before: "a", expect: "hello", capMs: 150))
         XCTAssertGreaterThanOrEqual(now, 150)
-        // A value-change notification after the write counts once things are quiet.
-        now = 0; notified = 20
-        let noted = CUEditEvidence(readValue: { "a" }, lastValueChangeMs: { notified }, nowMs: { now }, sleepMs: { now += $0 })
-        XCTAssertTrue(noted.wait(before: "a", since: 10, capMs: 1500))
-        XCTAssertLessThan(now, 200)
-        // One from before the write does not.
-        now = 0; notified = 5
-        XCTAssertFalse(noted.wait(before: "a", since: 10, capMs: 100))
+        // A value that changed, but not to the pasted text, is no proof.
+        now = 0
+        let other = CUEditEvidence(readValue: { "a b" }, nowMs: { now }, sleepMs: { now += $0 })
+        XCTAssertFalse(other.wait(before: "a", expect: "hello", capMs: 100))
+    }
+
+    func testFillerOnlyBeforeAndAfterIsNeverAProof() {
+        var now = 0.0
+        var value = "\u{200B}\u{200B}"
+        let ev = CUEditEvidence(readValue: { value }, nowMs: { now }, sleepMs: { ms in
+            now += ms
+            value = now > 50 ? "\u{200B}" : "\u{200B}\u{200B}\u{200B}"  // the filler flickers; the text never shows
+        })
+        XCTAssertFalse(ev.wait(before: "\u{200B}\u{200B}", expect: "The pasted body", capMs: 200), "unconfirmed, not success")
+        XCTAssertEqual(CUEditEvidence.normalized("\u{200B}a \n\u{FEFF} b\u{2060}"), "a b")
+        // The same text again: one more occurrence is the proof, not its mere presence.
+        let again = CUEditEvidence(readValue: { "note note" }, nowMs: { now }, sleepMs: { now += $0 })
+        XCTAssertTrue(again.wait(before: "note", expect: "note", capMs: 100))
+        let same = CUEditEvidence(readValue: { "note " }, nowMs: { now }, sleepMs: { now += $0 })
+        XCTAssertFalse(same.wait(before: "note", expect: "note", capMs: 100))
     }
 
     // MARK: queues

@@ -96,6 +96,10 @@ public final class CUCore: @unchecked Sendable {
             selectionHoldMs = 0
             blipReadMs = 0
             blipKeySettleMs = 0
+            blipPasteHoldMs = 0
+            blipDrainMs = 0
+            returnLoadWatchMs = 0
+            holdReleaseSchedule = { _, _ in }  // no real timer from a unit test: a test that wants it captures it
             keyTapInstaller = CUNoKeyTapInstaller()  // no real tap from a unit test: no blip unless a test fakes one
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
         }
@@ -337,11 +341,19 @@ public final class CUCore: @unchecked Sendable {
         emit { $0.targetBound(sessionId: p.sessionId, pid: pid, windowID: chosen.id, appName: appName, mirror: p.mirror) }
         noteGuardianPrivatePath(privatePath)
         noteGuardianActed(pid)
+        // Said up front: what working a window on another desktop costs, and the way out.
+        let offDesktop = sys.window(id: chosen.id)?.onScreen == false && !outcome.captureOnly
+        let costs = offDesktop ? Self.offDesktopCosts(appName) : nil
         return TargetBindResult(targetId: target.id,
                                 app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid),
                                 window: CUWindowInfo(id: chosen.id, title: chosen.title, frame: cuFrame(chosen.frame)),
-                                detail: found.reopened ? ["opened the app's default window", outcome.detail].compactMap { $0 }.joined(separator: "; ")
-                                    : outcome.detail)
+                                detail: [found.reopened ? "opened the app's default window" : nil, outcome.detail, costs]
+                                    .compactMap { $0 }.joined(separator: "; ").nonEmptyOrNil)
+    }
+
+    /// What working a window on another desktop costs (said at bind). Pure.
+    static func offDesktopCosts(_ app: String) -> String {
+        "\(app)'s window is not on this desktop, so it is worked in the background: a click is sent but can't be seen landing, keys reach it through a brief focus switch, and it may not redraw (a screenshot can be older than what was done) — if what you do there does not land, app.requestForeground(reason) asks the user to let \(app) come to the front for the rest of the script"
     }
 
     /// The live effects behind `CUWindowResolver` (run on the pid queue).
@@ -452,6 +464,13 @@ public final class CUCore: @unchecked Sendable {
     // short tail after, private-path gated — never merely because targets are bound.
     let guardianLock = NSLock()
     var guardianCore = CUFocusGuardianCore()
+    /// Apps held in front for a script (`target.foreground`), by target id, until the script ends.
+    let holdLock = NSLock()
+    var heldForeground: [String: HeldForeground] = [:]
+    /// Schedules a hold's safety release; replaceable by tests.
+    var holdReleaseSchedule: (TimeInterval, @escaping @Sendable () -> Void) -> Void = { seconds, work in
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: work)
+    }
     var guardianRefs = 0
     var guardianObservers: [NSObjectProtocol] = []
     var pendingGuardianNotes: [String] = []
@@ -526,11 +545,23 @@ public final class CUCore: @unchecked Sendable {
     static let blipFrontWaitMs: Double = 150
     /// How long a command is read for inside one blip. 0 in test cores (one read).
     var blipReadMs: Double = 120
-    /// A keyboard blip's burst: keys go out until this long after the blip began, then the blip ends and a
-    /// fresh one begins (each ends within `blipDeadlineMs`).
-    var blipBurstMs: Double = 180
+    /// A keyboard blip's bound and burst: ONE blip per act of typing (fewer, longer — live, a blip every ~4
+    /// characters cost ~200 ms each), keys going out until `blipBurstMs` after it began; a longer act takes a
+    /// fresh blip per burst. The tap comes off by the bound whatever happens.
+    var keyBlipBoundMs: Double = 1_500
+    var blipBurstMs: Double = 1_300
+    /// How long a paste blip holds the window key after Edit › Paste / ⌘V, for the page to take it (34 ms was
+    /// too short live). 0 in test cores.
+    var blipPasteHoldMs: Double = 180
     /// How long keys wait after a keyboard blip begins, for the app to take the key focus. 0 in test cores.
     var blipKeySettleMs: Double = 50
+    /// How long a keyboard blip still holds the window key after its last key, for the app to take the keys from
+    /// its queue: a key it takes after the blip ended goes to whatever window is key then (live: a Return reached
+    /// no field). 0 in test cores.
+    var blipDrainMs: Double = 120
+    /// How long after a Return in a field outside the page (a browser's address field) the page is watched for
+    /// the load it should start. 0 in test cores.
+    var returnLoadWatchMs: Double = 1_500
 
     /// Apps whose `AXFocused` write was seen to activate them (move the user's view): their fields use the
     /// press route first thereafter, for the helper's lifetime. Keyed by bundle id, else app name.
@@ -701,14 +732,23 @@ public final class CUCore: @unchecked Sendable {
             do {
                 obs = try observe(t, within: within)
             } catch {
-                guard let note = Self.goneWithinNote(error, within: within) else { throw error }
+                let pageChanged = t.pageAtSnapshot.map { old in pageSignature(t).map { !Self.isSamePage(old, $0) } ?? true } ?? false
+                guard let note = Self.goneWithinNote(error, within: within, pageChanged: pageChanged) else { throw error }
                 gone = note
                 within = nil
                 obs = try observe(t, within: nil)
             }
+            // A `within` element in a page the window is not showing (a tab in the background): said first — the
+            // header names the window's page, not that one.
+            var elsewhere: String?
+            if let within, let e = try? element(within, in: t) { elsewhere = notShowingNote(e, ref: within, t) }
+            let sid = t.nextSnapshotId()
+            let page = pageNumber(t, pageSignature(t))
+            if within == nil { t.pageNumberAtState = page }
             let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note,
-                                       caret: obs.caret, focusUnknown: obs.focusUnknown, focusText: obs.focusText)
-            let snap = CUSnapshot(id: t.nextSnapshotId(), scope: within, header: header, roots: obs.roots, formatter: formatter)
+                                       caret: obs.caret, focusText: obs.focusText, page: page,
+                                       stateNumber: Int(sid.components(separatedBy: ".s").last ?? ""), unread: obs.unread)
+            let snap = CUSnapshot(id: sid, scope: within, header: header, roots: obs.roots, formatter: formatter)
             // A whole-window, non-full state folds what is out of view first; `within` and `full` don't.
             var text = formatter.full(header: header, roots: obs.roots, viewportFirst: within == nil && p.full != true)
             var isDiff = false
@@ -726,7 +766,9 @@ public final class CUCore: @unchecked Sendable {
             // opens one when its own window is not the active one): say so, or the model watches the wrong one.
             let opened = newWindows(t)
             if !opened.isEmpty { text += "\n" + opened.joined(separator: "\n") }
+            if let elsewhere { text = elsewhere + "\n" + text }
             if let gone { text = gone + "\n" + text }
+            if within == nil { t.pageAtSnapshot = pageSignature(t) }
             t.store(snap)
             return TargetSnapshotResult(snapshotId: snap.id, text: text, isDiff: isDiff, changedRatio: ratio,
                                         settled: settled, waitedMs: waited)
@@ -735,9 +777,26 @@ public final class CUCore: @unchecked Sendable {
 
     /// A `state({ within })` whose element is gone answers with the whole window and this line first; any other
     /// error (and any other primitive's gone ref) stays an error. Pure.
-    static func goneWithinNote(_ error: Error, within: Int?) -> String? {
+    static func goneWithinNote(_ error: Error, within: Int?, pageChanged: Bool = false) -> String? {
         guard let within, (error as? CUError)?.code == "stale_ref" else { return nil }
-        return "[\(within)] is gone (the page changed) — showing the whole window"
+        return pageChanged
+            ? "[\(within)] is gone (the page changed) — showing the whole window"
+            : "[\(within)] is no longer in the window (a menu, panel or section it was in closed or was redrawn) — showing the whole window"
+    }
+
+    /// "[N] is in a page the window is not showing (“title”) …" for an element under a web area other than the
+    /// window's own (a background tab's, kept alive by the browser); nil otherwise.
+    func notShowingNote(_ e: AXUIElement, ref: Int, _ t: CUTarget) -> String? {
+        var area: AXUIElement?
+        var cur: AXUIElement? = e
+        for _ in 0..<80 {
+            guard let c = cur else { break }
+            if ax.string(c, kAXRoleAttribute) == "AXWebArea" { area = c; break }
+            cur = ax.element(c, kAXParentAttribute)
+        }
+        guard let area, pageSignature(t) != nil, let showing = t.webArea, !CFEqual(area, showing) else { return nil }
+        let title = ax.string(area, kAXTitleAttribute).flatMap { $0.isEmpty ? nil : $0 }
+        return "[\(ref)] is in a page the window is not showing\(title.map { " (\u{201C}\($0.prefix(80))\u{201D})" } ?? "") — a tab in the background; what follows may be out of date, and acts on it may not land: switch to that tab first"
     }
 
     public func targetFind(_ p: TargetFindParams) async throws -> TargetFindResult {
@@ -748,8 +807,24 @@ public final class CUCore: @unchecked Sendable {
         let formatter = self.formatter
         return try await queues.run(t.pid) { [self] in
             try floorCheckPrivacy(t)
-            let roots = try freshRead(t) ?? observe(t, within: nil).roots
-            return TargetFindResult(elements: CUFinder.find(p.query, in: roots, formatter: formatter))
+            var unread: Int?
+            let roots: [CUNode]
+            if let fresh = freshRead(t) { roots = fresh } else {
+                let obs = try observe(t, within: nil)
+                roots = obs.roots
+                unread = obs.unread
+            }
+            // What the matches are of: a page other than the last state()'s, or a read cut short, is said.
+            var notes: [String] = []
+            let page = pageNumber(t, pageSignature(t))
+            if let page, let seen = t.pageNumberAtState, page != seen {
+                notes.append("the page changed since your last state() (page \(page) now; that state was page \(seen)) — refs from before it are gone")
+            }
+            if let unread, unread > 0 {
+                notes.append("the read was cut short (at least \(unread) elements not read), so matches past it are missing — state({ within }) reads a part")
+            }
+            return TargetFindResult(elements: CUFinder.find(p.query, in: roots, formatter: formatter), page: page,
+                                    note: notes.isEmpty ? nil : notes.joined(separator: "; "))
         }
     }
 
@@ -766,16 +841,29 @@ public final class CUCore: @unchecked Sendable {
         return last.roots
     }
 
-    /// Notes for the app's real windows that appeared since the target last looked; remembers the current set.
+    /// Notes for the app's document windows that appeared since the target first looked. Cumulative: a window
+    /// seen once is never announced again (live: one utility window was announced twice, as it left the listing
+    /// and came back). Only titled windows of a document's size that accessibility does not call something else
+    /// — never a popover (a downloads list), a panel or a utility window.
     func newWindows(_ t: CUTarget) -> [String] {
-        let now = CUBindWait.realWindows(sys.windows(pid: t.pid))
+        let server = sys.windows(pid: t.pid)
+        let now = CUBindWait.realWindows(server)
         let known = t.knownWindows
-        t.knownWindows = Set(now.map(\.id))
+        t.knownWindows = known.union(now.map(\.id))
         guard !known.isEmpty else { return [] }
-        return now.filter { !known.contains($0.id) && $0.id != t.windowID }.prefix(3).map { w in
-            let title = w.title.isEmpty ? "" : " \u{201C}\(w.title.prefix(80))\u{201D}"
-            return "new \(t.appName) window\(title) (\(w.id)) — this state is still the bound window; useWindow(\(w.id)) to work in it"
+        let fresh = now.filter { !known.contains($0.id) && $0.id != t.windowID }
+        guard !fresh.isEmpty else { return [] }
+        var axInfo: [UInt32: (title: String, subrole: String?)] = [:]
+        for w in CUAXWindows.list(pid: t.pid, ax: ax, server: server) {
+            axInfo[w.id] = (w.title, ax.string(w.element, kAXSubroleAttribute))
         }
+        let documentKinds: Set<String> = [kAXStandardWindowSubrole, kAXDialogSubrole, "AXSystemDialog"]
+        return fresh.compactMap { w -> String? in
+            let title = !w.title.isEmpty ? w.title : (axInfo[w.id]?.title ?? "")
+            guard !title.isEmpty, w.frame.width >= 200, w.frame.height >= 120 else { return nil }
+            if let sub = axInfo[w.id]?.subrole, !documentKinds.contains(sub) { return nil }
+            return "new \(t.appName) window \u{201C}\(title.prefix(80))\u{201D} (\(w.id)) — this state is still the bound window; useWindow(\(w.id)) to work in it"
+        }.prefix(3).map { $0 }
     }
 
     public func targetScreenshot(_ p: TargetScreenshotParams) async throws -> TargetScreenshotResult {
@@ -884,13 +972,46 @@ public final class CUCore: @unchecked Sendable {
     func offScreenNote(_ t: CUTarget, _ img: CUCapturedImage) async throws -> String {
         let elsewhere = try await queues.run(t.pid) { [self] in isOffThisDesktop(t) }
         let now = clock.nowMs()
-        let digest = img.jpeg.hashValue ^ img.jpeg.count
+        // Over ALL the bytes: `Data`'s own hash reads only its first bytes — a JPEG's header, the same for every
+        // picture of one size, so every picture read as unchanged.
+        let digest = Self.contentDigest(img.jpeg)
         let previous = t.noteOffScreenShot(digest: digest, at: now)
-        var note = "captured \(t.appName)'s window \(elsewhere ? "on another desktop (another Space or full screen)" : "while it is not on screen (minimized or hidden)"): it is hidden there, so \(t.appName) may not be redrawing it and this image can be older than what was just done"
-        if let previous, previous.digest == digest, let acted = t.lastActionMs, acted > previous.atMs {
-            note += " — it is unchanged since the screenshot \(Int(((now - previous.atMs) / 1000).rounded())) s ago although input was sent since, so it is likely stale"
+        let where_ = elsewhere ? "on another desktop (another Space or full screen)" : "while it is not on screen (minimized or hidden)"
+        let check = "to see what is really there, read it (state() or find() text, or something the app counts, such as a word count)"
+        return Self.freshnessLabel(app: t.appName, where_: where_, check: check, previous: previous, digest: digest, now: now,
+                                   actedMs: t.lastActionMs, appActivityMs: monitor.lastNotificationMs(pid: t.pid))
+    }
+
+    /// FNV-1a over every byte. Pure.
+    static func contentDigest(_ data: Data) -> Int {
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        data.withUnsafeBytes { raw in
+            for b in raw { h = (h ^ UInt64(b)) &* 0x0000_0100_0000_01B3 }
         }
-        return note + "; to see what is really there, read it (state() or find() text, or something the app counts, such as a word count), or take a screenshot once the user shows the window"
+        return Int(bitPattern: UInt(truncatingIfNeeded: h))
+    }
+
+    /// Each off-screen picture labelled by what is known of it, never a blanket caveat (live: a model distrusted a
+    /// right picture because every one said it "can be older"): LIVE when it changed since the last one (the app
+    /// is drawing there); STALE SINCE the last change when it has not although input was sent or the app's content
+    /// changed (accessibility) since; LIKELY CURRENT when it has not and nothing happened since; and, for the first
+    /// picture, that its freshness can't be told yet. Pure.
+    static func freshnessLabel(app: String, where_: String, check: String, previous: (digest: Int, atMs: Double, changedAtMs: Double)?,
+                               digest: Int, now: Double, actedMs: Double?, appActivityMs: Double?) -> String {
+        let ago: (Double) -> String = { "\(Int(((now - $0) / 1000).rounded())) s ago" }
+        guard let previous else {
+            return "freshness unknown: captured \(app)'s window \(where_) — it is hidden there, so \(app) may not be redrawing it; a second screenshot after acting tells whether it is; \(check)"
+        }
+        if previous.digest != digest {
+            return "live: captured \(app)'s window \(where_), and it changed since the screenshot \(ago(previous.atMs)), so \(app) is drawing it there"
+        }
+        let acted = (actedMs ?? 0) > previous.atMs
+        let changed = (appActivityMs ?? 0) > previous.atMs
+        if acted || changed {
+            let why = acted && changed ? "input was sent and \(app)'s content changed since" : acted ? "input was sent since" : "\(app)'s content changed since (accessibility)"
+            return "stale since \(ago(previous.changedAtMs)): captured \(app)'s window \(where_), unchanged although \(why) — \(app) is not redrawing it there; \(check), or take a screenshot once the user shows the window"
+        }
+        return "likely current: captured \(app)'s window \(where_), unchanged since \(ago(previous.atMs)) with nothing done since"
     }
 
     // MARK: - waits
@@ -974,8 +1095,30 @@ public final class CUCore: @unchecked Sendable {
             if screenShots.count > 16 { screenShots.removeFirst(screenShots.count - 16) }
             return s
         }()
+        let winter = Self.winterWindowsNote(stack: sys.windowStack(), bundleId: { [sys] in sys.bundleId(pid: $0) },
+                                            area: img.pointsRect, width: img.width, height: img.height)
         return ScreenScreenshotResult(imageBase64: img.jpeg.base64EncodedString(), mime: "image/jpeg",
-                                      width: img.width, height: img.height, shotId: shot.id)
+                                      width: img.width, height: img.height, shotId: shot.id, detail: winter)
+    }
+
+    /// "Winter's own window is in this picture at [x, y, w, h] …" for Winter's app windows on the captured area, in
+    /// image pixels: an app shown inside one is Winter's live mirror of it, not the app (live: a model took the
+    /// mirror for the app and clicked by it). Nil when none is there. Pure.
+    static func winterWindowsNote(stack: [CUWindowServerWindow], bundleId: (pid_t) -> String?, area: CGRect,
+                                  width: Int, height: Int) -> String? {
+        guard area.width > 0, area.height > 0 else { return nil }
+        let sx = Double(width) / area.width, sy = Double(height) / area.height
+        let boxes = stack.filter { w in
+            CUWindowServer.isRealWindow(w) && w.onScreen && w.frame.intersects(area)
+                && (bundleId(w.pid).map { $0 == "com.winter.app" || $0.hasPrefix("com.winter.app.") } ?? false)
+        }.prefix(3).map { w -> String in
+            let f = w.frame.intersection(area)
+            let x = Int(((f.minX - area.minX) * sx).rounded()), y = Int(((f.minY - area.minY) * sy).rounded())
+            return "[\(x), \(y), \(Int((f.width * sx).rounded())), \(Int((f.height * sy).rounded()))]"
+        }
+        guard !boxes.isEmpty else { return nil }
+        let at = boxes.joined(separator: ", ")
+        return "Winter's own window\(boxes.count == 1 ? " is" : "s are") in this picture at \(at) (image pixels): an app shown inside \(boxes.count == 1 ? "it" : "them") is Winter's live mirror of that app, not the app itself — act on the app through its handle, never by points inside Winter's window"
     }
 
     public func screenAppAt(_ p: ScreenAppAtParams) async throws -> ScreenAppAtResult {
@@ -1343,8 +1486,9 @@ public final class CUCore: @unchecked Sendable {
         var focusedRef: Int?
         var title: String
         var caret: String? = nil
-        var focusUnknown = false
         var focusText: String? = nil
+        /// The read stopped at its budget: at least this many elements not read.
+        var unread: Int? = nil
     }
 
     /// Reads the bound window (plus open app menus), or the subtree at `within`.
@@ -1381,7 +1525,7 @@ public final class CUCore: @unchecked Sendable {
         var focusText: String?
         let wf = windowFocus(t, fresh: true)
         if let f = wf.element {
-            if let hidden = wf.hiddenInput {
+            if let hidden = hiddenInputWords(f, t) {
                 focusText = "focused: \(hidden)"
             } else if let r = t.refs.existingRef(for: AXIdentity(element: f)), roots.contains(where: { $0.find(ref: r) != nil }) {
                 focusedRef = r
@@ -1397,8 +1541,21 @@ public final class CUCore: @unchecked Sendable {
             focusText = "focus in another of \(t.appName)'s windows — click the field first, or pass { into }"
         }
         let title = AX.string(win, kAXTitleAttribute) ?? t.windowTitle
-        return Observation(roots: roots, focusedRef: focusedRef, title: title, caret: caret,
-                           focusUnknown: wf.element == nil && wf.elsewhere == nil, focusText: focusText)
+        let unread = result.truncated ? roots.reduce(0) { $0 + Self.unreadCount($1) } : nil
+        return Observation(roots: roots, focusedRef: focusedRef, title: title, caret: caret, focusText: focusText,
+                           unread: unread.map { max(1, $0) })
+    }
+
+    /// The children a read saw but did not read, over the whole tree.
+    static func unreadCount(_ n: CUNode) -> Int {
+        n.unreadChildren + n.children.reduce(0) { $0 + unreadCount($1) }
+    }
+
+    /// The window's page number: it goes up when the page (its URL, or with none its title) is another than the
+    /// one last numbered. Nil when the window shows no web page.
+    func pageNumber(_ t: CUTarget, _ sig: PageSignature?) -> Int? {
+        guard let sig else { return nil }
+        return t.numberPage(isNew: { last in last.map { !Self.isSamePage($0, sig) } ?? true }, sig: sig)
     }
 
     /// Actions the app listed but refused and `action()` has no pointer equivalent for: state stops listing
@@ -1488,4 +1645,8 @@ struct CULiveActivity: CUActivitySource {
     let monitor: CUAXActivityMonitor
     func lastNotificationMs(pid: pid_t) -> Double? { monitor.lastNotificationMs(pid: pid) }
     func windowSignature(pid: pid_t) -> Int { CUWindowServer.signature(pid: pid) }
+}
+
+private extension String {
+    var nonEmptyOrNil: String? { isEmpty ? nil : self }
 }

@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.5.1` (the contents of [`VERSION`](VERSION))
+Helper version: `1.6.0` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -188,20 +188,32 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 | Method | Params | Result |
 | --- | --- | --- |
 | `target.snapshot` | `{targetId, since?, full?, within?, settle?: {maxMs}, callId?}` | `{snapshotId, text, isDiff, changedRatio, settled, waitedMs}` |
-| `target.find` | `{targetId, query}` | `{elements: [{ref, role, name?, value?, states?}]}` |
+| `target.find` | `{targetId, query}` | `{elements: [{ref, role, name?, value?, states?}], page?, note?}` |
 | `target.screenshot` | `{targetId, region?, budget, settle?: {maxMs}, callId?}` | `{imageBase64, mime: "image/jpeg", width, height, shotId, settled, waitedMs, pointsWidth?, pointsHeight?, detail?}` |
-| `screen.screenshot` | `{display?, displayId?, excludeBundleIds: [string], budget}` | `{imageBase64, mime: "image/jpeg", width, height, shotId}` |
+| `screen.screenshot` | `{display?, displayId?, excludeBundleIds: [string], budget}` | `{imageBase64, mime: "image/jpeg", width, height, shotId, detail?}` |
 | `screen.appAt` | `{shotId, point}` | `{app, bundleId, windowId}` |
 
 - `snapshot`: `text` is the window's accessibility state with numbered refs. With `since` (a previous
   `snapshotId` of the same scope) and not `full`, the answer is a diff when at most half of it changed
   (`isDiff: true`). `within` scopes it to one ref. `settle` first waits for 150 ms of quiet, up to `maxMs`.
   A window with no accessibility answers a one-paragraph `text` instead.
-- `find`: `query` is a string or `{role?, name?, text?}`. A window with no accessibility answers `[]`.
+- `find`: `query` is a string or `{role?, name?, text?}`. A window with no accessibility answers `[]`. `page` is
+  the window's page number (as the state header says it); `note` says when the page changed since the last
+  whole-window `snapshot`, or the read was cut short.
+- A `snapshot`'s header ends with `page N` (the window's page, numbered: it goes up when the page's URL — an
+  in-page `#fragment` aside — or, with none, its title changes; absent when it shows no web page), `state N`
+  (the snapshot's number), and, when the read stopped at its budget, `read cut short: at least N elements not
+  read (the "more" markers show where)`.
 - `budget`: `{maxLongEdge, tile?, maxTiles?, quality}` (JPEG quality 0…1). `region` is in window points.
   `pointsWidth`/`pointsHeight` are the captured area in window points (a click's point is in image pixels).
 - `screen.screenshot`: `display` is an index into the active displays (0 = main) or `"all"`; `displayId`
-  (a `CGDirectDisplayID`) wins over it. `shotId`s are `screen.i<N>`; the last 16 are remembered.
+  (a `CGDirectDisplayID`) wins over it. `shotId`s are `screen.i<N>`; the last 16 are remembered. `detail` says
+  where Winter's own windows are in the image (image pixels): a picture of an app inside one is Winter's live
+  mirror of it, not the app.
+- `target.screenshot` of a window that is not on screen (taken from the window server) carries a `detail`
+  that begins with what is known of the picture's freshness: `freshness unknown` (the first one), `live` (it
+  changed since the last one), `stale since N s ago` (unchanged although input was sent or the app's content
+  changed since), or `likely current` (unchanged, and nothing done since).
 - `screen.appAt`: `point` in image pixels of that screen shot (or of a target's window shot). A point on a
   Winter window is `refused` (`winter_itself`); no window there, or an unknown shot, is `invalid_params`.
 
@@ -226,10 +238,32 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   (where its keys go), else — for a window that is not its app's key window — the element marked focused in the
   window's web content.
 - `pageNow`: the act changed the bound window's page — its web area's URL (or, with none, the window's title)
-  is different after it: a link navigated, a tab switched. The page's title now; refs read before it are gone.
+  is different after it: a link navigated, a tab switched; an in-page `#fragment` jump is not (a `#/…` or `#!…`
+  route is). The page's title now; refs read before it are gone, and no `focusNow`/`focusLost` is sent with it
+  (that read named the old page). A tab the act opened in the window's own tab bar is said in `detail`
+  ("a new tab opened in …"), whether or not it is the one showing.
+- A `key` chord that is a menu command (⌘L → Open Location…) is pressed only when the bound window is the
+  app's main window after aiming (a menu command acts on the main window, which can be another of its windows —
+  the user's); otherwise `unsupported`, nothing done. A `type`/`paste` with no `into` never goes into a focus
+  that is provably in another window of the app. While another of the app's windows is its KEY window, a chord's
+  menu item is pressed only in the focus blip (the bound window key), else `unsupported`. `Return` in a text field
+  of the window's toolbar (a browser's address field) watches the page for a load; when none starts, its `detail`
+  says so.
+- A keyboard focus blip holds the window key a moment after its last key (the app takes queued keys then).
+- `menu` walks the app's menu bar; when that has no `path[0]` and the bound window's page has its own menu bar
+  (an `AXMenuBar` in its web area) that does, each level is opened with a window-targeted click and verified by
+  the menu it shows, and the last item clicked and verified by its menu closing (`detail` says which). A page menu
+  that does not open is `unsupported`; a missing item is `invalid_params` naming what the page's menu has.
 - `type` and `paste` with no `into` refuse (`refused`) a focus that is not a text field (`focus_not_editable`),
   and several lines or more than 200 characters for a single-line field or for a browser's own field outside the
   page (`wrong_field_shape`); the message names the focus (and the page's editable element).
+- A `type`'s `detail` begins with what the field RECEIVED: `received: verified …` (a field that shows its text
+  holds it), `received: partly (the field holds the first M of N characters …)`, `received: none of it …`, or
+  `received: unverifiable …` (nothing reads it back). Longer or multi-line text into a field that reads back goes
+  as a paste and its `detail` begins `as a paste (…)`; multi-line text into an editor that can't be read back goes
+  as keys, a newline as Return. Plain ASCII characters are their layout's keys (Shift at most); Option-layer and
+  non-ASCII characters go as Unicode with no modifier flags. A `type` whose focus leaves the field partway stops
+  (`refused`, `focus_moved`) — a Tab, or a Return that moves the focus, moves it on purpose.
 - `action` is an object discriminated by `kind`, its fields beside it:
 
 | `kind` | Fields |
@@ -252,6 +286,16 @@ latest screenshot when `shotId` is absent. An unknown `kind` is `invalid_params`
 Errors include `stale_ref` (`ref`), `needs_foreground`, `window_elsewhere`, `refused` (the floors: §6),
 `busy` (retryable), `busy` with `uncertain: true` (the action was sent but not confirmed — it may have
 happened; never retried), `cancelled`, `unsupported`.
+
+`target.foreground` — `{targetId, moveDesktop?}` → `{front, detail?}`: the user agreed (the daemon's card, the script's
+`requestForeground(reason)`) that the app may come to the front and stay there until the session's script ends.
+The helper brings it forward and holds it: its acts then run as with `allowForeground: true`, the user-view guard
+and the Focus Guardian leave it alone, and at `script.active` `false` (or `session.ended`) the front goes back to
+the app that had it — if the held app still has it (a switch the user made meanwhile is left alone). `front:
+false` (with `detail`) when macOS did not bring it forward — or when its window is on another desktop and
+`moveDesktop` is not `true` (the daemon sets it only after a card the user answered): bringing it forward would
+take the user there. A hold whose script end is never heard is released after 330 s. A window on another desktop is bound with a `detail`
+that says what working it there costs and names this way out.
 
 ### 4.6 Waits
 
@@ -351,7 +395,8 @@ daemon words each one ("Notes quit — open it again with apps.open()", "Notes's
 useWindow to pick another", …) and reads an absent `reason` (an older helper) as `unknown`.
 
 `refused` reasons: `secure_field`, `auth_dialog`, `privacy_pane`, `winter_itself`, `save_path`,
-`focus_unknown`, `focus_not_placed`, `focus_not_editable`, `wrong_field_shape`, `applescript`, `automation_denied`.
+`focus_unknown`, `focus_not_placed`, `focus_not_editable`, `wrong_field_shape`, `focus_moved`, `applescript`, `automation_denied`.
+`focus_moved` stops a `type` whose focus left the field partway (`data.typed` / `data.total` say how far it got).
 
 ## 6. Floors
 
@@ -503,3 +548,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.4.0 | `target.act` results carry `pageNow` (§4.5); `target.snapshot` with a `within` ref that is gone answers the whole window, its text starting `[N] is gone (the page changed) — showing the whole window`, instead of `stale_ref` — additive. |
 | 1 | 1.5.0 | The `hover` action (§4.5); every window-targeted click now arrives by a short path of window-targeted moves (hover), never moving the user's cursor — additive (an older helper refuses `hover` as an unknown kind). |
 | 1 | 1.5.1 | No wire change: a press on web content that accessibility shows no effect of is followed by a click only when that is safe (pixels unchanged on screen, a readable state for a toggle, never off screen unless the app is learned, never a name that may act unseen); otherwise its `detail` says so. |
+| 1 | 1.6.0 | Additive: `target.foreground` (§4.5; the script's `requestForeground`); `refused` gains `focus_moved` (a `type` stopped when the focus left the field, `data.typed`/`data.total`); `screen.screenshot` results carry `detail` (Winter's own windows in the image); `target.find` results carry `page` and `note`; a snapshot header ends with `page N · state N` (and a cut-short read); `type` details begin `received: …` or `as a paste (…)`; a gone `within` ref says "the page changed" only when it did; off-screen window shots begin with a freshness label; `pageNow` ignores an in-page `#fragment` jump and comes without `focusNow`; a chord's menu item is pressed only when the bound window is main, and only in the focus blip while another window is key; `target.foreground` brings a window on another desktop forward only with `moveDesktop`; `menu` falls back to the page's own menu bar. The live-test-only `test.capture` route's path guard compares realpaths of the parent (no wire change). |

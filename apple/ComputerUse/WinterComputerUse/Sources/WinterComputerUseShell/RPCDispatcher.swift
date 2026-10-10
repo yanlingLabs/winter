@@ -110,6 +110,7 @@ public final class RPCDispatcher: @unchecked Sendable {
         engine("target.find") { try await $0.targetFind($1 as TargetFindParams) }
         engine("target.screenshot") { try await $0.targetScreenshot($1 as TargetScreenshotParams) }
         engine("target.act") { try await $0.targetAct($1 as TargetActParams) }
+        engine("target.foreground") { try await $0.targetForeground($1 as TargetForegroundParams) }
         engine("target.waitIdle") { try await $0.targetWaitIdle($1 as TargetWaitIdleParams) }
         engine("target.waitFor") { try await $0.targetWaitFor($1 as TargetWaitForParams) }
         engine("target.applescript") { try await $0.targetAppleScript($1 as TargetAppleScriptParams) }

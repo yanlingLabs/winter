@@ -13,7 +13,7 @@ import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { ComputerPolicy, type SessionFacts } from "../../src/computer-use/policy";
 import { RecentApps } from "../../src/computer-use/recent-apps";
-import { ComputerV2Service, actLine, focusLine, pageLine, targetLostMessage, type ScriptResult } from "../../src/computer-use/service";
+import { ComputerV2Service, actLine, focusLine, pageLine, targetLostMessage, timeoutMessage, type ScriptResult } from "../../src/computer-use/service";
 import { AutomationTelemetry } from "../../src/computer-use/telemetry";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
 import type { Settings } from "../../src/settings";
@@ -102,6 +102,23 @@ describe("ComputerV2: binding, state and the diff base", () => {
     const r2 = await w.run("await notes.state()");
     expect(w.fake.calls("target.snapshot")[1]).toMatchObject({ since: "snap1" });
     expect(text(r2)).toContain('~ [14] value "a" → "b"');
+  }, 30_000);
+
+  macOnly("binding the same window again prints what changed, not the whole tree", async () => {
+    const w = world();
+    w.fake.handlers["target.bind"] = () => ({ targetId: "t1", app: { name: "Notes", bundleId: "com.apple.Notes", pid: 501 }, window: { id: 7, title: "Notes window", frame: [0, 0, 800, 600] } });
+    w.fake.handlers["target.snapshot"] = (p) => {
+      const isDiff = p.since !== undefined && p.full !== true;
+      return { snapshotId: isDiff ? "snap2" : "snap1", isDiff, changedRatio: isDiff ? 0 : 1, settled: true, waitedMs: 0,
+        text: isDiff ? "Notes — focused [14]\n(no changes)" : 'Notes — window "Notes window"\n[1] window "Notes window"\n  [14] text area value="a" (focused)' };
+    };
+    await w.run("const notes = await apps.open('Notes')");
+    const r = await w.run("const again = await apps.open('Notes')");
+    expect(w.fake.calls("target.snapshot")[1]).toMatchObject({ since: "snap1" });
+    expect(w.fake.calls("target.snapshot")[1]!.full).toBeUndefined();
+    expect(text(r)).toContain("Notes was already bound to this window — the same handle");
+    expect(text(r)).toContain("(no changes)");
+    expect(text(r)).not.toContain("[1] window");
   }, 30_000);
 
   macOnly("an emit:false read does not advance the base; {full:true} omits since; within never becomes the base", async () => {
@@ -301,6 +318,46 @@ describe("ComputerV2: the policy, through a script", () => {
     expect(text(r3)).toContain("NeedsForeground Notes only enables that menu command while it is in front");
   }, 30_000);
 
+  macOnly("requestForeground(reason): the foreground card with the reason; on a yes the app is held in front and its acts need no second card", async () => {
+    const w = world({ policy: "ask", answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "session") });
+    w.fake.handlers["target.foreground"] = () => ({ front: true });
+    const r = await w.run("const notes = await apps.open('Notes')\nprint(await notes.requestForeground('the editor takes no keys in the background\u202e'))\nawait notes.click(14)\nawait notes.type('hi')");
+    expect(r.isError).toBe(false);
+    expect(text(r)).toContain("true");
+    expect(text(r)).toContain("Notes is in front until this script ends; then the front goes back to the user's app");
+    expect(cards(w.events).map((c) => c.summary)).toEqual([
+      "Allow Winter to use Notes (com.apple.Notes)?",
+      "Winter asks to bring Notes (com.apple.Notes) to the front and keep it there until this step ends (if its window is on another desktop, you are taken there): the editor takes no keys in the background",
+    ]);
+    expect(w.fake.calls("target.foreground")).toEqual([{ targetId: expect.any(String), moveDesktop: true }]);
+    expect(w.fake.calls("target.act").map((a) => a.allowForeground)).toEqual([true, true]);
+    // The next run starts without it: asked again.
+    await w.run("await notes.click(14)");
+    expect(w.fake.calls("target.act").at(-1)!.allowForeground).toBe(false);
+  }, 30_000);
+
+  macOnly("requestForeground under bypass asks no card, and never lets a window on another desktop take the user there", async () => {
+    const w = world({ policy: "bypass" });
+    w.fake.handlers["target.foreground"] = (p) => (p.moveDesktop === true ? { front: true }
+      : { front: false, detail: "Notes's window is on another desktop, and bringing it forward would take the user there — not done without the user's say (this session asks no card); ask the user to show the window, or keep to what works in the background" });
+    const r = await w.run("const notes = await apps.open('Notes')\nprint(String(await notes.requestForeground('to type')))");
+    expect(cards(w.events)).toEqual([]);
+    expect(w.fake.calls("target.foreground")[0]).toMatchObject({ moveDesktop: false });
+    expect(text(r)).toContain("false");
+    expect(text(r)).toContain("not done without the user's say");
+  }, 30_000);
+
+  macOnly("requestForeground declined: false, nothing brought forward, and a line saying what to do instead", async () => {
+    const w = world({ policy: "ask", answer: (c, b) => b.resolve(c.sessionId, c.callId, c.summary.startsWith("Allow"), "orb", "session") });
+    w.fake.handlers["target.foreground"] = () => ({ front: true });
+    const r = await w.run("const notes = await apps.open('Notes')\nprint(String(await notes.requestForeground('to type')))");
+    expect(text(r)).toContain("false");
+    expect(text(r)).toContain("Notes may not come to the front now");
+    expect(w.fake.calls("target.foreground")).toEqual([]);
+    const empty = await w.run("try { await notes.requestForeground('  ') } catch (e) { print(e.name) }");
+    expect(text(empty)).toContain("TypeError");
+  }, 30_000);
+
   macOnly("bypass: NO computer-use prompt at all — needs_foreground is retried at once with allowForeground, attended or not", async () => {
     for (const attended of [false, true]) {
       const w = world({ policy: "bypass", attended });
@@ -474,6 +531,24 @@ describe("ComputerV2: screenshots, points and the vision gate", () => {
     expect(w.fake.calls("screen.screenshot")).toHaveLength(1);
     expect(w.fake.calls("target.screenshot")).toHaveLength(1);
     expect(r.content.filter((c) => c.type === "image")).toHaveLength(2);
+  }, 30_000);
+
+  macOnly("find() says when the page changed since the last state()", async () => {
+    const w = world();
+    const note = "the page changed since your last state() (page 2 now; that state was page 1) — refs from before it are gone";
+    w.fake.handlers["target.find"] = () => ({ elements: [{ ref: 31, role: "link", name: "Next" }], page: 2, note });
+    const r = await w.run("const notes = await apps.open('Notes')\nconst found = await notes.find('Next', { emit: false })\nprint(found.length)");
+    expect(r.isError).toBe(false);
+    expect(text(r)).toContain(note);
+  }, 30_000);
+
+  macOnly("a display shot that shows Winter's own window says where it is: a picture of an app inside it is the mirror", async () => {
+    const w = world();
+    const note = "Winter's own window is in this picture at [200, 100, 800, 600] (image pixels): an app shown inside it is Winter's live mirror of that app, not the app itself — act on the app through its handle, never by points inside Winter's window";
+    w.fake.handlers["screen.screenshot"] = () => ({ imageBase64: Buffer.from("jpeg").toString("base64"), mime: "image/jpeg", width: 2000, height: 1000, shotId: "s1", detail: note });
+    const r = await w.run("await screen.screenshot()");
+    expect(r.isError).toBe(false);
+    expect(text(r)).toContain(note);
   }, 30_000);
 
   macOnly("a screenshot says its pixel coordinate frame and the window's point size", async () => {
@@ -778,7 +853,13 @@ describe("ComputerV2: the record it leaves", () => {
 
 describe("ComputerV2: where keyboard input went", () => {
   test("a keyboard act names the element first, then the helper's detail", () => {
-    expect(actLine("type", { kind: "type", text: "hi" }, { rung: 1, input: '[14] text area "Comment"' })).toBe('typed into [14] text area "Comment"');
+    expect(actLine("type", { kind: "type", text: "hi" }, { rung: 1, input: '[14] text area "Comment"' })).toBe('sent 2 characters to [14] text area "Comment"');
+    expect(actLine("type", { kind: "type", text: "Decision — Models 😀" }, { rung: 2, input: "[9181] text field", detail: "received: partly (the field holds the first 9 of 19 characters; the rest differs or is missing) — check state() before typing again" }))
+      .toBe("sent 19 characters to [9181] text field; received: partly (the field holds the first 9 of 19 characters; the rest differs or is missing) — check state() before typing again");
+    expect(actLine("type", { kind: "type", text: "x" }, { rung: 1, input: "[3] text field", detail: "received: verified (the field holds it)" }))
+      .toBe("sent 1 character to [3] text field; received: verified (the field holds it)");
+    expect(actLine("type", { kind: "type", text: "a\nb" }, { rung: 1, input: "[3] text area", detail: "as a paste (several lines go as a paste into a field that reads them back); the field shows the pasted text" }))
+      .toBe("sent 3 characters to [3] text area; as a paste (several lines go as a paste into a field that reads them back); the field shows the pasted text");
     expect(actLine("paste", { kind: "paste", text: "x" }, { rung: 1, input: '[3] text area "Doc"', detail: "pasted, unconfirmed: check the state" }))
       .toBe('pasted into [3] text area "Doc" — pasted, unconfirmed: check the state');
     expect(actLine("key", { kind: "key", combo: "cmd+a" }, { rung: 2, input: "[9] text field" })).toBe("pressed cmd+a in [9] text field");
@@ -796,12 +877,12 @@ describe("ComputerV2: where keyboard input went", () => {
 
   macOnly("the line reaches the script's result, inside the fence", async () => {
     const w = world();
-    w.fake.handlers["target.act"] = () => ({ rung: 1, input: '[14] text area "Comment"', detail: "typed 5 characters; Notes doesn't expose this editor's text to accessibility, so it can't be read back here" });
+    w.fake.handlers["target.act"] = () => ({ rung: 1, input: '[14] text area "Comment"', detail: "received: unverifiable — Notes doesn't expose this editor's text to accessibility, so it can't be read back here" });
     const r = await w.run("const notes = await apps.open('Notes')\nawait notes.type('hello', { into: 14 })");
     expect(r.isError).toBe(false);
     const out = text(r);
-    expect(out).toContain('typed into [14] text area "Comment" — typed 5 characters; Notes doesn\'t expose this editor\'s text');
-    expect(out.indexOf("typed into")).toBeGreaterThan(out.indexOf("<screen-data"));
+    expect(out).toContain('sent 5 characters to [14] text area "Comment"; received: unverifiable — Notes doesn\'t expose this editor\'s text');
+    expect(out.indexOf("sent 5 characters")).toBeGreaterThan(out.indexOf("<screen-data"));
   }, 30_000);
 });
 
@@ -857,5 +938,40 @@ describe("ComputerV2: hover", () => {
     const r = await w.run("const notes = await apps.open('Notes')\nawait notes.hover(14)");
     expect(r.isError).toBe(false);
     expect(w.fake.calls("target.act")[0]).toMatchObject({ action: { kind: "hover", ref: 14 }, access: "click" });
+  }, 30_000);
+});
+
+describe("ComputerV2: a timeout after the deadline was extended", () => {
+  test("says the effective deadline, and from what and why it was extended", () => {
+    expect(timeoutMessage(30_000, 30_000, [])).toBe("the script timed out after 30000 ms");
+    expect(timeoutMessage(30_000, 72_000, [{ primitive: "type", chars: 3000 }]))
+      .toBe("the script timed out after 72 s; extended from 30 s for typing 3,000 characters");
+    expect(timeoutMessage(30_000, 90_000, [{ primitive: "type", chars: 1200 }, { primitive: "paste", chars: 1800 }]))
+      .toBe("the script timed out after 90 s; extended from 30 s for typing and pasting 3,000 characters in 2 calls");
+  });
+
+  test("says how far the script got and what to do", () => {
+    expect(timeoutMessage(30_000, 30_000, [], { calls: 41, last: "type() in Safari" }))
+      .toBe("the script timed out after 30000 ms — 41 calls had run, the last type() in Safari; for longer work pass timeoutMs (e.g. 60000, at most 300000), split it across calls, or have a loop check timeLeft()");
+    expect(timeoutMessage(30_000, 72_000, [{ primitive: "type", chars: 3000 }], { calls: 1 }))
+      .toBe("the script timed out after 72 s; extended from 30 s for typing 3,000 characters — 1 call had run; for longer work pass timeoutMs (e.g. 102000, at most 300000), split it across calls, or have a loop check timeLeft()");
+  });
+
+  macOnly("timeLeft() is the run's time left; a timed-out loop says how far it got", async () => {
+    const w = world();
+    const r = await w.run("const left = await timeLeft()\nprint(typeof left, left > 0 && left <= 5000)", { timeoutMs: 5_000 });
+    expect(text(r)).toContain("number true");
+    const looped = await w.run("const notes = await apps.open('Notes')\nwhile (true) { await notes.state({ emit: false }); await sleep(50) }", { timeoutMs: 1_000 });
+    expect(looped.isError).toBe(true);
+    expect(text(looped)).toMatch(/timed out after 1000 ms — \d+ calls had run, the last (state|apps\.open)\(\)( in Notes)?; for longer work pass timeoutMs/);
+  }, 30_000);
+
+  macOnly("a run cancelled at its extended deadline says so", async () => {
+    const w = world();
+    w.fake.handlers["target.act"] = (params) => (params.action as { kind: string }).kind === "paste" ? new Promise(() => {}) : { rung: 1 };
+    const r = await w.run(`const notes = await apps.open('Notes')\nawait notes.paste(${JSON.stringify("Lorem ipsum.\n".repeat(250))})`, { timeoutMs: 1_000 });
+    expect(r.isError).toBe(true);
+    expect(text(r)).toMatch(/timed out after \d+ s; extended from 1 s for pasting 3,250 characters/);
+    expect(text(r)).not.toContain("timed out after 1000 ms");
   }, 30_000);
 });

@@ -91,6 +91,18 @@ final class CUTarget: @unchecked Sendable {
     /// The page (web area URL, window title) read after the last act, and when: the next act's "before".
     /// Pid-queue only.
     var pageAfterLastAct: (atMs: Double, page: CUCore.PageSignature?)?
+    /// The page numbering (`CUCore.pageNumber`): the page last numbered and its number. Pid-queue only.
+    private var numberedPage: (sig: CUCore.PageSignature, number: Int)?
+    func numberPage(isNew: (CUCore.PageSignature?) -> Bool, sig: CUCore.PageSignature) -> Int {
+        if isNew(numberedPage?.sig) { numberedPage = (sig, (numberedPage?.number ?? 0) + 1) }
+        return numberedPage!.number
+    }
+    /// The page number the last whole-window state() showed. Pid-queue only.
+    var pageNumberAtState: Int?
+
+    /// The page when the last whole-window state was read: a `within` ref gone since then is "the page changed"
+    /// only when this differs. Pid-queue only.
+    var pageAtSnapshot: CUCore.PageSignature?
     /// The bound window's web area as last found, the window title then, and how long a window found to hold none
     /// is not walked again. Pid-queue only.
     var webArea: AXUIElement?
@@ -107,11 +119,13 @@ final class CUTarget: @unchecked Sendable {
 
     /// The last off-screen image of the window (a digest) and when: a later identical one, with input sent in
     /// between, is called stale. Returns the one before this.
-    private var _lastOffScreenShot: (digest: Int, atMs: Double)?
-    func noteOffScreenShot(digest: Int, at ms: Double) -> (digest: Int, atMs: Double)? {
+    private var _lastOffScreenShot: (digest: Int, atMs: Double, changedAtMs: Double)?
+    func noteOffScreenShot(digest: Int, at ms: Double) -> (digest: Int, atMs: Double, changedAtMs: Double)? {
         lock.lock(); defer { lock.unlock() }
         let before = _lastOffScreenShot
-        _lastOffScreenShot = (digest, ms)
+        // When the picture last changed: kept while it stays the same.
+        let changedAt = before.map { $0.digest == digest ? $0.changedAtMs : ms } ?? ms
+        _lastOffScreenShot = (digest, ms, changedAt)
         return before
     }
 

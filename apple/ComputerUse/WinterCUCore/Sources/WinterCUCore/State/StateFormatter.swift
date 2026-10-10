@@ -22,21 +22,26 @@ public struct CUStateHeader: Sendable, Equatable {
     /// Where typed text goes in the focused element — "caret 12/40" or `selected 3–9 ("hello")` — when its text
     /// can be read; never for a secure field (`CUStateFormatter.caretNote`).
     public var caret: String?
-    /// The app reports no focused element at all (a canvas editor, some Electron views): said, so the model
-    /// does not type into the unknown.
-    public var focusUnknown: Bool
     /// What the focus is when it is not an element of the tree shown (a web page's hidden input, another window).
     public var focusText: String?
+    /// The page this state is of (its number in this window: it goes up when the page changes) and the state's own
+    /// number — refs from an earlier page are gone. Nil when the window shows no web page / for a diff base.
+    public var page: Int?
+    public var stateNumber: Int?
+    /// The read stopped at its budget (nodes or time): at least this many elements were not read.
+    public var unread: Int?
 
     public init(appName: String, windowTitle: String?, focusedRef: Int?, settle: CUSettleNote?,
-                caret: String? = nil, focusUnknown: Bool = false, focusText: String? = nil) {
+                caret: String? = nil, focusText: String? = nil, page: Int? = nil, stateNumber: Int? = nil, unread: Int? = nil) {
         self.appName = appName
         self.windowTitle = windowTitle
         self.focusedRef = focusedRef
         self.settle = settle
         self.caret = caret
-        self.focusUnknown = focusUnknown
         self.focusText = focusText
+        self.page = page
+        self.stateNumber = stateNumber
+        self.unread = unread
     }
 }
 
@@ -69,10 +74,14 @@ public struct CUStateFormatter: Sendable {
             if let c = h.caret { parts.append(c) }
         } else if let text = h.focusText {
             parts.append(text)
-        } else if h.focusUnknown {
-            parts.append("focus unknown — click the field first, or pass { into }")
         }
+        // No focus the app reports: nothing said here — a keyboard act that needs one says so (`focus_unknown`).
         if let s = h.settle { parts.append(s.text) }
+        if let p = h.page { parts.append("page \(p)") }
+        if let n = h.stateNumber { parts.append("state \(n)") }
+        if let u = h.unread, u > 0 {
+            parts.append("read cut short: at least \(u.formatted(.number.grouping(.automatic).locale(Locale(identifier: "en_US")))) elements not read (the \"more\" markers show where)")
+        }
         return parts.isEmpty ? h.appName : "\(h.appName) — " + parts.joined(separator: " · ")
     }
 
@@ -189,7 +198,13 @@ public struct CUStateFormatter: Sendable {
             if let p = items[i].parent, !items[p].outOfView || focusPath.contains(p) { elidable.insert(i) }
         }
 
-        var collapsed = Set<Int>()
+        // An element that says it is collapsed (a disclosure row, a closed outline item) keeps what it holds
+        // folded from the start — reachable with `within` (where it is the root, and shown open) — unless the
+        // focus is inside it.
+        var collapsed = Set<Int>(items.indices.filter {
+            items[$0].parent != nil && items[$0].node.states.contains(.collapsed) && !items[$0].node.children.isEmpty
+                && !focusPath.contains($0)
+        })
         var eliding = false
         // hidden[i]: some ancestor of i is collapsed or i is folded out of view. Parents precede children, so
         // one forward pass works. `shown[i]`: i's descendants still shown.

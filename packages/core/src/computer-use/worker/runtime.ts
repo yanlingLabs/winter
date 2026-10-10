@@ -134,6 +134,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     action(ref: unknown, name: unknown) { return call("action", tid(this), { ref, name }).then(nothing); }
     menu(path: unknown) { return call("menu", tid(this), { path }).then(nothing); }
     hover(t: unknown, o?: unknown) { return call("hover", tid(this), { target: t, ...opts(o) }).then(nothing); }
+    requestForeground(reason: unknown) { return call("requestForeground", tid(this), { reason }); }
     windows() { return call("windows", tid(this), {}); }
     useWindow(w: unknown) { return call("useWindow", tid(this), { window: w }).then(nothing); }
     waitFor(cond: unknown, o?: unknown) { return call("waitFor", tid(this), { cond, ...opts(o) }); }
@@ -211,7 +212,9 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
 
   // The API, by the names a script sees. Passed as PARAMETERS of the script function (so a script cannot
   // reassign them for the next call — though a top-level declaration of the same name shadows one, by choice).
-  const API: Record<string, unknown> = { apps, screen, print, show, sleep, App, Image, AutomationError, ...errorClasses };
+  /** The ms this run has left (its deadline, as extended, minus what has run; a card's wait does not count). */
+  const timeLeft = (): Promise<unknown> => call("timeLeft", undefined, {});
+  const API: Record<string, unknown> = { apps, screen, print, show, sleep, timeLeft, App, Image, AutomationError, ...errorClasses };
   const API_NAMES = Object.keys(API);
   const PARAMS = ["__scope", "__store", ...API_NAMES, ...SHADOWED];
 
