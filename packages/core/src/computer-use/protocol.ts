@@ -169,7 +169,9 @@ export type ActAction =
   | { kind: "drag"; from: { ref?: number; point?: [number, number] }; to: { ref?: number; point?: [number, number] }; shotId?: string }
   | { kind: "select"; ref: number; text: string; before?: string; after?: string; caret?: "start" | "end" }
   | { kind: "action"; ref: number; name: string }
-  | { kind: "menu"; path: string[] };
+  | { kind: "menu"; path: string[] }
+  /** helper 1.5.0: the pointer rests on the element or point (window-targeted, never the user's cursor). */
+  | { kind: "hover"; ref?: number; point?: [number, number]; shotId?: string; ms?: number };
 
 /** Why a target is gone — `target_lost`'s `data.reason` and the `targetLost` notification's `reason`, as the helper
  *  observed it (apple/ComputerUse/PROTOCOL.md). */

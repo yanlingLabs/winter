@@ -160,6 +160,7 @@ extension CUCore {
         case .select: return "select"
         case .action: return "action"
         case .menu: return "menu"
+        case .hover: return "hover"
         }
     }
 
@@ -195,6 +196,7 @@ extension CUCore {
         let pixel: (point: [Double]?, shot: String?)? = {
             switch a {
             case .click(let x): return (x.point, x.shotId)
+            case .hover(let x): return (x.point, x.shotId)
             case .scroll(let x): return (x.point, x.shotId)
             case .drag(let x): return (x.from.point, x.shotId)
             default: return nil
@@ -210,7 +212,7 @@ extension CUCore {
     static func checkAccess(_ action: CUAction, access: CUAccess, appName: String) throws {
         guard access == .click else { return }
         switch action {
-        case .click, .scroll, .action: return
+        case .click, .scroll, .action, .hover: return
         default:
             throw CUError.notAllowed("click_only",
                                      "\(appName) is set to click only in Settings — it allows clicks, scrolls and actions")
@@ -229,6 +231,7 @@ extension CUCore {
         case .select(let x): return x.ref
         case .action(let x): return x.ref
         case .menu: return nil
+        case .hover(let x): return x.ref
         }
     }
 
@@ -270,7 +273,44 @@ extension CUCore {
         case .select(let a): return try select(a, p, t, token)
         case .action(let a): return try axAction(a, p, t, token)
         case .menu(let a): return try menu(a, p, t, token)
+        case .hover(let a): return try hover(a, p, t, token)
         }
+    }
+
+    /// The pointer moved onto an element or a point and left there (`ms`, default 600, at most 5 s): the hover
+    /// path, window-targeted — the user's cursor never moves — so hover-only UI (menus, tooltips, buttons that
+    /// appear or arm on hover) shows; state() then shows what appeared.
+    private func hover(_ a: CUHoverAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+        let ms = Double(min(max(a.ms ?? 600, 0), 5_000))
+        let pt: CGPoint
+        var label: String?
+        if let ref = a.ref {
+            guard a.point == nil else { throw CUError.invalidParams("hover takes a ref or a point, not both") }
+            let e = try element(ref, in: t)
+            let info = ElementInfo(e, ax)
+            guard info.center != nil, let c = clickablePoint(e, info, t) else {
+                throw CUError.unsupported("[\(ref)] has no position in the window to hover — scroll to it first")
+            }
+            pt = c
+            label = Self.elementLabel(ref, info)
+        } else {
+            guard let px = try cuPoint(a.point) else { throw CUError.invalidParams("hover needs a ref or a point") }
+            pt = try screenPoint(for: t, shotId: a.shotId, pixel: px)
+        }
+        cursor(t, "caption", text: "Hovering")
+        try token.check()
+        let rested = "the pointer rested \(label.map { "on \($0)" } ?? "there") for \(Int(ms)) ms (window-targeted — the user's cursor did not move); state() shows what appeared"
+        if let subject = offScreenSubject(t) {
+            return try eventsElsewhere(p, t, token, cursor: nil, what: "the hover", subject: subject) { synth, route in
+                try synth.hover(pid: t.pid, windowFor: { _ in t.windowID }, at: pt, route: route, dwellMs: ms)
+            }.noting(rested)
+        }
+        let d = try CUInputLadder.decideEvents(context(p, t, pointer: true))
+        let synth = self.synth(p)
+        let windowFor = self.windowFor(t)
+        return try runEvents(p, t, d, focus: false, token) { route, check in
+            try synth.hover(pid: t.pid, windowFor: windowFor, at: pt, route: route, dwellMs: ms, check: check)
+        }.noting(rested)
     }
 
     /// An AX action or write that timed out may still run later: never follow it with events (that would do

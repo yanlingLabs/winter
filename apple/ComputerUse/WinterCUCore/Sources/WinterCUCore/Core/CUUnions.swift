@@ -119,6 +119,17 @@ public struct CUClickAction: Codable, Sendable, Equatable {
         self.button = button; self.count = count; self.modifiers = modifiers
     }
 }
+/// The pointer moved onto an element (or a point in the latest screenshot) and left there `ms` (default 600) —
+/// window-targeted, never the user's cursor — so hover-only UI appears.
+public struct CUHoverAction: Codable, Sendable, Equatable {
+    public var ref: Int?
+    public var point: [Double]?
+    public var shotId: String?
+    public var ms: Int?
+    public init(ref: Int? = nil, point: [Double]? = nil, shotId: String? = nil, ms: Int? = nil) {
+        self.ref = ref; self.point = point; self.shotId = shotId; self.ms = ms
+    }
+}
 public struct CUSetValueAction: Codable, Sendable, Equatable {
     public var ref: Int
     public var value: String
@@ -201,6 +212,7 @@ public enum CUAction: Codable, Sendable, Equatable {
     case select(CUSelectAction)
     case action(CUAXAction)
     case menu(CUMenuAction)
+    case hover(CUHoverAction)
 
     private enum KindKey: String, CodingKey { case kind }
 
@@ -216,6 +228,7 @@ public enum CUAction: Codable, Sendable, Equatable {
         case .select: return "select"
         case .action: return "action"
         case .menu: return "menu"
+        case .hover: return "hover"
         }
     }
 
@@ -233,6 +246,7 @@ public enum CUAction: Codable, Sendable, Equatable {
         case "select": self = .select(try CUSelectAction(from: decoder))
         case "action": self = .action(try CUAXAction(from: decoder))
         case "menu": self = .menu(try CUMenuAction(from: decoder))
+        case "hover": self = .hover(try CUHoverAction(from: decoder))
         default:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: k, debugDescription: "unknown action kind \(kind)")
         }
@@ -252,6 +266,7 @@ public enum CUAction: Codable, Sendable, Equatable {
         case .select(let a): try a.encode(to: encoder)
         case .action(let a): try a.encode(to: encoder)
         case .menu(let a): try a.encode(to: encoder)
+        case .hover(let a): try a.encode(to: encoder)
         }
     }
 }

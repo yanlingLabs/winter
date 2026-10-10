@@ -41,13 +41,14 @@ final class WindowTargetedEventTests: XCTestCase {
         let poster = RecordingPoster()
         try synth(poster).click(pid: 9, windowFor: { _ in 77 }, at: CGPoint(x: 130, y: 155), button: .left, count: 1,
                                 flags: [], route: .publicPid)
-        XCTAssertEqual(poster.entries.map(\.type), [.leftMouseDown, .leftMouseUp])
-        XCTAssertTrue(poster.entries.allSatisfy { $0.window == 77 && $0.window2 == 77 }, "fields 91 and 92")
+        XCTAssertEqual(poster.entries.map(\.type), [.mouseMoved, .mouseMoved, .mouseMoved, .leftMouseDown, .leftMouseUp])
+        XCTAssertTrue(poster.entries.allSatisfy { $0.window == 77 && $0.window2 == 77 }, "fields 91 and 92, the moves included")
         XCTAssertTrue(poster.entries.allSatisfy { $0.subtype == 3 }, "field 7 = 3, the synthesized-mouse subtype (as cua-driver stamps it)")
-        XCTAssertTrue(poster.entries.allSatisfy { $0.location == CGPoint(x: 130, y: 155) }, "the event's own location stays global")
-        XCTAssertEqual(SPIRecord.locations, [CGPoint(x: 30, y: 35), CGPoint(x: 30, y: 35)], "window-local: point − origin")
-        XCTAssertEqual(SPIRecord.fields.map(\.field), [51, 51])
-        XCTAssertEqual(SPIRecord.fields.map(\.value), [77, 77])
+        XCTAssertTrue(poster.entries.suffix(2).allSatisfy { $0.location == CGPoint(x: 130, y: 155) }, "the event's own location stays global")
+        XCTAssertEqual(Array(SPIRecord.locations.suffix(3)), [CGPoint(x: 30, y: 35), CGPoint(x: 30, y: 35), CGPoint(x: 30, y: 35)],
+                       "window-local: point − origin (the path's last move, the down, the up)")
+        XCTAssertEqual(SPIRecord.fields.map(\.field), [51, 51, 51, 51, 51])
+        XCTAssertEqual(SPIRecord.fields.map(\.value), [77, 77, 77, 77, 77])
     }
 
     func testWheelAndDragAreAddressedTheSameWay() throws {
@@ -65,7 +66,8 @@ final class WindowTargetedEventTests: XCTestCase {
         let poster = RecordingPoster()
         try synth(poster).click(pid: 9, windowFor: { _ in 77 }, at: CGPoint(x: 130, y: 155), button: .right, count: 1,
                                 flags: [], route: .skyLight)
-        XCTAssertTrue(SPIRecord.locations.allSatisfy { $0 == CGPoint(x: 130, y: 155) }, "WindowServer derives the local point there")
+        XCTAssertEqual(SPIRecord.locations.last, CGPoint(x: 130, y: 155), "WindowServer derives the local point there")
+        XCTAssertTrue(SPIRecord.locations.allSatisfy { $0.x > 100 }, "screen points throughout (the path included), never window-local")
         SPIRecord.reset()
         try synth(poster, spi: false).click(pid: 9, windowFor: { _ in 77 }, at: CGPoint(x: 130, y: 155), button: .left, count: 1,
                                             flags: [], route: .publicPid)

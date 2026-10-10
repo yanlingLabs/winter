@@ -130,9 +130,51 @@ final class InputTests: XCTestCase {
         let used = try synth(r).click(pid: 9, windowFor: { _ in 77 }, at: CGPoint(x: 100, y: 200), button: .left, count: 2, flags: [],
                                   route: .publicPid)
         XCTAssertEqual(used, .publicPid)
-        XCTAssertEqual(r.entries.map(\.type), [.leftMouseDown, .leftMouseUp, .leftMouseDown, .leftMouseUp])
-        XCTAssertEqual(r.entries.map(\.clickState), [1, 1, 2, 2])
-        XCTAssertTrue(r.entries.allSatisfy { $0.location == CGPoint(x: 100, y: 200) && $0.targetPid == 9 && $0.window == 77 })
+        XCTAssertEqual(r.entries.map(\.type), [.mouseMoved, .mouseMoved, .mouseMoved, .leftMouseDown, .leftMouseUp, .leftMouseDown, .leftMouseUp],
+                       "the hover path, then the clicks")
+        let clicks = r.entries.filter { $0.type != .mouseMoved }
+        XCTAssertEqual(clicks.map(\.clickState), [1, 1, 2, 2])
+        XCTAssertTrue(clicks.allSatisfy { $0.location == CGPoint(x: 100, y: 200) })
+        XCTAssertTrue(r.entries.allSatisfy { $0.targetPid == 9 && $0.window == 77 && $0.route == .publicPid })
+    }
+
+    func testEveryWindowTargetedClickArrivesByAHoverPathNeverMovingTheRealCursor() throws {
+        let r = Recorder()
+        var s = synth(r)
+        var sleeps: [Double] = []
+        s.sleep = { sleeps.append($0) }
+        s.pointerMemory = CUPointerMemory()
+        try s.click(pid: 9, windowFor: { _ in 77 }, at: CGPoint(x: 100, y: 200), button: .left, count: 1, flags: [], route: .publicPid)
+        // From just outside the point (no earlier position in the window), three moves, 10 ms apart, a 40 ms dwell.
+        XCTAssertEqual(r.entries.first?.location.x ?? 0, 100 - 24 + 8, accuracy: 0.001, "a third of the way from just up-left of it")
+        XCTAssertEqual(r.entries.first?.location.y ?? 0, 200 - 16 + 16.0 / 3, accuracy: 0.001)
+        XCTAssertEqual(r.entries[2].location, CGPoint(x: 100, y: 200), "the path ends at the point")
+        XCTAssertEqual(Array(sleeps.prefix(3)), [10, 10, 40])
+        // The next click in the same window starts where the last one left the pointer.
+        try s.click(pid: 9, windowFor: { _ in 77 }, at: CGPoint(x: 160, y: 200), button: .left, count: 1, flags: [], route: .publicPid)
+        let second = r.entries.dropFirst(5).prefix(3).map(\.location.x)
+        XCTAssertEqual(second, [120, 140, 160], "from (100, 200) to (160, 200)")
+        // Pid-posted only: never the HID tap (which moves the user's cursor).
+        XCTAssertTrue(r.entries.allSatisfy { $0.route == .publicPid })
+        // Rung 4 (the real pointer, consented) takes no synthetic path.
+        let fg = Recorder()
+        try synth(fg).click(pid: 9, windowFor: { _ in 77 }, at: CGPoint(x: 1, y: 1), button: .left, count: 1, flags: [], route: .hid)
+        XCTAssertFalse(fg.entries.contains { $0.type == .mouseMoved })
+    }
+
+    func testHoverMovesThereAndDwells() throws {
+        let r = Recorder()
+        var s = synth(r)
+        var sleeps: [Double] = []
+        s.sleep = { sleeps.append($0) }
+        let memory = CUPointerMemory()
+        s.pointerMemory = memory
+        try s.hover(pid: 9, windowFor: { _ in 77 }, at: CGPoint(x: 50, y: 60), route: .publicPid, dwellMs: 600)
+        XCTAssertEqual(r.entries.map(\.type), [.mouseMoved, .mouseMoved, .mouseMoved])
+        XCTAssertEqual(r.entries.last?.location, CGPoint(x: 50, y: 60))
+        XCTAssertEqual(sleeps, [10, 10, 600], "the dwell after the last move")
+        XCTAssertEqual(memory.point(in: 77), CGPoint(x: 50, y: 60))
+        XCTAssertTrue(r.entries.allSatisfy { $0.route == .publicPid && $0.window == 77 })
     }
 
     func testSkyLightClickPrimesChromium() throws {
@@ -140,9 +182,9 @@ final class InputTests: XCTestCase {
         let used = try synth(r).click(pid: 9, windowFor: { _ in 77 }, at: CGPoint(x: 100, y: 200), button: .left, count: 1, flags: [],
                                   route: .skyLight)
         XCTAssertEqual(used, .skyLight)
-        XCTAssertEqual(r.entries.map(\.type), [.mouseMoved, .leftMouseDown, .leftMouseUp, .leftMouseDown, .leftMouseUp])
-        XCTAssertEqual(r.entries[1].location, CGPoint(x: -1, y: -1), "the primer click is off screen")
-        XCTAssertEqual(r.entries[3].location, CGPoint(x: 100, y: 200))
+        XCTAssertEqual(r.entries.map(\.type), [.mouseMoved, .mouseMoved, .mouseMoved, .leftMouseDown, .leftMouseUp, .leftMouseDown, .leftMouseUp])
+        XCTAssertEqual(r.entries[3].location, CGPoint(x: -1, y: -1), "the primer click is off screen, after the hover path")
+        XCTAssertEqual(r.entries[5].location, CGPoint(x: 100, y: 200))
     }
 
     func testSkyLightDegradesWithoutThePrimer() throws {
@@ -157,7 +199,7 @@ final class InputTests: XCTestCase {
         let r = Recorder()
         try synth(r).click(pid: 1, windowFor: { _ in 0 }, at: .zero, button: .right, count: 1, flags: [.maskCommand], route: .publicPid)
         try synth(r).click(pid: 1, windowFor: { _ in 0 }, at: .zero, button: .middle, count: 1, flags: [], route: .publicPid)
-        XCTAssertEqual(r.entries.map(\.type), [.rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp])
+        XCTAssertEqual(r.entries.filter { $0.type != .mouseMoved }.map(\.type), [.rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp])
     }
 
     func testDragAndScrollSequences() throws {

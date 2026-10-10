@@ -50,6 +50,15 @@ struct CULiveEventPoster: CUEventPoster {
     }
 }
 
+/// Where the synthetic pointer last was in each window (window-targeted events only — never the real cursor): the
+/// start of the next hover path there.
+final class CUPointerMemory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var points: [UInt32: CGPoint] = [:]
+    func point(in window: UInt32) -> CGPoint? { lock.withLock { points[window] } }
+    func set(_ p: CGPoint, in window: UInt32) { lock.withLock { points[window] = p } }
+}
+
 /// Builds and posts the event sequences for pointer and keyboard input. Runs on the target's pid queue;
 /// the short sleeps between events are what real input looks like to the receiving app.
 struct CUEventSynth {
@@ -61,6 +70,16 @@ struct CUEventSynth {
     var windowOrigin: (UInt32) -> CGPoint? = { _ in nil }
     /// Whether the private setters (field 51, the window location) may be used: the private event path setting.
     var windowSPI = true
+    /// The synthetic pointer's last place per window (the hover path's start).
+    var pointerMemory: CUPointerMemory?
+
+    /// The hover path: this many window-targeted moves, this far apart, then a dwell before the press.
+    static let hoverMoves = 3
+    static let hoverMoveGapMs: Double = 10
+    static let hoverDwellMs: Double = 40
+    /// Where a path starts with no earlier synthetic position in the window: just up-left of the point, outside a
+    /// small control, so it is ENTERED (mouseover / mouseenter), as a real pointer would.
+    static let hoverEntryOffset = CGPoint(x: -24, y: -16)
 
     /// Raw `CGEventField` numbers the public enum does not name.
     static let windowNumberField: UInt32 = 51
@@ -120,10 +139,56 @@ struct CUEventSynth {
     /// the sequence there.
     typealias PointerCheck = (_ type: CGEventType, _ at: CGPoint) throws -> Void
 
-    /// A click at `point` (screen points). For SkyLight, a mouse move and an off-screen primer click come
-    /// first: Chromium only honours user-activation-gated clicks after a trusted gesture. Flags are always
-    /// set, empty included, so modifiers the user is holding never leak into the click. `windowFor` names the
-    /// window each event is routed to (the target pid's front-most window under that point).
+    /// The pointer's way to `point` in window `wid` on a window-targeted route: `hoverMoves` moves from where the
+    /// synthetic pointer last was in that window (else from just outside the point), `hoverMoveGapMs` apart, then
+    /// `dwellMs` — so the page sees the pointer arrive: mouseover / mouseenter, hover-armed widgets, menus that
+    /// open on hover, tooltips. Pid-posted (or SkyLight-posted) events only, stamped like the click: the user's
+    /// real cursor never moves (no HID tap, no warp). Not for `.hid` (rung 4 moves the real pointer itself).
+    @discardableResult
+    func hoverPath(pid: pid_t, windowID wid: UInt32, to point: CGPoint, route: CURoute, flags: CGEventFlags,
+                   clickGroup: Int64?, dwellMs: Double, check: PointerCheck) throws -> CURoute {
+        guard route != .hid else { return route }
+        let src = source(route)
+        let start = pointerMemory?.point(in: wid)
+            ?? CGPoint(x: point.x + Self.hoverEntryOffset.x, y: point.y + Self.hoverEntryOffset.y)
+        var used = route
+        for i in 1...Self.hoverMoves {
+            let f = Double(i) / Double(Self.hoverMoves)
+            let p = CGPoint(x: start.x + (point.x - start.x) * f, y: start.y + (point.y - start.y) * f)
+            guard let move = CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)
+            else { continue }
+            try check(.mouseMoved, p)
+            move.flags = flags
+            stampRouting(move, pid: pid, windowID: wid, location: p, route: route, clickGroup: clickGroup)
+            used = poster.post(move, pid: pid, route: route, authenticate: false)
+            sleep(i < Self.hoverMoves ? Self.hoverMoveGapMs : dwellMs)
+        }
+        pointerMemory?.set(point, in: wid)
+        return used
+    }
+
+    /// The pointer moved to `point` and left there `dwellMs` (default: long enough for hover-only UI).
+    @discardableResult
+    func hover(pid: pid_t, windowFor: (CGPoint) -> UInt32, at point: CGPoint, route: CURoute, dwellMs: Double,
+               check: PointerCheck = { _, _ in }) throws -> CURoute {
+        guard route == .hid else {
+            return try hoverPath(pid: pid, windowID: windowFor(point), to: point, route: route, flags: [], clickGroup: nil,
+                                 dwellMs: dwellMs, check: check)
+        }
+        // Rung 4 (the user agreed to the foreground): the real pointer itself moves there.
+        guard let move = CGEvent(mouseEventSource: source(route), mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)
+        else { return route }
+        try check(.mouseMoved, point)
+        let used = poster.post(move, pid: pid, route: route, authenticate: false)
+        sleep(dwellMs)
+        return used
+    }
+
+    /// A click at `point` (screen points). On a window-targeted route the hover path comes first (the page sees
+    /// the pointer arrive); for SkyLight an off-screen primer click follows it: Chromium only honours
+    /// user-activation-gated clicks after a trusted gesture. Flags are always set, empty included, so modifiers
+    /// the user is holding never leak into the click. `windowFor` names the window each event is routed to (the
+    /// target pid's front-most window under that point).
     @discardableResult
     func click(pid: pid_t, windowFor: (CGPoint) -> UInt32, at point: CGPoint, button: CUMouseButton, count: Int,
                flags: CGEventFlags, route: CURoute, check: PointerCheck = { _, _ in }) throws -> CURoute {
@@ -132,14 +197,11 @@ struct CUEventSynth {
         let group = Int64(DispatchTime.now().uptimeNanoseconds & 0x7fff_ffff)
         let wid = windowFor(point)
         var used = route
+        if route != .hid {
+            used = try hoverPath(pid: pid, windowID: wid, to: point, route: route, flags: flags, clickGroup: group,
+                                 dwellMs: Self.hoverDwellMs, check: check)
+        }
         if route == .skyLight {
-            if let move = CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) {
-                try check(.mouseMoved, point)
-                move.flags = flags
-                stampRouting(move, pid: pid, windowID: wid, location: point, route: route, clickGroup: group)
-                used = poster.post(move, pid: pid, route: route, authenticate: false)
-                sleep(15)
-            }
             if button == .left, used == .skyLight {
                 let off = CGPoint(x: -1, y: -1)
                 for type in [CGEventType.leftMouseDown, .leftMouseUp] {
@@ -190,6 +252,7 @@ struct CUEventSynth {
             used = poster.post(e, pid: pid, route: route, authenticate: false)
             sleep(16)
         }
+        if route != .hid { pointerMemory?.set(point, in: wid) }
         return used
     }
 
@@ -231,6 +294,7 @@ struct CUEventSynth {
             throw error
         }
         send(.leftMouseUp, to, wait: 0)
+        if route != .hid { pointerMemory?.set(to, in: windowFor(to)) }
         return used
     }
 

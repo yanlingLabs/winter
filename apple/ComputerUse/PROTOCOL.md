@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.4.0` (the contents of [`VERSION`](VERSION))
+Helper version: `1.5.0` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -244,6 +244,7 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 | `select` | `ref`, `text`, `before?`, `after?`, `caret?: "start"\|"end"` |
 | `action` | `ref`, `name` (an accessibility action) |
 | `menu` | `path: [string]` |
+| `hover` | `ref` or `point` (+ `shotId`), `ms?` (0–5000, default 600): the pointer rests there — window-targeted moves, never the user's cursor (with `click_only` access too) |
 
 A `point` is in image pixels of `shotId` (a screenshot of this target or of the screen), or of the target's
 latest screenshot when `shotId` is absent. An unknown `kind` is `invalid_params`.
@@ -498,3 +499,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.2.0 | A type or paste stopped while typing keys carries `data.typed` and `data.total` (on `cancelled`, and on any other error it hit mid-typing, whose message also says it); `target.act` results for `type`, `paste`, `key` and `setValue` carry `input` / `inputUnknown` (§4.5) — additive: a client that ignores them is unaffected. |
 | 1 | 1.3.0 | `target.act` results carry `focusNow` / `focusLost` (§4.5); `refused` gains the reasons `focus_not_editable` and `wrong_field_shape` for `type`/`paste` with no `into` — additive. |
 | 1 | 1.4.0 | `target.act` results carry `pageNow` (§4.5); `target.snapshot` with a `within` ref that is gone answers the whole window, its text starting `[N] is gone (the page changed) — showing the whole window`, instead of `stale_ref` — additive. |
+| 1 | 1.5.0 | The `hover` action (§4.5); every window-targeted click now arrives by a short path of window-targeted moves (hover), never moving the user's cursor — additive (an older helper refuses `hover` as an unknown kind). |

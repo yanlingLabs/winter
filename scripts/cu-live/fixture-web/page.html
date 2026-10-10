@@ -42,6 +42,12 @@
 <div class="row">
   <button id="web-button" type="button">Web Button</button>
   <div id="closure-button" role="button" tabindex="0" aria-label="Closure Button" class="closure">Closure Button</div>
+</div>
+<div class="row">
+  <div id="hover-menu"><span id="hover-trigger" role="button" tabindex="0" aria-label="Hover Menu">Hover Menu</span>
+    <div id="hover-items" role="menu" hidden><div id="hover-item" role="menuitem" tabindex="0" aria-label="Hidden Item">Hidden Item</div></div>
+  </div>
+  <button id="armed-button" type="button" aria-label="Armed Button">Armed Button</button>
   <a id="jump" href="#section-20">Jump</a>
 </div>
 <div class="row">
@@ -98,6 +104,19 @@
     closureDown = false;
   });
 
+  // --- hover: a menu that opens on mouseenter, and a button that only acts once the pointer has entered it -----
+  $("hover-trigger").addEventListener("mouseenter", function () { $("hover-items").hidden = false; post({ type: "hover", id: "hover-menu" }); });
+  // Choosing the item closes the menu, as a menu does (the change a press is verified by).
+  $("hover-item").addEventListener("click", function () { $("hover-items").hidden = true; post({ type: "hoveritem" }); });
+  var armed = false;
+  $("armed-button").addEventListener("mouseenter", function () { armed = true; });
+  $("armed-button").addEventListener("mouseleave", function () { armed = false; });
+  $("armed-button").addEventListener("click", function () {
+    if (!armed) return;
+    $("armed-button").setAttribute("aria-label", "Armed Button (done)");
+    post({ type: "armed" });
+  });
+
   // --- clicks and links --------------------------------------------------------------------------------------
   document.addEventListener("click", function (e) {
     var el = e.target.closest ? e.target.closest("button, a") : null;
@@ -150,6 +169,9 @@
     $("search").value = "";
     $("comment").value = "";
     $("doc").textContent = "";
+    $("hover-items").hidden = true;
+    armed = false;
+    $("armed-button").setAttribute("aria-label", "Armed Button");
     if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
     lastFocus = null;
     window.scrollTo(0, 0);

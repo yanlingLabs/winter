@@ -152,7 +152,7 @@ final class ActGateTests: XCTestCase {
         ax.performError = CUError.unsupported("no")
         let r = try await act(.click(CUClickAction(ref: ref(button))))
         XCTAssertEqual(r.rung, 2)
-        XCTAssertEqual(poster.entries.map(\.type), [.leftMouseDown, .leftMouseUp])
+        XCTAssertEqual(poster.entries.map(\.type), [.mouseMoved, .mouseMoved, .mouseMoved, .leftMouseDown, .leftMouseUp], "arriving by the hover path")
     }
 
     // MARK: cancel (I2)
