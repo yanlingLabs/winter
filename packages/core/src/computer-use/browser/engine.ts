@@ -592,7 +592,7 @@ export class BrowserEngine {
     const rows: Array<{ id: string; browser: string; url: string; title: string; active: boolean; yours: boolean }> = [];
     for (const b of backends) {
       try { rows.push(...await this.tabRows(scope, b)); } catch (err) {
-        if (args.browser !== undefined || !(err instanceof AutomationFailure) || err.kind !== "BrowserUnavailable") throw err;
+        if (args.browser !== undefined || !skippable(err)) throw err;
       }
       scope.live();
     }
@@ -630,7 +630,7 @@ export class BrowserEngine {
       for (const b of backends) {
         let rows;
         try { rows = await this.tabRows(scope, b); } catch (err) {
-          if (args.browser !== undefined || !(err instanceof AutomationFailure) || err.kind !== "BrowserUnavailable") throw err;
+          if (args.browser !== undefined || !skippable(err)) throw err;
           continue;
         }
         for (const r of rows) if (stripFragment(r.url) === want) hits.push({ id: r.id, url: r.url, backend: b });
@@ -1001,6 +1001,11 @@ function noteSiteOf(scope: TabRunScope, url: string): void {
     const host = new URL(url).hostname;
     if (host.length > 0) scope.noteSite(host);
   } catch { /* not a URL with a host */ }
+}
+
+/** With no `{ browser }` named, a browser that can't be reached or that the user does not allow is skipped. */
+function skippable(err: unknown): boolean {
+  return err instanceof AutomationFailure && (err.kind === "BrowserUnavailable" || err.kind === "NotAllowed");
 }
 
 function stripFragment(url: string): string {

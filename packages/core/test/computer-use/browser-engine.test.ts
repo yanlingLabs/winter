@@ -173,6 +173,17 @@ describe("browsers.list / open / tabs / tab", () => {
     expect(many.message).toContain("chrome:419");
   });
 
+  test("tabs with no browser named skips one the user set to Don't allow; naming it is NotAllowed", async () => {
+    const h = harness({ apps: { "com.google.Chrome": { access: "deny" } } });
+    h.chrome.addTab({ url: "https://u.example/", title: "U", nodes: [] }, { tabKey: "5" });
+    const r = h.run();
+    await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/" });
+    const rows = await h.engine.global(r.scope, "browsers.tabs", {}) as Array<{ id: string }>;
+    expect(rows.map((x) => x.id)).toEqual(["winter:w1"]);
+    const e = await failure(h.engine.global(r.scope, "browsers.tabs", { browser: "chrome" }));
+    expect((e as AutomationFailure).kind).toBe("NotAllowed");
+  });
+
   test("tab (winter): only this session's strip can be bound", async () => {
     const h = harness();
     h.winter.addTab({ url: "https://x.example/", title: "X", nodes: [] }, { tabKey: "foreign", sessionId: "s2" });
