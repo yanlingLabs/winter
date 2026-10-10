@@ -44,6 +44,8 @@ extension CUCore {
     /// for the next act that succeeds.
     func guardingUserView(_ p: TargetActParams, _ t: CUTarget, _ body: () throws -> ActOutcome) throws -> ActOutcome {
         let seq = t.beginAct()
+        // Held in front for this script (the user agreed): the app being in front is no view moved.
+        if holdsForeground(t) { t.consentedForeground = true }
         let before = userView()
         let route = { (o: ActOutcome?) in "\(Self.actionName(p.action)) (\(o.map { Self.routeName($0.rung) } ?? "failed"))" }
         let outcome: ActOutcome

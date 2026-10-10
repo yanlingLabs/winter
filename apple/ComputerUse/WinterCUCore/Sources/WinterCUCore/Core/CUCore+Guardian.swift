@@ -46,6 +46,7 @@ extension CUCore {
                 tailFrom = true
             }
         }
+        if !active { releaseHeldForeground(sessionId: sessionId) }
         if arm { _ = startGuardian(privatePath: true) }
         if tailFrom {
             let work = guardianTailSchedule(Self.guardianTail) { [weak self] in self?.endGuardIfIdle() }

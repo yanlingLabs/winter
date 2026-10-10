@@ -134,6 +134,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     action(ref: unknown, name: unknown) { return call("action", tid(this), { ref, name }).then(nothing); }
     menu(path: unknown) { return call("menu", tid(this), { path }).then(nothing); }
     hover(t: unknown, o?: unknown) { return call("hover", tid(this), { target: t, ...opts(o) }).then(nothing); }
+    requestForeground(reason: unknown) { return call("requestForeground", tid(this), { reason }); }
     windows() { return call("windows", tid(this), {}); }
     useWindow(w: unknown) { return call("useWindow", tid(this), { window: w }).then(nothing); }
     waitFor(cond: unknown, o?: unknown) { return call("waitFor", tid(this), { cond, ...opts(o) }); }

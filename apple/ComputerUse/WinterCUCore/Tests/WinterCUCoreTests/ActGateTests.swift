@@ -358,6 +358,34 @@ final class ActGateTests: XCTestCase {
         XCTAssertTrue(poster.entries.allSatisfy { $0.route == .hid && $0.location == point })
     }
 
+    func testAnAppHeldInFrontForTheScriptActsThereAndGivesTheFrontBackAtItsEnd() async throws {
+        world(bundle: "org.blenderfoundation.blender")
+        let s = shot()
+        sys.running = [pid, 1]
+        sys.stack = [sys.windows[77]!]
+        let held = try await core.targetForeground(TargetForegroundParams(targetId: "t1"))
+        XCTAssertTrue(held.front)
+        XCTAssertEqual(sys.activated, [pid], "brought forward once")
+        // An act that needs the foreground needs no second asking while it is held.
+        let r = try await act(.click(CUClickAction(point: [50, 60], shotId: s)))
+        XCTAssertEqual(r.rung, 4)
+        XCTAssertEqual(sys.frontmostPid(), pid, "still in front between acts")
+        // The script ends: the front goes back to the app that had it.
+        core.scriptActivity(sessionId: "s", active: false)
+        XCTAssertEqual(sys.frontmostPid(), 1)
+        // Not held any more: the next one needs consent again.
+        await expect("needs_foreground") { try await self.act(.click(CUClickAction(point: [50, 60], shotId: s))) }
+    }
+
+    func testAHeldAppTheUserLeftIsNotPulledBackAtTheEnd() async throws {
+        world(bundle: "org.blenderfoundation.blender")
+        _ = try await core.targetForeground(TargetForegroundParams(targetId: "t1"))
+        sys.running = [pid, 1, 4343]
+        sys.front = 4343  // the user switched to another app meanwhile
+        core.scriptActivity(sessionId: "s", active: false)
+        XCTAssertEqual(sys.frontmostPid(), 4343, "the user's own switch is left alone")
+    }
+
     func testAForegroundDragStopsAndReleasesWhenSomethingCoversThePath() async throws {
         world(bundle: "org.blenderfoundation.blender")
         let s = shot()

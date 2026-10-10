@@ -338,11 +338,19 @@ public final class CUCore: @unchecked Sendable {
         emit { $0.targetBound(sessionId: p.sessionId, pid: pid, windowID: chosen.id, appName: appName, mirror: p.mirror) }
         noteGuardianPrivatePath(privatePath)
         noteGuardianActed(pid)
+        // Said up front: what working a window on another desktop costs, and the way out.
+        let offDesktop = sys.window(id: chosen.id)?.onScreen == false && !outcome.captureOnly
+        let costs = offDesktop ? Self.offDesktopCosts(appName) : nil
         return TargetBindResult(targetId: target.id,
                                 app: CUBoundApp(name: appName, bundleId: app.bundleIdentifier ?? "", pid: pid),
                                 window: CUWindowInfo(id: chosen.id, title: chosen.title, frame: cuFrame(chosen.frame)),
-                                detail: found.reopened ? ["opened the app's default window", outcome.detail].compactMap { $0 }.joined(separator: "; ")
-                                    : outcome.detail)
+                                detail: [found.reopened ? "opened the app's default window" : nil, outcome.detail, costs]
+                                    .compactMap { $0 }.joined(separator: "; ").nonEmptyOrNil)
+    }
+
+    /// What working a window on another desktop costs (said at bind). Pure.
+    static func offDesktopCosts(_ app: String) -> String {
+        "\(app)'s window is not on this desktop, so it is worked in the background: a click is sent but can't be seen landing, keys reach it through a brief focus switch, and it may not redraw (a screenshot can be older than what was done) — if what you do there does not land, app.requestForeground(reason) asks the user to let \(app) come to the front for the rest of the script"
     }
 
     /// The live effects behind `CUWindowResolver` (run on the pid queue).
@@ -453,6 +461,9 @@ public final class CUCore: @unchecked Sendable {
     // short tail after, private-path gated — never merely because targets are bound.
     let guardianLock = NSLock()
     var guardianCore = CUFocusGuardianCore()
+    /// Apps held in front for a script (`target.foreground`), by target id, until the script ends.
+    let holdLock = NSLock()
+    var heldForeground: [String: HeldForeground] = [:]
     var guardianRefs = 0
     var guardianObservers: [NSObjectProtocol] = []
     var pendingGuardianNotes: [String] = []
@@ -1529,4 +1540,8 @@ struct CULiveActivity: CUActivitySource {
     let monitor: CUAXActivityMonitor
     func lastNotificationMs(pid: pid_t) -> Double? { monitor.lastNotificationMs(pid: pid) }
     func windowSignature(pid: pid_t) -> Int { CUWindowServer.signature(pid: pid) }
+}
+
+private extension String {
+    var nonEmptyOrNil: String? { isEmpty ? nil : self }
 }

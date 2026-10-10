@@ -318,6 +318,35 @@ describe("ComputerV2: the policy, through a script", () => {
     expect(text(r3)).toContain("NeedsForeground Notes only enables that menu command while it is in front");
   }, 30_000);
 
+  macOnly("requestForeground(reason): the foreground card with the reason; on a yes the app is held in front and its acts need no second card", async () => {
+    const w = world({ policy: "ask", answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "session") });
+    w.fake.handlers["target.foreground"] = () => ({ front: true });
+    const r = await w.run("const notes = await apps.open('Notes')\nprint(await notes.requestForeground('the editor takes no keys in the background\u202e'))\nawait notes.click(14)\nawait notes.type('hi')");
+    expect(r.isError).toBe(false);
+    expect(text(r)).toContain("true");
+    expect(text(r)).toContain("Notes is in front until this script ends; then the front goes back to the user's app");
+    expect(cards(w.events).map((c) => c.summary)).toEqual([
+      "Allow Winter to use Notes (com.apple.Notes)?",
+      "Winter asks to bring Notes (com.apple.Notes) to the front and keep it there until this step ends: the editor takes no keys in the background",
+    ]);
+    expect(w.fake.calls("target.foreground")).toHaveLength(1);
+    expect(w.fake.calls("target.act").map((a) => a.allowForeground)).toEqual([true, true]);
+    // The next run starts without it: asked again.
+    await w.run("await notes.click(14)");
+    expect(w.fake.calls("target.act").at(-1)!.allowForeground).toBe(false);
+  }, 30_000);
+
+  macOnly("requestForeground declined: false, nothing brought forward, and a line saying what to do instead", async () => {
+    const w = world({ policy: "ask", answer: (c, b) => b.resolve(c.sessionId, c.callId, c.summary.startsWith("Allow"), "orb", "session") });
+    w.fake.handlers["target.foreground"] = () => ({ front: true });
+    const r = await w.run("const notes = await apps.open('Notes')\nprint(String(await notes.requestForeground('to type')))");
+    expect(text(r)).toContain("false");
+    expect(text(r)).toContain("Notes may not come to the front now");
+    expect(w.fake.calls("target.foreground")).toEqual([]);
+    const empty = await w.run("try { await notes.requestForeground('  ') } catch (e) { print(e.name) }");
+    expect(text(empty)).toContain("TypeError");
+  }, 30_000);
+
   macOnly("bypass: NO computer-use prompt at all — needs_foreground is retried at once with allowForeground, attended or not", async () => {
     for (const attended of [false, true]) {
       const w = world({ policy: "bypass", attended });

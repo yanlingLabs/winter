@@ -103,8 +103,17 @@ public struct CUFocusGuardianCore: Sendable {
 
     /// The consented foreground rung takes the front for one action: its activation is allowed until `until`.
     public mutating func exempt(_ app: pid_t, until: TimeInterval) {
+        // A longer exemption of the same app (an app held in front for a script) is never cut short.
+        if exemptApp == app, exemptUntil > until { return }
         exemptApp = app
         exemptUntil = until
+    }
+
+    /// Ends `app`'s exemption now (its hold ended).
+    public mutating func endExempt(_ app: pid_t) {
+        guard exemptApp == app else { return }
+        exemptApp = nil
+        exemptUntil = 0
     }
 
     /// The user changed Space themselves (a user-attributed activation or a user-input-backed space change):

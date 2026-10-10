@@ -41,6 +41,9 @@ extension CUCore {
     public func targetAct(_ p: TargetActParams) async throws -> TargetActResult {
         try requireAccessibility()
         let t = try target(p.targetId)
+        // Held in front for this script (the user agreed): the foreground rung needs no second asking.
+        var p = p
+        if holdsForeground(t) { p.allowForeground = true }
         try ensureAlive(t)
         let token = cancels.begin(p.callId)
         defer { cancels.end(p.callId) }

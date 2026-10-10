@@ -327,6 +327,19 @@ public struct TargetScreenshotResult: Codable, Sendable, Equatable {
 
 public enum CUAccess: String, Codable, Sendable { case full, click }
 
+/// `target.foreground`: the user agreed (the daemon's card) that the app may come to the front and stay there
+/// until the session's script ends (`script.active` false).
+public struct TargetForegroundParams: Codable, Sendable, Equatable {
+    public var targetId: String
+    public init(targetId: String) { self.targetId = targetId }
+}
+public struct TargetForegroundResult: Codable, Sendable, Equatable {
+    /// The app is in front now.
+    public var front: Bool
+    public var detail: String?
+    public init(front: Bool, detail: String? = nil) { self.front = front; self.detail = detail }
+}
+
 public struct TargetActParams: Codable, Sendable, Equatable {
     public var targetId: String
     public var sessionId: String

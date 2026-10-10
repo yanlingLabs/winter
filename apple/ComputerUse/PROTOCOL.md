@@ -263,6 +263,14 @@ Errors include `stale_ref` (`ref`), `needs_foreground`, `window_elsewhere`, `ref
 `busy` (retryable), `busy` with `uncertain: true` (the action was sent but not confirmed — it may have
 happened; never retried), `cancelled`, `unsupported`.
 
+`target.foreground` — `{targetId}` → `{front, detail?}`: the user agreed (the daemon's card, the script's
+`requestForeground(reason)`) that the app may come to the front and stay there until the session's script ends.
+The helper brings it forward and holds it: its acts then run as with `allowForeground: true`, the user-view guard
+and the Focus Guardian leave it alone, and at `script.active` `false` (or `session.ended`) the front goes back to
+the app that had it — if the held app still has it (a switch the user made meanwhile is left alone). `front:
+false` (with `detail`) when macOS did not bring it forward. A window on another desktop is bound with a `detail`
+that says what working it there costs and names this way out.
+
 ### 4.6 Waits
 
 | Method | Params | Result |

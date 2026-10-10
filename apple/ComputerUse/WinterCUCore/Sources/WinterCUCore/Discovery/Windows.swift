@@ -271,7 +271,7 @@ enum CUWindowResolver {
     }
 
     static func whereItIsDetail(_ appName: String) -> String {
-        "step 0 (where it is): bound \(appName)'s window where it is; clicks on elements, scrolls, typing and keys work there, dragging needs it on this desktop"
+        "step 0 (where it is): bound \(appName)'s window where it is; dragging needs it on this desktop"
     }
 
     /// Step 0, then step a, then capture-only — never a new window. No candidate at all: `no_window`.

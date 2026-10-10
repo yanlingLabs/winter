@@ -162,6 +162,9 @@ interface RunCtx {
   focusLines: Map<string, { app: string; line: string }>;
   /** Why the run's deadline was extended (a long type/paste each), for the timeout's words. */
   extensions: Array<{ primitive: "type" | "paste"; chars: number }>;
+  /** Targets the user let come to the front for the rest of this run (`requestForeground`): their acts take
+   *  the foreground with no second card. */
+  foreground: Set<string>;
   sessionId: string;
   runId: string;
   callId: string;
@@ -285,7 +288,7 @@ export class ComputerV2Service {
       sessionId, runId, callId: `cv2_${randomBytes(6).toString("hex")}`, call, state, worker, builder, grants,
       abort: new AbortController(), timer, locks: new Map(), acted: new Set(), chains: new Map(), primitives: new Map(),
       apps: new Set(), timedOut: false, ended: false, bound: new Set(), daemonSentences: new Set(), textInFlight: new Set(),
-      focusLines: new Map(), extensions: [],
+      focusLines: new Map(), extensions: [], foreground: new Set(),
     };
     ctxRef.ctx = ctx;
     state.active = ctx;
@@ -456,7 +459,7 @@ export class ComputerV2Service {
     this.live(ctx);
     const t = this.target(ctx, targetId);
     const app: AppRef = { bundleId: t.bundleId, name: t.name };
-    if (ACT_PRIMITIVES.has(primitive)) {
+    if (ACT_PRIMITIVES.has(primitive) || primitive === "requestForeground") {
       await this.deps.policy.authorize(ctx.grants, app, { kind: "act", primitive }, ctx.abort.signal);
     } else {
       await this.deps.policy.authorize(ctx.grants, app, { kind: "observe" }, ctx.abort.signal);
@@ -467,6 +470,7 @@ export class ComputerV2Service {
       case "state": return await this.state(ctx, t, args, metric);
       case "find": return await this.find(ctx, t, args, metric);
       case "screenshot": return await this.targetScreenshot(ctx, t, args, metric);
+      case "requestForeground": return await this.requestForeground(ctx, t, args, metric);
       case "windows": {
         const res = await this.helperCall<TargetWindowsResult>(ctx, "target.windows", { targetId }, metric);
         ctx.builder.markScreenRead();
@@ -903,6 +907,37 @@ export class ComputerV2Service {
     return estimate > 60_000 ? estimate + 60_000 : undefined;
   }
 
+  /** `app.requestForeground(reason)`: the rung-4 card, with the model's reason, for the rest of this run. On a yes
+   *  the app comes to the front (the helper holds it there until the script ends, then gives the front back) and
+   *  its acts need no second asking; on a no, nothing moves. `true` when it is in front. */
+  private async requestForeground(ctx: RunCtx, t: TargetInfo, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<boolean> {
+    const reason = args.reason;
+    if (typeof reason !== "string" || reason.trim().length === 0) throw bad("requestForeground() takes a reason: what needs the app in front, for the user");
+    if (ctx.foreground.has(t.targetId)) return true;
+    const app: AppRef = { bundleId: t.bundleId, name: t.name };
+    if (!(await this.deps.policy.allowForeground(ctx.grants, app, ctx.abort.signal, reason))) {
+      ctx.builder.daemonLine(`${t.name} may not come to the front now (the user did not allow it, or this session does not ask) — keep to what works in the background, or ask the user to do this step`);
+      return false;
+    }
+    this.live(ctx);
+    if (!ctx.locks.has(FOREGROUND_LOCK_KEY)) {
+      const release = await this.locks.acquire(FOREGROUND_LOCK_KEY, { runId: ctx.runId, sessionId: ctx.sessionId }, {
+        waitMs: Math.min(LOCK_WAIT_MS, Math.max(500, ctx.timer.left() - 500)), signal: ctx.abort.signal, label: "The screen's foreground",
+      });
+      if (ctx.ended || ctx.cancelled !== undefined) { release(); this.live(ctx); }
+      ctx.locks.set(FOREGROUND_LOCK_KEY, release);
+    }
+    const res = await this.helperCall<{ front: boolean; detail?: string }>(ctx, "target.foreground", { targetId: t.targetId }, metric);
+    if (!res.front) {
+      const said = helperDetail(res.detail);
+      ctx.builder.daemonLine(said ?? `${t.name} could not be brought to the front`);
+      return false;
+    }
+    ctx.foreground.add(t.targetId);
+    ctx.builder.daemonLine(`${t.name} is in front until this script ends; then the front goes back to the user's app`);
+    return true;
+  }
+
   /** One action, through the input ladder; rung 4 (the foreground) only after the user agreed — or at once under `bypass`. */
   private async act(ctx: RunCtx, t: TargetInfo, primitive: string, action: ActAction, metric: PrimitiveMetric): Promise<undefined> {
     const settings = this.deps.settings();
@@ -916,7 +951,8 @@ export class ComputerV2Service {
     const actTimeout = action.kind === "type" || action.kind === "paste" ? this.fitTyping(ctx, action.kind, action.text) : undefined;
     let res: ActResult;
     try {
-      res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground: false }, metric, actTimeout);
+      // Held in front for this run (`requestForeground`): the foreground needs no second asking.
+      res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground: ctx.foreground.has(t.targetId) }, metric, actTimeout);
     } catch (err) {
       if (!(err instanceof HelperRpcError) || err.code !== "needs_foreground") throw err;
       const app: AppRef = { bundleId: t.bundleId, name: t.name };
