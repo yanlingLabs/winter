@@ -796,8 +796,10 @@ public final class CUCore: @unchecked Sendable {
                                        caret: obs.caret, focusText: obs.focusText, page: page,
                                        stateNumber: Int(sid.components(separatedBy: ".s").last ?? ""), unread: obs.unread)
             let snap = CUSnapshot(id: sid, scope: within, header: header, roots: obs.roots, formatter: formatter)
-            // A whole-window, non-full state folds what is out of view first; `within` and `full` don't.
-            var text = formatter.full(header: header, roots: obs.roots, viewportFirst: within == nil && p.full != true)
+            // A whole-window, non-full state folds what is out of view first; `within` and `full` don't. A `full`
+            // state is everything the read saw, up to the formatter's hard cap (its last line says when it was cut).
+            var text = formatter.full(header: header, roots: obs.roots, viewportFirst: within == nil && p.full != true,
+                                      whole: p.full == true)
             var isDiff = false
             var ratio = 1.0
             if let since = p.since, p.full != true, gone == nil, let old = t.snapshot(since), old.scope == within {

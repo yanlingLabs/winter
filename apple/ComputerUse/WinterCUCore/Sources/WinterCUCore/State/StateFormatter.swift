@@ -52,15 +52,28 @@ public struct CUStateHeader: Sendable, Equatable {
 ///       [2] toolbar
 ///         [3] button "New Note"
 ///
-/// Two spaces per level. Lines past `lineCap` are folded by collapsing the largest subtrees first, as
-/// `(<n> more — state({within:<ref>}))`. A subtree that holds the focused element is collapsed only
-/// when nothing else is left to fold, so the model keeps sight of where input goes.
+/// Two spaces per level. Lines past `lineCap` (`fullLineCap` for a `full: true` state) are folded by collapsing
+/// subtrees as `(<n> more — state({within:<ref>}))`, in this order:
+/// 1. the window's chrome — what lies outside a web page's content (toolbars, tab bars, a page's own menu bar
+///    included only when it is outside the page) — largest first;
+/// 2. subtrees INSIDE the page's content, largest first — the page itself (its web area, or the scroll area holding
+///    it) is never folded wholesale while anything else can be;
+/// 3. a subtree that holds the focused element, so the model keeps sight of where input goes;
+/// 4. the page's content itself; 5. a root, last of all.
+/// A window with no web page has no content: largest first, the focus last, as ever.
 public struct CUStateFormatter: Sendable {
     public var lineCap: Int
+    /// The cap of a `full: true` state: everything the read saw, up to this hard cap. The reader stops at
+    /// `AXTreeReader.defaultMaxNodes` elements, so a full state is not folded at all in practice; when it is, its
+    /// last line says so.
+    public var fullLineCap: Int
     public var valueCap: Int
 
-    public init(lineCap: Int = 300, valueCap: Int = 200) {
+    public static let defaultFullLineCap = AXTreeReader.defaultMaxNodes
+
+    public init(lineCap: Int = 300, fullLineCap: Int = CUStateFormatter.defaultFullLineCap, valueCap: Int = 200) {
         self.lineCap = max(1, lineCap)
+        self.fullLineCap = max(self.lineCap, fullLineCap)
         self.valueCap = valueCap
     }
 
@@ -154,9 +167,11 @@ public struct CUStateFormatter: Sendable {
     /// viewport — outside the window, or outside the visible rect of the scroll area it sits in — is folded
     /// first, one `… n more out of view` line per parent, so the on-screen links, buttons, headings and
     /// fields of a big web page survive. Only then are large subtrees collapsed.
-    public func full(header h: CUStateHeader, roots: [CUNode], viewportFirst: Bool = false) -> String {
+    /// `whole` (the model asked for `full: true`): the cap is `fullLineCap`, and a state that had to fold anyway
+    /// ends with a line saying so.
+    public func full(header h: CUStateHeader, roots: [CUNode], viewportFirst: Bool = false, whole: Bool = false) -> String {
         var lines = [header(h)]
-        lines.append(contentsOf: body(roots: roots, focusedRef: h.focusedRef, viewportFirst: viewportFirst))
+        lines.append(contentsOf: body(roots: roots, focusedRef: h.focusedRef, viewportFirst: viewportFirst, whole: whole))
         return lines.joined(separator: "\n")
     }
 
@@ -164,8 +179,26 @@ public struct CUStateFormatter: Sendable {
         "… \(count) more out of view — scroll, or state({within:\(ref)})"
     }
 
-    /// The indented lines of `roots`, folded to `lineCap`.
-    public func body(roots: [CUNode], focusedRef: Int?, viewportFirst: Bool = false) -> [String] {
+    /// The last line of a `full: true` state that still had to fold.
+    static func wholeCutMarker(cap: Int, folded: Int) -> String {
+        "… the full state is cut at \(cap.formatted(.number.grouping(.automatic).locale(Locale(identifier: "en_US")))) lines: "
+            + "\(folded.formatted(.number.grouping(.automatic).locale(Locale(identifier: "en_US")))) elements are folded behind the \"more\" markers above — read each with state({within})"
+    }
+
+    /// A collapsed element whose own children are what it discloses — sub-rows (an outline row's nested rows, a
+    /// tree item's group of items) — keeps them folded. One whose children are its own cells (an AppKit outline
+    /// row: its name is in them) does not: folding them would hide what it is. Pure.
+    static func foldsWhenCollapsed(_ n: CUNode) -> Bool {
+        guard n.states.contains(.collapsed), !n.children.isEmpty, n.role == "AXRow" else { return false }
+        func isRows(_ c: CUNode) -> Bool {
+            c.role == "AXRow" || (c.role == "AXGroup" && !c.children.isEmpty && c.children.allSatisfy { $0.role == "AXRow" })
+        }
+        return n.children.contains(where: isRows)
+    }
+
+    /// The indented lines of `roots`, folded to `lineCap` (`fullLineCap` when `whole`).
+    public func body(roots: [CUNode], focusedRef: Int?, viewportFirst: Bool = false, whole: Bool = false) -> [String] {
+        let cap = whole ? fullLineCap : lineCap
         // Flatten into an indexable list with parent links and depths, and whether each element lies outside
         // the visible rect it is clipped to (the window at the top, narrowed by every scroll area below it).
         struct Item { var node: CUNode; var parent: Int?; var depth: Int; var visibleDescendants: Int; var outOfView: Bool }
@@ -198,12 +231,23 @@ public struct CUStateFormatter: Sendable {
             if let p = items[i].parent, !items[p].outOfView || focusPath.contains(p) { elidable.insert(i) }
         }
 
-        // An element that says it is collapsed (a disclosure row, a closed outline item) keeps what it holds
+        // The page's content: each OUTERMOST web area, with the chain above it (the scroll area holding it, …) — the
+        // `contentPath` is folded only when nothing else can be; `inContent[i]`: i lies inside a page.
+        var contentPath = Set<Int>()
+        var inContent = [Bool](repeating: false, count: items.count)
+        for i in items.indices {
+            if let p = items[i].parent, inContent[p] { inContent[i] = true; continue }
+            guard items[i].node.role == "AXWebArea" else { continue }
+            inContent[i] = true
+            var j: Int? = i
+            while let k = j { contentPath.insert(k); j = items[k].parent }
+        }
+
+        // An element that says it is collapsed and holds what it discloses (an outline row's sub-rows) keeps them
         // folded from the start — reachable with `within` (where it is the root, and shown open) — unless the
         // focus is inside it.
         var collapsed = Set<Int>(items.indices.filter {
-            items[$0].parent != nil && items[$0].node.states.contains(.collapsed) && !items[$0].node.children.isEmpty
-                && !focusPath.contains($0)
+            items[$0].parent != nil && Self.foldsWhenCollapsed(items[$0].node) && !focusPath.contains($0)
         })
         var eliding = false
         // hidden[i]: some ancestor of i is collapsed or i is folded out of view. Parents precede children, so
@@ -229,18 +273,22 @@ public struct CUStateFormatter: Sendable {
             return lines + summaries.count
         }
         var total = recount()
-        if viewportFirst, total > lineCap, !elidable.isEmpty {
+        if viewportFirst, total > cap, !elidable.isEmpty {
             eliding = true
             total = recount()
         }
-        while total > lineCap {
-            // Largest subtree first; the focus path only when nothing else is left; roots last of all.
+        let preFolded = collapsed
+        while total > cap {
+            // Largest subtree first, in tiers: the chrome outside the page, then inside the page, then the focus
+            // path, then the page itself, roots last of all.
             var best: Int?
             func size(_ i: Int) -> Int { eliding ? shown[i] : items[i].visibleDescendants }
-            for pass in 0..<3 {
+            for pass in 0..<5 {
                 for i in items.indices where size(i) > 0 && !collapsed.contains(i) && !hidden[i] {
-                    if pass < 2, items[i].parent == nil { continue }
-                    if pass == 0, focusPath.contains(i) { continue }
+                    if pass < 4, items[i].parent == nil { continue }
+                    if pass < 3, contentPath.contains(i) { continue }
+                    if pass < 2, focusPath.contains(i) { continue }
+                    if pass == 0, inContent[i] { continue }
                     if best == nil || size(i) > size(best!) { best = i }
                 }
                 if best != nil { break }
@@ -249,6 +297,8 @@ public struct CUStateFormatter: Sendable {
             collapsed.insert(b)
             total = recount()
         }
+        // What the cap folded (the pre-folded collapsed rows are no cut): said at the end of a `full: true` state.
+        let cutBy = collapsed.subtracting(preFolded)
 
         // Elements folded out of view, per parent (the parent's line is followed by one marker line).
         var outOfViewCount: [Int: Int] = [:]
@@ -274,6 +324,11 @@ public struct CUStateFormatter: Sendable {
                 text += " " + Self.collapseMarker(count: n.unreadChildren, ref: n.ref)
             }
             out.append(text)
+        }
+        if whole, !cutBy.isEmpty || eliding {
+            let folded = cutBy.filter { !hidden[$0] }.reduce(0) { $0 + items[$1].node.descendantCount }
+                + outOfViewCount.values.reduce(0, +)
+            out.append(Self.wholeCutMarker(cap: cap, folded: folded))
         }
         return out
     }
