@@ -115,10 +115,43 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
 
   const targets = new WeakMap<object, string>();
   const tid = (app: object): string => targets.get(app) ?? "";
+  /**
+   * `app.extras` / `app.dict` (app adapters): frozen Proxies over the names the bind listed — a listed name is a
+   * function (one bridge call; the daemon checks the name again), anything else `undefined`; `has` and `ownKeys`
+   * answer the list, so `then`, symbols and `toJSON` are never callable and `await app.extras` is the object itself.
+   */
+  const callables = (kind: "extra" | "dict", names: readonly string[], targetId: string): Record<string, (...args: unknown[]) => Promise<unknown>> => {
+    const listed = new Set(names.filter((n) => typeof n === "string" && n.length > 0));
+    const fns = Object.create(null) as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    for (const n of listed) {
+      Object.defineProperty(fns, n, { value: (...args: unknown[]) => call(kind, targetId, { name: n, args }), enumerable: true });
+    }
+    Object.freeze(fns);
+    const own = (k: PropertyKey): k is string => typeof k === "string" && listed.has(k);
+    return new Proxy(fns, {
+      get: (_t, k) => (own(k) ? fns[k] : undefined),
+      has: (_t, k) => own(k),
+      ownKeys: () => [...listed],
+      getOwnPropertyDescriptor: (_t, k) => (own(k) ? Object.getOwnPropertyDescriptor(fns, k) : undefined),
+      set: () => false,
+      defineProperty: () => false,
+      deleteProperty: () => false,
+      setPrototypeOf: () => false,
+    });
+  };
   class App {
     constructor(h: AppHandle) {
       targets.set(this, h.targetId);
-      Object.defineProperties(this, { name: { value: h.name, enumerable: true }, bundleId: { value: h.bundleId, enumerable: true } });
+      Object.defineProperties(this, {
+        name: { value: h.name, enumerable: true }, bundleId: { value: h.bundleId, enumerable: true },
+        extras: { value: callables("extra", Array.isArray(h.extras) ? h.extras.map((e) => e?.name) : [], h.targetId) },
+        dict: { value: callables("dict", Array.isArray(h.dict) ? h.dict : [], h.targetId) },
+      });
+    }
+    help(topic?: unknown, o?: unknown) {
+      // `help({ emit: false })`: options with no topic.
+      if (topic !== null && typeof topic === "object" && !Array.isArray(topic) && o === undefined) { o = topic; topic = undefined; }
+      return call("help", tid(this), { ...(topic === undefined ? {} : { topic }), ...opts(o) });
     }
     state(o?: unknown) { return call("state", tid(this), opts(o)); }
     find(q: unknown, o?: unknown) { return call("find", tid(this), { query: q, ...opts(o) }); }

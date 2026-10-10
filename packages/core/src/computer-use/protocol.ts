@@ -159,7 +159,8 @@ export interface AppsListResult { apps: Array<{ name: string; bundleId: string; 
 export interface ScreenWindowsResult { windows: Array<{ app: string; bundleId: string; pid: number; windowId: number; title: string; frame: Rect; onScreen: boolean }> }
 export interface TargetBindResult {
   targetId: string;
-  app: { name: string; bundleId: string; pid: number };
+  /** helper 1.8.0: `path` (the running bundle's path) and `version` (its `CFBundleShortVersionString`). */
+  app: { name: string; bundleId: string; pid: number; path?: string; version?: string };
   window: { id: number; title: string; frame: Rect };
   /** What the bind had to do to reach a usable window (another Space, moved here, a new one opened). */
   detail?: string;
@@ -211,6 +212,24 @@ export interface ActResult {
 export interface AppleScriptResult { result: string | null; detail?: string }
 /** `target.scriptingDictionary`: the bound app's sdef, summarised (`scriptable: false` for an app without one). */
 export interface ScriptingDictionaryResult { scriptable: boolean; text?: string; truncated?: boolean }
+/** The helper version that answers `target.scriptingCommands` (an additive method: protocol 1). */
+export const HELPER_SCRIPTING_COMMANDS_VERSION = "1.8.0";
+/**
+ * `target.scriptingCommands` (helper 1.8.0): the bound app's dictionary COMMANDS, structured — read from its sdef like
+ * `target.scriptingDictionary`, never by asking the app. At most 300; hidden ones (and the helper's refused doors)
+ * dropped. `eventCode` is the 8-character Apple Event code (`aevtodoc`).
+ */
+export interface ScriptingCommandsResult {
+  scriptable: boolean;
+  bundleVersion?: string;
+  commands: Array<{
+    name: string; suite: string; eventCode: string; description?: string;
+    direct?: { type: string; optional: boolean; description?: string };
+    params: Array<{ name: string; type: string; optional: boolean; description?: string; enumerators?: string[] }>;
+    result?: { type: string };
+  }>;
+  truncated?: boolean;
+}
 export interface WaitIdleResult { settled: boolean; waitedMs: number }
 export interface WaitForResult { met: true; waitedMs: number }
 export interface AppAtResult { app: string; bundleId: string; windowId: number }

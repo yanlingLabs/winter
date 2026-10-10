@@ -382,7 +382,7 @@ export class ComputerPolicy {
    * May this script `bind` the app, or `act` on it with `primitive`? Raises the per-app card when the policy
    * asks for one. Throws `NotAllowed` / `Refused`; resolves when allowed.
    */
-  async authorize(run: RunGrants, app: AppRef, purpose: { kind: "bind" } | { kind: "act"; primitive: string } | { kind: "observe" }, signal?: AbortSignal): Promise<void> {
+  async authorize(run: RunGrants, app: AppRef, purpose: { kind: "bind" } | { kind: "act"; primitive: string; access?: "click" | "full" } | { kind: "observe" }, signal?: AbortSignal): Promise<void> {
     this.checkFloors(app);
     const { access, source } = effectiveAppAccess(this.deps.settings(), app.bundleId);
     if (access === "deny") {
@@ -395,7 +395,8 @@ export class ComputerPolicy {
     if (purpose.kind === "observe") return;
     if (purpose.kind === "act") {
       if (access === "view") throw new AutomationFailure("NotAllowed", `${app.name} is set to view only in Settings → Computer Use — you can look but not act`);
-      if (access === "click" && !CLICK_ONLY_PRIMITIVES.has(purpose.primitive)) {
+      // An app adapter's function states its own class (`access`), which replaces the primitive lookup.
+      if (access === "click" && (purpose.access !== undefined ? purpose.access !== "click" : !CLICK_ONLY_PRIMITIVES.has(purpose.primitive))) {
         throw new AutomationFailure("NotAllowed", `${app.name} is set to click only in Settings → Computer Use — clicks, scrolls and element actions work, ${purpose.primitive} does not`);
       }
     }

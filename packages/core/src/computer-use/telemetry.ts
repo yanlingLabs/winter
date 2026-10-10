@@ -37,6 +37,8 @@ export interface PrimitiveMetric {
   visitAnswer?: "allow" | "refuse" | "timeout-allow" | "aborted" | "unavailable" | "run-allowance" | "run-refusal" | "held-refusal";
   /** Where a person answered it: the session's `card`, the helper's on-screen `panel`; or `timeout`, `none`. */
   visitVia?: "card" | "panel" | "timeout" | "none";
+  /** An `extra` / `dict` primitive: the extra's or dictionary command's NAME (never its arguments). */
+  extra?: string;
 }
 
 export const AUTOMATION_METRICS_MAX_BYTES = 8 * 1024 * 1024;
