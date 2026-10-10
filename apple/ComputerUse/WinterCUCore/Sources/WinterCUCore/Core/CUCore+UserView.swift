@@ -135,6 +135,9 @@ extension CUCore {
             now = userView()
             if now.front != user, clock.nowMs() - lastActivate >= restoreRetryMs, clock.nowMs() < deadline {
                 _ = sys.activate(pid: user)
+                // A background process's activation can be refused (cooperative activation, macOS 14+; measured on
+                // 26.6: refused for a whole 2 s); the app made frontmost over accessibility is not.
+                try? ax.set(ax.application(user), kAXFrontmostAttribute, kCFBooleanTrue)
                 lastActivate = clock.nowMs()
                 attempts += 1
                 now = userView()

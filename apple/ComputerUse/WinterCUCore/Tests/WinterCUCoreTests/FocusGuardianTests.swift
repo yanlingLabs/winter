@@ -497,6 +497,23 @@ final class FocusGuardianTests: XCTestCase {
         XCTAssertTrue(notes.first?.hasSuffix("tried to come to the front; you were put back") ?? false, notes.first ?? "")
     }
 
+    func testARefusedActivationIsRetriedAsTheAppMadeFrontmost() {
+        // macOS refuses the background helper's activation outright (cooperative activation); AXFrontmost holds.
+        let sys = FakeSystem()
+        sys.running = [500, 800]; sys.front = 800; sys.space = 100
+        sys.activationRefused = [500]
+        let ax = FakeAX()
+        ax.onSet = { w in if w == "500:\(kAXFrontmostAttribute)" { sys.front = 500 } }
+        let core = CUCore(events: nil, clock: CUSystemClock(), skyLight: .none, poster: RecordingPoster(), ax: ax, sys: sys,
+                          pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
+        core.restoreDeadlineMs = 400
+        core.restoreRetryMs = 40
+        core.guardianRestore(CUGuardedView(app: 500, space: 100), thief: 800, repeatOffender: false, cause: "test")
+        XCTAssertEqual(sys.frontmostPid(), 500, "put back")
+        XCTAssertTrue(ax.written.contains("500:\(kAXFrontmostAttribute)"))
+        XCTAssertTrue(core.takeGuardianNotes().first?.hasSuffix("tried to come to the front; you were put back") ?? false)
+    }
+
     func testTheRestoreGivesUpAtTheDeadline() {
         let (core, sys) = retryWorld(refusals: -1)
         let start = Date()

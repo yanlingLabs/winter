@@ -224,7 +224,13 @@ final class FakeSystem: CUSystemBackend {
     func activeSpace() -> UInt64? { space }
     /// Runs on every activation (after `front` is set): a test moves the Space back as macOS would.
     var onActivate: ((pid_t) -> Void)?
-    func activate(pid: pid_t) -> Bool { activated.append(pid); front = pid; onActivate?(pid); return true }
+    /// Apps whose activation macOS refuses (a background caller's, under cooperative activation): recorded, no effect.
+    var activationRefused: Set<pid_t> = []
+    func activate(pid: pid_t) -> Bool {
+        activated.append(pid)
+        guard !activationRefused.contains(pid) else { return false }
+        front = pid; onActivate?(pid); return true
+    }
     /// Windows brought forward (a desktop visit, there and back), in order — with whether an element was raised and
     /// made main.
     private(set) var frontedWindows: [(pid: pid_t, windowID: UInt32, raised: Bool, main: Bool)] = []
