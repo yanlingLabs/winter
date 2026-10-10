@@ -15,7 +15,7 @@ import { PAGE_RUNTIME_SOURCE } from "../../src/computer-use/browser/page-runtime
 import { BrowserBackendRegistry } from "../../src/computer-use/browser/registry";
 import { fitsBudget, imageSize, scaleFor, toCss } from "../../src/computer-use/browser/scale";
 import { ruleAllowsSite, siteCardSummary, siteRow } from "../../src/computer-use/browser/site-policy";
-import { bodyLines, diffState, fullState, makeSnapshot, nodeLine, type TabNode } from "../../src/computer-use/browser/state-format";
+import { bodyLines, diffState, FULL_STATE_LINE_CAP, fullState, makeSnapshot, nodeLine, type TabNode } from "../../src/computer-use/browser/state-format";
 import { checkUploadPaths, UPLOAD_MAX_FILES } from "../../src/computer-use/browser/upload-paths";
 import { computerV2Description } from "../../src/computer-use/description";
 import { AutomationFailure } from "../../src/computer-use/errors";
@@ -116,6 +116,22 @@ describe("the tab state format", () => {
     expect(lines.some((l) => l.includes('[3] text field "Search"'))).toBe(true);
     const full = bodyLines(roots, 3, false);
     expect(full.some((l) => /\[2\] list \(400 more — state\(\{within:2\}\)\)/.test(l))).toBe(true);
+  });
+
+  test("full: true is everything the read saw, up to its hard cap, and says where it was cut", () => {
+    const items = Array.from({ length: 400 }, (_, i) => node(100 + i, "text", { name: `row ${i}` }));
+    const roots = [node(1, "main", { children: [node(2, "list", { children: items }), node(3, "text field", { name: "Search" })] })];
+    const whole = fullState({ title: "T", url: "u" }, roots, false, undefined, true).split("\n").slice(1);
+    expect(whole.length).toBe(403);
+    expect(whole.some((l) => l.includes('"row 399"'))).toBe(true);
+    expect(whole.some((l) => l.includes("more — state("))).toBe(false);
+    expect(whole.some((l) => l.includes("the full state is cut"))).toBe(false);
+    // The ordinary state folds to 300 as ever.
+    expect(fullState({ title: "T", url: "u" }, roots, false).split("\n").length).toBeLessThanOrEqual(301);
+    // Past the cap: folded the same way, and the last line says so.
+    const capped = bodyLines(roots, undefined, false, 50, true);
+    expect(capped.at(-1)).toBe('… the full state is cut at 50 lines: 400 elements are folded behind the "more" markers above — read each with state({within})');
+    expect(FULL_STATE_LINE_CAP).toBe(4_000);
   });
 
   test("diffs: + added, ~ changed facets, - removed; over half changed is reported for the full fallback", () => {
