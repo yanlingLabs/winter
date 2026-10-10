@@ -13,7 +13,7 @@ import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { ComputerPolicy, type SessionFacts } from "../../src/computer-use/policy";
 import { RecentApps } from "../../src/computer-use/recent-apps";
-import { ComputerV2Service, actLine, focusLine, pageLine, targetLostMessage, type ScriptResult } from "../../src/computer-use/service";
+import { ComputerV2Service, actLine, focusLine, pageLine, targetLostMessage, timeoutMessage, type ScriptResult } from "../../src/computer-use/service";
 import { AutomationTelemetry } from "../../src/computer-use/telemetry";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
 import type { Settings } from "../../src/settings";
@@ -857,5 +857,24 @@ describe("ComputerV2: hover", () => {
     const r = await w.run("const notes = await apps.open('Notes')\nawait notes.hover(14)");
     expect(r.isError).toBe(false);
     expect(w.fake.calls("target.act")[0]).toMatchObject({ action: { kind: "hover", ref: 14 }, access: "click" });
+  }, 30_000);
+});
+
+describe("ComputerV2: a timeout after the deadline was extended", () => {
+  test("says the effective deadline, and from what and why it was extended", () => {
+    expect(timeoutMessage(30_000, 30_000, [])).toBe("the script timed out after 30000 ms");
+    expect(timeoutMessage(30_000, 72_000, [{ primitive: "type", chars: 3000 }]))
+      .toBe("the script timed out after 72 s; extended from 30 s for typing 3,000 characters");
+    expect(timeoutMessage(30_000, 90_000, [{ primitive: "type", chars: 1200 }, { primitive: "paste", chars: 1800 }]))
+      .toBe("the script timed out after 90 s; extended from 30 s for typing and pasting 3,000 characters in 2 calls");
+  });
+
+  macOnly("a run cancelled at its extended deadline says so", async () => {
+    const w = world();
+    w.fake.handlers["target.act"] = (params) => (params.action as { kind: string }).kind === "paste" ? new Promise(() => {}) : { rung: 1 };
+    const r = await w.run(`const notes = await apps.open('Notes')\nawait notes.paste(${JSON.stringify("Lorem ipsum.\n".repeat(250))})`, { timeoutMs: 1_000 });
+    expect(r.isError).toBe(true);
+    expect(text(r)).toMatch(/timed out after \d+ s; extended from 1 s for pasting 3,250 characters/);
+    expect(text(r)).not.toContain("timed out after 1000 ms");
   }, 30_000);
 });

@@ -160,6 +160,8 @@ interface RunCtx {
   textInFlight: Set<Promise<void>>;
   /** The last focus change per target in this run, said once at its end. */
   focusLines: Map<string, { app: string; line: string }>;
+  /** Why the run's deadline was extended (a long type/paste each), for the timeout's words. */
+  extensions: Array<{ primitive: "type" | "paste"; chars: number }>;
   sessionId: string;
   runId: string;
   callId: string;
@@ -275,13 +277,15 @@ export class ComputerV2Service {
     const started = this.now();
     // The timer and the grants reference each other (a card pauses the timer): built in two steps.
     const ctxRef: { ctx?: RunCtx } = {};
-    const timer = new PausableTimer(timeoutMs, () => { if (ctxRef.ctx) { ctxRef.ctx.timedOut = true; this.cancel(ctxRef.ctx, `the script timed out after ${timeoutMs} ms`); } }, () => this.now());
+    const timer = new PausableTimer(timeoutMs, () => {
+      if (ctxRef.ctx) { ctxRef.ctx.timedOut = true; this.cancel(ctxRef.ctx, timeoutMessage(timeoutMs, ctxRef.ctx.timer.budget, ctxRef.ctx.extensions)); }
+    }, () => this.now());
     const grants = newRunGrants(sessionId, (waiting) => (waiting ? timer.pause() : timer.resume()));
     const ctx: RunCtx = {
       sessionId, runId, callId: `cv2_${randomBytes(6).toString("hex")}`, call, state, worker, builder, grants,
       abort: new AbortController(), timer, locks: new Map(), acted: new Set(), chains: new Map(), primitives: new Map(),
       apps: new Set(), timedOut: false, ended: false, bound: new Set(), daemonSentences: new Set(), textInFlight: new Set(),
-      focusLines: new Map(),
+      focusLines: new Map(), extensions: [],
     };
     ctxRef.ctx = ctx;
     state.active = ctx;
@@ -885,6 +889,7 @@ export class ComputerV2Service {
     if (fit.kind === "refuse") throw new AutomationFailure("Refused", fit.message);
     if (fit.kind === "extend") {
       ctx.timer.extend(fit.byMs);
+      ctx.extensions.push({ primitive, chars: [...text].length });
       this.deps.log?.(`computer-use: ${primitive} of ${[...text].length} characters (~${Math.ceil(estimate / 1000)} s): the run extended by ${Math.ceil(fit.byMs / 1000)} s`);
     }
     return estimate > 60_000 ? estimate + 60_000 : undefined;
@@ -1209,6 +1214,17 @@ const ERROR_MESSAGE_CAP = 4_096;
  * TRUSTED (shown outside the fence) only when its message is one the daemon itself sent in this call.
  */
 /** A bind's or useWindow's `detail` from the helper, as one short line (or nothing). */
+/** The words of a run's timeout: its EFFECTIVE deadline, and — when it was extended — from what and why
+ *  ("the script timed out after 72 s; extended from 30 s for typing 3,000 characters"). */
+export function timeoutMessage(timeoutMs: number, budgetMs: number, extensions: ReadonlyArray<{ primitive: "type" | "paste"; chars: number }>): string {
+  if (extensions.length === 0 || budgetMs <= timeoutMs) return `the script timed out after ${timeoutMs} ms`;
+  const s = (ms: number): string => `${Math.round(ms / 1000)} s`;
+  const chars = extensions.reduce((n, e) => n + e.chars, 0).toLocaleString("en-US");
+  const what = extensions.every((e) => e.primitive === "paste") ? "pasting" : extensions.every((e) => e.primitive === "type") ? "typing" : "typing and pasting";
+  const why = extensions.length === 1 ? `${what} ${chars} characters` : `${what} ${chars} characters in ${extensions.length} calls`;
+  return `the script timed out after ${s(budgetMs)}; extended from ${s(timeoutMs)} for ${why}`;
+}
+
 /** `the page changed (now "<title>") — refs from before it are gone; call state()`, when the act changed the page. */
 export function pageLine(res: ActResult): string | undefined {
   if (typeof res.pageNow !== "string" || res.pageNow.trim().length === 0) return undefined;
