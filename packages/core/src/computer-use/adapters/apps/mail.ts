@@ -2,14 +2,10 @@
 // message body or sends anything: `compose` makes an outgoing message with no window and saves it to Drafts.
 import type { AppAdapter } from "../types";
 import { appScript, intArg, optsArg, rows, stringArg, text, yes } from "./common";
+import { MAIL_GUIDE } from "../guides/mail";
 
 const bad = (message: string): TypeError => Object.assign(new TypeError(message), { name: "TypeError" });
 
-const GUIDE = `Mail's extras read headers and write drafts without bringing Mail forward:
-- messages() lists the newest headers of the inbox (all accounts) — id, read, date received (local time), mailbox, sender, subject; { unread: true } only unread ones, { mailbox: "Name" } another mailbox, { limit } up to 100 (default 20). Message bodies are not read;
-- unreadCount() is the inbox's unread count;
-- compose({ to, cc, subject, body }) saves a new message to Drafts without opening a window and never sends it — tell the user it is in Drafts.
-Sending is the user's step: never send mail for them, by any route, unless they asked for exactly that message to be sent.`;
 
 /** `mailbox "<name>"` (Mail's own), else the first account mailbox of that name; `inbox` for none. */
 function mailboxLines(name: string | undefined): string[] {
@@ -48,13 +44,13 @@ function addresses(v: unknown, what: string, required: boolean): string[] {
 
 export const mailAdapter: AppAdapter = {
   bundleIds: ["com.apple.mail"],
-  guide: { id: "mail@1", text: GUIDE },
+  guide: { id: "mail@1", text: MAIL_GUIDE },
   extras: [
     {
       name: "messages", access: "view",
       signature: "messages(o?: { mailbox?: string; unread?: boolean; limit?: number }): Promise<{ id: number; read: boolean; date: string; mailbox: string; from: string; subject: string }[]>",
-      summary: "the newest message headers of the inbox (or a mailbox) — no bodies",
-      doc: "Headers only: id, read, date received (local time, ISO), mailbox, sender, subject. The inbox of every account by default; { mailbox } is a mailbox name (Mail's own, else the first account's of that name). { unread: true } keeps unread ones; { limit } 1–100 (default 20).",
+      summary: "message headers of the inbox (or a mailbox), in Mail's order — no bodies",
+      doc: "Headers only, in Mail's own order (sort by date for the newest): id, read, date received (local time, ISO), mailbox, sender, subject. The inbox of every account by default; { mailbox } is a mailbox name (Mail's own, else the first account's of that name). { unread: true } keeps unread ones; { limit } 1–100 (default 20).",
       async run(scope, args) {
         const o = optsArg(args[0], "messages()", ["mailbox", "unread", "limit"]);
         const limit = o.limit === undefined ? 20 : intArg(o.limit, "messages({ limit })", 1, 100);

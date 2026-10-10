@@ -5,6 +5,7 @@
 import { AutomationFailure } from "../../errors";
 import type { AppAdapter } from "../types";
 import { appScript, rows, text, urlArg, yes } from "./common";
+import { CHROMIUM_GUIDE } from "../guides/chromium";
 
 /** The family's bundle ids (the browsers' table in the Phase 2 spine, channels included). */
 export const CHROMIUM_BUNDLE_IDS = [
@@ -14,15 +15,10 @@ export const CHROMIUM_BUNDLE_IDS = [
   "com.vivaldi.Vivaldi", "com.operasoftware.Opera", "company.thebrowser.Browser", "org.chromium.Chromium",
 ] as const;
 
-const GUIDE = `This browser's extras list its tabs and open a URL without touching any page or bringing the browser forward:
-- tabs() lists every tab: its window id, its index, whether it is the window's active tab, its URL and title;
-- openURL(url) opens a new tab at the end of the front window and keeps that window's active tab as it was; it returns where the new tab is ({ window, tab }).
-For work inside a page — reading it, clicking, typing — bind the tab with browsers.tab(…, { browser }) (its id from browsers.tabs()) instead of this app's window: that drives the page itself, in the background.
-The extras never run JavaScript in a page.`;
 
 export const chromiumAdapter: AppAdapter = {
   bundleIds: CHROMIUM_BUNDLE_IDS,
-  guide: { id: "chromium@1", text: GUIDE },
+  guide: { id: "chromium@1", text: CHROMIUM_GUIDE },
   extras: [
     {
       name: "tabs", access: "view",

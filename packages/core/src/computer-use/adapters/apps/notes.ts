@@ -2,15 +2,10 @@
 // `modification date`, `container` of a note; `make new note`). A password-protected note's text cannot be read.
 import type { AppAdapter } from "../types";
 import { appScript, intArg, optsArg, rows, stringArg, text } from "./common";
+import { NOTES_GUIDE } from "../guides/notes";
 
 const bad = (message: string): TypeError => Object.assign(new TypeError(message), { name: "TypeError" });
 
-const GUIDE = `Notes' extras work without bringing Notes forward or changing what it shows:
-- list() returns notes in Notes' own order — id, name, folder and last change (local time); { folder: "Name" } one folder, { limit } up to 200 (default 30);
-- read(id) returns a note's name and plain text (ids come from list() or search()); a locked note can't be read;
-- search(text) finds notes whose name or text contains it (at most 50);
-- create({ title, body, folder }) makes a new note — in the default folder unless { folder } names one — and returns its id. The body is plain text; its lines become the note's paragraphs, under the title.
-A note's name is its first line. Use the UI (bind a Notes window) to edit an existing note in place.`;
 
 /** A note id as Notes gives it (`x-coredata://…/ICNote/p123`). */
 function noteId(v: unknown): string {
@@ -36,7 +31,7 @@ const NOTE_ROW = "my winterText(id of x) & winterTAB & my winterISO(modification
 
 export const notesAdapter: AppAdapter = {
   bundleIds: ["com.apple.Notes"],
-  guide: { id: "notes@1", text: GUIDE },
+  guide: { id: "notes@1", text: NOTES_GUIDE },
   extras: [
     {
       name: "list", access: "view",

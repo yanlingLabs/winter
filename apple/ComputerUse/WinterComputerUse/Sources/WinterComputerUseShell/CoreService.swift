@@ -23,6 +23,8 @@ public protocol CoreService: AnyObject {
     func targetWaitFor(_ params: TargetWaitForParams) async throws -> TargetWaitForResult
     func targetAppleScript(_ params: TargetAppleScriptParams) async throws -> TargetAppleScriptResult
     func targetScriptingDictionary(_ params: TargetScriptingDictionaryParams) async throws -> TargetScriptingDictionaryResult
+    /// `target.scriptingCommands` (1.8.0): the bound app's dictionary commands, structured.
+    func targetScriptingCommands(_ params: TargetScriptingCommandsParams) async throws -> TargetScriptingCommandsResult
     func screenScreenshot(_ params: ScreenScreenshotParams) async throws -> ScreenScreenshotResult
     func screenAppAt(_ params: ScreenAppAtParams) async throws -> ScreenAppAtResult
     func cancel(_ params: CancelParams) async throws -> CancelResult

@@ -3,12 +3,8 @@
 // Xcode; the extra polls the result's `completed` until it is done or the script's time runs short.
 import type { AppAdapter, AdapterScope } from "../types";
 import { appScript, intArg, optsArg, rows, stringArg, text } from "./common";
+import { XCODE_GUIDE } from "../guides/xcode";
 
-const GUIDE = `Xcode's extras work on its open workspaces without bringing Xcode forward:
-- schemes() lists each open workspace (front first) with its schemes and its active scheme;
-- build() builds the front workspace's ACTIVE scheme for its active run destination (as Product › Build does), waits for it within the script's time, and returns its status (succeeded, failed, error occurred, cancelled, or still running) with the first build errors; { workspace: "Name" } picks another open workspace, { waitMs } waits less;
-- buildStatus() reads the last build's result again later.
-To build another scheme, the user (or you, in Xcode's scheme menu) must make it the active one first — build() never changes it. A long build: pass a larger timeoutMs to the script, or call buildStatus() in a later call.`;
 
 /** `workspace document "<name>"`, or the front one. */
 const workspaceRef = (name: string | undefined): string => (name === undefined ? "workspace document 1" : `workspace document ${text(name)}`);
@@ -46,7 +42,7 @@ const shape = (s: BuildState): Record<string, unknown> => ({
 
 export const xcodeAdapter: AppAdapter = {
   bundleIds: ["com.apple.dt.Xcode"],
-  guide: { id: "xcode@1", text: GUIDE },
+  guide: { id: "xcode@1", text: XCODE_GUIDE },
   extras: [
     {
       name: "schemes", access: "view",

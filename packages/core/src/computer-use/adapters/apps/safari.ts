@@ -4,14 +4,8 @@
 import { AutomationFailure } from "../../errors";
 import type { AppAdapter } from "../types";
 import { appScript, intArg, optsArg, rows, text, urlArg, yes } from "./common";
+import { SAFARI_GUIDE } from "../guides/safari";
 
-const GUIDE = `Safari's page content is in state() like any window's, and its extras read and open pages without touching the page or bringing Safari forward:
-- tabs() lists every tab: its window id, its index, whether it is the window's current tab, its URL and title;
-- currentURL() is the URL of Safari's front document (the current tab of its frontmost browser window);
-- pageText() is the readable text of that page; pageText({ window, tab }) reads another tab, with the ids tabs() gives — text only, no links or form values;
-- openURL(url) opens a new tab at the end of the front window without switching to it, and returns where it is ({ window, tab }); { newTab: false } loads the URL in that window's current tab instead, replacing its page.
-To work in a page (click, type), bind the window and use state() refs; a tab you opened with openURL must be made the current tab first (click it in the tab bar).
-The extras never run JavaScript in a page.`;
 
 /** `{ window, tab }` from tabs(), or the front document. */
 function tabRef(o: Record<string, unknown>): string {
@@ -25,7 +19,7 @@ function tabRef(o: Record<string, unknown>): string {
 
 export const safariAdapter: AppAdapter = {
   bundleIds: ["com.apple.Safari", "com.apple.SafariTechnologyPreview"],
-  guide: { id: "safari@1", text: GUIDE },
+  guide: { id: "safari@1", text: SAFARI_GUIDE },
   extras: [
     {
       name: "tabs", access: "view",
@@ -82,7 +76,7 @@ export const safariAdapter: AppAdapter = {
       name: "openURL", access: "full",
       signature: "openURL(url: string, o?: { newTab?: boolean }): Promise<{ window: number; tab: number }>",
       summary: "opens a URL in a new background tab of the front window (newTab: false: in its current tab)",
-      doc: "http, https or file URLs. By default a new tab at the end of the front window, which stays on its current tab; { newTab: false } loads the URL in the current tab instead (its page is replaced). With no browser window it fails (NoWindow). Returns where the page is.",
+      doc: "http, https or file URLs. By default a new tab at the end of the front window, whose current tab is kept as it was; { newTab: false } loads the URL in the current tab instead (its page is replaced). With no browser window it fails (NoWindow). Returns where the page is.",
       async run(scope, args) {
         const url = urlArg(args[0], "openURL(url)");
         const o = optsArg(args[1], "openURL(url, o)", ["newTab"]);
@@ -93,12 +87,19 @@ export const safariAdapter: AppAdapter = {
           "set w to front window",
           ...(o.newTab === false
             ? [`set URL of current tab of w to ${u}`, "return ((id of w) as text) & winterTAB & ((index of current tab of w) as text)"]
-            : [`set nt to make new tab at end of tabs of w with properties {URL:${u}}`, "return ((id of w) as text) & winterTAB & ((index of nt) as text)"]),
+            : [
+              "set ci to index of current tab of w",
+              `make new tab at end of tabs of w with properties {URL:${u}}`,
+              "set n to count of tabs of w",
+              // The user's current tab stays current, whether or not Safari switched to the new one.
+              "set current tab of w to tab ci of w",
+              "return ((id of w) as text) & winterTAB & (n as text)",
+            ]),
         ]), { timeoutMs: 15_000 });
         if ((result ?? "").trim() === "NOWINDOW") throw new AutomationFailure("NoWindow", "Safari has no browser window to open a tab in — ask the user to open one (Winter never opens a browser window in front of them)");
         const [row] = rows(result, 2);
         const where = { window: Number(row?.[0] ?? 0), tab: Number(row?.[1] ?? 0) };
-        scope.say(o.newTab === false ? "loaded the URL in the front window's current tab" : "opened the URL in a new tab of the front window (its current tab did not change)");
+        scope.say(o.newTab === false ? "loaded the URL in the front window's current tab" : "opened the URL in a new tab at the end of the front window (its current tab is unchanged)");
         return where;
       },
     },
