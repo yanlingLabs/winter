@@ -10,6 +10,28 @@ import type { WinterProfile } from "../profile";
 /** The helper protocol this daemon speaks — `apple/ComputerUse/PROTOCOL.md`'s "Protocol version", the helper's
  *  `RPCWire.protocolVersion` and WinterKit's `ComputerUseHelperProtocol.version` (a repo test keeps them equal). */
 export const HELPER_PROTOCOL = 1;
+/**
+ * The oldest helper this daemon works with (apple/ComputerUse/PROTOCOL.md, "Compatibility"): 1.7.0 is the first that
+ * never moves the user to another desktop without the desktop-switch prompt (`needs_desktop_visit`). An older helper
+ * — one still running after an update, or a dev helper not rebuilt — is closed and relaunched once, then refused
+ * typed (`HelperOutdatedError`): it would move desktops without asking.
+ */
+export const HELPER_MIN_VERSION = "1.7.0";
+
+/** `version` ≥ `minimum`, by the first three numeric parts (a pre-release tag after them is ignored); an unreadable
+ *  version is never enough. */
+export function helperVersionAtLeast(version: unknown, minimum: string = HELPER_MIN_VERSION): boolean {
+  const parts = (v: string): number[] | undefined => {
+    const m = /^(\d+)\.(\d+)(?:\.(\d+))?/.exec(v.trim());
+    return m === null ? undefined : [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)];
+  };
+  if (typeof version !== "string") return false;
+  const have = parts(version);
+  const need = parts(minimum);
+  if (have === undefined || need === undefined) return false;
+  for (let i = 0; i < 3; i++) if (have[i]! !== need[i]!) return have[i]! > need[i]!;
+  return true;
+}
 
 /** The helper's bundle id per profile: dist `com.winter.computeruse`, dev `com.winter.computeruse.dev`. */
 export function helperBundleIdFor(profile: WinterProfile): string {
@@ -119,6 +141,16 @@ export class HelperProtocolMismatchError extends HelperUnavailableError {
   }
 }
 
+/** The running helper is older than `HELPER_MIN_VERSION` and a relaunch did not bring a newer one: unusable until
+ *  Winter (and so its helper) is updated — never retried. */
+export class HelperOutdatedError extends HelperUnavailableError {
+  readonly reason = "outdated" as const;
+  constructor(readonly helperVersion: string | undefined, readonly minimum: string = HELPER_MIN_VERSION) {
+    super(`Winter Computer Use ${helperVersion ?? "(unknown version)"} is older than this Winter needs (${minimum} or later) — update Winter, or quit Winter Computer Use so its current version starts`, false);
+    this.name = "HelperOutdatedError";
+  }
+}
+
 export type Rect = [x: number, y: number, w: number, h: number];
 
 export interface HelloResult { protocol: number; helperVersion: string; pid: number }
@@ -141,7 +173,9 @@ export interface FindResult {
   /** The page changed since the last state(), or the read was cut short (helper 1.6.0+). */
   note?: string;
 }
-export interface ScreenshotBudget { maxLongEdge: number; tile?: number; maxTiles?: number; quality: number }
+/** `maxBytes` (helper 1.7.0): an encoded JPEG over it is re-encoded from the SAME capture at the next lower quality
+ *  (0.8 → 0.6 → 0.45 → 0.3), so a live shot's one desktop visit is never repeated for its size. */
+export interface ScreenshotBudget { maxLongEdge: number; tile?: number; maxTiles?: number; quality: number; maxBytes?: number }
 export interface ScreenshotResult {
   imageBase64: string; mime: "image/jpeg"; width: number; height: number; shotId: string; settled?: boolean; waitedMs?: number;
   /** The captured area's size in window POINTS (clicks take image pixels, which differ on a Retina display). */
@@ -203,7 +237,10 @@ export type TargetLostReason = "app_quit" | "window_closed" | "helper_restart" |
 export type HelperNotification =
   | { method: "escPressed"; params: { sessionIds: string[] } }
   | { method: "targetLost"; params: { targetId: string; reason: TargetLostReason } }
-  | { method: "permissionsChanged"; params: { permissions: HelperPermissions } };
+  | { method: "permissionsChanged"; params: { permissions: HelperPermissions } }
+  /** helper 1.7.0: after EVERY desktop visit (success, a failed primitive, a cancelled request — whose answer the
+   *  dispatcher sends before the visit's report exists): how long the user was away and whether they are back. */
+  | { method: "desktopVisited"; params: { sessionId: string; callId?: string; targetId: string; app: string; why: "act" | "live"; ms: number; returned: boolean; userMoved?: boolean } };
 
 /** One request line is at most 1 MiB; one response line at most 16 MiB (images). */
 export const HELPER_MAX_REQUEST_LINE = 1024 * 1024;

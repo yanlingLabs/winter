@@ -16,7 +16,12 @@ export class FakeHelper {
   installed = true;
   verifyOk = true;
   helloProtocol = 1;
+  /** The helper version `hello` and `status` report (the daemon requires ≥ HELPER_MIN_VERSION). */
+  helperVersion = "1.7.0";
   pid = 4242;
+  /** The pids the daemon asked to end (an outdated helper); `onTerminate` lets a test "update" it. */
+  readonly terminated: number[] = [];
+  onTerminate?: (pid: number) => void;
   /** The app PATHS the launcher was asked to open (the daemon launches the helper by path). */
   readonly launched: string[] = [];
   readonly requests: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -49,6 +54,12 @@ export class FakeHelper {
     launch: async (appPath) => { this.launched.push(appPath); this.running = true; },
   };
   readonly verifier: HelperVerifier = () => this.verifyOk;
+  /** The daemon's `terminate` seam: SIGTERM to an outdated helper — it quits (its socket stops answering). */
+  readonly terminate = (pid: number): void => {
+    this.terminated.push(pid);
+    this.quit();
+    this.onTerminate?.(pid);
+  };
 
   calls(method: string): Array<Record<string, unknown>> {
     return this.requests.filter((r) => r.method === method).map((r) => r.params);
@@ -104,8 +115,8 @@ export class FakeHelper {
     const override = this.handlers[method];
     if (override !== undefined) return await override(params);
     switch (method) {
-      case "hello": return { protocol: this.helloProtocol, helperVersion: "1.0-test", pid: this.pid };
-      case "status": return { helperVersion: "1.0-test", permissions: { accessibility: true, screenRecording: false } };
+      case "hello": return { protocol: this.helloProtocol, helperVersion: this.helperVersion, pid: this.pid };
+      case "status": return { helperVersion: this.helperVersion, permissions: { accessibility: true, screenRecording: false } };
       case "permissions.request": return { opened: true };
       case "apps.list": return { apps: this.apps.map((a) => ({ name: a.name, bundleId: a.bundleId, running: a.running, ...(a.running ? { pid: a.pid } : {}) })) };
       case "screen.windows": return { windows: this.apps.filter((a) => a.running).map((a, i) => ({ app: a.name, bundleId: a.bundleId, pid: a.pid, windowId: 100 + i, title: `${a.name} window`, frame: [0, 0, 800, 600], onScreen: true })) };
