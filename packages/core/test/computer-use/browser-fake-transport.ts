@@ -53,6 +53,14 @@ export class FakeTab {
   navigateByDetach?: "resolve" | "reject";
   /** An attach is refused (`tab_gone`) until this time — the tab between documents. */
   betweenUntil = 0;
+  /** Winter for Chrome's discard before a top-level navigation (PROTOCOL.md §5.3): the stand-in document's events come
+   *  first — on the SAME session — then the command runs as asked. */
+  navigateByDiscard = false;
+  /** The fallbacks of §5.3 for a browser that behaves otherwise: "new-session" — the discard ended the debugging
+   *  session (an `Inspector.detached`, the command run in a session the engine does not follow, answered `cdp_error`
+   *  with `navigated: true`); "new-key" — the tab came back under a new key (`tab.gone` for the old one, then
+   *  `tab_gone` with `navigated` and the new key; `goneAfter`: the gone notice comes after the answer). */
+  navigateFallback?: "new-session" | "navigated-only" | { newKey: string; goneAfter?: boolean };
   readonly winterObjects = new Set<string>();
   values = new Map<string, string>();
   focused: string | undefined;
@@ -184,6 +192,25 @@ export class FakeCdpTransport implements CdpTransport {
     t.winterObjects.clear();
   }
 
+  /** The discard's own events (§5.3 step 1), all in before the command is sent: the old subframes detached (and their
+   *  sessions), the contexts cleared, a main-world context, the stand-in's lifecycle with the OLD loaderId — and no
+   *  `Page.frameNavigated`. */
+  private discard(t: FakeTab): void {
+    for (const f of t.page.frames ?? []) {
+      this.emit(t, "Page.frameDetached", { frameId: f.frameId, reason: "remove" });
+      if (f.oopif === true) this.emit(t, "Target.detachedFromTarget", { sessionId: `S-${f.frameId}`, targetId: f.frameId });
+    }
+    for (const [k] of [...t.contexts]) { t.contexts.delete(k); t.endedContexts.add(k); }
+    this.emit(t, "Runtime.executionContextsCleared", {});
+    const id = this.nextCtx++;
+    this.emit(t, "Runtime.executionContextCreated", { context: { id, uniqueId: `u-${id}`, name: "", origin: "", auxData: { frameId: "top", isDefault: true, type: "default" } } });
+    const loaderId = `L${t.doc}`;
+    for (const name of ["init", "DOMContentLoaded", "load", "networkIdle"]) this.emit(t, "Page.lifecycleEvent", { frameId: "top", loaderId, name, timestamp: 1 });
+    this.emit(t, "Page.domContentEventFired", { timestamp: 1 });
+    this.emit(t, "Page.loadEventFired", { timestamp: 1 });
+    t.page = { ...t.page, frames: [], nodes: [], title: "" };
+  }
+
   /** The extension's own navigation of a `beforeunload` tab: a synthetic top-level `Inspector.detached`, the debugger
    *  let go, the new document loaded while nobody is attached. */
   private navigateDetached(t: FakeTab, url: string): void {
@@ -268,6 +295,32 @@ export class FakeCdpTransport implements CdpTransport {
     if (method === "Runtime.evaluate" || (method === "Runtime.callFunctionOn" && typeof params.objectId !== "string") || method === "Page.createIsolatedWorld") runtimeOn();
     if (method === "Runtime.evaluate") ended(params.contextId);
     if ((method === "Runtime.callFunctionOn" && typeof params.objectId !== "string") || method === "DOM.resolveNode") ended(params.executionContextId);
+    const topLevel = (method === "Page.navigate" && params.frameId === undefined || method === "Page.reload" || method === "Page.navigateToHistoryEntry") && session === undefined;
+    if (topLevel && t.navigateByDiscard) this.discard(t);
+    if (topLevel && t.navigateFallback !== undefined) {
+      const fb = t.navigateFallback;
+      const url = method === "Page.navigate" ? String(params.url) : method === "Page.reload" ? t.page.url : t.history[Number(params.entryId) - 1]!;
+      if (method === "Page.navigateToHistoryEntry") t.historyIndex = Number(params.entryId) - 1;
+      else if (method === "Page.navigate") { t.history = t.history.slice(0, t.historyIndex + 1); t.history.push(url); t.historyIndex = t.history.length - 1; }
+      if (fb === "navigated-only") {
+        // Navigated with the session kept but no event the engine could follow: only the answer says so.
+        for (const [k] of [...t.contexts]) { t.contexts.delete(k); t.endedContexts.add(k); }
+        t.doc++;
+        t.page = this.page(url);
+        throw new TransportError("cdp_error", "navigated — read the page again", { navigated: true, cdpMessage: "navigated — read the page again" });
+      }
+      if (fb === "new-session") {
+        this.navigateDetached(t, url);
+        t.attached = true; // the extension attached again — in a session the engine never enabled anything in
+        throw new TransportError("cdp_error", "the page was navigated, but the browser started a new debugging session for it — read the page again", { navigated: true, cdpMessage: "the page was navigated, but the browser started a new debugging session for it — read the page again" });
+      }
+      const fresh = this.addTab(this.page(url), { tabKey: fb.newKey, ...(t.sessionId === undefined ? {} : { sessionId: t.sessionId }), agent: t.agent });
+      fresh.history = [...t.history];
+      fresh.historyIndex = t.historyIndex;
+      if (fb.goneAfter === true) setTimeout(() => this.goneTab(t.tabKey, "closed"), 0);
+      else this.goneTab(t.tabKey, "closed");
+      throw new TransportError("tab_gone", "the tab came back under a new key", { navigated: true, tabKey: fb.newKey });
+    }
     const detachNavigate = (url: string): T => {
       const how = t.navigateByDetach!;
       this.navigateDetached(t, url);

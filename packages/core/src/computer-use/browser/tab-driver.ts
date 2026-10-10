@@ -86,6 +86,7 @@ export function transportFailure(err: unknown, browserName: string): Error {
     case "timeout": return new AutomationFailure("TargetBusy", "the browser did not answer in time — the page may be busy; try again in a moment", true);
     case "not_allowed": return new Error(`the browser refused that request (${err.message})`);
     case "cdp_error": {
+      if (err.data.navigated === true) return new AutomationFailure("StaleRef", "the page navigated meanwhile — call state() to read it again");
       // -32603 from Winter's app: the browser's answer was too large for the link, or not valid JSON.
       if (err.data.cdpCode === -32603) return new Error("the browser's answer was too large or unreadable — read less at once (state({ within }), a region screenshot)");
       const msg = typeof err.data.cdpMessage === "string" ? err.data.cdpMessage : err.message;
@@ -111,8 +112,9 @@ export class TabDriver {
   fileChooser?: { frameId: string; mode: string };
 
   private attached = false;
-  /** Times the debugger was let go while the tab lived (an idle detach, `stopped`, a command's `tab_gone`): a
-   *  navigation in flight across one is finished by attaching again (`navigation`). */
+  /** Times the tab's document was replaced underneath the engine or its debugger let go while the tab lived (an idle
+   *  detach, `stopped`, a command's `tab_gone`, a command answered "navigated — read the page again"): a navigation in
+   *  flight across one is finished by reading the tab afresh (`navigation`). */
   private detaches = 0;
   private attaching?: Promise<void>;
   private releasing?: Promise<void>;
@@ -150,9 +152,13 @@ export class TabDriver {
    *  creation BEFORE it answers the `Page.createIsolatedWorld` that made it, so the id is matched up afterwards. */
   private readonly seenUnique = new Map<string, string>();
 
+  /** The tab came back under a NEW key after a navigation (Winter for Chrome, when the browser gave a discarded tab a new
+   *  id): the engine moves everything it keys by the old one, and this driver follows (`tabKey` is set by it). */
+  onRekey?: (newKey: string) => boolean;
+
   constructor(
     readonly backend: string,
-    readonly tabKey: string,
+    public tabKey: string,
     public transport: CdpTransport,
     /** "Winter's browser", "Google Chrome" — for error sentences. */
     readonly browserName: string,
@@ -183,7 +189,14 @@ export class TabDriver {
       if (err instanceof AutomationFailure) throw err;
       // `tab_gone` from a command is not proof the tab closed (an extension's debugger can be let go while the tab
       // lives): attach again on the next primitive — that attach failing is what loses the tab.
-      if (err instanceof TransportError && err.code === "tab_gone") { this.attached = false; this.detaches++; this.resetDocumentState(true); }
+      if (err instanceof TransportError && err.code === "tab_gone") {
+        // The tab came back under a new key after a navigation: the engine moves it (and un-loses it) first.
+        const moved = movedTo(err);
+        if (moved !== undefined) this.onRekey?.(moved);
+        this.attached = false; this.detaches++; this.resetDocumentState(true);
+      }
+      // "Navigated — read the page again": the command ran, in a debugging session the engine no longer follows.
+      if (err instanceof TransportError && err.code === "cdp_error" && err.data.navigated === true) { this.detaches++; this.resetDocumentState(true); }
       throw transportFailure(err, this.browserName);
     }
   }
@@ -228,14 +241,18 @@ export class TabDriver {
     this.lastUsed = this.now();
     if (this.attached) return;
     this.attaching ??= (async () => {
-      let info: { viewport: [number, number]; dpr: number };
-      try { info = await this.transport.attach(this.tabKey, { sessionId }); } catch (err) {
-        if (err instanceof TransportError && err.code === "tab_gone") {
-          if (o.transient === true) throw new TabBetween();
-          this.gone ??= "closed";
-          throw this.lost();
+      let info: { viewport: [number, number]; dpr: number } | undefined;
+      for (let attempt = 0; info === undefined; attempt++) {
+        try { info = await this.transport.attach(this.tabKey, { sessionId }); } catch (err) {
+          if (err instanceof TransportError && err.code === "tab_gone") {
+            const moved = movedTo(err);
+            if (moved !== undefined && attempt === 0 && this.onRekey?.(moved) === true) continue;
+            if (o.transient === true) throw new TabBetween();
+            this.gone ??= "closed";
+            throw this.lost();
+          }
+          throw transportFailure(err, this.browserName);
         }
-        throw transportFailure(err, this.browserName);
       }
       this.viewport = info.viewport;
       this.dpr = info.dpr > 0 ? info.dpr : 1;
@@ -468,6 +485,14 @@ export class TabDriver {
         break;
     }
     for (const poke of [...this.pokes]) poke();
+  }
+
+  /** A "closed" that turned out to be the tab coming back under a new key (`onRekey`): it lives. */
+  revive(): void {
+    this.gone = undefined;
+    this.attached = false;
+    this.detaches++;
+    this.resetDocumentState(true);
   }
 
   onGone(reason: string): void {
@@ -1228,6 +1253,8 @@ export class TabDriver {
       if (this.gone !== undefined) throw this.lost();
       if (this.dialog !== undefined) return true;
       try {
+        // Still attached, its document replaced underneath ("navigated — read the page again"): read its frames again.
+        if (this.topFrameId === undefined) await this.loadTopFrame();
         const q = await this.quietInfo();
         if (q.readyState !== "loading" && (arrived === undefined || arrived(q.url))) return true;
       } catch (err) {
@@ -1297,6 +1324,11 @@ interface FrameTreeNode { frame: { id: string; parentId?: string; url: string; u
 
 /** An attach refused while the tab is between documents (`ensureAttached`'s `transient`): try again shortly. */
 class TabBetween extends Error {}
+
+/** A `tab_gone` that says the tab NAVIGATED and lives on under a new key (`data: { navigated, tabKey }`). */
+function movedTo(err: TransportError): string | undefined {
+  return err.data.navigated === true && typeof err.data.tabKey === "string" && err.data.tabKey.length > 0 ? err.data.tabKey : undefined;
+}
 
 /** Two URLs name the same document (the fragment and a trailing slash aside). */
 function sameDocUrl(a: string, b: string): boolean {

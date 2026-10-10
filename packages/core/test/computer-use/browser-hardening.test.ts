@@ -673,3 +673,87 @@ describe("world rule: Runtime is enabled in a frame's session before its world i
     expect(lastEnable).toBeLessThan(lastWorld);
   });
 });
+
+describe("lane D §5.3: leaving a page that may ask \"leave this page?\"", () => {
+  const A: FakePage = {
+    url: "https://a.example/", title: "A", nodes: [{ id: 1, role: "button", name: "On A" }, { id: 6, role: "iframe", name: "Pay", frame: true, origin: "pay.example" }],
+    frames: [{ frameId: "f1", ownerId: 6, nodes: [{ id: 1, role: "button", name: "Pay now" }], oopif: true, url: "https://pay.example/" }],
+  };
+  const B: FakePage = { url: "https://b.example/", title: "B", nodes: [{ id: 1, role: "button", name: "On B" }] };
+
+  test("the discard's stand-in events (same session, old loaderId, no frameNavigated) come first: goto, back and reload work as ever", async () => {
+    const h = harness();
+    h.chrome.pages[A.url] = A;
+    h.chrome.pages[B.url] = B;
+    const r = h.run();
+    const t = await h.engine.global(r.scope, "browsers.open", { url: A.url, browser: "chrome" }) as TabHandle;
+    expect(r.text()).toContain('button "Pay now"');
+    const ft = h.chrome.tabs.get(t.id.split(":")[1]!)!;
+    ft.navigateByDiscard = true;
+    const t0 = Date.now();
+    await h.engine.primitive(r.scope, t.targetId, "goto", { url: B.url });
+    expect(await h.engine.primitive(r.scope, t.targetId, "url", {})).toBe(B.url);
+    const s = await h.engine.primitive(r.scope, t.targetId, "state", {}) as string;
+    expect(s).toContain('button "On B"');
+    expect(s.split("\n")[0]).toContain(" · new page");
+    await h.engine.primitive(r.scope, t.targetId, "back", {});
+    expect(await h.engine.primitive(r.scope, t.targetId, "url", {})).toBe(A.url);
+    await h.engine.primitive(r.scope, t.targetId, "reload", {});
+    expect(await h.engine.primitive(r.scope, t.targetId, "url", {})).toBe(A.url);
+    // Never a 10 s wait on a DOMContentLoaded that already went by (the stand-in's carries the OLD loaderId).
+    expect(Date.now() - t0).toBeLessThan(3_000);
+    expect(r.text()).not.toContain("still loading");
+  });
+
+  test("fallback: the discard ended the debugging session — navigated, read again in a fresh session", async () => {
+    const h = harness();
+    h.chrome.pages[A.url] = { ...A, frames: [], nodes: [{ id: 1, role: "button", name: "On A" }] };
+    h.chrome.pages[B.url] = B;
+    const r = h.run();
+    const t = await h.engine.global(r.scope, "browsers.open", { url: A.url, browser: "chrome" }) as TabHandle;
+    const ft = h.chrome.tabs.get(t.id.split(":")[1]!)!;
+    ft.navigateFallback = "new-session";
+    const enables = (): number => h.chrome.sent.filter((s) => s.method === "Runtime.enable" && s.session === undefined).length;
+    const before = enables();
+    await h.engine.primitive(r.scope, t.targetId, "goto", { url: B.url });
+    expect(enables()).toBe(before + 1);
+    expect(await h.engine.primitive(r.scope, t.targetId, "url", {})).toBe(B.url);
+    expect(await h.engine.primitive(r.scope, t.targetId, "state", { full: true }) as string).toContain('button "On B"');
+  });
+
+  test("fallback: an answer that says only \"navigated\" (no event followed) reads the tab again", async () => {
+    const h = harness();
+    h.chrome.pages[A.url] = { ...A, frames: [], nodes: [{ id: 1, role: "button", name: "On A" }] };
+    h.chrome.pages[B.url] = B;
+    const r = h.run();
+    const t = await h.engine.global(r.scope, "browsers.open", { url: A.url, browser: "chrome" }) as TabHandle;
+    h.chrome.tabs.get(t.id.split(":")[1]!)!.navigateFallback = "navigated-only";
+    await h.engine.primitive(r.scope, t.targetId, "goto", { url: B.url });
+    expect(await h.engine.primitive(r.scope, t.targetId, "url", {})).toBe(B.url);
+    const s = await h.engine.primitive(r.scope, t.targetId, "state", {}) as string;
+    expect(s).toContain('button "On B"');
+  });
+
+  for (const goneAfter of [false, true]) {
+    test(`fallback: the tab came back under a new key (its "closed" ${goneAfter ? "after" : "before"} the answer) — the same handle and agent tab, rekeyed`, async () => {
+      const h = harness();
+      h.chrome.pages[A.url] = { ...A, frames: [], nodes: [{ id: 1, role: "button", name: "On A" }] };
+      h.chrome.pages[B.url] = B;
+      const r = h.run();
+      const t = await h.engine.global(r.scope, "browsers.open", { url: A.url, browser: "chrome" }) as TabHandle;
+      const oldKey = t.id.split(":")[1]!;
+      h.chrome.tabs.get(oldKey)!.navigateFallback = { newKey: "777", goneAfter };
+      await h.engine.primitive(r.scope, t.targetId, "goto", { url: B.url });
+      await tick(5);
+      expect(await h.engine.primitive(r.scope, t.targetId, "url", {})).toBe(B.url);
+      expect(await h.engine.primitive(r.scope, t.targetId, "state", { full: true }) as string).toContain('button "On B"');
+      expect(h.chrome.tabs.get("777")!.attached).toBe(true);
+      const rows = await h.engine.global(r.scope, "browsers.tabs", { browser: "chrome" }) as Array<{ id: string; yours: boolean }>;
+      expect(rows).toEqual([expect.objectContaining({ id: "chrome:777", yours: true })]);
+      // Still the session's agent tab: its turn's end closes it.
+      r.end();
+      h.engine.turnEnded("s1");
+      expect(h.chrome.tabs.get("777")!.closed).toBe(true);
+    });
+  }
+});

@@ -427,13 +427,36 @@ describe("dialogs", () => {
     await h.engine.primitive(r.scope, t.targetId, "goto", { url: "https://q.example/" });
     expect(h.winter.sent.some((x) => x.method === "Page.handleJavaScriptDialog" && x.params.accept === true)).toBe(true);
     expect(await h.engine.primitive(r.scope, t.targetId, "url", {})).toBe("https://q.example/");
-    // A user tab's beforeunload is shown, not answered.
+    // A beforeunload the PAGE raises by itself on a user's tab is shown, not answered.
     h.chrome.addTab({ url: "https://u.example/", title: "U", nodes: [] }, { tabKey: "9" });
     const u = await h.engine.global(r.scope, "browsers.tab", { tab: "chrome:9" }) as TabHandle;
-    h.chrome.tabs.get("9")!.beforeUnload = true;
-    await h.engine.primitive(r.scope, u.targetId, "goto", { url: "https://v.example/" });
+    h.chrome.openDialog("9", "beforeunload", "");
     const s = await h.engine.primitive(r.scope, u.targetId, "state", {}) as string;
     expect(s.split("\n")[1]).toMatch(/^dialog beforeunload/);
+    expect(h.chrome.sent.some((x) => x.tabKey === "9" && x.method === "Page.handleJavaScriptDialog")).toBe(false);
+  });
+
+  test("goto, back, forward and reload never navigate the user's own tab in their browser (Winter's built-in strip is exempt)", async () => {
+    const h = harness();
+    h.chrome.addTab({ url: "https://u.example/", title: "U", nodes: [] }, { tabKey: "9" });
+    const r = h.run();
+    const u = await h.engine.global(r.scope, "browsers.tab", { tab: "chrome:9" }) as TabHandle;
+    for (const [p, a] of [["goto", { url: "https://v.example/" }], ["back", {}], ["forward", {}], ["reload", {}]] as const) {
+      const e = await failure(h.engine.primitive(r.scope, u.targetId, p, a as Record<string, unknown>));
+      expect((e as AutomationFailure).kind).toBe("NotAllowed");
+      expect(e.message).toBe("this is the user's own tab — navigating it away could raise a leave-page prompt and lose their work; open the page in a new tab with browsers.open(url)");
+    }
+    expect(h.chrome.sent.some((x) => x.tabKey === "9" && /^Page\.(navigate|reload|navigateToHistoryEntry|getNavigationHistory)$/.test(x.method))).toBe(false);
+    // In-page acts on it stay allowed.
+    await h.engine.primitive(r.scope, u.targetId, "state", {});
+    // The tab Winter opened in the same browser navigates; so does the user's tab in Winter's own strip.
+    const mine = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "chrome" }) as TabHandle;
+    await h.engine.primitive(r.scope, mine.targetId, "goto", { url: "https://b.example/" });
+    h.panel.set("s1", [{ tabId: "user-tab", url: "https://w.example/" }]);
+    h.winter.addTab({ url: "https://w.example/", title: "W", nodes: [] }, { tabKey: "user-tab", sessionId: "s1" });
+    const w = await h.engine.global(r.scope, "browsers.tab", { tab: "winter:user-tab" }) as TabHandle;
+    await h.engine.primitive(r.scope, w.targetId, "goto", { url: "https://x.example/" });
+    expect(await h.engine.primitive(r.scope, w.targetId, "url", {})).toBe("https://x.example/");
   });
 });
 

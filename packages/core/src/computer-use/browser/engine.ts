@@ -68,6 +68,7 @@ export interface BrowserEngineDeps {
 interface Binding {
   targetId: string;
   backend: BackendId;
+  /** The tab's key in its backend (moves when the tab comes back under a new one after a navigation). */
   tabKey: string;
   kind: "agent" | "user";
   boundRun: string;
@@ -92,6 +93,12 @@ export interface BrowserListRow { id: string; name: string; isDefault: boolean; 
 /** At most this many tabs held (a live built-in browser, an attached debugger) per session and in all; past it the
  *  least recently used is let go (still open: its next use takes it again). */
 export const HOLDS_PER_SESSION = 8;
+/** Navigation in a user's browser leaves only tabs Winter opened: the user's own tab's page could ask "leave this
+ *  page?" and lose their work (the controller's ruling; Winter's built-in browser hides its dialogs, so it is exempt). */
+const NAVIGATE_PRIMITIVES: ReadonlySet<string> = new Set(["goto", "back", "forward", "reload"]);
+export const USER_TAB_NAVIGATION = "this is the user's own tab — navigating it away could raise a leave-page prompt and lose their work; open the page in a new tab with browsers.open(url)";
+/** How long a closed tab's teardown is kept for a `rekey` (a navigation's answer follows its "closed" at once). */
+const RECENTLY_CLOSED_MS = 30_000;
 export const HOLDS_GLOBAL = 16;
 
 const isRef = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
@@ -132,6 +139,9 @@ function characters(text: string): string {
 export class BrowserEngine {
   private readonly sessions = new Map<string, SessionBrowsers>();
   private readonly drivers = new Map<string, TabDriver>();
+  /** Tabs reported closed a moment ago, with what that tore down (`rekey` restores it when a navigation's answer says
+   *  the tab came back under a new key). */
+  private readonly recentlyClosed = new Map<string, { at: number; reason: string; agentTabs: Map<string, AgentTab> }>();
   private readonly hooked = new Map<CdpTransport, { backend: BackendId; off: Array<() => void> }>();
   private readonly approvals = new SiteApprovals();
   private readonly declined = new Map<string, Set<string>>();
@@ -190,6 +200,7 @@ export class BrowserEngine {
       scope.live();
       const facts = scope.sessionFacts();
       if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
+      if (NAVIGATE_PRIMITIVES.has(primitive) && b.kind === "user" && this.familyOf(b.backend) !== "winter") throw new AutomationFailure("NotAllowed", USER_TAB_NAVIGATION);
       const act = !OBSERVE_PRIMITIVES.has(primitive);
       if (b.bundleId !== undefined) {
         const app = this.appRef(b.backend, b.bundleId);
@@ -420,11 +431,21 @@ export class BrowserEngine {
     const d = this.drivers.get(key);
     if (reason === "stopped") { d?.onGone("stopped"); return; }
     d?.onGone(reason);
-    for (const s of this.sessions.values()) {
+    // A "closed" may be a navigation that gave the tab a new key, said by the command's own answer just after: what it
+    // tears down is kept a little while, so `rekey` can put it back.
+    const agentTabs = new Map<string, AgentTab>();
+    for (const [sid, s] of this.sessions) {
       const targetId = s.byTab.get(key);
       const b = targetId === undefined ? undefined : s.bindings.get(targetId);
       if (b !== undefined && b.lost === undefined) b.lost = reason;
+      const a = s.agentTabs.get(key);
+      if (a !== undefined) agentTabs.set(sid, a);
       if (reason === "closed" || reason === "crashed") s.agentTabs.delete(key);
+    }
+    if (reason === "closed" && d !== undefined) {
+      const now = this.now();
+      for (const [k, v] of this.recentlyClosed) if (now - v.at > RECENTLY_CLOSED_MS) this.recentlyClosed.delete(k);
+      this.recentlyClosed.set(key, { at: now, reason, agentTabs });
     }
     this.drivers.delete(key);
   }
@@ -460,10 +481,53 @@ export class BrowserEngine {
     const key = tabKeyOf(backend, tabKey);
     let d = this.drivers.get(key);
     if (d === undefined) {
-      d = new TabDriver(backend, tabKey, transport, this.browserName(backend), () => this.now());
+      const driver = new TabDriver(backend, tabKey, transport, this.browserName(backend), () => this.now());
+      if (this.familyOf(backend) !== "winter") driver.onRekey = (newKey) => this.rekey(driver, newKey);
+      d = driver;
       this.drivers.set(key, d);
     } else d.replaceTransport(transport);
     return d;
+  }
+
+  /**
+   * The tab came back under a NEW key after a navigation (Winter for Chrome, PROTOCOL.md §5.3: a browser that gives a
+   * discarded tab a new id). Everything keyed by the old key moves to the new one: the driver, each session's binding
+   * (same target id) and its agent-tab mark — restored if the old key's "closed" already arrived. The handle's printed
+   * id changes; its target id does not.
+   */
+  private rekey(driver: TabDriver, newKey: string): boolean {
+    const backend = driver.backend;
+    const oldKey = driver.tabKey;
+    if (newKey === oldKey) return false;
+    const oldK = tabKeyOf(backend, oldKey);
+    const newK = tabKeyOf(backend, newKey);
+    if (this.drivers.has(newK)) return false;
+    const closed = this.recentlyClosed.get(oldK);
+    this.recentlyClosed.delete(oldK);
+    if (closed !== undefined) driver.revive();
+    if (this.drivers.get(oldK) === driver) this.drivers.delete(oldK);
+    this.drivers.set(newK, driver);
+    driver.tabKey = newKey;
+    for (const [sid, s] of this.sessions) {
+      const targetId = s.byTab.get(oldK);
+      if (targetId !== undefined) {
+        s.byTab.delete(oldK);
+        s.byTab.set(newK, targetId);
+        const b = s.bindings.get(targetId);
+        if (b !== undefined) {
+          b.tabKey = newKey;
+          if (closed !== undefined && b.lost === closed.reason) delete b.lost;
+        }
+      }
+      const a = s.agentTabs.get(oldK) ?? closed?.agentTabs.get(sid);
+      if (a !== undefined) {
+        s.agentTabs.delete(oldK);
+        a.tabKey = newKey;
+        s.agentTabs.set(newK, a);
+      }
+    }
+    this.deps.log?.(`computer-use: ${backend} tab ${oldKey} came back as ${newKey} after a navigation`);
+    return true;
   }
 
   private unavailable(backend: BackendId): AutomationFailure {
