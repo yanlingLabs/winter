@@ -108,6 +108,7 @@ public final class CUCore: @unchecked Sendable {
             visitArriveMs = 0
             visitLateSwitchMs = 0
             keySwitchGapMs = 0
+            keyInAppSettleMs = 0
             visitFreshMaxMs = 0
             visitFreshStableMs = 0
             visitNoProbeWaitMs = 0
@@ -517,6 +518,13 @@ public final class CUCore: @unchecked Sendable {
     /// The pause between the synthetic deactivation and the make-key records (`releaseOtherKeyWindow`); 0 in
     /// test cores.
     var keySwitchGapMs: Double = 30
+    /// How long the make-key step waits for the app to show the key window an activation brings back (0 in tests).
+    var keyInAppSettleMs: Double = 60
+    /// The make-key step for Chromium-based apps: off until measured (see `makeKeyApplies`).
+    var makeKeyChromium = false
+    /// Apps a blip's hand-back left with no key window (`noteStranded`).
+    let strandLock = NSLock()
+    var strandedPids = Set<pid_t>()
     /// The most elements a hover's "did anything appear" walk counts; past it the walk proves nothing (nil).
     var hoverFingerprintMaxNodes = 4000
     var visitFreshMaxMs: Double = 1000

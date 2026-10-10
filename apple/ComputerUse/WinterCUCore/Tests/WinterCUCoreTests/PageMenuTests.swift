@@ -104,8 +104,8 @@ final class PageMenuTests: XCTestCase {
         let r = try await menu(["Tools", "Word count"], privatePath: true)
         XCTAssertEqual(r.detail, "chose Tools › Word count from the page's own menu bar, with real clicks (its menu closed)")
         XCTAssertEqual(Array((atFirstDown ?? []).prefix(3)), ["activate 77", "down pid \(pid) window 77", "up pid \(pid) window 77"],
-                       "activation and make-key records before the first click")
-        XCTAssertEqual(enforcer.deactivated, 0, "the window was already the app's key window: nothing resigned")
+                       "the app shows no focused element (no key window): activation and make-key records before the first click")
+        XCTAssertEqual(enforcer.deactivated, 0, "no other window was key: nothing resigned")
         XCTAssertTrue(FocusSPI.calls.isEmpty, "no focus records: no blip for a click")
         XCTAssertTrue(sys.activated.isEmpty, "nothing activated")
     }
@@ -116,11 +116,11 @@ final class PageMenuTests: XCTestCase {
         let other = fakeElement(95_099)
         ax.add(other, role: kAXWindowRole, title: "Other")
         ax.windowIDs[AXIdentity(element: other)] = 78
-        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: other])
+        ax.focus(pid: pid, on: other)  // the app's focus — its key window — is the other window
         let enforcer = FakeFocusEnforcer()
         core.focusEnforcerFactory = { _ in enforcer }
         _ = try await menu(["Tools", "Word count"], privatePath: true)
-        XCTAssertEqual(Array(FocusSPI.order.prefix(4)), ["deactivate", "activate 77", "down pid \(pid) window 77", "up pid \(pid) window 77"])
+        XCTAssertEqual(Array(FocusSPI.order.prefix(5)), ["activate 77", "deactivate", "activate 77", "down pid \(pid) window 77", "up pid \(pid) window 77"])
     }
 
     func testNoMakeKeyRecordsForAChromiumAppAnAppInFrontOrWithThePrivatePathOff() async throws {

@@ -187,33 +187,132 @@ extension CUCore {
         let userWindow = ax.element(ax.application(user), kAXFocusedWindowAttribute).flatMap { ax.windowID($0) }
         let sky = skyLight
         let (tp, tw) = (t.pid, t.windowID)
-        let undo = {
+        let undo = { [self] in
             if let userWindow { sky.restoreFocus(previousPid: user, previousWindowID: userWindow, targetPid: tp, targetWindowID: tw) }
+            // The hand-back's defocus leaves the app with NO key window (measured) — while accessibility may still name
+            // a focused element in its main window. Remembered, so the next make-key step does not take it for key.
+            noteStranded(tp, true)
         }
         // The focus record makes the app active, but its key window is the one it already had: after an earlier
         // blip's hand-back the app holds NO key window, and a later blip left it so (live 2026-10-10: the second
-        // paste of a run read Edit › Paste disabled and took no ⌘V; keys for the Docs window went nowhere). The
-        // make-key records name the bound window — with the app deactivated first when another of its windows
-        // is key, since the records only take where no window is.
-        let makeKey = makeKeyApplies(t)
-        let release = makeKey && boundWindowIsKeyInApp(t) == false
+        // paste of a run read Edit › Paste disabled and took no ⌘V; keys for the Docs window went nowhere). Once the
+        // app has taken the activation, the bound window is made its key window — only when it is not (`makeKeyInApp`).
+        var made = "no make-key step"
         guard backgroundStep(.focusRecords, t, run: { [self] in
-            if release { releaseOtherKeyWindow(t) }
             guard sky.focusWithoutRaise(pid: tp, windowID: tw) else { return false }
-            if makeKey { _ = sky.makeKeyWindow(pid: tp, windowID: tw) }
+            made = makeKeyInApp(t) { [self] in
+                // After the deactivation the app is told it is active again (the blip keeps it so), to the app alone.
+                noteSyntheticActivation()
+                _ = focusEnforcer(for: t, privatePath: true)?.forceActivation(windowID: tw)
+            }
             return true
         }, undo: { _ = undo() })
         else { return nil }
-        CULog.act.notice("\(t.appName, privacy: .public): window \(tw, privacy: .public) made key without raising\(makeKey ? " (make-key records\(release ? ", after another of its windows resigned key" : ""))" : "", privacy: .public)")
+        CULog.act.notice("\(t.appName, privacy: .public): window \(tw, privacy: .public) made key without raising (\(made, privacy: .public))")
         return { _ = undo() }
     }
 
-    /// The make-key records apply: they can be posted, the app is in the background, and the bound window is on
-    /// this desktop (a window on another Space keeps the routes it had — nothing new is sent there).
+    /// The make-key step may apply: the records can be posted, the app is in the background (the window server's
+    /// front, read now), the bound window is on this desktop (a window on another Space keeps the routes it had), and
+    /// the app is not Chromium-based unless measured otherwise (`makeKeyChromium`).
     func makeKeyApplies(_ t: CUTarget) -> Bool {
-        guard t.accessible, skyLight.canFocusWithoutRaise, sys.frontmostPid() != t.pid else { return false }
+        guard t.accessible, skyLight.canFocusWithoutRaise, !t.isChromium || makeKeyChromium, sys.frontmostPid() != t.pid else { return false }
         return sys.window(id: t.windowID)?.onScreen == true
     }
+
+    /// The app's key window as accessibility shows it, read after an activation: its focused element's window. A
+    /// stranded app (no key window — after a blip's hand-back) answers NO focused element, while its
+    /// `AXFocusedWindow` still names its main window (measured on 2026-10-11), so that attribute is never asked.
+    enum KeyInApp: Equatable {
+        /// The bound window is its app's key window: nothing is sent.
+        case key
+        /// The app holds no key window: the records alone name the bound one.
+        case noKeyWindow
+        /// Another STANDARD window of the app is key: the deactivation first (the records only take where no window
+        /// is key), then the activation and the records.
+        case otherKey
+        /// Not touched, and why: a panel, sheet, dialog or popover holds the keys, or the focus can't be placed.
+        case leave(String)
+    }
+
+    func keyInApp(_ t: CUTarget) -> KeyInApp {
+        guard let f = ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute) else { return .noKeyWindow }
+        let bound = try? windowElement(t)
+        let w: AXUIElement? = ax.string(f, kAXRoleAttribute) == kAXWindowRole ? f : ax.element(f, kAXWindowAttribute)
+        guard let w else {
+            if let bound, inBoundWindow(f, t, bound) == true { return .key }
+            return .leave("its focus is in no window accessibility can name")
+        }
+        if let id = ax.windowID(w) { if id == t.windowID { return .key } } else if let bound, CFEqual(w, bound) { return .key }
+        let sub = ax.string(w, kAXSubroleAttribute)
+        guard ax.string(w, kAXRoleAttribute) == kAXWindowRole, sub == nil || sub == kAXStandardWindowSubrole else {
+            return .leave("another of its windows (\(sub ?? "a panel")) holds the keys")
+        }
+        return .otherKey
+    }
+
+    /// Transient UI of the app is open — a menu (AppKit's menu window, layer 101, or one accessibility lists), a
+    /// popover, a sheet: an on-screen window of the app at the normal or menu level that accessibility does not list
+    /// among its windows. The make-key records and the deactivation would close it (measured on 2026-10-11 with a
+    /// probe app of our own: an open context menu and a transient popover both closed), so nothing is sent.
+    func transientUIOpen(_ t: CUTarget) -> Bool {
+        let app = ax.application(t.pid)
+        let listed = Set(ax.elements(app, kAXWindowsAttribute).compactMap { ax.windowID($0) })
+        let unlisted = sys.windowStack().contains {
+            $0.pid == t.pid && $0.id != t.windowID && !listed.contains($0.id) && ($0.layer == 0 || $0.layer == 101)
+                && $0.alpha > 0.05 && $0.frame.width >= 4 && $0.frame.height >= 4
+        }
+        if unlisted { return true }
+        guard let bound = try? windowElement(t) else { return false }
+        return !Self.openMenus(app: app, boundWindow: bound, ax: ax).isEmpty
+    }
+
+    /// The bound window made its app's KEY window, after an activation the caller just posted (the blip's focus
+    /// record, or a click's synthetic activation) — and only when it is not already: nothing while transient UI is
+    /// open; nothing when it is key; the records alone when the app holds no key window; for another standard window
+    /// key, the deactivation, `keySwitchGapMs`, `reactivate`, then the records. The window server's front is read
+    /// again right before the deactivation and before the records: if the user brought the app forward meanwhile,
+    /// nothing more is sent (their own key window is never touched). Returns what it did, for the log.
+    func makeKeyInApp(_ t: CUTarget, reactivate: () -> Void) -> String {
+        guard makeKeyApplies(t) else { return "the make-key step does not apply" }
+        if transientUIOpen(t) { return "left as it is: a menu, popover or sheet of the app is open" }
+        // The activation is taken a moment later: a key window it brings back shows then. An app our own hand-back
+        // left with no key window is known to hold none, whatever accessibility says.
+        let stranded = isStranded(t.pid)
+        var decision: KeyInApp = stranded ? .noKeyWindow : keyInApp(t)
+        let deadline = clock.nowMs() + keyInAppSettleMs
+        while !stranded, decision == .noKeyWindow, clock.nowMs() < deadline {
+            usleep(10_000)
+            decision = keyInApp(t)
+        }
+        let inFront = { [self] in sys.frontmostPid() == t.pid }
+        switch decision {
+        case .key:
+            return "already its app's key window"
+        case .leave(let why):
+            return "left as it is: \(why)"
+        case .noKeyWindow:
+            guard !inFront() else { return "stopped: the app came to the front" }
+            guard skyLight.makeKeyWindow(pid: t.pid, windowID: t.windowID) else { return "make-key records refused" }
+            noteStranded(t.pid, false)
+            return "the app held no key window — make-key records"
+        case .otherKey:
+            guard !inFront() else { return "stopped: the app came to the front" }
+            releaseOtherKeyWindow(t)
+            reactivate()
+            guard !inFront() else { return "stopped: the app came to the front" }
+            guard skyLight.makeKeyWindow(pid: t.pid, windowID: t.windowID) else { return "make-key records refused" }
+            noteStranded(t.pid, false)
+            return "another of its windows was key — it resigned, then make-key records"
+        }
+    }
+
+    /// Apps a blip's hand-back left with no key window (until the make-key step names one, or the app is activated).
+    func noteStranded(_ pid: pid_t, _ stranded: Bool) {
+        strandLock.withLock { if stranded { strandedPids.insert(pid) } else { strandedPids.remove(pid) } }
+    }
+
+    func isStranded(_ pid: pid_t) -> Bool { strandLock.withLock { strandedPids.contains(pid) } }
 
     /// The synthetic deactivation, so another of the app's windows resigns key, then `keySwitchGapMs` for the
     /// app to take it before the records that follow (live: with no gap one switch in six was lost; 20 ms
@@ -224,24 +323,26 @@ extension CUCore {
         if enforcer.deactivate(), keySwitchGapMs > 0 { usleep(useconds_t(keySwitchGapMs * 1000)) }
     }
 
-    /// Before a window-targeted click in the background: the bound window made its app's key window (the
-    /// synthetic activation, then the make-key records — the deactivation first when another of its windows is
-    /// key), so the click reaches the page instead of being taken as the click that makes the window key
-    /// (AppKit's first click; live: the page's own “Tools” menu never opened, a click on a canvas only made its
-    /// window key). Posted to the app alone: nothing is raised, nothing activates, the user's key focus stays.
-    /// False — nothing posted — when it does not apply (the private path off, a Chromium app, the app in front,
-    /// the window elsewhere); a caller that posted the synthetic activation alone before still does.
+    /// Before a window-targeted click in the background: the synthetic activation, then the bound window made its
+    /// app's key window when it is not (`makeKeyInApp`), so the click reaches the page instead of being taken as
+    /// the click that makes the window key (AppKit's first click; live: the page's own “Tools” menu never opened, a
+    /// click on a canvas only made its window key). Never when the click goes to another window of the app (a sheet,
+    /// popover or panel under the point: `clickWindow`). Posted to the app alone: nothing is raised, nothing
+    /// activates, the user's key focus stays. False — nothing posted — when it does not apply (the private path off,
+    /// the click elsewhere, no enforcer); a caller that posted the synthetic activation alone before still does.
     @discardableResult
-    func keyForClick(_ t: CUTarget, privatePath: Bool) -> Bool {
-        guard privatePath, !t.isChromium, makeKeyApplies(t), let enforcer = focusEnforcer(for: t, privatePath: true) else {
+    func keyForClick(_ t: CUTarget, privatePath: Bool, clickWindow: UInt32) -> Bool {
+        guard privatePath, clickWindow == t.windowID, makeKeyApplies(t), let enforcer = focusEnforcer(for: t, privatePath: true) else {
             return false
         }
-        if boundWindowIsKeyInApp(t) == false { releaseOtherKeyWindow(t) }
         noteSyntheticActivation()
         _ = enforcer.forceActivation(windowID: t.windowID)
-        let made = skyLight.makeKeyWindow(pid: t.pid, windowID: t.windowID)
-        CULog.act.notice("click in \(t.appName, privacy: .public): window \(t.windowID, privacy: .public) made its app's key window first (make-key records \(made ? "sent" : "refused", privacy: .public))")
-        return made
+        let made = makeKeyInApp(t) { [self] in
+            noteSyntheticActivation()
+            _ = enforcer.forceActivation(windowID: t.windowID)
+        }
+        CULog.act.notice("click in \(t.appName, privacy: .public): window \(t.windowID, privacy: .public) — \(made, privacy: .public)")
+        return true
     }
 
     /// Makes the bound window the app's main window (menu commands and keys apply to it), checked like any

@@ -146,10 +146,15 @@ final class FakeFocusEnforcer: CUFocusEnforcing, @unchecked Sendable {
     func enforce(windowID: UInt32) -> Bool { enforced.append(windowID); return result }
     /// The activations posted whatever the target was believed to be (a menu command's validation).
     private(set) var forced: [UInt32] = []
-    func forceActivation(windowID: UInt32) -> Bool { forced.append(windowID); FocusSPI.order.append("activate \(windowID)"); return true }
+    func forceActivation(windowID: UInt32) -> Bool {
+        forced.append(windowID); FocusSPI.order.append("activate \(windowID)"); onForce?(); return true
+    }
     /// The synthetic deactivations posted (another window of the app was key).
     private(set) var deactivated = 0
-    func deactivate() -> Bool { deactivated += 1; FocusSPI.order.append("deactivate"); return true }
+    func deactivate() -> Bool { deactivated += 1; FocusSPI.order.append("deactivate"); onDeactivate?(); return true }
+    /// Hooks: the fake world changes as an app might react (the user bringing it forward meanwhile).
+    var onForce: (() -> Void)?
+    var onDeactivate: (() -> Void)?
     func teardown() { tornDown += 1 }
 }
 

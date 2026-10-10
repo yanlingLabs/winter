@@ -243,6 +243,7 @@ extension CUCore {
     }
 
     func onActivation(pid: pid_t) {
+        noteStranded(pid, false)  // really activated: it has its key window back (or the user picks one)
         let now = clock.nowSeconds()
         // During a desktop visit only input AFTER it began is the user's (never the click that allowed it).
         let visit = visitInput(now: now)

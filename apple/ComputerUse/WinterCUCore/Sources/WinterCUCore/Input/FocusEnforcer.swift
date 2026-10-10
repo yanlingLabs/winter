@@ -298,7 +298,7 @@ public final class CULiveFocusEnforcer: CUFocusEnforcing {
     public func enforce(windowID: UInt32) -> Bool {
         lock.lock(); defer { lock.unlock() }
         // Already front for the user: nothing to fake (and nothing to restore).
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+        if frontPid() == pid {
             state = CUSyntheticFocusState(believesActive: true, believesFocus: true, isReallyActive: true)
             return false
         }
@@ -313,7 +313,7 @@ public final class CULiveFocusEnforcer: CUFocusEnforcing {
 
     public func forceActivation(windowID: UInt32) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+        if frontPid() == pid {
             state = CUSyntheticFocusState(believesActive: true, believesFocus: true, isReallyActive: true)
             return false
         }
@@ -322,10 +322,15 @@ public final class CULiveFocusEnforcer: CUFocusEnforcing {
         return true
     }
 
+    /// The front process as the window server has it now (NSWorkspace hears of a change later, on the main run loop).
+    private func frontPid() -> pid_t? {
+        skyLight.frontProcessPid() ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
+
     public func deactivate() -> Bool {
         lock.lock(); defer { lock.unlock() }
         // Front for the user: it is really active — never told otherwise.
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid { return false }
+        if frontPid() == pid { return false }
         guard let e = CUFocusEvents.appDeactivated() else { return false }
         let cid = skyLight.disableUpdate()
         defer { if let cid { skyLight.reenableUpdate(cid) } }

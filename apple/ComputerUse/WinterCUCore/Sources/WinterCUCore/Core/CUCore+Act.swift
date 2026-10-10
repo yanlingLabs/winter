@@ -510,7 +510,7 @@ extension CUCore {
         let event = announced ? nil : CursorEvent(kind: "press", point: pt, count: count, button: button.rawValue)
         // Pid events in the background: the window made its app's key window first, so the click is not taken
         // as the one that makes it key.
-        if d.rung == .processEvents { keyForClick(t, privatePath: p.privatePath) }
+        if d.rung == .processEvents { keyForClick(t, privatePath: p.privatePath, clickWindow: windowFor(pt)) }
         return try runEvents(p, t, d, focus: true, token, cursor: event) { route, check in
             try synth.click(pid: t.pid, windowFor: windowFor, at: pt, button: button, count: count, flags: flags,
                             route: route, check: check)
@@ -1455,8 +1455,9 @@ extension CUCore {
         let route: CURoute = elsewhere && t.isChromium && skyLight.isAvailable ? .skyLight : .publicPid
         var s = synth
         s.windowSPI = t.privatePath
-        if !keyForClick(t, privatePath: t.privatePath) { postSyntheticActivation(t, privatePath: t.privatePath) }
-        try? s.click(pid: t.pid, windowFor: windowFor(t), at: c, button: .left, count: 1, flags: [], route: route)
+        let windowFor = self.windowFor(t)
+        if !keyForClick(t, privatePath: t.privatePath, clickWindow: windowFor(c)) { postSyntheticActivation(t, privatePath: t.privatePath) }
+        try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
         return true
     }
@@ -1604,7 +1605,7 @@ extension CUCore {
         // Key IN ITS APP (the app's focused window): in the background the system-wide key focus is the user's
         // app, always, so it can't tell whether the click only made the window key.
         let wasKey = boundWindowIsKeyInApp(t)
-        if !keyForClick(t, privatePath: t.privatePath) { postSyntheticActivation(t, privatePath: t.privatePath) }
+        if !keyForClick(t, privatePath: t.privatePath, clickWindow: windowFor(c)) { postSyntheticActivation(t, privatePath: t.privatePath) }
         try? s.click(pid: t.pid, windowFor: windowFor, at: c, button: .left, count: 1, flags: [], route: route)
         t.lastFocusClickMs = clock.nowMs()
         let clicked = waitFocused(e, t, web: web)
