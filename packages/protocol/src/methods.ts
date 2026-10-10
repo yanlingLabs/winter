@@ -4,6 +4,7 @@ import { z } from "zod";
 // from this file — methods.ts already imports from events.ts, so the reverse edge would be a module
 // cycle whose `z.enum(...)` const would be in the TDZ at events.ts's evaluation. Re-exported by the
 // package index either way, so `@yanlinglabs/winter-protocol` consumers see no difference.
+import { NDJSON_MAX_LINE_BYTES } from "./ndjson";
 import { SessionEvent, UserMessageImageRef, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
 
 export const PROTOCOL_VERSION = 0;
@@ -340,13 +341,19 @@ export const SessionHistoryResult = z.object({
 });
 
 /** Code-mode image input: `text` keeps its `[Image #n]` placeholders (what the user's bubble shows)
- *  and `images` names each one's staged file — the daemon hands the MODEL the text with every
- *  placeholder replaced by its path, and stores the `user_message` with the placeholders and
- *  `images`. Every entry is checked before anything is appended (typed `image_reference_invalid`):
- *  the path is a regular file `session.stageImage` could have written — directly inside THIS
- *  session's temp `images/` folder, no symlink — `n` is unique, and `[Image #n]` appears in `text`;
- *  a non-code session refuses `image_session_not_code`, a non-local caller `image_reference_invalid`.
- *  Omitted (or empty) = no images. The array length is checked by the handler (typed), not here. */
+ *  and `images` names each one's file — the daemon hands the MODEL the text with every placeholder
+ *  replaced by its path, and stores the `user_message` with the placeholders and `images`. Every
+ *  entry is checked before anything is appended (typed refusals, never echoing a path). A path is one
+ *  of two things (2026-10-10, "raw image paths"):
+ *    - a STAGED image — a regular file `session.stageImage` wrote, directly inside THIS session's
+ *      temp `images/` folder (no symlink), named `image_<k>.<ext>`; or
+ *    - the user's ORIGINAL file — an absolute path that resolves (`realpath`, a symlink is fine) to a
+ *      regular file of at most `IMAGE_FILE_MAX_BYTES`, whose MAGIC BYTES are an image type the runtime
+ *      Read tool can prepare (png/jpeg/gif/webp/heic/tiff/bmp), and that is not under the daemon's
+ *      home. It is never copied or downscaled; the runtime's Read tool prepares it for the model.
+ *  `n` is unique and `[Image #n]` appears in `text`; a non-code session refuses
+ *  `image_session_not_code`, a non-local caller `image_reference_invalid`. Omitted (or empty) = no
+ *  images. The array length is checked by the handler (typed), not here. */
 export const SessionSendImagesParam = z.array(UserMessageImageRef).optional();
 export const SessionSendParams = z.object({
   sessionId: z.string(),
@@ -522,11 +529,15 @@ export const ComputerUseSetSettingsParams = z.object({
 });
 export const ComputerUseSetSettingsResult = z.object({ ok: z.literal(true) });
 
-/** Code-mode image input (2026-09-29): a composer image, STAGED into the session's own temp directory
- *  (`sessionTmpDir(sessionId)/images/image_<k>.<ext>`, the daemon picks `k`, created atomically and
- *  never over an existing file, mode 0600); the client names the returned absolute path beside its
- *  `[Image #n]` placeholder in `session.send`/`session.steer`'s `images`, and the daemon gives the
- *  model the text with the path in place — the model then reads it.
+/** Code-mode image input (2026-09-29, raw paths 2026-10-10): a composer image that has NO file of its
+ *  own (clipboard data, a screenshot in the clipboard), STAGED as it is into the session's own temp
+ *  directory (`sessionTmpDir(sessionId)/images/image_<k>.<ext>`, the daemon picks `k`, created
+ *  atomically and never over an existing file, mode 0600); the client names the returned absolute
+ *  path beside its `[Image #n]` placeholder in `session.send`/`session.steer`'s `images`, and the
+ *  daemon gives the model the text with the path in place — the model then reads it. The bytes are
+ *  written UNCHANGED: nothing downscales or re-encodes them here (a client only downscales an image
+ *  that cannot fit the request, below). A dragged or picked FILE is never staged — its own path
+ *  goes in `images` instead (see `SessionSendImagesParam`).
  *
  *  LOCAL role only (never remote-allowlisted; an explicit harness-role check like `elicitation.url`).
  *  Every refusal is typed in `data.code`:
@@ -536,33 +547,39 @@ export const ComputerUseSetSettingsResult = z.object({ ok: z.literal(true) });
  *    - `image_input_unsupported` — the session's CURRENT model row does not accept images, with the
  *      exact message `IMAGE_INPUT_UNSUPPORTED_MESSAGE` (`INVALID_PARAMS`);
  *    - `image_data_invalid` — `dataBase64` is not strict base64, or decodes to nothing;
- *    - `image_too_large` — more than `STAGE_IMAGE_MAX_BYTES` (3.75 MiB) decoded, or wider/taller than
- *      `STAGE_IMAGE_MAX_DIMENSION` px (read from the header bytes), message
- *      `IMAGE_TOO_LARGE_MESSAGE` (the runtime Read tool's own image limit, so a staged file is always
- *      readable);
- *    - `image_type_unsupported` — the bytes are not png/jpeg/gif/webp (the MAGIC BYTES decide,
- *      never the declared type);
+ *    - `image_too_large` — more than `STAGE_IMAGE_MAX_BYTES` decoded (what one request line can
+ *      carry), message `IMAGE_TOO_LARGE_MESSAGE`. No pixel limit is applied: the runtime Read tool
+ *      scales an oversize image down itself;
+ *    - `image_type_unsupported` — the bytes are not one of `STAGE_IMAGE_MEDIA_TYPES` (the MAGIC BYTES
+ *      decide, never the declared type);
  *    - `image_type_mismatch` — the bytes are an allowed type other than the declared `mediaType`;
  *    - `image_stage_failed` — the file could not be created safely (`INTERNAL`).
  *  An unknown session is `NOT_FOUND`. The bytes are never logged. */
-export const STAGE_IMAGE_MEDIA_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
-/** The runtime Read tool's image limit — `READ_IMAGE_MAX_BYTES` in the agent runtime's
- *  `tools/impl/read.ts` (3.75 MiB: the raw size whose base64 is exactly 5 MiB, Claude's per-image
- *  limit on Bedrock/Vertex). Hard-coded here until that constant is published; keep the two equal,
- *  so a staged image is always one Read will deliver. A max-size request's base64 (5,242,880 chars)
- *  plus its JSON-RPC envelope fits the daemon's 8 MiB inbound NDJSON line cap (`LineDecoder`). */
-export const STAGE_IMAGE_MAX_BYTES = 3_932_160;
-/** `4 * ceil(STAGE_IMAGE_MAX_BYTES / 3)` — the longest base64 a max-size image encodes to. Longer
- *  data is refused `image_too_large` before it is decoded. */
-export const STAGE_IMAGE_B64_MAX_LENGTH = 4 * Math.ceil(STAGE_IMAGE_MAX_BYTES / 3);
-/** The runtime Read tool refuses an image wider or taller than this many pixels; `session.stageImage`
- *  refuses it too (`image_too_large`), reading the dimensions from the header bytes, never decoding. */
-export const STAGE_IMAGE_MAX_DIMENSION = 8000;
-/** The long edge clients downscale an attached image to before staging — Anthropic's documented size
- *  above which the service downscales anyway, so nothing the model could see is lost. */
+export const STAGE_IMAGE_MEDIA_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/heic", "image/tiff", "image/bmp"] as const;
+/** Room kept under the daemon's NDJSON line cap for everything in a `session.stageImage` request that
+ *  is not the image: the JSON envelope, the session id, the media type. The real envelope is a few
+ *  hundred bytes; this is deliberately generous. */
+export const STAGE_IMAGE_LINE_HEADROOM_BYTES = 256 * 1024;
+/** The longest base64 `dataBase64` may be: the line cap less the headroom, a whole number of 4-char
+ *  groups. Longer data is refused `image_too_large` before it is decoded. */
+export const STAGE_IMAGE_B64_MAX_LENGTH = Math.floor((NDJSON_MAX_LINE_BYTES - STAGE_IMAGE_LINE_HEADROOM_BYTES) / 4) * 4;
+/** The most a staged image may weigh decoded — the raw size whose base64 is exactly
+ *  `STAGE_IMAGE_B64_MAX_LENGTH` (5.81 MiB). Set by the request line, not by the runtime Read tool
+ *  (which prepares a source of up to `IMAGE_FILE_MAX_BYTES`). A client whose clipboard image is over it
+ *  downscales that one image (`IMAGE_ATTACH_MAX_LONG_EDGE`) so it fits. */
+export const STAGE_IMAGE_MAX_BYTES = (STAGE_IMAGE_B64_MAX_LENGTH / 4) * 3;
+/** The largest ORIGINAL image file `session.send`'s `images` accepts — the runtime Read tool's own
+ *  `IMAGE_MAX_INPUT_BYTES` (64 MiB), the most it will prepare (shrink, and re-encode if it must).
+ *  Keep the two equal. */
+export const IMAGE_FILE_MAX_BYTES = 64 * 1024 * 1024;
+/** The long edge a client downscales a clipboard image to, ONLY when its raw bytes do not fit
+ *  `STAGE_IMAGE_MAX_BYTES` — the same size the runtime Read tool shrinks to (`IMAGE_MAX_LONG_EDGE`),
+ *  Anthropic's documented size above which the service downscales anyway. */
 export const IMAGE_ATTACH_MAX_LONG_EDGE = 1568;
-/** The `image_too_large` refusal's wording, shared by every client's attach-time check. */
-export const IMAGE_TOO_LARGE_MESSAGE = "Images must be 3.75 MB or smaller";
+/** The `image_too_large` refusal's wording for a staged image, shared by every client's attach-time check. */
+export const IMAGE_TOO_LARGE_MESSAGE = "The image is too large to attach";
+/** The same refusal for an original image FILE past `IMAGE_FILE_MAX_BYTES`. */
+export const IMAGE_FILE_TOO_LARGE_MESSAGE = "Image files must be 64 MB or smaller";
 export const IMAGE_INPUT_UNSUPPORTED = "image_input_unsupported";
 export const IMAGE_INPUT_UNSUPPORTED_MESSAGE = "The selected model doesn't support images";
 export const IMAGE_SESSION_NOT_CODE = "image_session_not_code";
@@ -575,9 +592,11 @@ export const IMAGE_TOO_LARGE = "image_too_large";
 export const IMAGE_TYPE_UNSUPPORTED = "image_type_unsupported";
 export const IMAGE_TYPE_MISMATCH = "image_type_mismatch";
 export const IMAGE_STAGE_FAILED = "image_stage_failed";
-/** `session.send`/`session.steer`'s `images` refusal: an entry whose file is not one this session
- *  staged, a repeated `n`, an `n` with no `[Image #n]` in the text, too many entries, or a caller
- *  other than a local client. Nothing is appended. */
+/** `session.send`/`session.steer`'s `images` refusal: an entry that is neither a file this session
+ *  staged nor a readable original image file (relative, missing, not a regular file, under the
+ *  daemon's home), a repeated `n`, an `n` with no `[Image #n]` in the text, too many entries, or a
+ *  caller other than a local client. Nothing is appended. (An original file that is not an image,
+ *  or is past `IMAGE_FILE_MAX_BYTES`, answers `image_type_unsupported` / `image_too_large`.) */
 export const IMAGE_REFERENCE_INVALID = "image_reference_invalid";
 export const SessionStageImageParams = z.object({
   sessionId: z.string().min(1),

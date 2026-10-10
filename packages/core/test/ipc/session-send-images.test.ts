@@ -1,14 +1,18 @@
 // Code-mode image input: `session.send`/`session.steer`'s `images`. The stored `user_message` keeps
-// the user's `[Image #n]` placeholders (the bubble shows them) and names each one's staged path in
-// `images`; only the model is given the paths (winter-session.test.ts covers the push). Every entry is
-// checked before anything is appended: the file must be one `session.stageImage` wrote for THIS
-// session, `n` unique and present in the text, a code session, a local caller.
+// the user's `[Image #n]` placeholders (the bubble shows them) and names each one's file in `images`;
+// only the model is given the paths (winter-session.test.ts covers the push). Every entry is checked
+// before anything is appended: the file is either one `session.stageImage` wrote for THIS session or
+// (2026-10-10, raw image paths) the user's ORIGINAL image file — an absolute path resolving to a regular
+// file of at most 64 MiB, an image by its magic bytes, outside the daemon's home — and `n` is unique
+// and present in the text, a code session, a local caller, a model that reads images.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, openSync, closeSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  ConnWriter, ERR, IMAGE_REFERENCE_INVALID, IMAGE_SESSION_NOT_CODE, LineDecoder, METHODS, PROTOCOL_VERSION, SessionEvent,
+  ConnWriter, ERR, IMAGE_FILE_MAX_BYTES, IMAGE_FILE_TOO_LARGE_MESSAGE, IMAGE_INPUT_UNSUPPORTED, IMAGE_REFERENCE_INVALID, IMAGE_SESSION_NOT_CODE, IMAGE_SESSION_NO_MODEL,
+  IMAGE_TOO_LARGE, IMAGE_TYPE_UNSUPPORTED, LineDecoder, METHODS, PROTOCOL_VERSION, SessionEvent,
   USER_MESSAGE_IMAGES_MAX, encodeLine, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
@@ -66,6 +70,7 @@ class TestClient {
 }
 
 const IMAGE_TAG = loadCatalog().models.find((m) => m.inputModalities.value.includes("image"))!.key;
+const TEXT_TAG = loadCatalog().models.find((m) => !m.inputModalities.value.includes("image"))!.key;
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
 const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64");
 
@@ -86,23 +91,27 @@ describe("session.send / session.steer — images (code-mode image input)", () =
     for (const d of cleanup.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  async function boot(winter?: WinterSessionDrivers) {
+  /** `withHome`: wire the daemon's `winterHome` (the "never under the home" rule needs one). */
+  async function boot(winter?: WinterSessionDrivers, withHome = false) {
     const home = mkdtempSync(join(tmpdir(), "winter-sendimg-"));
     cleanup.push(home);
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, ...(winter === undefined ? {} : { winter }) });
+    const server = startIpcServer({
+      socketPath, serverVersion: "test", tokens: authority, store,
+      ...(winter === undefined ? {} : { winter }), ...(withHome ? { winterHome: home } : {}),
+    });
     stop = () => { server.stop(); store.close(); };
     const c = await TestClient.connect(socketPath);
     await c.hello(tokens.harness, "orb");
-    return { store, socketPath, tokens, c };
+    return { store, socketPath, tokens, c, home };
   }
 
   /** A code session with one staged image, attached — answers the staged path. */
-  async function staged(mode: "code" | "chat" = "code") {
-    const b = await boot();
+  async function staged(mode: "code" | "chat" = "code", withHome = false) {
+    const b = await boot(undefined, withHome);
     const sid = b.store.createSession("global", { model: IMAGE_TAG, mode });
     let path = "";
     if (mode === "code") {
@@ -137,28 +146,18 @@ describe("session.send / session.steer — images (code-mode image input)", () =
   test("every bad reference refuses typed image_reference_invalid and appends NOTHING", async () => {
     const { store, c, sid, path } = await staged();
     const imagesDir = join(realpathSync(tmpBase), `winter-session-${sid}`, "images");
-    // Planted by the agent (the folder is a sandbox writable root): a symlink to the staged file, a
-    // file with a name staging never picks, and a subfolder.
+    // Planted by the agent (the folder is a sandbox writable root): a symlink to the staged file
+    // under a name staging WOULD pick, and a subfolder under one too — both of the staged shape, so
+    // both held to the strict staged rules.
     symlinkSync(path, join(imagesDir, "image_90.png"));
-    writeFileSync(join(imagesDir, "evil.png"), PNG);
     mkdirSync(join(imagesDir, "image_91.png"));
-    // Another session's staged image.
-    const other = store.createSession("global", { model: IMAGE_TAG });
-    const otherPath = (await c.request(METHODS.sessionStageImage, { sessionId: other, mediaType: "image/png", dataBase64: b64(PNG) })).result.path;
-    const outside = join(mkdtempSync(join(tmpdir(), "winter-sendimg-out-")), "image_1.png");
-    cleanup.push(join(outside, ".."));
-    writeFileSync(outside, PNG);
     const before = store.read(sid).length;
     const bad: Array<{ text: string; images: Array<{ n: number; path: string }> }> = [
       { text: "no token here", images: [{ n: 1, path }] },
       { text: "[Image #1] [Image #2]", images: [{ n: 1, path }, { n: 2, path: join(imagesDir, "image_7.png") }] },
       { text: "[Image #1]", images: [{ n: 1, path }, { n: 1, path }] },
-      { text: "[Image #1]", images: [{ n: 1, path: outside }] },
-      { text: "[Image #1]", images: [{ n: 1, path: otherPath }] },
       { text: "[Image #1]", images: [{ n: 1, path: join(imagesDir, "image_90.png") }] },
-      { text: "[Image #1]", images: [{ n: 1, path: join(imagesDir, "evil.png") }] },
       { text: "[Image #1]", images: [{ n: 1, path: join(imagesDir, "image_91.png") }] },
-      { text: "[Image #1]", images: [{ n: 1, path: `${imagesDir}/../images/image_1.png` }] },
       { text: "[Image #1]", images: [{ n: 1, path: "images/image_1.png" }] },
       {
         text: Array.from({ length: USER_MESSAGE_IMAGES_MAX + 1 }, (_, i) => `[Image #${i + 1}]`).join(" "),
@@ -174,6 +173,157 @@ describe("session.send / session.steer — images (code-mode image input)", () =
       }
     }
     expect(store.read(sid).length).toBe(before);
+    c.close();
+  });
+
+  // ---- raw image paths (2026-10-10): the user's ORIGINAL file --------------------------------------
+
+  /** A scratch folder OUTSIDE the daemon's home, with a distinctive name no error may echo. */
+  function userDir(): string {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-userpics-SECRETNAME-")));
+    cleanup.push(dir);
+    return dir;
+  }
+  const PNG_FILE = Buffer.concat([Buffer.from(PNG), Buffer.alloc(64)]);
+
+  test("an ORIGINAL image file is accepted as spelled — no copy, no staging, the model sees its own path", async () => {
+    const { store, c, sid, path } = await staged();
+    const dir = userDir();
+    const photo = join(dir, "My Photo.png"); // a space: paths are not shell-escaped on the wire
+    writeFileSync(photo, PNG_FILE);
+    const res = await c.request(METHODS.sessionSend, { sessionId: sid, text: "look at [Image #1] and [Image #2]", images: [{ n: 1, path: photo }, { n: 2, path }] });
+    expect(res.error).toBeUndefined();
+    const [m] = userMessages(store, sid);
+    expect(m).toMatchObject({ text: "look at [Image #1] and [Image #2]", images: [{ n: 1, path: photo }, { n: 2, path }] });
+    expect(modelTextOf(m!)).toBe(`look at ${photo} and ${path}`);
+    // A draft of ONLY original files never touches the session's staging folder.
+    const fresh = store.createSession("global", { model: IMAGE_TAG });
+    await c.request(METHODS.sessionAttach, { sessionId: fresh, fromSeq: 0 });
+    expect((await c.request(METHODS.sessionSend, { sessionId: fresh, text: "[Image #1]", images: [{ n: 1, path: photo }] })).error).toBeUndefined();
+    expect(realpathSync(photo)).toBe(photo);
+    c.close();
+  });
+
+  test("every type the Read tool prepares is accepted (png/jpeg/gif/webp/heic/tiff/bmp), whatever the file is called", async () => {
+    const { c, sid } = await staged();
+    const dir = userDir();
+    const files: Array<[string, Uint8Array]> = [
+      ["a.png", PNG], ["b.jpg", new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16])], ["c.gif", new Uint8Array([...Buffer.from("GIF89a"), 1, 0, 1, 0])],
+      ["d.webp", new Uint8Array([...Buffer.from("RIFF"), 4, 0, 0, 0, ...Buffer.from("WEBPVP8 ")])],
+      ["e.heic", new Uint8Array([0, 0, 0, 24, ...Buffer.from("ftypheic"), 0, 0, 0, 0])],
+      ["f.tiff", new Uint8Array([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0])], ["g.bmp", new Uint8Array([...Buffer.from("BM"), 0, 0, 0, 0, 0, 0])],
+      ["no-extension", PNG],
+    ];
+    for (const [name, bytes] of files) {
+      writeFileSync(join(dir, name), bytes);
+      const res = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: join(dir, name) }] });
+      expect({ name, error: res.error }).toEqual({ name, error: undefined });
+    }
+    c.close();
+  });
+
+  test("a symlink to an image is fine (the TARGET is judged); a path spelled with .. is fine; the spelling is kept", async () => {
+    const { store, c, sid } = await staged();
+    const dir = userDir();
+    mkdirSync(join(dir, "real"));
+    writeFileSync(join(dir, "real", "pic.png"), PNG_FILE);
+    symlinkSync(join(dir, "real", "pic.png"), join(dir, "link.png"));
+    symlinkSync(join(dir, "real"), join(dir, "linkdir"));
+    for (const spelled of [join(dir, "link.png"), join(dir, "linkdir", "pic.png"), `${dir}/real/../real/pic.png`]) {
+      const res = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: spelled }] });
+      expect({ spelled, error: res.error }).toEqual({ spelled, error: undefined });
+      expect(userMessages(store, sid).at(-1)!.images).toEqual([{ n: 1, path: spelled }]);
+    }
+    // A symlink to a non-image is refused by its TARGET, however image-like its own name.
+    writeFileSync(join(dir, "notes.txt"), "plain text");
+    symlinkSync(join(dir, "notes.txt"), join(dir, "looks-like.png"));
+    const res = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: join(dir, "looks-like.png") }] });
+    expect(res.error.data.code).toBe(IMAGE_TYPE_UNSUPPORTED);
+    c.close();
+  });
+
+  test("an original that is not an absolute path to a real, regular, small image refuses typed — and no refusal echoes the path", async () => {
+    const { store, c, sid, home } = await staged("code", true);
+    const dir = userDir();
+    writeFileSync(join(dir, "notes.png"), "this is text with an image extension");
+    writeFileSync(join(dir, "empty.png"), "");
+    mkdirSync(join(dir, "folder.png"));
+    // > 64 MiB without allocating it: a sparse file with a real PNG header.
+    const big = join(dir, "huge.png");
+    writeFileSync(big, PNG);
+    truncateSync(big, IMAGE_FILE_MAX_BYTES + 1);
+    // Exactly the cap is fine (checked below); a FIFO must be refused, never opened for a read that blocks.
+    const exact = join(dir, "exact.png");
+    writeFileSync(exact, PNG);
+    truncateSync(exact, IMAGE_FILE_MAX_BYTES);
+    const fifo = join(dir, "pipe.png");
+    execFileSync("/usr/bin/mkfifo", [fifo]);
+    // Inside the daemon's home — read-denied areas and the rest of its state.
+    mkdirSync(join(home, "runtimes"), { recursive: true });
+    writeFileSync(join(home, "runtimes", "shot.png"), PNG_FILE);
+    writeFileSync(join(home, "shot.png"), PNG_FILE);
+    symlinkSync(join(home, "shot.png"), join(dir, "into-home.png"));
+    const cases: Array<[string, string, string]> = [
+      ["not an image", join(dir, "notes.png"), IMAGE_TYPE_UNSUPPORTED],
+      ["empty", join(dir, "empty.png"), IMAGE_TYPE_UNSUPPORTED],
+      ["missing", join(dir, "missing.png"), IMAGE_REFERENCE_INVALID],
+      ["directory", join(dir, "folder.png"), IMAGE_REFERENCE_INVALID],
+      ["fifo", fifo, IMAGE_REFERENCE_INVALID],
+      ["over 64 MiB", big, IMAGE_TOO_LARGE],
+      ["relative", "pics/shot.png", IMAGE_REFERENCE_INVALID],
+      ["dot-relative", "./shot.png", IMAGE_REFERENCE_INVALID],
+      ["home: run-less file", join(home, "shot.png"), IMAGE_REFERENCE_INVALID],
+      ["home: runtimes", join(home, "runtimes", "shot.png"), IMAGE_REFERENCE_INVALID],
+      ["home: spelled with ..", `${dir}/../${home.split("/").pop()}/shot.png`, IMAGE_REFERENCE_INVALID],
+      ["symlink into home", join(dir, "into-home.png"), IMAGE_REFERENCE_INVALID],
+    ];
+    const before = store.read(sid).length;
+    for (const [label, path, code] of cases) {
+      for (const method of [METHODS.sessionSend, METHODS.sessionSteer]) {
+        const res = await c.request(method, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path }] });
+        expect({ label, method, code: res.error?.data?.code }).toEqual({ label, method, code });
+        expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+        const wire = JSON.stringify(res.error);
+        for (const secret of [path, "SECRETNAME", dir, home, tmpBase]) expect({ label, leaked: wire.includes(secret) }).toEqual({ label, leaked: false });
+      }
+    }
+    expect(store.read(sid).length).toBe(before);
+    // The size refusal uses the shared wording; the cap itself is inclusive.
+    const over = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: big }] });
+    expect(over.error.message).toBe(IMAGE_FILE_TOO_LARGE_MESSAGE);
+    expect((await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: exact }] })).error).toBeUndefined();
+    c.close();
+  });
+
+  test("a daemon with no home wired cannot apply the home rule (the production daemon always has one)", async () => {
+    const { c, sid } = await staged(); // no winterHome
+    const dir = userDir();
+    writeFileSync(join(dir, "ok.png"), PNG_FILE);
+    expect((await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: join(dir, "ok.png") }] })).error).toBeUndefined();
+    c.close();
+  });
+
+  test("the model backstop: a send carrying images to a text-only (or model-less) session refuses typed; nothing appended", async () => {
+    const { store, c } = await boot();
+    const dir = userDir();
+    writeFileSync(join(dir, "ok.png"), PNG_FILE);
+    const images = [{ n: 1, path: join(dir, "ok.png") }];
+    const text = store.createSession("global", { model: TEXT_TAG });
+    const switched = store.createSession("global", { model: IMAGE_TAG });
+    store.setModel(switched, TEXT_TAG);
+    const none = store.createSession("global", { model: "unstated/unstated" });
+    for (const [sid, code] of [[text, IMAGE_INPUT_UNSUPPORTED], [switched, IMAGE_INPUT_UNSUPPORTED], [none, IMAGE_SESSION_NO_MODEL]] as const) {
+      await c.request(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 }); // a client is attached to one session at a time
+      const before = store.read(sid).length;
+      for (const method of [METHODS.sessionSend, METHODS.sessionSteer]) {
+        const res = await c.request(method, { sessionId: sid, text: "[Image #1]", images });
+        expect({ method, code: res.error?.data?.code }).toEqual({ method, code });
+      }
+      expect(store.read(sid).length).toBe(before);
+    }
+    // Plain text to a text-only session is untouched.
+    await c.request(METHODS.sessionAttach, { sessionId: text, fromSeq: 0 });
+    expect((await c.request(METHODS.sessionSend, { sessionId: text, text: "hello" })).error).toBeUndefined();
     c.close();
   });
 
@@ -201,6 +351,13 @@ describe("session.send / session.steer — images (code-mode image input)", () =
     const before = store.read(sid).length;
     const res = await phone.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path }] });
     expect(res.error.data.code).toBe(IMAGE_REFERENCE_INVALID);
+    // Nor can it name a file on this Mac: an original image path is a local client's alone.
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-remote-pic-")));
+    cleanup.push(dir);
+    writeFileSync(join(dir, "mine.png"), PNG);
+    const original = await phone.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: join(dir, "mine.png") }] });
+    expect(original.error.data.code).toBe(IMAGE_REFERENCE_INVALID);
+    expect(original.error.message).not.toContain(dir);
     // (session.steer is not remote-allowed at all; were it ever, the images check refuses it too.)
     expect((await phone.request(METHODS.sessionSteer, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path }] })).error).toBeDefined();
     expect(store.read(sid).length).toBe(before);

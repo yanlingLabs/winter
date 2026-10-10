@@ -773,10 +773,10 @@ extension WinterClient {
         }
     }
 
-    /// `images` (code-mode image input): each `[Image #n]` placeholder's staged path
-    /// (`stageImage`). `text` keeps the placeholders — the user's message shows them — and the daemon
-    /// gives the MODEL the paths. Only a daemon whose `stageImage` answered `imagesOnSend` takes
-    /// them; an empty list omits the key.
+    /// `images` (code-mode image input): each `[Image #n]` placeholder's path — a staged copy
+    /// (`stageImage`) or the user's own original image file. `text` keeps the placeholders — the user's
+    /// message shows them — and the daemon gives the MODEL the paths. Only a daemon whose `stageImage`
+    /// answered `imagesOnSend` takes them; an empty list omits the key.
     public func send(sessionId: String, text: String, images: [SessionEvent.UserMessageImageRef] = []) async throws -> Int {
         let r = try await request("session.send", params: obj(["sessionId": .string(sessionId), "text": .string(text), "images": imagesParam(images)]))
         guard let seq = r["seq"]?.intValue else { throw RpcError(code: -3, message: "invalid result from server for session.send") }
@@ -838,13 +838,16 @@ extension WinterClient {
         return url
     }
 
-    /// Code-mode image input (2026-09-29): `session.stageImage` — writes one composer image into the
-    /// session's own temp directory (daemon-named `image_<k>.<ext>`) and returns its absolute path,
-    /// plus whether this daemon takes `images` on `send`/`steer` (`imagesOnSend`) — then the text
-    /// keeps its `[Image #n]` placeholder and names the path in `images`; otherwise (an older daemon,
-    /// whose send schema would silently drop `images`) the composer substitutes the path itself.
-    /// `mediaType` must be what the bytes ARE (png/jpeg/gif/webp — the daemon sniffs and refuses a
-    /// mismatch). Throws `RpcError` with the daemon's message and `data.code` on a refusal —
+    /// Code-mode image input (2026-09-29; raw image paths 2026-10-10): `session.stageImage` — writes one
+    /// composer image that has NO file of its own (clipboard data), AS IT IS, into the session's own temp
+    /// directory (daemon-named `image_<k>.<ext>`) and returns its absolute path, plus whether this daemon
+    /// takes `images` on `send`/`steer` (`imagesOnSend`) — then the text keeps its `[Image #n]`
+    /// placeholder and names the path in `images`; otherwise (an older daemon, whose send schema would
+    /// silently drop `images`) the composer substitutes the path itself. A dragged or pasted FILE is
+    /// never staged: its own path goes in `images`.
+    /// `mediaType` must be what the bytes ARE (png/jpeg/gif/webp/heic/tiff/bmp — the daemon sniffs and
+    /// refuses a mismatch); `data` may be as large as one request line carries (about 5.8 MiB) and is
+    /// stored unchanged. Throws `RpcError` with the daemon's message and `data.code` on a refusal —
     /// `image_input_unsupported` carries exactly "The selected model doesn't support images". Local
     /// clients only (never remote-allowlisted). The bytes are never logged.
     public func stageImage(sessionId: String, mediaType: String, data: Data) async throws -> StagedImage {

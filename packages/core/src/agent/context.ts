@@ -43,6 +43,15 @@ export const ULTRA_DELEGATION_INSTRUCTION = [
   "This is a posture, not a quota. Work that is genuinely sequential, or small enough that splitting it would cost more than it saves, stays right here. Ultra is a licence to delegate, never an obligation to.",
 ].join("\n\n");
 
+/** Code-mode image paths (2026-10-10, "raw image paths"): the ONE standing line that tells a code
+ *  session's model what an image path in the user's message is. A staged copy (clipboard data the
+ *  daemon wrote into the session's temp folder) is the session's to keep or move; any other image path
+ *  is the user's own file, which must stay where it is. STATIC on purpose — no session id, no path, no
+ *  per-message state — so it never breaks the prompt cache. Added by `assemble()` to every prompt that
+ *  keeps the base slot (code, dispatch children), never to chat's or a dispatch coordinator's. */
+export const IMAGE_PATH_GUIDANCE =
+  "An image path in the user's message under this session's temp folder is a staged copy you may move to keep; any other image path is the user's own file — read or copy it, never move, rename or edit it unless the user asks.";
+
 const TRUNC = "\n[…truncated]";
 
 /** Cap a string to `maxBytes` UTF-8 bytes, truncating on a valid boundary (a split multibyte char degrades to U+FFFD, never a lone surrogate). */
@@ -394,6 +403,11 @@ export class ContextAssembler {
         extraDirs: input.extraDirs ?? [],
       }));
     }
+    // Code-mode image input: how to treat an image path in the user's message. Gated on
+    // `basePromptOverride === undefined` ALONE — like the workspace block it is about the code
+    // session's job, not its persona, so a style that replaces the base keeps it, and a run-home
+    // incarnation keeps it too — and NOT on `outDir`, which a workdir-less test composes without.
+    if (input.basePromptOverride === undefined) sections.push(IMAGE_PATH_GUIDANCE);
     // provider-correctness T5: ADDITIVE, and deliberately NOT part of the base-slot resolution
     // above. A style — even one that REPLACES the base (`keepCodingInstructions:false`) — is about
     // which persona is speaking; the tier is about how hard the user asked it to work. The two are

@@ -12,7 +12,7 @@
  *  the window; "stick" auto-follows the tail until the user scrolls away. */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanup, render } from "ink-testing-library";
@@ -21,6 +21,7 @@ import { METHODS } from "@yanlinglabs/winter-protocol";
 import { CORE_VERSION } from "@yanlinglabs/winter-core";
 import { App, bottomBarRows } from "../../src/tui/app";
 import { DELTA_COALESCE_MS, makeEventBridge } from "../../src/tui/event-bridge";
+import type { ClipboardImage } from "../../src/tui/images";
 import type { AgentRow } from "../../src/tui/state";
 import type { TaskRow } from "../../src/task-display";
 
@@ -39,6 +40,8 @@ afterEach(cleanup);
 function fakeClient(opts: {
   request?: (method: string, params?: unknown) => unknown;
   stageImage?: (sessionId: string, mediaType: string, dataBase64: string) => Promise<{ path: string; imagesOnSend?: boolean }>;
+  /** Answers `send` itself (a refusal, say); the call is recorded either way. */
+  send?: (...args: unknown[]) => Promise<unknown>;
 } = {}) {
   const calls: { method: string; args: unknown[] }[] = [];
   const rec = (method: string) => (...args: unknown[]) => {
@@ -47,7 +50,9 @@ function fakeClient(opts: {
   };
   return {
     calls,
-    send: rec("send"),
+    send: opts.send
+      ? (...args: unknown[]) => { calls.push({ method: "send", args }); return opts.send!(...args); }
+      : rec("send"),
     steer: rec("steer"),
     interrupt: rec("interrupt"),
     setModel: rec("setModel"),
@@ -2194,10 +2199,11 @@ describe("App — shift+tab policy switch reports a bypass crossing", () => {
   });
 });
 
-// Code-mode image input (2026-09-29): an image enters the draft as `[Image #n]` — from ctrl+v (the
-// clipboard reader is INJECTED, so no test reads the real clipboard) or a pasted image path — and at
-// submit each live placeholder is staged (`session.stageImage`); the text goes out WITH its placeholders
-// and `images` names each staged path (the daemon gives the model the paths) — or, to a daemon whose
+// Code-mode image input (2026-09-29; raw image paths 2026-10-10): an image enters the draft as `[Image #n]` —
+// from ctrl+v (the clipboard reader is INJECTED, so no test reads the real clipboard) or a pasted image
+// path. A FILE (a pasted path, or a file copied in Finder) is attached as its ORIGINAL path and never
+// staged; clipboard DATA is staged raw (`session.stageImage`) at submit. The text goes out WITH its
+// placeholders and `images` names each path (the daemon gives the model the paths) — or, to a daemon whose
 // stage result lacks `imagesOnSend`, with the paths substituted into the text as before.
 describe("App — code-mode image input", () => {
   // 24 bytes: signature + IHDR header + width 1 + height 1. With the dimensions stated the image is within the 1568 px
@@ -2205,6 +2211,7 @@ describe("App — code-mode image input", () => {
   // every attach through a real `/usr/bin/sips` subprocess — whose latency is whatever the machine's load makes it,
   // and the fixed waits below raced it. Resizing is `images.test.ts`'s business, not this file's.)
   const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1]);
+  const CLIP = { kind: "data" as const, bytes: PNG }; // what the injected clipboard reader answers: image DATA
   const TAG = "codex-oauth/gpt-5.6-sol";
   const syncConfig = (supportsImages: boolean) => (method: string) =>
     method === METHODS.syncConfig
@@ -2213,7 +2220,7 @@ describe("App — code-mode image input", () => {
   const plain = (frame: string | undefined) => (frame ?? "").replace(/\x1b\[[0-9;]*m/g, "");
   const callsOf = (client: ReturnType<typeof fakeClient>, method: string) => client.calls.filter((c) => c.method === method);
 
-  test("a pasted image path becomes [Image #1]; Enter stages it and sends the placeholder plus its path in images", async () => {
+  test("a pasted image path becomes [Image #1]; Enter sends the placeholder plus the ORIGINAL path in images — nothing is staged", async () => {
     const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
     const path = join(dir, "My Shot.png");
     writeFileSync(path, PNG);
@@ -2227,15 +2234,121 @@ describe("App — code-mode image input", () => {
       stdin.write(path.replace(/ /g, "\\ "));
       await until(() => plain(lastFrame()).includes("look at [Image #1]"), "the pasted path to become [Image #1]");
       stdin.write("\r");
-      await until(() => callsOf(client, "send").length > 0, "the draft to be staged and sent");
-      const stage = client.calls.find((c) => c.method === "stageImage");
-      expect(stage?.args).toEqual(["s1", "image/png", Buffer.from(PNG).toString("base64")]);
-      expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "look at [Image #1]", [{ n: 1, path: "/tmp/winter-session-s1/images/image_1.png" }]]);
+      await until(() => callsOf(client, "send").length > 0, "the draft to be sent");
+      expect(client.calls.some((c) => c.method === "stageImage")).toBe(false); // the user's own file: no copy, no staging
+      expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "look at [Image #1]", [{ n: 1, path }]]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("a big image FILE is never read or downscaled: only its path goes (a 3 MB-header PNG stands in for a Retina shot)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
+    const path = join(dir, "huge.png");
+    // A real header declaring 6000x4000 px, padded sparse to 40 MB (> the request budget, < the 64 MiB file cap).
+    const header = Buffer.from(PNG);
+    header.writeUInt32BE(6000, 16); header.writeUInt32BE(4000, 20);
+    writeFileSync(path, header);
+    truncateSync(path, 40 * 1024 * 1024);
+    try {
+      const client = fakeClient({ request: syncConfig(true) });
+      const { stdin, lastFrame } = render(<App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} />);
+      await wait();
+      stdin.write("see ");
+      await wait();
+      stdin.write(path);
+      await until(() => plain(lastFrame()).includes("see [Image #1]"), "the path to become [Image #1]");
+      stdin.write("\r");
+      await until(() => callsOf(client, "send").length > 0, "the draft to be sent");
+      expect(client.calls.some((c) => c.method === "stageImage")).toBe(false);
+      expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "see [Image #1]", [{ n: 1, path }]]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("an image file over 64 MiB is refused with a note and typed as its path instead", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
+    const path = join(dir, "enormous.png");
+    writeFileSync(path, PNG);
+    truncateSync(path, 64 * 1024 * 1024 + 1);
+    try {
+      const client = fakeClient({ request: syncConfig(true) });
+      const { stdin, lastFrame } = render(<App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} />);
+      await wait();
+      stdin.write("see ");
+      await wait();
+      stdin.write(path);
+      await until(() => plain(lastFrame()).includes("Image files must be 64 MB or smaller"), "the too-large note");
+      await wait();
+      expect(plain(lastFrame())).not.toContain("[Image #");
+      expect(plain(lastFrame()).replace(/\n/g, "")).toContain(`see ${path}`); // (the composer wraps a long path)
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("ctrl+v with a FILE on the clipboard (Finder ⌘C) attaches that file's own path — not its bytes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
+    const path = join(dir, "copied.heic");
+    writeFileSync(path, new Uint8Array([0, 0, 0, 24, ...Buffer.from("ftypheic"), 0, 0, 0, 0]));
+    try {
+      const client = fakeClient({ request: syncConfig(true) });
+      const { stdin, lastFrame } = render(
+        <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve({ kind: "file", path })} />,
+      );
+      await wait();
+      stdin.write("\x16");
+      await until(() => plain(lastFrame()).includes("[Image #1]"), "the copied file to become [Image #1]");
+      stdin.write("\r");
+      await until(() => callsOf(client, "send").length > 0, "the draft to be sent");
+      expect(client.calls.some((c) => c.method === "stageImage")).toBe(false);
+      expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "[Image #1]", [{ n: 1, path }]]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("a mixed draft: the file keeps its own path, the clipboard data is staged raw — in placeholder order", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
+    const path = join(dir, "a.png");
+    writeFileSync(path, PNG);
+    try {
+      const client = fakeClient({ request: syncConfig(true) });
+      const { stdin, lastFrame } = render(<App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(CLIP)} />);
+      await wait();
+      stdin.write("x ");
+      await wait();
+      stdin.write(path);
+      await until(() => plain(lastFrame()).includes("x [Image #1]"), "the file to become [Image #1]");
+      stdin.write("\x16");
+      await until(() => plain(lastFrame()).includes("[Image #1][Image #2]"), "the clipboard data to become [Image #2]");
+      stdin.write("\r");
+      await until(() => callsOf(client, "send").length > 0, "the draft to be sent");
+      expect(callsOf(client, "stageImage").map((c) => c.args)).toEqual([["s1", "image/png", Buffer.from(PNG).toString("base64")]]); // raw bytes, once
+      expect(client.calls.find((c) => c.method === "send")?.args).toEqual(["s1", "x [Image #1][Image #2]", [
+        { n: 1, path }, { n: 2, path: "/tmp/winter-session-s1/images/image_1.png" },
+      ]]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("a send the daemon REFUSES (a model switched to a text-only one) hands the draft back WITH its attachments, so a retry still sends them", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
+    const path = join(dir, "a.png");
+    writeFileSync(path, PNG);
+    try {
+      let refuse = true;
+      const client = fakeClient({ request: syncConfig(true), send: () => (refuse ? Promise.reject(new Error("The selected model doesn't support images")) : Promise.resolve(1)) });
+      const { stdin, lastFrame } = render(<App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} />);
+      await wait();
+      stdin.write("see ");
+      await wait();
+      stdin.write(path);
+      await until(() => plain(lastFrame()).includes("see [Image #1]"), "the path to become [Image #1]");
+      stdin.write("\r");
+      await until(() => plain(lastFrame()).includes("message not sent: The selected model doesn't support images"), "the refusal note");
+      await until(() => plain(lastFrame()).includes("see [Image #1]"), "the refused draft to come back");
+      refuse = false;
+      stdin.write("\r");
+      await until(() => callsOf(client, "send").length === 2, "the retry to be sent");
+      expect(callsOf(client, "send")[1]!.args).toEqual(["s1", "see [Image #1]", [{ n: 1, path }]]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   test("ctrl+v attaches the clipboard's image; an empty clipboard inserts nothing", async () => {
-    let clip: Uint8Array | null = PNG;
+    let clip: ClipboardImage = CLIP;
     let reads = 0; // the clipboard reader's calls: the barrier for "ctrl+v was handled" when nothing is inserted
     const client = fakeClient({ request: syncConfig(true) });
     const { stdin, lastFrame } = render(
@@ -2249,7 +2362,7 @@ describe("App — code-mode image input", () => {
     await until(() => reads === 2, "the second ctrl+v to read the (empty) clipboard");
     await wait(); // the empty read's continuation has run: nothing was inserted
     expect(plain(lastFrame())).not.toContain("[Image #2]");
-    clip = PNG;
+    clip = CLIP;
     stdin.write("\x16");
     await until(() => plain(lastFrame()).includes("[Image #1][Image #2]"), "the third ctrl+v to add [Image #2]");
   });
@@ -2257,7 +2370,7 @@ describe("App — code-mode image input", () => {
   test("a model without image input refuses at attach time with the exact message, and attaches nothing", async () => {
     const client = fakeClient({ request: syncConfig(false) });
     const { stdin, lastFrame } = render(
-      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(CLIP)} />,
     );
     await wait();
     stdin.write("\x16");
@@ -2277,7 +2390,7 @@ describe("App — code-mode image input", () => {
       stageImage: () => Promise.reject(new Error("The selected model doesn't support images")),
     });
     const { stdin, lastFrame } = render(
-      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(CLIP)} />,
     );
     await wait();
     stdin.write("see ");
@@ -2300,7 +2413,7 @@ describe("App — code-mode image input", () => {
       stageImage: () => new Promise<{ path: string }>((_, r) => { reject = r; }),
     });
     const { stdin, lastFrame } = render(
-      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(CLIP)} />,
     );
     await wait();
     stdin.write("first ");
@@ -2326,7 +2439,7 @@ describe("App — code-mode image input", () => {
       stageImage: () => new Promise<{ path: string; imagesOnSend?: boolean }>((r) => { resolve = r; }),
     });
     const { stdin, lastFrame } = render(
-      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(CLIP)} />,
     );
     await wait();
     stdin.write("one ");
@@ -2371,7 +2484,7 @@ describe("App — code-mode image input", () => {
   test("a new attachment's number lands past any [Image #n] already in the draft (a recalled message)", async () => {
     const client = fakeClient({ request: syncConfig(true) });
     const { stdin, lastFrame } = render(
-      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(CLIP)} />,
     );
     await wait();
     stdin.write("old [Image #1] ");
@@ -2392,7 +2505,7 @@ describe("App — code-mode image input", () => {
         : {},
     });
     const { stdin, lastFrame } = render(
-      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(CLIP)} />,
     );
     await wait();
     stdin.write("\x16");
@@ -2403,7 +2516,7 @@ describe("App — code-mode image input", () => {
     const bridge = makeEventBridge();
     const client = fakeClient({ request: syncConfig(true) });
     const { stdin, lastFrame } = render(
-      <App client={client} bridge={bridge} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+      <App client={client} bridge={bridge} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(CLIP)} />,
     );
     await wait();
     stdin.write("\x16");
@@ -2427,7 +2540,7 @@ describe("App — code-mode image input", () => {
       stageImage: (sid) => Promise.resolve({ path: `/tmp/winter-session-${sid}/images/image_1.png` }),
     });
     const { stdin, lastFrame } = render(
-      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+      <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(CLIP)} />,
     );
     await wait();
     stdin.write("see ");
@@ -2443,7 +2556,7 @@ describe("App — code-mode image input", () => {
     const bridge = makeEventBridge();
     const client = fakeClient({ request: syncConfig(true) });
     const { stdin, lastFrame } = render(
-      <App client={client} bridge={bridge} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+      <App client={client} bridge={bridge} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(CLIP)} />,
     );
     await wait();
     bridge.push(ev({ type: "turn_started", threadId: "main" }));
@@ -2462,7 +2575,7 @@ describe("App — code-mode image input", () => {
     const bridge = makeEventBridge();
     const client = fakeClient({ request: syncConfig(true) });
     const { stdin, lastFrame } = render(
-      <App client={client} bridge={bridge} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+      <App client={client} bridge={bridge} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(CLIP)} />,
     );
     await wait();
     bridge.push(ev({ type: "thread_started", threadId: "th_1", agentType: "general-purpose", description: "scout", ts: 500 }));
@@ -2482,6 +2595,33 @@ describe("App — code-mode image input", () => {
     expect(client.calls.some((c) => c.method === "send" || c.method === "steer")).toBe(false);
   });
 
+  test("a child view's message naming an ORIGINAL file gets that file's own path in the text", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
+    const path = join(dir, "a.png");
+    writeFileSync(path, PNG);
+    try {
+      const bridge = makeEventBridge();
+      const client = fakeClient({ request: syncConfig(true) });
+      const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} model={TAG} />);
+      await wait();
+      bridge.push(ev({ type: "thread_started", threadId: "th_1", agentType: "general-purpose", description: "scout", ts: 500 }));
+      bridge.push(ev({ type: "turn_started", threadId: "th_1", ts: 1000 }));
+      await wait();
+      stdin.write("\x01");
+      await wait();
+      stdin.write("\r"); // open th_1's child view
+      await wait();
+      stdin.write("look ");
+      await until(() => plain(lastFrame()).includes("look "), "the text typed into the child view's composer");
+      stdin.write(path);
+      await until(() => plain(lastFrame()).includes("look [Image #1]"), "the pasted path to become [Image #1]");
+      stdin.write("\r");
+      await until(() => callsOf(client, "sendToThread").length > 0, "the child-view message to go out");
+      expect(client.calls.find((c) => c.method === "sendToThread")?.args).toEqual(["s1", "th_1", `look ${path}`]);
+      expect(client.calls.some((c) => c.method === "stageImage" || c.method === "send" || c.method === "steer")).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   test("a deleted placeholder is not staged; a pasted .png that is not an image types as text", async () => {
     const dir = mkdtempSync(join(tmpdir(), "winter-tui-image-"));
     const fake = join(dir, "not-really.png");
@@ -2489,7 +2629,7 @@ describe("App — code-mode image input", () => {
     try {
       const client = fakeClient({ request: syncConfig(true) });
       const { stdin, lastFrame } = render(
-        <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(PNG)} />,
+        <App client={client} bridge={makeEventBridge()} {...baseProps} model={TAG} readClipboardImage={() => Promise.resolve(CLIP)} />,
       );
       await wait();
       stdin.write("\x16");

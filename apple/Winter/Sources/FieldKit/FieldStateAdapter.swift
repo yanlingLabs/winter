@@ -1109,7 +1109,7 @@ final class FieldStateAdapter: ObservableObject {
 
     /// Attach one image to the draft and answer its placeholder, or refuse (`nil`) with the reason
     /// on `composerNotice`: the selected model takes no image (the exact message), or it is over the
-    /// cap. An empty catalogue is refreshed so the NEXT attach can be checked; this one is let
+    /// cap (image data past one request line, or a file past 64 MiB). An empty catalogue is refreshed so the NEXT attach can be checked; this one is let
     /// through, and the daemon's `session.stageImage` refuses at submit if it must.
     func attachComposerImage(_ image: ComposerImage) -> String? {
         if modelCatalogue.models.isEmpty { onRefreshModelCatalogue() }
@@ -1117,28 +1117,44 @@ final class FieldStateAdapter: ObservableObject {
             composerNotice = composerImageUnsupportedMessage
             return nil
         }
-        guard image.data.count <= composerImageMaxBytes else {
-            composerNotice = composerImageTooLargeMessage
-            return nil
+        switch image {
+        case .data(let data):
+            // Image data that cannot fit one request even after the downscale (`composerImage(fromImageData:)`).
+            guard data.data.count <= composerImageMaxBytes else {
+                composerNotice = composerImageTooLargeMessage
+                return nil
+            }
+        case .file(let path):
+            // The user's own file is never read or copied; only its size is checked against what the
+            // runtime's Read tool will prepare (the daemon checks it again at send).
+            guard let size = composerRegularFileSize(path) else {
+                composerNotice = composerImageFileUnreadableMessage
+                return nil
+            }
+            guard size <= composerImageFileMaxBytes else {
+                composerNotice = composerImageFileTooLargeMessage
+                return nil
+            }
         }
         composerNotice = nil
         return ComposerImageDraft.token(composerImages.add(image, draftText: composerDraft))
     }
 
     /// **Every code-mode submit site's one door** (`ShellSessionHost.submit`,
-    /// `DetachedWindowController.submit`): what to actually send — each live `[Image #n]` staged
-    /// through `stage` (`session.stageImage` on that surface's own client and session); the text keeps
-    /// its placeholders and `images` names the staged paths (the model sees the paths, the message
-    /// bubble the placeholders), or, from a daemon without `imagesOnSend`, the paths are substituted
-    /// into the text (`resolveComposerImages`) — or `nil` when staging was refused, with the daemon's
-    /// own sentence on `composerNotice`, and then NOTHING is sent. A draft with no live placeholder
+    /// `DetachedWindowController.submit`): what to actually send — each live `[Image #n]` resolved to
+    /// its path: a FILE is its own original path (nothing staged), image DATA is staged raw through
+    /// `stage` (`session.stageImage` on that surface's own client and session); the text keeps its
+    /// placeholders and `images` names the paths (the model sees the paths, the message bubble the
+    /// placeholders), or, from a daemon without `imagesOnSend`, the paths are substituted into the text
+    /// (`resolveComposerImages`) — or `nil` when staging was refused, with the daemon's own sentence on
+    /// `composerNotice`, and then NOTHING is sent. A draft with no live placeholder
     /// comes back as is, with no images.
     ///
     /// A draft carried into a session that is NOT code (a hop or an in-place switch keeps the draft)
     /// sends its text literally and drops its attachments, silently — images are a code-session
     /// feature, and a refusal there would only block the message. A row not loaded yet is left to
     /// the daemon.
-    func composerTextForSend(_ text: String, stage: (ComposerImage) async throws -> StagedImage) async -> ComposerOutgoing? {
+    func composerTextForSend(_ text: String, stage: (ComposerImageData) async throws -> StagedImage) async -> ComposerOutgoing? {
         if let row = currentSessionRow(), !composerImageInputEnabled(row: row) {
             composerImages = ComposerImageDraft()
             return ComposerOutgoing(text: text, images: [])

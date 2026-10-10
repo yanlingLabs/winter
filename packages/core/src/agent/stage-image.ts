@@ -1,7 +1,9 @@
-// Code-mode image input (2026-09-29): `session.stageImage`'s file half. A composer image is written
-// into the session's own temp directory — `sessionTmpDir(sessionId)/images/image_<k>.<ext>`; the
-// client names that path beside its `[Image #n]` placeholder on send, and the model reads it.
-// `validateImageRefs` (bottom) is the send-side check that a named path is one staged here.
+// Code-mode image input (2026-09-29; raw image paths 2026-10-10): `session.stageImage`'s file half. An
+// image with no file of its own (clipboard data) is written, AS IT IS, into the session's temp
+// directory — `sessionTmpDir(sessionId)/images/image_<k>.<ext>`; the client names that path beside its
+// `[Image #n]` placeholder on send, and the model reads it. Nothing here downscales or re-encodes: the
+// runtime's Read tool prepares any image for the model itself. A dragged or picked FILE is never staged —
+// the client names its own path, and `validateImageRefs` (bottom) accepts it as an ORIGINAL file.
 //
 // That directory is HOSTILE. It is a sandbox writable root, so the session's agent can create
 // anything inside it (an `images` symlink pointing anywhere), and the sandboxed shell can also write
@@ -19,11 +21,11 @@
 // the swap landed before the `images/` mkdir, one empty `images` directory) inside a directory the
 // agent could already write, and the file is unlinked; nothing is ever WRITTEN there.
 // The bytes are never logged, and no refusal message carries any of them.
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import {
-  IMAGE_DATA_INVALID, IMAGE_REFERENCE_INVALID, IMAGE_STAGE_FAILED, USER_MESSAGE_IMAGES_MAX, USER_MESSAGE_IMAGES_MAX_MESSAGE, type UserMessageImageRef, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
-  STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, STAGE_IMAGE_MAX_DIMENSION, type STAGE_IMAGE_MEDIA_TYPES,
+  IMAGE_DATA_INVALID, IMAGE_FILE_MAX_BYTES, IMAGE_FILE_TOO_LARGE_MESSAGE, IMAGE_REFERENCE_INVALID, IMAGE_STAGE_FAILED, USER_MESSAGE_IMAGES_MAX, USER_MESSAGE_IMAGES_MAX_MESSAGE, type UserMessageImageRef, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
+  STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, type STAGE_IMAGE_MEDIA_TYPES,
 } from "@yanlinglabs/winter-protocol";
 import { imageTokenNumbers } from "../sessions/model-text";
 import { sessionTmpDirPath } from "./session-tmp";
@@ -39,11 +41,16 @@ export class StageImageRefusal extends Error {
   }
 }
 
+// The extension decides how the runtime's Read tool treats the file, so each type gets the one Read
+// maps back to its own media type (`IMAGE_MIME` in the agent runtime's `tools/impl/read.ts`).
 const EXTENSION: Record<StageImageMediaType, string> = {
   "image/png": "png",
   "image/jpeg": "jpg",
   "image/gif": "gif",
   "image/webp": "webp",
+  "image/heic": "heic",
+  "image/tiff": "tiff",
+  "image/bmp": "bmp",
 };
 
 function startsWith(bytes: Uint8Array, prefix: readonly number[], at = 0): boolean {
@@ -54,19 +61,37 @@ function startsWith(bytes: Uint8Array, prefix: readonly number[], at = 0): boole
 
 const ascii = (s: string): number[] => [...s].map((c) => c.charCodeAt(0));
 
-/** The media type the MAGIC BYTES name, or `undefined` for anything outside the four allowed. */
+// The `ftyp` brands the runtime reads as a HEIC (`sniffImageType` in the agent runtime's
+// `tools/image-prep.ts`) — keep the two lists equal.
+const HEIC_BRANDS = ["heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1"];
+
+/** How many leading bytes `sniffImageMediaType` needs to name any type (HEIC's `ftyp` brand ends at 12). */
+export const IMAGE_SNIFF_BYTES = 12;
+
+/**
+ * The media type the MAGIC BYTES name, or `undefined` for anything outside the seven the runtime's Read
+ * tool can prepare. A port of the runtime's own `sniffImageType` (PNG, JPEG, GIF, WebP, BMP, TIFF,
+ * HEIC), so the daemon and the Read tool can never disagree about what a file is.
+ */
 export function sniffImageMediaType(bytes: Uint8Array): StageImageMediaType | undefined {
   if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
   if (startsWith(bytes, [0xff, 0xd8, 0xff])) return "image/jpeg";
   if (startsWith(bytes, ascii("GIF87a")) || startsWith(bytes, ascii("GIF89a"))) return "image/gif";
   if (startsWith(bytes, ascii("RIFF")) && startsWith(bytes, ascii("WEBP"), 8)) return "image/webp";
+  if (startsWith(bytes, ascii("BM"))) return "image/bmp";
+  if (startsWith(bytes, [0x49, 0x49, 0x2a, 0x00]) || startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2a])) return "image/tiff";
+  if (bytes.length >= 12 && startsWith(bytes, ascii("ftyp"), 4)) {
+    const brand = String.fromCharCode(bytes[8]!, bytes[9]!, bytes[10]!, bytes[11]!);
+    if (HEIC_BRANDS.includes(brand)) return "image/heic";
+  }
   return undefined;
 }
 
 /**
  * An image's pixel dimensions, read from its HEADER bytes only (nothing is decoded): PNG's IHDR,
- * GIF's logical screen, WebP's VP8/VP8L/VP8X header, JPEG's first SOF marker. `undefined` when the
- * header cannot be read — the caller then has no dimension to refuse on.
+ * GIF's logical screen, WebP's VP8/VP8L/VP8X header, JPEG's first SOF marker. `undefined` for any other
+ * type, or when the header cannot be read. (The daemon no longer refuses on a size — the runtime's Read
+ * tool scales an oversize image itself; clients use this to decide whether THEY must downscale.)
  */
 export function imageDimensions(bytes: Uint8Array): { width: number; height: number } | undefined {
   const b = bytes;
@@ -105,6 +130,8 @@ export function imageDimensions(bytes: Uint8Array): { width: number; height: num
   return undefined;
 }
 
+const IMAGE_TYPES_MESSAGE = "Only PNG, JPEG, GIF, WebP, HEIC, TIFF and BMP images are supported";
+
 const STRICT_BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 
 /** Strict standard base64 — `Buffer.from(s, "base64")` silently SKIPS characters it does not know,
@@ -128,17 +155,13 @@ export function validateStagedImage(mediaType: StageImageMediaType, dataBase64: 
   }
   const sniffed = sniffImageMediaType(bytes);
   if (sniffed === undefined) {
-    throw new StageImageRefusal(IMAGE_TYPE_UNSUPPORTED, "Only PNG, JPEG, GIF and WebP images are supported");
+    throw new StageImageRefusal(IMAGE_TYPE_UNSUPPORTED, IMAGE_TYPES_MESSAGE);
   }
   if (sniffed !== mediaType) {
     throw new StageImageRefusal(IMAGE_TYPE_MISMATCH, `the image data is ${sniffed}, not the declared ${mediaType}`);
   }
-  // The runtime Read tool refuses an image past 8000 px on either edge; so does staging, from the
-  // header alone. (Clients downscale to 1568 px before they get here — this is the backstop.)
-  const dims = imageDimensions(bytes);
-  if (dims !== undefined && (dims.width > STAGE_IMAGE_MAX_DIMENSION || dims.height > STAGE_IMAGE_MAX_DIMENSION)) {
-    throw new StageImageRefusal(IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE);
-  }
+  // No pixel limit: the bytes are stored as they are, and the runtime's Read tool shrinks anything
+  // over 1568 px (and refuses only a source declaring over 100 megapixels) when the model reads it.
   return { bytes, ext: EXTENSION[sniffed] };
 }
 
@@ -232,16 +255,83 @@ export function stageSessionImage(
   throw new StageImageRefusal(IMAGE_STAGE_FAILED, "could not pick a free image file name", true);
 }
 
+/** What `validateImageRefs` needs to know beyond the session. */
+export interface ImageRefContext {
+  /** The daemon's `<WINTER_HOME>`: no original image may live under it (its `run/` and `runtimes/`
+   *  are read-denied to the agent, and the rest is the daemon's own state). Absent (a server built
+   *  without one — most tests): the home rule cannot be applied and is skipped. */
+  winterHome?: string | undefined;
+}
+
+/** `home` and its realpath (when it resolves), each as a prefix an original file must not sit under. */
+function homePrefixes(home: string | undefined): string[] {
+  if (home === undefined || home === "") return [];
+  const out = new Set<string>([resolve(home)]);
+  try { out.add(realpathSync(home)); } catch { /* a home that does not exist yet has only its spelling */ }
+  return [...out];
+}
+
+const underPrefix = (path: string, prefix: string): boolean => path === prefix || path.startsWith(prefix.endsWith(sep) ? prefix : prefix + sep);
+
 /**
- * `session.send`/`session.steer`'s `images` check — every entry, before anything is appended. Each
- * `path` must be a file `stageSessionImage` could have written for THIS session: a regular file (never
- * a symlink, `lstat`) named `image_<k>.<ext>`, directly inside `<root>/images/` (the root derived
- * exactly as staging derives it, and both directories real), spelled as its own realpath. Each `n` is
- * unique and its `[Image #n]` appears in `text`; at most `USER_MESSAGE_IMAGES_MAX` entries. Answers
- * the refs to store (`undefined` for none — an empty array is "no images"), or throws a
- * `StageImageRefusal` (`image_reference_invalid`) whose message never echoes a path.
+ * The ORIGINAL-file half of `validateImageRefs`: the user's own image file, named by its absolute path.
+ * Never copied, never rewritten — the path is stored and handed to the model as the client spelled it.
+ * It must be an absolute path whose `realpath` (a symlink is fine — the TARGET is judged) is a REGULAR
+ * file, outside the daemon's home (the path as spelled AND the resolved one), whose first bytes are an
+ * image type the runtime's Read tool can prepare, and that weighs at most `IMAGE_FILE_MAX_BYTES`. Only a
+ * dozen header bytes are read — never the file — and the descriptor is the one that is `fstat`ed, so a
+ * file swapped for a FIFO or a link after the resolve is refused rather than followed or waited on.
+ * Every refusal names the placeholder, never the path.
  */
-export function validateImageRefs(sessionId: string, text: string, images: readonly UserMessageImageRef[] | undefined): UserMessageImageRef[] | undefined {
+function checkOriginalImage(ref: UserMessageImageRef, prefixes: readonly string[]): void {
+  const invalid = (why: string): never => { throw new StageImageRefusal(IMAGE_REFERENCE_INVALID, `[Image #${ref.n}] ${why}`); };
+  if (!isAbsolute(ref.path) || ref.path.includes("\0")) invalid("is not an absolute path to an image file");
+  const spelled = resolve(ref.path);
+  if (prefixes.some((p) => underPrefix(spelled, p))) invalid("is inside Winter's own data folder, which sessions cannot read — copy it somewhere else first");
+  let real: string;
+  try { real = realpathSync(ref.path); } catch { return invalid("is not an image file that exists"); }
+  if (prefixes.some((p) => underPrefix(real, p))) invalid("is inside Winter's own data folder, which sessions cannot read — copy it somewhere else first");
+  let fd: number;
+  try { fd = openSync(real, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW); } catch { return invalid("is not an image file that can be read"); }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) invalid("is not a regular image file");
+    const header = Buffer.alloc(IMAGE_SNIFF_BYTES);
+    let filled = 0;
+    try {
+      while (filled < header.length) {
+        const n = readSync(fd, header, filled, header.length - filled, filled);
+        if (n === 0) break;
+        filled += n;
+      }
+    } catch { invalid("is not an image file that can be read"); }
+    if (sniffImageMediaType(header.subarray(0, filled)) === undefined) {
+      throw new StageImageRefusal(IMAGE_TYPE_UNSUPPORTED, `[Image #${ref.n}] is not an image: ${IMAGE_TYPES_MESSAGE}`);
+    }
+    if (st.size > IMAGE_FILE_MAX_BYTES) throw new StageImageRefusal(IMAGE_TOO_LARGE, IMAGE_FILE_TOO_LARGE_MESSAGE);
+  } finally {
+    try { closeSync(fd); } catch { /* already closed */ }
+  }
+}
+
+/**
+ * `session.send`/`session.steer`'s `images` check — every entry, before anything is appended. Each `path`
+ * is one of two things, told apart by its SHAPE alone:
+ *   - a STAGED image: directly inside THIS session's `<root>/images/` and named `image_<k>.<ext>` — held to
+ *     the strict rules `stageSessionImage` writes by (a regular file, never a symlink, `lstat`; the root
+ *     derived exactly as staging derives it, both directories real; spelled as its own realpath). A
+ *     path of that shape that fails them is refused, never re-judged as an original;
+ *   - anything else: the user's ORIGINAL file (`checkOriginalImage`).
+ * Each `n` is unique and its `[Image #n]` appears in `text`; at most `USER_MESSAGE_IMAGES_MAX` entries.
+ * Answers the refs to store (`undefined` for none — an empty array is "no images"), or throws a
+ * `StageImageRefusal` whose message never echoes a path.
+ */
+export function validateImageRefs(
+  sessionId: string,
+  text: string,
+  images: readonly UserMessageImageRef[] | undefined,
+  ctx: ImageRefContext = {},
+): UserMessageImageRef[] | undefined {
   if (images === undefined || images.length === 0) return undefined;
   const refuse = (why: string): never => { throw new StageImageRefusal(IMAGE_REFERENCE_INVALID, why); };
   if (images.length > USER_MESSAGE_IMAGES_MAX) refuse(USER_MESSAGE_IMAGES_MAX_MESSAGE);
@@ -252,18 +342,26 @@ export function validateImageRefs(sessionId: string, text: string, images: reado
     seen.add(ref.n);
     if (!inText.has(ref.n)) refuse(`[Image #${ref.n}] does not appear in the message`);
   }
-  let imagesDir: string;
-  try {
-    const root = sessionRootOf(sessionTmpDirPath(sessionId));
-    requireRealDirectory(root);
-    imagesDir = join(root, "images");
-    requireRealDirectory(imagesDir);
-  } catch {
-    return refuse("this session has no staged images");
-  }
+  // Where a staged image would live — computed WITHOUT requiring the folder to exist (a draft of only
+  // original files has no `images/` yet); the folder is checked only when a ref actually names it.
+  let stagedRoot: string | undefined;
+  try { stagedRoot = sessionRootOf(sessionTmpDirPath(sessionId)); } catch { stagedRoot = undefined; }
+  const stagedDir = stagedRoot === undefined ? undefined : join(stagedRoot, "images");
+  let stagedDirsChecked = false;
+  const prefixes = homePrefixes(ctx.winterHome);
   for (const ref of images) {
+    const staged = stagedDir !== undefined && dirname(ref.path) === stagedDir && NAME_RE.test(basename(ref.path));
+    if (!staged) { checkOriginalImage(ref, prefixes); continue; }
     const notStaged = `[Image #${ref.n}] is not an image staged for this session`;
-    if (dirname(ref.path) !== imagesDir || !NAME_RE.test(basename(ref.path))) refuse(notStaged);
+    if (!stagedDirsChecked) {
+      try {
+        requireRealDirectory(stagedRoot!);
+        requireRealDirectory(stagedDir!);
+      } catch {
+        return refuse("this session has no staged images");
+      }
+      stagedDirsChecked = true;
+    }
     let st;
     try { st = lstatSync(ref.path); } catch { return refuse(notStaged); }
     if (st.isSymbolicLink() || !st.isFile()) refuse(notStaged);

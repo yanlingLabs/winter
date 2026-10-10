@@ -5,18 +5,26 @@ import UniformTypeIdentifiers
 import WinterKit
 import WinterProtocol
 
-// MARK: - Code-mode image input (2026-09-29)
+// MARK: - Code-mode image input (2026-09-29; raw image paths 2026-10-10)
 //
 // In a CODE session, pasting image data or an image file, or dropping image files, onto the composer
 // adds an attachment to the draft and inserts the plain-text placeholder `[Image #n]` (n counts per
-// draft from 1 and is never reused within it). At submit every placeholder still in the text is
-// staged with `session.stageImage` — the daemon writes the image into the session's own temp
-// directory. The text is sent WITH its placeholders (the user's message shows `[Image #n]`) and
-// `images` names each one's staged path; the daemon gives the MODEL the text with the paths in place.
-// A daemon whose stage answer lacks `imagesOnSend` (it would silently drop `images`) is sent the
-// paths substituted into the text instead, as before. A placeholder the user deleted is never staged.
-// Every other mode keeps today's behaviour: the intake answers "not handled" and AppKit's own
-// paste/drop runs.
+// draft from 1 and is never reused within it). There are two kinds of attachment, and neither is ever
+// resized or copied by default (the runtime's Read tool prepares any image for the model itself):
+//
+//   - a FILE (a Finder drag, a dropped file, a file copied in Finder): the ORIGINAL file's path. It is
+//     never read beyond its first few bytes, never copied and never staged — the path itself rides in
+//     `images`, and the daemon checks it (an absolute path to a regular image file of at most 64 MiB,
+//     outside its home);
+//   - DATA with no file (a screenshot or image on the clipboard): the RAW bytes, written by
+//     `session.stageImage` into the session's own temp directory at submit. Only an image whose bytes
+//     cannot fit one request line (`composerImageMaxBytes`) is downscaled, and only that one.
+//
+// The text is sent WITH its placeholders (the user's message shows `[Image #n]`) and `images` names each
+// one's path; the daemon gives the MODEL the text with the paths in place. A daemon whose stage answer
+// lacks `imagesOnSend` (it would silently drop `images`) is sent the paths substituted into the text
+// instead, as before. A placeholder the user deleted is never sent. Every other mode keeps today's
+// behaviour: the intake answers "not handled" and AppKit's own paste/drop runs.
 //
 // Everything here is pure (or reads only a pasteboard handed to it), so the rules are unit-tested
 // without a view (`ComposerImagesTests`).
@@ -25,22 +33,55 @@ import WinterProtocol
 /// daemon's `image_input_unsupported` message, word for word.
 let composerImageUnsupportedMessage = "The selected model doesn't support images"
 
-/// The runtime Read tool's image limit — its `READ_IMAGE_MAX_BYTES` (3.75 MiB, the raw size whose
-/// base64 is exactly 5 MiB) — which `session.stageImage` enforces too (`STAGE_IMAGE_MAX_BYTES`).
-let composerImageMaxBytes = 3_932_160
+/// The most a STAGED image may weigh — `STAGE_IMAGE_MAX_BYTES`: the raw size whose base64 fills one
+/// request line (the daemon's 8 MiB NDJSON line cap) less 256 KiB of headroom. Hand-mirrored; the
+/// protocol constant is the source (`packages/protocol/src/methods.ts`).
+let composerImageMaxBytes = 6_094_848
 
-/// Shown for an image past `composerImageMaxBytes` — the daemon's `image_too_large` refusal wording.
-let composerImageTooLargeMessage = "Images must be 3.75 MB or smaller"
+/// The most an original image FILE may weigh — `IMAGE_FILE_MAX_BYTES`, the runtime Read tool's own 64 MiB.
+let composerImageFileMaxBytes = 64 * 1024 * 1024
 
-/// One attached image: its bytes and the media type those bytes ARE (sniffed, never guessed from a
-/// file name — the daemon refuses a declared type the bytes disagree with).
-struct ComposerImage: Equatable {
+/// Shown for staged image data past `composerImageMaxBytes` even after the downscale — the daemon's
+/// `image_too_large` refusal wording (`IMAGE_TOO_LARGE_MESSAGE`).
+let composerImageTooLargeMessage = "The image is too large to attach"
+
+/// Shown for an image FILE past `composerImageFileMaxBytes` (`IMAGE_FILE_TOO_LARGE_MESSAGE`).
+let composerImageFileTooLargeMessage = "Image files must be 64 MB or smaller"
+
+/// Shown when a dropped file vanished or stopped being a plain file between the drop and the attach.
+let composerImageFileUnreadableMessage = "That image file could not be read"
+
+/// Image DATA with no file of its own: its bytes and the media type those bytes ARE (sniffed, never
+/// guessed from a name — the daemon refuses a declared type the bytes disagree with).
+struct ComposerImageData: Equatable {
     let data: Data
     let mediaType: String
 }
 
-/// The media type the magic bytes name — png, jpeg, gif or webp, the four the daemon stages — or
-/// `nil` for anything else.
+/// One attached image: the user's own FILE (its path is what the model is given), or image DATA that
+/// has no file (staged raw at submit).
+enum ComposerImage: Equatable {
+    case file(path: String)
+    case data(ComposerImageData)
+
+    init(data: Data, mediaType: String) { self = .data(ComposerImageData(data: data, mediaType: mediaType)) }
+
+    /// The staged half, or `nil` for a file.
+    var imageData: ComposerImageData? {
+        if case .data(let data) = self { return data }
+        return nil
+    }
+
+    /// The original file's path, or `nil` for image data.
+    var filePath: String? {
+        if case .file(let path) = self { return path }
+        return nil
+    }
+}
+
+/// The media type the magic bytes name — one of the seven the runtime Read tool prepares: png, jpeg,
+/// gif, webp, heic, tiff or bmp — or `nil` for anything else. A port of the daemon's
+/// `sniffImageMediaType` (itself the runtime's `sniffImageType`): keep the three equal.
 func composerImageMediaType(of data: Data) -> String? {
     let b = [UInt8](data.prefix(12))
     func starts(_ p: [UInt8], at i: Int = 0) -> Bool { b.count >= i + p.count && Array(b[i..<(i + p.count)]) == p }
@@ -48,37 +89,51 @@ func composerImageMediaType(of data: Data) -> String? {
     if starts([0xFF, 0xD8, 0xFF]) { return "image/jpeg" }
     if starts(Array("GIF87a".utf8)) || starts(Array("GIF89a".utf8)) { return "image/gif" }
     if starts(Array("RIFF".utf8)) && starts(Array("WEBP".utf8), at: 8) { return "image/webp" }
+    if starts(Array("BM".utf8)) { return "image/bmp" }
+    if starts([0x49, 0x49, 0x2A, 0x00]) || starts([0x4D, 0x4D, 0x00, 0x2A]) { return "image/tiff" }
+    if b.count >= 12 && starts(Array("ftyp".utf8), at: 4),
+       let brand = String(bytes: b[8..<12], encoding: .ascii),
+       ["heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1"].contains(brand) {
+        return "image/heic"
+    }
     return nil
 }
 
-/// The long edge an attached image is downscaled to — Anthropic's documented size above which the
-/// service downscales anyway, so nothing the model could see is lost (`IMAGE_ATTACH_MAX_LONG_EDGE`).
+/// The long edge an image is downscaled to WHEN IT CANNOT FIT `composerImageMaxBytes` — Anthropic's
+/// documented size above which the service downscales anyway, so nothing the model could see is lost
+/// (`IMAGE_ATTACH_MAX_LONG_EDGE`).
 let composerImageMaxLongEdge = 1568
 
 /// JPEG qualities tried, in order, when an image is still over the cap after the downscale.
 private let composerJPEGQualities: [Double] = [0.85, 0.75, 0.65, 0.5]
 
-/// Bytes as an attachment, prepared ONCE, when attached — a submit never re-encodes.
-///
-/// One of the four stageable types that is already within `composerImageMaxLongEdge`, within the cap
-/// and upright is kept byte for byte. Anything else (a Retina screenshot, TIFF/HEIC/BMP from the
-/// pasteboard, a rotated JPEG) is rendered through ImageIO — `CGImageSourceCreateThumbnailAtIndex`,
-/// long edge at most 1568, orientation applied — and encoded as PNG (a JPEG stays JPEG; a GIF becomes
-/// a PNG of its first frame). If that is still over the cap it is re-encoded as JPEG, quality stepping
-/// 0.85 → 0.5 (transparency flattened onto white). What comes back may still exceed the cap only when
-/// nothing fits; the attach gate then refuses it with `composerImageTooLargeMessage`. `nil` when the
-/// bytes are not an image at all.
+/// Image DATA (a screenshot or image on the pasteboard — it has no file of its own) as an attachment,
+/// decided ONCE, when attached — a submit never re-encodes. Data of one of the seven types that fits
+/// one request (`composerImageMaxBytes`) is kept BYTE FOR BYTE, however big the picture: no decode, no
+/// resize, no re-encode — the runtime's Read tool prepares it for the model. Anything else is the
+/// over-budget fallback (`composerDownscaledImage`) for this one image. `nil` when the bytes are not
+/// an image at all.
 func composerImage(fromImageData data: Data) -> ComposerImage? {
+    if let sniffed = composerImageMediaType(of: data), data.count <= composerImageMaxBytes {
+        return ComposerImage(data: data, mediaType: sniffed)
+    }
+    return composerDownscaledImage(fromImageData: data)
+}
+
+/// The OVER-BUDGET fallback: bytes that cannot be staged as they are (more than `composerImageMaxBytes`,
+/// or a type the daemon does not sniff — e.g. a pasteboard format ImageIO can still read) are rendered
+/// through ImageIO — `CGImageSourceCreateThumbnailAtIndex`, long edge at most 1568, orientation
+/// applied — and encoded as PNG (a JPEG stays JPEG; a GIF becomes a PNG of its first frame). If that is
+/// still over the cap it is re-encoded as JPEG, quality stepping 0.85 → 0.5 (transparency flattened
+/// onto white). What comes back may still exceed the cap only when nothing fits; the attach gate then
+/// refuses it with `composerImageTooLargeMessage`. `nil` when the bytes are not an image at all.
+func composerDownscaledImage(fromImageData data: Data) -> ComposerImage? {
     guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0 else { return nil }
     let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
     let width = (props?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
     let height = (props?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
-    let orientation = (props?[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
     let longEdge = max(width, height)
     let sniffed = composerImageMediaType(of: data)
-    if let sniffed, longEdge > 0, longEdge <= composerImageMaxLongEdge, orientation == 1, data.count <= composerImageMaxBytes {
-        return ComposerImage(data: data, mediaType: sniffed)
-    }
     let options: [CFString: Any] = [
         kCGImageSourceCreateThumbnailFromImageAlways: true,
         kCGImageSourceCreateThumbnailWithTransform: true,
@@ -98,6 +153,28 @@ func composerImage(fromImageData data: Data) -> ComposerImage? {
         if jpeg.count <= composerImageMaxBytes { return last }
     }
     return last
+}
+
+/// A regular file's size, FOLLOWING symlinks (the daemon judges the target too); `nil` for a missing path,
+/// a directory, a FIFO or anything else that is not a plain file.
+func composerRegularFileSize(_ path: String) -> Int? {
+    var info = stat()
+    guard stat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+    return Int(info.st_size)
+}
+
+/// An image FILE as an attachment: its ORIGINAL path, with nothing read beyond its first 12 bytes — a
+/// plain file whose magic bytes are one of the seven types (never its name: an SVG or a corrupt file
+/// hands the whole paste back to AppKit, which types the path). `nil` otherwise. The size is the attach
+/// gate's business (`composerImageFileMaxBytes`).
+func composerImage(fromFile url: URL) -> ComposerImage? {
+    // A file-REFERENCE url (`/.file/id=…`, which some apps put on a pasteboard) is turned into its path first.
+    let path = (url as NSURL).filePathURL?.path ?? url.path
+    guard composerRegularFileSize(path) != nil,
+          let handle = FileHandle(forReadingAtPath: path) else { return nil }
+    defer { try? handle.close() }
+    guard let header = try? handle.read(upToCount: 12), composerImageMediaType(of: header) != nil else { return nil }
+    return ComposerImage.file(path: path)
 }
 
 /// One CGImage encoded as `type` through ImageIO.
@@ -170,18 +247,20 @@ func composerPasteboardMayHaveImage(_ pasteboard: NSPasteboard) -> Bool {
     composerImageSource(on: pasteboard) != nil
 }
 
-/// The images a pasteboard carries, or `nil` when it carries none (or any of them fails to decode) —
-/// `nil` hands the paste/drop back to AppKit untouched. Image files are read (and converted if needed); with no file URLs, PNG data wins
-/// over TIFF; text beside the image (see `composerStringIsPastedText`) keeps the paste text.
+/// The images a pasteboard carries, or `nil` when it carries none (or any of them is not one) — `nil`
+/// hands the paste/drop back to AppKit untouched. Image FILES (a Finder drag or copy) come back as their
+/// ORIGINAL paths, checked by their first bytes only (`composerImage(fromFile:)`); with no file URLs,
+/// PNG data wins over TIFF and comes back RAW (`composerImage(fromImageData:)`); text beside the image
+/// (see `composerStringIsPastedText`) keeps the paste text.
 func composerImages(from pasteboard: NSPasteboard) -> [ComposerImage]? {
     switch composerImageSource(on: pasteboard) {
     case nil:
         return nil
     case .files(let urls):
-        // Every file must DECODE, not merely be typed as an image: an SVG conforms to `.image` but
-        // ImageIO reads no frame from it, and a corrupt file reads nothing. Any such file hands the
-        // whole paste back to AppKit (which inserts the paths) rather than silently doing nothing.
-        let images = urls.compactMap { url in (try? Data(contentsOf: url)).flatMap(composerImage(fromImageData:)) }
+        // Every file must BE an image by its bytes, not merely be typed as one: an SVG conforms to
+        // `.image` but is no raster, and a corrupt file is nothing. Any such file hands the whole paste
+        // back to AppKit (which inserts the paths) rather than silently doing nothing.
+        let images = urls.compactMap(composerImage(fromFile:))
         return images.count == urls.count ? images : nil
     case .data(let type):
         return pasteboard.data(forType: type).flatMap(composerImage(fromImageData:)).map { [$0] }
@@ -264,14 +343,16 @@ struct ComposerOutgoing: Equatable {
     let images: [SessionEvent.UserMessageImageRef]
 }
 
-/// **The one submit-time helper** every code-mode submit site goes through: stage each attachment the
-/// text still references (`stage` is `session.stageImage` for that session), in order. When every
-/// stage answered `imagesOnSend`, the text goes as written (placeholders kept) with `images` naming
-/// each staged path; otherwise (an older daemon) each placeholder is replaced by its path in the text
-/// and `images` is empty. The first refusal throws — the caller sends nothing. A text with no live
-/// placeholder comes back unchanged, with no images, and stages nothing.
+/// **The one submit-time helper** every code-mode submit site goes through: resolve each attachment the
+/// text still references into the path the model is given, in order. A FILE is its own path — nothing is
+/// staged; DATA is staged raw (`stage` is `session.stageImage` for that session). When every stage
+/// answered `imagesOnSend` (trivially so when nothing was staged — a draft of files alone assumes a daemon
+/// that, being able to take an original path at all, takes `images`), the text goes as written
+/// (placeholders kept) with `images` naming each path; otherwise (an older daemon) each placeholder is
+/// replaced by its path in the text and `images` is empty. The first refusal throws — the caller sends
+/// nothing. A text with no live placeholder comes back unchanged, with no images, and stages nothing.
 func resolveComposerImages(_ text: String, draft: ComposerImageDraft,
-                           stage: (ComposerImage) async throws -> StagedImage) async throws -> ComposerOutgoing {
+                           stage: (ComposerImageData) async throws -> StagedImage) async throws -> ComposerOutgoing {
     var refs: [SessionEvent.UserMessageImageRef] = []
     var imagesOnSend = true
     let referenced = draft.referencedNumbers(in: text)
@@ -280,9 +361,14 @@ func resolveComposerImages(_ text: String, draft: ComposerImageDraft,
     }
     for n in referenced {
         guard let image = draft.images[n] else { continue }
-        let staged = try await stage(image)
-        refs.append(SessionEvent.UserMessageImageRef(n: n, path: staged.path))
-        if !staged.imagesOnSend { imagesOnSend = false }
+        switch image {
+        case .file(let path):
+            refs.append(SessionEvent.UserMessageImageRef(n: n, path: path))
+        case .data(let data):
+            let staged = try await stage(data)
+            refs.append(SessionEvent.UserMessageImageRef(n: n, path: staged.path))
+            if !staged.imagesOnSend { imagesOnSend = false }
+        }
     }
     if refs.isEmpty || imagesOnSend { return ComposerOutgoing(text: text, images: refs) }
     let paths = Dictionary(uniqueKeysWithValues: refs.map { ($0.n, $0.path) })
@@ -297,8 +383,9 @@ func composerImageInputEnabled(row: SessionSummary?) -> Bool {
 }
 
 /// Whether the model in force accepts images, per the synced catalogue. A model the catalogue does
-/// not list (or an empty catalogue) is NOT refused here — the daemon's `session.stageImage` is the
-/// authority and refuses at submit when it truly is text-only.
+/// not list (or an empty catalogue) is NOT refused here — the daemon is the authority and refuses at
+/// submit when it truly is text-only (`session.stageImage` for data; `session.send`/`session.steer` for
+/// any attachment, which is the only door a file passes through — a file is never staged).
 func composerModelAcceptsImages(model: String?, catalogue: SyncConfigSnapshot) -> Bool {
     guard let model, let row = catalogue.models.first(where: { $0.id == model }) else { return true }
     return row.supportsImages

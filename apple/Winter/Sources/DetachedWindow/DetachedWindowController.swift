@@ -709,10 +709,21 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
                 try await client.stageImage(sessionId: sid, mediaType: image.mediaType, data: image.data)
             }) else { return }
             let ok: Bool
-            if wasRunning {
-                ok = (try? await client.steer(sessionId: sid, text: outgoing.text, images: outgoing.images)) != nil
-            } else {
-                ok = (try? await client.send(sessionId: sid, text: outgoing.text, images: outgoing.images)) != nil
+            do {
+                if wasRunning {
+                    _ = try await client.steer(sessionId: sid, text: outgoing.text, images: outgoing.images)
+                } else {
+                    _ = try await client.send(sessionId: sid, text: outgoing.text, images: outgoing.images)
+                }
+                ok = true
+            } catch {
+                ok = false
+                // A FILE attachment is never staged, so the daemon's checks of it (its model backstop, a
+                // file that vanished or sits under its home) answer HERE, on the send: say why, beside
+                // the draft that stays in the composer. A send without images keeps failing quietly.
+                if !outgoing.images.isEmpty {
+                    adapter.composerNotice = (error as? RpcError)?.message ?? "couldn't send — try again"
+                }
             }
             // Clears only what was sent — edits made during the round trip stay.
             if ok { adapter.composerSendSucceeded(sentDraft: text) }

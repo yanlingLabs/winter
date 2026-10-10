@@ -121,7 +121,7 @@ export class WinterClient {
     });
     // 16 MiB outbound: ConnWriter's default 4 MiB cap is the DAEMON's slow-consumer guard for its
     // broadcasts. A client's own requests can legitimately reach the daemon's 8 MiB inbound line cap
-    // (a max-size `session.stageImage` is ~7 MB), and at 4 MiB the writer would end this socket on
+    // (a max-size `session.stageImage` is ~8 MB), and at 4 MiB the writer would end this socket on
     // the request itself.
     client.writer = new ConnWriter(client.socket as unknown as WritableSocket, 16 * 1024 * 1024);
     await client.request(METHODS.hello, {
@@ -196,16 +196,18 @@ export class WinterClient {
   async attach(sessionId: string, fromSeq = 0): Promise<number> {
     return this.validated(SessionAttachResult, await this.request(METHODS.sessionAttach, { sessionId, fromSeq }), METHODS.sessionAttach).lastSeq;
   }
-  /** Code-mode image input: stage one composer image into the session's temp directory and get its
-   *  absolute path back (`session.stageImage`), plus `imagesOnSend` when this daemon takes `images` on
-   *  `send`/`steer`. A refusal rejects with the daemon's message and its typed `data.code` (e.g.
-   *  `image_input_unsupported`). */
+  /** Code-mode image input: stage one composer image that has no file of its own (clipboard data), AS IT
+   *  IS, into the session's temp directory and get its absolute path back (`session.stageImage`), plus
+   *  `imagesOnSend` when this daemon takes `images` on `send`/`steer`. A dragged or pasted FILE is never
+   *  staged — its own path goes in `images`. A refusal rejects with the daemon's message and its typed
+   *  `data.code` (e.g. `image_input_unsupported`). */
   async stageImage(sessionId: string, mediaType: string, dataBase64: string): Promise<{ path: string; imagesOnSend?: boolean }> {
     const r = this.validated(SessionStageImageResult, await this.request(METHODS.sessionStageImage, { sessionId, mediaType, dataBase64 }), METHODS.sessionStageImage);
     return r.imagesOnSend === true ? { path: r.path, imagesOnSend: true } : { path: r.path };
   }
   /** `images` (code-mode image input): each `[Image #n]` placeholder's staged path — `text` keeps the
-   *  placeholders; the daemon gives the model the paths. Omitted from the wire when empty. */
+   *  placeholders; the daemon gives the model the paths (a staged copy's, or the user's own file's).
+   *  Omitted from the wire when empty. */
   async send(sessionId: string, text: string, images?: readonly UserMessageImageRef[]): Promise<number> {
     return this.validated(SessionSendResult, await this.request(METHODS.sessionSend, { sessionId, text, ...(images !== undefined && images.length > 0 ? { images } : {}) }), METHODS.sessionSend).seq;
   }

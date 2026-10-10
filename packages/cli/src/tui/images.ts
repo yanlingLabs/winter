@@ -1,33 +1,44 @@
-/** Code-mode image input (2026-09-29) — the TUI half.
+/** Code-mode image input (2026-09-29; raw image paths 2026-10-10) — the TUI half.
  *
  *  An image enters the draft as the plain-text placeholder `[Image #n]` (n counts per draft from 1
  *  and never repeats within one), from ctrl+v with an image on the clipboard or from a pasted /
- *  dropped path to an image file. At submit, every placeholder still in the text is staged with
- *  `session.stageImage` (the daemon writes it into the session's temp directory). The text goes out
- *  WITH its placeholders — the user's message shows `[Image #n]` — and `images` names each one's
- *  staged path; the daemon gives the MODEL the text with the paths in place. A daemon that predates
- *  that (its stage result has no `imagesOnSend`) is sent the paths substituted into the text, as
- *  before. A placeholder the user deleted is simply not staged.
+ *  dropped path to an image file. Two kinds of attachment, neither of them ever resized or copied by
+ *  default:
+ *    - a FILE (a pasted or dragged path, a file copied in Finder): the ORIGINAL file's absolute path.
+ *      Nothing is staged; the path itself goes in `images`, and the daemon checks it (a regular image
+ *      file, at most 64 MiB, outside its home). The runtime's Read tool prepares the file for the model.
+ *    - DATA with no file (a clipboard image): the RAW bytes, written by `session.stageImage` into the
+ *      session's temp directory at submit. Only an image whose bytes cannot fit one request line is
+ *      downscaled (`prepareDraftImage`), and only that one.
+ *  The text goes out WITH its placeholders — the user's message shows `[Image #n]` — and `images` names
+ *  each one's path; the daemon gives the MODEL the text with the paths in place. A daemon that
+ *  predates that (a stage result without `imagesOnSend`) is sent the paths substituted into the text,
+ *  as before. A placeholder the user deleted is simply not sent.
  *
  *  Pure helpers first; the clipboard reader (osascript) last, injectable so no test ever touches the
  *  user's real clipboard. */
 
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { IMAGE_ATTACH_MAX_LONG_EDGE, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE, STAGE_IMAGE_MAX_BYTES, USER_MESSAGE_IMAGES_MAX, USER_MESSAGE_IMAGES_MAX_MESSAGE } from "@yanlinglabs/winter-protocol";
-import { imageDimensions, imageTokenNumbers, sniffImageMediaType, substituteImageTokens } from "@yanlinglabs/winter-core";
+import {
+  IMAGE_ATTACH_MAX_LONG_EDGE, IMAGE_FILE_MAX_BYTES, IMAGE_FILE_TOO_LARGE_MESSAGE, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE,
+  STAGE_IMAGE_MAX_BYTES, USER_MESSAGE_IMAGES_MAX, USER_MESSAGE_IMAGES_MAX_MESSAGE,
+} from "@yanlinglabs/winter-protocol";
+import { IMAGE_SNIFF_BYTES, imageDimensions, imageTokenNumbers, sniffImageMediaType, substituteImageTokens } from "@yanlinglabs/winter-core";
 import type { UserMessageImageRef } from "@yanlinglabs/winter-protocol";
 
-// Shown when an image is over the daemon's cap (the runtime Read tool's own 3.75 MiB limit) — the
-// daemon's `image_too_large` refusal says the same, word for word.
-export { IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE };
+// Shown when an image cannot be attached: DATA over what one request line carries even after the
+// downscale (`image_too_large`), or a FILE over the runtime Read tool's 64 MiB — the daemon's refusals
+// say the same, word for word.
+export { IMAGE_FILE_TOO_LARGE_MESSAGE, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_TOO_LARGE_MESSAGE };
 
-export interface DraftImage {
-  bytes: Uint8Array;
-  mediaType: string;
-}
+/** One attachment: the user's own FILE (its absolute path is what the model is given), or image DATA
+ *  that has no file (staged raw at submit). */
+export type DraftImage =
+  | { kind: "file"; path: string }
+  | { kind: "data"; bytes: Uint8Array; mediaType: string };
 
 export const imageToken = (n: number): string => `[Image #${n}]`;
 
@@ -73,6 +84,22 @@ export class DraftImages {
     for (const n of [...this.images.keys()]) if (n < mark) this.images.delete(n);
     if (this.images.size === 0) this.next = 1;
   }
+
+  /** The attachments `text` references, as they are now — taken before a send clears them, so a send
+   *  the daemon then REFUSES can hand them back (`restore`) with the draft. */
+  snapshot(text: string): Array<[number, DraftImage]> {
+    return this.referencedIn(text).map((n) => [n, this.images.get(n)!]);
+  }
+
+  /** Puts a refused draft's attachments back under their own numbers (the placeholders in the text
+   *  handed back to the composer still name them). A number the draft has since reused is left alone;
+   *  the counter stays past every restored number. */
+  restore(entries: ReadonlyArray<[number, DraftImage]>): void {
+    for (const [n, image] of entries) {
+      if (!this.images.has(n)) this.images.set(n, image);
+      this.next = Math.max(this.next, n + 1);
+    }
+  }
 }
 
 /** `session.stageImage`'s answer: the staged path, and whether this daemon takes `images` on
@@ -94,22 +121,27 @@ export interface StagedDraft {
 }
 
 /**
- * Stage every attachment `text` still references (`stage` is `session.stageImage`), in order. The
- * first refusal rejects with the daemon's own error, and nothing is sent by the caller. A draft
- * referencing more than `USER_MESSAGE_IMAGES_MAX` images is refused before anything is staged —
- * the daemon would refuse the send anyway, after the files were written.
+ * Resolve every attachment `text` still references into the path the model is given, in order: a FILE
+ * is its own path (nothing is staged); DATA is staged raw (`stage` is `session.stageImage`). The first
+ * refusal rejects with the daemon's own error, and nothing is sent by the caller. A draft referencing
+ * more than `USER_MESSAGE_IMAGES_MAX` images is refused before anything is staged — the daemon would
+ * refuse the send anyway, after the files were written. `imagesOnSend` says whether the daemon takes
+ * `images`: false only when a stage answer said it does not (a draft of files alone stages nothing and
+ * so cannot ask — it assumes a daemon that, being able to take an original path at all, takes `images`).
  */
 export async function stageDraftImages(
   text: string,
   images: DraftImages,
-  stage: (image: DraftImage) => Promise<StagedImage>,
+  stage: (image: Extract<DraftImage, { kind: "data" }>) => Promise<StagedImage>,
 ): Promise<StagedDraft> {
   const refs: UserMessageImageRef[] = [];
   let imagesOnSend = true;
   const referenced = images.referencedIn(text);
   if (referenced.length > USER_MESSAGE_IMAGES_MAX) throw new Error(USER_MESSAGE_IMAGES_MAX_MESSAGE);
   for (const n of referenced) {
-    const staged = await stage(images.get(n)!);
+    const image = images.get(n)!;
+    if (image.kind === "file") { refs.push({ n, path: image.path }); continue; }
+    const staged = await stage(image);
     refs.push({ n, path: staged.path });
     if (staged.imagesOnSend !== true) imagesOnSend = false;
   }
@@ -117,7 +149,8 @@ export async function stageDraftImages(
   return { text, images: refs, modelText, imagesOnSend };
 }
 
-const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
+// The extensions the runtime Read tool maps to an image (`IMAGE_MIME` in its `tools/impl/read.ts`).
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|heic|tiff?|bmp)$/i;
 
 /**
  * A pasted or dropped string that names ONE image file by path — Terminal/iTerm drag a file in as its
@@ -145,31 +178,61 @@ export function isRegularFile(path: string): boolean {
   try { return statSync(path).isFile(); } catch { return false; }
 }
 
-/** Only the magic bytes: is this one of the four image types the daemon stages? */
+/** Only the magic bytes: is this one of the seven image types the runtime's Read tool prepares? */
 export function isStageableImage(bytes: Uint8Array): boolean {
   return sniffImageMediaType(bytes) !== undefined;
 }
 
-const EXT_FOR: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
+/** What `inspectImageFile` found. */
+export type ImageFileCheck = "ok" | "not-image" | "too-large";
+
+/**
+ * Whether `path` is an image file the daemon will take as it is: a regular file (a symlink is followed —
+ * the daemon judges the target too), an image by its first bytes (never its name), at most
+ * `IMAGE_FILE_MAX_BYTES`. Reads only `IMAGE_SNIFF_BYTES` bytes — never the file. Anything unreadable is
+ * `"not-image"`, so the caller falls back to typing the pasted text as it always did.
+ */
+export function inspectImageFile(path: string): ImageFileCheck {
+  let fd: number | undefined;
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) return "not-image";
+    fd = openSync(path, "r");
+    const header = Buffer.alloc(IMAGE_SNIFF_BYTES);
+    const n = readSync(fd, header, 0, header.length, 0);
+    if (sniffImageMediaType(header.subarray(0, n)) === undefined) return "not-image";
+    return st.size > IMAGE_FILE_MAX_BYTES ? "too-large" : "ok";
+  } catch {
+    return "not-image";
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+const EXT_FOR: Record<string, string> = {
+  "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp", "image/heic": "heic", "image/tiff": "tiff", "image/bmp": "bmp",
+};
 const JPEG_QUALITIES = [85, 75, 65, 50];
 
 /**
- * An image's bytes as a draft attachment, prepared ONCE, at attach time, so a submit never
- * re-encodes. An image within `IMAGE_ATTACH_MAX_LONG_EDGE` (1568 px — Anthropic's documented size
- * above which the service downscales anyway) and within the stage cap is attached untouched. Anything
- * else is written to a PRIVATE temp copy (never the user's own file) and `sips -Z 1568`-ed there,
- * keeping PNG as PNG and JPEG as JPEG (a GIF or WebP becomes a PNG of its first frame); if the result
- * is still over 3.75 MB it is re-encoded as JPEG, quality stepping 85 → 50. Only when that still
- * fails is it `"too-large"`. `"not-image"` when the magic bytes are none of the four the daemon takes.
+ * Image DATA (a clipboard image — it has no file of its own) as a draft attachment, decided ONCE, at
+ * attach time. The bytes stay exactly as they are — no downscale, no re-encode — whenever they fit one
+ * request line (`STAGE_IMAGE_MAX_BYTES`): the runtime's Read tool prepares the image for the model
+ * itself. Only an image that does NOT fit is downscaled, so that one image can be sent at all: the
+ * bytes go to a PRIVATE temp copy (never the user's own file) and are `sips -Z 1568`-ed there, keeping
+ * PNG as PNG and JPEG as JPEG (anything else becomes a PNG of its first frame); if the result still
+ * does not fit it is re-encoded as JPEG, quality stepping 85 → 50. Only when that fails too is it
+ * `"too-large"`. `"not-image"` when the magic bytes are none of the seven the Read tool prepares.
  */
-export async function prepareDraftImage(bytes: Uint8Array): Promise<DraftImage | "not-image" | "too-large"> {
+export async function prepareDraftImage(bytes: Uint8Array): Promise<Extract<DraftImage, { kind: "data" }> | "not-image" | "too-large"> {
   const mediaType = sniffImageMediaType(bytes);
   if (mediaType === undefined) return "not-image";
+  if (bytes.length <= STAGE_IMAGE_MAX_BYTES) return { kind: "data", bytes, mediaType };
+  // Over the request budget: the existing downscale, for this one image.
+  if (process.platform !== "darwin") return "too-large";
   const dims = imageDimensions(bytes);
   const longEdge = dims === undefined ? undefined : Math.max(dims.width, dims.height);
   const needsResize = longEdge === undefined || longEdge > IMAGE_ATTACH_MAX_LONG_EDGE;
-  if (!needsResize && bytes.length <= STAGE_IMAGE_MAX_BYTES) return { bytes, mediaType };
-  if (process.platform !== "darwin") return bytes.length <= STAGE_IMAGE_MAX_BYTES ? { bytes, mediaType } : "too-large";
 
   const dir = mkdtempSync(join(tmpdir(), "winter-attach-"));
   try {
@@ -178,16 +241,14 @@ export async function prepareDraftImage(bytes: Uint8Array): Promise<DraftImage |
     const asJpeg = mediaType === "image/jpeg";
     const resized = join(dir, asJpeg ? "resized.jpg" : "resized.png");
     const args = ["-s", "format", asJpeg ? "jpeg" : "png", ...(needsResize ? ["-Z", String(IMAGE_ATTACH_MAX_LONG_EDGE)] : []), source, "--out", resized];
-    if (!(await run("/usr/bin/sips", args)).ok || !existsSync(resized)) {
-      return bytes.length <= STAGE_IMAGE_MAX_BYTES ? { bytes, mediaType } : "too-large";
-    }
+    if (!(await run("/usr/bin/sips", args)).ok || !existsSync(resized)) return "too-large";
     const out = new Uint8Array(readFileSync(resized));
-    if (out.length <= STAGE_IMAGE_MAX_BYTES) return { bytes: out, mediaType: asJpeg ? "image/jpeg" : "image/png" };
+    if (out.length <= STAGE_IMAGE_MAX_BYTES) return { kind: "data", bytes: out, mediaType: asJpeg ? "image/jpeg" : "image/png" };
     for (const quality of JPEG_QUALITIES) {
       const jpeg = join(dir, `q${quality}.jpg`);
       if (!(await run("/usr/bin/sips", ["-s", "format", "jpeg", "-s", "formatOptions", String(quality), resized, "--out", jpeg])).ok) continue;
       const encoded = new Uint8Array(readFileSync(jpeg));
-      if (encoded.length <= STAGE_IMAGE_MAX_BYTES) return { bytes: encoded, mediaType: "image/jpeg" };
+      if (encoded.length <= STAGE_IMAGE_MAX_BYTES) return { kind: "data", bytes: encoded, mediaType: "image/jpeg" };
     }
     return "too-large";
   } finally {
@@ -216,30 +277,32 @@ const WRITE_FLAVOUR = (flavour: string) => [
   "-e", "end run",
 ];
 
+/** What the clipboard holds: an image FILE (Finder ⌘C) — its own path, nothing read — or image DATA. */
+export type ClipboardImage = { kind: "file"; path: string } | { kind: "data"; bytes: Uint8Array } | null;
+
 /**
  * The clipboard's image, or `null` when it holds none (the caller then leaves ctrl+v doing what it
- * did before — nothing). Tried in order: a copied image FILE (Finder ⌘C: `«class furl»`, read only
- * when it is an image by extension), PNG data, then TIFF data converted to PNG with `sips`. Every
+ * did before — nothing). Tried in order: a copied image FILE (Finder ⌘C: `«class furl»`, when it is an
+ * image by extension) — answered as that file's PATH, never read here —, PNG data, then TIFF data. The
+ * data comes back RAW: no conversion, no resize (`prepareDraftImage` decides whether it fits). Every
  * flavour is written into a private `mkdtemp` directory that is removed before this returns.
  */
-export async function readClipboardImage(): Promise<Uint8Array | null> {
+export async function readClipboardImage(): Promise<ClipboardImage> {
   if (process.platform !== "darwin") return null;
   const furl = await run("/usr/bin/osascript", ["-e", "POSIX path of (the clipboard as «class furl»)"]);
   if (furl.ok) {
     const path = furl.stdout.trim();
-    return IMAGE_EXT.test(path) && isRegularFile(path) ? new Uint8Array(readFileSync(path)) : null;
+    return IMAGE_EXT.test(path) && isRegularFile(path) ? { kind: "file", path } : null;
   }
   const dir = mkdtempSync(join(tmpdir(), "winter-clipboard-"));
   try {
     const png = join(dir, "clipboard.png");
     if ((await run("/usr/bin/osascript", [...WRITE_FLAVOUR("«class PNGf»"), png])).ok && existsSync(png)) {
-      return new Uint8Array(readFileSync(png));
+      return { kind: "data", bytes: new Uint8Array(readFileSync(png)) };
     }
     const tiff = join(dir, "clipboard.tiff");
     if ((await run("/usr/bin/osascript", [...WRITE_FLAVOUR("«class TIFF»"), tiff])).ok && existsSync(tiff)) {
-      if ((await run("/usr/bin/sips", ["-s", "format", "png", tiff, "--out", png])).ok && existsSync(png)) {
-        return new Uint8Array(readFileSync(png));
-      }
+      return { kind: "data", bytes: new Uint8Array(readFileSync(tiff)) };
     }
     return null;
   } finally {
