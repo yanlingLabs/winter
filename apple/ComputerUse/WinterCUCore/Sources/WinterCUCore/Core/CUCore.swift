@@ -707,11 +707,16 @@ public final class CUCore: @unchecked Sendable {
             do {
                 obs = try observe(t, within: within)
             } catch {
-                guard let note = Self.goneWithinNote(error, within: within) else { throw error }
+                let pageChanged = t.pageAtSnapshot.map { old in pageSignature(t).map { !Self.isSamePage(old, $0) } ?? true } ?? false
+                guard let note = Self.goneWithinNote(error, within: within, pageChanged: pageChanged) else { throw error }
                 gone = note
                 within = nil
                 obs = try observe(t, within: nil)
             }
+            // A `within` element in a page the window is not showing (a tab in the background): said first — the
+            // header names the window's page, not that one.
+            var elsewhere: String?
+            if let within, let e = try? element(within, in: t) { elsewhere = notShowingNote(e, ref: within, t) }
             let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note,
                                        caret: obs.caret, focusText: obs.focusText)
             let snap = CUSnapshot(id: t.nextSnapshotId(), scope: within, header: header, roots: obs.roots, formatter: formatter)
@@ -732,7 +737,9 @@ public final class CUCore: @unchecked Sendable {
             // opens one when its own window is not the active one): say so, or the model watches the wrong one.
             let opened = newWindows(t)
             if !opened.isEmpty { text += "\n" + opened.joined(separator: "\n") }
+            if let elsewhere { text = elsewhere + "\n" + text }
             if let gone { text = gone + "\n" + text }
+            if within == nil { t.pageAtSnapshot = pageSignature(t) }
             t.store(snap)
             return TargetSnapshotResult(snapshotId: snap.id, text: text, isDiff: isDiff, changedRatio: ratio,
                                         settled: settled, waitedMs: waited)
@@ -741,9 +748,26 @@ public final class CUCore: @unchecked Sendable {
 
     /// A `state({ within })` whose element is gone answers with the whole window and this line first; any other
     /// error (and any other primitive's gone ref) stays an error. Pure.
-    static func goneWithinNote(_ error: Error, within: Int?) -> String? {
+    static func goneWithinNote(_ error: Error, within: Int?, pageChanged: Bool = false) -> String? {
         guard let within, (error as? CUError)?.code == "stale_ref" else { return nil }
-        return "[\(within)] is gone (the page changed) — showing the whole window"
+        return pageChanged
+            ? "[\(within)] is gone (the page changed) — showing the whole window"
+            : "[\(within)] is no longer in the window (a menu, panel or section it was in closed or was redrawn) — showing the whole window"
+    }
+
+    /// "[N] is in a page the window is not showing (“title”) …" for an element under a web area other than the
+    /// window's own (a background tab's, kept alive by the browser); nil otherwise.
+    func notShowingNote(_ e: AXUIElement, ref: Int, _ t: CUTarget) -> String? {
+        var area: AXUIElement?
+        var cur: AXUIElement? = e
+        for _ in 0..<80 {
+            guard let c = cur else { break }
+            if ax.string(c, kAXRoleAttribute) == "AXWebArea" { area = c; break }
+            cur = ax.element(c, kAXParentAttribute)
+        }
+        guard let area, pageSignature(t) != nil, let showing = t.webArea, !CFEqual(area, showing) else { return nil }
+        let title = ax.string(area, kAXTitleAttribute).flatMap { $0.isEmpty ? nil : $0 }
+        return "[\(ref)] is in a page the window is not showing\(title.map { " (\u{201C}\($0.prefix(80))\u{201D})" } ?? "") — a tab in the background; what follows may be out of date, and acts on it may not land: switch to that tab first"
     }
 
     public func targetFind(_ p: TargetFindParams) async throws -> TargetFindResult {
@@ -772,16 +796,29 @@ public final class CUCore: @unchecked Sendable {
         return last.roots
     }
 
-    /// Notes for the app's real windows that appeared since the target last looked; remembers the current set.
+    /// Notes for the app's document windows that appeared since the target first looked. Cumulative: a window
+    /// seen once is never announced again (live: one utility window was announced twice, as it left the listing
+    /// and came back). Only titled windows of a document's size that accessibility does not call something else
+    /// — never a popover (a downloads list), a panel or a utility window.
     func newWindows(_ t: CUTarget) -> [String] {
-        let now = CUBindWait.realWindows(sys.windows(pid: t.pid))
+        let server = sys.windows(pid: t.pid)
+        let now = CUBindWait.realWindows(server)
         let known = t.knownWindows
-        t.knownWindows = Set(now.map(\.id))
+        t.knownWindows = known.union(now.map(\.id))
         guard !known.isEmpty else { return [] }
-        return now.filter { !known.contains($0.id) && $0.id != t.windowID }.prefix(3).map { w in
-            let title = w.title.isEmpty ? "" : " \u{201C}\(w.title.prefix(80))\u{201D}"
-            return "new \(t.appName) window\(title) (\(w.id)) — this state is still the bound window; useWindow(\(w.id)) to work in it"
+        let fresh = now.filter { !known.contains($0.id) && $0.id != t.windowID }
+        guard !fresh.isEmpty else { return [] }
+        var axInfo: [UInt32: (title: String, subrole: String?)] = [:]
+        for w in CUAXWindows.list(pid: t.pid, ax: ax, server: server) {
+            axInfo[w.id] = (w.title, ax.string(w.element, kAXSubroleAttribute))
         }
+        let documentKinds: Set<String> = [kAXStandardWindowSubrole, kAXDialogSubrole, "AXSystemDialog"]
+        return fresh.compactMap { w -> String? in
+            let title = !w.title.isEmpty ? w.title : (axInfo[w.id]?.title ?? "")
+            guard !title.isEmpty, w.frame.width >= 200, w.frame.height >= 120 else { return nil }
+            if let sub = axInfo[w.id]?.subrole, !documentKinds.contains(sub) { return nil }
+            return "new \(t.appName) window \u{201C}\(title.prefix(80))\u{201D} (\(w.id)) — this state is still the bound window; useWindow(\(w.id)) to work in it"
+        }.prefix(3).map { $0 }
     }
 
     public func targetScreenshot(_ p: TargetScreenshotParams) async throws -> TargetScreenshotResult {

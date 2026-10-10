@@ -162,6 +162,32 @@ final class LiveGateFinderTests: XCTestCase {
         XCTAssertTrue(core.newWindows(target).isEmpty, "said once")
     }
 
+    func testAWindowIsAnnouncedOnceEverAndOnlyADocumentWindow() throws {
+        finder()
+        target.knownWindows = [77]
+        var utility = FakeSystem.window(500, pid: pid, CGRect(x: 0, y: 0, width: 400, height: 300), owner: "Finder")
+        utility.title = ""  // untitled
+        sys.windows[500] = utility
+        XCTAssertTrue(core.newWindows(target).isEmpty, "an untitled window is not announced")
+        let pop = fakeElement(99_600)
+        ax.add(pop, role: kAXWindowRole, subrole: "AXUnknown", title: "Downloads", frame: CGRect(x: 600, y: 40, width: 300, height: 400))
+        ax.windowIDs[AXIdentity(element: pop)] = 501
+        ax.put(ax.application(pid), [kAXWindowsAttribute: [window, pop]])
+        var popover = FakeSystem.window(501, pid: pid, CGRect(x: 600, y: 40, width: 300, height: 400), owner: "Finder")
+        popover.title = "Downloads"
+        sys.windows[501] = popover
+        XCTAssertTrue(core.newWindows(target).isEmpty, "a popover is no new window")
+        var doc = FakeSystem.window(502, pid: pid, CGRect(x: 100, y: 100, width: 800, height: 500), owner: "Finder")
+        doc.title = "Report"
+        sys.windows[502] = doc
+        XCTAssertEqual(core.newWindows(target).count, 1)
+        // It leaves the listing for a moment and comes back: not announced again.
+        sys.windows[502] = nil
+        XCTAssertTrue(core.newWindows(target).isEmpty)
+        sys.windows[502] = doc
+        XCTAssertTrue(core.newWindows(target).isEmpty, "seen once, never announced again")
+    }
+
     func testAWindowTheServerMissesOnceIsNotLost() async throws {
         finder()
         sys.missOnce = [77]

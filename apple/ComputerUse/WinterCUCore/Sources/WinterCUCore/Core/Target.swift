@@ -91,6 +91,9 @@ final class CUTarget: @unchecked Sendable {
     /// The page (web area URL, window title) read after the last act, and when: the next act's "before".
     /// Pid-queue only.
     var pageAfterLastAct: (atMs: Double, page: CUCore.PageSignature?)?
+    /// The page when the last whole-window state was read: a `within` ref gone since then is "the page changed"
+    /// only when this differs. Pid-queue only.
+    var pageAtSnapshot: CUCore.PageSignature?
     /// The bound window's web area as last found, the window title then, and how long a window found to hold none
     /// is not walked again. Pid-queue only.
     var webArea: AXUIElement?

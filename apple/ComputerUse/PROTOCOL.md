@@ -226,7 +226,10 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   (where its keys go), else — for a window that is not its app's key window — the element marked focused in the
   window's web content.
 - `pageNow`: the act changed the bound window's page — its web area's URL (or, with none, the window's title)
-  is different after it: a link navigated, a tab switched. The page's title now; refs read before it are gone.
+  is different after it: a link navigated, a tab switched; an in-page `#fragment` jump is not (a `#/…` or `#!…`
+  route is). The page's title now; refs read before it are gone, and no `focusNow`/`focusLost` is sent with it
+  (that read named the old page). A tab the act opened in the window's own tab bar is said in `detail`
+  ("a new tab opened in …"), whether or not it is the one showing.
 - `type` and `paste` with no `into` refuse (`refused`) a focus that is not a text field (`focus_not_editable`),
   and several lines or more than 200 characters for a single-line field or for a browser's own field outside the
   page (`wrong_field_shape`); the message names the focus (and the page's editable element).

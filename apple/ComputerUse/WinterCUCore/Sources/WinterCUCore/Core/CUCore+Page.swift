@@ -8,6 +8,8 @@ extension CUCore {
     struct PageSignature: Equatable {
         var url: String?
         var title: String?
+        /// The window's own tabs (its tab bar, outside any page), by name; nil when it has none.
+        var tabs: [String]? = nil
     }
 
     /// The bound window's page: nil when it shows no web page (or has no accessibility here). Cheap: the web area
@@ -34,7 +36,52 @@ extension CUCore {
             if CFGetTypeID(v) == CFURLGetTypeID() { return (v as! URL).absoluteString }
             return v as? String
         }
-        return PageSignature(url: url, title: title ?? ax.string(area, kAXTitleAttribute))
+        return PageSignature(url: url, title: title ?? ax.string(area, kAXTitleAttribute), tabs: tabNames(win))
+    }
+
+    /// The names of the window's own tabs: the tab buttons of its tab bars — tab groups outside any web area
+    /// (a page's own tab widgets are not the window's tabs). Bounded in nodes and time; nil when there are none.
+    func tabNames(_ win: AXUIElement, maxNodes: Int = 400, maxMs: Double = 40) -> [String]? {
+        let deadline = clock.nowMs() + maxMs
+        var queue = [win]
+        var seen = 0
+        var names: [String]?
+        while !queue.isEmpty, seen < maxNodes, clock.nowMs() < deadline {
+            let n = queue.removeFirst()
+            seen += 1
+            let role = ax.string(n, kAXRoleAttribute)
+            if role == "AXWebArea" { continue }
+            if role == kAXTabGroupRole {
+                let tabs = ax.elements(n, kAXChildrenAttribute).filter {
+                    ax.string($0, kAXSubroleAttribute) == "AXTabButton" || ax.string($0, kAXRoleAttribute) == kAXRadioButtonRole
+                }
+                if !tabs.isEmpty {
+                    names = (names ?? []) + tabs.map { ax.string($0, kAXTitleAttribute) ?? ax.string($0, kAXDescriptionAttribute) ?? "" }
+                    continue
+                }
+            }
+            queue.append(contentsOf: ax.elements(n, kAXChildrenAttribute))
+        }
+        return names
+    }
+
+    /// `u` without its #fragment.
+    static func withoutFragment(_ u: String?) -> String? {
+        guard let u, let i = u.firstIndex(of: "#") else { return u }
+        return String(u[..<i])
+    }
+
+    /// Two URLs are the same page when they differ at most in an in-page #fragment (an anchor jump) — not one
+    /// that routes (`#/…`, `#!…`: a page that navigates by its fragment).
+    static func samePage(_ a: String?, _ b: String?) -> Bool {
+        if a == b { return true }
+        guard withoutFragment(a) == withoutFragment(b) else { return false }
+        let routes: (String?) -> Bool = { u in
+            guard let u, let i = u.firstIndex(of: "#") else { return false }
+            let f = u[u.index(after: i)...]
+            return f.hasPrefix("/") || f.hasPrefix("!")
+        }
+        return !routes(a) && !routes(b)
     }
 
     /// The window's first web area, breadth first, bounded in nodes and time.
@@ -57,16 +104,47 @@ extension CUCore {
         return pageSignature(t)
     }
 
-    /// After an act: a different URL (or, with no URL, a different title) means the page changed.
+    /// The same page: the same URL up to an in-page #fragment (or, with no URL, the same title); tabs aside.
+    static func isSamePage(_ a: PageSignature, _ b: PageSignature) -> Bool {
+        a.url != nil || b.url != nil ? samePage(a.url, b.url) : a.title == b.title
+    }
+
+    /// After an act: a different URL (or, with no URL, a different title) means the page changed — an in-page
+    /// #fragment jump does not. The focus line read before that is dropped (it named the old page). A tab that
+    /// opened is said, whether or not it is showing.
     func notePageChange(from before: PageSignature?, _ t: CUTarget, _ o: ActOutcome) -> ActOutcome {
         let after = pageSignature(t)
         t.pageAfterLastAct = (clock.nowMs(), after)
         guard let before, let after else { return o }
-        let changed = before.url != nil || after.url != nil ? before.url != after.url : before.title != after.title
-        guard changed else { return o }
         var o = o
-        o.pageNow = after.title.flatMap { $0.isEmpty ? nil : $0 } ?? after.url ?? "untitled"
-        CULog.act.notice("act in \(t.appName, privacy: .public): the page changed")
+        let changed = !Self.isSamePage(before, after)
+        if changed {
+            o.pageNow = after.title.flatMap { $0.isEmpty ? nil : $0 } ?? after.url ?? "untitled"
+            o.focusNow = nil
+            o.focusLost = false
+            CULog.act.notice("act in \(t.appName, privacy: .public): the page changed")
+        }
+        if let note = Self.newTabNote(before.tabs, after.tabs, showing: changed, app: t.appName) {
+            CULog.act.notice("act in \(t.appName, privacy: .public): a tab opened")
+            o = o.noting(note)
+        }
         return o
+    }
+
+    /// "a new tab opened in Safari: “Title” …" when the window has more tabs than before. Pure.
+    static func newTabNote(_ before: [String]?, _ after: [String]?, showing: Bool, app: String) -> String? {
+        guard let before, let after, after.count > before.count else { return nil }
+        var left = before
+        var added: [String] = []
+        for n in after {
+            if let i = left.firstIndex(of: n) { left.remove(at: i) } else { added.append(n) }
+        }
+        if added.isEmpty { added = Array(after.suffix(after.count - before.count)) }
+        let names = added.prefix(3).map { $0.isEmpty ? "untitled" : "\u{201C}\($0.prefix(80))\u{201D}" }.joined(separator: ", ")
+        let count = after.count - before.count
+        let what = count == 1 ? "a new tab opened in \(app)" : "\(count) new tabs opened in \(app)"
+        return showing
+            ? "\(what) (\(names)), and it is the one showing now"
+            : "\(what) (\(names)) — the window still shows the tab it showed; click the new tab to work in it"
     }
 }
