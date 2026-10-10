@@ -39,14 +39,22 @@ final class FramingTests: XCTestCase {
         let next = frame(#"{"ok":1}"#)
         var items = decoder.push(big.prefix(12))
         items += decoder.push(big.dropFirst(12) + next)
-        XCTAssertEqual(items, [.oversized(25), .message(Data(#"{"ok":1}"#.utf8))])
+        XCTAssertEqual(items, [.oversized(25, prefix: Data(String(repeating: "y", count: 8).utf8)), .message(Data(#"{"ok":1}"#.utf8))])
     }
 
     func testTheExtensionMayNotSendMoreThan16MiB() {
         XCTAssertEqual(NativeMessageDecoder().maxMessage, 16 * 1024 * 1024)
         var decoder = NativeMessageDecoder()
         var length = UInt32(16 * 1024 * 1024 + 1).littleEndian
-        XCTAssertEqual(decoder.push(Data(bytes: &length, count: 4)), [.oversized(16 * 1024 * 1024 + 1)])
+        XCTAssertEqual(decoder.push(Data(bytes: &length, count: 4)), [.oversized(16 * 1024 * 1024 + 1, prefix: Data())])
+    }
+
+    func testAnOversizedMessageKeepsItsStartToBeAnswered() {
+        var decoder = NativeMessageDecoder(maxMessage: 10)
+        let big = #"{"jsonrpc":"2.0","id":"d42","result":{"data":"xxxxxxxxxxxxxxxx"}}"#
+        guard case .oversized(let length, let prefix) = decoder.push(frame(big)).first else { return XCTFail("expected oversized") }
+        XCTAssertEqual(length, big.utf8.count)
+        XCTAssertEqual(String(decoding: prefix, as: UTF8.self), big)
     }
 
     // MARK: host → Chrome

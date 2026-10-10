@@ -19,8 +19,9 @@ public enum HostProtocol {
     /// Daemon → host: one line becomes one native message, so the same 1 MiB.
     public static let maxDaemonLine = 1024 * 1024
 
-    /// How often the host tries again while no daemon answers on the socket.
+    /// The first wait before the host tries again while no daemon answers on the socket; it doubles up to `maxRetrySeconds`.
     public static let retrySeconds: TimeInterval = 2
+    public static let maxRetrySeconds: TimeInterval = 60
     /// How long the host waits after the daemon refused it, or could not be verified, before trying again.
     public static let refusedRetrySeconds: TimeInterval = 30
 }

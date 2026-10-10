@@ -2,12 +2,16 @@ import Foundation
 
 /// Chrome native messaging, incoming: each message is a 4-byte native-endian (little-endian on every Mac) length, then
 /// that many bytes of UTF-8 JSON. Incremental — feed it whatever `read` returned. A message over the cap is skipped
-/// (its bytes consumed and dropped, the stream kept in step) and reported once.
+/// (its bytes consumed and dropped, the stream kept in step) and reported once, with the start of it that was at hand
+/// (enough to find the JSON-RPC id it answers, so the daemon can be told at once).
 public struct NativeMessageDecoder {
     public enum Item: Equatable {
         case message(Data)
-        case oversized(Int)
+        case oversized(Int, prefix: Data)
     }
+
+    /// How much of an oversized message is kept to report it.
+    public static let oversizedPrefix = 4096
 
     private var buffer = Data()
     private var skipping = 0
@@ -31,8 +35,8 @@ public struct NativeMessageDecoder {
             let b = [UInt8](buffer.prefix(4))
             let length = Int(UInt32(b[0]) | UInt32(b[1]) << 8 | UInt32(b[2]) << 16 | UInt32(b[3]) << 24)
             if length > maxMessage {
-                items.append(.oversized(length))
                 let available = buffer.count - 4
+                items.append(.oversized(length, prefix: Data(buffer.dropFirst(4).prefix(Self.oversizedPrefix))))
                 if available >= length {
                     buffer = Data(buffer.dropFirst(4 + length))
                 } else {

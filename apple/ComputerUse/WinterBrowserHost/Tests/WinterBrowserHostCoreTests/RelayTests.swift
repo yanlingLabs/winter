@@ -122,15 +122,43 @@ final class RelayTests: XCTestCase {
         XCTAssertEqual(toExtension.count, 2)
     }
 
-    func testNoDaemonIsSaidOnceAndTriedAgainEvery2Seconds() {
-        connector.results = [{ .unavailable("ENOENT") }, { .unavailable("ENOENT") }]
+    func testNoDaemonIsSaidOnceAndTriedAgainBackingOffFrom2To60Seconds() {
+        var waits: [TimeInterval] = []
         relay.start()
-        XCTAssertEqual(statuses(), [["daemon": "unavailable"]])
-        XCTAssertEqual(scheduler.pending.map { $0.0 }, [2])
-        scheduler.fire()
-        XCTAssertEqual(connector.attempts, 2)
+        for _ in 0 ..< 8 {
+            waits.append(scheduler.pending.first!.0)
+            scheduler.fire()
+        }
+        XCTAssertEqual(waits, [2, 4, 8, 16, 32, 60, 60, 60])
+        XCTAssertEqual(connector.attempts, 9)
         XCTAssertEqual(statuses(), [["daemon": "unavailable"]], "the same status is not repeated")
+    }
+
+    func testAConnectionResetsTheBackoff() {
+        relay.start()
+        scheduler.fire() // 2 s
+        scheduler.fire() // 4 s
+        let link = FakeLink()
+        connector.results = [{ .connected(link) }]
+        scheduler.fire() // 8 s → connects
+        connector.daemonSays(#"{"jsonrpc":"2.0","id":"h1","result":{"protocol":1,"daemonVersion":"0.124.0"}}"#)
+        connector.onClose?()
         XCTAssertEqual(scheduler.pending.map { $0.0 }, [2])
+    }
+
+    func testAnExtensionAnswerTooLargeToCarryGetsTheDaemonAnImmediateTypedError() throws {
+        let link = connected()
+        relay.fromExtensionOversized(length: 20_000_000, prefix: Data(#"{"jsonrpc":"2.0","id":"d17","result":{"result":{"data":"AAAA"#.utf8))
+        let sent = link.objects().last!
+        XCTAssertEqual(sent["id"] as? String, "d17")
+        let error = try XCTUnwrap(sent["error"] as? [String: Any])
+        XCTAssertEqual((error["data"] as? [String: String])?["code"], "cdp_error")
+        XCTAssertTrue((error["message"] as? String ?? "").contains("16 MiB"))
+        // Not an answer to the daemon (a notification, or no id at hand): nothing is sent.
+        let before = link.lines.count
+        relay.fromExtensionOversized(length: 20_000_000, prefix: Data(#"{"jsonrpc":"2.0","method":"cdp.event","params":{"#.utf8))
+        relay.fromExtensionOversized(length: 20_000_000, prefix: Data())
+        XCTAssertEqual(link.lines.count, before)
     }
 
     func testAnUnverifiedDaemonGetsNothingAndIsTriedAgainIn30Seconds() {

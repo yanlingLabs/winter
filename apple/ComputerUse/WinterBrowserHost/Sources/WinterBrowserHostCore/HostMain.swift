@@ -44,7 +44,7 @@ public enum HostMain {
                 for item in decoder.push(Data(buffer[0 ..< n])) {
                     switch item {
                     case .message(let payload): queue.async { relay.fromExtension(payload) }
-                    case .oversized(let length): say("refused a \(length)-byte message from the extension (over 16 MiB)")
+                    case .oversized(let length, let prefix): queue.async { relay.fromExtensionOversized(length: length, prefix: prefix) }
                     }
                 }
             }

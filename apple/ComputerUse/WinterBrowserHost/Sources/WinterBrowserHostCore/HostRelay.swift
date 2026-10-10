@@ -27,7 +27,9 @@ public protocol RelayScheduler {
 ///  - connect to `browser.sock`, verify it is the daemon, say `host.hello`; until that is answered nothing else crosses;
 ///  - then relay every JSON-RPC object unchanged in both directions, reading only its size and envelope;
 ///  - tell the extension how the daemon link stands with `host.status` (never sent to the daemon);
-///  - no daemon: try again every 2 s; refused or unverified: every 30 s.
+///  - no daemon: try again after 2 s, doubling to at most 60 s while Winter isn't running (back to 2 s once connected);
+///    refused or unverified: every 30 s;
+///  - an extension message too large to carry that answers the daemon gets the daemon an immediate typed error instead.
 /// A request from the extension that cannot reach the daemon is answered `disconnected` here; anything else is dropped.
 public final class HostRelay {
     public struct Hello: Equatable {
@@ -58,7 +60,10 @@ public final class HostRelay {
     private let toExtension: (Data) -> Void
     private let log: (String) -> Void
     private let retrySeconds: TimeInterval
+    private let maxRetrySeconds: TimeInterval
     private let refusedRetrySeconds: TimeInterval
+    /// The wait before the next try while nothing answers on the socket.
+    private var nextRetry: TimeInterval
 
     public private(set) var phase: Phase = .idle
     private var link: DaemonLink?
@@ -72,6 +77,7 @@ public final class HostRelay {
     public init(hello: Hello, connector: DaemonConnecting, scheduler: RelayScheduler,
                 toExtension: @escaping (Data) -> Void, log: @escaping (String) -> Void = { _ in },
                 retrySeconds: TimeInterval = HostProtocol.retrySeconds,
+                maxRetrySeconds: TimeInterval = HostProtocol.maxRetrySeconds,
                 refusedRetrySeconds: TimeInterval = HostProtocol.refusedRetrySeconds) {
         self.hello = hello
         self.connector = connector
@@ -79,7 +85,16 @@ public final class HostRelay {
         self.toExtension = toExtension
         self.log = log
         self.retrySeconds = retrySeconds
+        self.maxRetrySeconds = maxRetrySeconds
         self.refusedRetrySeconds = refusedRetrySeconds
+        self.nextRetry = retrySeconds
+    }
+
+    /// The next no-daemon wait, doubling up to the ceiling.
+    private func backoff() -> TimeInterval {
+        let wait = nextRetry
+        nextRetry = min(nextRetry * 2, maxRetrySeconds)
+        return wait
     }
 
     public func start() {
@@ -108,12 +123,12 @@ public final class HostRelay {
             if !send(["jsonrpc": "2.0", "id": id, "method": "host.hello", "params": params]) {
                 dropLink()
                 status(["daemon": "unavailable"])
-                retry(after: retrySeconds)
+                retry(after: backoff())
             }
         case .unavailable(let why):
             log("no daemon on the socket (\(why))")
             status(["daemon": "unavailable"])
-            retry(after: retrySeconds)
+            retry(after: backoff())
         case .unverified(let why):
             log("the process on the socket is not Winter's daemon (\(why)) — nothing sent")
             status(["daemon": "unverified"])
@@ -135,6 +150,7 @@ public final class HostRelay {
             helloId = nil
             if object["result"] != nil {
                 phase = .relaying
+                nextRetry = retrySeconds
                 log("connected to the daemon")
                 lastStatus = nil
                 status(["daemon": "connected"])
@@ -170,7 +186,7 @@ public final class HostRelay {
         helloId = nil
         log("the daemon connection closed")
         status(["daemon": "unavailable"])
-        retry(after: retrySeconds)
+        retry(after: backoff())
     }
 
     private func dropLink() {
@@ -193,6 +209,27 @@ public final class HostRelay {
     }
 
     // MARK: - The extension side
+
+    /// A message from the extension over the host's cap (`prefix` is its start). If it answers a daemon request, the
+    /// daemon gets that request's answer now — a typed error — instead of waiting out its timeout.
+    public func fromExtensionOversized(length: Int, prefix: Data) {
+        log("refused a \(length)-byte message from the extension (over \(HostProtocol.maxExtensionMessage / 1024 / 1024) MiB)")
+        guard phase == .relaying, let link, let id = Self.daemonRequestId(in: prefix) else { return }
+        let reply: [String: Any] = ["jsonrpc": "2.0", "id": id, "error": [
+            "code": -32000,
+            "message": "the browser's answer is larger than the \(HostProtocol.maxExtensionMessage / 1024 / 1024) MiB Winter for Chrome can carry",
+            "data": ["code": "cdp_error"],
+        ] as [String: Any]]
+        if let data = try? JSONSerialization.data(withJSONObject: reply, options: []) { _ = link.send(LineEncoder.line(data)) }
+    }
+
+    /// The daemon's request id (`d…`) an answer starting with `prefix` carries, when it is a response.
+    static func daemonRequestId(in prefix: Data) -> String? {
+        let head = String(decoding: prefix, as: UTF8.self)
+        guard !head.contains("\"method\""), let range = head.range(of: #""id"\s*:\s*"(d[0-9]{1,18})""#, options: .regularExpression) else { return nil }
+        let match = String(head[range])
+        return match.split(separator: "\"").last(where: { $0.hasPrefix("d") }).map(String.init)
+    }
 
     /// One native message's JSON from the extension.
     public func fromExtension(_ payload: Data) {
