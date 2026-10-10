@@ -679,7 +679,7 @@ extension WinterClient {
     /// this wrapper doesn't have.
     ///
     /// **`nil` and `[]` are DIFFERENT answers and the difference is load-bearing.** The daemon
-    /// populates `dirs` only for rows that PARTICIPATE in working directories (code + cowork +
+    /// populates `dirs` only for rows that PARTICIPATE in working directories (code + reserved cowork +
     /// absent-means-code — `session.list`'s own `participatesInActivity` gate, ipc/server.ts), so:
     ///   * `nil` — this session has no working-directory concept at all (chat/dispatch), or the
     ///     daemon predates the field. A picker must be ABSENT, not empty.
@@ -688,6 +688,8 @@ extension WinterClient {
     ///     adopt door.
     /// Collapsing the two (`?? []`) is how a chat window grows a folder menu whose every tap comes
     /// back `DIRS_MODE_REFUSAL`.
+    /// Cowork recognition here is groundwork for synthetic/future rows, not a supported daemon
+    /// mode: `session.create` excludes it and `SpawnSession` rejects its reserved argument.
     ///
     /// `cwd` is the ALIAS of `dirs[0]?.path` for a participating row — the daemon overwrites it at
     /// `session.list` time from the dirs set, because `session.setDirs` deliberately never touches
@@ -1003,7 +1005,7 @@ extension WinterClient {
     ///
     /// **Every refusal is a thrown `RpcError` carrying the daemon's own wording, and that wording is
     /// meant to be SHOWN.** `set-dirs.ts` owns the refusal matrix and names each rule in its own
-    /// sentence — "working directories apply to code and cowork sessions only" (chat/dispatch),
+    /// sentence — "working directories apply to code sessions only; Cowork is not yet available" (chat/dispatch),
     /// "that directory is locked for this session" (the first-write lock), "that directory can never
     /// be a working directory" (the dirGrant denylist), and the remove-primary refusal that names
     /// `setPrimary` as the way out. Surfacing them VERBATIM is what makes a refusal teachable; a
@@ -1045,8 +1047,8 @@ extension WinterClient {
     ///
     /// **Every refusal is a thrown `RpcError` carrying the daemon's own sentence, and that sentence
     /// is meant to be SHOWN** — the `setDirs` precedent, and the same reasoning: `set-activity.ts`
-    /// writes one per rule and each names the rule it enforced ("activity states apply to code and
-    /// cowork sessions only", "session is archived — resume it first", "stop or background it
+    /// writes one per rule and each names the rule it enforced (the Code-only availability refusal,
+    /// with Cowork not yet available; "session is archived — resume it first"; "stop or background it
     /// first"). A client-side "couldn't change that" erases exactly the sentence that teaches the
     /// rule. An unknown session throws NOT_FOUND, same precedent as `setPolicy`/`setModel`.
     public func setActivity(sessionId: String, activity: String?) async throws -> String? {

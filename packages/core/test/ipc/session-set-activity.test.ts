@@ -372,7 +372,7 @@ describe("session.setActivity (session-activity-hygiene T3)", () => {
       const res = await c.request(METHODS.sessionSetActivity, { sessionId, activity: "background" });
       expect(res.error).toBeTruthy();
       expect(res.error.code).toBe(ERR.INVALID_PARAMS);
-      expect(res.error.message).toBe("activity states apply to code and cowork sessions only");
+      expect(res.error.message).toBe("activity states apply to code sessions only; Cowork is not yet available");
       expect(store.list().find((s) => s.sessionId === sessionId)!.backgrounded).toBeUndefined();
       c.close();
     });
@@ -529,7 +529,7 @@ describe("session.setActivity (session-activity-hygiene T3)", () => {
     return id;
   }
 
-  test("a COWORK session is settable (the participation allowlist is code AND cowork)", async () => {
+  test("a synthetic cowork-shaped row is settable by the reserved participation allowlist", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "activity-setter");

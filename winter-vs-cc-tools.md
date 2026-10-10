@@ -1,5 +1,10 @@
 # Tool inventories — Winter vs. Claude Code
 
+> Historical comparison: several names and deferral rules below predate the runtime migration.
+> For the current tool surface, read [CLAUDE.md](CLAUDE.md#tool-surface) and the capability tables
+> it names. References to Claude Cowork do not imply Winter Cowork is available; see the
+> [Cowork implementation map](docs/cowork-status.md).
+
 Two reference tables: Winter's built-in agent tools, and Claude Code's fixed built-in
 catalogue. **Deferred = Yes** means the tool is hidden behind `ToolSearch` (schema not
 loaded / not callable until loaded); **No** means always visible.
@@ -46,7 +51,7 @@ path and its own page reader, and it needs the Exa key either way. It follows in
 | `agent_list` | Yes | List your background subagents with status, elapsed time, and description. |
 | `agent_output` | Yes | Fetch a subagent's output (or latest message while running) plus its transcript path. |
 | `send_message` | No | Send a message to a subagent by id/name to re-task or resume it (fire-and-forget). |
-| `task_stop` | Yes | Stop a running background agent, a background bash task, or — in the dispatch session — a dispatch child session. |
+| `task_stop` | Yes | Legacy tool name. Current `TaskStop` stops subagents/background tasks and, for Code or Dispatch callers, an eligible Code session's running turn. |
 | `task_create` | No | Create a task on the session's live to-do list (starts pending). |
 | `task_update` | No | Update a task's status, fields, owner, or task-graph links. |
 | `task_list` | No | List the session's tasks with their statuses. |
@@ -81,8 +86,8 @@ path and its own page reader, and it needs the Exa key either way. It follows in
 | `computer` | No* | Control the Mac: read the AX tree, screenshot, click/drag/type/scroll, wait. |
 | `ToolSearch` | — | Load deferred tools' schemas so they become callable. |
 
-**Counts below predate the engine's retirement and the web-tools ruling; the per-tool rows are
-what to trust.** Notes:
+**These counts and legacy rows predate the engine's retirement; use the current surface linked
+above for availability and tool names.** Historical notes:
 
 - `computer` (`No*`) is only *registered* when `settings.computerUse.enabled` is on; when
   present it's not deferred.
@@ -94,12 +99,13 @@ what to trust.** Notes:
   the ToolSearch index, and `execute()`'s guard can never disagree about what's hidden.
 - `session_spawn` is **dispatch-session-only** — the mirror image of `spawn_agent`/`skill_write`/
   `write`/`edit`/`lsp`/`notebook_edit`, which are excluded FROM a dispatch session; a code
-  session never sees `session_spawn` at all. Its CC analogue is Cowork's "Dispatch" child
-  creation — but unlike `spawn_agent`'s in-session subagent THREAD, a spawned dispatch child is
+  session never sees `session_spawn` at all. The comparison is to **Claude Cowork**'s "Dispatch"
+  child creation, not an implemented Winter Cowork mode; Winter spawns Code sessions. Unlike
+  `spawn_agent`'s in-session subagent THREAD, a spawned dispatch child is
   a full first-class sibling SESSION (own transcript, own `session.list` entry, independently
-  attachable/resumable), not a nested thread of the caller's own session. `task_stop`'s dispatch
-  branch is the corresponding teardown: from the dispatch session only, it can stop one of its
-  own children by session id, alongside its existing bg-agent/bg-bash-task targets.
+  attachable/resumable), not a nested thread of the caller's own session. Current `TaskStop` also
+  reaches eligible Code peer sessions through host messaging, from Code and Dispatch callers;
+  the target need not be the caller's child. Cowork sessions remain unavailable.
 
 ---
 

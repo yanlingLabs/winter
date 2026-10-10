@@ -6,8 +6,9 @@ import {
 
 // Plan-immunity Task 2 (mode×surface matrix — ledger .superpowers/sdd/2026-07-28-plan-immunity/
 // progress.md): the TUI/CLI's single source for "is this session's mode one the CLI is allowed to
-// act on" (code = TUI + macOS app + iOS app; chat/cowork/dispatch are apps-only, dispatch also the
-// orb) plus the two user-facing strings that predicate drives. Pure module, no socket/process —
+// act on" (code = TUI + macOS app + iOS app; chat/dispatch are apps-only, dispatch also the
+// orb) plus the two user-facing strings that predicate drives. Cowork rows here are synthetic
+// future-mode fixtures, not an available app mode. Pure module, no socket/process —
 // the actual command routes (main.ts's send/watch/resume/sessions cases) are thin glue over these,
 // consistent with this package's existing convention (main.test.ts's own top comment) of unit
 // testing the pure logic and exercising the wired socket/process paths by hand.

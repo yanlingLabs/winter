@@ -177,9 +177,10 @@ struct SessionSummary: Equatable, Identifiable {
     /// (chips, tabs, roster, panel) reads this field, never `listSessions()` directly. Defaulted,
     /// same reasoning as `mode`/`dirs` above.
     ///
-    /// One of `"active"|"background"|"idle"|"archived"` for a participating (code/cowork) row,
+    /// One of `"active"|"background"|"idle"|"archived"` for a participating (code/reserved cowork) row,
     /// `nil` for a chat/dispatch row or a daemon predating the field — the SAME absent-is-a-real-
     /// value discipline `dirs` documents above. Never coerce absence to a displayed value.
+    /// Cowork row handling is groundwork; supported daemon create paths cannot produce that mode.
     ///
     /// **Not the browser lifecycle's input any more** (b2-agent-browser T1): this is the daemon's
     /// four-state LABEL, withheld from chat/dispatch, and the panel's own sessions are chat. What

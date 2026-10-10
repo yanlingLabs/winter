@@ -761,12 +761,10 @@ export function browserToolDefs(deps: BrowserToolDeps): ToolDefinition[] {
     // the old hand-written allowlists with (registry.ts) — listing "chat" here is what makes this a
     // default tool there.
     //
-    // "cowork" is absent because the registry has no such mode: `Mode` is code|dispatch|chat and
-    // `engine.ts`'s `resolveMode` folds a cowork session into "chat" (its own comment records that
-    // choice and why it is the right analogue). The spec's `deferred: ["code","cowork","dispatch"]`
-    // therefore cannot be written literally, and the honest consequence is stated rather than hidden:
-    // the day cowork ships, a cowork session gets CHAT's read-only browser until someone widens
-    // `Mode` — a change with its own blast radius that this task deliberately did not make.
+    // The historical spec included "cowork", but the supported registry and protocol modes are
+    // code|dispatch|chat. Cowork creation is unsupported. The retired engine.ts mapping to chat
+    // no longer applies: session-driver.ts and handoff.ts narrow unknown stored modes to code.
+    // That fallback is not Cowork support and does not define a future Cowork browser policy.
     modes: ["code", "dispatch", "chat"],
     // Deferred in code and dispatch (ToolSearch-loaded there), IMMEDIATE in chat — spec §1's
     // "default tool in chat where it is the primary web surface". The asymmetry is also forced:

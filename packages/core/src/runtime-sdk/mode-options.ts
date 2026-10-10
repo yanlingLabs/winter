@@ -128,7 +128,8 @@ export const CHAT_BUILTIN_TOOLS: readonly string[] = ["AskUserQuestion", "ToolSe
  * **DISPATCH's allowed built-ins** — EXACTLY the ruling's list (2026-10-01), less its search tool, which
  * `toolsFor` adds: `Bash`, `Read`, `WebFetch`, `SendMessage`, `TaskStop`, the three cron tools,
  * `AskUserQuestion`, `PushNotification`, `ScheduleWakeup`, plus `ToolSearch` so the deferred tools load.
- * (`TaskStop` also stops a code/Cowork SESSION by its `s_…` id since agent SDK 0.0.39 — `host_session_stop`.)
+ * (`TaskStop` also stops a code SESSION by its `s_…` id since agent SDK 0.0.39 — `host_session_stop`;
+ * the host predicate reserves future Cowork participation, but Cowork is not available today.)
  * `SpawnSession`/`ListSessions`/`Computer`/`Browser` are the daemon's capability tools (ManageSession was
  * removed from dispatch 2026-10-02)
  * (MCP, never filtered by `tools`); a user/plugin MCP server's tools arrive the same way, deferred.

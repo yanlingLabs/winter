@@ -1615,7 +1615,7 @@ extension MethodWrapperTests {
     /// running-turn refusal, all of which a surface then shows verbatim.
     func testSetActivityRefusalsSurfaceTheDaemonsWordingVerbatim() async throws {
         for refusal in [
-            "activity states apply to code and cowork sessions only",
+            "activity states apply to code sessions only; Cowork is not yet available",
             "session is archived — resume it first",
             "stop or background it first",
         ] {
@@ -1640,7 +1640,7 @@ extension MethodWrapperTests {
     func testSetDirsRefusalsSurfaceTheDaemonsWordingVerbatim() async throws {
         for refusal in [
             "that directory is locked for this session",
-            "working directories apply to code and cowork sessions only",
+            "working directories apply to code sessions only; Cowork is not yet available",
             "that directory can never be a working directory",
             "the primary directory can't be removed — use setPrimary to replace it instead",
         ] {

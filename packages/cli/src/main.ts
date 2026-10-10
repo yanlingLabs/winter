@@ -1594,7 +1594,7 @@ if (import.meta.main) {
   }
   case "sessions": {
     // Plan-immunity Task 2 (mode×surface matrix): this is a plain INVENTORY, not a picker — it
-    // stays a truthful listing of every session that exists, chat/dispatch/cowork included, just
+    // stays a truthful listing of every session that exists, chat/dispatch included, just
     // visibly MARKED as not-for-here via `sessionModeMarker` rather than hidden (contrast the
     // TUI's `/sessions`, and `resume`'s no-id picker below, which HIDE non-code rows — see
     // session-mode.ts's file doc for why the two surfaces differ).

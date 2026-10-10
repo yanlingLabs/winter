@@ -2,6 +2,14 @@
 
 The canonical list of known, deliberately parked work. Nothing here blocks a release. When an item ships, delete its line in the same commit; when new work gets parked, add it here rather than in a private note.
 
+## Cowork
+
+Cowork is unavailable. The [implementation map](docs/cowork-status.md) separates working shared infrastructure from reserved hooks and UI placeholders.
+
+- [ ] Define Cowork's product behavior and its prompt, tool, permission, workspace, and runtime choices; existing reserved mode names do not decide these.
+- [ ] Implement supported Cowork session creation and execution across the protocol, store, daemon, runtime/run-home modes, and capability policies, with coverage through the real creation path. Decide its remote/iOS contract explicitly.
+- [ ] Wire the Cowork composer, folder and approval controls, session windows, and Dispatch's `/spawn` hook to that implementation. The current Mac and iOS surfaces remain unavailable placeholders.
+
 ## MCP
 - [ ] The runtime does not read `mcpServers` from an agent definition FILE (only a programmatic definition carries them); the daemon already lists and keys those servers.
 - [ ] An elicitation a server raises outside any tool call is cancelled when an unrelated call on the same connection ends, and the runtime does not handle MCP's `-32042` URL-elicitation-required error.

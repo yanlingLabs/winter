@@ -88,10 +88,11 @@ func initialWorkingDirChoice(recents: [String]) -> WorkingDirChoice {
 
 /// Whether the header's working-folders chip renders at all, decided by the DAEMON's own
 /// participation gate rather than by a mode list mirrored over here: `session.list` populates `dirs`
-/// only for rows that participate (code + cowork + absent-means-code, ipc/server.ts), so an absent
+/// only for rows that participate (code + reserved cowork + absent-means-code, ipc/server.ts), so an absent
 /// array IS the daemon saying "this session has no working-directory concept". A chat or dispatch
 /// window therefore shows no chip, and it shows none because the daemon said so — not because this
 /// file happens to hold the same allowlist today.
+/// Recognizing a synthetic/future Cowork row does not provide a Cowork create door.
 ///
 /// `[]` is the opposite answer and must show the chip: a workdir-less session is precisely the one
 /// that needs the adopt door.

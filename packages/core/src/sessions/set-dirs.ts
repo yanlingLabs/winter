@@ -35,9 +35,9 @@ export interface SetDirsDeps {
 /** `session.setDirs` and dispatch's dirGrant-adjacent doors both answer with this, verbatim, for
  *  the same reason `ACTIVITY_MODE_REFUSAL` is one constant: chat and dispatch sessions have no
  *  writable root at all (design doc §1), so every op refuses identically regardless of which door
- *  reached this state machine. Reuses `participatesInActivity` (the same code/cowork allowlist
- *  activity state gates on) rather than re-deciding the mode list a second time. */
-export const DIRS_MODE_REFUSAL = "working directories apply to code and cowork sessions only";
+ *  reached this state machine. Reuses `participatesInActivity` (code today, with future cowork
+ *  participation reserved) rather than re-deciding the mode list a second time. */
+export const DIRS_MODE_REFUSAL = "working directories apply to code sessions only; Cowork is not yet available";
 
 /** A locked entry can never be changed or removed for the session's lifetime (design doc §1) — this
  *  is the one refusal that names that rule. Fires for `setPrimary` over a locked `dirs[0]` and for
