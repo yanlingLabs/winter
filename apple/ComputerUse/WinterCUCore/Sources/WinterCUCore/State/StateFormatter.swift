@@ -184,7 +184,13 @@ public struct CUStateFormatter: Sendable {
             if let p = items[i].parent, !items[p].outOfView || focusPath.contains(p) { elidable.insert(i) }
         }
 
-        var collapsed = Set<Int>()
+        // An element that says it is collapsed (a disclosure row, a closed outline item) keeps what it holds
+        // folded from the start — reachable with `within` (where it is the root, and shown open) — unless the
+        // focus is inside it.
+        var collapsed = Set<Int>(items.indices.filter {
+            items[$0].parent != nil && items[$0].node.states.contains(.collapsed) && !items[$0].node.children.isEmpty
+                && !focusPath.contains($0)
+        })
         var eliding = false
         // hidden[i]: some ancestor of i is collapsed or i is folded out of view. Parents precede children, so
         // one forward pass works. `shown[i]`: i's descendants still shown.

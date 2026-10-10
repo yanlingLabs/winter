@@ -186,6 +186,14 @@ final class BackgroundPasteTests: XCTestCase {
         XCTAssertTrue(r.detail?.contains("received: unverifiable") ?? false, r.detail ?? "")
     }
 
+    func testALongLineIntoAnEditorThatCantBeReadBackIsAPasteThatSaysSo() async throws {
+        world()
+        let r = try await type(String(repeating: "word ", count: 50))  // 250 characters, one line
+        XCTAssertTrue(r.detail?.hasPrefix("as a paste (more than 200 characters go as a paste; this field can't be read back)") ?? false, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("unconfirmed") ?? false, r.detail ?? "")
+        XCTAssertFalse(r.detail?.contains("reads them back") ?? true, "never claims a read-back it can't do")
+    }
+
     func testAnInputTargetThatChangedSaysTheKeysArrived() async throws {
         world()
         poster.onPost = { [unowned self] e in if e.type == .keyUp { ax.put(doc, [kAXValueAttribute: "\u{200B}\u{200B}\u{200B}"]) } }

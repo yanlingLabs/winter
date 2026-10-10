@@ -151,6 +151,21 @@ final class StateFormatterTests: XCTestCase {
         XCTAssertEqual(lines[1], "  [2] group \"Big\" (31 more — state({within:2}))")
     }
 
+    func testACollapsedElementKeepsWhatItHoldsFolded() {
+        let rows = (0..<3).map { CUNode(ref: 300 + $0, role: "AXRow", name: "child \($0)") }
+        let closed = CUNode(ref: 2, role: "AXRow", name: "Section", states: .collapsed, children: rows)
+        let open = CUNode(ref: 3, role: "AXRow", name: "Open", states: .expanded, children: [CUNode(ref: 400, role: "AXRow", name: "shown")])
+        let root = CUNode(ref: 1, role: "AXOutline", children: [closed, open])
+        let lines = f.body(roots: [root], focusedRef: nil)
+        XCTAssertTrue(lines.contains("  [2] row \"Section\" (collapsed) (3 more — state({within:2}))"), lines.joined(separator: "\n"))
+        XCTAssertFalse(lines.contains { $0.contains("child 0") })
+        XCTAssertTrue(lines.contains { $0.contains("[400] row \"shown\"") })
+        // Read with `within`, it is the root: shown open.
+        XCTAssertTrue(f.body(roots: [closed], focusedRef: nil).contains { $0.contains("child 0") })
+        // The focus inside it: open.
+        XCTAssertTrue(f.body(roots: [root], focusedRef: 301).contains { $0.contains("child 1") })
+    }
+
     func testIndentationIsTwoSpacesPerLevel() {
         let tree = CUNode(ref: 1, role: "AXWindow", children: [
             CUNode(ref: 2, role: "AXGroup", name: "a", children: [CUNode(ref: 3, role: "AXButton", name: "b")]),

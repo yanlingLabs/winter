@@ -870,8 +870,10 @@ extension CUCore {
         if text.contains("\n") || text.count > Self.typeKeysMax, readable || !text.contains("\n") {
             let lines = text.split(separator: "\n", omittingEmptySubsequences: false).count
             CULog.act.notice("type in \(t.appName, privacy: .public): \(text.count, privacy: .public) characters sent as a paste")
-            return try pasteText(text, format: .text, p, t, token, g)
-                .noting("as a paste (\(lines > 1 ? "several lines go" : "more than \(Self.typeKeysMax) characters go") as a paste into a field that reads them back)")
+            let why = lines > 1 ? "several lines go as a paste into a field that reads them back"
+                : readable ? "more than \(Self.typeKeysMax) characters go as a paste into a field that reads them back"
+                : "more than \(Self.typeKeysMax) characters go as a paste; this field can't be read back"
+            return try pasteText(text, format: .text, p, t, token, g).noting("as a paste (\(why))")
         }
         let d = try CUInputLadder.decideEvents(context(p, t, pointer: false))
         let synth = self.synth(p)
@@ -946,6 +948,7 @@ extension CUCore {
     /// longest leading part of it now there, M of N), or nothing.
     func receivedVerdict(_ e: AXUIElement, typed: String, before: String, capMs: Double) -> Received {
         let want = CUEditEvidence.normalized(typed)
+        if want.isEmpty { return Received(word: "unverifiable", words: "unverifiable (only whitespace was typed, which can't be told apart in the field)") }
         let was = CUEditEvidence.normalized(before)
         let deadline = clock.nowMs() + capMs
         var now = was
@@ -974,9 +977,11 @@ extension CUCore {
         return Received(word: "partly", words: "partly (the field holds the first \(lo) of \(chars.count) characters; the rest differs or is missing) — check state() before typing again")
     }
 
-    /// `a` and `b` are the same element, or one lies inside the other (a contenteditable's own children).
+    /// `a` and `b` are the same element, one lies inside the other (a contenteditable's own children), or both
+    /// lie in the same editable element (a web editor re-reports its focused leaf as the caret moves).
     func sameFocus(_ a: AXUIElement, _ b: AXUIElement) -> Bool {
         if CFEqual(a, b) { return true }
+        if let ea = ax.element(a, "AXEditableAncestor"), let eb = ax.element(b, "AXEditableAncestor"), CFEqual(ea, eb) { return true }
         for (x, y) in [(a, b), (b, a)] {
             var cur = ax.element(x, kAXParentAttribute)
             for _ in 0..<12 {

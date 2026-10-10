@@ -339,9 +339,9 @@ struct CUEventSynth {
     /// Types `text` at the batched pace above. Each plain ASCII character is ITS OWN KEY — the layout's key code
     /// with Shift as needed — carrying the character as its Unicode string, so an editor that reads the key
     /// (a canvas editor) sees the key it expects and one that reads the text gets the exact character.
-    /// Characters no plain key types (Option-layer, non-ASCII, emoji, CJK) go as Unicode alone with no flags, a
-    /// run of them in one event (in chunks of `unicodeChunk` UTF-16 units), never one carrier key per character.
-    /// Return and Tab are their keys.
+    /// A character a key types only with Option, or a non-ASCII one, goes as its own Unicode event with no flags;
+    /// characters no key types at all (emoji, CJK) go as Unicode alone too, a run of them in one event (in chunks
+    /// of `unicodeChunk` UTF-16 units), never one carrier key per character. Return and Tab are their keys.
     /// `between` runs before each character (a run: before its first) and may throw to stop. `posted` is told
     /// how many characters have gone out so far, after each key or run (a cancelled type says how far it got).
     @discardableResult
@@ -392,9 +392,16 @@ struct CUEventSynth {
                 posted?(i)
                 continue
             }
+            if stroke(ch) != nil {
+                // A key types it, but not plainly (Option, or not ASCII): its own Unicode event, no flags.
+                post(code: 0, flags: [], unicode: String(ch))
+                i += 1
+                posted?(i)
+                continue
+            }
             // A run of characters no key types: one event per chunk, never splitting a character.
             var run = ""
-            while i < chars.count, plainStroke(chars[i]) == nil, !["\n", "\r", "\r\n", "\t"].contains(chars[i]),
+            while i < chars.count, stroke(chars[i]) == nil, !["\n", "\r", "\r\n", "\t"].contains(chars[i]),
                   run.utf16.count + String(chars[i]).utf16.count <= Self.unicodeChunk || run.isEmpty {
                 run.append(chars[i])
                 i += 1

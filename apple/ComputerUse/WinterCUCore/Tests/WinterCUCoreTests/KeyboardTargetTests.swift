@@ -80,6 +80,8 @@ final class KeyboardTargetTests: XCTestCase {
         XCTAssertEqual(dash.keycode, 0, "Unicode alone, no layout key")
         XCTAssertEqual(downs.first { $0.unicode.contains("ç") }?.keycode, 0, "non-ASCII: no layout key either")
         XCTAssertTrue(downs[0].flags.contains(.maskShift), "plain ASCII keeps its key and Shift")
+        XCTAssertTrue(downs.contains { $0.unicode == "ç" } && downs.contains { $0.unicode == "å" },
+                      "a character a key types goes as its own event, never merged into a run")
     }
 
     func testReturnAndTabAreTheirKeys() throws {
@@ -465,6 +467,49 @@ final class KeyboardTargetTests: XCTestCase {
             XCTAssertFalse(e.message.contains("had been typed before this"), "the counts once")
         }
         XCTAssertEqual(poster.keyDowns.count, 3, "nothing more went out")
+    }
+
+    func testTypingWithNoIntoStopsWhenTheFocusLeavesTheField() async throws {
+        safari(fieldOwner: pid)
+        let search = searchHasFocus()
+        ax.focus(pid: pid, on: field)
+        var n = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyUp else { return }
+            n += 1
+            if n == 2 { ax.focus(pid: pid, on: search) }
+        }
+        do {
+            try await act(.type(CUTypeAction(text: "Hello")))
+            XCTFail("typing went on into the search box")
+        } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("focus_moved"))
+            XCTAssertTrue(e.message.hasPrefix("typed 2 of 5 characters"), e.message)
+        }
+        XCTAssertEqual(poster.keyDowns.count, 2)
+    }
+
+    func testAnEditorThatReReportsItsFocusedLeafIsStillTheSameField() async throws {
+        // A web editor re-reports its focused leaf (a text run) as the caret moves: the same editable element.
+        safari(fieldOwner: pid)
+        let leaf = fakeElement(93_095)
+        ax.add(leaf, role: kAXStaticTextRole, frame: CGRect(x: 22, y: 62, width: 40, height: 20),
+               extra: ["AXEditableAncestor": field!, kAXParentAttribute: fakeElement(93_096)])
+        ax.put(field, ["AXEditableAncestor": field!])
+        var n = 0
+        poster.onPost = { [unowned self] e in
+            guard e.type == .keyUp else { return }
+            n += 1
+            if n == 2 { ax.focus(pid: pid, on: leaf) }
+        }
+        _ = try await act(.type(CUTypeAction(text: "Hello", into: ref(field))))
+        XCTAssertEqual(poster.keyDowns.count, 5, "not stopped")
+    }
+
+    func testOnlyWhitespaceTypedIsUnverifiableNotNoneOfIt() async throws {
+        safari(fieldOwner: pid)
+        let r = try await act(.type(CUTypeAction(text: " ", into: ref(field))))
+        XCTAssertTrue(r.detail?.contains("received: unverifiable (only whitespace") ?? false, r.detail ?? "")
     }
 
     func testATabMovesTheFocusOnPurpose() async throws {
