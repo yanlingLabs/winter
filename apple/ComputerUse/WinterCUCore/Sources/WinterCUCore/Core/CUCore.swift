@@ -938,13 +938,46 @@ public final class CUCore: @unchecked Sendable {
     func offScreenNote(_ t: CUTarget, _ img: CUCapturedImage) async throws -> String {
         let elsewhere = try await queues.run(t.pid) { [self] in isOffThisDesktop(t) }
         let now = clock.nowMs()
-        let digest = img.jpeg.hashValue ^ img.jpeg.count
+        // Over ALL the bytes: `Data`'s own hash reads only its first bytes — a JPEG's header, the same for every
+        // picture of one size, so every picture read as unchanged.
+        let digest = Self.contentDigest(img.jpeg)
         let previous = t.noteOffScreenShot(digest: digest, at: now)
-        var note = "captured \(t.appName)'s window \(elsewhere ? "on another desktop (another Space or full screen)" : "while it is not on screen (minimized or hidden)"): it is hidden there, so \(t.appName) may not be redrawing it and this image can be older than what was just done"
-        if let previous, previous.digest == digest, let acted = t.lastActionMs, acted > previous.atMs {
-            note += " — it is unchanged since the screenshot \(Int(((now - previous.atMs) / 1000).rounded())) s ago although input was sent since, so it is likely stale"
+        let where_ = elsewhere ? "on another desktop (another Space or full screen)" : "while it is not on screen (minimized or hidden)"
+        let check = "to see what is really there, read it (state() or find() text, or something the app counts, such as a word count)"
+        return Self.freshnessLabel(app: t.appName, where_: where_, check: check, previous: previous, digest: digest, now: now,
+                                   actedMs: t.lastActionMs, appActivityMs: monitor.lastNotificationMs(pid: t.pid))
+    }
+
+    /// FNV-1a over every byte. Pure.
+    static func contentDigest(_ data: Data) -> Int {
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        data.withUnsafeBytes { raw in
+            for b in raw { h = (h ^ UInt64(b)) &* 0x0000_0100_0000_01B3 }
         }
-        return note + "; to see what is really there, read it (state() or find() text, or something the app counts, such as a word count), or take a screenshot once the user shows the window"
+        return Int(bitPattern: UInt(truncatingIfNeeded: h))
+    }
+
+    /// Each off-screen picture labelled by what is known of it, never a blanket caveat (live: a model distrusted a
+    /// right picture because every one said it "can be older"): LIVE when it changed since the last one (the app
+    /// is drawing there); STALE SINCE the last change when it has not although input was sent or the app's content
+    /// changed (accessibility) since; LIKELY CURRENT when it has not and nothing happened since; and, for the first
+    /// picture, that its freshness can't be told yet. Pure.
+    static func freshnessLabel(app: String, where_: String, check: String, previous: (digest: Int, atMs: Double, changedAtMs: Double)?,
+                               digest: Int, now: Double, actedMs: Double?, appActivityMs: Double?) -> String {
+        let ago: (Double) -> String = { "\(Int(((now - $0) / 1000).rounded())) s ago" }
+        guard let previous else {
+            return "freshness unknown: captured \(app)'s window \(where_) — it is hidden there, so \(app) may not be redrawing it; a second screenshot after acting tells whether it is; \(check)"
+        }
+        if previous.digest != digest {
+            return "live: captured \(app)'s window \(where_), and it changed since the screenshot \(ago(previous.atMs)), so \(app) is drawing it there"
+        }
+        let acted = (actedMs ?? 0) > previous.atMs
+        let changed = (appActivityMs ?? 0) > previous.atMs
+        if acted || changed {
+            let why = acted && changed ? "input was sent and \(app)'s content changed since" : acted ? "input was sent since" : "\(app)'s content changed since (accessibility)"
+            return "stale since \(ago(previous.changedAtMs)): captured \(app)'s window \(where_), unchanged although \(why) — \(app) is not redrawing it there; \(check), or take a screenshot once the user shows the window"
+        }
+        return "likely current: captured \(app)'s window \(where_), unchanged since \(ago(previous.atMs)) with nothing done since"
     }
 
     // MARK: - waits
@@ -1028,8 +1061,30 @@ public final class CUCore: @unchecked Sendable {
             if screenShots.count > 16 { screenShots.removeFirst(screenShots.count - 16) }
             return s
         }()
+        let winter = Self.winterWindowsNote(stack: sys.windowStack(), bundleId: { [sys] in sys.bundleId(pid: $0) },
+                                            area: img.pointsRect, width: img.width, height: img.height)
         return ScreenScreenshotResult(imageBase64: img.jpeg.base64EncodedString(), mime: "image/jpeg",
-                                      width: img.width, height: img.height, shotId: shot.id)
+                                      width: img.width, height: img.height, shotId: shot.id, detail: winter)
+    }
+
+    /// "Winter's own window is in this picture at [x, y, w, h] …" for Winter's app windows on the captured area, in
+    /// image pixels: an app shown inside one is Winter's live mirror of it, not the app (live: a model took the
+    /// mirror for the app and clicked by it). Nil when none is there. Pure.
+    static func winterWindowsNote(stack: [CUWindowServerWindow], bundleId: (pid_t) -> String?, area: CGRect,
+                                  width: Int, height: Int) -> String? {
+        guard area.width > 0, area.height > 0 else { return nil }
+        let sx = Double(width) / area.width, sy = Double(height) / area.height
+        let boxes = stack.filter { w in
+            CUWindowServer.isRealWindow(w) && w.onScreen && w.frame.intersects(area)
+                && (bundleId(w.pid).map { $0 == "com.winter.app" || $0.hasPrefix("com.winter.app.") } ?? false)
+        }.prefix(3).map { w -> String in
+            let f = w.frame.intersection(area)
+            let x = Int(((f.minX - area.minX) * sx).rounded()), y = Int(((f.minY - area.minY) * sy).rounded())
+            return "[\(x), \(y), \(Int((f.width * sx).rounded())), \(Int((f.height * sy).rounded()))]"
+        }
+        guard !boxes.isEmpty else { return nil }
+        let at = boxes.joined(separator: ", ")
+        return "Winter's own window\(boxes.count == 1 ? " is" : "s are") in this picture at \(at) (image pixels): an app shown inside \(boxes.count == 1 ? "it" : "them") is Winter's live mirror of that app, not the app itself — act on the app through its handle, never by points inside Winter's window"
     }
 
     public func screenAppAt(_ p: ScreenAppAtParams) async throws -> ScreenAppAtResult {

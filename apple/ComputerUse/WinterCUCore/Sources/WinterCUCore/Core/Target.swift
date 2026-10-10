@@ -110,11 +110,13 @@ final class CUTarget: @unchecked Sendable {
 
     /// The last off-screen image of the window (a digest) and when: a later identical one, with input sent in
     /// between, is called stale. Returns the one before this.
-    private var _lastOffScreenShot: (digest: Int, atMs: Double)?
-    func noteOffScreenShot(digest: Int, at ms: Double) -> (digest: Int, atMs: Double)? {
+    private var _lastOffScreenShot: (digest: Int, atMs: Double, changedAtMs: Double)?
+    func noteOffScreenShot(digest: Int, at ms: Double) -> (digest: Int, atMs: Double, changedAtMs: Double)? {
         lock.lock(); defer { lock.unlock() }
         let before = _lastOffScreenShot
-        _lastOffScreenShot = (digest, ms)
+        // When the picture last changed: kept while it stays the same.
+        let changedAt = before.map { $0.digest == digest ? $0.changedAtMs : ms } ?? ms
+        _lastOffScreenShot = (digest, ms, changedAt)
         return before
     }
 

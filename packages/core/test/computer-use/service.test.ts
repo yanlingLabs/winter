@@ -522,6 +522,15 @@ describe("ComputerV2: screenshots, points and the vision gate", () => {
     expect(r.content.filter((c) => c.type === "image")).toHaveLength(2);
   }, 30_000);
 
+  macOnly("a display shot that shows Winter's own window says where it is: a picture of an app inside it is the mirror", async () => {
+    const w = world();
+    const note = "Winter's own window is in this picture at [200, 100, 800, 600] (image pixels): an app shown inside it is Winter's live mirror of that app, not the app itself — act on the app through its handle, never by points inside Winter's window";
+    w.fake.handlers["screen.screenshot"] = () => ({ imageBase64: Buffer.from("jpeg").toString("base64"), mime: "image/jpeg", width: 2000, height: 1000, shotId: "s1", detail: note });
+    const r = await w.run("await screen.screenshot()");
+    expect(r.isError).toBe(false);
+    expect(text(r)).toContain(note);
+  }, 30_000);
+
   macOnly("a screenshot says its pixel coordinate frame and the window's point size", async () => {
     const w = world();
     const r = await w.run("const notes = await apps.open('Notes')\nawait notes.screenshot()");

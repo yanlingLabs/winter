@@ -190,7 +190,7 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 | `target.snapshot` | `{targetId, since?, full?, within?, settle?: {maxMs}, callId?}` | `{snapshotId, text, isDiff, changedRatio, settled, waitedMs}` |
 | `target.find` | `{targetId, query}` | `{elements: [{ref, role, name?, value?, states?}]}` |
 | `target.screenshot` | `{targetId, region?, budget, settle?: {maxMs}, callId?}` | `{imageBase64, mime: "image/jpeg", width, height, shotId, settled, waitedMs, pointsWidth?, pointsHeight?, detail?}` |
-| `screen.screenshot` | `{display?, displayId?, excludeBundleIds: [string], budget}` | `{imageBase64, mime: "image/jpeg", width, height, shotId}` |
+| `screen.screenshot` | `{display?, displayId?, excludeBundleIds: [string], budget}` | `{imageBase64, mime: "image/jpeg", width, height, shotId, detail?}` |
 | `screen.appAt` | `{shotId, point}` | `{app, bundleId, windowId}` |
 
 - `snapshot`: `text` is the window's accessibility state with numbered refs. With `since` (a previous
@@ -201,7 +201,13 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 - `budget`: `{maxLongEdge, tile?, maxTiles?, quality}` (JPEG quality 0…1). `region` is in window points.
   `pointsWidth`/`pointsHeight` are the captured area in window points (a click's point is in image pixels).
 - `screen.screenshot`: `display` is an index into the active displays (0 = main) or `"all"`; `displayId`
-  (a `CGDirectDisplayID`) wins over it. `shotId`s are `screen.i<N>`; the last 16 are remembered.
+  (a `CGDirectDisplayID`) wins over it. `shotId`s are `screen.i<N>`; the last 16 are remembered. `detail` says
+  where Winter's own windows are in the image (image pixels): a picture of an app inside one is Winter's live
+  mirror of it, not the app.
+- `target.screenshot` of a window that is not on screen (taken from the window server) carries a `detail`
+  that begins with what is known of the picture's freshness: `freshness unknown` (the first one), `live` (it
+  changed since the last one), `stale since N s ago` (unchanged although input was sent or the app's content
+  changed since), or `likely current` (unchanged, and nothing done since).
 - `screen.appAt`: `point` in image pixels of that screen shot (or of a target's window shot). A point on a
   Winter window is `refused` (`winter_itself`); no window there, or an unknown shot, is `invalid_params`.
 

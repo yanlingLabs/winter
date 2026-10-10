@@ -187,10 +187,10 @@ final class FocusAndCaptureTests: XCTestCase {
     private let streamFailure = CUError.unsupported("capture failed: Failed to start stream due to audio/video capture failure")
 
     /// A solid image (`alpha` 0 → nothing drawn, what an undrawn window comes back as).
-    private func solid(_ w: Int, _ h: Int, alpha: CGFloat = 1) -> CGImage {
+    private func solid(_ w: Int, _ h: Int, alpha: CGFloat = 1, gray: CGFloat? = nil) -> CGImage {
         let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        ctx.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.9, alpha: alpha))
+        ctx.setFillColor(gray.map { CGColor(red: $0, green: $0, blue: $0, alpha: alpha) } ?? CGColor(red: 0.2, green: 0.5, blue: 0.9, alpha: alpha))
         ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
         return ctx.makeImage()!
     }
@@ -218,9 +218,9 @@ final class FocusAndCaptureTests: XCTestCase {
         XCTAssertEqual([r.width, r.height], [800, 533], "fitted to the budget like any capture")
         XCTAssertEqual(r.mime, "image/jpeg")
         XCTAssertNotNil(Data(base64Encoded: r.imageBase64).flatMap { CGImageSourceCreateWithData($0 as CFData, nil) })
-        XCTAssertEqual(r.detail, "captured Code's window on another desktop (another Space or full screen): it is hidden there, so Code "
-            + "may not be redrawing it and this image can be older than what was just done; to see what is really there, read it "
-            + "(state() or find() text, or something the app counts, such as a word count), or take a screenshot once the user shows the window")
+        XCTAssertEqual(r.detail, "freshness unknown: captured Code's window on another desktop (another Space or full screen) — it is hidden "
+            + "there, so Code may not be redrawing it; a second screenshot after acting tells whether it is; to see what is really there, "
+            + "read it (state() or find() text, or something the app counts, such as a word count)")
         XCTAssertTrue(sys.moved.isEmpty, "never moved here for a picture")
     }
 
@@ -228,13 +228,53 @@ final class FocusAndCaptureTests: XCTestCase {
         electron(onScreen: false)
         _ = privateCapture(solid(2400, 1600))
         let first = try await core.targetScreenshot(shotParams())
-        XCTAssertFalse(first.detail?.contains("likely stale") ?? true, "nothing to compare with yet")
+        XCTAssertTrue(first.detail?.hasPrefix("freshness unknown:") ?? false, "nothing to compare with yet")
         let again = try await core.targetScreenshot(shotParams())
-        XCTAssertFalse(again.detail?.contains("likely stale") ?? true, "no input since: the same picture is no news")
+        XCTAssertTrue(again.detail?.hasPrefix("likely current:") ?? false, "no input since: the same picture is no news — \(again.detail ?? "")")
         target.lastActionMs = CUSystemClock().nowMs() + 1  // input sent after the last shot
         let after = try await core.targetScreenshot(shotParams())
-        XCTAssertTrue(after.detail?.contains("unchanged since the screenshot 0 s ago although input was sent since, so it is likely stale") ?? false,
+        XCTAssertTrue(after.detail?.hasPrefix("stale since 0 s ago: captured Code's window on another desktop (another Space or full screen), unchanged although input was sent since") ?? false,
                       after.detail ?? "")
+    }
+
+    func testAnOffScreenImageThatChangedIsLive() async throws {
+        electron(onScreen: false)
+        var shade: CGFloat = 0.2
+        core.privateCaptureOverride = { [unowned self] _, _ in self.solid(2400, 1600, gray: shade) }
+        _ = try await core.targetScreenshot(shotParams())
+        shade = 0.7
+        let r = try await core.targetScreenshot(shotParams())
+        XCTAssertTrue(r.detail?.hasPrefix("live: captured Code's window on another desktop") ?? false, r.detail ?? "")
+        XCTAssertFalse(r.detail?.contains("older") ?? true, "no blanket caveat on a live picture")
+    }
+
+    func testTheDigestReadsEveryByteNotJustTheHeader() {
+        var a = Data(repeating: 7, count: 4096), b = a
+        b[4000] = 8
+        XCTAssertNotEqual(CUCore.contentDigest(a), CUCore.contentDigest(b))
+        a[4000] = 8
+        XCTAssertEqual(CUCore.contentDigest(a), CUCore.contentDigest(b))
+    }
+
+    func testFreshnessLabelsArePure() {
+        let label = { (prev: (digest: Int, atMs: Double, changedAtMs: Double)?, digest: Int, acted: Double?, activity: Double?) in
+            CUCore.freshnessLabel(app: "Safari", where_: "on another desktop", check: "read it", previous: prev, digest: digest,
+                                  now: 60_000, actedMs: acted, appActivityMs: activity)
+        }
+        XCTAssertTrue(label((1, 50_000, 20_000), 1, nil, 55_000).hasPrefix("stale since 40 s ago: captured Safari's window on another desktop, unchanged although Safari's content changed since (accessibility)"))
+        XCTAssertTrue(label((1, 50_000, 20_000), 1, 51_000, 52_000).contains("input was sent and Safari's content changed since"))
+        XCTAssertTrue(label((1, 50_000, 20_000), 1, 10_000, 10_000).hasPrefix("likely current:"))
+        XCTAssertTrue(label((1, 50_000, 20_000), 2, 55_000, nil).hasPrefix("live:"))
+    }
+
+    func testAScreenShotMarksWintersOwnWindowsInImagePixels() {
+        let winter = FakeSystem.window(500, pid: 777, CGRect(x: 100, y: 50, width: 400, height: 300), owner: "Winter")
+        let other = FakeSystem.window(501, pid: 778, CGRect(x: 600, y: 50, width: 400, height: 300), owner: "Safari")
+        let ids: [pid_t: String] = [777: "com.winter.app.dev", 778: "com.apple.Safari"]
+        let note = CUCore.winterWindowsNote(stack: [winter, other], bundleId: { ids[$0] }, area: CGRect(x: 0, y: 0, width: 1000, height: 500),
+                                            width: 2000, height: 1000)
+        XCTAssertEqual(note, "Winter's own window is in this picture at [200, 100, 800, 600] (image pixels): an app shown inside it is Winter's live mirror of that app, not the app itself — act on the app through its handle, never by points inside Winter's window")
+        XCTAssertNil(CUCore.winterWindowsNote(stack: [other], bundleId: { ids[$0] }, area: CGRect(x: 0, y: 0, width: 1000, height: 500), width: 2000, height: 1000))
     }
 
     func testARegionOfAWindowElsewhereIsTheGlobalRectOfThatRegion() async throws {

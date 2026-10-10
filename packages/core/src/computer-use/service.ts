@@ -1015,6 +1015,9 @@ export class ComputerV2Service {
     const handle = this.keepImage(ctx, res);
     if (args.emit !== false) ctx.builder.image(res.imageBase64, res.mime ?? "image/jpeg");
     else ctx.builder.markScreenRead();
+    // Where Winter's own windows are in it (a picture of an app inside one is Winter's mirror, not the app).
+    const detail = helperDetail(res.detail, 500);
+    if (detail !== undefined) ctx.builder.daemonLine(detail);
     return handle;
   }
 

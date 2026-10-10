@@ -465,12 +465,15 @@ public struct ScreenScreenshotResult: Codable, Sendable, Equatable {
     public var width: Int
     public var height: Int
     public var shotId: String
-    public init(imageBase64: String, mime: String, width: Int, height: Int, shotId: String) {
+    /// Where Winter's own windows are in the image (a picture of an app inside one is Winter's live mirror of it).
+    public var detail: String?
+    public init(imageBase64: String, mime: String, width: Int, height: Int, shotId: String, detail: String? = nil) {
         self.imageBase64 = imageBase64
         self.mime = mime
         self.width = width
         self.height = height
         self.shotId = shotId
+        self.detail = detail
     }
 }
 
