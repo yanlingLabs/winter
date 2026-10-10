@@ -194,10 +194,20 @@ export class ExtensionTransport implements CdpTransport {
         return true;
       }
       case "debugger.detached":
-        // The user cancelling Chrome's "started debugging" infobar is the user taking the tab back; any other detach
-        // (the page went somewhere the debugger cannot follow, the extension's idle detach) leaves a tab that can be
-        // attached again.
-        this.gone(tabKey, params.reason === "canceled_by_user" ? "detached_by_user" : "stopped");
+        if (params.reason === "canceled_by_user") {
+          // The user dismissed Chrome's "started debugging" bar: they took the tab back.
+          this.gone(tabKey, "detached_by_user");
+          return true;
+        }
+        // Any other detach (the extension's idle detach, the page going where the debugger cannot follow) leaves a tab
+        // that is still open and can be attached again — never "gone". The engine hears it as the debugger's own
+        // `Inspector.detached` on the tab's top-level session (delivered whatever the subscription: it ends them all)
+        // and re-attaches when it next needs the tab.
+        this.subscriptions.delete(tabKey);
+        {
+          const detached: CdpEvent = { tabKey, method: "Inspector.detached", params: { reason: typeof params.reason === "string" ? params.reason : "detached" } };
+          for (const l of this.eventListeners) this.safely(() => l(detached));
+        }
         return true;
       case "stop.pressed":
         for (const l of this.stopListeners) this.safely(() => l(tabKey));

@@ -187,7 +187,7 @@ describe("notifications", () => {
     ]);
   });
 
-  test("tab.gone and debugger.detached become onTabGone; Stop becomes onStop", () => {
+  test("only a tab really closed or crashed — or taken back by the user — is gone; Stop becomes onStop", () => {
     const h = harness();
     const gone: [string, string][] = [];
     const stops: string[] = [];
@@ -196,11 +196,30 @@ describe("notifications", () => {
     h.notify("tab.gone", { tabKey: "1", reason: "closed" });
     h.notify("tab.gone", { tabKey: "2", reason: "crashed" });
     h.notify("debugger.detached", { tabKey: "3", reason: "canceled_by_user" });
+    h.notify("stop.pressed", { tabKey: "6" });
+    expect(gone).toEqual([["1", "closed"], ["2", "crashed"], ["3", "detached_by_user"]]);
+    expect(stops).toEqual(["6"]);
+  });
+
+  test("an idle or target_closed detach of a tab that still exists is the debugger's own Inspector.detached, never a lost tab", async () => {
+    const h = harness();
+    const gone: string[] = [];
+    const events: unknown[] = [];
+    h.t.onTabGone((k) => gone.push(k));
+    h.t.onEvent((e) => events.push(e));
+    const sub = h.t.subscribe("4", ["Page.frameNavigated"]); // Inspector.detached not subscribed: delivered anyway
+    h.answer({});
+    await sub;
     h.notify("debugger.detached", { tabKey: "4", reason: "target_closed" });
     h.notify("debugger.detached", { tabKey: "5", reason: "idle" });
-    h.notify("stop.pressed", { tabKey: "6" });
-    expect(gone).toEqual([["1", "closed"], ["2", "crashed"], ["3", "detached_by_user"], ["4", "stopped"], ["5", "stopped"]]);
-    expect(stops).toEqual(["6"]);
+    expect(gone).toEqual([]);
+    expect(events).toEqual([
+      { tabKey: "4", method: "Inspector.detached", params: { reason: "target_closed" } },
+      { tabKey: "5", method: "Inspector.detached", params: { reason: "idle" } },
+    ]);
+    // The tab's subscription ended with its debugger: nothing more is forwarded until it is attached and subscribed again.
+    h.notify("cdp.event", { tabKey: "4", method: "Page.frameNavigated", params: {} });
+    expect(events).toHaveLength(2);
   });
 
   test("a throwing listener does not stop the others", () => {
