@@ -16,7 +16,9 @@ import WinterSessionKit
 // watches.
 //
 // `RemoteMirrorRelay` is one phone's watch of one session: it takes the source's updates on any thread and sends
-// them to the phone at the phone's pace — one write in flight, only the newest picture waiting, pictures cut to
+// them to the phone at the phone's pace — on the connection's own lower-priority side stream, at most
+// `MirrorWire.maxUnackedPictures` pictures unacknowledged by the phone (a QUIC write returns once its bytes are
+// BUFFERED, so only the phone's `mirrorAck` says a picture arrived), only the newest picture waiting, pictures cut to
 // the transport's size (`MirrorFrameFitter`) and paced (`MirrorWire.activeFps`, `idleFps` after `idleAfter`).
 // All of its work (the JPEG re-encode included) runs on its own task: never on the Gateway actor (which relays
 // every rpc for the phone) and never on the main actor (where the Mac's mirror runs).
@@ -51,7 +53,9 @@ public protocol RemoteMirrorSource: AnyObject, Sendable {
 ///      or `reset` drops a waiting picture (it was the previous target's);
 ///   2. cursor updates, in order, at most `maxPendingCursors` (the oldest go; a run of `move`s keeps its last);
 ///   3. the NEWEST picture only, sent once `interval` has passed since the last picture sent: `1 / activeFps` while
-///      the agent acted (a `show` or an action-kind cursor) in the last `idleAfter` seconds, `1 / idleFps` after.
+///      the agent acted (a `show` or an action-kind cursor) in the last `idleAfter` seconds, `1 / idleFps` after —
+///      and only while fewer than `MirrorWire.maxUnackedPictures` sent pictures await the phone's acknowledgement
+///      (`ack`). Each sent picture carries the relay's own `seq` (1, 2, …), which the phone acknowledges.
 /// A picture that cannot be fitted under `MirrorWire.maxJPEGBytes` is dropped, never sent.
 public final class RemoteMirrorRelay: @unchecked Sendable {
     public typealias Send = @Sendable (MirrorUpdate) async -> Void
@@ -67,6 +71,10 @@ public final class RemoteMirrorRelay: @unchecked Sendable {
         var stopped = false
         var timer: Task<Void, Never>?
         var droppedFrames = 0
+        /// Pictures sent and not yet acknowledged, by seq — and those being fitted right now (they will be sent).
+        var unacked: Set<Int> = []
+        var fitting = 0
+        var nextSeq = 0
     }
 
     private enum Next {
@@ -153,6 +161,19 @@ public final class RemoteMirrorRelay: @unchecked Sendable {
         wake.finish()
     }
 
+    /// The phone has every picture up to `seq` (acknowledgements are cumulative: the side stream is in order).
+    public func ack(_ seq: Int) {
+        let changed = state.withLock { s -> Bool in
+            let before = s.unacked.count
+            s.unacked = s.unacked.filter { $0 > seq }
+            return s.unacked.count != before
+        }
+        if changed { wake.yield() }
+    }
+
+    /// Pictures sent and not yet acknowledged (tests).
+    var unackedPictures: Int { state.withLock { $0.unacked.count } }
+
     var isStopped: Bool { state.withLock { $0.stopped } }
     /// Pictures dropped because they could not be fitted under the byte cap (tests, diagnostics).
     var droppedFrames: Int { state.withLock { $0.droppedFrames } }
@@ -168,6 +189,8 @@ public final class RemoteMirrorRelay: @unchecked Sendable {
             if !s.controls.isEmpty { return .send(s.controls.removeFirst()) }
             if !s.cursors.isEmpty { return .send(s.cursors.removeFirst()) }
             guard let frame = s.frame else { return .idle }
+            // The link is behind (or the phone is): keep only the newest picture until an acknowledgement lands.
+            guard s.unacked.count + s.fitting < MirrorWire.maxUnackedPictures else { return .idle }
             let t = now()
             if let last = s.lastFrameSentAt {
                 let due = last + Self.interval(now: t, lastActionAt: s.lastActionAt)
@@ -175,6 +198,7 @@ public final class RemoteMirrorRelay: @unchecked Sendable {
             }
             s.frame = nil
             s.lastFrameSentAt = t
+            s.fitting += 1
             return .send(.frame(frame))
         }
     }
@@ -205,10 +229,18 @@ public final class RemoteMirrorRelay: @unchecked Sendable {
             case .send(.frame(let frame)):
                 // The re-encode happens here, on the relay's own task — off every actor.
                 guard let fitted = fit(frame) else {
-                    state.withLock { $0.droppedFrames += 1 }
+                    state.withLock { $0.droppedFrames += 1; $0.fitting -= 1 }
                     continue
                 }
-                await send(.frame(fitted))
+                let seq: Int? = state.withLock { s -> Int? in
+                    s.fitting -= 1
+                    guard !s.stopped else { return nil }
+                    s.nextSeq += 1
+                    s.unacked.insert(s.nextSeq)
+                    return s.nextSeq
+                }
+                guard let seq else { return }
+                await send(.frame(MirrorFrame(seq: seq, jpeg: fitted.jpeg, width: fitted.width, height: fitted.height, windowSize: fitted.windowSize)))
             case .send(let update):
                 await send(update)
             case .wait(let seconds):

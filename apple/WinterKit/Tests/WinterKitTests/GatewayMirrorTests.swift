@@ -71,8 +71,28 @@ final class GatewayMirrorTests: XCTestCase {
         conn.outbound.compactMap { try? WireFrame.decode($0, expectedEpoch: 1) }
     }
 
+    /// The mirror envelopes the Gateway wrote on the connection's SIDE stream (delivered or not).
+    private func sideEnvelopes(_ conn: ScriptedRemoteConn) -> [WireEnvelope] {
+        conn.sideWritten.compactMap { try? WireFrame.decode($0, expectedEpoch: 1) }
+    }
+
     private func mirrorUpdates(_ conn: ScriptedRemoteConn) -> [MirrorUpdate] {
-        envelopes(conn).filter { $0.kind == .mirror }.compactMap { MirrorWire.decode($0.payload) }
+        sideEnvelopes(conn).filter { $0.kind == .mirror }.compactMap { MirrorWire.decode($0.payload) }
+    }
+
+    private func pictures(_ conn: ScriptedRemoteConn) -> [MirrorFrame] {
+        mirrorUpdates(conn).compactMap { if case .frame(let f) = $0 { return f }; return nil }
+    }
+
+    private func ackFrame(seq: Int, session: String = "s1") -> Data {
+        let payload = try! JSONSerialization.data(withJSONObject: ["seq": seq])
+        return try! WireFrame.encode(WireEnvelope(v: 1, pairingEpoch: 1, hostID: "phone-x", sessionID: session, streamID: nil,
+                                                  seq: nil, kind: .mirrorAck, timestamp: 0, payload: payload))
+    }
+
+    private func smallPicture(_ n: Int) -> MirrorUpdate {
+        .frame(MirrorFrame(seq: n, jpeg: RemoteMirrorTests.jpeg(width: 32, height: 24, noise: false), width: 32, height: 24,
+                           windowSize: CGSize(width: 800, height: 600)))
     }
 
     private func rpcResponses(_ conn: ScriptedRemoteConn) -> [JSONValue] {
@@ -187,12 +207,15 @@ final class GatewayMirrorTests: XCTestCase {
         guard case .frame(let f) = updates[2] else { return XCTFail("\(updates)") }
         XCTAssertEqual(f.width, 64)
 
-        // Every mirror envelope: this session, no seq, no stream — nothing cursor- or replay-related.
-        for env in envelopes(conn) where env.kind == .mirror {
+        // Every mirror envelope: this session, no seq, no stream — nothing cursor- or replay-related — and on the side
+        // stream, never the session stream.
+        for env in sideEnvelopes(conn) {
+            XCTAssertEqual(env.kind, .mirror)
             XCTAssertEqual(env.sessionID, "s1")
             XCTAssertNil(env.seq)
             XCTAssertNil(env.streamID)
         }
+        XCTAssertFalse(envelopes(conn).contains { $0.kind == .mirror }, "never on the session stream")
         XCTAssertFalse(envelopes(conn).contains { $0.kind == .event && MirrorWire.decode($0.payload) != nil }, "never on the event stream")
     }
 
@@ -219,6 +242,109 @@ final class GatewayMirrorTests: XCTestCase {
         XCTAssertEqual(rpcResponses(conn).last?["result"]?["mirror"]?.boolValue, false)
         let stopped = await until { r.source.unwatched.count == 1 }
         XCTAssertTrue(stopped)
+        let mirrorWatch = await r.gateway.mirrorWatchForTesting("phone-m")
+        XCTAssertNil(mirrorWatch)
+    }
+
+    /// Review finding 1: pictures ride their OWN stream, so a stalled reader of them (a slow link, a phone that stopped
+    /// reading) never delays the session stream — an event and an rpc reply land at once — and, because a QUIC write
+    /// returns once BUFFERED, the phone's acknowledgements hold the pictures out to two, the newest waiting.
+    func testAStalledMirrorReaderNeverDelaysAnEventOrAReplyAndPicturesWaitOnTheAcknowledgements() async throws {
+        let r = rig(source: FakeMirrorSource(initial: [.show(app: "Notes", windowSize: CGSize(width: 800, height: 600), others: 0, live: true)]))
+        defer { r.run.cancel() }
+        let (conn, sent) = try await attachedPhone(r)
+        conn.stallSideReader()
+        try await watch(r, conn, id: 1, daemonIndex: sent)
+        for n in 1...12 {
+            r.source.push(smallPicture(n))
+            try await Task.sleep(nanoseconds: 210_000_000 / 4) // pictures come faster than the phone reads them
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(pictures(conn).count, MirrorWire.maxUnackedPictures, "a buffered write is no delivery: at most two out unacknowledged")
+        XCTAssertTrue(conn.sideDelivered.isEmpty, "the phone has read nothing")
+
+        // The session stream is untouched by all that: an event and an rpc reply arrive at once.
+        let before = envelopes(conn).count
+        r.daemon.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"user_message","seq":2,"sessionId":"s1","ts":0,"threadId":"main","text":"hi","clientName":"harness"}}"#)
+        conn.enqueueInbound(try rpcFrame(id: 9, method: "session.list", params: .object([:])))
+        let listId = try await nextDaemonRequest(r, index: sent + 1, method: "session.list")
+        r.daemon.feed(#"{"jsonrpc":"2.0","id":\#(listId),"result":{"sessions":[]}}"#)
+        let arrived = await until(1) { self.envelopes(conn).count >= before + 2 }
+        XCTAssertTrue(arrived)
+        let latest = envelopes(conn).suffix(2).map(\.kind)
+        XCTAssertTrue(latest.contains(.event) && latest.contains(.rpcResponse), "\(latest)")
+        XCTAssertFalse(envelopes(conn).contains { $0.kind == .mirror }, "no picture ever sat on the session stream")
+
+        // The phone catches up and acknowledges: the NEWEST picture goes next, never the stale ones in between.
+        conn.resumeSideReader()
+        conn.enqueueInbound(ackFrame(seq: 2))
+        let moved = await until { self.pictures(conn).count == 3 }
+        XCTAssertTrue(moved)
+        XCTAssertEqual(pictures(conn).map(\.seq), [1, 2, 3], "the relay numbers the pictures it sends")
+    }
+
+    func testAnAcknowledgementFromAnotherConnectionOrSessionIsIgnored() async throws {
+        let r = rig(source: FakeMirrorSource(initial: []))
+        defer { r.run.cancel() }
+        let (conn, sent) = try await attachedPhone(r)
+        try await watch(r, conn, id: 1, daemonIndex: sent)
+        r.source.push(smallPicture(1))
+        try await Task.sleep(nanoseconds: 250_000_000)
+        r.source.push(smallPicture(2))
+        _ = await until { self.pictures(conn).count == 2 }
+        r.source.push(smallPicture(3))
+        // A shell connection of the same phone, and an ack naming another session: neither counts.
+        let shell = ScriptedRemoteConn()
+        r.listener.simulateConnection(shell)
+        shell.enqueueInbound(try helloFrame(clientInstanceID: "phone-m", resumes: []))
+        _ = await until { self.envelopes(shell).contains { $0.kind == .helloAck } }
+        shell.enqueueInbound(ackFrame(seq: 2))
+        conn.enqueueInbound(ackFrame(seq: 2, session: "other"))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(pictures(conn).count, 2)
+        conn.enqueueInbound(ackFrame(seq: 2))
+        let moved = await until { self.pictures(conn).count == 3 }
+        XCTAssertTrue(moved)
+    }
+
+    func testAConnectionWithNoSideStreamFallsBackToTheSessionStream() async throws {
+        let daemon = ScriptedTransport()
+        let listener = LoopbackListener()
+        let source = FakeMirrorSource(initial: [.show(app: "Notes", windowSize: CGSize(width: 800, height: 600), others: 0, live: true)])
+        let gateway = Gateway(listener: listener,
+                              daemonFactory: { WinterClient(makeTransport: { daemon }, token: "remote-token", clientName: "iphone-gateway") },
+                              hostID: "host-test", directory: InMemoryDirectory(peerID: "peer-stub"), mirrorSource: source)
+        let run = Task { await gateway.run() }
+        defer { run.cancel() }
+        let r = Rig(gateway: gateway, daemon: daemon, listener: listener, source: source, run: run)
+        let conn = ScriptedRemoteConn(hasSideChannel: false)
+        listener.simulateConnection(conn)
+        conn.enqueueInbound(try helloFrame(clientInstanceID: "phone-m", resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)]))
+        let helloId = try await nextDaemonRequest(r, index: 0, method: "protocol.hello")
+        daemon.feed(#"{"jsonrpc":"2.0","id":\#(helloId),"result":{"ok":true}}"#)
+        let attachId = try await nextDaemonRequest(r, index: 1, method: "session.attach")
+        daemon.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"harness_attached","seq":1,"sessionId":"s1","ts":0,"clientName":"iphone-gateway"}}"#)
+        daemon.feed(#"{"jsonrpc":"2.0","id":\#(attachId),"result":{"ok":true,"lastSeq":1}}"#)
+        _ = await until { self.envelopes(conn).contains { $0.kind == .helloAck } }
+        try await watch(r, conn, id: 1, daemonIndex: 2)
+        let landed = await until { self.envelopes(conn).contains { $0.kind == .mirror } }
+        XCTAssertTrue(landed, "with no side stream the mirror still arrives, on the session stream")
+    }
+
+    /// Review finding 2: a renewal the daemon REFUSES (an rpc error, not `mirror: false`) is no renewal — the watch
+    /// stops there instead of running on until its lease lapses.
+    func testARenewalTheDaemonRefusesStopsTheWatch() async throws {
+        let r = rig()
+        defer { r.run.cancel() }
+        let (conn, sent) = try await attachedPhone(r)
+        try await watch(r, conn, id: 1, daemonIndex: sent)
+        XCTAssertEqual(r.source.watches.count, 1)
+        conn.enqueueInbound(try mirrorFrame(2, "s1", watch: true))
+        let gateId = try await nextDaemonRequest(r, index: sent + 1, method: "session.mirror")
+        r.daemon.feed(#"{"jsonrpc":"2.0","id":\#(gateId),"error":{"code":-32004,"message":"attach to the session first"}}"#)
+        let stopped = await until { r.source.unwatched.count == 1 }
+        XCTAssertTrue(stopped, "a refused renewal ends the watch")
+        XCTAssertEqual(rpcResponses(conn).last?["error"]?["code"]?.intValue, -32004)
         let mirrorWatch = await r.gateway.mirrorWatchForTesting("phone-m")
         XCTAssertNil(mirrorWatch)
     }

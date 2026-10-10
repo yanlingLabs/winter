@@ -797,6 +797,16 @@ public actor Gateway {
             return
         }
         if envelope.kind == .pong { return }
+        // ComputerV2 Phase 1b: the phone has a mirror picture — lets the next one go (never reaches the daemon or the
+        // rate limiter, like a ping). Only for the watch this very connection holds.
+        if envelope.kind == .mirrorAck {
+            if let mirror = session.mirror, mirror.connGeneration == generation, envelope.sessionID == mirror.sessionId,
+               let body = try? JSONSerialization.jsonObject(with: envelope.payload) as? [String: Any],
+               let seq = (body["seq"] as? NSNumber)?.intValue {
+                mirror.relay.ack(seq)
+            }
+            return
+        }
 
         guard envelope.kind == .rpcRequest else {
             await sendGatewayError(conn, epoch: session.epoch, id: .null, sessionID: envelope.sessionID, message: "expected rpcRequest frame, got \(envelope.kind)")
@@ -917,9 +927,13 @@ public actor Gateway {
         do {
             result = try await session.daemonClient.request(rpc.method, params: rpc.params, commandId: rpc.commandId)
         } catch let e as RpcError {
+            // A refused or failed gate ends a running watch of that session: a renewal the daemon would not grant is no
+            // renewal (review finding 2).
+            if watch == true, let sessionId, session.mirror?.sessionId == sessionId { await stopMirror(session) }
             await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: e.code, message: e.message, data: e.data)
             return
         } catch {
+            if watch == true, let sessionId, session.mirror?.sessionId == sessionId { await stopMirror(session) }
             await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: -1, message: "\(error)")
             return
         }
@@ -957,7 +971,10 @@ public actor Gateway {
                 kind: .mirror, timestamp: Int(Date().timeIntervalSince1970 * 1000), payload: MirrorWire.encode(update))
             // Never an oversized frame: the phone's transport would drop the connection for it.
             guard let frame = try? WireFrame.encode(envelope), frame.count <= MirrorWire.maxEnvelopeBytes else { return }
-            await conn.send(frame)
+            // Its own lower-priority stream, so a picture never sits ahead of the session's events and replies; a
+            // connection without one (it could not be opened) falls back to the session stream, still bounded by the
+            // phone's acknowledgements.
+            if await !conn.sendSide(frame) { await conn.send(frame) }
         }
         let state = MirrorWatchState(sessionId: sessionId, connGeneration: generation, token: token, relay: relay, leaseUntil: now() + mirrorLease)
         session.mirror = state

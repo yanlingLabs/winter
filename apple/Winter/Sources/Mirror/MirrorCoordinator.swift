@@ -335,6 +335,11 @@ final class MirrorCoordinator: ObservableObject {
     /// stops a window's. Still never a launch of the helper, and still never anything that moves the user's view: the
     /// helper's view capture only ever reads the bound window.
     private var remoteViewers: [String: Int] = [:]
+    /// When the last phone stops watching a session, its count rests at 0 for `remoteViewerGrace` before the session
+    /// leaves `desiredSessions` — a phone that comes right back (a reconnect, a hop out of the screen and in) reuses
+    /// the subscription instead of closing and reopening the helper's capture (review finding 10).
+    private var remoteGraceTasks: [String: Task<Void, Never>] = [:]
+    private let remoteViewerGrace: Duration
 
     private(set) var windows: [String: MirrorWindow] = [:]
     /// The windows that show the mirror right now — what the panels watch.
@@ -389,9 +394,11 @@ final class MirrorCoordinator: ObservableObject {
          sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
          log: @escaping (String) -> Void = { _ in },
          now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-         remote: RemoteMirrorHub? = nil) {
+         remote: RemoteMirrorHub? = nil,
+         remoteViewerGrace: Duration = .seconds(5)) {
         self.client = client
         self.remote = remote
+        self.remoteViewerGrace = remoteViewerGrace
         self.makeSink = makeSink
         self.sleep = sleep
         self.log = log
@@ -445,19 +452,36 @@ final class MirrorCoordinator: ObservableObject {
     /// A paired phone started watching `sessionId` (`RemoteMirrorHub`). Each call is one viewer; pair it with
     /// `removeRemoteViewer`.
     func addRemoteViewer(_ sessionId: String) {
+        remoteGraceTasks.removeValue(forKey: sessionId)?.cancel() // back within the grace: the subscription is reused
         remoteViewers[sessionId, default: 0] += 1
         scheduleSync()
     }
 
-    /// A phone's watch of `sessionId` ended. The subscription it held closes once no window and no other phone wants it.
+    /// A phone's watch of `sessionId` ended. The subscription it held closes once no window and no other phone wants
+    /// it — after `remoteViewerGrace`, in case the phone comes right back.
     func removeRemoteViewer(_ sessionId: String) {
-        guard let count = remoteViewers[sessionId] else { return }
-        if count <= 1 { remoteViewers.removeValue(forKey: sessionId) } else { remoteViewers[sessionId] = count - 1 }
-        scheduleSync()
+        guard let count = remoteViewers[sessionId], count > 0 else { return }
+        if count > 1 {
+            remoteViewers[sessionId] = count - 1
+            return
+        }
+        remoteViewers[sessionId] = 0
+        remoteGraceTasks[sessionId]?.cancel()
+        let grace = remoteViewerGrace
+        let sleep = self.sleep
+        remoteGraceTasks[sessionId] = Task { [weak self] in
+            await sleep(grace)
+            guard !Task.isCancelled, let self, self.remoteViewers[sessionId] == 0 else { return }
+            self.remoteViewers.removeValue(forKey: sessionId)
+            self.remoteGraceTasks.removeValue(forKey: sessionId)
+            self.scheduleSync()
+        }
     }
 
     /// How many phones watch `sessionId` (tests).
     func remoteViewerCount(_ sessionId: String) -> Int { remoteViewers[sessionId] ?? 0 }
+    /// Whether a phone-only subscription of `sessionId` is resting in its grace (tests).
+    func isInRemoteGrace(_ sessionId: String) -> Bool { remoteViewers[sessionId] == 0 }
 
     /// Pictures reach a session's Mac panel model only while a visible eligible window shows the session: a session
     /// subscribed only for a phone (or whose window is hidden) does not have every picture decoded for a panel nobody

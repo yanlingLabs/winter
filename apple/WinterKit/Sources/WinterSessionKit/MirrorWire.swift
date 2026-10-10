@@ -95,11 +95,16 @@ public struct MirrorEnvelope: Sendable, Equatable {
 /// (~1.8× all told), so a picture is capped at `maxJPEGBytes` (an envelope of ~175 KB at most) and the Gateway
 /// refuses to send any envelope over `maxEnvelopeBytes`. Pictures are cut to `maxLongEdge` pixels on their long
 /// edge, at most `activeFps` a second while the agent acts and `idleFps` once it has not for `idleAfter` seconds —
-/// and never faster than the link takes them: the Gateway keeps one picture in flight and only the newest waiting.
+/// and never faster than the link takes them: they ride their OWN lower-priority stream (so they never sit ahead of
+/// the session's events and replies), and the Gateway keeps at most `maxUnackedPictures` of them unacknowledged by
+/// the phone (`WireKind.mirrorAck`) — about 200 KB — holding only the newest back while the link is behind. A QUIC
+/// write returns once its bytes are buffered, so only the phone's acknowledgement says a picture got there.
 public enum MirrorWire {
     public static let maxLongEdge = 640
     public static let maxJPEGBytes = 96 * 1024
     public static let maxEnvelopeBytes = 256 * 1024
+    /// Pictures sent and not yet acknowledged by the phone, at most (≤ about 200 KB on the link).
+    public static let maxUnackedPictures = 2
     public static let activeFps = 5
     public static let idleFps = 1
     public static let idleAfter: TimeInterval = 3
@@ -180,4 +185,90 @@ public enum MirrorWire {
     private static func size(_ v: Any?) -> CGSize? { numbers(v, count: 2).map { CGSize(width: $0[0], height: $0[1]) } }
     private static func point(_ v: Any?) -> CGPoint? { numbers(v, count: 2).map { CGPoint(x: $0[0], y: $0[1]) } }
     private static func rect(_ v: Any?) -> CGRect? { numbers(v, count: 4).map { CGRect(x: $0[0], y: $0[1], width: $0[2], height: $0[3]) } }
+}
+
+/// ComputerV2 Phase 1b: where mirror updates wait for a consumer that is behind (`WinterSessionClient.mirror`).
+///
+/// A CONTROL update (`show`/`reset`/`clear`) is never dropped and keeps its place. A picture replaces an older waiting
+/// picture of the same session — unless a control update of that session waits after the older one (the new picture
+/// belongs after it, so it is queued). Cursors are bounded per session: past `maxCursors` waiting, the oldest goes.
+final class MirrorMailbox: @unchecked Sendable {
+    static let maxCursors = 32
+    private let lock = NSLock()
+    private var queue: [MirrorEnvelope] = []
+    private var waiter: CheckedContinuation<MirrorEnvelope?, Never>?
+    private var finished = false
+
+    func push(_ envelope: MirrorEnvelope) {
+        lock.lock()
+        if finished { lock.unlock(); return }
+        if let waiter {
+            self.waiter = nil
+            lock.unlock()
+            waiter.resume(returning: envelope)
+            return
+        }
+        switch envelope.update {
+        case .frame:
+            if let index = queue.lastIndex(where: { $0.sessionID == envelope.sessionID && Self.isFrame($0.update) }),
+               !queue[(index + 1)...].contains(where: { $0.sessionID == envelope.sessionID && Self.isControl($0.update) }) {
+                queue[index] = envelope
+            } else {
+                queue.append(envelope)
+            }
+        case .cursor:
+            queue.append(envelope)
+            let cursors = queue.indices.filter { queue[$0].sessionID == envelope.sessionID && Self.isCursor(queue[$0].update) }
+            if cursors.count > Self.maxCursors { queue.remove(at: cursors[0]) }
+        case .show, .reset, .clear:
+            queue.append(envelope)
+        }
+        lock.unlock()
+    }
+
+    func finish() {
+        lock.lock()
+        finished = true
+        let w = waiter
+        waiter = nil
+        lock.unlock()
+        w?.resume(returning: nil)
+    }
+
+    func next() async -> MirrorEnvelope? {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<MirrorEnvelope?, Never>) in
+                lock.lock()
+                if !queue.isEmpty {
+                    let first = queue.removeFirst()
+                    lock.unlock()
+                    continuation.resume(returning: first)
+                } else if finished || Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume(returning: nil)
+                } else {
+                    waiter = continuation
+                    lock.unlock()
+                }
+            }
+        } onCancel: {
+            lock.lock()
+            let cancelled = waiter
+            waiter = nil
+            lock.unlock()
+            cancelled?.resume(returning: nil)
+        }
+    }
+
+    /// Updates waiting (tests).
+    var pending: [MirrorEnvelope] { lock.lock(); defer { lock.unlock() }; return queue }
+
+    private static func isFrame(_ u: MirrorUpdate) -> Bool { if case .frame = u { return true }; return false }
+    private static func isCursor(_ u: MirrorUpdate) -> Bool { if case .cursor = u { return true }; return false }
+    private static func isControl(_ u: MirrorUpdate) -> Bool {
+        switch u {
+        case .show, .reset, .clear: return true
+        case .frame, .cursor: return false
+        }
+    }
 }

@@ -160,6 +160,67 @@ final class RemoteMirrorHubTests: XCTestCase {
         XCTAssertEqual(r.coordinator.remoteViewerCount("s1"), 0)
     }
 
+    /// A gate for the coordinator's 5 s grace: parks the grace's wait until the test opens it.
+    final class GraceGate: @unchecked Sendable {
+        private let state = OSAllocatedUnfairLock(initialState: (open: false, parked: [CheckedContinuation<Void, Never>]()))
+        func wait() async {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                let now = state.withLock { s -> Bool in if s.open { return true }; s.parked.append(c); return false }
+                if now { c.resume() }
+            }
+        }
+        func open() {
+            let parked = state.withLock { s -> [CheckedContinuation<Void, Never>] in s.open = true; let p = s.parked; s.parked = []; return p }
+            parked.forEach { $0.resume() }
+        }
+        func close() { state.withLock { $0.open = false } }
+    }
+
+    private func graceRig(_ gate: GraceGate) -> Rig {
+        let client = FakeHelperClient()
+        client.setTargets([.fake("t1", app: "Notes")], for: "s1")
+        let hub = RemoteMirrorHub()
+        let sinks = Sinks()
+        let coordinator = MirrorCoordinator(client: client,
+                                            makeSink: { id in let s = RecordingSink(); sinks.byId[id] = s; return s },
+                                            sleep: { d in if d == .seconds(5) { await gate.wait() } else { await Task.yield() } },
+                                            remote: hub)
+        return Rig(coordinator: coordinator, client: client, hub: hub, sinks: sinks)
+    }
+
+    /// Review finding 10: a phone that comes back within the grace reuses the subscription — no unsubscribe, no
+    /// resubscribe, no restart of the helper's capture.
+    func testAPhoneThatComesBackWithinTheGraceReusesTheSubscription() async {
+        let gate = GraceGate()
+        let r = graceRig(gate)
+        let (_, first) = await phoneWatch(r.hub)
+        await expect({ r.coordinator.isReceivingFrames(sessionId: "s1") })
+        await r.hub.unwatch(first)
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertTrue(r.coordinator.isInRemoteGrace("s1"))
+        XCTAssertEqual(r.client.count("unsubscribe:s1"), 0, "nothing closes inside the grace")
+        let (phone, _) = await phoneWatch(r.hub)
+        XCTAssertEqual(r.coordinator.remoteViewerCount("s1"), 1)
+        gate.open() // the old grace's wait ends: it finds a viewer and does nothing
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertEqual(r.client.count("unsubscribe:s1"), 0)
+        XCTAssertEqual(r.client.count("subscribe:s1"), 1, "the same subscription, never reopened")
+        XCTAssertEqual(phone.updates.first, Self.notes, "the phone gets the state on show at once")
+    }
+
+    func testAfterTheGraceAPhoneOnlySubscriptionCloses() async {
+        let gate = GraceGate()
+        let r = graceRig(gate)
+        let (_, watch) = await phoneWatch(r.hub)
+        await expect({ r.coordinator.isReceivingFrames(sessionId: "s1") })
+        await r.hub.unwatch(watch)
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertEqual(r.client.count("unsubscribe:s1"), 0)
+        gate.open()
+        await expect({ r.client.count("unsubscribe:s1") == 1 && r.client.count("disconnect") == 1 }, "\(r.client.calls)")
+        XCTAssertFalse(r.coordinator.isInRemoteGrace("s1"))
+    }
+
     func testAHiddenMacWindowIsSubscribedWithPicturesForThePhoneAndItsPanelGetsTheNewestWhenShown() async {
         let r = rig()
         openMainWindow(r, visible: false)

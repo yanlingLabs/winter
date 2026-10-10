@@ -2395,9 +2395,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (!socket.data.hubClient || hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
           throw new RpcFailure(ERR.NOT_FOUND, "attach to the session first");
         }
+        // Chat has no computer use: answered off at once, so a chat screen never makes Winter.app open anything.
+        if ((opts.store.meta(p.sessionId).mode ?? "code") === "chat") return { ok: true, mirror: false };
+        // Fail CLOSED (review decision): settings that cannot be read are no consent to stream the screen.
         const settings = liveSettingsFor(opts);
-        const mirror = settings === undefined ? true : computerUseEnabledFrom(settings) && computerUseMirrorFrom(settings);
-        return { ok: true, mirror };
+        if (settings === undefined) {
+          console.error(`session.mirror for ${p.sessionId}: the settings could not be read — the phone mirror stays off`);
+          return { ok: true, mirror: false };
+        }
+        return { ok: true, mirror: computerUseEnabledFrom(settings) && computerUseMirrorFrom(settings) };
       }
       case METHODS.sessionCompact: {
         const p = parseParams(SessionCompactParams, params);

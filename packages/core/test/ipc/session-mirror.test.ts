@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
+import { saveSettings, Settings } from "../../src/settings";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
@@ -65,9 +66,10 @@ describe("session.mirror — the phone mirror's gate (ComputerV2 Phase 1b)", () 
     home = undefined;
   });
 
-  async function boot(settings?: unknown): Promise<{ store: SessionStore; socketPath: string; remoteToken: string; harnessToken: string }> {
+  async function boot(settings: Record<string, unknown> = {}): Promise<{ store: SessionStore; socketPath: string; remoteToken: string; harnessToken: string }> {
     home = mkdtempSync(join(tmpdir(), "winter-session-mirror-"));
-    if (settings !== undefined) writeFileSync(join(home, "settings.json"), JSON.stringify(settings));
+    // A real daemon always has its settings file (boot writes it); the gate fails closed without one.
+    saveSettings(join(home, "settings.json"), Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, ...settings }));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -156,16 +158,38 @@ describe("session.mirror — the phone mirror's gate (ComputerV2 Phase 1b)", () 
     c.close();
   });
 
-  test("chat and dispatch sessions are remote-eligible and may be watched once attached", async () => {
+  test("a dispatch session may be watched once attached", async () => {
     const { store, socketPath, remoteToken } = await boot();
-    for (const mode of ["chat", "dispatch"] as const) {
-      const id = store.createSession("global", { mode });
-      const c = await remote(socketPath, remoteToken);
-      expect((await c.request(METHODS.sessionAttach, { sessionId: id })).error).toBeUndefined();
-      const res = await c.request(METHODS.sessionMirror, { sessionId: id, watch: true });
-      expect(res.error).toBeUndefined();
-      expect(res.result.ok).toBe(true);
-      c.close();
-    }
+    const id = store.createSession("global", { mode: "dispatch" });
+    const c = await remote(socketPath, remoteToken);
+    expect((await c.request(METHODS.sessionAttach, { sessionId: id })).error).toBeUndefined();
+    const res = await c.request(METHODS.sessionMirror, { sessionId: id, watch: true });
+    expect(res.error).toBeUndefined();
+    expect(res.result).toEqual({ ok: true, mirror: true });
+    c.close();
+  });
+
+  test("a chat session has no computer use: answered mirror:false, so nothing is opened for it", async () => {
+    const { store, socketPath, remoteToken } = await boot();
+    const id = store.createSession("global", { mode: "chat" });
+    const c = await remote(socketPath, remoteToken);
+    expect((await c.request(METHODS.sessionAttach, { sessionId: id })).error).toBeUndefined();
+    const res = await c.request(METHODS.sessionMirror, { sessionId: id, watch: true });
+    expect(res.error).toBeUndefined();
+    expect(res.result).toEqual({ ok: true, mirror: false });
+    c.close();
+  });
+
+  test("settings that cannot be read fail CLOSED: mirror:false (a missing file too)", async () => {
+    const { store, socketPath, remoteToken } = await boot();
+    // A settings.json that is not JSON at all: the reader cannot tell what the user chose.
+    writeFileSync(join(home!, "settings.json"), "{ this is not json");
+    const code = store.createSession("global", { mode: "code" });
+    const c = await remote(socketPath, remoteToken);
+    expect((await c.request(METHODS.sessionAttach, { sessionId: code })).error).toBeUndefined();
+    const res = await c.request(METHODS.sessionMirror, { sessionId: code, watch: true });
+    expect(res.error).toBeUndefined();
+    expect(res.result).toEqual({ ok: true, mirror: false });
+    c.close();
   });
 });
