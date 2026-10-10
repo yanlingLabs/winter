@@ -111,6 +111,24 @@ public struct CUError: Error, Codable, Sendable, Equatable, CustomStringConverti
         CUError(code: "stale_ref", message: "[\(ref)] is gone — call state()", data: ["ref": .int(ref)])
     }
 
+    /// Why a desktop visit would be needed: an act that can't land from this desktop, or a live picture.
+    public enum DesktopVisitWhy: String, Sendable { case act, live }
+
+    /// The work can't be done — or a LIVE picture can't be had — without moving the user to the window's
+    /// desktop for a moment, and the request did not carry the user's say (`desktopVisit`). Nothing was moved.
+    /// The message names the app and why, never screen text.
+    public static func needsDesktopVisit(_ app: String, why: DesktopVisitWhy, _ message: String? = nil) -> CUError {
+        let said = message ?? {
+            switch why {
+            case .act:
+                return "\(app)'s window is on another desktop, and this action needs it on screen — Winter would have to take the user to that desktop for a moment (and bring them back)"
+            case .live:
+                return "\(app)'s window is on another desktop, and its picture there is stale or not yet known (an app may stop redrawing a window it can't show) — a live picture needs the user taken to that desktop for a moment (and brought back)"
+            }
+        }()
+        return CUError(code: "needs_desktop_visit", message: said, data: ["why": .string(why.rawValue)])
+    }
+
     public static func needsForeground(_ app: String) -> CUError {
         CUError(code: "needs_foreground",
                 message: "\(app) only accepts this input in the foreground — Winter must bring it to the front and use the mouse")

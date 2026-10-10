@@ -73,8 +73,46 @@ public struct CUFocusGuardianCore: Sendable {
     private var claimUntil: TimeInterval = 0
     /// How long a physical click claims the activation it causes (an app can take a while to activate).
     public static let clickClaimWindow: TimeInterval = 1.5
+    /// A DESKTOP VISIT in progress (the user agreed to be taken to `visitApp`'s desktop for one primitive, and
+    /// brought back right after): until `visitUntil`, the switch there and the way back are the agent's own —
+    /// neither undone nor adopted as the user's view, which stays what it was before the visit, so a failed
+    /// return can still be restored. User input during it is only noted (`visitSawUserInput`): whether the user
+    /// went somewhere of their own is decided when the visit ends, by where they are then.
+    private var visitApp: pid_t?
+    private var visitUntil: TimeInterval = 0
+    public private(set) var visitSawUserInput = false
+    /// The longest a visit mode lasts if its end is never told (a visit takes ~0.5–3 s).
+    public static let visitMaxSeconds: TimeInterval = 10
 
     public init() {}
+
+    /// A visit is in progress at `now` (begun, not ended, within its safety deadline).
+    public func visiting(now: TimeInterval) -> Bool { visitApp != nil && now <= visitUntil }
+
+    /// The user agreed to be taken to `app`'s desktop for one primitive: until `endVisit` (or the deadline), its
+    /// activation and the Space changes are the visit's own.
+    public mutating func beginVisit(app: pid_t, now: TimeInterval) {
+        visitApp = app
+        visitUntil = now + Self.visitMaxSeconds
+        visitSawUserInput = false
+    }
+
+    /// The visit is over: returns whether user input was seen during it (the caller decides, by where the user
+    /// is now, whether they moved somewhere themselves). The user's view is still the pre-visit one.
+    @discardableResult
+    public mutating func endVisit() -> Bool {
+        let saw = visitSawUserInput
+        visitApp = nil
+        visitUntil = 0
+        visitSawUserInput = false
+        return saw
+    }
+
+    /// The user is somewhere of their own now (they moved during a visit): that is where later restores return them.
+    public mutating func adoptUserView(_ v: CUGuardedView) {
+        guard active else { return }
+        view = v
+    }
 
     /// Starts guarding, seeding the user's current view. Idempotent.
     public mutating func begin(view: CUGuardedView) {
@@ -86,6 +124,8 @@ public struct CUFocusGuardianCore: Sendable {
         thefts.removeAll()
         exemptApp = nil
         claimApp = nil
+        visitApp = nil
+        visitSawUserInput = false
     }
 
     /// The user physically clicked a window of `app` (a bound target's): the user's app and Space are now that
@@ -93,6 +133,8 @@ public struct CUFocusGuardianCore: Sendable {
     /// is theirs. The guardian never fights a user who clicks into the agent's app.
     public mutating func userClicked(app: pid_t, space: UInt64?, now: TimeInterval) {
         guard active else { return }
+        // During a desktop visit a click is noted, not adopted: where the user ends up decides at its end.
+        if visiting(now: now) { visitSawUserInput = true; return }
         view = CUGuardedView(app: app, space: space ?? view.space)
         claimApp = app
         claimUntil = now + Self.clickClaimWindow
@@ -125,6 +167,12 @@ public struct CUFocusGuardianCore: Sendable {
     /// Decide what one activation means and update the tracked view.
     public mutating func handle(_ a: CUActivation, now: TimeInterval) -> CUGuardianVerdict {
         guard active else { return .ignore }
+        // A desktop visit: the target coming forward (and the user's app coming back after) is the visit's own.
+        // Nothing is undone or adopted; the user's input is only noted.
+        if visiting(now: now) {
+            if a.hadRecentUserInput, !a.fromSyntheticEvent { visitSawUserInput = true }
+            return .ignore
+        }
         // An app the agent never touched: the user's choice, always — it becomes the user's app and is never undone.
         if !a.suspect {
             view = CUGuardedView(app: a.app, space: a.space ?? view.space)
@@ -162,6 +210,11 @@ public struct CUFocusGuardianCore: Sendable {
     public mutating func handleSpaceChange(to space: UInt64?, front: pid_t? = nil, hadRecentUserInput: Bool, caused: Bool = true,
                                            now: TimeInterval) -> CUGuardedView? {
         guard active, let space, space != view.space else { return nil }
+        // A desktop visit's own Space changes (there and back) are neither undone nor adopted mid-visit.
+        if visiting(now: now) {
+            if hadRecentUserInput { visitSawUserInput = true }
+            return nil
+        }
         if !caused || hadRecentUserInput || (claimApp != nil && now <= claimUntil) {
             view = CUGuardedView(app: front ?? view.app, space: space)
             return nil

@@ -60,31 +60,20 @@ extension CUCore {
         if case .key(let k) = p.action, (try? CUKeyChord.parse(k.combo))?.isEscape == true {
             await MainActor.run { [weak self] in self?.events?.willSendEscape() }
         }
-        var outcome = try await queues.run(t.pid) { [self] () -> ActOutcome in
-            do {
-                // A cancel that arrived while this act waited behind others stops it here.
-                try token.check()
-                try floorCheckPrivacy(t)
-                try saveFloorBeforeAct(p, t)
-                do {
-                    let focusBefore = t.accessible ? focusBeforeAct(t) : nil
-                    let pageBefore = pageBeforeAct(t)
-                    var o = try guardingUserView(p, t) { try perform(p, on: t, token: token) }
-                    t.lastActionMs = clock.nowMs()
-                    if let focusBefore { o = noteFocusChange(from: focusBefore, t, o) }
-                    o = notePageChange(from: pageBefore, t, o)
-                    return o
-                } catch let e as CUError where e.code == "stale_element" {
-                    if let ref = Self.primaryRef(p.action) { t.refs.forget(ref); throw CUError.staleRef(ref) }
-                    // The target is still bound; only the element moved under the action.
-                    throw CUError.busy("the \(t.appName) UI changed under the action — call state() and retry")
-                }
-            } catch {
-                // A refusal or a failure: a gentle "no" where the act was aimed. Not for a cancel (the user
-                // or the script stopped it) or a target that is gone (its cursor goes with it).
-                if Self.showsRefusal(error) { cursor(t, "refused", at: attemptPoint(p.action, t)) }
-                logAct(p, t, failed: error)
-                throw error
+        var outcome: ActOutcome
+        var visit: CUVisitReport?
+        do {
+            outcome = try await queues.run(t.pid) { [self] () -> ActOutcome in try actOnce(p, t, token, inVisit: false) }
+        } catch is CUVisitNeeded {
+            // The background could not do it, its window is on another desktop, and the user allowed a visit: the
+            // act once more, inside one — the foreground implied there. One visit at a time, helper-wide.
+            await visitGate.acquire()
+            defer { visitGate.release() }
+            var inner = p
+            inner.allowForeground = true
+            (outcome, visit) = try await queues.run(t.pid) { [self] () -> (ActOutcome, CUVisitReport) in
+                // `actOnce` shows and logs its own failure; a visit that never arrived logs its own too.
+                try inDesktopVisit(t, why: .act, token: token) { try actOnce(inner, t, token, inVisit: true) }
             }
         }
         if let paths = outcome.pendingOpen {
@@ -105,7 +94,54 @@ extension CUCore {
             : (notes + [outcome.detail].compactMap { $0 }).joined(separator: "; ")
         return TargetActResult(rung: outcome.rung.rawValue, detail: detail, input: outcome.input,
                                inputUnknown: outcome.inputUnknown ? true : nil, focusNow: outcome.focusNow,
-                               focusLost: outcome.focusLost ? true : nil, pageNow: outcome.pageNow)
+                               focusLost: outcome.focusLost ? true : nil, pageNow: outcome.pageNow, visit: visit)
+    }
+
+    /// One attempt at the act on the target's pid queue: the floors, the act under the user-view guard, what it
+    /// changed. When it can't land from here and its window is on ANOTHER DESKTOP (it needs the foreground, the
+    /// window can't be reached, or the foreground rung found it elsewhere), the user's say decides: without it
+    /// `needs_desktop_visit` (nothing was moved); with it (`desktopVisit`), `CUVisitNeeded` — the caller does it
+    /// once more inside a visit. `inVisit`: this IS that once more.
+    func actOnce(_ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token, inVisit: Bool) throws -> ActOutcome {
+        do {
+            // A cancel that arrived while this act waited behind others stops it here.
+            try token.check()
+            try floorCheckPrivacy(t)
+            try saveFloorBeforeAct(p, t)
+            do {
+                let focusBefore = t.accessible ? focusBeforeAct(t) : nil
+                let pageBefore = pageBeforeAct(t)
+                var o: ActOutcome
+                do {
+                    o = try guardingUserView(p, t) { try perform(p, on: t, token: token) }
+                } catch let e as CUError where !inVisit && Self.visitCouldHelp(e) && isOffThisDesktop(t) {
+                    if p.desktopVisit == true {
+                        CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): can't land from this desktop (\(e.code, privacy: .public)) — once more inside a desktop visit, as the user allowed")
+                        throw CUVisitNeeded()
+                    }
+                    CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): can't land from this desktop (\(e.code, privacy: .public)) — needs the user's say for a desktop visit")
+                    throw e.code == "needs_desktop_visit" ? e : CUError.needsDesktopVisit(
+                        t.appName, why: .act, "\(e.message) — a desktop visit would do it (the user taken to that desktop for a moment and brought back)")
+                }
+                t.lastActionMs = clock.nowMs()
+                if let focusBefore { o = noteFocusChange(from: focusBefore, t, o) }
+                o = notePageChange(from: pageBefore, t, o)
+                return o
+            } catch let e as CUError where e.code == "stale_element" {
+                if let ref = Self.primaryRef(p.action) { t.refs.forget(ref); throw CUError.staleRef(ref) }
+                // The target is still bound; only the element moved under the action.
+                throw CUError.busy("the \(t.appName) UI changed under the action — call state() and retry")
+            }
+        } catch is CUVisitNeeded {
+            throw CUVisitNeeded()
+        } catch {
+            // A refusal or a failure: a gentle "no" where the act was aimed. Not for a cancel (the user
+            // or the script stopped it), a target that is gone (its cursor goes with it), or a desktop visit to
+            // ask for (nothing was refused).
+            if Self.showsRefusal(error) { cursor(t, "refused", at: attemptPoint(p.action, t)) }
+            logAct(p, t, failed: error)
+            throw error
+        }
     }
 
     /// The focus before an act: the one read after the last act when that is recent (one read per act), else a
@@ -188,7 +224,7 @@ extension CUCore {
 
     static func showsRefusal(_ error: Error) -> Bool {
         guard let e = error as? CUError else { return true }
-        return e.code != "cancelled" && e.code != "target_lost"
+        return e.code != "cancelled" && e.code != "target_lost" && e.code != "needs_desktop_visit"
     }
 
     /// Where a failed act was aimed: its element's centre, else its point, else the cursor's last place.
@@ -2947,6 +2983,13 @@ extension CUCore {
     /// Rung 4: bring the app forward, act with the real pointer, then put the pointer and the user's app back.
     /// Every press, drag step and release is hit-tested by the caller's check.
     private func inForeground<T>(_ t: CUTarget, _ body: () throws -> T) throws -> T {
+        // Bringing an app forward whose window is on ANOTHER desktop takes the user there: never without their
+        // say for a desktop visit (user ruling 2026-10-10) — not with `allowForeground`, not for a held app.
+        // Inside a visit the window is on screen already.
+        if !isVisiting(t), isOffThisDesktop(t) {
+            CULog.act.notice("foreground in \(t.appName, privacy: .public): its window is on another desktop — not brought forward without the user's say for a visit")
+            throw CUError.needsDesktopVisit(t.appName, why: .act)
+        }
         // The user agreed to this act taking the foreground: the user-view guard and the Focus Guardian leave
         // it alone, for this one action.
         t.consentedForeground = true

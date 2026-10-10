@@ -129,6 +129,13 @@ final class CUTarget: @unchecked Sendable {
         return before
     }
 
+    /// The window was just shown on its desktop (a visit) and repainted there: an off-screen picture taken after
+    /// differs from the one before for THAT reason, not because the app draws off screen — its freshness is
+    /// unknown again.
+    func forgetOffScreenShot() {
+        lock.lock(); _lastOffScreenShot = nil; lock.unlock()
+    }
+
     /// Actions an app listed for an element but refused (`AXOpen` on Finder's icons), by role: hidden from
     /// state when `action()` has no equivalent to fall back on. Pid-queue only.
     private(set) var refusedActions: [String: Set<String>] = [:]
