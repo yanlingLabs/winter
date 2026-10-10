@@ -58,4 +58,4 @@ Before selecting the backend, settle:
 3. Whether hardware isolation between unrelated conversations is required or a shared guest kernel is acceptable.
 4. The maximum active guest resource budget and how users should experience queued work.
 
-The existing [research and decision draft](2026-10-10-cowork-vm-research.md) records accepted workspace/direct-write behavior. Subagent continuation after parent restart is being fixed separately in the SDK; that work does not require choosing or implementing a VM backend.
+The existing [research and decision draft](2026-10-10-cowork-vm-research.md) records accepted workspace/direct-write behavior. Subagent continuation after parent restart is implemented in [SDK PR 2](https://github.com/yanlingLabs/winter-agent-sdk/pull/2), pending review/CI and release. It does not require choosing or implementing a VM backend.
