@@ -530,6 +530,23 @@ describe("the built-in adapters' AppleScript", () => {
     });
   }
 
+  test("Notes' list and search read each note's folder on its own: one Notes can't name leaves the row's folder empty", async () => {
+    const notes = BUILTIN_ADAPTERS.find((a) => a.bundleIds.includes("com.apple.Notes"))!;
+    for (const [name, args] of [["list", []], ["search", ["groceries"]]] as const) {
+      const def = notes.extras.find((e) => e.name === name)!;
+      const [src] = await scriptsOf("com.apple.Notes", def, [...args], "");
+      // Live: a note in Recently Deleted answered `name of container` with -1728 and failed the whole call.
+      expect(src).toMatch(/set f to ""\n\s*try\n\s*set f to name of container of x\n\s*end try/);
+      expect(src).not.toMatch(/winterText\(name of container of x\)/);
+    }
+  });
+
+  test("Mail's messages() skips a message it can't read rather than failing the list", async () => {
+    const def = BUILTIN_ADAPTERS.find((a) => a.bundleIds.includes("com.apple.mail"))!.extras.find((e) => e.name === "messages")!;
+    const [src] = await scriptsOf("com.apple.mail", def, [], "");
+    expect(src).toMatch(/set m to item i of ms\n\s*try\n\s*set out to out & \(id of m\)[^\n]*\n\s*end try/);
+  });
+
   test("openWith runs no AppleScript (the service's background document open)", async () => {
     const def = BUILTIN_ADAPTERS[0]!.extras.find((e) => e.name === "openWith")!;
     expect(await scriptsOf("com.apple.finder", def, [file, "TextEdit"], null)).toEqual([]);

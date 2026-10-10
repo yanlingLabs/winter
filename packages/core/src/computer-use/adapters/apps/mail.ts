@@ -65,7 +65,10 @@ export const mailAdapter: AppAdapter = {
           "set out to \"\"",
           "repeat with i from 1 to n",
           "  set m to item i of ms",
-          "  set out to out & (id of m) & winterTAB & (read status of m) & winterTAB & my winterISO(date received of m) & winterTAB & my winterText(name of mailbox of m) & winterTAB & my winterText(sender of m) & winterTAB & my winterText(subject of m) & winterLF",
+          // One message Mail can't read (moved or deleted meanwhile) is skipped, never the whole list's failure.
+          "  try",
+          "    set out to out & (id of m) & winterTAB & (read status of m) & winterTAB & my winterISO(date received of m) & winterTAB & my winterText(name of mailbox of m) & winterTAB & my winterText(sender of m) & winterTAB & my winterText(subject of m) & winterLF",
+          "  end try",
           "end repeat",
           "return out",
         ], { handlers: ["text", "iso", "min"] }), { timeoutMs: 30_000 });

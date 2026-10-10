@@ -27,7 +27,15 @@ export function noteHtml(title: string, body: string): string {
   return `<div><h1>${escapeHtml(title)}</h1></div>${lines.map((l) => `<div>${l.length === 0 ? "<br>" : escapeHtml(l)}</div>`).join("")}`;
 }
 
-const NOTE_ROW = "my winterText(id of x) & winterTAB & my winterISO(modification date of x) & winterTAB & my winterText(name of container of x) & winterTAB & my winterText(name of x) & winterLF";
+/** One note `x` as a row. Its folder is read on its own: a note whose container Notes can't name (one in Recently
+ *  Deleted, seen live: -1728) lists with folder "" rather than failing the whole call. */
+const NOTE_ROW = [
+  "  set f to \"\"",
+  "  try",
+  "    set f to name of container of x",
+  "  end try",
+  "  set out to out & my winterText(id of x) & winterTAB & my winterISO(modification date of x) & winterTAB & my winterText(f) & winterTAB & my winterText(name of x) & winterLF",
+];
 
 export const notesAdapter: AppAdapter = {
   bundleIds: ["com.apple.Notes"],
@@ -47,7 +55,7 @@ export const notesAdapter: AppAdapter = {
           "set out to \"\"",
           "repeat with i from 1 to n",
           `  set x to note i${from}`,
-          `  set out to out & ${NOTE_ROW}`,
+          ...NOTE_ROW,
           "end repeat",
           "return out",
         ], { handlers: ["text", "iso", "min"] }), { timeoutMs: 30_000 });
@@ -88,7 +96,7 @@ export const notesAdapter: AppAdapter = {
           "set out to \"\"",
           "repeat with i from 1 to n",
           "  set x to item i of found",
-          `  set out to out & ${NOTE_ROW}`,
+          ...NOTE_ROW,
           "end repeat",
           "return out",
         ], { handlers: ["text", "iso", "min"] }), { timeoutMs: 30_000 });
