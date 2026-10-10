@@ -18,7 +18,7 @@ export function trashRefusal(path: string, home: string = homedir()): string | u
     ...["Library", "Desktop", "Documents", "Downloads", "Applications", "Pictures", "Movies", "Music"].map((d) => `${home}/${d}`)]);
   if (exact.has(path)) return `Winter doesn't trash ${path} — it is a system or home folder; ask the user`;
   const below = ["/System/", "/usr/", "/bin/", "/sbin/", "/etc/", "/private/etc/", "/private/var/db/", "/Library/Keychains/",
-    `${home}/Library/Keychains/`, `${home}/.ssh/`, `${home}/.gnupg/`, `${home}/.winter`, `${home}/.norma`];
+    `${home}/Library/Keychains/`, `${home}/.ssh/`, `${home}/.gnupg/`, `${home}/.winter`];
   for (const p of below) if (path === p.replace(/\/$/, "") || path.startsWith(p)) return `Winter doesn't trash anything in ${p.replace(/\/$/, "")} — ask the user`;
   return undefined;
 }
