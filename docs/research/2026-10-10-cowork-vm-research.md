@@ -6,6 +6,18 @@ The starting direction is a local VM containing Winter and its subagents, with e
 
 The [existing implementation map](../cowork-status.md) records the reusable groundwork. Code inspection here used Winter `0e9409cf`, agent SDK `8601190c`, runtime SDK `c5424202`, and iOS `36d6958`. The inspected Mac runs macOS 26.6.1 on arm64.
 
+## Decisions from the first design discussion
+
+The user selected the following behavior after the initial research:
+
+- Standalone Cowork has one durable workspace per conversation.
+- Introduce the workspace portion of Projects: a Project owns a reusable workspace. This does not approve unrelated Project UI, collaboration, or organization features. Simultaneous conversations sharing a Project workspace still need a concurrency policy.
+- Changes to granted writable Mac folders take effect directly, rather than going through a staged-copy/apply flow.
+- Prefer stopping and restarting a quiescent guest with files and agent state retained. Subagent history and identity must survive so `SendMessage` can logically continue a prior child after restart; retaining arbitrary process RAM is not the requested mechanism.
+- Avoid a new host process for each Cowork session, preferably by placing VM control inside the existing daemon. The feasibility boundary between in-process control and Apple-managed VM execution is described below; a helper process per conversation is not the selected design.
+
+These settle product direction, not implementation completion. Remaining decisions include the physical VM isolation boundary, Project writer concurrency, Project memory sharing, and schedule target semantics.
+
 ## Documented external behavior
 
 ### Claude Cowork and Claude Code cloud are different references
@@ -39,7 +51,11 @@ The inspected public release is `container` 1.5.0, with documented Apple silicon
 
 The machine service's inspected configuration mounts its internal files and, optionally, the whole host home; it also enables SSH forwarding. That is not the proposed Cowork access boundary. Prefer a custom native Containerization integration with explicit shares, or evaluate an ordinary long-lived container configuration, rather than adopting the machine defaults. [Machine configuration](https://github.com/apple/container/blob/1.5.0/Sources/Services/MachineAPIService/Server/MachinesService.swift#L635)
 
-“Embedded in the daemon” needs two meanings separated. The daemon can own lifecycle and a native component can hold the VM controller. That does not put Linux guest processes into the Bun address space. A signed Swift helper is the recommended starting design; an in-process native bridge remains an alternative if having no Winter-owned helper process is a firm requirement. Either can be an internal Winter component rather than requiring users to operate another VM product. The native controller requires the virtualization entitlement. [Apple entitlement](https://developer.apple.com/documentation/virtualization/adding-the-virtualization-entitlement-to-your-project)
+“Embedded in the daemon” needs two meanings separated. A native bridge could hold the VM controller in the existing Bun daemon, with VM operations dispatched onto the controller's serial queue. That avoids an additional Winter-owned controller process per conversation. The native host executable needs the virtualization entitlement. This is feasible in principle, not a completed integration. [Apple entitlement](https://developer.apple.com/documentation/virtualization/adding-the-virtualization-entitlement-to-your-project), [VZVirtualMachine](https://developer.apple.com/documentation/virtualization/vzvirtualmachine)
+
+It does not establish that the VM itself executes wholly in the daemon's PID. The installed framework contains Apple's `com.apple.Virtualization.VirtualMachine` XPC service, configured for multiple instances; no public VZ switch to eliminate that backing service was found. Exact host PID counts have not been measured. The lower-level Hypervisor API explicitly allows only one VM per process, so it does not provide multiple independently hardware-isolated VMs inside a single daemon PID either. [Hypervisor](https://developer.apple.com/documentation/hypervisor?language=objc)
+
+If avoiding a VM-backed host process per conversation is the overriding constraint, one shared VM with separate guest containers is an alternative, with a different isolation boundary. The pinned Containerization 0.47.0 source includes experimental `LinuxPod`: containers have separate root filesystems/processes but share one VM's CPU, memory, and network. This shares a guest kernel and is not equivalent to a hardware VM per conversation. It is a research option, not an accepted choice. [LinuxPod source](https://github.com/apple/containerization/blob/bc994b88df46207fad7775b0eabc51947e315881/Sources/Containerization/LinuxPod.swift#L26-L30)
 
 Pause, stop, and saved-state restore also differ. Pause retains execution state but does not establish RAM reclamation. Stop/start can retain disk while replacing guest processes. VZ saved-state support requires a compatible configuration and separate handling of external resources; support for the intended Linux/virtiofs/vsock combination remains unverified. Do not make RAM restoration a v1 prerequisite. [Save/restore validation](https://developer.apple.com/documentation/virtualization/vzvirtualmachineconfiguration/validatesaverestoresupport()), [WWDC23 save/restore](https://developer.apple.com/videos/play/wwdc2023/10007/)
 
@@ -72,19 +88,20 @@ Subagents should stay in the session's guest and inherit its access ceiling. Tod
 
 ### Workspace and persistence contract
 
-Proposed first-version default: one durable workspace per Cowork session, one active VM lease for it, and all that session's subagents inside it. Keep workspace identity distinct internally so later workspace reuse can be designed without using a transient VM ID as the storage key. Multiple independent conversations sharing one writable workspace is not assumed.
+Accepted ownership: a standalone Cowork conversation owns its workspace; a Project owns a reusable workspace used by its conversations. Keep conversation identity, workspace identity, and running VM identity separate. Proposed execution default is one active writer lease per workspace; whether Project conversations run concurrently remains open. Physical VM sharing is also undecided because of the host-process requirement above.
 
 | Data | Proposed location/ownership | Survives normal VM stop? |
 | --- | --- | --- |
 | Base OS and tooling | Versioned, shared immutable image | Yes; image updates do not silently reset workspace data |
-| Git checkouts and uncommitted files | Session-owned writable guest disk, stable `/workspace/repos/<repo-id>` paths | Yes |
+| Git checkouts and uncommitted files | Workspace-owned writable guest storage, stable `/workspace/repos/<repo-id>` paths | Yes |
 | Workspace manifest | Host-owned: repo IDs/remotes/base refs, selected grants, primary cwd, image version | Yes |
 | Folder-backed work | Explicit virtiofs shares at stable `/workspace/folders/<grant-id>` paths | Host files remain; existing grants are revalidated on restart |
 | Cowork MEMDIR | Persistent workspace-scoped guest directory | Yes; broader sharing with Code/Chat memory requires a separate decision |
 | Session scratch | Persistent guest scratch exposed as `TMPDIR` | Yes; cleanup is a separate retention policy |
 | OS `/tmp` | Disposable guest boot data | No promise across stop/reboot |
 | Transcript and approvals | Canonical host event log, with guest durable replay state | Yes |
-| Shells, sockets, in-memory subagents | Live guest execution | No after cold stop; they must settle before automatic stop |
+| Subagent history and identity | Durable guest transcripts, metadata, provider state, and a complete restoration record | Yes; logical continuation needs the SDK restoration work below |
+| Shells, sockets, active engine generations | Live guest execution | No after cold stop; they must settle before automatic stop |
 | Deliverable artifacts | Persistent output area and explicit export/read bridge to host UI | Yes |
 
 The proposed persistent scratch gives Cowork its own tmp directory without treating guest OS `/tmp` as durable storage. Scratch retention and cleanup policy remain open. Valid persisted folder grants mount automatically after revalidation; revoked or unavailable grants block dependent work, with a new prompt only when consent is actually needed.
@@ -114,7 +131,15 @@ The VM needs separate internal states such as stopped, starting, running, quiesc
 
 Reuse Code's actual enforcement, not an oversimplified “every detach aborts” rule: the last terminal attachment can abort a human-started turn, while app/phone detachment and automated turns have different handling. [Detach enforcement](../../packages/core/src/sessions/activity-enforcement.ts#L251)
 
-A cold restart resumes durable Winter state and files. It does not resume arbitrary OS processes. Exact checkpointing, interrupted tool reconciliation, guest event acknowledgment, and crash recovery must be specified before claiming lossless VM sleep.
+A cold restart should resume durable Winter state and files, including addressable subagents. It does not resume arbitrary OS processes. Exact checkpointing, interrupted tool reconciliation, guest event acknowledgment, and crash recovery must be specified before claiming lossless VM sleep.
+
+### Subagents after a cold restart
+
+The user's reasoning is correct as a design: persisting a child conversation makes logical continuation possible without preserving its original engine in RAM. The desired sequence is to retain the guest's durable store, reopen the parent with the same identity, reconstruct its child roster and execution contexts, and let `SendMessage` to an existing child ID start a new generation from that child's history.
+
+The current SDK only completes part of that sequence. It writes child JSONL transcripts, metadata and provider-state sidecars, then reconstructs child IDs/names and recorded status on parent resume. However, `restoredChildHandle.resume()` explicitly returns `unavailable` because restarting that child across a parent-process restart is unimplemented. A child whose handle still exists in the same parent process can reread its transcript and start another generation; that is a different path. [Cold-restored handle](https://github.com/yanlingLabs/winter-agent-sdk/blob/8601190c/packages/runtime/src/subagents/restore.ts#L31), [same-runtime continuation](https://github.com/yanlingLabs/winter-agent-sdk/blob/8601190c/packages/runtime/src/subagents/child-engine.ts#L1795)
+
+The durable child record is not yet the complete construction snapshot: parts of the persona, tools, MCP configuration, isolation/workspace and callback bindings live in the current handle's closures. Cowork's contract therefore needs a restorable execution record, handles rebound to the new parent runtime, current permission/credential validation, and preserved workspaces. Existing restore tests explicitly expect the refusal, so durable files alone must not be reported as working post-restart `SendMessage`. Acceptance needs a real parent-process restart followed by continuation of the same child ID, with its earlier context intact. [Restore tests](https://github.com/yanlingLabs/winter-agent-sdk/blob/8601190c/packages/runtime/src/subagents/restore.test.ts#L126)
 
 ### Daemon-owned scheduling
 
@@ -135,6 +160,7 @@ These are static source findings, not live reproductions. They are recorded for 
 | No validated Linux guest artifact | SDK build compiles for its current native target; shipped platform fallback is darwin-arm64. [Build](https://github.com/yanlingLabs/winter-agent-sdk/blob/8601190c/scripts/build-runtime.ts#L155), [transport](https://github.com/yanlingLabs/winter-agent-sdk/blob/8601190c/packages/sdk/src/transport.ts#L47) | Define Linux ARM64 packaging, provisioning, updates, and guest smoke checks. |
 | Shell sandbox is macOS-specific | Required sandbox execution refuses when macOS `sandbox-exec` is unavailable. [Sandbox spawn](https://github.com/yanlingLabs/winter-agent-sdk/blob/8601190c/packages/runtime/src/sandbox/spawn.ts#L258) | Add an explicit Linux/VM execution posture; do not silently turn off a required sandbox. |
 | Idle is weaker than no guest work | [WinterSession.idle](../../packages/core/src/runtime-sdk/winter-session.ts#L936) checks in-flight turns; [daemon background work](../../packages/core/src/daemon.ts#L2110) uses child-agent roster entries. | Guest-wide task occupancy and a drain handshake must cover shells, workflows, monitors, and pending requests too. |
+| Restored subagents are addressable but cannot restart | [Restored child handle](https://github.com/yanlingLabs/winter-agent-sdk/blob/8601190c/packages/runtime/src/subagents/restore.ts#L42) refuses `resume()` after a parent runtime restart. | Implement logical child continuation from durable state before automatic VM cold-stop can meet the selected subagent behavior. |
 | Cron already reaches the host, incompletely | [Cron sink](../../packages/core/src/runtime-sdk/sinks.ts#L304) mirrors successful tool creates into routines. | Reuse host ownership, but replace eventual result mirroring with one authoritative acknowledged schedule operation. |
 | One-shot intent is lost | [PendingCronCreate/parser](../../packages/core/src/runtime-sdk/sinks.ts#L184) retains only cron/prompt, ignoring `recurring`; successful creates reach the recurring RoutineStore. | Preserve one-shot versus repeating semantics. The current comment claiming one-shots are excluded does not match the parser. |
 | Schedule ID/list authority is split | [ID mapping](../../packages/core/src/runtime-sdk/sinks.ts#L273) is a process-local Map; CronList remains child-side. Host creation can fail after the child has already answered success. | Persist canonical identities and return success only after durable host acceptance. |
@@ -152,17 +178,17 @@ Guest paths and host capabilities require separate authority. Filesystem/shell w
 | Decision | Suggested starting point | Status |
 | --- | --- | --- |
 | Execution location | Winter loop and subagents in a local Linux ARM64 guest | User direction; Linux choice proposed |
-| VM ownership | Daemon-managed native controller, preferably a bundled Swift helper | Proposed; in-process bridge remains an option |
+| VM ownership | Prefer native VM controller inside the existing daemon; avoid a Winter helper per conversation | User requirement; Apple backing-process constraint unresolved |
 | VM technology | Evaluate Containerization before building all VZ device/image plumbing directly | Proposed; no runtime validation yet |
-| Workspace | One persistent workspace per session, stable guest paths, one active writer | Proposed |
-| Access | Explicit selected folders or selected repos; no ambient home/SSH sharing | User direction plus proposed enforcement details |
+| Workspace | Per-conversation for standalone Cowork; reusable workspace for Projects | Accepted; Project concurrency remains open |
+| Access | Direct writes to explicitly granted folders, or selected repos cloned into guest storage | Accepted; no ambient home/SSH sharing remains proposed enforcement |
 | Memory and temp | Workspace-scoped persistent MEMDIR and scratch; disposable OS tmp | Proposed; sharing/retention choices remain open |
-| Resource release | Quiescent cold stop, retained disk, durable Winter resume | Proposed; RAM snapshot is a later optimization |
+| Resource release | Quiescent cold stop, retained files and durable parent/child continuation | Accepted direction; child cold-resume currently requires SDK work |
 | Scheduling | Durable host authority, VM start on demand, no overlapping workspace runs | Proposed |
 | Host tools | Explicit narrow capabilities, no automatic guest-to-host shell fallback | Proposed |
 | Git publication | Session branches; separate commit/push/PR/merge authority | Proposed |
 
-The next discussion should settle the process boundary, the exact resume promise, memory scope, schedule target semantics, and direct-write versus staged folder behavior. Only then should this draft become an implementation spec with acceptance gates.
+The next discussion should resolve whether Apple's VM backing processes are acceptable or a shared VM is required, whether Project conversations may write concurrently, Project memory scope, and schedule target semantics. Direct host-folder writes and workspace ownership are already settled. Only then should this draft become an implementation spec with acceptance gates.
 
 ## Research limits and later validation
 
