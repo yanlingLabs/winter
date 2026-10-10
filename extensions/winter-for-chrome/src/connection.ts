@@ -9,12 +9,21 @@ import { EXTENSION_PROTOCOL, RPC_ERROR, RPC_METHOD_NOT_FOUND } from "./protocol"
 import type { StatusBoard } from "./status";
 
 const INSTANCE_KEY = "instanceId";
+/** The host takes at most 16 MiB from the extension (a native message larger than that is refused). */
+export const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
 /** After a hello the daemon refused for a reason that may pass (no browser engine yet), say hello again this much later. */
 const HELLO_RETRY_MS = 30_000;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** The message's size as the host will see it (UTF-8 JSON). Measured exactly only when it could be near the cap. */
+function messageBytes(message: unknown): number {
+  const json = JSON.stringify(message) ?? "";
+  if (json.length * 3 <= MAX_MESSAGE_BYTES) return json.length;
+  return new TextEncoder().encode(json).length;
+}
 
 export interface ConnectionOptions {
   hostName: string;
@@ -76,8 +85,18 @@ export class HostConnection {
   }
 
   private post(message: Record<string, unknown>): void {
+    let out = message;
+    if (messageBytes(message) > MAX_MESSAGE_BYTES) {
+      // Too big for the host to carry. An answer becomes an immediate typed error, so the daemon is told at once
+      // instead of waiting out its timeout; a notification is dropped (it answers nothing).
+      if (message.id === undefined) {
+        this.opts.log?.(`dropped a ${String(message.method)} notification larger than 16 MiB`);
+        return;
+      }
+      out = { jsonrpc: "2.0", id: message.id, error: { code: RPC_ERROR, message: "the browser's answer is larger than the 16 MiB Winter for Chrome can send — ask for less (a smaller screenshot or region)", data: { code: "cdp_error" } } };
+    }
     try {
-      this.port?.postMessage(message);
+      this.port?.postMessage(out);
     } catch (err) {
       this.opts.log?.(`postMessage failed: ${err instanceof Error ? err.message : String(err)}`);
     }

@@ -98,6 +98,9 @@ export interface ChromeApi {
     setBadgeText(p: { text: string }): Promise<void>;
     setBadgeBackgroundColor(p: { color: string }): Promise<void>;
     setTitle(p: { title: string }): Promise<void>;
+    /** "" while Winter is driving a tab: a click on the toolbar button is then Stop (`onClicked`), not the popup. */
+    setPopup(p: { popup: string }): Promise<void>;
+    onClicked: ChromeEvent<(tab: ChromeTab) => void>;
   };
   runtime: {
     connectNative(application: string): ChromePort;

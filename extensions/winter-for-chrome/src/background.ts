@@ -51,6 +51,8 @@ const api: ChromeApi = {
     setBadgeText: (p) => chrome.action.setBadgeText(p),
     setBadgeBackgroundColor: (p) => chrome.action.setBadgeBackgroundColor(p),
     setTitle: (p) => chrome.action.setTitle(p),
+    setPopup: (p) => chrome.action.setPopup(p),
+    onClicked: chrome.action.onClicked,
   },
   runtime: {
     connectNative: (application) => chrome.runtime.connectNative(application) as ChromePort,
@@ -62,23 +64,28 @@ const api: ChromeApi = {
 const log = (line: string): void => console.log(`[winter] ${line}`);
 const status = new StatusBoard(api);
 let connection: HostConnection | undefined;
-const controller = new ExtensionController(api, { notify: (method, params) => connection?.notify(method, params), log });
+const controller = new ExtensionController(api, {
+  notify: (method, params) => connection?.notify(method, params),
+  onDriven: (count) => status.setDriven(count),
+  log,
+});
 connection = new HostConnection(api, controller, status, { hostName: __WINTER_HOST_NAME__, log });
 
 // Listeners are registered synchronously at the top level (an MV3 worker woken by an event must find them).
 // The worker must also START with the browser — an MV3 worker runs only for an event it listens to, so without these a
-// browser restart would leave Winter for Chrome asleep (and Winter unable to reach it) until some tab closed. Waking is
-// all they are for: the code below opens the port to the host on every start.
-chrome.runtime.onStartup.addListener(() => undefined);
-chrome.runtime.onInstalled.addListener(() => undefined);
+// browser restart would leave Winter for Chrome asleep (and Winter unable to reach it) until some tab closed. They also
+// tell the controller WHY it started: after a browser start the agent-tab record is stale and is cleared; after an
+// update of the extension it still describes open tabs and is kept.
+chrome.runtime.onStartup.addListener(() => controller.noteLaunch("startup"));
+chrome.runtime.onInstalled.addListener((details: { reason?: string }) => {
+  controller.noteLaunch(details.reason === "update" ? "update" : details.reason === "chrome_update" ? "startup" : "install");
+});
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (typeof message === "object" && message !== null && (message as { type?: unknown }).type === "winter.status") {
     if (sender.id !== api.runtimeId) return undefined;
     const s = status.get();
     sendResponse({ state: s.state, sentence: statusSentence(s), ...(s.state === "connected" ? { backend: s.backend } : {}) });
-    return undefined;
   }
-  controller.onRuntimeMessage(message, sender);
   return undefined;
 });
 

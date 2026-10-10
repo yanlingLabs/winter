@@ -17,7 +17,8 @@ beforeEach(async () => {
   chrome = new FakeChrome();
   clock = new ManualClock();
   status = new StatusBoard(chrome);
-  controller = new ExtensionController(chrome, { notify: (m, p) => conn.notify(m, p), clock });
+  controller = new ExtensionController(chrome, { notify: (m, p) => conn.notify(m, p), onDriven: (n) => status.setDriven(n), clock });
+  controller.noteLaunch("install");
   await controller.start();
   conn = new HostConnection(chrome, controller, status, { hostName: "com.winter.browser.dev", clock });
 });
@@ -109,6 +110,38 @@ describe("the daemon's requests", () => {
     await p.deliver({ id: "d1", method: "debugger.attach", params: { tabKey: "101" } });
     await chrome.userCancelsInfobar(101);
     expect(p.sent.at(-1)).toEqual({ jsonrpc: "2.0", method: "debugger.detached", params: { tabKey: "101", reason: "canceled_by_user" } });
+  });
+});
+
+describe("size", () => {
+  test("an answer too big for the host becomes an immediate typed error to the daemon, not a silent drop", async () => {
+    const p = await connected();
+    chrome.cdp["Page.captureScreenshot"] = { data: "A".repeat(17 * 1024 * 1024) };
+    await p.deliver({ id: "d1", method: "debugger.attach", params: { tabKey: "101" } });
+    await p.deliver({ id: "d2", method: "cdp.send", params: { tabKey: "101", method: "Page.captureScreenshot", params: {} } });
+    expect(p.sent.at(-1)).toEqual({ jsonrpc: "2.0", id: "d2", error: { code: -32000, message: expect.stringContaining("larger than the 16 MiB"), data: { code: "cdp_error" } } });
+    chrome.cdp["Page.captureScreenshot"] = { data: "A".repeat(1024) };
+    await p.deliver({ id: "d3", method: "cdp.send", params: { tabKey: "101", method: "Page.captureScreenshot", params: {} } });
+    expect(p.sent.at(-1)).toEqual({ jsonrpc: "2.0", id: "d3", result: { result: { data: "A".repeat(1024) } } });
+  });
+});
+
+describe("the toolbar button", () => {
+  test("idle: the status popup; while Winter drives a tab: Stop (no popup, a STOP badge); back to the popup after", async () => {
+    const p = await connected();
+    const popups = () => chrome.calls.filter((c) => c.api === "action.setPopup").map((c) => (c.args[0] as { popup: string }).popup);
+    const badges = () => chrome.calls.filter((c) => c.api === "action.setBadgeText").map((c) => (c.args[0] as { text: string }).text);
+    expect(popups().at(-1)).toBe("popup.html");
+    await p.deliver({ id: "d1", method: "debugger.attach", params: { tabKey: "101" } });
+    await p.deliver({ id: "d2", method: "overlay", params: { tabKey: "101", active: true } });
+    expect(popups().at(-1)).toBe("");
+    expect(badges().at(-1)).toBe("STOP");
+    expect(String((chrome.calls.filter((c) => c.api === "action.setTitle").at(-1)?.args[0] as { title: string }).title)).toContain("Stop Winter");
+    chrome.clickAction();
+    expect(p.sent.at(-1)).toEqual({ jsonrpc: "2.0", method: "stop.pressed", params: { tabKey: "101" } });
+    await p.deliver({ id: "d3", method: "overlay", params: { tabKey: "101", active: false } });
+    expect(popups().at(-1)).toBe("popup.html");
+    expect(badges().at(-1)).toBe("");
   });
 });
 

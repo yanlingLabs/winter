@@ -6,11 +6,13 @@
 //    activate a tab or focus a window (the `ChromeApi` it is given has no such call).
 //  - It never reads a site's cookies or storage, and runs page code only in the "winter" world (the guard).
 //  - The debugger is attached only while the daemon has the tab bound — and is detached after 5 minutes without a
-//    command, and whenever the link to Winter drops.
+//    command, whenever the link to Winter drops, and (for any left from a previous run of the service worker) at start.
 //  - It closes only Winter's own tabs (an agent tab, by tab id — pinned or moved, until `keep()`), and only when the
-//    daemon says so: it never decides by itself that a tab should close. Closing ungroups the tab first, so a group's
-//    last tab never leaves an empty (or a saved) group behind.
-import type { ChromeApi, ChromeTab, Clock, DebuggerTarget, MessageSender } from "./chrome-api";
+//    daemon says so: it never decides by itself that a tab should close. A close keeps the debugger attached with Page
+//    events on and accepts the page's own "leave this page?" (beforeunload) prompt for that agent tab, so no native
+//    dialog is ever left in the user's browser; it ungroups the tab first, so a group's last tab leaves no group behind.
+//  - Stop is the toolbar button: while any tab is driven, a click on it stops Winter there.
+import type { ChromeApi, ChromeTab, Clock, DebuggerTarget } from "./chrome-api";
 import { realClock } from "./chrome-api";
 import { AgentBook, groupTitle } from "./groups";
 import { isAllowedEvent, strippedParams, TabGuard } from "./guard";
@@ -29,7 +31,16 @@ export class ExtensionError extends Error {
 export class UnknownMethod extends Error {}
 
 export const IDLE_DETACH_MS = 5 * 60 * 1000;
+/** How long a close may take, the page's beforeunload prompt included, before it is reported as failed. */
+export const CLOSE_TIMEOUT_MS = 10_000;
+/** How long the start waits to learn whether the browser itself just started (`runtime.onStartup`). */
+export const LAUNCH_HINT_MS = 3_000;
 const DEBUGGER_PROTOCOL_VERSION = "1.3";
+const ATTACHED_KEY = "winterAttached";
+const ALIVE_KEY = "winterAlive";
+
+/** Why the service worker started: the browser started, the extension was installed or updated, or it simply woke. */
+export type LaunchKind = "startup" | "install" | "update";
 
 interface Attached {
   tabId: number;
@@ -44,8 +55,12 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 export interface ControllerOptions {
   /** Sends one notification to the daemon. */
   notify(method: string, params: Record<string, unknown>): void;
+  /** How many tabs are being driven now (the toolbar button turns into Stop while it is more than 0). */
+  onDriven?(count: number): void;
   clock?: Clock;
   idleDetachMs?: number;
+  closeTimeoutMs?: number;
+  launchHintMs?: number;
   log?(line: string): void;
 }
 
@@ -56,6 +71,11 @@ export class ExtensionController {
   private readonly idleMs: number;
   /** Tabs whose `tab.gone` was sent (ids are never reused while the browser runs). */
   private readonly goneSent = new Set<number>();
+  /** Agent tabs being closed by `tabs.close`: their beforeunload prompt is accepted. */
+  private readonly closing = new Set<number>();
+  private readonly removedWaiters = new Map<number, () => void>();
+  private launch: LaunchKind | undefined;
+  private launchWaiter: ((k: LaunchKind) => void) | undefined;
 
   constructor(private readonly chrome: ChromeApi, private readonly opts: ControllerOptions) {
     this.book = new AgentBook(chrome);
@@ -63,13 +83,60 @@ export class ExtensionController {
     this.idleMs = opts.idleDetachMs ?? IDLE_DETACH_MS;
   }
 
-  /** Loads the group book and listens to the browser. Call once, before the first request. */
+  /** `runtime.onStartup` / `runtime.onInstalled` told why the worker started (background.ts forwards them). */
+  noteLaunch(kind: LaunchKind): void {
+    if (this.launch !== undefined) return;
+    this.launch = kind;
+    this.launchWaiter?.(kind);
+  }
+
+  /**
+   * Listens to the browser, decides whether the agent-tab record still describes this browser session, and detaches
+   * whatever a previous run of the worker left attached. Call once, synchronously at the worker's top level (its
+   * listeners are registered before its first await), before the first request.
+   */
   async start(): Promise<void> {
     this.chrome.debugger.onEvent.addListener((source, method, params) => this.onDebuggerEvent(source, method, params));
     this.chrome.debugger.onDetach.addListener((source, reason) => { void this.onDebuggerDetach(source, reason); });
     this.chrome.tabs.onRemoved.addListener((tabId) => this.onTabRemoved(tabId));
     this.chrome.tabGroups.onRemoved.addListener((group) => { void this.book.dropGroup(group.id); });
-    await this.book.load();
+    this.chrome.action.onClicked.addListener(() => this.stopDriven());
+
+    // storage.session holds the "alive" mark for this browser session AND this version of the extension. Present: the
+    // worker merely restarted. Absent: the browser started, or the extension was installed or updated — onStartup /
+    // onInstalled says which (after a browser start every recorded id is stale; after an update the tabs are still
+    // Winter's). No word in time is treated as a browser start: Winter would rather forget a tab than take a user's.
+    const alive = (await this.chrome.storage.session.get([ALIVE_KEY]))[ALIVE_KEY] === true;
+    const kind = alive ? undefined : await this.launchKind();
+    if (kind === "startup") await this.book.clear();
+    else await this.book.load();
+    await this.chrome.storage.session.set({ [ALIVE_KEY]: true });
+    await this.recoverAttached();
+  }
+
+  private launchKind(): Promise<LaunchKind> {
+    if (this.launch !== undefined) return Promise.resolve(this.launch);
+    return new Promise((resolve) => {
+      const timer = this.clock.setTimeout(() => { this.launchWaiter = undefined; resolve("startup"); }, this.opts.launchHintMs ?? LAUNCH_HINT_MS);
+      this.launchWaiter = (k) => { this.clock.clearTimeout(timer); this.launchWaiter = undefined; resolve(k); };
+    });
+  }
+
+  /** Debuggers and overlays a previous run of the worker left behind: nothing is bound to them any more. */
+  private async recoverAttached(): Promise<void> {
+    const stored = (await this.chrome.storage.session.get([ATTACHED_KEY]))[ATTACHED_KEY];
+    const ids = Array.isArray(stored) ? stored.filter((x): x is number => Number.isInteger(x)) : [];
+    for (const tabId of ids) {
+      if (this.attached.has(tabId)) continue;
+      await this.paintOverlay(tabId, { active: false });
+      try { await this.chrome.debugger.detach({ tabId }); } catch { /* already gone */ }
+    }
+    if (ids.length > 0) this.opts.log?.(`detached ${ids.length} tab(s) a previous worker left attached`);
+    await this.saveAttached();
+  }
+
+  private async saveAttached(): Promise<void> {
+    try { await this.chrome.storage.session.set({ [ATTACHED_KEY]: [...this.attached.keys()] }); } catch { /* best effort */ }
   }
 
   /** The tab ids attached right now (tests, status). */
@@ -100,13 +167,15 @@ export class ExtensionController {
     for (const tabId of [...this.attached.keys()]) await this.detach(tabId);
   }
 
-  /** A message from one of the extension's own overlays: the user pressed Stop. */
-  onRuntimeMessage(message: unknown, sender: MessageSender): boolean {
-    if (!isRecord(message) || message.type !== "winter.stop") return false;
-    const tabId = sender.tab?.id;
-    if (sender.id !== this.chrome.runtimeId || tabId === undefined || !this.attached.has(tabId)) return false;
-    this.opts.notify("stop.pressed", { tabKey: String(tabId) });
-    return true;
+  /** The toolbar button was clicked while Winter was driving: Stop, for every driven tab. */
+  stopDriven(): boolean {
+    const driven = [...this.attached.values()].filter((a) => a.overlay);
+    for (const a of driven) this.opts.notify("stop.pressed", { tabKey: String(a.tabId) });
+    return driven.length > 0;
+  }
+
+  private drivenChanged(): void {
+    this.opts.onDriven?.([...this.attached.values()].filter((a) => a.overlay).length);
   }
 
   // ── tabs ─────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -166,16 +235,24 @@ export class ExtensionController {
     // In the BACKGROUND: the user's active tab and window never change.
     const tab = await this.chrome.tabs.create({ url, active: false, windowId });
     if (tab.id === undefined) throw new ExtensionError("cdp_error", "the browser opened no tab");
+    // From here on the tab exists and is Winter's: it is returned whatever the grouping does, so it can be driven and
+    // closed like any other agent tab — a failed group step must never leave an untracked tab behind.
     await this.book.addTab(tab.id, sessionId);
-    if (groupId !== undefined) {
-      await this.chrome.tabs.group({ tabIds: [tab.id], groupId });
-    } else {
-      groupId = await this.chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId } });
-      const title = groupTitle(sessionTitle);
-      await this.chrome.tabGroups.update(groupId, { title, color: "blue" });
-      await this.book.addGroup(groupId, sessionId, title);
+    let grouped = -1;
+    try {
+      if (groupId !== undefined) {
+        await this.chrome.tabs.group({ tabIds: [tab.id], groupId });
+        grouped = groupId;
+      } else {
+        grouped = await this.chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId } });
+        const title = groupTitle(sessionTitle);
+        await this.book.addGroup(grouped, sessionId, title);
+        await this.chrome.tabGroups.update(grouped, { title, color: "blue" });
+      }
+    } catch (err) {
+      this.opts.log?.(`tab ${tab.id}: could not put it in its Winter group (${err instanceof Error ? err.message : String(err)}) — it stays Winter's, ungrouped`);
     }
-    return this.wire({ ...tab, groupId });
+    return this.wire({ ...tab, groupId: grouped });
   }
 
   /** The window a new Winter group goes into: the one the user used last, else any normal one; never a private one. */
@@ -193,18 +270,39 @@ export class ExtensionController {
   private async closeTab(tabId: number): Promise<void> {
     const tab = await this.getTab(tabId);
     if (this.book.sessionOfTab(tabId) === undefined) throw new ExtensionError("not_allowed", "Winter closes only the tabs it opened");
-    await this.detach(tabId);
+    // Hold the debugger through the close with Page events on, so the page's "leave this page?" prompt comes to the
+    // extension (and is accepted, below) instead of opening as a native dialog in the user's browser. A page the
+    // debugger may not attach to has no such prompt for Winter to answer: it is simply removed.
+    if (!this.attached.has(tabId) && attachRefusal(tab.url ?? tab.pendingUrl, this.chrome.runtimeId) === undefined) {
+      try {
+        await this.chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
+        this.attached.set(tabId, { tabId, guard: new TabGuard(), subscribed: new Set(), overlay: false });
+        await this.saveAttached();
+      } catch { /* another debugger, or the tab is going: removed below all the same */ }
+    }
+    this.closing.add(tabId);
+    const a = this.attached.get(tabId);
+    if (a !== undefined) {
+      if (a.idle !== undefined) this.clock.clearTimeout(a.idle);
+      try { await this.chrome.debugger.sendCommand({ tabId }, "Page.enable", {}); } catch { /* best effort */ }
+    }
     // Out of its group first: closing a group's last tab would otherwise leave the browser holding the group (a saved
     // group, in browsers that save them); ungrouping the last tab removes the group with it.
     if (tab.groupId >= 0) {
       try { await this.chrome.tabs.ungroup([tabId]); } catch { /* the tab is closing anyway */ }
     }
-    try {
-      await this.chrome.tabs.remove(tabId);
-    } catch {
-      throw new ExtensionError("tab_gone", "the tab is closed");
-    } finally {
-      await this.book.dropTab(tabId);
+    const removed = new Promise<boolean>((resolve) => {
+      const timer = this.clock.setTimeout(() => { this.removedWaiters.delete(tabId); resolve(false); }, this.opts.closeTimeoutMs ?? CLOSE_TIMEOUT_MS);
+      this.removedWaiters.set(tabId, () => { this.clock.clearTimeout(timer); resolve(true); });
+    });
+    // `tabs.remove` answers only once the page let itself be closed; the tab's removal (onRemoved) is what counts.
+    this.chrome.tabs.remove(tabId).catch(() => undefined);
+    const gone = await removed;
+    this.closing.delete(tabId);
+    if (!gone) {
+      // Still there: say so, and leave nothing of Winter's on it (the debugger was only held for the close).
+      await this.detach(tabId);
+      throw new ExtensionError("timeout", "the tab did not close (the page kept it open)");
     }
   }
 
@@ -234,6 +332,7 @@ export class ExtensionController {
       }
       this.attached.set(tabId, { tabId, guard: new TabGuard(), subscribed: new Set(), overlay: false });
       this.goneSent.delete(tabId);
+      await this.saveAttached();
       try {
         // A background tab behaves as focused (focus events, :focus, caret), so it can be driven without coming forward.
         await this.chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true });
@@ -266,10 +365,14 @@ export class ExtensionController {
     if (a === undefined) return;
     this.attached.delete(tabId);
     if (a.idle !== undefined) this.clock.clearTimeout(a.idle);
-    if (a.overlay) await this.paintOverlay(tabId, { active: false });
+    if (a.overlay) {
+      await this.paintOverlay(tabId, { active: false });
+      this.drivenChanged();
+    }
     try {
       await this.chrome.debugger.detach({ tabId });
     } catch { /* already detached (the tab closed, or the user cancelled) */ }
+    await this.saveAttached();
   }
 
   private touch(tabId: number): void {
@@ -285,7 +388,7 @@ export class ExtensionController {
 
   private attachedOrGone(tabId: number): Attached {
     const a = this.attached.get(tabId);
-    if (a === undefined) throw new ExtensionError("tab_gone", "Winter is not attached to this tab (attach it first)");
+    if (a === undefined || this.closing.has(tabId)) throw new ExtensionError("tab_gone", "Winter is not attached to this tab (attach it first)");
     return a;
   }
 
@@ -315,6 +418,7 @@ export class ExtensionController {
     const message = err instanceof Error ? err.message : String(err);
     if (/not attached to the tab|no tab with given id|cannot access a/i.test(message)) {
       this.attached.delete(tabId);
+      void this.saveAttached();
       return new ExtensionError("tab_gone", "Winter is no longer attached to this tab");
     }
     try {
@@ -343,13 +447,15 @@ export class ExtensionController {
     const active = params.active === true;
     const c = isRecord(params.cursor) ? params.cursor : undefined;
     const cursor = c !== undefined && typeof c.x === "number" && typeof c.y === "number" && typeof c.kind === "string" ? { x: c.x, y: c.y, kind: c.kind } : undefined;
+    const changed = a.overlay !== active;
     a.overlay = active;
     await this.paintOverlay(tabId, { active, ...(cursor === undefined ? {} : { cursor }) });
+    if (changed) this.drivenChanged();
   }
 
   private async paintOverlay(tabId: number, args: { active: boolean; cursor?: { x: number; y: number; kind: string } }): Promise<void> {
     try {
-      await this.chrome.scripting.executeScript({ target: { tabId }, world: "ISOLATED", func: drawOverlay as (arg: never) => void, args: [{ ...args, stopLabel: "Stop Winter" }] });
+      await this.chrome.scripting.executeScript({ target: { tabId }, world: "ISOLATED", func: drawOverlay as (arg: never) => void, args: [args] });
     } catch { /* best effort: a page that forbids scripts (a store page, a PDF viewer) simply shows none */ }
   }
 
@@ -360,6 +466,13 @@ export class ExtensionController {
     if (tabId === undefined) return;
     const a = this.attached.get(tabId);
     if (a === undefined) return;
+    // The page's own "leave this page?" while Winter closes one of its agent tabs: accepted, so the close completes and
+    // no dialog is left in the user's browser. Never for the user's tabs, and never outside a close.
+    if (method === "Page.javascriptDialogOpening" && source.sessionId === undefined && params?.type === "beforeunload"
+      && this.closing.has(tabId) && this.book.sessionOfTab(tabId) !== undefined) {
+      void this.chrome.debugger.sendCommand({ tabId }, "Page.handleJavaScriptDialog", { accept: true }).catch(() => undefined);
+      return;
+    }
     a.guard.observeEvent(method, params, source.sessionId);
     const tabKey = String(tabId);
     if (a.subscribed.has(method) && isAllowedEvent(method)) {
@@ -378,7 +491,10 @@ export class ExtensionController {
     if (tabId === undefined || !this.attached.has(tabId)) return; // not ours, or detached by us
     const a = this.attached.get(tabId)!;
     this.attached.delete(tabId);
+    await this.saveAttached();
     if (a.idle !== undefined) this.clock.clearTimeout(a.idle);
+    if (a.overlay) this.drivenChanged();
+    if (this.closing.has(tabId)) return; // the close itself reports the outcome
     if (reason === "canceled_by_user") {
       // The user dismissed the browser's "started debugging this browser" bar: they took the tab back.
       if (a.overlay) await this.paintOverlay(tabId, { active: false });
@@ -394,8 +510,14 @@ export class ExtensionController {
   private onTabRemoved(tabId: number): void {
     const a = this.attached.get(tabId);
     if (a?.idle !== undefined) this.clock.clearTimeout(a.idle);
-    this.attached.delete(tabId);
+    if (a !== undefined) {
+      this.attached.delete(tabId);
+      void this.saveAttached();
+      if (a.overlay) this.drivenChanged();
+    }
     void this.book.dropTab(tabId);
+    this.removedWaiters.get(tabId)?.();
+    this.removedWaiters.delete(tabId);
     this.gone(tabId, "closed");
   }
 

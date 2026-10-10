@@ -22,8 +22,14 @@ export function devKey(): string {
   return readFileSync(join(ROOT, "keys", "dev.pub"), "utf8").trim();
 }
 
-/** Calls the extension must never contain: each would activate a tab or focus a window, read a site's data, or run
- *  code in the page's own world. Checked on the built bundle as well as by the unit tests. */
+/**
+ * Calls the extension must never contain: each would activate a tab or focus a window, read a site's data, or run code
+ * in the page's own world. What this is, honestly: a REGEX over the built bundles (background.js and popup.js) and, in
+ * the unit tests, over the sources — a backstop against a slip, not a proof. `background.ts` binds the real `chrome` as
+ * `any`, so the type system does not stop such a call there; what keeps them out of the logic is that every other module
+ * reaches the browser only through the `ChromeApi` interface (chrome-api.ts), which has none of these members, and the
+ * review of the one binding file. A call spelled some other way (computed property names, `eval`) would pass the regex.
+ */
 export const FORBIDDEN_IN_BUNDLE: { pattern: RegExp; why: string }[] = [
   { pattern: /tabs\.update\s*\(/, why: "tabs.update (could activate a tab)" },
   { pattern: /tabs\.highlight\s*\(/, why: "tabs.highlight (activates tabs)" },
@@ -51,9 +57,11 @@ async function buildFlavor(flavor: Flavor, outRoot: string): Promise<string> {
     define: { __WINTER_HOST_NAME__: JSON.stringify(HOST_NAME[flavor]) },
   });
   if (!built.success) throw new Error(`bundling failed:\n${built.logs.map((l) => String(l)).join("\n")}`);
-  const bundle = readFileSync(join(out, "background.js"), "utf8");
-  const hits = FORBIDDEN_IN_BUNDLE.filter((f) => f.pattern.test(bundle));
-  if (hits.length > 0) throw new Error(`the ${flavor} bundle contains what Winter for Chrome must never do: ${hits.map((h) => h.why).join("; ")}`);
+  for (const file of ["background.js", "popup.js"]) {
+    const bundle = readFileSync(join(out, file), "utf8");
+    const hits = FORBIDDEN_IN_BUNDLE.filter((f) => f.pattern.test(bundle));
+    if (hits.length > 0) throw new Error(`the ${flavor} ${file} contains what Winter for Chrome must never do: ${hits.map((h) => h.why).join("; ")}`);
+  }
   cpSync(join(ROOT, "src", "popup.html"), join(out, "popup.html"));
   const svg = readFileSync(join(REPO, "assets", "brand", "scale-burst.svg"), "utf8");
   for (const size of [16, 32, 48, 128]) {

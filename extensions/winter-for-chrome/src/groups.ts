@@ -6,9 +6,11 @@
 //    turn end unless marked); the extension only carries that out.
 //  - Each session's agent tabs open in one tab group, "Winter · <session title>", group id → session id.
 //
-// Both maps live in `chrome.storage.session`: it survives a service-worker restart (and so a daemon restart, which
-// reconnects the same worker) but not a browser restart — exactly the lifetime of the tab and group ids it holds. After
-// a browser restart Winter knows none of its old tabs: any it restores are the user's from then on, never closed.
+// The record lives in `chrome.storage.local`, so a service-worker restart AND an update of the extension (which clears
+// `storage.session`) keep it: the tabs are still open, still Winter's. Tab and group ids last only as long as the browser
+// session, so the record is CLEARED when the browser itself starts (the controller decides that at startup, before the
+// record is read for anything): after a browser restart Winter knows none of its old tabs, and any it restores are the
+// user's from then on — an old id is never mistaken for a new tab.
 import type { ChromeApi } from "./chrome-api";
 
 const STORAGE_KEY = "winterAgents";
@@ -21,9 +23,9 @@ export class AgentBook {
 
   constructor(private readonly chrome: ChromeApi) {}
 
-  /** Loads the book and forgets tabs and groups that no longer exist. */
+  /** Loads the record and forgets tabs and groups that no longer exist. */
   async load(): Promise<void> {
-    const stored = (await this.chrome.storage.session.get([STORAGE_KEY]))[STORAGE_KEY];
+    const stored = (await this.chrome.storage.local.get([STORAGE_KEY]))[STORAGE_KEY];
     this.groups.clear();
     this.tabs.clear();
     if (typeof stored === "object" && stored !== null) {
@@ -50,6 +52,13 @@ export class AgentBook {
       try { await this.chrome.tabs.get(id); } catch { this.tabs.delete(id); changed = true; }
     }
     if (changed) await this.save();
+  }
+
+  /** The browser started: every id in the record belonged to its previous session. */
+  async clear(): Promise<void> {
+    this.groups.clear();
+    this.tabs.clear();
+    await this.save();
   }
 
   /** The session an agent tab belongs to, or undefined for the user's tabs. */
@@ -86,7 +95,7 @@ export class AgentBook {
   }
 
   private async save(): Promise<void> {
-    await this.chrome.storage.session.set({
+    await this.chrome.storage.local.set({
       [STORAGE_KEY]: {
         groups: Object.fromEntries([...this.groups].map(([id, g]) => [String(id), g])),
         tabs: Object.fromEntries([...this.tabs].map(([id, s]) => [String(id), s])),

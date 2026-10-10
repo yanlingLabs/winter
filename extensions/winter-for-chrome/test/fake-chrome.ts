@@ -75,7 +75,7 @@ export class FakeChrome implements ChromeApi {
     "Page.getLayoutMetrics": { cssVisualViewport: { clientWidth: 1280, clientHeight: 720 }, visualViewport: { clientWidth: 2560, clientHeight: 1440 } },
     "Emulation.setFocusEmulationEnabled": {},
   };
-  private nextTab = 100;
+  nextTab = 100;
   private nextGroup = 1;
   private uuid = 0;
 
@@ -84,6 +84,16 @@ export class FakeChrome implements ChromeApi {
   readonly tabsOnRemoved = event<(tabId: number) => void>();
   readonly groupsOnRemoved = event<(group: { id: number }) => void>();
   readonly runtimeOnMessage = event<(message: unknown, sender: MessageSender, sendResponse: (r: unknown) => void) => boolean | undefined>();
+  readonly actionOnClicked = event<(tab: ChromeTab) => void>();
+  /** Tabs whose page set a beforeunload handler (and had a user gesture): closing them asks "leave this page?". */
+  beforeunload = new Set<number>();
+  /** Tabs with Page events on (through the debugger). */
+  pageEnabled = new Set<number>();
+  /** A beforeunload prompt shown as a NATIVE dialog in the user's browser (nothing handled it over CDP). */
+  nativeDialogs: number[] = [];
+  private pendingDialogs = new Map<number, () => void>();
+  /** Make the next tabs.group call fail. */
+  groupFails = false;
 
   constructor() {
     this.addWindow({ id: 1, incognito: false });
@@ -120,13 +130,26 @@ export class FakeChrome implements ChromeApi {
       if (!this.windows_.some((w) => w.id === p.windowId)) throw new Error(`No window with id: ${p.windowId}.`);
       return { ...this.addTab({ windowId: p.windowId, url: p.url, title: "", active: p.active }) };
     },
-    remove: async (tabId: number) => {
+    remove: (tabId: number) => {
       this.record("tabs.remove", tabId);
-      this.tabOr(tabId);
-      this.closeTab(tabId);
+      try { this.tabOr(tabId); } catch (err) { return Promise.reject(err); }
+      if (!this.beforeunload.has(tabId)) {
+        void this.closeTab(tabId);
+        return Promise.resolve();
+      }
+      // The page asks "leave this page?": over CDP when a debugger has Page events on, else as a native dialog.
+      return new Promise<void>((resolve) => {
+        if (this.attachedDebuggers.has(tabId) && this.pageEnabled.has(tabId)) {
+          this.pendingDialogs.set(tabId, () => { void this.closeTab(tabId).then(resolve); });
+          this.emitCdp(tabId, "Page.javascriptDialogOpening", { url: "https://x/", message: "", type: "beforeunload", hasBrowserHandler: true });
+        } else {
+          this.nativeDialogs.push(tabId); // never resolves: the user's browser now shows a dialog
+        }
+      });
     },
     group: async (p: { tabIds: number[]; groupId?: number; createProperties?: { windowId: number } }) => {
       this.record("tabs.group", p);
+      if (this.groupFails) { this.groupFails = false; throw new Error("Tabs cannot be edited right now (user may be dragging a tab)."); }
       let id = p.groupId;
       if (id === undefined) {
         id = this.nextGroup++;
@@ -187,6 +210,15 @@ export class FakeChrome implements ChromeApi {
     sendCommand: async (target: DebuggerTarget, method: string, params?: Record<string, unknown>) => {
       this.record("debugger.sendCommand", target, method, params);
       if (target.tabId === undefined || !this.attachedDebuggers.has(target.tabId)) throw new Error(`Debugger is not attached to the tab with id: ${target.tabId}.`);
+      if (method === "Page.enable" && target.sessionId === undefined) this.pageEnabled.add(target.tabId);
+      if (method === "Page.handleJavaScriptDialog") {
+        const pending = this.pendingDialogs.get(target.tabId);
+        if (pending !== undefined && params?.accept === true) {
+          this.pendingDialogs.delete(target.tabId);
+          pending();
+        }
+        return {};
+      }
       const answer = this.cdp[method];
       if (answer === undefined) return {};
       if (typeof answer === "function") return (answer as (t: DebuggerTarget, p: Record<string, unknown> | undefined) => unknown)(target, params);
@@ -210,12 +242,23 @@ export class FakeChrome implements ChromeApi {
     };
   }
   storage = { local: this.area(this.storage_), session: this.area(this.sessionStorage_) };
+  /** The extension was updated or reloaded: `storage.session` is cleared (and its debuggers dropped); tabs stay. */
+  updateExtension(): void {
+    for (const k of Object.keys(this.sessionStorage_)) delete this.sessionStorage_[k];
+    this.attachedDebuggers.clear();
+  }
 
   action = {
     setBadgeText: async (p: { text: string }) => { this.record("action.setBadgeText", p); },
     setBadgeBackgroundColor: async (_p: { color: string }) => undefined,
     setTitle: async (p: { title: string }) => { this.record("action.setTitle", p); },
+    setPopup: async (p: { popup: string }) => { this.record("action.setPopup", p); },
+    onClicked: this.actionOnClicked,
   };
+  /** The user clicks the extension's toolbar button. */
+  clickAction(): void {
+    for (const l of this.actionOnClicked.listeners) l({ windowId: 1, active: true, groupId: -1, incognito: false, id: 100 });
+  }
 
   runtime = {
     connectNative: (application: string) => {
@@ -243,6 +286,7 @@ export class FakeChrome implements ChromeApi {
   /** The user (or the page) closes a tab. */
   async closeTab(tabId: number): Promise<void> {
     const had = this.attachedDebuggers.delete(tabId);
+    this.pageEnabled.delete(tabId);
     this.tabs_.delete(tabId);
     if (had) for (const l of this.debuggerOnDetach.listeners) l({ tabId }, "target_closed");
     for (const l of this.tabsOnRemoved.listeners) l(tabId);
@@ -260,6 +304,9 @@ export class FakeChrome implements ChromeApi {
     const old = [...this.tabs_.values()];
     this.tabs_.clear();
     this.groups_.clear();
+    this.attachedDebuggers.clear();
+    // Ids start over: a restored tab can get an id an old agent tab had.
+    this.nextTab = 100;
     for (const t of old) this.addTab({ ...t, id: undefined, groupId: -1 });
   }
   private pruneGroups(): void {
