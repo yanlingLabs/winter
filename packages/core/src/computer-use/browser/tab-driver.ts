@@ -68,6 +68,9 @@ export interface TabStateResult { text: string; snapshotId: string; isDiff: bool
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 const bad = (message: string): Error => Object.assign(new TypeError(message), { name: "TypeError" });
 const stale = (ref: number): AutomationFailure => new AutomationFailure("StaleRef", `[${ref}] is gone — call state()`);
+/** A text leaf's ref given where a field's is wanted: name the field it labels, when it labels one. */
+const textLeafError = (ref: number, call: string, control: number | undefined): Error =>
+  new Error(`[${ref}] is text, not a field — ${control === undefined ? `${call}() takes a field's ref (state() and find() list them)` : `it labels [${control}]: ${call}([${control}], …)`}`);
 
 export const HOLD_CEILING_SENTENCE = "too many built-in browser tabs are in use right now — close some with tab.close()";
 
@@ -912,26 +915,39 @@ export class TabDriver {
   /** `waitFor`: the runtime's observer plus a 100 ms poll; `WaitTimeout` with what was seen. */
   async waitFor(cond: RtCondition & { refs?: number[]; goneRefs?: number[] }, timeoutMs: number, signal?: AbortSignal): Promise<{ waitedMs: number }> {
     const start = this.now();
-    const ids = (refs: number[] | undefined, gone: boolean): number[] | undefined => {
-      if (refs === undefined) return undefined;
-      const out: number[] = [];
-      for (const r of refs) {
-        try { out.push(this.resolve(r).id); } catch (err) { if (!gone) throw err; }
-      }
-      return out;
-    };
+    const { refs, goneRefs, ...page } = cond;
     let seen = "";
     for (;;) {
       if (this.dialog !== undefined) throw new AutomationFailure("TargetBusy", this.dialogBusySentence());
-      const c: RtCondition = { ...cond, ...(cond.refs === undefined ? {} : { ids: ids(cond.refs, false)! }), ...(cond.goneRefs === undefined ? {} : { goneIds: ids(cond.goneRefs, true)! }) };
-      delete (c as { refs?: unknown }).refs;
-      delete (c as { goneRefs?: unknown }).goneRefs;
-      let res: RtCheck | undefined;
-      try { res = await this.callFresh<RtCheck>(this.top(), "check", c); } catch (err) { if (!isContextGone(err)) throw err; }
-      if (res !== undefined) {
-        seen = res.seen;
-        if (res.met) return { waitedMs: this.now() - start };
+      // A ref's id is its own frame runtime's: each frame checks its own refs, the top frame the page conditions too.
+      const top = this.top();
+      const groups = new Map<FrameRec, { rtId?: string; ids: number[]; goneIds: number[] }>([[top, { ids: [], goneIds: [] }]]);
+      const group = (rec: FrameRec, rtId: string): { rtId?: string; ids: number[]; goneIds: number[] } => {
+        let g = groups.get(rec);
+        if (g === undefined) { g = { ids: [], goneIds: [] }; groups.set(rec, g); }
+        g.rtId = rtId;
+        return g;
+      };
+      for (const r of refs ?? []) { const x = this.resolve(r); group(x.rec, x.rtId).ids.push(x.id); }
+      for (const r of goneRefs ?? []) {
+        let x: { rec: FrameRec; id: number; rtId: string };
+        try { x = this.resolve(r); } catch { continue; }
+        group(x.rec, x.rtId).goneIds.push(x.id);
       }
+      let met = true;
+      for (const [rec, g] of groups) {
+        const c: RtCondition = { ...(rec === top ? page : {}), ...(g.ids.length > 0 ? { ids: g.ids } : {}), ...(g.goneIds.length > 0 ? { goneIds: g.goneIds } : {}) };
+        let res: RtCheck | undefined;
+        try {
+          res = g.rtId === undefined ? await this.callFresh<RtCheck>(rec, "check", c) : await this.callIn<RtCheck>(rec, "check", c, { expectRt: g.rtId });
+        } catch (err) {
+          // The frame's document changed under its refs: they are gone (the next round re-resolves them).
+          if (!isContextGone(err) && !(err instanceof AutomationFailure && err.kind === "StaleRef")) throw err;
+        }
+        if (rec === top && res !== undefined) seen = res.seen;
+        if (res === undefined ? rec === top || g.ids.length > 0 : !res.met) met = false;
+      }
+      if (met) return { waitedMs: this.now() - start };
       const left = timeoutMs - (this.now() - start);
       if (left <= 0 || signal?.aborted === true) {
         throw new AutomationFailure("WaitTimeout", `the wait timed out without the condition being met${seen.length > 0 ? ` — seen: ${seen.slice(0, 2_000)}` : ""}`);
@@ -1128,10 +1144,11 @@ export class TabDriver {
 
   async setValue(ref: number, value: string): Promise<string> {
     const { rec, id, rtId } = this.resolve(ref);
-    const r = await this.callIn<{ ok: true; shown: string } | { ok: false; reason: string }>(rec, "setValue", { id, value }, { expectRt: rtId });
+    const r = await this.callIn<{ ok: true; shown: string } | { ok: false; reason: string; control?: number }>(rec, "setValue", { id, value }, { expectRt: rtId });
     if (!r.ok) {
       if (r.reason === "secure_field") throw new AutomationFailure("Refused", SECURE_FIELD_SENTENCE);
       if (r.reason === "gone") throw stale(ref);
+      if (r.reason === "text") throw textLeafError(ref, "setValue", r.control === undefined ? undefined : this.refFor(rtId, r.control));
       throw new Error(`[${ref}]: ${r.reason}`);
     }
     return r.shown;
@@ -1150,9 +1167,10 @@ export class TabDriver {
   /** `DOM.setFileInputFiles` on a file input ref (paths already checked by the engine). */
   async upload(ref: number, files: string[]): Promise<void> {
     const { rec, id, rtId } = this.resolve(ref);
-    const fi = await this.callIn<{ ok: true; multiple: boolean } | { ok: false; reason: string }>(rec, "fileInput", { id }, { expectRt: rtId });
+    const fi = await this.callIn<{ ok: true; multiple: boolean } | { ok: false; reason: string; control?: number }>(rec, "fileInput", { id }, { expectRt: rtId });
     if (!fi.ok) {
       if (fi.reason === "gone") throw stale(ref);
+      if (fi.reason === "text") throw textLeafError(ref, "upload", fi.control === undefined ? undefined : this.refFor(rtId, fi.control));
       throw new Error(`[${ref}] is ${fi.reason === "not a file input" ? "not a file input — upload() takes an input[type=file] ref" : fi.reason}`);
     }
     if (!fi.multiple && files.length > 1) throw new Error(`[${ref}] takes one file`);

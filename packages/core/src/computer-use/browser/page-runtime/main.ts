@@ -42,6 +42,14 @@ type Any = Record<string, unknown>;
     const n = nodeOf(id);
     return n instanceof Element ? n : undefined;
   };
+  /** A text leaf's ref names text, not a field: the form control it labels (a `<label>` it sits in), if any. */
+  const textLeaf = (id: unknown): { ok: false; reason: "text"; control?: RtId } | undefined => {
+    const n = nodeOf(id);
+    if (!(n instanceof Text)) return undefined;
+    const label = n.parentElement?.closest("label");
+    const control = label instanceof HTMLLabelElement ? label.control : null;
+    return { ok: false, reason: "text", ...(control === null ? {} : { control: idOf(control) }) };
+  };
   const prune = (): void => { for (const [k, r] of refs) if (r.deref() === undefined) refs.delete(k); };
 
   // ── the quiet-DOM watcher ───────────────────────────────────────────────────────────────────────
@@ -684,9 +692,9 @@ type Any = Record<string, unknown>;
     return set === undefined ? undefined : (v: string) => set.call(el, v);
   };
   const fire = (el: Element, type: string): void => { el.dispatchEvent(new Event(type, { bubbles: true, composed: true })); };
-  const setValue = (arg: { id: RtId; value: string }): { ok: true; shown: string } | { ok: false; reason: string } => {
+  const setValue = (arg: { id: RtId; value: string }): { ok: true; shown: string } | { ok: false; reason: string; control?: RtId } => {
     const el = elementOf(arg.id);
-    if (el === undefined) return { ok: false, reason: "gone" };
+    if (el === undefined) return textLeaf(arg.id) ?? { ok: false, reason: "gone" };
     if (isSecure(el)) return { ok: false, reason: "secure_field" };
     if (isDisabled(el)) return { ok: false, reason: "disabled" };
     if (el instanceof HTMLSelectElement) {
@@ -734,7 +742,9 @@ type Any = Record<string, unknown>;
     return { ok: false, reason: "that element takes no value — click it, or type into a text field" };
   };
   const select = (arg: { id: RtId; text: string; before?: string; after?: string; caret?: "start" | "end" }): { ok: true } | { ok: false; reason: string } => {
-    const el = elementOf(arg.id);
+    // A text leaf's text is selected in the element that holds it.
+    const node = nodeOf(arg.id);
+    const el = node instanceof Element ? node : node instanceof Text ? node.parentElement ?? undefined : undefined;
     if (el === undefined) return { ok: false, reason: "gone" };
     if (isSecure(el)) return { ok: false, reason: "secure_field" };
     const locate = (hay: string): number => {
@@ -786,9 +796,9 @@ type Any = Record<string, unknown>;
     if ((el as HTMLElement).isContentEditable === true) return (el as HTMLElement).innerText ?? el.textContent;
     return null;
   };
-  const fileInput = (arg: { id: RtId }): { ok: true; multiple: boolean } | { ok: false; reason: string } => {
+  const fileInput = (arg: { id: RtId }): { ok: true; multiple: boolean } | { ok: false; reason: string; control?: RtId } => {
     const el = elementOf(arg.id);
-    if (el === undefined) return { ok: false, reason: "gone" };
+    if (el === undefined) return textLeaf(arg.id) ?? { ok: false, reason: "gone" };
     if (!(el instanceof HTMLInputElement) || el.type.toLowerCase() !== "file") return { ok: false, reason: "not a file input" };
     if (el.disabled) return { ok: false, reason: "disabled" };
     return { ok: true, multiple: el.multiple };
@@ -827,8 +837,8 @@ type Any = Record<string, unknown>;
     if (met && c.goneText !== undefined && vt().includes(c.goneText)) met = false;
     if (met && c.title !== undefined && !document.title.includes(c.title)) met = false;
     if (met && c.url !== undefined && !location.href.includes(c.url)) met = false;
-    if (met && c.ids !== undefined && c.ids.some((id) => elementOf(id) === undefined)) met = false;
-    if (met && c.goneIds !== undefined && c.goneIds.some((id) => elementOf(id) !== undefined)) met = false;
+    if (met && c.ids !== undefined && c.ids.some((id) => nodeOf(id) === undefined)) met = false;
+    if (met && c.goneIds !== undefined && c.goneIds.some((id) => nodeOf(id) !== undefined)) met = false;
     const seenText = collapse(vt()).slice(0, 300);
     return { met, seen: redactText(`title "${cap(document.title, 80)}" · ${seenText}`) };
   };
@@ -891,7 +901,7 @@ type Any = Record<string, unknown>;
       case "hitAt": return hitAt(a as { x: number; y: number; guardMenu?: boolean });
       case "waitChange": return waitChange(a as { maxMs: number });
       case "check": return check((a ?? {}) as RtCondition);
-      case "alive": return ((a as { ids: RtId[] }).ids ?? []).filter((id) => elementOf(id) !== undefined);
+      case "alive": return ((a as { ids: RtId[] }).ids ?? []).filter((id) => nodeOf(id) !== undefined);
       default: throw new Error(`unknown op ${op}`);
     }
   };

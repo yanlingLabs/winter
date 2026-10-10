@@ -35,6 +35,8 @@ export interface FakePage {
   busy?: boolean;
   /** Native picker controls: id → what pressing one opens ("a pop-up menu", "a date picker"). */
   pickers?: Record<number, string>;
+  /** Text leaves (top frame): id → the field the text labels, or null — `setValue`/`fileInput` answer `reason: "text"`. */
+  textLeaves?: Record<number, number | null>;
 }
 
 interface Ctx { frameId: string; session?: string; winter: boolean; doc: number }
@@ -528,6 +530,8 @@ export class FakeCdpTransport implements CdpTransport {
       case "setValue": {
         const n = node(arg?.id);
         if (n === undefined) return { ok: false, reason: "gone" };
+        const leaf = frameId === "top" ? t.page.textLeaves?.[n.id] : undefined;
+        if (leaf !== undefined) return { ok: false, reason: "text", ...(leaf === null ? {} : { control: leaf }) };
         if (f.secure.includes(n.id)) return { ok: false, reason: "secure_field" };
         t.values.set(key(n.id), String(arg?.value));
         return { ok: true, shown: String(arg?.value) };
@@ -539,7 +543,11 @@ export class FakeCdpTransport implements CdpTransport {
         return { ok: true };
       }
       case "readValue": return f.secure.includes(Number(arg?.id)) ? null : t.values.get(key(arg?.id)) ?? "";
-      case "fileInput": return t.page.fileInputs?.includes(Number(arg?.id)) === true ? { ok: true, multiple: true } : { ok: false, reason: "not a file input" };
+      case "fileInput": {
+        const leaf = frameId === "top" ? t.page.textLeaves?.[Number(arg?.id)] : undefined;
+        if (leaf !== undefined) return { ok: false, reason: "text", ...(leaf === null ? {} : { control: leaf }) };
+        return t.page.fileInputs?.includes(Number(arg?.id)) === true ? { ok: true, multiple: true } : { ok: false, reason: "not a file input" };
+      }
       case "pasteEvent": return { handled: false };
       case "quiet": return { sinceMutationMs: t.page.busy === true ? 0 : 10_000, url: f.url, title: t.page.title, readyState: "complete" };
       case "waitChange": return false;
