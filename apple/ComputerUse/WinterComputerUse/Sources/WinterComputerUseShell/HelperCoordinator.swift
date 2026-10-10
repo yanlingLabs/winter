@@ -9,12 +9,15 @@ public enum HelperNotification: Equatable, Sendable {
     case escPressed(sessionIds: [String])
     case targetLost(targetId: String, reason: String)
     case permissionsChanged(accessibility: Bool, screenRecording: Bool)
+    /// A desktop visit closed (whatever its outcome): the daemon counts every one.
+    case desktopVisited(CUDesktopVisitEvent)
 
     public var method: String {
         switch self {
         case .escPressed: return "escPressed"
         case .targetLost: return "targetLost"
         case .permissionsChanged: return "permissionsChanged"
+        case .desktopVisited: return "desktopVisited"
         }
     }
 
@@ -26,6 +29,16 @@ public enum HelperNotification: Equatable, Sendable {
             return .object(["targetId": .string(targetId), "reason": .string(reason)])
         case .permissionsChanged(let accessibility, let screenRecording):
             return .object(["permissions": .object(["accessibility": .bool(accessibility), "screenRecording": .bool(screenRecording)])])
+        case .desktopVisited(let e):
+            let r = e.report
+            var o: [String: JSONValue] = [
+                "visitId": .string(r.visitId), "sessionId": .string(e.sessionId), "targetId": .string(r.targetId),
+                "app": .string(r.app), "why": .string(r.why), "actions": .number(Double(r.actions)), "ms": .number(Double(r.ms)),
+                "returned": .bool(r.returned),
+            ]
+            if let callId = e.callId { o["callId"] = .string(callId) }
+            if r.userMoved == true { o["userMoved"] = .bool(true) }
+            return .object(o)
         }
     }
 }
@@ -136,7 +149,7 @@ public enum HelperNotification: Equatable, Sendable {
     public func askDesktopVisit(_ p: PromptDesktopVisitParams) async throws -> CUDesktopPromptAnswer {
         let id = p.promptId
         let request = CUDesktopPromptRequest(promptId: id, sessionId: p.sessionId, app: p.app, bundleId: p.bundleId,
-                                             reason: p.reason, timeoutMs: p.timeoutMs)
+                                             reason: p.reason, timeoutMs: p.timeoutMs ?? 60_000, expiresAt: p.expiresAt)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (c: CheckedContinuation<CUDesktopPromptAnswer, Error>) in
                 guard promptWaiters[id] == nil else {
@@ -171,8 +184,12 @@ public enum HelperNotification: Equatable, Sendable {
 
     // MARK: Esc
 
+    /// Esc also closes the open desktop visit at once (the user returned) — wired to the engine by the app.
+    public var onEscape: () -> Void = {}
+
     public func escapePressed() {
         guard !activeScripts.isEmpty else { return }
+        onEscape()
         notify(.escPressed(sessionIds: activeScripts.sorted()))
     }
 
@@ -238,5 +255,10 @@ public enum HelperNotification: Equatable, Sendable {
 
     public func willSendEscape() {
         escapeTap.expectSyntheticEscape(for: Self.syntheticEscapeWindow)
+    }
+
+    /// A desktop visit closed: the daemon hears it (`desktopVisited`).
+    public func desktopVisited(_ visit: CUDesktopVisitEvent) {
+        notify(.desktopVisited(visit))
     }
 }

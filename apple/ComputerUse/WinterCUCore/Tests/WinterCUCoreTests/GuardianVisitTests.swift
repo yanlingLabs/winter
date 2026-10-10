@@ -69,4 +69,16 @@ final class GuardianVisitTests: XCTestCase {
         g.end()
         XCTAssertFalse(g.visiting(now: 1))
     }
+
+    func testAVisitModeLastsWhatItIsGivenAndFollowsTheCap() {
+        var g = started()
+        g.beginVisit(app: 9, now: 0, maxSeconds: 200)
+        XCTAssertTrue(g.visiting(now: 150), "a primitive's own deadline")
+        g.extendVisit(until: 60)
+        XCTAssertFalse(g.visiting(now: 61), "the cap re-armed shorter once it ended")
+        XCTAssertTrue(g.visiting(now: 59))
+        g.endVisit()
+        g.extendVisit(until: 500)
+        XCTAssertFalse(g.visiting(now: 1), "no visit to extend")
+    }
 }

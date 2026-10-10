@@ -60,22 +60,9 @@ extension CUCore {
         if case .key(let k) = p.action, (try? CUKeyChord.parse(k.combo))?.isEscape == true {
             await MainActor.run { [weak self] in self?.events?.willSendEscape() }
         }
-        var outcome: ActOutcome
-        var visit: CUVisitReport?
-        do {
-            outcome = try await queues.run(t.pid) { [self] () -> ActOutcome in try actOnce(p, t, token, inVisit: false) }
-        } catch is CUVisitNeeded {
-            // The background could not do it, its window is on another desktop, and the user allowed a visit: the
-            // act once more, inside one — the foreground implied there. One visit at a time, helper-wide.
-            await visitGate.acquire()
-            defer { visitGate.release() }
-            var inner = p
-            inner.allowForeground = true
-            (outcome, visit) = try await queues.run(t.pid) { [self] () -> (ActOutcome, CUVisitReport) in
-                // `actOnce` shows and logs its own failure; a visit that never arrived logs its own too.
-                try inDesktopVisit(t, why: .act, privatePath: p.privatePath, token: token) { try actOnce(inner, t, token, inVisit: true) }
-            }
-        }
+        let acted = try await actWithVisits(p, t, token)
+        var outcome = acted.0
+        let inVisit = acted.1
         if let paths = outcome.pendingOpen {
             // The queue is released: open now, bounded, and say what happened.
             do {
@@ -94,7 +81,48 @@ extension CUCore {
             : (notes + [outcome.detail].compactMap { $0 }).joined(separator: "; ")
         return TargetActResult(rung: outcome.rung.rawValue, detail: detail, input: outcome.input,
                                inputUnknown: outcome.inputUnknown ? true : nil, focusNow: outcome.focusNow,
-                               focusLost: outcome.focusLost ? true : nil, pageNow: outcome.pageNow, visit: visit)
+                               focusLost: outcome.focusLost ? true : nil, pageNow: outcome.pageNow, inVisit: inVisit ? true : nil)
+    }
+
+    /// The act, with desktop visits (CUCore+Visit): inside the session's open visit when its window is on the
+    /// visited desktop; else in the background; and when that needs its window's desktop — the session's open visit
+    /// (another desktop) is closed first and the act tried again where the user is now (its window may be there:
+    /// no prompt), then, still needing it, a visit opened with the user's say (`desktopVisit`) or
+    /// `needs_desktop_visit` without it. Returns whether it ran inside a visit.
+    func actWithVisits(_ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) async throws -> (ActOutcome, Bool) {
+        // Inside the visit the foreground is implied (the app is in front on its own desktop).
+        var inner = p
+        inner.allowForeground = true
+        if let v = openVisit(of: p.sessionId), onVisitedDesktop(v, t),
+           let id = beginVisitActivity(v, t, callId: p.callId, maxMs: p.visitMaxMs) {
+            defer { endVisitActivity(v, id) }
+            do { return (try await queues.run(t.pid) { [self] in try actOnce(inner, t, token, inVisit: true) }, true) }
+            catch { throw Self.markedInVisit(error) }
+        }
+        var lastNeed: Error
+        do {
+            return (try await queues.run(t.pid) { [self] in try actOnce(p, t, token, inVisit: false) }, false)
+        } catch where Self.needsItsDesktop(error) {
+            lastNeed = error
+        }
+        // It needs its window's desktop: never asked for (nor answered) while the session sits on another one.
+        if await closeVisit(of: p.sessionId, reason: .otherDesktop) {
+            do {
+                return (try await queues.run(t.pid) { [self] in try actOnce(p, t, token, inVisit: false) }, false)
+            } catch where Self.needsItsDesktop(error) {
+                lastNeed = error
+            }
+        }
+        guard p.desktopVisit == true else {
+            throw lastNeed is CUVisitNeeded ? CUError.needsDesktopVisit(t.appName, why: .act) : lastNeed
+        }
+        try token.check()
+        let v = try await openDesktopVisit(t, why: .act, privatePath: p.privatePath, sessionId: p.sessionId, callId: p.callId,
+                                           maxMs: p.visitMaxMs)
+        let id = beginVisitActivity(v, t, callId: p.callId, maxMs: p.visitMaxMs)
+        defer { endVisitActivity(v, id) }
+        do { return (try await queues.run(t.pid) { [self] in try actOnce(inner, t, token, inVisit: true) }, true) }
+        catch { throw Self.markedInVisit(error) }
     }
 
     /// One attempt at the act on the target's pid queue: the floors, the act under the user-view guard, what it

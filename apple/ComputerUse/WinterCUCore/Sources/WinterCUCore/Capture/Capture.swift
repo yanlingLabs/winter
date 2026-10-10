@@ -77,7 +77,7 @@ actor CUCapturer {
         config.captureResolution = .best
         if region != nil { config.sourceRect = area }
         let image = try await shoot(filter: filter, config: config)
-        let encoded = try encode(image, width: w, height: h, quality: budget.quality)
+        let encoded = try encode(image, width: w, height: h, quality: budget.quality, maxBytes: budget.maxBytes)
         return CUCapturedImage(jpeg: encoded.data, width: encoded.width, height: encoded.height, pointsRect: area)
     }
 
@@ -141,7 +141,7 @@ actor CUCapturer {
             guard let composed = ctx.makeImage() else { throw CUError.unsupported("could not compose the displays") }
             image = composed
         }
-        let encoded = try encode(image, width: w, height: h, quality: budget.quality)
+        let encoded = try encode(image, width: w, height: h, quality: budget.quality, maxBytes: budget.maxBytes)
         return CUCapturedImage(jpeg: encoded.data, width: encoded.width, height: encoded.height, pointsRect: union)
     }
 
@@ -195,17 +195,23 @@ actor CUCapturer {
         }
     }
 
-    private func encode(_ image: CGImage, width: Int, height: Int, quality: Double) throws -> (data: Data, width: Int, height: Int) {
-        try Self.encode(image, width: width, height: height, quality: quality)
+    private func encode(_ image: CGImage, width: Int, height: Int, quality: Double, maxBytes: Int?) throws -> (data: Data, width: Int, height: Int) {
+        try Self.encode(image, width: width, height: height, quality: quality, maxBytes: maxBytes)
     }
 
-    static func encode(_ image: CGImage, width: Int, height: Int, quality: Double) throws -> (data: Data, width: Int, height: Int) {
+    /// JPEG within the 3 MiB cap; then, when `maxBytes` is given and the result is over it, the SAME image at the
+    /// same size encoded again down `CUCaptureBudget.maxBytesLadder` (the first that fits, else the last).
+    static func encode(_ image: CGImage, width: Int, height: Int, quality: Double, maxBytes: Int? = nil) throws -> (data: Data, width: Int, height: Int) {
         let result = CUCaptureBudget.encodeWithinCap(width: width, height: height, quality: quality) { w, h, q in
             let img = (w == image.width && h == image.height) ? image : Self.scaled(image, w, h)
             return img.flatMap { Self.jpeg($0, quality: q) }
         }
         guard let result else { throw CUError.unsupported("could not encode the image") }
-        return result
+        guard let maxBytes, result.data.count > maxBytes else { return result }
+        let sized = (result.width == image.width && result.height == image.height) ? image : Self.scaled(image, result.width, result.height)
+        guard let sized else { return result }
+        let fitted = CUCaptureBudget.fitMaxBytes(result.data, quality: quality, maxBytes: maxBytes) { Self.jpeg(sized, quality: $0) }
+        return (fitted, result.width, result.height)
     }
 
     /// The part of the window a capture covers, in window points: all of it, or `region` clipped to it.
@@ -224,7 +230,7 @@ actor CUCapturer {
     /// long edge and tiles from the image's pixels, then JPEG within the byte cap.
     static func encodeWindowImage(_ image: CGImage, pointsRect: CGRect, budget: CUImageBudget) throws -> CUCapturedImage {
         let (w, h) = CUCaptureBudget.targetSize(source: CGSize(width: image.width, height: image.height), budget: budget)
-        let encoded = try encode(image, width: w, height: h, quality: budget.quality)
+        let encoded = try encode(image, width: w, height: h, quality: budget.quality, maxBytes: budget.maxBytes)
         return CUCapturedImage(jpeg: encoded.data, width: encoded.width, height: encoded.height, pointsRect: pointsRect)
     }
 

@@ -41,25 +41,28 @@ final class WireCodingTests: XCTestCase {
         }
     }
 
-    /// 1.7.0 (desktop visits): the new params decode, are absent when not sent, and the results carry `visit`
-    /// only when one happened.
+    /// 1.7.0 (desktop visits): the new params decode, are absent when not sent, the results carry `inVisit` only when
+    /// the primitive ran inside a visit, and a closed visit's report has the spine's keys.
     func testDesktopVisitFields() throws {
-        let act = try decode(TargetActParams.self, #"{"targetId":"t1","sessionId":"s","callId":"c","action":{"kind":"menu","path":["File"]},"access":"full","allowForeground":true,"privatePath":true,"desktopVisit":true}"#)
+        let act = try decode(TargetActParams.self, #"{"targetId":"t1","sessionId":"s","callId":"c","action":{"kind":"menu","path":["File"]},"access":"full","allowForeground":true,"privatePath":true,"desktopVisit":true,"visitMaxMs":45000}"#)
         XCTAssertEqual(act.desktopVisit, true)
+        XCTAssertEqual(act.visitMaxMs, 45_000)
         let old = try decode(TargetActParams.self, #"{"targetId":"t1","sessionId":"s","callId":"c","action":{"kind":"menu","path":["File"]},"access":"full","allowForeground":false,"privatePath":true}"#)
         XCTAssertNil(old.desktopVisit, "an older daemon never asks for a visit")
         XCTAssertNil(try json(old)["desktopVisit"])
-        let shot = try decode(TargetScreenshotParams.self, #"{"targetId":"t1","budget":{"maxLongEdge":800,"quality":0.7},"live":true,"desktopVisit":false}"#)
+        let shot = try decode(TargetScreenshotParams.self, #"{"targetId":"t1","budget":{"maxLongEdge":800,"quality":0.7,"maxBytes":3145728},"live":true,"desktopVisit":false,"visitMaxMs":30000}"#)
         XCTAssertEqual(shot.live, true)
         XCTAssertEqual(shot.desktopVisit, false)
-        let plain = try json(TargetActResult(rung: 2))
-        XCTAssertNil(plain["visit"], "no visit, no key")
-        let visited = try json(TargetActResult(rung: 4, visit: CUVisitReport(ms: 420, returned: true)))
-        XCTAssertEqual(visited["visit"] as? [String: AnyHashable], ["ms": 420, "returned": true])
-        let moved = try json(TargetScreenshotResult(imageBase64: "", mime: "image/jpeg", width: 1, height: 1, shotId: "t1.i1",
-                                                    settled: true, waitedMs: 0,
-                                                    visit: CUVisitReport(ms: 900, returned: false, userMoved: true, detail: "left there")))
-        XCTAssertEqual(moved["visit"] as? [String: AnyHashable], ["ms": 900, "returned": false, "userMoved": true, "detail": "left there"])
+        XCTAssertEqual(shot.visitMaxMs, 30_000)
+        XCTAssertEqual(shot.budget.maxBytes, 3_145_728)
+        XCTAssertNil(try json(TargetActResult(rung: 2))["inVisit"], "not in a visit, no key")
+        XCTAssertEqual(try json(TargetActResult(rung: 4, inVisit: true))["inVisit"] as? Bool, true)
+        let closed = try json(VisitCloseResult(visits: [CUVisitReport(visitId: "v3", targetId: "t1", app: "Safari", why: "live", actions: 4,
+                                                                      ms: 900, returned: false, userMoved: true, detail: "left there")]))
+        XCTAssertEqual((closed["visits"] as? [[String: AnyHashable]])?.first,
+                       ["visitId": "v3", "targetId": "t1", "app": "Safari", "why": "live", "actions": 4, "ms": 900, "returned": false,
+                        "userMoved": true, "detail": "left there"])
+        XCTAssertEqual(try decode(VisitCloseParams.self, #"{"sessionId":"s_1"}"#).sessionId, "s_1")
         let e = CUError.needsDesktopVisit("Safari", why: .live)
         XCTAssertEqual(e.code, "needs_desktop_visit")
         XCTAssertEqual(e.data, ["why": .string("live")])

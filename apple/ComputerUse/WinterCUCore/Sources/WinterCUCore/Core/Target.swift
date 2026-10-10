@@ -129,11 +129,12 @@ final class CUTarget: @unchecked Sendable {
         return before
     }
 
-    /// The window was just shown on its desktop (a visit) and repainted there: an off-screen picture taken after
-    /// differs from the one before for THAT reason, not because the app draws off screen — its freshness is
-    /// unknown again.
-    func forgetOffScreenShot() {
-        lock.lock(); _lastOffScreenShot = nil; lock.unlock()
+    /// The region and budget of the last off-screen or live shot of the window: a desktop visit's return takes the
+    /// window's next baseline picture the same way, so the digests compare.
+    private var _lastStill: (region: CGRect?, budget: CUImageBudget)?
+    var lastStill: (region: CGRect?, budget: CUImageBudget)? {
+        get { lock.lock(); defer { lock.unlock() }; return _lastStill }
+        set { lock.lock(); _lastStill = newValue; lock.unlock() }
     }
 
     /// Actions an app listed for an element but refused (`AXOpen` on Finder's icons), by role: hidden from
