@@ -436,6 +436,25 @@ describe("ComputerV2: the desktop switch end to end", () => {
     expect(heldAfterClose).toBeNull();
   }, 30_000);
 
+  macOnly("a primitive that FAILS inside the open visit (data.inVisit) keeps the visit's foreground lock — the visit is still open", async () => {
+    const w = world({ policy: "bypass", answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "switch") });
+    const v = openVisits(w.fake);
+    let n = 0;
+    w.fake.handlers["target.act"] = (p) => {
+      v.enter(p);
+      // (the first request throws needs_desktop_visit inside enter, before counting)
+      if (++n === 2) throw new FakeHelperError("unsupported", "the button found nothing there", { inVisit: true });
+      return { rung: 4, inVisit: true };
+    };
+    let held: unknown = "unset";
+    w.fake.handlers["target.find"] = () => { held = w.svc.locks.holder(FOREGROUND_LOCK_KEY) ?? null; return { elements: [] }; };
+    const r = await w.run("const notes = await apps.open('Notes')\nawait notes.click(14)\ntry { await notes.click(15) } catch (e) { print(e.name) }\nawait notes.find('a')");
+    expect(text(r)).toContain("Error");
+    expect(held).toMatchObject({ sessionId: "s1" });
+    expect(text(r)).toContain("moved the user to Notes's desktop for 420 ms (2 actions) and back");
+    expect(w.metrics().find((m) => m.primitive === "click" && m.error !== undefined)).toMatchObject({ inVisit: true });
+  }, 30_000);
+
   macOnly("an allowed request the helper did in the background (no visit open) does not keep the foreground lock", async () => {
     const w = world({ policy: "bypass", answer: (c, b) => b.resolve(c.sessionId, c.callId, true, "orb", "switch") });
     const v = openVisits(w.fake);

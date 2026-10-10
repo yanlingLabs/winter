@@ -1055,6 +1055,8 @@ export class ComputerV2Service {
           res = await this.helperCall<ActResult>(ctx, "target.act", { ...params, allowForeground, ...(visit ? { desktopVisit: true, visitMaxMs } : {}) }, metric, actTimeout);
         } catch (err) {
           if (visit && err instanceof HelperUnavailableError) this.noteVisitStranded(ctx, t.name);
+          // A primitive that FAILED inside the open visit leaves it open (`data.inVisit`): the lock stays with it.
+          if (err instanceof HelperRpcError && err.data.inVisit === true) { ctx.visitOpen = true; metric.inVisit = true; }
           if (!(err instanceof HelperRpcError) || attempt >= 2) throw err;
           if (err.code === "needs_desktop_visit" && !visit) {
             // No way to do it without moving the user to the window's desktop: ask (every policy), then visit.
@@ -1160,6 +1162,7 @@ export class ComputerV2Service {
         return shot;
       } catch (err) {
         if (visit && err instanceof HelperUnavailableError) this.noteVisitStranded(ctx, t.name);
+        if (err instanceof HelperRpcError && err.data.inVisit === true) { ctx.visitOpen = true; metric.inVisit = true; }
         throw err;
       } finally {
         if (visit) {
