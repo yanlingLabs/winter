@@ -40,7 +40,28 @@ export interface VerifyContext {
   metrics: readonly Record<string, unknown>[];
   /** The screenshots the daemon returned since the scenario started, judged by their own pixels. */
   shots: readonly ImageStats[];
+  /** A `desktopSwitch` scenario: what the runner saw of the desktop-switch prompt (absent otherwise). */
+  prompt?: PromptObservation;
 }
+
+/**
+ * The desktop-switch prompt as the runner saw it (user ruling 2026-10-10): the session's card(s) that default-allow,
+ * and the helper's own on-screen panel — a NEW on-screen window of the helper while the card waited (`panelSeen`),
+ * gone once it was answered (`panelGone`).
+ */
+export interface PromptObservation {
+  cards: ReadonlyArray<{ toolName?: string; summary?: string; onTimeout?: string; expiresAt?: number; issuedAt?: number }>;
+  panelSeen: boolean;
+  panelGone: boolean;
+}
+
+/** The helper's own process name — the owner of its on-screen prompt panel in the window list. */
+export const HELPER_OWNER = "Winter Computer Use Dev";
+/** How long the user may be away from their desktop during ONE visit (arrive ≤ ~1.5 s, a fresh frame ≤ ~1 s, the
+ *  capture, the return): the suite's bound, with each run's real figure in the scenario's note. */
+export const DESKTOP_VISIT_MAX_AWAY_MS = 3_000;
+/** The reason the live-screenshot scenarios give (it must reach the prompt verbatim). */
+export const LIVE_REASON = "to see what the window shows right now";
 
 export interface FixtureCommand { role: "main" | "user"; cmd: string; args?: Record<string, unknown> }
 
@@ -86,6 +107,12 @@ export interface Scenario {
   userSwitchAfterMs?: number;
   /** The script prelude (default PRELUDE; the generic app checks bring their own, which includes it). */
   prelude?: string;
+  /**
+   * THE DESKTOP SWITCH (user ruling 2026-10-10): the action raises the desktop-switch prompt. The runner answers its
+   * card (`approval_requested` with `onTimeout: "allow"`) after `afterMs` — `allow` (Switch now) or `refuse` — and
+   * looks for the helper's on-screen panel while it waits and after the answer (`VerifyContext.prompt`).
+   */
+  desktopSwitch?: { answer: "allow" | "refuse"; afterMs: number };
   verify(ctx: VerifyContext): Check[];
 }
 
@@ -175,6 +202,25 @@ function screenshotChecks(ctx: VerifyContext): Check[] {
     check(`it shows the fixture's sentinel block (≥ ${SENTINEL_MIN_PIXELS} #FF00FF pixels)`, shots.length > 0 && shots.every((s) => s.sentinelPixels >= SENTINEL_MIN_PIXELS), describe),
   ];
 }
+
+/** The desktop-switch prompt: ONE card that default-allows, naming the app, its bundle id and the reason, and the
+ *  helper's own panel on the user's desktop while it waited — closed once answered. */
+function promptChecks(ctx: VerifyContext): Check[] {
+  const p = ctx.prompt;
+  const cards = p?.cards ?? [];
+  const c = cards[0];
+  return [
+    check("ONE desktop-switch card that default-allows (onTimeout: allow, a minute)", cards.length === 1 && c?.toolName === "ComputerV2" && c?.onTimeout === "allow"
+      && typeof c?.expiresAt === "number" && typeof c?.issuedAt === "number" && c.expiresAt - c.issuedAt === 60_000, JSON.stringify(cards)),
+    check("it names the app, its bundle id and the reason", (c?.summary ?? "").includes(`${FIXTURE_APP} (${FIXTURE_BUNDLE})`) && (c?.summary ?? "").includes(LIVE_REASON), String(c?.summary)),
+    check("the helper's own prompt appeared on your desktop while it waited", p?.panelSeen === true, "no new on-screen window of the helper"),
+    check("…and closed once the card was answered", p?.panelGone === true, "the helper's prompt window was still on screen"),
+  ];
+}
+
+/** The metrics line of the scenario's live screenshot. */
+const liveShotMetric = (ctx: VerifyContext): Record<string, unknown> | undefined =>
+  ctx.metrics.find((m) => m.primitive === "screenshot" && m.visitAnswer !== undefined);
 
 const DOC_TEXT = "Doc line: Mixed CASE ✓ ünï 日本 & <tag> 100%";
 /** ~3,000 characters over many lines: a paste that, typed as keys, ran out a 30 s script (the live failure). */
@@ -614,6 +660,46 @@ const off = await win("Fixture Offspace");
 const img = await off.screenshot({ emit: false });
 report({ w: img.width, h: img.height });`,
     verify: (ctx) => [ok(ctx), ...screenshotChecks(ctx), check("a real size", Number(fact(ctx, "w")) > 100 && Number(fact(ctx, "h")) > 100)],
+  },
+  // ── the desktop switch (user ruling 2026-10-10) ─────────────────────────────────────────────────────────────
+  // A LIVE picture of a window on another desktop can only be had there: the user is ASKED (the card and the helper's
+  // on-screen panel), then moved there for that one capture and straight back. Refused: nothing moves at all. These
+  // run after the capture-only rows (a visit shows the window on screen, after which accessibility may see it).
+  {
+    name: "desktop switch: a live screenshot off-Space, refused — NeedsForeground, nothing moved", group: "desktop-switch",
+    desktopSwitch: { answer: "refuse", afterMs: 1_000 },
+    code: `
+const off = await win("Fixture Offspace");
+try {
+  const img = await off.screenshot({ emit: false, live: true, reason: ${JSON.stringify(LIVE_REASON)} });
+  report({ shot: true, w: img.width });
+} catch (e) { report({ error: e.name, message: e.message }); }`,
+    verify: (ctx) => [
+      ok(ctx),
+      ...promptChecks(ctx),
+      check("the screenshot failed with NeedsForeground, saying the user refused", fact(ctx, "error") === "NeedsForeground" && /refused to be moved/.test(String(fact(ctx, "message"))),
+        `${String(fact(ctx, "error"))}: ${String(fact(ctx, "message"))}`),
+      check("no visit was made (metrics)", ctx.metrics.every((m) => m.visit === undefined) && liveShotMetric(ctx)?.visitAnswer === "refuse", JSON.stringify(liveShotMetric(ctx))),
+    ],
+  },
+  {
+    name: "desktop switch: a live screenshot off-Space — the prompt, ONE visit, the user back on their desktop", group: "desktop-switch",
+    desktopSwitch: { answer: "allow", afterMs: 1_500 },
+    allowExcursionMs: DESKTOP_VISIT_MAX_AWAY_MS,
+    code: `
+const off = await win("Fixture Offspace");
+const img = await off.screenshot({ emit: false, live: true, reason: ${JSON.stringify(LIVE_REASON)} });
+report({ w: img.width, h: img.height });`,
+    verify: (ctx) => {
+      const m = liveShotMetric(ctx);
+      const visit = m?.visit as { count?: number; ms?: number; returned?: boolean } | undefined;
+      return [
+        ok(ctx), ...screenshotChecks(ctx), ...promptChecks(ctx),
+        check("the result says the user was moved there and back", new RegExp(`moved the user to ${FIXTURE_APP}'s desktop for \\d+ ms and back`).test(ctx.output), ctx.output.slice(0, 400)),
+        check("ONE visit, the user verified back (metrics)", visit?.count === 1 && visit?.returned === true && m?.visitAnswer === "allow", JSON.stringify(m)),
+        check("a real size", Number(fact(ctx, "w")) > 100 && Number(fact(ctx, "h")) > 100),
+      ];
+    },
   },
   {
     // The guardian protects the user FROM the agent, never from themselves: an app the agent never touched coming

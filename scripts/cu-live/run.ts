@@ -31,7 +31,10 @@
  *     full screen = on its own Space) and "Winter CU User App" (frontmost: the user's app);
  *   - `cu-live-tool monitor`: the frontmost app, the active Space and the HID idle time every 20 ms (+ every
  *     activation) — every scenario asserts the user's frontmost app and Space never change, from its start until 3 s
- *     after it, and a drop of the HID idle time (real input) aborts the run;
+ *     after it, and a drop of the HID idle time (real input) aborts the run. The one consented exception is the
+ *     desktop switch (user ruling 2026-10-10): its scenarios answer the prompt (the card here, the helper's own
+ *     on-screen panel looked for in the window list) and assert ONE visit, the user back within
+ *     `DESKTOP_VISIT_MAX_AWAY_MS` — or, refused, that nothing moved at all;
  *   - `cu-live-viewprobe`: the helper's mirror stream (`view.*`), checked for frames, blank frames and repeats;
  *   - two sessions on the agent SDK's prompt-scripted double (`winter-test/calls`): `bypass` (no cards) and `ask`
  *     (the per-app card, answered here).
@@ -53,7 +56,7 @@ import {
   renderTable, statusOf, summarizeTop, type Check, type FixtureEvent, type FocusBaseline, type MonitorSample, type ScenarioResult,
 } from "./lib";
 import { REAL_APP_SCENARIOS, realAppsPreflight, withRealDir, type RealAppsRun } from "./real-apps";
-import { expectedCardSummary, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage, type ImageStats, type ProbeEvent, type Scenario } from "./scenarios";
+import { expectedCardSummary, HELPER_OWNER, PRELUDE, SCENARIOS, scriptOf, usesDocsPage, usesWebPage, type ImageStats, type ProbeEvent, type PromptObservation, type Scenario } from "./scenarios";
 import { DEFAULT_GENERIC_APPS, describePlan, GENERIC_PRELUDE, genericScenario, offSpacePlan, offSpaceSkipReason, onDesktopPlan, visualSkipReason, parseApps, resolveApp, restorePlan, SCRIPTS, type GenericApp, type ResolveDeps } from "./generic";
 
 // ── thresholds (env overrides) ───────────────────────────────────────────────────────────────────────────────────
@@ -298,8 +301,50 @@ async function openSession(client: DaemonClient, cwd: string, policy: "bypass" |
   return sessionId;
 }
 
-/** Send one scripted turn and wait for its end; answers the ComputerV2 cards with `answer` (ask sessions). */
-async function runTurn(client: DaemonClient, sessionId: string, text: string, ms: number, answer?: Scenario["answer"]): Promise<{ output: string; isError: boolean; cards: SessionEvent[] }> {
+/**
+ * THE DESKTOP SWITCH (user ruling 2026-10-10): a scenario's default-allow card is answered by this rig — `afterMs`
+ * after it appears, Switch now (`allow`) or Don't switch (`refuse`) — and the helper's own prompt is looked for in the
+ * window list: a NEW on-screen window of the helper halfway through the wait (`panelSeen`), gone a second after the
+ * answer (`panelGone`). Window ids and on-screen flags only — no titles, no grant needed.
+ */
+interface DesktopSwitchRig {
+  readonly observation: PromptObservation & { cards: Array<PromptObservation["cards"][number]> };
+  card(e: SessionEvent, respond: (approved: boolean) => Promise<unknown>): void;
+  /** Every answered card has been checked after its answer. */
+  done(): Promise<void>;
+}
+
+function desktopSwitchRig(tool: string, plan: NonNullable<Scenario["desktopSwitch"]>): DesktopSwitchRig {
+  const onScreen = (): Set<number> => new Set(sh(tool, ["windows", HELPER_OWNER]).stdout.split("\n").flatMap((l) => {
+    try { const w = JSON.parse(l) as { id: number; onScreen: boolean }; return w.onScreen ? [w.id] : []; } catch { return []; }
+  }));
+  const before = onScreen();
+  const observation: DesktopSwitchRig["observation"] = { cards: [], panelSeen: false, panelGone: false };
+  const pending: Array<Promise<void>> = [];
+  return {
+    observation,
+    card(e, respond) {
+      const c = e as SessionEvent & { toolName?: string; summary?: string; onTimeout?: string; expiresAt?: number; issuedAt?: number };
+      observation.cards.push({ toolName: c.toolName, summary: c.summary, onTimeout: c.onTimeout, expiresAt: c.expiresAt, issuedAt: c.issuedAt });
+      pending.push((async () => {
+        const half = Math.floor(plan.afterMs / 2);
+        await sleep(half);
+        const during = [...onScreen()].filter((id) => !before.has(id));
+        observation.panelSeen = observation.panelSeen || during.length > 0;
+        await sleep(plan.afterMs - half);
+        await respond(plan.answer === "allow").catch(() => {});
+        await sleep(1_000);
+        const after = onScreen();
+        observation.panelGone = during.length > 0 && during.every((id) => !after.has(id));
+      })());
+    },
+    done: async () => { await Promise.all(pending); },
+  };
+}
+
+/** Send one scripted turn and wait for its end; answers the ComputerV2 cards with `answer` (ask sessions), and a
+ *  desktop-switch card (`onTimeout: "allow"`) through `rig` when the scenario has one — else it is refused. */
+async function runTurn(client: DaemonClient, sessionId: string, text: string, ms: number, answer?: Scenario["answer"], rig?: DesktopSwitchRig): Promise<{ output: string; isError: boolean; cards: SessionEvent[] }> {
   const from = client.events.length;
   const cards: SessionEvent[] = [];
   const answered = new Set<string>();
@@ -309,8 +354,14 @@ async function runTurn(client: DaemonClient, sessionId: string, text: string, ms
       const e = client.events[i]! as SessionEvent & { callId?: string; toolName?: string };
       if (e.type !== "approval_requested" || e.sessionId !== sessionId || e.callId === undefined || answered.has(e.callId)) continue;
       answered.add(e.callId);
+      const callId = e.callId;
+      if ((e as { onTimeout?: string }).onTimeout === "allow" && rig !== undefined) {
+        rig.card(e, (approved) => client.call(METHODS.approvalRespond, { sessionId, callId, approved, ...(approved ? { optionId: "switch" } : {}) }));
+        continue;
+      }
       cards.push(e);
-      // Only the per-app card is approved; any other card (a foreground request would hand over the real pointer) is denied.
+      // Only the per-app card is approved; any other card (a foreground request would hand over the real pointer, a
+      // desktop switch would move the user) is denied.
       const approved = answer !== undefined && answer !== false && (e as { summary?: string }).summary === expectedCardSummary();
       void client.call(METHODS.approvalRespond, { sessionId, callId: e.callId, approved, ...(approved ? { optionId: answer } : {}) }).catch(() => {});
     }
@@ -789,8 +840,10 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           switchedAt = Date.now();
           await bringToFront(finderPid, "Finder (the user's switch)");
         })();
-        const turn = await runTurn(where.client, where.sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer);
+        const rig = s.desktopSwitch === undefined ? undefined : desktopSwitchRig(built.tool, s.desktopSwitch);
+        const turn = await runTurn(where.client, where.sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer, rig);
         await userSwitch;
+        await rig?.done();
         // A prompt during the action stops the run here, before this row is judged (its failure would be the prompt's).
         abortIfPrompt();
         const t1 = Date.now();
@@ -809,6 +862,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           output: turn.output, isError: turn.isError, facts, events, since,
           ...(state === undefined ? {} : { state }), probe: probe!.items.filter((p) => p.t >= since), metrics: readMetrics(home, since),
           shots: shotsSince(built.tool, home, since),
+          ...(rig === undefined ? {} : { prompt: rig.observation }),
         });
         if (s.session === "ask") checks.push(...cardChecks(turn.cards, s.foregroundCard === true));
         const leaked = events.filter((e) => e.role === "user" && (e.ev === "user.key" || e.ev === "user.mouse") && e.t >= since && e.t <= t1);
@@ -821,6 +875,7 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
         // Whether the deliberate self-activation REALLY took (macOS 14+ may refuse it) — else the scenario proves less.
         const steals = events.filter((e) => e.role === "main" && e.ev === "activated" && e.t >= since);
         const note = typeof facts.skipped === "string" ? `skipped: ${facts.skipped}`
+          : s.desktopSwitch !== undefined ? `away from your desktop ${focus.longestAwayMs} ms (bound ${s.allowExcursionMs ?? 0} ms)`
           : s.allowExcursionMs === undefined ? (s.name.startsWith("bind off-Space") ? `off-Space by ${offspaceMethod}` : undefined)
             : steals.length === 0 ? "no steal attempt was logged"
               : `steal ${steals.some((e) => e.took === true) ? "TOOK" : "did not take (macOS refused the activation)"}; your app was away ${focus.longestAwayMs} ms`;
