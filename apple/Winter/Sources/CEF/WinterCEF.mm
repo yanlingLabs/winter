@@ -4,9 +4,11 @@
 #import <objc/runtime.h>
 
 #include <algorithm>
+#include <cctype>
 #include <climits>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
@@ -31,6 +33,13 @@
 #include "include/cef_devtools_message_observer.h"
 #include "include/cef_parser.h"
 #include "include/cef_registration.h"
+// ComputerV2 Phase 2 — the four handlers a held tab's native UI is answered through (the browser link's
+// automation holds, `WinterCEFSetAutomationNativeUI`). Implemented by `WinterClient`; with no flag set
+// each answers exactly as CEF's default would.
+#include "include/cef_dialog_handler.h"
+#include "include/cef_download_handler.h"
+#include "include/cef_jsdialog_handler.h"
+#include "include/cef_permission_handler.h"
 // editor-plumbing Task 2 — the `winter-editor://` scheme. `cef_resource_handler.h` and
 // `cef_response.h` both arrive transitively through `cef_scheme.h`; named because this file
 // IMPLEMENTS `CefResourceHandler` and `CefSchemeHandlerFactory`.
@@ -502,15 +511,35 @@ static NSMutableArray<WinterCEFPendingBrowser *> *g_pending = nil;
 /// `WinterClient` CEF holds; this handle exists only so `WinterCEFCloseBrowser` can find a creation BY
 /// PARENT VIEW and mark it abandoned, and it zeroes itself the moment the creation settles.
 @property(nonatomic, weak) WinterCEFBrowserCreation *creation;
+/// ComputerV2 Phase 2 — the browser link's `WinterCEFAutomationNativeUI` flags for this tab. Zero
+/// (every handler at CEF's default) unless the link holds the tab.
+@property(nonatomic) uint32_t automationNativeUI;
+/// Where this tab's DevTools events go (`WinterCEFSetDevToolsEventObserver`); `nil` drops them.
+@property(nonatomic, copy) void (^devToolsEventObserver)(NSString *, NSData *, NSString *);
+/// Told when this tab's renderer dies (`WinterCEFSetRendererCrashObserver`).
+@property(nonatomic, copy) void (^crashObserver)(void);
+/// The JS dialog this tab is holding under `WinterCEFAutomationHoldsJSDialogs`, until it is answered.
+- (void)holdDialog:(CefRefPtr<CefJSDialogCallback>)callback;
+- (CefRefPtr<CefJSDialogCallback>)takeHeldDialog;
 @end
 
-@implementation WinterCEFTabBridge
+@implementation WinterCEFTabBridge {
+  CefRefPtr<CefJSDialogCallback> _heldDialog;
+}
 - (instancetype)init {
   if ((self = [super init])) {
     _url = @"";
     _title = @"";
   }
   return self;
+}
+- (void)holdDialog:(CefRefPtr<CefJSDialogCallback>)callback {
+  _heldDialog = callback;
+}
+- (CefRefPtr<CefJSDialogCallback>)takeHeldDialog {
+  CefRefPtr<CefJSDialogCallback> taken = _heldDialog;
+  _heldDialog = nullptr;
+  return taken;
 }
 @end
 
@@ -703,17 +732,173 @@ void FailAllPendingCDP(int browser_id, NSString *reason) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// ComputerV2 Phase 2: the browser link's half of the CDP door
+// ---------------------------------------------------------------------------
+
+/// **The last DevTools message id handed out on each browser, by EITHER door.** CEF assigns
+/// `ExecuteDevToolsMethod`'s ids itself ("based on previous values") and knows nothing about the ids
+/// in raw `SendDevToolsMessage` text, so a raw message given an id of its own could later collide with
+/// one CEF assigns — and the pending registry, keyed by id, would settle the wrong call. So every id
+/// is drawn from here: a raw message takes the next one, and `ExecuteDevToolsMethod` is SUGGESTED the
+/// next one (it answers `max(suggested, its own next)`, recorded right back). One counter, no overlap.
+std::map<int, int> g_cdp_last_message_id;
+
+int SuggestedCDPMessageId(int browser_id) {
+  return g_cdp_last_message_id[browser_id] + 1;
+}
+
+void NoteCDPMessageId(int browser_id, int message_id) {
+  int &last = g_cdp_last_message_id[browser_id];
+  if (message_id > last) {
+    last = message_id;
+  }
+}
+
+/// Whether a failure payload is the browser's own protocol error (`{"code": …, "message": …}`) rather
+/// than one this file synthesised (`CDPReasonJSON`, `{"message": …}` only).
+bool PayloadIsProtocolError(NSString *payload) {
+  NSData *data = [payload dataUsingEncoding:NSUTF8StringEncoding];
+  if (data == nil) {
+    return false;
+  }
+  id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+  return [parsed isKindOfClass:[NSDictionary class]] &&
+         [((NSDictionary *)parsed)[@"code"] isKindOfClass:[NSNumber class]];
+}
+
+/// **The decisions behind `WinterCEFAutomationNativeUI`**, one function per kind — called by the
+/// handlers below AND by `WinterCEFAutomationDecisionsForFlags`, so the seam reads the real answers.
+bool AutomationHoldsJSDialogs(uint32_t flags) { return (flags & WinterCEFAutomationHoldsJSDialogs) != 0; }
+bool AutomationDeniesPermissions(uint32_t flags) { return (flags & WinterCEFAutomationDeniesPermissions) != 0; }
+bool AutomationCancelsFileChooser(uint32_t flags) { return (flags & WinterCEFAutomationCancelsFileChooser) != 0; }
+bool AutomationCancelsDownloads(uint32_t flags) { return (flags & WinterCEFAutomationCancelsDownloads) != 0; }
+
+/// Take a JS dialog as a held, never-shown custom dialog — or answer `false` to leave it to CEF's
+/// default, which is what every tab the link does not hold gets. NOT `suppress_message`: a suppressed
+/// dialog is cancelled on the spot, and the agent must be able to read it (DevTools reports it as
+/// `Page.javascriptDialogOpening`) and choose OK or Cancel (`Page.handleJavaScriptDialog`).
+bool HoldJSDialog(WinterCEFTabBridge *bridge, CefRefPtr<CefJSDialogCallback> callback) {
+  if (bridge == nil || !callback || !AutomationHoldsJSDialogs(bridge.automationNativeUI)) {
+    return false;
+  }
+  [bridge holdDialog:callback];
+  Log("js-dialog-held (an automated tab: never shown; DevTools or the link answers it)");
+  return true;
+}
+
+/// The child session a raw DevTools message is an EVENT of, or `nil`.
+///
+/// A flattened child target's messages (an out-of-process iframe) arrive on the browser's one
+/// DevTools connection with a top-level `"sessionId"` — and CEF's structured `OnDevToolsEvent` drops
+/// that key, so the raw observer must catch them. It runs on EVERY message, a multi-megabyte
+/// screenshot result included, so it first makes a byte test that parses nothing: Chromium appends a
+/// child's `sessionId` as the message's LAST key, so only a message ending `,"sessionId":"<id>"}` can
+/// be one (a nested `sessionId`, as in `Target.attachedToTarget`'s params, ends `"}}`). Results go to
+/// `OnDevToolsMethodResult` like the tab's own (their ids are unique per browser); only events with a
+/// session are parsed here.
+NSString *ChildSessionEventOf(const char *bytes, size_t size, NSString **outMethod, NSData **outParams) {
+  static const char kKey[] = ",\"sessionId\":\"";
+  const size_t keyLength = sizeof(kKey) - 1;
+  if (bytes == nullptr || size < keyLength + 3 || bytes[size - 1] != '}' || bytes[size - 2] != '"') {
+    return nil;
+  }
+  const size_t closingQuote = size - 2;
+  size_t valueStart = closingQuote;
+  while (valueStart > 0 && bytes[valueStart - 1] != '"') {
+    const unsigned char c = static_cast<unsigned char>(bytes[valueStart - 1]);
+    if (!(isalnum(c) || c == '-' || c == '_' || c == '.') || closingQuote - valueStart >= 128) {
+      return nil;
+    }
+    valueStart -= 1;
+  }
+  if (valueStart == closingQuote || valueStart < keyLength) {
+    return nil;
+  }
+  if (memcmp(bytes + valueStart - keyLength, kKey, keyLength) != 0) {
+    return nil;
+  }
+  if (size >= 6 && memcmp(bytes, "{\"id\":", 6) == 0) {
+    return nil;  // a result — it settles through `OnDevToolsMethodResult`
+  }
+  NSData *data = [NSData dataWithBytes:bytes length:size];
+  id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+  if (![parsed isKindOfClass:[NSDictionary class]]) {
+    return nil;
+  }
+  NSDictionary *message = parsed;
+  NSString *method = message[@"method"];
+  NSString *session = message[@"sessionId"];
+  if (message[@"id"] != nil || ![method isKindOfClass:[NSString class]] ||
+      ![session isKindOfClass:[NSString class]]) {
+    return nil;
+  }
+  id params = message[@"params"];
+  if (![params isKindOfClass:[NSDictionary class]]) {
+    params = @{};
+  }
+  if (outMethod != nullptr) {
+    *outMethod = method;
+  }
+  if (outParams != nullptr) {
+    *outParams = [NSJSONSerialization dataWithJSONObject:params options:0 error:nil] ?: [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+  }
+  return session;
+}
+
 /// **The reply side of the CDP door.** One instance per open browser, alive for exactly as long as
 /// its registration is (`g_cdp_registrations`).
 ///
-/// Only two of the five callbacks are overridden, and the two that are left alone are left alone on
-/// purpose. `OnDevToolsMessage` would see every message before it is dispatched — returning `true`
-/// from it would SUPPRESS the structured callbacks below, which is the opposite of what this needs —
-/// and `OnDevToolsEvent` fires only while a domain's notifications are enabled, which nothing here
-/// enables (B2's verbs are all method calls). `OnDevToolsAgentAttached` is a fact with no consequence
-/// for a caller that is already waiting.
+/// B2 overrode only the two result callbacks (its verbs are all method calls and enable no domain).
+/// ComputerV2 Phase 2's browser link enables domains and needs their EVENTS, so two more are
+/// overridden, each narrowly:
+///
+///   * `OnDevToolsEvent` — the tab's own events, handed to the tab's `devToolsEventObserver` (unset
+///     for every tab the link does not hold, so nothing changes for those);
+///   * `OnDevToolsMessage` — answers `true` (handled) ONLY for a flattened child target's event,
+///     which the structured callback would deliver without its session (`ChildSessionEventOf`).
+///     Every other message — every result, the old consumer's included, and every event of the tab
+///     itself — answers `false` and reaches the structured callbacks exactly as before.
+///
+/// `OnDevToolsAgentAttached` is a fact with no consequence for a caller that is already waiting.
 class WinterCDPObserver : public CefDevToolsMessageObserver {
  public:
+  bool OnDevToolsMessage(CefRefPtr<CefBrowser> browser, const void *message, size_t message_size) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (!browser) {
+      return false;
+    }
+    NSString *method = nil;
+    NSData *params = nil;
+    NSString *session = ChildSessionEventOf(static_cast<const char *>(message), message_size, &method, &params);
+    if (session == nil) {
+      return false;
+    }
+    WinterCEFTabBridge *bridge = OpenBrowserRecordFor(browser).bridge;
+    if (bridge.devToolsEventObserver != nil) {
+      bridge.devToolsEventObserver(method, params, session);
+    }
+    return true;
+  }
+
+  void OnDevToolsEvent(CefRefPtr<CefBrowser> browser,
+                       const CefString &method,
+                       const void *params,
+                       size_t params_size) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (!browser) {
+      return;
+    }
+    WinterCEFTabBridge *bridge = OpenBrowserRecordFor(browser).bridge;
+    if (bridge.devToolsEventObserver == nil) {
+      return;
+    }
+    // "|params| is only valid for the scope of this callback" — copied, since the observer hands it on.
+    NSData *data = (params != nullptr && params_size > 0) ? [NSData dataWithBytes:params length:params_size]
+                                                          : [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+    bridge.devToolsEventObserver([NSString stringWithUTF8String:method.ToString().c_str()] ?: @"", data, nil);
+  }
+
   /// A method call finished. `message_id` is the id `ExecuteDevToolsMethod` returned to the caller,
   /// which is the whole correlation: `result` is the protocol's `"result"` dictionary on success and
   /// its `"error"` dictionary on failure (`cef_devtools_message_observer.h`), and both are already
@@ -1027,6 +1212,7 @@ void ForgetOpenBrowser(CefRefPtr<CefBrowser> browser) {
   // drains with it), and the agent was told "timed out" — which for a dead renderer is true.
   FailAllPendingCDP(browser->GetIdentifier(), @"the tab's browser closed before the result arrived");
   g_cdp_registrations.erase(browser->GetIdentifier());
+  g_cdp_last_message_id.erase(browser->GetIdentifier());
 }
 
 /// Push the live snapshot to whoever is watching. Main thread by construction — CEF's UI thread IS
@@ -1408,7 +1594,11 @@ class WinterClient : public CefClient,
                     public CefLoadHandler,
                     public CefDisplayHandler,
                     public CefRequestHandler,
-                    public CefContextMenuHandler {
+                    public CefContextMenuHandler,
+                    public CefJSDialogHandler,
+                    public CefPermissionHandler,
+                    public CefDialogHandler,
+                    public CefDownloadHandler {
  public:
   /// **ONE CLIENT PER BROWSER**, holding the in-flight record for the creation it was made for and
   /// the tab that creation belongs to. See `CreateBrowserNow` for why the client — rather than a
@@ -1515,6 +1705,128 @@ class WinterClient : public CefClient,
     }
     Log("render-process-terminated (id=%d, status=%d, error=%d)",
         browser ? browser->GetIdentifier() : 0, static_cast<int>(status), error_code);
+    // ComputerV2 Phase 2: the browser link reports a held tab's crash as `tabGone {reason: crashed}`.
+    // The page's held dialog went with the renderer; its callback is dropped, never run.
+    WinterCEFTabBridge *tab = Tab();
+    if (tab != nil) {
+      [tab takeHeldDialog];
+      if (tab.crashObserver != nil) {
+        tab.crashObserver();
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // ComputerV2 Phase 2 — the native UI of a tab the browser link holds
+  //
+  // Each handler checks the tab's `automationNativeUI` flags (`WinterCEFSetAutomationNativeUI`) and,
+  // with the flag clear, answers `false` — CEF's documented default, i.e. exactly what this client did
+  // when it installed no such handler at all. So a tab nobody automates behaves as it always has, and a
+  // held tab shows nothing: no window, no sheet, no panel, and nothing taking the user's focus.
+  // ---------------------------------------------------------------------------
+
+  CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override { return this; }
+  CefRefPtr<CefPermissionHandler> GetPermissionHandler() override { return this; }
+  CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
+  CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
+
+  bool OnJSDialog(CefRefPtr<CefBrowser> browser,
+                  const CefString &origin_url,
+                  JSDialogType dialog_type,
+                  const CefString &message_text,
+                  const CefString &default_prompt_text,
+                  CefRefPtr<CefJSDialogCallback> callback,
+                  bool &suppress_message) override {
+    CEF_REQUIRE_UI_THREAD();
+    return HoldJSDialog(Tab(), callback);
+  }
+
+  bool OnBeforeUnloadDialog(CefRefPtr<CefBrowser> browser,
+                            const CefString &message_text,
+                            bool is_reload,
+                            CefRefPtr<CefJSDialogCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    return HoldJSDialog(Tab(), callback);
+  }
+
+  /// "Called to cancel any pending dialogs and reset any saved dialog state" (a navigation, among
+  /// others). The page has moved on, so a held callback is DROPPED — never run: running one whose
+  /// dialog the browser already tore down could answer twice.
+  void OnResetDialogState(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (WinterCEFTabBridge *tab = Tab()) {
+      [tab takeHeldDialog];
+    }
+  }
+
+  void OnDialogClosed(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (WinterCEFTabBridge *tab = Tab()) {
+      [tab takeHeldDialog];
+    }
+  }
+
+  bool OnRequestMediaAccessPermission(CefRefPtr<CefBrowser> browser,
+                                      CefRefPtr<CefFrame> frame,
+                                      const CefString &requesting_origin,
+                                      uint32_t requested_permissions,
+                                      CefRefPtr<CefMediaAccessCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    WinterCEFTabBridge *tab = Tab();
+    if (tab == nil || !callback || !AutomationDeniesPermissions(tab.automationNativeUI)) {
+      return false;
+    }
+    callback->Cancel();
+    Log("media-access-denied (an automated tab)");
+    return true;
+  }
+
+  bool OnShowPermissionPrompt(CefRefPtr<CefBrowser> browser,
+                              uint64_t prompt_id,
+                              const CefString &requesting_origin,
+                              uint32_t requested_permissions,
+                              CefRefPtr<CefPermissionPromptCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    WinterCEFTabBridge *tab = Tab();
+    if (tab == nil || !callback || !AutomationDeniesPermissions(tab.automationNativeUI)) {
+      return false;
+    }
+    callback->Continue(CEF_PERMISSION_RESULT_DENY);
+    Log("permission-prompt-denied (an automated tab)");
+    return true;
+  }
+
+  bool OnFileDialog(CefRefPtr<CefBrowser> browser,
+                    FileDialogMode mode,
+                    const CefString &title,
+                    const CefString &default_file_path,
+                    const std::vector<CefString> &accept_filters,
+                    const std::vector<CefString> &accept_extensions,
+                    const std::vector<CefString> &accept_descriptions,
+                    CefRefPtr<CefFileDialogCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    WinterCEFTabBridge *tab = Tab();
+    if (tab == nil || !callback || !AutomationCancelsFileChooser(tab.automationNativeUI)) {
+      return false;
+    }
+    callback->Cancel();
+    Log("file-chooser-cancelled (an automated tab)");
+    return true;
+  }
+
+  /// `true` is CEF's own default here; a held tab refuses, so no download starts and nothing asks
+  /// where to save one. (With the flag clear, `OnBeforeDownload`'s default then cancels it for this
+  /// Alloy-style browser, as it always has.)
+  bool CanDownload(CefRefPtr<CefBrowser> browser,
+                   const CefString &url,
+                   const CefString &request_method) override {
+    CEF_REQUIRE_UI_THREAD();
+    WinterCEFTabBridge *tab = Tab();
+    if (tab != nil && AutomationCancelsDownloads(tab.automationNativeUI)) {
+      Log("download-refused (an automated tab)");
+      return false;
+    }
+    return true;
   }
 
   /// **A popup becomes a PANEL TAB — and CEF still never creates a window.** Those are two separate
@@ -3081,10 +3393,15 @@ void WinterCEFExecuteCDP(NSView *parent,
     params = parsed->GetDictionary();
   }
 
-  // 0 = "assign the next id yourself". Passing our own would collide with the sequence CEF hands to
-  // any other session on the same browser (a DevTools front-end the user opened), and the id is only
-  // ever used to correlate — it is never chosen for meaning.
-  const int messageId = browser->GetHost()->ExecuteDevToolsMethod(0, CefString(method), params);
+  // ComputerV2 Phase 2: the id is SUGGESTED from the browser's one counter rather than left to CEF
+  // (`0`), because the browser link's raw `SendDevToolsMessage` path picks ids too, and only one
+  // counter for both can keep them apart (`g_cdp_last_message_id`). CEF answers the larger of the
+  // suggestion and its own next id, which is recorded back. Ids are per DevTools CLIENT, so a
+  // DevTools front-end the user opened has its own sequence either way; the id is still only ever
+  // used to correlate — never chosen for meaning.
+  const int browserId = browser->GetIdentifier();
+  const int messageId =
+      browser->GetHost()->ExecuteDevToolsMethod(SuggestedCDPMessageId(browserId), CefString(method), params);
   if (messageId <= 0) {
     // "will return the assigned message ID if called on the UI thread and the message was
     // successfully submitted for validation, otherwise 0" — so this is a submit that never happened,
@@ -3093,6 +3410,7 @@ void WinterCEFExecuteCDP(NSView *parent,
     answer(NO, CDPReasonJSON(@"the browser refused to submit the DevTools method"));
     return;
   }
+  NoteCDPMessageId(browserId, messageId);
   // **The ordering assumption, stated rather than assumed.** A DevTools method result travels back
   // through the agent, never re-entrantly out of the call above, so registering after the submit is
   // safe — but if that were ever untrue the reply would find no pending entry and be dropped, and
@@ -3100,6 +3418,197 @@ void WinterCEFExecuteCDP(NSView *parent,
   // on this line, and the caller's own deadline is what covers it (`PanelCommandConsumer`'s
   // abandonment timer, which exists for the app-is-wedged case anyway).
   RememberPendingCDP(browser->GetIdentifier(), messageId, answer);
+}
+
+// ---------------------------------------------------------------------------
+// ComputerV2 Phase 2: the browser link's doors
+// ---------------------------------------------------------------------------
+
+void WinterCEFSendCDP(NSView *parent,
+                     const char *method,
+                     const char *paramsJSON,
+                     const char *cdpSessionId,
+                     WinterCEFCDPStatusCompletion completion) {
+  if (completion == nil) {
+    Log("cdp REFUSED: no completion block");
+    return;
+  }
+  WinterCEFCDPStatusCompletion answer = [completion copy];
+  if (method == nullptr || *method == '\0') {
+    answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"no DevTools method was named"));
+    return;
+  }
+  if (!g_initialized) {
+    answer(WinterCEFCDPStatusNotLive, CDPReasonJSON(@"the browser engine is not running"));
+    return;
+  }
+  auto browser = BrowserForParent(parent);
+  if (!browser || !browser->GetHost()) {
+    answer(WinterCEFCDPStatusNotLive, CDPReasonJSON(@"this tab has no live browser"));
+    return;
+  }
+  const int browserId = browser->GetIdentifier();
+  // The shared registry speaks `(ok, payload)`; this door's caller needs the KIND of failure. A failure
+  // the browser reported carries the protocol's numeric `code`; one this file decided (the browser
+  // closed, the agent detached — `FailAllPendingCDP`) carries only a message.
+  WinterCEFCDPCompletion settle = ^(BOOL ok, NSString *payload) {
+    if (ok) {
+      answer(WinterCEFCDPStatusOK, payload ?: @"{}");
+    } else {
+      answer(PayloadIsProtocolError(payload) ? WinterCEFCDPStatusProtocolError : WinterCEFCDPStatusGone,
+             payload ?: CDPReasonJSON(@"the DevTools method failed without a reason"));
+    }
+  };
+
+  if (cdpSessionId == nullptr || *cdpSessionId == '\0') {
+    // The tab's own session: the structured door, as `WinterCEFExecuteCDP` uses it.
+    CefRefPtr<CefDictionaryValue> params;
+    if (paramsJSON != nullptr && *paramsJSON != '\0') {
+      CefRefPtr<CefValue> parsed = CefParseJSON(CefString(paramsJSON), JSON_PARSER_RFC);
+      if (!parsed || parsed->GetType() != VTYPE_DICTIONARY) {
+        answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the DevTools params were not a JSON object"));
+        return;
+      }
+      params = parsed->GetDictionary();
+    }
+    const int messageId =
+        browser->GetHost()->ExecuteDevToolsMethod(SuggestedCDPMessageId(browserId), CefString(method), params);
+    if (messageId <= 0) {
+      answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the browser refused to submit the DevTools method"));
+      return;
+    }
+    NoteCDPMessageId(browserId, messageId);
+    RememberPendingCDP(browserId, messageId, settle);
+    return;
+  }
+
+  // A child target's session: raw, because only the raw message can name a `sessionId`. Its result
+  // still arrives through `OnDevToolsMethodResult` by id — which is why the id comes from the same
+  // counter as every other on this browser.
+  id params = @{};
+  if (paramsJSON != nullptr && *paramsJSON != '\0') {
+    NSData *data = [NSData dataWithBytes:paramsJSON length:strlen(paramsJSON)];
+    params = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![params isKindOfClass:[NSDictionary class]]) {
+      answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the DevTools params were not a JSON object"));
+      return;
+    }
+  }
+  const int messageId = SuggestedCDPMessageId(browserId);
+  NSDictionary *message = @{
+    @"id" : @(messageId),
+    @"method" : [NSString stringWithUTF8String:method] ?: @"",
+    @"params" : params,
+    @"sessionId" : [NSString stringWithUTF8String:cdpSessionId] ?: @"",
+  };
+  NSData *encoded = [NSJSONSerialization dataWithJSONObject:message options:0 error:nil];
+  if (encoded == nil) {
+    answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the DevTools message could not be encoded"));
+    return;
+  }
+  NoteCDPMessageId(browserId, messageId);
+  if (!browser->GetHost()->SendDevToolsMessage(encoded.bytes, encoded.length)) {
+    answer(WinterCEFCDPStatusRefused, CDPReasonJSON(@"the browser refused to submit the DevTools message"));
+    return;
+  }
+  // Registered after the submit, as `WinterCEFExecuteCDP` does and on the same ordering argument: a
+  // reply travels back through the agent, never re-entrantly out of the call above.
+  RememberPendingCDP(browserId, messageId, settle);
+}
+
+void WinterCEFSetDevToolsEventObserver(NSView *parent,
+                                      void (^observer)(NSString *method, NSData *params,
+                                                       NSString *cdpSessionId)) {
+  BridgeFor(parent).devToolsEventObserver = observer;
+}
+
+void WinterCEFSetRendererCrashObserver(NSView *parent, void (^observer)(void)) {
+  BridgeFor(parent).crashObserver = observer;
+}
+
+void WinterCEFSetAutomationNativeUI(NSView *parent, uint32_t flags) {
+  WinterCEFTabBridge *bridge = BridgeFor(parent);
+  if (bridge == nil) {
+    return;
+  }
+  bridge.automationNativeUI = flags;
+  if (!AutomationHoldsJSDialogs(flags)) {
+    // A dialog nobody may show and nobody will answer would pause the page for good: dismissed, as the
+    // user's own Cancel would. Only reachable with CEF up — nothing else can hand this file a callback.
+    if (CefRefPtr<CefJSDialogCallback> held = [bridge takeHeldDialog]) {
+      held->Continue(false, CefString());
+      Log("js-dialog-dismissed (the tab is no longer held)");
+    }
+  }
+}
+
+BOOL WinterCEFResolveHeldDialog(NSView *parent, WinterCEFHeldDialogAction action, const char *promptText) {
+  WinterCEFTabBridge *bridge = ExistingBridgeFor(parent);
+  if (bridge == nil) {
+    return NO;
+  }
+  CefRefPtr<CefJSDialogCallback> held = [bridge takeHeldDialog];
+  if (!held) {
+    return NO;
+  }
+  if (action != WinterCEFHeldDialogActionDrop) {
+    held->Continue(action == WinterCEFHeldDialogActionAccept,
+                   CefString(promptText != nullptr ? promptText : ""));
+    Log("js-dialog-answered by the link (%s)", action == WinterCEFHeldDialogActionAccept ? "accept" : "dismiss");
+  }
+  return YES;
+}
+
+BOOL WinterCEFClientInstallsTheAutomationHandlers(void) {
+  // Asked through `CefClient`, as CEF asks — see `WinterCEFClientInstallsTheClickAndMenuHandlers` for
+  // why only that can tell a deleted getter from a live one. Header-only and abstract; reaches no
+  // framework symbol.
+  CefRefPtr<CefClient> client = new WinterClient(nil, nil);
+  return client->GetJSDialogHandler() != nullptr && client->GetPermissionHandler() != nullptr &&
+         client->GetDialogHandler() != nullptr && client->GetDownloadHandler() != nullptr;
+}
+
+NSString *WinterCEFAutomationDecisionsForFlags(uint32_t flags) {
+  NSString *dialogs = AutomationHoldsJSDialogs(flags) ? @"held" : @"default";
+  return [@[
+    [@"jsdialog=" stringByAppendingString:dialogs],
+    [@"beforeunload=" stringByAppendingString:dialogs],
+    AutomationDeniesPermissions(flags) ? @"permission=deny" : @"permission=default",
+    AutomationDeniesPermissions(flags) ? @"media=deny" : @"media=default",
+    AutomationCancelsFileChooser(flags) ? @"filechooser=cancel" : @"filechooser=default",
+    AutomationCancelsDownloads(flags) ? @"download=refuse" : @"download=default",
+  ] componentsJoinedByString:@";"];
+}
+
+NSString *WinterCEFChildSessionOfDevToolsMessage(NSString *message) {
+  NSData *data = [message dataUsingEncoding:NSUTF8StringEncoding];
+  NSString *method = nil;
+  NSData *params = nil;
+  NSString *session = ChildSessionEventOf(static_cast<const char *>(data.bytes), data.length, &method, &params);
+  return session != nil ? [NSString stringWithFormat:@"%@ %@ %@", session, method,
+                                    [[NSString alloc] initWithData:params encoding:NSUTF8StringEncoding]]
+                        : nil;
+}
+
+NSString *WinterCEFCDPMessageIdsWithNoCEFAnywhere(void) {
+  // A browser id no real browser can have (CEF never starts in the unit-test host).
+  const int browserId = -515151;
+  NSMutableArray<NSString *> *ids = [[NSMutableArray alloc] init];
+  // A raw send takes the next id.
+  int raw = SuggestedCDPMessageId(browserId);
+  NoteCDPMessageId(browserId, raw);
+  [ids addObject:[NSString stringWithFormat:@"%d", raw]];
+  // The structured door is SUGGESTED the next id; CEF may answer a larger one (its own next), and that
+  // answer is recorded back — so the raw send after it cannot reuse it.
+  int suggested = SuggestedCDPMessageId(browserId);
+  int cefAnswered = suggested + 5;
+  NoteCDPMessageId(browserId, cefAnswered);
+  [ids addObject:[NSString stringWithFormat:@"%d", cefAnswered]];
+  int rawAfter = SuggestedCDPMessageId(browserId);
+  NoteCDPMessageId(browserId, rawAfter);
+  [ids addObject:[NSString stringWithFormat:@"%d", rawAfter]];
+  g_cdp_last_message_id.erase(browserId);
+  return [ids componentsJoinedByString:@","];
 }
 
 // ---------------------------------------------------------------------------

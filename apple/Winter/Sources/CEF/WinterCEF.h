@@ -333,6 +333,113 @@ void WinterCEFExecuteCDP(NSView *parent,
                         const char *paramsJSON,
                         WinterCEFCDPCompletion completion);
 
+#pragma mark - ComputerV2 Phase 2: the browser link's door
+
+/// How `WinterCEFSendCDP` ended. Unlike `WinterCEFExecuteCDP`'s `ok`, the failure is TYPED, because
+/// the browser link answers the daemon with a code (`cdp_error`, `not_live`, `tab_gone`) and a code
+/// read back out of a message string is a guess.
+typedef NS_ENUM(int, WinterCEFCDPStatus) {
+  /// `payloadJSON` is the method's `"result"` object (`{}` when it has none).
+  WinterCEFCDPStatusOK = 0,
+  /// The browser answered an error: `payloadJSON` is the protocol's `{"code": …, "message": …}`.
+  WinterCEFCDPStatusProtocolError = 1,
+  /// Nothing was sent — no live browser in this container, or the engine is not running.
+  /// `payloadJSON` is `{"message": …}`.
+  WinterCEFCDPStatusNotLive = 2,
+  /// It was sent, and the browser went away (closed, or its DevTools agent detached) before it
+  /// answered. `payloadJSON` is `{"message": …}`.
+  WinterCEFCDPStatusGone = 3,
+  /// Nothing was sent — the method or params could not be submitted. `payloadJSON` is `{"message": …}`.
+  WinterCEFCDPStatusRefused = 4,
+};
+
+typedef void (^WinterCEFCDPStatusCompletion)(WinterCEFCDPStatus status, NSString *payloadJSON);
+
+/// **Run one DevTools method for the browser link** — on the tab's own session, or, with
+/// `cdpSessionId`, on a flattened child target's (an out-of-process iframe), which
+/// `ExecuteDevToolsMethod` cannot address: that case is sent raw with `SendDevToolsMessage`.
+///
+/// Same registry and the same always-answers contract as `WinterCEFExecuteCDP` (the completion fires
+/// exactly once, error never silence), and the same producer posture: **this validates nothing** —
+/// the allowlist and the world rules are the link's (`CDPTabGate`), applied before this is reached.
+///
+/// Every message id on a browser — this door's, both of its paths', and `WinterCEFExecuteCDP`'s — is
+/// drawn from ONE per-browser counter, so a raw message can never reuse an id CEF assigned (or the
+/// reverse) and settle the wrong call.
+void WinterCEFSendCDP(NSView *parent,
+                     const char *method,
+                     const char *paramsJSON,
+                     const char *cdpSessionId,
+                     WinterCEFCDPStatusCompletion completion);
+
+/// Observe the DevTools EVENTS of the browser hosted by `parent` — every event of every domain an
+/// earlier method enabled, the tab's own (`cdpSessionId` nil) and its flattened child targets'
+/// (`cdpSessionId` set). `params` is the event's params object as the browser wrote it. Unfiltered:
+/// which events leave the app is the link's call. Called on the MAIN thread. `nil` stops observing.
+void WinterCEFSetDevToolsEventObserver(NSView *parent,
+                                      void (^observer)(NSString *method, NSData *params,
+                                                       NSString *cdpSessionId));
+
+/// Observe the renderer of the browser hosted by `parent` dying (`OnRenderProcessTerminated`). The
+/// browser itself stays; its page is gone. Called on the MAIN thread. `nil` stops observing.
+void WinterCEFSetRendererCrashObserver(NSView *parent, void (^observer)(void));
+
+/// **The native UI a held tab never shows** — the browser link's automation holds. A flag set on a
+/// container's tab answers that kind of request without any window, sheet or panel:
+typedef NS_OPTIONS(uint32_t, WinterCEFAutomationNativeUI) {
+  WinterCEFAutomationNativeUINone = 0,
+  /// `alert`/`confirm`/`prompt` and `beforeunload`: taken as custom dialogs and never shown. The
+  /// page stays paused on it until DevTools answers (`Page.handleJavaScriptDialog`) or
+  /// `WinterCEFResolveHeldDialog` does.
+  WinterCEFAutomationHoldsJSDialogs = 1u << 0,
+  /// Permission prompts and media-access requests: denied.
+  WinterCEFAutomationDeniesPermissions = 1u << 1,
+  /// A page-opened file chooser: cancelled (DevTools' own file-chooser interception normally gets
+  /// there first; this is the belt).
+  WinterCEFAutomationCancelsFileChooser = 1u << 2,
+  /// Downloads: refused at `CanDownload`.
+  WinterCEFAutomationCancelsDownloads = 1u << 3,
+};
+
+/// Set the flags for `parent`'s tab (they live on the tab, so they hold before its browser exists).
+/// Clearing `WinterCEFAutomationHoldsJSDialogs` while a dialog is held DISMISSES it (as Cancel) — a
+/// dialog nobody may show and nobody will answer would pause the page forever. With no flag set,
+/// every handler answers exactly as before the link existed (CEF's own default).
+void WinterCEFSetAutomationNativeUI(NSView *parent, uint32_t flags);
+
+/// What to do with a held dialog.
+typedef NS_ENUM(int, WinterCEFHeldDialogAction) {
+  /// Forget it without answering — DevTools has already answered it, or the page closed it.
+  WinterCEFHeldDialogActionDrop = 0,
+  /// Answer OK (with `promptText` for a prompt).
+  WinterCEFHeldDialogActionAccept = 1,
+  /// Answer Cancel.
+  WinterCEFHeldDialogActionDismiss = 2,
+};
+
+/// Resolve the dialog `parent`'s tab is holding, if any. Returns whether there was one.
+BOOL WinterCEFResolveHeldDialog(NSView *parent, WinterCEFHeldDialogAction action, const char *promptText);
+
+/// **Test seam.** YES when the browser client INSTALLS the four handlers the automation flags work
+/// through (`CefJSDialogHandler`, `CefPermissionHandler`, `CefDialogHandler`, `CefDownloadHandler`) —
+/// asked through `CefClient` exactly as CEF asks, like `WinterCEFClientInstallsTheClickAndMenuHandlers`:
+/// deleting a getter would leave every override in the binary and the flags dead. Safe with CEF down.
+BOOL WinterCEFClientInstallsTheAutomationHandlers(void);
+
+/// **Test seam.** The decision each handler makes for `flags`, as `kind=answer` pairs joined by `;` —
+/// computed by the very functions the handlers call, with no browser, no callback and no CEF.
+NSString *WinterCEFAutomationDecisionsForFlags(uint32_t flags);
+
+/// **Test seam.** The child session a raw DevTools message is an EVENT of, or `nil` — the test the
+/// raw observer makes on every message before it parses one (results and the tab's own events go to
+/// the structured callbacks). `message` is the message's JSON text. No CEF anywhere.
+NSString *WinterCEFChildSessionOfDevToolsMessage(NSString *message);
+
+/// **Test seam.** Drive the per-browser message-id counter the way the two DevTools doors do — an
+/// `ExecuteDevToolsMethod` that answers a larger id than suggested, then raw sends — and return the
+/// ids handed out, `,`-joined. No CEF anywhere; leaves no state behind.
+NSString *WinterCEFCDPMessageIdsWithNoCEFAnywhere(void);
+
 #pragma mark - editor-plumbing Task 3: the editor page's bridge
 
 /// **The shape of an answer to one editor query**, and the type a Swift-side responder is stored
