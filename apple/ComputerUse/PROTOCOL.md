@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.3.0` (the contents of [`VERSION`](VERSION))
+Helper version: `1.4.0` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -208,7 +208,7 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
 ### 4.5 Actions
 
 `target.act` — `{targetId, sessionId, callId, action, access, allowForeground, privatePath}` →
-`{rung, detail?, input?, inputUnknown?, focusNow?, focusLost?}`.
+`{rung, detail?, input?, inputUnknown?, focusNow?, focusLost?, pageNow?}`.
 
 - `callId` is required (it is what `cancel` names). `access` is `"full"` or `"click"`; with `"click"` only
   `click`, `scroll` and `action` are allowed, anything else is `not_allowed` (`reason: "click_only"`).
@@ -225,6 +225,8 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   reports none now. The focus is the bound window's own: the app's focused element when it lies in that window
   (where its keys go), else — for a window that is not its app's key window — the element marked focused in the
   window's web content.
+- `pageNow`: the act changed the bound window's page — its web area's URL (or, with none, the window's title)
+  is different after it: a link navigated, a tab switched. The page's title now; refs read before it are gone.
 - `type` and `paste` with no `into` refuse (`refused`) a focus that is not a text field (`focus_not_editable`),
   and several lines or more than 200 characters for a single-line field or for a browser's own field outside the
   page (`wrong_field_shape`); the message names the focus (and the page's editable element).
@@ -495,3 +497,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.1.0 | `target_lost` errors carry `data.reason` (`app_quit`, `window_closed`, `helper_restart`, `unknown`) and the `targetLost` notification's `reason` takes the same four values (additive: a client that ignores it is unaffected; one that reads it must treat an absent reason as `unknown`). |
 | 1 | 1.2.0 | A type or paste stopped while typing keys carries `data.typed` and `data.total` (on `cancelled`, and on any other error it hit mid-typing, whose message also says it); `target.act` results for `type`, `paste`, `key` and `setValue` carry `input` / `inputUnknown` (§4.5) — additive: a client that ignores them is unaffected. |
 | 1 | 1.3.0 | `target.act` results carry `focusNow` / `focusLost` (§4.5); `refused` gains the reasons `focus_not_editable` and `wrong_field_shape` for `type`/`paste` with no `into` — additive. |
+| 1 | 1.4.0 | `target.act` results carry `pageNow` (§4.5); `target.snapshot` with a `within` ref that is gone answers the whole window, its text starting `[N] is gone (the page changed) — showing the whole window`, instead of `stale_ref` — additive. |

@@ -685,15 +685,27 @@ public final class CUCore: @unchecked Sendable {
         }
         return try await queues.run(t.pid) { [self] in
             try floorCheckPrivacy(t)
-            let obs = try observe(t, within: p.within)
+            // A `within` element that is gone (a link navigated, a tab switched): the whole window instead of an
+            // error — the model asked to look, and the page it looked at is no more.
+            var within = p.within
+            var gone: String?
+            let obs: Observation
+            do {
+                obs = try observe(t, within: within)
+            } catch {
+                guard let note = Self.goneWithinNote(error, within: within) else { throw error }
+                gone = note
+                within = nil
+                obs = try observe(t, within: nil)
+            }
             let header = CUStateHeader(appName: t.appName, windowTitle: obs.title, focusedRef: obs.focusedRef, settle: note,
                                        caret: obs.caret, focusUnknown: obs.focusUnknown, focusText: obs.focusText)
-            let snap = CUSnapshot(id: t.nextSnapshotId(), scope: p.within, header: header, roots: obs.roots, formatter: formatter)
+            let snap = CUSnapshot(id: t.nextSnapshotId(), scope: within, header: header, roots: obs.roots, formatter: formatter)
             // A whole-window, non-full state folds what is out of view first; `within` and `full` don't.
-            var text = formatter.full(header: header, roots: obs.roots, viewportFirst: p.within == nil && p.full != true)
+            var text = formatter.full(header: header, roots: obs.roots, viewportFirst: within == nil && p.full != true)
             var isDiff = false
             var ratio = 1.0
-            if let since = p.since, p.full != true, let old = t.snapshot(since), old.scope == p.within {
+            if let since = p.since, p.full != true, gone == nil, let old = t.snapshot(since), old.scope == within {
                 let d = CUStateDiff.compute(old: old, new: snap)
                 ratio = d.changedRatio
                 if ratio <= 0.5 {
@@ -706,10 +718,18 @@ public final class CUCore: @unchecked Sendable {
             // opens one when its own window is not the active one): say so, or the model watches the wrong one.
             let opened = newWindows(t)
             if !opened.isEmpty { text += "\n" + opened.joined(separator: "\n") }
+            if let gone { text = gone + "\n" + text }
             t.store(snap)
             return TargetSnapshotResult(snapshotId: snap.id, text: text, isDiff: isDiff, changedRatio: ratio,
                                         settled: settled, waitedMs: waited)
         }
+    }
+
+    /// A `state({ within })` whose element is gone answers with the whole window and this line first; any other
+    /// error (and any other primitive's gone ref) stays an error. Pure.
+    static func goneWithinNote(_ error: Error, within: Int?) -> String? {
+        guard let within, (error as? CUError)?.code == "stale_ref" else { return nil }
+        return "[\(within)] is gone (the page changed) — showing the whole window"
     }
 
     public func targetFind(_ p: TargetFindParams) async throws -> TargetFindResult {

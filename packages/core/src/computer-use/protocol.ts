@@ -146,6 +146,8 @@ export interface ActResult {
   rung: 1 | 2 | 3 | 4; detail?: string; input?: string; inputUnknown?: boolean;
   /** helper 1.3.0: the bound window's focus moved during the act — where it is now (name and role only), or lost. */
   focusNow?: string; focusLost?: boolean;
+  /** helper 1.4.0: the act changed the bound window's page (a link navigated, a tab switched) — its title now. */
+  pageNow?: string;
 }
 /** `target.applescript`: the script's result as AppleScript displays it (null: none). */
 export interface AppleScriptResult { result: string | null; detail?: string }
