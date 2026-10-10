@@ -358,6 +358,21 @@ report({ item: item.name });`,
     verify: (ctx) => [ok(ctx), check("the context menu item ran", has(ctx.events, ctx.since, "context", (e) => e.item === "Canvas Red"))],
   },
   {
+    // A button whose click changes only pixels, never anything accessibility shows: the press works, the helper must
+    // see that in the pixels and NOT click it as well (a toggle would flip back, an action would run twice).
+    name: "a press whose effect only shows in pixels is not repeated", group: "click",
+    before: [{ role: "main", cmd: "reset" }],
+    code: `
+const web = await webWin();
+const b = await pick(web, "Pixel Button", "button");
+await web.click(b.ref);
+report({ ok: true });`,
+    verify: (ctx) => {
+      const presses = eventsSince(ctx.events, ctx.since, "web.pixel");
+      return [ok(ctx), check("pressed exactly once", presses.length === 1, JSON.stringify(presses))];
+    },
+  },
+  {
     // Hover-only UI: a menu that opens on mouseenter (hover(), then its item), and a button that acts only once the
     // pointer has entered it (a click arrives by the hover path; an accessibility press alone would not arm it).
     name: "hover: a hover-revealed menu, and a button armed by the pointer entering it", group: "click",

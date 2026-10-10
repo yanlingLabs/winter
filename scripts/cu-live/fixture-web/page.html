@@ -48,6 +48,7 @@
     <div id="hover-items" role="menu" hidden><div id="hover-item" role="menuitem" tabindex="0" aria-label="Hidden Item">Hidden Item</div></div>
   </div>
   <button id="armed-button" type="button" aria-label="Armed Button">Armed Button</button>
+  <canvas id="pixel-button" role="button" tabindex="0" aria-label="Pixel Button" width="96" height="28"></canvas>
   <a id="jump" href="#section-20">Jump</a>
 </div>
 <div class="row">
@@ -117,6 +118,24 @@
     post({ type: "armed" });
   });
 
+  // --- a button whose click changes only its pixels, never anything accessibility shows: a press that worked
+  // must not be followed by a click (that would do it twice) ---------------------------------------------------
+  var pixelPresses = 0;
+  function drawPixelButton() {
+    var c = $("pixel-button").getContext("2d");
+    c.fillStyle = pixelPresses % 2 === 0 ? "#d0d7de" : "#1f6feb";
+    c.fillRect(0, 0, 96, 28);
+    c.fillStyle = pixelPresses % 2 === 0 ? "#222" : "#fff";
+    c.font = "12px sans-serif";
+    c.fillText("Pixel Button", 10, 18);
+  }
+  drawPixelButton();
+  $("pixel-button").addEventListener("click", function () {
+    pixelPresses += 1;
+    drawPixelButton();
+    post({ type: "pixel", count: pixelPresses });
+  });
+
   // --- clicks and links --------------------------------------------------------------------------------------
   document.addEventListener("click", function (e) {
     var el = e.target.closest ? e.target.closest("button, a") : null;
@@ -172,6 +191,8 @@
     $("hover-items").hidden = true;
     armed = false;
     $("armed-button").setAttribute("aria-label", "Armed Button");
+    pixelPresses = 0;
+    drawPixelButton();
     if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
     lastFocus = null;
     window.scrollTo(0, 0);

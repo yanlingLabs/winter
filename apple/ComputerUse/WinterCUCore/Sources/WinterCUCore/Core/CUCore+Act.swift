@@ -356,9 +356,15 @@ extension CUCore {
                     try token.check()
                     let before = pressEvidence(e, t)
                     let webBefore = webPress && axAction == kAXPressAction ? webPressEvidence(e, t) : nil
+                    // Its pixels before the press (on screen only): a press whose effect accessibility can't see may
+                    // still show it, and a click after it would do it twice.
+                    let crop = webBefore != nil ? pressCrop(e, info, t) : nil
+                    let shotBefore = crop.flatMap { pressShot($0, t) }
                     do {
                         try ax.perform(e, axAction)
-                        if let webBefore { return try verifyWebPress(e, info, ref: ref, before: webBefore, p, t, token) }
+                        if let webBefore {
+                            return try verifyWebPress(e, info, ref: ref, before: webBefore, crop: crop, shotBefore: shotBefore, p, t, token)
+                        }
                         return ActOutcome(rung: .accessibility)
                     } catch let error where Self.pressMayHaveActed(error) != nil {
                         // Never fall through to a click here: the press may have acted, and a click would repeat it.
@@ -467,10 +473,16 @@ extension CUCore {
                         CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): AX \(action, privacy: .public)")
                         if let webBefore, !webPressChanged(el, t, since: webBefore) {
                             // Web content that acts on a real mouse press (Google Docs' widgets) ignores the
-                            // accessibility press: the window-targeted click below, unless a repeat could do harm.
+                            // accessibility press. Off screen its pixels may be stale, so the window-targeted click
+                            // below only for an app LEARNED to ignore presses (a click there once had an effect
+                            // accessibility saw), and never where a repeat could do harm.
                             let info = ElementInfo(el, ax)
                             if Self.mayActUnseen(info.labels) {
                                 return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.unseenPressNote(Self.elementLabel(nil, info)))")
+                            }
+                            if !prefersWebClicks(t) || statefulWithoutReadableState(el, info) {
+                                CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): no visible effect — not clicked as well")
+                                return ActOutcome(rung: .accessibility, detail: "\(subject), so the element was sent a press over accessibility; \(Self.noEffectNote(Self.elementLabel(nil, info)))")
                             }
                             CULog.act.notice("click in \(t.appName, privacy: .public) (off screen): the accessibility press changed nothing — clicking instead")
                             return try webClickVerified(el, t, pressIgnored: true, why: "the accessibility press did nothing", label: Self.elementLabel(nil, info)) {
@@ -2384,15 +2396,78 @@ extension CUCore {
 
     /// After an accessibility press on web content: something changed → done; nothing → a window-targeted click
     /// at its centre (unless a repeat could do harm), itself verified.
+    /// After an accessibility press on web content that accessibility shows no effect of, the fallback click is
+    /// CONSERVATIVE — on a page whose effect accessibility can't see, a second action would undo or double the
+    /// first (a toggle flips back, a like is withdrawn, an item goes into the cart twice). It is clicked only when
+    /// none of these holds: a name that may act unseen (send, pay, delete, …); a toggle-like control whose state
+    /// can't be read; a window not on screen (its pixels may be stale); no capture to compare; or its pixels
+    /// changed (the press did something: said so, not repeated).
     private func verifyWebPress(_ e: AXUIElement, _ info: ElementInfo, ref: Int, before: WebPressEvidence,
+                                crop: CGRect?, shotBefore: CGImage?,
                                 _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
         if webPressChanged(e, t, since: before) { return ActOutcome(rung: .accessibility) }
+        let label = Self.elementLabel(ref, info)
         if Self.mayActUnseen(info.labels) {
             CULog.act.notice("click in \(t.appName, privacy: .public): the accessibility press changed nothing visible, and the command may act unseen — not clicked as well")
-            return ActOutcome(rung: .accessibility, detail: Self.unseenPressNote(Self.elementLabel(ref, info)))
+            return ActOutcome(rung: .accessibility, detail: Self.unseenPressNote(label))
         }
-        CULog.act.notice("click in \(t.appName, privacy: .public): the accessibility press on web content changed nothing — a window-targeted click instead")
+        if statefulWithoutReadableState(e, info) {
+            CULog.act.notice("click in \(t.appName, privacy: .public): a toggle-like control with no readable state — not clicked as well")
+            return ActOutcome(rung: .accessibility, detail: "the accessibility press on \(label) showed no change accessibility can see, and a second press could undo it (it holds a state accessibility doesn't show) — check state() or a screenshot before pressing again")
+        }
+        if offScreenSubject(t) != nil {
+            CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect, and the window is not on screen — not clicked as well")
+            return ActOutcome(rung: .accessibility, detail: Self.noEffectNote(label))
+        }
+        guard let crop, let shotBefore, let shotAfter = pressShot(crop, t) else {
+            CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect and no capture to compare — not clicked as well")
+            return ActOutcome(rung: .accessibility, detail: Self.noEffectNote(label))
+        }
+        if CUImageTools.differs(shotBefore, shotAfter) {
+            CULog.act.notice("click in \(t.appName, privacy: .public): the press changed pixels but nothing accessibility can see — pressed, not clicked as well")
+            return ActOutcome(rung: .accessibility, detail: "pressed \(label) (the effect is visible but not to accessibility)")
+        }
+        CULog.act.notice("click in \(t.appName, privacy: .public): the accessibility press on web content changed nothing, not even pixels — a window-targeted click instead")
         return try clickWebElement(e, info, ref: ref, p, t, token, pressIgnored: true, why: "the accessibility press did nothing")
+    }
+
+    static func noEffectNote(_ label: String) -> String {
+        "the accessibility press on \(label) had no effect accessibility can see — check state() or a screenshot before pressing again"
+    }
+
+    /// Toggle-like and stateful controls — checkbox, switch, toggle, radio button, tab, disclosure, a menu item with
+    /// a check mark — whose state can't be read: a second press could undo the first, so no fallback click. One
+    /// whose value / selected / expanded reads (and stayed the same) may be.
+    func statefulWithoutReadableState(_ e: AXUIElement, _ info: ElementInfo) -> Bool {
+        let role = info.role ?? "", sub = info.subrole ?? ""
+        let toggleLike = ["AXCheckBox", "AXRadioButton", "AXSwitch", "AXToggle", "AXDisclosureTriangle", "AXTab"].contains(role)
+            || ["AXToggle", "AXSwitch", "AXTabButton"].contains(sub)
+            || (role == kAXMenuItemRole && ax.attribute(e, kAXMenuItemMarkCharAttribute) != nil)
+        guard toggleLike else { return false }
+        let readable = ax.attribute(e, kAXValueAttribute) != nil || ax.bool(e, kAXSelectedAttribute) != nil
+            || ax.bool(e, kAXExpandedAttribute) != nil
+        return !readable
+    }
+
+    /// The area a press's visible effect shows in: the element, with its parent row when that is small (a list
+    /// row, a toolbar), else the element with a margin — within the window. Nil when it has no frame.
+    func pressCrop(_ e: AXUIElement, _ info: ElementInfo, _ t: CUTarget) -> CGRect? {
+        guard let f = ax.frame(e), f.width > 0, f.height > 0 else { return nil }
+        var rect = f.insetBy(dx: -12, dy: -8)
+        if let parent = ax.element(e, kAXParentAttribute), let pf = ax.frame(parent),
+           pf.width * pf.height <= max(4 * f.width * f.height, 400 * 120) {
+            rect = rect.union(pf)
+        }
+        if let window = sys.window(id: t.windowID)?.frame { rect = rect.intersection(window) }
+        return rect.isNull || rect.isEmpty ? nil : rect
+    }
+
+    /// The window server's picture of `rect` (global points) of the bound window, when it is on screen and one can
+    /// be had (Screen Recording granted, not blank); nil otherwise.
+    func pressShot(_ rect: CGRect, _ t: CUTarget) -> CGImage? {
+        guard sys.window(id: t.windowID)?.onScreen == true, let image = try? privateWindowImage(t.windowID, globalRect: rect),
+              !CUImageTools.isBlank(image) else { return nil }
+        return image
     }
 
     /// A window-targeted left click at the element's centre, after the synthetic activation (an inactive window
