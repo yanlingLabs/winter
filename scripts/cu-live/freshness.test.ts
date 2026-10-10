@@ -187,6 +187,8 @@ function fakeDeps(prefs: Record<string, { type: string; value: string }>, extra:
       if (code.includes("Quit Safari")) { calls.push("quit Safari"); safariUp = false; return { output: "", isError: false, facts: {} }; }
       calls.push("turn");
       if (code.includes(`"New Window"`)) { safariWindowIds.add(2); return { output: "", isError: false, facts: { made: true, id: 2 } }; }
+      if (code.includes(`"confirm"`)) return { output: "", isError: false, facts: { navigated: true, field: "smart search field" } };
+      if (code.includes("sfApp.windows()") && code.includes("open:")) return { output: "", isError: false, facts: { open: safariWindowIds.has(2) } };
       // The page loaded in the test's window; the fake window never goes full screen.
       if (code.includes("full screen button") && !code.includes("close button")) return { output: "", isError: false, facts: { title: "Fixture Fresh", fullScreen: false } };
       if (code.includes("close button")) { safariWindowIds.delete(2); return { output: "", isError: false, facts: { closed: true } }; }
@@ -210,10 +212,11 @@ describe("the Safari preference mode, end to end on fake plumbing", () => {
     const r = await measureSafariWithPrefs(d, outDir, "Safari, WebKitPreferences NO");
     expect(r.ok).toBe(false); // the fake window never goes full screen: nothing measured, but everything undone
     expect(r.error).toContain("full screen");
-    // File › New Window, the title check + full-screen press, then closing ONLY that window (verified gone).
-    expect(calls.filter((c) => c === "turn").length).toBe(3);
-    // The page opened only AFTER the test's own window existed (so it tabs into that window, never the user's).
-    expect(calls.findIndex((c) => c.startsWith("open -g -a Safari file:"))).toBeGreaterThan(calls.indexOf("turn"));
+    // File › New Window, the page loaded through its own address field, the title check + full-screen press,
+    // closing ONLY that window, then Safari's own window list says it is gone.
+    expect(calls.filter((c) => c === "turn").length).toBe(5);
+    // Never a URL handed to Safari from outside: that lands in the user's last active window.
+    expect(calls.some((c) => c.startsWith("open -g -a Safari file:"))).toBe(false);
     const q1 = calls.indexOf("quit Safari"), w1 = calls.findIndex((c) => c.startsWith("defaults write") && c.endsWith("-bool NO"));
     const relaunch1 = calls.indexOf("open -g -a Safari");
     expect(q1).toBeGreaterThan(-1);
