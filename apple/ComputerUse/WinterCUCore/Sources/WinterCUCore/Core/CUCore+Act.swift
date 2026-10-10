@@ -335,6 +335,12 @@ extension CUCore {
             guard a.point == nil else { throw CUError.invalidParams("click takes a ref or a point, not both") }
             let e = try element(ref, in: t)
             let info = ElementInfo(e, ax)
+            // A page's hidden text input (zero-size or off the window, standing in for a document drawn on a
+            // canvas): there is nothing there to click — said, with what does work, instead of "scroll to it".
+            if hiddenInputWords(e, t) != nil {
+                CULog.act.notice("click in \(t.appName, privacy: .public): [\(ref, privacy: .public)] is the page's hidden text input — not clicked")
+                throw CUError.unsupported("[\(ref)] is the page's hidden text input (it types into the document): it has no place on screen to click — type or paste into it with type(text, { into: \(ref) }) or paste(text, { into: \(ref) }); to put the caret somewhere in the document, click the document's text where you want it")
+            }
             // A disabled control does nothing when PRESSED; its context menu (a right click) may still open.
             if button == .left { try requireEnabled(info, ref: ref, t) }
             try pasteMenuGuard(e, info, p, t)

@@ -123,6 +123,17 @@ final class FocusTargetTests: XCTestCase {
         XCTAssertTrue(r.detail?.contains("can't be read back here") ?? false, r.detail ?? "")
     }
 
+    func testAClickOnThePagesHiddenInputSaysWhatWorksInstead() async throws {
+        world(boundIsKey: false, pageFocus: hidden)
+        ax.setActions(hidden, [kAXPressAction])
+        let e = await refusal(.click(CUClickAction(ref: ref(hidden))))
+        XCTAssertEqual(e?.code, "unsupported")
+        XCTAssertTrue(e?.message.contains("is the page's hidden text input (it types into the document): it has no place on screen to click — type or paste into it with type(text, { into: \(ref(hidden)) })") ?? false, e?.message ?? "")
+        XCTAssertFalse(e?.message.contains("scroll to it first") ?? true)
+        XCTAssertTrue(ax.performed.isEmpty)
+        XCTAssertTrue(poster.entries.isEmpty)
+    }
+
     func testSelectAllIsNeverARangeOverAHiddenInputsOwnFiller() async throws {
         world(boundIsKey: false, pageFocus: hidden)
         ax.focus(pid: pid, on: otherField)
