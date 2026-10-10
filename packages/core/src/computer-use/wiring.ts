@@ -5,16 +5,25 @@
 // SETTINGS ARE HOT, never a restart: every reader reads the daemon's live holder, and a write made here (an
 // "Always allow" answer, `computerUse.apps.set`, `computerUse.setSettings`) is ALSO served from memory until the
 // settings watcher swaps the holder (the `connector-source.ts` `noteWritten` pattern) — the very next call sees it.
-import type { NewSessionEvent, SessionEvent } from "@yanlinglabs/winter-protocol";
+import { PanelOpenTabParams, type NewSessionEvent, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { ApprovalBroker } from "../agent/approvals";
+import { sessionTmpDir } from "../agent/session-tmp";
+import { mintPanelTab } from "../panel/open-tab";
+import { foldPanelTabs } from "../panel/store";
+import { sandboxConfigFor } from "../runtime-sdk/mode-options";
 import type { WinterProfile } from "../profile";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
 import { runningTurnOrigin } from "../sessions/turn-origins";
 import {
   computerUseAllowAllAppsFrom, computerUseAppsFrom, computerUseEnabledFrom, computerUseLegacyComputerFrom, computerUseMirrorFrom,
-  computerUsePrivateEventPathFrom, loadSettings, saveSettings, setComputerUseApp, setComputerUseFlags, type ComputerUseAccess, type Settings,
+  computerUsePrivateEventPathFrom, computerUseScreenshotMaxDimFrom, loadSettings, saveSettings, setComputerUseApp, setComputerUseFlags,
+  type ComputerUseAccess, type Settings,
 } from "../settings";
+import { systemAppResolver } from "./app-resolve";
+import { BrowserLink } from "./browser/cef-link/rpc";
+import { BrowserEngine } from "./browser/engine";
+import { BrowserBackendRegistry } from "./browser/registry";
 import { DiffBases } from "./diff-base";
 import { HelperClient, type HelperLauncher, type HelperTransport, type HelperVerifier } from "./helper-client";
 import { ComputerPolicy, DEFAULT_APP_EXCEPTIONS, defaultAppException } from "./policy";
@@ -35,6 +44,8 @@ export interface ComputerUseInjection {
   idleMs?: number;
   /** The live suite's screenshot sink (`ComputerV2ServiceDeps.screenshotSink`) — never set in production. */
   screenshotSink?: (shot: { sessionId: string; primitive: string; mime: string; base64: string }) => void;
+  /** Phase 2: is a browser app installed (default: a LaunchServices lookup, never a launch)? */
+  browserInstalled?: (bundleId: string) => boolean;
 }
 
 export interface ComputerUseRuntimeDeps {
@@ -51,6 +62,12 @@ export interface ComputerUseRuntimeDeps {
   interrupt?(sessionId: string): void;
   /** Does the helper serve this daemon's home (the profile's default)? Only then may it be launched. */
   launchAllowed: boolean;
+  /** Phase 2, the browsers' dangerous-domain floor: the user-added half of the list for a project, and the user's saved
+   *  allow rules there (a standing `WebFetch(domain:…)` rule approves a listed host where a card could). */
+  dangerousDomainsAdded?(cwd?: string): readonly string[] | undefined;
+  savedAllowRules?(cwd?: string): readonly string[];
+  /** Is the session running a main-thread turn now (a daemon restart's orphaned agent tabs stay open while it is)? */
+  turnRunning?(sessionId: string): boolean;
   inject?: ComputerUseInjection;
   log?(line: string): void;
 }
@@ -62,6 +79,8 @@ export interface ComputerUseStatus {
   mirror: boolean;
   privateEventPath: boolean;
   helper: { installed: boolean; running: boolean; version?: string; permissions?: HelperPermissions };
+  /** Phase 2: the browsers ComputerV2 can drive (the built-in one, and every user's browser connected or installed). */
+  browsers?: Array<{ id: string; name: string; connected: boolean; reason?: string }>;
 }
 
 /** One EXCEPTION to the master switch (`computerUse.apps.list`). `access: null` — the row is listed only for its
@@ -95,6 +114,10 @@ export interface ComputerUseRuntime {
   settings(): Settings | null | undefined;
   /** The hub observer: compaction (diff bases) and main-thread turn ends (the helper fades the mirrors). */
   observe(event: SessionEvent): void;
+  /** Phase 2: the browser engine, the backends it can use, and Winter.app's browser link (`browserLink.*`). */
+  browsers: BrowserEngine;
+  backends: BrowserBackendRegistry;
+  browserLink: BrowserLink;
   stop(): void;
 }
 
@@ -159,8 +182,51 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     log,
   });
 
+  // Phase 2: the browsers. The registry holds the backends (Winter.app's link registers the built-in browser; Winter
+  // for Chrome's host server registers the user's); the engine drives their tabs for the service.
+  const backends = new BrowserBackendRegistry();
+  const winterWebTabs = (sessionId: string): { tabs: Array<{ tabId: string; url?: string; title?: string }>; activeTabId?: string } => {
+    let events: SessionEvent[];
+    try { events = deps.store.read(sessionId); } catch { return { tabs: [] }; }
+    const fold = foldPanelTabs(events);
+    return {
+      tabs: fold.tabs.filter((t) => t.kind === "web").map((t) => ({ tabId: t.tabId, ...(t.url === undefined ? {} : { url: t.url }), ...(t.title === undefined ? {} : { title: t.title }) })),
+      ...(fold.activeTabId === undefined ? {} : { activeTabId: fold.activeTabId }),
+    };
+  };
+  const browserLink = new BrowserLink({
+    registry: backends, log,
+    tabUrl: (sessionId, tabId) => winterWebTabs(sessionId).tabs.find((t) => t.tabId === tabId)?.url,
+  });
+  const browsers = new BrowserEngine({
+    registry: backends,
+    // The old Browser's door: parsed through the panel's schema (the http/https guard and the caps), then minted —
+    // opened and activated in the session's strip, exactly as `Browser`'s `open` does.
+    mintWinterTab: (sessionId, url) => mintPanelTab(deps.hub, PanelOpenTabParams.parse({ sessionId, kind: "web", ...(url === undefined ? {} : { url }) })),
+    winterTabClosed: (sessionId, tabId) => { deps.hub.append(sessionId, { type: "panel_tab_closed", sessionId, tabId } as NewSessionEvent); },
+    winterTabs: winterWebTabs,
+    sessionInfo: (sessionId) => {
+      const meta = deps.store.meta(sessionId);
+      let title: string | null = null;
+      try { title = deps.store.getTitle(sessionId); } catch { title = null; }
+      return { cwd: meta.cwd, ...(title === null ? {} : { title }) };
+    },
+    site: {
+      ...(deps.dangerousDomainsAdded === undefined ? {} : { dangerousDomainsAdded: deps.dangerousDomainsAdded }),
+      ...(deps.savedAllowRules === undefined ? {} : { savedAllowRules: deps.savedAllowRules }),
+    },
+    home: deps.home,
+    uploadRoots: (sessionId, cwd) => ({ tmpDir: sessionTmpDir(sessionId), denyRead: sandboxConfigFor(deps.home, cwd).filesystem?.denyRead ?? [] }),
+    screenshotMaxDim: () => computerUseScreenshotMaxDimFrom(settings()),
+    installed: deps.inject?.browserInstalled ?? ((bundleId) => systemAppResolver.fromBundleId(bundleId) !== undefined),
+    persistentlyAllowed: (sessionId, bundleId) => policy.persistentlyAllowed(sessionId, bundleId),
+    stopScript: (sessionId, reason) => service?.stopScript(sessionId, reason),
+    ...(deps.turnRunning === undefined ? {} : { turnRunning: deps.turnRunning }),
+    log,
+  });
+
   service = new ComputerV2Service({
-    helper, policy, settings, diffBases, recentApps,
+    helper, policy, settings, diffBases, recentApps, browsers,
     telemetry: new AutomationTelemetry(deps.home),
     ...(deps.audit === undefined ? {} : { audit: deps.audit }),
     ...(deps.interrupt === undefined ? {} : { interrupt: deps.interrupt }),
@@ -184,6 +250,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
         mirror: computerUseMirrorFrom(s),
         privateEventPath: computerUsePrivateEventPathFrom(s),
         helper: helperStatus,
+        browsers: browsers.listRows().map((r) => ({ id: r.id, name: r.name, connected: r.connected, ...(r.reason === undefined ? {} : { reason: r.reason }) })),
       };
     },
     async requestPermission(kind) {
@@ -246,8 +313,13 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     policy,
     control,
     settings,
+    browsers,
+    backends,
+    browserLink,
     observe(event) {
       diffBases.observe(event);
+      // A built-in tab closed in the strip (by the user, or by Winter): the engine lets go of it.
+      if (event.type === "panel_tab_closed") browsers.panelTabClosed(event.sessionId, (event as { tabId: string }).tabId);
       if (event.type === "turn_completed") {
         const threadId = (event as { threadId?: string }).threadId;
         if (threadId === undefined || threadId === "main") svc.turnEnded(event.sessionId);
@@ -255,6 +327,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     },
     stop() {
       svc.stop();
+      browserLink.stop();
       helper.close();
     },
   };

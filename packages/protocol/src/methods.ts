@@ -444,7 +444,43 @@ export const ComputerUseStatusResult = z.object({
       message: z.string(),
     }).optional(),
   }),
+  /** ComputerV2 Phase 2: the browsers ComputerV2 can drive — Winter's built-in browser ("winter") and every user's
+   *  browser that is connected (Winter for Chrome) or installed; `reason` says why one is not connected. */
+  browsers: z.array(z.object({ id: z.string(), name: z.string(), connected: z.boolean(), reason: z.string().optional() })).optional(),
 });
+/** ComputerV2 Phase 2 — Winter.app's BROWSER LINK: the dedicated connection (clientName "browser-link") over which the
+ *  daemon drives the built-in browser's tabs (CDP, the allowlisted subset) with no window open. HARNESS ROLE ONLY —
+ *  never in `REMOTE_ALLOWED_METHODS` or the plugin list, and refused for any other role. The connection never attaches
+ *  to a session and nothing on it is a `SessionEvent`. The protocol number is `BROWSER_LINK_PROTOCOL`
+ *  (`computer-use/browser/cef-link/`), kept equal to WinterKit's `BrowserLinkProtocol.version`.
+ *
+ *  App → daemon (requests): `browserLink.attach` (a second attach replaces the first; the older link is told
+ *  `browserLink.detached`), `browserLink.result` (one per command; an unknown or late `cmdId` is dropped and still
+ *  answered `{}`), `browserLink.events` (≤ 256 per batch, only subscribed allowlisted events, Network params stripped),
+ *  `browserLink.tabGone`. Daemon → app (notifications, no id): `browserLink.command`, `browserLink.detached`. */
+export const BrowserLinkAttachParams = z.object({ protocol: z.number().int(), appVersion: z.string().max(64), pid: z.number().int() });
+export const BrowserLinkAttachResult = z.object({ linkId: z.string(), protocol: z.number().int() });
+export const BrowserLinkResultParams = z.union([
+  z.object({ linkId: z.string().min(1), cmdId: z.string().min(1), ok: z.literal(true), result: z.unknown() }),
+  z.object({
+    linkId: z.string().min(1), cmdId: z.string().min(1), ok: z.literal(false),
+    error: z.object({ code: z.string().max(64), message: z.string().max(4_096), data: z.record(z.string(), z.unknown()).optional() }),
+  }),
+]);
+export const BROWSER_LINK_EVENTS_MAX = 256;
+export const BrowserLinkEventsParams = z.object({
+  linkId: z.string().min(1),
+  events: z.array(z.object({
+    tabId: z.string().min(1).max(256), method: z.string().min(1).max(128), params: z.record(z.string(), z.unknown()),
+    cdpSessionId: z.string().min(1).max(256).optional(),
+  })).max(BROWSER_LINK_EVENTS_MAX),
+});
+export const BrowserLinkTabGoneParams = z.object({ linkId: z.string().min(1), tabId: z.string().min(1).max(256), reason: z.enum(["closed", "crashed", "stopped"]) });
+export const BrowserLinkAckResult = z.object({});
+/** Daemon → app notifications. `op`: tab.ensure, tab.release, tab.close, tabs.live, cdp.send, cdp.subscribe, overlay. */
+export const BrowserLinkCommandNotification = z.object({ linkId: z.string(), cmdId: z.string(), op: z.string(), params: z.record(z.string(), z.unknown()) });
+export const BrowserLinkDetachedNotification = z.object({ linkId: z.string(), reason: z.literal("replaced") });
+
 /** Launches the helper if needed and asks IT to raise the system prompt (or open the Privacy pane). Refuses
  *  `ERR.RETRY` with `data.code: "helper_unavailable"` when the helper cannot be reached. */
 export const ComputerUseRequestPermissionParams = z.object({ kind: z.enum(["accessibility", "screenRecording"]) });
@@ -3117,6 +3153,13 @@ export const METHODS = {
   computerUseAppsList: "computerUse.apps.list",
   computerUseAppsSet: "computerUse.apps.set",
   computerUseSetSettings: "computerUse.setSettings",
+  // ComputerV2 Phase 2: Winter.app's browser link. HARNESS role only.
+  browserLinkAttach: "browserLink.attach",
+  browserLinkResult: "browserLink.result",
+  browserLinkEvents: "browserLink.events",
+  browserLinkTabGone: "browserLink.tabGone",
+  browserLinkCommand: "browserLink.command",
+  browserLinkDetached: "browserLink.detached",
   sessionStageImage: "session.stageImage",
   sessionAddDir: "session.addDir",
   sessionSetCwd: "session.setCwd",

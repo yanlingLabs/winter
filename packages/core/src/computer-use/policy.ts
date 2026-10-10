@@ -48,10 +48,10 @@ export const COMPUTER_V2_TOOL_NAME = "ComputerV2";
 
 /** The primitives that ACT on an app (everything else observes). */
 export const ACT_PRIMITIVES: ReadonlySet<string> = new Set(["click", "setValue", "type", "paste", "key", "scroll", "drag", "select", "action", "menu", "hover", "applescript",
-  "goto", "upload", "back", "forward", "reload", "keep", "close"]);
+  "goto", "upload", "back", "forward", "reload", "keep", "handoff", "close"]);
 /** What a `click`-only app still permits (R17): clicks, scrolls and accessibility actions — and, on a browser's tab,
- *  its history moves, a reload, keeping or closing a tab Winter opened. */
-export const CLICK_ONLY_PRIMITIVES: ReadonlySet<string> = new Set(["click", "scroll", "action", "hover", "back", "forward", "reload", "keep", "close"]);
+ *  its history moves, a reload, keeping, handing over or closing a tab Winter opened. */
+export const CLICK_ONLY_PRIMITIVES: ReadonlySet<string> = new Set(["click", "scroll", "action", "hover", "back", "forward", "reload", "keep", "handoff", "close"]);
 
 /** The system's authentication surfaces — refused as targets (spec §13.3; the helper refuses them too). */
 export const AUTH_DIALOG_BUNDLE_IDS: ReadonlySet<string> = new Set([

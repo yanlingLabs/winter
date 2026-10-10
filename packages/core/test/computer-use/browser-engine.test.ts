@@ -7,7 +7,9 @@ import { join } from "node:path";
 import { CDP_ALLOWED_METHODS } from "../../src/computer-use/browser/cdp-allowlist";
 import { AutomationFailure } from "../../src/computer-use/errors";
 import type { TabHandle } from "../../src/computer-use/worker/bridge";
-import type { FakePage } from "./browser-fake-transport";
+import { BrowserEngine } from "../../src/computer-use/browser/engine";
+import { BrowserBackendRegistry } from "../../src/computer-use/browser/registry";
+import { FakeCdpTransport, type FakePage } from "./browser-fake-transport";
 import { harness } from "./browser-harness";
 
 const SHOP: FakePage = {
@@ -64,13 +66,37 @@ describe("browsers.list / open / tabs / tab", () => {
     expect(h.engine.owns("s2", handle.targetId)).toBe(false);
   });
 
-  test("open: a non-http URL is a TypeError; about:blank mints a tab with no url", async () => {
+  test("open: a non-http(s) URL is NotAllowed before anything opens; about:blank mints a tab with no url, shown as about:blank", async () => {
     const h = harness();
     const r = h.run();
-    const e = await failure(h.engine.global(r.scope, "browsers.open", { url: "file:///etc/passwd" }));
-    expect(e).toBeInstanceOf(TypeError);
-    await h.engine.global(r.scope, "browsers.open", { url: "about:blank" });
+    for (const url of ["file:///etc/passwd", "javascript:alert(1)", "data:text/html,hi"]) {
+      const e = await failure(h.engine.global(r.scope, "browsers.open", { url }));
+      expect((e as AutomationFailure).kind).toBe("NotAllowed");
+    }
+    expect(h.panel.get("s1")).toBeUndefined();
+    // Winter's start page for about:blank is a data: URL in the app; the model reads about:blank.
+    h.winter.pages["about:blank"] = { url: "data:text/html,<p>Winter</p>", title: "", nodes: [] };
+    const t = await h.engine.global(r.scope, "browsers.open", { url: "about:blank" }) as TabHandle;
     expect(h.panel.get("s1")).toEqual([{ tabId: "w1" }]);
+    expect(await h.engine.primitive(r.scope, t.targetId, "url", {})).toBe("about:blank");
+    expect(r.text()).toContain('Tab "(untitled)" — about:blank\n');
+    expect(r.text()).not.toContain("new page");
+    const js = await failure(h.engine.primitive(r.scope, t.targetId, "goto", { url: "javascript:void(0)" }));
+    expect((js as AutomationFailure).kind).toBe("NotAllowed");
+    expect(js.message).toBe("goto() opens only http(s) pages and about:blank — a javascript: URL is refused");
+    expect(h.winter.sent.some((s) => s.method === "Page.navigate")).toBe(false);
+  });
+
+  test("a built-in tab closed in the strip: its hold is released and its binding is TargetLost", async () => {
+    const h = harness();
+    const r = h.run();
+    const t = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/" }) as TabHandle;
+    expect(h.winter.tabs.get("w1")!.attached).toBe(true);
+    h.engine.panelTabClosed("s1", "w1");
+    await new Promise((res) => setTimeout(res, 0));
+    expect(h.winter.tabs.get("w1")!.attached).toBe(false);
+    const e = await failure(h.engine.primitive(r.scope, t.targetId, "state", {}));
+    expect((e as AutomationFailure).kind).toBe("TargetLost");
   });
 
   test("open (chrome): checked as an act, then a bind — the per-app card names Google Chrome; the daemon line says in the background", async () => {
@@ -460,12 +486,13 @@ describe("upload", () => {
 });
 
 describe("lifecycle", () => {
-  test("turn end releases the user's tabs (TargetLost after, never closed); agent tabs stay bound", async () => {
+  test("turn end: the user's tabs are released (never closed); unmarked agent tabs in the user's browser close; built-in ones stay", async () => {
     const h = harness();
     h.chrome.addTab({ url: "https://u.example/", title: "U", nodes: [] }, { tabKey: "5" });
     const r = h.run();
     const user = await h.engine.global(r.scope, "browsers.tab", { tab: "chrome:5" }) as TabHandle;
     const agent = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "chrome" }) as TabHandle;
+    const builtIn = await h.engine.global(r.scope, "browsers.open", { url: "https://w.example/" }) as TabHandle;
     r.end();
     h.engine.turnEnded("s1");
     const r2 = h.run();
@@ -473,31 +500,111 @@ describe("lifecycle", () => {
     expect((e as AutomationFailure).kind).toBe("TargetLost");
     expect(e.message).toContain("released at the end of the turn");
     expect(h.chrome.tabs.get("5")!.closed).toBe(false);
-    await h.engine.primitive(r2.scope, agent.targetId, "state", {});
-    // close() on a user tab is NotAllowed; on an agent tab it closes it.
+    // The agent's own tab — the one it was just using — closed (being "selected" is not special).
+    expect(h.chrome.tabs.get(agent.id.split(":")[1]!)!.closed).toBe(true);
+    const gone = await failure(h.engine.primitive(r2.scope, agent.targetId, "state", {}));
+    expect((gone as AutomationFailure).kind).toBe("TargetLost");
+    expect(gone.message).toContain("when your turn ended");
+    // The built-in browser's tab is never closed by the rule, and stays bound.
+    await h.engine.primitive(r2.scope, builtIn.targetId, "state", {});
+    expect([...h.winter.tabs.values()].every((t) => !t.closed)).toBe(true);
+    // Re-binding the user's tab gives the same handle; close() on it is NotAllowed.
     const again = await h.engine.global(r2.scope, "browsers.tab", { tab: "chrome:5" }) as TabHandle;
     expect(again.targetId).toBe(user.targetId);
     const no = await failure(h.engine.primitive(r2.scope, user.targetId, "close", {}));
     expect((no as AutomationFailure).kind).toBe("NotAllowed");
   });
 
-  test("idle end closes un-kept user-browser agent tabs; kept ones and winter tabs stay; stop closes nothing", async () => {
+  test("keep() hands a tab to the user for good; handoff() lets it survive one turn end, then it closes", async () => {
     const h = harness();
     const r = h.run();
-    const keep = await h.engine.global(r.scope, "browsers.open", { url: "https://k.example/", browser: "chrome" }) as TabHandle;
-    await h.engine.global(r.scope, "browsers.open", { url: "https://c.example/", browser: "chrome" });
-    await h.engine.global(r.scope, "browsers.open", { url: "https://w.example/" });
-    await h.engine.primitive(r.scope, keep.targetId, "keep", {});
+    const kept = await h.engine.global(r.scope, "browsers.open", { url: "https://k.example/", browser: "chrome" }) as TabHandle;
+    const handed = await h.engine.global(r.scope, "browsers.open", { url: "https://h.example/", browser: "chrome" }) as TabHandle;
+    await h.engine.primitive(r.scope, kept.targetId, "keep", {});
+    await h.engine.primitive(r.scope, handed.targetId, "handoff", {});
     r.end();
-    const stopH = harness();
-    const sr = stopH.run();
-    await stopH.engine.global(sr.scope, "browsers.open", { url: "https://c.example/", browser: "chrome" });
-    stopH.engine.sessionEnded("s1", "stop");
-    expect([...stopH.chrome.tabs.values()].every((t) => !t.closed)).toBe(true);
+    const tab = (t: TabHandle) => h.chrome.tabs.get(t.id.split(":")[1]!)!;
+    expect(tab(kept).kept).toBe(true);
+    h.engine.turnEnded("s1");
+    expect(tab(kept).closed).toBe(false);
+    expect(tab(handed).closed).toBe(false);
+    const r2 = h.run();
+    await h.engine.primitive(r2.scope, handed.targetId, "state", {});
+    r2.end();
+    // The mark was cleared at that turn end: the next one closes it (unless handed off again).
+    h.engine.turnEnded("s1");
+    expect(tab(handed).closed).toBe(true);
+    expect(tab(kept).closed).toBe(false);
+    h.engine.turnEnded("s1");
+    expect(tab(kept).closed).toBe(false);
+  });
+
+  test("handoff() and keep() are click-only acts: a view-only Chrome refuses them, a click-only one allows them", async () => {
+    const view = harness({ apps: { "com.google.Chrome": { access: "view" } } });
+    view.chrome.addTab({ url: "https://u.example/", title: "U", nodes: [] }, { tabKey: "5", agent: true });
+    const vr = view.run();
+    const vt = await view.engine.global(vr.scope, "browsers.tab", { tab: "chrome:5" }) as TabHandle;
+    const e = await failure(view.engine.primitive(vr.scope, vt.targetId, "handoff", {}));
+    expect((e as AutomationFailure).kind).toBe("NotAllowed");
+    const click = harness({ apps: { "com.google.Chrome": { access: "click" } } });
+    const cr = click.run();
+    const ct = await failure(click.engine.global(cr.scope, "browsers.open", { url: "https://a.example/", browser: "chrome" }));
+    expect((ct as AutomationFailure).kind).toBe("NotAllowed"); // opening a tab is full-class
+    click.chrome.addTab({ url: "https://u.example/", title: "U", nodes: [] }, { tabKey: "6" });
+    const bound = await click.engine.global(cr.scope, "browsers.tab", { tab: "chrome:6" }) as TabHandle;
+    await click.engine.primitive(cr.scope, bound.targetId, "handoff", {});
+    await click.engine.primitive(cr.scope, bound.targetId, "keep", {});
+  });
+
+  test("the runtime idling out and the daemon stopping close nothing; deletion and archiving close the remaining agent tabs", async () => {
+    const h = harness();
+    const r = h.run();
+    const a = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "chrome" }) as TabHandle;
+    const k = await h.engine.global(r.scope, "browsers.open", { url: "https://k.example/", browser: "chrome" }) as TabHandle;
+    await h.engine.primitive(r.scope, a.targetId, "handoff", {});
+    await h.engine.primitive(r.scope, k.targetId, "keep", {});
+    await h.engine.global(r.scope, "browsers.open", { url: "https://w.example/" });
+    r.end();
+    const tab = (t: TabHandle) => h.chrome.tabs.get(t.id.split(":")[1]!)!;
     h.engine.sessionEnded("s1", "idle");
-    const chromeTabs = [...h.chrome.tabs.values()];
-    expect(chromeTabs.map((t) => [t.page.url, t.closed, t.kept])).toEqual([["https://k.example/", false, true], ["https://c.example/", true, false]]);
+    h.engine.sessionEnded("s1", "stop");
+    expect(tab(a).closed).toBe(false);
+    h.engine.sessionEnded("s1", "deleted");
+    expect(tab(a).closed).toBe(true);
+    expect(tab(k).closed).toBe(false);
     expect([...h.winter.tabs.values()].every((t) => !t.closed)).toBe(true);
+
+    const arch = harness();
+    const ar = arch.run("s9");
+    const t = await arch.engine.global(ar.scope, "browsers.open", { url: "https://a.example/", browser: "chrome" }) as TabHandle;
+    await arch.engine.primitive(ar.scope, t.targetId, "handoff", {});
+    ar.end();
+    arch.engine.sessionArchived("s9");
+    expect(arch.chrome.tabs.get(t.id.split(":")[1]!)!.closed).toBe(true);
+  });
+
+  test("after a daemon restart: the browser's agent tabs this run never opened close unless their session is running a turn", async () => {
+    const registry = new BrowserBackendRegistry();
+    const late = new FakeCdpTransport("chrome", "chrome");
+    late.addTab({ url: "https://idle.example/", title: "I", nodes: [] }, { tabKey: "1", sessionId: "s-idle", agent: true });
+    late.addTab({ url: "https://busy.example/", title: "B", nodes: [] }, { tabKey: "2", sessionId: "s-busy", agent: true });
+    late.addTab({ url: "https://mine.example/", title: "M", nodes: [] }, { tabKey: "3" });
+    const engine = new BrowserEngine({
+      registry, mintWinterTab: () => "x", winterTabs: () => ({ tabs: [] }), sessionInfo: () => ({}), home: "/nonexistent",
+      turnRunning: (sid) => sid === "s-busy",
+    });
+    registry.register(late, { family: "chrome", name: "Google Chrome", bundleId: "com.google.Chrome", instanceKey: "chrome-1" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(late.tabs.get("1")!.closed).toBe(true);
+    expect(late.tabs.get("2")!.closed).toBe(false);
+    expect(late.tabs.get("3")!.closed).toBe(false);
+    // A service-worker restart (the same instance re-registering) closes nothing this run opened.
+    const r = new FakeCdpTransport("chrome", "chrome");
+    r.addTab({ url: "https://busy.example/", title: "B", nodes: [] }, { tabKey: "2", sessionId: "s-busy", agent: true });
+    registry.register(r, { family: "chrome", name: "Google Chrome", bundleId: "com.google.Chrome", instanceKey: "chrome-1" });
+    await new Promise((res) => setTimeout(res, 10));
+    expect(r.tabs.get("2")!.closed).toBe(false);
+    engine.stop();
   });
 
   test("a tab closed under the engine is TargetLost; the extension's Stop stops the session holding it", async () => {

@@ -175,6 +175,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     text(o?: unknown) { return call("text", tid(this), opts(o)); }
     upload(ref: unknown, paths: unknown) { return call("upload", tid(this), { ref, paths }).then(nothing); }
     keep() { return call("keep", tid(this), {}).then(nothing); }
+    handoff() { return call("handoff", tid(this), {}).then(nothing); }
     close() { return call("close", tid(this), {}).then(nothing); }
     toString(): string { return `[Tab ${(this as unknown as { id: string }).id}]`; }
   }

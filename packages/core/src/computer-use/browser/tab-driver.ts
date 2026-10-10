@@ -80,6 +80,8 @@ export function transportFailure(err: unknown, browserName: string): Error {
     case "timeout": return new AutomationFailure("TargetBusy", "the browser did not answer in time — the page may be busy; try again in a moment", true);
     case "not_allowed": return new Error(`the browser refused that request (${err.message})`);
     case "cdp_error": {
+      // -32603 from Winter's app: the browser's answer was too large for the link, or not valid JSON.
+      if (err.data.cdpCode === -32603) return new Error("the browser's answer was too large or unreadable — read less at once (state({ within }), a region screenshot)");
       const msg = typeof err.data.cdpMessage === "string" ? err.data.cdpMessage : err.message;
       return new Error(msg.slice(0, 300));
     }
@@ -201,6 +203,9 @@ export class TabDriver {
     this.resetDocumentState(false);
     try { await this.transport.detach(this.tabKey); } catch { /* the tab or the link is gone already */ }
   }
+
+  /** The model is about to see this tab whole (a fresh binding): earlier navigations are not "new" to it. */
+  resetPageMark(): void { this.newPage = false; }
 
   overlay(active: boolean, cursor?: { x: number; y: number; kind: "move" | "press" | "type" | "scroll" }): void {
     try { this.transport.overlay(this.tabKey, { active, ...(cursor === undefined ? {} : { cursor }) }); } catch { /* best effort */ }
@@ -590,7 +595,7 @@ export class TabDriver {
     const notes: string[] = [];
     if (this.fileChooser !== undefined) notes.push("the page asked for a file — use upload(ref, paths) on its file input");
     return {
-      title: this.title, url: this.url,
+      title: this.title, url: shownUrl(this.url),
       ...(focusedRef === undefined ? {} : { focusedRef }), ...(settle === undefined ? {} : { settle }),
       ...(this.newPage && !scoped ? { newPage: true } : {}), ...(unread === undefined ? {} : { unread }),
       ...(this.dialog === undefined ? {} : { dialog: this.dialog }), ...(notes.length === 0 ? {} : { notes }),
@@ -1026,6 +1031,11 @@ export class TabDriver {
 }
 
 interface FrameTreeNode { frame: { id: string; parentId?: string; url: string; urlFragment?: string }; childFrames?: FrameTreeNode[] }
+
+/** A tab's URL as the model reads it: Winter's start page (a `data:` URL, loaded for about:blank) reads as about:blank. */
+export function shownUrl(url: string): string {
+  return url.startsWith("data:") ? "about:blank" : url;
+}
 
 /** The CDP said the context (the document) the call was aimed at is gone. */
 export function isContextGone(err: unknown): boolean {

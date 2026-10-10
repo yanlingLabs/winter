@@ -1249,6 +1249,21 @@ export async function startDaemon(opts: {
     // ComputerV2's Esc (the helper's `escPressed`) is the user's stop: a Dispatch child's report says so.
     interrupt: (sid) => { dispatchChildren?.noteStop(sid, { kind: "user" }); void winterDrivers.get(sid)?.interrupt(); },
     launchAllowed: opts.secrets === undefined && process.platform === "darwin" && isDefaultWinterHome(home, profile),
+    // Phase 2, the browsers' dangerous-domain floor: the SAME user-added list `Search`, the old `Browser` and the
+    // child's `WebFetch` read, and the user's saved allow rules (the "everywhere" tier in claude's grammar plus the
+    // project tiers) — a standing `WebFetch(domain:…)` rule approves a listed host where a card could ask.
+    dangerousDomainsAdded,
+    savedAllowRules: (cwd) => {
+      const user = sdkAllowRules(winterHome) ?? [];
+      if (cwd === undefined) return user;
+      return [...user, ...projectScopeAllowRulesFor(cwd, {
+        effectiveSettings: (root) => projectSettings.effective(root),
+        approvedProjectRules: (root) => approvedProjectRules.rulesFor(root),
+        ...(permissionRules === undefined ? {} : { projectRules: (root: string) => permissionRules!.rulesFor(root).project }),
+        trust: trustStore,
+      })];
+    },
+    turnRunning: (sid) => winterDrivers.get(sid)?.turnRunning ?? false,
     ...(opts.computerUse === undefined ? {} : { inject: opts.computerUse }),
     log: (line) => console.error(line),
   });
@@ -2918,6 +2933,8 @@ export async function startDaemon(opts: {
     onConnectorPermissionsSaved: (next) => { connectorPermissions.noteWritten(next); },
     // ComputerV2 (2026-10-08): Settings → Computer Use's local-only RPCs.
     computerUse: computerUseRuntime.control,
+    browserLink: computerUseRuntime.browserLink,
+    onSessionArchived: (sid) => computerUseRuntime.browsers.sessionArchived(sid),
     // A client's `session.interrupt` is the user's stop (the Mac's stop button, a terminal's Esc, the phone).
     onUserInterrupt: (sid) => dispatchChildren?.noteStop(sid, { kind: "user" }),
     connectorPermissions,

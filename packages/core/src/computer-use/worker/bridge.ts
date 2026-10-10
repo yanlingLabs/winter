@@ -37,7 +37,7 @@ export const APP_PRIMITIVES = [
 export const GLOBAL_PRIMITIVES = ["apps.list", "apps.open", "screen.screenshot", "screen.windows", "screen.appAt", "timeLeft"] as const;
 /** Phase 2: a browser tab's primitives (`Tab`), and the `browsers` global's. */
 export const TAB_PRIMITIVES = ["state", "find", "screenshot", "click", "setValue", "type", "paste", "key", "scroll", "drag",
-  "select", "hover", "waitFor", "waitForIdle", "goto", "back", "forward", "reload", "url", "title", "text", "upload", "keep", "close"] as const;
+  "select", "hover", "waitFor", "waitForIdle", "goto", "back", "forward", "reload", "url", "title", "text", "upload", "keep", "handoff", "close"] as const;
 export const BROWSER_PRIMITIVES = ["browsers.list", "browsers.open", "browsers.tabs", "browsers.tab"] as const;
 export type AppPrimitive = (typeof APP_PRIMITIVES)[number];
 export type GlobalPrimitive = (typeof GLOBAL_PRIMITIVES)[number];

@@ -23,7 +23,7 @@ import { shouldCloseAgentTab } from "./lifecycle";
 import type { BrowserBackendRegistry } from "./registry";
 import { BLOCKED_TAB_PRIMITIVES, ensureSiteAllowed, listedHost, SiteApprovals, type SiteFloorDeps } from "./site-policy";
 import type { TabRunScope } from "./tab-scope";
-import { TabDriver, transportFailure } from "./tab-driver";
+import { shownUrl, TabDriver, transportFailure } from "./tab-driver";
 import type { BackendId, BrowserFamily, CdpTransport, TransportTab } from "./transport";
 import { checkUploadPaths } from "./upload-paths";
 
@@ -58,6 +58,8 @@ export interface BrowserEngineDeps {
   persistentlyAllowed?(sessionId: string, bundleId: string): boolean;
   /** Stop the script a session is running now (the extension's Stop button). */
   stopScript?(sessionId: string, reason: string): void;
+  /** Is the session running a main-thread turn now (a daemon restart's orphaned agent tabs stay open while it is)? */
+  turnRunning?(sessionId: string): boolean;
   now?(): number;
   log?(line: string): void;
 }
@@ -77,9 +79,12 @@ interface SessionBrowsers {
   bindings: Map<string, Binding>;
   /** backend|tabKey → target id. */
   byTab: Map<string, string>;
-  /** This session's agent tabs (kept across a reset or a worker restart). */
-  agentTabs: Map<string, { backend: BackendId; tabKey: string; kept: boolean }>;
+  /** This session's agent tabs (kept across a reset or a worker restart), with the model's marks: `kept` (handed to
+   *  the user) and `handoff` (survives this turn's end only). */
+  agentTabs: Map<string, AgentTab>;
 }
+
+interface AgentTab { backend: BackendId; tabKey: string; kept: boolean; handoff: boolean }
 
 export interface BrowserListRow { id: string; name: string; isDefault: boolean; connected: boolean; reason?: string }
 
@@ -88,14 +93,19 @@ const isPoint = (v: unknown): v is [number, number] => Array.isArray(v) && v.len
 const bad = (message: string): Error => Object.assign(new TypeError(message), { name: "TypeError" });
 const tabKeyOf = (backend: string, tabKey: string): string => `${backend}|${tabKey}`;
 
-/** `browsers.open`/`goto` URLs: http(s), or about:blank. */
+/** `browsers.open`/`goto` URLs: http(s), or exactly about:blank. Any other scheme (`javascript:` would run code outside
+ *  the isolated world; `file:` is not in this phase) is refused here, before any browser sees it. */
 export function checkTabUrl(url: unknown, what: string): string {
   if (typeof url !== "string" || url.trim().length === 0) throw bad(`${what} takes a URL`);
   const u = url.trim();
   if (u === "about:blank") return u;
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(u)?.[1]?.toLowerCase();
+  if (scheme !== undefined && scheme !== "http" && scheme !== "https") {
+    throw new AutomationFailure("NotAllowed", `${what} opens only http(s) pages and about:blank — a ${scheme}: URL is refused`);
+  }
   let parsed: URL;
   try { parsed = new URL(u); } catch { throw bad(`${what}: "${u.slice(0, 120)}" is not a URL — pass a full http(s) URL`); }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw bad(`${what} takes an http(s) URL or about:blank (not ${parsed.protocol})`);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new AutomationFailure("NotAllowed", `${what} opens only http(s) pages and about:blank`);
   return parsed.href;
 }
 
@@ -201,7 +211,8 @@ export class BrowserEngine {
     }
   }
 
-  /** A main-thread turn ended: the user's tabs are released (never closed); agent tabs stay bound. */
+  /** A main-thread turn ended: the user's tabs are released (never closed); the session's agent tabs in a user's
+   *  browser close unless the model marked them (`keep()`, `handoff()` — the latter cleared now); built-in tabs stay. */
   turnEnded(sessionId: string): void {
     const s = this.sessions.get(sessionId);
     if (s === undefined) return;
@@ -210,6 +221,35 @@ export class BrowserEngine {
       b.lost = "turn_end";
       void this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.release(sessionId);
     }
+    for (const [key, a] of [...s.agentTabs]) {
+      if (shouldCloseAgentTab({ event: "turn-ended", family: this.familyOf(a.backend), kept: a.kept, handoff: a.handoff })) {
+        this.closeAgentTab(sessionId, s, key, a, "closed_turn_end");
+      } else {
+        a.handoff = false;
+      }
+    }
+  }
+
+  /** The session was archived: its remaining agent tabs in a user's browser close (unless kept). */
+  sessionArchived(sessionId: string): void {
+    const s = this.sessions.get(sessionId);
+    if (s === undefined) return;
+    for (const [key, a] of [...s.agentTabs]) {
+      if (shouldCloseAgentTab({ event: "session-archived", family: this.familyOf(a.backend), kept: a.kept })) this.closeAgentTab(sessionId, s, key, a, "closed_session_end");
+    }
+  }
+
+  /** Close one agent tab in its browser (best effort) and forget it; a binding of it reads why. */
+  private closeAgentTab(sessionId: string, s: SessionBrowsers, key: string, a: AgentTab, why: string): void {
+    s.agentTabs.delete(key);
+    const targetId = s.byTab.get(key);
+    const b = targetId === undefined ? undefined : s.bindings.get(targetId);
+    if (b !== undefined && b.lost === undefined) b.lost = why;
+    const d = this.drivers.get(key);
+    if (d !== undefined) { void d.release(sessionId); d.onGone("closed"); this.drivers.delete(key); }
+    const transport = this.deps.registry.get(a.backend);
+    if (transport === undefined || !transport.connected) return;
+    void transport.closeTab(a.tabKey).catch((err: unknown) => this.deps.log?.(`computer-use: closing ${a.backend}:${a.tabKey} failed (${err instanceof Error ? err.message : "error"})`));
   }
 
   /** A reset or a worker restart: the bindings and holds go; the tabs stay open, and the engine still remembers
@@ -227,21 +267,44 @@ export class BrowserEngine {
     const s = this.sessions.get(sessionId);
     if (s !== undefined) {
       for (const b of s.bindings.values()) if (b.lost === undefined) void this.drivers.get(tabKeyOf(b.backend, b.tabKey))?.release(sessionId);
-      if (reason !== "stop") {
-        for (const [key, a] of s.agentTabs) {
-          const family = this.familyOf(a.backend);
-          if (!shouldCloseAgentTab({ event: reason === "idle" ? "idle-ended" : "session-deleted", family, kept: a.kept })) continue;
-          const transport = this.deps.registry.get(a.backend);
-          if (transport === undefined || !transport.connected) continue;
-          void transport.closeTab(a.tabKey).catch((err: unknown) => this.deps.log?.(`computer-use: closing ${a.backend}:${a.tabKey} at session end failed (${err instanceof Error ? err.message : "error"})`));
-          s.agentTabs.delete(key);
+      if (reason === "deleted") {
+        for (const [key, a] of [...s.agentTabs]) {
+          if (shouldCloseAgentTab({ event: "session-deleted", family: this.familyOf(a.backend), kept: a.kept })) this.closeAgentTab(sessionId, s, key, a, "closed_session_end");
         }
       }
     }
-    if (reason !== "stop") {
+    // The runtime idling out keeps the session's memory of its agent tabs (the next turn's end still closes them);
+    // the bindings themselves went with the worker.
+    if (reason === "idle" && s !== undefined) {
+      s.bindings.clear();
+      s.byTab.clear();
+    }
+    if (reason === "deleted") {
       this.sessions.delete(sessionId);
       this.approvals.sessionEnded(sessionId);
     }
+  }
+
+  /**
+   * A built-in tab left the session's strip (`panel_tab_closed` — the user closed it, or Winter did): its hold is
+   * released and every binding of it is `TargetLost`. The app cannot tell a closed tab from one not folded yet, so it
+   * keeps a held browser alive until the daemon lets go.
+   */
+  panelTabClosed(sessionId: string, tabId: string): void {
+    const key = tabKeyOf("winter", tabId);
+    const d = this.drivers.get(key);
+    if (d !== undefined) {
+      for (const sid of [...d.holders]) void d.release(sid);
+      d.onGone("closed");
+      this.drivers.delete(key);
+    }
+    for (const s of this.sessions.values()) {
+      const targetId = s.byTab.get(key);
+      const b = targetId === undefined ? undefined : s.bindings.get(targetId);
+      if (b !== undefined && b.lost === undefined) b.lost = "closed";
+      s.agentTabs.delete(key);
+    }
+    void sessionId;
   }
 
   /** Daemon stop: every hold is released, nothing is closed. */
@@ -285,11 +348,32 @@ export class BrowserEngine {
         transport.onStop((tabKey) => this.stopPressed(id, tabKey)),
       ];
       this.hooked.set(transport, { backend: id, off });
+      if (this.familyOf(id) !== "winter" && transport.connected) void this.reconcileOrphans(id, transport);
     }
     for (const [t, h] of this.hooked) {
       if (live.has(t)) continue;
       for (const off of h.off) off();
       this.hooked.delete(t);
+    }
+  }
+
+  /**
+   * A user's browser (re)connected: agent tabs it reports that this daemon run never opened belong to a run before a
+   * restart. Those of sessions with no running turn close (the ruling; a `handoff` does not survive a restart, and a
+   * kept tab is no longer an agent tab). Agent tabs this run knows are left to the turn-end rule.
+   */
+  private async reconcileOrphans(backend: BackendId, transport: CdpTransport): Promise<void> {
+    let tabs: TransportTab[];
+    try { tabs = await transport.listTabs(); } catch { return; }
+    for (const t of tabs) {
+      if (!t.agent || t.sessionId === undefined) continue;
+      if (this.sessions.get(t.sessionId)?.agentTabs.has(tabKeyOf(backend, t.tabKey)) === true) continue;
+      let running = false;
+      try { running = this.deps.turnRunning?.(t.sessionId) === true; } catch { running = false; }
+      if (!shouldCloseAgentTab({ event: "restart-orphan", family: this.familyOf(backend), kept: false, turnRunning: running })) continue;
+      try { await transport.closeTab(t.tabKey); } catch (err) {
+        this.deps.log?.(`computer-use: closing an orphaned agent tab ${backend}:${t.tabKey} failed (${err instanceof Error ? err.message : "error"})`);
+      }
     }
   }
 
@@ -394,6 +478,7 @@ export class BrowserEngine {
     scope.live();
     const driver = this.driverFor(backend, tabKey);
     if (!opened && url.length > 0 && url !== "about:blank") await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, url, this.browserName(backend), this.cwdOf(scope.sessionId));
+    noteSiteOf(scope, url);
     let targetId = s.byTab.get(key);
     const existing = targetId === undefined ? undefined : s.bindings.get(targetId);
     const again = existing !== undefined && existing.lost === undefined;
@@ -401,6 +486,8 @@ export class BrowserEngine {
       targetId = `bt_${randomBytes(6).toString("hex")}`;
       s.byTab.set(key, targetId);
     }
+    // A fresh binding prints the whole tab: "new page" means something only against a state the model saw.
+    if (!again) driver.resetPageMark();
     const b: Binding = existing !== undefined && again ? existing : {
       targetId, backend, tabKey, kind, boundRun: scope.runId, ...(bundleId === undefined ? {} : { bundleId }),
     };
@@ -456,6 +543,7 @@ export class BrowserEngine {
     scope.live();
     if (url !== "about:blank") await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, url, name, this.cwdOf(scope.sessionId));
     scope.noteBrowser(backend);
+    noteSiteOf(scope, url);
     let title: string | undefined;
     try { title = this.deps.sessionInfo(scope.sessionId).title; } catch { title = undefined; }
     let tab: TransportTab;
@@ -468,7 +556,7 @@ export class BrowserEngine {
       }
     } catch (err) { throw transportFailure(err, name); }
     const s = this.session(scope.sessionId);
-    s.agentTabs.set(tabKeyOf(backend, tab.tabKey), { backend, tabKey: tab.tabKey, kept: false });
+    s.agentTabs.set(tabKeyOf(backend, tab.tabKey), { backend, tabKey: tab.tabKey, kept: false, handoff: false });
     const handle = await this.bind(scope, backend, tab.tabKey, url, true);
     const driver = this.driverFor(backend, tab.tabKey);
     const loaded = await driver.waitOpened(url, scope.signal);
@@ -794,6 +882,7 @@ export class BrowserEngine {
         const url = checkTabUrl(args.url, "goto()");
         if (url !== "about:blank") await ensureSiteAllowed(scope, this.approvals, this.deps.site ?? {}, url, this.browserName(b.backend), this.cwdOf(sid));
         scope.live();
+        noteSiteOf(scope, url);
         return await this.navigate(scope, b, driver, () => driver.goto(url, scope.signal));
       }
       case "back": return await this.navigate(scope, b, driver, () => driver.history(-1, scope.signal));
@@ -802,7 +891,7 @@ export class BrowserEngine {
       case "url": {
         try { await driver.quietInfo(); } catch { /* the last committed URL */ }
         scope.builder.markScreenRead();
-        return driver.url;
+        return shownUrl(driver.url);
       }
       case "title": {
         try { await driver.quietInfo(); } catch { /* the last title read */ }
@@ -827,12 +916,17 @@ export class BrowserEngine {
       }
       case "keep": {
         if (b.kind !== "agent") return undefined; // a tab the user already owns
-        const s = this.session(sid);
-        const a = s.agentTabs.get(tabKeyOf(b.backend, b.tabKey));
-        if (a !== undefined) a.kept = true;
+        const a = this.session(sid).agentTabs.get(tabKeyOf(b.backend, b.tabKey));
         if (this.familyOf(b.backend) !== "winter") {
           try { await driver.transport.keepTab(b.tabKey); } catch (err) { throw transportFailure(err, this.browserName(b.backend)); }
         }
+        if (a !== undefined) { a.kept = true; a.handoff = false; }
+        return undefined;
+      }
+      case "handoff": {
+        // Engine-side only: the tab stays the agent's and in Winter's group, and survives this turn's end.
+        const a = this.session(sid).agentTabs.get(tabKeyOf(b.backend, b.tabKey));
+        if (a !== undefined && !a.kept) a.handoff = true;
         return undefined;
       }
       case "close": {
@@ -901,6 +995,14 @@ export class BrowserEngine {
   }
 }
 
+/** The audit's site: a URL's host only (never its path or query). */
+function noteSiteOf(scope: TabRunScope, url: string): void {
+  try {
+    const host = new URL(url).hostname;
+    if (host.length > 0) scope.noteSite(host);
+  } catch { /* not a URL with a host */ }
+}
+
 function stripFragment(url: string): string {
   const i = url.indexOf("#");
   return i < 0 ? url : url.slice(0, i);
@@ -911,6 +1013,8 @@ function lostSentence(b: Binding): string {
     case "turn_end": return "that tab is the user's and was released at the end of the turn — bind it again with browsers.tab()";
     case "once": return `${b.backend} was allowed for one call only — bind the tab again with browsers.tab()`;
     case "closed_by_you": return "you closed that tab — open another with browsers.open()";
+    case "closed_turn_end": return "Winter closed that tab when your turn ended (it was not marked with keep() or handoff()) — open a new one with browsers.open()";
+    case "closed_session_end": return "Winter closed that tab when the session ended — open a new one with browsers.open()";
     case "crashed": return "the tab crashed — open it again with browsers.open()";
     case "detached_by_user": return "the user stopped Winter from controlling this tab — ask them before binding it again";
     case "stopped": return "the tab's browser was stopped — open a new tab with browsers.open()";

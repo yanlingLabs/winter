@@ -1,39 +1,43 @@
-// ComputerV2 Phase 2 — when Winter closes a tab its automation opened (an "agent tab").
+// ComputerV2 Phase 2 — when Winter closes a tab its automation opened (an "agent tab"). THE ONE PLACE the rule
+// lives: the engine asks `shouldCloseAgentTab` at every main-thread turn end, when a session is deleted or archived,
+// and when it first meets a user browser after a daemon restart.
 //
-// THE ONE PLACE the rule lives: the engine (idle end, session deletion) and Winter for Chrome's host server (orphaned
-// groups found after a daemon restart) both ask `shouldCloseAgentTab`. The final rule is pending a user decision;
-// what is here is the current placeholder:
-//
-//   - a tab in Winter's own browser is NEVER closed by this rule: it lives in the session's panel strip and goes
-//     with the session (archive and delete already stop it);
-//   - a tab the model kept (`keep()`) is never closed — it is the user's now;
-//   - otherwise, a tab in the user's own browser closes when its session's computer-use runtime idles out (30
-//     minutes) or the session is deleted; an orphaned Winter group found after a restart closes when its session is
-//     deleted or archived (else it waits for that session's next idle end);
-//   - a turn's end and the daemon stopping close nothing.
+// The user's ruling (the rule ChatGPT's browser follows, exactly), for tabs in the USER'S OWN browser:
+//   - at every main-thread TURN END, every agent tab of the session that is not marked is closed — the tab the agent
+//     was just using included (being "selected" is not special, nor is the browser's own tab pin);
+//   - two marks, both set by the model: `keep()` hands the tab to the user for good (it leaves Winter's group and is
+//     never closed again); `handoff()` lets it survive THIS turn's end only (the mark is cleared at that turn end);
+//   - the session deleted or archived: its remaining agent tabs close;
+//   - after a daemon restart, at the browser's next hello: agent tabs of sessions with no running turn close
+//     (a `handoff` does not survive the restart; a kept tab is no longer an agent tab);
+//   - the daemon stopping, or the computer-use runtime idling out, closes nothing.
+// Tabs the user already had open are never closed (they are released at turn end). Tabs in Winter's own browser are
+// never closed by this rule: they live in the session's panel strip and go with the session.
 import type { BrowserFamily } from "./transport";
 
-export type AgentTabEvent = "turn-ended" | "idle-ended" | "session-deleted" | "daemon-stop" | "orphan-found";
+export type AgentTabEvent = "turn-ended" | "session-deleted" | "session-archived" | "restart-orphan" | "idle-ended" | "daemon-stop";
 
 export interface AgentTabFacts {
   event: AgentTabEvent;
   family: BrowserFamily;
-  /** The model called `keep()` on it. */
+  /** `keep()`: handed to the user. */
   kept: boolean;
-  /** For `orphan-found`: the session it belongs to is deleted or archived. */
-  sessionGone?: boolean;
+  /** `handoff()`: survives this turn's end only. */
+  handoff?: boolean;
+  /** For `restart-orphan`: its session is running a turn now. */
+  turnRunning?: boolean;
 }
 
 export function shouldCloseAgentTab(f: AgentTabFacts): boolean {
   if (f.family === "winter") return false;
   if (f.kept) return false;
   switch (f.event) {
-    case "idle-ended":
+    case "turn-ended": return f.handoff !== true;
     case "session-deleted":
+    case "session-archived":
       return true;
-    case "orphan-found":
-      return f.sessionGone === true;
-    case "turn-ended":
+    case "restart-orphan": return f.turnRunning !== true;
+    case "idle-ended":
     case "daemon-stop":
       return false;
   }

@@ -262,7 +262,11 @@ export class FakeCdpTransport implements CdpTransport {
         }
         return r({ result: { type: "object", value: this.op(t, frameId, op, arg) } });
       }
-      case "Input.dispatchMouseEvent": case "Input.dispatchKeyEvent": return r({});
+      case "Input.dispatchMouseEvent": return r({});
+      case "Input.dispatchKeyEvent": {
+        if (params.type === "keyDown" && typeof params.text === "string" && t.focused !== undefined) t.values.set(t.focused, (t.values.get(t.focused) ?? "") + params.text);
+        return r({});
+      }
       case "Input.insertText": {
         if (t.focused !== undefined) t.values.set(t.focused, (t.values.get(t.focused) ?? "") + String(params.text));
         return r({});
