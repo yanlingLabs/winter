@@ -1,5 +1,6 @@
 import { chmodSync, realpathSync, statSync } from "node:fs";
 import { ComputerUseControlError, type ComputerUseControl } from "../computer-use/wiring";
+import { BrowserLinkRpcError, type BrowserLink } from "../computer-use/browser/cef-link/rpc";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
@@ -381,6 +382,11 @@ export interface IpcServerOptions {
    * LOCAL-ONLY `computerUse.*` RPCs. Absent (a bare test server): those methods answer INTERNAL.
    */
   computerUse?: ComputerUseControl;
+  /** ComputerV2 Phase 2: Winter.app's browser link (`browserLink.*`, harness role only — `computer-use/browser/cef-link/`).
+   *  Absent (a bare test server): those methods answer INTERNAL. */
+  browserLink?: BrowserLink;
+  /** A session was archived (`session.setActivity`): the browser engine closes its remaining agent tabs. */
+  onSessionArchived?: (sessionId: string) => void;
   /** `session.interrupt` is about to stop a running turn on a client's behalf — the user's stop
    *  (`DispatchChildren.noteStop`, so a Dispatch child's report says who stopped it). */
   onUserInterrupt?: (sessionId: string) => void;
@@ -1491,7 +1497,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     store: opts.store,
     isRunning: (sessionId) => opts.engine?.isRunning(sessionId) ?? false,
     derive: deriveActivity,
-    emit: (sessionId, activity) => hub.emitActivity(sessionId, activity),
+    emit: (sessionId, activity) => {
+      hub.emitActivity(sessionId, activity);
+      if (activity === "archived") { try { opts.onSessionArchived?.(sessionId); } catch { /* best effort: the tabs close at the session's next turn end */ } }
+    },
   };
 
   /** working-directories T3: the deps `session.setDirs` hands to the shared write half (T2's
@@ -1910,6 +1919,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (socket.data.helloTimer) clearTimeout(socket.data.helloTimer);
         if (socket.data.hubClient) hub.detach(socket.data.hubClient);
         harnessConns.delete(socket.data);
+        // ComputerV2 Phase 2: the connection that carried Winter.app's browser link is gone — the built-in browser
+        // reads "Winter isn't running" until the app attaches again (every command in flight fails `disconnected`).
+        opts.browserLink?.connectionClosed(socket.data);
         // Chat Slice D task 2: an in-flight chunked sync.push dies with its connection — the
         // partial bytes are dropped, never carried over to whatever reconnects next (a resumed
         // push must start over, which is exactly what makes the apply atomic).
@@ -3422,6 +3434,24 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             if (err.code === "helper_unavailable") throw new RpcFailure(ERR.RETRY, err.message, { code: err.code, retryable: true });
             throw new RpcFailure(ERR.INTERNAL, err.message, { code: err.code });
           }
+          throw err;
+        }
+      }
+      // -----------------------------------------------------------------------------------------
+      // ComputerV2 Phase 2: Winter.app's BROWSER LINK. Harness role only — outside every allowlist, and the explicit
+      // check keeps it so if one ever widens. The connection never attaches to a session; nothing here is an event.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.browserLinkAttach:
+      case METHODS.browserLinkResult:
+      case METHODS.browserLinkEvents:
+      case METHODS.browserLinkTabGone: {
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, `${method} is available to Winter's app only`);
+        const link = opts.browserLink;
+        if (link === undefined) throw new RpcFailure(ERR.INTERNAL, `${method} is not available on this server`);
+        try {
+          return link.handle(socket.data, (message) => socket.data.writer.enqueue(encodeLine(message)), method, params);
+        } catch (err) {
+          if (err instanceof BrowserLinkRpcError) throw new RpcFailure(ERR.INVALID_PARAMS, err.message, { code: err.code, ...err.data });
           throw err;
         }
       }

@@ -37,6 +37,10 @@ export const APP_PRIMITIVES = [
 export const GLOBAL_PRIMITIVES = ["apps.list", "apps.open", "screen.screenshot", "screen.windows", "screen.appAt", "timeLeft"] as const;
 /** App adapters (Phase 2): `app.extras.<name>(…)`, `app.dict.<name>(…)`, `app.help(…)` — `adapters/`. */
 export const EXTRA_PRIMITIVES = ["extra", "dict", "help"] as const;
+/** Phase 2: a browser tab's primitives (`Tab`), and the `browsers` global's. */
+export const TAB_PRIMITIVES = ["state", "find", "screenshot", "click", "setValue", "type", "paste", "key", "scroll", "drag",
+  "select", "hover", "waitFor", "waitForIdle", "goto", "back", "forward", "reload", "url", "title", "text", "upload", "keep", "handoff", "close"] as const;
+export const BROWSER_PRIMITIVES = ["browsers.list", "browsers.open", "browsers.tabs", "browsers.tab"] as const;
 export type AppPrimitive = (typeof APP_PRIMITIVES)[number];
 export type GlobalPrimitive = (typeof GLOBAL_PRIMITIVES)[number];
 export type Primitive = AppPrimitive | GlobalPrimitive;
@@ -46,6 +50,9 @@ export interface ExtraSpec { name: string; access: "view" | "click" | "full" }
 /** The handle a bound app crosses the bridge as; the worker wraps it in an `App`. `extras` / `dict`: the names its
  *  `app.extras` / `app.dict` answer (filled at bind by `adapters/`). */
 export interface AppHandle { targetId: string; name: string; bundleId: string; extras?: ExtraSpec[]; dict?: string[] }
+/** The handle a bound browser tab crosses the bridge as; the worker wraps it in a `Tab`. `id` is the model-visible
+ *  tab id ("winter:…", "chrome:…"), `targetId` the engine's own (`bt_…`). */
+export interface TabHandle { kind: "tab"; targetId: string; id: string; browser: string }
 /** An opaque image handle: the bytes stay in the daemon. */
 export interface ImageHandle { image: string; width: number; height: number }
 

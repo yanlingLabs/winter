@@ -37,6 +37,9 @@ export interface PrimitiveMetric {
   visitAnswer?: "allow" | "refuse" | "timeout-allow" | "aborted" | "unavailable" | "run-allowance" | "run-refusal" | "held-refusal";
   /** Where a person answered it: the session's `card`, the helper's on-screen `panel`; or `timeout`, `none`. */
   visitVia?: "card" | "panel" | "timeout" | "none";
+  /** A browser tab's primitive: the backend id it ran on ("winter", "chrome", …) and the engine's own time, ms. */
+  backend?: string;
+  engineMs?: number;
   /** An `extra` / `dict` primitive: the extra's or dictionary command's NAME (never its arguments). */
   extra?: string;
 }

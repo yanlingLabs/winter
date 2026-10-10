@@ -124,6 +124,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// host's `onPanelCommand` hook holds weakly. `nil` until the shell is first summoned, exactly
     /// like the coordinator above — with no shell there is no harness, so no command can arrive.
     private(set) var panelCommands: PanelCommandConsumer?
+    /// ComputerV2 Phase 2: the browser link (`BrowserLink/`) — how the daemon's browser engine drives
+    /// the built-in browser. Started in `boot()` with the main connection, NOT with the shell: it must
+    /// work with no window ever opened. `nil` when there is no harness token (or under unit tests).
+    private(set) var browserLink: BrowserLink?
     /// editor-product T8: the main menu's ⌘S — the third save trigger, and the only one reachable
     /// with the keyboard focus outside the editor. Held for the app's life because an `NSMenuItem`
     /// does NOT retain its target: nothing else owns this object, and a deallocated target is a menu
@@ -1048,6 +1052,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // identity. `setenv(…, 0)` never overwrites an explicit env, so tests/power users still win.
         // Placed AFTER the unit-test guard so the xctest host launch never stamps `~/.winter-dev`.
         AppProfile.bootstrapEnvironment()
+        // Winter for Chrome: every browser's native-messaging manifest points at THIS bundle's host (Release only — the
+        // dev manifest is `bun run dev:helper`'s; BrowserExtension/BrowserHostManifest.swift).
+        #if !DEBUG
+        BrowserHostManifest.writeForThisApp { NSLog("%@", $0) }
+        #endif
         _ = boot()
         #if DEBUG
         // panel-cef Task 6a: the window half of the panel smoke door (`ShellRootView`'s `.onAppear`
@@ -1738,6 +1747,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await model?.start()
                 mb?.refresh()
             }
+            browserLink = BrowserLink.start(home: AppProfile.winterHome, keychainService: AppProfile.keychainService)
         }
         // The menu's state line and login-item checkbox are refreshed when the menu is OPENED (`MenuBarController`
         // observes `NSMenu.didBeginTrackingNotification`), not on a clock: nobody reads them while it is closed, and

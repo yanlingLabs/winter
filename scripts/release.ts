@@ -114,7 +114,10 @@ import {
   keychainFfiProbeOk,
 } from "./release-lib";
 import { fetchAnt, parseAntPin } from "./fetch-ant";
-import { checkSignedHelper, HELPER, HELPER_EMBED_RELATIVE, helperExecutable, helperRequirement, LSREGISTER, readHelperVersion } from "./computer-helper-lib";
+import {
+  BROWSER_HOST, browserHostExecutable, checkSignedBrowserHost, checkSignedHelper, HELPER, HELPER_EMBED_RELATIVE, helperExecutable, helperRequirement, LSREGISTER,
+  readHelperVersion,
+} from "./computer-helper-lib";
 import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 import { buildWinter } from "./build-winter";
@@ -853,6 +856,26 @@ assertSigned(computerHelperApp, "Winter Computer Use");
   if (failures.length > 0) fail(`Winter Computer Use is not signed the way TCC and the daemon need:\n  ${failures.join("\n  ")}`);
   console.log(`Winter Computer Use verified: ${HELPER.dist.identifier}, designated => ${stated}, hardened runtime, the Apple Events entitlement only, version ${helperVersion}, no test hooks.`);
 }
+// Winter for Chrome's native host, nested in the helper's Contents/MacOS (embed-computer-helper.sh signs it first, with
+// its own identity). The daemon checks the host's process against EXACTLY this requirement, and Chrome runs it for the
+// user's browsers, so: Winter's team and a secure timestamp, the identifier com.winter.browserhost, the stated
+// requirement, the hardened runtime, no entitlements at all, and no test hooks (a release host containing one could be
+// pointed at another home and a fake daemon).
+const browserHostPath = browserHostExecutable(computerHelperApp);
+assertSigned(browserHostPath, "winter-browser-host");
+{
+  const failures = checkSignedBrowserHost("dist", TEAM_ID, {
+    codesignDvv: probe(`codesign -dvv "${browserHostPath}" 2>&1`).stdout,
+    codesignDr: probe(`codesign -d -r- "${browserHostPath}" 2>&1`).stdout,
+    entitlementsXml: probe(`codesign -d --entitlements - --xml "${browserHostPath}" 2>/dev/null`).stdout,
+    executable: readFileSync(browserHostPath),
+  });
+  const stated = helperRequirement(BROWSER_HOST.dist.identifier, TEAM_ID);
+  const satisfied = probe(`codesign --verify --strict -R='${stated}' "${browserHostPath}" 2>&1`);
+  if (!satisfied.ok) failures.push(`the host's signature does not satisfy its own stated requirement: ${satisfied.stdout.trim()}`);
+  if (failures.length > 0) fail(`winter-browser-host is not signed the way the daemon and Chrome need:\n  ${failures.join("\n  ")}`);
+  console.log(`winter-browser-host verified: ${BROWSER_HOST.dist.identifier}, designated => ${stated}, hardened runtime, no entitlements, no test hooks.`);
+}
 // "Start from nothing" pinned where it SHIPS, across every component this repo signs — not just
 // where entitlements are declared. project.yml can hand CODE_SIGN_ENTITLEMENTS to the wrong
 // target, or to four of five, without anything failing to build.
@@ -910,6 +933,7 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // ComputerV2 — Winter Computer Use: no cs.* relaxation. Its one entitlement is Apple Events (applescript()),
   // which is not in the cs.* family; checkSignedHelper above pins exactly that one.
   { path: computerHelperApp, label: "Winter Computer Use", expect: [] },
+  { path: browserHostPath, label: "winter-browser-host", expect: [] },
   // Winter Phase 8d (P8d-2) — `winter` is re-signed at embed time under Winter's own team identity
   // (embed-runtimes.sh), same posture as winter-core/WinterHelper above.
   // A2 (2026-09-22): `winter` is a bun binary too (measured `Bun v1.4.2` in the shipped runtime) —

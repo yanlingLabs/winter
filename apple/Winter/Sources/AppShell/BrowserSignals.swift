@@ -146,6 +146,10 @@ final class BrowserSignalsCoordinator {
 
         runtime.host = host
         runtime.onLingerDeadline = { [weak self] _ in self?.replan() }
+        // ComputerV2 Phase 2: the browser link asks for a plan the moment it takes or drops a hold.
+        // From here on that plan is THIS one — the full signals — rather than the headless planner
+        // it used while no shell existed.
+        runtime.replanHook = { [weak self] in self?.replan() }
 
         // Trigger 1. See `PanelStore.onFold` for why this is a hook rather than a `$tabs` sink.
         host.panelStore.onFold = { [weak self] in self?.replan() }
@@ -278,6 +282,7 @@ final class BrowserSignalsCoordinator {
         let memoryBytesByTab = BrowserMemorySampler.equalShare(totalBytes: memoryBytes(),
                                                                liveTabIds: live)
 
+        let planNow = now()
         let actions = BrowserLifecycleEngine.plan(sessions: sessions,
                                                   tabs: tabs,
                                                   live: live,
@@ -285,17 +290,22 @@ final class BrowserSignalsCoordinator {
                                                   pendingStops: runtime.pendingStopDeadlines,
                                                   lruOrder: runtime.lruOrder,
                                                   memoryBytesByTab: memoryBytesByTab,
-                                                  now: now())
+                                                  held: runtime.holds,
+                                                  closing: Set(runtime.closing.keys),
+                                                  now: planNow)
 
         // The reverse index the executor needs to bind a created tab's model to its session. Built
         // from the same `tabs` the plan was computed from, so a `.create` can never be attributed to
-        // a session the plan did not see.
+        // a session the plan did not see — plus the holds (rule H), whose tabs may be in no folded
+        // list at all. The fold wins where both name a tab; they are the same daemon's word.
         var sessionOf: [String: String] = [:]
+        for (tabId, hold) in runtime.holds { sessionOf[tabId] = hold.sessionId }
         for (sessionId, list) in tabs {
             for tab in list { sessionOf[tab.tabId] = sessionId }
         }
 
         runtime.apply(actions, tabs: tabs, sessionOf: { sessionOf[$0] })
+        runtime.pruneClosing(listed: Set(tabs.values.joined().map(\.tabId)), now: planNow)
 
         // After `apply`, because the live set is what the gate reads and this pass may have just
         // created the first browser or stopped the last one.
@@ -438,5 +448,44 @@ final class BrowserSignalsCoordinator {
         guard active != pollActive else { return }
         pollActive = active
         host.directory.setPolling(active: active)
+    }
+}
+
+/// ComputerV2 Phase 2 — **the plan when there is no shell yet.**
+///
+/// `BrowserSignalsCoordinator` is built the first time the app window is summoned, and Winter is a
+/// menu-bar app: it can run for days without that ever happening, and the browser link must still
+/// work with no window ever opened. Until a coordinator exists, the link plans through here.
+///
+/// The world it describes is the honest one: no session is shown, attached or listed by this app, so
+/// the only tabs it knows are the holds. Rule H creates and keeps those; the belt stops any other
+/// browser — which at this point can only be a tab the link held and has since released, since no
+/// other producer runs without a shell. No memory is measured (no sampler without a coordinator), so
+/// the count backstop is the bound. Same engine, same executor — only the inputs are fewer.
+@MainActor
+enum BrowserHeadlessPlanner {
+    static func replan(runtime: BrowserRuntime, now: Date = Date()) {
+        let holds = runtime.holds
+        let actions = BrowserLifecycleEngine.plan(sessions: [:],
+                                                  tabs: [:],
+                                                  live: runtime.liveTabIds,
+                                                  viewport: runtime.viewportTabId,
+                                                  pendingStops: runtime.pendingStopDeadlines,
+                                                  lruOrder: runtime.lruOrder,
+                                                  memoryBytesByTab: [:],
+                                                  held: holds,
+                                                  closing: Set(runtime.closing.keys),
+                                                  now: now)
+        runtime.apply(actions, tabs: [:], sessionOf: { holds[$0]?.sessionId })
+        runtime.pruneClosing(listed: [], now: now)
+    }
+
+    /// The plan the browser link asks for: the coordinator's when a shell exists, this one otherwise.
+    static func replan(_ runtime: BrowserRuntime) {
+        if let hook = runtime.replanHook {
+            hook()
+        } else {
+            replan(runtime: runtime)
+        }
     }
 }

@@ -1,0 +1,7 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Inner</title></head>
+<body>
+  <button onclick="document.getElementById('fs').textContent = 'frame pressed'">Frame button</button><span id="fs">frame idle</span>
+  <input id="note" aria-label="Frame note" oninput="document.getElementById('echo').textContent = 'echo ' + this.value">
+  <span id="echo">echo</span>
+</body></html>
