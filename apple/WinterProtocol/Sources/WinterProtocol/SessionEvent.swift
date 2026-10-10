@@ -950,8 +950,10 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let error: String
     }
 
-    /// session-activity-hygiene T4: a code/cowork session's derived lifecycle state, pushed live
-    /// whenever it actually CHANGES so an open UI flips without re-polling `session.list`.
+    /// session-activity-hygiene T4: a Code session's derived lifecycle state, pushed live whenever
+    /// it actually CHANGES so an open UI flips without re-polling `session.list`. The participation
+    /// predicate also reserves Cowork for synthetic/future rows; Cowork creation and execution
+    /// are not implemented.
     ///
     /// TRANSIENT (see `transientTypes` at the bottom of this file): broadcast-only, never in the
     /// session log, and stamped with the store's current `lastSeq` — so it must be exempted from

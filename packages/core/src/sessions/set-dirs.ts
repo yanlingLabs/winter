@@ -37,7 +37,7 @@ export interface SetDirsDeps {
  *  writable root at all (design doc §1), so every op refuses identically regardless of which door
  *  reached this state machine. Reuses `participatesInActivity` (code today, with future cowork
  *  participation reserved) rather than re-deciding the mode list a second time. */
-export const DIRS_MODE_REFUSAL = "working directories apply to code sessions only; Cowork is not yet available";
+export const DIRS_MODE_REFUSAL = "working directories apply to code sessions only";
 
 /** A locked entry can never be changed or removed for the session's lifetime (design doc §1) — this
  *  is the one refusal that names that rule. Fires for `setPrimary` over a locked `dirs[0]` and for

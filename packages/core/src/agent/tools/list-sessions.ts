@@ -91,7 +91,7 @@ export function listSessionsToolDefs(deps: ListSessionsDeps): ToolDefinition[] {
     modes: ["dispatch"],
     deferred: true,
     description: [
-      "List the code sessions on this Mac (chat and the dispatch session itself never appear). Cowork mode is not yet available.",
+      "List the code sessions on this Mac (chat and the dispatch session itself never appear).",
       `With no arguments: what is going on now — every active and background session, plus the sessions you spawned (an inactive one shows as "completed"; only the newest ${LIST_SESSIONS_RECENT_COMPLETED_CHILDREN} of those). Idle and archived sessions are counted, not listed.`,
       "Each row: session id, state, mode, how long a running turn has been going, working directory, title, transcript file.",
       `query: find a session by what you remember, across ALL sessions (idle and archived included) — words from its title or first message, when it ran ("yesterday", "last week", "monday", "2026-09-30"), its directory, or a file it edited ("the session that edited ~/projects/winter/config.toml", or just the path). The ${LIST_SESSIONS_QUERY_MAX_ROWS} closest matches come back first, each with why it matched.`,

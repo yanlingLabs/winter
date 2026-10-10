@@ -76,7 +76,7 @@ export const DELIVERY_DEDUPE_MAX = 500;
 /** The refusal a chat session gets (it has no SendMessage; defensive). */
 export const CHAT_SENDER_REFUSAL = "a chat session cannot message or stop other Winter sessions";
 /** The refusal for a chat or dispatch TARGET. The predicate also reserves future Cowork support. */
-export const TARGET_MODE_REFUSAL = "only code sessions can currently be messaged or stopped; chat and dispatch targets are unsupported, and Cowork is not yet available";
+export const TARGET_MODE_REFUSAL = "only code sessions can currently be messaged or stopped; chat and dispatch targets are unsupported";
 
 /** The slice of a session's live driver this file uses (`LegSession`). */
 export interface MessagingDriverHandle {

@@ -85,7 +85,7 @@ import { checkDangerousDomain, dangerousDomainRefusal } from "./page-core";
  *  read-only set as "open, navigate, tabs, read, screenshot" — five verbs, no `back` — while §2's
  *  verb table puts `navigate` / `back` on one row and marks it `read`. §2 is taken as the better
  *  reading on two grounds: it is the normative table (§1 is a summary sentence, and it also omits
- *  `back` from the code/cowork/dispatch list where nobody disputes it belongs), and `back` is the
+ *  `back` from its proposed work-mode list, which included the unimplemented Cowork mode), and `back` is the
  *  strict inverse of `navigate` — a mode allowed to move a tab forward but not to undo it would be
  *  a strange capability boundary, and `back` reaches nothing `navigate` did not already reach —
  *  **except a listed host already in that tab's history, the shared-strip case** (whole-branch

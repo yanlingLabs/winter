@@ -925,7 +925,7 @@ final class FieldStateAdapter: ObservableObject {
     ///
     /// Verbatim is the whole point. `set-dirs.ts` writes one sentence per rule — "that directory is
     /// locked for this session", "that directory can never be a working directory", the Code-only
-    /// availability refusal (Cowork is not yet available), and the remove-primary refusal that names
+    /// availability refusal, and the remove-primary refusal that names
     /// `setPrimary` as the way out. Each names the rule it enforced; a client-side "couldn't set
     /// folder" erases exactly the sentence that teaches the rule. Set by the WIRER (never by this
     /// adapter), same convention as `interactionErrors`.
@@ -1031,8 +1031,8 @@ final class FieldStateAdapter: ObservableObject {
     /// The daemon's OWN refusal sentence for the last `session.setActivity` attempt, shown VERBATIM,
     /// or `nil` when the last attempt succeeded (or none has been made). Same reasoning as
     /// `dirsRefusal` above, on a state machine with the same discipline: `set-activity.ts` writes one
-    /// sentence per rule ("activity states apply to code sessions only; Cowork is not yet available", "session is
-    /// archived — resume it first", "stop or background it first") and each names the rule it
+    /// sentence per rule ("activity states apply to code sessions only", "session is archived —
+    /// resume it first", "stop or background it first") and each names the rule it
     /// enforced. Set by the WIRER, never by this adapter.
     @Published var activityRefusal: String?
 

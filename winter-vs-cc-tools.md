@@ -1,8 +1,6 @@
 # Tool inventories — Winter vs. Claude Code
 
-> Historical comparison: several names and deferral rules below predate the runtime migration.
-> For the current tool surface, read [CLAUDE.md](CLAUDE.md#tool-surface) and the capability tables
-> it names. References to Claude Cowork do not imply Winter Cowork is available; see the
+> References to an external product's Cowork do not imply Winter Cowork is available; see the
 > [Cowork implementation map](docs/cowork-status.md).
 
 Two reference tables: Winter's built-in agent tools, and Claude Code's fixed built-in
@@ -86,8 +84,8 @@ path and its own page reader, and it needs the Exa key either way. It follows in
 | `computer` | No* | Control the Mac: read the AX tree, screenshot, click/drag/type/scroll, wait. |
 | `ToolSearch` | — | Load deferred tools' schemas so they become callable. |
 
-**These counts and legacy rows predate the engine's retirement; use the current surface linked
-above for availability and tool names.** Historical notes:
+**Counts below predate the engine's retirement and the web-tools ruling; the per-tool rows are
+what to trust.** Notes:
 
 - `computer` (`No*`) is only *registered* when `settings.computerUse.enabled` is on; when
   present it's not deferred.
@@ -99,7 +97,7 @@ above for availability and tool names.** Historical notes:
   the ToolSearch index, and `execute()`'s guard can never disagree about what's hidden.
 - `session_spawn` is **dispatch-session-only** — the mirror image of `spawn_agent`/`skill_write`/
   `write`/`edit`/`lsp`/`notebook_edit`, which are excluded FROM a dispatch session; a code
-  session never sees `session_spawn` at all. The comparison is to **Claude Cowork**'s "Dispatch"
+  session never sees `session_spawn` at all. The comparison is to an external product's Cowork "Dispatch"
   child creation, not an implemented Winter Cowork mode; Winter spawns Code sessions. Unlike
   `spawn_agent`'s in-session subagent THREAD, a spawned dispatch child is
   a full first-class sibling SESSION (own transcript, own `session.list` entry, independently

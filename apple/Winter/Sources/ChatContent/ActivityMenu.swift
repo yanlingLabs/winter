@@ -10,8 +10,9 @@ import WinterKit
 ///
 /// * `nil` activity — the session does not PARTICIPATE in the lifecycle (chat/dispatch, or a daemon
 ///   predating the field). `session.setActivity` refuses it outright with "activity states apply to
-///   code and cowork sessions only", so an affordance here would be a button whose every click is a
-///   refusal. The same "the daemon's own participation answer is the gate" shape `dirsMenuIsVisible`
+///   code sessions only", so an affordance here would be a button whose every click is a
+///   refusal. Code is supported today; the Cowork participation predicate is reserved groundwork.
+///   The same "the daemon's own participation answer is the gate" shape `dirsMenuIsVisible`
 ///   already uses for the working-folders chip, off the same `session.list` row.
 /// * `"archived"` — ARCHIVED IS IMMUTABLE EXCEPT THROUGH RESUME (activity-verb-semantics ruling 1):
 ///   both background verbs are refused with "session is archived — resume it first". Resume is a

@@ -372,7 +372,7 @@ describe("session.setActivity (session-activity-hygiene T3)", () => {
       const res = await c.request(METHODS.sessionSetActivity, { sessionId, activity: "background" });
       expect(res.error).toBeTruthy();
       expect(res.error.code).toBe(ERR.INVALID_PARAMS);
-      expect(res.error.message).toBe("activity states apply to code sessions only; Cowork is not yet available");
+      expect(res.error.message).toBe("activity states apply to code sessions only");
       expect(store.list().find((s) => s.sessionId === sessionId)!.backgrounded).toBeUndefined();
       c.close();
     });

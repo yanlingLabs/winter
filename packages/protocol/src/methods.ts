@@ -1371,7 +1371,7 @@ export const SessionSetEffortResult = z.object({});
 //
 // Refusals, all daemon-side (sessions/set-activity.ts, behind ipc/server.ts): an unknown session is
 // `NOT_FOUND` and takes precedence over everything below it; a chat/dispatch target is
-// `INVALID_PARAMS` ("activity states apply to code sessions only; Cowork is not yet available" — chat
+// `INVALID_PARAMS` ("activity states apply to code sessions only" — chat
 // and dispatch have no lifecycle, while T2 reserves future cowork participation); `"background"`/`"unbackground"` on an ARCHIVED
 // session is `INVALID_PARAMS` ("session is archived — resume it first"); `"archived"` on a session
 // with a RUNNING TURN is `INVALID_PARAMS` ("stop or background it first"), because archived is a

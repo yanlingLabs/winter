@@ -32,7 +32,7 @@ Sibling source references at the audited revisions:
 
 - Agent SDK `bc7e128f`: [host session contract](https://github.com/yanlingLabs/winter-agent-sdk/blob/bc7e128f2af855741dd38a0a45fdd03eae4a44b3/packages/sdk/src/protocol/config.ts#L365), [host bridge](https://github.com/yanlingLabs/winter-agent-sdk/blob/bc7e128f2af855741dd38a0a45fdd03eae4a44b3/packages/runtime/src/messaging/host-port.ts).
 - Runtime SDK `c5424202`: [RunMode](https://github.com/yanlingLabs/winter-runtime-sdk/blob/c5424202619cc8df2c8d18b832bfc52ad6fa35f7/src/run-home/types.ts#L29), [mode validation](https://github.com/yanlingLabs/winter-runtime-sdk/blob/c5424202619cc8df2c8d18b832bfc52ad6fa35f7/src/run-home/build.ts#L134).
-- iOS `8435d0a4`: [availability](https://github.com/yanlingLabs/winter-ios/blob/8435d0a4b8ff0ac0ddd8a9e5b4b40893e46adca0/Winter/App/SessionMode.swift#L37), [placeholder route](https://github.com/yanlingLabs/winter-ios/blob/8435d0a4b8ff0ac0ddd8a9e5b4b40893e46adca0/Winter/App/AppShellView.swift#L305), [list filtering](https://github.com/yanlingLabs/winter-ios/blob/8435d0a4b8ff0ac0ddd8a9e5b4b40893e46adca0/Winter/Code/SessionListModel.swift#L74).
+- iOS: the app marks Cowork unavailable and routes it to a coming-soon view.
 
 ## What still blocks a functional mode
 
@@ -46,18 +46,4 @@ Sibling source references at the audited revisions:
 - **Supported product modes and permission modes are different axes.** The SDK's older reference adapters expose permission-mode values where future product-mode metadata was anticipated. The current host messaging contract has a separate host-supplied product-mode string; neither implements Cowork.
 - **There is no supported Cowork fallback.** The old `engine.ts` is gone. Current [session-driver](../packages/core/src/runtime-sdk/session-driver.ts) and [handoff](../packages/core/src/runtime-sdk/handoff.ts) helpers map an unknown raw mode to Code, while supported creation rejects Cowork. Old comments predicting a Chat fallback are obsolete; the Code fallback is not a way to enable Cowork.
 - **Tool deferral is not roadmap deferral.** `deferred` in tool registration means schema loading through ToolSearch. It does not indicate that the tool or Cowork is waiting to be implemented.
-- **Claude Cowork is an external comparison.** Mentions of that product in comparison notes or old vendor metadata do not describe a shipped Winter feature. Dated research and release notes remain historical records.
-
-## Validation scope
-
-The implementation map is based on source inspection. The cleanup changes documentation, comments, test names/wording fixtures, and model-facing availability wording; it does not add a mode or alter routing, schemas, lifecycle predicates, or UI availability.
-
-Cleanup checks on 2026-10-10:
-
-- Core: **248 tests passed**, zero failures, across session messaging/listing/spawning, lifecycle, directory and remote-gate IPC, workspace/assistant memory, system-prompt assembly, and Dispatch configuration (11 files).
-- CLI: **201 tests passed**, zero failures, across mode handling, the session roster, and TUI commands (3 files).
-- Core, Protocol, and CLI TypeScript checks passed.
-- Protocol generation completed with no generated schema or fixture changes.
-- Local links and repository diffs checked; Swift production edits are comments only. Agent SDK TypeScript edits are comments only.
-
-Native Swift suites/builds and the full runtime end-to-end suite were not run. The changed Swift error fixtures retain the existing pass-through assertions. These checks validate the cleanup and existing helpers, not Cowork end-to-end execution.
+- **References to an external product's Cowork are comparisons.** Mentions of that product in comparison notes or old vendor metadata do not describe a shipped Winter feature. Dated research and release notes remain historical records.
