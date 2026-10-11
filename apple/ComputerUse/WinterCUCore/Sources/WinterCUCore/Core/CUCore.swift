@@ -376,6 +376,7 @@ public final class CUCore: @unchecked Sendable {
             targets[t.id] = t
             return t
         }()
+        updateWorkWatcher()
         // The element is cached now: a window on another Space is not in the AX list to find it again.
         windowElementsLock.withLock { windowElements[target.id] = chosen.element }
         target.knownWindows = Set(CUBindWait.realWindows(serverNow).map(\.id)).union([chosen.id])
@@ -638,6 +639,8 @@ public final class CUCore: @unchecked Sendable {
     var switchInputObservableOverride: Bool?
     /// Secure Event Input, as a test sets it (live: `IsSecureEventInputEnabled`).
     var secureInputOverride: Bool?
+    /// The process holding Secure Event Input, as a test sets it (live: the session's `kCGSSessionSecureInputPID`).
+    var secureInputOwnerOverride: pid_t?
     /// Every verdict of the one rule, with the path that asked (the model-based test's I5 check).
     var moveJudged: ((String, CUUserView, CUMoveOwner) -> Void)?
     /// Schedules the end of the guard's tail; tests run it by hand.
@@ -650,6 +653,10 @@ public final class CUCore: @unchecked Sendable {
     var focusTheftGuard = CUFocusGuard()
     /// The live CPS tap's run-loop thread and port (best-effort; nil when it could not be created).
     var cpsTapThread: Thread?
+    /// The work watcher (`CUCore+WorkWatcher.swift`): its tap's thread and port, while a target is bound.
+    let workWatcherLock = NSLock()
+    var workWatcherThread: Thread?
+    var workWatcherPort: CFMachPort?
     var cpsTapPort: CFMachPort?
     /// A test seam for the CPS notification handler (the live tap feeds the real one).
     var cpsReleaseOverride: ((Int32) -> Bool)?
@@ -1530,6 +1537,7 @@ public final class CUCore: @unchecked Sendable {
         focusEnforcers.removeValue(forKey: id)?.teardown()
         focusEnforcersLock.unlock()
         if let t { unwatchIfUnused(t.pid) }
+        updateWorkWatcher()
         return t
     }
 

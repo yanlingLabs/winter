@@ -8,13 +8,20 @@ import Foundation
 extension CUCore {
     static let remoteDebuggingSentence = "Winter never turns on or approves remote debugging in a browser — it would give any app on this Mac full control of the browser and its sign-ins. Ask the user to do it if they really want it."
 
-    /// The schemes of the Chromium family's internal pages.
-    static let inspectSchemes: Set<String> = ["chrome", "edge", "brave", "vivaldi", "opera", "arc"]
-
-    /// An internal inspect page: scheme one of `inspectSchemes`, host `inspect`. Pure.
+    /// An internal inspect page: host `inspect` under any scheme that is not the web's (`chrome`, `edge`, `brave`,
+    /// `vivaldi`, `opera`, `arc`, `comet`, … — review of round 11, MEDIUM #8: a fixed list missed Edge Canary's, Opera
+    /// GX's and newer browsers' own schemes). Pure.
     static func isInspectPage(_ url: String?) -> Bool {
-        guard let s = url, let u = URL(string: s), let scheme = u.scheme?.lowercased(), inspectSchemes.contains(scheme) else { return false }
+        guard let s = url, let u = URL(string: s), let scheme = u.scheme?.lowercased(), !["http", "https"].contains(scheme) else { return false }
         return u.host?.lowercased() == "inspect"
+    }
+
+    /// The inspect page's own title as a window shows it ("Inspect with Chrome Developer Tools", Edge's, …), for a
+    /// window with no accessibility. Pure.
+    static func isInspectPageTitle(_ s: String?) -> Bool {
+        guard let s = s?.lowercased() else { return false }
+        return s.range(of: #"\binspect with .{1,40} developer tools\b"#, options: .regularExpression) != nil
+            || s.range(of: #"^[a-z][a-z0-9+.-]*://inspect\b"#, options: .regularExpression) != nil
     }
 
     /// The dialog's English wording (its title or its text). Pure. (A localized dialog: its structural signature is to
@@ -25,8 +32,19 @@ extension CUCore {
     }
 
     func floorCheckRemoteDebugging(_ p: TargetActParams, _ t: CUTarget) throws {
-        guard t.accessible, let b = t.bundleId, CUChromium.bundleIds.contains(b) else { return }
+        // Every Chromium-based app (review of round 11, MEDIUM #8: Edge Canary, Brave Beta/Nightly, Opera GX, the Vivaldi
+        // snapshot, Comet — a bundle list misses them).
+        guard t.isChromium || t.bundleId.map(CUChromium.bundleIds.contains) == true else { return }
         let refusal = CUError.refused(.remoteDebugging, Self.remoteDebuggingSentence)
+        // A capture-only bind (no accessibility) still sends point clicks: judged by the window server's titles.
+        guard t.accessible else {
+            let titles = sys.windows(pid: t.pid).map(\.title)
+            if Self.isInspectPageTitle(sys.window(id: t.windowID)?.title) || titles.contains(where: Self.isRemoteDebuggingDialogText) {
+                CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): an inspect page or the remote-debugging dialog (capture-only) — refused")
+                throw refusal
+            }
+            return
+        }
         // The dialog: browser-modal, so while it is up nothing in the app is acted on.
         if remoteDebuggingDialogShown(t) {
             CULog.act.notice("\(Self.actionName(p.action), privacy: .public) in \(t.appName, privacy: .public): the remote-debugging dialog is up — refused")
@@ -67,7 +85,8 @@ extension CUCore {
     func remoteDebuggingDialogShown(_ t: CUTarget) -> Bool {
         // Scanned again only when the app's windows changed (a dialog or a sheet is a window of its own): an act on a
         // browser with many windows pays one window-server read, not a walk of every window.
-        let windows = Set(sys.windows(pid: t.pid).map(\.id))
+        // (Every layer: a dialog may sit above the normal level — review of round 11, MEDIUM #8.)
+        let windows = appWindowsOnScreen(t)
         if let last = t.remoteDebuggingScan, last.windows == windows { return last.shown }
         let shown = scanForRemoteDebuggingDialog(t)
         t.remoteDebuggingScan = (windows, shown)
@@ -79,6 +98,9 @@ extension CUCore {
         for w in ax.elements(ax.application(t.pid), kAXWindowsAttribute) {
             let role = ax.string(w, kAXRoleAttribute), sub = ax.string(w, kAXSubroleAttribute)
             if role == kAXSheetRole || (sub != nil && sub != kAXStandardWindowSubrole) { candidates.append(w) }
+            // A standard window with no web page in it may be the dialog too (never a browser window: its page title may
+            // say anything) — review of round 11, MEDIUM #8.
+            else if firstWebArea(w, maxNodes: 200, maxMs: 30) == nil { candidates.append(w) }
             candidates.append(contentsOf: ax.elements(w, kAXChildrenAttribute).filter { ax.string($0, kAXRoleAttribute) == kAXSheetRole })
         }
         for d in candidates {

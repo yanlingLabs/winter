@@ -450,9 +450,15 @@ public struct TargetActParams: Codable, Sendable, Equatable {
     /// With `desktopVisit`: how long that visit may last (the act's own deadline, a long type/paste's included) —
     /// the guardian's visit mode lasts that long, clamped to 10…330 s (absent: 10 s).
     public var visitMaxMs: Int?
+    /// (1.11.0) The daemon opens a rerouted LINK itself — through its own door, under the opener app's access and
+    /// consent: the helper answers the link's URL in `linkOpen` instead of opening it (absent: the helper opens it, as
+    /// before).
+    public var linkOpensViaDaemon: Bool?
     public init(targetId: String, sessionId: String, callId: String, action: CUAction, access: CUAccess,
-                allowForeground: Bool, privatePath: Bool, desktopVisit: Bool? = nil, visitMaxMs: Int? = nil) {
+                allowForeground: Bool, privatePath: Bool, desktopVisit: Bool? = nil, visitMaxMs: Int? = nil,
+                linkOpensViaDaemon: Bool? = nil) {
         self.visitMaxMs = visitMaxMs
+        self.linkOpensViaDaemon = linkOpensViaDaemon
         self.targetId = targetId
         self.sessionId = sessionId
         self.callId = callId
@@ -483,9 +489,13 @@ public struct TargetActResult: Codable, Sendable, Equatable {
     public var guardian: [String]?
     /// The apps that came forward after the agent's action with no input of the user's since the last act (a metric).
     public var viewMovedBy: [String]?
+    /// (1.11.0, with `linkOpensViaDaemon`) The act was on a link in an app that is not a web browser: not pressed — this
+    /// URL is for the daemon to open in the background through its own door.
+    public var linkOpen: String?
     public init(rung: Int, detail: String? = nil, input: String? = nil, inputUnknown: Bool? = nil,
                 focusNow: String? = nil, focusLost: Bool? = nil, pageNow: String? = nil, inVisit: Bool? = nil,
-                guardian: [String]? = nil, viewMovedBy: [String]? = nil) {
+                guardian: [String]? = nil, viewMovedBy: [String]? = nil, linkOpen: String? = nil) {
+        self.linkOpen = linkOpen
         self.rung = rung
         self.detail = detail
         self.input = input

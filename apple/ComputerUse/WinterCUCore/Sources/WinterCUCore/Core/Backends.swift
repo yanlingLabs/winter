@@ -200,10 +200,15 @@ final class CULiveSystem: CUSystemBackend {
         UserDefaults(suiteName: "com.apple.WindowManager")?.bool(forKey: "GloballyEnabled") ?? false
     }
     func isContentProcess(_ pid: pid_t, of appPid: pid_t) -> Bool {
-        guard pid > 0, pid != appPid, pid != getpid(), kill(pid, 0) == 0 || errno == EPERM else { return false }
-        // A regular app is a different app, never a part of this one.
-        guard let app = NSRunningApplication(processIdentifier: pid) else { return true }
-        return app.activationPolicy != .regular
+        guard pid > 0, appPid > 0, pid != appPid, pid != getpid(), kill(pid, 0) == 0 || errno == EPERM else { return false }
+        // A TRUE part of the app only (review of round 11, HIGH #2: any non-regular process passed — Spotlight, a
+        // launcher, the emoji picker, a status item — so typing into their panel was work in the front app): the app is
+        // responsible for it (Safari's WebContent, an XPC service launchd started — measured), it is the app's child
+        // (Chrome's renderer helpers — measured: their responsible process can be whatever launched Chrome), or its
+        // executable lies inside the app's bundle.
+        return CUProcessFacts.isPart(pid, of: appPid, responsible: CUProcessFacts.responsiblePid(pid),
+                                     parent: CUProcessFacts.parentPid(pid), executable: CUProcessFacts.executablePath(pid),
+                                     appBundle: NSRunningApplication(processIdentifier: appPid)?.bundleURL?.resolvingSymlinksInPath().path)
     }
     func cursorLocation() -> CGPoint? { CGEvent(source: nil)?.location }
     func warpCursor(to p: CGPoint) {
@@ -244,5 +249,47 @@ enum CUHitTest {
         }
         let owner = top.ownerName.isEmpty ? "another window" : "“\(top.ownerName)”"
         throw CUError.unsupported("\(owner) covers that point in front of \(appName) — use a ref or ask the user to move it")
+    }
+}
+
+
+/// Process facts the content-process check reads.
+enum CUProcessFacts {
+    /// `pid` is a true part of `appPid`: the app is responsible for it, it is the app's child, or its executable lies
+    /// inside the app's bundle. Pure — the live check and the tests' fake both decide by it.
+    static func isPart(_ pid: pid_t, of appPid: pid_t, responsible: pid_t?, parent: pid_t?, executable: String?,
+                       appBundle: String?) -> Bool {
+        guard pid > 0, appPid > 0, pid != appPid else { return false }
+        if responsible == appPid || parent == appPid { return true }
+        guard let exe = executable, let bundle = appBundle, !bundle.isEmpty else { return false }
+        return exe.hasPrefix(bundle.hasSuffix("/") ? bundle : bundle + "/")
+    }
+
+    private typealias ResponsibleFn = @convention(c) (pid_t) -> pid_t
+    /// libsystem's `responsibility_get_pid_responsible_for_pid` (private; looked up, never linked): nil when absent.
+    private static let responsible: ResponsibleFn? = {
+        guard let h = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "responsibility_get_pid_responsible_for_pid") else { return nil }
+        return unsafeBitCast(h, to: ResponsibleFn.self)
+    }()
+
+    static func responsiblePid(_ pid: pid_t) -> pid_t? {
+        guard let f = responsible else { return nil }
+        let r = f(pid)
+        return r > 0 ? r : nil
+    }
+
+    static func parentPid(_ pid: pid_t) -> pid_t? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        let ppid = info.kp_eproc.e_ppid
+        return ppid > 1 ? ppid : nil
+    }
+
+    static func executablePath(_ pid: pid_t) -> String? {
+        var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 else { return nil }
+        return URL(fileURLWithPath: String(cString: buf)).resolvingSymlinksInPath().path
     }
 }
