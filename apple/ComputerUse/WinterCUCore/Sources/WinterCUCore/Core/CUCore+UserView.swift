@@ -53,6 +53,10 @@ extension CUCore {
         do {
             outcome = try body()
         } catch {
+            // The act refused because the app came to the front meanwhile: that change is the user's (or the app's
+            // own, which the guardian answers) — never "undone" here, which would pull the user back out of the app
+            // they chose (review of round 4).
+            if Self.isAppInFront(error) { throw error }
             // The error is the result; what moved is said with the next one.
             checkAfterAct(before, t, seq: seq, route: route(nil))
             throw error
@@ -165,37 +169,91 @@ extension CUCore {
 
     func isRetired(_ step: CUBackgroundStep) -> Bool { retiredStepsLock.withLock { retiredSteps.contains(step) } }
 
+    enum StepResult: Equatable {
+        /// Ran, and the user's view stayed (or the change was the user's own).
+        case ran
+        /// Not run: retired, or it failed.
+        case notRun
+        /// Ran and moved the user's view: undone, the view restored, the step retired.
+        case undone
+    }
+
     /// Runs a background step and checks the user's view `stepSettleMs` later. A step that moved it is undone,
-    /// the view restored, the act told, and the step never used again. False: skipped, failed or undone.
-    func backgroundStep(_ step: CUBackgroundStep, _ t: CUTarget, run: () -> Bool, undo: () -> Void) -> Bool {
-        guard !isRetired(step) else { return false }
+    /// the view restored, the act told, and the step never used again.
+    /// `usersOwn`: a change of the view that is the USER's doing (they brought the target forward themselves, with
+    /// their own input) — never the step's: nothing undone, the step not retired, nobody pulled back out of the app they
+    /// chose (review of round 4: a ⌘-Tab into the target during a typing burst retired the focus records for the
+    /// helper's life and yanked the user back to their previous app).
+    func backgroundStep(_ step: CUBackgroundStep, _ t: CUTarget, run: () -> Bool, undo: () -> Void,
+                        usersOwn: (CUUserView) -> Bool = { _ in false }) -> StepResult {
+        guard !isRetired(step) else { return .notRun }
         let before = userView()
-        guard run() else { return false }
+        guard run() else { return .notRun }
         let after = view(after: before, settleMs: stepSettleMs)
-        guard after != before else { return true }
+        guard after != before else { return .ran }
+        if usersOwn(after) {
+            CULog.act.notice("\(step.rawValue, privacy: .public) in \(t.appName, privacy: .public): the user brought it forward meanwhile — their move, left as it is")
+            return .ran
+        }
         undo()
         retiredStepsLock.withLock { _ = retiredSteps.insert(step) }
         let said = viewMoved(before, after, t, route: step.rawValue, late: false)
         t.addViewNote("\(said) (\(step.rawValue) is no longer used)")
-        return false
+        return .undone
+    }
+
+    /// The user's own click, key or modifier within the guardian's window — the HID state (the helper's posted events
+    /// never count there: measured on 2026-10-11, a key and a click it posted left "seconds since the last key/click"
+    /// at over an hour) or the session tap's hardware actions (never a pointer move: moving the mouse activates nothing).
+    func userActedRecently(now: TimeInterval) -> Bool {
+        if secondsSinceUserInput < CUFocusGuardianCore.userInputWindow { return true }
+        let last = guardianLock.withLock { lastHardwareActionAt }
+        return last >= 0 && now - last <= Self.guardianHardwareWindow
+    }
+
+    /// How a focus blip's start went (`keyWithoutRaise`).
+    enum BlipStart {
+        /// The focus records are unavailable or retired: no blip (nothing was posted).
+        case unavailable
+        /// Refused before anything was posted (the user's view untouched).
+        case refusedBeforeAnything(CUError)
+        /// The app activated itself on the focus record (no input of the user's behind it): undone, the user's view
+        /// put back, the focus records retired — and nothing may be typed (review of round 4: the act typed on with no
+        /// blip, into the app's key window).
+        case undone(CUError)
+        /// The bound window holds the key focus; `undo` hands it back.
+        case keyed(undo: () -> Void)
+        /// Posted, then refused: the blip must END the ordinary way (hand-back, the wait for the user's app, the
+        /// guardian's restore) before the refusal is thrown.
+        case refused(undo: () -> Void, CUError)
+        /// The user brought the target app forward meanwhile: refused, and the key focus is theirs — never handed back
+        /// (that would pull them out of the app they chose).
+        case userTookTheApp(CUError)
     }
 
     /// Makes the bound window key without raising it or activating the app (yabai's focus records), when the
-    /// app is in the background and the private path is on. Returns the undo: the user's key window handed back.
+    /// app is in the background and the private path is on. Its undo hands the key focus back to the user's window —
+    /// the one accessibility names, else their app's frontmost window as the window server lists it, else none named
+    /// (the defocus still goes to the target; the blip's end restores the user's app if their key focus is not back).
     /// The user's app resigns active while it lasts, so it is used ONLY inside the focus blip (`beginBlip`, with
-    /// the keyboard reroute on) — never for typing, clicks or reads. Nil: the focus records are unavailable or
-    /// retired. Throws (`focus_not_placed` / `app_in_front`), with the key focus already handed back, when the bound
-    /// window could not be made the one the app's keys go to — a panel, dialog or another app window holds them,
-    /// where they would go can't be told, or the app came to the front meanwhile: keys (and a menu command, which acts
-    /// where the keys go) sent then would land in another window (review of round 3, MEDIUM: a floating Inspector got
-    /// the text, and a typed newline could press a dialog's default button).
-    func keyWithoutRaise(_ t: CUTarget) throws -> (() -> Void)? {
-        guard skyLight.canFocusWithoutRaise, let user = sys.frontmostPid(), user != t.pid else { return nil }
+    /// the keyboard reroute on) — never for typing, clicks or reads. A REFUSAL (`focus_not_placed`, `app_in_front`):
+    /// the bound window could not be made the one the app's keys go to — a panel, dialog or another app window holds
+    /// them, where they would go can't be told, or the app came to the front meanwhile: keys (and a menu command, which
+    /// acts where the keys go) sent then would land in another window (review of round 3). What can be decided without
+    /// the focus record (the app's window list unreadable) is refused before anything is posted.
+    func keyWithoutRaise(_ t: CUTarget) -> BlipStart {
+        guard skyLight.canFocusWithoutRaise, let user = sys.frontmostPid(), user != t.pid else { return .unavailable }
+        if makeKeyApplies(t), case .unknown(let why) = transientUI(t) {
+            return .refusedBeforeAnything(CUError.refused(.focusNotPlaced, "where \(t.appName)'s keys would go can't be told (\(why)), so nothing was typed — try again, or click the field first"))
+        }
         let userWindow = ax.element(ax.application(user), kAXFocusedWindowAttribute).flatMap { ax.windowID($0) }
+            ?? sys.windowStack().first(where: { $0.pid == user && $0.layer == 0 })?.id
         let sky = skyLight
         let (tp, tw) = (t.pid, t.windowID)
         let undo = { [self] in
-            if let userWindow { sky.restoreFocus(previousPid: user, previousWindowID: userWindow, targetPid: tp, targetWindowID: tw) }
+            // With no window of theirs to name, the record still takes the key focus from the target (review of round 4:
+            // nothing at all was posted then, and the target kept the user's keys).
+            sky.restoreFocus(previousPid: user, previousWindowID: userWindow ?? 0, targetPid: tp, targetWindowID: tw)
             // The hand-back's defocus leaves the app with NO key window (measured) — while accessibility may still name
             // a focused element in its main window. Remembered, so the next make-key step does not take it for key.
             noteStranded(tp, true)
@@ -205,7 +263,8 @@ extension CUCore {
         // paste of a run read Edit › Paste disabled and took no ⌘V; keys for the Docs window went nowhere). Once the
         // app has taken the activation, the bound window is made its key window — only when it is not (`makeKeyInApp`).
         var made = MakeKeyOutcome.notApplicable
-        guard backgroundStep(.focusRecords, t, run: { [self] in
+        let usersMove = { [self] (now: CUUserView) -> Bool in now.front == tp && userActedRecently(now: clock.nowSeconds()) }
+        let step = backgroundStep(.focusRecords, t, run: { [self] in
             guard sky.focusWithoutRaise(pid: tp, windowID: tw) else { return false }
             made = makeKeyInApp(t) { [self] in
                 // After the deactivation the app is told it is active again (the blip keeps it so), to the app alone.
@@ -213,15 +272,26 @@ extension CUCore {
                 _ = focusEnforcer(for: t, privatePath: true)?.forceActivation(windowID: tw)
             }
             return true
-        }, undo: { _ = undo() })
-        else { return nil }
-        CULog.act.notice("\(t.appName, privacy: .public): window \(tw, privacy: .public) made key without raising (\(made.words, privacy: .public))")
-        if let refusal = keysRefusal(made, t) {
-            undo()
-            CULog.act.notice("\(t.appName, privacy: .public): nothing sent in the focus blip — \(refusal.message, privacy: .public)")
-            throw refusal
+        }, undo: { _ = undo() }, usersOwn: usersMove)
+        switch step {
+        case .notRun:
+            return .unavailable
+        case .undone:
+            return .undone(CUError.refused(.focusNotPlaced, "\(t.appName) activated itself when its window was being made key; the user's app was put back and nothing was typed — check state(), and try again"))
+        case .ran:
+            break
         }
-        return { _ = undo() }
+        CULog.act.notice("\(t.appName, privacy: .public): window \(tw, privacy: .public) made key without raising (\(made.words, privacy: .public))")
+        if sys.frontmostPid() == tp {
+            let e = CUError.refused(.appInFront, "\(t.appName) came to the front while its window was being made key — the user may be using it now, so nothing was typed; check state(), and try again if it is still wanted")
+            CULog.act.notice("\(t.appName, privacy: .public): nothing sent in the focus blip — it came to the front")
+            return .userTookTheApp(e)
+        }
+        if let refusal = keysRefusal(made, t) {
+            CULog.act.notice("\(t.appName, privacy: .public): nothing sent in the focus blip — \(refusal.message, privacy: .public)")
+            return .refused(undo: undo, refusal)
+        }
+        return .keyed(undo: undo)
     }
 
     /// Whether keys may go out after the make-key step: yes when it did not apply, the window was key already, or the
@@ -266,6 +336,9 @@ extension CUCore {
         let w: AXUIElement? = ax.string(f, kAXRoleAttribute) == kAXWindowRole ? f : ax.element(f, kAXWindowAttribute)
         guard let w else {
             if let bound, inBoundWindow(f, t, bound) == true { return .boundWindow }
+            // An element with no window of its own (some Java, Qt and custom toolkits): the app's focused window says
+            // whose it is (review of round 4: refused for good, the advice to click first looping).
+            if boundWindowIsKeyInApp(t) == true { return .boundWindow }
             return .unknown("its focus is in no window accessibility can name")
         }
         if isBound(w) { return .boundWindow }
@@ -311,6 +384,9 @@ extension CUCore {
         let w: AXUIElement? = ax.string(f, kAXRoleAttribute) == kAXWindowRole ? f : ax.element(f, kAXWindowAttribute)
         guard let w else {
             if let bound, inBoundWindow(f, t, bound) == true { return .key }
+            // No window of its own (some Java, Qt and custom toolkits typed into before round 4): the app's focused
+            // window is the bound one.
+            if boundWindowIsKeyInApp(t) == true { return .key }
             return .leave("its focus is in no window accessibility can name")
         }
         if let id = ax.windowID(w) { if id == t.windowID { return .key } } else if let bound, CFEqual(w, bound) { return .key }
@@ -402,7 +478,15 @@ extension CUCore {
         if sys.frontmostPid() == t.pid { return .appInFront }
         guard makeKeyApplies(t) else { return .notApplicable }
         switch transientUI(t) {
-        case .open(let why): return .transientOpen(why)
+        case .open(let why):
+            // An app our own hand-back left with no key window: what is still open survived that loss of the key
+            // focus — not a menu or a transient popover (they close with it; measured with a probe app of ours), but an
+            // attached completion or autocomplete window of the bound window (review of round 4: refused at a typing
+            // run's second burst). The keys must reach the window, so it is named as for an app with no key window
+            // (the next key opens such a list again) — unless the keys provably go to another window.
+            if isStranded(t.pid), case .elsewhere = whereKeysGo(t) { return .transientOpen(why) }
+            if !isStranded(t.pid) { return .transientOpen(why) }
+            CULog.act.notice("\(t.appName, privacy: .public): \(why, privacy: .public), and the app holds no key window after our hand-back — an attached list; the window is named")
         case .unknown(let why): return .unknown(why)
         case .none: break
         }
@@ -492,6 +576,12 @@ extension CUCore {
         }
         CULog.act.notice("click in \(t.appName, privacy: .public): window \(t.windowID, privacy: .public) — \(made.words, privacy: .public)")
         return made == .appInFront ? .appInFront : .prepared
+    }
+
+    /// An `app_in_front` refusal.
+    static func isAppInFront(_ error: Error) -> Bool {
+        guard let e = error as? CUError, e.code == "refused" else { return false }
+        return e.data?["reason"] == .string(CUFloorReason.appInFront.rawValue)
     }
 
     /// The click not sent because the app came to the front while it was being prepared.

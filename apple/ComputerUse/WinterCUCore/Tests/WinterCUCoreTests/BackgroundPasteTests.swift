@@ -195,6 +195,15 @@ final class BackgroundPasteTests: XCTestCase {
         XCTAssertFalse(r.detail?.contains("reads them back") ?? true, "never claims a read-back it can't do")
     }
 
+    /// Review of round 4 (LOW): a long text with a Tab went as a paste — its tabs pasted as characters, while the
+    /// protocol said a Tab moves the focus. Said truthfully in the result.
+    func testALongTextWithTabsPastedSaysItsTabsWentInAsCharacters() async throws {
+        world()
+        let r = try await type(String(repeating: "cell\t", count: 50))  // 250 characters, one line
+        XCTAssertTrue(r.detail?.hasPrefix("as a paste (") ?? false, r.detail ?? "")
+        XCTAssertTrue(r.detail?.contains("its tabs went in as characters, moving no focus") ?? false, r.detail ?? "")
+    }
+
     /// Another window of the app is its key window, with a File › Open Location… (⌘L) item.
     private func anotherWindowKey() -> AXUIElement {
         let other = fakeElement(97_020), file = fakeElement(97_021), fileMenu = fakeElement(97_022), open = fakeElement(97_023)

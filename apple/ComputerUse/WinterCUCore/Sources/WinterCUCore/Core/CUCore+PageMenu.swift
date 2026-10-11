@@ -36,7 +36,7 @@ extension CUCore {
             }
             let last = depth == a.path.count - 1
             let menusBefore = Set(pageMenus(in: area).map { AXIdentity(element: $0) })
-            guard let point = ElementInfo(item, ax).center, windowClick(at: point, t) else {
+            guard let point = ElementInfo(item, ax).center, try windowClick(at: point, t) else {
                 closePageMenu(t)
                 throw CUError.unsupported("the page's “\(label)” menu item can't be clicked here (it is outside the window, or the window can't be reached) — scroll it into view, or call app.requestForeground(reason)")
             }

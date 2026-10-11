@@ -668,13 +668,38 @@ final class DesktopVisitTests: XCTestCase {
         XCTAssertEqual(userView, CUUserView(space: 2, front: pid), "left: it can't be told whose it was")
     }
 
+    /// Review of round 4 (LOW): a chord the tap SEES (⌘S, ⌃C) went to an app and switched nothing — the switcher's own
+    /// (⌘-Tab) shows only as the modifier's press and release; a ⌘ held over a second before the Tab counted nothing; a
+    /// chord from before the watch counted. A ⌘/⌃ hold counts (while it lasts, and its release) unless a chord was seen
+    /// in it; a gesture counts; nothing before the watch began.
     func testOnlyInputThatCanSwitchCountsAsTheUsersMove() {
-        XCTAssertTrue(CUCore.canSwitch(type: .flagsChanged, flags: .maskCommand), "⌘ (⌘-Tab)")
-        XCTAssertTrue(CUCore.canSwitch(type: .keyDown, flags: .maskControl), "⌃-arrow")
-        XCTAssertFalse(CUCore.canSwitch(type: .keyDown, flags: []), "typing")
-        XCTAssertFalse(CUCore.canSwitch(type: .keyDown, flags: .maskShift), "a capital")
-        XCTAssertFalse(CUCore.canSwitch(type: .scrollWheel, flags: []))
-        XCTAssertTrue(CUCore.canSwitch(type: CGEventType(rawValue: 31)!, flags: []), "a swipe")
+        var s = CUSwitchInput()
+        // ⌘-Tab: ⌘ down, the Tab swallowed by the switcher, ⌘ up 1.5 s later.
+        s.event(type: .flagsChanged, flags: .maskCommand, now: 10)
+        XCTAssertTrue(s.seen(from: 9, seenAt: 11, window: 1), "a chord-less hold going on")
+        s.event(type: .flagsChanged, flags: [], now: 11.5)
+        XCTAssertTrue(s.seen(from: 9, seenAt: 11.8, window: 1), "its release, however long ⌘ was held")
+        XCTAssertFalse(s.seen(from: 9, seenAt: 13, window: 1), "only within the window before the change")
+        XCTAssertFalse(s.seen(from: 12, seenAt: 12.2, window: 1), "never from before the watch began")
+        // ⌘S: the chord is seen — an app got it, nothing switched.
+        var e = CUSwitchInput()
+        e.event(type: .flagsChanged, flags: .maskCommand, now: 20)
+        e.event(type: .keyDown, flags: .maskCommand, now: 20.1)
+        XCTAssertFalse(e.seen(from: 19, seenAt: 20.2, window: 1), "a seen chord is no switch")
+        e.event(type: .flagsChanged, flags: [], now: 20.3)
+        XCTAssertFalse(e.seen(from: 19, seenAt: 20.4, window: 1), "nor its release")
+        // Typing, a capital, a scroll: nothing. A swipe: yes.
+        var g = CUSwitchInput()
+        g.event(type: .keyDown, flags: [], now: 30)
+        g.event(type: .flagsChanged, flags: .maskShift, now: 30.1)
+        g.event(type: .scrollWheel, flags: [], now: 30.2)
+        XCTAssertFalse(g.seen(from: 29, seenAt: 30.3, window: 1))
+        g.event(type: CGEventType(rawValue: 31)!, flags: [], now: 30.4)
+        XCTAssertTrue(g.seen(from: 29, seenAt: 30.5, window: 1), "a swipe between desktops")
+        // A hold whose release was never seen is not trusted for ever.
+        var h = CUSwitchInput()
+        h.event(type: .flagsChanged, flags: .maskControl, now: 40)
+        XCTAssertFalse(h.seen(from: 39, seenAt: 40 + CUSwitchInput.holdMax + 1, window: 1))
     }
 
     func testOnlyTheTargetsOwnLateSwitchIsUndone() {
@@ -708,6 +733,9 @@ final class DesktopVisitTests: XCTestCase {
         let newer = fakeElement(96_102)
         ax.add(newer, role: kAXWindowRole, title: "New", frame: CGRect(x: 0, y: 0, width: 400, height: 300))
         ax.windowIDs[AXIdentity(element: newer)] = 502
+        var w502 = FakeSystem.window(502, pid: user, CGRect(x: 0, y: 0, width: 400, height: 300))
+        w502.onScreen = false  // on their desktop, not the visited one
+        sys.windows[502] = w502
         ax.put(ax.application(user), [kAXFocusedWindowAttribute: newer])  // a window the user's app opened meanwhile
         closed = try await close()
         report = try XCTUnwrap(closed.first)
@@ -783,6 +811,63 @@ final class DesktopVisitTests: XCTestCase {
         XCTAssertEqual(ax.element(ax.application(pid), kAXFocusedWindowAttribute).flatMap { ax.windowID($0) }, 66,
                        "back in the window they were in, not merely in the app")
         XCTAssertEqual(sys.frontedWindows.last.map { "\($0.pid):\($0.windowID):\($0.main)" }, "\(pid):66:true")
+    }
+
+    /// Review of round 4 (MEDIUM): the user's app IS the target app, and the visit's act opened an alert on the visited
+    /// desktop — now the app's focused window. The return took it for a newer window of the user's, raised it and made it
+    /// main, and the user stayed there. Only a window that was on their desktop, or is not on the visited one, is theirs.
+    func testTheReturnNeverAnchorsOnAWindowTheVisitsActOpened() async throws {
+        world()
+        let mine = fakeElement(96_066), alert = fakeElement(96_079)
+        ax.add(mine, role: kAXWindowRole, title: "Mine", frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+        ax.windowIDs[AXIdentity(element: mine)] = 66
+        sys.windows[66] = FakeSystem.window(66, pid: pid, CGRect(x: 0, y: 0, width: 400, height: 300))
+        ax.add(alert, role: kAXWindowRole, subrole: kAXDialogSubrole, title: "Save?")
+        ax.windowIDs[AXIdentity(element: alert)] = 79
+        sys.front = pid
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: mine])
+        sys.onActivate = { _ in }
+        sys.onFrontWindow = { [unowned self] p, wid, _ in
+            guard p == pid else { return }
+            if wid == 77 { show(2); ax.put(ax.application(pid), [kAXFocusedWindowAttribute: window]) }
+            if wid == 66, sys.frontedWindows.last?.main == true { show(1); ax.put(ax.application(pid), [kAXFocusedWindowAttribute: mine]) }
+        }
+        _ = try await click(visit: true)
+        XCTAssertEqual(userView, CUUserView(space: 2, front: pid))
+        // The act opened an alert on the visited desktop: on screen there, the app's focused window now.
+        sys.windows[79] = FakeSystem.window(79, pid: pid, CGRect(x: 100, y: 100, width: 300, height: 150))
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: alert])
+        _ = try await close()
+        let returns = sys.frontedWindows.dropFirst().map { "\($0.pid):\($0.windowID)" }
+        XCTAssertEqual(returns.first, "\(pid):66", "their own window raised, not the visit's alert: \(returns)")
+        XCTAssertFalse(returns.contains("\(pid):79"))
+        XCTAssertEqual(userView.space, 1, "back on their desktop")
+    }
+
+    /// The same once their desktop is back but their app is not yet in front (a second return attempt): the alert, now
+    /// off screen on the visited desktop, is still not theirs.
+    func testASecondReturnAttemptNeverAnchorsOnTheVisitsWindowEither() async throws {
+        world()
+        let mine = fakeElement(96_066), alert = fakeElement(96_079)
+        ax.add(mine, role: kAXWindowRole, title: "Mine", frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+        ax.windowIDs[AXIdentity(element: mine)] = 66
+        sys.windows[66] = FakeSystem.window(66, pid: pid, CGRect(x: 0, y: 0, width: 400, height: 300))
+        ax.add(alert, role: kAXWindowRole, subrole: kAXDialogSubrole, title: "Save?")
+        ax.windowIDs[AXIdentity(element: alert)] = 79
+        sys.front = pid
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: mine])
+        sys.onActivate = { _ in }
+        _ = try await click(visit: true)
+        // The visit's act opened an alert on the visited desktop; then their desktop came back on its own, the alert
+        // with the visited one went off screen, and the app's focused window is still the alert.
+        var a = FakeSystem.window(79, pid: pid, CGRect(x: 100, y: 100, width: 300, height: 150))
+        a.onScreen = false
+        sys.windows[79] = a
+        ax.put(ax.application(pid), [kAXFocusedWindowAttribute: alert])
+        show(1)
+        XCTAssertNotEqual(core.returnWindow(try XCTUnwrap(core.openVisit?.base)).id, 79, "never the visit's alert")
+        _ = try await close()
+        XCTAssertFalse(sys.frontedWindows.dropFirst().contains { $0.windowID == 79 })
     }
 
     func testAVisitWithNothingToAnchorTheReturnIsRefusedWhenTheUsersAppHasWindowsElsewhere() async throws {

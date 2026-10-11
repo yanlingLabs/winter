@@ -2,7 +2,7 @@
 
 **Protocol version: 1**
 
-Helper version: `1.9.4` (the contents of [`VERSION`](VERSION))
+Helper version: `1.9.5` (the contents of [`VERSION`](VERSION))
 
 This is the wire contract between **Winter Computer Use** (the signed helper app built from this folder) and
 its two clients: the Winter daemon (`winter-core`) and Winter.app. It is written from the code in
@@ -198,7 +198,8 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   (`isDiff: true`). A diff also prints, as `+ <line> — now shown, in [p] …`, what the state shows now that the
   `since` print had folded or left out of view (a scroll, a fold that opened), and a change to an element that print
   never showed carries the element's line and context. Against a folded print, `changedRatio` is also the new lines'
-  share of what the print shows (a whole new screen of rows is the state again, not a longer list); only the lines a
+  share of what the print shows — new lines it SHOWS, never an addition it folds (a whole new screen of rows is the
+  state again, not a longer list); only the lines a
   diff keeps under its cap count as seen afterwards, and a state printed instead keeps as seen what the `since` print
   had shown that is still there unchanged. `within` scopes it to one ref. `settle` first waits for 150 ms of quiet, up to `maxMs`.
   A window with no accessibility answers a one-paragraph `text` instead. A state is folded to 300 lines (`full`:
@@ -296,8 +297,20 @@ without the grant; captures fail `permission_missing` (`"screenRecording"`) with
   only when the app's keys reach the bound window anyway (its own focus, a popover or context menu of it, a sheet on
   it): otherwise nothing is sent and the act is `refused` — `focus_not_placed` naming what holds the keys (`its
   floating window "Inspector"`, `its dialog …`) or saying it can't be told, `app_in_front` when the app came to the
-  front. A background click whose app came to the front while it was prepared is not sent (`refused`,
-  `app_in_front`). A Tab in a `type`'s text goes as keys, never an accessibility insert (it moves the focus).
+  front. A refusal after the blip's focus record ends the blip as every blip ends (the key focus handed back — with no
+  readable window of the user's, naming none — the wait for their app, a second hand-back, the reroute removed only
+  then, the guardian's restore if they are still not back), so the target never keeps the user's keys; what needs no
+  focus record (the app's window list unreadable) is refused before it. `app_in_front` means the user brought the app
+  forward: nothing is handed back or undone, the user is never pulled back out of it, and the background steps stay in
+  use; the app activating itself on the focus record (no input of the user's behind it) is undone — the user's app put
+  back, the focus records no longer used — and nothing is typed (`focus_not_placed`). A background click — or the
+  click that places a field's focus before typing — whose app came to the front
+  while it was prepared is not sent and stops the act (`refused`, `app_in_front`). A focused element with no window
+  of its own (some Java, Qt and custom toolkits) counts as the bound window's when the app's focused window is the
+  bound one. An attached list (a completion or autocomplete window) still open after a blip's hand-back left the app
+  with no key window is no menu or popover: the window is named and the keys go. A Tab in a `type`'s text goes as
+  keys, never an accessibility insert (it moves the focus) — except in text long or multi-line enough to go as a paste
+  into a field that reads it back, whose tabs go in as characters (its `detail` says so).
 - `menu` walks the app's menu bar; when that has no `path[0]` and the bound window's page has its own menu bar
   (an `AXMenuBar` in its web area) that does, each level is opened with a window-targeted click and verified by
   the menu it shows, and the last item clicked and verified by its menu closing (`detail` says which). A page menu
@@ -441,10 +454,14 @@ never back and forth between their view and the window's, never held there to th
   never comes on screen: the user is brought back and the request fails `unsupported` ("macOS did not show <App>'s
   desktop — nothing was done there") with `data.visit` (the closed visit's report); a switch that comes after that (the
   app answering late) is watched for about 1.2 s and undone — unless input of the user's that can switch apps or
-  desktops (a ⌘ or ⌃ chord, a trackpad gesture, a click on the target's window or on the Dock) came within a second
-  before it, which makes it their move (typing in their own app does not); with no way to see such input (no session
-  tap) it is left alone. The return raises the user's recorded window, a newer one of theirs, or — when theirs closed
-  — another of their windows that was on their desktop, never the target's window; with none, their app alone. A visit is refused before anything moves (`unsupported`)
+  desktops came since the watch began and within a second before it, which makes it their move: a ⌘ or ⌃ held and
+  released with no chord seen in between (the switcher's own, ⌘-Tab, shows only so; a chord an app gets — ⌘S —
+  switches nothing), or still held; a trackpad gesture; a click on the target's window or on the Dock. Typing in their
+  own app does not count. With no way to see such input (no session tap, read at each change) it is left alone. The
+  return raises the user's recorded window, a newer one of theirs, or — when theirs closed — another of their windows
+  that was on their desktop; "theirs" is a window that was on their desktop when the visit began or is not shown on
+  the visited one — never the target's window, nor an alert or window the visit's act opened there; with none, their
+  app alone. A visit is refused before anything moves (`unsupported`)
   when the user's own window can't be told while their app has windows on other desktops (the return could not tell
   where to bring them).
 - **While open.** Every primitive of that session on a window of the visited desktop runs there, with no further
@@ -729,3 +746,4 @@ the helper is too old; higher, too new. Either way the fix is the same — Winte
 | 1 | 1.9.2 | No wire change — the live gate's second round: a window in a full-screen transition (listed, on no Space for a moment) is not a closed one; an explicit `full` state is held to 48 KB as well; a desktop visit that switched late is undone, returns to the user's own window (made main), and is refused before anything moves when the user's window can't be told; in every focus blip and before a background window-targeted click the bound window is made its app's key window (after a blip's hand-back an app held no key window and later blips left it so: keys went nowhere, Edit › Paste stayed disabled, a first click only made the window key); a page menu WebKit keeps alive after closing counts as closed; a hover over a WebKit page that shows nothing new says so. Its review: the key-window step only when the window is not key (an app's focused element tells; a blip's hand-back is remembered as none), never over a menu, popover, sheet or a panel holding the keys, never for a click landing on another window, Chromium excluded (measured), the front re-read before it acts; a visit's late-switch watch undoes only the target's own switch and never fights a window the user changed; the window-gone watch suspends under the call's cancel, coalesced per pid; a diff surfaces what its folded base never showed. |
 | 1 | 1.9.3 | Additive: `refused` gains `app_in_front` (the app came to the front while a background act was prepared: the keys or the click were not sent); `target.find`, `target.foreground`, `target.scriptingDictionary` and `target.scriptingCommands` take an optional `callId` (`cancel` reaches them; every call that can wait on a window's transition registers its cancel first). Behaviour — the live gate's third round and its review: a focus blip whose make-key step could not make the bound window the one the keys go to (a panel, a dialog or another window holds them; the app's window list unreadable; the app come to the front) sends nothing and refuses (`focus_not_placed` naming what holds the keys), while a popover or context menu of the bound window still takes them; the key-window read is made every time (a stale "stranded" mark never skips it, and is forgotten when the guardian stops and with the app's last target); `input` and `focusNow` are read where the app answers — inside the blip, and in the page when the app holds no key window — and a Tab in a `type` goes as keys; a diff counts as seen only the lines it keeps, and a whole new screen of rows is the state again; a visit's late switch is the user's only on input that can switch (⌘/⌃ chords, gestures, a click on the target or the Dock), and its return never anchors on the target's window. |
 | 1 | 1.9.4 | No wire change — the live gate's fourth round: an app a blip's hand-back left with no key window is remembered until it is really activated (by anyone — seen by an always-on activation observer, no tap, no timer), its last target is lost or its pid dies; 1.9.3 forgot it when the guardian stopped, 3 s after a script, so the next script's first background click read the stale "key" answer, sent no make-key records and only made the window key (a page's own menu never opened). |
+| 1 | 1.9.5 | No wire change — the review of round 4: a refused focus blip ends the ordinary way (the key focus handed back — naming no window when the user's can't be read — waited for, handed back again, the reroute removed only then, the guardian's restore), and what needs no focus record is refused before it; the user bringing the target forward during a blip or a focus click is their move (`app_in_front`, nothing undone or retired, never pulled back out), the app activating ITSELF on the focus record is undone and nothing is typed (`focus_not_placed`), and a refused focus click stops the typing; a focus with no window of its own counts when the app's focused window is the bound one; an attached list after a blip's hand-back no longer refuses the next burst; a visit's return never anchors on a window shown on the visited desktop; the late-switch watch counts a ⌘/⌃ hold with no chord seen, from the watch's start, the input source read at each change; a long or multi-line `type` with tabs says they went in as characters; `focusNow` takes the blip's answer only when nothing is readable after the act; off-screen additions no longer tip a diff into the full print. |

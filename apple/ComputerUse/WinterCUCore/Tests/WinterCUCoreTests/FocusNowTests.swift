@@ -172,4 +172,23 @@ final class FocusNowTests: XCTestCase {
         _ = try await act(.type(CUTypeAction(text: "plain")))
         XCTAssertTrue(ax.written.contains { $0.hasSuffix(":AXSelectedText") })
     }
+
+    /// Review of round 4 (LOW): the answer read inside the blip (before its hand-back) replaced ANY read after the act
+    /// that was not the app's own — a page that moved its focus after the keys got the stale one, which became the next
+    /// act's "before". It stands in only when nothing is readable after the act.
+    func testAFreshReadOfThePageWinsOverTheBlipsOlderAnswer() async throws {
+        world(webPage: true)
+        ax.put(first, [kAXFocusedAttribute: true])
+        FocusSPI.onFocus = { [unowned self] in
+            if FocusSPI.calls.last == "focus pid \(pid) window 77" { ax.focus(pid: pid, on: first) }  // the app's answer in the blip
+            else if FocusSPI.calls.last == "focus pid 1 window 31" {
+                ax.focus(pid: pid, on: nil)
+                // The page moves its focus after the keys (its own script): the fresh read names the second field.
+                ax.put(first, [kAXFocusedAttribute: false])
+                ax.put(second, [kAXFocusedAttribute: true])
+            }
+        }
+        let r = try await act(.key(CUKeyAction(combo: "x")))
+        XCTAssertTrue(r.focusNow?.contains("\"Replace with\"") ?? false, "the page's own focus now: \(r.focusNow ?? "nil")")
+    }
 }

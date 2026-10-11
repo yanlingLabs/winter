@@ -110,27 +110,16 @@ extension CUCore {
     func noteTapEvent(type: CGEventType, sourcePid: Int64, userData: Int64, flags: CGEventFlags = [], now: TimeInterval) {
         let kind = CUHardwareInput.classify(type: type, sourcePid: sourcePid, userData: userData)
         if kind != .none { noteHardwareInput(now: now, move: kind == .move) }
-        if kind == .action, Self.canSwitch(type: type, flags: flags) { noteSwitchInput(now: now) }
+        if kind == .action { guardianLock.withLock { switchInput.event(type: type, flags: flags, now: now) } }
     }
 
-    /// Hardware input that can switch the front app or the desktop by itself: a key or modifier change with ⌘ or ⌃ held
-    /// (⌘-Tab, ⌘-`, ⌃-arrows — the modifier's own press is seen even where the switcher takes the chord), and a
-    /// trackpad gesture (a swipe between desktops, Mission Control's). A click counts only on a target's window or the
-    /// Dock (`onPhysicalClick`). Typing, scrolling and pointer moves never do. Pure.
-    static func canSwitch(type: CGEventType, flags: CGEventFlags) -> Bool {
-        switch type.rawValue {
-        case CGEventType.keyDown.rawValue, CGEventType.flagsChanged.rawValue:
-            return flags.contains(.maskCommand) || flags.contains(.maskControl)
-        case 18, 29, 30, 31, 32: return true  // rotate, gesture, magnify, swipe, smart magnify
-        default: return false
-        }
-    }
+    /// A click on a bound target's window or on the Dock, or a trackpad gesture: input that can switch.
+    func noteSwitchInput(now: TimeInterval) { guardianLock.withLock { switchInput.note(now) } }
 
-    func noteSwitchInput(now: TimeInterval) { guardianLock.withLock { lastSwitchInputAt = now } }
-
-    /// Whether switch-capable input can be seen at all: the session tap or the gesture monitor runs.
+    /// Whether switch-capable input can be seen at all: the session tap runs (the gesture monitor alone sees no
+    /// modifiers it can pair, nor the user's clicks).
     var switchInputObservable: Bool {
-        switchInputObservableOverride ?? guardianLock.withLock { cpsTapPort != nil || guardianGestureMonitor != nil }
+        switchInputObservableOverride ?? guardianLock.withLock { cpsTapPort != nil }
     }
 
     /// The listen-only tap (or the gesture monitor) saw a hardware-origin event (source pid 0, not ours). `move`:
@@ -196,11 +185,10 @@ extension CUCore {
                 guard kind != .none else { return }
                 let now = self.clock.nowSeconds()
                 self.noteHardwareInput(now: now, move: kind == .move)
+                // Gestures only: modifiers are the session tap's (the two seeing one press out of order would leave a hold
+                // that never ends).
                 let gestures: Set<NSEvent.EventType> = [.gesture, .swipe, .magnify, .rotate, .beginGesture, .endGesture, .smartMagnify]
-                if kind == .action, gestures.contains(event.type)
-                    || Self.canSwitch(type: event.cgEvent?.type ?? .null, flags: event.cgEvent?.flags ?? []) {
-                    self.noteSwitchInput(now: now)
-                }
+                if kind == .action, gestures.contains(event.type) { self.noteSwitchInput(now: now) }
             }
             let stale = self.guardianLock.withLock { () -> Bool in
                 if self.guardianRefs == 0 { return true }
@@ -484,5 +472,48 @@ enum CUHardwareInput: Equatable {
         guard sourcePid == 0, !CUEventStamp.isOurs(userData) else { return .none }
         if type == .mouseMoved { return .move }
         return userTypes.contains(type.rawValue) || (markers && gestureMarkers.contains(type.rawValue)) ? .action : .none
+    }
+}
+
+/// Hardware input that can switch the front app or the desktop by itself — review of round 4: a chord the tap SEES
+/// (⌘S, ⌘Z, ⌃C) went to an app and switched nothing, while the switcher's own (⌘-Tab, ⌃-arrows) is swallowed: only the
+/// modifier's press and release show. So a ⌘ or ⌃ HOLD counts — its release, and the hold while it lasts — unless a
+/// chord was seen during it; a trackpad gesture counts, and a click on a target's window or the Dock (`note`). Typing,
+/// scrolling and pointer moves never do. Pure.
+struct CUSwitchInput {
+    /// When switch-capable input last ended (a hold's release, a gesture, a click).
+    private(set) var lastAt: TimeInterval = -1
+    /// A ⌘/⌃ hold in progress: since when, and whether a chord was seen in it.
+    private var hold: (since: TimeInterval, chord: Bool)?
+    /// A hold whose release was never seen is not trusted past this.
+    static let holdMax: TimeInterval = 10
+
+    static func modifier(_ flags: CGEventFlags) -> Bool { flags.contains(.maskCommand) || flags.contains(.maskControl) }
+
+    mutating func event(type: CGEventType, flags: CGEventFlags, now: TimeInterval) {
+        switch type.rawValue {
+        case CGEventType.flagsChanged.rawValue:
+            if Self.modifier(flags) {
+                if hold == nil { hold = (now, false) }
+            } else if let h = hold {
+                if !h.chord { lastAt = now }  // released with no chord seen: the switcher's
+                hold = nil
+            }
+        case CGEventType.keyDown.rawValue:
+            if Self.modifier(flags), hold != nil { hold?.chord = true }  // a chord an app got: no switch
+        case 18, 29, 30, 31, 32:  // rotate, gesture, magnify, swipe, smart magnify
+            lastAt = now
+        default:
+            break
+        }
+    }
+
+    mutating func note(_ now: TimeInterval) { lastAt = now }
+
+    /// Whether such input came after `from` and at most `window` before `seenAt` — or a chord-less hold is going on.
+    func seen(from: TimeInterval, seenAt: TimeInterval, window: TimeInterval) -> Bool {
+        if lastAt >= 0, lastAt >= max(from, seenAt - window) { return true }
+        if let h = hold, !h.chord, seenAt - h.since < Self.holdMax { return true }
+        return false
     }
 }

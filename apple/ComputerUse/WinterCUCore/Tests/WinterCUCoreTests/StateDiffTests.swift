@@ -170,6 +170,24 @@ final class StateDiffTests: XCTestCase {
         XCTAssertLessThanOrEqual(CUStateDiff.compute(old: base, new: near, shownNow: nearShown).changedRatio, 0.5)
     }
 
+    /// Review of round 4 (LOW): additions the print folds (off screen) are no new lines of it — they never tip the diff
+    /// into the full print by themselves.
+    func testOffScreenAdditionsAloneNeverTipTheDiffIntoThePrint() {
+        let f = CUStateFormatter(lineCap: 40)
+        let (base, _) = printedSnap("s1", page(offset: 0), f)
+        var roots = page(offset: 0)
+        let extra = (0..<50).map { i in
+            CUNode(ref: 900 + i, role: "AXTextField", name: "New \(i)", value: "x",
+                   frame: CGRect(x: 10, y: 3000 + Double(i) * 20, width: 300, height: 18))  // far below the view
+        }
+        roots[0].children[0].children[0].children += extra
+        let (now, nowShown) = printedSnap("s2", roots, f)
+        XCTAssertTrue(nowShown.isDisjoint(with: extra.map(\.ref)), "the print folds them")
+        let d = CUStateDiff.compute(old: base, new: now, shownNow: nowShown)
+        XCTAssertEqual(d.added.count, 50)
+        XCTAssertLessThanOrEqual(d.changedRatio, 0.5, "a diff of 50 + lines, not the whole state again")
+    }
+
     /// Review of round 3 (LOW): when the state is printed instead of a diff, what the base had shown and is still there
     /// unchanged stays seen (it was "surfaced" again later) — a row changed meanwhile does not.
     func testWhatTheBaseShowedStaysSeenAfterAPrint() {
