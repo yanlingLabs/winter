@@ -100,6 +100,12 @@ describe("the local network (refused; this Mac allowed)", () => {
     const e = await failure(h.engine.primitive(r.scope, tab.targetId, "goto", { url: "https://redirects.example/" }));
     expect((e as AutomationFailure).kind).toBe("NotAllowed");
     expect(e.message).toBe(`${HEADLESS_LAN_REFUSAL} — the page led there (a redirect); nothing was sent to it`);
+    // The browser's notice can trail the failed navigation's answer: it is waited for, briefly.
+    refusedAt = 1;
+    h.headless.failNextNavigate = "net::ERR_ABORTED";
+    setTimeout(() => { refusedAt = Date.now(); }, 100);
+    const late = await failure(h.engine.primitive(r.scope, tab.targetId, "goto", { url: "https://redirects-late.example/" }));
+    expect((late as AutomationFailure).kind).toBe("NotAllowed");
     // An older refusal (before this navigation) leaves an ordinary failure as it is.
     refusedAt = 1;
     h.headless.failNextNavigate = "net::ERR_NAME_NOT_RESOLVED";

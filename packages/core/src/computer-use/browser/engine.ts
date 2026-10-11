@@ -152,6 +152,9 @@ export const USER_TAB_NAVIGATION = "this is the user's own tab — navigating it
 const RECENTLY_CLOSED_MS = 30_000;
 export const HOLDS_GLOBAL = 16;
 
+/** How long a failed headless navigation waits for the browser's local-network notice (it can trail the answer). */
+const HEADLESS_REFUSAL_GRACE_MS = 400;
+
 /** Phase 4 (the user's ruling on headless tabs): a headless tab is nobody's but the agent's — never handed over, never
  *  shown. */
 export const HEADLESS_KEEP = "a headless tab can't be handed to the user — nobody can see it; open the page with browsers.open(url) in Winter's browser to show them";
@@ -2131,10 +2134,12 @@ export class BrowserEngine {
       loaded = await go();
     } catch (err) {
       // A headless navigation the browser itself cancelled because it led to the local network (a redirect there):
-      // the model reads why, not a bare net error.
-      const refusedAt = this.isHeadless(b.backend) ? this.deps.headlessLocalNetworkRefusedAt?.(b.tabKey) : undefined;
-      if (refusedAt !== undefined && refusedAt >= startedAt) {
-        throw new AutomationFailure("NotAllowed", `${HEADLESS_LAN_REFUSAL} — the page led there (a redirect); nothing was sent to it`);
+      // the model reads why, not a bare net error. The browser's notice can trail the failed navigation's answer by a
+      // moment (they travel separately), so a failure waits a little for it.
+      if (this.isHeadless(b.backend) && this.deps.headlessLocalNetworkRefusedAt !== undefined) {
+        const refused = (): boolean => (this.deps.headlessLocalNetworkRefusedAt?.(b.tabKey) ?? -1) >= startedAt;
+        for (let waited = 0; !refused() && waited < HEADLESS_REFUSAL_GRACE_MS; waited += 25) await new Promise((r) => setTimeout(r, 25));
+        if (refused()) throw new AutomationFailure("NotAllowed", `${HEADLESS_LAN_REFUSAL} — the page led there (a redirect); nothing was sent to it`);
       }
       throw err;
     } finally {

@@ -504,13 +504,17 @@ await check("console(): the page's console calls and its uncaught exception, as 
 });
 
 await check("network() and networkBody(id): the API call with its status; its JSON body with the secret redacted", async () => {
-  // What Winter saw since it bound the tab: the first load's requests came before; a reload is seen whole.
+  // What Winter saw since it bound the tab: the first load's call is there only if the tab was bound before the page
+  // made it (a headless tab is bound while its first page still loads); a reload is seen whole — exactly one more.
+  type Row = { id: string; url: string; status?: number; mime?: string };
+  const before = (await R("network", { filter: "/api/items", emit: false }) as Row[]).length;
   await R("reload");
   await R("waitFor", { cond: { load: "load" }, timeoutMs: 5_000 });
   await new Promise((r) => setTimeout(r, 300));
-  const api = await R("network", { filter: "/api/items", emit: false }) as Array<{ id: string; url: string; status?: number; mime?: string }>;
-  expect(api.length === 1 && api[0]!.status === 200, "the request and its status", JSON.stringify(api));
-  const body = await R("networkBody", { id: api[0]!.id, emit: false }) as string;
+  const api = await R("network", { filter: "/api/items", emit: false }) as Row[];
+  const call = api.at(-1);
+  expect(before <= 1 && api.length === before + 1 && call?.status === 200, "the request and its status", JSON.stringify({ before, api }));
+  const body = await R("networkBody", { id: call!.id, emit: false }) as string;
   expect(body.includes('"owner": "shop"') && body.includes("<redacted>") && !body.includes("tok_live_should_never_show"), "the body, its token redacted", body);
 });
 
