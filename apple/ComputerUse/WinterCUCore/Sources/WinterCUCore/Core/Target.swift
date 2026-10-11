@@ -112,6 +112,11 @@ final class CUTarget: @unchecked Sendable {
     /// The focus read after the last act, and when: the next act's "before". Pid-queue only.
     var focusAfterLastAct: (atMs: Double, focus: CUCore.WindowFocus)?
 
+    /// The bound window's focus read INSIDE this act's focus blips (`CUCore.noteBlipFocus`), while the window held
+    /// the key focus: where the keys went (the first blip, before its first key) and where they left it (the last,
+    /// after its keys were taken). Pid-queue only.
+    var blipFocus: (act: Int, start: CUCore.WindowFocus?, end: CUCore.WindowFocus?)?
+
     /// When this target last had a window-targeted click posted to place the focus or make its window key:
     /// the app may handle it after the act's next accessibility write (a late click moves the caret).
     /// Pid-queue only.

@@ -191,4 +191,7 @@ public enum CUFloorReason: String, Codable, Sendable {
     case focusMoved = "focus_moved"
     /// A desktop visit was not made: the app the user is in can't be read, so they could not be brought back.
     case frontUnknown = "front_unknown"
+    /// The app came to the front while a background act was being prepared (the user's doing, or its own): the keys
+    /// or the click were not sent — the user may be using it now.
+    case appInFront = "app_in_front"
 }

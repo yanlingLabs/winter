@@ -142,6 +142,9 @@ extension CUCore {
         guard guardianRefs > 0 else { return }
         guardianRefs = 0
         guardianCore.end()
+        // With the observers gone an activation of a stranded app is no longer seen: the marks would go stale (the
+        // user may give the app a key window meanwhile), so they go now.
+        forgetStranded()
         guardianCauses.removeAll()
         guardianLastCause = -1
         for o in guardianObservers { NSWorkspace.shared.notificationCenter.removeObserver(o) }

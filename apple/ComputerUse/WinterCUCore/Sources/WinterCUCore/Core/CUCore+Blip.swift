@@ -49,8 +49,10 @@ final class CUFocusBlip {
 extension CUCore {
     /// Starts a blip for `why`: the reroute tap first, then the focus records. Nil — with the reason logged —
     /// when it can't run: the private path off, the app already in front, no tap, or the focus records
-    /// unavailable or retired (the user-view guard undid them once).
-    func beginBlip(_ p: TargetActParams, _ t: CUTarget, why: String, boundMs: Double = CUCore.blipDeadlineMs) -> CUFocusBlip? {
+    /// unavailable or retired (the user-view guard undid them once). Throws — the tap removed, the key focus handed
+    /// back — when the bound window could not be made the window the app's keys go to (`keyWithoutRaise`): nothing
+    /// may be sent then.
+    func beginBlip(_ p: TargetActParams, _ t: CUTarget, why: String, boundMs: Double = CUCore.blipDeadlineMs) throws -> CUFocusBlip? {
         let app = t.appName
         guard p.privatePath, let user = sys.frontmostPid(), user != t.pid else {
             CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used (private path off, or the app is in front)")
@@ -62,7 +64,12 @@ extension CUCore {
             CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used — no keyboard reroute tap")
             return nil
         }
-        guard let undo = keyWithoutRaise(t) else {
+        let made: (() -> Void)?
+        do { made = try keyWithoutRaise(t) } catch {
+            reroute.end()
+            throw error
+        }
+        guard let undo = made else {
             reroute.end()
             CULog.act.notice("focus blip in \(app, privacy: .public) for \(why, privacy: .public): not used — the focus records are unavailable or retired")
             return nil
@@ -72,8 +79,11 @@ extension CUCore {
         // fault in the log).
         let removeTap = { [self] (why: String) -> Int in
             let held = clock.nowMs() - start
+            // Only a tap still installed now overran: the bound timer also runs after a blip that ended in time (its
+            // tap long removed), and that is no overrun (live 2026-10-11: three false faults in one probe run).
+            let wasInstalled = reroute.isInstalled
             let n = reroute.end()
-            if held > boundMs + 30 {
+            if wasInstalled, held > boundMs + 30 {
                 CULog.act.fault("focus blip in \(app, privacy: .public): the keyboard reroute stayed \(Int(held), privacy: .public) ms, over its \(Int(boundMs), privacy: .public) ms bound (\(why, privacy: .public))")
             }
             return n
@@ -125,7 +135,7 @@ extension CUCore {
     func pressInBlip<Item>(_ p: TargetActParams, _ t: CUTarget, title: String, read: () throws -> Item?,
                            press: (Item) throws -> String?) throws -> BlipOutcome {
         for attempt in 1...2 {
-            guard let blip = beginBlip(p, t, why: "“\(title)” (try \(attempt))") else {
+            guard let blip = try beginBlip(p, t, why: "“\(title)” (try \(attempt))") else {
                 return attempt == 1 ? .unavailable : .stillDisabled
             }
             defer { blip.end() }
@@ -150,6 +160,26 @@ extension CUCore {
 // MARK: keyboard input
 
 extension CUCore {
+    /// The bound window's focus read while a keyboard blip holds it key (`CUTarget.blipFocus`): `start` once, after
+    /// the first blip of the act settled and before its first key; otherwise after a blip's keys were taken, before it
+    /// hands the key focus back (the last such read stands). Only the app's own answer for the window is kept — the
+    /// one that says where its keys go.
+    func noteBlipFocus(_ t: CUTarget, start: Bool) {
+        guard t.accessible else { return }
+        let f = windowFocus(t, fresh: true)
+        guard f.source == .app, f.element != nil else { return }
+        let seq = t.actSeq
+        var cur: (act: Int, start: WindowFocus?, end: WindowFocus?) = t.blipFocus.flatMap { $0.act == seq ? $0 : nil } ?? (seq, nil, nil)
+        if start { if cur.start == nil { cur.start = f } } else { cur.end = f }
+        t.blipFocus = cur
+    }
+
+    /// The focus read inside this act's blips, `start` or end.
+    func blipFocusRead(_ t: CUTarget, start: Bool) -> WindowFocus? {
+        guard let bf = t.blipFocus, bf.act == t.actSeq else { return nil }
+        return start ? bf.start : bf.end
+    }
+
     /// Whether keys for the bound window need the focus blip: the private path is on, the app is in the
     /// background, and the window does not hold the key focus — not its app's key window by accessibility, or
     /// not the window server's key focus.
@@ -190,14 +220,14 @@ final class CUKeyBlips {
         }
         if settled { return }
         if let b = blip, !b.isEnded, core.clock.nowMs() - b.begunMs < core.blipBurstMs { return }
-        if let b = blip, !b.isEnded { drain(); b.end("its burst was spent") }
+        if let b = blip, !b.isEnded { drain(); core.noteBlipFocus(t, start: false); b.end("its burst was spent") }
         blip = nil
         guard core.needsKeyBlip(p, t) else {
             if bursts == 0 { CULog.act.notice("keys in \(self.t.appName, privacy: .public): the window holds the key focus — no focus blip") }
             settled = bursts == 0
             return
         }
-        guard let b = core.beginBlip(p, t, why: "\(why) (burst \(bursts + 1))", boundMs: core.keyBlipBoundMs) else {
+        guard let b = try core.beginBlip(p, t, why: "\(why) (burst \(bursts + 1))", boundMs: core.keyBlipBoundMs) else {
             settled = true
             return
         }
@@ -205,10 +235,12 @@ final class CUKeyBlips {
         bursts += 1
         // The app takes the key focus as it handles the focus record: keys sent before that are lost.
         if core.blipKeySettleMs > 0 { usleep(useconds_t(core.blipKeySettleMs * 1000)) }
+        // Where the keys go, as the app answers for its key window — the bound one now.
+        if bursts == 1 { core.noteBlipFocus(t, start: true) }
     }
 
     func end() {
-        if let b = blip, !b.isEnded { drain(); b.end() }
+        if let b = blip, !b.isEnded { drain(); core.noteBlipFocus(t, start: false); b.end() }
         blip = nil
     }
 

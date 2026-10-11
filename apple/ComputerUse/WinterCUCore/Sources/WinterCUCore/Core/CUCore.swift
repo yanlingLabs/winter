@@ -1507,6 +1507,8 @@ public final class CUCore: @unchecked Sendable {
 
     func lose(_ t: CUTarget, reason: CUTargetLostReason) {
         guard remove(t.id) != nil else { return }
+        // The app's "stranded" mark goes with it when it quit or nothing of it stays bound (a pid can be reused).
+        if reason == .appQuit || !boundTargetPids().contains(t.pid) { noteStranded(t.pid, false) }
         emit { $0.targetLost(targetId: t.id, reason: reason.rawValue) }
         emit { $0.targetReleased(sessionId: t.sessionId, pid: t.pid, windowID: t.windowID) }
     }
