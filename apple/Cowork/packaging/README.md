@@ -55,6 +55,20 @@ bundle is accepted only with matching pins and verified material hashes, then
 copied into a fresh private prefix. That cache is a local build convenience,
 not an authenticated distribution channel. Native/network inputs are copied
 only when the Swift stage begins; their individual source hashes are recorded.
+Both pkg-config path variables name the private metadata, including SwiftPM's
+internal parser. Cached dylibs receive temporary build-prefix install IDs only
+in their fresh copies, then the final bundle is relocated and checked again.
+
+The native stage defaults to `--native-profile verified-eof`: it runs the
+snapshot's fixed Containerization preparer, verifies the committed upstream
+archive/patch/full-tree pins, and builds from that fixed local source path.
+An archive already in the development package is only a cache and is verified
+again. The complete original archive, patched tree, patch, notices and pinned
+profile are retained in `source/containerization-profile`; the manifest records
+the profile identity. `--native-profile upstream` is available for comparison
+builds, whose real VM launch remains blocked. Ambient profile environment
+variables cannot select a different source. Swift uses the canonical snapshot
+path so the manifest's source-alias refusal still applies.
 
 `dependencies.json` pins complete source archives, exact versions, SHA256 and
 the checksum evidence authority. GLib's checksum comes from GNOME's published

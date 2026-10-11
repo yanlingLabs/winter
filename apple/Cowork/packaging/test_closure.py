@@ -44,10 +44,16 @@ class ClosureTests(unittest.TestCase):
     def test_smoke_environment_strips_injected_library_search(self):
         with patch.dict("os.environ", {"DYLD_LIBRARY_PATH": "/opt/homebrew/lib", "DYLD_FALLBACK_LIBRARY_PATH": "/tmp",
             "PKG_CONFIG_LIBDIR": "/opt/homebrew/lib/pkgconfig", "LDFLAGS": "-L/opt/homebrew/lib",
-            "CPATH": "/opt/homebrew/include", "GI_TYPELIB_PATH": "/tmp"}):
+            "CPATH": "/opt/homebrew/include", "GI_TYPELIB_PATH": "/tmp",
+            "WINTER_COWORK_NATIVE_PROFILE": "unreviewed"}):
             env = clean_environment()
-        for key in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "PKG_CONFIG_LIBDIR", "LDFLAGS", "CPATH", "GI_TYPELIB_PATH"):
+        for key in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "PKG_CONFIG_LIBDIR", "LDFLAGS", "CPATH", "GI_TYPELIB_PATH", "WINTER_COWORK_NATIVE_PROFILE"):
             self.assertNotIn(key, env)
+
+    def test_native_profile_rejects_unknown_sources_before_io(self):
+        build = Build.__new__(Build)
+        with self.assertRaisesRegex(ValueError, "unknown native source profile"):
+            build.prepare_native("/tmp/unreviewed-dependency")
 
     def test_verification_checks_runpaths_in_every_architecture(self):
         with tempfile.TemporaryDirectory() as tmp:

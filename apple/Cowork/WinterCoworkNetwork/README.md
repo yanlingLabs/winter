@@ -101,8 +101,9 @@ Build currently uses existing local GLib2.90.0 via pkg-config, and transitively
 libintl1.0 and PCRE2 10.49; no global installation was performed. These are
 runtime dependencies, not optional developer-only dependencies. Current output
 still links Homebrew absolute paths. The separate `../packaging` recipe has
-built and relocated GLib/libintl/PCRE2 from pinned sources; the reviewed network
-product still needs its final package and relocated smoke. Production
+built and relocated GLib/libintl/PCRE2 from pinned sources and verified a release
+network package plus its relocated synthetic smoke; see its `VALIDATION.md`.
+The default developer build and that isolated package are separate artifacts. Production
 availability must remain blocked until the exact native
 closure is packaged with relative load paths, verified provenance and notices,
 corresponding GLib/libintl source/build material and LGPL replacement/relinking

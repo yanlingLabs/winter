@@ -69,15 +69,42 @@ historical and must be regenerated for the final reviewed package. The script
 does not edit the vendor sources. Git identity verification does not establish
 a verified publisher signature.
 
+## Verified network package
+
+```sh
+python3 apple/Cowork/packaging/build.py --network-only --jobs 4 \
+  --dependency-bundle apple/Cowork/packaging/out/build-nzn18phm/bundle \
+  --libslirp-upstream-checkout apple/Cowork/packaging/out/libslirp-upstream-9nc0wfan
+```
+
+`out/build-le7dfij8/bundle` contains the release network dylib and its three
+source-built shared dependencies. All 33 network/route tests and the relocated
+synthetic C smoke passed. The latter reports
+`{"relocatedNetwork":true,"syntheticNoOutbound":true,"realVM":false}`.
+The runtime closure checker accepted all four arm64 dylibs with only relative
+bundle or Apple system references. The network dylib SHA256 is
+`a31920a353c0b961440f371cb02ce96dbb76762b616d9089468fd43d438866b3`.
+Regenerated libslirp provenance reconstructs the exact current vendor tree;
+its patch SHA256 is
+`2f3b90942ef06fe6846f7bf3014d9327f45036fdcf0be530bfdf3e02e03fa116`.
+The recipe/closure/environment tests now number eight.
+
+This run caught and fixed two packaging errors before accepting an artifact:
+SwiftPM needed the private pkg-config directory in `PKG_CONFIG_PATH` as well as
+`PKG_CONFIG_LIBDIR`; otherwise its own parser selected Homebrew. Imported
+relocated dependencies also needed temporary install IDs in their fresh build
+copies so Swift test executables could load them before final relocation.
+The original verified cache is unchanged. No `DYLD_*` workaround is used.
+
 ## Pending
 
-Controller/Node-API and network Swift products, their relocated fake/synthetic
-smokes, and final libslirp provenance are deferred while review fixes modify
-those sources. The recipe's `--dependency-bundle` option permits packaging a
+Controller/Node-API products and their relocated fake smokes are deferred while
+native lifecycle review fixes modify those sources. The recipe's
+`--dependency-bundle` option permits packaging a
 fresh reviewed source snapshot without repeating the dependency source build.
-The approved verified-EOF Containerization build profile must also be wired to
-its fixed prepare/verify helper and included in the artifact graph once that
-helper is supplied by the native owner. Production team signing, hardened
+The recipe now wires the verified-EOF Containerization profile to its fixed
+prepare/verify helper and source retention; the combined native artifact still
+needs to exercise that route. Production team signing, hardened
 compiled-Bun loading, replacement/relinking
 policy, CI provenance, notarization, app integration and all VM/authority
 feasibility gates remain open. This evidence does not authorize enabling Cowork.

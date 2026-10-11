@@ -33,7 +33,8 @@ def clean_environment():
         if key.startswith(("DYLD_", "PKG_CONFIG_")) or key in (
             "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "CPATH", "LIBRARY_PATH",
             "SDKROOT", "CMAKE_PREFIX_PATH", "GI_TYPELIB_PATH", "GIO_EXTRA_MODULES",
-            "GIO_MODULE_DIR", "GSETTINGS_SCHEMA_DIR", "PYTHONPATH", "PYTHONHOME"):
+            "GIO_MODULE_DIR", "GSETTINGS_SCHEMA_DIR", "PYTHONPATH", "PYTHONHOME",
+            "WINTER_COWORK_NATIVE_PROFILE"):
             env.pop(key, None)
     env.update(MACOSX_DEPLOYMENT_TARGET="26.0", LC_ALL="C", LANG="C")
     env.update(CC=output("xcrun", "--find", "clang").strip(),
@@ -51,7 +52,7 @@ class Build:
         self.bundle = directory / "bundle"
         self.env = clean_environment()
         self.env.update(PKG_CONFIG_LIBDIR=str(self.prefix / "lib/pkgconfig"),
-                        PKG_CONFIG_PATH="", CMAKE_PREFIX_PATH=str(self.prefix),
+                        PKG_CONFIG_PATH=str(self.prefix / "lib/pkgconfig"), CMAKE_PREFIX_PATH=str(self.prefix),
                         CPPFLAGS=f"-I{self.prefix}/include",
                         CFLAGS="-O2 -fPIC", CXXFLAGS="-O2 -fPIC",
                         LDFLAGS=f"-L{self.prefix}/lib -Wl,-headerpad_max_install_names")
@@ -92,6 +93,21 @@ class Build:
                 raise ValueError(f"dependency cache material mismatch: {relative}")
         validate(bundle / "lib")
         shutil.copytree(bundle / "dependency-prefix", self.prefix, symlinks=True)
+        # Cached libraries are distribution-relocated. Build/test executables
+        # must resolve this invocation's prefix until their own closure is staged.
+        # Edit only the fresh copies; never mutate the verified source bundle.
+        for binary in sorted((self.prefix / "lib").glob("*.dylib")):
+            if binary.is_symlink():
+                continue
+            self.run(f"cache-id-{binary.name}", ["install_name_tool", "-id", binary, binary])
+            for ref in dependencies(output("otool", "-L", str(binary))):
+                if is_system(ref) or ref == str(binary):
+                    continue
+                if not ref.startswith("@loader_path/") or Path(ref).name != ref.removeprefix("@loader_path/"):
+                    raise ValueError(f"unexpected cache build dependency: {ref}")
+                self.run(f"cache-load-{binary.name}", ["install_name_tool", "-change", ref,
+                    self.prefix / "lib" / Path(ref).name, binary])
+            self.run(f"cache-sign-{binary.name}", ["codesign", "--force", "--sign", "-", binary])
         shutil.copytree(bundle, self.bundle / "source/dependency-build", symlinks=True)
         for directory in ("source", "notices", "build-config", "build-logs"):
             shutil.copytree(bundle / directory, self.bundle / directory, dirs_exist_ok=True)
@@ -207,7 +223,32 @@ class Build:
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(candidate, dest)
 
-    def swift(self, skip_native, node_headers):
+    def prepare_native(self, profile):
+        if profile not in ("upstream", "verified-eof"):
+            raise ValueError("unknown native source profile")
+        self.native_profile = {"name": profile}
+        self.env["WINTER_COWORK_NATIVE_PROFILE"] = profile
+        if profile == "upstream":
+            return
+        # This is the snapshot's fixed helper and fixed relative dependency path.
+        # An existing archive is merely a cache: the helper verifies it, every
+        # patched file and the complete prepared tree against committed pins.
+        source = self.native / "out/dependencies"
+        source.mkdir(parents=True)
+        cached = NATIVE / "out/dependencies/containerization-source.tar.gz"
+        if cached.is_file():
+            shutil.copyfile(cached, source / cached.name)
+        helper = self.native.resolve() / "dependency-patches/prepare-containerization.py"
+        self.run("native-source-prepare", ["python3", helper])
+        self.run("native-source-verify", ["python3", helper, "--verify-only", "--offline"])
+        pins = json.loads((self.native / "dependency-patches/output-completion-provenance.json").read_text())
+        self.native_profile.update(revision=pins["revision"], archiveSha256=pins["archiveSha256"],
+            patchSha256=pins["patchSha256"], sourceTreeSha256=pins["sourceTreeSha256"])
+        retained = self.bundle / "source/containerization-profile"
+        shutil.copytree(source, retained, ignore=shutil.ignore_patterns(".build", ".swiftpm", ".git"))
+        shutil.copytree(self.native / "dependency-patches", retained / "winter-patches")
+
+    def swift(self, skip_native, node_headers, native_profile):
         self.snapshot()
         isolated = ["--cache-path", self.directory / "swift-cache", "--config-path", self.directory / "swift-config",
                     "--security-path", self.directory / "swift-security", "--manifest-cache", "local",
@@ -220,10 +261,13 @@ class Build:
         shutil.copyfile(scratch / "release/libWinterCoworkNetwork.dylib",
                         self.bundle / "lib/libWinterCoworkNetwork.dylib")
         if not skip_native:
+            self.prepare_native(native_profile)
             scratch = self.directory / "swift-native"
-            self.run("native-build", ["swift", "build", *isolated, "--package-path", self.native,
+            # The source manifest rejects aliases. Automake's private symlink
+            # remains useful for dependencies, but Swift sees the canonical tree.
+            self.run("native-build", ["swift", "build", *isolated, "--package-path", self.native.resolve(),
                 "--scratch-path", scratch, "--configuration", "release", "--jobs", self.jobs])
-            self.run("native-tests", ["swift", "test", *isolated, "--package-path", self.native,
+            self.run("native-tests", ["swift", "test", *isolated, "--package-path", self.native.resolve(),
                 "--scratch-path", scratch, "--jobs", self.jobs])
             shutil.copyfile(scratch / "release/libWinterCoworkNative.dylib",
                             self.bundle / "lib/libWinterCoworkNative.dylib")
@@ -343,6 +387,7 @@ def main():
     parser.add_argument("--dependency-bundle", type=Path)
     parser.add_argument("--libslirp-upstream-checkout", type=Path)
     parser.add_argument("--network-only", action="store_true")
+    parser.add_argument("--native-profile", choices=("verified-eof", "upstream"), default="verified-eof")
     parser.add_argument("--node-headers", type=Path, default=Path(os.environ.get(
         "WINTER_NODE_API_HEADERS", "/opt/homebrew/opt/node/include/node")))
     args = parser.parse_args()
@@ -370,7 +415,7 @@ def main():
             closure = build.export_dependencies()
             build.dependency_smoke()
         else:
-            build.swift(args.network_only, args.node_headers.resolve())
+            build.swift(args.network_only, args.node_headers.resolve(), args.native_profile)
             closure = build.relocate()
             build.smoke(args.network_only)
         build.material()
@@ -388,6 +433,7 @@ def main():
                 "sdk": output("xcrun", "--show-sdk-version"),
                 "platform": platform.platform(), "arch": platform.machine()},
             "commit": build.commit,
+            "nativeProfile": getattr(build, "native_profile", None),
             "inputHashes": {str(p.relative_to(directory / "input")): digest(p)
                 for p in sorted((directory / "input").rglob("*")) if p.is_file()},
             "elapsedSeconds": round(time.time() - started),
