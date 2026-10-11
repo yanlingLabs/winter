@@ -46,11 +46,14 @@ describe("the extension ids", () => {
     expect(swiftStrings(hostSwift("ExtensionIds.swift"), "dev")).toEqual([derived]);
   });
 
-  test("dist: the store ids, the same in the daemon, the host and Winter.app's manifest writer (none before the first upload)", () => {
+  test("dist: the store ids, the same in the daemon, the host and Winter.app's manifest writer, and never the dev id", () => {
     const app = read("apple", "Winter", "Sources", "BrowserExtension", "BrowserHostManifest.swift");
     expect(swiftStrings(hostSwift("ExtensionIds.swift"), "dist")).toEqual([...EXTENSION_IDS.dist]);
     expect(swiftStrings(app, "storeExtensionIds")).toEqual([...EXTENSION_IDS.dist]);
     for (const id of [...EXTENSION_IDS.dist, ...EXTENSION_IDS.dev]) expect(id).toMatch(/^[a-p]{32}$/);
+    expect(EXTENSION_IDS.dist.length).toBeGreaterThan(0);
+    expect(new Set(EXTENSION_IDS.dist).size).toBe(EXTENSION_IDS.dist.length);
+    for (const id of EXTENSION_IDS.dev) expect(EXTENSION_IDS.dist).not.toContain(id);
   });
 
   test("the dev key is a public key only", () => {

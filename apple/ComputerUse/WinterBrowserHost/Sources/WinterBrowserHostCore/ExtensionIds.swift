@@ -4,9 +4,12 @@ import Foundation
 /// here, the daemon's `browser/extension/extension-ids.ts`, Winter.app's manifest writer, and the id the dev build's
 /// manifest `key` derives (`extensions/winter-for-chrome/keys/dev.pub`).
 public enum ExtensionIds {
-    /// The Chrome Web Store and Edge Add-ons listings (publisher yanlingLabs). Assigned at the first upload: until then
-    /// dist serves no extension at all.
-    public static let dist: [String] = []
+    /// The store builds (publisher yanlingLabs), each id assigned by its store at the first upload: the Chrome Web Store's
+    /// "Winter for Chrome" and Edge Add-ons' "Winter for Edge".
+    public static let dist: [String] = [
+        "bapmmpefcbjabfdfeehimdhldpjaoemd", // Edge Add-ons: Winter for Edge
+        // Chrome Web Store: Winter for Chrome (its id goes here once the store assigns it)
+    ]
     /// The unpacked dev build (its id is fixed by its manifest key).
     public static let dev: [String] = ["jikdcokcpbacalfeipkognejnlnobbbf"]
 

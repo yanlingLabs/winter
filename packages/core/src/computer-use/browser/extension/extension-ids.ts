@@ -8,12 +8,15 @@ import type { WinterProfile } from "../../../profile";
 
 /**
  * The extension ids each profile accepts.
- *  - dist: the Chrome Web Store and Edge Add-ons listings (publisher yanlingLabs). Their ids are assigned at the first
- *    upload, so until then dist has none and the user's browsers stay "not connected".
+ *  - dist: the store builds (publisher yanlingLabs), each id assigned by its store at the first upload — the Chrome Web
+ *    Store's "Winter for Chrome" (the `store` flavor) and Edge Add-ons' "Winter for Edge" (the `edge` flavor).
  *  - dev: the unpacked dev build, whose id is fixed by its manifest `key`.
  */
 export const EXTENSION_IDS: Readonly<Record<WinterProfile, readonly string[]>> = {
-  dist: [],
+  dist: [
+    "bapmmpefcbjabfdfeehimdhldpjaoemd", // Edge Add-ons: Winter for Edge
+    // Chrome Web Store: Winter for Chrome (its id goes here once the store assigns it, and in the two Swift lists)
+  ],
   dev: ["jikdcokcpbacalfeipkognejnlnobbbf"],
 };
 
