@@ -382,9 +382,38 @@ public final class CUCore: @unchecked Sendable {
     /// takes no hover from a pointer that is not the real one — WebKit (measured 2026-10-10) and Chromium alike (run111,
     /// 2026-10-11: a background Chrome page got the private path's moves, but neither a mouseenter nor a :hover, on either
     /// route). On the target's queue.
+    ///
+    /// WebKit builds a web view's accessibility tree lazily, on the first request (measured, run115: the first walk of a
+    /// fresh WKWebView window saw its host group empty, the web area 20–30 ms later): when the first walk finds none but
+    /// an empty group, it looks again a few times (≤ ~160 ms).
     func hasWebContent(_ t: CUTarget) -> Bool {
         guard t.accessible, let win = try? windowElement(t) else { return false }
-        return firstWebArea(win) != nil
+        for attempt in 0..<9 {
+            if attempt > 0 { clock.pause(ms: 20) }
+            let (found, emptyGroup) = webAreaWalk(win)
+            if found { return true }
+            if !emptyGroup { return false }
+        }
+        return false
+    }
+
+    /// One bounded breadth-first walk: whether a web area is there, and whether an empty group is (a web view whose tree
+    /// is not built yet).
+    private func webAreaWalk(_ win: AXUIElement, maxNodes: Int = 600, maxMs: Double = 80) -> (found: Bool, emptyGroup: Bool) {
+        let deadline = clock.nowMs() + maxMs
+        var queue = [win]
+        var next = 0
+        var emptyGroup = false
+        while next < queue.count, next < maxNodes, clock.nowMs() < deadline {
+            let n = queue[next]
+            next += 1
+            let role = ax.string(n, kAXRoleAttribute)
+            if role == "AXWebArea" { return (true, emptyGroup) }
+            let kids = ax.elements(n, kAXChildrenAttribute)
+            if kids.isEmpty, role == kAXGroupRole { emptyGroup = true }
+            queue.append(contentsOf: kids)
+        }
+        return (false, emptyGroup)
     }
 
     /// What working a window on another desktop costs (said at bind). Pure.
