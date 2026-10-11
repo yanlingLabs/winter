@@ -473,6 +473,20 @@ await check("inspect(ref | point), html(), text({ within }), assets()", async ()
   expect(await R("text", { within: title, emit: false }) === "Price list", "text({ within }) reads one element");
   const assets = await R("assets", { emit: false }) as Array<{ kind: string; url: string }>;
   expect(assets.some((a) => a.kind === "stylesheet" && a.url.endsWith("/static/site.css")) && assets.some((a) => a.kind === "image" && a.url.endsWith("/static/logo.png")), "assets: the stylesheet and the image", JSON.stringify(assets));
+  expect(!JSON.stringify(assets).includes("sigsecret77"), "assets: a signed URL's signature redacted", JSON.stringify(assets));
+});
+
+await check("URL-valued attributes and markdown links print with their credentials redacted (html, inspect, text({ markdown }))", async () => {
+  const secrets = ["resetsecret42", "datasecret9", "sigsecret77"];
+  const html = await R("html", { emit: false }) as string;
+  expect(secrets.every((x) => !html.includes(x)) && html.includes("/reset?token=<redacted>&amp;lang=en") && html.includes("api_key=<redacted>") && html.includes("sig=<redacted> 1x"), "html()", html.slice(0, 1_200));
+  const reset = (await R("find", { query: { css: "#reset" }, emit: false }) as Array<{ ref: number }>)[0]!.ref;
+  const info = await R("inspect", { target: reset, emit: false }) as { attributes: Record<string, string> };
+  expect(info.attributes.href === "/reset?token=<redacted>&lang=en" && info.attributes["data-url"] === "https://api.example.com/x?api_key=<redacted>", "inspect()", JSON.stringify(info.attributes));
+  const md = await R("text", { markdown: true, emit: false }) as string;
+  expect(md.includes("[Reset your password](") && md.includes("/reset?token=<redacted>&lang=en)") && secrets.every((x) => !md.includes(x)), "text({ markdown })", md);
+  const para = await R("text", { within: reset, markdown: true, emit: false }) as string;
+  expect(!para.includes("resetsecret42"), "text({ within, markdown })", para);
 });
 
 await check("setValue(check box, true) presses it once; dialog() and answerDialog(false)", async () => {

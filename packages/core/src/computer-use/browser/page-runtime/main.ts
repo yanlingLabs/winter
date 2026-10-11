@@ -12,7 +12,7 @@
 import type {
   RtCheck, RtClassify, RtCondition, RtFindQuery, RtFound, RtHit, RtId, RtInspect, RtLink, RtNode, RtPoint, RtSnapshot,
 } from "./protocol";
-import { looksSecret, REDACTED, redactText } from "./redact";
+import { looksLikeUrl, looksSecret, REDACTED, redactText, redactUrl, redactUrlAttribute } from "./redact";
 import { classifyTarget, cssSelectorRefusal, isPaymentHost, isSecureField, isTextEntry as isTextEntryFacts, nativePicker, pickerValueHint, TEXT_INPUT_TYPES, type ElementFacts } from "./rules";
 
 type Any = Record<string, unknown>;
@@ -567,6 +567,8 @@ type Any = Record<string, unknown>;
       if ((el instanceof HTMLInputElement && el.type.toLowerCase() === "hidden") || isSecure(el)) return REDACTED;
     }
     if (lname === "content" && el.tagName === "META" && SECRET_META.test(`${el.getAttribute("name") ?? ""} ${el.getAttribute("property") ?? ""} ${el.getAttribute("http-equiv") ?? ""}`)) return REDACTED;
+    const asUrl = redactUrlAttribute(lname, value);
+    if (asUrl !== undefined) return cap(asUrl, 500);
     if (looksSecret(value)) return REDACTED;
     return cap(redactText(value), 500);
   };
@@ -638,7 +640,7 @@ type Any = Record<string, unknown>;
       }
       // A field's live value (what the user or Winter typed), with the secure-field floor.
       if ((el instanceof HTMLInputElement && !["checkbox", "radio", "file", "button", "submit", "reset", "image"].includes(el.type.toLowerCase())) && !el.hasAttribute("value")) {
-        const live = el.type.toLowerCase() === "hidden" || isSecure(el) ? REDACTED : looksSecret(el.value) ? REDACTED : el.value;
+        const live = el.type.toLowerCase() === "hidden" || isSecure(el) ? REDACTED : looksSecret(el.value) ? REDACTED : looksLikeUrl(el.value) ? redactUrl(el.value.trim()) : el.value;
         if (live.length > 0) open += ` value="${escAttr(live)}"`;
       }
       put(`${open}>`);
@@ -758,7 +760,7 @@ type Any = Record<string, unknown>;
       if (markdown && tag === "PRE") { brk(); lines.push("```"); lines.push((n.textContent ?? "").replace(/\n+$/, "")); lines.push("```"); return; }
       if (markdown && tag === "A" && (n as HTMLAnchorElement).href) {
         const label = textOf(n);
-        if (label.length > 0) { line += ` [${label}](${(n as HTMLAnchorElement).href}) `; return; }
+        if (label.length > 0) { line += ` [${label}](${redactUrl((n as HTMLAnchorElement).href)}) `; return; }
       }
       if (markdown && (tag === "STRONG" || tag === "B")) { line += " **"; for (const c of composedChildren(n)) walk(c, depth + 1); line += "** "; return; }
       if (markdown && tag === "CODE") { line += " `"; for (const c of composedChildren(n)) walk(c, depth + 1); line += "` "; return; }
