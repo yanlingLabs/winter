@@ -4,6 +4,8 @@ As of 2026-10-10, Winter cannot create or run a supported Cowork session. Code, 
 
 This map covers the Winter host and its sibling agent SDK, runtime SDK, and iOS repositories. It describes source behavior; the unavailable Cowork mode has no end-to-end execution to validate. Outstanding work is tracked in [Follow-ups](../follow_up.md#cowork).
 
+The 2026-10-11 [workspace metadata API slice](cowork-workspace-api.md) adds canonical host RPC reads/mutations and isolated daemon fixture coverage. Production Cowork creation/execution and client availability remain blocked; the historical infrastructure map below is retained.
+
 ## What already exists
 
 | Area | Implemented today | Cowork boundary | Source |

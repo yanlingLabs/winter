@@ -52,6 +52,21 @@ export class CoworkRepository {
     if (!row) throw new CoworkError("not_found"); return workspace(row);
   }
   list(): Workspace[] { return this.all("SELECT * FROM cowork_workspaces WHERE state!='deleted' ORDER BY created_at,workspace_id").map(workspace); }
+  project(projectId: string): Workspace {
+    const row = this.one("SELECT workspace_id FROM cowork_projects WHERE project_id=?", id(projectId));
+    if (!row) throw new CoworkError("not_found");
+    const current = this.get(row.workspace_id);
+    if (current.ownership !== "project" || current.ownerId !== projectId) throw new CoworkError("authority_denied");
+    return current;
+  }
+  updateTitle(context: MutationContext, workspaceId: string, title: string): MutationReceipt<Workspace> {
+    const normalized = text(title, 200);
+    return this.mutate(context, "workspace.update", id(workspaceId), { title: normalized }, () => {
+      this.run("UPDATE cowork_workspaces SET title=? WHERE workspace_id=?", normalized, workspaceId);
+      this.advance(workspaceId);
+      return { workspaceId, value: this.get(workspaceId), kind: "workspace_display_changed", applied: true };
+    });
+  }
   policy(workspaceId: string): WorkspacePolicy {
     const row = this.one("SELECT * FROM cowork_policies WHERE workspace_id=?", id(workspaceId));
     if (!row) throw new CoworkError("not_found");
@@ -86,8 +101,8 @@ export class CoworkRepository {
     const changed = this.run("UPDATE cowork_operations SET status=?,updated_at=? WHERE workspace_id=? AND operation_id=? AND status='pending'", status, this.now(), workspaceId, operationId);
     if (changed.changes) this.publish(workspaceId, operationId, "workspace_operation_changed", { operationId, status, terminal: true, ...(supersededBy ? { supersededBy } : {}) });
   }
-  private mutate<T>(context: MutationContext, method: string, scope: string, input: unknown, body: () => { workspaceId: string; value: T; kind: string; payload?: unknown; changedSources?: string[] }): MutationReceipt<T> {
-    id(context.principalId); id(context.requestId);
+  private mutate<T>(context: MutationContext, method: string, scope: string, input: unknown, body: () => { workspaceId: string; value: T; kind: string; payload?: unknown; changedSources?: string[]; applied?: boolean }): MutationReceipt<T> {
+    id(context.principalId); id(context.requestId); method = id(context.method ?? method);
     const requestDigest = digest({ input, expectedRevision: context.expectedRevision ?? null });
     return this.rs.transaction(() => {
       const previous = this.one("SELECT request_digest,result_json FROM cowork_operations WHERE principal_id=? AND method=? AND scope=? AND request_id=?", context.principalId, method, scope, context.requestId);
@@ -101,9 +116,11 @@ export class CoworkRepository {
         const narrowing = method === "workspace.source.revoke";
         if (current.state !== "retained" && !(narrowing && current.state !== "deleted")) throw new CoworkError("authority_denied");
       }
+      context.admitMutation?.();
       const result = body(), current = this.get(result.workspaceId), operationId = this.mint("operation"), at = this.now();
       const receipt: MutationReceipt<T> = { operationId, workspaceId: current.workspaceId, revision: current.configRevision, value: result.value };
-      this.run("INSERT INTO cowork_operations VALUES(?,?,?,?,?,?,?,?,?,?,?)", operationId, context.principalId, method, scope, context.requestId, requestDigest, current.workspaceId, "pending", canonical(receipt), at, at);
+      context.validateReceipt?.(receipt);
+      this.run("INSERT INTO cowork_operations VALUES(?,?,?,?,?,?,?,?,?,?,?)", operationId, context.principalId, method, scope, context.requestId, requestDigest, current.workspaceId, result.applied ? "applied" : "pending", canonical(receipt), at, at);
       for (const sourceId of result.changedSources ?? []) {
         const previousOperation = this.one("SELECT operation_id FROM cowork_sources WHERE workspace_id=? AND source_id=?", current.workspaceId, sourceId)?.operation_id;
         if (previousOperation) this.concludeOperation(current.workspaceId, previousOperation, "superseded", operationId);
@@ -116,7 +133,7 @@ export class CoworkRepository {
   private advance(workspaceId: string, authority = false): void {
     this.run("UPDATE cowork_workspaces SET config_revision=config_revision+1,grant_revision=grant_revision+?,updated_at=? WHERE workspace_id=?", authority ? 1 : 0, this.now(), workspaceId);
   }
-  create(context: MutationContext, input: { ownership: "standalone" | "project"; title: string; sources: SourceSelection[]; ceiling: CapabilityCeiling; defaultPolicy?: ApprovalPolicy }): MutationReceipt<{ workspace: Workspace; sources: WorkspaceSource[] }> {
+  create(context: MutationContext, input: { ownership: "standalone" | "project"; title: string; sources: SourceSelection[]; ceiling: CapabilityCeiling; defaultPolicy?: ApprovalPolicy }): MutationReceipt<{ workspace: Workspace; sources: WorkspaceSource[]; policy: WorkspacePolicy; automaticPublication: boolean }> {
     if (!["standalone", "project"].includes(input.ownership) || !Array.isArray(input.sources) || input.sources.length < 1 || input.sources.length > 100) throw new CoworkError("invalid_request");
     const normalized = { ...input, title: text(input.title, 200), sources: input.sources.map(selection), ceiling: ceiling(input.ceiling), defaultPolicy: input.defaultPolicy ?? "auto" };
     if (!POLICIES.has(normalized.defaultPolicy)) throw new CoworkError("invalid_request");
@@ -126,7 +143,7 @@ export class CoworkRepository {
       this.run("INSERT INTO cowork_policies VALUES(?,?,?,?,?,1,1,1)", workspaceId, this.mint("policy"), normalized.defaultPolicy, "github-only-feature-branches", canonical(normalized.ceiling));
       if (input.ownership === "project") this.run("INSERT INTO cowork_projects VALUES(?,?,?)", ownerId, workspaceId, at);
       const sources = normalized.sources.map(value => this.insertSource(workspaceId, value));
-      return { workspaceId, value: { workspace: this.get(workspaceId), sources }, kind: "workspace_created", payload: { ownership: input.ownership }, changedSources: sources.map(value => value.sourceId) };
+      return { workspaceId, value: { workspace: this.get(workspaceId), sources, policy: this.policy(workspaceId), automaticPublication: this.githubOnly(workspaceId) }, kind: "workspace_created", payload: { ownership: input.ownership }, changedSources: sources.map(value => value.sourceId) };
     });
   }
   addSource(context: MutationContext, workspaceId: string, input: SourceSelection): MutationReceipt<WorkspaceSource> {

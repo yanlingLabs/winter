@@ -674,9 +674,9 @@ final class GatewayGateTests: XCTestCase {
         XCTAssertEqual(resp.kind, .rpcResponse, "the connection must still serve a normal rpc after an ignored pong")
     }
 
-    // MARK: - G7: the Swift remote allowlist is EXACTLY the twenty-five names (cross-language tripwire)
+    // MARK: - G7: the Swift remote allowlist is EXACTLY the forty names (cross-language tripwire)
 
-    func testG7_RemoteAllowlistIsExactlyTheTwentyFiveNames() {
+    func testG7_RemoteAllowlistIsExactlyTheFortyNames() {
         let expected: Set<String> = [
             "protocol.hello", "session.list", "session.attach", "session.send",
             "session.dispatch", "approval.respond", "ask_user.respond",
@@ -697,10 +697,27 @@ final class GatewayGateTests: XCTestCase {
             "credential.list", "credential.set", "credential.remove",
             // grew 24→25: ComputerV2 Phase 1b — the phone watches the live mirror of the session it is attached to.
             "session.mirror",
+            // Cowork workspace routes remain subject to daemon per-record authority.
+            "workspace.list",
+            "workspace.get",
+            "workspace.create",
+            "workspace.update",
+            "project.list",
+            "project.get",
+            "project.create",
+            "project.update",
+            "workspace.source.list",
+            "workspace.source.get",
+            "workspace.source.addRepository",
+            "workspace.source.remove",
+            "workspace.source.revoke",
+            "workspace.operation.get",
+            "workspace.policy.get",
+
         ]
-        XCTAssertEqual(Gateway.remoteAllowedMethods.count, 25)
+        XCTAssertEqual(Gateway.remoteAllowedMethods.count, 40)
         XCTAssertEqual(Gateway.remoteAllowedMethods, expected,
-                       "Swift remote allowlist drifted from the twenty-five — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
+                       "Swift remote allowlist drifted from the forty — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
     }
 
     // MARK: - WB-C1: a JSON-RPC error's `data` survives the relay (DIVERGED{lastSeq} → the phone)
