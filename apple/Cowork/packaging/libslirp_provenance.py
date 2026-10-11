@@ -10,16 +10,31 @@ import subprocess
 import tempfile
 
 COMMIT = "390848f47391f412451b2d259d8527fabb51e5e3"
+TREE = "0509386ab50c032b58f5af4576f8ee5f79157c51"
 URL = "https://gitlab.freedesktop.org/slirp/libslirp.git"
 HERE = Path(__file__).resolve().parent
 
 
 def tree_hashes(root):
+    if root.is_symlink() or any(p.is_symlink() for p in root.rglob("*")):
+        raise ValueError("vendored source symlinks are refused")
     return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in sorted(root.rglob("*")) if p.is_file() and ".git" not in p.relative_to(root).parts}
+            for p in sorted(root.rglob("*")) if p.is_file()}
 
 
-def generate(vendor, destination, upstream=None):
+def verify_vendor(vendor, pin_path=HERE / "libslirp-vendor-pin.json"):
+    pin = json.loads(pin_path.read_text())
+    if pin.get("format") != 1 or pin.get("upstreamCommit") != COMMIT or pin.get("upstreamGitTree") != TREE:
+        raise ValueError("committed vendor pin format/upstream mismatch")
+    files = tree_hashes(vendor)
+    digest = hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if digest != pin.get("vendoredTreeSha256") or len(files) != pin.get("vendoredFileCount"):
+        raise ValueError("vendored source differs from the committed reviewed hash")
+    return pin
+
+
+def generate(vendor, destination, upstream=None, pin_path=HERE / "libslirp-vendor-pin.json"):
+    pin = verify_vendor(vendor, pin_path)
     destination.mkdir(parents=True, exist_ok=False)
     env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null", GIT_TERMINAL_PROMPT="0")
     if upstream is None:
@@ -29,7 +44,7 @@ def generate(vendor, destination, upstream=None):
         subprocess.run(["git", "-C", upstream, "checkout", "-q", "--detach", "FETCH_HEAD"], env=env, check=True)
     identity = subprocess.check_output(["git", "-C", upstream, "rev-parse", "HEAD"], env=env, text=True).strip()
     tree = subprocess.check_output(["git", "-C", upstream, "rev-parse", "HEAD^{tree}"], env=env, text=True).strip()
-    if identity != COMMIT or subprocess.check_output(["git", "-C", upstream, "status", "--porcelain"], env=env):
+    if identity != COMMIT or tree != pin["upstreamGitTree"] or subprocess.check_output(["git", "-C", upstream, "status", "--porcelain"], env=env):
         raise ValueError("upstream must be the exact clean pinned commit")
     with (destination / "libslirp-upstream.tar").open("wb") as stream:
         subprocess.run(["git", "-C", upstream, "archive", "--format=tar", COMMIT], env=env, check=True, stdout=stream)
@@ -77,6 +92,7 @@ def generate(vendor, destination, upstream=None):
         "upstreamProjectionHashes": original, "vendoredHashes": expected,
         "vendoredGitTree": vendor_git_tree,
         "vendoredTreeSha256": hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "committedVendorPin": pin,
         "patchReconstructionVerified": True}
     (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     if (destination / "upstream-checkout").exists():

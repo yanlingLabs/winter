@@ -14,7 +14,7 @@ import tempfile
 import time
 import urllib.request
 from closure import dependencies, is_system, output, runpaths, validate
-from libslirp_provenance import generate as libslirp_provenance
+from libslirp_provenance import generate as libslirp_provenance, verify_vendor
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -35,7 +35,7 @@ def require_json_receipt(log, expected):
             continue
         if isinstance(value, dict) and all(key in value and type(value[key]) is type(wanted)
                 and value[key] == wanted for key, wanted in expected.items()):
-            return
+            return value
     raise ValueError(f"successful exit without required execution receipt: {log.name}")
 
 
@@ -71,6 +71,7 @@ class Build:
         self.env.update(CLANG_MODULE_CACHE_PATH=str(directory / "clang-module-cache"),
                         BUN_RUNTIME_TRANSPILER_CACHE_PATH=str(directory / "bun-transpiler-cache"))
         self.commands = []
+        self.execution_receipts = {}
         (directory / "logs").mkdir()
         (directory / "sources").mkdir()
         (self.bundle / "lib").mkdir(parents=True)
@@ -85,6 +86,10 @@ class Build:
     def snapshot(self):
         for original, snapshot in ((NETWORK, self.network), (NATIVE, self.native)):
             shutil.copytree(original, snapshot, ignore=shutil.ignore_patterns(".build", "out", "__pycache__", ".git"))
+        # A generated provenance inventory cannot bless arbitrary vendor edits.
+        # Verify the committed reviewed pin before compiling any network source.
+        self.vendor_pin = verify_vendor(self.network / "vendor/libslirp",
+                                        self.recipe / "libslirp-vendor-pin.json")
 
     def import_dependencies(self, bundle):
         manifest = json.loads((bundle / "manifest.json").read_text())
@@ -181,7 +186,9 @@ class Build:
             subprocess.run(command, cwd=cwd or ROOT, env=command_env,
                            stdout=stream, stderr=subprocess.STDOUT, check=True, timeout=timeout)
         if receipt is not None:
-            require_json_receipt(log, receipt)
+            value = require_json_receipt(log, receipt)
+            self.execution_receipts[label] = {"receipt": value, "log": str(log.relative_to(self.directory)),
+                                              "sha256": digest(log)}
 
     def source(self, name, cache):
         pin = PINS[name]
@@ -357,7 +364,7 @@ class Build:
                         archive.add(path, arcname=f"swift-dependencies/{rel}", recursive=False)
         if self.network.exists():
             libslirp_provenance(self.network / "vendor/libslirp", self.bundle / "source/libslirp-provenance",
-                               getattr(self, "libslirp_upstream", None))
+                               getattr(self, "libslirp_upstream", None), self.recipe / "libslirp-vendor-pin.json")
             shutil.copytree(self.network / "vendor/libslirp", self.bundle / "notices/libslirp",
                             ignore=shutil.ignore_patterns("src", "include", "subprojects", "test", "build-aux"))
         for scratch in self.directory.glob("swift-*"):
@@ -394,6 +401,18 @@ class Build:
             self.run("relocated-client-smoke", ["bun", "run", "--no-env-file", f"--config={config}",
                 self.native / "node-api/client-smoke.ts"], env=env, timeout=30,
                 receipt={"nativeTypedClient": True, "productionFeatureBlocked": True, "realVM": False})
+            output_receipt = {"nativeOutputTransport": True, "pressureBytes": 10 * 1024 * 1024,
+                "pauseStopsNativeReads": True, "exactStdoutStderr": True, "sharedReadiness": True,
+                "concurrentStreams": 12, "callbackFailureVisible": True, "noChunksAfterDispose": True,
+                "pauseInsideCallback": True, "bothEOFRequired": True, "extraInheritedDescriptors": False,
+                "descriptorEnumeration": "/dev/fd", "highFixtureDescriptors": 140, "realVM": False}
+            self.run("relocated-output-smoke", ["bun", "run", "--no-env-file", f"--config={config}",
+                self.native / "node-api/output-smoke.ts"], env=env, timeout=30, receipt=output_receipt)
+            compiled = relocated / "compiled-output-smoke"
+            self.run("output-smoke-compile", ["bun", "build", f"--config={config}",
+                "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", "--compile",
+                self.native / "node-api/output-smoke.ts", "--outfile", compiled], env=env)
+            self.run("relocated-compiled-output-smoke", [compiled], env=env, timeout=30, receipt=output_receipt)
 
 
 def main():
@@ -450,6 +469,8 @@ def main():
                 "sdk": output("xcrun", "--show-sdk-version"),
                 "platform": platform.platform(), "arch": platform.machine()},
             "commit": build.commit,
+            "committedVendorPin": getattr(build, "vendor_pin", None),
+            "executionReceipts": build.execution_receipts,
             "nativeProfile": getattr(build, "native_profile", None),
             "inputHashes": {str(p.relative_to(directory / "input")): digest(p)
                 for p in sorted((directory / "input").rglob("*")) if p.is_file()},

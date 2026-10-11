@@ -123,10 +123,71 @@ These supplemental logs are outside the original bundle manifest, whose source
 recipe and empty smoke logs remain unchanged for audit. The next full recipe
 run must retain the corrected receipts in its manifest material.
 
+## Fresh frozen native/output package
+
+```sh
+python3 -m unittest discover -s apple/Cowork/packaging -p 'test_*.py'
+python3 apple/Cowork/packaging/build.py --jobs 4 \
+  --dependency-bundle apple/Cowork/packaging/out/build-nzn18phm/bundle \
+  --libslirp-upstream-checkout apple/Cowork/packaging/out/libslirp-upstream-9nc0wfan
+python3 apple/Cowork/packaging/closure.py \
+  apple/Cowork/packaging/out/build-ycs24bpl/bundle/lib
+```
+
+The fresh combined bundle is `out/build-ycs24bpl/bundle`, built in309 seconds
+from frozen native `a5cae99956d55171d4578a0b3f77ea245e450acd` and network
+`02fb0e264a5630c9820fe88e7d17e4c6072ed292`. Eleven packaging regressions pass.
+The network stage passes45 Swift Testing tests (its separate XCTest compatibility
+footer reports0). The verified-eof native stage executes45 XCTest tests:44 pass
+and1 APFS Data-firmlink fixture skips because the host does not expose that alias.
+The real case-alias identity test passes. Exact logs are retained as
+`build-logs/10-network-tests.log` and `build-logs/14-native-tests.log`.
+
+Both relocated addon/client smokes produce their required actual JSON receipts.
+Ordinary and compiled Bun output smokes also load the relocated protected addon
+and produce nonempty identical receipts in
+`build-logs/35-relocated-output-smoke.log` and
+`build-logs/37-relocated-compiled-output-smoke.log`:
+
+```json
+{"nativeOutputTransport":true,"pressureBytes":10485760,"pauseStopsNativeReads":true,"exactStdoutStderr":true,"maxChunkBytes":65536,"sharedReadiness":true,"concurrentStreams":12,"callbackFailureVisible":true,"noChunksAfterDispose":true,"pauseInsideCallback":true,"bothEOFRequired":true,"extraInheritedDescriptors":false,"descriptorEnumeration":"/dev/fd","highFixtureDescriptors":140,"realVM":false}
+```
+
+The recipe uses `--config=PATH`, disables compiled dotenv/bunfig autoload,
+requires typed execution receipts, and records the actual receipts plus command
+log hashes in `manifest.json`. Every receipt's retained log SHA256 was independently
+checked. The compiled fixture remains outside the runtime bundle at
+`out/build-ycs24bpl/relocated-smoke/compiled-output-smoke`; its SHA256 is
+`94c970b0b8c98fa2edbb47032e8d80d2ab337fa3964e247f9ee2b3d8b61fbd49`.
+
+The committed vendor pin checks all66 libslirp files before compilation. Its
+content-map SHA256 is
+`92b94c449a232a355c7af325db487ae3959c4740a10254bc4a15c372b3408d9f`.
+A modified/extra/missing file or symlink cannot be accepted by generating a new
+inventory during the build. Reconstruction additionally checks the exact
+upstream commit/tree and retained pin; this is not publisher-signature evidence.
+Native preparation independently verifies the pinned Containerization archive,
+EOF patch and complete patched tree. The runtime closure accepts all six arm64
+Mach-O files with only bundle-relative or Apple system references.
+
+| Material | SHA256 |
+| --- | --- |
+| `manifest.json` | `578095e9f01cb66a4299f96209315872607b0e01303664e63168b18a19e73ecd` |
+| `libWinterCoworkNative.dylib` | `ce8a98571e48e02d99ef919ef499594bd92744d586a9f584397b36683ad36218` |
+| `libWinterCoworkNetwork.dylib` | `6e4e3edc673807e7a9abe187a1c87d770cea0d70c7fcf11c9856b140ba1fb693` |
+| `winter-cowork-native.node` | `2fe3d43ea2b3e98d8f47be954dc74a074f2af0ef6024962fb4eeb829f1fa0d54` |
+
+This remains an ad-hoc signed native foundation with `productionReady:false`.
+The accepted per-workspace worker architecture, durable authority integration,
+real guest IO/termination, active RAM return and production activation are not
+proved by these no-VM checks. The dependency cache and native/network sources
+were not modified. The later validation/report text is not retroactively inserted
+into the source snapshot; code/test/vendor-pin hashes match the built recipe.
+
 ## Pending
 
-The next native checkpoint adds the protected output transport needed by the
-host Code broker; its integration and packaging are still pending. The recipe's
+The protected native output transport is packaged and fixture-verified in the
+fresh bundle above. Its production host-broker/worker integration remains pending. The recipe's
 `--dependency-bundle` option permits packaging a
 fresh reviewed source snapshot without repeating the dependency source build.
 The combined package exercises the verified-EOF fixed prepare/verify helper and

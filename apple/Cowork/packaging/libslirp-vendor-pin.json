@@ -1,0 +1,10 @@
+{
+  "format": 1,
+  "upstreamVersion": "4.9.5",
+  "upstreamCommit": "390848f47391f412451b2d259d8527fabb51e5e3",
+  "upstreamGitTree": "0509386ab50c032b58f5af4576f8ee5f79157c51",
+  "reviewedVendorCommit": "02fb0e264a5630c9820fe88e7d17e4c6072ed292",
+  "vendoredTreeSha256": "92b94c449a232a355c7af325db487ae3959c4740a10254bc4a15c372b3408d9f",
+  "vendoredFileCount": 66,
+  "hashAuthority": "Reviewed committed Winter vendor contents; content map SHA256, not a publisher signature"
+}

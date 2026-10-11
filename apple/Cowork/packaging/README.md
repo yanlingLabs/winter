@@ -95,6 +95,12 @@ The dependency stage's relocated C smoke asserts exact GLib/libintl/PCRE2
 runtime versions, exercises a GLib regex through PCRE2, and calls gettext under
 the C locale. It strips loader search environments and makes no network call.
 
+Before compiling libslirp, the recipe checks the snapshot against the committed
+`libslirp-vendor-pin.json`: exact reviewed content-map SHA256/file count and
+upstream commit/tree. Missing/extra/modified files and symlink aliases fail
+closed. A generated inventory cannot bless unreviewed vendor changes; updating
+the committed pin requires a separately reviewed vendor change.
+
 For libslirp, the package records the exact clean upstream Git commit/tree,
 retains a complete upstream `git archive`, hashes every vendored file and
 generates `winter-libslirp.patch`. Applying that patch to upstream `src/`,
@@ -127,13 +133,23 @@ dylib**, creates/destroys a synthetic endpoint, rejects a loopback tuple, sends
 an unsupported local frame, and checks current/stale policy replacement ACKs
 with zero outbound attempts. The controller addon and typed-client smokes load
 the **relocated packaged native dylib** with the fake backend and verify the
-production-blocked factory. Injected `DYLD_*`, pkg-config, compiler/library
+production-blocked factory. Mandatory ordinary and compiled Bun output smokes
+load the relocated packaged addon and emit typed receipts for exact10MiB output,
+native pause/backpressure, both EOFs,12 concurrent streams and actual /dev/fd
+inheritance enumeration after140 fixture FDs are opened. The compiler disables
+dotenv/bunfig autoload; source execution keeps explicit `--config=PATH`. A zero
+exit without the expected receipt cannot pass.
+
+Injected `DYLD_*`, pkg-config, compiler/library
 search and GLib module environments are stripped. No real VM, host-pressure
 test, Winter home, daemon, app, Keychain or credential is used.
 
 Mach-O edits are followed by **ad-hoc test signing only**. `manifest.json`
 records hashes, all closure load commands by architecture, dylib aliases,
-toolchain, source pins, command lines and source/build material hashes. It
+toolchain, source pins, command lines, source/build material hashes and actual
+`executionReceipts` linked to their command logs by SHA256. Receipt log paths
+are relative to the invocation directory; the bundle retains copies under
+`build-logs/<log basename>`. It
 explicitly marks `productionReady: false`. Its hash inventory describes an
 artifact; it is not authenticated host admission or a release signature.
 

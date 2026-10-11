@@ -1,10 +1,12 @@
 import tempfile
 import unittest
 import json
+import hashlib
 from pathlib import Path
 from closure import dependencies, is_system, resolve_reference, runpaths, validate
 from build import Build, PINS, clean_environment, require_json_receipt
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+from libslirp_provenance import COMMIT, TREE, tree_hashes, verify_vendor
 
 
 class ClosureTests(unittest.TestCase):
@@ -63,7 +65,59 @@ class ClosureTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "without required execution receipt"):
                     require_json_receipt(log, {"realVM": False})
             log.write_text('ordinary output\n{"realVM":false,"nodeAPI":true}\n')
-            require_json_receipt(log, {"realVM": False, "nodeAPI": True})
+            self.assertEqual(require_json_receipt(log, {"realVM": False, "nodeAPI": True}),
+                             {"realVM": False, "nodeAPI": True})
+
+    def test_vendor_pin_refuses_changed_missing_extra_and_aliased_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "vendor"
+            root.mkdir()
+            source = root / "source.c"
+            source.write_text("reviewed fixture")
+            hashes = tree_hashes(root)
+            pin = Path(tmp) / "pin.json"
+            pin.write_text(json.dumps({"format": 1, "upstreamCommit": COMMIT, "upstreamGitTree": TREE,
+                "vendoredFileCount": 1, "vendoredTreeSha256": hashlib.sha256(
+                    json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}))
+            verify_vendor(root, pin)
+            source.write_text("unreviewed edit")
+            with self.assertRaisesRegex(ValueError, "committed reviewed hash"):
+                verify_vendor(root, pin)
+            source.unlink()
+            with self.assertRaises(ValueError):
+                verify_vendor(root, pin)
+            source.write_text("reviewed fixture")
+            (root / "extra").touch()
+            with self.assertRaises(ValueError):
+                verify_vendor(root, pin)
+            (root / "extra").unlink()
+            (root / "alias").symlink_to(source)
+            with self.assertRaisesRegex(ValueError, "symlinks"):
+                verify_vendor(root, pin)
+
+    def test_recipe_requires_ordinary_and_compiled_output_receipts_with_config_equals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build = Build.__new__(Build)
+            build.directory = Path(tmp)
+            build.bundle = Path(tmp) / "bundle"
+            (build.bundle / "lib").mkdir(parents=True)
+            build.native = Path(tmp) / "native"
+            build.network = Path(tmp) / "network"
+            build.run = Mock()
+            with patch("build.clean_environment", return_value={}):
+                build.smoke(False)
+            calls = {call.args[0]: call for call in build.run.call_args_list}
+            for label in ("relocated-native-smoke", "relocated-client-smoke", "relocated-output-smoke", "output-smoke-compile"):
+                argv = [str(v) for v in calls[label].args[1]]
+                self.assertTrue(any(v.startswith("--config=") for v in argv))
+                self.assertNotIn("--config", argv)
+            ordinary = calls["relocated-output-smoke"].kwargs["receipt"]
+            compiled = calls["relocated-compiled-output-smoke"].kwargs["receipt"]
+            self.assertEqual(ordinary, compiled)
+            self.assertEqual(ordinary["pressureBytes"], 10 * 1024 * 1024)
+            self.assertEqual(ordinary["highFixtureDescriptors"], 140)
+            self.assertEqual(ordinary["descriptorEnumeration"], "/dev/fd")
+            self.assertIs(ordinary["realVM"], False)
 
     def test_verification_checks_runpaths_in_every_architecture(self):
         with tempfile.TemporaryDirectory() as tmp:
