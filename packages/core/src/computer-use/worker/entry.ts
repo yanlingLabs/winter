@@ -42,8 +42,11 @@ export function runAutomationWorker(): void {
   let buf = "";
   // The rest of a runaway line is being skipped (up to its newline).
   let skipping = false;
+  // ONE streaming decoder for the whole pipe: a character split across two chunks is joined, never two U+FFFDs. The
+  // line limit counts characters, as the daemon's own guard does (`worker-host.ts`'s `reply`).
+  const utf8 = new TextDecoder("utf-8");
   process.stdin.on("data", (d: Buffer) => {
-    let text = d.toString("utf8");
+    let text = utf8.decode(d, { stream: true });
     if (skipping) {
       const nl = text.indexOf("\n");
       if (nl < 0) return;

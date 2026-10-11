@@ -81,8 +81,10 @@ export class AutomationWorker {
     let isReady = false;
     let stderr = "";
     child.stderr?.on("data", (d: Buffer) => { if (stderr.length < 4096) stderr += d.toString("utf8"); });
+    // ONE streaming decoder for the whole pipe: a character split across two chunks is joined, never two U+FFFDs.
+    const utf8 = new TextDecoder("utf-8");
     child.stdout?.on("data", (d: Buffer) => {
-      worker.buf += d.toString("utf8");
+      worker.buf += utf8.decode(d, { stream: true });
       let i: number;
       while ((i = worker.buf.indexOf("\n")) >= 0) {
         const line = worker.buf.slice(0, i);

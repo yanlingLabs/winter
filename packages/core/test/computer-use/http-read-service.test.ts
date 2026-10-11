@@ -42,6 +42,7 @@ function world(o: { policy?: SessionFacts["policy"] } = {}) {
       const host = ((init.headers ?? {}) as Record<string, string>).Host ?? "";
       fetched.push(host);
       if (host === "controls.example") return new Response("\u0001".repeat(1_000_000) + "end", { headers: { "content-type": "text/plain" } });
+      if (host === "ja.example") return new Response("日本語のテキスト。".repeat(100_000), { headers: { "content-type": "text/plain; charset=utf-8" } });
       const n = /^doc(\d+)\.example$/.exec(host)?.[1] ?? "?";
       return new Response(`<html><head><title>Doc ${n}</title></head><body><h1>Page ${n}</h1><p>Body of page ${n}.</p></body></html>`, { headers: { "content-type": "text/html" } });
     },
@@ -93,6 +94,13 @@ describe("browsers.read through the ComputerV2 service", () => {
     expect(r.isError).toBe(false);
     expect(text(r)).toContain("got end");
     expect(Date.now() - t0).toBeLessThan(10_000);
+  }, 30_000);
+
+  macOnly("a long Japanese page reaches the script whole through the real worker (no character split by the pipe)", async () => {
+    const w = world();
+    const r = await w.run("const p = await browsers.read('https://ja.example/', { emit: false }); print('got', p.text.length, [...p.text].filter((c) => c === '\\uFFFD').length, p.text === '日本語のテキスト。'.repeat(100000))");
+    expect(r.isError).toBe(false);
+    expect(text(r)).toContain("got 900000 0 true");
   }, 30_000);
 
   macOnly("every browsers.* primitive reaches the engine (none falls through to an app target)", async () => {

@@ -10,6 +10,41 @@ import { sandboxAvailable } from "../../src/workflows/sandbox";
 const macOnly = sandboxAvailable() ? test : test.skip;
 const SCRIPT = "try { const x = await apps.list(); print('got', typeof x) } catch (e) { print('ERR', e.name, e.message) }";
 
+describe("non-ASCII text across the bridge", () => {
+  macOnly("an answer whose character is split between two pipe chunks reaches the script whole", async () => {
+    const w = await AutomationWorker.start();
+    try {
+      const prints: string[] = [];
+      const stdin = (w as unknown as { child: { stdin: { write(b: Uint8Array): void } } }).child.stdin;
+      const value = "日本語のテキスト。";
+      const r = await w.run("r1", "const x = await apps.list(); print(x, x.length, [...x].filter((c) => c === '\\uFFFD').length)", {
+        onCall: (m) => {
+          const bytes = new TextEncoder().encode(`{"op":"reply","id":${m.id},"ok":true,"value":"${value}"}\n`);
+          const cut = bytes.indexOf(0xe6) + 1; // inside the first character's three bytes
+          stdin.write(bytes.subarray(0, cut));
+          setTimeout(() => stdin.write(bytes.subarray(cut)), 60);
+        },
+        onPrint: (t) => prints.push(t), onShow: () => {},
+      });
+      expect(r).toEqual({ kind: "done" });
+      expect(prints).toEqual([`${value} 9 0`]);
+    } finally { w.kill(); }
+  }, 30_000);
+
+  macOnly("a long non-ASCII print reaches the daemon whole, however the pipe cuts it", async () => {
+    const w = await AutomationWorker.start();
+    try {
+      const prints: string[] = [];
+      // 180,000 characters (540 KB of UTF-8): under the worker's own print cap, cut by the pipe many times.
+      const r = await w.run("r1", "print('日本語のテキスト。'.repeat(20000))", { onCall: () => {}, onPrint: (t) => prints.push(t), onShow: () => {} });
+      expect(r).toEqual({ kind: "done" });
+      expect(prints).toHaveLength(1);
+      expect(prints[0]!).toBe("日本語のテキスト。".repeat(20000));
+      expect(prints[0]!.includes("\uFFFD")).toBe(false);
+    } finally { w.kill(); }
+  }, 30_000);
+});
+
 describe("an answer too large for the bridge", () => {
   macOnly("the daemon sends it as a typed error naming its size", async () => {
     const w = await AutomationWorker.start();
