@@ -1,6 +1,10 @@
 # Host output-only native addon
 
-The production byte transport is independent of the historical VZ controller.
+This composition branch contains both the native producer from PR #16 and the
+Core consumer from PR #14, with the combined fixture below. Neither split PR
+alone proves this integration. Production activation remains disabled.
+
+The native byte transport is independent of the historical VZ controller.
 `Sources/output_transport.c` and `fd_creation.c` are the same reviewed sources
 included by the legacy probe adapter; they are shared, not copied/forked. The
 standalone adapter exports only the bounded output factory and fixed ABI/source
