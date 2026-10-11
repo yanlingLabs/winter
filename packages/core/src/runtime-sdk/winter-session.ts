@@ -1414,19 +1414,20 @@ class WinterSessionImpl implements WinterSession {
   }
 
   private emit(batch: ProjectedBatch, message?: ProtocolSdkMessage): void {
-    const assistant = message === undefined ? undefined : asAssistantFrame(message);
+    const incarnation = this.inc;
+    const hostCode = incarnation?.hostCode?.protectedStorage ? incarnation.hostCode : undefined;
+    const assistant = hostCode === undefined || message === undefined ? undefined : asAssistantFrame(message);
     const runtimeNames = new Map<string, string>();
     for (const block of assistant?.message.content ?? []) {
       if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") runtimeNames.set(block.id, block.name);
     }
-    const incarnation = this.inc;
     let hostRejected = false;
     for (const e of batch.persist) {
       // Admission cannot erase the projected evidence, including the rest of this same batch.
       this.safeAppend(e);
       this.relayChild(e);
-      if (!hostRejected) {
-        try { incarnation?.hostCode?.observe(e, e.type === "tool_call" ? runtimeNames.get(e.callId) : undefined); } catch { hostRejected = true; }
+      if (hostCode && !hostRejected) {
+        try { hostCode.observe(e, e.type === "tool_call" ? runtimeNames.get(e.callId) : undefined); } catch { hostRejected = true; }
       }
     }
     for (const e of batch.broadcast) {
