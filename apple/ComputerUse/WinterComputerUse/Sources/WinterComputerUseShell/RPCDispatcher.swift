@@ -41,9 +41,15 @@ public final class RPCDispatcher: @unchecked Sendable {
         buildRoutes()
         if liveTest {
             let activate = activator ?? { pid in await MainActor.run { TestActivator.activate(pid: pid) } }
-            routes["test.activate"] = { params, _ in
+            routes["test.activate"] = { [core] params, _ in
                 let p = try RPCDispatcher.decode(TestActivateParams.self, params)
+                if p.asUser == true { core.testUserInput(pid: p.pid, switching: true) }
                 return AnyEncodable(await activate(p.pid))
+            }
+            routes["test.userInput"] = { [core] params, _ in
+                let p = try RPCDispatcher.decode(TestUserInputParams.self, params)
+                core.testUserInput(pid: p.pid, switching: false)
+                return AnyEncodable([String: Bool]())
             }
             // May this helper already script an app (never asking)? The suite runs an AppleScript-backed scenario only
             // on `granted`, so a test never raises macOS's Automation question.
