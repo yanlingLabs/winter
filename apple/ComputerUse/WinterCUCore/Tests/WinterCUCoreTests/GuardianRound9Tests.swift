@@ -83,6 +83,26 @@ final class GuardianRound9Tests: XCTestCase {
         XCTAssertEqual(judge(&g, 77, now: 50.3), .visit)
     }
 
+    /// The user's ⌘-Tab into the app being held in front (requestForeground), released after the hold was issued, is
+    /// theirs — and the hold's end gives nothing back. With no input of theirs, the landing is the consent's and its end
+    /// gives the place back.
+    func testTheUsersSwitchIntoTheHeldAppIsTheirsAndNothingIsGivenBack() {
+        var g = started()
+        g.inputEvent(type: .flagsChanged, flags: .maskCommand, now: 69.95)
+        g.noteCause(600, raise: true, now: 70.0)   // the hold's activation
+        g.exempt(600, until: 100, now: 70.0)
+        g.inputEvent(type: .flagsChanged, flags: [], now: 70.05)
+        XCTAssertTrue(judge(&g, 600, now: 70.1).isUsers, "their ⌘-Tab, released after the hold was issued")
+        g.endExempt(600)
+        XCTAssertEqual(g.view.app, 600, "the hold's end gives nothing back")
+        var h = started()
+        h.noteCause(600, raise: true, now: 70.0)
+        h.exempt(600, until: 100, now: 70.0)
+        XCTAssertEqual(judge(&h, 600, now: 70.1), .consented)
+        h.endExempt(600)
+        XCTAssertEqual(h.view.app, 1, "the consent's own landing: its end gives the place back")
+    }
+
     /// A click on another display's window of an app not in front: ONE input (an app switch takes the desktop along).
     func testAClickOnAnotherDisplaysWindowIsOneInput() {
         var g = started()

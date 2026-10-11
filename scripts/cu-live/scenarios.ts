@@ -456,7 +456,11 @@ report({ ok: true });`,
 const form = await win("Fixture Form");
 const area = await pick(form, "Native Hover Area");
 await form.hover(area.ref, { ms: 600 });
-const item = await pick(form, "Native Hidden Item", "button");
+// The item is listed once it is shown (a hidden button is not): looked for up to 2 s.
+let item;
+for (const t0 = Date.now(); ; await sleep(200)) {
+  try { item = await pick(form, "Native Hidden Item", "button"); break; } catch (e) { if (Date.now() - t0 > 2000) throw e; }
+}
 await form.click(item.ref);
 report({ ok: true });`,
     verify: (ctx) => [ok(ctx),
