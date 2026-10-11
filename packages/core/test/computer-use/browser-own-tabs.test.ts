@@ -80,6 +80,9 @@ describe("mute()", () => {
     const user = await h.engine.global(r.scope, "browsers.tab", { tab: "chrome:8" }) as TabHandle;
     expect((await failure(h.engine.primitive(r.scope, user.targetId, "mute", {})) as AutomationFailure).kind).toBe("NotAllowed");
     const w = await h.engine.global(r.scope, "browsers.open", { url: "https://w.example/" }) as TabHandle;
+    await h.engine.primitive(r.scope, w.targetId, "mute", {});
+    expect(h.winter.tabs.get(keyOf(w))!.muted).toBe(true);
+    delete h.winter.setMuted;
     await expect(h.engine.primitive(r.scope, w.targetId, "mute", {})).rejects.toThrow(/built-in browser can't mute a tab yet/);
     delete h.chrome.setMuted;
     const old = await failure(h.engine.primitive(r.scope, tab.targetId, "mute", {}));

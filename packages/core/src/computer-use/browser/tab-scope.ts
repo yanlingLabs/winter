@@ -39,6 +39,12 @@ export interface TabRunScope {
   sessionFacts(): SessionFacts;
   /** Raise the dangerous-domain site card (`once` / `session`) — the run's clock is paused while it waits. */
   siteCard(summary: string): Promise<{ approved: boolean; optionId?: string }>;
+  /** Phase 3: a hand-off card (`waitForUser`) — its own options and clock; `onIssued` gets a way to answer it from the
+   *  browser (Winter for Chrome's Done). `by` says who answered ("timeout", "aborted", a client, "browser"). */
+  userCard?(summary: string, options: ReadonlyArray<{ id: string; label: string }>, timeoutMs: number,
+    onIssued?: (answer: (approved: boolean, by: string, optionId?: string) => void) => void): Promise<{ approved: boolean; optionId?: string; by?: string }>;
+  /** For the audit line: a hand-off was asked for (a count). */
+  noteHandoff?(): void;
   /** Did the user allow this app for longer than this run (session/always grant, or bypass)? */
   persistentlyAllowed(bundleId: string): boolean;
   /** Is the app already allowed for this session — so using it raises no card now (a session/always grant, bypass,

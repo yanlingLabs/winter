@@ -143,6 +143,13 @@ export class FakeCdpTransport implements CdpTransport {
   setMuted?: CdpTransport["setMuted"];
   updateGroup?: CdpTransport["updateGroup"];
   listWindows?: CdpTransport["listWindows"];
+  history?: CdpTransport["history"];
+  bookmarks?: CdpTransport["bookmarks"];
+  /** The user's history and bookmarks (a user's browser), and which optional permissions they granted. */
+  historyItems: Array<{ url: string; title: string; lastVisitTime: number }> = [];
+  bookmarkItems: Array<{ url: string; title: string; folder: string }> = [];
+  readonly granted = new Set<string>(["history", "bookmarks"]);
+  readonly libraryQueries: unknown[] = [];
   readonly groupUpdates: Array<{ sessionId: string; title?: string; color?: string; collapsed?: boolean }> = [];
   /** Phase 3 downloads: what the server answers by URL; the native handler's arms; where a user's browser saves. */
   files: Record<string, FakeFile> = {};
@@ -210,14 +217,37 @@ export class FakeCdpTransport implements CdpTransport {
   }
   windows: Array<{ id: number; focused: boolean; tabs: number }> = [{ id: 1, focused: true, tabs: 2 }];
 
+  /** Phase 3's hand-off: the tabs shown to the user (`present`), and the browser's own Done (`onUserDone`). */
+  readonly presented: string[] = [];
+  present?: CdpTransport["present"];
+  onUserDone?: CdpTransport["onUserDone"];
+  private readonly doneListeners = new Set<(tabKey: string, done: boolean) => void>();
+
   constructor(readonly backend: string, readonly family: BrowserFamily) {
+    // Both the built-in browser's link (protocol 2) and Winter for Chrome 1.1 can present a tab and mute one.
+    this.present = async (tabKey, o) => { this.tab(tabKey); this.presented.push(`${tabKey}@${o.sessionId}`); };
+    this.setMuted = async (tabKey, muted) => { this.tab(tabKey).muted = muted; };
     if (family !== "winter") {
-      this.features = new Set(["cdp3", "mute", "group", "keepGroup", "windows", "tabFacts"]);
-      this.setMuted = async (tabKey, muted) => { this.tab(tabKey).muted = muted; };
+      this.features = new Set(["cdp3", "present", "userDone", "mute", "group", "keepGroup", "windows", "tabFacts"]);
+      this.onUserDone = (l) => { this.doneListeners.add(l); return () => { this.doneListeners.delete(l); }; };
       this.updateGroup = async (o) => { this.groupUpdates.push({ ...o }); };
       this.listWindows = async () => this.windows.map((w) => ({ ...w }));
+      const refuse = (p: string): never => { throw new TransportError("not_allowed", `Winter for Chrome may not search this browser's ${p} — ask the user to allow it in Winter for Chrome's menu (its toolbar button)`, { permission: p }); };
+      this.history = async (q) => {
+        if (!this.granted.has("history")) refuse("history");
+        this.libraryQueries.push({ history: q });
+        return this.historyItems.filter((i) => q.text === "" || i.title.includes(q.text) || i.url.includes(q.text)).slice(0, q.maxResults).map((i) => ({ ...i }));
+      };
+      this.bookmarks = async (q) => {
+        if (!this.granted.has("bookmarks")) refuse("bookmarks");
+        this.libraryQueries.push({ bookmarks: q });
+        return this.bookmarkItems.filter((i) => q.text === undefined || i.title.includes(q.text)).slice(0, q.maxResults).map((i) => ({ ...i }));
+      };
     }
   }
+
+  /** Test door: the user presses Done (or Stop waiting) in the browser's own toolbar popup. */
+  pressDone(tabKey: string, done: boolean): void { for (const l of [...this.doneListeners]) l(tabKey, done); }
 
   page(url: string): FakePage {
     const p = this.pages[url];

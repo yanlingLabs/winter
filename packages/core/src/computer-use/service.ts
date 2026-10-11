@@ -248,6 +248,8 @@ interface RunCtx {
   browsers?: Set<string>;
   /** download() files saved this run (a count, for the audit line). */
   downloads?: number;
+  /** waitForUser() hand-offs asked for this run (a count, for the audit line). */
+  handoffs?: number;
   /** Phase 2: browser-tab primitives still running (the run's tab locks wait for them at its end). */
   tabWork?: Set<Promise<unknown>>;
 }
@@ -456,7 +458,7 @@ export class ComputerV2Service {
       kind: "automation", sessionId, apps: [...ctx.apps], primitives: Object.fromEntries(ctx.primitives),
       durationMs: this.now() - started, outcome: outcomeWord, ...(ctx.visitsClaimed > 0 ? { desktopVisits: ctx.visitsClaimed } : {}),
       ...(ctx.sites === undefined ? {} : { sites: [...ctx.sites] }), ...(ctx.browsers === undefined ? {} : { browsers: [...ctx.browsers] }),
-      ...(ctx.downloads === undefined ? {} : { downloads: ctx.downloads }),
+      ...(ctx.downloads === undefined ? {} : { downloads: ctx.downloads }), ...(ctx.handoffs === undefined ? {} : { handoffs: ctx.handoffs }),
     });
     return builder.build(error === undefined ? {} : { error });
   }
@@ -1438,6 +1440,8 @@ export class ComputerV2Service {
       sessionPolicy: () => this.deps.policy.sessionFacts(ctx.sessionId).policy,
       sessionFacts: () => this.deps.policy.sessionFacts(ctx.sessionId),
       siteCard: (summary) => this.deps.policy.siteCard(ctx.grants, summary, ctx.abort.signal),
+      userCard: (summary, options, timeoutMs, onIssued) => this.deps.policy.userCard(ctx.grants, summary, options, timeoutMs, ctx.abort.signal, onIssued),
+      noteHandoff: () => { ctx.handoffs = (ctx.handoffs ?? 0) + 1; },
       persistentlyAllowed: (bundleId) => this.deps.policy.persistentlyAllowed(ctx.sessionId, bundleId),
       granted: (bundleId) => this.deps.policy.persistentlyAllowed(ctx.sessionId, bundleId) || ctx.grants.once.has(bundleId),
       builder: ctx.builder,

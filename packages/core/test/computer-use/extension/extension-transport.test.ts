@@ -283,6 +283,14 @@ describe("Phase 3: the members an extension's hello names", () => {
     await expect(bad).rejects.toBeInstanceOf(TransportError);
   });
 
+  test("present: tabs.present { tabKey }", async () => {
+    const h = harness({}, ["present", "userDone"]);
+    const p = h.t.present!("418", { sessionId: "s_1" });
+    expect(h.sent.at(-1)).toMatchObject({ method: "tabs.present", params: { tabKey: "418" } });
+    h.answer({});
+    await p;
+  });
+
   test("a tab's facts: lastAccessed, group and windowId when well-formed, dropped otherwise", async () => {
     const h = harness({}, ["tabFacts"]);
     const listed = h.t.listTabs();

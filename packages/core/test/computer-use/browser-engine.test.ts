@@ -8,6 +8,7 @@ import { CDP_ALLOWED_METHODS } from "../../src/computer-use/browser/cdp-allowlis
 import { AutomationFailure } from "../../src/computer-use/errors";
 import type { TabHandle } from "../../src/computer-use/worker/bridge";
 import { BrowserEngine } from "../../src/computer-use/browser/engine";
+import { browserForBundleId, isRealInstallPath } from "../../src/computer-use/browser/families";
 import { BrowserBackendRegistry } from "../../src/computer-use/browser/registry";
 import { FakeCdpTransport, type FakePage } from "./browser-fake-transport";
 import { harness } from "./browser-harness";
@@ -44,6 +45,24 @@ describe("browsers.list / open / tabs / tab", () => {
     expect(rows.map((x) => x.id)).toEqual(["winter", "chrome", "edge"]);
     expect(rows[0]).toMatchObject({ isDefault: true, connected: true });
     expect(rows[2]).toMatchObject({ connected: false, reason: "Winter for Chrome is not installed in Microsoft Edge — ask the user" });
+  });
+
+  test("list: a family installed only as another channel is named by that channel (Phase 3's channels too)", async () => {
+    const h = harness({ installed: ["com.brave.Browser.beta", "com.operasoftware.OperaGX", "com.vivaldi.Vivaldi.snapshot"] });
+    const r = h.run();
+    const rows = await h.engine.global(r.scope, "browsers.list", {}) as Array<{ id: string; name: string; reason?: string }>;
+    expect(rows.map((x) => [x.id, x.name])).toEqual([["winter", "Winter (built-in)"], ["chrome", "Google Chrome"], ["brave", "Brave Beta"], ["vivaldi", "Vivaldi Snapshot"], ["opera", "Opera GX"]]);
+    expect(rows.find((x) => x.id === "opera")?.reason).toBe("Winter for Chrome is not installed in Opera GX — ask the user");
+  });
+
+  test("a real install: a copy in the Trash, a cache (Playwright's Chrome for Testing), translocated or temp does not count", () => {
+    expect(isRealInstallPath("/Applications/Google Chrome.app")).toBe(true);
+    expect(isRealInstallPath("/Users/u/Applications/Arc.app")).toBe(true);
+    expect(isRealInstallPath("/Users/u/.Trash/Google Chrome.app")).toBe(false);
+    expect(isRealInstallPath("/Users/u/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app")).toBe(false);
+    expect(isRealInstallPath("/private/var/folders/8n/x/T/AppTranslocation/ABC/d/Brave Browser.app")).toBe(false);
+    expect(isRealInstallPath("/var/folders/8n/x/T/tmp/Chromium.app")).toBe(false);
+    expect(browserForBundleId("com.operasoftware.OperaNext")).toEqual({ bundleId: "com.operasoftware.OperaNext", family: "opera", name: "Opera Beta" });
   });
 
   test("open (winter): mints a panel tab, prints the daemon line then the fenced full state, returns a tab handle", async () => {

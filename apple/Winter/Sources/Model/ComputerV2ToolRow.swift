@@ -128,7 +128,7 @@ private let screenMemberPattern = try! NSRegularExpression(pattern: #"\bscreen\s
 
 /// A call of one of the target API's members. `waitForIdle` precedes `waitFor` so the longer name wins.
 private let verbPattern = try! NSRegularExpression(
-    pattern: #"\.\s*(state|find|screenshot|click|setValue|type|paste|key|scroll|drag|select|action|waitForIdle|waitFor|menu|windows|useWindow|hover|goto|back|forward|reload|text|upload)\s*\("#)
+    pattern: #"\.\s*(state|find|screenshot|click|setValue|type|paste|key|scroll|drag|select|action|waitForIdle|waitForUser|waitFor|menu|windows|useWindow|hover|goto|back|forward|reload|text|upload|console|networkBody|network|inspect|html|assets|download|viewport|answerDialog)\s*\("#)
 
 /// PURE: the apps a script opens, in the order it opens them, as names a person would say.
 func computerV2AppNames(in code: String) -> [String] {

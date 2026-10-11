@@ -21,7 +21,7 @@ import {
   type ComputerUseAccess, type Settings,
 } from "../settings";
 import { AppAdapters, type AppAdapter } from "./adapters";
-import { systemAppResolver } from "./app-resolve";
+import { installedBrowser, systemAppResolver } from "./app-resolve";
 import { BrowserLink } from "./browser/cef-link/rpc";
 import { BrowserEngine } from "./browser/engine";
 import { BrowserBackendRegistry } from "./browser/registry";
@@ -259,7 +259,9 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       return { tmpDir: sessionTmpDirPath(sessionId), denyWrite: sandbox?.denyWrite ?? [], denyRead: sandbox?.denyRead ?? [] };
     },
     screenshotMaxDim: () => computerUseScreenshotMaxDimFrom(settings()),
-    installed: deps.inject?.browserInstalled ?? ((bundleId) => systemAppResolver.fromBundleId(bundleId) !== undefined),
+    // A real install only: a copy in the Trash, a cache (Playwright's Chrome for Testing), a translocated or temp copy
+    // does not make a browser "installed" for browsers.list().
+    installed: deps.inject?.browserInstalled ?? ((bundleId) => installedBrowser(bundleId)),
     persistentlyAllowed: (sessionId, bundleId) => policy.persistentlyAllowed(sessionId, bundleId),
     stopScript: (sessionId, reason) => service?.stopScript(sessionId, reason),
     ...(deps.turnRunning === undefined ? {} : { turnRunning: deps.turnRunning }),

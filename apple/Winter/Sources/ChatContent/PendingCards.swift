@@ -313,7 +313,15 @@ func showsCardTitleRow(_ ask: InteractionRecord.Ask) -> Bool {
 /// are (the primary row, no `optionId` — byte-identical to before). Pure and exported so
 /// `PendingCardsTests` can drive the rule directly, since `PendingApprovalBody` is a private view.
 func approvalAdditionalOptions(_ options: [SessionEvent.ApprovalOption]?) -> [SessionEvent.ApprovalOption] {
-    (options ?? []).filter { $0.id != "allow_once" && $0.id != approvalOnceOptionId && $0.id != approvalSwitchOptionId && $0.id != "deny" }
+    let all = options ?? []
+    // ComputerV2's hand-off: the card's PRIMARY option ("Show me the tab", or "Done" when it is the only one) is the
+    // approve button, never a quiet extra; the first card's "I've done it" stays a quiet extra.
+    let handoffPrimary = all.contains { $0.id == approvalHandoffShowOptionId } ? approvalHandoffShowOptionId
+        : (all.count == 1 && all[0].id == approvalHandoffDoneOptionId ? approvalHandoffDoneOptionId : nil)
+    return all.filter {
+        $0.id != "allow_once" && $0.id != approvalOnceOptionId && $0.id != approvalSwitchOptionId && $0.id != "deny"
+            && $0.id != handoffPrimary
+    }
 }
 
 /// PURE: the countdown line of a card that default-ALLOWS at `defaultAllowAt` (epoch ms) — ComputerV2's desktop
@@ -341,6 +349,12 @@ func defaultAllowRedraws(_ defaultAllowAt: Int, now: Date = Date()) -> [Date] {
     return dates
 }
 
+/// ComputerV2's sign-in hand-off (Phase 3, `waitForUser`): the first card's "Show me the tab" (its PRIMARY button, beside
+/// "Not now"; its other option, "I've done it", rides the quiet row), then the waiting card's lone "Done" (beside "Stop
+/// waiting"). A plain approve of either is what the engine reads as that primary choice.
+let approvalHandoffShowOptionId = "handoff_show"
+let approvalHandoffDoneOptionId = "handoff_done"
+
 /// The id of ComputerV2's desktop-switch card's one option (2026-10-10): "Switch now" — the card's PRIMARY
 /// button, beside "Don't switch" (a plain deny). Never a quiet extra.
 let approvalSwitchOptionId = "switch"
@@ -366,6 +380,13 @@ func approvalPrimaryChoice(_ options: [SessionEvent.ApprovalOption]?) -> Approva
     // ComputerV2's desktop switch: "Switch now" / "Don't switch" (the ruling's words). What they send is unchanged.
     if let switchNow = (options ?? []).first(where: { $0.id == approvalSwitchOptionId }) {
         return ApprovalPrimaryChoice(approveLabel: switchNow.label.isEmpty ? "Switch now" : switchNow.label, denyLabel: "Don't switch")
+    }
+    // ComputerV2's sign-in hand-off.
+    if let show = (options ?? []).first(where: { $0.id == approvalHandoffShowOptionId }) {
+        return ApprovalPrimaryChoice(approveLabel: show.label.isEmpty ? "Show me the tab" : show.label, denyLabel: "Not now")
+    }
+    if let only = options, only.count == 1, only[0].id == approvalHandoffDoneOptionId {
+        return ApprovalPrimaryChoice(approveLabel: only[0].label.isEmpty ? "Done" : only[0].label, denyLabel: "Stop waiting")
     }
     guard let once = (options ?? []).first(where: { $0.id == approvalOnceOptionId }) else {
         return ApprovalPrimaryChoice(approveLabel: "Approve", denyLabel: "Deny")

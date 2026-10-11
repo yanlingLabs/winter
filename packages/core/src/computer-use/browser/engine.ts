@@ -18,16 +18,16 @@ import { constants, copyFileSync, lstatSync, realpathSync, rmdirSync, writeFileS
 import { dirname, join } from "node:path";
 import { nextScreenshotQuality, screenshotBudgetFor, SCREENSHOT_BYTE_CAP, SCREENSHOT_QUALITY } from "../budget";
 import { AutomationFailure } from "../errors";
-import type { AppRef } from "../policy";
+import { cardReason, type AppRef } from "../policy";
 import type { TabHandle } from "../worker/bridge";
-import { familyInfo, familyOfBackendId } from "./families";
+import { browserForBundleId, familyInfo, familyOfBackendId } from "./families";
 import { shouldCloseAgentTab } from "./lifecycle";
 import type { BrowserBackendRegistry } from "./registry";
 import { BLOCKED_TAB_PRIMITIVES, ensureSiteAllowed, listedHost, SiteApprovals, type SiteFloorDeps } from "./site-policy";
 import type { TabRunScope } from "./tab-scope";
 import { redactText, redactUrl } from "./page-runtime/redact";
 import { pickerSentence, shownUrl, TabDriver, transportFailure, transportHasCdp3 } from "./tab-driver";
-import type { BackendId, BrowserFamily, CdpTransport, TransportTab } from "./transport";
+import { TransportError, type BackendId, type BrowserFamily, type CdpTransport, type TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
 import { BODY_DEFAULT_CHARS, BODY_MAX_CHARS, isTextMime, redactBody } from "./body-redact";
 import { bytesLabel, CONSOLE_LEVELS, consoleLine, requestLine } from "./devtools";
@@ -49,8 +49,15 @@ const FOCUS_NOT_EDITABLE = "the focus is not a text field, so nothing was typed 
 
 /** What a tab primitive is, for the per-app policy (everything not here acts). */
 const OBSERVE_PRIMITIVES: ReadonlySet<string> = new Set(["state", "find", "screenshot", "waitFor", "waitForIdle", "url", "title", "text",
-  // Phase 3's readers
-  "console", "network", "networkBody", "inspect", "html", "assets", "dialog"]);
+  // Phase 3's readers, and the hand-off (the user acts there, not Winter; it has its own card)
+  "console", "network", "networkBody", "inspect", "html", "assets", "dialog", "waitForUser"]);
+/** waitForUser(): 5 minutes by default, at most 30 (the script's clock is paused while the user works). */
+const HANDOFF_DEFAULT_MS = 5 * 60_000;
+const HANDOFF_MAX_MS = 30 * 60_000;
+/** The hand-off's two cards (the Mac words their buttons by these ids: "Show me the tab" / "Not now", then
+ *  "Done" / "Stop waiting"). A plain approve of the first card is "show"; of the second, "done". */
+export const HANDOFF_ASK_OPTIONS = [{ id: "handoff_show", label: "Show me the tab" }, { id: "handoff_done", label: "I've done it" }] as const;
+export const HANDOFF_WAIT_OPTIONS = [{ id: "handoff_done", label: "Done" }] as const;
 
 export interface BrowserEngineDeps {
   registry: BrowserBackendRegistry;
@@ -168,6 +175,8 @@ export class BrowserEngine {
   private readonly declined = new Map<string, Set<string>>();
   /** download() calls per run (session + run id), for the per-run cap. */
   private readonly downloadsByRun = new Map<string, number>();
+  /** waitForUser(): the hand-off card waiting on a tab (backend|tabKey), answerable from the browser's own Done. */
+  private readonly handoffAnswers = new Map<string, (approved: boolean, by: string, optionId?: string) => void>();
   private installedCache?: { at: number; ids: Set<string> };
   private unwatch?: () => void;
   private stopped = false;
@@ -210,6 +219,8 @@ export class BrowserEngine {
         case "browsers.tabs": return await this.tabs(scope, args);
         case "browsers.tab": return await this.bindCall(scope, args);
         case "browsers.windows": return await this.windowsCall(scope, args);
+        case "browsers.history": return await this.libraryCall(scope, args, "history");
+        case "browsers.bookmarks": return await this.libraryCall(scope, args, "bookmarks");
         case "browsers.group": return await this.groupCall(scope, args);
         default: throw bad(`unknown primitive ${primitive}`);
       }
@@ -395,8 +406,11 @@ export class BrowserEngine {
     for (const fam of ["chrome", "edge", "brave", "vivaldi", "opera", "arc", "chromium"] as const) {
       const info = familyInfo(fam)!;
       if ([...rows.values()].some((r) => familyOfBackendId(r.id) === fam)) continue;
-      if (!info.bundleIds.some((b) => installed.has(b))) continue;
-      rows.set(fam, { id: fam, name: info.name, isDefault: false, connected: false, reason: `Winter for Chrome is not installed in ${info.name} — ask the user` });
+      // Named by the channel that is installed (the main one first): a Mac with only Chrome Beta lists "Google Chrome Beta".
+      const channel = info.bundleIds.find((b) => installed.has(b));
+      if (channel === undefined) continue;
+      const name = browserForBundleId(channel)?.name ?? info.name;
+      rows.set(fam, { id: fam, name, isDefault: false, connected: false, reason: `Winter for Chrome is not installed in ${name} — ask the user` });
     }
     const order = ["winter", "chrome", "edge", "brave", "vivaldi", "opera", "arc", "chromium"];
     return [...rows.values()].sort((a, b) => order.indexOf(familyOfBackendId(a.id) ?? "") - order.indexOf(familyOfBackendId(b.id) ?? "") || a.id.localeCompare(b.id));
@@ -414,6 +428,10 @@ export class BrowserEngine {
         transport.onEvent((e) => this.drivers.get(tabKeyOf(id, e.tabKey))?.onEvent(e)),
         transport.onTabGone((tabKey, reason) => this.tabGone(id, tabKey, reason)),
         transport.onStop((tabKey) => this.stopPressed(id, tabKey)),
+        // The hand-off's Done / Stop waiting in the browser itself (Winter for Chrome's toolbar popup).
+        ...(transport.onUserDone === undefined ? [] : [transport.onUserDone((tabKey, done) => {
+          this.handoffAnswers.get(tabKeyOf(id, tabKey))?.(done, "browser", done ? "handoff_done" : undefined);
+        })]),
         // A download the built-in browser refused while nothing was armed: the next state says so.
         ...(transport.onDownload === undefined ? [] : [transport.onDownload((tabKey, d) => {
           if (d.state === "refused") this.drivers.get(tabKeyOf(id, tabKey))?.noteUncaughtDownload(d.name);
@@ -462,6 +480,8 @@ export class BrowserEngine {
   private tabGone(backend: BackendId, tabKey: string, reason: string): void {
     const key = tabKeyOf(backend, tabKey);
     const d = this.drivers.get(key);
+    // A tab handed to the user and closed (or crashed) while Winter waited: the wait is over.
+    if (reason !== "stopped") this.handoffAnswers.get(key)?.(false, "tab-gone");
     if (reason === "stopped") { d?.onGone("stopped"); return; }
     d?.onGone(reason);
     // A "closed" may be a navigation that gave the tab a new key, said by the command's own answer just after: what it
@@ -1194,6 +1214,7 @@ export class BrowserEngine {
       case "network": this.requireCdp3(driver, "network()"); return this.networkCall(scope, driver, args);
       case "networkBody": this.requireCdp3(driver, "networkBody()"); return await this.networkBodyCall(scope, driver, args);
       case "download": return await this.downloadCall(scope, b, driver, args);
+      case "waitForUser": return await this.waitForUserCall(scope, b, driver, args);
       case "upload": {
         if (!isRef(args.ref)) throw bad("upload() takes a file input's ref and a path or an array of paths");
         const cwd = (() => { try { return this.deps.sessionInfo(sid).cwd; } catch { return undefined; } })();
@@ -1358,6 +1379,81 @@ export class BrowserEngine {
     return rows;
   }
 
+  /**
+   * `browsers.history()` / `browsers.bookmarks()`: a read-only search of the user's browser, to find a page they mean.
+   * `{ browser }`, else every connected user's browser this session already allowed (the others named in a line).
+   * Checked as a BIND of the browser (its per-app card), and Winter for Chrome's optional permission (refused
+   * `NotAllowed` until the user switches it on in the extension's menu). URLs and titles redacted; printed fenced.
+   */
+  private async libraryCall(scope: TabRunScope, args: Record<string, unknown>, what: "history" | "bookmarks"): Promise<unknown> {
+    const label = `${what}()`;
+    if (args.browser !== undefined && this.familyOf(this.backendFor(args.browser)) === "winter") {
+      throw new Error("Winter's built-in browser keeps no history or bookmarks Winter can read");
+    }
+    const facts = scope.sessionFacts();
+    if (facts.mode === "chat" || facts.policy === "chat") throw new AutomationFailure("NotAllowed", "computer use is not available in chat");
+    const chosen = args.browser === undefined ? this.defaultBackends(scope) : { ids: [this.backendFor(args.browser)], leftOut: [] as string[] };
+    const ids = chosen.ids.filter((id) => this.familyOf(id) !== "winter");
+    if (ids.length === 0) {
+      throw bad(`browsers.${label} searches a user's browser — name it with { browser } (browsers.list() shows them)${chosen.leftOut.length > 0 ? `; not allowed in this session yet: ${chosen.leftOut.join("; ")}` : ""}`);
+    }
+    const limit = args.limit === undefined ? 25 : args.limit;
+    if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 200) throw bad(`browsers.${label}'s limit is a whole number 1–200`);
+    const query = args.query === undefined ? "" : args.query;
+    if (typeof query !== "string") throw bad(`browsers.${label}'s query is text`);
+    const when = (v: unknown, key: string): number | undefined => {
+      if (v === undefined) return undefined;
+      const ms = typeof v === "string" ? Date.parse(v) : Number.NaN;
+      if (!Number.isFinite(ms)) throw bad(`browsers.history()'s ${key} is a date ("2026-10-01" or an ISO time)`);
+      return ms;
+    };
+    const from = what === "history" ? when(args.from, "from") : undefined;
+    const to = what === "history" ? when(args.to, "to") : undefined;
+    const leftOut = [...chosen.leftOut];
+    const rows: Array<{ browser: string; url: string; title: string; visited?: string; folder?: string }> = [];
+    for (const id of ids) {
+      const name = this.browserName(id);
+      const t = this.deps.registry.get(id);
+      if (t === undefined || !t.connected) {
+        if (args.browser !== undefined) throw this.unavailable(id);
+        leftOut.push(`${name} (${id}) — can't be reached`);
+        continue;
+      }
+      const fn = what === "history" ? t.history : t.bookmarks;
+      if (fn === undefined) {
+        const e = new AutomationFailure("BrowserUnavailable", `the Winter for Chrome in ${name} is too old for ${label} — ask the user to update it`);
+        if (args.browser !== undefined) throw e;
+        leftOut.push(`${name} (${id}) — its Winter for Chrome is too old`);
+        continue;
+      }
+      const bundleId = this.bundleIdOf(id);
+      if (bundleId !== undefined) await scope.authorize(this.appRef(id, bundleId), { kind: "bind" });
+      scope.live();
+      scope.noteBrowser(id);
+      try {
+        if (what === "history") {
+          const found = await t.history!({ text: query.slice(0, 500), maxResults: limit, startTime: from ?? this.now() - 90 * 24 * 3_600_000, ...(to === undefined ? {} : { endTime: to }) });
+          for (const i of found) rows.push({ browser: id, url: redactUrl(i.url), title: redactText(i.title), visited: new Date(i.lastVisitTime).toISOString() });
+        } else {
+          const found = await t.bookmarks!({ ...(query.trim() === "" ? {} : { text: query.slice(0, 500) }), maxResults: limit });
+          for (const i of found) rows.push({ browser: id, url: redactUrl(i.url), title: redactText(i.title), folder: redactText(i.folder) });
+        }
+      } catch (err) {
+        if (err instanceof TransportError && err.code === "not_allowed") throw new AutomationFailure("NotAllowed", err.message);
+        throw transportFailure(err, name);
+      }
+      scope.live();
+    }
+    const out = rows.slice(0, limit);
+    if (leftOut.length > 0) scope.builder.daemonLine(`left out: ${leftOut.join("; ")}`);
+    scope.builder.markScreenRead();
+    if (args.emit !== false) {
+      scope.builder.text(out.length === 0 ? `(nothing in the ${what === "history" ? "history" : "bookmarks"} matches)` : out.map((r) =>
+        `${JSON.stringify(r.title.slice(0, 120))} ${r.url.slice(0, 200)}${r.visited === undefined ? "" : ` · ${r.visited}`}${r.folder === undefined || r.folder === "" ? "" : ` · ${JSON.stringify(r.folder.slice(0, 80))}`}${ids.length > 1 ? ` · ${r.browser}` : ""}`).join("\n"), { screen: true });
+    }
+    return out;
+  }
+
   private async groupCall(scope: TabRunScope, args: Record<string, unknown>): Promise<undefined> {
     const id = this.oneUserBrowser(scope, args.browser, "tab groups");
     const t = this.deps.registry.get(id);
@@ -1412,6 +1508,85 @@ export class BrowserEngine {
       scope.builder.text([head, ...read.entries.map(requestLine)].join("\n"), { screen: true });
     }
     return read.entries;
+  }
+
+  // ── waitForUser() — the sign-in hand-off ──────────────────────────────────────────────────────
+
+  /**
+   * `waitForUser(reason, { timeoutMs })`: a page needs the user (a sign-in, a 2-step code, a CAPTCHA). Winter asks on a
+   * card under every policy but `dont-ask` (which never asks: refused, and the model tells the user in its reply).
+   * "Show me the tab" lets the tab go — nothing is read while the user types — and brings it forward: the built-in
+   * browser shows the session's window with that tab; a user's browser activates the tab and focuses its window (the
+   * one place Winter for Chrome does). A second card waits for "Done" (the browser's own toolbar offers it too). Done:
+   * the tab is taken again and its whole state printed — `{ done: true }`. Declined, "Stop waiting" or no answer:
+   * `{ done: false }`, the tab left with the user. The tab closed meanwhile is `TargetLost`.
+   */
+  private async waitForUserCall(scope: TabRunScope, b: Binding, driver: TabDriver, args: Record<string, unknown>): Promise<{ done: boolean }> {
+    const sid = scope.sessionId;
+    const reason = typeof args.reason === "string" ? cardReason(args.reason) : "";
+    if (reason === "") throw bad("waitForUser() takes a reason — what the user needs to do there (\"sign in\", \"enter the code\")");
+    const timeout = args.timeoutMs === undefined ? HANDOFF_DEFAULT_MS : args.timeoutMs;
+    if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) throw bad("waitForUser()'s timeoutMs is a positive number of ms");
+    const total = Math.min(timeout, HANDOFF_MAX_MS);
+    let host = "this page";
+    try { const h = new URL(driver.url).hostname; if (h.length > 0) host = h; } catch { /* not a URL with a host */ }
+    if (scope.sessionPolicy() === "dont-ask") {
+      throw new AutomationFailure("NotAllowed", `this session never asks — tell the user in your reply what they need to do on ${host}`);
+    }
+    if (scope.userCard === undefined) throw new Error("this Winter can't hand a tab to the user");
+    const winter = this.familyOf(b.backend) === "winter";
+    const name = this.browserName(b.backend);
+    const transport = driver.transport;
+    if (transport.present === undefined) {
+      throw winter
+        ? new Error("Winter's built-in browser can't show a tab to the user until Winter is updated")
+        : new AutomationFailure("BrowserUnavailable", `the Winter for Chrome in ${name} is too old for waitForUser() — ask the user to update it`);
+    }
+    scope.noteHandoff?.();
+    const t0 = this.now();
+    const ask = await scope.userCard(`${name} — ${host}: ${reason}. Winter waits while you do it.`, HANDOFF_ASK_OPTIONS, total);
+    scope.live();
+    if (!ask.approved) {
+      scope.builder.daemonLine(`the user did not take over (${ask.by === "timeout" ? "no answer" : "declined"})`);
+      return { done: false };
+    }
+    if (ask.optionId !== "handoff_done") {
+      // Hand the tab over: nothing of Winter's reads it while the user is there.
+      const key = tabKeyOf(b.backend, b.tabKey);
+      try {
+        if (winter) {
+          // Shown first (so the built-in browser keeps it live in the panel), then let go.
+          await transport.present(b.tabKey, { sessionId: sid });
+          await driver.release(sid);
+        } else {
+          await driver.release(sid);
+          await transport.present(b.tabKey, { sessionId: sid });
+        }
+      } catch (err) { throw transportFailure(err, name); }
+      scope.builder.daemonLine(winter ? `showed the tab to the user in Winter's window` : `brought the tab forward in ${name} for the user`);
+      const left = Math.max(1_000, total - (this.now() - t0));
+      let wait: { approved: boolean; optionId?: string; by?: string };
+      try {
+        wait = await scope.userCard(`Waiting for you on ${host} in ${name} — press Done when you have finished.`, HANDOFF_WAIT_OPTIONS, left,
+          (answer) => { this.handoffAnswers.set(key, answer); });
+      } finally {
+        this.handoffAnswers.delete(key);
+        // The browser's own waiting mark goes (Winter for Chrome's badge and pill).
+        if (!winter) transport.overlay(b.tabKey, { active: false });
+      }
+      scope.live();
+      if (wait.by === "tab-gone") throw new AutomationFailure("TargetLost", "the tab was closed while Winter waited for the user");
+      if (!wait.approved) {
+        scope.builder.daemonLine(`the user ${wait.by === "timeout" ? "did not finish in time" : "stopped the wait"} — the tab stays with them`);
+        return { done: false };
+      }
+    }
+    // Done: the tab is taken again — a fresh look (every earlier ref is stale).
+    await driver.ensureAttached(sid);
+    scope.live();
+    scope.builder.daemonLine(`the user finished on ${host}`);
+    await this.printState(scope, b.targetId, driver, { full: true, settle: true });
+    return { done: true };
   }
 
   // ── download() ─────────────────────────────────────────────────────────────────────────────────

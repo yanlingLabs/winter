@@ -110,5 +110,6 @@ export async function ensureSiteAllowed(scope: TabRunScope, approvals: SiteAppro
   approvals.approve(scope.sessionId, scope.runId, host, res.optionId === "session" ? "session" : "once");
 }
 
-/** The primitives that still work on a tab sitting on an unapproved listed host. */
-export const BLOCKED_TAB_PRIMITIVES: ReadonlySet<string> = new Set(["back", "close", "url", "title"]);
+/** The primitives that still work on a tab sitting on an unapproved listed host (Phase 3: handing the tab to the user —
+ *  the user acts there, not Winter). */
+export const BLOCKED_TAB_PRIMITIVES: ReadonlySet<string> = new Set(["back", "close", "url", "title", "waitForUser"]);
