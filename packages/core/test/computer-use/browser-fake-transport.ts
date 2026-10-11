@@ -126,7 +126,7 @@ export class FakeCdpTransport implements CdpTransport {
 
   /** Phase 3's optional members — a user's browser (Winter for Chrome 1.1) has them; the built-in fake starts without
    *  (a test adds or deletes them to play another build). */
-  features = new Set<string>();
+  features?: Set<string>;
   setMuted?: CdpTransport["setMuted"];
   updateGroup?: CdpTransport["updateGroup"];
   listWindows?: CdpTransport["listWindows"];
@@ -135,7 +135,7 @@ export class FakeCdpTransport implements CdpTransport {
 
   constructor(readonly backend: string, readonly family: BrowserFamily) {
     if (family !== "winter") {
-      this.features = new Set(["mute", "group", "keepGroup", "windows", "tabFacts"]);
+      this.features = new Set(["cdp3", "mute", "group", "keepGroup", "windows", "tabFacts"]);
       this.setMuted = async (tabKey, muted) => { this.tab(tabKey).muted = muted; };
       this.updateGroup = async (o) => { this.groupUpdates.push({ ...o }); };
       this.listWindows = async () => this.windows.map((w) => ({ ...w }));

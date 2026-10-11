@@ -25,6 +25,12 @@ import { fitsBudget, imageSize, outputSize, scaleFor, toCss, type CssRect, type 
 import { diffState, fullState, makeSnapshot, printedState, type TabDialogLine, type TabHeader, type TabNode, type TabSnapshot } from "./state-format";
 import { TransportError, type CdpEvent, type CdpTransport } from "./transport";
 
+/** Phase 3's events: the developer readers (console(), network()) and a download the page started by itself — subscribed
+ *  only where the transport's allowlist has them (a Winter for Chrome built before Phase 3 refuses a subscription naming
+ *  any). */
+const PHASE3_EVENTS = ["Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded", "Network.responseReceived", "Page.downloadWillBegin"];
+export const PHASE3_TAB_EVENTS: ReadonlySet<string> = new Set(PHASE3_EVENTS);
+
 /** The events the engine follows on every tab (a subset of `CDP_ALLOWED_EVENTS`). */
 export const TAB_EVENTS: readonly string[] = [
   "Page.frameNavigated", "Page.navigatedWithinDocument", "Page.domContentEventFired", "Page.loadEventFired", "Page.lifecycleEvent",
@@ -32,9 +38,15 @@ export const TAB_EVENTS: readonly string[] = [
   "Page.javascriptDialogClosed", "Page.fileChooserOpened", "Runtime.executionContextCreated", "Runtime.executionContextDestroyed",
   "Runtime.executionContextsCleared", "Network.requestWillBeSent", "Network.loadingFinished", "Network.loadingFailed",
   "Target.attachedToTarget", "Target.detachedFromTarget", "Inspector.detached", "Inspector.targetCrashed",
-  // Phase 3: the developer readers (console(), network()) and a download the page started by itself.
-  "Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded", "Network.responseReceived", "Page.downloadWillBegin",
+  ...PHASE3_EVENTS,
 ];
+
+/** Does this transport carry Phase 3's CDP (the console, network details, response bodies, Fetch, IO, Emulation)? A
+ *  Winter for Chrome says so in its hello (`cdp3`); the built-in browser's link always does. */
+export function transportHasCdp3(transport: CdpTransport): boolean {
+  const features = (transport as { features?: ReadonlySet<string> }).features;
+  return features === undefined || features.has("cdp3");
+}
 
 /** What the browser keeps of response bodies while Winter is attached (networkBody()); request bodies never. */
 export const NETWORK_BUFFERS = { maxResourceBufferSize: CDP_NETWORK_BUFFER_MAX.resource, maxTotalBufferSize: CDP_NETWORK_BUFFER_MAX.total, maxPostDataSize: 0 } as const;
@@ -285,7 +297,8 @@ export class TabDriver {
       }
       this.viewport = info.viewport;
       this.dpr = info.dpr > 0 ? info.dpr : 1;
-      try { await this.transport.subscribe(this.tabKey, TAB_EVENTS); } catch (err) { throw transportFailure(err, this.browserName); }
+      const events = transportHasCdp3(this.transport) ? TAB_EVENTS : TAB_EVENTS.filter((e) => !PHASE3_TAB_EVENTS.has(e));
+      try { await this.transport.subscribe(this.tabKey, events); } catch (err) { throw transportFailure(err, this.browserName); }
       await this.enableDomains(undefined);
       // Background tabs behave as focused (focus events, :focus, caret) — never by raising anything.
       await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
@@ -328,7 +341,7 @@ export class TabDriver {
     // Request timing (idle detection, network()) and capped response bodies (networkBody()); request bodies never.
     await this.send("Network.enable", { ...NETWORK_BUFFERS }, session).catch(() => undefined);
     // The browser's own page messages (failed loads, CSP, interventions) for console().
-    await this.send("Log.enable", {}, session).catch(() => undefined);
+    if (transportHasCdp3(this.transport)) await this.send("Log.enable", {}, session).catch(() => undefined);
     await this.send("Page.setInterceptFileChooserDialog", { enabled: true }, session).catch(() => undefined);
     await this.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, session).catch(() => undefined);
   }
@@ -352,7 +365,7 @@ export class TabDriver {
         await quiet("Page.setInterceptFileChooserDialog", { enabled: false });
         await quiet("Emulation.setFocusEmulationEnabled", { enabled: false });
         if (this.emulating) { await quiet("Emulation.clearDeviceMetricsOverride"); this.emulating = false; }
-        await quiet("Log.disable");
+        if (transportHasCdp3(this.transport)) await quiet("Log.disable");
         await quiet("Target.setAutoAttach", { autoAttach: false, waitForDebuggerOnStart: false, flatten: true });
         await quiet("Network.disable");
         await quiet("Runtime.disable");

@@ -260,7 +260,7 @@ describe("Phase 3: the members an extension's hello names", () => {
   });
 
   test("mute, group, keepGroup, windows: each request as sent, each answer as read", async () => {
-    const h = harness({}, ["mute", "group", "keepGroup", "windows", "tabFacts"]);
+    const h = harness({}, ["cdp3", "mute", "group", "keepGroup", "windows", "tabFacts"]);
     expect(h.t.present).toBeUndefined();
     const muted = h.t.setMuted!("418", true);
     expect(h.sent.at(-1)).toMatchObject({ method: "tabs.mute", params: { tabKey: "418", muted: true } });

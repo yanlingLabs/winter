@@ -4,6 +4,8 @@
 import { describe, expect, test } from "bun:test";
 import { redactBody, SECRET_KEY, isTextMime } from "../../src/computer-use/browser/body-redact";
 import { renderConsoleArgs, TabDevtools, consoleLine, requestLine } from "../../src/computer-use/browser/devtools";
+import { PHASE3_TAB_EVENTS } from "../../src/computer-use/browser/tab-driver";
+import type { AutomationFailure } from "../../src/computer-use/errors";
 import type { TabHandle } from "../../src/computer-use/worker/bridge";
 import type { FakePage } from "./browser-fake-transport";
 import { harness } from "./browser-harness";
@@ -162,5 +164,24 @@ describe("console(), network(), networkBody() on a tab", () => {
     // The driver asked the browser to keep bodies — capped, and never a request body.
     const tab = h.winter.tabs.get(key)!;
     expect(tab.networkBuffers).toEqual({ resource: 1_048_576, total: 8_388_608 });
+  });
+});
+
+describe("a Winter for Chrome built before Phase 3 (its hello names no cdp3)", () => {
+  test("still drives tabs — subscribed to Phase 2's events only, no Log.enable — and the members that need Phase 3's CDP say to update it", async () => {
+    const h = harness();
+    h.chrome.features = new Set(["mute"]);
+    const r = h.run();
+    const tab = await h.engine.global(r.scope, "browsers.open", { url: "https://a.example/", browser: "chrome" }) as TabHandle;
+    const fake = h.chrome.tabs.get(tab.id.split(":")[1]!)!;
+    for (const e of PHASE3_TAB_EVENTS) expect(fake.subscribed).not.toContain(e);
+    expect(fake.subscribed).toContain("Network.requestWillBeSent");
+    expect(h.chrome.sent.some((x) => x.method === "Log.enable")).toBe(false);
+    await h.engine.primitive(r.scope, tab.targetId, "state", { emit: false });
+    for (const [primitive, args] of [["console", {}], ["network", {}], ["networkBody", { id: "1" }], ["viewport", { size: { width: 400, height: 800 } }]] as const) {
+      const e = await h.engine.primitive(r.scope, tab.targetId, primitive, args).then(() => undefined, (err: unknown) => err as AutomationFailure);
+      expect({ primitive, kind: e?.kind, message: e?.message }).toEqual({ primitive, kind: "BrowserUnavailable", message: `the Winter for Chrome in Google Chrome is too old for ${primitive}() — ask the user to update it` });
+    }
+    r.end();
   });
 });

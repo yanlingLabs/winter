@@ -24,7 +24,7 @@ import type { BrowserBackendRegistry } from "./registry";
 import { BLOCKED_TAB_PRIMITIVES, ensureSiteAllowed, listedHost, SiteApprovals, type SiteFloorDeps } from "./site-policy";
 import type { TabRunScope } from "./tab-scope";
 import { redactText, redactUrl } from "./page-runtime/redact";
-import { pickerSentence, shownUrl, TabDriver, transportFailure } from "./tab-driver";
+import { pickerSentence, shownUrl, TabDriver, transportFailure, transportHasCdp3 } from "./tab-driver";
 import type { BackendId, BrowserFamily, CdpTransport, TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
 import { BODY_DEFAULT_CHARS, BODY_MAX_CHARS, isTextMime, redactBody } from "./body-redact";
@@ -1171,9 +1171,9 @@ export class BrowserEngine {
         scope.acted.add(b.targetId);
         return undefined;
       }
-      case "console": return this.consoleCall(scope, driver, args);
-      case "network": return this.networkCall(scope, driver, args);
-      case "networkBody": return await this.networkBodyCall(scope, driver, args);
+      case "console": this.requireCdp3(driver, "console()"); return this.consoleCall(scope, driver, args);
+      case "network": this.requireCdp3(driver, "network()"); return this.networkCall(scope, driver, args);
+      case "networkBody": this.requireCdp3(driver, "networkBody()"); return await this.networkBodyCall(scope, driver, args);
       case "upload": {
         if (!isRef(args.ref)) throw bad("upload() takes a file input's ref and a path or an array of paths");
         const cwd = (() => { try { return this.deps.sessionInfo(sid).cwd; } catch { return undefined; } })();
@@ -1207,6 +1207,7 @@ export class BrowserEngine {
       }
       case "viewport": {
         this.requireOwnTab(sid, b, "viewport()");
+        this.requireCdp3(driver, "viewport()");
         const size = args.size;
         if (size === null) { await driver.setViewport(null); scope.acted.add(b.targetId); return undefined; }
         if (size === null || typeof size !== "object" || Array.isArray(size)) throw bad("viewport() takes { width, height, mobile?, scale? } or null");
@@ -1293,6 +1294,13 @@ export class BrowserEngine {
       ].join("\n"), { screen: true });
     }
     return out;
+  }
+
+  /** A Winter for Chrome built before Phase 3 has none of its CDP (its hello names no `cdp3`). */
+  private requireCdp3(driver: TabDriver, what: string): void {
+    if (!transportHasCdp3(driver.transport)) {
+      throw new AutomationFailure("BrowserUnavailable", `the Winter for Chrome in ${driver.browserName} is too old for ${what} — ask the user to update it`);
+    }
   }
 
   /** viewport()/mute(): only a tab Winter opened and still owns (never the user's page). */

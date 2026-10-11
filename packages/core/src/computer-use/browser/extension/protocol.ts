@@ -57,8 +57,10 @@ export interface ExtensionHelloParams {
   features?: string[];
 }
 
-/** Phase 3's extension features (`hello.features`). */
-export const EXTENSION_FEATURES = ["present", "userDone", "mute", "group", "keepGroup", "windows", "history", "bookmarks", "downloads", "tabFacts"] as const;
+/** Phase 3's extension features (`hello.features`). `cdp3`: its bundled CDP allowlist is Phase 3's (console, network
+ *  details, response bodies, Fetch, IO, Emulation) — without it the engine subscribes to Phase 2's events only and the
+ *  members that need the rest answer "update Winter for Chrome". */
+export const EXTENSION_FEATURES = ["cdp3", "present", "userDone", "mute", "group", "keepGroup", "windows", "history", "bookmarks", "downloads", "tabFacts"] as const;
 export type ExtensionFeature = (typeof EXTENSION_FEATURES)[number];
 
 export interface ExtensionHelloResult {

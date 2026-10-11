@@ -111,7 +111,7 @@ describe("keep({ group })", () => {
     expect(h.chrome.tabs.get(keyOf(a))).toMatchObject({ kept: true, keptGroup: "Trip" });
     const b = await h.engine.global(r.scope, "browsers.open", { url: "https://b.example/", browser: "chrome" }) as TabHandle;
     await expect(h.engine.primitive(r.scope, b.targetId, "keep", { group: "  " })).rejects.toThrow(/keep\(\)'s group is a name/);
-    h.chrome.features.delete("keepGroup");
+    h.chrome.features!.delete("keepGroup");
     await h.engine.primitive(r.scope, b.targetId, "keep", { group: "Trip" });
     const w = await h.engine.global(r.scope, "browsers.open", { url: "https://w.example/" }) as TabHandle;
     await h.engine.primitive(r.scope, w.targetId, "keep", { group: "Trip" });
