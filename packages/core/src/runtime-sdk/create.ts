@@ -282,7 +282,7 @@ function endWithin(sessionId: string, abort: AbortController, end: () => Promise
 export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrides: WinterRuntimeSdkOverrides = {}): Promise<WinterRuntimeSdk> {
   const factory = overrides.createRuntimeSdk ?? createRouterSdk;
   const codeExecution = deps.codeExecution ?? new HostCodeExecutionService(deps.home, undefined, undefined, {
-    createOutputTransport: deps.hostOutputTransportFactory ?? loadBundledHostOutputFactory(),
+    createOutputTransport: deps.hostOutputTransportFactory ?? loadBundledHostOutputFactory(deps.log),
   });
   // test-keychain-isolation fix: built from `deps.home` — the daemon's ACTUAL home — rather than
   // reusing the frozen, env-only `CORE_BRAND` singleton. `CORE_BRAND` resolves its `keychainService`
