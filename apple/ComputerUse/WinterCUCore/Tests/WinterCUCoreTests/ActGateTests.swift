@@ -155,6 +155,19 @@ final class ActGateTests: XCTestCase {
         XCTAssertEqual(poster.entries.map(\.type), [.mouseMoved, .mouseMoved, .mouseMoved, .leftMouseDown, .leftMouseUp], "arriving by the hover path")
     }
 
+    /// Round 13 (dogfood): an action the app answers "not supported" that took effect anyway (an open panel closed after
+    /// AXOpen) is said as done — no pointer fallback onto whatever was under it.
+    func testARefusedActionThatTookEffectIsDoneAndNotClickedAgain() async throws {
+        world()
+        ax.setActions(button, [kAXPressAction, "AXOpen"])
+        ax.performErrorAfterActing = CUError(code: "unsupported", message: "AXOpen is not supported by this element",
+                                             data: ["axError": .int(Int(AXError.actionUnsupported.rawValue))])
+        ax.onPerform = { [ax, button] _ in ax!.dead.insert(AXIdentity(element: button)) }
+        let r = try await act(.action(CUAXAction(ref: ref(button), name: "open")))
+        XCTAssertTrue(r.detail?.contains("but it took effect (the element is gone)") == true, r.detail ?? "-")
+        XCTAssertTrue(poster.entries.isEmpty, "no pointer fallback")
+    }
+
     // MARK: cancel (I2)
 
     func testCancelReachesAnActWaitingInTheQueue() async throws {

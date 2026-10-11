@@ -2911,6 +2911,13 @@ extension CUCore {
                 let note = try judgeErroredPress(e, t, before: before, code: Self.pressMayHaveActed(error)!, what: "“\(words)” on [\(a.ref)]")
                 return ActOutcome(rung: .accessibility, detail: note)
             } catch let err as CUError where Self.refusedAction(err) {
+                // Refused — yet it may have acted (dogfood, round 13: an open panel answered AXOpen "not supported" and
+                // still took the file and closed). Something changed — the element gone, a window opened or closed, the
+                // focus, its value: it took effect, said so, and nothing more is sent (the pointer fallback would land on
+                // whatever is under the closed panel).
+                if let note = refusedYetActed(e, t, before: before, what: "“\(words)” on [\(a.ref)]") {
+                    return ActOutcome(rung: .accessibility, detail: note)
+                }
                 t.noteRefused(action: name, role: role)
             }
         }
@@ -2939,6 +2946,27 @@ extension CUCore {
         PressEvidence(windows: Set(sys.windows(pid: t.pid).filter { $0.layer == 0 }.map(\.id)),
                       focused: ax.element(ax.application(t.pid), kAXFocusedUIElementAttribute).map { AXIdentity(element: $0) },
                       value: ax.string(e, kAXValueAttribute), alive: ax.isAlive(e))
+    }
+
+    /// An action the app REFUSED (unsupported, not implemented) that changed something anyway, watched for up to
+    /// `pressSettleMs`: the note to say instead of the refusal; nil when nothing changed (it really did nothing).
+    func refusedYetActed(_ e: AXUIElement, _ t: CUTarget, before: PressEvidence, what: String) -> String? {
+        let deadline = clock.nowMs() + pressSettleMs
+        var after = pressEvidence(e, t)
+        while after == before, clock.nowMs() < deadline {
+            clock.pause(ms: 50)
+            after = pressEvidence(e, t)
+        }
+        guard after != before else { return nil }
+        CULog.act.notice("\(what, privacy: .public) in \(t.appName, privacy: .public): refused, yet something changed — taken as done")
+        return "\(t.appName) answered \(what) with “not supported”, but it took effect (\(Self.pressChangeWords(before, after))) — check state() before doing it again"
+    }
+
+    static func pressChangeWords(_ before: PressEvidence, _ after: PressEvidence) -> String {
+        if before.alive && !after.alive { return "the element is gone" }
+        if before.windows != after.windows { return "a window opened or closed" }
+        if before.value != after.value { return "its value changed" }
+        return "the focus moved"
     }
 
     /// The AX error of a press that may have acted anyway: -25200 (kAXErrorFailure) — a live fixture opened its
