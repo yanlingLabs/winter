@@ -1787,11 +1787,21 @@ test("protected broker refusal retains the complete projected batch before async
   expect(h.events.some(event => event.type === "agent_error" && event.code === "host_execution_refused")).toBe(true);
   expect(disposedAfter).toContain("tool_call"); expect(disposedAfter).toContain("assistant_message"); await h.session.done;
 });
-test("unprotected Code session receives no extra failClosed PreToolUse hook", async () => {
-  let q!: FakeQuery;
+test("unprotected Code receives no extra hook and never consults Cowork observation", async () => {
+  let q!: FakeQuery, observed = 0;
   const runtime = {
     sdk: { query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: Options }) => (q = new FakeQuery(prompt, options)) as unknown as Query }, trackQuery() {}, untrack() {},
-    codeExecution: { enroll: ({ options }: { options: Options }) => ({ options, generationId: "ordinary", protectedStorage: false, observe() {}, noteHook() {}, async completeHook() {}, dispose() {} }) },
+    codeExecution: { enroll: ({ options }: { options: Options }) => ({ options, generationId: "ordinary", protectedStorage: false,
+      observe() { observed++; throw new Error("unprotected observer must be unreachable"); }, noteHook() {}, async completeHook() {}, dispose() {} }) },
   } as unknown as WinterRuntimeSdk;
-  const h = harness({ runtime, mode: "code" }); await h.session.open(); expect(q.options.hooks).toBeUndefined(); q.end(); await h.session.done;
+  const h = harness({ runtime, mode: "code" }); await h.session.open(); expect(q.options.hooks).toBeUndefined();
+  q.emit(init(q.options, ["Bash"])); await h.settled(); await h.session.send("ordinary task", "fixture");
+  q.emit({ type: "assistant", uuid: "ordinary-batch", session_id: "be-x", message: { content: [
+    { type: "tool_use", id: "ordinary-call", name: "Bash", input: { command: "fixture" } }, { type: "text", text: "ordinary output" },
+  ] } });
+  await h.settled();
+  expect(observed).toBe(0);
+  expect(h.events.some(event => event.type === "tool_call" && event.callId === "ordinary-call")).toBe(true);
+  expect(h.events.some(event => event.type === "agent_error" && event.code === "host_execution_refused")).toBe(false);
+  q.end(); await h.session.done;
 });
