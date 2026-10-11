@@ -2,6 +2,8 @@
 
 Status: user-approved design direction, updated 2026-10-11. Cowork is not implemented. The user accepted this specification's direction and the source/publication decisions below; detailed mechanisms remain proposed until validated. Approval of the specification does not authorize implementation. Automatic resource return is a feasibility requirement to validate, not an established property of the selected backend direction.
 
+The [execution and integration contracts](cowork-execution-contracts.md) are part of this specification: Linux confinement, policy/messaging matrices, guest router/file readers, extensions/trust, provider/Git gateways, network enforcement and lifecycle/retention. The [independent review ledger](research/2026-10-11-cowork-spec-review.md) tracks the gaps those contracts address. No review or document edit establishes that a feasibility gate passed.
+
 ## Accepted behavior
 
 | Requirement | Contract |
@@ -61,19 +63,19 @@ See the [options comparison](research/2026-10-10-cowork-vm-options.md) for alter
 | --- | --- |
 | Host daemon | Workspace manifests, canonical UI transcript/events, approvals, grants, resource admission, schedules, credential authority and recovery UI |
 | Native controller | VM objects and lifecycle, explicit disks/shares/network configuration, versioned transport, native resource cleanup |
-| Guest supervisor | Conversation process launch, authenticated stream routing, task/process ownership, occupancy, drain/flush handshake and connection-loss handling |
+| Guest supervisor | Protected conversation launch, portable guest router/run-home materialization, confined tool process ownership, authenticated file/event transport, occupancy, drain/flush and recovery |
 | Guest conversation runtime | Agent loop, its own subagents and SDK store, tools and conversation-local control state |
 | Workspace storage | Shared Project files/memory/environment plus distinct per-conversation state, scratch and outputs |
 
 A workspace has one guest/disk owner but may have many active conversations. The owner lease prevents attaching its writable disks twice; it does not serialize Project conversations. Keep `workspaceId`, `sessionId`, `guestIncarnationId`, lease epoch, grant revision, image digest and runtime version separate.
 
-The host determines workspace and launch identity from the authenticated channel and controller state. Guest-supplied IDs or claimed approvals are not authority. Run agent workloads non-root and keep the supervisor control interface out of their general tool surface. Cross-workspace grants remain denied even if guest code invents another workspace/session ID.
+The host determines workspace and launch identity from the authenticated channel and controller state. Guest-supplied IDs or claimed approvals are not authority. Protect supervisor/runtime identities and immutable code separately from confined tool processes; non-root alone is insufficient when Bash can access the runtime's files. Tool code cannot edit run homes, SDK authority snapshots, peer stores or protected shared instructions. Apply the [Linux boundary and policy matrices](cowork-execution-contracts.md#authority-and-linux-execution-boundary) to every execution path. Cross-workspace grants remain denied even if guest code invents another workspace/session ID.
 
 All Project mounts and shared memory belong to the Project's explicit grant set. Adding a folder grants the Project access, including its other conversations and subagents. Do not silently union supposedly private conversation grants. Distinct runtime homes and transcripts prevent accidental context mixing; they do not promise adversarial confidentiality inside one shared guest.
 
 ## Persistent storage and environment
 
-Use a shared immutable base-image cache, a persistent writable environment layer per workspace, and a separate persistent data volume. Retain installed tools/packages and environment changes across normal cold stops. Pin the writable environment to its base-image digest; a new base cannot silently replace the lower layer beneath an old installation overlay.
+Use a shared immutable base-image cache, a persistent writable tool environment per workspace, a separate persistent data volume, and narrow host-backed shares for guidance/memory/outputs. Retain installed tools/packages across normal cold stops. Trusted Winter/supervisor/router code is supplied separately read-only, version-locked to the host's required SDK/protocol; packages cannot replace or shadow it. Pin the writable environment to its base-image digest; a new base cannot silently replace the lower layer beneath an old installation overlay.
 
 Proposed guest layout:
 
@@ -81,11 +83,11 @@ Proposed guest layout:
 | --- | --- |
 | `/workspace/repos/<repo-id>` | Persistent guest-cloned repositories, including dirty files, local commits and Git worktrees |
 | `/workspace/folders/<grant-id>` | Explicit host-folder mounts; read-only/read-write as granted |
-| `/workspace/.winter/WINTER.md` | Persistent shared workspace instructions, loaded for every conversation/subagent independently of its cwd |
-| `/workspace/.winter/conversations/<session-id>` | That conversation's durable SDK home, parent/child transcripts, metadata and replay state |
-| `/workspace/.winter/memory` | Shared Project MEMDIR; standalone conversations get their own workspace memory |
+| `/workspace/.winter/WINTER.md` | Protected alias to host-backed shared instructions, read-only to tools, loaded for every conversation/subagent independently of cwd |
+| `/workspace/.winter/conversations/<session-id>` | Real guest SDK directory, owned by the protected runtime and omitted from general tool filesystem views |
+| `/workspace/.winter/memory` | Host-backed shared Project MEMDIR; standalone conversations get their own workspace memory |
 | `/workspace/.winter/scratch/<session-id>` | Persistent conversation TMPDIR |
-| `/workspace/outputs/<session-id>` | Durable outputs, accessible through the host artifact bridge |
+| `/workspace/outputs/<session-id>` | Host-backed durable outputs, readable through the artifact bridge while the VM is stopped |
 | Guest `/tmp` | Disposable OS/boot scratch, with no cold-restart persistence promise |
 
 `outputs/<session-id>` is an optional destination for user-facing deliverables such as PDFs, spreadsheets, reports, images or archives. Source edits stay in their repository or mounted folder; build caches and intermediate products stay in their appropriate cache/build directories. Do not duplicate all changed files into outputs. Export a build product there only when it is a requested deliverable. Selected host folders are not copied in or synchronized out on every boot/stop; persistent guest disks and tool caches are reused rather than routinely rebuilt.
@@ -103,9 +105,14 @@ The following Cowork paths are proposed; they have not been created by this spec
     manifest.json                       identity, volume references, versions, grants
     env.ext4                            persistent writable environment layer
     data.ext4                           persistent workspace data volume
+    shared/instructions/WINTER.md       canonical editable workspace guidance
+    shared/memory/                      canonical Project memory files
+    shared/outputs/<session-id>/        canonical user-facing deliverables
 ```
 
-`data.ext4` is an ordinary file on the Mac used as a virtual disk and mounted at `/workspace` inside the guest. It contains cloned repositories, worktrees, shared memory, the per-conversation SDK stores (including subagents), scratch and outputs listed above. `env.ext4` retains installed packages and environment changes, paired with the selected base image. The exact storage format/layout is an implementation detail to validate; the durable ownership contract is not optional. Images may use sparse backing; deleted guest files do not imply immediate host disk-space reclamation.
+`data.ext4` is an ordinary file on the Mac used as a virtual disk and mounted at `/workspace` inside the guest. It contains cloned repositories, worktrees, real per-conversation SDK stores (including subagents) and persistent scratch. Its nested host-backed mounts have one authoritative host copy: `shared/memory` at `/workspace/.winter/memory` and `shared/outputs` at `/workspace/outputs`. Mount `shared/instructions` read-only at `/run/winter/shared-instructions`, with a supervisor-owned `/workspace/.winter/WINTER.md` alias to its WINTER.md. Only the approved host write path or direct user editing changes that file; do not redirect SDK store directory levels through symlinks.
+
+`env.ext4` retains tool packages/environment changes, paired with its base image, but never the mutable source of trusted runtime code. No ordinary Mac filesystem reader can treat the ext4 contents as host files. Guest-only file browsing uses the [authenticated guest file channel](cowork-execution-contracts.md#guest-router-file-channel-and-immutable-runtime) and may require visible wake; host-backed guidance, memory, outputs and host transcripts remain available while stopped. Shares are direct files, not periodically synchronized replicas. Host reads of guest-writable shared data must reject traversal and symlink escapes. Images may use sparse backing; deleted guest files do not imply immediate host disk-space reclamation.
 
 Selected Mac folders stay at their original Mac paths, outside these images. They are mounted into `/workspace/folders/<grant-id>`; their direct edits are not copied back from a private snapshot and are not rolled back with the VM.
 
@@ -121,6 +128,8 @@ Image/runtime updates occur while stopped. Validate compatibility, retain the pr
 
 Source membership is mutable throughout a workspace's life, including while a conversation is working. Persist source identities, repository selections, mount permissions and a configuration revision in the host's workspace manifest. Track desired membership separately from the guest incarnation's acknowledged state; expose preparing, ready, unavailable, removing and detached states, plus pending restart where applicable. The change is workspace-wide; show it to every Project conversation and refresh their source/instruction context. An agent cannot add authority by editing its own configuration files.
 
+Explicit overlapping folder grants are allowed, including another workspace or a normal Code session; those consumers share the same files and normal edit/Git behavior. Do not infer cross-session authority from that overlap. Validate macOS access for the actual signed daemon/controller separately from the Winter grant, and observe the [mounted-folder compatibility contract](cowork-execution-contracts.md#network-and-mounted-folder-behavior), including Linux-versus-Mac dependency/build artifacts.
+
 Add a selected GitHub repository by cloning it once into its stable guest location and exposing progress/errors; existing checkouts and active conversation identities remain intact. A selected Mac folder becomes a direct read-only/read-write mount according to its grant, never an automatic copy. A stopped workspace can record either addition without booting immediately; materialize it before dependent work. Do not switch a conversation's cwd merely because a source was added. Mount/clone readiness and current instruction loading must succeed before reporting the source usable.
 
 Use a live share update for a running guest when the chosen backend supports and validates it. Accepting an add request during a turn does not promise instantaneous device hotplug: if a mount change requires a guest restart, show it as pending and perform a coordinated checkpoint/restart at a safe boundary, preserving conversation identities. Never silently kill occupied work for an addition. Concurrent source changes use host configuration revisions; serialize configuration updates, not conversation turns.
@@ -135,15 +144,15 @@ Before completing folder revocation, stop affected operations and ensure open ha
 
 ## Workspace and repository instructions
 
-Use `/workspace/.winter/WINTER.md` as the persistent, user-editable instruction file shared by this workspace. It is global to that workspace, not every Winter workspace or the Mac user account. Seed it only when absent, preserve user edits on restart/update, and expose it through the workspace settings/files surface. Explicitly map agent edits of this shared file to the existing SDK user-instruction policy (user approval required); its new path is not already covered by current protection. Direct user edits remain available. Do not change normal repository-file editing semantics. Shared Project memory remains a separate directory for accumulated knowledge. [Current protected instruction paths](../packages/core/src/runtime-sdk/protected-paths.ts#L35)
+Use `/workspace/.winter/WINTER.md` as the persistent, user-editable instruction file shared by this workspace. It is global to that workspace, not every Winter workspace or the Mac user account. Seed optional guidance only when absent, preserve user edits on restart/update, and expose its canonical host-backed file through workspace settings/files while the VM is stopped. Agent edits require the existing SDK user-instruction approval treatment, enforced by a read-only tool view and content-bound host write operation, not a path-hook convention alone. Direct user edits remain available. Do not change normal repository-file editing semantics. Shared Project memory remains a separate directory for accumulated knowledge. [Current protected instruction paths](../packages/core/src/runtime-sdk/protected-paths.ts#L35)
 
 Every conversation and subagent receives this file through an explicit workspace instruction scope, regardless of cwd, checkout/worktree boundary, specialized subagent type or fork mode. Include it in effective instruction context once, not as repeated transcript messages, and do not let `omitProjectContext` remove this workspace scope. Instruction prose retains ordinary WINTER.md authority; it is not promoted into a system-level permission grant.
 
-Preserve normal Winter Code discovery for applicable trusted source roots. Within the instruction context, configured personal/user instructions precede the shared workspace instructions; source-specific instructions then follow normal broad-to-local order. For each directory from the trusted source root down to the working directory, Winter's current run-home builder reads `WINTER.md`, `.winter/WINTER.md`, then `WINTER.local.md`. Preserve its supported import, path-confinement, trust and compatibility rules, with guest paths rather than host absolute paths. A repository WINTER.md remains automatically discovered; users need not ask the agent to read it manually. Instructions from one repository do not become global rules for unrelated repositories.
+Preserve normal Winter Code filename/import/discovery order for admitted source roots. Configured personal/user instructions precede the shared workspace instructions; source-specific instructions follow broad-to-local order. For each directory from source root down to the working directory, load `WINTER.md`, `.winter/WINTER.md`, then `WINTER.local.md`, with confined imports and guest paths. A repository WINTER.md remains automatically discovered; users need not ask the agent to read it manually. Unlike today's single trusted-root gate, Cowork explicitly separates plain instruction admission from executable-configuration trust: selecting a source admits its confined guidance, but its hooks/MCP/plugins/permission configuration stay untrusted until user action. Instructions from one repository do not become global rules for unrelated repositories. See the [trust contract](cowork-execution-contracts.md#trust-and-extensions).
 
 When work targets another attached source or a deeper directory, resolve and load its applicable instruction chain before the next model action that works there. Adding a directory to the filesystem or an `additionalDirectories` list alone does not establish this behavior. Source additions/removals, instruction edits, cwd changes, trust changes and cold restoration invalidate the relevant context. Rebuild the materialized instruction view at the next safe turn/steer boundary, and before work starts against a newly selected source; do not mutate an in-flight provider request. Retire detached-source instructions from current context while retaining historical messages. On parent or child resume, load current workspace guidance before the first model request, including for forks that retain their inherited history.
 
-Recommended initial workspace-file guidance (editable, with runtime facts supplied separately):
+Recommended initial workspace-file guidance (editable; the publication obligation is generated separately from host policy):
 
 ```markdown
 # Workspace instructions
@@ -152,17 +161,12 @@ Follow the current user request and the applicable instructions for each source.
 Use the shared Project memory for durable project knowledge. Coordinate with
 other conversations through SendMessage; choose worktrees when useful.
 
-When the workspace is GitHub-only and automatic feature-branch
-publication is enabled, finish completed task changes by committing your own
-changes and pushing an allowed feature branch. Respect task-specific limits
-such as "do not push". Do not include unrelated work, push default/protected
-branches, merge, or force-push without separate authority. Report incomplete
-validation or publication honestly, and preserve local work when blocked.
-The owning conversation coordinates publication; a subagent publishes only
-when that responsibility has been explicitly delegated to it.
+Respect task-specific publication limits such as "do not push". Coordinate
+staging with other conversations and avoid including unrelated work.
+Report incomplete validation or publication honestly and preserve local work.
 ```
 
-Keep invariant runtime facts and current source/policy descriptors in concise generated runtime/system context: this is Linux, the allowed locations and their readiness, current workspace/grant revision, effective tool capabilities and publication bounds. Store the actual publication policy, approvals and source grants in host-owned records and enforce them in brokers. Editing any WINTER.md can change working guidance or narrow requested behavior, but cannot expand grants, enable a disabled capability or authorize another repository. Do not hardcode dynamic source lists or duplicate the editable working guidance into an independently drifting system-prompt paragraph.
+Keep invariant runtime facts and current source/policy descriptors in concise generated runtime/system context: this is Linux, the allowed locations/readiness, workspace/grant revision, effective capabilities and publication bounds. Generate the GitHub-only commit/feature-push completion instruction from the host's canonical policy on each relevant turn/resume; deleting an editable seed paragraph cannot silently turn off the configured default. Store and enforce publication policy, approvals and source grants on the host. WINTER.md and task instructions may narrow requested behavior but cannot expand grants or enable capabilities. Avoid independently maintained copies of policy text: generate from the same host record, while preserving user-authored guidance.
 
 **Existing source behavior is only a starting point.** Winter's router builds a generated run-home WINTER.md from user and trusted root-to-cwd files, and the runtime reads that copy as its user tier. A repo/worktree boundary excludes the new `/workspace/.winter/WINTER.md`; additional roots are not scanned automatically. Some built-in subagents omit the instruction context, and forks retain an inherited request layout. Merely adding a file or rereading a stale generated run home is insufficient: explicit workspace injection, current source discovery and context refresh are planned implementation work. [Run-home instruction construction](https://github.com/yanlingLabs/winter-runtime-sdk/blob/c5424202619cc8df2c8d18b832bfc52ad6fa35f7/src/run-home/instructions.ts#L251), [Winter run-home setting sources](../packages/core/src/runtime-sdk/mode-options.ts#L1285), [SDK context omission](https://github.com/yanlingLabs/winter-agent-sdk/blob/27f1c43e8383582ce73e544237bcfa6fb3721db3/packages/runtime/src/context/assembler.ts#L330), [fork request layout](https://github.com/yanlingLabs/winter-agent-sdk/blob/27f1c43e8383582ce73e544237bcfa6fb3721db3/packages/runtime/src/subagents/child-engine.ts#L1523)
 
@@ -176,7 +180,7 @@ Project memory is ordinary shared durable Markdown/files under MEMDIR. Agents ch
 
 ## Same-Project SendMessage
 
-The host daemon authenticates the sender, resolves the target by durable session identity and verifies Project membership from its own records. Project membership enables peer messaging within that Project; cross-Project messaging needs its separate applicable authority. An unknown target returns `not_found` and never creates a conversation. Messages are attributed as agent messages and execute under the recipient's current policy/grants.
+The host daemon authenticates the sender, resolves the target by durable session identity and verifies Project membership from its own records. Same-Project Cowork peer messaging is allowed; cross-Project and host Code/Dispatch boundaries follow the [explicit messaging/creation matrix](cowork-execution-contracts.md#session-messaging-and-creation-boundaries), not generic activity participation. Guest send/list/stop/spawn against host sessions is denied by default; host-to-Cowork delegation requires a specific user-authorized grant. An unknown target returns `not_found` and never creates a conversation. Messages are attributed as agent messages and execute under the recipient's current policy/grants.
 
 | Recipient | Recommended delivery behavior |
 | --- | --- |
@@ -211,11 +215,11 @@ Recompute the GitHub-only condition from current selected membership when prepar
 
 ## Credentials, host access and revocation
 
-Keep provider/Git credentials on the host and expose scoped broker operations to the guest. Provider requests are constrained to approved providers/models and concrete destinations; Git requests to approved repositories/ref operations. Validate redirects and operation authority on the host. Existing host credential callbacks can transfer credential material to a runtime, so they cannot be reused unchanged to promise credential-free guest configuration.
+Keep provider/Git credentials on the host. The [gateway contract](cowork-execution-contracts.md#provider-and-git-gateways) specifies a new host-provider transport using provider-runtime adapters, covering main/subagent/auxiliary models and keyed search, plus a host Git smart-HTTP gateway that validates actual ref updates. GitHub account/repository connection and its credential inventory are new work. Existing host credential callbacks transfer usable material and cannot be reused unchanged; endpoint rewriting or repository-wide tokens alone cannot enforce this design.
 
 Offer guest-native filesystem, shell, search and workflow execution first. Use an explicit Linux/VM execution posture; unsupported macOS sandbox code must fail rather than silently disable required protection or fall back to executing on the Mac. No automatic host home, SSH agent, Keychain or daemon-socket mount.
 
-Recommend ordinary outbound Internet access for browsing and dependencies, while private host/LAN services need explicit capabilities or network grants. Local model endpoints are mapped deliberately through the host broker. This egress policy is a proposed product choice and needs enforcement tests; keeping credentials on the host alone does not control outbound data.
+Ordinary outbound Internet is available within policy; private host/LAN services require grants. Enforce this through the [host-owned network endpoint](cowork-execution-contracts.md#network-and-mounted-folder-behavior), with no direct NAT/bridge bypass. Local model endpoints use scoped host broker operations. Attachment, throughput, destination checks and bypass resistance are gate-1 requirements; guest proxy variables or host-held credentials alone are insufficient.
 
 Host browser/office/computer capabilities are separate explicit opt-ins. They receive bounded artifacts or validated grant/location references, never arbitrary guest strings reinterpreted as privileged Mac paths. The artifact bridge exposes stable `{workspaceId, locationId, relativePath}` identities with traversal, symlink and content-size checks.
 
@@ -232,6 +236,8 @@ Prefer a selected Mac checkout for iOS/macOS work: the guest edits the direct mo
 ## Activity, cold stop and recovery
 
 Keep Code's activity derivation and attachment semantics. VM power is separate: `stopped`, `starting`, `running`, `quiescing`, `stopping`, `failed/recovery-required`. Reading the transcript does not require a live guest. An attached conversation may remain Active while its VM is stopped; an idle background label does not itself hold compute awake.
+
+The [daemon/sleep lifecycle contract](cowork-execution-contracts.md#daemon-lifetime-sleep-resource-coordination-and-retention) covers app quit, updates, daemon replacement/crash and system sleep. Closing a view is not quitting the owning app/daemon. Intentional daemon exit drains/checkpoints guests before stores close; a replacement daemon restores new incarnations, never assumes live VZ adoption. Unknown Cowork occupancy blocks automatic updates. Forced termination and incomplete checkpoints produce explicit interrupted/recovery state.
 
 Recommend attempting automatic cold stop after **two minutes of continuous workspace-wide quiescence**. This is a tunable starting value, not the existing Code activity grace period or a measured optimum.
 
@@ -257,6 +263,8 @@ Use current grants and policy within the schedule's saved authority ceiling; sto
 
 Recommend pausing schedules targeting an archived conversation and refusing automated peer wake while other Project conversations continue. Archiving a Project pauses its jobs and drains its workspace when safe. Archive preserves data; deletion is separate. Deleting one conversation does not delete shared Project files/memory or granted host folders.
 
+Deleting a standalone conversation also does not silently destroy its workspace: retain it for explicit export/deletion. Empty-session reapers, runtime retention and model-driven cleanup cannot remove Cowork volumes. Backups include mutable volumes, host-shared files and manifests by default; provide a consistent export/restore path and measure sparse-image backup behavior instead of assuming either whole-image recopy or efficient block-level backup. See the [retention contract](cowork-execution-contracts.md#daemon-lifetime-sleep-resource-coordination-and-retention).
+
 ## Resource policy and product surfaces
 
 Cowork manages resources automatically; users do not carve out RAM or CPU/GPU cores for each VM. Winter selects necessary boot ceilings internally and uses host pressure plus guest demand to admit work. Concurrent Project conversations already share the same guest's resources.
@@ -265,7 +273,7 @@ CPU counts are virtual execution limits, not exclusive physical-core reservation
 
 Automatic **return** of memory is a blocking feasibility question. Apple's current container documentation says pages freed inside Linux are not automatically relinquished to macOS. VZ's traditional balloon device can request pages back and make memory available again within the configured ceiling, but the guest may not comply. The inspected Containerization backend has extension hooks where Winter can add balloon support; its default backend does not establish that behavior. Kernel balloon/page-reporting flags alone are not proof of actual reclaim. [Current limitation](https://github.com/apple/container/blob/f70ecbb926d925818a34917529e304b1177ce98c/docs/technical-overview.md#releasing-container-memory-to-macos), [balloon target](https://developer.apple.com/documentation/virtualization/vzvirtiotraditionalmemoryballoondevice/targetvirtualmachinememorysize), [VZ extension points](https://github.com/apple/containerization/blob/bc994b88df46207fad7775b0eabc51947e315881/Sources/Containerization/VZVirtualMachineInstance.swift)
 
-Recommend a host-wide automatic resource controller that observes pressure/demand, requests unused memory back where verified, and stops/disposes only fully idle guests through the durable lifecycle. Do not silently restart occupied guests to shrink memory, rely on host swapping as evidence of successful reclaim, or advertise seamless elastic RAM before it is demonstrated. If a workload exceeds its boot ceiling, report the constraint and arrange a safe resize/restart boundary rather than pretending it can grow without limit.
+Coordinate automatic resource admission across participating daemons for the logged-in user, including dev/dist/custom homes, while observing total host pressure/demand. Request unused memory back where verified, and stop/dispose only fully idle guests through the durable lifecycle. A private per-daemon counter is not host-wide coordination; the [admission and test-isolation contract](cowork-execution-contracts.md#daemon-lifetime-sleep-resource-coordination-and-retention) defines the shared accounting boundary. Do not silently restart occupied guests to shrink memory, rely on host swapping as evidence of successful reclaim, or advertise seamless elastic RAM before it is demonstrated. If a workload exceeds its boot ceiling, report the constraint and arrange a safe resize/restart boundary rather than pretending it can grow without limit.
 
 A single shared Linux VM is an alternative for a common guest memory pool across all workspaces. It allows one workspace to reuse memory freed by another inside Linux, but does not by itself solve return to macOS and changes the per-workspace kernel/failure boundary. It has not been selected by this requirement.
 
@@ -279,14 +287,16 @@ Retain only the workspace portion of Projects in this scope. Keep Code behavior 
 
 ## Build order and acceptance gates
 
-1. **Native/authority/resource slice:** signed compiled daemon plus pinned Containerization, Linux guest and authenticated supervisor channel; disposable folder fixtures and mocked credentials only. Prove confinement/revocation, actual host/guest process topology and genuine memory reclaim behavior before finalizing the backend or attaching user data.
-2. **Durable execution slice:** Linux Winter artifact, guest run-home/transport, explicit guest sandbox posture, two concurrent Project conversations, independent cancellation, durable files/environment/memory, and real cold parent/child continuation. Release/pin the SDK prerequisite as a separate authorized integration step and complete shutdown/resume ownership gates needed for auto-stop.
-3. **Workspace behavior:** live folder/repository changes, minimum-source and revocation rules, shared/per-source instruction loading and refresh, ordinary shared filesystem/Markdown/Git behavior, feature-branch publication defaults, same-Project peer messaging, provider/Git brokers, artifacts, image compatibility, crash recovery and automatic resource management.
+1. **Native/authority/resource slice:** signed compiled daemon, pinned Containerization, immutable minimal guest control components and authenticated channel; disposable folder fixtures/mocked credentials only. Prove Linux control/tool separation, host network enforcement without NAT bypass, signed folder access/revocation, process/daemon lifetime, genuine memory reclaim and multi-daemon admission before attaching user data. Real-VM tests require explicit opt-in; ordinary tests use a fake backend.
+2. **Durable execution slice:** immutable Linux Winter artifact, guest router/run-home/file transport, explicit policy/messaging matrix, all host-reader replacements, Linux Workflow, two concurrent Project conversations, independent cancellation and real cold parent/child continuation. Include parent crash, sleep/wake, update/quit drain and interrupted effects. Release/pin the SDK prerequisite separately and complete shutdown/resume ownership gates needed for auto-stop.
+3. **Workspace behavior:** live source changes, minimum-source/revocation rules, instruction refresh, executable trust/extensions, ordinary shared filesystem/Git behavior, Linux/Mac build-artifact separation, feature-branch publication gateway, provider/auxiliary-model transport, same-Project messaging, host-backed artifacts/memory, image compatibility, backup/restore and retention.
 4. **Scheduled/UI flows:** one canonical host scheduler, Mac/CLI/paired-client flows, activity parity, archive/delete behavior and end-to-end support through real supported creation doors.
 
 Before exposing Cowork, verify: two unrelated guests cannot cross grants; two Project conversations really overlap and can message one another; agents can choose shared checkouts or worktrees without a Cowork locking layer; stopping one conversation does not stop another; peer delivery survives a stopped recipient and daemon restart without creating a new identity; revocation removes access after the required restart; idle detection includes detached work; wake/stop races start exactly one valid incarnation; dirty repos and memory survive cold stop; SDK SendMessage continues the same child after actual process/VM restart; schedule IDs survive daemon restart; disk-full and interrupted-effect recovery stay truthful; automatic resource claims match measured host behavior; and events/approvals remain correctly associated with their conversations.
 
 Source/instruction acceptance must cover adding folders and repositories mid-conversation; guest acknowledgment before readiness; failed additions and concurrent last-source removals; revoking the final permission without data loss; no writes into removed mountpoints; no deletion of dirty retained checkouts; source updates reaching all Project conversations; shared instructions present for ordinary, specialized and forked subagents after cold resume; normal root/local/import discovery for mounted and cloned sources; no unrelated-source instruction leakage; original-file edits reaching rebuilt context rather than a stale generated copy; the shared-file edit policy; GitHub-only automatic commit/push on permitted feature branches; the trigger changing correctly for mixed sources, pending additions and revoked-but-retained folders; explicit user overrides; rejection of default/protected/force/merge operations and disconnected repositories. If offering host builds, additionally prove path translation, build/test/signing authority, cancellation/revocation and preserved build caches; a Linux shell must never silently execute on the Mac.
+
+The companion contracts add mandatory evidence for shell/config/store tampering attempts, cross-mode messaging denial including aliases, every approval/connector row and unattended card, genuine guest run-home handles, guest image/diff/path consumers, untrusted executable configuration, host-only OAuth/provider/Git secrets, actual multi-ref push validation, raw/private-network bypass attempts, stopped shared-file reads, standalone cleanup protection, multi-daemon races and backup restoration. Include stale revisions and callback epochs throughout. None is satisfied merely by checking that a tool description or prompt says the right thing.
 
 Measure first image provisioning, prepared VM boot, Winter-ready latency, repo setup and steady-state resource use separately. Apple's sub-second lightweight-guest startup description is not a Winter readiness benchmark. [Apple Containerization design](https://github.com/apple/containerization#design)
 

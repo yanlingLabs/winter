@@ -209,6 +209,10 @@ The normal Winter Code path generates a run-home WINTER.md from the SDK-home ins
 
 The updated [working specification](../cowork-spec.md) also records that outputs are optional user-facing deliverables, mounted source edits are not mirrored there, persistent disks/build caches are reused, and Xcode work requires an explicit Mac-side build capability against a host-readable checkout. Apple's sub-second lightweight guest-start claim remains distinct from measured Winter readiness.
 
+### Independent review response, 2026-10-11
+
+A later source review identified missing execution contracts, rather than proof of a failed VM feasibility test. The [review ledger](2026-10-11-cowork-spec-review.md) records all findings and their disposition. The [execution companion](../cowork-execution-contracts.md) adds protected Linux runtime/tool separation, approval and cross-mode messaging matrices, a guest-local router and file channel, extension/executable-trust rules, concrete provider/Git gateways, host network enforcement, and daemon/sleep/retention/backup contracts. Shared workspace guidance, memory and outputs now have one canonical host-backed copy mounted at their guest locations for stopped-state access; cloned repos, scratch and real SDK stores remain on guest data storage. Earlier storage proposals in this research record are superseded by that specification.
+
 ## Research limits and later validation
 
 No Apple VM was launched, no image was downloaded or built, and no Linux Winter process was run. Sub-second Winter readiness, resource budgets, Linux shell/tool support, dynamic mount revocation, filesystem durability, network enforcement, and save/restore compatibility remain unverified.
