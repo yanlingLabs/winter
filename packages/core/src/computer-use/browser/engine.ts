@@ -29,6 +29,7 @@ import { redactText, redactUrl } from "./page-runtime/redact";
 import { cssSelectorRefusal } from "./page-runtime/rules";
 import { escapeInvisible } from "./page-runtime/webmcp";
 import { pickerSentence, shownUrl, SITE_TOOL_STOP_GRACE_MS, TabDriver, transportFailure, transportHasCdp3, USER_TAB_FULL_PAGE } from "./tab-driver";
+import { HttpReader } from "./http-read";
 import { TransportError, type BackendId, type BrowserFamily, type CdpTransport, type TransportTab } from "./transport";
 import { checkUploadFiles, clearStagedUploads, stageUploads } from "./upload-paths";
 import { BODY_DEFAULT_CHARS, BODY_MAX_CHARS, isTextMime, redactBody } from "./body-redact";
@@ -99,6 +100,8 @@ export interface BrowserEngineDeps {
   turnRunning?(sessionId: string): boolean;
   now?(): number;
   log?(line: string): void;
+  /** Phase 4: the plain-HTTP page reader `browsers.read` uses (default: one on the system resolver and `fetch`). */
+  httpReader?: HttpReader;
 }
 
 interface Binding {
@@ -183,6 +186,8 @@ export class BrowserEngine {
   private readonly recentlyClosed = new Map<string, { at: number; reason: string; agentTabs: Map<string, AgentTab> }>();
   private readonly hooked = new Map<CdpTransport, { backend: BackendId; off: Array<() => void> }>();
   private readonly approvals = new SiteApprovals();
+  /** Phase 4: `browsers.read` (an injected reader for tests). */
+  private readonly reader: HttpReader;
   private readonly declined = new Map<string, Set<string>>();
   /** download() calls per run (session + run id), for the per-run cap. */
   private readonly downloadsByRun = new Map<string, number>();
@@ -197,6 +202,7 @@ export class BrowserEngine {
     // them).
     clearStagedUploads(deps.home);
     clearStagedDownloads(deps.home);
+    this.reader = deps.httpReader ?? new HttpReader();
     this.unwatch = deps.registry.onChange(() => this.hookTransports());
     this.hookTransports();
   }
@@ -233,6 +239,8 @@ export class BrowserEngine {
         case "browsers.history": return await this.libraryCall(scope, args, "history");
         case "browsers.bookmarks": return await this.libraryCall(scope, args, "bookmarks");
         case "browsers.group": return await this.groupCall(scope, args);
+        // Phase 4: a page's text over plain HTTP, no browser (`http-read.ts`).
+        case "browsers.read": return await this.reader.read(scope, checkTabUrl(args.url, "browsers.read()"), args, { approvals: this.approvals, site: this.deps.site ?? {}, cwd: this.cwdOf(scope.sessionId) });
         default: throw bad(`unknown primitive ${primitive}`);
       }
     } finally {

@@ -44,8 +44,8 @@ const COMPUTER_V2_VERBS = /\.(state|find|screenshot|click|setValue|type|paste|ke
 const APPS_OPEN = /apps\s*\.\s*open\s*\(\s*(["'`])((?:(?!\1)[^\\\n])+)\1/g;
 /** A saved script's call (`scripts.exportCsv(…)`, Phase 4), shown as "script exportCsv"; `scripts.save(` is not one. */
 const SAVED_SCRIPT_CALL = /\bscripts\s*\.\s*([a-z][A-Za-z0-9_]{0,47})\s*\(/g;
-/** `browsers.open("https://example.com/…")`: the site it opens, shown as its host. */
-const BROWSERS_OPEN = /browsers\s*\.\s*open\s*\(\s*(["'`])((?:(?!\1)[^\\\n]){1,300})\1/g;
+/** `browsers.open("https://example.com/…")` / `browsers.read("…")`: the site it opens or reads, shown as its host. */
+const BROWSERS_OPEN = /browsers\s*\.\s*(?:open|read)\s*\(\s*(["'`])((?:(?!\1)[^\\\n]){1,300})\1/g;
 
 function hostOf(url: string): string | undefined {
   if (url.includes("${")) return undefined;

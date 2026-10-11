@@ -46,7 +46,9 @@ export const TAB_PRIMITIVES = ["state", "find", "screenshot", "click", "setValue
   "console", "network", "networkBody", "inspect", "html", "assets", "dialog", "answerDialog", "viewport", "mute", "download", "waitForUser",
   // Phase 4: a site's own tools (WebMCP)
   "tools", "callTool"] as const;
-export const BROWSER_PRIMITIVES = ["browsers.list", "browsers.open", "browsers.tabs", "browsers.tab", "browsers.windows", "browsers.group", "browsers.history", "browsers.bookmarks"] as const;
+export const BROWSER_PRIMITIVES = ["browsers.list", "browsers.open", "browsers.tabs", "browsers.tab", "browsers.windows", "browsers.group", "browsers.history", "browsers.bookmarks",
+  // Phase 4
+  "browsers.read"] as const;
 /** Saved scripts (Phase 4): `scripts.save(name, fn)` and the bridge call a saved script makes as it starts. */
 export const SCRIPT_PRIMITIVES = ["scripts.save", "scripts.run"] as const;
 export type AppPrimitive = (typeof APP_PRIMITIVES)[number];

@@ -50,6 +50,13 @@ final class ComputerV2ToolRowTests: XCTestCase {
         XCTAssertEqual(computerV2AppNames(in: "await browsers.open(`https://${host}/`)"), [])
     }
 
+    func testAPlainReadNamesItsSite() {
+        XCTAssertEqual(computerV2Label(title: nil, code: #"const r = await browsers.read("https://docs.example.com/api"); print(r.text)"#), "docs.example.com")
+        XCTAssertEqual(computerV2AppNames(in: #"await browsers.read('http://localhost:3000/health'); const t = await browsers.open("https://example.com/")"#),
+                       ["localhost:3000", "example.com"])
+        XCTAssertEqual(computerV2AppNames(in: "await Promise.all(urls.map((u) => browsers.read(u)))"), [])
+    }
+
     func testASavedScriptsCallIsShownAsScriptAndItsName() {
         XCTAssertEqual(computerV2Verbs(in: "const r = await scripts.exportCsv(sheet, '/tmp/a.csv'); await notes.state()"), ["script exportCsv", "state"])
         XCTAssertEqual(computerV2Label(title: nil, code: "await scripts.exportCsv(s, p)"), "Using the computer · script exportCsv")

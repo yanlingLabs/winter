@@ -569,11 +569,14 @@ export class ComputerV2Service {
       const on = msg.target === undefined ? undefined : ctx.state.targets.get(msg.target)?.name ?? this.deps.browsers?.label(ctx.sessionId, msg.target);
       ctx.lastPrimitive = `${msg.primitive}()${on === undefined ? "" : ` in ${on}`}`;
     }
+    // Every `browsers.*` primitive is the engine's — by `BROWSER_PRIMITIVES` itself, never a second hand-kept list (one
+    // here once left Phase 3's windows/group/history/bookmarks unreachable from a script).
+    if (BROWSER_GLOBALS.has(msg.primitive)) {
+      if (this.deps.browsers === undefined) throw new AutomationFailure("BrowserUnavailable", "browsers are not available in this daemon");
+      return await this.trackTabWork(ctx, this.deps.browsers.global(this.tabScope(ctx, metric), msg.primitive, args));
+    }
     switch (msg.primitive) {
       case "timeLeft": return Math.max(0, Math.floor(ctx.timer.left()));
-      case "browsers.list": case "browsers.open": case "browsers.tabs": case "browsers.tab":
-        if (this.deps.browsers === undefined) throw new AutomationFailure("BrowserUnavailable", "browsers are not available in this daemon");
-        return await this.trackTabWork(ctx, this.deps.browsers.global(this.tabScope(ctx, metric), msg.primitive, args));
       case "apps.list": return await this.appsList(ctx, args, metric);
       case "apps.open": {
         const target = str(args.app)?.trim();
@@ -1836,6 +1839,8 @@ function failure(name: string, message: string): ScriptResult {
 
 /** The functions a script may call — anything else from the worker is refused unrecorded (review I6). */
 const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...EXTRA_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES, ...SCRIPT_PRIMITIVES]);
+/** The `browsers` global's primitives: every one is the browser engine's (`BrowserEngine.global`). */
+const BROWSER_GLOBALS: ReadonlySet<string> = new Set<string>(BROWSER_PRIMITIVES);
 /** A browser tab's primitives no app has (refused on an app target before the helper sees them). */
 const TAB_ONLY_PRIMITIVES: ReadonlySet<string> = new Set<string>(TAB_PRIMITIVES.filter((p) => !(APP_PRIMITIVES as readonly string[]).includes(p)));
 /** How long a run's end waits for its tab input to stop before letting the tab locks go. */

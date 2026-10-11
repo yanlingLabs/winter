@@ -81,8 +81,10 @@ export class AutomationWorker {
     let isReady = false;
     let stderr = "";
     child.stderr?.on("data", (d: Buffer) => { if (stderr.length < 4096) stderr += d.toString("utf8"); });
+    // ONE streaming decoder for the whole pipe: a character split across two chunks is joined, never two U+FFFDs.
+    const utf8 = new TextDecoder("utf-8");
     child.stdout?.on("data", (d: Buffer) => {
-      worker.buf += d.toString("utf8");
+      worker.buf += utf8.decode(d, { stream: true });
       let i: number;
       while ((i = worker.buf.indexOf("\n")) >= 0) {
         const line = worker.buf.slice(0, i);
@@ -158,8 +160,16 @@ export class AutomationWorker {
     });
   }
 
+  /** One answer to the worker. An answer too large for one bridge line (`BRIDGE_MAX_LINE` — the worker would drop it
+   *  and the script's call would never settle) is sent as a typed error naming its size instead. */
   reply(id: number, outcome: { ok: true; value?: unknown } | { ok: false; error: { kind: string; message: string } }): void {
-    this.send({ op: "reply", id, ...outcome } as HostToWorker);
+    if (!this.alive) return;
+    let line = JSON.stringify({ op: "reply", id, ...outcome });
+    if (line.length > BRIDGE_MAX_LINE) {
+      const mb = (line.length / (1024 * 1024)).toFixed(1);
+      line = JSON.stringify({ op: "reply", id, ok: false, error: { kind: "Error", message: `that answer is too large to hand to the script (${mb} MB as text) — ask for less at once` } });
+    }
+    try { this.child.stdin?.write(`${line}\n`); } catch { /* reported through "close" */ }
   }
 
   cancel(runId: string, reason?: string): void {
