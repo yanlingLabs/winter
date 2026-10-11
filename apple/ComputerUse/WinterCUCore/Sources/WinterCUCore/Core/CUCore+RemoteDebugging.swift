@@ -65,6 +65,16 @@ extension CUCore {
     /// A dialog or sheet of the app (or a sheet on the bound window) worded "Allow remote debugging": its title, or a
     /// text within its first nodes. Never a standard window — a page's title may say anything.
     func remoteDebuggingDialogShown(_ t: CUTarget) -> Bool {
+        // Scanned again only when the app's windows changed (a dialog or a sheet is a window of its own): an act on a
+        // browser with many windows pays one window-server read, not a walk of every window.
+        let windows = Set(sys.windows(pid: t.pid).map(\.id))
+        if let last = t.remoteDebuggingScan, last.windows == windows { return last.shown }
+        let shown = scanForRemoteDebuggingDialog(t)
+        t.remoteDebuggingScan = (windows, shown)
+        return shown
+    }
+
+    private func scanForRemoteDebuggingDialog(_ t: CUTarget) -> Bool {
         var candidates: [AXUIElement] = []
         for w in ax.elements(ax.application(t.pid), kAXWindowsAttribute) {
             let role = ax.string(w, kAXRoleAttribute), sub = ax.string(w, kAXSubroleAttribute)

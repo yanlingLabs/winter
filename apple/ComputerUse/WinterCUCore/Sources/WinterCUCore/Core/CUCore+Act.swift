@@ -873,8 +873,10 @@ extension CUCore {
     /// falling back to the bound window. One window-list read per action.
     func windowFor(_ t: CUTarget) -> (CGPoint) -> UInt32 {
         let bound = t.windowID
-        let others = otherDocumentWindows(t)
-        let stack = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 && !others.contains($0.id) }
+        let mine = sys.windowStack().filter { $0.pid == t.pid && $0.alpha > 0 }
+        // (Accessibility is asked only when the app has another window at the normal level on screen — most acts: none.)
+        let others = mine.contains { $0.layer == 0 && $0.id != bound } ? otherDocumentWindows(t) : []
+        let stack = mine.filter { !others.contains($0.id) }
         return { point in stack.first { $0.frame.contains(point) }?.id ?? bound }
     }
 
