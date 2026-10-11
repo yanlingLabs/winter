@@ -85,6 +85,9 @@ struct SimCand: Hashable, CustomStringConvertible {
     var held: SimHeld?
     /// During a desktop visit: what was in front when it began (its return may go back there, or to their place).
     var visitPre: SPlace? = nil
+    /// `expected` was LEFT in front by an untouched app's coming forward around the agent's action (not adopted): a theft
+    /// right after it is restored there — what was in front just before (round 10's MEDIUM #6, the user's ruling).
+    var leftThere = false
     var description: String {
         "place \(place), settles at \(expected)" + (held.map { ", \(SimPid.name($0.app)) held (before: \($0.pre))" } ?? "")
             + (visitPre.map { ", visit from \($0)" } ?? "")
@@ -954,13 +957,15 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         case .user(let d, _):
             return [SimCand(place: d, expected: d, held: nil)]
         case .agentDirect:
+            if c.leftThere { return [SimCand(place: c.expected, expected: c.expected, held: c.held, visitPre: c.visitPre)] }
             return [SimCand(place: c.place, expected: c.visitPre == nil ? c.place : c.expected, held: c.held, visitPre: c.visitPre)]
         case .untouched(_, .adopt, _, _):
             return [SimCand(place: n, expected: n, held: nil)]
         case .untouched(_, .undone, _, _):
+            if c.leftThere { return [SimCand(place: c.expected, expected: c.expected, held: c.held, visitPre: c.visitPre)] }
             return [SimCand(place: c.place, expected: c.visitPre == nil ? c.place : c.expected, held: c.held, visitPre: c.visitPre)]
         case .untouched(_, .leftAlone, _, _):
-            return [SimCand(place: c.place, expected: n, held: c.held, visitPre: c.visitPre)]
+            return [SimCand(place: c.place, expected: n, held: c.held, visitPre: c.visitPre, leftThere: !visiting && c.held == nil)]
         case .engine(let k):
             switch k {
             case .restore, .giveBack:

@@ -683,6 +683,18 @@ public struct CUFocusGuardianCore: Sendable {
         judged = (q.app, q.space, owner, evidence, lastCause(q.app), seenAt, before)
         lastFresh = true
         lastReason = owner.words
+        // The agent's app jumped in over what was left in front around an action (an app the user may have opened, or a
+        // dialog): the restore returns them THERE — what was in front just before — never to an older place (round 10's
+        // MEDIUM #6, the user's ruling).
+        // (Never a restore of the engine's that landed late — that is no app the user opened — nor while an app is held in
+        // front with consent: its give-back decides where the user goes.)
+        if owner.undoes, let left = unexplainedLeft, left == before, left.app != q.app,
+           left.app.map({ restoredAt[$0].map { r in now - r > Self.restoreLateWindow } ?? true }) ?? true,
+           view.app.map({ exemptions[$0] == nil }) ?? true {
+            view = left
+            viewAt = now
+        }
+        unexplainedLeft = { if case .unexplained = owner { return current }; return nil }()
         switch owner {
         case .user:
             if visiting(now: now) { visitSawUserInput = true }
@@ -1016,6 +1028,10 @@ public struct CUFocusGuardianCore: Sendable {
     }
 
     // MARK: the user working in an app (round 10)
+
+    /// The state an `.unexplained` verdict left in front (cleared by the next verdict): a theft right after it is restored
+    /// there.
+    private var unexplainedLeft: CUGuardedView?
 
     /// The app the user is WORKING in: they clicked, typed or scrolled in its window while it was in front (switching there
     /// to look is not working in it). The agent is hands-off it until it leaves the front (user ruling, round 10).

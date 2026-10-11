@@ -86,7 +86,6 @@ final class GuardianModelTests: XCTestCase {
         (1022, "I2: the engine's place T@200, the user's T@100 — the same app on two desktops"),
         (1038, "I3: the key focus handed to T2 (a visit's return) while the user is at S"),
         (1055, "I3: the key focus handed to T2 (a visit's return) while the user is at the held app T3"),
-        (1059, "I3: the key focus handed to T2 (a visit's return) while the user is at X@200"),
         (1067, "I2: the engine's place T2@300 (the visited app), the user's X@200"),
     ]
 

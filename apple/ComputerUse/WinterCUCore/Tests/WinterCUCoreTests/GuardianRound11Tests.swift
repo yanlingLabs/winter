@@ -191,4 +191,22 @@ final class GuardianRound11Tests: XCTestCase {
         XCTAssertThrowsError(try core.refuseWhileUserWorks(t))
         XCTAssertEqual(CUCore.workWatcherMask & (CGEventMask(1) << CGEventMask(CGEventType.mouseMoved.rawValue)), 0, "no pointer moves")
     }
+
+    /// Round 10's MEDIUM #6 (the user's ruling), done in round 12: an app left in front around the agent's action (the
+    /// user may have opened it — not adopted), then the agent's app jumps in: the restore returns them to what was in
+    /// front just before, never to the older place.
+    func testATheftAfterAnUnexplainedChangeIsRestoredToWhatWasInFrontJustBefore() {
+        var g = CUFocusGuardianCore()
+        g.begin(view: CUGuardedView(app: 1, space: 100))
+        g.noteCause(500, now: 20)
+        g.noteOpenerCause(now: 20)
+        g.noteHardwareAction(now: 19.5)  // their key a moment before: not clearly the agent's
+        let left = g.judge(CUMoveQuery(app: 700, space: 100, hardwareAt: 19.5), now: 20.4)
+        guard case .unexplained = left else { return XCTFail("\(left)") }
+        XCTAssertEqual(g.view.app, 1, "left in front, not adopted")
+        g.noteCause(500, now: 21)
+        let theft = g.judge(CUMoveQuery(app: 500, space: 100), now: 21.2)
+        XCTAssertTrue(theft.undoes, "\(theft)")
+        XCTAssertEqual(g.view.app, 700, "restored to what was in front just before")
+    }
 }
