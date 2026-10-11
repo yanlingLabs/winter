@@ -375,7 +375,7 @@ extension CUCore {
 
     /// Whether the user is working in `pid` now (round 10): the agent does not act on it.
     func userIsWorking(in pid: pid_t) -> Bool {
-        guard guardianRunning else { return false }
+        // (Read whether or not the guardian runs: the mark outlasts it, and the always-on activation observer ends it.)
         let front = sys.frontmostPid()
         let now = clock.nowSeconds()
         return guardianLock.withLock { guardianCore.userIsWorking(in: pid, front: front, now: now) }

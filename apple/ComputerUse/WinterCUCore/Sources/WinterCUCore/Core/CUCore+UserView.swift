@@ -627,6 +627,8 @@ extension CUCore {
     /// the notification is handled. A notification that comes late, the app no longer in front (one our own focus records
     /// set off, delivered after the blip's hand-back re-marked it), changes nothing.
     func appActivated(pid: pid_t) {
+        // The user's work in another app is over (I6 outlasts the guard; this ends it between scripts).
+        guardianLock.withLock { guardianCore.otherAppActivated(pid) }
         guard sys.frontmostPid() == pid else { return }
         noteStranded(pid, false)
     }

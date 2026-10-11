@@ -66,20 +66,21 @@ final class GuardianRound11Tests: XCTestCase {
         XCTAssertFalse(o.undoes, "a system dialog is left for the user to answer: \(o)")
     }
 
-    /// The user's work in an app ends with the guard: a later guard does not refuse acts on it.
-    func testTheUsersWorkDoesNotSurviveTheGuardsStop() {
+    /// Review of round 11, MEDIUM #6: the user's work in an app OUTLASTS the guard (a user still typing in it when the next
+    /// script begins is still working there); another app activating ends it, guarding or not.
+    func testTheUsersWorkOutlastsTheGuardUntilAnotherAppActivates() {
         var g = CUFocusGuardianCore()
         g.begin(view: CUGuardedView(app: 7, space: 100))
         g.userInteracted(7, front: 7, now: 10)
-        XCTAssertTrue(g.userIsWorking(in: 7, front: 7, now: 10.5))
         g.end()
         g.begin(view: CUGuardedView(app: 7, space: 100))
-        XCTAssertFalse(g.userIsWorking(in: 7, front: 7, now: 60))
-        // A click pending its app's activation goes with it too.
-        g.userInteracted(8, front: 7, now: 61)
+        XCTAssertTrue(g.userIsWorking(in: 7, front: 7, now: 30), "still in it, after a pause between scripts")
+        g.otherAppActivated(7)
+        XCTAssertTrue(g.userIsWorking(in: 7, front: 7, now: 31), "its own activation ends nothing")
         g.end()
-        g.begin(view: CUGuardedView(app: 8, space: 100))
-        XCTAssertFalse(g.userIsWorking(in: 8, front: 8, now: 61.2))
+        g.otherAppActivated(8)  // between scripts: they went to another app
+        g.begin(view: CUGuardedView(app: 7, space: 100))
+        XCTAssertFalse(g.userIsWorking(in: 7, front: 7, now: 60), "back to look: not until they interact anew")
     }
 
     /// "Clearly" at a moment reads only the opener acts and launches from before it.
