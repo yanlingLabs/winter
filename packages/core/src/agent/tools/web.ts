@@ -21,6 +21,9 @@
 //
 // So: no new daemon tool should be built on this file without a ruling, and nothing here may be
 // treated as dead weight to trim without reading the two reasons above first.
+import type { Transform } from "node:stream";
+import { createBrotliDecompress, createGunzip, createInflate, createInflateRaw } from "node:zlib";
+
 const MAX_FETCH_BYTES = 5 * 1024 * 1024; // hard cap on bytes READ off the wire (streamed — see readCapped)
 const MAX_REDIRECT_HOPS = 3;
 
@@ -1051,18 +1054,42 @@ export async function followRedirects(startUrl: string, opts: FollowRedirectsOpt
 /** What a host is under the reader's rule: this Mac's `loopback`, or another `private` address (or name). */
 export type AddressClass = "loopback" | "private";
 
+/** The reader's IPv4 classes: the shared table (`ipv4Refusal`) plus what no web server is ever at — multicast and the
+ *  reserved and broadcast space (`224.0.0.0/3`: 224/4 and 240/4), the benchmarking range (`198.18.0.0/15`) and the IETF
+ *  protocol assignments (`192.0.0.0/24`). The shared table itself is unchanged (the old Browser keeps its verdicts). */
 function ipv4Class(bits: number): AddressClass | null {
   if (bits === 0) return "private"; // 0.0.0.0, unspecified
-  return ipv4Refusal((bits >>> 24) & 0xff, (bits >>> 16) & 0xff) === null ? null : ((bits >>> 24) & 0xff) === 127 ? "loopback" : "private";
+  const a = (bits >>> 24) & 0xff;
+  const b = (bits >>> 16) & 0xff;
+  const c = (bits >>> 8) & 0xff;
+  if (ipv4Refusal(a, b) !== null) return a === 127 ? "loopback" : "private";
+  if (a >= 224) return "private";
+  if (a === 198 && (b === 18 || b === 19)) return "private";
+  if (a === 192 && b === 0 && c === 0) return "private";
+  return null;
 }
 
+const v4At = (bytes: Uint8Array, i: number, j: number, k: number, l: number): number => ((bytes[i]! << 24) | (bytes[j]! << 16) | (bytes[k]! << 8) | bytes[l]!) >>> 0;
+
+/** The reader's IPv6 classes: the shared rules plus site-local (`fec0::/10`), multicast (`ff00::/8`), Teredo
+ *  (`2001::/32`, a tunnel no web server is reached through), and every form that carries an IPv4 address — mapped
+ *  (`::ffff:0:0/96`), compatible (`::/96`), NAT64 (`64:ff9b::/96` and the local-use `64:ff9b:1::/48`) and 6to4
+ *  (`2002::/16`) — judged by that IPv4 address. */
 function ipv6Class(bytes: Uint8Array): AddressClass | null {
+  const zero = (from: number, to: number): boolean => bytes.slice(from, to).every((x) => x === 0);
   if (bytes.every((b) => b === 0)) return "private"; // ::
-  if (bytes.slice(0, 15).every((b) => b === 0) && bytes[15] === 1) return "loopback"; // ::1
-  if (bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 0xff && bytes[11] === 0xff) {
-    const v4 = ipv4Class(((bytes[12]! << 24) | (bytes[13]! << 16) | (bytes[14]! << 8) | bytes[15]!) >>> 0);
-    if (v4 !== null) return v4;
+  if (zero(0, 15) && bytes[15] === 1) return "loopback"; // ::1
+  const embedded = (bits: number): AddressClass | null => ipv4Class(bits);
+  if (zero(0, 10) && bytes[10] === 0xff && bytes[11] === 0xff) return embedded(v4At(bytes, 12, 13, 14, 15)); // mapped
+  if (zero(0, 12)) return embedded(v4At(bytes, 12, 13, 14, 15)); // compatible (deprecated, still routed by some stacks)
+  if (bytes[0] === 0x00 && bytes[1] === 0x64 && bytes[2] === 0xff && bytes[3] === 0x9b) {
+    if (zero(4, 12)) return embedded(v4At(bytes, 12, 13, 14, 15)); // 64:ff9b::/96
+    if (bytes[4] === 0x00 && bytes[5] === 0x01) return embedded(v4At(bytes, 6, 7, 9, 10)); // 64:ff9b:1::/48 (RFC 6052 /48 layout)
   }
+  if (bytes[0] === 0x20 && bytes[1] === 0x02) return embedded(v4At(bytes, 2, 3, 4, 5)); // 6to4
+  if (bytes[0] === 0x20 && bytes[1] === 0x01 && bytes[2] === 0x00 && bytes[3] === 0x00) return "private"; // Teredo
+  if (bytes[0] === 0xff) return "private"; // multicast
+  if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0xc0) return "private"; // fec0::/10, site-local
   return ipv6Refusal(bytes) === null ? null : "private";
 }
 
@@ -1128,6 +1155,34 @@ export function decodeNumericEntities(text: string): string {
   });
 }
 
+/**
+ * Numeric character references in MARKUP, before `htmlToText` reads it, so nothing is decoded twice (`&amp;#60;` stays
+ * the text `&#60;`): each becomes its character, except the five that are markup themselves (`<` `>` `&` `"` `'`),
+ * which become the named references `htmlToText` decodes once. U+0000, a lone surrogate or past U+10FFFF read U+FFFD.
+ */
+export function decodeNumericReferencesInMarkup(html: string): string {
+  return html.replace(/&#(?:([0-9]{1,8})|[xX]([0-9a-fA-F]{1,7}));/g, (_m, dec: string | undefined, hex: string | undefined) => {
+    const cp = dec !== undefined ? Number.parseInt(dec, 10) : Number.parseInt(hex!, 16);
+    if (!Number.isFinite(cp) || cp === 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return "\uFFFD";
+    switch (cp) {
+      case 0x3c: return "&lt;";
+      case 0x3e: return "&gt;";
+      case 0x26: return "&amp;";
+      case 0x22: return "&quot;";
+      case 0x27: return "&#39;";
+      default: return String.fromCodePoint(cp);
+    }
+  });
+}
+
+/** A document's title for the reader: its `<title>`, else its first `<h1>`; "" when it has neither. (`extractTitle`
+ *  above prefers the `<h1>` and answers "-" — unchanged for the old Browser.) */
+export function extractDocumentTitle(html: string): string {
+  const src = firstElementInner(html, "title") ?? firstElementInner(html, "h1");
+  if (src === null) return "";
+  return htmlToText(decodeNumericReferencesInMarkup(src)).replace(/\s+/g, " ").trim();
+}
+
 /** One hop's plan: the CHECKED addresses to connect to, in order (the next is tried only when one fails to connect). */
 export interface PinnedHop { addresses: readonly string[] }
 
@@ -1135,48 +1190,110 @@ export interface FollowWithOptions {
   /** Checks one hop (its scheme is http or https, it carries no user name or password): the addresses it may connect
    *  to, or why not. May throw (a policy refusal the caller raises itself). */
   prepare(url: URL): Promise<PinnedHop | { refused: string }>;
-  fetchFn?: (url: string, init: RequestInit & { tls?: { serverName?: string } }) => Promise<Response>;
+  fetchFn?: (url: string, init: RequestInit & { tls?: { serverName?: string }; decompress?: boolean }) => Promise<Response>;
   signal?: AbortSignal;
   maxHops: number;
   /** At most this many body bytes are read off the wire (streamed; past it the body is cut and `truncated`). */
   maxBytes: number;
+  /** At most this many bytes of the DECODED body (a compressed one is inflated by hand, streamed, and stops here). */
+  maxDecodedBytes: number;
+  /** The final response's content type, before its body is read: `false` refuses it unread (`kind: "type"`). */
+  acceptType?(contentType: string): boolean;
   /** Sent with every hop (the reader's fixed Accept and User-Agent). `Host` is the hop's own, always. */
   headers: Record<string, string>;
 }
 
 export type FollowWithResult =
   | { ok: true; url: string; status: number; contentType: string; body: Uint8Array; bytesRead: number; truncated: boolean }
-  | { ok: false; kind: "refused" | "redirects" | "timeout" | "network" | "invalid"; error: string; url: string };
+  | { ok: false; kind: "refused" | "redirects" | "timeout" | "network" | "invalid" | "type" | "encoding"; error: string; url: string; contentType?: string };
 
-/** `readCapped`'s streaming cut, keeping the BYTES (the reader decodes by the page's own charset). */
-async function readCappedBytes(res: Response, capBytes: number): Promise<{ body: Uint8Array; bytesRead: number; truncated: boolean }> {
-  if (!res.body) {
-    const all = new Uint8Array(await res.arrayBuffer());
-    return all.byteLength > capBytes ? { body: all.subarray(0, capBytes), bytesRead: capBytes, truncated: true } : { body: all, bytesRead: all.byteLength, truncated: false };
-  }
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
+/** The page redirected somewhere it may not go — said without echoing the page's own choice of address. */
+const REDIRECT_REFUSED = "the page redirected to an address Winter won't read";
+
+/** The compressions the reader inflates itself (`decompress: false`: never the fetch's own, which inflates EAGERLY and
+ *  so bounds nothing — a 3 KiB brotli body is gigabytes). */
+const DECODERS = new Set(["gzip", "x-gzip", "deflate", "br"]);
+
+/** A streaming inflater for `encoding`; a `deflate` body is zlib-wrapped or raw, told apart by its first two bytes. */
+function decoderFor(encoding: string, first: Uint8Array): Transform {
+  const opts = { chunkSize: 64 * 1024 };
+  if (encoding === "br") return createBrotliDecompress(opts);
+  if (encoding === "gzip" || encoding === "x-gzip") return createGunzip(opts);
+  const zlibWrapped = first.length >= 2 && (first[0]! & 0x0f) === 8 && ((first[0]! << 8) | first[1]!) % 31 === 0;
+  return zlibWrapped ? createInflate(opts) : createInflateRaw(opts);
+}
+
+/**
+ * The body, at most `wireCap` bytes off the wire and at most `outCap` bytes once decoded — a compressed body inflated
+ * here, streamed, the inflater DESTROYED the moment its output reaches the cap (measured: a 2 GiB bomb stops after
+ * ~6 MiB, ~10 MiB of memory). `bytesRead` counts the wire. A body whose compression fails partway keeps what was read
+ * (`truncated`); one that yields nothing is an error.
+ */
+async function readDecodedCapped(res: Response, encoding: string, wireCap: number, outCap: number): Promise<{ body: Uint8Array; bytesRead: number; truncated: boolean } | { error: string }> {
+  const chunks: Buffer[] = [];
+  let outLen = 0;
+  let wire = 0;
   let truncated = false;
+  const keep = (b: Uint8Array): boolean => {
+    const room = outCap - outLen;
+    if (b.byteLength > room) { chunks.push(Buffer.from(b.buffer, b.byteOffset, room)); outLen = outCap; truncated = true; return false; }
+    chunks.push(Buffer.from(b.buffer, b.byteOffset, b.byteLength));
+    outLen += b.byteLength;
+    return true;
+  };
+  const reader = res.body?.getReader();
+  if (reader === undefined) {
+    const all = new Uint8Array(await res.arrayBuffer());
+    wire = Math.min(all.byteLength, wireCap);
+    if (all.byteLength > wireCap) truncated = true;
+    if (encoding === "") keep(all.subarray(0, wireCap));
+    else return { error: "the page's compressed body could not be read" };
+    return { body: Buffer.concat(chunks), bytesRead: wire, truncated };
+  }
+  let dec: Transform | undefined;
+  let decFailed = false;
+  let decDone: Promise<void> | undefined;
   try {
     for (;;) {
+      if (truncated) break;
       const { done, value } = await reader.read();
       if (done) break;
-      if (!value) continue;
-      total += value.byteLength;
-      chunks.push(value);
-      if (total > capBytes) {
-        truncated = true;
-        try { await reader.cancel(); } catch { /* stream already closing */ }
-        break;
+      if (!value || value.byteLength === 0) continue;
+      let piece = value;
+      if (wire + piece.byteLength > wireCap) { piece = piece.subarray(0, wireCap - wire); truncated = true; }
+      wire += piece.byteLength;
+      if (encoding === "") { keep(piece); continue; }
+      if (dec === undefined) {
+        const d = decoderFor(encoding, piece);
+        dec = d;
+        decDone = new Promise<void>((resolve) => {
+          d.on("data", (c: Buffer) => { if (!keep(c)) { d.destroy(); resolve(); } });
+          d.on("end", () => resolve());
+          d.on("close", () => resolve());
+          d.on("error", () => { decFailed = true; resolve(); });
+        });
       }
+      if (dec.destroyed || decFailed) break;
+      if (!dec.write(piece)) {
+        const d = dec;
+        await Promise.race([new Promise<void>((r) => d.once("drain", () => r())), decDone!]);
+      }
+      if (decFailed || dec.destroyed) break;
     }
   } finally {
-    try { reader.releaseLock(); } catch { /* already released by cancel() */ }
+    try { await reader.cancel(); } catch { /* already closed */ }
+    try { reader.releaseLock(); } catch { /* released by cancel() */ }
   }
-  const combined = Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)));
-  const body = new Uint8Array(combined.buffer, combined.byteOffset, Math.min(combined.byteLength, capBytes));
-  return { body, bytesRead: body.byteLength, truncated };
+  if (dec !== undefined) {
+    if (!dec.destroyed && !decFailed) dec.end();
+    await decDone;
+    if (!dec.destroyed) dec.destroy();
+  }
+  if (decFailed) {
+    if (outLen === 0) return { error: "the page's compressed body could not be read" };
+    truncated = true;
+  }
+  return { body: Buffer.concat(chunks), bytesRead: wire, truncated };
 }
 
 /**
@@ -1190,9 +1307,9 @@ export async function followRedirectsWith(startUrl: string, opts: FollowWithOpti
   let current = startUrl;
   for (let redirects = 0; ; redirects++) {
     let url: URL;
-    try { url = new URL(current); } catch { return { ok: false, kind: "invalid", error: "a redirect named an address that is not a URL", url: current }; }
-    if (url.protocol !== "http:" && url.protocol !== "https:") return { ok: false, kind: "refused", error: `a redirect led to a ${url.protocol} address — only http(s) is read`, url: current };
-    if (url.username !== "" || url.password !== "") return { ok: false, kind: "refused", error: "a URL with a user name or password is not read", url: current };
+    try { url = new URL(current); } catch { return { ok: false, kind: "invalid", error: REDIRECT_REFUSED, url: current }; }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return { ok: false, kind: "refused", error: redirects === 0 ? "only http(s) is read" : REDIRECT_REFUSED, url: current };
+    if (url.username !== "" || url.password !== "") return { ok: false, kind: "refused", error: redirects === 0 ? "a URL with a user name or password is not read" : REDIRECT_REFUSED, url: current };
     const plan = await opts.prepare(url);
     if ("refused" in plan) return { ok: false, kind: "refused", error: plan.refused, url: current };
     if (plan.addresses.length === 0) return { ok: false, kind: "network", error: `${url.hostname} has no address`, url: current };
@@ -1202,8 +1319,8 @@ export async function followRedirectsWith(startUrl: string, opts: FollowWithOpti
     for (const address of plan.addresses) {
       const connect = new URL(url.toString());
       connect.hostname = address.includes(":") ? `[${address}]` : address;
-      const init: RequestInit & { tls?: { serverName?: string } } = {
-        method: "GET", redirect: "manual", signal: opts.signal,
+      const init: RequestInit & { tls?: { serverName?: string }; decompress?: boolean } = {
+        method: "GET", redirect: "manual", signal: opts.signal, decompress: false,
         headers: { ...opts.headers, Host: url.host },
         ...(url.protocol === "https:" && !hostIsIp ? { tls: { serverName: url.hostname } } : {}),
       };
@@ -1223,15 +1340,26 @@ export async function followRedirectsWith(startUrl: string, opts: FollowWithOpti
       try { await res.body?.cancel(); } catch { /* already closed */ }
       if (redirects >= opts.maxHops) return { ok: false, kind: "redirects", error: `too many redirects (more than ${opts.maxHops})`, url: current };
       try { current = new URL(res.headers.get("location")!, url).toString(); } catch {
-        return { ok: false, kind: "invalid", error: "a redirect named an address that is not a URL", url: current };
+        return { ok: false, kind: "invalid", error: REDIRECT_REFUSED, url: current };
       }
       continue;
     }
-    let read: { body: Uint8Array; bytesRead: number; truncated: boolean };
-    try { read = await readCappedBytes(res, opts.maxBytes); } catch (e) {
+    const contentType = res.headers.get("content-type") ?? "";
+    const encoding = (res.headers.get("content-encoding") ?? "").trim().toLowerCase();
+    if (opts.acceptType !== undefined && !opts.acceptType(contentType)) {
+      try { await res.body?.cancel(); } catch { /* already closed */ }
+      return { ok: false, kind: "type", error: "not text", url: current, contentType };
+    }
+    if (encoding !== "" && encoding !== "identity" && !DECODERS.has(encoding)) {
+      try { await res.body?.cancel(); } catch { /* already closed */ }
+      return { ok: false, kind: "encoding", error: "the page is compressed in a way Winter doesn't read", url: current };
+    }
+    let read: Awaited<ReturnType<typeof readDecodedCapped>>;
+    try { read = await readDecodedCapped(res, encoding === "identity" ? "" : encoding, opts.maxBytes, opts.maxDecodedBytes); } catch (e) {
       if (opts.signal?.aborted === true) return { ok: false, kind: "timeout", error: `timed out reading ${url.host}`, url: current };
       return { ok: false, kind: "network", error: `the connection to ${url.host} broke while reading`, url: current };
     }
-    return { ok: true, url: current, status: res.status, contentType: res.headers.get("content-type") ?? "", ...read };
+    if ("error" in read) return { ok: false, kind: "encoding", error: read.error, url: current };
+    return { ok: true, url: current, status: res.status, contentType, ...read };
   }
 }

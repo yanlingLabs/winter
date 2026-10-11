@@ -36,10 +36,12 @@ function world(o: { policy?: SessionFacts["policy"] } = {}) {
   const policy = new ComputerPolicy({ settings: () => settings, saveAlwaysGrant: () => {}, approvals: new ApprovalBroker(), emit: () => {}, session: () => facts, attended: () => true });
   const fetched: string[] = [];
   const reader = new HttpReader({
+    env: {},
     resolve: async () => ["93.184.216.34"],
     fetchFn: async (_url, init) => {
       const host = ((init.headers ?? {}) as Record<string, string>).Host ?? "";
       fetched.push(host);
+      if (host === "controls.example") return new Response("\u0001".repeat(1_000_000) + "end", { headers: { "content-type": "text/plain" } });
       const n = /^doc(\d+)\.example$/.exec(host)?.[1] ?? "?";
       return new Response(`<html><head><title>Doc ${n}</title></head><body><h1>Page ${n}</h1><p>Body of page ${n}.</p></body></html>`, { headers: { "content-type": "text/html" } });
     },
@@ -67,7 +69,7 @@ describe("browsers.read through the ComputerV2 service", () => {
     ].join("\n"));
     expect(r.isError).toBe(false);
     const t = text(r);
-    expect(t).toContain("20 200 Page 7 # Page 7 true");
+    expect(t).toContain("20 200 Doc 7 # Page 7 true");
     expect(t).toMatch(/<screen-data id="[0-9a-f]+">/);
     expect(t).toContain("read https://doc3.example/ — 200 text/html");
     expect(w.fetched.length).toBe(21);
@@ -82,6 +84,15 @@ describe("browsers.read through the ComputerV2 service", () => {
     const r = await w.run("try { await browsers.read('http://192.168.1.1/') } catch (e) { print(e instanceof NotAllowed, e.message) }");
     expect(text(r)).toContain("true 192.168.1.1 is a private network address");
     expect(w.fetched).toEqual([]);
+  }, 30_000);
+
+  macOnly("a page of a million control characters answers at once (they are removed — never a reply too large for the bridge)", async () => {
+    const w = world();
+    const t0 = Date.now();
+    const r = await w.run("const p = await browsers.read('https://controls.example/', { emit: false }); print('got', p.text)");
+    expect(r.isError).toBe(false);
+    expect(text(r)).toContain("got end");
+    expect(Date.now() - t0).toBeLessThan(10_000);
   }, 30_000);
 
   macOnly("every browsers.* primitive reaches the engine (none falls through to an app target)", async () => {
