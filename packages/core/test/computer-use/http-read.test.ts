@@ -6,7 +6,7 @@
 // thing on loopback: a pinned TLS connect verified against the original name, gzip, and the address fallback.
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addressClassOf, decodeNumericEntities, ipAddressClass } from "../../src/agent/tools/web";
@@ -396,8 +396,8 @@ const servers: Array<{ stop(force?: boolean): void }> = [];
 afterEach(() => { for (const s of servers.splice(0)) s.stop(true); });
 
 function makeCert(): { cert: string; key: string } | undefined {
-  const openssl = ["/opt/homebrew/bin/openssl", "/usr/bin/openssl"].find((p) => existsSync(p));
-  if (openssl === undefined) return undefined;
+  const openssl = Bun.which("openssl");
+  if (openssl === null) return undefined;
   const dir = mkdtempSync(join(tmpdir(), "winter-read-tls-"));
   try {
     execFileSync(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(dir, "key.pem"), "-out", join(dir, "cert.pem"), "-days", "1",
