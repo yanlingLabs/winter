@@ -3,6 +3,7 @@
 //
 //   Tab "Checkout — Shop" — https://shop.example.com/cart · focused [12] · settled 120 ms
 //   dialog confirm "Leave this page?" — [91] button "OK" · [92] button "Cancel"
+//   site tools (WebMCP): search_site, add_to_cart — tab.tools() describes them
 //   [1] main
 //     [2] heading "Your cart" (level 2)
 //     [3] link "Continue shopping" → shop.example.com
@@ -59,9 +60,14 @@ export interface TabHeader {
   newPage?: boolean;
   unread?: number;
   dialog?: TabDialogLine;
+  /** Phase 4 (WebMCP): the page's own tools, by name (`total` may exceed the names); `total: 0` in a diff: they went. */
+  siteTools?: { names: string[]; total: number };
   /** Lines after the header and the dialog (a file chooser the page opened, a download it started). */
   notes?: string[];
 }
+
+/** At most this many tool names on a state's line. */
+export const SITE_TOOLS_LINE_NAMES = 20;
 
 export function quote(s: string): string {
   let out = "\"";
@@ -98,9 +104,19 @@ export function dialogLine(d: TabDialogLine): string {
   return `dialog ${d.type} ${quote(cut(d.message, 300))} — ${buttons.join(" · ")}`;
 }
 
+/** The page's tools on one line: the first names (the page's own, already checked to be plain ASCII names), the count
+ *  of the rest, and where to read them. */
+export function siteToolsLine(t: { names: string[]; total: number }): string {
+  if (t.total === 0 || t.names.length === 0) return "site tools (WebMCP): none now";
+  const shown = t.names.slice(0, SITE_TOOLS_LINE_NAMES);
+  const more = Math.max(0, t.total - shown.length);
+  return `site tools (WebMCP): ${shown.join(", ")}${more > 0 ? ` … and ${more} more` : ""} — tab.tools() describes them`;
+}
+
 function headLines(h: TabHeader): string[] {
   const out = [headerLine(h)];
   if (h.dialog !== undefined) out.push(dialogLine(h.dialog));
+  if (h.siteTools !== undefined) out.push(siteToolsLine(h.siteTools));
   for (const n of h.notes ?? []) out.push(n);
   return out;
 }
@@ -341,6 +357,8 @@ export interface TabSnapshot {
   /** The refs whose own line the model has SEEN for this snapshot (its folded print's lines, or a diff's lines on top of
    *  what its base had shown). Absent: everything in it. */
   shown?: Set<number>;
+  /** Phase 4 (WebMCP): the page's tool set when read ("" for none) — a diff names the tools only when it changed. */
+  siteTools?: string;
 }
 
 export function makeSnapshot(id: string, roots: readonly TabNode[], scope?: number, shown?: Set<number>): TabSnapshot {

@@ -3171,6 +3171,12 @@ class WinterApp : public CefApp, public CefBrowserProcessHandler {
     }
     command_line->AppendSwitchWithValue(kSwitch, value);
     Log("disable-features=%s (upstream ReadAnythingSoftNavigationObserver null-deref)", value.c_str());
+    // WebMCP (ComputerV2 Phase 4): a site's own agent tools, `document.modelContext` — off by default in this Chromium
+    // (an origin trial). Process-wide and fixed at launch, so always on; the daemon's `computerUse.webmcp` decides
+    // whether Winter reads or calls them. Appended like the switch above.
+    static const char kEnable[] = "enable-features";
+    const std::string enabled = command_line->HasSwitch(kEnable) ? command_line->GetSwitchValue(kEnable).ToString() : "";
+    command_line->AppendSwitchWithValue(kEnable, enabled.empty() ? "WebMCP" : enabled + ",WebMCP");
   }
 
   void OnContextInitialized() override {
