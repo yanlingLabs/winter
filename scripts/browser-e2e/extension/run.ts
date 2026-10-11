@@ -330,7 +330,7 @@ async function main(): Promise<void> {
     const chromeLog: string[] = [];
     chrome = spawn(exe, [
       "--headless=new", `--user-data-dir=${profile}`, `--load-extension=${extensionDir}`, "--no-first-run", "--no-default-browser-check",
-      "--disable-gpu", "--window-size=1200,900", "--force-device-scale-factor=2", "--remote-debugging-port=0", `${base}/user.html`,
+      "--disable-gpu", "--window-size=1200,900", "--force-device-scale-factor=2", "--remote-debugging-port=0", "--enable-features=WebMCP", `${base}/user.html`,
     ], {
       env: { ...process.env, WINTER_BROWSER_HOST_HOME: home, WINTER_CU_TEST_DAEMON_REQUIREMENT: bunDr },
       stdio: ["ignore", "ignore", "pipe"],
@@ -398,6 +398,14 @@ async function main(): Promise<void> {
     check(await code(raw("Page.navigate", { url: "file:///etc/hosts" })) === "not_allowed", "…and to a file: URL");
     const titleAfter = await evalIn<string>("document.title");
     check(titleAfter.result.value === "Winter e2e page", "…none of which ran", titleAfter.result.value);
+
+    // Phase 4 (WebMCP, Route A): the page's own tools are read and run from the winter world through Winter for Chrome
+    // — the engine's page runtime does exactly this inside Runtime.callFunctionOn; nothing new is allowlisted.
+    const inWinter = <T>(expression: string) => transport.send<{ result: { value?: T } }>(tab.tabKey, "Runtime.evaluate", { contextId: world.executionContextId, expression, returnByValue: true, awaitPromise: true });
+    const listed = await inWinter<string>("(async () => { const mc = document.modelContext; if (!mc) return 'no API'; const ts = await mc.getTools(); return ts.filter((t) => t.window === window).map((t) => t.name).join(','); })()");
+    check(listed.result.value === "count_clicks", "WebMCP through the extension: the winter world lists the page's own tool", listed.result.value);
+    const ran = await inWinter<string>("(async () => { const mc = document.modelContext; const t = (await mc.getTools()).find((x) => x.name === 'count_clicks'); try { return await mc.executeTool(t, '{}'); } catch (e) { if (!(e instanceof TypeError)) throw e; return await mc.executeTool(t, {}); } })()");
+    check(typeof ran.result.value === "string" && JSON.parse(ran.result.value).clicks === 0, "…and runs it there (the page's own callback answers)", ran.result.value);
 
     // Network events arrive reduced (Phase 3: the request's URL and method, its timing and frame — never headers, cookies
     // or post data), exactly as `cdp-reduce.ts` leaves them.

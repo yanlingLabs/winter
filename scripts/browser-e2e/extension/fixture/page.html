@@ -19,5 +19,10 @@
     const params = new URLSearchParams(location.search);
     if (params.get("frame")) document.getElementById("frame").src = params.get("frame");
     fetch("/ping?n=1").catch(() => {});
+    // Phase 4 (WebMCP): one tool of the page's own, when the browser offers the API.
+    if (document.modelContext) {
+      document.modelContext.registerTool({ name: "count_clicks", description: "How often Count was pressed",
+        execute: async () => ({ clicks: Number(document.body.dataset.clicks) }) });
+    }
   </script>
 </body></html>

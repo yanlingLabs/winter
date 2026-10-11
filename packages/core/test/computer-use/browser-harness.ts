@@ -34,6 +34,8 @@ export interface HarnessOpts {
   headless?: boolean;
   /** More engine deps (Phase 4's headless hooks). */
   engineDeps?: Partial<BrowserEngineDeps>;
+  /** Phase 4: `computerUse.webmcp` as each primitive reads it (default on). */
+  webMcp?: () => boolean;
 }
 
 export function harness(o: HarnessOpts = {}) {
@@ -114,6 +116,7 @@ export function harness(o: HarnessOpts = {}) {
     const browsers = new Set<string>();
     let downloads = 0;
     let handoffs = 0;
+    let siteTools = 0;
     const scope: TabRunScope = {
       sessionId, runId, callId: "cv2_test", vision: o.vision ?? true, signal: abort.signal,
       live: () => { if (abort.signal.aborted) throw new Error("ended"); },
@@ -134,6 +137,7 @@ export function harness(o: HarnessOpts = {}) {
       builder, lastTargetShot, acted, diffBases, metric,
       keepImage: (img) => { const id = `img${images.size + 1}`; images.set(id, { data: img.imageBase64 }); return { image: id, width: img.width, height: img.height }; },
       noteSite: (h) => sites.add(h), noteBrowser: (b) => browsers.add(b), noteDownload: () => { downloads++; }, trusted: () => {},
+      webMcp: () => o.webMcp?.() ?? true, noteSiteTool: () => { siteTools++; },
     };
     const end = (): void => {
       abort.abort();
@@ -142,7 +146,7 @@ export function harness(o: HarnessOpts = {}) {
       engine.runEnded(sessionId, runId);
     };
     const text = (): string => builder.build().content.map((c) => (c.type === "text" ? c.text : "[image]")).join("");
-    return { scope, builder, end, text, metric, sites, browsers, grants, abort, downloads: () => downloads, handoffs: () => handoffs };
+    return { scope, builder, end, text, metric, sites, browsers, grants, abort, downloads: () => downloads, handoffs: () => handoffs, siteTools: () => siteTools };
   };
   return { engine, registry, winter, chrome, headless, winterReg, chromeReg, panel, closedWinter, cards, approvals, run, locks, diffBases, home, cwd, tmp, facts, stops, policy };
 }

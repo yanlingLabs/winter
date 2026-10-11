@@ -54,11 +54,14 @@ describe("the extension ids", () => {
     expect(swiftStrings(hostSwift("ExtensionIds.swift"), "dev")).toEqual([derived]);
   });
 
-  test("dist: the store ids, the same in the daemon, the host and Winter.app's manifest writer (none before the first upload)", () => {
+  test("dist: the store ids, the same in the daemon, the host and Winter.app's manifest writer, and never the dev id", () => {
     const app = read("apple", "Winter", "Sources", "BrowserExtension", "BrowserHostManifest.swift");
     expect(swiftStrings(hostSwift("ExtensionIds.swift"), "dist")).toEqual([...EXTENSION_IDS.dist]);
     expect(swiftStrings(app, "storeExtensionIds")).toEqual([...EXTENSION_IDS.dist]);
     for (const id of [...EXTENSION_IDS.dist, ...EXTENSION_IDS.dev]) expect(id).toMatch(/^[a-p]{32}$/);
+    expect(EXTENSION_IDS.dist.length).toBeGreaterThan(0);
+    expect(new Set(EXTENSION_IDS.dist).size).toBe(EXTENSION_IDS.dist.length);
+    for (const id of EXTENSION_IDS.dev) expect(EXTENSION_IDS.dist).not.toContain(id);
   });
 
   test("the dev key is a public key only", () => {
@@ -71,10 +74,10 @@ describe("the extension ids", () => {
 describe("names and identities", () => {
   test("the native-host names: daemon, host, extension builds and Winter.app's writer", async () => {
     const identity = hostSwift("HostIdentity.swift");
-    const ext = await import(join(REPO, ...EXT, "src", "manifest.ts")) as { HOST_NAME: { dev: string; store: string } };
+    const ext = await import(join(REPO, ...EXT, "src", "manifest.ts")) as { HOST_NAME: { dev: string; store: string; edge: string } };
     expect(swiftString(identity, "distNativeHostName")).toBe(NATIVE_HOST_NAME.dist);
     expect(swiftString(identity, "devNativeHostName")).toBe(NATIVE_HOST_NAME.dev);
-    expect(ext.HOST_NAME).toEqual({ store: NATIVE_HOST_NAME.dist, dev: NATIVE_HOST_NAME.dev });
+    expect(ext.HOST_NAME).toEqual({ store: NATIVE_HOST_NAME.dist, edge: NATIVE_HOST_NAME.dist, dev: NATIVE_HOST_NAME.dev });
     expect(swiftString(read("apple", "Winter", "Sources", "BrowserExtension", "BrowserHostManifest.swift"), "hostName")).toBe(NATIVE_HOST_NAME.dist);
   });
 

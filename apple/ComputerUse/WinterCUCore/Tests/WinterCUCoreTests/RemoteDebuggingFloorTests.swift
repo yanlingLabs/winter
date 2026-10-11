@@ -14,6 +14,7 @@ final class RemoteDebuggingFloorTests: XCTestCase {
     let dialog = fakeElement(99_005)
     let dialogText = fakeElement(99_006)
     let other = fakeElement(99_007)
+    let otherArea = fakeElement(99_008)
 
     var ax: FakeAX!
     var sys: FakeSystem!
@@ -21,7 +22,8 @@ final class RemoteDebuggingFloorTests: XCTestCase {
     var target: CUTarget!
 
     private func world(bundle: String = "com.google.Chrome", url: String = "chrome://inspect/#remote-debugging",
-                       dialogUp: Bool = false, standardTitled: String? = nil) {
+                       dialogUp: Bool = false, standardTitled: String? = nil, chromium: Bool? = nil, accessible: Bool = true,
+                       serverTitle: String = "") {
         ax = FakeAX()
         var windows = [window]
         if dialogUp { windows.insert(dialog, at: 0) }
@@ -42,18 +44,23 @@ final class RemoteDebuggingFloorTests: XCTestCase {
                extra: [kAXChildrenAttribute: [dialogText]])
         ax.add(dialogText, role: kAXStaticTextRole, extra: [kAXParentAttribute: dialog, kAXValueAttribute: "Allow remote debugging?"])
         ax.add(other, role: kAXWindowRole, subrole: kAXStandardWindowSubrole, title: standardTitled ?? "",
-               frame: CGRect(x: 900, y: 0, width: 400, height: 300))
+               frame: CGRect(x: 900, y: 0, width: 400, height: 300), extra: [kAXChildrenAttribute: [otherArea]])
+        ax.add(otherArea, role: "AXWebArea", frame: CGRect(x: 900, y: 40, width: 400, height: 260),
+               extra: [kAXParentAttribute: other, "AXURL": "https://example.com/tutorial"])
 
         sys = FakeSystem()
         sys.running = [pid]
         sys.bundles[pid] = bundle
-        sys.windows[77] = FakeSystem.window(77, pid: pid, CGRect(x: 0, y: 0, width: 800, height: 600))
+        var w77 = FakeSystem.window(77, pid: pid, CGRect(x: 0, y: 0, width: 800, height: 600))
+        w77.title = serverTitle
+        sys.windows[77] = w77
         sys.stack = [sys.windows[77]!]
         sys.front = 1
         core = CUCore(events: nil, clock: CUSystemClock(), skyLight: recordingSkyLight(), poster: RecordingPoster(), ax: ax, sys: sys,
                       pasteboard: { PasteAndQueueTests.FakePasteboard([]) }, startMonitors: false)
-        target = CUTarget(id: "t1", sessionId: "s", pid: pid, bundleId: bundle, appName: "Google Chrome", isChromium: true,
-                          mirror: false, windowID: 77, windowTitle: "Inspect")
+        target = CUTarget(id: "t1", sessionId: "s", pid: pid, bundleId: bundle, appName: "Google Chrome",
+                          isChromium: chromium ?? (bundle != "com.apple.Safari"), mirror: false, windowID: 77, windowTitle: "Inspect")
+        target.accessible = accessible
         core.registerForTesting(target, windowElement: window)
         target.refs.beginGeneration()
     }
@@ -111,5 +118,32 @@ final class RemoteDebuggingFloorTests: XCTestCase {
     func testAPageTitledSoIsNoDialog() {
         world(url: "https://example.com", standardTitled: "Allow remote debugging — a tutorial")
         XCTAssertNoThrow(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(toolbarButton)))), target))
+    }
+
+    /// Review of round 11, MEDIUM #8: any Chromium-based app (Edge Canary is in no list), any non-web scheme's `inspect`.
+    func testEveryChromiumAppAndAnyNonWebSchemeAreCovered() {
+        world(bundle: "com.microsoft.edgemac.Canary", url: "edge://inspect/#devices", chromium: true)
+        XCTAssertThrowsError(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(checkbox)))), target))
+        XCTAssertTrue(CUCore.isInspectPage("comet://inspect/#remote-debugging"))
+        XCTAssertFalse(CUCore.isInspectPage("https://inspect.example.com/"))
+    }
+
+    /// A capture-only bind still sends point clicks: judged by the window server's titles.
+    func testACaptureOnlyBindIsJudgedByItsWindowTitle() {
+        world(accessible: false, serverTitle: "Inspect with Chrome Developer Tools")
+        XCTAssertThrowsError(try core.floorCheckRemoteDebugging(params(.key(CUKeyAction(combo: "space"))), target)) {
+            XCTAssertTrue(isRemoteDebuggingRefusal($0))
+        }
+        world(accessible: false, serverTitle: "Example Domain")
+        XCTAssertNoThrow(try core.floorCheckRemoteDebugging(params(.key(CUKeyAction(combo: "space"))), target))
+    }
+
+    /// A standard window with no web page that says "Allow remote debugging" is the dialog too.
+    func testAStandardWindowWithNoPageThatSaysSoIsTheDialog() {
+        world(url: "https://example.com", standardTitled: "")
+        ax.put(other, [kAXChildrenAttribute: [dialogText]])
+        XCTAssertThrowsError(try core.floorCheckRemoteDebugging(params(.click(CUClickAction(ref: ref(toolbarButton)))), target)) {
+            XCTAssertTrue(isRemoteDebuggingRefusal($0))
+        }
     }
 }

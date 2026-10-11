@@ -13,7 +13,7 @@
 // rejects `Cancelled` (and the helper is told to stop that work by call id), every later primitive throws, and a
 // script that has not settled 1 s later loses its worker (the SDK's cancel bound is 5 s).
 import { randomBytes } from "node:crypto";
-import { computerUsePrivateEventPathFrom, computerUseMirrorFrom, computerUseScreenshotMaxDimFrom, type Settings } from "../settings";
+import { computerUsePrivateEventPathFrom, computerUseMirrorFrom, computerUseScreenshotMaxDimFrom, computerUseWebMcpFrom, type Settings } from "../settings";
 import { nextScreenshotQuality, screenshotBudgetFor, SCREENSHOT_BYTE_CAP, SCREENSHOT_QUALITY } from "./budget";
 import { DiffBases } from "./diff-base";
 import { AUTOMATION_ERROR_KINDS, AutomationFailure, isAutomationFailure } from "./errors";
@@ -32,7 +32,8 @@ import type { RecentApps } from "./recent-apps";
 import { ResultBuilder, type ResultContent, type ScriptError } from "./result";
 import type { AutomationTelemetry, PrimitiveMetric } from "./telemetry";
 import { AutomationWorker, AutomationWorkerUnavailable, type AutomationWorkerOptions, type CallMessage } from "./worker-host";
-import { APP_PRIMITIVES, BROWSER_PRIMITIVES, EXTRA_PRIMITIVES, GLOBAL_PRIMITIVES, TAB_PRIMITIVES, type AppHandle, type ImageHandle } from "./worker/bridge";
+import { APP_PRIMITIVES, BROWSER_PRIMITIVES, EXTRA_PRIMITIVES, GLOBAL_PRIMITIVES, SCRIPT_PRIMITIVES, savedScriptNameOk, TAB_PRIMITIVES, type AppHandle, type ImageHandle, type SavedScriptSource } from "./worker/bridge";
+import { SavedScripts } from "./saved-scripts";
 import type { AdapterRunScope, AppAdapters } from "./adapters";
 import { AdapterDelivery } from "./adapters/delivery";
 import type { BrowserEngine } from "./browser/engine";
@@ -105,6 +106,8 @@ export interface ComputerV2ServiceDeps {
   screenshotSink?(shot: { sessionId: string; primitive: string; mime: string; base64: string }): void;
   /** App adapters (Phase 2): extras, dictionary wrappers and guides, delivered at bind (`adapters/`). */
   adapters?: AppAdapters;
+  /** Phase 4: the sessions' saved scripts (`scripts.save`); the service makes its own when absent. */
+  savedScripts?: SavedScripts;
 }
 
 /** `windowId`: the bound window (its window-server id), from the bind and every `useWindow` — what an app adapter's
@@ -250,8 +253,13 @@ interface RunCtx {
   downloads?: number;
   /** waitForUser() hand-offs asked for this run (a count, for the audit line). */
   handoffs?: number;
+  /** Phase 4: site tools (WebMCP) called this run (a count, for the audit line — never a name). */
+  siteTools?: number;
   /** Phase 2: browser-tab primitives still running (the run's tab locks wait for them at its end). */
   tabWork?: Set<Promise<unknown>>;
+  /** Phase 4, for the audit line: the saved scripts this run saved and ran (names only). */
+  scriptsSaved?: Set<string>;
+  scriptsRan?: Set<string>;
 }
 
 const isRef = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
@@ -276,11 +284,20 @@ export class ComputerV2Service {
   /** Which apps' "web pages don't react to hover" line this session's model has seen (once per session per app; again
    *  after a compaction, a reset, a worker restart — the adapter delivery's rule). */
   readonly hoverNotes = new AdapterDelivery();
+  /** Phase 4: the sessions' saved scripts — outside `SessionState`, which the idle end deletes. */
+  readonly savedScripts: SavedScripts;
+  /**
+   * Sessions that have had a worker: kept OUTSIDE `SessionState` — the idle end deletes that, so without
+   * this the next call started silently and the model found out from an `undefined` or a `TargetLost` that its
+   * variables and handles were gone. Removed only when the session is deleted (and with the daemon).
+   */
+  private readonly ranWorker = new Set<string>();
   private stopped = false;
 
   constructor(private readonly deps: ComputerV2ServiceDeps) {
     this.locks = deps.locks ?? new TargetLocks();
     this.diffBases = deps.diffBases ?? new DiffBases();
+    this.savedScripts = deps.savedScripts ?? new SavedScripts();
   }
 
   private now(): number { return (this.deps.now ?? Date.now)(); }
@@ -325,19 +342,31 @@ export class ComputerV2Service {
   private async runNow(call: ScriptCall, input: ScriptInput, state: SessionState, timeoutMs: number): Promise<ScriptResult> {
     const { sessionId } = call;
     const builder = new ResultBuilder();
+    // Saved scripts survive a reset and every restart (re-installed below): the notice says so — never which.
+    const kept = this.savedScripts.any(sessionId) ? " Saved scripts are kept." : "";
+    // The daemon-wide memory cap cleared this session's scripts for another one: said once.
+    if (this.savedScripts.takeEvicted(sessionId)) builder.notice("This session's saved scripts were cleared to free memory — save them again.");
     if (input.reset === true) {
       this.resetSession(sessionId, state);
-      builder.notice("The automation runtime was reset: earlier variables and bindings are gone (apps stay open).");
+      builder.notice(`The automation runtime was reset: earlier variables and bindings are gone (apps stay open).${kept}`);
     } else if (state.worker === undefined || !state.worker.alive) {
-      if (state.hadWorker) builder.notice("The automation runtime restarted; earlier variables and bindings are gone.");
+      if (state.hadWorker) builder.notice(`The automation runtime restarted; earlier variables and bindings are gone.${kept}`);
+      // The idle end deleted this session's state with its `hadWorker`; `ranWorker` remembers it had one.
+      else if (this.ranWorker.has(sessionId)) builder.notice(`The automation runtime restarted after ${idleWords(this.deps.idleMs ?? WORKER_IDLE_MS)} without use; earlier variables and bindings are gone.${kept}`);
       this.forgetBindings(sessionId, state);
     }
     // The fence is per SESSION: a runtime that read the screen in an earlier call may print what it read now.
     if (state.tainted) builder.markScreenRead();
+    // A FRESH worker (a first call, a reset, an idle end, a crash, a cancel that killed it) gets the session's saved
+    // scripts before its first run.
+    let install: SavedScriptSource[] | undefined;
     if (state.worker === undefined || !state.worker.alive) {
       try {
         state.worker = await (this.deps.startWorker?.() ?? AutomationWorker.start({ ...this.deps.worker, log: (l) => this.log(l) }));
         state.hadWorker = true;
+        this.ranWorker.add(sessionId);
+        const saved = this.savedScripts.forInstall(sessionId);
+        if (saved.length > 0) install = saved;
       } catch (err) {
         const message = err instanceof AutomationWorkerUnavailable ? err.message : `the automation runtime could not start (${err instanceof Error ? err.message : "error"})`;
         return builder.build({ error: { name: "HelperUnavailable", message } });
@@ -391,7 +420,16 @@ export class ComputerV2Service {
         if (img === undefined) { builder.text("[show(): that image is no longer available]"); return; }
         builder.image(img.data, img.mime);
       },
-    });
+    }, install);
+    // A saved script the fresh worker left out (it stores the daemon's copy only after the same name and shape checks
+    // the daemon made, so only a FORGED report reaches this): said once, unnamed (a name is the model's own text), and
+    // only for a name this run actually sent. The daemon keeps its copy — there is no delete door.
+    if (outcome.kind === "done" && install !== undefined && outcome.installFailed !== undefined) {
+      const sent = new Set(install.map((e) => e.name));
+      if (outcome.installFailed.some((name) => sent.has(name))) {
+        builder.notice("A saved script could not be re-created in the fresh runtime and was dropped from it.");
+      }
+    }
 
     // Cancelled with a type/paste still in flight: the worker gave the script up at once, but the helper's answer
     // (how far the typing got) is worth the wait — the helper stops within a key and answers within the client's
@@ -438,7 +476,7 @@ export class ComputerV2Service {
 
     // The taint outlives the call (the fence is per session) — unless the runtime is gone below.
     if (builder.readScreen) state.tainted = true;
-    let error: ScriptError | undefined;
+    let error: (ScriptError & { place?: string }) | undefined;
     let outcomeWord: string;
     if (outcome.kind === "exited") {
       state.worker = undefined;
@@ -451,6 +489,9 @@ export class ComputerV2Service {
       // The worker is UNTRUSTED (the model's code shares its process): its error name is normalised to a known
       // kind or `Error` before it reaches the result or the audit line, and its message and line are bounded.
       error = outcome.error === undefined ? undefined : normaliseScriptError(outcome.error, ctx.daemonSentences);
+      // A daemon sentence thrown inside a saved script: the sentence alone is the daemon's (outside the fence); the
+      // place the worker appended ("(in saved script x, line n)" — a name is the model's own text) is the script's.
+      if (error?.place !== undefined) builder.text(error.place);
       if (outcome.note === "declarations-not-kept") builder.notice("This script's top-level declarations could not be kept for later calls.");
       outcomeWord = ctx.timedOut ? "timeout" : ctx.cancelled !== undefined ? "cancelled" : error === undefined ? "ok" : `error:${error.name}`;
     }
@@ -459,8 +500,15 @@ export class ComputerV2Service {
       durationMs: this.now() - started, outcome: outcomeWord, ...(ctx.visitsClaimed > 0 ? { desktopVisits: ctx.visitsClaimed } : {}),
       ...(ctx.sites === undefined ? {} : { sites: [...ctx.sites] }), ...(ctx.browsers === undefined ? {} : { browsers: [...ctx.browsers] }),
       ...(ctx.downloads === undefined ? {} : { downloads: ctx.downloads }), ...(ctx.handoffs === undefined ? {} : { handoffs: ctx.handoffs }),
+      ...(ctx.siteTools === undefined ? {} : { siteTools: ctx.siteTools }),
+      // Saved scripts: their NAMES only — never a source or an argument.
+      ...(ctx.scriptsSaved === undefined && ctx.scriptsRan === undefined ? {} : {
+        scripts: { ...(ctx.scriptsSaved === undefined ? {} : { saved: [...ctx.scriptsSaved] }), ...(ctx.scriptsRan === undefined ? {} : { ran: [...ctx.scriptsRan] }) },
+      }),
     });
-    return builder.build(error === undefined ? {} : { error });
+    if (error === undefined) return builder.build({});
+    const { place: _place, ...shown } = error;
+    return builder.build({ error: shown });
   }
 
   /** `script.active` for this run, on the helper connection that is live now (a relaunched helper is told again). */
@@ -521,11 +569,14 @@ export class ComputerV2Service {
       const on = msg.target === undefined ? undefined : ctx.state.targets.get(msg.target)?.name ?? this.deps.browsers?.label(ctx.sessionId, msg.target);
       ctx.lastPrimitive = `${msg.primitive}()${on === undefined ? "" : ` in ${on}`}`;
     }
+    // Every `browsers.*` primitive is the engine's — by `BROWSER_PRIMITIVES` itself, never a second hand-kept list (one
+    // here once left Phase 3's windows/group/history/bookmarks unreachable from a script).
+    if (BROWSER_GLOBALS.has(msg.primitive)) {
+      if (this.deps.browsers === undefined) throw new AutomationFailure("BrowserUnavailable", "browsers are not available in this daemon");
+      return await this.trackTabWork(ctx, this.deps.browsers.global(this.tabScope(ctx, metric), msg.primitive, args));
+    }
     switch (msg.primitive) {
       case "timeLeft": return Math.max(0, Math.floor(ctx.timer.left()));
-      case "browsers.list": case "browsers.open": case "browsers.tabs": case "browsers.tab":
-        if (this.deps.browsers === undefined) throw new AutomationFailure("BrowserUnavailable", "browsers are not available in this daemon");
-        return await this.trackTabWork(ctx, this.deps.browsers.global(this.tabScope(ctx, metric), msg.primitive, args));
       case "apps.list": return await this.appsList(ctx, args, metric);
       case "apps.open": {
         const target = str(args.app)?.trim();
@@ -543,6 +594,8 @@ export class ComputerV2Service {
       case "screen.screenshot": return await this.screenScreenshot(ctx, args, metric);
       case "screen.windows": return await this.screenWindows(ctx, args, metric);
       case "screen.appAt": return await this.screenAppAt(ctx, args, metric);
+      case "scripts.save": return this.saveScript(ctx, args, metric);
+      case "scripts.run": return this.runSavedScript(ctx, args, metric);
       default: break;
     }
     const targetId = msg.target ?? "";
@@ -551,6 +604,29 @@ export class ComputerV2Service {
     const run = prev.catch(() => {}).then(() => this.targetPrimitive(ctx, targetId, msg.primitive, args, metric));
     ctx.chains.set(targetId, run);
     return await run;
+  }
+
+  // ── saved scripts (Phase 4) ────────────────────────────────────────────────────────────────────
+
+  /** `scripts.save(name, fn)`: kept for the session (memory only). Allowed under every policy — saving code does
+   *  nothing; what it later does is checked primitive by primitive. Everything is checked again here (the worker is
+   *  untrusted); the source is never logged, measured or audited — the metric carries the NAME only. */
+  private saveScript(ctx: RunCtx, args: Record<string, unknown>, metric: PrimitiveMetric): undefined {
+    if (savedScriptNameOk(args.name)) metric.script = args.name;
+    const res = this.savedScripts.save(ctx.sessionId, args.name, args.source);
+    if ("refused" in res) throw bad(res.refused);
+    (ctx.scriptsSaved ??= new Set()).add(args.name as string);
+    return undefined;
+  }
+
+  /** A saved script starting (`scripts.<name>(…)` asks first): counted, and refused for a name the session never
+   *  saved (a forged call — the worker only calls this for a name it holds). A cancelled run stops it here. */
+  private runSavedScript(ctx: RunCtx, args: Record<string, unknown>, metric: PrimitiveMetric): undefined {
+    if (!savedScriptNameOk(args.name) || !this.savedScripts.has(ctx.sessionId, args.name)) throw bad("no script was saved under that name in this session");
+    metric.script = args.name;
+    (ctx.scriptsRan ??= new Set()).add(args.name);
+    this.savedScripts.ran(ctx.sessionId);
+    return undefined;
   }
 
   private async targetPrimitive(ctx: RunCtx, targetId: string, primitive: string, args: Record<string, unknown>, metric: PrimitiveMetric): Promise<unknown> {
@@ -1105,6 +1181,9 @@ export class ComputerV2Service {
       targetId: t.targetId, sessionId: ctx.sessionId, callId: ctx.callId, action,
       access: this.deps.policy.accessFor(t.bundleId) === "click" ? "click" : "full",
       privatePath: computerUsePrivateEventPathFrom(settings),
+      // helper 1.11.0: a link rerouted out of an app that is not a browser comes back here to open, under the opener's
+      // own access and card (an older helper ignores it and opens the link itself, as before).
+      linkOpensViaDaemon: true,
     };
     // A type or paste long enough to outlast the run's time left gets the run extended (or is refused up front)
     // — never killed halfway with the field part-filled.
@@ -1189,7 +1268,31 @@ export class ComputerV2Service {
     // change per target, said once at the end of the script — twenty acts can't flood the result.
     const focus = focusLine(res);
     if (focus !== undefined) ctx.focusLines.set(t.targetId, { app: t.name, line: focus });
+    if (typeof res.linkOpen === "string") await this.openLink(ctx, res.linkOpen, metric);
     return undefined;
+  }
+
+  /** A link the helper rerouted (round 10's MEDIUM #7): opened in the background in its default app through the daemon's
+   *  own door — the opener's effective access and per-app card, like `apps.open` — and NOT bound (the agent's click
+   *  asked for no app to work in). Only http(s) and mailto. */
+  private async openLink(ctx: RunCtx, url: string, metric: PrimitiveMetric): Promise<void> {
+    let parsed: URL;
+    try { parsed = new URL(url); } catch { throw new AutomationFailure("Refused", "the link's address could not be read — nothing was opened"); }
+    if (!["http:", "https:", "mailto:"].includes(parsed.protocol)) {
+      throw new AutomationFailure("Refused", "only web and mail links are opened from another app — nothing was opened");
+    }
+    const settings = this.deps.settings();
+    const who = await this.helperCall<{ bundleId: string; name: string; path: string }>(ctx, "apps.defaultOpener", { urls: [url] }, metric);
+    this.live(ctx);
+    await this.deps.policy.authorize(ctx.grants, { bundleId: who.bundleId, name: who.name }, { kind: "bind" }, ctx.abort.signal);
+    this.live(ctx);
+    const res = await this.helperCall<{ app: { name: string; bundleId: string; pid: number }; windowID?: number }>(
+      ctx, "apps.openDocument",
+      { urls: [url], sessionId: ctx.sessionId, mirror: computerUseMirrorFrom(settings), privatePath: computerUsePrivateEventPathFrom(settings) },
+      metric, undefined, { afterEnd: true });
+    this.live(ctx);
+    const host = parsed.protocol === "mailto:" ? "a mail link" : parsed.host;
+    ctx.builder.daemonLine(`the link (${host}) opened in ${res.app.name} in the background — not bound; apps.open() it to work in it`);
   }
 
   /** The screen's one foreground lock for this primitive (rung 4, a desktop visit, a whole-screen shot) — a no-op
@@ -1465,6 +1568,8 @@ export class ComputerV2Service {
       noteSite: (host) => { (ctx.sites ??= new Set()).add(host); },
       noteBrowser: (id) => { (ctx.browsers ??= new Set()).add(id); },
       noteDownload: () => { ctx.downloads = (ctx.downloads ?? 0) + 1; },
+      webMcp: () => computerUseWebMcpFrom(this.deps.settings()),
+      noteSiteTool: () => { ctx.siteTools = (ctx.siteTools ?? 0) + 1; },
       trusted: (sentence) => { ctx.daemonSentences.add(sentence); },
     };
   }
@@ -1612,6 +1717,11 @@ export class ComputerV2Service {
    */
   endSession(sessionId: string, reason: "deleted" | "idle" | "stop" = "deleted"): void {
     if (reason !== "idle") this.deps.policy.clearSession(sessionId);
+    // Saved scripts and the restart notice's memory outlive the idle end; a deleted session takes them with it.
+    if (reason === "deleted") {
+      this.savedScripts.clearSession(sessionId);
+      this.ranWorker.delete(sessionId);
+    }
     this.deps.browsers?.sessionEnded(sessionId, reason);
     const state = this.sessions.get(sessionId);
     if (state === undefined) return;
@@ -1706,6 +1816,9 @@ export class ComputerV2Service {
   stop(): void {
     this.stopped = true;
     for (const sessionId of [...this.sessions.keys()]) this.endSession(sessionId, "stop");
+    // Saved scripts are memory only — nothing survives the daemon.
+    this.savedScripts.clearAll();
+    this.ranWorker.clear();
     this.deps.browsers?.stop();
   }
 
@@ -1713,12 +1826,21 @@ export class ComputerV2Service {
   workerPid(sessionId: string): number | undefined { return this.sessions.get(sessionId)?.worker?.pid; }
 }
 
+/** The idle end's length in words: "30 minutes" (a test's shorter seam in seconds). */
+export function idleWords(ms: number): string {
+  if (ms >= 60_000) { const m = Math.round(ms / 60_000); return `${m} minute${m === 1 ? "" : "s"}`; }
+  const s = Math.max(1, Math.round(ms / 1000));
+  return `${s} second${s === 1 ? "" : "s"}`;
+}
+
 function failure(name: string, message: string): ScriptResult {
   return new ResultBuilder().build({ error: { name, message, trusted: true } });
 }
 
 /** The functions a script may call — anything else from the worker is refused unrecorded (review I6). */
-const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...EXTRA_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES]);
+const KNOWN_PRIMITIVES: ReadonlySet<string> = new Set<string>([...APP_PRIMITIVES, ...GLOBAL_PRIMITIVES, ...EXTRA_PRIMITIVES, ...TAB_PRIMITIVES, ...BROWSER_PRIMITIVES, ...SCRIPT_PRIMITIVES]);
+/** The `browsers` global's primitives: every one is the browser engine's (`BrowserEngine.global`). */
+const BROWSER_GLOBALS: ReadonlySet<string> = new Set<string>(BROWSER_PRIMITIVES);
 /** A browser tab's primitives no app has (refused on an app target before the helper sees them). */
 const TAB_ONLY_PRIMITIVES: ReadonlySet<string> = new Set<string>(TAB_PRIMITIVES.filter((p) => !(APP_PRIMITIVES as readonly string[]).includes(p)));
 /** How long a run's end waits for its tab input to stop before letting the tab locks go. */
@@ -1807,13 +1929,22 @@ function helperDetail(detail: unknown, cap = 300): string | undefined {
   return line.length === 0 ? undefined : line;
 }
 
-export function normaliseScriptError(e: { name?: unknown; message?: unknown; line?: unknown }, daemonSentences: ReadonlySet<string>): ScriptError {
+/** What the worker appends to an error thrown inside a saved script (`worker/runtime.ts`'s `savedPlace`). */
+const SAVED_SCRIPT_PLACE = / \(in saved script [a-z][A-Za-z0-9_]{0,47}(?:, line \d+)?\)$/;
+
+export function normaliseScriptError(e: { name?: unknown; message?: unknown; line?: unknown }, daemonSentences: ReadonlySet<string>): ScriptError & { place?: string } {
   const name = typeof e.name === "string" && KNOWN_ERROR_NAMES.has(e.name) ? e.name : "Error";
   const raw = typeof e.message === "string" ? e.message : String(e.message ?? "");
-  const message = raw.slice(0, ERROR_MESSAGE_CAP);
   const line = typeof e.line === "number" && Number.isInteger(e.line) && e.line > 0 && e.line < 1_000_000 ? e.line : undefined;
-  const trusted = (AUTOMATION_ERROR_KINDS as readonly string[]).includes(name) && daemonSentences.has(raw);
-  return { name, message, ...(line === undefined ? {} : { line }), trusted };
+  const kind = (AUTOMATION_ERROR_KINDS as readonly string[]).includes(name);
+  // A daemon sentence thrown inside a saved script carries the worker's "(in saved script x, line n)" after it. Only
+  // the sentence is the daemon's: it alone is trusted, and the place goes back to the caller to show as the script's
+  // own text (inside the fence) — never the whole message outside it.
+  const own = raw.replace(SAVED_SCRIPT_PLACE, "");
+  if (kind && own !== raw && !daemonSentences.has(raw) && daemonSentences.has(own)) {
+    return { name, message: own.slice(0, ERROR_MESSAGE_CAP), ...(line === undefined ? {} : { line }), trusted: true, place: raw.slice(own.length).trim() };
+  }
+  return { name, message: raw.slice(0, ERROR_MESSAGE_CAP), ...(line === undefined ? {} : { line }), trusted: kind && daemonSentences.has(raw) };
 }
 
 /** Sleep `ms` unless `signal` aborts first; `false` when it did. */
