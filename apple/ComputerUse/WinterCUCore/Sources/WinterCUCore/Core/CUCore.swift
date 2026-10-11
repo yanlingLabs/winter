@@ -1855,10 +1855,18 @@ public final class CUCore: @unchecked Sendable {
         observers.append(ws.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: nil) {
             [weak self] note in
             guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self.noteStranded(app.processIdentifier, false)  // a pid that died takes its mark with it
             self.lock.lock()
             let affected = self.targets.values.filter { $0.pid == app.processIdentifier }
             self.lock.unlock()
             for t in affected { self.lose(t, reason: .appQuit) }
+        })
+        // Always on (never only while the guardian runs): an app activated by anyone gets its key window back, so its
+        // "stranded" mark goes (`appActivated`). A notification only — no tap, no timer, nothing at idle.
+        observers.append(ws.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil) {
+            [weak self] note in
+            guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self.appActivated(pid: app.processIdentifier)
         })
         observers.append(DistributedNotificationCenter.default().addObserver(
             forName: NSNotification.Name("com.apple.Carbon.TISNotifySelectedKeyboardInputSourceChanged"), object: nil,
