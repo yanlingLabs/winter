@@ -14,7 +14,7 @@ import tempfile
 import time
 import urllib.request
 from closure import dependencies, is_system, output, runpaths, validate
-from libslirp_provenance import generate as libslirp_provenance, verify_vendor
+from libslirp_provenance import generate as libslirp_provenance, verify_committed_vendor
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -88,8 +88,8 @@ class Build:
             shutil.copytree(original, snapshot, ignore=shutil.ignore_patterns(".build", "out", "__pycache__", ".git"))
         # A generated provenance inventory cannot bless arbitrary vendor edits.
         # Verify the committed reviewed pin before compiling any network source.
-        self.vendor_pin = verify_vendor(self.network / "vendor/libslirp",
-                                        self.recipe / "libslirp-vendor-pin.json")
+        self.vendor_pin = verify_committed_vendor(ROOT, self.commit, self.network / "vendor/libslirp",
+                                                  self.recipe / "libslirp-vendor-pin.json")
 
     def import_dependencies(self, bundle):
         manifest = json.loads((bundle / "manifest.json").read_text())
@@ -393,6 +393,7 @@ class Build:
         if not skip_native:
             env["WINTER_COWORK_NATIVE_TEST_BUILD"] = str(relocated)
             env["BUN_RUNTIME_TRANSPILER_CACHE_PATH"] = str(self.directory / "bun-transpiler-cache")
+            env["WINTER_COWORK_NATIVE_EXIT_FIXTURE"] = str(self.native / "node-api/output-exit-child.ts")
             config = self.directory / "empty-bunfig.toml"
             config.write_text("")
             self.run("relocated-native-smoke", ["bun", "run", "--no-env-file", f"--config={config}",
@@ -406,6 +407,7 @@ class Build:
                 "concurrentStreams": 12, "callbackFailureVisible": True, "noChunksAfterDispose": True,
                 "pauseInsideCallback": True, "bothEOFRequired": True, "extraInheritedDescriptors": False,
                 "descriptorEnumeration": "/dev/fd", "highFixtureDescriptors": 140, "realVM": False}
+            output_receipt.update(staleWriterGettersDenied=True, invalidStatisticsThrows=True, exitWithoutDispose=True)
             self.run("relocated-output-smoke", ["bun", "run", "--no-env-file", f"--config={config}",
                 self.native / "node-api/output-smoke.ts"], env=env, timeout=30, receipt=output_receipt)
             compiled = relocated / "compiled-output-smoke"

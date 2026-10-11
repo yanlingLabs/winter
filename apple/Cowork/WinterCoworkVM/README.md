@@ -286,9 +286,20 @@ RPC may nominate neither factories nor descriptors. The SDK keeps final authorit
 checks, spawning, framing, quotas and owned process cleanup.
 
 The immutable addon now creates stdout/stderr pipes directly with compiled C
-calls. All parent descriptors are CLOEXEC; reader endpoints are nonblocking and
+calls. All parent descriptors are CLOEXEC; Darwin pipe creation plus flag assignment
+is serialized with registered pthread_atfork handlers. Callback code is pinned
+with RTLD_NODELETE because atfork has no unregister API. Darwin has no public
+pipe2: this is fork synchronization, not an atomic pipe syscall. Mac posix_spawn
+callers must use POSIX_SPAWN_CLOEXEC_DEFAULT; pinned Bun1.3.14
+(0d9b296af33f2b851fcbf4df3e9ec89751734ba4),
+[src/runtime/api/bun/process.zig:1374](https://github.com/oven-sh/bun/blob/0d9b296af33f2b851fcbf4df3e9ec89751734ba4/src/runtime/api/bun/process.zig#L1374)
+sets it, including its SETEXEC path. An unrelated native spawn without that
+flag is outside this pipe adapter's guarantee. Reader endpoints are nonblocking and
 writer endpoints remain blocking for real kernel backpressure. Numeric writer
-FDs are copied onto child1/2 during spawn; closeWriters immediately closes the
+FDs are borrowed only for immediate synchronous spawn; getter access after
+closeWriters/dispose throws instead of returning a stale reused descriptor. A
+numeric FD already copied by a caller cannot be revoked, so callers must not
+retain it for a later spawn. FDs are copied onto child1/2 during spawn; closeWriters immediately closes the
 parent copies. No runtime bun:ffi or temporary source compilation is involved.
 
 One shared native poll readiness thread per addon environment services at most128
@@ -308,7 +319,12 @@ closeWriters/dispose are idempotent. dispose closes only owned descriptors,
 unregisters readiness and prevents later chunks. Poll snapshots retain context
 and revalidate descriptor ownership before reading, so a reused FD cannot be
 mistaken for its disposed reader. TSFN and wrapper references retain the engine
-through callback drain/GC. Thread-safe callback releases and JS allocations occur
+through callback drain/GC. Each successfully queued event also retains its
+context through null-environment teardown callbacks independently of the TSFN
+finalizer and wrapper; finalization order cannot free the context early. First
+read/enqueue error stops all further read admission while existing peer callbacks
+drain. errno is saved before close. Invalid statistics receivers throw.
+Thread-safe callback releases and JS allocations occur
 outside the engine mutex to permit reentrant cleanup. This is a byte transport,
 not process termination or disk/authority proof.
 
@@ -333,3 +349,13 @@ Existing VM addon/client fake smokes continue to pass. No daemon/provider/VM or
 live home/Keychain/global service is involved. This adds the packaged capability;
 real host-broker injection/integration and independent security review remain
 required before production use.
+
+Round3 output review regressions pass in ordinary and compiled Bun: closed FD
+getters, invalid statistics calls, and a child exiting without dispose while32
+native data callbacks remain queued. Compile-only EIO and stdout-enqueue failure
+fixtures prove preserved errno and stopped read admission while a peer callback
+is queued. A standalone native fixture forks/execs32 children during concurrent
+pipe creation; a deliberately unmarked pipe first proves the detector observes
+an inheritance leak, then the guarded implementation excludes all extra FDs.
+These are no-VM process/adapter checks, not guest, production signing or key
+bootstrap evidence. No VZ implementation changes were made for this review.

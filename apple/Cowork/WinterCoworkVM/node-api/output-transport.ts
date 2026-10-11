@@ -12,7 +12,7 @@ export interface NativeHostOutputTransport {
   resume(): void;
   start(onStdout: (chunk: Buffer) => void, onStderr: (chunk: Buffer) => void): Promise<unknown>;
   dispose(): void;
-  statistics(): { pendingBytes: number; peakPendingBytes: number; readCalls: number; chunkLimit: number; sharedReaders: number; paused: boolean; flagsVerified: boolean };
+  statistics(): { pendingBytes: number; peakPendingBytes: number; readCalls: number; readError: number; chunkLimit: number; sharedReaders: number; paused: boolean; flagsVerified: boolean };
 }
 export function createNativeHostOutputTransportFactory(verifiedAddonPath: string): () => Promise<NativeHostOutputTransport> {
   if (!isAbsolute(verifiedAddonPath)) throw new Error("A verified protected absolute native addon path is required");

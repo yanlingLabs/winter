@@ -98,7 +98,11 @@ the C locale. It strips loader search environments and makes no network call.
 Before compiling libslirp, the recipe checks the snapshot against the committed
 `libslirp-vendor-pin.json`: exact reviewed content-map SHA256/file count and
 upstream commit/tree. Missing/extra/modified files and symlink aliases fail
-closed. A generated inventory cannot bless unreviewed vendor changes; updating
+closed. Pin bytes are loaded with git show at the recorded built commit; dirty
+vendor/packaging paths are refused. The recipe independently hashes bounded Git
+blobs from reviewedVendorCommit and requires them to match that committed pin.
+A working-tree pin or a self-consistent hash naming unrelated reviewed contents
+cannot become authority. A generated inventory cannot bless unreviewed vendor changes; updating
 the committed pin requires a separately reviewed vendor change.
 
 For libslirp, the package records the exact clean upstream Git commit/tree,
@@ -136,7 +140,9 @@ the **relocated packaged native dylib** with the fake backend and verify the
 production-blocked factory. Mandatory ordinary and compiled Bun output smokes
 load the relocated packaged addon and emit typed receipts for exact10MiB output,
 native pause/backpressure, both EOFs,12 concurrent streams and actual /dev/fd
-inheritance enumeration after140 fixture FDs are opened. The compiler disables
+inheritance enumeration after140 fixture FDs are opened. The receipt also
+requires closed-writer getter refusal, invalid-statistics errors and exit without
+dispose while32 native events remain queued. The compiler disables
 dotenv/bunfig autoload; source execution keeps explicit `--config=PATH`. A zero
 exit without the expected receipt cannot pass.
 

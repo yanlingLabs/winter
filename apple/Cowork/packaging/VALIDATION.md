@@ -195,3 +195,25 @@ source-retention route. Production team signing, hardened
 compiled-Bun loading, replacement/relinking
 policy, CI provenance, notarization, app integration and all VM/authority
 feasibility gates remain open. This evidence does not authorize enabling Cowork.
+
+## Round3 source fixes — new artifact required
+
+Twelve packaging regressions pass, including a disposable Git repository proving
+that the built-commit pin is authoritative and a committed self-consistent pin
+cannot falsely name unrelated reviewed vendor bytes. Dirty vendor/packaging
+state is refused. No global Git configuration is changed.
+
+The native output source now owns context per queued event, closes read admission
+on first failure, preserves errno before close, refuses stale writer getters, and
+throws for invalid statistics receivers. Ordinary and compiled no-VM output
+receipts pass, including32 queued events during actual process exit without
+dispose. EIO/enqueue failure fixtures and a32-child concurrent fork/exec fixture
+with a real raw-pipe leak positive control pass. See
+/tmp/cowork-output-round3-{normal,compiled}.log,
+/tmp/cowork-{read-error,enqueue-error,fd-creation}-round3.log and
+/tmp/cowork-packaging-round3-tests.log.
+
+The historical build-ycs24bpl bundle above remains unchanged and predates these
+fixes. The recipe now requires the expanded receipts; a fresh frozen package
+must be built before claiming they passed for a new protected artifact. Native
+Swift/VZ and network sources were not modified for this adapter review.

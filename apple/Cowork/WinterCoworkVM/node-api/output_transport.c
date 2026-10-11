@@ -115,16 +115,21 @@ static void output_call_js(napi_env env,napi_value callback,void *data,void *eve
   free(event);
   if(abort)output_release_tsfn(ctx,napi_tsfn_abort);
   else if(finish)output_release_tsfn(ctx,napi_tsfn_release);
+  output_release(ctx); // Every queued event owns context through env==NULL drain.
 }
 static bool output_enqueue(output_context *ctx,int stream,const uint8_t *bytes,size_t length,int error) {
   // Compile-time fixture only: the production artifact has no fault switch.
 #ifdef WINTER_OUTPUT_FIXTURE_TERMINAL_FAILURE
   if (stream<0) return false;
 #endif
+#ifdef WINTER_OUTPUT_FIXTURE_STDOUT_ENQUEUE_FAILURE
+  if (stream==0) return false;
+#endif
   output_event *event=stream<0?ctx->terminal_event:malloc(sizeof(*event)+length);
   if (!event) return false;
   event->stream=stream;event->error=error;event->length=length;if(length)memcpy(event->bytes,bytes,length);
-  if (napi_call_threadsafe_function(ctx->callback,event,napi_tsfn_nonblocking)!=napi_ok) { if(stream>=0)free(event); return false; }
+  output_retain(ctx); // TSFN finalizer may run before null-environment callbacks.
+  if (napi_call_threadsafe_function(ctx->callback,event,napi_tsfn_nonblocking)!=napi_ok) { output_release(ctx);if(stream>=0)free(event); return false; }
   if(stream<0)ctx->terminal_event=NULL;
   return true;
 }
@@ -156,7 +161,7 @@ static void *output_reactor(void *data) {
       if(ctx->started && ctx->ready) { output_retain(ctx); output_finish_locked(ctx,0);
         if(!ctx->listed){finished[finished_count++]=ctx;continue;} output_release(ctx);
       }
-      if(ctx->started && ctx->ready && !ctx->paused && !ctx->disposed && !ctx->complete)for(int stream=0;stream<2;stream++)if(!ctx->pending[stream] && !ctx->eof[stream] && ctx->readers[stream]>=0){
+      if(ctx->started && ctx->ready && !ctx->paused && !ctx->disposed && !ctx->complete && !ctx->read_error)for(int stream=0;stream<2;stream++)if(!ctx->pending[stream] && !ctx->eof[stream] && ctx->readers[stream]>=0){
         output_retain(ctx);contexts[count-1]=ctx;streams[count-1]=stream;polls[count++]=(struct pollfd){.fd=ctx->readers[stream],.events=POLLIN};
       }
       i++;
@@ -170,12 +175,19 @@ static void *output_reactor(void *data) {
       output_context *ctx=contexts[i-1];int stream=streams[i-1];
       // Recheck ownership/paused state after poll: a disposed FD may already
       // have been reused elsewhere in this process. Never read that alias.
-      if(ready>0 && polls[i].revents && !engine->closing && !ctx->disposed && !ctx->paused && !ctx->pending[stream] && ctx->readers[stream]==polls[i].fd){
-        ssize_t length=read(ctx->readers[stream],chunk,sizeof(chunk));ctx->read_calls++;
+      if(ready>0 && polls[i].revents && !engine->closing && !ctx->disposed && !ctx->paused && !ctx->read_error && !ctx->pending[stream] && ctx->readers[stream]==polls[i].fd){
+        ssize_t length;
+#ifdef WINTER_OUTPUT_FIXTURE_READ_ERROR
+        // Compile-only fixture simulates an actual read failure. No runtime knob.
+        errno=EIO;length=-1;
+#else
+        length=read(ctx->readers[stream],chunk,sizeof(chunk));
+#endif
+        int read_errno=errno;ctx->read_calls++;
         if(length>0){ctx->pending[stream]=true;ctx->pending_bytes+=(uint64_t)length;if(ctx->pending_bytes>ctx->peak_bytes)ctx->peak_bytes=ctx->pending_bytes;
           if(!output_enqueue(ctx,stream,chunk,(size_t)length,0)){ctx->pending[stream]=false;ctx->pending_bytes-=(uint64_t)length;output_finish_locked(ctx,ENOMEM);}
         } else if(length==0){ctx->eof[stream]=true;output_close_fd(&ctx->readers[stream]);}
-        else if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR){ctx->eof[stream]=true;output_close_fd(&ctx->readers[stream]);output_finish_locked(ctx,errno);}
+        else if(read_errno!=EAGAIN && read_errno!=EWOULDBLOCK && read_errno!=EINTR){ctx->eof[stream]=true;output_close_fd(&ctx->readers[stream]);output_finish_locked(ctx,read_errno);}
       }
     }
     pthread_mutex_unlock(&engine->lock);
@@ -198,7 +210,7 @@ static output_engine *output_get_engine(napi_env env) {
   void *data=NULL;if(napi_get_instance_data(env,&data)!=napi_ok)return NULL;if(data)return data;
   output_engine *engine=calloc(1,sizeof(*engine));if(!engine)return NULL;
   engine->env=env;atomic_init(&engine->owners,1);pthread_mutex_init(&engine->lock,NULL);
-  if(pipe(engine->wake)!=0){pthread_mutex_destroy(&engine->lock);free(engine);return NULL;}
+  if(native_pipe_cloexec(engine->wake)!=0){pthread_mutex_destroy(&engine->lock);free(engine);return NULL;}
   for(int i=0;i<2;i++){
     if(fcntl(engine->wake[i],F_SETFL,O_NONBLOCK)||fcntl(engine->wake[i],F_SETFD,FD_CLOEXEC)){close(engine->wake[0]);close(engine->wake[1]);pthread_mutex_destroy(&engine->lock);free(engine);return NULL;}
   }
@@ -228,11 +240,20 @@ static napi_value output_start(napi_env env,napi_callback_info info) {
   if(!references){pthread_mutex_lock(&ctx->engine->lock);output_dispose_locked(ctx,true);pthread_mutex_unlock(&ctx->engine->lock);output_reject_disposed(ctx);output_release_tsfn(ctx,napi_tsfn_abort);return promise;}
   pthread_mutex_lock(&ctx->engine->lock);ctx->ready=true;output_wake(ctx->engine);pthread_mutex_unlock(&ctx->engine->lock);return promise;
 }
+static napi_value output_writer_fd(napi_env env,napi_callback_info info) {
+  size_t count=0;void *stream_data=NULL,*data=NULL;napi_value self,value;
+  if(napi_get_cb_info(env,info,&count,NULL,&self,&stream_data)!=napi_ok || napi_unwrap(env,self,&data)!=napi_ok || !data)
+    return fail(env,"output_transport_invalid","Missing native output transport");
+  output_context *ctx=data;int stream=(int)(uintptr_t)stream_data;
+  pthread_mutex_lock(&ctx->engine->lock);int fd=ctx->disposed?-1:ctx->writers[stream];pthread_mutex_unlock(&ctx->engine->lock);
+  if(fd<0)return fail(env,"output_transport_closed","Native output writer is closed");
+  return napi_create_int32(env,fd,&value)==napi_ok?value:NULL;
+}
 static napi_value output_stats(napi_env env,napi_callback_info info) {
-  size_t count=0;output_context *ctx=output_this(env,info,NULL,&count,NULL);napi_value result,value;if(!ctx)return NULL;
+  size_t count=0;output_context *ctx=output_this(env,info,NULL,&count,NULL);napi_value result,value;if(!ctx)return fail(env,"output_transport_invalid","Missing native output transport");
   pthread_mutex_lock(&ctx->engine->lock);
   uint64_t pending=ctx->pending_bytes,peak=ctx->peak_bytes,reads=ctx->read_calls;size_t shared=ctx->engine->count;bool paused=ctx->paused;
-  bool flags=true;
+  bool flags=true;int read_error=ctx->read_error;
   for(int i=0;i<2;i++){
     if(ctx->readers[i]>=0){int status=fcntl(ctx->readers[i],F_GETFL),descriptor=fcntl(ctx->readers[i],F_GETFD);flags &= status>=0 && descriptor>=0 && (status&O_NONBLOCK)!=0 && (descriptor&FD_CLOEXEC)!=0;}
     if(ctx->writers[i]>=0){int descriptor=fcntl(ctx->writers[i],F_GETFD);flags &= descriptor>=0 && (descriptor&FD_CLOEXEC)!=0;}
@@ -240,6 +261,7 @@ static napi_value output_stats(napi_env env,napi_callback_info info) {
   pthread_mutex_unlock(&ctx->engine->lock);napi_create_object(env,&result);
 #define OUTPUT_NUMBER(name, number) napi_create_double(env,(double)(number),&value);napi_set_named_property(env,result,name,value)
   OUTPUT_NUMBER("pendingBytes",pending);OUTPUT_NUMBER("peakPendingBytes",peak);OUTPUT_NUMBER("readCalls",reads);OUTPUT_NUMBER("chunkLimit",OUTPUT_CHUNK_LIMIT);OUTPUT_NUMBER("sharedReaders",shared);
+  OUTPUT_NUMBER("readError",read_error);
 #undef OUTPUT_NUMBER
   napi_get_boolean(env,paused,&value);napi_set_named_property(env,result,"paused",value);napi_get_boolean(env,flags,&value);napi_set_named_property(env,result,"flagsVerified",value);return result;
 }
@@ -250,14 +272,14 @@ static napi_value output_create(napi_env env,napi_callback_info info) {
   output_context *ctx=calloc(1,sizeof(*ctx));if(!ctx)return fail(env,"allocation_failed","Cannot allocate bounded native output transport");ctx->env=env;ctx->engine=engine;atomic_init(&ctx->owners,1);atomic_fetch_add(&engine->owners,1);
   for(int i=0;i<2;i++)ctx->readers[i]=ctx->writers[i]=-1;
   ctx->terminal_event=malloc(sizeof(output_event));if(!ctx->terminal_event)goto failed;
-  for(int i=0;i<2;i++){int fds[2];if(pipe(fds)!=0)goto failed;ctx->readers[i]=fds[0];ctx->writers[i]=fds[1];
+  for(int i=0;i<2;i++){int fds[2];if(native_pipe_cloexec(fds)!=0)goto failed;ctx->readers[i]=fds[0];ctx->writers[i]=fds[1];
     if(fcntl(fds[0],F_SETFL,O_NONBLOCK)||fcntl(fds[0],F_SETFD,FD_CLOEXEC)||fcntl(fds[1],F_SETFD,FD_CLOEXEC))goto failed;
     int read_status=fcntl(fds[0],F_GETFL),read_descriptor=fcntl(fds[0],F_GETFD),write_descriptor=fcntl(fds[1],F_GETFD),write_status=fcntl(fds[1],F_GETFL);
     if(read_status<0||read_descriptor<0||write_descriptor<0||write_status<0||(write_status&O_NONBLOCK)||!(read_status&O_NONBLOCK)||!(read_descriptor&FD_CLOEXEC)||!(write_descriptor&FD_CLOEXEC))goto failed;
   }
-  napi_value result,out,err;if(napi_create_object(env,&result)!=napi_ok||napi_create_int32(env,ctx->writers[0],&out)!=napi_ok||napi_create_int32(env,ctx->writers[1],&err)!=napi_ok)goto failed;
+  napi_value result;if(napi_create_object(env,&result)!=napi_ok)goto failed;
   napi_property_descriptor methods[]={
-    {"stdoutFd",NULL,NULL,NULL,NULL,out,napi_enumerable,NULL},{"stderrFd",NULL,NULL,NULL,NULL,err,napi_enumerable,NULL},
+    {"stdoutFd",NULL,NULL,output_writer_fd,NULL,NULL,napi_enumerable,(void *)(uintptr_t)0},{"stderrFd",NULL,NULL,output_writer_fd,NULL,NULL,napi_enumerable,(void *)(uintptr_t)1},
     {"closeWriters",NULL,output_close_writers,NULL,NULL,NULL,napi_default,NULL},{"pause",NULL,output_pause,NULL,NULL,NULL,napi_default,NULL},
     {"resume",NULL,output_resume,NULL,NULL,NULL,napi_default,NULL},{"start",NULL,output_start,NULL,NULL,NULL,napi_default,NULL},
     {"dispose",NULL,output_dispose,NULL,NULL,NULL,napi_default,NULL},{"statistics",NULL,output_stats,NULL,NULL,NULL,napi_default,NULL}

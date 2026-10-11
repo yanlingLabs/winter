@@ -8,11 +8,53 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import re
 
 COMMIT = "390848f47391f412451b2d259d8527fabb51e5e3"
 TREE = "0509386ab50c032b58f5af4576f8ee5f79157c51"
 URL = "https://gitlab.freedesktop.org/slirp/libslirp.git"
 HERE = Path(__file__).resolve().parent
+VENDOR_PATH = "apple/Cowork/WinterCoworkNetwork/vendor/libslirp"
+PIN_PATH = "apple/Cowork/packaging/libslirp-vendor-pin.json"
+
+
+def verify_committed_vendor(repository, built_commit, vendor, pin_path):
+    """Pin authority comes from Git objects, not whatever JSON is in the tree."""
+    if not re.fullmatch(r"[a-f0-9]{40}", built_commit):
+        raise ValueError("full built Git commit required")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null", GIT_TERMINAL_PROMPT="0", GIT_NO_REPLACE_OBJECTS="1")
+    def git(*args):
+        return subprocess.check_output(["git", "--no-optional-locks", "-C", repository,
+            "-c", "core.fsmonitor=false", *args], env=env)
+    if git("status", "--porcelain", "--untracked-files=all", "--", VENDOR_PATH, "apple/Cowork/packaging"):
+        raise ValueError("dirty vendor/packaging cannot authorize a protected package")
+    committed = git("show", f"{built_commit}:{PIN_PATH}")
+    if pin_path.read_bytes() != committed:
+        raise ValueError("vendor pin differs from the built commit")
+    pin = json.loads(committed)
+    reviewed = pin.get("reviewedVendorCommit", "")
+    if not re.fullmatch(r"[a-f0-9]{40}", reviewed):
+        raise ValueError("full reviewed vendor Git commit required")
+    hashes = {}
+    total = 0
+    for entry in git("ls-tree", "-r", "-z", reviewed, "--", VENDOR_PATH).split(b"\0"):
+        if not entry:
+            continue
+        metadata, name = entry.split(b"\t", 1)
+        mode, kind, oid = metadata.decode().split()
+        path = name.decode()
+        if kind != "blob" or mode not in ("100644", "100755") or not path.startswith(VENDOR_PATH + "/"):
+            raise ValueError("reviewed vendor contains an unsupported Git object/alias")
+        size = int(git("cat-file", "-s", oid))
+        total += size
+        if size > 2 * 1024 * 1024 or total > 16 * 1024 * 1024 or len(hashes) >= 256:
+            raise ValueError("reviewed vendor Git object inventory exceeds its bound")
+        hashes[path[len(VENDOR_PATH) + 1:]] = hashlib.sha256(git("cat-file", "blob", oid)).hexdigest()
+    digest = hashlib.sha256(json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if digest != pin.get("vendoredTreeSha256") or len(hashes) != pin.get("vendoredFileCount"):
+        raise ValueError("reviewedVendorCommit contents do not match the committed pin")
+    return verify_vendor(vendor, pin_path)
 
 
 def tree_hashes(root):
@@ -106,6 +148,9 @@ if __name__ == "__main__":
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--upstream-checkout", type=Path)
     args = parser.parse_args()
+    repository = HERE.parents[2]
+    built_commit = subprocess.check_output(["git", "-C", repository, "rev-parse", "HEAD"], text=True).strip()
+    verify_committed_vendor(repository, built_commit, args.vendor.resolve(), HERE / "libslirp-vendor-pin.json")
     manifest = generate(args.vendor.resolve(), args.destination.resolve(), args.upstream_checkout.resolve() if args.upstream_checkout else None)
     print(json.dumps({"upstreamGitTree": manifest["upstreamGitTree"], "vendoredGitTree": manifest["vendoredGitTree"], "vendoredTreeSha256": manifest["vendoredTreeSha256"],
                       "patchSha256": manifest["patchSha256"], "patchReconstructionVerified": True}, indent=2))

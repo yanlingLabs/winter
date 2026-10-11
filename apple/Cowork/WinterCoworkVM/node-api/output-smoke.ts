@@ -18,6 +18,8 @@ try {
   assert(pressure.statistics().flagsVerified); pressure.pause();
   const child=Bun.spawn(["/bin/sh","-c",'dd if=/dev/zero bs=65536 count=160 2>/dev/null; printf done > "$1/done"',"winter-output-fixture",fixture],{stdin:"ignore",stdout:pressure.stdoutFd,stderr:pressure.stderrFd});children.push(child);
   pressure.closeWriters();pressure.closeWriters();
+  assert.throws(()=>pressure.stdoutFd,/writer is closed/);
+  assert.throws(()=>pressure.stderrFd,/writer is closed/);
   let total=0,maxChunk=0;
   const done=pressure.start(chunk=>{total+=chunk.length;maxChunk=Math.max(maxChunk,chunk.length)},()=>{});
   await Bun.sleep(100);
@@ -62,7 +64,15 @@ for name in os.listdir("/dev/fd"):
 print(json.dumps(found))`],{stdin:"ignore",stdout:inherited.stdoutFd,stderr:inherited.stderrFd});children.push(fdChild);inherited.closeWriters();
   await inherited.start(chunk=>{descriptorReport+=chunk.toString()},()=>{});assert.equal(await fdChild.exited,0);assert.deepEqual(JSON.parse(descriptorReport),[]);inherited.dispose();
   const inspect=await create();transports.push(inspect);const active=inspect.statistics().sharedReaders;assert.equal(active,1);inspect.dispose();
-  console.log(JSON.stringify({nativeOutputTransport:true,pressureBytes:total,pauseStopsNativeReads:true,exactStdoutStderr:true,maxChunkBytes:maxChunk,sharedReadiness:true,concurrentStreams:12,callbackFailureVisible:true,noChunksAfterDispose:true,pauseInsideCallback:true,bothEOFRequired:true,extraInheritedDescriptors:false,descriptorEnumeration:"/dev/fd",highFixtureDescriptors:140,realVM:false}));
+  const reused=openSync("/dev/null","r");
+  try { assert.throws(()=>inspect.stdoutFd,/writer is closed/);assert.throws(()=>inspect.stderrFd,/writer is closed/);assert.throws(()=>inspect.statistics.call({}),/Missing native output transport/); }
+  finally { closeSync(reused) }
+  const exitFixture=process.env.WINTER_COWORK_NATIVE_EXIT_FIXTURE??join(import.meta.dir,"output-exit-child.ts");
+  const bun=Bun.which("bun");assert(bun,"fixture Bun executable required");
+  const exited=Bun.spawn([bun,"run","--no-env-file",exitFixture,join(build,"winter-cowork-native.node")],{stdin:"ignore",stdout:"pipe",stderr:"pipe",env:{PATH:process.env.PATH??"/usr/bin:/bin",LANG:"C",LC_ALL:"C",BUN_RUNTIME_TRANSPILER_CACHE_PATH:process.env.BUN_RUNTIME_TRANSPILER_CACHE_PATH}});children.push(exited);
+  const exitLog=await new Response(exited.stdout).text(),exitError=await new Response(exited.stderr).text();
+  assert.equal(await exited.exited,0,exitError);const exitReceipt=JSON.parse(exitLog.trim());assert(exitReceipt.exitWithoutDispose && exitReceipt.queuedNativeEvents);
+  console.log(JSON.stringify({nativeOutputTransport:true,pressureBytes:total,pauseStopsNativeReads:true,exactStdoutStderr:true,maxChunkBytes:maxChunk,sharedReadiness:true,concurrentStreams:12,callbackFailureVisible:true,noChunksAfterDispose:true,pauseInsideCallback:true,bothEOFRequired:true,extraInheritedDescriptors:false,descriptorEnumeration:"/dev/fd",highFixtureDescriptors:140,staleWriterGettersDenied:true,invalidStatisticsThrows:true,exitWithoutDispose:true,realVM:false}));
 } finally {
   for(const child of children)if(child.exitCode===null){try{child.kill()}catch{};await child.exited}
   for(const transport of transports)transport.dispose();

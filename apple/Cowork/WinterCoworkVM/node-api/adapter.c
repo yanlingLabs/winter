@@ -10,6 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include "fd_creation.c"
 
 typedef struct {
   void *library;
@@ -135,7 +136,7 @@ static napi_value subscribe(napi_env env, napi_callback_info info) {
   napi_valuetype type;
   if (count != 1 || napi_typeof(env, args[0], &type) != napi_ok || type != napi_function) return fail(env, "invalid_callback", "subscribe accepts one event callback");
   if (ctx->api.event_fd(ctx->native) < 0) return fail(env, "event_channel_unavailable", "Native wakeup FD is unavailable");
-  if (pipe(ctx->wake) != 0) return fail(env, "event_channel_unavailable", "Cannot create owned event reader wakeup");
+  if (native_pipe_cloexec(ctx->wake) != 0) return fail(env, "event_channel_unavailable", "Cannot create owned event reader wakeup");
   for (int i=0; i<2; i++) { fcntl(ctx->wake[i], F_SETFL, O_NONBLOCK); fcntl(ctx->wake[i], F_SETFD, FD_CLOEXEC); }
   napi_create_string_utf8(env, "Winter Cowork native events", NAPI_AUTO_LENGTH, &name);
   if (napi_create_threadsafe_function(env, args[0], NULL, name, 64, 2, ctx, thread_finalized, ctx, call_js, &ctx->callback) != napi_ok)

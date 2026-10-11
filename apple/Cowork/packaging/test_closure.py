@@ -2,11 +2,13 @@ import tempfile
 import unittest
 import json
 import hashlib
+import os
+import subprocess
 from pathlib import Path
 from closure import dependencies, is_system, resolve_reference, runpaths, validate
 from build import Build, PINS, clean_environment, require_json_receipt
 from unittest.mock import patch, Mock
-from libslirp_provenance import COMMIT, TREE, tree_hashes, verify_vendor
+from libslirp_provenance import COMMIT, TREE, PIN_PATH, VENDOR_PATH, tree_hashes, verify_vendor, verify_committed_vendor
 
 
 class ClosureTests(unittest.TestCase):
@@ -118,6 +120,36 @@ class ClosureTests(unittest.TestCase):
             self.assertEqual(ordinary["highFixtureDescriptors"], 140)
             self.assertEqual(ordinary["descriptorEnumeration"], "/dev/fd")
             self.assertIs(ordinary["realVM"], False)
+
+    def test_vendor_pin_authority_is_built_and_reviewed_git_objects(self):
+        with tempfile.TemporaryDirectory(prefix="winter-package-git-") as tmp:
+            root=Path(tmp);vendor=root/VENDOR_PATH;vendor.mkdir(parents=True)
+            (vendor/"source.c").write_text("reviewed fixture")
+            env={k:v for k,v in os.environ.items() if not k.startswith("GIT_")}
+            env.update(GIT_CONFIG_NOSYSTEM="1",GIT_CONFIG_GLOBAL="/dev/null",GIT_TERMINAL_PROMPT="0")
+            def git(*args):
+                return subprocess.check_output(["git","-C",root,"-c","user.name=Fixture","-c","user.email=fixture@example.invalid",
+                    "-c","core.hooksPath=/dev/null","-c","commit.gpgsign=false",*args],env=env)
+            git("init","-q");git("add",".");git("commit","-qm","reviewed vendor")
+            reviewed=git("rev-parse","HEAD").decode().strip()
+            hashes=tree_hashes(vendor);pin=root/PIN_PATH;pin.parent.mkdir(parents=True)
+            record={"format":1,"upstreamCommit":COMMIT,"upstreamGitTree":TREE,"reviewedVendorCommit":reviewed,
+                "vendoredFileCount":1,"vendoredTreeSha256":hashlib.sha256(json.dumps(hashes,sort_keys=True,separators=(",",":")).encode()).hexdigest()}
+            pin.write_text(json.dumps(record));git("add",".");git("commit","-qm","pin reviewed bytes")
+            built=git("rev-parse","HEAD").decode().strip()
+            verify_committed_vendor(root,built,vendor,pin)
+            pin.write_text("{}")
+            with self.assertRaisesRegex(ValueError,"dirty vendor/packaging"):
+                verify_committed_vendor(root,built,vendor,pin)
+            git("restore",PIN_PATH)
+            # Even a committed self-consistent hash cannot lie about which
+            # reviewed Git commit supplied those exact vendor bytes.
+            (vendor/"source.c").write_text("changed source")
+            hashes=tree_hashes(vendor);record["vendoredTreeSha256"]=hashlib.sha256(json.dumps(hashes,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+            pin.write_text(json.dumps(record));git("add",".");git("commit","-qm","incorrect claimed review")
+            changed=git("rev-parse","HEAD").decode().strip()
+            with self.assertRaisesRegex(ValueError,"reviewedVendorCommit contents"):
+                verify_committed_vendor(root,changed,vendor,pin)
 
     def test_verification_checks_runpaths_in_every_architecture(self):
         with tempfile.TemporaryDirectory() as tmp:
