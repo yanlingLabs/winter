@@ -660,11 +660,6 @@ public struct CUFocusGuardianCore: Sendable {
             }
             return (.user("the agent did not touch it — an app it never touched coming forward after input of theirs is theirs"), nil)
         }
-        // The consented foreground's own landing: the consent's (before any input of the user's that came meanwhile).
-        if let a = app, a == exemptApp, now < exemptUntil, now - exemptIssuedAt <= Self.restoreLateWindow,
-           !(claim.map { $0.app == a && now <= $0.until } ?? false) {
-            return (.consented, nil)
-        }
         let late = app.flatMap { restoreLate($0, now: now) } ?? -.infinity
         let cause = max(front ? max(lastCause(app), late) : -.infinity, shown.map { raises[$0] ?? -.infinity }.max() ?? -.infinity)
         let raiseCause = max(front ? max(lastRaise(app), late) : -.infinity, shown.map { raises[$0] ?? -.infinity }.max() ?? -.infinity)
@@ -687,6 +682,12 @@ public struct CUFocusGuardianCore: Sendable {
             // On the visited desktop, their input in the visited app is no move away: the visit's end decides.
             if visit, let a = app, a == visitApp { return (.visit, nil) }
             return (.user("their input that switches apps or desktops (⌘-Tab, ⌃-arrows, a swipe, the Dock, a click on another app's window), after the agent's last action that could raise it"), .instant(i, keep: false))
+        }
+        // The consented foreground's own landing: the consent's — unless a switch of theirs AFTER it was issued explains
+        // it (above: their ⌘-Tab into the app being held is theirs, and its end gives nothing back — found by the
+        // model-based test).
+        if let a = app, a == exemptApp, now < exemptUntil, now - exemptIssuedAt <= Self.restoreLateWindow {
+            return (.consented, nil)
         }
         if !q.inputObservable, let c = q.clickAt, now - c <= Self.userInputWindow, c > cause, c <= upTo, !visit || c >= visitStartedAt {
             if visit, let a = app, a == visitApp { return (.visit, nil) }

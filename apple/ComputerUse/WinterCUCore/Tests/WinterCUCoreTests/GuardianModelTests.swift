@@ -30,7 +30,9 @@ final class GuardianModelTests: XCTestCase {
         var totals = SimStats()
         var surveyed = 0
         let only = Int(ProcessInfo.processInfo.environment["WINTER_CU_SIM_ONLY_SEED"] ?? "")
-        for seed in only.map({ [$0] }) ?? Array(1...Self.seeds) {
+        // WINTER_CU_SIM_FIRST_SEED: a sweep of seeds first…first+seeds−1 (a long run in parallel processes).
+        let first = Int(ProcessInfo.processInfo.environment["WINTER_CU_SIM_FIRST_SEED"] ?? "") ?? 1
+        for seed in only.map({ [$0] }) ?? Array(first..<(first + Self.seeds)) {
             let plan = SimPlan.generate(seed: UInt64(seed), count: Self.steps)
             let run = await SimRun.execute(plan)
             totals.add(run.stats)

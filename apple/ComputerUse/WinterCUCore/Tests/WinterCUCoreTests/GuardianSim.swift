@@ -627,7 +627,10 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         let t = now
         let fits = { (i: Int) -> Bool in
             let s = self.switches[i]
-            guard i != excluding, s.visible, !s.claim, !s.pending, t - s.at <= s.lifeMs, t >= s.at else { return false }
+            // A click into a window that activated nothing (a drag out of a background window) still claims that app's
+            // activation for the claim's window (the contract: the engine can't tell a drag at the mouse-down).
+            let dragClaim = s.claim && s.dest == nil && s.target == pid && t - s.at <= 1_500 + self.nextHearing()
+            guard i != excluding, s.visible, !s.claim || dragClaim, !s.pending, dragClaim || t - s.at <= s.lifeMs, t >= s.at else { return false }
             if let target = s.target, target != pid { return false }
             return (s.app && app) || (s.desktop && desktop)
         }
@@ -741,6 +744,11 @@ final class SimWorld: CUSystemBackend, @unchecked Sendable {
         if s.claim { return mine }
         if touchedDest {
             if let r = raiseAt[n.app], r > s.at {
+                // The app being held in front (session s2's consented foreground) raised after their input: the engine may
+                // take it for the consent's own landing.
+                if holding, n.app == SimPid.held {
+                    return .either([mine, .engine(.consented(n.app))], "the consented foreground raised it after their input")
+                }
                 return .either([mine, .agentDirect(n.app, "raised by the agent after their input")], "the agent raised it after their input")
             }
             // Their app stayed in front while the desktop changed, and the agent raised a window shown on the new desktop
