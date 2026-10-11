@@ -181,6 +181,10 @@ final class FormController: NSObject {
     let notes: NotesTextView
     let notesScroll: NotesScrollView
     let agree: NSButton
+    /// A native hover-revealed control (round 9): a plain AppKit view whose tracking area shows "Native Hidden Item"
+    /// when the pointer enters it — what Winter's window-targeted pointer DOES reach (a web page's hover does not).
+    let hoverArea: HoverRevealView
+    let hiddenItem: NSButton
     private let openDocument: () -> Void
 
     init(slot: Int, openDocument: @escaping () -> Void) {
@@ -210,6 +214,8 @@ final class FormController: NSObject {
         _ = scrollContaining(notes, in: scroll)
         notesScroll = scroll
         agree = NSButton(checkboxWithTitle: "Agree", target: nil, action: nil)
+        hiddenItem = NSButton(title: "Native Hidden Item", target: nil, action: nil)
+        hoverArea = HoverRevealView(frame: NSRect(x: left, y: 350, width: 170, height: 28))
         super.init()
 
         let submit = NSButton(title: "Submit", target: self, action: #selector(submitPressed(_:)))
@@ -226,7 +232,19 @@ final class FormController: NSObject {
         agree.identifier = NSUserInterfaceItemIdentifier("agree")
         agree.setAccessibilityIdentifier("agree")
 
-        for view in [name, email, notesScroll, submit, open, agree] as [NSView] { root.addSubview(view) }
+        hiddenItem.frame = NSRect(x: left + 190, y: 350, width: 170, height: 28)
+        hiddenItem.identifier = NSUserInterfaceItemIdentifier("native-hidden-item")
+        hiddenItem.setAccessibilityIdentifier("native-hidden-item")
+        hiddenItem.target = self
+        hiddenItem.action = #selector(hiddenItemPressed(_:))
+        hiddenItem.isHidden = true
+        hoverArea.onEnter = { [weak self] in
+            guard let self else { return }
+            Fixture.shared.emit("form.hover", [("id", .str("native-hover-area"))])
+            self.hiddenItem.isHidden = false
+        }
+
+        for view in [name, email, notesScroll, submit, open, agree, hoverArea, hiddenItem] as [NSView] { root.addSubview(view) }
         // Added last, so it is topmost.
         root.addSubview(SentinelView(frame: Sentinel.rect))
         window.contentView = root
@@ -239,6 +257,10 @@ final class FormController: NSObject {
     @objc private func openDocumentPressed(_ sender: NSButton) {
         Fixture.shared.emit("button", [("id", .str("open-document"))])
         openDocument()
+    }
+
+    @objc private func hiddenItemPressed(_ sender: NSButton) {
+        Fixture.shared.emit("form.hoveritem", [("id", .str("native-hidden-item"))])
     }
 
     @objc private func agreeToggled(_ sender: NSButton) {
@@ -254,7 +276,34 @@ final class FormController: NSObject {
         notes.setSelectedRange(NSRange(location: 0, length: 0))
         notes.undoManager?.removeAllActions()
         agree.state = .off
+        hiddenItem.isHidden = true
     }
+}
+
+/// A box that reports the pointer entering it — in any app state (`.activeAlways`: the fixture is in the background
+/// while the suite drives it), the way a native toolbar's hover-revealed controls work.
+final class HoverRevealView: NSView {
+    var onEnter: () -> Void = {}
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.secondaryLabelColor.cgColor
+        let label = NSTextField(labelWithString: "Native Hover Area")
+        label.frame = NSRect(x: 8, y: 5, width: frame.width - 16, height: 18)
+        label.setAccessibilityElement(false)
+        addSubview(label)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Native Hover Area")
+        setAccessibilityIdentifier("native-hover-area")
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func mouseEntered(with event: NSEvent) { onEnter() }
 }
 
 // MARK: - (b) Fixture Web
