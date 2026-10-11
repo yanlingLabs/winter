@@ -389,7 +389,8 @@ function desktopSwitchRig(tool: string, plan: NonNullable<Scenario["desktopSwitc
     card(e, respond) {
       const c = e as SessionEvent & { toolName?: string; summary?: string; onTimeout?: string; expiresAt?: number; issuedAt?: number };
       observation.cards.push({ toolName: c.toolName, summary: c.summary, onTimeout: c.onTimeout, expiresAt: c.expiresAt, issuedAt: c.issuedAt });
-      pending.push((async () => {
+      // Awaited only by `done()`, after the turn: handled now so a failure meanwhile cannot kill the runner (done() still throws).
+      const answered = (async () => {
         const half = Math.floor(plan.afterMs / 2);
         await sleep(half);
         const during = [...onScreen()].filter((id) => !before.has(id));
@@ -399,7 +400,9 @@ function desktopSwitchRig(tool: string, plan: NonNullable<Scenario["desktopSwitc
         await sleep(1_000);
         const after = onScreen();
         observation.panelGone = during.length > 0 && during.every((id) => !after.has(id));
-      })());
+      })();
+      answered.catch(() => undefined);
+      pending.push(answered);
     },
     done: async () => { await Promise.all(pending); },
   };
@@ -1002,7 +1005,11 @@ async function liveRun(built: Built, o: Options): Promise<ScenarioResult[]> {
           if (ack.ev === "cmd.error") throw new Error(`the user's click into Name did not take: ${JSON.stringify(ack).slice(0, 200)}`);
           workedAt = Date.now();
         })();
-        const rig = s.desktopSwitch === undefined ? undefined : desktopSwitchRig(built.tool, s.desktopSwitch);
+        // Both run beside the turn and are awaited only after it: a handler NOW, or a failure during the turn is an
+        // unhandled rejection that kills the runner before its cleanup (round 11's live run). The awaits below still throw.
+        userSwitch?.catch(() => undefined);
+        userWorks?.catch(() => undefined);
+        const rig =s.desktopSwitch === undefined ? undefined : desktopSwitchRig(built.tool, s.desktopSwitch);
         const turn = await runTurn(where.client, where.sid, computerV2Message(scriptOf(s), timeout), timeout + 60_000, s.answer, rig);
         await userSwitch;
         await userWorks;
@@ -1521,6 +1528,14 @@ async function main(): Promise<void> {
     log,
     onHardExit: killOwned,
   });
+  // A stray rejection or exception would end the process with NOTHING cleaned up — the user left on another desktop,
+  // the fixtures open (round 11's live run). It stops the run instead, through the very path a signal takes.
+  const strayError = (what: string) => (err: unknown): void => {
+    log(`${what}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)} — stopping the run and cleaning up`);
+    if (stop?.requested === undefined) process.kill(process.pid, "SIGTERM");
+  };
+  process.on("unhandledRejection", strayError("an unhandled rejection"));
+  process.on("uncaughtException", strayError("an uncaught exception"));
   let built: Built;
   try {
     built = buildAll(log);
