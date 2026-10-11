@@ -1,7 +1,8 @@
 # Memory-return decision after acknowledged page-group evidence
 
 Research date: 2026-10-11. Active-work return is required by the user's subsequent
-explicit decision. A replacement backend/topology has not been accepted.
+explicit decision. The user subsequently approved one sandboxed VMM worker per
+workspace, orchestrated by the daemon. The replacement backend still needs proof.
 This note adds no implementation, VM run, host-pressure test or backend adoption.
 
 ## What the latest experiment establishes
@@ -68,9 +69,9 @@ allocations, but do **not** close the accepted resource gate: the
 [specification](../../../docs/cowork-spec.md#resource-policy-and-product-surfaces)
 calls automatic return a blocking feasibility question and gate 1 explicitly
 requires genuine reclaim. The user's decision excludes idle-only substitution.
-Evaluate a bounded live-reclaim backend experiment, then present any conflict
-with the accepted in-daemon topology as a concrete separate decision. Approval
-of active return alone does not authorize silently changing that topology.
+The subsequent explicit worker decision resolves the conflict with the former
+in-daemon topology. Evaluate the bounded live Linux reclaim backend under that
+approved topology; approval of workers does not itself pass the resource gate.
 
 ## Alternatives for the mandatory live-return requirement
 
@@ -101,8 +102,8 @@ Apple explicitly permits only **one HVF VM per host process**. Preserving one
 independent VM per workspace therefore needs a VMM worker per workspace, while
 the daemon may still own orchestration. Embedding several HVF VMs directly in the
 existing daemon is not a supported alternative; sharing one guest kernel would
-instead change the accepted isolation model. This process/security tradeoff is
-why a backend change needs a focused user decision, not an unnoticed library swap.
+instead change the accepted isolation model. The user has now accepted that worker process tradeoff. Backend adoption still
+requires the resource, device and security gates.
 [Apple Hypervisor virtual-resource mapping](https://developer.apple.com/documentation/hypervisor).
 
 ## What sharing system resources means
@@ -119,12 +120,12 @@ not a missing permission to use the Mac's RAM.
 [VZ memorySize](https://developer.apple.com/documentation/virtualization/vzvirtualmachineconfiguration/memorysize),
 [HVF resource mapping](https://developer.apple.com/documentation/hypervisor).
 
-The user asked whether direct system-resource use avoids workers. Three HVF
-topologies remain candidates; none has been adopted:
+The user asked whether direct system-resource use avoids workers. The later
+explicit decision selected the first topology; the other two remain unselected:
 
 | Topology | Mac-side process layout | Isolation/recovery consequence |
 | --- | --- | --- |
-| One HVF VM per workspace | Daemon plus one small worker per active workspace | Closest to the selected separate-VM design; changes the process preference. |
+| One HVF VM per workspace | Daemon plus one small worker per active workspace | Selected topology; preserves one kernel/failure boundary per workspace. |
 | One outer HVF VM with workspace containers | One VM may be controlled inside the daemon | Shared Linux kernel and restart; changes workspace isolation. |
 | One outer HVF VM with nested workspace VMs | One outer VM controlled inside daemon; inner VMMs run in Linux | Separate inner kernels, but a new outer Linux/KVM trusted layer and two-stage file/reclaim forwarding. |
 
@@ -137,12 +138,15 @@ guest, outer guest and Mac backing to hand pages back safely; cgroup reclaim
 alone does not demonstrate Mac memory return.
 [Apple nested virtualization requirements](https://github.com/apple/container/blob/main/docs/container-machine.md#nested-virtualization-and-custom-kernels).
 
-Recommendation remains a small worker per workspace for the shortest path to
-the selected isolation model. If avoiding those workers is the stronger
-requirement, a shared outer VM is possible only with an explicit revised
-isolation/recovery decision. Continue backend-independent implementation while
-that decision is pending; do not enable an arbitrary native-host execution
-fallback under the name Cowork.
+Proceed with the approved small sandboxed worker per workspace. The next
+candidate is libkrun v1.19.6, commit `227b2de6ed323fe180e02f871c5f325a90c13cc2`.
+Its macOS free-page handler still uses `MADV_FREE`; adoption requires a safe
+ownership/whole-span validation and discard path that proves host return while
+real Linux work continues. Disable implicit TSI networking and confine all
+guest-facing parsers in the worker. Do not enable an arbitrary native-host
+execution fallback under the name Cowork.
+[Pinned reporting implementation](https://github.com/libkrun/libkrun/blob/227b2de6ed323fe180e02f871c5f325a90c13cc2/src/devices/src/virtio/balloon/device.rs),
+[API and explicit networking](https://github.com/libkrun/libkrun/blob/227b2de6ed323fe180e02f871c5f325a90c13cc2/include/libkrun.h).
 
 ## Local bounded HVF primitive, after the active-return decision
 
@@ -165,9 +169,8 @@ This proves only the host reclaim primitive and explicit guest handoff on this
 machine. It does **not** prove Linux reporting/balloon ownership, device-DMA
 synchronization, concurrent vCPU integrity, a production VMM sandbox, startup
 latency, or the complete active-work resource gate. Those need the real Linux
-backend and live-workload checks before adoption. A separate user decision about
-the required per-workspace worker process is pending; active-return approval
-alone does not change the earlier in-daemon preference.
+backend and live-workload checks before adoption. The later per-workspace worker approval resolves topology only; it does not
+extend this primitive result to real Linux or production reclaim.
 
 Build and run only the opt-in bounded fixture:
 
