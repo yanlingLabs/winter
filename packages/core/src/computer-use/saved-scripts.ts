@@ -10,8 +10,10 @@
 // - The model can never list or read one back: nothing here is ever printed, logged, written to metrics or the audit
 //   line (names only there), or sent anywhere but into the session's own fresh worker.
 // - The worker is untrusted (the model's code shares its process), so every save is checked again here — its name,
-//   its size and its SHAPE (exactly one function or arrow expression, `worker/saved-shape.ts`): a stored source is
-//   evaluated again by later workers, and only that shape evaluates without running anything.
+//   its size and its SHAPE (one function or arrow expression and nothing after it, `worker/saved-shape.ts`, a lexer's
+//   check that refuses what it could misread). A stored source is evaluated again by later workers; what keeps that
+//   harmless is the shape check, the worker's inert install and the round trip at the first call together. A FORGED
+//   save remains a residual risk: what passes them can run code only when that script is called by name.
 import {
   SAVED_SCRIPT_MAX_BYTES, SAVED_SCRIPTS_MAX_COUNT, SAVED_SCRIPTS_MAX_TOTAL_BYTES, savedScriptNameOk, savedScriptTooLarge, type SavedScriptSource,
 } from "./worker/bridge";

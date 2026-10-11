@@ -3,9 +3,14 @@
 // untrusted), with the persistent-REPL transform's own lexer (`repl.ts`).
 //
 // Why it matters: a saved source is evaluated again in later workers, as `return (\n<source>\n)`. Evaluating a
-// function or arrow EXPRESSION runs nothing — parameter defaults and the body run only when it is called — so a source
-// of this shape can be re-created without side effects. Anything else (a comma expression ending in a function, a
-// call, a function followed by `(…)` or `.call(…)`) would run code at re-creation, so it is refused.
+// function or arrow expression runs nothing — parameter defaults and the body run only when it is called — and this
+// check refuses what would visibly run code at re-creation (a comma expression ending in a function, a call, a
+// function followed by `(…)` or `.call(…)`). It is a LEXER's view, not the engine's: where the two could read a `/`
+// or an HTML-like comment differently (below) the source is refused outright, but it is not a parser. What makes a
+// stored source safe is the three together — this check, the worker's inert install, and the round trip at the first
+// call (the re-created function's own source must be exactly the stored text, or it never runs). A FORGED bridge save
+// (the model's code can write bridge lines itself) remains a residual risk: what passes all three can run code only
+// when that saved script is called by name, after the daemon's say-so — what the model could do by running the code.
 import { tokenize } from "./repl";
 
 type Tok = ReturnType<typeof tokenize>[number];
@@ -37,6 +42,18 @@ function matchClose(toks: readonly Tok[], open: number): number {
   return -1;
 }
 
+/** Words after which the lexer reads a `/` as a regular expression although the engine may read a division:
+ *  `of`, `yield` and `await` are plain identifiers in sloppy code. A regex there is refused. */
+const MAYBE_IDENTIFIER = new Set(["of", "yield", "await"]);
+function regexReadingsAgree(toks: readonly Tok[]): boolean {
+  for (let k = 1; k < toks.length; k++) {
+    if (toks[k]!.type !== "regex") continue;
+    const prev = toks[k - 1]!;
+    if (prev.type === "ident" && MAYBE_IDENTIFIER.has(prev.value)) return false;
+  }
+  return true;
+}
+
 const is = (t: Tok | undefined, type: Tok["type"], value?: string): boolean => t !== undefined && t.type === type && (value === undefined || t.value === value);
 
 /** A block `{ … }` starting at `at` that is the LAST thing in the source. */
@@ -48,9 +65,13 @@ const blockToEnd = (toks: readonly Tok[], at: number): boolean => is(toks[at], "
  * body is a block ending the source, or an expression body with balanced brackets and no `,` or `;` at its own level.
  */
 export function savedScriptShapeOk(source: string): boolean {
+  // HTML-like comments (`<!--`, and `-->` where it starts a line) are comments to the engine in sloppy code but
+  // operators to the lexer: refused anywhere, so the two can never disagree about what is code.
+  if (source.includes("<!--") || source.includes("-->")) return false;
   let toks: Tok[];
   try { toks = tokenize(source); } catch { return false; }
   if (toks.length === 0) return false;
+  if (!regexReadingsAgree(toks)) return false;
   let i = 0;
   // `async` as a prefix — not a parameter named `async` (`async => …`).
   if (is(toks[0], "ident", "async") && !is(toks[1], "punct", "=>") && !toks[1]?.nl) i = 1;

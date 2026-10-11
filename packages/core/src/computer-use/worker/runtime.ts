@@ -328,13 +328,13 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
   // A stored source is text that later workers evaluate, so it is held to three rules:
   //  1. it is read only through `Function.prototype.toString` and `Reflect.apply` as they were BEFORE any script ran
   //     (a script can replace both) — captured here;
-  //  2. it has one shape — exactly one function or arrow expression (`saved-shape.ts`, checked again by the daemon),
-  //     whose evaluation runs nothing;
-  //  3. installing is INERT: a fresh worker only stores the daemon's copy; the first `scripts.<name>(…)` re-creates the
-  //     function and runs it only if the re-created function's own source is exactly the stored text.
-  // A FORGED bridge save (the model's code can write bridge lines itself) can still store any source the daemon's
-  // checks accept; rules 2 and 3 keep what it can do to running that one function when it is called by name — the
-  // same thing the model could do by running the code directly — never at a worker's start or after a reset.
+  //  2. its shape — one function or arrow expression and nothing after it (`saved-shape.ts`, checked again by the
+  //     daemon) — a lexer's check that refuses whatever it could misread, not a parser;
+  //  3. installing is INERT: a fresh worker only stores the daemon's copy; the first `scripts.<name>(…)`, after the
+  //     daemon's say-so, re-creates the function and runs it only if its own source is exactly the stored text.
+  // A FORGED bridge save (the model's code can write bridge lines itself) remains a residual risk: a source that
+  // passes rules 2 and 3 runs only when that saved script is called by name — the same thing the model could do by
+  // running the code directly — never at a worker's start or after a reset.
   const fnToString = Function.prototype.toString;
   const reflectApply = Reflect.apply;
   const FunctionCtor = Function;
@@ -359,14 +359,15 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     w = async (...args: unknown[]): Promise<unknown> => {
       const entry = saved.get(name);
       if (entry === undefined) throw new TypeError(`scripts.${name} is not a function`);
+      // The daemon hears of the run FIRST — before the stored text is evaluated at all: it counts it (a re-create
+      // that then fails still leaves its `ran` entry), and a cancelled run stops it here.
+      await call("scripts.run", undefined, { name });
       if (entry.fn === undefined) {
         try { entry.fn = compileSaved(name, entry.source); } catch {
           saved.delete(name);
           throw new TypeError(`scripts.${name} could not be re-created in this runtime — save it again`);
         }
       }
-      // The daemon hears of the run first: it counts it, and a cancelled run stops it before it starts.
-      await call("scripts.run", undefined, { name });
       return await entry.fn(...args);
     };
     Object.defineProperty(w, "name", { value: name });

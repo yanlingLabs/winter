@@ -64,6 +64,20 @@ describe("SavedScripts (the daemon's store, memory only)", () => {
     }
   });
 
+  test("the shape check refuses where its lexer and the engine could read the text differently", () => {
+    const s = new SavedScripts();
+    // A `/` right after `of`, `yield` or `await` (plain identifiers in sloppy code), and any HTML-like comment.
+    for (const bad of ["(s) => { for (const m of /a/.exec(s)) print(m) }", "function* g() { yield /a/ }", "async () => await /a/",
+      "() => 1 <!-- x", "() => 1\n--> x", "() => {\n  --> x\n}"]) {
+      expect(savedScriptShapeOk(bad)).toBe(false);
+      expect(s.save("s1", "bad", bad)).toMatchObject({ refused: expect.stringContaining("one function or arrow expression") });
+    }
+    // The same words before anything else stay fine.
+    for (const ok of ["(xs) => { for (const x of xs) print(x / 2) }", "function* g() { yield 1 / 2 }", "async (p) => (await p) / 2", "(a, b) => a < b && b > a"]) {
+      expect(savedScriptShapeOk(ok)).toBe(true);
+    }
+  });
+
   test("16 MiB across the daemon: the least recently USED other session's scripts are cleared (never the saver's), and it is told once", () => {
     const s = new SavedScripts(100);
     const src = (n: number) => `() => "${"x".repeat(n)}"`;      // 8 + n bytes
@@ -229,11 +243,23 @@ describe("the worker's scripts", () => {
     expect((await run("print(await scripts.add(2, 3))")).prints).toEqual(["5"]);
   });
 
-  test("a re-created function whose own source is not the stored text is never run, and is dropped", async () => {
+  test("a re-created function whose own source is not the stored text is never run, and is dropped — the daemon heard of the run first", async () => {
     const { run } = runtime();
     const r = await run("let m; try { await scripts.spaced(1) } catch (e) { m = e.name + ': ' + e.message }\nprint(m, typeof scripts.spaced)", [{ name: "spaced", source: "(a) => a   " }]);
     expect(r.prints).toEqual(["TypeError: scripts.spaced could not be re-created in this runtime — save it again undefined"]);
-    expect(r.calls).toEqual([]);
+    expect(r.calls.map((c) => [c.primitive, c.args])).toEqual([["scripts.run", { name: "spaced" }]]);
+  });
+
+  test("the stored text is not evaluated before the daemon's say-so: a refused run re-creates nothing", async () => {
+    let refuse = true;
+    const { run } = runtime((m) => (m.primitive === "scripts.run" && refuse ? { ok: false, error: { kind: "TypeError", message: "no script was saved under that name in this session" } } : { ok: true }));
+    // A source whose round trip would fail: had it been re-created, it would have been dropped from the runtime.
+    const r = await run("let m; try { await scripts.later(1) } catch (e) { m = e.message }\nprint(m, typeof scripts.later)", [{ name: "later", source: "(a) => a   " }]);
+    expect(r.prints).toEqual(["no script was saved under that name in this session function"]);
+    expect(r.calls.map((c) => c.primitive)).toEqual(["scripts.run"]);
+    refuse = false;
+    const again = await run("let n; try { await scripts.later(1) } catch (e) { n = e.message }\nprint(n, typeof scripts.later)");
+    expect(again.prints).toEqual(["scripts.later could not be re-created in this runtime — save it again undefined"]);
   });
 
   test("the source is read with Function.prototype.toString and Reflect.apply as they were before any script ran", async () => {
@@ -413,6 +439,17 @@ describe("saved scripts in the service", () => {
     expect(textOf(r)).toContain("This session's saved scripts were cleared to free memory — save them again.");
     expect(textOf(r)).toContain("undefined");
     expect(textOf(await w.run("print(2)", { sessionId: "older" }))).not.toContain("cleared to free memory");
+  });
+
+  test("a saved script that cannot be re-created still counts as run (the daemon heard of it before the re-create)", async () => {
+    const w = world();
+    await w.run("print('warm')");
+    // A forged save whose text passes the shape check but not the round trip (the worker never sends trailing space).
+    w.latest().forge = (runId) => [{ op: "call", id: 90_101, runId, primitive: "scripts.save", args: { name: "spaced", source: "(a) => a   " } }];
+    await w.run("await sleep(20)");
+    const r = await w.run("let m; try { await scripts.spaced(1) } catch (e) { m = e.message }\nprint(m)", { reset: true });
+    expect(textOf(r)).toContain("scripts.spaced could not be re-created in this runtime — save it again");
+    expect(w.audits.at(-1)).toMatchObject({ kind: "automation", scripts: { ran: ["spaced"] } });
   });
 
   test("metrics carry the NAME only; the audit line lists the names saved and run; no source anywhere", async () => {
