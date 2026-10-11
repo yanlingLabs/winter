@@ -540,6 +540,8 @@ public struct CUFocusGuardianCore: Sendable {
                 let (appMoved, desktopMoved) = Self.moved(q, from: previous)
                 input.useOldest(from: now - Self.switchWindow, upTo: now, app: appMoved, desktop: desktopMoved, front: app, heardAt: now)
             }
+            // Back at their place: a claim of a click elsewhere is gone (they moved on from it).
+            if previous != current, let c = claim, c.app != app { claim = nil }
             judged = nil
             lastReason = CUMoveOwner.theirPlace.words
             return .theirPlace

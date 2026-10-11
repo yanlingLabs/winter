@@ -119,6 +119,7 @@ final class GuardianRound8Tests: XCTestCase {
         let (core, sys) = world()
         defer { core.stopGuardian() }
         core.noteGuardianActed(500)  // the agent acting on the target, just now
+        core.noteTapEvent(type: CGEventType(rawValue: 31)!, sourcePid: 0, userData: 0, now: core.clock.nowSeconds())  // their swipe
         sys.space = 200
         sys.front = 77
         core.onSpaceChange()
@@ -132,7 +133,10 @@ final class GuardianRound8Tests: XCTestCase {
         defer { core.stopGuardian() }
         core.noteGuardianActed(500)
         XCTAssertEqual(core.onPhysicalClick(at: CGPoint(x: 1100, y: 100), userData: 0, now: core.clock.nowSeconds()), 77)
-        XCTAssertEqual(core.guardianPlace()?.app, 77, "their place at once")
+        XCTAssertEqual(core.guardianPlace()?.app, 1, "their place moves once Mail's activation is seen (round 9)")
+        sys.front = 77
+        core.onActivation(pid: 77)
+        XCTAssertEqual(core.guardianPlace()?.app, 77, "claimed: theirs")
         // The target coming forward right after is not explained by a click on Mail's window.
         sys.front = 500
         core.onActivation(pid: 500)
@@ -198,7 +202,7 @@ final class GuardianRound8Tests: XCTestCase {
         XCTAssertFalse(judge(&g, 500, now: 1.25).isUsers, "still the agent's")
         // A click into ITS window does claim it (they chose it).
         g.userClicked(app: 500, space: 100, now: 1.3)
-        XCTAssertEqual(judge(&g, 500, now: 1.35), .theirPlace)
+        XCTAssertEqual(judge(&g, 500, now: 1.35), .user("they clicked into its window"))
     }
 
     /// What the agent does to an app while it is in front can't have brought it forward: an act begun 70 ms after the user's
@@ -213,9 +217,11 @@ final class GuardianRound8Tests: XCTestCase {
         core.noteGuardianActed(500)  // the act begins: the target is in front already
         core.onActivation(pid: 500)
         XCTAssertTrue(sys.activated.isEmpty, "their move")
-        // Once it has left the front, what was done to it counts: it coming back by itself is undone.
+        // Once it has left the front (their ⌘-Tab back), what was done to it counts: it coming back by itself is undone.
+        commandTab(core)
         sys.front = 1
         core.onActivation(pid: 1)
+        Thread.sleep(forTimeInterval: 0.2)  // a moment later (not within the ⌘-Tab's short second explanation)
         sys.front = 500
         core.onActivation(pid: 500)
         XCTAssertEqual(sys.activated.last, 1)
@@ -244,19 +250,30 @@ final class GuardianRound8Tests: XCTestCase {
         XCTAssertTrue(judge(&g, 500, 300, now: 1.9).isUsers, "on the swipe's desktop: theirs")
     }
 
-    /// An app the agent never touched came forward, and a touched one right after, before the guardian heard of either:
-    /// the restore went to the place it knew before both (the model-based test). The first activation, heard of late, is
-    /// still the user's — their place — and the theft is put back THERE.
+    /// An app the agent never touched came forward — after a click of theirs —, and a touched one right after, before the
+    /// guardian heard of either: the restore went to the place it knew before both (the model-based test). The first
+    /// activation, heard of late, is still the user's — their place — and the theft is put back THERE. With no input of
+    /// theirs, the untouched one was the agent's indirect effect (round 9): never their place — the theft goes back to
+    /// their own app.
     func testAnUntouchedActivationHeardLateIsStillTheirPlace() {
         let (core, sys) = world()
         defer { core.stopGuardian() }
         core.noteGuardianActed(500)
+        core.noteTapEvent(type: .leftMouseDown, sourcePid: 0, userData: 0, now: core.clock.nowSeconds())  // their click
         sys.front = 77   // Mail comes forward (never touched)…
         sys.front = 500  // …and the target takes the front 5 ms later
         core.onActivation(pid: 77)
         XCTAssertEqual(sys.activated.last, 77, "put back to Mail, their place by then — not to the app before it")
         core.onActivation(pid: 500)
         XCTAssertEqual(core.guardianPlace()?.app, 77)
+        let (core2, sys2) = world()
+        defer { core2.stopGuardian() }
+        core2.noteGuardianActed(500)
+        sys2.front = 77
+        sys2.front = 500
+        core2.onActivation(pid: 77)
+        XCTAssertEqual(sys2.activated.last, 1, "put back to their own app: Mail was the agent's doing")
+        XCTAssertEqual(core2.guardianPlace()?.app, 1)
     }
 
     /// During a desktop visit the agent acts in front: an app its click brings up there is the visit's, never "the user

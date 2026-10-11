@@ -20,9 +20,11 @@ final class FocusGuardianTests: XCTestCase {
         g.judge(CUMoveQuery(app: app, space: space, since: since, inputObservable: observable, clickAt: clickAt), now: now)
     }
 
-    /// The user's ⌘-Tab as the session tap sees it: ⌘ down, the Tab swallowed, ⌘ up.
+    /// The user's ⌘-Tab as the session tap sees it: ⌘ down, the Tab swallowed, ⌘ up (hardware actions both).
     private func commandTab(_ g: inout CUFocusGuardianCore, at t: TimeInterval) {
+        g.noteHardwareAction(now: t - 0.1)
         g.inputEvent(type: .flagsChanged, flags: .maskCommand, now: t - 0.1)
+        g.noteHardwareAction(now: t)
         g.inputEvent(type: .flagsChanged, flags: [], now: t)
     }
 
@@ -39,17 +41,39 @@ final class FocusGuardianTests: XCTestCase {
     }
 
     /// I1 — review of round 7 (HIGH 1): a synthetic mark on the TARGET made the user's plain click into Mail a theft. Marks
-    /// and causes are per app: an app the agent never touched coming forward is always the user's, whatever else it did.
+    /// and causes are per app: an app the agent never touched coming forward after input of the user's is theirs, whatever
+    /// else the agent did; with no input of theirs since the agent's action, it is the agent's indirect effect (round 9:
+    /// the user's ruling) — undone; a system dialog then is left for them.
     func testAnAppTheAgentNeverTouchedIsAlwaysTheUsersWhateverTheAgentDidElsewhere() {
         var g = started()
         g.noteCause(500, now: 10)   // the agent's synthetic activation of the target, just now
-        XCTAssertEqual(judge(&g, 77, 100, now: 10.05), .user("the agent did not touch it — an app it never touched coming forward is always the user's"))
+        g.noteHardwareAction(now: 10.03)  // their click into Mail
+        XCTAssertEqual(judge(&g, 77, 100, now: 10.05), .user("the agent did not touch it — an app it never touched coming forward after input of theirs is theirs"))
         XCTAssertEqual(g.view.app, 77)
         // A touched app with no input of theirs: the agent's — put back to Mail (77), their place now.
         XCTAssertFalse(judge(&g, 500, 100, now: 10.1).isUsers)
         XCTAssertEqual(g.view.app, 77)
-        // Past the causal window the target is no longer touched: theirs.
+        // Past the causal window the target is no longer touched — and the agent is no longer active: theirs.
         XCTAssertTrue(judge(&g, 500, 200, now: 10 + CUFocusGuardianCore.causalWindow + 0.1).isUsers)
+        // No input of theirs since the agent's action: an untouched app coming forward is its indirect effect — undone; a
+        // system dialog is left in front for them to answer.
+        var h = started()
+        h.noteCause(500, now: 10)
+        let ind = judge(&h, 77, 100, now: 10.2)
+        XCTAssertTrue(ind.undoes, "\(ind)")
+        if case .indirect = ind {} else { XCTFail("\(ind)") }
+        XCTAssertEqual(h.view.app, 1, "never their place")
+        var d = started()
+        d.noteCause(500, now: 10)
+        let dialog = d.judge(CUMoveQuery(app: 66, space: 100, appIsSystemUI: true), now: 10.2)
+        if case .unexplained = dialog {} else { XCTFail("\(dialog)") }
+        XCTAssertFalse(dialog.undoes)
+        XCTAssertEqual(d.view.app, 1)
+        // The first activation of an app the user launched (not the agent): theirs.
+        var l = started()
+        l.noteCause(500, now: 10)
+        l.appLaunched(88, now: 9)
+        XCTAssertEqual(l.judge(CUMoveQuery(app: 88, space: 100), now: 10.2), .user("the first activation of an app the user launched"))
     }
 
     /// I2 / item 5 — switch input counts only when it came AFTER the agent's last cause on that app, and explains one
@@ -57,14 +81,20 @@ final class FocusGuardianTests: XCTestCase {
     func testSwitchInputCountsOnlyAfterTheAgentsLastCauseOnThatAppAndOnlyOnce() {
         var g = started()
         commandTab(&g, at: 1.0)
-        g.noteCause(500, now: 1.1)  // the agent's mark after their ⌘-Tab
-        XCTAssertFalse(judge(&g, 500, now: 1.2).isUsers, "input before the mark does not outrank it")
+        g.noteCause(500, raise: true, now: 1.1)  // the agent's raising mark after their ⌘-Tab
+        XCTAssertFalse(judge(&g, 500, now: 1.2).isUsers, "input before a raising mark does not outrank it")
         XCTAssertEqual(judge(&g, 1, now: 1.3), .theirPlace)  // put back
         commandTab(&g, at: 1.4)     // now after the mark
         XCTAssertTrue(judge(&g, 500, now: 1.5).isUsers)
         // Used up: the change it explained took it. Back in their app, the target's next self-activation is undone.
         XCTAssertTrue(judge(&g, 1, now: 1.6).isUsers, "their app: untouched")
         XCTAssertFalse(judge(&g, 500, now: 1.7).isUsers, "the ⌘-Tab explained one change only")
+        // #8 — a cause that can't raise (an act's start) landing between their release and the switcher's activation never
+        // outranks their input, heard within the switch's latency.
+        var b = started()
+        commandTab(&b, at: 1.0)
+        b.noteCause(500, now: 1.03)
+        XCTAssertTrue(judge(&b, 500, now: 1.2).isUsers)
         // An app switch never explains a desktop change on its own, nor a desktop switch an app change on the same desktop.
         var h = started()
         h.noteCause(500, now: 0.9)
@@ -82,8 +112,8 @@ final class FocusGuardianTests: XCTestCase {
         XCTAssertEqual(judge(&g, 500, now: 1.2), first, "the next path asking about the same state")
         XCTAssertFalse(g.lastFresh)
         g.userClicked(app: 500, space: 100, now: 1.3)  // they click into its window: new input
-        XCTAssertTrue(g.view.app == 500)
-        XCTAssertEqual(judge(&g, 500, now: 1.35), .theirPlace, "their place now")
+        XCTAssertEqual(judge(&g, 500, now: 1.35), .user("they clicked into its window"))
+        XCTAssertEqual(g.view.app, 500, "their place now")
     }
 
     /// The one rule, in its order.
@@ -92,7 +122,8 @@ final class FocusGuardianTests: XCTestCase {
         XCTAssertEqual(judge(&g, 1, now: 0), .theirPlace, "0. their place")
         g.noteCause(9, now: 1)
         XCTAssertEqual(judge(&g, 9, now: 1), .agent("the agent touched it, and no input of the user's that switches apps or desktops came after"))
-        XCTAssertTrue(judge(&g, 8, now: 1.01).isUsers, "1. not touched")
+        g.noteHardwareAction(now: 1.005)
+        XCTAssertTrue(judge(&g, 8, now: 1.01).isUsers, "1. not touched (and input of theirs since the agent's action)")
         g.noteCause(9, now: 1.02)
         g.userClicked(app: 9, space: 100, now: 1.03)
         XCTAssertEqual(judge(&g, 9, 300, now: 1.05), .user("they clicked into its window"), "2. a claim (the desktop it was on)")
@@ -169,12 +200,16 @@ final class FocusGuardianTests: XCTestCase {
     func testAnAppTheAgentIsLaunchingIsTouched() {
         var g = started()
         let launch = g.beginLaunch(now: 10)
+        g.appLaunched(800, startedAt: 10.5, bundle: "com.example.new", now: 10.55)  // NSWorkspace: launched — nothing named yet
         XCTAssertTrue(g.judge(CUMoveQuery(app: 800, space: 100, appStartedAt: 10.5, appBundle: "com.example.new"), now: 11).isUsers,
                       "nothing launched yet: theirs")
         g.setLaunchBundle(launch, "com.example.new")
+        g.appLaunched(801, startedAt: 10.6, bundle: "com.example.new", now: 10.65)  // the agent's own: not recorded as theirs
         XCTAssertFalse(g.judge(CUMoveQuery(app: 801, space: 100, appStartedAt: 10.6, appBundle: "com.example.new"), now: 11.1).isUsers)
+        g.appLaunched(802, startedAt: 10.7, bundle: "com.other", now: 10.75)
         XCTAssertTrue(g.judge(CUMoveQuery(app: 802, space: 100, appStartedAt: 10.7, appBundle: "com.other"), now: 11.2).isUsers,
                       "another app the user started meanwhile")
+        g.noteHardwareAction(now: 11.25)  // the user switches to an app they had open before
         XCTAssertTrue(g.judge(CUMoveQuery(app: 803, space: 100, appStartedAt: 2, appBundle: "com.example.new"), now: 11.3).isUsers,
                       "started before the launch")
         g.endLaunch(launch, pid: 801, now: 12)
@@ -516,9 +551,10 @@ final class FocusGuardianTests: XCTestCase {
         g.begin(view: CUGuardedView(app: 1, space: 100))
         g.noteCause(500, now: 9.9)
         g.userClicked(app: 500, space: 100, now: 10)
-        XCTAssertEqual(g.view, CUGuardedView(app: 500, space: 100), "the user's app is the clicked one at once")
+        XCTAssertEqual(g.view.app, 1, "their place moves once the activation is seen (a click may activate nothing)")
         // The app activates a second later — on the desktop the click took them to: theirs.
         XCTAssertTrue(g.judge(CUMoveQuery(app: 500, space: 200), now: 11).isUsers)
+        XCTAssertEqual(g.view, CUGuardedView(app: 500, space: 200))
         // After that, a touched app's activation is undone back to the CLICKED app's place, not the old one.
         g.noteCause(7, now: 11.1)
         XCTAssertFalse(g.judge(CUMoveQuery(app: 7, space: 200), now: 11.2).isUsers)
@@ -531,7 +567,9 @@ final class FocusGuardianTests: XCTestCase {
         var h = CUFocusGuardianCore()
         h.begin(view: CUGuardedView(app: 1, space: 100))
         h.userClicked(app: 500, space: 100, now: 10)
+        XCTAssertTrue(h.judge(CUMoveQuery(app: 500, space: 100), now: 10.05).isUsers, "their click into it")
         h.noteCause(500, now: 10.1)
+        h.noteHardwareAction(now: 10.15)
         XCTAssertTrue(h.judge(CUMoveQuery(app: 1, space: 100), now: 10.2).isUsers, "they went back to their app")
         XCTAssertFalse(h.judge(CUMoveQuery(app: 500, space: 100), now: 10.4).isUsers,
                        "within the claim's window, but they had moved elsewhere: the target activating itself is undone")

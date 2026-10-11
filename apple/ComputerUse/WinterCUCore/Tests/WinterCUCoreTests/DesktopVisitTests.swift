@@ -690,11 +690,13 @@ final class DesktopVisitTests: XCTestCase {
         e.event(type: .keyDown, flags: .maskCommand, now: 20.1)
         e.event(type: .flagsChanged, flags: [], now: 20.3)
         XCTAssertFalse(e.explains(from: 19, after: 0, now: 20.4), "a seen chord is no switch")
-        // Under Secure Event Input the tap sees no keys: a hold can't be told from a shortcut.
+        // Under Secure Event Input the tap sees the modifiers but no keys (measured, run107): a ⌘-Tab looks like a ⌘ tap — it
+        // counts, briefly (the switcher acts 10–70 ms after the release).
         var sec = CUSwitchInput()
         sec.event(type: .flagsChanged, flags: .maskCommand, secure: true, now: 25)
         sec.event(type: .flagsChanged, flags: [], secure: true, now: 25.2)
-        XCTAssertFalse(sec.explains(from: 24, after: 0, now: 25.3))
+        XCTAssertTrue(sec.explains(from: 24, after: 0, now: 25.3))
+        XCTAssertFalse(sec.explains(from: 24, after: 0, now: 25.2 + CUSwitchInput.secureLife + 0.1), "only briefly")
         // Typing, a capital, a scroll, the generic gesture: nothing. A swipe: yes.
         var g = CUSwitchInput()
         g.event(type: .keyDown, flags: [], now: 30)
